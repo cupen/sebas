@@ -1,0 +1,7 @@
+{"type":"text_delta","session_id":"s1","delta":"hello "}
+{"type":"text_delta","session_id":"s1","delta":"world"}
+{"type":"tool_start","session_id":"s1","tool_name":"Read","args":{"file":"a.rs"}}
+{"type":"tool_end","session_id":"s1","tool_name":"Read","result":"...content..."}
+{"type":"permission_request","session_id":"s1","request_id":"r1","tool_name":"Bash","args":{"cmd":"ls"}}
+{"type":"text_delta","session_id":"s1","delta":"done"}
+{"type":"finished","session_id":"s1"}

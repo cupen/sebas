@@ -1,0 +1,47 @@
+---
+source: feishu/tests/cards_test.rs
+expression: card
+---
+schema: "2.0"
+header:
+  title:
+    content: ⚠ 权限请求
+    tag: plain_text
+  template: orange
+body:
+  elements:
+    - tag: markdown
+      content: "**Bash** 想要执行："
+    - tag: note
+      elements:
+        - tag: plain_text
+          content: "{\n  \"cmd\": \"rm -rf\"\n}"
+    - tag: action
+      actions:
+        - tag: button
+          text:
+            tag: plain_text
+            content: Allow once
+          type: primary
+          value:
+            decision: allow_once
+            request_id: r1
+            session_id: s1
+        - tag: button
+          text:
+            tag: plain_text
+            content: Allow session
+          type: default
+          value:
+            decision: allow_session
+            request_id: r1
+            session_id: s1
+        - tag: button
+          text:
+            tag: plain_text
+            content: Deny
+          type: danger
+          value:
+            decision: deny
+            request_id: r1
+            session_id: s1

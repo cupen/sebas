@@ -1,0 +1,20 @@
+# sebas minimum config — only 3 required fields below.
+# All other sections/fields have defaults; omit them entirely.
+[feishu]
+app_id = "cli_xxx"
+app_secret = "..."
+owner_id = "ou_xxx"
+# 启动时发给每个恢复会话的消息（空 = 不发）
+# hello_msg = "你好，我又回来了"
+
+# Optional: override ACP agent settings (defaults shown)
+# [acp.claude]
+# path = "claude"
+# args = []
+# sessions_dir = "~/.claude/sessions"
+# work_dir = "~/workbench"
+# startup_timeout_secs = 30
+# idle_kill_secs = 172800  # 48 hours
+
+# Optional: router, card, media, log sections all have defaults.
+# See docs/superpowers/specs/2026-07-26-sebas-design.md §6.2 for full list.

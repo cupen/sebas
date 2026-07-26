@@ -1,0 +1,149 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[derive(Debug, Clone)]
+pub enum FeishuIn {
+    Text {
+        key: SessionKey,
+        text: String,
+        reply_to: Option<String>,
+    },
+    Media {
+        key: SessionKey,
+        files: Vec<String>,
+        caption: Option<String>,
+    },
+    ButtonCb {
+        key: SessionKey,
+        action: CardAction,
+    },
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct SessionKey {
+    pub chat_id: String,
+    pub thread_id: Option<String>,
+}
+
+impl Serialize for SessionKey {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let s = match &self.thread_id {
+            None => self.chat_id.clone(),
+            Some(tid) => format!("{}\0{}", self.chat_id, tid),
+        };
+        ser.serialize_str(&s)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionKey {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        let (chat_id, thread_id) = match s.split_once('\0') {
+            None => (s, None),
+            Some((c, t)) => (c.to_owned(), Some(t.to_owned())),
+        };
+        Ok(SessionKey { chat_id, thread_id })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CardAction {
+    pub session_id: String,
+    pub request_id: Option<String>,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeishuEnvelope {
+    pub schema: String,
+    pub header: FeishuHeader,
+    pub event: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeishuHeader {
+    pub event_type: String,
+}
+
+impl FeishuEnvelope {
+    /// Convert a wire event to an internal event, filtering out non-owner senders.
+    /// When `owner_id` is empty, the owner filter is skipped (single-user bots).
+    pub fn into_event(self, owner_id: &str) -> Option<FeishuIn> {
+        if !owner_id.is_empty() {
+            let sender_open_id = self
+                .event
+                .pointer("/sender/sender_id/open_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if sender_open_id != owner_id {
+                return None;
+            }
+        }
+
+        if self.header.event_type == "card.action.trigger" {
+            let chat_id = self
+                .event
+                .pointer("/chat_id")
+                .or_else(|| self.event.pointer("/message/chat_id"))
+                .and_then(serde_json::Value::as_str)?
+                .to_owned();
+            let thread_id = self
+                .event
+                .pointer("/thread_id")
+                .or_else(|| self.event.pointer("/message/thread_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let session_id = self
+                .event
+                .pointer("/action/session_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let request_id = self
+                .event
+                .pointer("/action/request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            return Some(FeishuIn::ButtonCb {
+                key: SessionKey { chat_id, thread_id },
+                action: CardAction {
+                    session_id,
+                    request_id,
+                    value: self.event,
+                },
+            });
+        }
+
+        let message = self.event.pointer("/message")?;
+        let chat_id = message.pointer("/chat_id")?.as_str()?.to_owned();
+        let message_id = message.pointer("/message_id")?.as_str()?.to_owned();
+        let message_type = message.pointer("/message_type")?.as_str()?;
+        let content_str = message.pointer("/content")?.as_str()?;
+        let thread_id = message
+            .pointer("/thread_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let key = SessionKey { chat_id, thread_id };
+
+        match (self.header.event_type.as_str(), message_type) {
+            ("im.message.receive_v1", "text") => {
+                let body: MessageBody = serde_json::from_str(content_str).ok()?;
+                Some(FeishuIn::Text {
+                    key,
+                    text: body.text.unwrap_or_default(),
+                    reply_to: Some(message_id),
+                })
+            }
+            ("im.message.receive_v1", "image" | "file" | "audio") => Some(FeishuIn::Media {
+                key,
+                files: vec![message_id],
+                caption: None,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessageBody {
+    pub text: Option<String>,
+}
