@@ -1,12 +1,12 @@
-[workspace]
-resolver = "2"
-members = ["router", "feishu", "acp-claude"]
-
 [package]
 name = "sebas"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.88"
+edition = "2024"
+rust-version = "1.90"
+
+[workspace]
+resolver = "2"
+members = ["router", "feishu", "acp-claude"]
 
 [dependencies]
 router = { path = "router" }
