@@ -121,24 +121,36 @@ fn parses_card_action_trigger_to_buttoncb() {
     );
 }
 
-/// Missing `action.session_id` must NOT panic; the parse path should drop the
-/// frame so the dispatcher can log a warn instead of forwarding a half-shaped
-/// ButtonCb.
+/// Missing `action.session_id` is currently defaulted to `""` by
+/// `into_event` rather than dropped. Pin that behaviour so future
+/// tightening (e.g. returning `None` for half-shaped frames) is
+/// intentional and reviewable.
 #[test]
-fn card_action_trigger_without_session_id_is_none() {
-    let raw = serde_json::json!({
+fn card_action_trigger_without_session_id_defaults_empty() {
+    // Synthesize an envelope whose event.action lacks session_id entirely.
+    let json = r#"{
         "schema": "2.0",
-        "header": { "event_type": "card.action.trigger", "tenant_key": "tk" },
+        "header": {"event_type": "card.action.trigger"},
         "event": {
-            "chat_id": "oc_perm",
-            "action": { "request_id": "req_no_session" }
+            "chat_id": "oc_xyz",
+            "action": {
+                "value": {"decision": "allow_once"}
+            }
         }
-    });
-    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    }"#; // no session_id field above on purpose
+    let env: FeishuEnvelope = serde_json::from_str(json).expect("parse");
     let evt = env.into_event("");
-    // into_event currently defaults session_id to "" rather than returning
-    // None; pin that behaviour so future tightening is intentional.
-    if let Some(FeishuIn::ButtonCb { action, .. }) = evt {
-        assert_eq!(action.session_id, "");
-    }
+    // into_event defaults a missing session_id to "" rather than dropping
+    // the frame. Pin that so future tightening is intentional.
+    let Some(FeishuIn::ButtonCb { action, .. }) = evt else {
+        panic!("expected Some(ButtonCb) for missing session_id, got {evt:?}");
+    };
+    assert_eq!(action.session_id, "");
+    assert_eq!(
+        action
+            .value
+            .pointer("/action/value/decision")
+            .and_then(|v| v.as_str()),
+        Some("allow_once")
+    );
 }
