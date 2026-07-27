@@ -10,6 +10,7 @@ use router::router::{Out, RouterHandle};
 use router::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::{info, debug, warn, error};
 
 pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
     // openlark 0.19 uses reqwest 0.13, whose Rustls connector consults the
@@ -52,9 +53,9 @@ pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                tracing::info!(%status, body = %body, "hello_msg send result");
+                info!(%status, body = %body, "hello_msg send result");
             }
-            Err(e) => tracing::warn!(?e, "hello_msg send failed"),
+            Err(e) => warn!(?e, "hello_msg send failed"),
         }
     }
 
@@ -73,7 +74,7 @@ pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
                 .map_err(|e| crate::error::SebasError::Feishu(format!("send: {e}")))?;
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::info!(%status, body = %body, "test message send result");
+            info!(%status, body = %body, "test message send result");
             if !status.is_success() {
                 Err(crate::error::SebasError::Feishu(format!("test message failed: {body}")))
             } else {
@@ -105,7 +106,7 @@ pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
             )
             .await
             {
-                tracing::error!(?e, "outbound dispatch failed");
+                error!(?e, "outbound dispatch failed");
             }
         }
     });
@@ -119,13 +120,13 @@ pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
     let ws_app_id = cfg.feishu.app_id.clone();
     let ws_app_secret = cfg.feishu.app_secret.clone();
 
-    tracing::info!("sebas started; waiting for SIGINT/SIGTERM");
+    info!("sebas started; waiting for SIGINT/SIGTERM");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("shutting down (SIGINT)");
+            info!("shutting down (SIGINT)");
         }
         _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router) => {
-            tracing::warn!("WS loop exited; awaiting ctrl_c");
+            warn!("WS loop exited; awaiting ctrl_c");
             tokio::signal::ctrl_c().await.ok();
         }
     }
@@ -140,7 +141,7 @@ pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
         .await
         .map_err(|e| crate::error::SebasError::Router(e.to_string()))?;
     if let Err(e) = std::fs::write(&cfg.router.state_file, json) {
-        tracing::warn!(?e, "failed to persist session state");
+        warn!(?e, "failed to persist session state");
     }
     Ok(())
 }
@@ -163,21 +164,21 @@ async fn dispatch_out(
             let new_id = feishu.send_card(http, token, &key, card).await?;
             if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
                 router.record_root_msg_id(session_id, new_id.clone()).await;
-                tracing::debug!(message_id = %new_id, "recorded card msg_id");
+                debug!(message_id = %new_id, "recorded card msg_id");
             }
         }
         Out::UpdateCard { session_id, card } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
                 feishu.update_card(http, token, &message_id, card).await?;
             } else {
-                tracing::debug!(?session_id, "no root msg_id recorded; skipping update");
+                debug!(?session_id, "no root msg_id recorded; skipping update");
             }
         }
         Out::React { session_id, emoji } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
                 feishu.react(http, token, &message_id, &emoji).await?;
             } else {
-                tracing::debug!(?session_id, "no root msg_id recorded; skipping react");
+                debug!(?session_id, "no root msg_id recorded; skipping react");
             }
         }
         Out::SpawnAcp { key, prompt } => {
@@ -220,7 +221,7 @@ async fn dispatch_out(
             mgr.send(&session_id, cmd).await?;
         }
         Out::HelpText { key } => {
-            tracing::info!(?key, "send help");
+            info!(?key, "send help");
         }
     }
     Ok(())
@@ -232,7 +233,7 @@ async fn dispatch_out(
 fn spawn_acp_pump(mgr: Arc<SessionManager>, router: RouterHandle, session_id: String) {
     tokio::spawn(async move {
         let Some(rx) = mgr.event_rx(&session_id).await else {
-            tracing::warn!(%session_id, "no event_rx for session; pump not started");
+            warn!(%session_id, "no event_rx for session; pump not started");
             return;
         };
         let mut rx = rx.lock().await;
@@ -240,10 +241,10 @@ fn spawn_acp_pump(mgr: Arc<SessionManager>, router: RouterHandle, session_id: St
             let finished = matches!(evt, AcpEvent::Finished { .. } | AcpEvent::Error { .. });
             router.dispatch_acp_event(evt).await;
             if finished {
-                tracing::debug!(%session_id, "session reported completion");
+                debug!(%session_id, "session reported completion");
             }
         }
-        tracing::debug!(%session_id, "acp event stream closed; pump exiting");
+        debug!(%session_id, "acp event stream closed; pump exiting");
     });
 }
 
@@ -277,7 +278,7 @@ async fn run_ws_loop(app_id: &str, app_secret: &str, owner_id: &str, router: Rou
         {
             Ok(builder) => builder.build(),
             Err(e) => {
-                tracing::error!(error = %e, "failed to register event handlers; aborting WS loop");
+                error!(error = %e, "failed to register event handlers; aborting WS loop");
                 return;
             }
         };
@@ -288,24 +289,24 @@ async fn run_ws_loop(app_id: &str, app_secret: &str, owner_id: &str, router: Rou
             .build();
         let ws_config = Arc::new(ws_config);
 
-        tracing::info!("connecting to feishu WS via open-lark");
+        info!("connecting to feishu WS via open-lark");
         let result = LarkWsClient::open(ws_config, dispatcher).await;
 
         match result {
             Ok(()) => {
-                tracing::info!("feishu WS session ended cleanly; reconnecting");
+                info!("feishu WS session ended cleanly; reconnecting");
                 backoff = Duration::from_secs(1);
             }
             Err(WsClientError::ConnectionClosed { reason }) => {
-                tracing::warn!(?reason, "feishu WS closed; reconnecting");
+                warn!(?reason, "feishu WS closed; reconnecting");
                 backoff = Duration::from_secs(1);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "feishu WS failed; backing off");
+                warn!(error = %e, "feishu WS failed; backing off");
             }
         }
 
-        tracing::info!(?backoff, "WS reconnect after backoff");
+        info!(?backoff, "WS reconnect after backoff");
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(max_backoff);
     }
@@ -338,7 +339,7 @@ impl EventHandler for RouterEventHandler {
                     });
                 }
             }
-            Err(e) => tracing::warn!(?e, "failed to parse open-lark envelope"),
+            Err(e) => warn!(?e, "failed to parse open-lark envelope"),
         }
         Ok(())
     }
