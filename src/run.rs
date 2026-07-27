@@ -284,11 +284,12 @@ fn spawn_acp_pump(mgr: Arc<SessionManager>, router: RouterHandle, session_id: St
 /// any other error); we wrap it in an outer reconnect loop with exponential
 /// backoff so a transient flap doesn't take the bot offline.
 ///
-/// Note on event coverage: we register only `im.message.receive_v1` via
-/// `register_raw` (v0.19.0+). That covers inbound text/media. Other event
-/// types such as `card.action.trigger` (used by our permission card
-/// buttons) are not surfaced by this dispatcher; see the migration report at
-/// `.superpowers/sdd/ws-v019-cratesio-report.md` for the alternatives.
+/// Note on event coverage: v0.19.0's `register_raw` accepts any non-empty
+/// string key, so we register both inbound event names we care about:
+/// `im.message.receive_v1` (text/media) and `card.action.trigger` (button
+/// callbacks from permission cards). Each registration hands the same
+/// `RouterEventHandler` clone every frame; the handler parses both
+/// envelope shapes via `FeishuEnvelope::into_event`.
 async fn run_ws_loop(
     app_id: &str,
     app_secret: &str,
@@ -307,12 +308,21 @@ async fn run_ws_loop(
             owner_id: owner_id.to_string(),
             dump_dir: dump_dir.clone(),
         };
+        // Two raw registrations sharing the same handler. `register_raw` in
+        // v0.19.0 is purely a key-on-HashMap insert keyed by the supplied
+        // string, so `card.action.trigger` is accepted — there is no enum
+        // of supported events on the openlark side. Any registration error
+        // (empty / duplicate key) is bubbled up and aborts the WS loop.
         let dispatcher = match EventDispatcherHandler::builder()
-            .register_raw("im.message.receive_v1", handler)
+            .register_raw("im.message.receive_v1", handler.clone())
+            .and_then(|b| b.register_raw("card.action.trigger", handler))
         {
-            Ok(builder) => builder.build(),
+            Ok(d) => d,
             Err(e) => {
-                error!(error = %e, "failed to register event handlers; aborting WS loop");
+                error!(
+                    error = %e,
+                    "failed to register event handlers; aborting WS loop"
+                );
                 return;
             }
         };
@@ -346,12 +356,16 @@ async fn run_ws_loop(
     }
 }
 
-/// Raw-bytes event handler bound to `im.message.receive_v1` via
-/// `register_raw`. Bypasses v0.14.0's typed-registration bug (where the
-/// dispatcher built the lookup key as `schema.type_` instead of the
-/// server-emitted `p2.*` key, dropping every inbound message) by avoiding
-/// the typed dispatch layer entirely: we get the framed JSON payload, parse
-/// it as our own `FeishuEnvelope`, and forward into the router.
+/// Raw-bytes event handler bound to inbound event names via `register_raw`.
+/// Bypasses v0.14.0's typed-registration bug (where the dispatcher built the
+/// lookup key as `schema.type_` instead of the server-emitted `p2.*` key,
+/// dropping every inbound message) by avoiding the typed dispatch layer
+/// entirely: we get the framed JSON payload, parse it as our own
+/// `FeishuEnvelope`, and forward into the router. The same instance is
+/// registered twice (`im.message.receive_v1` for text/media and
+/// `card.action.trigger` for permission-card button callbacks), so the
+/// struct must be cheap to clone — all owned fields are already `Clone`.
+#[derive(Clone)]
 struct RouterEventHandler {
     router: RouterHandle,
     owner_id: String,
