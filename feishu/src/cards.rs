@@ -30,10 +30,14 @@ pub struct CardTitle {
 #[serde(tag = "tag", rename_all = "snake_case")]
 pub enum CardElement {
     Hr,
-    Markdown { content: String },
+    Markdown {
+        content: String,
+    },
     /// V2 replacement for the removed V1 `note` component: plain text with
     /// notation size + grey color, per the card JSON 2.0 migration guide.
-    Div { text: DivText },
+    Div {
+        text: DivText,
+    },
     /// V2 buttons are first-class body elements (the V1 `action` container
     /// was removed); callback payloads travel via `behaviors`.
     Button {

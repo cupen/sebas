@@ -1,21 +1,41 @@
 use crate::commands::{parse_command, Command};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
-use feishu::cards::{apply_event, render_dead_session_card, render_permission_card, render_root_card};
+use feishu::cards::{
+    apply_event, render_dead_session_card, render_permission_card, render_root_card,
+};
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 
 #[derive(Debug)]
 pub enum Out {
-    SpawnAcp { key: SessionKey, prompt: String },
-    SendAcp { session_id: String, cmd: AcpCommand },
-    SendCard { key: SessionKey, card: serde_json::Value, msg_id: Option<String> },
-    UpdateCard { session_id: String, card: serde_json::Value },
-    React { session_id: String, emoji: String },
-    HelpText { key: SessionKey },
+    SpawnAcp {
+        key: SessionKey,
+        prompt: String,
+    },
+    SendAcp {
+        session_id: String,
+        cmd: AcpCommand,
+    },
+    SendCard {
+        key: SessionKey,
+        card: serde_json::Value,
+        msg_id: Option<String>,
+    },
+    UpdateCard {
+        session_id: String,
+        card: serde_json::Value,
+    },
+    React {
+        session_id: String,
+        emoji: String,
+    },
+    HelpText {
+        key: SessionKey,
+    },
 }
 
 pub struct RouterHandle {
@@ -85,7 +105,11 @@ impl RouterHandle {
     pub async fn dispatch(&self, evt: FeishuIn) {
         match evt {
             FeishuIn::Text { key, text, .. } => self.on_text(key, text).await,
-            FeishuIn::Media { key, files, caption } => {
+            FeishuIn::Media {
+                key,
+                files,
+                caption,
+            } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
                 self.on_text(key, prompt).await;
             }
@@ -121,8 +145,13 @@ impl RouterHandle {
                     })
                     .await;
             }
-            AcpEvent::PermissionRequest { session_id, request_id, tool_name, args } => {
-                let card = render_permission_card(&session_id, &request_id, &tool_name, &args);
+            AcpEvent::PermissionRequest {
+                session_id,
+                request_id,
+                tool_name,
+                args,
+            } => {
+                let card = render_permission_card(session_id, request_id, tool_name, args);
                 // Resolve the SessionKey that owns this session so Feishu has a
                 // real `receive_id`. Without this the card would carry an empty
                 // chat_id and Feishu rejects it.
@@ -219,10 +248,7 @@ impl RouterHandle {
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.
-        let _ = self
-            .tx
-            .send(Out::SpawnAcp { key, prompt })
-            .await;
+        let _ = self.tx.send(Out::SpawnAcp { key, prompt }).await;
     }
 
     async fn continue_session(&self, session_id: String, prompt: String) {

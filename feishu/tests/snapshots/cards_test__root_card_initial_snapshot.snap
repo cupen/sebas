@@ -1,0 +1,21 @@
+---
+source: feishu/tests/cards_test.rs
+expression: card
+---
+schema: "2.0"
+header:
+  title:
+    content: 👀 Claude Code
+    tag: plain_text
+  template: blue
+body:
+  elements:
+    - tag: markdown
+      content: "> 重构 src/foo.rs"
+    - tag: hr
+    - tag: div
+      text:
+        tag: plain_text
+        content: "msg_id: msg_1"
+        text_size: notation
+        text_color: grey

@@ -1,18 +1,27 @@
-use router::state::SessionMap;
+use acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use feishu::events::{CardAction, FeishuIn, SessionKey};
+use router::router::{Out, RouterHandle};
 use router::state::Mapping;
-use router::router::{RouterHandle, Out};
-use feishu::events::{FeishuIn, SessionKey, CardAction};
-use acp_claude::session::{AcpEvent, AcpCommand, Decision};
+use router::state::SessionMap;
 use std::time::Duration;
 
 #[tokio::test]
 async fn permission_request_emits_card_with_buttons() {
     let map = SessionMap::new();
     // The router resolves session_id -> SessionKey via the map, so seed it.
-    let key = SessionKey { chat_id: "oc_x".into(), thread_id: None };
-    map.insert(key.clone(), Mapping { session_id: "s1".into(), last_active_unix: 1 })
-        .await
-        .unwrap();
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    map.insert(
+        key.clone(),
+        Mapping {
+            session_id: "s1".into(),
+            last_active_unix: 1,
+        },
+    )
+    .await
+    .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     let event = AcpEvent::PermissionRequest {
@@ -24,12 +33,20 @@ async fn permission_request_emits_card_with_buttons() {
     router.apply_event_to_out("s1".into(), &event).await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     match out {
         Out::SendCard { key, card, .. } => {
-            assert_eq!(key.chat_id, "oc_x", "expected resolved SessionKey, got {key:?}");
+            assert_eq!(
+                key.chat_id, "oc_x",
+                "expected resolved SessionKey, got {key:?}"
+            );
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("Allow once"), "missing 'Allow once' in card: {s}");
+            assert!(
+                s.contains("Allow once"),
+                "missing 'Allow once' in card: {s}"
+            );
             assert!(s.contains("Deny"), "missing 'Deny' in card: {s}");
         }
         other => panic!("expected SendCard, got {other:?}"),
@@ -39,11 +56,20 @@ async fn permission_request_emits_card_with_buttons() {
 #[tokio::test]
 async fn button_callback_emits_permission_reply() {
     let map = SessionMap::new();
-    let key = SessionKey { chat_id: "oc_x".into(), thread_id: None };
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
     // on_button now requires a live session mapping before forwarding a reply.
-    map.insert(key.clone(), Mapping { session_id: "s1".into(), last_active_unix: 1 })
-        .await
-        .unwrap();
+    map.insert(
+        key.clone(),
+        Mapping {
+            session_id: "s1".into(),
+            last_active_unix: 1,
+        },
+    )
+    .await
+    .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     let action = CardAction {
         session_id: "s1".into(),
@@ -54,9 +80,19 @@ async fn button_callback_emits_permission_reply() {
     router.dispatch(FeishuIn::ButtonCb { key, action }).await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     match out {
-        Out::SendAcp { session_id, cmd: AcpCommand::PermissionReply { session_id: sid, request_id: rid, decision } } => {
+        Out::SendAcp {
+            session_id,
+            cmd:
+                AcpCommand::PermissionReply {
+                    session_id: sid,
+                    request_id: rid,
+                    decision,
+                },
+        } => {
             assert_eq!(session_id, "s1");
             assert_eq!(sid, "s1");
             assert_eq!(rid, "r1");
@@ -70,7 +106,10 @@ async fn button_callback_emits_permission_reply() {
 async fn button_callback_on_dead_session_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let key = SessionKey { chat_id: "oc_gone".into(), thread_id: None };
+    let key = SessionKey {
+        chat_id: "oc_gone".into(),
+        thread_id: None,
+    };
     let action = CardAction {
         session_id: "s_dead".into(),
         request_id: Some("r1".into()),
@@ -80,7 +119,9 @@ async fn button_callback_on_dead_session_emits_help_card() {
     router.dispatch(FeishuIn::ButtonCb { key, action }).await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     match out {
         Out::SendCard { key, card, .. } => {
             assert_eq!(key.chat_id, "oc_gone");

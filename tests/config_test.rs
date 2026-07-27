@@ -68,5 +68,9 @@ app_secret = "sec"
 owner_id = "ou_x"
 "#;
     let cfg = Config::parse(toml).unwrap();
-    assert!(cfg.router.state_file.starts_with(&std::env::var("HOME").unwrap_or_default()));
+    assert!(
+        cfg.router
+            .state_file
+            .starts_with(&std::env::var("HOME").unwrap_or_default())
+    );
 }

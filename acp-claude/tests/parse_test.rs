@@ -24,7 +24,11 @@ fn parses_full_session_stream() {
     }
 
     match &events[4] {
-        AcpEvent::PermissionRequest { request_id, tool_name, .. } => {
+        AcpEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            ..
+        } => {
             assert_eq!(request_id, "r1");
             assert_eq!(tool_name, "Bash");
         }

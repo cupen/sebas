@@ -61,11 +61,11 @@ impl FeishuClient {
         card_json: serde_json::Value,
     ) -> anyhow::Result<String> {
         let receive_id = key.chat_id.clone();
-        let url = if key.thread_id.is_some() {
-            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
-        } else {
-            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
-        };
+        // Note: pre-existing code uses chat_id for both thread and non-thread
+        // send paths. The thread branch is collapsed into a single
+        // assignment to keep clippy::if_same_then_else happy without
+        // changing the (already-shipped) behaviour.
+        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
         let body = serde_json::json!({
             "receive_id": receive_id,
             "msg_type": "interactive",
@@ -115,9 +115,7 @@ impl FeishuClient {
         message_id: &str,
         emoji_type: &str,
     ) -> anyhow::Result<()> {
-        let url = format!(
-            "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions"
-        );
+        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions");
         let body = serde_json::json!({ "reaction_type": { "emoji_type": emoji_type } });
         let resp: ApiResponse<serde_json::Value> = http
             .post(&url)

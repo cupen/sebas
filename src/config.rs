@@ -84,10 +84,18 @@ impl Default for AcpClaudeConfig {
     }
 }
 
-fn default_claude_path() -> String { "claude".into() }
-fn default_sessions_dir() -> String { "~/.claude/sessions".into() }
-fn default_startup_timeout() -> u64 { 30 }
-fn default_idle_kill() -> u64 { 172800 }
+fn default_claude_path() -> String {
+    "claude".into()
+}
+fn default_sessions_dir() -> String {
+    "~/.claude/sessions".into()
+}
+fn default_startup_timeout() -> u64 {
+    30
+}
+fn default_idle_kill() -> u64 {
+    172800
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouterConfig {
@@ -109,9 +117,15 @@ impl Default for RouterConfig {
     }
 }
 
-fn default_state_file() -> String { "~/.config/sebas/sessions.json".into() }
-fn default_channel_buffer() -> usize { 256 }
-fn default_max_concurrent() -> usize { 32 }
+fn default_state_file() -> String {
+    "~/.config/sebas/sessions.json".into()
+}
+fn default_channel_buffer() -> usize {
+    256
+}
+fn default_max_concurrent() -> usize {
+    32
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CardConfig {
@@ -136,10 +150,18 @@ impl Default for CardConfig {
     }
 }
 
-fn default_theme_color() -> String { "blue".into() }
-fn default_max_user_text() -> usize { 4000 }
-fn default_max_tool_output() -> usize { 2000 }
-fn default_true() -> bool { true }
+fn default_theme_color() -> String {
+    "blue".into()
+}
+fn default_max_user_text() -> usize {
+    4000
+}
+fn default_max_tool_output() -> usize {
+    2000
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MediaConfig {
@@ -158,8 +180,12 @@ impl Default for MediaConfig {
     }
 }
 
-fn default_download_dir() -> String { "~/.cache/sebas/downloads".into() }
-fn default_max_file_size() -> u64 { 52_428_800 }
+fn default_download_dir() -> String {
+    "~/.cache/sebas/downloads".into()
+}
+fn default_max_file_size() -> u64 {
+    52_428_800
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LogConfig {
@@ -171,16 +197,21 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: default_log_level(), file: None }
+        Self {
+            level: default_log_level(),
+            file: None,
+        }
     }
 }
 
-fn default_log_level() -> String { "info".into() }
+fn default_log_level() -> String {
+    "info".into()
+}
 
 impl Config {
     pub fn parse(s: &str) -> Result<Self> {
-        let cfg: Config = toml::from_str(s)
-            .map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
+        let cfg: Config =
+            toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
         cfg.validate()?;
         Ok(cfg.with_expanded_paths())
     }
@@ -211,10 +242,10 @@ impl Config {
 }
 
 pub fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into();
-        }
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into();
     }
     p.to_string()
 }

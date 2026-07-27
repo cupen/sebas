@@ -18,9 +18,14 @@ pub struct SessionMap {
 }
 
 impl SessionMap {
-    pub fn new() -> Self { Self::with_capacity(usize::MAX) }
+    pub fn new() -> Self {
+        Self::with_capacity(usize::MAX)
+    }
     pub fn with_capacity(cap: usize) -> Self {
-        Self { inner: Arc::new(RwLock::new(HashMap::new())), capacity: cap }
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            capacity: cap,
+        }
     }
 
     pub async fn insert(&self, key: SessionKey, mapping: Mapping) -> Result<(), RouterError> {
@@ -66,10 +71,15 @@ impl SessionMap {
 
     pub fn restore_json(s: &str) -> serde_json::Result<Self> {
         let map: HashMap<SessionKey, Mapping> = serde_json::from_str(s)?;
-        Ok(Self { inner: Arc::new(RwLock::new(map)), capacity: usize::MAX })
+        Ok(Self {
+            inner: Arc::new(RwLock::new(map)),
+            capacity: usize::MAX,
+        })
     }
 }
 
 impl Default for SessionMap {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

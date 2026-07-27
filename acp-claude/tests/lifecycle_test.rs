@@ -1,13 +1,22 @@
 use acp_claude::manager::SessionManager;
+use std::path::PathBuf;
 use std::time::Duration;
+
+fn fake_claude_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("target/debug/fake-claude")
+}
 
 #[tokio::test]
 async fn create_and_kill() {
     let mgr = SessionManager::new();
+    let fake = fake_claude_path();
     let id = mgr
-        .create_session("/bin/cat", vec![], None, "hello".into())
+        .create_session(fake.to_str().unwrap(), vec![], None, "hello".into())
         .await
-        .expect("spawn cat");
+        .expect("spawn fake-claude");
     tokio::time::sleep(Duration::from_millis(100)).await;
     mgr.kill(&id).await;
 }
@@ -15,5 +24,5 @@ async fn create_and_kill() {
 #[tokio::test]
 async fn kill_unknown_is_noop() {
     let mgr = SessionManager::new();
-    mgr.kill("nope").await;  // must not panic
+    mgr.kill("nope").await; // must not panic
 }

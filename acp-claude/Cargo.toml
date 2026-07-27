@@ -10,4 +10,5 @@ tokio = { version = "1.40", features = ["process", "io-util", "sync", "macros", 
 tracing = "0.1"
 thiserror = "1"
 anyhow = "1"
-uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+agent-client-protocol = { workspace = true }

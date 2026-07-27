@@ -4,13 +4,13 @@ use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::render_root_card;
 use feishu::client::{FeishuClient, FeishuConfig};
-use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use open_lark::Config as LarkConfig;
+use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use router::router::{Out, RouterHandle};
 use router::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
 pub async fn run(
     cfg: Config,
@@ -24,8 +24,7 @@ pub async fn run(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     init_tracing(&cfg);
 
-    let state_raw = std::fs::read_to_string(&cfg.router.state_file)
-        .unwrap_or_else(|_| "{}".into());
+    let state_raw = std::fs::read_to_string(&cfg.router.state_file).unwrap_or_else(|_| "{}".into());
     let map = SessionMap::restore_json(&state_raw)
         .map_err(|e| crate::error::SebasError::Config(format!("restore: {e}")))?;
 
@@ -53,7 +52,13 @@ pub async fn run(
             "msg_type": "text",
             "content": serde_json::to_string(&serde_json::json!({"text": cfg.feishu.hello_msg})).unwrap_or_default(),
         });
-        match http.post(url).bearer_auth(&token.access_token).json(&body).send().await {
+        match http
+            .post(url)
+            .bearer_auth(&token.access_token)
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -73,21 +78,26 @@ pub async fn run(
             "msg_type": "text",
             "content": serde_json::to_string(&serde_json::json!({"text": "✅ sebas 已启动"})).unwrap_or_default(),
         });
-        let result = async {
-            let resp = http.post(url).bearer_auth(&token.access_token).json(&body).send().await
+        async {
+            let resp = http
+                .post(url)
+                .bearer_auth(&token.access_token)
+                .json(&body)
+                .send()
+                .await
                 .map_err(|e| crate::error::SebasError::Feishu(format!("send: {e}")))?;
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             info!(%status, body = %body, "test message send result");
             if !status.is_success() {
-                Err(crate::error::SebasError::Feishu(format!("test message failed: {body}")))
+                Err(crate::error::SebasError::Feishu(format!(
+                    "test message failed: {body}"
+                )))
             } else {
                 Ok(())
             }
-        }.await;
-        if let Err(e) = result {
-            return Err(e);
         }
+        .await?;
     }
 
     // Spawn outbound pump
@@ -388,11 +398,11 @@ fn init_tracing(cfg: &Config) {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_new(&cfg.log.level).unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = fmt().with_env_filter(filter);
-    if let Some(ref path) = cfg.log.file {
-        if let Ok(file) = std::fs::File::create(path) {
-            subscriber.with_writer(file).init();
-            return;
-        }
+    if let Some(ref path) = cfg.log.file
+        && let Ok(file) = std::fs::File::create(path)
+    {
+        subscriber.with_writer(file).init();
+        return;
     }
     subscriber.init();
 }

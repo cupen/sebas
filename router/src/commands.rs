@@ -23,20 +23,20 @@ pub fn parse_command(input: &str) -> Command {
     let head = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
     match head {
-        "/new"      => Command::New,
+        "/new" => Command::New,
         "/sessions" => Command::Sessions,
-        "/switch"   => match arg.parse::<usize>() {
+        "/switch" => match arg.parse::<usize>() {
             Ok(n) => Command::Switch(n),
             Err(_) => Command::PassThrough(input.into()),
         },
-        "/resume"   => Command::Resume(arg.into()),
-        "/cancel"   => Command::Cancel,
-        "/status"   => Command::Status,
-        "/compact"  => Command::Compact,
-        "/cost"     => Command::Cost,
-        "/model"    => Command::Model(arg.into()),
-        "/cd"       => Command::Cd(arg.into()),
-        "/help"     => Command::Help,
+        "/resume" => Command::Resume(arg.into()),
+        "/cancel" => Command::Cancel,
+        "/status" => Command::Status,
+        "/compact" => Command::Compact,
+        "/cost" => Command::Cost,
+        "/model" => Command::Model(arg.into()),
+        "/cd" => Command::Cd(arg.into()),
+        "/help" => Command::Help,
         _ => Command::PassThrough(input.into()),
     }
 }

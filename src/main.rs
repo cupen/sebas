@@ -31,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
         )
     });
     let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-    sebas::run::run(cfg, cli.test_msg, cli.dump_inbound).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    sebas::run::run(cfg, cli.test_msg, cli.dump_inbound)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }

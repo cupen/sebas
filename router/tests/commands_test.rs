@@ -3,7 +3,7 @@ use router::commands::{parse_command, Command};
 #[test]
 fn parses_new() {
     match parse_command("/new") {
-        Command::New => {},
+        Command::New => {}
         _ => panic!("expected New"),
     }
 }
@@ -11,7 +11,7 @@ fn parses_new() {
 #[test]
 fn parses_switch_with_arg() {
     match parse_command("/switch 3") {
-        Command::Switch(3) => {},
+        Command::Switch(3) => {}
         _ => panic!("expected Switch(3)"),
     }
 }
@@ -28,7 +28,10 @@ fn parses_help() {
 
 #[test]
 fn double_slash_escapes_to_prompt() {
-    assert_eq!(parse_command("//compact"), Command::PassThrough("/compact".into()));
+    assert_eq!(
+        parse_command("//compact"),
+        Command::PassThrough("/compact".into())
+    );
     assert_eq!(parse_command("/compact"), Command::Compact);
 }
 
@@ -39,5 +42,8 @@ fn unknown_command_passes_through() {
 
 #[test]
 fn plain_text_is_pass_through() {
-    assert_eq!(parse_command("hello world"), Command::PassThrough("hello world".into()));
+    assert_eq!(
+        parse_command("hello world"),
+        Command::PassThrough("hello world".into())
+    );
 }

@@ -61,7 +61,9 @@ fn no_owner_filter_when_empty() {
         }
     });
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
-    let evt = env.into_event("").expect("event should pass when owner_id is empty");
+    let evt = env
+        .into_event("")
+        .expect("event should pass when owner_id is empty");
     match evt {
         FeishuIn::Text { text, .. } => assert_eq!(text, "hi"),
         _ => panic!("expected Text"),

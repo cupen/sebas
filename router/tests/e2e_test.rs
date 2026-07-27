@@ -1,7 +1,7 @@
+use acp_claude::session::AcpEvent;
+use feishu::events::{FeishuIn, SessionKey};
 use router::router::{Out, RouterHandle};
 use router::state::SessionMap;
-use feishu::events::{FeishuIn, SessionKey};
-use acp_claude::session::AcpEvent;
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_millis(500);
@@ -10,16 +10,21 @@ const WAIT: Duration = Duration::from_millis(500);
 async fn full_round_trip_text_to_events() {
     let map = SessionMap::new();
     let (handle, mut out_rx) = RouterHandle::new(map.clone());
-    let key = SessionKey { chat_id: "oc_x".into(), thread_id: None };
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
 
     // 1) Text in → expect SpawnAcp only. The root SendCard is now emitted by
     // the dispatcher (after create_session mints the real session_id), not the
     // router, so it does not appear on this channel.
-    handle.dispatch(FeishuIn::Text {
-        key: key.clone(),
-        text: "hello".into(),
-        reply_to: None,
-    }).await;
+    handle
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_to: None,
+        })
+        .await;
 
     let first = tokio::time::timeout(WAIT, out_rx.recv())
         .await
@@ -31,10 +36,12 @@ async fn full_round_trip_text_to_events() {
     );
 
     // 2) ACP event in → expect UpdateCard
-    handle.dispatch_acp_event(AcpEvent::TextDelta {
-        session_id: "s1".into(),
-        delta: "hi back".into(),
-    }).await;
+    handle
+        .dispatch_acp_event(AcpEvent::TextDelta {
+            session_id: "s1".into(),
+            delta: "hi back".into(),
+        })
+        .await;
 
     let out = tokio::time::timeout(WAIT, out_rx.recv())
         .await

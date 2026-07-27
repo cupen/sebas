@@ -24,9 +24,8 @@ pub mod download_file {
         dest: &Path,
     ) -> anyhow::Result<()> {
         // 1. GET /im/v1/messages/{message_id}/resources/{file_key} → redirect URL or stream
-        let url = format!(
-            "https://open.feishu.cn/open-apis/im/v1/messages/msg/resources/{file_key}"
-        );
+        let url =
+            format!("https://open.feishu.cn/open-apis/im/v1/messages/msg/resources/{file_key}");
         let bytes = http
             .get(&url)
             .bearer_auth(token)

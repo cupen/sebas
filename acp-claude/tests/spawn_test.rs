@@ -19,6 +19,8 @@ async fn echo_subprocess_round_trip() {
     });
 
     let mut buf = vec![0u8; 6];
-    tokio::io::AsyncReadExt::read_exact(&mut stdout, &mut buf).await.unwrap();
+    tokio::io::AsyncReadExt::read_exact(&mut stdout, &mut buf)
+        .await
+        .unwrap();
     assert_eq!(&buf, b"hello\n");
 }

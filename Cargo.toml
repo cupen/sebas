@@ -8,6 +8,9 @@ rust-version = "1.90"
 resolver = "2"
 members = ["router", "feishu", "acp-claude"]
 
+[workspace.dependencies]
+agent-client-protocol = "2.0"
+
 [dependencies]
 router = { path = "router" }
 feishu = { path = "feishu" }
