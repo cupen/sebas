@@ -48,12 +48,20 @@ impl SessionManager {
     /// directory is still reported to the agent via `NewSessionRequest`
     /// (defaulting to "." if None) so prompts and tool calls see a
     /// sensible path.
+    ///
+    /// `prompt` is part of the public API surface (the prior hand-rolled
+    /// `SessionManager::create_session` accepted it) but is **not** sent
+    /// here — the agent connection is established but no message is
+    /// pushed until the caller dispatches `AcpCommand::CreateSession`
+    /// (or `ContinueSession`) through `send`. Keeping the param unused
+    /// is intentional: the prompt is forwarded exactly once via the
+    /// command channel.
     pub async fn create_session(
         &self,
         path: &str,
         args: Vec<String>,
         work_dir: Option<String>,
-        prompt: String,
+        _prompt: String,
     ) -> anyhow::Result<String> {
         let agent = AcpAgent::new(AcpAgentConfig::new(path).args(args));
 
@@ -72,7 +80,6 @@ impl SessionManager {
             let result = run_session(
                 agent,
                 cwd,
-                prompt,
                 cmd_rx,
                 evt_tx,
                 cancel_rx,
@@ -208,7 +215,6 @@ fn decision_to_outcome(decision: Decision) -> RequestPermissionOutcome {
 async fn run_session(
     agent: AcpAgent,
     cwd: String,
-    prompt: String,
     cmd_rx: mpsc::Receiver<AcpCommand>,
     evt_tx: mpsc::Sender<AcpEvent>,
     cancel_rx: oneshot::Receiver<()>,
@@ -249,7 +255,7 @@ async fn run_session(
             on_receive_request!(),
         )
         .connect_with(agent, move |cx: ConnectionTo<Agent>| async move {
-            run_main(cx, cwd, prompt, init_tx, evt_tx, cmd_rx, cancel_rx).await
+            run_main(cx, cwd, init_tx, evt_tx, cmd_rx, cancel_rx).await
         })
         .await
 }
@@ -258,7 +264,6 @@ async fn run_session(
 async fn run_main(
     cx: ConnectionTo<Agent>,
     cwd: String,
-    prompt: String,
     init_tx: oneshot::Sender<String>,
     evt_tx: mpsc::Sender<AcpEvent>,
     mut cmd_rx: mpsc::Receiver<AcpCommand>,
@@ -281,16 +286,16 @@ async fn run_main(
     let session_id = new_session.session_id.0.to_string();
     let _ = init_tx.send(session_id.clone());
 
-    // 3) Start the active session and send the initial prompt. The
-    //    ActiveSession internally registers a per-session dynamic
-    //    handler that pumps SessionNotifications into its update
-    //    channel which we drain below.
+    // 3) Open the active session. The session pumps SessionNotifications
+    //    through its update channel which we drain below. We do **not**
+    //    send the initial prompt here — the caller dispatches it via
+    //    `AcpCommand::CreateSession` (or `ContinueSession`) through
+    //    `SessionManager::send`. This avoids pushing the prompt twice.
     let mut session = cx
         .build_session(std::path::PathBuf::from("."))
         .block_task()
         .start_session()
         .await?;
-    session.send_prompt(prompt)?;
 
     // 4) Read loop. The session is long-lived: each `StopReason::EndTurn`
     //    is forwarded as a `Finished` event but the connection is kept
@@ -326,10 +331,10 @@ async fn run_main(
                         break;
                     }
                     Some(AcpCommand::CreateSession { prompt, .. }) => {
-                        // Old test fixtures use CreateSession to issue
-                        // the initial prompt; the SDK now does that
-                        // itself. Treat CreateSession as a follow-up
-                        // prompt equivalent to ContinueSession.
+                        // `CreateSession` is the single channel through
+                        // which the initial prompt reaches the agent;
+                        // `create_session` deliberately does not push
+                        // one on its own, so this is the only send.
                         if session.send_prompt(prompt).is_err() {
                             let _ = evt_tx
                                 .send(AcpEvent::Error {
