@@ -12,7 +12,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, debug, warn, error};
 
-pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
+pub async fn run(
+    cfg: Config,
+    test_msg: Option<String>,
+    dump_inbound: Option<String>,
+) -> Result<()> {
     // openlark 0.19 uses reqwest 0.13, whose Rustls connector consults the
     // process-wide provider. Our reqwest 0.12 clients use ring explicitly;
     // install one provider up front so the mixed dependency graph is
@@ -119,13 +123,26 @@ pub async fn run(cfg: Config, test_msg: Option<String>) -> Result<()> {
     let ws_owner = cfg.feishu.owner_id.clone();
     let ws_app_id = cfg.feishu.app_id.clone();
     let ws_app_secret = cfg.feishu.app_secret.clone();
+    let ws_dump_dir = match dump_inbound.as_ref() {
+        Some(p) => match std::fs::create_dir_all(p) {
+            Ok(()) => Some(std::path::PathBuf::from(p)),
+            Err(e) => {
+                warn!(?e, path = %p, "failed to create inbound dump dir; disabling dump");
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(d) = &ws_dump_dir {
+        info!(dir = %d.display(), "inbound WS payloads will be dumped here");
+    }
 
     info!("sebas started; waiting for SIGINT/SIGTERM");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down (SIGINT)");
         }
-        _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router) => {
+        _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router, ws_dump_dir) => {
             warn!("WS loop exited; awaiting ctrl_c");
             tokio::signal::ctrl_c().await.ok();
         }
@@ -262,7 +279,13 @@ fn spawn_acp_pump(mgr: Arc<SessionManager>, router: RouterHandle, session_id: St
 /// types such as `card.action.trigger` (used by our permission card
 /// buttons) are not surfaced by this dispatcher; see the migration report at
 /// `.superpowers/sdd/ws-v019-cratesio-report.md` for the alternatives.
-async fn run_ws_loop(app_id: &str, app_secret: &str, owner_id: &str, router: RouterHandle) {
+async fn run_ws_loop(
+    app_id: &str,
+    app_secret: &str,
+    owner_id: &str,
+    router: RouterHandle,
+    dump_dir: Option<std::path::PathBuf>,
+) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
@@ -272,6 +295,7 @@ async fn run_ws_loop(app_id: &str, app_secret: &str, owner_id: &str, router: Rou
         let handler = RouterEventHandler {
             router: router.clone(),
             owner_id: owner_id.to_string(),
+            dump_dir: dump_dir.clone(),
         };
         let dispatcher = match EventDispatcherHandler::builder()
             .register_raw("im.message.receive_v1", handler)
@@ -321,6 +345,10 @@ async fn run_ws_loop(app_id: &str, app_secret: &str, owner_id: &str, router: Rou
 struct RouterEventHandler {
     router: RouterHandle,
     owner_id: String,
+    /// Optional directory for raw payload snapshots. When set, every received
+    /// WS frame is written to `<dir>/<unix_ms>-<uuid>.json` before parsing, so
+    /// you can replay captured traffic locally without a live Feishu bot.
+    dump_dir: Option<std::path::PathBuf>,
 }
 
 impl EventHandler for RouterEventHandler {
@@ -328,6 +356,17 @@ impl EventHandler for RouterEventHandler {
         &self,
         payload: &[u8],
     ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(dir) = &self.dump_dir {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let pid = std::process::id();
+            let path = dir.join(format!("{ts}-{pid}.json"));
+            if let Err(e) = std::fs::write(&path, payload) {
+                warn!(?e, ?path, "failed to dump inbound payload");
+            }
+        }
         let text = std::str::from_utf8(payload)?;
         match serde_json::from_str::<feishu::events::FeishuEnvelope>(text) {
             Ok(env) => {

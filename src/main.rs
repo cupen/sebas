@@ -11,6 +11,12 @@ struct Cli {
     /// receive_id_type: open_id (private) or chat_id (group).
     #[arg(long)]
     test_msg: Option<String>,
+
+    /// Dump every raw inbound WS payload to this directory as one .json file per
+    /// event (timestamp-prefixed). Useful for local replay/debug without needing
+    /// the live Feishu connection. Disabled when omitted.
+    #[arg(long)]
+    dump_inbound: Option<String>,
 }
 
 #[tokio::main]
@@ -25,6 +31,6 @@ async fn main() -> anyhow::Result<()> {
         )
     });
     let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-    sebas::run::run(cfg, cli.test_msg).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    sebas::run::run(cfg, cli.test_msg, cli.dump_inbound).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
