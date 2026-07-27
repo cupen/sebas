@@ -10,10 +10,10 @@ A Rust daemon that bridges Claude Code (via ACP) to Feishu. Run Claude Code remo
 #    - im:message.group_at_msg (for group messages)
 #    - im:message.p2p_msg (for direct messages)
 #    Enable "Long connection" event subscription in app capabilities.
-# 2. cp config/sebas.toml.example sebas.toml
-# 3. Edit sebas.toml: set app_id, app_secret, owner_id (your open_id)
+# 2. cp config/config.toml.example config.toml
+# 3. Edit config.toml: set app_id, app_secret, owner_id (your open_id)
 # 4. cargo build --release
-# 5. ./target/release/sebas -config ./sebas.toml
+# 5. ./target/release/sebas -config ./config.toml
 ```
 
 ## Configuration

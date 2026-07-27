@@ -3,7 +3,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    #[arg(long, default_value = "./sebas.toml")]
+    #[arg(long, default_value = "./config.toml")]
     config: String,
 
     /// Send a startup "sebas 已启动" message to this chat_id, then continue running.
