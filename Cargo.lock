@@ -2333,6 +2333,7 @@ dependencies = [
  "dirs",
  "feishu",
  "futures-util",
+ "libc",
  "openlark",
  "reqwest 0.12.28",
  "router",
