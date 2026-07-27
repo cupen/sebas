@@ -30,10 +30,33 @@ pub struct CardTitle {
 #[serde(tag = "tag", rename_all = "snake_case")]
 pub enum CardElement {
     Hr,
-    PlainText { content: String },
     Markdown { content: String },
-    Note { elements: Vec<CardText> },
-    Action { actions: Vec<CardButton> },
+    /// V2 replacement for the removed V1 `note` component: plain text with
+    /// notation size + grey color, per the card JSON 2.0 migration guide.
+    Div { text: DivText },
+    /// V2 buttons are first-class body elements (the V1 `action` container
+    /// was removed); callback payloads travel via `behaviors`.
+    Button {
+        text: CardText,
+        r#type: String,
+        behaviors: Vec<CardBehavior>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DivText {
+    pub tag: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CardBehavior {
+    pub r#type: String,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,7 +67,6 @@ pub struct CardText {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CardButton {
-    pub tag: String,
     pub text: CardText,
     pub r#type: String, // "primary" | "danger" | "default"
     pub value: Value,
@@ -72,11 +94,13 @@ impl Card {
     }
 
     pub fn push_note(&mut self, content: impl Into<String>) {
-        self.body.elements.push(CardElement::Note {
-            elements: vec![CardText {
+        self.body.elements.push(CardElement::Div {
+            text: DivText {
                 tag: "plain_text".into(),
                 content: content.into(),
-            }],
+                text_size: Some("notation".into()),
+                text_color: Some("grey".into()),
+            },
         });
     }
 
@@ -85,7 +109,16 @@ impl Card {
     }
 
     pub fn push_actions(&mut self, actions: Vec<CardButton>) {
-        self.body.elements.push(CardElement::Action { actions });
+        for a in actions {
+            self.body.elements.push(CardElement::Button {
+                text: a.text,
+                r#type: a.r#type,
+                behaviors: vec![CardBehavior {
+                    r#type: "callback".into(),
+                    value: a.value,
+                }],
+            });
+        }
     }
 }
 
@@ -107,7 +140,6 @@ pub fn render_permission_card(
     card.push_text(format!("**{tool_name}** 想要执行："));
     card.push_note(serde_json::to_string_pretty(args).unwrap_or_default());
     let btn = |label: &str, kind: &str, decision: &str| CardButton {
-        tag: "button".into(),
         text: CardText {
             tag: "plain_text".into(),
             content: label.into(),
