@@ -35,6 +35,10 @@ futures-util = "0.3"
 # never matched because registered keys vs. emit keys were different).
 openlark = { version = "0.19", default-features = false, features = ["communication", "websocket"] }
 
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"
+
 [[bin]]
 name = "sebas"
 path = "src/main.rs"
