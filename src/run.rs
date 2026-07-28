@@ -4,6 +4,7 @@ use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::render_root_card;
 use feishu::client::{FeishuClient, FeishuConfig};
+use feishu::events::SessionKey;
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use router::router::{Out, RouterHandle};
@@ -38,10 +39,22 @@ pub async fn run(
     });
 
     let http = reqwest::Client::new();
-    let token = feishu
-        .fetch_token(&http)
-        .await
-        .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?;
+    // Test affordance: `SEBAS_TEST_FAKE_TOKEN=1` skips the live Feishu auth
+    // HTTP call and substitutes a stub token. Used by integration tests that
+    // cannot reach the live Feishu API. Off by default; production callers
+    // see no behaviour change.
+    let token = if std::env::var("SEBAS_TEST_FAKE_TOKEN").as_deref() == Ok("1") {
+        info!("SEBAS_TEST_FAKE_TOKEN=1; using stub tenant_access_token");
+        feishu::client::FeishuToken {
+            access_token: "t-stub-test".into(),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+        }
+    } else {
+        feishu
+            .fetch_token(&http)
+            .await
+            .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?
+    };
 
     // hello_msg: send to the owner (private DM via open_id) if both are set.
     // If owner_id is empty, do nothing.
@@ -147,10 +160,39 @@ pub async fn run(
         info!(dir = %d.display(), "inbound WS payloads will be dumped here");
     }
 
+    // Test affordance: `SEBAS_TEST_SPAWN_SESSION=1` mints a session via the
+    // `acp.claude.path` binary at startup. Without this, the daemon idles
+    // and no child is ever spawned — which makes the SIGTERM-cleanup test
+    // vacuous. With it, an ACP child is alive as a direct descendant of
+    // the sebas pid, so `kill_all` actually has work to do. Off by default.
+    if std::env::var("SEBAS_TEST_SPAWN_SESSION").as_deref() == Ok("1") {
+        spawn_test_session(&cfg, &router, &mgr).await;
+    }
+
     info!("sebas started; waiting for SIGINT/SIGTERM");
+    let sigint = async {
+        tokio::signal::ctrl_c().await.ok();
+    };
+    let sigterm = async {
+        #[cfg(unix)]
+        {
+            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+            sig.recv().await;
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix platforms only have ctrl_c equivalent; never fires
+            // separately here. Block forever so the select arm stays inert.
+            std::future::pending::<()>().await;
+        }
+    };
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+        _ = sigint => {
             info!("shutting down (SIGINT)");
+        }
+        _ = sigterm => {
+            info!("shutting down (SIGTERM)");
         }
         _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router, ws_dump_dir) => {
             warn!("WS loop exited; awaiting ctrl_c");
@@ -365,14 +407,19 @@ async fn run_ws_loop(
 /// registered twice (`im.message.receive_v1` for text/media and
 /// `card.action.trigger` for permission-card button callbacks), so the
 /// struct must be cheap to clone — all owned fields are already `Clone`.
+///
+/// Also reused by `crate::replay` (the `sebas replay --dir` subcommand) so
+/// the WS path and the offline replay path share the same parse + dispatch
+/// logic 1:1. Fields are `pub` so tests and `replay::run` can construct one
+/// directly without a constructor.
 #[derive(Clone)]
-struct RouterEventHandler {
-    router: RouterHandle,
-    owner_id: String,
+pub struct RouterEventHandler {
+    pub router: RouterHandle,
+    pub owner_id: String,
     /// Optional directory for raw payload snapshots. When set, every received
     /// WS frame is written to `<dir>/<unix_ms>-<uuid>.json` before parsing, so
     /// you can replay captured traffic locally without a live Feishu bot.
-    dump_dir: Option<std::path::PathBuf>,
+    pub dump_dir: Option<std::path::PathBuf>,
 }
 
 impl EventHandler for RouterEventHandler {
@@ -391,19 +438,10 @@ impl EventHandler for RouterEventHandler {
                 warn!(?e, ?path, "failed to dump inbound payload");
             }
         }
-        let text = std::str::from_utf8(payload)?;
-        match serde_json::from_str::<feishu::events::FeishuEnvelope>(text) {
-            Ok(env) => {
-                if let Some(in_ev) = env.into_event(&self.owner_id) {
-                    let router = self.router.clone();
-                    // dispatcher handler is sync; dispatch is async → spawn
-                    tokio::spawn(async move {
-                        router.dispatch(in_ev).await;
-                    });
-                }
-            }
-            Err(e) => warn!(?e, "failed to parse open-lark envelope"),
-        }
+        // Delegate the parse + dispatch to the shared replay helper so the
+        // WS loop and `sebas replay --dir` exercise the exact same routing
+        // logic. `replay_frame` is sync; it spawns the async dispatch.
+        crate::replay::replay_frame(self, payload);
         Ok(())
     }
 }
@@ -419,4 +457,53 @@ fn init_tracing(cfg: &Config) {
         return;
     }
     subscriber.init();
+}
+
+/// Test-only helper used by the SIGTERM-cleanup integration test
+/// (`tests/sigterm_cleanup_test.rs`). Spawns one ACP session against the
+/// configured `acp.claude.path` and records a synthetic `SessionKey` in
+/// the router, so a child process is alive as a descendant of the sebas
+/// pid by the time SIGTERM arrives. Production callers never set
+/// `SEBAS_TEST_SPAWN_SESSION`, so this path is dormant.
+async fn spawn_test_session(cfg: &Config, router: &RouterHandle, mgr: &SessionManager) {
+    let claude = &cfg.acp.claude;
+    let session_id = match mgr
+        .create_session(
+            &claude.path,
+            claude.args.clone(),
+            claude.work_dir.clone(),
+            "[test-mode] sigterm-cleanup probe".into(),
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(?e, "SEBAS_TEST_SPAWN_SESSION: create_session failed");
+            return;
+        }
+    };
+    // Forward the initial prompt via the command channel so the child
+    // transitions out of `session/new` and into the read loop. Without
+    // this, fake-claude would block waiting for a prompt and we'd never
+    // see any child liveness signal.
+    if let Err(e) = mgr
+        .send(
+            &session_id,
+            AcpCommand::CreateSession {
+                session_id: session_id.clone(),
+                prompt: "[test-mode] sigterm-cleanup probe".into(),
+            },
+        )
+        .await
+    {
+        warn!(?e, "SEBAS_TEST_SPAWN_SESSION: send failed");
+    }
+    // Synthetic SessionKey — the test never sends a real Feishu message,
+    // so the key content doesn't matter; it just needs to be unique.
+    let key = SessionKey {
+        chat_id: format!("test-sigterm-{}", std::process::id()),
+        thread_id: None,
+    };
+    router.insert_mapping(key, session_id.clone()).await;
+    info!(%session_id, "SEBAS_TEST_SPAWN_SESSION: spawned child session");
 }

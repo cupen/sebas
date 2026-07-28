@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(version)]
@@ -31,6 +32,8 @@ struct RunArgs {
 enum Cmd {
     /// Install a systemd user or system unit for sebas.
     InstallService(InstallServiceArgs),
+    /// Replay captured inbound events from a directory of `.json` files.
+    Replay(ReplayArgs),
 }
 
 #[derive(Parser)]
@@ -60,6 +63,15 @@ struct InstallServiceArgs {
     config: String,
 }
 
+#[derive(Parser)]
+struct ReplayArgs {
+    /// Directory containing `.json` files to replay (one envelope per file).
+    /// Files are processed in lexical filename order so timestamp-prefixed
+    /// dumps preserve capture order.
+    #[arg(long)]
+    dir: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -74,6 +86,15 @@ async fn main() -> anyhow::Result<()> {
             let code = sebas::install_service::exit_code_of(&err).unwrap_or(1);
             eprintln!("error: {err:?}");
             std::process::exit(code);
+        }
+        Some(Cmd::Replay(args)) => {
+            // Exit 1 only on dir-not-found / unwrap-able FS errors.
+            // Per-frame read/parse failures are warn-and-skip inside run().
+            if let Err(e) = sebas::replay::run(args.into()).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
         }
         None => {
             // Default mode: long-lived run.
@@ -104,6 +125,14 @@ impl From<InstallServiceArgs> for sebas::install_service::InstallServiceArgs {
             force: a.force,
             run_as: a.run_as,
             config: a.config,
+        }
+    }
+}
+
+impl From<ReplayArgs> for sebas::replay::ReplayArgs {
+    fn from(a: ReplayArgs) -> Self {
+        Self {
+            dir: PathBuf::from(a.dir),
         }
     }
 }
