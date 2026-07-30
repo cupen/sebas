@@ -2,8 +2,10 @@ use crate::commands::{parse_command, Command};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
 use feishu::cards::{
-    apply_event, render_dead_session_card, render_permission_card, render_root_card,
+    apply_event_to_card, render_accumulated_card, render_dead_session_card,
+    render_permission_card,
 };
+use feishu::cards::CardConfig;
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +44,8 @@ pub struct RouterHandle {
     map: SessionMap,
     tx: mpsc::Sender<Out>,
     msgid: MsgIdMap,
+    card_states: crate::card_state::CardStateMap,
+    card_cfg: CardConfig,
 }
 
 impl Clone for RouterHandle {
@@ -50,18 +54,29 @@ impl Clone for RouterHandle {
             map: self.map.clone(),
             tx: self.tx.clone(),
             msgid: self.msgid.clone(),
+            card_states: self.card_states.clone(),
+            card_cfg: self.card_cfg.clone(),
         }
     }
 }
 
 impl RouterHandle {
     pub fn new(map: SessionMap) -> (Self, mpsc::Receiver<Out>) {
+        Self::new_with_card_config(map, CardConfig::default())
+    }
+
+    pub fn new_with_card_config(
+        map: SessionMap,
+        card_cfg: CardConfig,
+    ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(256);
         (
             Self {
                 map,
                 tx,
                 msgid: MsgIdMap::default(),
+                card_states: crate::card_state::CardStateMap::default(),
+                card_cfg,
             },
             rx,
         )
@@ -80,6 +95,56 @@ impl RouterHandle {
     /// Look up the root card message_id for a session (used by `UpdateCard`).
     pub async fn root_msg_id(&self, session_id: &str) -> Option<String> {
         self.msgid.get(session_id).await
+    }
+
+    /// seed_card：SpawnAcp 臂发完 root 卡后调用（dispatch_out）。
+    /// 幂等：已存在则保留（防 SpawnAcp 重入冲掉已累积状态）。spec §4.2。
+    pub async fn seed_card(&self, session_id: String, user_prompt: String) {
+        self.card_states.seed(session_id, user_prompt).await;
+    }
+
+    /// apply_event：纯状态变更（FSM emoji + apply_event_to_card append/截断/总量）。
+    /// 不发 Out。session 无 CardState 时 lazy seed（prompt="" 兜底）。spec §4.2。
+    pub async fn apply_event(&self, session_id: &str, event: &AcpEvent) {
+        let cfg = &self.card_cfg;
+        self.card_states
+            .apply(session_id, |st| {
+                // FSM（spec §5）
+                let next = next_emoji(&st.status_emoji, event);
+                if let Some(e) = next {
+                    st.status_emoji = e.into();
+                }
+                apply_event_to_card(&mut st.body, event, cfg);
+            })
+            .await;
+    }
+
+    /// flush_card：快照 → render_accumulated_card → Out::UpdateCard。
+    /// 无 CardState 则 no-op。spec §4.2。节流契约保证 flush 只在 debounce 到点或
+    /// Finished/terminal 即时被调，故不维护 dirty flag。
+    pub async fn flush_card(&self, session_id: &str) {
+        let Some(st) = self.card_states.snapshot(session_id).await else {
+            return;
+        };
+        let card = render_accumulated_card(
+            &st.user_prompt,
+            session_id,
+            &st.status_emoji,
+            &st.body,
+            &self.card_cfg.theme_color,
+        );
+        let _ = self
+            .tx
+            .send(Out::UpdateCard {
+                session_id: session_id.to_string(),
+                card: serde_json::to_value(&card).unwrap(),
+            })
+            .await;
+    }
+
+    /// drop_card：session 死亡/通道关时清 CardState（防无界增长）。spec §4.2。
+    pub async fn drop_card(&self, session_id: &str) {
+        self.card_states.drop(session_id).await;
     }
 
     /// Record a `SessionKey -> session_id` mapping. Called by the dispatcher
@@ -136,45 +201,15 @@ impl RouterHandle {
         self.apply_event_to_out(session_id, &event).await;
     }
 
+    /// apply_event_to_out：同步薄封装（apply_event + flush_card 即时出卡）。
+    ///
+    /// **Spec §6 偏差**：spec §6 说「dispatch_acp_event 改为调 apply_event 不发
+    /// Out」，但 spec §9 要求 router_test/e2e_test/terminal_error_test 零改动通过
+    /// —— 这些测试调 dispatch_acp_event 并断言立即收到 UpdateCard。故本计划保留
+    /// dispatch_acp_event → apply_event_to_out（同步 flush），仅把 **pump** 从
+    /// dispatch_acp_event 改为 apply_event + debounce + flush_card（Task 6）。
     pub async fn apply_event_to_out(&self, session_id: String, event: &AcpEvent) {
         match event {
-            AcpEvent::Error {
-                session_id,
-                terminal: true,
-                ..
-            } => {
-                // Session is unrecoverably dead: drop the mapping so later
-                // messages don't route into a corpse, and mark the root card.
-                self.map.remove_by_session(session_id).await;
-                let mut card = render_root_card("", session_id, "❌");
-                apply_event(&mut card, event);
-                let _ = self
-                    .tx
-                    .send(Out::UpdateCard {
-                        session_id: session_id.clone(),
-                        card: serde_json::to_value(&card).unwrap(),
-                    })
-                    .await;
-            }
-            AcpEvent::TextDelta { .. }
-            | AcpEvent::ToolStart { .. }
-            | AcpEvent::Finished { .. }
-            | AcpEvent::Error { .. } => {
-                let emoji = if matches!(event, AcpEvent::Finished { .. }) {
-                    "✅"
-                } else {
-                    "🚧"
-                };
-                let mut card = render_root_card("", &session_id, emoji);
-                apply_event(&mut card, event);
-                let _ = self
-                    .tx
-                    .send(Out::UpdateCard {
-                        session_id,
-                        card: serde_json::to_value(&card).unwrap(),
-                    })
-                    .await;
-            }
             AcpEvent::PermissionRequest {
                 session_id,
                 request_id,
@@ -198,7 +233,19 @@ impl RouterHandle {
                     })
                     .await;
             }
-            _ => {}
+            AcpEvent::Error { terminal: true, .. } => {
+                // terminal Error 并入累积模型（spec §8）：apply_event（置 ❌ + append
+                // 错误正文，保留死前 transcript）→ flush_card → remove_by_session → drop_card。
+                self.apply_event(session_id.as_str(), event).await;
+                self.flush_card(session_id.as_str()).await;
+                self.map.remove_by_session(session_id.as_str()).await;
+                self.drop_card(session_id.as_str()).await;
+            }
+            _ => {
+                // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
+                self.apply_event(session_id.as_str(), event).await;
+                self.flush_card(session_id.as_str()).await;
+            }
         }
     }
 
@@ -369,6 +416,29 @@ fn extract_session_id(event: &AcpEvent) -> &str {
         | AcpEvent::PermissionRequest { session_id, .. }
         | AcpEvent::Finished { session_id }
         | AcpEvent::Error { session_id, .. } => session_id,
+    }
+}
+
+/// status emoji FSM（spec §5）。返回 Some(新emoji) 表示转移；None 表示不变。
+/// seed=👀；首个流式事件 -> 🚧；Finished -> ✅；terminal Error -> ❌；
+/// 已 🚧/✅/❌ 不回退 👀。
+fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
+    match event {
+        AcpEvent::Finished { .. } => Some("✅"),
+        AcpEvent::Error { terminal: true, .. } => Some("❌"),
+        AcpEvent::TextDelta { .. }
+        | AcpEvent::ThinkingDelta { .. }
+        | AcpEvent::ToolStart { .. }
+        | AcpEvent::ToolProgress { .. }
+        | AcpEvent::ToolEnd { .. }
+        | AcpEvent::Error { terminal: false, .. } => {
+            if current == "👀" {
+                Some("🚧")
+            } else {
+                None
+            }
+        }
+        AcpEvent::PermissionRequest { .. } => None,
     }
 }
 

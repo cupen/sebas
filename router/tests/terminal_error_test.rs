@@ -71,3 +71,56 @@ async fn non_terminal_error_keeps_mapping() {
         "non-terminal error must keep the mapping"
     );
 }
+
+#[tokio::test]
+async fn terminal_error_preserves_pre_death_transcript() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+
+    // 累积若干事件（死前 transcript）。
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::TextDelta { session_id: "s1".into(), delta: "step1".into() },
+        )
+        .await;
+    let _ = tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await;
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::ToolEnd { session_id: "s1".into(), tool_name: "Bash".into(), result: "step2".into() },
+        )
+        .await;
+    let _ = tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await;
+
+    // terminal Error：死前 transcript 必须保留 + 错误正文。
+    router
+        .dispatch_acp_event(AcpEvent::Error {
+            session_id: "s1".into(),
+            message: "agent crashed".into(),
+            terminal: true,
+        })
+        .await;
+
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match out {
+        Out::UpdateCard { session_id, card } => {
+            assert_eq!(session_id, "s1");
+            let s = serde_json::to_string(&card).unwrap();
+            assert!(s.contains('❌'), "❌ emoji: {s}");
+            assert!(s.contains("step1"), "死前 TextDelta 保留: {s}");
+            assert!(s.contains("step2"), "死前 ToolEnd 保留: {s}");
+            assert!(s.contains("agent crashed"), "错误正文: {s}");
+        }
+        other => panic!("expected UpdateCard, got {other:?}"),
+    }
+    assert!(map.get(&key).await.is_none(), "terminal 必清 mapping");
+}
