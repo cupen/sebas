@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::error::Result;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::cards::render_root_card;
+use feishu::cards::render_accumulated_card;
 use feishu::client::{FeishuClient, FeishuConfig};
 use feishu::events::SessionKey;
 use open_lark::Config as LarkConfig;
@@ -29,7 +29,7 @@ pub async fn run(
     let map = SessionMap::restore_json(&state_raw)
         .map_err(|e| crate::error::SebasError::Config(format!("restore: {e}")))?;
 
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = RouterHandle::new_with_card_config(map, cfg.card.clone());
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,
     )));
@@ -293,22 +293,27 @@ async fn dispatch_out(
                     return Ok(());
                 }
             };
-            // 2) Send the root card and record its message_id keyed by the
-            //    real session_id (so streaming UpdateCards resolve correctly).
-            //    Done before the event pump starts so no early delta is lost.
-            let card = render_root_card(&prompt, &session_id, "👀");
+            // 2) seed_card（spec §4.2）: 记录 user_prompt 供后续 flush 重渲染
+            //    引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
+            //    会用 prompt="" 冲掉引用块。
+            router.seed_card(session_id.clone(), prompt.clone()).await;
+            // 3) Send the seed card (empty body) and record its message_id
+            //    keyed by the real session_id (so streaming UpdateCards
+            //    resolve correctly). render_accumulated_card 用真实 theme，
+            //    与后续 flush 产出的卡结构一致（避免初始卡蓝、后续卡变色的跳变）。
+            let card = render_accumulated_card(&prompt, &session_id, "👀", &[], &cfg.card.theme_color);
             let msg_id = feishu
                 .send_card(http, tokens, &key, serde_json::to_value(&card)?)
                 .await?;
             if !msg_id.is_empty() {
                 router.record_root_msg_id(session_id.clone(), msg_id).await;
             }
-            // 3) Pump ACP events from this session back into the router.
+            // 4) Pump ACP events from this session back into the router.
             //    `rx` was cloned before any slow I/O (the send_card HTTP
             //    round trip above) so a crash-on-first-prompt terminal event
             //    survives the wrapper's eager table removal (D6).
             spawn_acp_pump(rx, router.clone(), session_id.clone());
-            // 4) Flush queued prompts as ONE follow-up (sending them one by
+            // 5) Flush queued prompts as ONE follow-up (sending them one by
             //    one would violate ACP's one-prompt-in-flight rule).
             if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
                 warn!(?e, "failed to flush pending prompts");
