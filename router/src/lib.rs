@@ -2,6 +2,7 @@ pub mod commands;
 pub mod error;
 pub mod router;
 pub mod state;
+pub mod card_state;
 
 pub use commands::{parse_command, Command};
 pub use router::{MsgIdMap, Out, RouterHandle};
