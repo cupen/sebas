@@ -45,7 +45,7 @@ fn count_method(lines: &[serde_json::Value], method: &str) -> usize {
 #[tokio::test]
 async fn exactly_one_session_new_and_routing_id_matches() {
     let journal = journal_path("single-new");
-    let mgr = SessionManager::new();
+    let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
         .create_session(
             fake().to_str().unwrap(),

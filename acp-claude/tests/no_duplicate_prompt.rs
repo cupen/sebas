@@ -15,7 +15,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn one_prompt_yields_exactly_three_events() {
-    let mgr = SessionManager::new();
+    let mgr = SessionManager::new(Duration::from_secs(30));
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")

@@ -11,7 +11,7 @@ fn fake_claude_path() -> PathBuf {
 
 #[tokio::test]
 async fn create_and_kill() {
-    let mgr = SessionManager::new();
+    let mgr = SessionManager::new(Duration::from_secs(30));
     let fake = fake_claude_path();
     let id = mgr
         .create_session(fake.to_str().unwrap(), vec![], None, "hello".into())
@@ -23,6 +23,6 @@ async fn create_and_kill() {
 
 #[tokio::test]
 async fn kill_unknown_is_noop() {
-    let mgr = SessionManager::new();
+    let mgr = SessionManager::new(Duration::from_secs(30));
     mgr.kill("nope").await; // must not panic
 }

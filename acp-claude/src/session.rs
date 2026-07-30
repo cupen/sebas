@@ -33,6 +33,9 @@ pub struct AcpSessionHandle {
 pub struct SessionMeta {
     pub session_id: String,
     pub handle: AcpSessionHandle,
+    /// Set by kill()/kill_all() before signalling shutdown, so the wrapper
+    /// task does not synthesize a crash event for an explicit kill.
+    pub expected_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +105,11 @@ pub enum AcpEvent {
     Error {
         session_id: String,
         message: String,
+        /// True when the session is unrecoverably dead (process exit,
+        /// transport failure) — the router removes the mapping and shows ❌.
+        /// `#[serde(default)]` keeps legacy fixtures/deserialization working.
+        #[serde(default)]
+        terminal: bool,
     },
 }
 

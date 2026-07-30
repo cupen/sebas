@@ -37,3 +37,32 @@ fn parses_full_session_stream() {
 
     matches!(events.last(), Some(AcpEvent::Finished { .. }));
 }
+
+#[test]
+fn error_terminal_defaults_to_false_and_round_trips() {
+    // Legacy shape (no terminal field) still parses, defaulting to false.
+    let legacy = r#"{"type":"error","session_id":"s1","message":"boom"}"#;
+    let evt: AcpEvent = serde_json::from_str(legacy).expect("legacy parses");
+    match evt {
+        AcpEvent::Error {
+            session_id,
+            message,
+            terminal,
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(message, "boom");
+            assert!(!terminal);
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    // New shape round-trips.
+    let evt = AcpEvent::Error {
+        session_id: "s2".into(),
+        message: "dead".into(),
+        terminal: true,
+    };
+    let s = serde_json::to_string(&evt).unwrap();
+    assert!(s.contains("\"terminal\":true"));
+    let back: AcpEvent = serde_json::from_str(&s).unwrap();
+    assert!(matches!(back, AcpEvent::Error { terminal: true, .. }));
+}

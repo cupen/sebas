@@ -126,6 +126,24 @@ impl RouterHandle {
 
     pub async fn apply_event_to_out(&self, session_id: String, event: &AcpEvent) {
         match event {
+            AcpEvent::Error {
+                session_id,
+                terminal: true,
+                ..
+            } => {
+                // Session is unrecoverably dead: drop the mapping so later
+                // messages don't route into a corpse, and mark the root card.
+                self.map.remove_by_session(session_id).await;
+                let mut card = render_root_card("", session_id, "❌");
+                apply_event(&mut card, event);
+                let _ = self
+                    .tx
+                    .send(Out::UpdateCard {
+                        session_id: session_id.clone(),
+                        card: serde_json::to_value(&card).unwrap(),
+                    })
+                    .await;
+            }
             AcpEvent::TextDelta { .. }
             | AcpEvent::ToolStart { .. }
             | AcpEvent::Finished { .. }

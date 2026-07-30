@@ -25,7 +25,7 @@ async fn permission_round_trip() {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let mgr = SessionManager::new();
+    let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
         .create_session(
             fake().to_str().unwrap(),

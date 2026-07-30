@@ -49,7 +49,7 @@ async fn drain_cancel_fallout(mgr: &SessionManager, id: &str) {
 
 #[tokio::test]
 async fn session_survives_cancel() {
-    let mgr = SessionManager::new();
+    let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
         .create_session(fake().to_str().unwrap(), vec![], None, "".into())
         .await

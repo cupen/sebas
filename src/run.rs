@@ -30,7 +30,9 @@ pub async fn run(
         .map_err(|e| crate::error::SebasError::Config(format!("restore: {e}")))?;
 
     let (router, mut out_rx) = RouterHandle::new(map);
-    let mgr = Arc::new(SessionManager::new());
+    let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
+        cfg.acp.claude.startup_timeout_secs,
+    )));
 
     let feishu = FeishuClient::new(FeishuConfig {
         app_id: cfg.feishu.app_id.clone(),
@@ -43,17 +45,19 @@ pub async fn run(
     // HTTP call and substitutes a stub token. Used by integration tests that
     // cannot reach the live Feishu API. Off by default; production callers
     // see no behaviour change.
-    let token = if std::env::var("SEBAS_TEST_FAKE_TOKEN").as_deref() == Ok("1") {
+    let tokens = if std::env::var("SEBAS_TEST_FAKE_TOKEN").as_deref() == Ok("1") {
         info!("SEBAS_TEST_FAKE_TOKEN=1; using stub tenant_access_token");
-        feishu::client::FeishuToken {
-            access_token: "t-stub-test".into(),
-            expires_at: chrono::Utc::now().timestamp() + 3600,
-        }
+        feishu::client::TokenManager::with_stub_token("t-stub-test")
     } else {
-        feishu
-            .fetch_token(&http)
+        let tm = feishu::client::TokenManager::new(
+            cfg.feishu.app_id.clone(),
+            cfg.feishu.app_secret.clone(),
+        );
+        // Startup auth check stays fatal (spec §4.1).
+        tm.token()
             .await
-            .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?
+            .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?;
+        tm
     };
 
     // hello_msg: send to the owner (private DM via open_id) if both are set.
@@ -65,9 +69,10 @@ pub async fn run(
             "msg_type": "text",
             "content": serde_json::to_string(&serde_json::json!({"text": cfg.feishu.hello_msg})).unwrap_or_default(),
         });
+        let bearer = tokens.token().await.unwrap_or_default();
         match http
             .post(url)
-            .bearer_auth(&token.access_token)
+            .bearer_auth(&bearer)
             .json(&body)
             .send()
             .await
@@ -92,9 +97,10 @@ pub async fn run(
             "content": serde_json::to_string(&serde_json::json!({"text": "✅ sebas 已启动"})).unwrap_or_default(),
         });
         async {
+            let bearer = tokens.token().await.unwrap_or_default();
             let resp = http
                 .post(url)
-                .bearer_auth(&token.access_token)
+                .bearer_auth(&bearer)
                 .json(&body)
                 .send()
                 .await
@@ -115,7 +121,7 @@ pub async fn run(
 
     // Spawn outbound pump
     let cfg_for_outbound = cfg.clone();
-    let token_clone = token.access_token.clone();
+    let tokens_for_outbound = tokens.clone();
     let http_for_outbound = http.clone();
     let feishu_for_outbound = feishu.clone();
     let router_for_outbound = router.clone();
@@ -125,7 +131,7 @@ pub async fn run(
             if let Err(e) = dispatch_out(
                 &feishu_for_outbound,
                 &http_for_outbound,
-                &token_clone,
+                &tokens_for_outbound,
                 &cfg_for_outbound,
                 &router_for_outbound,
                 &mgr_for_outbound,
@@ -218,7 +224,7 @@ pub async fn run(
 async fn dispatch_out(
     feishu: &FeishuClient,
     http: &reqwest::Client,
-    token: &str,
+    tokens: &feishu::client::TokenManager,
     cfg: &Config,
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
@@ -230,7 +236,7 @@ async fn dispatch_out(
             // `UpdateCard`/`React`, which only know the session_id, can resolve
             // the message_id. Only record when a session_id is supplied; plain
             // cards (permission prompts, help) don't need to be updated later.
-            let new_id = feishu.send_card(http, token, &key, card).await?;
+            let new_id = feishu.send_card(http, tokens, &key, card).await?;
             if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
                 router.record_root_msg_id(session_id, new_id.clone()).await;
                 debug!(message_id = %new_id, "recorded card msg_id");
@@ -238,14 +244,14 @@ async fn dispatch_out(
         }
         Out::UpdateCard { session_id, card } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
-                feishu.update_card(http, token, &message_id, card).await?;
+                feishu.update_card(http, tokens, &message_id, card).await?;
             } else {
                 debug!(?session_id, "no root msg_id recorded; skipping update");
             }
         }
         Out::React { session_id, emoji } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
-                feishu.react(http, token, &message_id, &emoji).await?;
+                feishu.react(http, tokens, &message_id, &emoji).await?;
             } else {
                 debug!(?session_id, "no root msg_id recorded; skipping react");
             }
@@ -278,7 +284,7 @@ async fn dispatch_out(
             //    before the event pump starts so no early delta is lost.
             let card = render_root_card(&prompt, &session_id, "👀");
             let msg_id = feishu
-                .send_card(http, token, &key, serde_json::to_value(&card)?)
+                .send_card(http, tokens, &key, serde_json::to_value(&card)?)
                 .await?;
             if !msg_id.is_empty() {
                 router.record_root_msg_id(session_id.clone(), msg_id).await;
