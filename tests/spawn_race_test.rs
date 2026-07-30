@@ -6,6 +6,7 @@ use feishu::events::{FeishuIn, SessionKey};
 use router::router::{Out, RouterHandle};
 use router::state::SessionMap;
 use acp_claude::manager::SessionManager;
+use acp_claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,14 +80,15 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
         })
         .await;
 
-    let (session_id, pending) = spawn.await.unwrap().expect("spawn ok");
+    let (session_id, pending, rx) = spawn.await.unwrap().expect("spawn ok");
     assert_eq!(pending, vec!["msg2".to_string()]);
     sebas::run::flush_pending_prompts(&mgr, &session_id, pending)
         .await
         .expect("flush");
 
     // Drain the session's events so the child finishes both turns.
-    let rx = mgr.event_rx(&session_id).await.expect("event rx");
+    // `rx` was returned by acp_spawn_and_activate (cloned before the prompt
+    // was sent); entry is present and session alive in this test.
     let mut finished = 0;
     let guard = tokio::time::timeout(Duration::from_secs(5), async {
         let mut rx = rx.lock().await;
@@ -113,4 +115,101 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
         "pending prompt must reach the agent: {raw}"
     );
     let _ = std::fs::remove_file(&journal);
+}
+
+/// D6 regression: if the agent crashes on the first prompt, the terminal
+/// `Error{terminal:true}` event must still reach the pump even though the
+/// production path does `acp_spawn_and_activate` → `send_card` (a slow HTTP
+/// round trip) → `spawn_acp_pump`. The fix clones the event receiver inside
+/// `acp_spawn_and_activate` BEFORE the prompt is sent, so it survives the
+/// wrapper's eager table removal when the process dies. Pre-fix, the pump
+/// looked up `event_rx` AFTER the send_card delay — by which time the crash
+/// had already removed the only Receiver Arc, losing the terminal event.
+#[tokio::test]
+async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
+    let map = SessionMap::new();
+    let (router, mut out_rx) = RouterHandle::new(map);
+    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let key = SessionKey {
+        chat_id: "oc_crash".into(),
+        thread_id: None,
+    };
+
+    // Dispatch a text with "crash" -> SpawnAcp. The agent (fake-claude)
+    // will send one chunk ("boom") then exit(2) — crashing during the first
+    // turn, which is exactly D6's target scenario.
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "crash".into(),
+            reply_to: None,
+        })
+        .await;
+    let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let Out::SpawnAcp { key: k, prompt } = out else {
+        panic!("expected SpawnAcp, got {out:?}")
+    };
+
+    // Spawn the session with "crash" as the INITIAL prompt. The returned
+    // `rx` is cloned before the prompt reaches the agent.
+    let (session_id, _pending, rx) = sebas::run::acp_spawn_and_activate(
+        &mgr,
+        &router,
+        &k,
+        &prompt,
+        fake().to_str().unwrap(),
+        vec![],
+        None,
+    )
+    .await
+    .expect("spawn ok");
+
+    // Simulate the production send_card delay (50-500ms HTTP round trip)
+    // during which the agent crashes and the wrapper removes the table
+    // entry — the ONLY Receiver Arc clone in the pre-fix code path.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Drain rx: the terminal Error event must survive because our rx clone
+    // holds the receiver alive despite the table removal.
+    let mut terminal_errors = 0;
+    let mut stream_closed = false;
+    let guard = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut rx = rx.lock().await;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(evt)) => {
+                    if matches!(evt, AcpEvent::Error { terminal: true, .. }) {
+                        terminal_errors += 1;
+                    }
+                }
+                Ok(None) => {
+                    stream_closed = true;
+                    break;
+                }
+                Err(_) => break, // per-event timeout
+            }
+        }
+    })
+    .await;
+    assert!(guard.is_ok(), "drain should complete within 5s");
+    assert_eq!(
+        terminal_errors, 1,
+        "exactly one terminal Error event must survive the table removal"
+    );
+    assert!(stream_closed, "stream must close after the terminal event");
+
+    // The table entry was removed by the wrapper, so send must fail fast.
+    let send_result = mgr
+        .send(
+            &session_id,
+            AcpCommand::ContinueSession {
+                session_id: session_id.clone(),
+                prompt: "after crash".into(),
+            },
+        )
+        .await;
+    assert!(send_result.is_err(), "send must fail after table removal");
 }

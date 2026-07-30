@@ -14,7 +14,7 @@ owner_id = "ou_x"
     assert_eq!(cfg.acp.claude.idle_kill_secs, 172800);
     assert_eq!(cfg.router.max_concurrent_sessions, 32);
     assert_eq!(cfg.log.level, "info");
-    assert!(matches!(cfg.log.file, None));
+    assert!(cfg.log.file.is_none());
 }
 
 #[test]

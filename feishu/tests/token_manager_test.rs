@@ -42,8 +42,8 @@ fn start_stub(card_bodies: Vec<String>) -> Stub {
                     break;
                 }
                 let lower = line.to_lowercase();
-                if lower.starts_with("content-length:") {
-                    content_len = lower[15..].trim().parse().unwrap_or(0);
+                if let Some(stripped) = lower.strip_prefix("content-length:") {
+                    content_len = stripped.trim().parse().unwrap_or(0);
                 }
                 if line == "\r\n" {
                     break;
@@ -119,7 +119,7 @@ async fn send_card_retries_once_with_fresh_token_on_business_error() {
     // targets the real Feishu host; for the test we call the internal
     // `post_card` via a client whose base is the stub. To keep the public
     // surface minimal, the retry policy is factored into
-    // `FeishuClient::post_json_with_retry`, which the test drives directly.
+    // `FeishuClient::post_card_with_retry`, which the test drives directly.
     let client = feishu::client::FeishuClient::new(feishu::client::FeishuConfig {
         app_id: "app".into(),
         app_secret: "secret".into(),

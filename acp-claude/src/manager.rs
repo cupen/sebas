@@ -189,7 +189,8 @@ impl SessionManager {
     ///   Does not touch the SDK.
     /// - `Cancel` sends a `session/cancel` notification through the
     ///   command channel; the background task forwards it to the agent
-    ///   and exits.
+    ///   but the session stays alive (D4: Cancel cancels the current
+    ///   turn only, not the session).
     /// - Everything else (CreateSession, ContinueSession) is forwarded
     ///   to the command channel for the background task to handle.
     pub async fn send(&self, session_id: &str, cmd: AcpCommand) -> anyhow::Result<()> {
@@ -362,7 +363,7 @@ async fn run_main(
     *sid_slot.lock().await = Some(session_id.clone());
     let _ = init_tx.send(session_id.clone());
 
-    // 4) Read loop. The session is long-lived: each `StopReason::EndTurn`
+    // 3) Read loop. The session is long-lived: each `StopReason::EndTurn`
     //    is forwarded as a `Finished` event but the connection is kept
     //    alive so the caller can issue `ContinueSession` commands for
     //    follow-up prompts. The loop exits (and the SDK connection

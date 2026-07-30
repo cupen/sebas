@@ -92,8 +92,8 @@ fn main() {
 
         if method.is_empty() {
             // A response (to our session/request_permission).
-            if let (Some((perm_id, prompt_id, sid)), Some(rid)) = (&pending_perm, &id) {
-                if perm_id == rid {
+            if let (Some((perm_id, prompt_id, sid)), Some(rid)) = (&pending_perm, &id)
+                && perm_id == rid {
                     let (sid, prompt_id) = (sid.clone(), prompt_id.clone());
                     pending_perm = None;
                     send_chunk(&mut out, &sid, "perm done");
@@ -102,7 +102,6 @@ fn main() {
                         json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
                     );
                 }
-            }
             continue;
         }
 
@@ -206,8 +205,8 @@ fn main() {
                     .pointer("/params/sessionId")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if let Some((_, prompt_id, p_sid)) = &pending_perm {
-                    if p_sid == sid {
+                if let Some((_, prompt_id, p_sid)) = &pending_perm
+                    && p_sid == sid {
                         let prompt_id = prompt_id.clone();
                         pending_perm = None;
                         send(
@@ -215,7 +214,6 @@ fn main() {
                             json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"cancelled"}}),
                         );
                     }
-                }
                 // No turn in flight -> ignore (accurate: cancel is a notification).
             }
             _ => {
@@ -250,15 +248,14 @@ fn send_chunk(out: &mut io::StdoutLock<'_>, sid: &str, text: &str) {
 /// Write msg to stdout; also append to the shared journal (if any) as `dir:"out"`.
 fn send(stdout: &mut io::StdoutLock<'_>, msg: Value) {
     // Journal outbound.
-    if let Some(jpath) = SHARED_JOURNAL.get() {
-        if let Ok(mut jf) = std::fs::OpenOptions::new().create(true).append(true).open(jpath) {
+    if let Some(jpath) = SHARED_JOURNAL.get()
+        && let Ok(mut jf) = std::fs::OpenOptions::new().create(true).append(true).open(jpath) {
             let rec = json!({"dir": "out", "msg": msg});
             let mut s = serde_json::to_string(&rec).unwrap_or_default();
             s.push('\n');
             let _ = jf.write_all(s.as_bytes());
             let _ = jf.flush();
         }
-    }
     let mut s = serde_json::to_string(&msg).unwrap_or_default();
     s.push('\n');
     let _ = stdout.write_all(s.as_bytes());

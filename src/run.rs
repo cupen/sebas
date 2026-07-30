@@ -266,7 +266,7 @@ async fn dispatch_out(
             //    (spec §4.1 "ACP spawn failure"). create_session and
             //    CreateSession-prompt failures share the same Err branch —
             //    both mean the session is unusable.
-            let (session_id, pending) = match acp_spawn_and_activate(
+            let (session_id, pending, rx) = match acp_spawn_and_activate(
                 mgr,
                 router,
                 &key,
@@ -304,7 +304,10 @@ async fn dispatch_out(
                 router.record_root_msg_id(session_id.clone(), msg_id).await;
             }
             // 3) Pump ACP events from this session back into the router.
-            spawn_acp_pump(mgr.clone(), router.clone(), session_id.clone());
+            //    `rx` was cloned before any slow I/O (the send_card HTTP
+            //    round trip above) so a crash-on-first-prompt terminal event
+            //    survives the wrapper's eager table removal (D6).
+            spawn_acp_pump(rx, router.clone(), session_id.clone());
             // 4) Flush queued prompts as ONE follow-up (sending them one by
             //    one would violate ACP's one-prompt-in-flight rule).
             if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
@@ -324,8 +327,11 @@ async fn dispatch_out(
 /// Create the ACP session, send the initial prompt, and flip the router's
 /// Spawning placeholder to Active (draining queued prompts). No Feishu side
 /// effects, no event pump, no pending flush — the caller sequences those so
-/// the root card can go out before the pump starts. `pub` for integration
-/// tests (tests/spawn_race_test.rs); not part of the stable API.
+/// the root card can go out before the pump starts. Returns a clone of the
+/// session's event receiver taken BEFORE the initial prompt is sent, so a
+/// crash-on-first-prompt terminal event survives the wrapper's eager table
+/// removal (D6). `pub` for integration tests (tests/spawn_race_test.rs);
+/// not part of the stable API.
 pub async fn acp_spawn_and_activate(
     mgr: &Arc<SessionManager>,
     router: &RouterHandle,
@@ -334,10 +340,24 @@ pub async fn acp_spawn_and_activate(
     claude_path: &str,
     claude_args: Vec<String>,
     work_dir: Option<String>,
-) -> anyhow::Result<(String, Vec<String>)> {
+) -> anyhow::Result<(
+    String,
+    Vec<String>,
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
+)> {
     let session_id = mgr
         .create_session(claude_path, claude_args, work_dir, prompt.to_string())
         .await?;
+    // Clone the event receiver IMMEDIATELY after create_session returns Ok
+    // (entry is in the table, session alive — before any slow I/O or prompt
+    // send). This guarantees that if the agent crashes on the first prompt
+    // (D6 target), the buffered terminal event survives the wrapper's eager
+    // table removal — the dropped entry only releases the manager's Arc
+    // clone, not this consumer's.
+    let rx = mgr
+        .event_rx(&session_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no event_rx for freshly-created session"))?;
     mgr.send(
         &session_id,
         AcpCommand::CreateSession {
@@ -347,7 +367,7 @@ pub async fn acp_spawn_and_activate(
     )
     .await?;
     let pending = router.activate(key, session_id.clone()).await;
-    Ok((session_id, pending))
+    Ok((session_id, pending, rx))
 }
 
 /// Flush prompts queued during spawn as ONE ContinueSession (one-by-one
@@ -372,13 +392,16 @@ pub async fn flush_pending_prompts(
 
 /// Drain ACP events for one session and forward each into the router, which
 /// turns them into `UpdateCard` / `SendCard` outbound messages. Exits when the
-/// session's event stream closes (process exited / stdout EOF).
-fn spawn_acp_pump(mgr: Arc<SessionManager>, router: RouterHandle, session_id: String) {
+/// session's event stream closes (process exited / stdout EOF). The receiver
+/// is passed in (cloned before any slow I/O in `acp_spawn_and_activate`) so
+/// the pump always has a live channel even if the wrapper removed the table
+/// entry after a crash (D6).
+fn spawn_acp_pump(
+    rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
+    router: RouterHandle,
+    session_id: String,
+) {
     tokio::spawn(async move {
-        let Some(rx) = mgr.event_rx(&session_id).await else {
-            warn!(%session_id, "no event_rx for session; pump not started");
-            return;
-        };
         let mut rx = rx.lock().await;
         while let Some(evt) = rx.recv().await {
             let finished = matches!(evt, AcpEvent::Finished { .. } | AcpEvent::Error { .. });
