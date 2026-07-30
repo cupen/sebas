@@ -10,7 +10,7 @@ pub struct Config {
     #[serde(default)]
     pub router: RouterConfig,
     #[serde(default)]
-    pub card: CardConfig,
+    pub card: feishu::cards::CardConfig,
     #[serde(default)]
     pub media: MediaConfig,
     #[serde(default)]
@@ -125,42 +125,6 @@ fn default_channel_buffer() -> usize {
 }
 fn default_max_concurrent() -> usize {
     32
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CardConfig {
-    #[serde(default = "default_theme_color")]
-    pub theme_color: String,
-    #[serde(default = "default_max_user_text")]
-    pub max_user_text_chars: usize,
-    #[serde(default = "default_max_tool_output")]
-    pub max_tool_output_chars: usize,
-    #[serde(default = "default_true")]
-    pub fold_long_output: bool,
-}
-
-impl Default for CardConfig {
-    fn default() -> Self {
-        Self {
-            theme_color: default_theme_color(),
-            max_user_text_chars: default_max_user_text(),
-            max_tool_output_chars: default_max_tool_output(),
-            fold_long_output: true,
-        }
-    }
-}
-
-fn default_theme_color() -> String {
-    "blue".into()
-}
-fn default_max_user_text() -> usize {
-    4000
-}
-fn default_max_tool_output() -> usize {
-    2000
-}
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

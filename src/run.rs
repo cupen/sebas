@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::error::Result;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::cards::render_root_card;
+use feishu::cards::render_accumulated_card;
 use feishu::client::{FeishuClient, FeishuConfig};
 use feishu::events::SessionKey;
 use open_lark::Config as LarkConfig;
@@ -29,7 +29,7 @@ pub async fn run(
     let map = SessionMap::restore_json(&state_raw)
         .map_err(|e| crate::error::SebasError::Config(format!("restore: {e}")))?;
 
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = RouterHandle::new_with_card_config(map, cfg.card.clone());
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,
     )));
@@ -293,22 +293,27 @@ async fn dispatch_out(
                     return Ok(());
                 }
             };
-            // 2) Send the root card and record its message_id keyed by the
-            //    real session_id (so streaming UpdateCards resolve correctly).
-            //    Done before the event pump starts so no early delta is lost.
-            let card = render_root_card(&prompt, &session_id, "👀");
+            // 2) seed_card（spec §4.2）: 记录 user_prompt 供后续 flush 重渲染
+            //    引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
+            //    会用 prompt="" 冲掉引用块。
+            router.seed_card(session_id.clone(), prompt.clone()).await;
+            // 3) Send the seed card (empty body) and record its message_id
+            //    keyed by the real session_id (so streaming UpdateCards
+            //    resolve correctly). render_accumulated_card 用真实 theme，
+            //    与后续 flush 产出的卡结构一致（避免初始卡蓝、后续卡变色的跳变）。
+            let card = render_accumulated_card(&prompt, &session_id, "👀", &[], &cfg.card.theme_color);
             let msg_id = feishu
                 .send_card(http, tokens, &key, serde_json::to_value(&card)?)
                 .await?;
             if !msg_id.is_empty() {
                 router.record_root_msg_id(session_id.clone(), msg_id).await;
             }
-            // 3) Pump ACP events from this session back into the router.
+            // 4) Pump ACP events from this session back into the router.
             //    `rx` was cloned before any slow I/O (the send_card HTTP
             //    round trip above) so a crash-on-first-prompt terminal event
             //    survives the wrapper's eager table removal (D6).
             spawn_acp_pump(rx, router.clone(), session_id.clone());
-            // 4) Flush queued prompts as ONE follow-up (sending them one by
+            // 5) Flush queued prompts as ONE follow-up (sending them one by
             //    one would violate ACP's one-prompt-in-flight rule).
             if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
                 warn!(?e, "failed to flush pending prompts");
@@ -390,24 +395,66 @@ pub async fn flush_pending_prompts(
     .await
 }
 
-/// Drain ACP events for one session and forward each into the router, which
-/// turns them into `UpdateCard` / `SendCard` outbound messages. Exits when the
-/// session's event stream closes (process exited / stdout EOF). The receiver
-/// is passed in (cloned before any slow I/O in `acp_spawn_and_activate`) so
-/// the pump always has a live channel even if the wrapper removed the table
-/// entry after a crash (D6).
-fn spawn_acp_pump(
+/// Drain ACP events for one session, accumulating them into CardState and
+/// flushing a single UpdateCard at most once per 150 ms (spec §6 节流契约).
+///
+/// - 流式事件（TextDelta/ThinkingDelta/ToolStart/ToolProgress/ToolEnd/非
+///   terminal Error）: `apply_event`（状态）+ 标脏；interval tick 到点若脏
+///   则 `flush_card`。
+/// - Finished / terminal Error / PermissionRequest: 即时 `apply_event_to_out`
+///   （terminal 额外 remove_by_session + drop_card 后泵退出）。
+/// - 通道关闭（recv → None）: `drop_card` + 退出。
+///
+/// `rx` 在 `acp_spawn_and_activate` 里于任何慢 I/O 之前克隆，故即便 agent
+/// 首次 prompt 即崩（D6）、wrapper 急切移除表项，终端事件仍能经此克隆抵达。
+///
+/// 机制选择（spec §6 把 async 机制委托给计划钉死）：用
+/// `tokio::time::interval(150ms) + dirty bool`，而非 spec 建议的
+/// `Option<Sleep> + select + pending()` —— 后者在 select 跨臂借用 `&mut`
+/// 会冲突，interval + Copy bool 规避之，契约等价。
+pub fn spawn_acp_pump(
     rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
     router: RouterHandle,
     session_id: String,
 ) {
     tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(150));
+        // 第一个 tick 立即触发（tokio interval 语义）；此时 dirty=false，是 no-op。
+        let mut dirty = false;
         let mut rx = rx.lock().await;
-        while let Some(evt) = rx.recv().await {
-            let finished = matches!(evt, AcpEvent::Finished { .. } | AcpEvent::Error { .. });
-            router.dispatch_acp_event(evt).await;
-            if finished {
-                debug!(%session_id, "session reported completion");
+        loop {
+            tokio::select! {
+                maybe_evt = rx.recv() => {
+                    let Some(evt) = maybe_evt else {
+                        router.drop_card(&session_id).await;
+                        break;
+                    };
+                    let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
+                    let is_immediate = matches!(
+                        evt,
+                        AcpEvent::Finished { .. }
+                            | AcpEvent::Error { terminal: true, .. }
+                            | AcpEvent::PermissionRequest { .. }
+                    );
+                    if is_immediate {
+                        // 即时路径：取消待发 debounce，同步出最终态。
+                        dirty = false;
+                        router.apply_event_to_out(session_id.clone(), &evt).await;
+                        if is_terminal {
+                            break;
+                        }
+                    } else {
+                        // 流式：只累积状态，标脏，重置 debounce 由 interval 周期保证。
+                        router.apply_event(&session_id, &evt).await;
+                        dirty = true;
+                    }
+                }
+                _ = ticker.tick() => {
+                    if dirty {
+                        dirty = false;
+                        router.flush_card(&session_id).await;
+                    }
+                }
             }
         }
         debug!(%session_id, "acp event stream closed; pump exiting");

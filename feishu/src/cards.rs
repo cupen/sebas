@@ -1,6 +1,44 @@
 use acp_claude::session::AcpEvent;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
+/// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CardConfig {
+    #[serde(default = "default_theme_color")]
+    pub theme_color: String,
+    #[serde(default = "default_max_user_text")]
+    pub max_user_text_chars: usize,
+    #[serde(default = "default_max_tool_output")]
+    pub max_tool_output_chars: usize,
+    #[serde(default = "default_true")]
+    pub fold_long_output: bool,
+}
+
+impl Default for CardConfig {
+    fn default() -> Self {
+        Self {
+            theme_color: default_theme_color(),
+            max_user_text_chars: default_max_user_text(),
+            max_tool_output_chars: default_max_tool_output(),
+            fold_long_output: true,
+        }
+    }
+}
+
+fn default_theme_color() -> String {
+    "blue".into()
+}
+fn default_max_user_text() -> usize {
+    4000
+}
+fn default_max_tool_output() -> usize {
+    2000
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Card {
@@ -126,12 +164,30 @@ impl Card {
     }
 }
 
-pub fn render_root_card(user_prompt: &str, msg_id: &str, status_emoji: &str) -> Card {
-    let mut card = Card::new(&format!("{status_emoji} Claude Code"), "blue");
+/// 从累积状态构建完整卡（spec §4.3）：
+/// header(`{emoji} Claude Code`, theme) + 引用块(`> {user_prompt}`) + 分隔线
+/// + body 各元素 + footer 灰注(`msg_id: {session_id}`)。
+pub fn render_accumulated_card(
+    user_prompt: &str,
+    session_id: &str,
+    status_emoji: &str,
+    body: &[CardElement],
+    theme: &str,
+) -> Card {
+    let mut card = Card::new(&format!("{status_emoji} Claude Code"), theme);
     card.push_text(format!("> {user_prompt}"));
     card.push_divider();
-    card.push_note(format!("msg_id: {msg_id}"));
+    for el in body {
+        card.body.elements.push(el.clone());
+    }
+    card.push_note(format!("msg_id: {session_id}"));
     card
+}
+
+/// seed 时的初始卡构建器（不再被每个事件调用）。空 body 薄封装。
+/// 保留供 cards_test 快照；theme 固定 "blue" 以保持快照不变。
+pub fn render_root_card(user_prompt: &str, msg_id: &str, status_emoji: &str) -> Card {
+    render_accumulated_card(user_prompt, msg_id, status_emoji, &[], "blue")
 }
 
 pub fn render_permission_card(
@@ -178,44 +234,103 @@ pub fn render_error_card(message: &str) -> Card {
     card
 }
 
-pub fn apply_event(card: &mut Card, event: &AcpEvent) {
+/// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
+/// 单元素截断（max_user_text_chars / max_tool_output_chars + fold_long_output）
+/// + 总量兜底（24000 丢旧，Hr 连后一个一起丢）。PermissionRequest 不累积（走独立 SendCard）。
+pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &CardConfig) {
     match event {
-        AcpEvent::TextDelta { delta, .. } => card.push_text(delta.clone()),
-        AcpEvent::ThinkingDelta { delta, .. } => card.push_note(format!("💭 {delta}")),
-        AcpEvent::ToolStart {
-            tool_name, args, ..
-        } => {
-            card.push_divider();
-            card.push_text(format!("📖 **{tool_name}** `{}`", args));
+        AcpEvent::TextDelta { delta, .. } => {
+            push_text_truncated(body, delta, cfg.max_user_text_chars, cfg.fold_long_output);
         }
-        AcpEvent::ToolEnd {
-            tool_name, result, ..
-        } => {
-            card.push_note(format!("✓ {tool_name} done: {}", truncate(result, 200)));
+        AcpEvent::ThinkingDelta { delta, .. } => {
+            body.push(note_element(format!("💭 {delta}")));
         }
-        AcpEvent::PermissionRequest {
-            tool_name, args, ..
-        } => {
-            card.push_text(format!("⏸ waiting for permission: {tool_name} `{}`", args));
+        AcpEvent::ToolStart { tool_name, args, .. } => {
+            body.push(CardElement::Hr);
+            push_text_truncated(
+                body,
+                &format!("📖 **{tool_name}** `{args}`"),
+                cfg.max_user_text_chars,
+                cfg.fold_long_output,
+            );
         }
-        AcpEvent::Finished { .. } => card.push_text("✅ 完成"),
-        AcpEvent::Error { message, .. } => card.push_text(format!("❌ {message}")),
-        AcpEvent::ToolProgress {
-            tool_name,
-            progress,
-            ..
-        } => {
-            card.push_note(format!("⏳ {tool_name}: {progress}"));
+        AcpEvent::ToolEnd { tool_name, result, .. } => {
+            let (text, note) = truncate_with_note(result, cfg.max_tool_output_chars, cfg.fold_long_output);
+            body.push(note_element(format!("✓ {tool_name} done: {text}")));
+            if let Some(n) = note {
+                body.push(note_element(format!("（已折叠 {n} 字）")));
+            }
+        }
+        AcpEvent::ToolProgress { tool_name, progress, .. } => {
+            body.push(note_element(format!("⏳ {tool_name}: {progress}")));
+        }
+        AcpEvent::Finished { .. } => body.push(CardElement::Markdown {
+            content: "✅ 完成".into(),
+        }),
+        AcpEvent::Error { message, .. } => body.push(CardElement::Markdown {
+            content: format!("❌ {message}"),
+        }),
+        AcpEvent::PermissionRequest { .. } => {} // 独立 SendCard，不累积
+    }
+    enforce_total_budget(body, cfg);
+}
+
+/// 截断文本到 `limit` 字符；超限则返回 (截断文本, Some(溢出字符数))。
+fn truncate_with_note(s: &str, limit: usize, fold: bool) -> (String, Option<usize>) {
+    if !fold {
+        return (s.to_string(), None);
+    }
+    let count = s.chars().count();
+    if count <= limit {
+        return (s.to_string(), None);
+    }
+    let truncated: String = s.chars().take(limit).collect();
+    (truncated, Some(count - limit))
+}
+
+/// push 一段 Markdown 文本，必要时截断 + 追加灰注。
+fn push_text_truncated(body: &mut Vec<CardElement>, text: &str, limit: usize, fold: bool) {
+    let (content, note) = truncate_with_note(text, limit, fold);
+    body.push(CardElement::Markdown { content });
+    if let Some(n) = note {
+        body.push(note_element(format!("（已折叠 {n} 字）")));
+    }
+}
+
+/// 构造一个灰注 Div 元素（notation size + grey）。
+fn note_element(content: String) -> CardElement {
+    CardElement::Div {
+        text: DivText {
+            tag: "plain_text".into(),
+            content,
+            text_size: Some("notation".into()),
+            text_color: Some("grey".into()),
+        },
+    }
+}
+
+/// 总量兜底（spec §7）：body 累积字符 > 24000 -> 丢最旧；最旧是 Hr 则连后一个一起丢。
+fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
+    const TOTAL_BUDGET: usize = 24000;
+    while total_chars(body) > TOTAL_BUDGET {
+        if body.is_empty() {
+            break;
+        }
+        // 最旧是 Hr -> 连后一个一起丢（不留悬空分隔线）。
+        let drop_two = matches!(body.first(), Some(CardElement::Hr));
+        body.remove(0);
+        if drop_two && !body.is_empty() {
+            body.remove(0);
         }
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(n).collect();
-        out.push('…');
-        out
-    }
+fn total_chars(body: &[CardElement]) -> usize {
+    body.iter()
+        .map(|e| match e {
+            CardElement::Markdown { content } => content.chars().count(),
+            CardElement::Div { text } => text.content.chars().count(),
+            _ => 0,
+        })
+        .sum()
 }

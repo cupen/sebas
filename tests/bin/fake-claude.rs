@@ -190,6 +190,22 @@ fn main() {
                         );
                         pending_perm = Some((perm_id, prompt_id, sid));
                     }
+                    "stream" => {
+                        // 5 TextDelta chunks then end_turn. A short pause
+                        // BEFORE end_turn lets the pump's 150ms debounce tick
+                        // fire and flush a merged 🚧 card; without it the
+                        // Finished immediate path would preempt the tick and
+                        // only the final ✅ card would ever appear (mirrors a
+                        // real agent that streams, pauses, then finishes).
+                        for i in 0..5 {
+                            send_chunk(&mut out, &sid, &format!("chunk{i} "));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        send(
+                            &mut out,
+                            json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
+                        );
+                    }
                     _ => {
                         send_chunk(&mut out, &sid, "hello ");
                         send_chunk(&mut out, &sid, "world");
