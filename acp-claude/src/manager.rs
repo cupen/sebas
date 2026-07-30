@@ -5,10 +5,9 @@ use crate::session::{
     translate_update, AcpCommand, AcpEvent, AcpSessionHandle, Decision, ResponderSlot, SessionMeta,
 };
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, Implementation, InitializeRequest, NewSessionRequest,
-    PermissionOptionId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId as SdkSessionId,
-    SessionNotification, StopReason,
+    CancelNotification, ClientCapabilities, Implementation, InitializeRequest, PermissionOptionId,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId as SdkSessionId, SessionNotification, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
@@ -278,35 +277,28 @@ async fn run_main(
     .block_task()
     .await?;
 
-    // 2) session/new — capture the SDK session_id we will route on.
-    let new_session = cx
-        .send_request(NewSessionRequest::new(std::path::PathBuf::from(cwd)))
-        .block_task()
-        .await?;
-    let session_id = new_session.session_id.0.to_string();
-    let _ = init_tx.send(session_id.clone());
-
-    // 3) Open the active session. The session pumps SessionNotifications
-    //    through its update channel which we drain below. We do **not**
-    //    send the initial prompt here — the caller dispatches it via
-    //    `AcpCommand::CreateSession` (or `ContinueSession`) through
-    //    `SessionManager::send`. This avoids pushing the prompt twice.
+    // 2) session/new — exactly once, via the SDK session builder. The
+    //    SDK-issued session id is the single routing id for the whole
+    //    pipeline (prompts, updates, permission requests, cancel).
     let mut session = cx
-        .build_session(std::path::PathBuf::from("."))
+        .build_session(std::path::PathBuf::from(&cwd))
         .block_task()
         .start_session()
         .await?;
+    let session_id = session.session_id().0.to_string();
+    let _ = init_tx.send(session_id.clone());
 
     // 4) Read loop. The session is long-lived: each `StopReason::EndTurn`
     //    is forwarded as a `Finished` event but the connection is kept
     //    alive so the caller can issue `ContinueSession` commands for
     //    follow-up prompts. The loop exits (and the SDK connection
-    //    drops) only when:
+    //    drops, SIGKILL-ing the child) only when:
     //      - `cancel_rx` fires (`kill_all` or `kill`)
-    //      - the consumer sends `AcpCommand::Cancel`
     //      - a transport error occurs
     //      - the cmd channel closes (consumer dropped the manager)
     //      - a `Refusal` stop reason is reported
+    //    `AcpCommand::Cancel` does NOT exit the loop — it cancels the
+    //    current turn and the session stays alive.
     let mut cancel_rx = cancel_rx;
     let mut should_exit = false;
 
@@ -314,6 +306,9 @@ async fn run_main(
         tokio::select! {
             biased;
             _ = &mut cancel_rx => {
+                // Kill path — `kill` or `kill_all` was called. This
+                // terminates the entire session (connection drop →
+                // child SIGKILL).
                 let _ = cx.send_notification(CancelNotification::new(SdkSessionId::new(session_id.clone())));
                 let _ = evt_tx
                     .send(AcpEvent::Finished { session_id: session_id.clone() })
@@ -323,12 +318,12 @@ async fn run_main(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AcpCommand::Cancel { .. }) => {
-                        let _ = cx
-                            .send_notification(CancelNotification::new(SdkSessionId::new(session_id.clone())));
-                        let _ = evt_tx
-                            .send(AcpEvent::Finished { session_id: session_id.clone() })
-                            .await;
-                        break;
+                        // Cancel the current TURN only; the session stays
+                        // alive. The agent answers with StopReason::Cancelled
+                        // which the read loop maps to a turn-level Finished.
+                        let _ = cx.send_notification(CancelNotification::new(
+                            SdkSessionId::new(session_id.clone()),
+                        ));
                     }
                     Some(AcpCommand::CreateSession { prompt, .. }) => {
                         // `CreateSession` is the single channel through

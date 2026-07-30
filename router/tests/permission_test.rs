@@ -74,6 +74,7 @@ async fn button_callback_emits_permission_reply() {
     let action = CardAction {
         session_id: "s1".into(),
         request_id: Some("r1".into()),
+        decision: Some("allow_once".into()),
         value: serde_json::json!({ "decision": "allow_once" }),
     };
 
@@ -113,6 +114,7 @@ async fn button_callback_on_dead_session_emits_help_card() {
     let action = CardAction {
         session_id: "s_dead".into(),
         request_id: Some("r1".into()),
+        decision: Some("allow_once".into()),
         value: serde_json::json!({ "decision": "allow_once" }),
     };
 
@@ -129,5 +131,42 @@ async fn button_callback_on_dead_session_emits_help_card() {
             assert!(s.contains("会话已结束"), "missing dead-session notice: {s}");
         }
         other => panic!("expected SendCard help, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn button_callback_unknown_decision_defaults_to_deny() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    map.insert(
+        key.clone(),
+        Mapping {
+            session_id: "s1".into(),
+            last_active_unix: 1,
+        },
+    )
+    .await
+    .unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+    let action = CardAction {
+        session_id: "s1".into(),
+        request_id: Some("r1".into()),
+        decision: None, // malformed payload -> fail closed
+        value: serde_json::json!({}),
+    };
+    router.dispatch(FeishuIn::ButtonCb { key, action }).await;
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match out {
+        Out::SendAcp {
+            cmd: AcpCommand::PermissionReply { decision, .. },
+            ..
+        } => assert!(matches!(decision, Decision::Deny)),
+        other => panic!("expected SendAcp PermissionReply, got {other:?}"),
     }
 }

@@ -1,4 +1,4 @@
-use feishu::events::{CardAction, FeishuEnvelope, FeishuIn, SessionKey};
+use feishu::events::{FeishuEnvelope, FeishuIn, SessionKey};
 
 #[test]
 fn parses_text_message_event() {
@@ -77,6 +77,9 @@ fn no_owner_filter_when_empty() {
 /// can't be tested headlessly.
 #[test]
 fn parses_card_action_trigger_to_buttoncb() {
+    // Real Feishu V2 card callback: the button's behaviors[].value object is
+    // delivered back at event.action.value. This mirrors what
+    // cards.rs::render_permission_card writes.
     let raw = serde_json::json!({
         "schema": "2.0",
         "header": { "event_type": "card.action.trigger", "tenant_key": "tk" },
@@ -85,16 +88,16 @@ fn parses_card_action_trigger_to_buttoncb() {
             "chat_type": "p2p",
             "thread_id": "omt_thread",
             "action": {
-                "session_id": "sess_42",
-                "request_id": "req_42",
-                "value": { "decision": "allow_once" }
+                "value": {
+                    "session_id": "sess_42",
+                    "request_id": "req_42",
+                    "decision": "allow_once"
+                }
             }
         }
     });
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
-    let evt = env
-        .into_event("")
-        .expect("card.action.trigger from owner (skipped: empty owner_id) should parse");
+    let evt = env.into_event("").expect("should parse");
     let FeishuIn::ButtonCb { key, action } = evt else {
         panic!("expected ButtonCb");
     };
@@ -107,18 +110,32 @@ fn parses_card_action_trigger_to_buttoncb() {
     );
     assert_eq!(action.session_id, "sess_42");
     assert_eq!(action.request_id.as_deref(), Some("req_42"));
-    let CardAction {
-        session_id: _,
-        request_id: _,
-        value,
-    } = action;
-    assert_eq!(
-        value
-            .pointer("/action/value/decision")
-            .and_then(serde_json::Value::as_str),
-        Some("allow_once"),
-        "decision value preserved through into_event"
-    );
+    assert_eq!(action.decision.as_deref(), Some("allow_once"));
+}
+
+/// Legacy flat layout (/action/session_id + /action/value/decision split)
+/// still parses — tolerance against doc-vs-reality drift.
+#[test]
+fn parses_card_action_trigger_legacy_flat_layout() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "card.action.trigger" },
+        "event": {
+            "chat_id": "oc_x",
+            "action": {
+                "session_id": "sess_leg",
+                "request_id": "req_leg",
+                "value": { "decision": "deny" }
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let FeishuIn::ButtonCb { action, .. } = env.into_event("").expect("parses") else {
+        panic!("expected ButtonCb");
+    };
+    assert_eq!(action.session_id, "sess_leg");
+    assert_eq!(action.request_id.as_deref(), Some("req_leg"));
+    assert_eq!(action.decision.as_deref(), Some("deny"));
 }
 
 /// Missing `action.session_id` is currently defaulted to `""` by
@@ -146,11 +163,5 @@ fn card_action_trigger_without_session_id_defaults_empty() {
         panic!("expected Some(ButtonCb) for missing session_id, got {evt:?}");
     };
     assert_eq!(action.session_id, "");
-    assert_eq!(
-        action
-            .value
-            .pointer("/action/value/decision")
-            .and_then(|v| v.as_str()),
-        Some("allow_once")
-    );
+    assert_eq!(action.decision.as_deref(), Some("allow_once"));
 }

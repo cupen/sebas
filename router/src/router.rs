@@ -214,14 +214,10 @@ impl RouterHandle {
                 .await;
             return;
         }
-        let decision_str = action
-            .value
-            .get("decision")
-            .and_then(|v| v.as_str())
-            .unwrap_or("deny");
-        let decision = match decision_str {
-            "allow_once" => Decision::AllowOnce,
-            "allow_session" => Decision::AllowSession,
+        let decision = match action.decision.as_deref() {
+            Some("allow_once") => Decision::AllowOnce,
+            Some("allow_session") => Decision::AllowSession,
+            // Fail closed: unknown or missing decision is a deny.
             _ => Decision::Deny,
         };
         match (action.session_id.clone(), action.request_id.clone()) {

@@ -49,6 +49,10 @@ impl<'de> Deserialize<'de> for SessionKey {
 pub struct CardAction {
     pub session_id: String,
     pub request_id: Option<String>,
+    /// Parsed at the events layer (which owns payload shape); the router
+    /// consumes only this field for the allow/deny policy.
+    pub decision: Option<String>,
+    /// Raw event object, retained for debugging/future fields.
     pub value: serde_json::Value,
 }
 
@@ -92,22 +96,25 @@ impl FeishuEnvelope {
                 .or_else(|| self.event.pointer("/message/thread_id"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
-            let session_id = self
-                .event
-                .pointer("/action/session_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            let request_id = self
-                .event
-                .pointer("/action/request_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
+            // Primary: the V2 button behaviors[].value round-trip location.
+            // Fallback: the legacy flat layout (tolerance against payload drift).
+            let pick = |primary: &str, legacy: &str| {
+                self.event
+                    .pointer(primary)
+                    .or_else(|| self.event.pointer(legacy))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let session_id =
+                pick("/action/value/session_id", "/action/session_id").unwrap_or_default();
+            let request_id = pick("/action/value/request_id", "/action/request_id");
+            let decision = pick("/action/value/decision", "/action/decision");
             return Some(FeishuIn::ButtonCb {
                 key: SessionKey { chat_id, thread_id },
                 action: CardAction {
                     session_id,
                     request_id,
+                    decision,
                     value: self.event,
                 },
             });
