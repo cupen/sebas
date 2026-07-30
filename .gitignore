@@ -9,4 +9,4 @@ config.toml
 *.db
 .beads-credential-key
 .beads/proxieddb/
-.beads/interactions.jsonl   # bd append-only audit log; not part of source
+.beads/interactions.jsonl
