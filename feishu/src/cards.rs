@@ -1,6 +1,44 @@
 use acp_claude::session::AcpEvent;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
+/// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CardConfig {
+    #[serde(default = "default_theme_color")]
+    pub theme_color: String,
+    #[serde(default = "default_max_user_text")]
+    pub max_user_text_chars: usize,
+    #[serde(default = "default_max_tool_output")]
+    pub max_tool_output_chars: usize,
+    #[serde(default = "default_true")]
+    pub fold_long_output: bool,
+}
+
+impl Default for CardConfig {
+    fn default() -> Self {
+        Self {
+            theme_color: default_theme_color(),
+            max_user_text_chars: default_max_user_text(),
+            max_tool_output_chars: default_max_tool_output(),
+            fold_long_output: true,
+        }
+    }
+}
+
+fn default_theme_color() -> String {
+    "blue".into()
+}
+fn default_max_user_text() -> usize {
+    4000
+}
+fn default_max_tool_output() -> usize {
+    2000
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Card {

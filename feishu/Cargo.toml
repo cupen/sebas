@@ -16,3 +16,4 @@ acp-claude = { path = "../acp-claude" }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
+toml = "0.8"
