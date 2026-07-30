@@ -10,3 +10,4 @@ config.toml
 .beads-credential-key
 .beads/proxieddb/
 .beads/interactions.jsonl
+.claude/worktrees
