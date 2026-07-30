@@ -216,44 +216,103 @@ pub fn render_error_card(message: &str) -> Card {
     card
 }
 
-pub fn apply_event(card: &mut Card, event: &AcpEvent) {
+/// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
+/// 单元素截断（max_user_text_chars / max_tool_output_chars + fold_long_output）
+/// + 总量兜底（24000 丢旧，Hr 连后一个一起丢）。PermissionRequest 不累积（走独立 SendCard）。
+pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &CardConfig) {
     match event {
-        AcpEvent::TextDelta { delta, .. } => card.push_text(delta.clone()),
-        AcpEvent::ThinkingDelta { delta, .. } => card.push_note(format!("💭 {delta}")),
-        AcpEvent::ToolStart {
-            tool_name, args, ..
-        } => {
-            card.push_divider();
-            card.push_text(format!("📖 **{tool_name}** `{}`", args));
+        AcpEvent::TextDelta { delta, .. } => {
+            push_text_truncated(body, delta, cfg.max_user_text_chars, cfg.fold_long_output);
         }
-        AcpEvent::ToolEnd {
-            tool_name, result, ..
-        } => {
-            card.push_note(format!("✓ {tool_name} done: {}", truncate(result, 200)));
+        AcpEvent::ThinkingDelta { delta, .. } => {
+            body.push(note_element(format!("💭 {delta}")));
         }
-        AcpEvent::PermissionRequest {
-            tool_name, args, ..
-        } => {
-            card.push_text(format!("⏸ waiting for permission: {tool_name} `{}`", args));
+        AcpEvent::ToolStart { tool_name, args, .. } => {
+            body.push(CardElement::Hr);
+            push_text_truncated(
+                body,
+                &format!("📖 **{tool_name}** `{args}`"),
+                cfg.max_user_text_chars,
+                cfg.fold_long_output,
+            );
         }
-        AcpEvent::Finished { .. } => card.push_text("✅ 完成"),
-        AcpEvent::Error { message, .. } => card.push_text(format!("❌ {message}")),
-        AcpEvent::ToolProgress {
-            tool_name,
-            progress,
-            ..
-        } => {
-            card.push_note(format!("⏳ {tool_name}: {progress}"));
+        AcpEvent::ToolEnd { tool_name, result, .. } => {
+            let (text, note) = truncate_with_note(result, cfg.max_tool_output_chars, cfg.fold_long_output);
+            body.push(note_element(format!("✓ {tool_name} done: {text}")));
+            if let Some(n) = note {
+                body.push(note_element(format!("（已折叠 {n} 字）")));
+            }
+        }
+        AcpEvent::ToolProgress { tool_name, progress, .. } => {
+            body.push(note_element(format!("⏳ {tool_name}: {progress}")));
+        }
+        AcpEvent::Finished { .. } => body.push(CardElement::Markdown {
+            content: "✅ 完成".into(),
+        }),
+        AcpEvent::Error { message, .. } => body.push(CardElement::Markdown {
+            content: format!("❌ {message}"),
+        }),
+        AcpEvent::PermissionRequest { .. } => {} // 独立 SendCard，不累积
+    }
+    enforce_total_budget(body, cfg);
+}
+
+/// 截断文本到 `limit` 字符；超限则返回 (截断文本, Some(溢出字符数))。
+fn truncate_with_note(s: &str, limit: usize, fold: bool) -> (String, Option<usize>) {
+    if !fold {
+        return (s.to_string(), None);
+    }
+    let count = s.chars().count();
+    if count <= limit {
+        return (s.to_string(), None);
+    }
+    let truncated: String = s.chars().take(limit).collect();
+    (truncated, Some(count - limit))
+}
+
+/// push 一段 Markdown 文本，必要时截断 + 追加灰注。
+fn push_text_truncated(body: &mut Vec<CardElement>, text: &str, limit: usize, fold: bool) {
+    let (content, note) = truncate_with_note(text, limit, fold);
+    body.push(CardElement::Markdown { content });
+    if let Some(n) = note {
+        body.push(note_element(format!("（已折叠 {n} 字）")));
+    }
+}
+
+/// 构造一个灰注 Div 元素（notation size + grey）。
+fn note_element(content: String) -> CardElement {
+    CardElement::Div {
+        text: DivText {
+            tag: "plain_text".into(),
+            content,
+            text_size: Some("notation".into()),
+            text_color: Some("grey".into()),
+        },
+    }
+}
+
+/// 总量兜底（spec §7）：body 累积字符 > 24000 -> 丢最旧；最旧是 Hr 则连后一个一起丢。
+fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
+    const TOTAL_BUDGET: usize = 24000;
+    while total_chars(body) > TOTAL_BUDGET {
+        if body.is_empty() {
+            break;
+        }
+        // 最旧是 Hr -> 连后一个一起丢（不留悬空分隔线）。
+        let drop_two = matches!(body.first(), Some(CardElement::Hr));
+        body.remove(0);
+        if drop_two && !body.is_empty() {
+            body.remove(0);
         }
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(n).collect();
-        out.push('…');
-        out
-    }
+fn total_chars(body: &[CardElement]) -> usize {
+    body.iter()
+        .map(|e| match e {
+            CardElement::Markdown { content } => content.chars().count(),
+            CardElement::Div { text } => text.content.chars().count(),
+            _ => 0,
+        })
+        .sum()
 }
