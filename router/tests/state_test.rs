@@ -9,16 +9,9 @@ async fn insert_and_lookup() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    m.insert(
-        k.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await;
+    m.insert(k.clone(), Mapping::active("s1")).await.unwrap();
     let got = m.get(&k).await;
-    assert_eq!(got.unwrap().session_id, "s1");
+    assert_eq!(got.unwrap().session_id(), Some("s1"));
 }
 
 #[tokio::test]
@@ -28,19 +21,12 @@ async fn dump_and_restore_round_trip() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    m.insert(
-        k.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await;
+    m.insert(k.clone(), Mapping::active("s1")).await.unwrap();
 
     let json = m.dump_json().await.unwrap();
     let m2 = SessionMap::restore_json(&json).unwrap();
     let got = m2.get(&k).await;
-    assert_eq!(got.unwrap().session_id, "s1");
+    assert_eq!(got.unwrap().session_id(), Some("s1"));
 }
 
 #[tokio::test]
@@ -52,12 +38,10 @@ async fn overflow_rejects() {
                 chat_id: format!("oc_{i}"),
                 thread_id: None,
             },
-            Mapping {
-                session_id: format!("s_{i}"),
-                last_active_unix: 0,
-            },
+            Mapping::active(format!("s_{i}")),
         )
-        .await;
+        .await
+        .unwrap();
     }
     let r = m
         .insert(
@@ -65,10 +49,7 @@ async fn overflow_rejects() {
                 chat_id: "oc_3".into(),
                 thread_id: None,
             },
-            Mapping {
-                session_id: "s_3".into(),
-                last_active_unix: 0,
-            },
+            Mapping::active("s_3"),
         )
         .await;
     assert!(r.is_err());

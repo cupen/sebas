@@ -258,30 +258,44 @@ async fn dispatch_out(
         }
         Out::SpawnAcp { key, prompt } => {
             let claude = &cfg.acp.claude;
-            // 1) Spawn the claude subprocess and mint a session_id.
-            let session_id = mgr
-                .create_session(
-                    &claude.path,
-                    claude.args.clone(),
-                    claude.work_dir.clone(),
-                    prompt.clone(),
-                )
-                .await?;
-            // 2) Kick off the session with the initial prompt.
-            mgr.send(
-                &session_id,
-                AcpCommand::CreateSession {
-                    session_id: session_id.clone(),
-                    prompt: prompt.clone(),
-                },
+            // 1) Spawn the claude subprocess, mint a session_id, send the
+            //    initial prompt, and flip the router's Spawning placeholder
+            //    to Active (draining queued prompts). On failure (missing
+            //    binary, handshake timeout, or prompt send failure): drop the
+            //    placeholder and show an ❌ card instead of a silent log line
+            //    (spec §4.1 "ACP spawn failure"). create_session and
+            //    CreateSession-prompt failures share the same Err branch —
+            //    both mean the session is unusable.
+            let (session_id, pending) = match acp_spawn_and_activate(
+                mgr,
+                router,
+                &key,
+                &prompt,
+                &claude.path,
+                claude.args.clone(),
+                claude.work_dir.clone(),
             )
-            .await?;
-            // 3) Record the mapping so continuations, permission-card routing
-            //    and liveness checks can find this session.
-            router.insert_mapping(key.clone(), session_id.clone()).await;
-            // 4) Send the root card and record its message_id keyed by the real
-            //    session_id (so streaming UpdateCards resolve correctly). Done
-            //    before the event pump starts so no early delta is lost.
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    router.fail_spawn(&key).await;
+                    let card = feishu::cards::render_error_card(&format!(
+                        "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
+                    ));
+                    if let Err(e2) = feishu
+                        .send_card(http, tokens, &key, serde_json::to_value(&card)?)
+                        .await
+                    {
+                        warn!(?e2, "failed to send spawn-failure card");
+                    }
+                    warn!(?e, "create_session failed");
+                    return Ok(());
+                }
+            };
+            // 2) Send the root card and record its message_id keyed by the
+            //    real session_id (so streaming UpdateCards resolve correctly).
+            //    Done before the event pump starts so no early delta is lost.
             let card = render_root_card(&prompt, &session_id, "👀");
             let msg_id = feishu
                 .send_card(http, tokens, &key, serde_json::to_value(&card)?)
@@ -289,8 +303,13 @@ async fn dispatch_out(
             if !msg_id.is_empty() {
                 router.record_root_msg_id(session_id.clone(), msg_id).await;
             }
-            // 5) Pump ACP events from this session back into the router.
-            spawn_acp_pump(mgr.clone(), router.clone(), session_id);
+            // 3) Pump ACP events from this session back into the router.
+            spawn_acp_pump(mgr.clone(), router.clone(), session_id.clone());
+            // 4) Flush queued prompts as ONE follow-up (sending them one by
+            //    one would violate ACP's one-prompt-in-flight rule).
+            if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+                warn!(?e, "failed to flush pending prompts");
+            }
         }
         Out::SendAcp { session_id, cmd } => {
             mgr.send(&session_id, cmd).await?;
@@ -300,6 +319,55 @@ async fn dispatch_out(
         }
     }
     Ok(())
+}
+
+/// Create the ACP session, send the initial prompt, and flip the router's
+/// Spawning placeholder to Active (draining queued prompts). No Feishu side
+/// effects, no event pump, no pending flush — the caller sequences those so
+/// the root card can go out before the pump starts. `pub` for integration
+/// tests (tests/spawn_race_test.rs); not part of the stable API.
+pub async fn acp_spawn_and_activate(
+    mgr: &Arc<SessionManager>,
+    router: &RouterHandle,
+    key: &SessionKey,
+    prompt: &str,
+    claude_path: &str,
+    claude_args: Vec<String>,
+    work_dir: Option<String>,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let session_id = mgr
+        .create_session(claude_path, claude_args, work_dir, prompt.to_string())
+        .await?;
+    mgr.send(
+        &session_id,
+        AcpCommand::CreateSession {
+            session_id: session_id.clone(),
+            prompt: prompt.to_string(),
+        },
+    )
+    .await?;
+    let pending = router.activate(key, session_id.clone()).await;
+    Ok((session_id, pending))
+}
+
+/// Flush prompts queued during spawn as ONE ContinueSession (one-by-one
+/// would violate ACP's one-prompt-in-flight rule). `pub` for tests.
+pub async fn flush_pending_prompts(
+    mgr: &Arc<SessionManager>,
+    session_id: &str,
+    pending: Vec<String>,
+) -> anyhow::Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    mgr.send(
+        session_id,
+        AcpCommand::ContinueSession {
+            session_id: session_id.to_string(),
+            prompt: pending.join("\n"),
+        },
+    )
+    .await
 }
 
 /// Drain ACP events for one session and forward each into the router, which

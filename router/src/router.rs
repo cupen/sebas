@@ -87,19 +87,31 @@ impl RouterHandle {
     /// that continuations, permission-card routing (reverse lookup) and
     /// liveness checks can find the session.
     pub async fn insert_mapping(&self, key: SessionKey, session_id: String) {
-        let mapping = crate::state::Mapping {
-            session_id,
-            last_active_unix: now_unix(),
-        };
-        if let Err(e) = self.map.insert(key, mapping).await {
+        if let Err(e) = self.map.insert(key, crate::state::Mapping::active(session_id)).await {
             tracing::warn!(?e, "failed to insert session mapping");
         }
     }
 
-    /// True if a live session is mapped for `key` (used to reject button
-    /// callbacks that arrive after a session has ended).
+    /// True if a live (Active) session is mapped for `key` (used to reject
+    /// button callbacks that arrive after a session has ended, and to keep
+    /// `/new` from double-spawning while a spawn is in flight).
     pub async fn session_alive(&self, key: &SessionKey) -> bool {
-        self.map.get(key).await.is_some()
+        self.map
+            .get(key)
+            .await
+            .map(|m| m.session_id().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Flip Spawning -> Active for `key` and drain queued prompts.
+    /// Called by the dispatcher once `create_session` has minted the id.
+    pub async fn activate(&self, key: &SessionKey, session_id: String) -> Vec<String> {
+        self.map.activate(key, session_id).await
+    }
+
+    /// Spawn failed/timeout: remove the Spawning placeholder for `key`.
+    pub async fn fail_spawn(&self, key: &SessionKey) {
+        self.map.fail_spawn(key).await;
     }
 
     pub async fn dispatch(&self, evt: FeishuIn) {
@@ -192,20 +204,44 @@ impl RouterHandle {
 
     async fn on_text(&self, key: SessionKey, text: String) {
         match parse_command(&text) {
-            Command::New => self.spawn_new(key, String::new()).await,
+            Command::New => {
+                match self.map.begin_spawn(key.clone()).await {
+                    Ok(crate::state::BeginSpawn::AlreadySpawning) => {
+                        // A spawn is already in flight for this chat; a second
+                        // /new would orphan the in-flight session.
+                        tracing::debug!("spawn already in flight; ignoring duplicate /new");
+                    }
+                    Ok(_) => self.spawn_new(key, String::new()).await,
+                    Err(e) => {
+                        tracing::warn!(?e, "begin_spawn failed");
+                        let _ = self.tx.send(Out::HelpText { key }).await;
+                    }
+                }
+            }
             Command::Help => {
                 let _ = self.tx.send(Out::HelpText { key }).await;
             }
             Command::PassThrough(p) => {
-                if let Some(m) = self.map.get(&key).await {
-                    self.continue_session(m.session_id, p).await;
-                } else {
-                    self.spawn_new(key, p).await;
+                match self.map.route_text(key.clone(), p.clone()).await {
+                    Ok(crate::state::TextRoute::Continue(sid)) => {
+                        self.continue_session(sid, p).await
+                    }
+                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
+                    Ok(crate::state::TextRoute::Enqueued) => {}
+                    Err(e) => {
+                        tracing::warn!(?e, "route_text failed");
+                        let _ = self.tx.send(Out::HelpText { key }).await;
+                    }
                 }
             }
             Command::Compact | Command::Cost | Command::Cancel | Command::Status => {
-                if let Some(m) = self.map.get(&key).await {
-                    self.forward_to_session(&m.session_id, text).await;
+                let sid = self
+                    .map
+                    .get(&key)
+                    .await
+                    .and_then(|m| m.session_id().map(str::to_owned));
+                if let Some(sid) = sid {
+                    self.forward_to_session(&sid, text).await;
                 } else {
                     let _ = self.tx.send(Out::HelpText { key }).await;
                 }

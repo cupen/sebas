@@ -38,14 +38,7 @@ async fn existing_session_dispatches_continue() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(
-        k.clone(),
-        Mapping {
-            session_id: "existing".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await;
+    map.insert(k.clone(), Mapping::active("existing")).await.unwrap();
 
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     tokio::spawn(async move {

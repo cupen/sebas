@@ -171,6 +171,13 @@ pub fn render_dead_session_card() -> Card {
     card
 }
 
+/// Shown when the agent fails to spawn or times out during handshake.
+pub fn render_error_card(message: &str) -> Card {
+    let mut card = Card::new("❌ 启动失败", "red");
+    card.push_text(message.to_string());
+    card
+}
+
 pub fn apply_event(card: &mut Card, event: &AcpEvent) {
     match event {
         AcpEvent::TextDelta { delta, .. } => card.push_text(delta.clone()),

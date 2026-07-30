@@ -14,15 +14,7 @@ async fn terminal_error_removes_mapping_and_marks_card() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(
-        key.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await
-    .unwrap();
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router
@@ -58,15 +50,7 @@ async fn non_terminal_error_keeps_mapping() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(
-        key.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await
-    .unwrap();
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router

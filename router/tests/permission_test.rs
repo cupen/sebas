@@ -13,15 +13,7 @@ async fn permission_request_emits_card_with_buttons() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(
-        key.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await
-    .unwrap();
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     let event = AcpEvent::PermissionRequest {
@@ -61,15 +53,7 @@ async fn button_callback_emits_permission_reply() {
         thread_id: None,
     };
     // on_button now requires a live session mapping before forwarding a reply.
-    map.insert(
-        key.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await
-    .unwrap();
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     let action = CardAction {
         session_id: "s1".into(),
@@ -141,15 +125,7 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(
-        key.clone(),
-        Mapping {
-            session_id: "s1".into(),
-            last_active_unix: 1,
-        },
-    )
-    .await
-    .unwrap();
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     let action = CardAction {
         session_id: "s1".into(),
