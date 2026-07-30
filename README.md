@@ -33,15 +33,15 @@ See `docs/superpowers/specs/2026-07-26-sebas-design.md`.
 
 ## Status
 
-This is an MVP / work-in-progress. The WebSocket long-connection URL and handshake against a real Feishu workspace have not been verified end-to-end. Coverage tooling (cargo-llvm-cov) is not yet configured in CI. The `record` subcommand (§4.4 of the spec) is deferred.
+This is an MVP / work-in-progress. The WebSocket long-connection is fully wired (handshake, event dispatch, exponential-backoff reconnect) but has never been verified end-to-end against a real Feishu workspace (tracked: sebas-vw5.4). No CI is configured at all (tracked: sebas-nya). The `record` subcommand (§4.4 of the spec) is not implemented; `--dump-inbound` plus the `replay` subcommand cover the capture/replay path in the meantime (tracked: sebas-nya).
 
 ## Known limitations
 
-- SessionMap is in-memory only and lost on restart; sessions are restored lazily on next message per chat, but any in-progress work in the previous Claude Code session is not resumable from the child's perspective.
-- A `tests/bin/fake-claude.rs` development binary exists for integration testing, but no production test harness with real ACP protocol fixtures is in place yet.
-- Slash commands `/compact`, `/cost`, `/model`, `/cd` are dispatched to the ACP backend but their protocol-level behavior has not been validated end-to-end.
-- No coverage thresholds enforced in CI; overall ≥80%, router ≥90%, cards ≥90% targets are stated goals only.
-- The `record` subcommand for fixture capture (§4.4) is not implemented.
+- SessionMap is persisted to `state_file` and restored on restart, but no lazy respawn exists: after restart the restored mappings point at dead `session_id`s, `mgr.send` returns `unknown session`, and the next message for that chat is silently dropped; in-progress work in the dead Claude Code child is not resumable (tracked: sebas-bob).
+- `tests/bin/fake-claude.rs` is a real-protocol ACP harness used by several integration tests; what is missing is wire-level fixtures (real JSON-RPC frames) and the canned-binary replay harness (tracked: sebas-vw5.3).
+- `/compact` and `/cost` are forwarded to ACP as literal prompts; `/model`, `/cd`, `/status`, and `/help` are parsed but not wired (they fall through to HelpText or a no-op). Protocol-level behavior of the forwarded commands has not been validated end-to-end (tracked: sebas-3ti for the unwired commands; tracked: sebas-vw5.4 for end-to-end validation).
+- No CI at all; the router ≥90%, cards ≥90%, overall ≥80% coverage targets are stated goals only (tracked: sebas-nya).
+- The `record` subcommand for fixture capture (§4.4) is not implemented; `--dump-inbound` + `replay` cover the WS capture/replay path in the meantime (tracked: sebas-nya).
 
 ## Manual smoke test
 
