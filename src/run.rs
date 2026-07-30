@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::Result;
+use crate::reactions::{ReactPlan, ReactionTracker};
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::render_accumulated_card;
@@ -46,6 +47,9 @@ pub async fn run(
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,
     )));
+    // Tracks the current emoji reaction on each session's root card so the
+    // router's phase machine can swap 👀→🚧→✅ rather than pile them up.
+    let reactions = Arc::new(ReactionTracker::default());
 
     let feishu = FeishuClient::new(FeishuConfig {
         app_id: cfg.feishu.app_id.clone(),
@@ -133,6 +137,7 @@ pub async fn run(
     let feishu_for_outbound = feishu.clone();
     let router_for_outbound = router.clone();
     let mgr_for_outbound = mgr.clone();
+    let reactions_for_outbound = reactions.clone();
     tokio::spawn(async move {
         while let Some(out) = out_rx.recv().await {
             if let Err(e) = dispatch_out(
@@ -142,6 +147,7 @@ pub async fn run(
                 &cfg_for_outbound,
                 &router_for_outbound,
                 &mgr_for_outbound,
+                &reactions_for_outbound,
                 out,
             )
             .await
@@ -231,6 +237,9 @@ pub async fn run(
     Ok(())
 }
 
+// 参数即 outbound 共享上下文（client/http/tokens/cfg/router/mgr/reactions），
+// 打包 struct 只会给每个 match arm 增加 `ctx.` 噪音。
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_out(
     feishu: &FeishuClient,
     http: &reqwest::Client,
@@ -238,6 +247,7 @@ async fn dispatch_out(
     cfg: &Config,
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
+    reactions: &ReactionTracker,
     out: Out,
 ) -> anyhow::Result<()> {
     match out {
@@ -261,7 +271,22 @@ async fn dispatch_out(
         }
         Out::React { session_id, emoji } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
-                feishu.react(http, tokens, &message_id, &emoji).await?;
+                match reactions.plan(&session_id, &emoji).await {
+                    ReactPlan::Skip => {}
+                    ReactPlan::ReactOnly => {
+                        let rid = feishu.react(http, tokens, &message_id, &emoji).await?;
+                        reactions.record(&session_id, emoji, rid).await;
+                    }
+                    ReactPlan::Swap { unreact_id } => {
+                        // Best-effort: a stale reaction already gone is not fatal,
+                        // but failing to add the new one would strand the state.
+                        if let Err(e) = feishu.unreact(http, tokens, &message_id, &unreact_id).await {
+                            warn!(%session_id, "unreact before swap failed (continuing): {e}");
+                        }
+                        let rid = feishu.react(http, tokens, &message_id, &emoji).await?;
+                        reactions.record(&session_id, emoji, rid).await;
+                    }
+                }
             } else {
                 debug!(?session_id, "no root msg_id recorded; skipping react");
             }
@@ -304,7 +329,8 @@ async fn dispatch_out(
                 }
             };
             wire_session_card_and_pump(
-                feishu, http, tokens, cfg, router, mgr, key, session_id, prompt, pending, rx,
+                feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
+                pending, rx,
             )
             .await?;
         }
@@ -351,7 +377,8 @@ async fn dispatch_out(
                 info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
             }
             wire_session_card_and_pump(
-                feishu, http, tokens, cfg, router, mgr, key, session_id, prompt, pending, rx,
+                feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
+                pending, rx,
             )
             .await?;
         }
@@ -503,6 +530,7 @@ async fn wire_session_card_and_pump(
     cfg: &Config,
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
+    reactions: &ReactionTracker,
     key: SessionKey,
     session_id: String,
     prompt: String,
@@ -524,7 +552,13 @@ async fn wire_session_card_and_pump(
         .send_card(http, tokens, &key, serde_json::to_value(&card)?)
         .await?;
     if !msg_id.is_empty() {
-        router.record_root_msg_id(session_id.clone(), msg_id).await;
+        router.record_root_msg_id(session_id.clone(), msg_id.clone()).await;
+        // Stamp the initial 👀 reaction on the root card. Best-effort:
+        // a reaction failure must not abort session creation.
+        match feishu.react(http, tokens, &msg_id, "👀").await {
+            Ok(rid) => reactions.record(&session_id, "👀".into(), rid).await,
+            Err(e) => warn!(%session_id, "initial 👀 react failed: {e}"),
+        }
     }
     // Pump ACP events from this session back into the router.
     // `rx` was cloned before any slow I/O (the send_card HTTP round trip
@@ -564,9 +598,11 @@ pub async fn flush_pending_prompts(
 ///
 /// - 流式事件（TextDelta/ThinkingDelta/ToolStart/ToolProgress/ToolEnd/非
 ///   terminal Error）: `apply_event`（状态）+ 标脏；interval tick 到点若脏
-///   则 `flush_card`。
+///   则 `flush_card`。FSM 转移出的 reaction 随 flush 一起发（`pending_react`），
+///   保持「先出卡、后换 reaction」的顺序。
 /// - Finished / terminal Error / PermissionRequest: 即时 `apply_event_to_out`
-///   （terminal 额外 remove_by_session + drop_card 后泵退出）。
+///   （terminal 额外 remove_by_session + drop_card 后泵退出）。该路径自带
+///   即时 React，故丢弃未发的 `pending_react`（避免 ✅/❌ 之后又补一个 🚧）。
 /// - 通道关闭（recv → None）: `drop_card` + 退出。
 ///
 /// `rx` 在 `acp_spawn_and_activate` 里于任何慢 I/O 之前克隆，故即便 agent
@@ -587,6 +623,7 @@ pub fn spawn_acp_pump(
         let mut ticker = tokio::time::interval(Duration::from_millis(150));
         // 第一个 tick 立即触发（tokio interval 语义）；此时 dirty=false，是 no-op。
         let mut dirty = false;
+        let mut pending_react: Option<&'static str> = None;
         let mut rx = rx.lock().await;
         loop {
             tokio::select! {
@@ -605,13 +642,17 @@ pub fn spawn_acp_pump(
                     if is_immediate {
                         // 即时路径：取消待发 debounce，同步出最终态。
                         dirty = false;
+                        pending_react = None;
                         router.apply_event_to_out(session_id.clone(), &evt).await;
                         if is_terminal {
                             break;
                         }
                     } else {
-                        // 流式：只累积状态，标脏，重置 debounce 由 interval 周期保证。
-                        router.apply_event(&session_id, &evt).await;
+                        // 流式：只累积状态，标脏；FSM 转移（👀→🚧）的 reaction
+                        // 记入 pending_react，随下次 flush 一起发。
+                        if let Some(emoji) = router.apply_event(&session_id, &evt).await {
+                            pending_react = Some(emoji);
+                        }
                         dirty = true;
                     }
                 }
@@ -619,6 +660,9 @@ pub fn spawn_acp_pump(
                     if dirty {
                         dirty = false;
                         router.flush_card(&session_id).await;
+                    }
+                    if let Some(emoji) = pending_react.take() {
+                        router.emit_reaction(&session_id, emoji).await;
                     }
                 }
             }

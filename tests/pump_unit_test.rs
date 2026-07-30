@@ -50,8 +50,17 @@ async fn five_deltas_merge_into_one_updatecard() {
         assert!(s.contains(&format!("chunk{i}")), "chunk{i} in card: {s}");
     }
     assert!(s.contains("🚧"));
-    let second = tokio::time::timeout(Duration::from_millis(120), out_rx.recv()).await;
-    assert!(second.is_err(), "150ms 窗口内不得发第二个 UpdateCard");
+    // p3g：合并卡落地后同一 tick 紧跟 👀→🚧 的 reaction（先卡后 reaction）。
+    let second = tokio::time::timeout(Duration::from_millis(120), out_rx.recv())
+        .await
+        .expect("React 🚧 follows the merged card")
+        .expect("channel open");
+    assert!(
+        matches!(second, Out::React { ref emoji, .. } if emoji == "🚧"),
+        "合并卡后紧跟 React 🚧: {second:?}"
+    );
+    let third = tokio::time::timeout(Duration::from_millis(120), out_rx.recv()).await;
+    assert!(third.is_err(), "150ms 窗口内不得再有第三个 Out");
 }
 
 #[tokio::test]
