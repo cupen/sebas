@@ -243,3 +243,35 @@ fn finished_and_error_append_markdown() {
         other => panic!("expected Error Markdown, got {other:?}"),
     }
 }
+
+#[test]
+fn render_accumulated_card_structure() {
+    use feishu::cards::{render_accumulated_card, CardElement};
+    let body = vec![
+        CardElement::Markdown { content: "hello".into() },
+        CardElement::Hr,
+        CardElement::Markdown { content: "world".into() },
+    ];
+    let card = render_accumulated_card("重构 foo", "msg_9", "🚧", &body, "orange");
+    let s = serde_json::to_string(&card).unwrap();
+    // header title 含 emoji + "Claude Code"，template=orange
+    assert!(s.contains("🚧 Claude Code"));
+    assert!(s.contains("\"template\":\"orange\""));
+    // 引用块
+    assert!(s.contains("> 重构 foo"));
+    // body 两段 text 都在
+    assert!(s.contains("hello"));
+    assert!(s.contains("world"));
+    // footer msg_id
+    assert!(s.contains("msg_id: msg_9"));
+}
+
+#[test]
+fn render_accumulated_card_empty_body_matches_seed() {
+    use feishu::cards::render_accumulated_card;
+    let card = render_accumulated_card("hi", "msg_1", "👀", &[], "blue");
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("👀 Claude Code"));
+    assert!(s.contains("> hi"));
+    assert!(s.contains("msg_id: msg_1"));
+}

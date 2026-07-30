@@ -164,12 +164,30 @@ impl Card {
     }
 }
 
-pub fn render_root_card(user_prompt: &str, msg_id: &str, status_emoji: &str) -> Card {
-    let mut card = Card::new(&format!("{status_emoji} Claude Code"), "blue");
+/// 从累积状态构建完整卡（spec §4.3）：
+/// header(`{emoji} Claude Code`, theme) + 引用块(`> {user_prompt}`) + 分隔线
+/// + body 各元素 + footer 灰注(`msg_id: {session_id}`)。
+pub fn render_accumulated_card(
+    user_prompt: &str,
+    session_id: &str,
+    status_emoji: &str,
+    body: &[CardElement],
+    theme: &str,
+) -> Card {
+    let mut card = Card::new(&format!("{status_emoji} Claude Code"), theme);
     card.push_text(format!("> {user_prompt}"));
     card.push_divider();
-    card.push_note(format!("msg_id: {msg_id}"));
+    for el in body {
+        card.body.elements.push(el.clone());
+    }
+    card.push_note(format!("msg_id: {session_id}"));
     card
+}
+
+/// seed 时的初始卡构建器（不再被每个事件调用）。空 body 薄封装。
+/// 保留供 cards_test 快照；theme 固定 "blue" 以保持快照不变。
+pub fn render_root_card(user_prompt: &str, msg_id: &str, status_emoji: &str) -> Card {
+    render_accumulated_card(user_prompt, msg_id, status_emoji, &[], "blue")
 }
 
 pub fn render_permission_card(
