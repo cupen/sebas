@@ -390,24 +390,66 @@ pub async fn flush_pending_prompts(
     .await
 }
 
-/// Drain ACP events for one session and forward each into the router, which
-/// turns them into `UpdateCard` / `SendCard` outbound messages. Exits when the
-/// session's event stream closes (process exited / stdout EOF). The receiver
-/// is passed in (cloned before any slow I/O in `acp_spawn_and_activate`) so
-/// the pump always has a live channel even if the wrapper removed the table
-/// entry after a crash (D6).
-fn spawn_acp_pump(
+/// Drain ACP events for one session, accumulating them into CardState and
+/// flushing a single UpdateCard at most once per 150 ms (spec §6 节流契约).
+///
+/// - 流式事件（TextDelta/ThinkingDelta/ToolStart/ToolProgress/ToolEnd/非
+///   terminal Error）: `apply_event`（状态）+ 标脏；interval tick 到点若脏
+///   则 `flush_card`。
+/// - Finished / terminal Error / PermissionRequest: 即时 `apply_event_to_out`
+///   （terminal 额外 remove_by_session + drop_card 后泵退出）。
+/// - 通道关闭（recv → None）: `drop_card` + 退出。
+///
+/// `rx` 在 `acp_spawn_and_activate` 里于任何慢 I/O 之前克隆，故即便 agent
+/// 首次 prompt 即崩（D6）、wrapper 急切移除表项，终端事件仍能经此克隆抵达。
+///
+/// 机制选择（spec §6 把 async 机制委托给计划钉死）：用
+/// `tokio::time::interval(150ms) + dirty bool`，而非 spec 建议的
+/// `Option<Sleep> + select + pending()` —— 后者在 select 跨臂借用 `&mut`
+/// 会冲突，interval + Copy bool 规避之，契约等价。
+pub fn spawn_acp_pump(
     rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
     router: RouterHandle,
     session_id: String,
 ) {
     tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(150));
+        // 第一个 tick 立即触发（tokio interval 语义）；此时 dirty=false，是 no-op。
+        let mut dirty = false;
         let mut rx = rx.lock().await;
-        while let Some(evt) = rx.recv().await {
-            let finished = matches!(evt, AcpEvent::Finished { .. } | AcpEvent::Error { .. });
-            router.dispatch_acp_event(evt).await;
-            if finished {
-                debug!(%session_id, "session reported completion");
+        loop {
+            tokio::select! {
+                maybe_evt = rx.recv() => {
+                    let Some(evt) = maybe_evt else {
+                        router.drop_card(&session_id).await;
+                        break;
+                    };
+                    let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
+                    let is_immediate = matches!(
+                        evt,
+                        AcpEvent::Finished { .. }
+                            | AcpEvent::Error { terminal: true, .. }
+                            | AcpEvent::PermissionRequest { .. }
+                    );
+                    if is_immediate {
+                        // 即时路径：取消待发 debounce，同步出最终态。
+                        dirty = false;
+                        router.apply_event_to_out(session_id.clone(), &evt).await;
+                        if is_terminal {
+                            break;
+                        }
+                    } else {
+                        // 流式：只累积状态，标脏，重置 debounce 由 interval 周期保证。
+                        router.apply_event(&session_id, &evt).await;
+                        dirty = true;
+                    }
+                }
+                _ = ticker.tick() => {
+                    if dirty {
+                        dirty = false;
+                        router.flush_card(&session_id).await;
+                    }
+                }
             }
         }
         debug!(%session_id, "acp event stream closed; pump exiting");
