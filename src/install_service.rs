@@ -73,7 +73,7 @@ pub fn render_unit(scope: Scope, inputs: UnitInputs<'_>) -> String {
     }
     s.push_str(&format!("Environment=RUST_LOG={}\n", inputs.log_level));
     s.push_str(&format!(
-        "ExecStart={} --config {}\n",
+        "ExecStart={} run --config {}\n",
         inputs.binary_abs.display(),
         inputs.config_abs.display(),
     ));
@@ -330,7 +330,7 @@ mod tests {
         let s = render_unit(Scope::User, std_inputs(None));
         assert!(s.contains("[Unit]"));
         assert!(s.contains("Description="));
-        assert!(s.contains("ExecStart=/usr/local/bin/sebas --config /home/u/cfg.toml"));
+        assert!(s.contains("ExecStart=/usr/local/bin/sebas run --config /home/u/cfg.toml"));
         assert!(!s.contains("User="));
         assert!(!s.contains("Group="));
         assert!(s.contains("Environment=RUST_LOG=info"));

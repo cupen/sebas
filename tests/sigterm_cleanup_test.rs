@@ -21,13 +21,11 @@
 //!    Both env vars are read in `src/run.rs`; production callers never
 //!    set them, so the test path is dormant outside this test.
 //!
-//! 2. **Config file location.** The brief suggests `--config <path>`, but
-//!    `sebas`'s top-level clap enum (subcommands install-service, replay,
-//!    …) rejects `--config` before it can be consumed in the default-mode
-//!    arm. Instead, this test lays the config at the binary's default
-//!    path (`./config.toml`) and spawns the daemon with `current_dir` set
-//!    to the same temp dir. This sidesteps the CLI surface and still
-//!    gives the test full control over the file contents.
+//! 2. **Config file location.** The daemon is started via the explicit
+//!    `run` subcommand, whose `--config` defaults to `./config.toml`.
+//!    This test lays the config at that default path and spawns the
+//!    daemon with `current_dir` set to the same temp dir, giving the
+//!    test full control over the file contents without juggling paths.
 //!
 //! 3. **Child must be running long enough to be our child.** Spawning
 //!    the ACP subprocess inside `acp-claude::SessionManager` takes
@@ -124,6 +122,7 @@ async fn sigterm_cleans_up_child_and_persists_state() {
 
     // ---- 3. Spawn sebas with cwd=work_dir so it picks up our config. -----
     let mut child = tokio::process::Command::new(&sebas_bin)
+        .arg("run")
         .current_dir(work_dir.path())
         .env("SEBAS_TEST_FAKE_TOKEN", "1")
         .env("SEBAS_TEST_SPAWN_SESSION", "1")

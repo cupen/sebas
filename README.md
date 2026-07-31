@@ -13,7 +13,7 @@ A Rust daemon that bridges Claude Code (via ACP) to Feishu. Run Claude Code remo
 # 2. cp config/config.toml.example config.toml
 # 3. Edit config.toml: set app_id, app_secret, owner_id (your open_id)
 # 4. cargo build --release
-# 5. ./target/release/sebas -config ./config.toml
+# 5. ./target/release/sebas run --config ./config.toml
 ```
 
 ## Configuration
