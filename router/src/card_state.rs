@@ -46,13 +46,16 @@ impl CardStateMap {
             .or_insert_with(|| CardState::new(&user_prompt));
     }
 
-    /// 无 entry 时 `lazy()` 兜底插入，再对 `&mut CardState` 跑 `f`。
-    pub async fn apply<F: FnOnce(&mut CardState)>(&self, session_id: &str, f: F) {
+    /// 无 entry 时 `lazy()` 兜底插入，再对 `&mut CardState` 跑 `f`，返回其结果。
+    pub async fn apply<F, R>(&self, session_id: &str, f: F) -> R
+    where
+        F: FnOnce(&mut CardState) -> R,
+    {
         let mut g = self.inner.write().await;
         let st = g
             .entry(session_id.to_string())
             .or_insert_with(CardState::lazy);
-        f(st);
+        f(st)
     }
 
     /// 克隆一份给 flush 渲染。

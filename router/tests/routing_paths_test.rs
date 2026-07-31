@@ -22,6 +22,16 @@ async fn next_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
         .expect("channel open")
 }
 
+/// 收干一小段时间窗内的全部 Out（p3g 起 FSM 转移会连带 Out::React，
+/// 不能再假设一个事件只产一个 Out）。
+async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Vec<Out> {
+    let mut out = vec![];
+    while let Ok(Some(o)) = tokio::time::timeout(Duration::from_millis(60), rx.recv()).await {
+        out.push(o);
+    }
+    out
+}
+
 // ---------- on_button 分支 ----------
 
 #[tokio::test]
@@ -231,10 +241,10 @@ async fn dispatch_acp_event_routes_every_variant() {
     ];
     for evt in events {
         router.dispatch_acp_event(evt).await;
-        let out = next_out(&mut out_rx).await;
+        let outs = drain(&mut out_rx).await;
         assert!(
-            matches!(out, Out::UpdateCard { .. }),
-            "UpdateCard, got {out:?}"
+            outs.iter().any(|o| matches!(o, Out::UpdateCard { .. })),
+            "expected UpdateCard in {outs:?}"
         );
     }
 }
@@ -287,6 +297,12 @@ async fn terminal_error_removes_mapping_and_drops_card() {
         .await;
     let out = next_out(&mut out_rx).await;
     assert!(matches!(out, Out::UpdateCard { .. }));
+    // p3g：terminal 连带 ❌ reaction（先卡后 reaction）。
+    let react = next_out(&mut out_rx).await;
+    assert!(
+        matches!(react, Out::React { ref emoji, .. } if emoji == "❌"),
+        "terminal 换 ❌ reaction: {react:?}"
+    );
     assert!(map.get(&key()).await.is_none(), "mapping removed");
     // CardState 已清：后续 flush 是 no-op。
     router.flush_card("s1").await;

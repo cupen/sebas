@@ -87,18 +87,29 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     }
     assert!(s.contains("🚧"));
 
-    // Finished 立即产 ✅ 卡。
+    // Finished 立即产 ✅ 卡。p3g 起 Out 序列里还混有 reaction（tick 的 🚧、
+    // Finished 自带的 ✅），按类别找：✅ 卡 + ✅ reaction 都必须出现。
     let mut got_done = false;
-    for _ in 0..3 {
+    let mut got_done_react = false;
+    for _ in 0..4 {
         let o = tokio::time::timeout(Duration::from_millis(400), out_rx.recv())
             .await
             .expect("recv in time")
             .expect("channel open");
-        let s = card_str(&o);
-        if s.contains("✅") {
-            got_done = true;
+        match o {
+            Out::UpdateCard { .. } | Out::SendCard { .. } => {
+                if card_str(&o).contains("✅") {
+                    got_done = true;
+                }
+            }
+            Out::React { ref emoji, .. } if emoji == "✅" => got_done_react = true,
+            Out::React { .. } => {} // tick 补发的 🚧，忽略
+            other => panic!("unexpected out: {other:?}"),
+        }
+        if got_done && got_done_react {
             break;
         }
     }
     assert!(got_done, "Finished 必产 ✅ 卡");
+    assert!(got_done_react, "Finished 必换 ✅ reaction");
 }

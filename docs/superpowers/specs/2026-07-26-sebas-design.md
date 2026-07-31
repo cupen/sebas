@@ -333,7 +333,10 @@ env vars（仅覆盖敏感字段）：
 
 > **已完成**：飞书长连接（WebSocket）事件循环已与 `dispatch_out` / `SessionManager` 全链路接线 —— 入站消息会真正 `create_session` + 派发 ACP 命令，ACP 事件经 per-session pump 回流刷新卡片，关闭时 `kill_all` 收尾。此前的「WS 循环待接线」TODO 不再适用。
 
-- `sebas record` 子命令本身的设计（fixture 录制工具）—— 等 ACP 客户端稳定后再细化
-- 飞书群聊 @ 机器人 的具体消息格式（@ 消息 vs 普通消息的 payload 差异）—— 实现阶段确认
-- Claude Code ACP 子命令的精确协议（`claude --acp` 还是其它）—— 实现前从 Claude Code 文档 / 实测确认
-- 多用户 / 配额等目前不在范围，但 SessionKey 已预留 user_id 字段，将来扩展不需要破坏性改动
+> **2026-07-28 走查**：以下各条已核实并标注结论。
+
+- ⏳ `sebas record` 子命令本身的设计（fixture 录制工具）—— 等 ACP 客户端稳定后再细化 — 结论：仍待定；已实现 --dump-inbound 抓包 + replay 回放作为部分替代，record 本身未实现（tracked: sebas-nya，内含）
+- ⏳ 飞书群聊 @ 机器人 的具体消息格式（@ 消息 vs 普通消息的 payload 差异）—— 实现阶段确认 — 结论：代码不做 @ 解析（依赖飞书投递过滤 + owner 过滤），@ 前缀会进 prompt（tracked: sebas-n4z）
+- ✅ ~~Claude Code ACP 子命令的精确协议（`claude --acp` 还是其它）—— 实现前从 Claude Code 文档 / 实测确认~~ — 已解决：迁移官方 agent-client-protocol v2 SDK（commit 76a4b56），由 SDK 负责 spawn 与协议帧（acp-claude/src/manager.rs:66）
+- ❌ ~~多用户 / 配额等目前不在范围，但 SessionKey 已预留 user_id 字段，将来扩展不需要破坏性改动~~ — 声明不实：SessionKey（feishu/src/events.rs:21-25）只有 chat_id + thread_id，无 user_id 字段。修正：多用户仍是非目标；若将来支持多用户需在 SessionKey 增加 user_id 维度
+- ⏳ /resume 处理者表述矛盾（§3.3(d) vs §5 表格，以 §5 表格为准）——修复 sebas-3ti 时统一两处表述

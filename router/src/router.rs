@@ -130,7 +130,10 @@ impl RouterHandle {
 
     /// apply_event：纯状态变更（FSM emoji + apply_event_to_card append/截断/总量）。
     /// 不发 Out。session 无 CardState 时 lazy seed（prompt="" 兜底）。spec §4.2。
-    pub async fn apply_event(&self, session_id: &str, event: &AcpEvent) {
+    ///
+    /// 返回 `Some(新 emoji)` 表示 FSM 发生转移 —— 由调用方决定是否发
+    /// `Out::React`（本方法保持纯状态契约），见 `emit_reaction`。
+    pub async fn apply_event(&self, session_id: &str, event: &AcpEvent) -> Option<&'static str> {
         let cfg = &self.card_cfg;
         self.card_states
             .apply(session_id, |st| {
@@ -140,8 +143,20 @@ impl RouterHandle {
                     st.status_emoji = e.into();
                 }
                 apply_event_to_card(&mut st.body, event, cfg);
+                next
             })
-            .await;
+            .await
+    }
+
+    /// 发射 root 卡 reaction（apply_event 报告 FSM 转移 / continue 回切时由
+    /// 调用方触发）。root 卡消息上的 emoji 由此跟踪会话状态：
+    /// 🚧 working → ✅ done → ❌ failed。
+    pub async fn emit_reaction(&self, session_id: &str, emoji: &str) {
+        self.emit(Out::React {
+            session_id: session_id.into(),
+            emoji: emoji.into(),
+        })
+        .await;
     }
 
     /// flush_card：快照 → render_accumulated_card → Out::UpdateCard。
@@ -260,16 +275,24 @@ impl RouterHandle {
             }
             AcpEvent::Error { terminal: true, .. } => {
                 // terminal Error 并入累积模型（spec §8）：apply_event（置 ❌ + append
-                // 错误正文，保留死前 transcript）→ flush_card → remove_by_session → drop_card。
-                self.apply_event(session_id.as_str(), event).await;
+                // 错误正文，保留死前 transcript）→ flush_card → 换 reaction →
+                // remove_by_session → drop_card。
+                let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
+                if let Some(emoji) = react {
+                    self.emit_reaction(session_id.as_str(), emoji).await;
+                }
                 self.map.remove_by_session(session_id.as_str()).await;
                 self.drop_card(session_id.as_str()).await;
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
-                self.apply_event(session_id.as_str(), event).await;
+                // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）。
+                let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
+                if let Some(emoji) = react {
+                    self.emit_reaction(session_id.as_str(), emoji).await;
+                }
             }
         }
     }
@@ -379,6 +402,23 @@ impl RouterHandle {
     }
 
     async fn continue_session(&self, session_id: String, prompt: String) {
+        // 新 turn 回切（spec §5 回边）：上一 turn 已 settled（✅/❌）时重置为
+        // 🚧，先刷出回切后的卡再换 reaction，让用户看到会话重新进入工作状态。
+        let flipped = self
+            .card_states
+            .apply(&session_id, |st| {
+                if matches!(st.status_emoji.as_str(), "✅" | "❌") {
+                    st.status_emoji = "🚧".into();
+                    true
+                } else {
+                    false
+                }
+            })
+            .await;
+        if flipped {
+            self.flush_card(&session_id).await;
+            self.emit_reaction(&session_id, "🚧").await;
+        }
         self.emit(Out::SendAcp {
             session_id: session_id.clone(),
             cmd: AcpCommand::ContinueSession { session_id, prompt },

@@ -173,15 +173,30 @@ impl FeishuClient {
         url: &str,
         body: serde_json::Value,
     ) -> anyhow::Result<()> {
-        #[derive(serde::Deserialize)]
-        struct R {
-            code: i32,
-            msg: String,
-        }
+        self.request_with_retry_data::<serde_json::Value>(http, tokens, method, url, body)
+            .await
+            .map(|_| ())
+    }
+
+    /// `request_with_retry` 的带负载变体：返回解析后的 `data`。
+    /// `#[serde(default)]` 容忍缺失的 data；用 `serde_json::Value` 作 `T`
+    /// 可容忍任意形状（如 DELETE reaction 返回的 `data: {}` 空 map ——
+    /// `()` 会拒绝它：`invalid type: map, expected unit`）。
+    async fn request_with_retry_data<T>(
+        &self,
+        http: &reqwest::Client,
+        tokens: &TokenManager,
+        method: reqwest::Method,
+        url: &str,
+        body: serde_json::Value,
+    ) -> anyhow::Result<T>
+    where
+        T: serde::de::DeserializeOwned + Default,
+    {
         let mut attempt = 0;
         loop {
             let token = tokens.token().await?;
-            let resp: R = http
+            let resp: ApiResp<T> = http
                 .request(method.clone(), url)
                 .bearer_auth(token)
                 .json(&body)
@@ -190,7 +205,7 @@ impl FeishuClient {
                 .json()
                 .await?;
             if resp.code == 0 {
-                return Ok(());
+                return Ok(resp.data);
             }
             attempt += 1;
             if attempt > 1 {
@@ -233,22 +248,94 @@ impl FeishuClient {
             .await
     }
 
+    /// Add an emoji reaction to `message_id`. Returns the Feishu-assigned
+    /// `reaction_id` so the caller can later `unreact` it (swap reactions).
     pub async fn react(
         &self,
         http: &reqwest::Client,
         tokens: &TokenManager,
         message_id: &str,
         emoji_type: &str,
-    ) -> anyhow::Result<()> {
-        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions");
+    ) -> anyhow::Result<String> {
+        let url = format!(
+            "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions"
+        );
         let body = serde_json::json!({ "reaction_type": { "emoji_type": emoji_type } });
-        self.request_with_retry(http, tokens, reqwest::Method::POST, &url, body)
-            .await
+        let out: ReactionOut = self
+            .request_with_retry_data(http, tokens, reqwest::Method::POST, &url, body)
+            .await?;
+        Ok(out.reaction_id.unwrap_or_default())
     }
+
+    /// Remove a reaction by its `reaction_id` (as returned by `react`).
+    pub async fn unreact(
+        &self,
+        http: &reqwest::Client,
+        tokens: &TokenManager,
+        message_id: &str,
+        reaction_id: &str,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions/{reaction_id}"
+        );
+        self.request_with_retry_data::<serde_json::Value>(
+            http,
+            tokens,
+            reqwest::Method::DELETE,
+            &url,
+            serde_json::json!({}),
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiResp<T> {
+    code: i32,
+    msg: String,
+    #[serde(default)]
+    data: T,
+}
+
+#[derive(Default, Deserialize)]
+struct ReactionOut {
+    #[serde(default)]
+    reaction_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
 struct MessageOut {
     #[allow(non_snake_case)]
     message_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: Feishu DELETE-reaction returns `{"code":0,"data":{}}` — a
+    /// *present* map. Deserializing into a unit-typed payload errors on the
+    /// map (`invalid type: map, expected unit`), which would make every
+    /// `unreact` fail and strand the old reaction (the swap bug p3g fixes).
+    /// `ApiResp<Value>` tolerates it.
+    #[test]
+    fn unreact_response_with_present_data_object_is_tolerated() {
+        let body = r#"{"code":0,"msg":"success","data":{}}"#;
+        let resp: ApiResp<serde_json::Value> = serde_json::from_str(body).unwrap();
+        assert_eq!(resp.code, 0);
+        // And the unit-typed deserialization this replaces would reject it:
+        let unit: Result<ApiResp<()>, _> = serde_json::from_str(body);
+        assert!(
+            unit.is_err(),
+            "ApiResp<()> must reject a present data map — don't regress"
+        );
+    }
+
+    #[test]
+    fn react_response_picks_up_reaction_id() {
+        let body = r#"{"code":0,"msg":"success","data":{"reaction_id":"rid_1"}}"#;
+        let resp: ApiResp<ReactionOut> = serde_json::from_str(body).unwrap();
+        assert_eq!(resp.data.reaction_id.as_deref(), Some("rid_1"));
+    }
 }
