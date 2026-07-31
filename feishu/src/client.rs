@@ -153,7 +153,11 @@ impl FeishuClient {
             }
             attempt += 1;
             if attempt > 1 {
-                anyhow::bail!("feishu api failed after token refresh: {} {}", resp.code, resp.msg);
+                anyhow::bail!(
+                    "feishu api failed after token refresh: {} {}",
+                    resp.code,
+                    resp.msg
+                );
             }
             tokens.force_refresh().await?;
         }
@@ -190,7 +194,11 @@ impl FeishuClient {
             }
             attempt += 1;
             if attempt > 1 {
-                anyhow::bail!("feishu api failed after token refresh: {} {}", resp.code, resp.msg);
+                anyhow::bail!(
+                    "feishu api failed after token refresh: {} {}",
+                    resp.code,
+                    resp.msg
+                );
             }
             tokens.force_refresh().await?;
         }
@@ -232,9 +240,7 @@ impl FeishuClient {
         message_id: &str,
         emoji_type: &str,
     ) -> anyhow::Result<()> {
-        let url = format!(
-            "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions"
-        );
+        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions");
         let body = serde_json::json!({ "reaction_type": { "emoji_type": emoji_type } });
         self.request_with_retry(http, tokens, reqwest::Method::POST, &url, body)
             .await

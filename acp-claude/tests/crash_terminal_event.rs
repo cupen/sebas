@@ -59,7 +59,9 @@ async fn crash_yields_terminal_error_and_cleanup() {
                 assert!(!saw_terminal, "duplicate terminal event");
                 saw_terminal = true;
             }
-            Some(AcpEvent::Error { terminal: false, .. }) => {
+            Some(AcpEvent::Error {
+                terminal: false, ..
+            }) => {
                 panic!("non-terminal Error from a crash path");
             }
             Some(_) => continue,

@@ -27,7 +27,12 @@ pub struct AcpConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeishuConfig {
+    // serde-default（空串）让 TOML 缺字段时解析不报错，把「必填」判定留给
+    // validate() —— 这样 env 覆盖（SEBAS_FEISHU_APP_ID/SECRET）才有机会
+    // 在 validate 前补齐字段（spec §6.3 env > TOML）。
+    #[serde(default)]
     pub app_id: String,
+    #[serde(default)]
     pub app_secret: String,
     #[serde(default)]
     pub owner_id: String,
@@ -173,11 +178,37 @@ fn default_log_level() -> String {
 }
 
 impl Config {
+    /// Parse TOML, apply env overrides, validate required fields, expand
+    /// `~` paths. Priority per spec §6.3: CLI flags > env vars > TOML >
+    /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
-        let cfg: Config =
+        let mut cfg: Config =
             toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
+        cfg.apply_env_overrides();
         cfg.validate()?;
         Ok(cfg.with_expanded_paths())
+    }
+
+    /// env vars override TOML for the sensitive/ops fields (spec §6.3).
+    /// Empty values are ignored so `SEBAS_X=` never blanks a configured
+    /// credential. Runs BEFORE `validate` so env can satisfy required
+    /// fields on a host without a config file.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("SEBAS_FEISHU_APP_ID")
+            && !v.is_empty()
+        {
+            self.feishu.app_id = v;
+        }
+        if let Ok(v) = std::env::var("SEBAS_FEISHU_APP_SECRET")
+            && !v.is_empty()
+        {
+            self.feishu.app_secret = v;
+        }
+        if let Ok(v) = std::env::var("SEBAS_LOG_LEVEL")
+            && !v.is_empty()
+        {
+            self.log.level = v;
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -187,7 +218,36 @@ impl Config {
         if self.feishu.app_secret.is_empty() {
             return Err(SebasError::Config("feishu.app_secret is required".into()));
         }
-        // owner_id is optional; empty means skip owner filtering (single-user bots).
+        // owner_id 决策（sebas-nya）：维持**可选**，偏离 spec §6.1 的必填。
+        // 依据：spec §6 同时写明「只有 3 个必填字段」只是设计原则，而实际
+        // 部署（config/config.toml）以 owner_id = "" 运行单用户机器人；
+        // 空值语义 = 跳过 owner 过滤。风险（任何飞书用户都可驱动 bot）在
+        // run::run 启动时以 warn 提示，并在 config.toml.example 文档化。
+        Ok(())
+    }
+
+    /// Environmental startup checks (spec §6.4) that need a real
+    /// filesystem and PATH — kept OUT of `parse` so unit tests can
+    /// validate pure config on hosts without a claude binary. `run::run`
+    /// calls this before touching the network or spawning anything.
+    ///
+    /// 1. 目录可写性：state_file 父目录、media.download_dir、log.file 父
+    ///    目录（缺失则创建；创建/探测失败 → 友好 Config 错误，不 panic）。
+    /// 2. ACP 子进程二进制可达：绝对路径查存在+可执行位；裸名字扫 PATH。
+    pub fn validate_runtime(&self) -> Result<()> {
+        if let Some(parent) = std::path::Path::new(&self.router.state_file).parent() {
+            check_dir_writable(parent, "router.state_file 父目录")?;
+        }
+        check_dir_writable(
+            std::path::Path::new(&self.media.download_dir),
+            "media.download_dir",
+        )?;
+        if let Some(f) = &self.log.file
+            && let Some(parent) = std::path::Path::new(f).parent()
+        {
+            check_dir_writable(parent, "log.file 父目录")?;
+        }
+        check_binary_reachable(&self.acp.claude.path)?;
         Ok(())
     }
 
@@ -203,6 +263,60 @@ impl Config {
         }
         self
     }
+}
+
+/// spec §6.4.3: the directory must exist (create it if missing) and accept
+/// a probe file. The probe is created and removed immediately — it proves
+/// writability for the state file / downloads / log file we create later.
+fn check_dir_writable(dir: &std::path::Path, what: &str) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| SebasError::Config(format!("{what} {} 创建失败: {e}", dir.display())))?;
+    let probe = dir.join(format!(".sebas-write-probe-{}", std::process::id()));
+    let probe_result = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe)
+        .map(|_| ());
+    let _ = std::fs::remove_file(&probe);
+    probe_result.map_err(|e| SebasError::Config(format!("{what} {} 不可写: {e}", dir.display())))
+}
+
+/// spec §6.4.4: the ACP child binary must be reachable — an absolute (or
+/// relative-with-separator) path is checked directly, a bare name is
+/// resolved against PATH. Either way the file must exist and be executable.
+fn check_binary_reachable(path: &str) -> Result<()> {
+    let is_executable = |p: &std::path::Path| -> bool {
+        if !p.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p)
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    };
+
+    let found = if path.contains('/') {
+        is_executable(std::path::Path::new(path))
+    } else {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(path))))
+            .unwrap_or(false)
+    };
+    if !found {
+        return Err(SebasError::Config(format!(
+            "找不到 ACP agent 二进制 '{path}'。请安装 claude（并确认它以 ACP 模式运行所需的包装），\
+             或在 [acp.claude] path 配置可执行文件的绝对路径。"
+        )));
+    }
+    Ok(())
 }
 
 pub fn expand_tilde(p: &str) -> String {

@@ -1,5 +1,7 @@
-use feishu::cards::{apply_event_to_card, render_permission_card, render_root_card, CardConfig, CardElement};
 use acp_claude::session::AcpEvent;
+use feishu::cards::{
+    apply_event_to_card, render_permission_card, render_root_card, CardConfig, CardElement,
+};
 
 #[test]
 fn root_card_initial_snapshot() {
@@ -64,7 +66,10 @@ fn append_text_delta() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
-        &AcpEvent::TextDelta { session_id: "s".into(), delta: "hi".into() },
+        &AcpEvent::TextDelta {
+            session_id: "s".into(),
+            delta: "hi".into(),
+        },
         &cfg(),
     );
     assert_eq!(body.len(), 1);
@@ -79,17 +84,28 @@ fn append_revives_thinking_toolend_toolprogress() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ThinkingDelta { session_id: "s".into(), delta: "thinking".into() },
+        &AcpEvent::ThinkingDelta {
+            session_id: "s".into(),
+            delta: "thinking".into(),
+        },
         &cfg(),
     );
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolProgress { session_id: "s".into(), tool_name: "Bash".into(), progress: "in_progress".into() },
+        &AcpEvent::ToolProgress {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            progress: "in_progress".into(),
+        },
         &cfg(),
     );
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolEnd { session_id: "s".into(), tool_name: "Bash".into(), result: "ok".into() },
+        &AcpEvent::ToolEnd {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            result: "ok".into(),
+        },
         &cfg(),
     );
     // ThinkingDelta -> Div; ToolProgress -> Div; ToolEnd -> Div（各 1 个元素）
@@ -104,7 +120,11 @@ fn tool_start_emits_hr_then_markdown() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolStart { session_id: "s".into(), tool_name: "Bash".into(), args: serde_json::json!({"cmd":"ls"}) },
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"cmd":"ls"}),
+        },
         &cfg(),
     );
     assert!(matches!(body[0], CardElement::Hr));
@@ -117,7 +137,10 @@ fn long_text_is_truncated_with_grey_note() {
     let big = "a".repeat(50);
     apply_event_to_card(
         &mut body,
-        &AcpEvent::TextDelta { session_id: "s".into(), delta: big.clone() },
+        &AcpEvent::TextDelta {
+            session_id: "s".into(),
+            delta: big.clone(),
+        },
         &cfg_small(),
     );
     // TextDelta 截断到 10 + 灰注（已折叠 40 字），共 2 个元素。
@@ -138,10 +161,16 @@ fn long_text_is_truncated_with_grey_note() {
 fn fold_disabled_skips_truncation() {
     let mut body = vec![];
     let big = "a".repeat(50);
-    let c = CardConfig { fold_long_output: false, ..cfg_small() };
+    let c = CardConfig {
+        fold_long_output: false,
+        ..cfg_small()
+    };
     apply_event_to_card(
         &mut body,
-        &AcpEvent::TextDelta { session_id: "s".into(), delta: big },
+        &AcpEvent::TextDelta {
+            session_id: "s".into(),
+            delta: big,
+        },
         &c,
     );
     // 不截断：单元素，全文保留。
@@ -158,7 +187,11 @@ fn long_toolend_result_truncated() {
     let big = "x".repeat(20);
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolEnd { session_id: "s".into(), tool_name: "Bash".into(), result: big },
+        &AcpEvent::ToolEnd {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            result: big,
+        },
         &cfg_small(),
     );
     // ToolEnd.result 截断到 5 + 灰注，共 2 个元素。
@@ -173,7 +206,10 @@ fn total_budget_drops_oldest() {
     for _ in 0..7 {
         apply_event_to_card(
             &mut body,
-            &AcpEvent::TextDelta { session_id: "s".into(), delta: "a".repeat(4000) },
+            &AcpEvent::TextDelta {
+                session_id: "s".into(),
+                delta: "a".repeat(4000),
+            },
             &c,
         );
     }
@@ -189,21 +225,28 @@ fn total_budget_drops_hr_with_following_element() {
     // 先 push 一个 Hr + 一个 text，再 push 大量 text 触发总量。
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolStart { session_id: "s".into(), tool_name: "Bash".into(), args: serde_json::json!({}) },
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({}),
+        },
         &c,
     ); // body = [Hr, Markdown]
     for _ in 0..7 {
         apply_event_to_card(
             &mut body,
-            &AcpEvent::TextDelta { session_id: "s".into(), delta: "a".repeat(4000) },
+            &AcpEvent::TextDelta {
+                session_id: "s".into(),
+                delta: "a".repeat(4000),
+            },
             &c,
         );
     } // body = [Hr, Markdown, M, M, M, M, M, M, M] -> Hr 最旧
-    // 总量超 24000 -> 丢 Hr + 其后 1 个 Markdown（共 2 个），剩余 7-1=6 段 text + 原 Markdown? 需算:
-    //   元素: [Hr, Markdown(ToolStart的), M, M, M, M, M, M, M] = 1 Hr + 8 Markdown
-    //   字符: 8*4000 = 32000 -> 丢 Hr+第1个M -> 7*4000=28000 -> 继续 -> 丢第2个M -> 6*4000=24000 -> 停.
-    //   但丢 Hr 时连后一个 -> 第一次丢 [Hr, Markdown(ToolStart)] -> 剩 7 M = 28000 -> 再丢 1 M -> 6 M = 24000.
-    //   最终 body.len() = 6 (6 个 Markdown).
+      // 总量超 24000 -> 丢 Hr + 其后 1 个 Markdown（共 2 个），剩余 7-1=6 段 text + 原 Markdown? 需算:
+      //   元素: [Hr, Markdown(ToolStart的), M, M, M, M, M, M, M] = 1 Hr + 8 Markdown
+      //   字符: 8*4000 = 32000 -> 丢 Hr+第1个M -> 7*4000=28000 -> 继续 -> 丢第2个M -> 6*4000=24000 -> 停.
+      //   但丢 Hr 时连后一个 -> 第一次丢 [Hr, Markdown(ToolStart)] -> 剩 7 M = 28000 -> 再丢 1 M -> 6 M = 24000.
+      //   最终 body.len() = 6 (6 个 Markdown).
     assert_eq!(body.len(), 6);
     // 最旧的 Hr 已被连带丢掉.
     assert!(matches!(body[0], CardElement::Markdown { .. }));
@@ -214,7 +257,12 @@ fn permission_request_is_noop_for_body() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
-        &AcpEvent::PermissionRequest { session_id: "s".into(), request_id: "r".into(), tool_name: "Bash".into(), args: serde_json::json!({}) },
+        &AcpEvent::PermissionRequest {
+            session_id: "s".into(),
+            request_id: "r".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({}),
+        },
         &cfg(),
     );
     assert!(body.is_empty(), "PermissionRequest 不累积进 root body");
@@ -225,12 +273,18 @@ fn finished_and_error_append_markdown() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
-        &AcpEvent::Finished { session_id: "s".into() },
+        &AcpEvent::Finished {
+            session_id: "s".into(),
+        },
         &cfg(),
     );
     apply_event_to_card(
         &mut body,
-        &AcpEvent::Error { session_id: "s".into(), message: "boom".into(), terminal: false },
+        &AcpEvent::Error {
+            session_id: "s".into(),
+            message: "boom".into(),
+            terminal: false,
+        },
         &cfg(),
     );
     assert_eq!(body.len(), 2);
@@ -248,9 +302,13 @@ fn finished_and_error_append_markdown() {
 fn render_accumulated_card_structure() {
     use feishu::cards::{render_accumulated_card, CardElement};
     let body = vec![
-        CardElement::Markdown { content: "hello".into() },
+        CardElement::Markdown {
+            content: "hello".into(),
+        },
         CardElement::Hr,
-        CardElement::Markdown { content: "world".into() },
+        CardElement::Markdown {
+            content: "world".into(),
+        },
     ];
     let card = render_accumulated_card("重构 foo", "msg_9", "🚧", &body, "orange");
     let s = serde_json::to_string(&card).unwrap();

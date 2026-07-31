@@ -245,7 +245,9 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
         AcpEvent::ThinkingDelta { delta, .. } => {
             body.push(note_element(format!("💭 {delta}")));
         }
-        AcpEvent::ToolStart { tool_name, args, .. } => {
+        AcpEvent::ToolStart {
+            tool_name, args, ..
+        } => {
             body.push(CardElement::Hr);
             push_text_truncated(
                 body,
@@ -254,14 +256,21 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
                 cfg.fold_long_output,
             );
         }
-        AcpEvent::ToolEnd { tool_name, result, .. } => {
-            let (text, note) = truncate_with_note(result, cfg.max_tool_output_chars, cfg.fold_long_output);
+        AcpEvent::ToolEnd {
+            tool_name, result, ..
+        } => {
+            let (text, note) =
+                truncate_with_note(result, cfg.max_tool_output_chars, cfg.fold_long_output);
             body.push(note_element(format!("✓ {tool_name} done: {text}")));
             if let Some(n) = note {
                 body.push(note_element(format!("（已折叠 {n} 字）")));
             }
         }
-        AcpEvent::ToolProgress { tool_name, progress, .. } => {
+        AcpEvent::ToolProgress {
+            tool_name,
+            progress,
+            ..
+        } => {
             body.push(note_element(format!("⏳ {tool_name}: {progress}")));
         }
         AcpEvent::Finished { .. } => body.push(CardElement::Markdown {

@@ -42,13 +42,16 @@ impl CardStateMap {
     /// 幂等 seed：entry 已存在则保留（防 SpawnAcp 重入冲掉已累积状态）。
     pub async fn seed(&self, session_id: String, user_prompt: String) {
         let mut g = self.inner.write().await;
-        g.entry(session_id).or_insert_with(|| CardState::new(&user_prompt));
+        g.entry(session_id)
+            .or_insert_with(|| CardState::new(&user_prompt));
     }
 
     /// 无 entry 时 `lazy()` 兜底插入，再对 `&mut CardState` 跑 `f`。
     pub async fn apply<F: FnOnce(&mut CardState)>(&self, session_id: &str, f: F) {
         let mut g = self.inner.write().await;
-        let st = g.entry(session_id.to_string()).or_insert_with(CardState::lazy);
+        let st = g
+            .entry(session_id.to_string())
+            .or_insert_with(CardState::lazy);
         f(st);
     }
 

@@ -34,9 +34,12 @@ async fn five_deltas_merge_into_one_updatecard() {
     spawn_acp_pump(rx, router.clone(), "s1".into());
 
     for i in 0..5 {
-        tx.send(AcpEvent::TextDelta { session_id: "s1".into(), delta: format!("chunk{i} ") })
-            .await
-            .unwrap();
+        tx.send(AcpEvent::TextDelta {
+            session_id: "s1".into(),
+            delta: format!("chunk{i} "),
+        })
+        .await
+        .unwrap();
     }
     let first = tokio::time::timeout(Duration::from_millis(400), out_rx.recv())
         .await
@@ -60,12 +63,17 @@ async fn finished_flushes_immediately_after_stream() {
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
     spawn_acp_pump(rx, router.clone(), "s2".into());
 
-    tx.send(AcpEvent::TextDelta { session_id: "s2".into(), delta: "x".into() })
-        .await
-        .unwrap();
-    tx.send(AcpEvent::Finished { session_id: "s2".into() })
-        .await
-        .unwrap();
+    tx.send(AcpEvent::TextDelta {
+        session_id: "s2".into(),
+        delta: "x".into(),
+    })
+    .await
+    .unwrap();
+    tx.send(AcpEvent::Finished {
+        session_id: "s2".into(),
+    })
+    .await
+    .unwrap();
 
     let mut got_done = false;
     for _ in 0..3 {
@@ -85,20 +93,32 @@ async fn finished_flushes_immediately_after_stream() {
 #[tokio::test]
 async fn terminal_error_flushes_removes_and_exits() {
     let map = SessionMap::new();
-    let key = feishu::events::SessionKey { chat_id: "oc_t".into(), thread_id: None };
-    map.insert(key.clone(), Mapping::active("s3")).await.unwrap();
+    let key = feishu::events::SessionKey {
+        chat_id: "oc_t".into(),
+        thread_id: None,
+    };
+    map.insert(key.clone(), Mapping::active("s3"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     router.seed_card("s3".into(), "p".into()).await;
     let (tx, rx) = mpsc::channel::<AcpEvent>(64);
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
     spawn_acp_pump(rx, router.clone(), "s3".into());
 
-    tx.send(AcpEvent::TextDelta { session_id: "s3".into(), delta: "before".into() })
-        .await
-        .unwrap();
-    tx.send(AcpEvent::Error { session_id: "s3".into(), message: "crashed".into(), terminal: true })
-        .await
-        .unwrap();
+    tx.send(AcpEvent::TextDelta {
+        session_id: "s3".into(),
+        delta: "before".into(),
+    })
+    .await
+    .unwrap();
+    tx.send(AcpEvent::Error {
+        session_id: "s3".into(),
+        message: "crashed".into(),
+        terminal: true,
+    })
+    .await
+    .unwrap();
 
     let mut got_red = false;
     for _ in 0..3 {
@@ -112,6 +132,9 @@ async fn terminal_error_flushes_removes_and_exits() {
             break;
         }
     }
-    assert!(got_red, "terminal 必产含 ❌ + 死前 transcript + 错误正文的卡");
+    assert!(
+        got_red,
+        "terminal 必产含 ❌ + 死前 transcript + 错误正文的卡"
+    );
     assert!(map.get(&key).await.is_none(), "terminal 后 mapping 必清");
 }

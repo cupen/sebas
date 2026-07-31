@@ -105,3 +105,49 @@ async fn replay_button_cb_routes_to_help_when_session_dead() {
         "expected Out::SendCard (dead session) or Out::HelpText, got {out:?}"
     );
 }
+
+/// `replay::run` 的 FS 路径：目录 glob、按文件名排序、逐帧 dispatch、
+/// 坏帧 warn-and-skip、dir 不存在 → Err。
+#[tokio::test]
+async fn replay_run_reads_sorted_frames_and_skips_bad_ones() {
+    let dir = std::env::temp_dir().join(format!("sebas-replay-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mk_frame = |chat: &str| {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": "2.0",
+            "header": { "event_type": "im.message.receive_v1", "tenant_key": "t" },
+            "event": {
+                "sender": { "sender_id": { "open_id": "ou_anyone" } },
+                "message": {
+                    "chat_id": chat,
+                    "message_id": "om_1",
+                    "message_type": "text",
+                    "content": "{\"text\":\"hi\"}"
+                }
+            }
+        }))
+        .unwrap()
+    };
+    // 时间戳前缀保证字典序 = 捕获序；混入一个坏帧和一个非 .json 文件。
+    std::fs::write(dir.join("001-a.json"), mk_frame("oc_a")).unwrap();
+    std::fs::write(dir.join("002-b.json"), mk_frame("oc_b")).unwrap();
+    std::fs::write(dir.join("003-bad.json"), "{ nope").unwrap();
+    std::fs::write(dir.join("ignore.txt"), mk_frame("oc_c")).unwrap();
+
+    let count = sebas::replay::run(sebas::replay::ReplayArgs { dir: dir.clone() })
+        .await
+        .expect("replay run");
+    assert_eq!(
+        count, 2,
+        "two well-formed frames dispatched, bad one skipped"
+    );
+
+    let missing = sebas::replay::run(sebas::replay::ReplayArgs {
+        dir: dir.join("does-not-exist"),
+    })
+    .await;
+    assert!(missing.is_err(), "missing dir must error");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

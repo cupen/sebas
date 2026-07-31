@@ -1,9 +1,16 @@
 [feishu]
 app_id = ""
 app_secret = ""
-# owner_id = ""
+# owner_id 单用户鉴权（你的 open_id，ou_ 开头）。
+# 决策（sebas-nya）：可选，偏离 spec §6.1 的必填 —— 留空 = 不过滤发送者，
+# 任何能给 bot 发消息的飞书用户都可驱动本机 claude，启动时会有 warn 提示。
+# 强烈建议填上：open_id 可在飞书开放平台或 bot 收到的消息事件里查到。
+# owner_id = "ou_xxx"
 # 启动时发给每个恢复会话的消息（空 = 不发）
 # hello_msg = "你好，我又回来了"
+
+# env 覆盖（spec §6.3，优先级高于本文件）：
+#   SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL
 
 # Optional: override ACP agent settings (defaults shown)
 # [acp.claude]

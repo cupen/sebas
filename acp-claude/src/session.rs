@@ -205,3 +205,126 @@ pub(crate) fn translate_update(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notif(update: serde_json::Value) -> SessionNotification {
+        let v = serde_json::json!({
+            "sessionId": "s1",
+            "update": update,
+        });
+        serde_json::from_value(v).expect("SessionNotification parses")
+    }
+
+    #[test]
+    fn agent_message_chunk_maps_to_text_delta() {
+        let n = notif(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "hello"}
+        }));
+        match translate_update("s1", &n) {
+            Some(AcpEvent::TextDelta { session_id, delta }) => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(delta, "hello");
+            }
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thought_chunk_maps_to_thinking_delta() {
+        let n = notif(serde_json::json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "hmm"}
+        }));
+        match translate_update("s1", &n) {
+            Some(AcpEvent::ThinkingDelta { delta, .. }) => assert_eq!(delta, "hmm"),
+            other => panic!("expected ThinkingDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_text_chunk_is_dropped() {
+        let n = notif(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": ""}
+        }));
+        assert!(translate_update("s1", &n).is_none());
+    }
+
+    #[test]
+    fn tool_call_maps_to_tool_start() {
+        let n = notif(serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc1",
+            "title": "Bash",
+            "rawInput": {"cmd": "ls"}
+        }));
+        match translate_update("s1", &n) {
+            Some(AcpEvent::ToolStart {
+                tool_name, args, ..
+            }) => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(args, serde_json::json!({"cmd": "ls"}));
+            }
+            other => panic!("expected ToolStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_call_update_in_progress_maps_to_progress() {
+        let n = notif(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc1",
+            "title": "Bash",
+            "status": "in_progress"
+        }));
+        match translate_update("s1", &n) {
+            Some(AcpEvent::ToolProgress {
+                tool_name,
+                progress,
+                ..
+            }) => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(progress, "in_progress");
+            }
+            other => panic!("expected ToolProgress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_call_update_with_output_maps_to_tool_end() {
+        let n = notif(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc1",
+            "title": "Bash",
+            "status": "completed",
+            "rawOutput": {"stdout": "done"}
+        }));
+        match translate_update("s1", &n) {
+            Some(AcpEvent::ToolEnd {
+                tool_name, result, ..
+            }) => {
+                assert_eq!(tool_name, "Bash");
+                assert!(result.contains("done"), "raw output stringified: {result}");
+            }
+            other => panic!("expected ToolEnd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_echo_and_plan_are_ignored() {
+        let user = notif(serde_json::json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "echo"}
+        }));
+        assert!(translate_update("s1", &user).is_none());
+        let plan = notif(serde_json::json!({
+            "sessionUpdate": "plan",
+            "entries": []
+        }));
+        assert!(translate_update("s1", &plan).is_none());
+    }
+}

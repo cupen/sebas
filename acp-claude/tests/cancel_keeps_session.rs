@@ -39,10 +39,10 @@ async fn drain_cancel_fallout(mgr: &SessionManager, id: &str) {
     tokio::task::yield_now().await;
     loop {
         match tokio::time::timeout(Duration::from_millis(500), mgr.next_event(id)).await {
-            Ok(Some(AcpEvent::Finished { .. })) => return,  // synthetic Finished consumed
-            Ok(Some(_)) => continue,                         // other events
+            Ok(Some(AcpEvent::Finished { .. })) => return, // synthetic Finished consumed
+            Ok(Some(_)) => continue,                       // other events
             Ok(None) => panic!("session closed unexpectedly after cancel"),
-            Err(_) => return,                                // timeout — session is idle
+            Err(_) => return, // timeout — session is idle
         }
     }
 }
@@ -67,9 +67,12 @@ async fn session_survives_cancel() {
     drain_until_finished(&mgr, &id).await;
 
     // Cancel (no turn in flight — agent ignores it, which is fine).
-    mgr.send(&id, AcpCommand::Cancel {
-        session_id: id.clone(),
-    })
+    mgr.send(
+        &id,
+        AcpCommand::Cancel {
+            session_id: id.clone(),
+        },
+    )
     .await
     .expect("cancel");
 

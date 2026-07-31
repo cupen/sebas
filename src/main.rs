@@ -34,6 +34,26 @@ enum Cmd {
     InstallService(InstallServiceArgs),
     /// Replay captured inbound events from a directory of `.json` files.
     Replay(ReplayArgs),
+    /// Record an ACP agent's stdio traffic as a fixture file (spec §4.4).
+    /// Type/paste JSON-RPC lines on stdin; responses print to stdout; both
+    /// directions are appended to --output as {"dir","msg"} journal lines.
+    Record(RecordArgs),
+}
+
+#[derive(Parser)]
+struct RecordArgs {
+    /// Fixture file to write (JSONL, one {"dir","msg"} object per line).
+    #[arg(long)]
+    output: String,
+
+    /// Config supplying acp.claude.path/args for the agent to record.
+    #[arg(long, default_value = "./config.toml")]
+    config: String,
+
+    /// Extra args for the agent binary, after `--`
+    /// (appended to the configured acp.claude.args).
+    #[arg(last = true)]
+    agent_args: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -96,6 +116,13 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Record(args)) => {
+            if let Err(e) = sebas::record::run(args.into()).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         None => {
             // Default mode: long-lived run.
             let run = RunArgs::parse();
@@ -133,6 +160,16 @@ impl From<ReplayArgs> for sebas::replay::ReplayArgs {
     fn from(a: ReplayArgs) -> Self {
         Self {
             dir: PathBuf::from(a.dir),
+        }
+    }
+}
+
+impl From<RecordArgs> for sebas::record::RecordArgs {
+    fn from(a: RecordArgs) -> Self {
+        Self {
+            output: PathBuf::from(a.output),
+            config: a.config,
+            agent_args: a.agent_args,
         }
     }
 }

@@ -2,10 +2,10 @@
 //! emit an ❌ UpdateCard. Non-terminal errors keep the existing behaviour.
 
 use acp_claude::session::AcpEvent;
+use feishu::events::SessionKey;
 use router::router::{Out, RouterHandle};
 use router::state::{Mapping, SessionMap};
 use std::time::Duration;
-use feishu::events::SessionKey;
 
 #[tokio::test]
 async fn terminal_error_removes_mapping_and_marks_card() {
@@ -14,7 +14,9 @@ async fn terminal_error_removes_mapping_and_marks_card() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router
@@ -50,7 +52,9 @@ async fn non_terminal_error_keeps_mapping() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router
@@ -79,21 +83,30 @@ async fn terminal_error_preserves_pre_death_transcript() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     // 累积若干事件（死前 transcript）。
     router
         .apply_event_to_out(
             "s1".into(),
-            &AcpEvent::TextDelta { session_id: "s1".into(), delta: "step1".into() },
+            &AcpEvent::TextDelta {
+                session_id: "s1".into(),
+                delta: "step1".into(),
+            },
         )
         .await;
     let _ = tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await;
     router
         .apply_event_to_out(
             "s1".into(),
-            &AcpEvent::ToolEnd { session_id: "s1".into(), tool_name: "Bash".into(), result: "step2".into() },
+            &AcpEvent::ToolEnd {
+                session_id: "s1".into(),
+                tool_name: "Bash".into(),
+                result: "step2".into(),
+            },
         )
         .await;
     let _ = tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await;

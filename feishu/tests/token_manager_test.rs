@@ -58,9 +58,9 @@ fn start_stub(card_bodies: Vec<String>) -> Stub {
                 r#"{"code":0,"msg":"ok","tenant_access_token":"t-fresh","expire":7200}"#.to_string()
             } else {
                 ch.fetch_add(1, Ordering::SeqCst);
-                card_bodies
-                    .next()
-                    .unwrap_or_else(|| r#"{"code":0,"msg":"ok","data":{"message_id":"om_1"}}"#.to_string())
+                card_bodies.next().unwrap_or_else(|| {
+                    r#"{"code":0,"msg":"ok","data":{"message_id":"om_1"}}"#.to_string()
+                })
             };
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -140,7 +140,11 @@ async fn send_card_retries_once_with_fresh_token_on_business_error() {
         .await
         .expect("retry succeeds");
     assert_eq!(out, "om_ok");
-    assert_eq!(stub.card_hits.load(Ordering::SeqCst), 2, "exactly one retry");
+    assert_eq!(
+        stub.card_hits.load(Ordering::SeqCst),
+        2,
+        "exactly one retry"
+    );
     assert!(
         stub.token_hits.load(Ordering::SeqCst) >= 2,
         "initial token + forced refresh"

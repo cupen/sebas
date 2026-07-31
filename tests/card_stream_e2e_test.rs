@@ -33,21 +33,36 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
-    let key = SessionKey { chat_id: "oc_stream".into(), thread_id: None };
+    let key = SessionKey {
+        chat_id: "oc_stream".into(),
+        thread_id: None,
+    };
 
     // Text "stream" -> SpawnAcp.
     router
-        .dispatch(FeishuIn::Text { key: key.clone(), text: "stream".into(), reply_to: None })
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "stream".into(),
+            reply_to: None,
+        })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    let Out::SpawnAcp { key: k, prompt } = out else { panic!("expected SpawnAcp, got {out:?}") };
+    let Out::SpawnAcp { key: k, prompt } = out else {
+        panic!("expected SpawnAcp, got {out:?}")
+    };
 
     // 走 production spawn：create_session + rx 克隆 + CreateSession prompt + activate.
     let (session_id, _pending, rx) = sebas::run::acp_spawn_and_activate(
-        &mgr, &router, &k, &prompt, fake().to_str().unwrap(), vec![], None,
+        &mgr,
+        &router,
+        &k,
+        &prompt,
+        fake().to_str().unwrap(),
+        vec![],
+        None,
     )
     .await
     .expect("spawn ok");
@@ -65,7 +80,10 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         .expect("channel open");
     let s = card_str(&first);
     for i in 0..5 {
-        assert!(s.contains(&format!("chunk{i}")), "chunk{i} in merged card: {s}");
+        assert!(
+            s.contains(&format!("chunk{i}")),
+            "chunk{i} in merged card: {s}"
+        );
     }
     assert!(s.contains("🚧"));
 
