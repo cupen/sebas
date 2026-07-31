@@ -25,8 +25,75 @@ async fn dump_and_restore_round_trip() {
 
     let json = m.dump_json().await.unwrap();
     let m2 = SessionMap::restore_json(&json).unwrap();
-    let got = m2.get(&k).await;
-    assert_eq!(got.unwrap().session_id(), Some("s1"));
+    let got = m2.get(&k).await.unwrap();
+    // Restored entries come back DORMANT (spec §3.3e): the child died with
+    // the previous daemon, so the mapping must not route as live...
+    assert_eq!(got.session_id(), None);
+    assert!(matches!(
+        got.state,
+        router::state::MappingState::Dormant { .. }
+    ));
+    // ...but the id survives for lazy respawn, and persists again on dump.
+    let json2 = m2.dump_json().await.unwrap();
+    assert!(json2.contains("\"session_id\":\"s1\""));
+}
+
+#[tokio::test]
+async fn dormant_first_text_claims_resume_then_queues() {
+    let json = r#"{"oc_x":{"session_id":"s-old","last_active_unix":1}}"#;
+    let m = SessionMap::restore_json(json).unwrap();
+    let k = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    // First text: claims the dormant mapping for lazy respawn (spec §3.3e)
+    // and swaps in a Spawning placeholder atomically.
+    let r = m.route_text(k.clone(), "hello".into()).await.unwrap();
+    assert!(matches!(r, router::state::TextRoute::Resume(ref old) if old == "s-old"));
+    // A racing second text queues behind the placeholder — no double respawn.
+    let r2 = m.route_text(k.clone(), "again".into()).await.unwrap();
+    assert!(matches!(r2, router::state::TextRoute::Enqueued));
+    // Activate flips to Active and drains the queue.
+    let pending = m.activate(&k, "s-new".into()).await;
+    assert_eq!(pending, vec!["again".to_string()]);
+    let r3 = m.route_text(k.clone(), "third".into()).await.unwrap();
+    assert!(matches!(r3, router::state::TextRoute::Continue(ref sid) if sid == "s-new"));
+}
+
+#[tokio::test]
+async fn dormant_new_means_fresh_spawn_not_resume() {
+    let json = r#"{"oc_x":{"session_id":"s-old","last_active_unix":1}}"#;
+    let m = SessionMap::restore_json(json).unwrap();
+    let k = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    let r = m.begin_spawn(k.clone()).await.unwrap();
+    assert!(matches!(r, router::state::BeginSpawn::ReplacedActive));
+    let got = m.get(&k).await.unwrap();
+    assert!(matches!(
+        got.state,
+        router::state::MappingState::Spawning { .. }
+    ));
+}
+
+#[tokio::test]
+async fn route_text_and_activate_touch_last_active() {
+    let m = SessionMap::new();
+    let k = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    // Backdate the entry so the touch is observable.
+    m.insert(k.clone(), Mapping::dormant("s1", 1))
+        .await
+        .unwrap();
+    m.route_text(k.clone(), "hi".into()).await.unwrap();
+    let t1 = m.get(&k).await.unwrap().last_active_unix;
+    assert!(t1 > 1, "route_text must refresh last_active_unix, got {t1}");
+    m.activate(&k, "s2".into()).await;
+    let t2 = m.get(&k).await.unwrap().last_active_unix;
+    assert!(t2 >= t1);
 }
 
 #[tokio::test]

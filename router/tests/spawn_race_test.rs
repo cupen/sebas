@@ -40,7 +40,10 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
         })
         .await;
     let second = tokio::time::timeout(Duration::from_millis(150), out_rx.recv()).await;
-    assert!(second.is_err(), "no second Out may be emitted while spawning");
+    assert!(
+        second.is_err(),
+        "no second Out may be emitted while spawning"
+    );
 
     let pending = map.activate(&key(), "s1".into()).await;
     assert_eq!(pending, vec!["msg2".to_string()]);
@@ -65,9 +68,7 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
 #[tokio::test]
 async fn fail_spawn_removes_placeholder() {
     let map = SessionMap::new();
-    map.route_text(key(), "m".into())
-        .await
-        .expect("route_text");
+    map.route_text(key(), "m".into()).await.expect("route_text");
     map.fail_spawn(&key()).await;
     assert!(map.get(&key()).await.is_none());
 }
@@ -94,7 +95,9 @@ async fn dump_filters_spawning_and_keeps_legacy_shape() {
         chat_id: "oc_active".into(),
         thread_id: None,
     };
-    map.insert(active_key.clone(), Mapping::active("s9")).await.unwrap();
+    map.insert(active_key.clone(), Mapping::active("s9"))
+        .await
+        .unwrap();
 
     let json = map.dump_json().await.unwrap();
     assert!(!json.contains("oc_race"), "spawning entry leaked into dump");
@@ -103,11 +106,12 @@ async fn dump_filters_spawning_and_keeps_legacy_shape() {
     assert!(json.contains("\"session_id\":\"s9\""));
     assert!(!json.contains("Spawning") && !json.contains("spawning"));
 
-    // Round-trip through restore.
+    // Round-trip through restore: entries come back Dormant (spec §3.3e) —
+    // dead child, eligible for lazy respawn, not live routing.
     let restored = SessionMap::restore_json(&json).unwrap();
     let m = restored.get(&active_key).await.expect("restored");
-    assert!(matches!(m.state, MappingState::Active { .. }));
-    assert_eq!(m.session_id(), Some("s9"));
+    assert!(matches!(m.state, MappingState::Dormant { .. }));
+    assert_eq!(m.session_id(), None);
 }
 
 #[tokio::test]

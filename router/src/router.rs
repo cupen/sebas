@@ -1,11 +1,10 @@
 use crate::commands::{parse_command, Command};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
-use feishu::cards::{
-    apply_event_to_card, render_accumulated_card, render_dead_session_card,
-    render_permission_card,
-};
 use feishu::cards::CardConfig;
+use feishu::cards::{
+    apply_event_to_card, render_accumulated_card, render_dead_session_card, render_permission_card,
+};
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +15,14 @@ use tokio::sync::{mpsc, RwLock};
 pub enum Out {
     SpawnAcp {
         key: SessionKey,
+        prompt: String,
+    },
+    /// Lazily respawn a restored session (spec §3.3e): try `session/load`
+    /// with `session_id`; the dispatcher falls back to a fresh session when
+    /// the agent cannot load it.
+    SpawnResume {
+        key: SessionKey,
+        session_id: String,
         prompt: String,
     },
     SendAcp {
@@ -69,7 +76,15 @@ impl RouterHandle {
         map: SessionMap,
         card_cfg: CardConfig,
     ) -> (Self, mpsc::Receiver<Out>) {
-        let (tx, rx) = mpsc::channel(256);
+        Self::new_with_config(map, card_cfg, 256)
+    }
+
+    pub fn new_with_config(
+        map: SessionMap,
+        card_cfg: CardConfig,
+        channel_buffer: usize,
+    ) -> (Self, mpsc::Receiver<Out>) {
+        let (tx, rx) = mpsc::channel(channel_buffer);
         (
             Self {
                 map,
@@ -80,6 +95,16 @@ impl RouterHandle {
             },
             rx,
         )
+    }
+
+    /// Send an `Out` to the outbound pump. Per spec §4.1 ("Channel send
+    /// fail"): a closed channel is a bug in dev (panic via debug_assert)
+    /// and an error-log-and-continue in prod — never a silent drop.
+    async fn emit(&self, out: Out) {
+        if let Err(e) = self.tx.send(out).await {
+            tracing::error!(?e, "router→outbound channel closed; dropping message");
+            debug_assert!(false, "router→outbound channel send failed: {e}");
+        }
     }
 
     pub async fn dump_json(&self) -> serde_json::Result<String> {
@@ -133,13 +158,11 @@ impl RouterHandle {
             &st.body,
             &self.card_cfg.theme_color,
         );
-        let _ = self
-            .tx
-            .send(Out::UpdateCard {
-                session_id: session_id.to_string(),
-                card: serde_json::to_value(&card).unwrap(),
-            })
-            .await;
+        self.emit(Out::UpdateCard {
+            session_id: session_id.to_string(),
+            card: serde_json::to_value(&card).unwrap(),
+        })
+        .await;
     }
 
     /// drop_card：session 死亡/通道关时清 CardState（防无界增长）。spec §4.2。
@@ -152,7 +175,11 @@ impl RouterHandle {
     /// that continuations, permission-card routing (reverse lookup) and
     /// liveness checks can find the session.
     pub async fn insert_mapping(&self, key: SessionKey, session_id: String) {
-        if let Err(e) = self.map.insert(key, crate::state::Mapping::active(session_id)).await {
+        if let Err(e) = self
+            .map
+            .insert(key, crate::state::Mapping::active(session_id))
+            .await
+        {
             tracing::warn!(?e, "failed to insert session mapping");
         }
     }
@@ -224,14 +251,12 @@ impl RouterHandle {
                     tracing::warn!(%session_id, "no SessionKey for permission request; dropping card");
                     return;
                 };
-                let _ = self
-                    .tx
-                    .send(Out::SendCard {
-                        key,
-                        card: serde_json::to_value(&card).unwrap(),
-                        msg_id: None,
-                    })
-                    .await;
+                self.emit(Out::SendCard {
+                    key,
+                    card: serde_json::to_value(&card).unwrap(),
+                    msg_id: None,
+                })
+                .await;
             }
             AcpEvent::Error { terminal: true, .. } => {
                 // terminal Error 并入累积模型（spec §8）：apply_event（置 ❌ + append
@@ -261,12 +286,12 @@ impl RouterHandle {
                     Ok(_) => self.spawn_new(key, String::new()).await,
                     Err(e) => {
                         tracing::warn!(?e, "begin_spawn failed");
-                        let _ = self.tx.send(Out::HelpText { key }).await;
+                        self.emit(Out::HelpText { key }).await;
                     }
                 }
             }
             Command::Help => {
-                let _ = self.tx.send(Out::HelpText { key }).await;
+                self.emit(Out::HelpText { key }).await;
             }
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
@@ -274,10 +299,19 @@ impl RouterHandle {
                         self.continue_session(sid, p).await
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
+                    Ok(crate::state::TextRoute::Resume(old_sid)) => {
+                        // Restored mapping claimed for lazy respawn (spec §3.3e).
+                        self.emit(Out::SpawnResume {
+                            key,
+                            session_id: old_sid,
+                            prompt: p,
+                        })
+                        .await;
+                    }
                     Ok(crate::state::TextRoute::Enqueued) => {}
                     Err(e) => {
                         tracing::warn!(?e, "route_text failed");
-                        let _ = self.tx.send(Out::HelpText { key }).await;
+                        self.emit(Out::HelpText { key }).await;
                     }
                 }
             }
@@ -290,11 +324,11 @@ impl RouterHandle {
                 if let Some(sid) = sid {
                     self.forward_to_session(&sid, text).await;
                 } else {
-                    let _ = self.tx.send(Out::HelpText { key }).await;
+                    self.emit(Out::HelpText { key }).await;
                 }
             }
             _ => {
-                let _ = self.tx.send(Out::HelpText { key }).await;
+                self.emit(Out::HelpText { key }).await;
             }
         }
     }
@@ -305,14 +339,12 @@ impl RouterHandle {
         // a command into the void.
         if !self.session_alive(&key).await {
             let card = render_dead_session_card();
-            let _ = self
-                .tx
-                .send(Out::SendCard {
-                    key,
-                    card: serde_json::to_value(&card).unwrap(),
-                    msg_id: None,
-                })
-                .await;
+            self.emit(Out::SendCard {
+                key,
+                card: serde_json::to_value(&card).unwrap(),
+                msg_id: None,
+            })
+            .await;
             return;
         }
         let decision = match action.decision.as_deref() {
@@ -323,20 +355,18 @@ impl RouterHandle {
         };
         match (action.session_id.clone(), action.request_id.clone()) {
             (sid, Some(rid)) => {
-                let _ = self
-                    .tx
-                    .send(Out::SendAcp {
-                        session_id: sid.clone(),
-                        cmd: AcpCommand::PermissionReply {
-                            session_id: sid,
-                            request_id: rid,
-                            decision,
-                        },
-                    })
-                    .await;
+                self.emit(Out::SendAcp {
+                    session_id: sid.clone(),
+                    cmd: AcpCommand::PermissionReply {
+                        session_id: sid,
+                        request_id: rid,
+                        decision,
+                    },
+                })
+                .await;
             }
             _ => {
-                let _ = self.tx.send(Out::HelpText { key }).await;
+                self.emit(Out::HelpText { key }).await;
             }
         }
     }
@@ -345,17 +375,15 @@ impl RouterHandle {
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.
-        let _ = self.tx.send(Out::SpawnAcp { key, prompt }).await;
+        self.emit(Out::SpawnAcp { key, prompt }).await;
     }
 
     async fn continue_session(&self, session_id: String, prompt: String) {
-        let _ = self
-            .tx
-            .send(Out::SendAcp {
-                session_id: session_id.clone(),
-                cmd: AcpCommand::ContinueSession { session_id, prompt },
-            })
-            .await;
+        self.emit(Out::SendAcp {
+            session_id: session_id.clone(),
+            cmd: AcpCommand::ContinueSession { session_id, prompt },
+        })
+        .await;
     }
 
     async fn forward_to_session(&self, session_id: &str, text: String) {
@@ -373,13 +401,11 @@ impl RouterHandle {
             },
             _ => return,
         };
-        let _ = self
-            .tx
-            .send(Out::SendAcp {
-                session_id: session_id.into(),
-                cmd,
-            })
-            .await;
+        self.emit(Out::SendAcp {
+            session_id: session_id.into(),
+            cmd,
+        })
+        .await;
     }
 }
 
@@ -431,7 +457,9 @@ fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
         | AcpEvent::ToolStart { .. }
         | AcpEvent::ToolProgress { .. }
         | AcpEvent::ToolEnd { .. }
-        | AcpEvent::Error { terminal: false, .. } => {
+        | AcpEvent::Error {
+            terminal: false, ..
+        } => {
             if current == "👀" {
                 Some("🚧")
             } else {

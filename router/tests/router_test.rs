@@ -38,7 +38,9 @@ async fn existing_session_dispatches_continue() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(k.clone(), Mapping::active("existing")).await.unwrap();
+    map.insert(k.clone(), Mapping::active("existing"))
+        .await
+        .unwrap();
 
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     tokio::spawn(async move {
@@ -58,6 +60,43 @@ async fn existing_session_dispatches_continue() {
     match out {
         Out::SendAcp { session_id, .. } => assert_eq!(session_id, "existing"),
         other => panic!("expected SendAcp, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dormant_mapping_emits_spawn_resume() {
+    // Restored state file → Dormant mapping; the first text must emit
+    // SpawnResume (lazy respawn, spec §3.3e), not SendAcp into the void.
+    let json = r#"{"oc_x":{"session_id":"sess-old","last_active_unix":1}}"#;
+    let map = SessionMap::restore_json(json).unwrap();
+    let k = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+    tokio::spawn(async move {
+        let _ = router
+            .dispatch(FeishuIn::Text {
+                key: k.clone(),
+                text: "继续".into(),
+                reply_to: None,
+            })
+            .await;
+    });
+
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match out {
+        Out::SpawnResume {
+            session_id, prompt, ..
+        } => {
+            assert_eq!(session_id, "sess-old");
+            assert_eq!(prompt, "继续");
+        }
+        other => panic!("expected SpawnResume, got {other:?}"),
     }
 }
 

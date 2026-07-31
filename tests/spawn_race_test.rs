@@ -2,11 +2,11 @@
 //! rapid texts produce exactly ONE session/new and TWO session/prompt calls
 //! (the second being the drained pending queue, joined).
 
+use acp_claude::manager::SessionManager;
+use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::events::{FeishuIn, SessionKey};
 use router::router::{Out, RouterHandle};
 use router::state::SessionMap;
-use acp_claude::manager::SessionManager;
-use acp_claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

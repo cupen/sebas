@@ -25,11 +25,24 @@ pub async fn run(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     init_tracing(&cfg);
 
-    let state_raw = std::fs::read_to_string(&cfg.router.state_file).unwrap_or_else(|_| "{}".into());
-    let map = SessionMap::restore_json(&state_raw)
-        .map_err(|e| crate::error::SebasError::Config(format!("restore: {e}")))?;
+    // spec §6.4 startup checks: directories writable + ACP binary reachable.
+    // Friendly Config error, no panic; runs before any network/spawn work.
+    cfg.validate_runtime()?;
 
-    let (router, mut out_rx) = RouterHandle::new_with_card_config(map, cfg.card.clone());
+    if cfg.feishu.owner_id.is_empty() {
+        // owner_id 决策（sebas-nya，文档化于 config.rs validate）：可选。
+        // 空值 = 不过滤发送者 —— 对能执行任意命令的单用户 bot 是真实风险，
+        // 启动时必须醒目提示。
+        warn!(
+            "feishu.owner_id 为空：任何飞书用户的消息都会被处理并驱动本机 claude；\
+             单用户机器人建议配置 owner_id（spec §6.1）"
+        );
+    }
+
+    let map = restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
+
+    let (router, mut out_rx) =
+        RouterHandle::new_with_config(map, cfg.card.clone(), cfg.router.channel_buffer);
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,
     )));
@@ -70,13 +83,7 @@ pub async fn run(
             "content": serde_json::to_string(&serde_json::json!({"text": cfg.feishu.hello_msg})).unwrap_or_default(),
         });
         let bearer = tokens.token().await.unwrap_or_default();
-        match http
-            .post(url)
-            .bearer_auth(&bearer)
-            .json(&body)
-            .send()
-            .await
-        {
+        match http.post(url).bearer_auth(&bearer).json(&body).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -206,11 +213,11 @@ pub async fn run(
         }
     }
 
-    // Signal all live sessions to cancel and reap their child processes before
-    // snapshotting state.
-    mgr.kill_all().await;
-
-    // Dump sessions on exit
+    // Snapshot state BEFORE killing children (spec §4.2 order: dump, then
+    // shutdown_children). Dumping after kill_all would race the pumps'
+    // teardown (terminal events strip mappings) and would lose the whole
+    // snapshot if a child hangs the kill — the restored mappings are what
+    // lazy respawn (spec §3.3e) works from.
     let json = router
         .dump_json()
         .await
@@ -218,6 +225,9 @@ pub async fn run(
     if let Err(e) = std::fs::write(&cfg.router.state_file, json) {
         warn!(?e, "failed to persist session state");
     }
+
+    // Signal all live sessions to cancel and reap their child processes.
+    mgr.kill_all().await;
     Ok(())
 }
 
@@ -293,31 +303,57 @@ async fn dispatch_out(
                     return Ok(());
                 }
             };
-            // 2) seed_card（spec §4.2）: 记录 user_prompt 供后续 flush 重渲染
-            //    引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
-            //    会用 prompt="" 冲掉引用块。
-            router.seed_card(session_id.clone(), prompt.clone()).await;
-            // 3) Send the seed card (empty body) and record its message_id
-            //    keyed by the real session_id (so streaming UpdateCards
-            //    resolve correctly). render_accumulated_card 用真实 theme，
-            //    与后续 flush 产出的卡结构一致（避免初始卡蓝、后续卡变色的跳变）。
-            let card = render_accumulated_card(&prompt, &session_id, "👀", &[], &cfg.card.theme_color);
-            let msg_id = feishu
-                .send_card(http, tokens, &key, serde_json::to_value(&card)?)
-                .await?;
-            if !msg_id.is_empty() {
-                router.record_root_msg_id(session_id.clone(), msg_id).await;
+            wire_session_card_and_pump(
+                feishu, http, tokens, cfg, router, mgr, key, session_id, prompt, pending, rx,
+            )
+            .await?;
+        }
+        Out::SpawnResume {
+            key,
+            session_id: old_sid,
+            prompt,
+        } => {
+            let claude = &cfg.acp.claude;
+            // Lazy respawn of a restored mapping (spec §3.3e): try
+            // `session/load` with the persisted id; the manager falls back
+            // to `session/new` when the agent can't load. `resumed` says
+            // which happened — on fallback the old conversation is gone, so
+            // tell the user instead of silently continuing fresh.
+            let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
+                mgr,
+                router,
+                &key,
+                &old_sid,
+                &prompt,
+                &claude.path,
+                claude.args.clone(),
+                claude.work_dir.clone(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    router.fail_spawn(&key).await;
+                    let card = feishu::cards::render_error_card(&format!(
+                        "agent 恢复失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
+                    ));
+                    if let Err(e2) = feishu
+                        .send_card(http, tokens, &key, serde_json::to_value(&card)?)
+                        .await
+                    {
+                        warn!(?e2, "failed to send resume-failure card");
+                    }
+                    warn!(?e, %old_sid, "resume_session failed");
+                    return Ok(());
+                }
+            };
+            if !resumed {
+                info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
             }
-            // 4) Pump ACP events from this session back into the router.
-            //    `rx` was cloned before any slow I/O (the send_card HTTP
-            //    round trip above) so a crash-on-first-prompt terminal event
-            //    survives the wrapper's eager table removal (D6).
-            spawn_acp_pump(rx, router.clone(), session_id.clone());
-            // 5) Flush queued prompts as ONE follow-up (sending them one by
-            //    one would violate ACP's one-prompt-in-flight rule).
-            if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
-                warn!(?e, "failed to flush pending prompts");
-            }
+            wire_session_card_and_pump(
+                feishu, http, tokens, cfg, router, mgr, key, session_id, prompt, pending, rx,
+            )
+            .await?;
         }
         Out::SendAcp { session_id, cmd } => {
             mgr.send(&session_id, cmd).await?;
@@ -375,6 +411,134 @@ pub async fn acp_spawn_and_activate(
     Ok((session_id, pending, rx))
 }
 
+/// Resume variant of [`acp_spawn_and_activate`] (spec §3.3e): ask the agent
+/// to `session/load` the persisted id (the manager falls back to
+/// `session/new` when it can't), then push the triggering prompt as a
+/// continuation and flip the router's placeholder to Active. The returned
+/// bool is `SpawnOutcome.resumed` — false means the old conversation is
+/// gone and the id is a fresh one. The event receiver is cloned
+/// IMMEDIATELY after the spawn returns, before any slow I/O (D6).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub async fn acp_resume_and_activate(
+    mgr: &Arc<SessionManager>,
+    router: &RouterHandle,
+    key: &SessionKey,
+    old_session_id: &str,
+    prompt: &str,
+    claude_path: &str,
+    claude_args: Vec<String>,
+    work_dir: Option<String>,
+) -> anyhow::Result<(
+    String,
+    Vec<String>,
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
+    bool,
+)> {
+    let outcome = mgr
+        .resume_session(claude_path, claude_args, work_dir, old_session_id)
+        .await?;
+    let session_id = outcome.session_id.clone();
+    let rx = mgr
+        .event_rx(&session_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no event_rx for freshly-resumed session"))?;
+    // The triggering prompt rides as a continuation: for a resumed session
+    // it appends to the loaded conversation; for a fallback-fresh session
+    // it is simply the first prompt (run_main drives both through
+    // `send_prompt`).
+    mgr.send(
+        &session_id,
+        AcpCommand::ContinueSession {
+            session_id: session_id.clone(),
+            prompt: prompt.to_string(),
+        },
+    )
+    .await?;
+    let pending = router.activate(key, session_id.clone()).await;
+    Ok((session_id, pending, rx, outcome.resumed))
+}
+
+/// Restore the session map from the state file (spec §3.3e):
+/// - missing or empty file → empty table (first boot; an empty file is a
+///   harmless leftover, not corruption);
+/// - valid JSON → entries come back `Dormant`, eligible for lazy respawn;
+/// - corrupt JSON → quarantine the file to `<path>.corrupt-<unix>` and
+///   boot with an empty table instead of refusing to start.
+///
+/// `capacity` wires `[router] max_concurrent_sessions` into the map.
+pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
+    let state_raw = std::fs::read_to_string(state_file).unwrap_or_else(|_| "{}".into());
+    match state_raw.trim() {
+        "" => SessionMap::with_capacity(capacity),
+        raw => match SessionMap::restore_json_with_capacity(raw, capacity) {
+            Ok(m) => m,
+            Err(e) => {
+                let unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let quarantined = format!("{state_file}.corrupt-{unix}");
+                warn!(
+                    ?e,
+                    path = %state_file,
+                    "session state file is corrupt; quarantining and starting fresh"
+                );
+                if let Err(re) = std::fs::rename(state_file, &quarantined) {
+                    warn!(?re, path = %quarantined, "failed to quarantine corrupt state file");
+                }
+                SessionMap::with_capacity(capacity)
+            }
+        },
+    }
+}
+
+/// Shared post-spawn wiring for the SpawnAcp and SpawnResume dispatch arms:
+/// seed the card state, send the root card, record its message_id, start the
+/// event pump, and flush prompts queued during the spawn.
+#[allow(clippy::too_many_arguments)]
+async fn wire_session_card_and_pump(
+    feishu: &FeishuClient,
+    http: &reqwest::Client,
+    tokens: &feishu::client::TokenManager,
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    key: SessionKey,
+    session_id: String,
+    prompt: String,
+    pending: Vec<String>,
+    rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
+    >,
+) -> anyhow::Result<()> {
+    // seed_card（spec §4.2）: 记录 user_prompt 供后续 flush 重渲染
+    // 引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
+    // 会用 prompt="" 冲掉引用块。
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    // Send the seed card (empty body) and record its message_id keyed by the
+    // real session_id (so streaming UpdateCards resolve correctly).
+    // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
+    //（避免初始卡蓝、后续卡变色的跳变）。
+    let card = render_accumulated_card(&prompt, &session_id, "👀", &[], &cfg.card.theme_color);
+    let msg_id = feishu
+        .send_card(http, tokens, &key, serde_json::to_value(&card)?)
+        .await?;
+    if !msg_id.is_empty() {
+        router.record_root_msg_id(session_id.clone(), msg_id).await;
+    }
+    // Pump ACP events from this session back into the router.
+    // `rx` was cloned before any slow I/O (the send_card HTTP round trip
+    // above) so a crash-on-first-prompt terminal event survives the
+    // wrapper's eager table removal (D6).
+    spawn_acp_pump(rx, router.clone(), session_id.clone());
+    // Flush queued prompts as ONE follow-up (sending them one by one would
+    // violate ACP's one-prompt-in-flight rule).
+    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+        warn!(?e, "failed to flush pending prompts");
+    }
+    Ok(())
+}
+
 /// Flush prompts queued during spawn as ONE ContinueSession (one-by-one
 /// would violate ACP's one-prompt-in-flight rule). `pub` for tests.
 pub async fn flush_pending_prompts(
@@ -413,7 +577,9 @@ pub async fn flush_pending_prompts(
 /// `Option<Sleep> + select + pending()` —— 后者在 select 跨臂借用 `&mut`
 /// 会冲突，interval + Copy bool 规避之，契约等价。
 pub fn spawn_acp_pump(
-    rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
+    rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
+    >,
     router: RouterHandle,
     session_id: String,
 ) {

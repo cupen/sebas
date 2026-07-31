@@ -16,6 +16,9 @@
 //!   --journal <path>    append every inbound message as {"dir":"in","msg":...}
 //!   --hang-on-init      never answer `initialize`
 //!   --delay-new-ms <n>  sleep n ms before answering `session/new`
+//!   --enable-load       advertise loadSession and answer `session/load` ok
+//!   --load-fails        advertise loadSession but answer `session/load` with
+//!                       a JSON-RPC error (exercises the resume fallback)
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -27,6 +30,8 @@ struct Flags {
     journal: Option<String>,
     hang_on_init: bool,
     delay_new_ms: u64,
+    enable_load: bool,
+    load_fails: bool,
 }
 
 fn parse_flags() -> Flags {
@@ -34,6 +39,8 @@ fn parse_flags() -> Flags {
         journal: None,
         hang_on_init: false,
         delay_new_ms: 0,
+        enable_load: false,
+        load_fails: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -43,6 +50,8 @@ fn parse_flags() -> Flags {
             "--delay-new-ms" => {
                 f.delay_new_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
+            "--enable-load" => f.enable_load = true,
+            "--load-fails" => f.load_fails = true,
             _ => {}
         }
     }
@@ -93,15 +102,16 @@ fn main() {
         if method.is_empty() {
             // A response (to our session/request_permission).
             if let (Some((perm_id, prompt_id, sid)), Some(rid)) = (&pending_perm, &id)
-                && perm_id == rid {
-                    let (sid, prompt_id) = (sid.clone(), prompt_id.clone());
-                    pending_perm = None;
-                    send_chunk(&mut out, &sid, "perm done");
-                    send(
-                        &mut out,
-                        json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
-                    );
-                }
+                && perm_id == rid
+            {
+                let (sid, prompt_id) = (sid.clone(), prompt_id.clone());
+                pending_perm = None;
+                send_chunk(&mut out, &sid, "perm done");
+                send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
+                );
+            }
             continue;
         }
 
@@ -110,6 +120,7 @@ fn main() {
                 if flags.hang_on_init {
                     continue;
                 }
+                let load_capable = flags.enable_load || flags.load_fails;
                 send(
                     &mut out,
                     json!({
@@ -118,7 +129,7 @@ fn main() {
                         "result": {
                             "protocolVersion": 1,
                             "agentCapabilities": {
-                                "loadSession": false,
+                                "loadSession": load_capable,
                                 "promptCapabilities": {
                                     "image": false,
                                     "audio": false,
@@ -136,6 +147,24 @@ fn main() {
                         }
                     }),
                 );
+            }
+            "session/load" => {
+                if flags.load_fails {
+                    send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"session not found"}}),
+                    );
+                } else if flags.enable_load {
+                    // Success: all LoadSessionResponse fields are optional.
+                    // The loaded id is the one in params; prompts afterwards
+                    // carry their own sessionId as usual.
+                    send(&mut out, json!({"jsonrpc":"2.0","id":id,"result":{}}));
+                } else if let Some(req_id) = id {
+                    send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","id":req_id,"error":{"code":-32601,"message":"method not found"}}),
+                    );
+                }
             }
             "session/new" => {
                 if flags.delay_new_ms > 0 {
@@ -222,14 +251,15 @@ fn main() {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if let Some((_, prompt_id, p_sid)) = &pending_perm
-                    && p_sid == sid {
-                        let prompt_id = prompt_id.clone();
-                        pending_perm = None;
-                        send(
-                            &mut out,
-                            json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"cancelled"}}),
-                        );
-                    }
+                    && p_sid == sid
+                {
+                    let prompt_id = prompt_id.clone();
+                    pending_perm = None;
+                    send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"cancelled"}}),
+                    );
+                }
                 // No turn in flight -> ignore (accurate: cancel is a notification).
             }
             _ => {
@@ -265,13 +295,17 @@ fn send_chunk(out: &mut io::StdoutLock<'_>, sid: &str, text: &str) {
 fn send(stdout: &mut io::StdoutLock<'_>, msg: Value) {
     // Journal outbound.
     if let Some(jpath) = SHARED_JOURNAL.get()
-        && let Ok(mut jf) = std::fs::OpenOptions::new().create(true).append(true).open(jpath) {
-            let rec = json!({"dir": "out", "msg": msg});
-            let mut s = serde_json::to_string(&rec).unwrap_or_default();
-            s.push('\n');
-            let _ = jf.write_all(s.as_bytes());
-            let _ = jf.flush();
-        }
+        && let Ok(mut jf) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(jpath)
+    {
+        let rec = json!({"dir": "out", "msg": msg});
+        let mut s = serde_json::to_string(&rec).unwrap_or_default();
+        s.push('\n');
+        let _ = jf.write_all(s.as_bytes());
+        let _ = jf.flush();
+    }
     let mut s = serde_json::to_string(&msg).unwrap_or_default();
     s.push('\n');
     let _ = stdout.write_all(s.as_bytes());

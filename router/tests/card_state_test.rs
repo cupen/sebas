@@ -73,19 +73,29 @@ async fn apply_event_accumulates_without_emitting_out() {
     router
         .apply_event(
             "s1",
-            &AcpEvent::TextDelta { session_id: "s1".into(), delta: "a".into() },
+            &AcpEvent::TextDelta {
+                session_id: "s1".into(),
+                delta: "a".into(),
+            },
         )
         .await;
     router
         .apply_event(
             "s1",
-            &AcpEvent::ThinkingDelta { session_id: "s1".into(), delta: "think".into() },
+            &AcpEvent::ThinkingDelta {
+                session_id: "s1".into(),
+                delta: "think".into(),
+            },
         )
         .await;
     router
         .apply_event(
             "s1",
-            &AcpEvent::ToolEnd { session_id: "s1".into(), tool_name: "Bash".into(), result: "ok".into() },
+            &AcpEvent::ToolEnd {
+                session_id: "s1".into(),
+                tool_name: "Bash".into(),
+                result: "ok".into(),
+            },
         )
         .await;
     assert!(
@@ -116,14 +126,19 @@ async fn apply_event_accumulates_without_emitting_out() {
 #[tokio::test]
 async fn fsm_eyes_to_construction_to_done() {
     let map = SessionMap::new();
-    let (router, _) = RouterHandle::new(map);
+    // 持有接收端到作用域结束：emit 在通道关闭时会 debug_assert（spec §4.1
+    // "Channel send fail"），裸 `_` 丢弃接收端会立刻触发 panic。
+    let (router, _rx) = RouterHandle::new(map);
     router.seed_card("s2".into(), "p".into()).await;
     // seed = 👀
     router.flush_card("s2").await; // 不验 Out，只驱动状态机内部（flush 不改 emoji）
     router
         .apply_event(
             "s2",
-            &AcpEvent::TextDelta { session_id: "s2".into(), delta: "x".into() },
+            &AcpEvent::TextDelta {
+                session_id: "s2".into(),
+                delta: "x".into(),
+            },
         )
         .await;
     router.flush_card("s2").await;
@@ -133,7 +148,10 @@ async fn fsm_eyes_to_construction_to_done() {
     router2
         .apply_event(
             "s2",
-            &AcpEvent::TextDelta { session_id: "s2".into(), delta: "x".into() },
+            &AcpEvent::TextDelta {
+                session_id: "s2".into(),
+                delta: "x".into(),
+            },
         )
         .await;
     router2.flush_card("s2").await;
@@ -154,7 +172,9 @@ async fn fsm_eyes_to_construction_to_done() {
     router3
         .apply_event_to_out(
             "s3".into(),
-            &AcpEvent::Finished { session_id: "s3".into() },
+            &AcpEvent::Finished {
+                session_id: "s3".into(),
+            },
         )
         .await;
     let o3 = tokio::time::timeout(Duration::from_millis(200), out3.recv())
@@ -178,7 +198,11 @@ async fn fsm_terminal_error_marks_red() {
     router
         .apply_event_to_out(
             "s4".into(),
-            &AcpEvent::Error { session_id: "s4".into(), message: "dead".into(), terminal: true },
+            &AcpEvent::Error {
+                session_id: "s4".into(),
+                message: "dead".into(),
+                terminal: true,
+            },
         )
         .await;
     let o = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
@@ -197,14 +221,20 @@ async fn fsm_terminal_error_marks_red() {
 #[tokio::test]
 async fn new_with_card_config_uses_theme() {
     // 自定义 theme_color 流到渲染卡。
-    let cfg = CardConfig { theme_color: "orange".into(), ..CardConfig::default() };
+    let cfg = CardConfig {
+        theme_color: "orange".into(),
+        ..CardConfig::default()
+    };
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new_with_card_config(map, cfg);
     router.seed_card("s5".into(), "hi".into()).await;
     router
         .apply_event_to_out(
             "s5".into(),
-            &AcpEvent::TextDelta { session_id: "s5".into(), delta: "x".into() },
+            &AcpEvent::TextDelta {
+                session_id: "s5".into(),
+                delta: "x".into(),
+            },
         )
         .await;
     let o = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
