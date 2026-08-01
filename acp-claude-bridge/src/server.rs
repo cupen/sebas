@@ -8,13 +8,35 @@ use crate::permission::PermissionDecision;
 use crate::translator;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptCapabilities,
-    PromptRequest, PromptResponse, SessionId, StopReason,
+    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse, SessionId,
+    StopReason,
 };
 use agent_client_protocol::{on_receive_notification, on_receive_request, Agent, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+
+/// Map a `PermissionOptionId` (as string) to a `PermissionDecision`.
+/// `allow_*` → Allow, anything else → Deny. 字符串约定必须与
+/// `acp-claude/manager.rs:320-329` 保持一致；该侧改字符串时要同步通知 bridge。
+fn option_id_to_decision(id: &str) -> crate::permission::PermissionDecision {
+    if id.starts_with("allow_") {
+        crate::permission::PermissionDecision::Allow
+    } else {
+        crate::permission::PermissionDecision::Deny
+    }
+}
+
+/// 固定 3 个 permission 选项，与 acp-claude 端一致：
+/// `allow_once` / `allow_always` / `reject_once`。
+fn build_permission_options() -> Vec<PermissionOption> {
+    vec![
+        PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+        PermissionOption::new("allow_always", "Allow for this chat", PermissionOptionKind::AllowAlways),
+        PermissionOption::new("reject_once", "Deny", PermissionOptionKind::RejectOnce),
+    ]
+}
 
 pub async fn run(
     mut claude: ClaudeDriver,
@@ -140,4 +162,38 @@ pub async fn run(
         .connect_to(Stdio::new())
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permission::PermissionDecision;
+
+    #[test]
+    fn option_id_allow_once_maps_to_allow() {
+        assert_eq!(option_id_to_decision("allow_once"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn option_id_allow_always_maps_to_allow() {
+        assert_eq!(option_id_to_decision("allow_always"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn option_id_reject_once_maps_to_deny() {
+        assert_eq!(option_id_to_decision("reject_once"), PermissionDecision::Deny);
+    }
+
+    #[test]
+    fn option_id_unknown_maps_to_deny() {
+        assert_eq!(option_id_to_decision("mystery"), PermissionDecision::Deny);
+    }
+
+    #[test]
+    fn build_permission_options_returns_three_stable_ids() {
+        let opts = build_permission_options();
+        assert_eq!(opts.len(), 3);
+        let ids: Vec<&str> = opts.iter().map(|o| o.option_id.0.as_ref()).collect();
+        assert_eq!(ids, vec!["allow_once", "allow_always", "reject_once"]);
+    }
 }
