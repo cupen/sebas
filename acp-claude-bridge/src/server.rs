@@ -5,10 +5,11 @@
 use crate::claude::driver::ClaudeDriver;
 use crate::permission::PermissionDecision;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    NewSessionRequest, NewSessionResponse, SessionId,
+    AgentCapabilities, CancelNotification, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, SessionId, StopReason,
 };
-use agent_client_protocol::{on_receive_request, Agent, Stdio};
+use agent_client_protocol::{on_receive_notification, on_receive_request, Agent, Stdio};
 use tokio::sync::mpsc;
 
 pub async fn run(
@@ -53,6 +54,32 @@ pub async fn run(
                 ))
             },
             on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: PromptRequest, responder, _cx| {
+                let session_id = req.session_id.clone();
+                let text = req
+                    .prompt
+                    .iter()
+                    .filter_map(|b| match b {
+                        agent_client_protocol::schema::v1::ContentBlock::Text(t) => {
+                            Some(t.text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                tracing::info!(session_id=%session_id, text_len=text.len(), "prompt received");
+                responder.respond(PromptResponse::new(StopReason::EndTurn))
+            },
+            on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |_notif: CancelNotification, _cx| {
+                tracing::info!("cancel received");
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
         )
         .connect_to(Stdio::new())
         .await?;

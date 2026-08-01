@@ -4,6 +4,7 @@ mod server;
 mod translator;
 
 use claude::driver::ClaudeDriver;
+use std::env;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -14,9 +15,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // For Task 8: just verify the server wires up. The actual driver + broker
-    // are wired in Task 9.
-    let _claude: ClaudeDriver = ClaudeDriver::spawn("true", &["/dev/null"]).await?;
+    // Args: <path-to-claude> [claude-args...]
+    // In production, sebas's acp-claude spawns this binary with no args; the
+    // path to claude is read from the env var SEBAS_CLAUDE_PATH (set by
+    // acp-claude) with a fallback to "claude" on PATH.
+    let claude_path = env::var("SEBAS_CLAUDE_PATH").unwrap_or_else(|_| "claude".into());
+    let extra: Vec<String> = env::args().skip(1).collect();
+    let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+
+    let claude = ClaudeDriver::spawn(&claude_path, &extra_refs).await?;
     let (_broker, perm_rx) = permission::PermissionBroker::bind().await?;
-    server::run(_claude, perm_rx).await
+    server::run(claude, perm_rx).await
 }
