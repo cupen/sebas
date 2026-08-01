@@ -12,14 +12,14 @@ app_secret = ""
 # env 覆盖（spec §6.3，优先级高于本文件）：
 #   SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL
 
-# Optional: override ACP agent settings (defaults shown)
-# [acp.claude]
-# path = "claude"
-# args = []
-# sessions_dir = "~/.claude/sessions"
-# work_dir = "~/workbench"
-# startup_timeout_secs = 30
-# idle_kill_secs = 172800  # 48 hours
+# Claude Code integration: the bridge binary built from this workspace
+# (member crate `acp-claude-bridge/`). It spawns `claude --print --input-format
+# stream-json --output-format stream-json` under the hood and speaks ACP to
+# sebas. Default path works for `cargo run` / `cargo build` from this repo;
+# install the binary to /usr/local/bin for production.
+[acp.claude]
+path = "./target/debug/claude-acp-bridge"
+args = []
 
 # Optional: router, card, media, log sections all have defaults.
 # See docs/superpowers/specs/2026-07-26-sebas-design.md §6.2 for full list.
