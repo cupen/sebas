@@ -1,4 +1,5 @@
 mod claude;
+mod permission;
 mod translator;
 
 fn main() {
