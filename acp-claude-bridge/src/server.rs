@@ -9,8 +9,9 @@ use crate::translator;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, InitializeRequest, InitializeResponse,
     LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse, SessionId,
-    StopReason,
+    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionId, StopReason, ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{on_receive_notification, on_receive_request, Agent, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,7 +43,6 @@ pub async fn run(
     mut claude: ClaudeDriver,
     perm_tx: mpsc::Sender<PermissionDecision>,
 ) -> anyhow::Result<()> {
-    let _ = perm_tx; // 下一 ticket 接通 permission broker；本 ticket 保持参数签名
     // 串行化所有 prompt handler：claude 子进程是单 stream，一次只允许一个 pump 在读
     let gate: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     // CancelNotification 只置位；当前不向 claude 子进程发中断信号（范围外）
@@ -128,7 +128,82 @@ pub async fn run(
                             stop_reason = StopReason::Cancelled;
                             break;
                         }
-                        for update in translator::translate(event.clone()) {
+                        // ToolUse 拦截：先发 ToolCall 通知，再同步等 sebas RequestPermissionResponse。
+                        // spec §4：失败一律 Deny（send_request_to Err / Response 非 Selected / option_id 不以 "allow_" 开头）。
+                        // 拦截后该 event 不再走 translator（ToolCall 通知已用 from_update 显式发出）。
+                        let updates: Vec<crate::translator::TranslatedUpdate> = match &event {
+                            crate::claude::StreamEvent::ToolUse { id, name, input } => {
+                                let tool_call_update = ToolCallUpdate::new(
+                                    id.clone(),
+                                    ToolCallUpdateFields::new()
+                                        .title(name.clone())
+                                        .raw_input(input.clone()),
+                                );
+                                // 1) emit ToolCall 通知
+                                let notif = notifications::from_update(
+                                    &session_id,
+                                    crate::translator::TranslatedUpdate::ToolCall {
+                                        id: id.clone(),
+                                        title: name.clone(),
+                                        raw_input: input.clone(),
+                                    },
+                                );
+                                if let Some(n) = notif {
+                                    if let Err(e) = cx.send_notification(n) {
+                                        tracing::warn!(error=%e, tool_id=%id, "tool_call notification failed");
+                                    }
+                                }
+                                // 2) 同步等 sebas 决策
+                                let req = RequestPermissionRequest::new(
+                                    SessionId::new(session_id.clone()),
+                                    tool_call_update,
+                                    build_permission_options(),
+                                );
+                                let decision = match cx
+                                    .send_request_to(agent_client_protocol::Client, req)
+                                    .block_task()
+                                    .await
+                                {
+                                    Ok(resp) => match resp.outcome {
+                                        RequestPermissionOutcome::Selected(sel) => {
+                                            tracing::info!(tool_id=%id, option=%sel.option_id.0, "permission selected");
+                                            option_id_to_decision(sel.option_id.0.as_ref())
+                                        }
+                                        other => {
+                                            tracing::warn!(tool_id=%id, ?other, "permission outcome not Selected → Deny");
+                                            crate::permission::PermissionDecision::Deny
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!(error=%e, tool_id=%id, "send_request_to failed → Deny");
+                                        crate::permission::PermissionDecision::Deny
+                                    }
+                                };
+                                // 3) 写 broker → hook unblock → claude 继续
+                                if let Err(e) = perm_tx.send(decision.clone()).await {
+                                    tracing::warn!(error=%e, "perm_tx.send failed");
+                                }
+                                // 4) 拒绝时补 ToolCallUpdate Failed
+                                if decision == crate::permission::PermissionDecision::Deny {
+                                    let denied = notifications::from_update(
+                                        &session_id,
+                                        crate::translator::TranslatedUpdate::ToolCallUpdate {
+                                            id: id.clone(),
+                                            status: crate::translator::ToolStatus::Failed,
+                                            raw_output: Some("denied by sebas".into()),
+                                        },
+                                    );
+                                    if let Some(n) = denied {
+                                        if let Err(e) = cx.send_notification(n) {
+                                            tracing::warn!(error=%e, tool_id=%id, "denied notification failed");
+                                        }
+                                    }
+                                }
+                                Vec::new() // 拦截后不再走 translator
+                            }
+                            _ => translator::translate(event.clone()),
+                        };
+                        for update in updates {
                             if let Some(notif) =
                                 notifications::from_update(&session_id, update)
                             {

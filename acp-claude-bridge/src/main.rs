@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
 
     let claude = ClaudeDriver::spawn(&claude_path, &extra_refs).await?;
-    let (_broker, perm_rx) = permission::PermissionBroker::bind().await?;
-    server::run(claude, perm_rx).await
+    let (broker, perm_tx) = permission::PermissionBroker::bind().await?;
+    tokio::spawn(broker.run());
+    server::run(claude, perm_tx).await
 }
