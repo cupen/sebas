@@ -1,4 +1,5 @@
 mod claude;
+mod notifications;
 mod permission;
 mod server;
 mod translator;
