@@ -12,8 +12,9 @@ A Rust daemon that bridges Claude Code (via ACP) to Feishu. Run Claude Code remo
 #    Enable "Long connection" event subscription in app capabilities.
 # 2. cp config/config.toml.example config.toml
 # 3. Edit config.toml: set app_id, app_secret, owner_id (your open_id)
-# 4. cargo build --release
-# 5. ./target/release/sebas run --config ./config.toml
+# 4. cargo build -p acp-claude-bridge --release
+# 5. cargo build --release
+# 6. ./target/release/sebas run --config ./config.toml
 ```
 
 ## Configuration
@@ -33,7 +34,7 @@ See `docs/superpowers/specs/2026-07-26-sebas-design.md`.
 
 ## Status
 
-This is an MVP / work-in-progress. The WebSocket long-connection is fully wired (handshake, event dispatch, exponential-backoff reconnect) but has never been verified end-to-end against a real Feishu workspace (tracked: sebas-vw5.4). No CI is configured at all (tracked: sebas-nya). The `record` subcommand (§4.4 of the spec) is not implemented; `--dump-inbound` plus the `replay` subcommand cover the capture/replay path in the meantime (tracked: sebas-nya).
+This is an MVP / work-in-progress. The WebSocket long-connection is fully wired (handshake, event dispatch, exponential-backoff reconnect). No CI is configured at all (tracked: sebas-nya). The `record` subcommand (§4.4 of the spec) is not implemented; `--dump-inbound` plus the `replay` subcommand cover the capture/replay path in the meantime (tracked: sebas-nya).
 
 ## Known limitations
 
