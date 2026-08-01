@@ -7,7 +7,6 @@
 use std::process::Command;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
@@ -100,7 +99,10 @@ async fn bridge_session_new_returns_uuid() {
     stdin.write_all(b"\n").await.unwrap();
     stdin.flush().await.unwrap();
     let mut line = String::new();
-    stdout.read_line(&mut line).await.unwrap();
+    timeout(Duration::from_secs(10), stdout.read_line(&mut line))
+        .await
+        .expect("timeout on init response")
+        .expect("read init response");
 
     // initialized notification
     stdin
