@@ -10,8 +10,8 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, InitializeRequest, InitializeResponse,
     LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionId, StopReason, ToolCallUpdate, ToolCallUpdateFields,
+    RequestPermissionOutcome, RequestPermissionRequest, SessionId, StopReason,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{on_receive_notification, on_receive_request, Agent, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
