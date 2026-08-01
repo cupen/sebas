@@ -165,6 +165,87 @@ fn parse_user_message(obj: &serde_json::Map<String, serde_json::Value>) -> Resul
     Ok(StreamEvent::Unknown)
 }
 
+pub mod driver {
+    //! Subprocess management + stream-json framing for `claude --print`.
+
+    use super::{parse_line, ParseError, StreamEvent};
+    use std::ffi::OsStr;
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::{Child, Command};
+    use tokio::sync::mpsc;
+
+    pub struct ClaudeDriver {
+        child: Child,
+        rx: mpsc::Receiver<StreamEvent>,
+    }
+
+    impl ClaudeDriver {
+        pub async fn spawn<I, S>(binary: &str, args: I) -> anyhow::Result<Self>
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            let mut child = Command::new(binary)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()?;
+            let stdout = child.stdout.take().expect("piped stdout");
+            let (tx, rx) = mpsc::channel(64);
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => match parse_line(&line) {
+                            Ok(Some(ev)) => {
+                                if tx.send(ev).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => continue,
+                            Err(e) => {
+                                tracing::warn!(error=%e, line=%line, "parse failed");
+                            }
+                        },
+                        Ok(None) => break,
+                        Err(e) => {
+                            tracing::warn!(error=%e, "stdout read failed");
+                            break;
+                        }
+                    }
+                }
+            });
+            Ok(Self { child, rx })
+        }
+
+        pub async fn next_event(&mut self) -> Option<StreamEvent> {
+            self.rx.recv().await
+        }
+
+        pub async fn send_user(&mut self, text: &str) -> anyhow::Result<()> {
+            let stdin = self.child.stdin.as_mut().expect("piped stdin");
+            let msg = serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]}
+            });
+            stdin.write_all(msg.to_string().as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
+            Ok(())
+        }
+    }
+
+    #[allow(dead_code)]
+    fn _re_export_parse_error() -> ParseError {
+        ParseError::Json(serde_json::from_str::<serde_json::Value>("\"\"").unwrap_err())
+    }
+}
+
+pub use driver::ClaudeDriver;
+
 #[cfg(test)]
 mod tests {
     use super::*;

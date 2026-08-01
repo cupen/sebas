@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.90"
 publish = false
 
+[lib]
+name = "acp_claude_bridge"
+path = "src/lib.rs"
+
 [[bin]]
 name = "claude-acp-bridge"
 path = "src/main.rs"
