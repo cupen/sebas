@@ -9,6 +9,11 @@ publish = false
 name = "claude-acp-bridge"
 path = "src/main.rs"
 
+[[bin]]
+name = "fake-stream-claude"
+path = "tests/bin/fake_stream_claude.rs"
+required-features = []
+
 [dependencies]
 agent-client-protocol = "2.0"
 tokio = { version = "1.48", features = ["full"] }
