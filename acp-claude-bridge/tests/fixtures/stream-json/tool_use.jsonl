@@ -1,0 +1,1 @@
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}}}
