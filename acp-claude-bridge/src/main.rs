@@ -14,6 +14,9 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // 写 stderr：bridge 的 stdout 是 JSON-RPC 通道；写 stdout 会污染帧导致
+        // acp-claude SDK 的 JSON parser 失败。
+        .with_writer(std::io::stderr)
         .init();
 
     // Args: <path-to-claude> [claude-args...]
