@@ -110,6 +110,39 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_update_failed_status() {
+        let n = from_update(
+            sid(),
+            TranslatedUpdate::ToolCallUpdate {
+                id: "toolu_02".into(),
+                status: ToolStatus::Failed,
+                raw_output: Some("denied".into()),
+            },
+        )
+        .expect("notification");
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["update"]["status"], "failed");
+        assert_eq!(v["update"]["toolCallId"], "toolu_02");
+        assert_eq!(v["update"]["rawOutput"], "denied");
+    }
+
+    #[test]
+    fn tool_call_update_without_output() {
+        let n = from_update(
+            sid(),
+            TranslatedUpdate::ToolCallUpdate {
+                id: "toolu_03".into(),
+                status: ToolStatus::Completed,
+                raw_output: None,
+            },
+        )
+        .expect("notification");
+        let v = serde_json::to_value(&n).unwrap();
+        // raw_output 缺省时序列化为 absent（`#[serde(skip_serializing_if = "Option::is_none")]`）
+        assert!(v["update"].get("rawOutput").is_none());
+    }
+
+    #[test]
     fn turn_end_returns_none() {
         let r = from_update(
             sid(),
@@ -117,6 +150,8 @@ mod tests {
                 stop_reason: ClaudeSR::EndTurn,
             },
         );
+        // TurnEnd 在 bridge 层消费（run_pump 把 `stop_reason` 填进 `PromptResponse`），
+        // 不发 SessionNotification——所以 from_update 直接 return None。
         assert!(r.is_none());
     }
 
