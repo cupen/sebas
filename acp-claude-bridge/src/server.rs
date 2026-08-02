@@ -13,10 +13,14 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, SessionId, StopReason,
     ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol::{on_receive_notification, on_receive_request, Agent, Stdio};
+use agent_client_protocol::{
+    on_receive_notification, on_receive_request, Agent, Client, ConnectionTo, Responder, Stdio,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
+
+type SharedClaude = Arc<tokio::sync::Mutex<crate::claude::driver::ClaudeDriver>>;
 
 /// Map a `PermissionOptionId` (as string) to a `PermissionDecision`.
 /// `allow_*` → Allow, anything else → Deny. 字符串约定必须与
@@ -40,9 +44,12 @@ fn build_permission_options() -> Vec<PermissionOption> {
 }
 
 pub async fn run(
-    mut claude: ClaudeDriver,
+    claude: ClaudeDriver,
     perm_tx: mpsc::Sender<PermissionDecision>,
 ) -> anyhow::Result<()> {
+    // 关键：`AsyncFnMut` 闭包不能 move 捕获。`ClaudeDriver` 不是 Clone，所以包在
+    // `Arc<TokioMutex<_>>` 里。handler 持 `OwnedMutexGuard` 跨 spawn 任务。
+    let claude: SharedClaude = Arc::new(tokio::sync::Mutex::new(claude));
     // 串行化所有 prompt handler：claude 子进程是单 stream，一次只允许一个 pump 在读
     let gate: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     // CancelNotification 只置位；当前不向 claude 子进程发中断信号（范围外）
@@ -88,8 +95,11 @@ pub async fn run(
         )
         .on_receive_request(
             {
-                let gate = gate.clone();
-                let cancel_flag = cancel_flag.clone();
+                // AsyncFnMut 要求闭包可重复调用；用 Arc<...> + clone-per-call 模式。
+                let gate = Arc::clone(&gate);
+                let cancel_flag = Arc::clone(&cancel_flag);
+                let claude = Arc::clone(&claude);
+                let perm_tx = mpsc::Sender::clone(&perm_tx);
                 async move |req: PromptRequest, responder, cx| {
                     let session_id = req.session_id.0.to_string();
                     let text = req
@@ -106,118 +116,28 @@ pub async fn run(
                     tracing::info!(session_id=%session_id, text_len=text.len(), "prompt received");
 
                     cancel_flag.store(false, Ordering::SeqCst);
-                    let _guard = gate.lock().await;
 
-                    if let Err(e) = claude.send_user(&text).await {
-                        tracing::warn!(error=%e, "send_user failed");
-                        let _ = responder.respond_with_error(
-                            agent_client_protocol::util::internal_error(
-                                "claude send_user failed",
-                            ),
-                        );
-                        return Ok(());
-                    }
+                    // 关键设计点：handler 不能 block on SDK 的 request/reply（会 deadlock
+                    // dispatch loop）。所以我们立刻 `lock_owned` 两个锁（Send），把 pump 整个
+                    // 移到 `cx.spawn` 任务里跑，handler 立刻 return Ok(())。pump 跑完前锁
+                    // 一直 hold 着，下一个 prompt 会排队等。
+                    let gate_guard = Arc::clone(&gate).lock_owned().await;
+                    let claude_guard = Arc::clone(&claude).lock_owned().await;
 
-                    let mut stop_reason = StopReason::EndTurn;
-                    loop {
-                        let Some(event) = claude.next_event().await else {
-                            tracing::warn!(session_id=%session_id, "driver EOF before TurnEnd");
-                            break;
-                        };
-                        if cancel_flag.load(Ordering::SeqCst) {
-                            stop_reason = StopReason::Cancelled;
-                            break;
-                        }
-                        // ToolUse 拦截：先发 ToolCall 通知，再同步等 sebas RequestPermissionResponse。
-                        // spec §4：失败一律 Deny（send_request_to Err / Response 非 Selected / option_id 不以 "allow_" 开头）。
-                        // 拦截后该 event 不再走 translator（ToolCall 通知已用 from_update 显式发出）。
-                        let updates: Vec<crate::translator::TranslatedUpdate> = match &event {
-                            crate::claude::StreamEvent::ToolUse { id, name, input } => {
-                                let tool_call_update = ToolCallUpdate::new(
-                                    id.clone(),
-                                    ToolCallUpdateFields::new()
-                                        .title(name.clone())
-                                        .raw_input(input.clone()),
-                                );
-                                // 1) emit ToolCall 通知
-                                let notif = notifications::from_update(
-                                    &session_id,
-                                    crate::translator::TranslatedUpdate::ToolCall {
-                                        id: id.clone(),
-                                        title: name.clone(),
-                                        raw_input: input.clone(),
-                                    },
-                                );
-                                if let Some(n) = notif {
-                                    if let Err(e) = cx.send_notification(n) {
-                                        tracing::warn!(error=%e, tool_id=%id, "tool_call notification failed");
-                                    }
-                                }
-                                // 2) 同步等 sebas 决策
-                                let req = RequestPermissionRequest::new(
-                                    SessionId::new(session_id.clone()),
-                                    tool_call_update,
-                                    build_permission_options(),
-                                );
-                                let decision = match cx
-                                    .send_request_to(agent_client_protocol::Client, req)
-                                    .block_task()
-                                    .await
-                                {
-                                    Ok(resp) => match resp.outcome {
-                                        RequestPermissionOutcome::Selected(sel) => {
-                                            tracing::info!(tool_id=%id, option=%sel.option_id.0, "permission selected");
-                                            option_id_to_decision(sel.option_id.0.as_ref())
-                                        }
-                                        other => {
-                                            tracing::warn!(tool_id=%id, ?other, "permission outcome not Selected → Deny");
-                                            crate::permission::PermissionDecision::Deny
-                                        }
-                                    },
-                                    Err(e) => {
-                                        tracing::warn!(error=%e, tool_id=%id, "send_request_to failed → Deny");
-                                        crate::permission::PermissionDecision::Deny
-                                    }
-                                };
-                                // 3) 写 broker → hook unblock → claude 继续
-                                if let Err(e) = perm_tx.send(decision.clone()).await {
-                                    tracing::warn!(error=%e, "perm_tx.send failed");
-                                }
-                                // 4) 拒绝时补 ToolCallUpdate Failed
-                                if decision == crate::permission::PermissionDecision::Deny {
-                                    let denied = notifications::from_update(
-                                        &session_id,
-                                        crate::translator::TranslatedUpdate::ToolCallUpdate {
-                                            id: id.clone(),
-                                            status: crate::translator::ToolStatus::Failed,
-                                            raw_output: Some("denied by sebas".into()),
-                                        },
-                                    );
-                                    if let Some(n) = denied {
-                                        if let Err(e) = cx.send_notification(n) {
-                                            tracing::warn!(error=%e, tool_id=%id, "denied notification failed");
-                                        }
-                                    }
-                                }
-                                Vec::new() // 拦截后不再走 translator
-                            }
-                            _ => translator::translate(event.clone()),
-                        };
-                        for update in updates {
-                            if let Some(notif) =
-                                notifications::from_update(&session_id, update)
-                            {
-                                if let Err(e) = cx.send_notification(notif) {
-                                    tracing::warn!(error=%e, "send_notification failed");
-                                }
-                            }
-                        }
-                        if let crate::claude::StreamEvent::TurnEnd { stop_reason: sr } = event {
-                            stop_reason = notifications::acp_stop_reason(sr);
-                            break;
-                        }
+                    let task = run_pump(
+                        session_id,
+                        text,
+                        claude_guard,
+                        mpsc::Sender::clone(&perm_tx),
+                        Arc::clone(&cancel_flag),
+                        cx.clone(),
+                        responder,
+                        gate_guard,
+                    );
+
+                    if let Err(e) = cx.spawn(task) {
+                        tracing::error!(error=%e, "failed to spawn pump task");
                     }
-                    let _ = responder.respond(PromptResponse::new(stop_reason));
                     Ok(())
                 }
             },
@@ -236,6 +156,149 @@ pub async fn run(
         )
         .connect_to(Stdio::new())
         .await?;
+    Ok(())
+}
+
+/// Pump loop 跑在 `cx.spawn` 任务里（不是 handler 内）。这里 await SDK request/reply 是
+/// 安全的——dispatch loop 不被这个任务阻塞。
+async fn run_pump(
+    session_id: String,
+    text: String,
+    mut claude: OwnedMutexGuard<crate::claude::driver::ClaudeDriver>,
+    perm_tx: mpsc::Sender<PermissionDecision>,
+    cancel_flag: Arc<AtomicBool>,
+    cx: ConnectionTo<Client>,
+    responder: Responder<PromptResponse>,
+    _gate_guard: OwnedMutexGuard<()>,
+) -> Result<(), agent_client_protocol::Error> {
+    if let Err(e) = claude.send_user(&text).await {
+        tracing::warn!(error=%e, "send_user failed");
+        let _ = responder.respond_with_error(
+            agent_client_protocol::util::internal_error("claude send_user failed"),
+        );
+        return Ok(());
+    }
+
+    let mut stop_reason = StopReason::EndTurn;
+    loop {
+        let Some(event) = claude.next_event().await else {
+            tracing::warn!(session_id=%session_id, "driver EOF before TurnEnd");
+            break;
+        };
+        if cancel_flag.load(Ordering::SeqCst) {
+            stop_reason = StopReason::Cancelled;
+            break;
+        }
+        // ToolUse 拦截：先发 ToolCall 通知，再等 sebas 的 RequestPermissionResponse。
+        // spec §4：失败一律 Deny（send_request_to Err / Response 非 Selected / option_id
+        // 不以 "allow_" 开头）。拦截后该 event 不再走 translator。
+        match &event {
+            crate::claude::StreamEvent::ToolUse { id, name, input } => {
+                let id_str = id.clone();
+                let name_str = name.clone();
+                let input_val = input.clone();
+                let session_id_clone = session_id.clone();
+                let cx_clone = cx.clone();
+                let tool_call_update = ToolCallUpdate::new(
+                    id_str.clone(),
+                    ToolCallUpdateFields::new()
+                        .title(name_str.clone())
+                        .raw_input(input_val.clone()),
+                );
+                // 1) emit ToolCall 通知
+                let notif = notifications::from_update(
+                    &session_id,
+                    crate::translator::TranslatedUpdate::ToolCall {
+                        id: id_str.clone(),
+                        title: name_str.clone(),
+                        raw_input: input_val.clone(),
+                    },
+                );
+                if let Some(n) = notif {
+                    if let Err(e) = cx.send_notification(n) {
+                        tracing::warn!(error=%e, tool_id=%id_str, "tool_call notification failed");
+                    }
+                }
+                // 2) 用 on_receiving_result 异步等 sebas 决策
+                let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+                let req = RequestPermissionRequest::new(
+                    SessionId::new(session_id_clone),
+                    tool_call_update,
+                    build_permission_options(),
+                );
+                let id_str_for_cb = id_str.clone();
+                let send_result = cx_clone
+                    .send_request_to(Client, req)
+                    .on_receiving_result(move |result| async move {
+                        let decision = match result {
+                            Ok(resp) => match resp.outcome {
+                                RequestPermissionOutcome::Selected(sel) => {
+                                    tracing::info!(
+                                        tool_id=%id_str_for_cb,
+                                        option=%sel.option_id.0,
+                                        "permission selected"
+                                    );
+                                    option_id_to_decision(sel.option_id.0.as_ref())
+                                }
+                                other => {
+                                    tracing::warn!(tool_id=%id_str_for_cb, ?other, "permission outcome not Selected → Deny");
+                                    PermissionDecision::Deny
+                                }
+                            },
+                            Err(e) => {
+                                tracing::warn!(error=%e, tool_id=%id_str_for_cb, "send_request_to failed → Deny");
+                                PermissionDecision::Deny
+                            }
+                        };
+                        let _ = decision_tx.send(decision);
+                        Ok(())
+                    });
+                if let Err(e) = send_result {
+                    // send_request_to 本身失败（连接已断等）：oneshot sender 在 drop，
+                    // decision_rx.await 返 Err → fallback Deny。
+                    let id_for_log = id_str.clone();
+                    tracing::warn!(error=%e, tool_id=%id_for_log, "send_request_to returned Err → fallback Deny on rx close");
+                }
+                let decision = decision_rx.await.unwrap_or(PermissionDecision::Deny);
+                // 3) 写 broker → hook unblock → claude 继续
+                if let Err(e) = perm_tx.send(decision.clone()).await {
+                    tracing::warn!(error=%e, "perm_tx.send failed");
+                }
+                // 4) 拒绝时补 ToolCallUpdate Failed
+                if decision == PermissionDecision::Deny {
+                    let denied = notifications::from_update(
+                        &session_id,
+                        crate::translator::TranslatedUpdate::ToolCallUpdate {
+                            id: id_str.clone(),
+                            status: crate::translator::ToolStatus::Failed,
+                            raw_output: Some("denied by sebas".into()),
+                        },
+                    );
+                    if let Some(n) = denied {
+                        if let Err(e) = cx.send_notification(n) {
+                            tracing::warn!(error=%e, tool_id=%id_str, "denied notification failed");
+                        }
+                    }
+                }
+            }
+            _ => {
+                let updates = translator::translate(event.clone());
+                for update in updates {
+                    if let Some(notif) = notifications::from_update(&session_id, update) {
+                        if let Err(e) = cx.send_notification(notif) {
+                            tracing::warn!(error=%e, "send_notification failed");
+                        }
+                    }
+                }
+            }
+        }
+        if let crate::claude::StreamEvent::TurnEnd { stop_reason: sr } = event {
+            stop_reason = notifications::acp_stop_reason(sr);
+            break;
+        }
+    }
+    let _ = responder.respond(PromptResponse::new(stop_reason));
+    // _gate_guard 在这里 drop，gate 释放，下个 prompt 可进。
     Ok(())
 }
 
@@ -268,6 +331,8 @@ mod tests {
     fn build_permission_options_returns_three_stable_ids() {
         let opts = build_permission_options();
         assert_eq!(opts.len(), 3);
+        // 字符串约定必须与 acp-claude/manager.rs:320-329 保持一致；
+        // 该侧改字符串时要同步通知 bridge
         let ids: Vec<&str> = opts.iter().map(|o| o.option_id.0.as_ref()).collect();
         assert_eq!(ids, vec!["allow_once", "allow_always", "reject_once"]);
     }
