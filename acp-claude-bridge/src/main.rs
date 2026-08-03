@@ -1,4 +1,5 @@
 mod claude;
+mod notifications;
 mod permission;
 mod server;
 mod translator;
@@ -13,6 +14,9 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // 写 stderr：bridge 的 stdout 是 JSON-RPC 通道；写 stdout 会污染帧导致
+        // acp-claude SDK 的 JSON parser 失败。
+        .with_writer(std::io::stderr)
         .init();
 
     // Args: <path-to-claude> [claude-args...]
@@ -24,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
 
     let claude = ClaudeDriver::spawn(&claude_path, &extra_refs).await?;
-    let (_broker, perm_rx) = permission::PermissionBroker::bind().await?;
-    server::run(claude, perm_rx).await
+    let (broker, perm_tx) = permission::PermissionBroker::bind().await?;
+    tokio::spawn(broker.run());
+    server::run(claude, perm_tx).await
 }
