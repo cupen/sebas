@@ -6,6 +6,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Phase token: string IS the Feishu `emoji_type` (e.g. `"Typing"`, `"OnIt"`,
+/// `"DONE"`, `"CrossMark"`) — required because Feishu's reaction API rejects
+/// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. The display
+/// glyph for the card header is derived via `feishu::cards::phase_visual`.
+pub mod phase {
+    pub const SEED: &str = "Typing";     // watching / waiting on first event
+    pub const WORKING: &str = "OnIt";     // streaming response in progress
+    pub const DONE: &str = "DONE";       // Finished event
+    pub const FAILED: &str = "CrossMark"; // terminal Error event
+}
+
 #[derive(Debug, Clone)]
 pub struct CardState {
     pub user_prompt: String,
@@ -14,20 +25,20 @@ pub struct CardState {
 }
 
 impl CardState {
-    /// seed_card 用：记录真实 user_prompt（重渲染引用块用），emoji 👀，空 body。
+    /// seed_card 用：记录真实 user_prompt（重渲染引用块用），emoji SEED，空 body。
     pub fn new(user_prompt: &str) -> Self {
         Self {
             user_prompt: user_prompt.into(),
-            status_emoji: "👀".into(),
+            status_emoji: phase::SEED.into(),
             body: Vec::new(),
         }
     }
 
-    /// 早到事件兜底：prompt=""，emoji 👀，空 body（spec §4.2 lazy seed）。
+    /// 早到事件兜底：prompt=""，emoji SEED，空 body（spec §4.2 lazy seed）。
     pub fn lazy() -> Self {
         Self {
             user_prompt: String::new(),
-            status_emoji: "👀".into(),
+            status_emoji: phase::SEED.into(),
             body: Vec::new(),
         }
     }

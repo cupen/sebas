@@ -119,7 +119,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         };
         match got {
             Out::UpdateCard { .. } => saw_update = true,
-            Out::React { emoji, .. } if emoji == "✅" => {
+            Out::React { emoji, .. } if emoji == router::card_state::phase::DONE => {
                 saw_react_done = true;
                 break;
             }
@@ -206,10 +206,10 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
             Err(_) => continue,
         };
         if let Out::React { emoji, .. } = &got {
-            if emoji == "🚧" {
+            if emoji == router::card_state::phase::WORKING {
                 saw_react_working = true;
             }
-            if emoji == "✅" {
+            if emoji == router::card_state::phase::DONE {
                 saw_react_done = true;
                 if saw_react_working {
                     working_before_done = true;

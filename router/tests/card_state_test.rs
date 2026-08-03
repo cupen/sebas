@@ -22,7 +22,7 @@ async fn seed_is_idempotent_keeps_accumulated_prompt() {
     m.seed("s1".into(), "SHOULD_NOT_WIN".into()).await;
     let snap = m.snapshot("s1").await.expect("seeded");
     assert_eq!(snap.user_prompt, "original");
-    assert_eq!(snap.status_emoji, "👀");
+    assert_eq!(snap.status_emoji, router::card_state::phase::SEED);
     assert_eq!(snap.body.len(), 1);
 }
 
@@ -38,7 +38,7 @@ async fn apply_lazy_seeds_with_empty_prompt() {
     .await;
     let snap = m.snapshot("s2").await.expect("lazy seeded");
     assert_eq!(snap.user_prompt, "");
-    assert_eq!(snap.status_emoji, "👀");
+    assert_eq!(snap.status_emoji, router::card_state::phase::SEED);
     assert_eq!(snap.body.len(), 1);
 }
 
@@ -57,11 +57,11 @@ async fn drop_removes_entry() {
 async fn new_and_lazy_constructors() {
     let a = CardState::new("prompt");
     assert_eq!(a.user_prompt, "prompt");
-    assert_eq!(a.status_emoji, "👀");
+    assert_eq!(a.status_emoji, router::card_state::phase::SEED);
     assert!(a.body.is_empty());
     let b = CardState::lazy();
     assert_eq!(b.user_prompt, "");
-    assert_eq!(b.status_emoji, "👀");
+    assert_eq!(b.status_emoji, router::card_state::phase::SEED);
 }
 
 #[tokio::test]
@@ -288,8 +288,8 @@ async fn phase_transitions_emit_reactions_card_first() {
     assert!(matches!(o1, Out::UpdateCard { .. }), "先出卡: {o1:?}");
     let o2 = recv(&mut out_rx).await;
     assert!(
-        matches!(o2, Out::React { ref emoji, .. } if emoji == "🚧"),
-        "再换 reaction 🚧: {o2:?}"
+        matches!(o2, Out::React { ref emoji, .. } if emoji == router::card_state::phase::WORKING),
+        "再换 reaction WORKING: {o2:?}"
     );
 
     // 已 🚧 时的流式事件只出卡，不再发 React
@@ -315,8 +315,8 @@ async fn phase_transitions_emit_reactions_card_first() {
     assert!(matches!(o4, Out::UpdateCard { .. }), "先出卡: {o4:?}");
     let o5 = recv(&mut out_rx).await;
     assert!(
-        matches!(o5, Out::React { ref emoji, .. } if emoji == "✅"),
-        "Finished 换 ✅: {o5:?}"
+        matches!(o5, Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE),
+        "Finished 换 DONE: {o5:?}"
     );
     assert_no_more(&mut out_rx).await;
 }
@@ -339,8 +339,8 @@ async fn terminal_error_emits_cross_reaction() {
     assert!(matches!(o1, Out::UpdateCard { .. }), "先出卡: {o1:?}");
     let o2 = recv(&mut out_rx).await;
     assert!(
-        matches!(o2, Out::React { ref emoji, .. } if emoji == "❌"),
-        "terminal Error 换 ❌: {o2:?}"
+        matches!(o2, Out::React { ref emoji, .. } if emoji == router::card_state::phase::FAILED),
+        "terminal Error 换 FAILED: {o2:?}"
     );
     assert_no_more(&mut out_rx).await;
 }
@@ -360,13 +360,13 @@ async fn continue_after_done_flips_reaction_back_to_working() {
         .expect("insert within capacity");
     let (router, mut out_rx) = RouterHandle::new(map);
     router.seed_card("r3".into(), "第一题".into()).await;
-    // 驱动到 ✅（纯状态，无 Out）
+    // 驱动到 DONE（纯状态，无 Out）
     let react = router
         .apply_event("r3", &AcpEvent::Finished { session_id: "r3".into() })
         .await;
-    assert_eq!(react, Some("✅"), "apply_event 报告 👀→✅ 转移");
+    assert_eq!(react, Some(router::card_state::phase::DONE), "apply_event 报告 SEED→DONE 转移");
 
-    // 用户追问：continue 回切 🚧 —— 先刷卡，再换 reaction，最后 SendAcp
+    // 用户追问：continue 回切 WORKING —— 先刷卡，再换 reaction，最后 SendAcp
     router
         .dispatch(FeishuIn::Text {
             key: k,
@@ -385,8 +385,8 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     }
     let o2 = recv(&mut out_rx).await;
     assert!(
-        matches!(o2, Out::React { ref emoji, .. } if emoji == "🚧"),
-        "回切 reaction 🚧: {o2:?}"
+        matches!(o2, Out::React { ref emoji, .. } if emoji == router::card_state::phase::WORKING),
+        "回切 reaction WORKING: {o2:?}"
     );
     let o3 = recv(&mut out_rx).await;
     assert!(matches!(o3, Out::SendAcp { .. }), "继续会话: {o3:?}");

@@ -2,6 +2,22 @@ use acp_claude::session::AcpEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Map a router FSM phase string (the Feishu `emoji_type`, e.g. `"Typing"`,
+/// `"OnIt"`, `"DONE"`, `"CrossMark"`) to the Unicode glyph shown in the card
+/// header. Feishu rejects arbitrary Unicode as reaction `emoji_type`
+/// (error 231001), so the state stores the API name and we render the visual
+/// separately. Unknown phases fall back to a neutral bullet so a bad value
+/// can't break the card.
+pub fn phase_visual(phase: &str) -> &str {
+    match phase {
+        "Typing" => "👀",
+        "OnIt" => "🚧",
+        "DONE" => "✅",
+        "CrossMark" => "❌",
+        _ => "•",
+    }
+}
+
 /// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
 /// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
 #[derive(Debug, Clone, Deserialize)]

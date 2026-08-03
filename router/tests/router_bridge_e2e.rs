@@ -81,7 +81,7 @@ async fn hello_text_drives_bridge_to_finished_emoji() {
     let deadline = std::time::Instant::now() + OVERALL;
     while std::time::Instant::now() < deadline && !got_finished {
         match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
-            Ok(Some(Out::React { emoji, .. })) if emoji == "✅" => {
+            Ok(Some(Out::React { emoji, .. })) if emoji == router::card_state::phase::DONE => {
                 got_finished = true;
             }
             Ok(Some(_)) => {}
