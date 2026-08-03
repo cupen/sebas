@@ -88,12 +88,16 @@ impl FeishuEnvelope {
                 .event
                 .pointer("/chat_id")
                 .or_else(|| self.event.pointer("/message/chat_id"))
+                // Feishu's card.action.trigger envelope keeps the chat id
+                // under /context/open_chat_id (not /chat_id or /message/...).
+                .or_else(|| self.event.pointer("/context/open_chat_id"))
                 .and_then(serde_json::Value::as_str)?
                 .to_owned();
             let thread_id = self
                 .event
                 .pointer("/thread_id")
                 .or_else(|| self.event.pointer("/message/thread_id"))
+                .or_else(|| self.event.pointer("/context/open_thread_id"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
             // Primary: the V2 button behaviors[].value round-trip location.

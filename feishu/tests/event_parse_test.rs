@@ -165,3 +165,50 @@ fn card_action_trigger_without_session_id_defaults_empty() {
     assert_eq!(action.session_id, "");
     assert_eq!(action.decision.as_deref(), Some("allow_once"));
 }
+
+/// Feishu's actual card.action.trigger envelope carries the chat id under
+/// `/context/open_chat_id`, not `/chat_id` or `/message/chat_id`. Earlier
+/// versions of `into_event` only checked the legacy locations, so button
+/// clicks were silently dropped ("replay: envelope produced no FeishuIn")
+/// and permission cards never advanced. This test pins the v2 layout.
+#[test]
+fn parses_card_action_trigger_with_context_open_chat_id() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": {
+            "event_type": "card.action.trigger",
+            "tenant_key": "tk",
+            "app_id": "cli_x"
+        },
+        "event": {
+            "operator": {
+                "tenant_key": "tk",
+                "open_id": "ou_user",
+                "union_id": "on_user"
+            },
+            "token": "c-cardtoken",
+            "action": {
+                "value": {
+                    "decision": "allow_once",
+                    "request_id": "req_real",
+                    "session_id": "sess_real"
+                },
+                "tag": "button"
+            },
+            "host": "im_message",
+            "context": {
+                "open_message_id": "om_x",
+                "open_chat_id": "oc_real"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").expect("should parse v2 layout");
+    let FeishuIn::ButtonCb { key, action } = evt else {
+        panic!("expected ButtonCb");
+    };
+    assert_eq!(key.chat_id, "oc_real");
+    assert_eq!(action.session_id, "sess_real");
+    assert_eq!(action.request_id.as_deref(), Some("req_real"));
+    assert_eq!(action.decision.as_deref(), Some("allow_once"));
+}
