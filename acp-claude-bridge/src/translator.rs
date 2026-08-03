@@ -5,6 +5,7 @@ use crate::claude::{StopReason, StreamEvent};
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranslatedUpdate {
     AgentMessageChunk { text: String },
+    AgentThoughtChunk { text: String },
     ToolCall { id: String, title: String, raw_input: serde_json::Value },
     ToolCallUpdate { id: String, status: ToolStatus, raw_output: Option<String> },
     TurnEnd { stop_reason: StopReason },
@@ -20,6 +21,9 @@ pub fn translate(event: StreamEvent) -> Vec<TranslatedUpdate> {
     match event {
         StreamEvent::System { .. } => vec![],
         StreamEvent::TextDelta { text } => vec![TranslatedUpdate::AgentMessageChunk { text }],
+        StreamEvent::ThinkingDelta { thinking } => {
+            vec![TranslatedUpdate::AgentThoughtChunk { text: thinking }]
+        }
         StreamEvent::ToolUse { id, name, input } => vec![TranslatedUpdate::ToolCall {
             id,
             title: name,

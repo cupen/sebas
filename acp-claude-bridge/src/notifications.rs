@@ -17,6 +17,9 @@ pub fn from_update(
         TranslatedUpdate::AgentMessageChunk { text } => SessionUpdate::AgentMessageChunk(
             ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
         ),
+        TranslatedUpdate::AgentThoughtChunk { text } => SessionUpdate::AgentThoughtChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
+        ),
         TranslatedUpdate::ToolCall { id, title, raw_input } => {
             SessionUpdate::ToolCall(ToolCall::new(id, title).raw_input(raw_input))
         }
