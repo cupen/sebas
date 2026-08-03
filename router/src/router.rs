@@ -1,7 +1,7 @@
 use crate::commands::{parse_command, Command};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
-use feishu::cards::CardConfig;
+use feishu::cards::{phase_visual, CardConfig};
 use feishu::cards::{
     apply_event_to_card, render_accumulated_card, render_dead_session_card, render_permission_card,
 };
@@ -169,7 +169,7 @@ impl RouterHandle {
         let card = render_accumulated_card(
             &st.user_prompt,
             session_id,
-            &st.status_emoji,
+            phase_visual(&st.status_emoji),
             &st.body,
             &self.card_cfg.theme_color,
         );
@@ -402,13 +402,17 @@ impl RouterHandle {
     }
 
     async fn continue_session(&self, session_id: String, prompt: String) {
-        // 新 turn 回切（spec §5 回边）：上一 turn 已 settled（✅/❌）时重置为
-        // 🚧，先刷出回切后的卡再换 reaction，让用户看到会话重新进入工作状态。
+        // 新 turn 回切（spec §5 回边）：上一 turn 已 settled（DONE/FAILED）时
+        // 重置为 WORKING，先刷出回切后的卡再换 reaction，让用户看到会话重新
+        // 进入工作状态。
         let flipped = self
             .card_states
             .apply(&session_id, |st| {
-                if matches!(st.status_emoji.as_str(), "✅" | "❌") {
-                    st.status_emoji = "🚧".into();
+                if matches!(
+                    st.status_emoji.as_str(),
+                    crate::card_state::phase::DONE | crate::card_state::phase::FAILED
+                ) {
+                    st.status_emoji = crate::card_state::phase::WORKING.into();
                     true
                 } else {
                     false
@@ -417,7 +421,7 @@ impl RouterHandle {
             .await;
         if flipped {
             self.flush_card(&session_id).await;
-            self.emit_reaction(&session_id, "🚧").await;
+            self.emit_reaction(&session_id, crate::card_state::phase::WORKING).await;
         }
         self.emit(Out::SendAcp {
             session_id: session_id.clone(),
@@ -485,13 +489,19 @@ fn extract_session_id(event: &AcpEvent) -> &str {
     }
 }
 
-/// status emoji FSM（spec §5）。返回 Some(新emoji) 表示转移；None 表示不变。
-/// seed=👀；首个流式事件 -> 🚧；Finished -> ✅；terminal Error -> ❌；
-/// 已 🚧/✅/❌ 不回退 👀。
+/// status emoji FSM（spec §5）。返回 Some(新emoji_type) 表示转移；None 表示
+/// 不变。seed=SEED（"Typing"）；首个流式事件 -> WORKING（"OnIt"）；
+/// Finished -> DONE（"DONE"）；terminal Error -> FAILED（"CrossMark"）；
+/// 已 WORKING/DONE/FAILED 不回退 SEED。
+///
+/// 这些字符串是 Feishu reaction API 的合法 emoji_type（unicode 👀/🚧/✅/❌
+/// 会被 Feishu 拒绝 231001）。`cards::phase_visual` 把它们映射成 card 头部
+/// 显示用的 Unicode 字符。
 fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
+    use crate::card_state::phase::{DONE, FAILED, SEED, WORKING};
     match event {
-        AcpEvent::Finished { .. } => Some("✅"),
-        AcpEvent::Error { terminal: true, .. } => Some("❌"),
+        AcpEvent::Finished { .. } => Some(DONE),
+        AcpEvent::Error { terminal: true, .. } => Some(FAILED),
         AcpEvent::TextDelta { .. }
         | AcpEvent::ThinkingDelta { .. }
         | AcpEvent::ToolStart { .. }
@@ -500,8 +510,8 @@ fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
         | AcpEvent::Error {
             terminal: false, ..
         } => {
-            if current == "👀" {
-                Some("🚧")
+            if current == SEED {
+                Some(WORKING)
             } else {
                 None
             }

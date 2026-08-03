@@ -11,3 +11,4 @@ config.toml
 .beads/proxieddb/
 .beads/interactions.jsonl
 .claude/worktrees
+logs/

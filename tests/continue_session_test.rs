@@ -91,7 +91,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Err(_) => continue,
         };
         if let Out::React { emoji, .. } = got {
-            if emoji == "✅" {
+            if emoji == router::card_state::phase::DONE {
                 first_done = true;
             }
         }
@@ -125,7 +125,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
                     saw_card_working = true;
                 }
             }
-            Out::React { emoji, .. } if emoji == "🚧" => saw_react_working = true,
+            Out::React { emoji, .. } if emoji == router::card_state::phase::WORKING => saw_react_working = true,
             Out::SendAcp {
                 cmd: AcpCommand::ContinueSession { prompt, .. },
                 ..

@@ -87,8 +87,9 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     }
     assert!(s.contains("🚧"));
 
-    // Finished 立即产 ✅ 卡。p3g 起 Out 序列里还混有 reaction（tick 的 🚧、
-    // Finished 自带的 ✅），按类别找：✅ 卡 + ✅ reaction 都必须出现。
+    // Finished 立即产 ✅ 卡（视觉由 phase_visual 把 DONE 映成 ✅）。p3g 起 Out
+    // 序列里还混有 reaction（tick 的 OnIt、Finished 自带的 DONE），按类别找：
+    // ✅ 卡 + DONE reaction 都必须出现。
     let mut got_done = false;
     let mut got_done_react = false;
     for _ in 0..4 {
@@ -102,8 +103,10 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
                     got_done = true;
                 }
             }
-            Out::React { ref emoji, .. } if emoji == "✅" => got_done_react = true,
-            Out::React { .. } => {} // tick 补发的 🚧，忽略
+            Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE => {
+                got_done_react = true;
+            }
+            Out::React { .. } => {} // tick 补发的 OnIt，忽略
             other => panic!("unexpected out: {other:?}"),
         }
         if got_done && got_done_react {
@@ -111,5 +114,5 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         }
     }
     assert!(got_done, "Finished 必产 ✅ 卡");
-    assert!(got_done_react, "Finished 必换 ✅ reaction");
+    assert!(got_done_react, "Finished 必换 DONE reaction");
 }

@@ -547,17 +547,26 @@ async fn wire_session_card_and_pump(
     // real session_id (so streaming UpdateCards resolve correctly).
     // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
     //（避免初始卡蓝、后续卡变色的跳变）。
-    let card = render_accumulated_card(&prompt, &session_id, "👀", &[], &cfg.card.theme_color);
+    // status_emoji 在 state 里是 Feishu emoji_type（"Typing"），渲染时通过
+    // phase_visual 映射成 💬。
+    let seed_emoji = feishu::cards::phase_visual(router::card_state::phase::SEED);
+    let card = render_accumulated_card(&prompt, &session_id, seed_emoji, &[], &cfg.card.theme_color);
     let msg_id = feishu
         .send_card(http, tokens, &key, serde_json::to_value(&card)?)
         .await?;
     if !msg_id.is_empty() {
         router.record_root_msg_id(session_id.clone(), msg_id.clone()).await;
-        // Stamp the initial 👀 reaction on the root card. Best-effort:
-        // a reaction failure must not abort session creation.
-        match feishu.react(http, tokens, &msg_id, "👀").await {
-            Ok(rid) => reactions.record(&session_id, "👀".into(), rid).await,
-            Err(e) => warn!(%session_id, "initial 👀 react failed: {e}"),
+        // Stamp the initial reaction on the root card. emoji_type 是 Feishu
+        // API 合法值（"Typing"），不再是 unicode 👀 —— 那个会被 231001 拒绝。
+        // Best-effort: a reaction failure must not abort session creation.
+        match feishu
+            .react(http, tokens, &msg_id, router::card_state::phase::SEED)
+            .await
+        {
+            Ok(rid) => reactions
+                .record(&session_id, router::card_state::phase::SEED.into(), rid)
+                .await,
+            Err(e) => warn!(%session_id, "initial react failed: {e}"),
         }
     }
     // Pump ACP events from this session back into the router.
