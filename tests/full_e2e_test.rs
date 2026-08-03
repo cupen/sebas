@@ -136,3 +136,96 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
     assert!(saw_update, "no UpdateCard within {OVERALL:?}");
     assert!(saw_react_done, "no React ✅ within {OVERALL:?}");
 }
+
+/// Same flow as the fast test but the bridge pauses 250 ms between
+/// text_delta and result so the production pump's 150 ms debounce ticks
+/// at least once before Finished arrives. That window is what exposes
+/// the full 👀→🚧→✅ FSM on `out_rx`: the fast test can only show the
+/// terminal ✅ because Finished takes the immediate path before any
+/// `ticker.tick()`.
+#[tokio::test]
+async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
+    let bridge = workspace_target().join("claude-acp-bridge");
+    let fake = workspace_target().join("fake-stream-claude");
+    unsafe { std::env::set_var("SEBAS_CLAUDE_PATH", &fake); }
+
+    let map = SessionMap::new();
+    let (router, mut out_rx) =
+        RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
+
+    let key = SessionKey {
+        chat_id: "oc_slow".into(),
+        thread_id: None,
+    };
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_to: None,
+        })
+        .await;
+    let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
+        .await
+        .expect("SpawnAcp")
+        .expect("closed");
+    let prompt = match spawn {
+        Out::SpawnAcp { prompt, .. } => prompt,
+        other => panic!("expected SpawnAcp, got {other:?}"),
+    };
+
+    let (session_id, pending, rx) = sebas::run::acp_spawn_and_activate(
+        &mgr,
+        &router,
+        &key,
+        &prompt,
+        bridge.to_str().unwrap(),
+        vec!["hello".into(), "--slow-ms".into(), "250".into()],
+        Some("/tmp".into()),
+    )
+    .await
+    .expect("spawn bridge");
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    router
+        .record_root_msg_id(session_id.clone(), "om_fake_slow".into())
+        .await;
+    sebas::run::spawn_acp_pump(rx, router.clone(), session_id.clone());
+    if let Err(e) = sebas::run::flush_pending_prompts(&mgr, &session_id, pending).await {
+        panic!("flush_pending_prompts failed: {e}");
+    }
+
+    // Walk out_rx in chronological order so we can confirm 🚧 precedes ✅.
+    let mut saw_react_working = false;
+    let mut saw_react_done = false;
+    let mut working_before_done = false;
+    let deadline = std::time::Instant::now() + OVERALL;
+    while std::time::Instant::now() < deadline {
+        let got = match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
+            Ok(Some(o)) => o,
+            Ok(None) => panic!("out_rx closed early"),
+            Err(_) => continue,
+        };
+        if let Out::React { emoji, .. } = &got {
+            if emoji == "🚧" {
+                saw_react_working = true;
+            }
+            if emoji == "✅" {
+                saw_react_done = true;
+                if saw_react_working {
+                    working_before_done = true;
+                }
+                break;
+            }
+        }
+    }
+
+    mgr.kill_all().await;
+    drop(mgr);
+
+    assert!(saw_react_working, "no React 🚧 in slow stream");
+    assert!(saw_react_done, "no React ✅ in slow stream");
+    assert!(
+        working_before_done,
+        "🚧 reaction should arrive before ✅ (FSM order)"
+    );
+}
