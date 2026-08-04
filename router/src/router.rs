@@ -444,7 +444,7 @@ impl RouterHandle {
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
-                        self.continue_session(sid, p, reply_to, key.clone()).await
+                        self.continue_session(sid, p, reply_to, key.clone(), false).await
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
@@ -453,6 +453,28 @@ impl RouterHandle {
                             key,
                             session_id: old_sid,
                             prompt: p,
+                        })
+                        .await;
+                    }
+                    Ok(crate::state::TextRoute::Enqueued) => {}
+                    Err(e) => {
+                        tracing::warn!(?e, "route_text failed");
+                        self.emit(Out::HelpText { key }).await;
+                    }
+                }
+            }
+            Command::Btw(text) => {
+                // /btw: same routing as PassThrough, but priority=true so it jumps the queue.
+                match self.map.route_text(key.clone(), text.clone()).await {
+                    Ok(crate::state::TextRoute::Continue(sid)) => {
+                        self.continue_session(sid, text, reply_to, key.clone(), true).await
+                    }
+                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, text).await,
+                    Ok(crate::state::TextRoute::Resume(old_sid)) => {
+                        self.emit(Out::SpawnResume {
+                            key,
+                            session_id: old_sid,
+                            prompt: text,
                         })
                         .await;
                     }
@@ -583,6 +605,7 @@ impl RouterHandle {
         prompt: String,
         root_id: Option<String>,
         key: SessionKey,
+        priority: bool,
     ) {
         use crate::card_state::phase::WORKING;
 
@@ -597,7 +620,7 @@ impl RouterHandle {
             self.map.enqueue_turn(&key, crate::state::QueuedTurn {
                 prompt,
                 reply_to: root_id,
-                priority: false,
+                priority,
             }).await;
             self.emit_reaction(&session_id, "⏳").await;
             return;

@@ -11,6 +11,7 @@ pub enum Command {
     Model(String),
     Cd(String),
     Help,
+    Btw(String),
     PassThrough(String),
 }
 
@@ -37,6 +38,13 @@ pub fn parse_command(input: &str) -> Command {
         "/model" => Command::Model(arg.into()),
         "/cd" => Command::Cd(arg.into()),
         "/help" => Command::Help,
+        "/btw" => {
+            if arg.is_empty() {
+                Command::PassThrough(input.into())
+            } else {
+                Command::Btw(arg.into())
+            }
+        }
         _ => Command::PassThrough(input.into()),
     }
 }

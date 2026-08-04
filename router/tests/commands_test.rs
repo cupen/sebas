@@ -47,3 +47,15 @@ fn plain_text_is_pass_through() {
         Command::PassThrough("hello world".into())
     );
 }
+
+#[test]
+fn parse_btw_command() {
+    let cmd = parse_command("/btw 顺便问一句");
+    assert!(matches!(cmd, Command::Btw(s) if s == "顺便问一句"));
+}
+
+#[test]
+fn parse_btw_command_empty_text_becomes_pass_through() {
+    // /btw with no text falls through to PassThrough
+    assert!(matches!(parse_command("/btw"), Command::PassThrough(_)));
+}

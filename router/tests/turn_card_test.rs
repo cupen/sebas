@@ -2,6 +2,7 @@
 //! Task 7: serialize — enqueue when in-flight, ⏳ reaction
 //! Task 8: drain queue when in-flight turn settles
 //! Task 8 (fix): terminal error abandons queued turns (do NOT drain on terminal Error)
+//! Task 9: /btw command — priority slot in turn queue
 
 use std::time::Duration;
 
@@ -158,4 +159,40 @@ async fn terminal_error_abandons_queued_turns() {
     }
     // Session is gone — the queued turn is abandoned.
     assert!(!router.session_alive(&key).await);
+}
+
+#[tokio::test]
+async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey { chat_id: "oc".into(), thread_id: None };
+    let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
+    router.seed_card("s1".into(), "first".into()).await;
+    router.apply_event_to_out("s1".into(), &AcpEvent::TextDelta {
+        session_id: "s1".into(), delta: "x".into(),
+    }).await; let _ = out_rx.recv().await;
+
+    // Queue a normal FIFO turn first.
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(), text: "fifo".into(), reply_to: Some("omF".into()),
+    }).await; let _ = out_rx.recv().await; // ⏳
+
+    // Now a /btw turn — must jump to front.
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(), text: "/btw btw".into(), reply_to: Some("omB".into()),
+    }).await; let _ = out_rx.recv().await; // ⏳
+
+    router.apply_event_to_out("s1".into(), &AcpEvent::Finished { session_id: "s1".into() }).await;
+    let _ = out_rx.recv().await; let _ = out_rx.recv().await; // UpdateCard + React ✅
+
+    // Drain: first SendCard should be the /btw one (omB), not FIFO (omF).
+    let first = out_rx.recv().await.unwrap();
+    match first {
+        Out::SendCard { root_id: Some(rid), .. } => assert_eq!(rid, "omB"),
+        other => panic!("expected SendCard(omB), got {other:?}"),
+    }
+    let second = out_rx.recv().await.unwrap();
+    match second {
+        Out::SendAcp { .. } => {}
+        other => panic!("expected SendAcp, got {other:?}"),
+    }
 }
