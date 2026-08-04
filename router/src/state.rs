@@ -1,9 +1,17 @@
 use crate::error::RouterError;
 use feishu::events::SessionKey;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// A queued turn waiting to be processed by the per-turn reply handler.
+#[derive(Debug, Clone)]
+pub struct QueuedTurn {
+    pub prompt: String,
+    pub reply_to: Option<String>,
+    pub priority: bool,
+}
 
 /// In-memory session mapping state. `Spawning` is a placeholder inserted
 /// synchronously when the first text arrives, so a second text racing the
@@ -109,6 +117,7 @@ const MAX_PENDING: usize = 16;
 #[derive(Clone)]
 pub struct SessionMap {
     inner: Arc<RwLock<HashMap<SessionKey, Mapping>>>,
+    turn_queue: Arc<RwLock<HashMap<SessionKey, VecDeque<QueuedTurn>>>>,
     capacity: usize,
 }
 
@@ -119,6 +128,7 @@ impl SessionMap {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            turn_queue: Arc::new(RwLock::new(HashMap::new())),
             capacity: cap,
         }
     }
@@ -264,6 +274,36 @@ impl SessionMap {
         }
     }
 
+    /// Enqueue a turn for the given session. Priority turns are inserted at
+    /// the front; non-priority turns are appended to the back.
+    pub async fn enqueue_turn(&self, key: &SessionKey, turn: QueuedTurn) {
+        let mut q = self.turn_queue.write().await;
+        let deque = q.entry(key.clone()).or_insert_with(VecDeque::new);
+        if turn.priority {
+            deque.push_front(turn);
+        } else {
+            deque.push_back(turn);
+        }
+    }
+
+    /// Pop the next turn from the queue, if any.
+    pub async fn pop_next_turn(&self, key: &SessionKey) -> Option<QueuedTurn> {
+        let mut q = self.turn_queue.write().await;
+        let popped = q.get_mut(key).and_then(|deque| deque.pop_front());
+        if let Some(ref deque) = q.get(key) {
+            if deque.is_empty() {
+                q.remove(key);
+            }
+        }
+        popped
+    }
+
+    /// Return the number of queued turns for the given session.
+    pub async fn queue_len(&self, key: &SessionKey) -> usize {
+        let q = self.turn_queue.read().await;
+        q.get(key).map(|deque| deque.len()).unwrap_or(0)
+    }
+
     /// Persist Active AND Dormant entries, in the legacy flat shape
     /// (`{"session_id": ..., "last_active_unix": ...}`) so the on-disk format
     /// is unchanged and restores work across versions. Spawning placeholders
@@ -303,6 +343,7 @@ impl SessionMap {
             .collect();
         Ok(Self {
             inner: Arc::new(RwLock::new(map)),
+            turn_queue: Arc::new(RwLock::new(HashMap::new())),
             capacity,
         })
     }
