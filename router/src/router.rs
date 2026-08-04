@@ -488,7 +488,7 @@ impl RouterHandle {
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
-                // Dead-session card is fire-and-forget (no thread reply).
+                // Permission cards are fire-and-forget (no threading).
                 root_id: None,
             })
             .await;
@@ -700,6 +700,11 @@ pub struct MsgIdMap {
 }
 
 impl MsgIdMap {
+    /// Record the message_id of the **most recent** per-turn card for a session.
+    /// Called by the dispatcher after each `send_card` returns. Streaming
+    /// `UpdateCard`s resolve through `get(session_id)`, so each new turn's
+    /// card "takes over" as the PATCH target — earlier turns stay frozen
+    /// at their final state. See `docs/superpowers/plans/2026-08-04-per-turn-reply-quote.md`.
     pub async fn record(&self, session_id: String, msg_id: String) {
         self.inner.write().await.insert(session_id, msg_id);
     }

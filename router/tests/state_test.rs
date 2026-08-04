@@ -1,6 +1,7 @@
 use feishu::events::SessionKey;
 use router::state::Mapping;
 use router::state::SessionMap;
+use router::MsgIdMap;
 
 #[tokio::test]
 async fn insert_and_lookup() {
@@ -120,4 +121,12 @@ async fn overflow_rejects() {
         )
         .await;
     assert!(r.is_err());
+}
+
+#[tokio::test]
+async fn msgid_map_record_overwrites_previous_entry() {
+    let m = MsgIdMap::default();
+    m.record("s1".into(), "om_first".into()).await;
+    m.record("s1".into(), "om_second".into()).await;
+    assert_eq!(m.get("s1").await.as_deref(), Some("om_second"));
 }
