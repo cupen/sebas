@@ -262,7 +262,7 @@ async fn dispatch_out(
             // `UpdateCard`/`React`, which only know the session_id, can resolve
             // the message_id. Only record when a session_id is supplied; plain
             // cards (permission prompts, help) don't need to be updated later.
-            let new_id = feishu.send_card(http, tokens, &key, card).await?;
+            let new_id = feishu.send_card(http, tokens, &key, card, None).await?;
             if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
                 router.record_root_msg_id(session_id, new_id.clone()).await;
                 debug!(message_id = %new_id, "recorded card msg_id");
@@ -353,7 +353,7 @@ async fn dispatch_out(
                         "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
                     if let Err(e2) = feishu
-                        .send_card(http, tokens, &key, serde_json::to_value(&card)?)
+                        .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
                         .await
                     {
                         warn!(?e2, "failed to send spawn-failure card");
@@ -398,7 +398,7 @@ async fn dispatch_out(
                         "agent 恢复失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
                     if let Err(e2) = feishu
-                        .send_card(http, tokens, &key, serde_json::to_value(&card)?)
+                        .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
                         .await
                     {
                         warn!(?e2, "failed to send resume-failure card");
@@ -586,7 +586,7 @@ async fn wire_session_card_and_pump(
     let seed_emoji = feishu::cards::phase_visual(router::card_state::phase::SEED);
     let card = render_accumulated_card(&prompt, &session_id, seed_emoji, &[], &cfg.card.theme_color);
     let msg_id = feishu
-        .send_card(http, tokens, &key, serde_json::to_value(&card)?)
+        .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
         .await?;
     if !msg_id.is_empty() {
         router.record_root_msg_id(session_id.clone(), msg_id.clone()).await;

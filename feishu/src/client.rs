@@ -219,19 +219,38 @@ impl FeishuClient {
         }
     }
 
+    /// Builds the JSON body for a card POST request.
+    /// When `root_id` is `Some` and non-empty, `root_id` is included in the
+    /// body so Feishu renders the card as a reply to the parent message.
+    pub fn build_send_card_body(
+        card_json: &serde_json::Value,
+        key: &SessionKey,
+        root_id: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let content = serde_json::to_string(card_json)?;
+        let mut body = serde_json::json!({
+            "receive_id": key.chat_id,
+            "msg_type": "interactive",
+            "content": content,
+        });
+        if let Some(rid) = root_id {
+            if !rid.is_empty() {
+                body["root_id"] = serde_json::Value::String(rid.to_string());
+            }
+        }
+        Ok(body)
+    }
+
     pub async fn send_card(
         &self,
         http: &reqwest::Client,
         tokens: &TokenManager,
         key: &SessionKey,
         card_json: serde_json::Value,
+        root_id: Option<&str>,
     ) -> anyhow::Result<String> {
         let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
-        let body = serde_json::json!({
-            "receive_id": key.chat_id,
-            "msg_type": "interactive",
-            "content": serde_json::to_string(&card_json)?,
-        });
+        let body = Self::build_send_card_body(&card_json, key, root_id)?;
         self.post_card_with_retry(http, tokens, url, body).await
     }
 
