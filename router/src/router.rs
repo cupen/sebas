@@ -70,9 +70,14 @@ pub enum Out {
 }
 
 pub struct RouterHandle {
-    map: SessionMap,
+    /// Public so integration tests in `tests/` can seed mappings without
+    /// going through `/new`. Production callers should use `insert_mapping`
+    /// (which also persists to disk on daemon side).
+    pub map: SessionMap,
     tx: mpsc::Sender<Out>,
-    msgid: MsgIdMap,
+    /// Public for tests; production goes through `record_root_msg_id` /
+    /// `root_msg_id`.
+    pub msgid: MsgIdMap,
     card_states: crate::card_state::CardStateMap,
     card_cfg: CardConfig,
     /// Tracks the Feishu `message_id` of each outstanding permission card,
@@ -180,6 +185,15 @@ impl RouterHandle {
     /// or never existed).
     pub async fn take_perm_card(&self, request_id: &str) -> Option<PermCardEntry> {
         self.perm_cards.take(request_id).await
+    }
+
+    /// Per-chat allowlist of (tool, args) signatures the user approved with
+    /// "Allow session". Tests use this to seed and inspect entries; the
+    /// production path goes through `apply_event_to_out` (auto-approve)
+    /// and `on_button` (grant on click) without reaching for the field
+    /// directly.
+    pub fn allowlist(&self) -> &SessionAllowlist {
+        &self.allowlist
     }
 
     /// Look up the root card message_id for a session (used by `UpdateCard`).
@@ -771,14 +785,39 @@ impl SessionAllowlist {
     }
 }
 
-/// Canonical signature for matching tool calls. Uses `serde_json::to_string`
-/// (key order is preserved by the bridge/claude — they're stable sources)
-/// so two identical (tool_name, args) calls hash to the same string.
+/// Canonical signature for matching tool calls. Canonicalizes `args` so
+/// that two semantically-equal (tool, args) calls hash to the same string
+/// regardless of:
+///   - key order in objects (Claude may serialise the same object with
+///     keys in different order on different invocations)
+///   - null fields (Claude sometimes emits `parent_tool_use_id: null`
+///     or other optional wrappers)
+/// Array order is preserved (semantically meaningful for command args,
+/// env, etc.).
 pub fn tool_signature(tool_name: &str, args: &Value) -> String {
-    // Compact JSON to keep the set small; null/empty objects both serialize
-    // to "{}" so the signature is consistent.
-    let args_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+    let canonical = canonicalize_value(args);
+    let args_str = serde_json::to_string(&canonical).unwrap_or_else(|_| "{}".to_string());
     format!("{tool_name}|{args_str}")
+}
+
+/// Recursively canonicalize a JSON value for stable hashing:
+/// - Objects: drop `null` fields, sort remaining keys, recurse.
+/// - Arrays: preserve order, recurse.
+/// - Other: unchanged.
+fn canonicalize_value(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), canonicalize_value(v)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(entries.into_iter().collect())
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize_value).collect()),
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]

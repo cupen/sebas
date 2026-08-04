@@ -405,6 +405,13 @@ async fn permission_card_click_emits_resolved_card_flip() {
         chat_id: "oc_perm".into(),
         thread_id: None,
     };
+    // Seed an active session mapping so `on_button` passes the
+    // `session_alive` check (production: the session is alive while
+    // there's a Claude child process for this chat).
+    router
+        .map
+        .insert(key.clone(), router::state::Mapping::active("sess-flip"))
+        .await;
     // Simulate the dispatch_out step that records the Feishu message_id
     // keyed by request_id (production: after `send_card` returns).
     router
@@ -475,6 +482,13 @@ async fn stale_permission_click_emits_expired_card() {
         chat_id: "oc_perm".into(),
         thread_id: None,
     };
+    // Seed an active session so `on_button` reaches the click path
+    // (the stale branch is taken because perm_cards.take returns None,
+    // not because the session is dead).
+    router
+        .map
+        .insert(key.clone(), router::state::Mapping::active("sess-stale"))
+        .await;
     router
         .dispatch(FeishuIn::ButtonCb {
             key: key.clone(),
@@ -516,7 +530,7 @@ fn render_resolved_card_includes_label() {
 
 // ---- sebas session-level allowlist (Allow session semantics) ----
 
-use acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use acp_claude::session::{AcpCommand, Decision};
 use router::router::tool_signature;
 use serde_json::json;
 
@@ -534,6 +548,63 @@ fn tool_signature_is_stable_for_same_input() {
     assert_ne!(sig_a, sig_d);
 }
 
+#[test]
+fn tool_signature_canonicalizes_key_order() {
+    // Reproduce the real-world failure mode: Claude's tool_use args may
+    // serialise the same logical object with keys in a different order on
+    // different invocations. A naive `serde_json::to_string` would produce
+    // different strings, and the allowlist would miss a "second same call".
+    // The signature must be order-insensitive.
+    let a = tool_signature("Bash", &json!({"command": "ls /tmp", "description": "list /tmp"}));
+    let b = tool_signature("Bash", &json!({"description": "list /tmp", "command": "ls /tmp"}));
+    assert_eq!(a, b, "key order must not affect signature");
+}
+
+#[test]
+fn tool_signature_ignores_null_fields() {
+    // Claude sometimes emits a `parent_tool_use_id: null` or other optional
+    // fields. Including those would defeat the match. The signature must
+    // strip nulls.
+    let with_null = tool_signature("Bash", &json!({"command": "ls", "parent": null}));
+    let without = tool_signature("Bash", &json!({"command": "ls"}));
+    assert_eq!(with_null, without, "null fields must not affect signature");
+}
+
+#[test]
+fn tool_signature_nested_object_keys_canonicalized() {
+    // Nested objects should also be canonicalized recursively.
+    let a = tool_signature("Bash", &json!({"command": "ls", "env": {"PATH": "/usr/bin", "HOME": "/root"}}));
+    let b = tool_signature("Bash", &json!({"env": {"HOME": "/root", "PATH": "/usr/bin"}, "command": "ls"}));
+    assert_eq!(a, b, "nested object key order must not affect signature");
+}
+
+#[test]
+fn tool_signature_preserves_array_order() {
+    // Array order is semantically meaningful for command args, env, etc.
+    // Canonicalization must NOT sort arrays.
+    let a = tool_signature("Bash", &json!({"args": ["ls", "-la", "/tmp"]}));
+    let b = tool_signature("Bash", &json!({"args": ["/tmp", "-la", "ls"]}));
+    assert_ne!(a, b, "array order is meaningful; must not be sorted");
+}
+
+#[test]
+fn tool_signature_claude_style_bash_args_match_across_invocations() {
+    // The exact scenario from the user's test: same `Bash ls /tmp` call
+    // arriving in two separate tool_use blocks with the surrounding
+    // Claude-Code wrapper fields. The wrapper fields may be added by the
+    // bridge translator and shouldn't be part of the signature.
+    //
+    // We model the inner call (the bridge would normalize before this point
+    // in production; the test pins the contract).
+    let args_a = json!({"command": "ls /tmp", "description": "list /tmp contents"});
+    let args_b = json!({"description": "list /tmp contents", "command": "ls /tmp"});
+    assert_eq!(
+        tool_signature("Bash", &args_a),
+        tool_signature("Bash", &args_b),
+        "Claude-style Bash args with reordered keys must match"
+    );
+}
+
 #[tokio::test]
 async fn allowlist_grant_and_check() {
     use router::router::RouterHandle;
@@ -547,27 +618,27 @@ async fn allowlist_grant_and_check() {
     };
     // Initial state: not allowed.
     assert!(
-        !router
-            .allowlist
+        !router.allowlist()
+            
             .is_allowed(&key, "Bash", &json!({"command": "ls"}))
             .await
     );
     // Grant.
-    router
-        .allowlist
+    router.allowlist()
+        
         .grant(&key, "Bash", &json!({"command": "ls"}))
         .await;
     // Now allowed.
     assert!(
-        router
-            .allowlist
+        router.allowlist()
+            
             .is_allowed(&key, "Bash", &json!({"command": "ls"}))
             .await
     );
     // Different args → not allowed.
     assert!(
-        !router
-            .allowlist
+        !router.allowlist()
+            
             .is_allowed(&key, "Bash", &json!({"command": "rm -rf /"}))
             .await
     );
@@ -577,8 +648,8 @@ async fn allowlist_grant_and_check() {
         thread_id: None,
     };
     assert!(
-        !router
-            .allowlist
+        !router.allowlist()
+            
             .is_allowed(&other_key, "Bash", &json!({"command": "ls"}))
             .await
     );
@@ -595,13 +666,13 @@ async fn allowlist_clear_drops_everything_for_chat() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    router.allowlist.grant(&key, "Bash", &json!({"command": "ls"})).await;
-    router.allowlist.grant(&key, "Read", &json!({"path": "/etc"})).await;
-    assert!(router.allowlist.is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
+    router.allowlist().grant(&key, "Bash", &json!({"command": "ls"})).await;
+    router.allowlist().grant(&key, "Read", &json!({"path": "/etc"})).await;
+    assert!(router.allowlist().is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
     // Clear wipes the whole entry (no leak across sessions).
-    router.allowlist.clear(&key).await;
-    assert!(!router.allowlist.is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
-    assert!(!router.allowlist.is_allowed(&key, "Read", &json!({"path": "/etc"})).await);
+    router.allowlist().clear(&key).await;
+    assert!(!router.allowlist().is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
+    assert!(!router.allowlist().is_allowed(&key, "Read", &json!({"path": "/etc"})).await);
 }
 
 #[tokio::test]
@@ -623,8 +694,8 @@ async fn permission_request_after_grant_auto_approves_without_card() {
         .await;
 
     // Pre-grant: the (Bash, ls) call is on the allowlist.
-    router
-        .allowlist
+    router.allowlist()
+        
         .grant(&key, "Bash", &json!({"command": "ls /tmp"}))
         .await;
 
