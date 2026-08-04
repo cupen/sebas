@@ -257,12 +257,13 @@ async fn dispatch_out(
             msg_id,
             perm_request_id,
             perm_meta,
+            root_id,
         } => {
             // The MsgIdMap is keyed by session_id (never chat_id) so that
             // `UpdateCard`/`React`, which only know the session_id, can resolve
             // the message_id. Only record when a session_id is supplied; plain
             // cards (permission prompts, help) don't need to be updated later.
-            let new_id = feishu.send_card(http, tokens, &key, card, None).await?;
+            let new_id = feishu.send_card(http, tokens, &key, card, root_id.as_deref()).await?;
             if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
                 router.record_root_msg_id(session_id, new_id.clone()).await;
                 debug!(message_id = %new_id, "recorded card msg_id");
