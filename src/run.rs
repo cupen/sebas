@@ -256,6 +256,7 @@ async fn dispatch_out(
             card,
             msg_id,
             perm_request_id,
+            perm_meta,
         } => {
             // The MsgIdMap is keyed by session_id (never chat_id) so that
             // `UpdateCard`/`React`, which only know the session_id, can resolve
@@ -267,11 +268,19 @@ async fn dispatch_out(
                 debug!(message_id = %new_id, "recorded card msg_id");
             }
             // Permission cards are tracked by request_id so a later button
-            // click can flip them in place (resolved/expired). Recorded
-            // after the send round-trip so we only store real message_ids.
+            // click can flip them in place (resolved/expired). We also stash
+            // (tool_name, args) so "Allow session" can register an entry in
+            // the session allowlist for auto-approving future calls.
             if let (false, Some(req_id)) = (new_id.is_empty(), perm_request_id) {
+                let (tool_name, args) = perm_meta.unwrap_or_default();
                 router
-                    .record_perm_card_msg_id(req_id.clone(), key.clone(), new_id.clone())
+                    .record_perm_card_msg_id(
+                        req_id.clone(),
+                        key.clone(),
+                        new_id.clone(),
+                        tool_name,
+                        args,
+                    )
                     .await;
                 debug!(%req_id, message_id = %new_id, "recorded perm card msg_id");
             }

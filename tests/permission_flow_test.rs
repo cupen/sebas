@@ -122,9 +122,17 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
 
     // Simulate the dispatch_out step that production performs after
     // send_card returns: record the Feishu message_id keyed by request_id
-    // so a subsequent click can flip the card in place.
+    // so a subsequent click can flip the card in place. The (tool_name,
+    // args) stash lets the click handler also register an "Allow session"
+    // entry in the session allowlist.
     router
-        .record_perm_card_msg_id(request_id.clone(), key.clone(), "om_fake".into())
+        .record_perm_card_msg_id(
+            request_id.clone(),
+            key.clone(),
+            "om_fake".into(),
+            "Bash".into(),
+            json!({"command": "echo hi"}),
+        )
         .await;
 
     // 2) (Fake) user clicks "Allow once": router maps to Decision::AllowOnce

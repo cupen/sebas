@@ -412,6 +412,8 @@ async fn permission_card_click_emits_resolved_card_flip() {
             "req-1".into(),
             key.clone(),
             "om_real".into(),
+            "Bash".into(),
+            serde_json::json!({"command": "echo hi"}),
         )
         .await;
     // User clicks Allow once on the card.
@@ -510,4 +512,205 @@ fn render_resolved_card_includes_label() {
     let v = serde_json::to_value(&card).unwrap();
     let s = v.to_string();
     assert!(s.contains("已允许（仅此一次）"), "resolved label: {s}");
+}
+
+// ---- sebas session-level allowlist (Allow session semantics) ----
+
+use acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use router::router::tool_signature;
+use serde_json::json;
+
+#[test]
+fn tool_signature_is_stable_for_same_input() {
+    // Exact match: same tool + same args → same signature.
+    let sig_a = tool_signature("Bash", &json!({"command": "ls /tmp"}));
+    let sig_b = tool_signature("Bash", &json!({"command": "ls /tmp"}));
+    assert_eq!(sig_a, sig_b);
+    // Different args → different signature.
+    let sig_c = tool_signature("Bash", &json!({"command": "ls /home"}));
+    assert_ne!(sig_a, sig_c);
+    // Different tool → different signature.
+    let sig_d = tool_signature("Read", &json!({"command": "ls /tmp"}));
+    assert_ne!(sig_a, sig_d);
+}
+
+#[tokio::test]
+async fn allowlist_grant_and_check() {
+    use router::router::RouterHandle;
+    use router::state::SessionMap;
+    use feishu::events::SessionKey;
+
+    let (router, _rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    // Initial state: not allowed.
+    assert!(
+        !router
+            .allowlist
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
+    // Grant.
+    router
+        .allowlist
+        .grant(&key, "Bash", &json!({"command": "ls"}))
+        .await;
+    // Now allowed.
+    assert!(
+        router
+            .allowlist
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
+    // Different args → not allowed.
+    assert!(
+        !router
+            .allowlist
+            .is_allowed(&key, "Bash", &json!({"command": "rm -rf /"}))
+            .await
+    );
+    // Different chat → not allowed.
+    let other_key = SessionKey {
+        chat_id: "oc_y".into(),
+        thread_id: None,
+    };
+    assert!(
+        !router
+            .allowlist
+            .is_allowed(&other_key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
+}
+
+#[tokio::test]
+async fn allowlist_clear_drops_everything_for_chat() {
+    use router::router::RouterHandle;
+    use router::state::SessionMap;
+    use feishu::events::SessionKey;
+
+    let (router, _rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    router.allowlist.grant(&key, "Bash", &json!({"command": "ls"})).await;
+    router.allowlist.grant(&key, "Read", &json!({"path": "/etc"})).await;
+    assert!(router.allowlist.is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
+    // Clear wipes the whole entry (no leak across sessions).
+    router.allowlist.clear(&key).await;
+    assert!(!router.allowlist.is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
+    assert!(!router.allowlist.is_allowed(&key, "Read", &json!({"path": "/etc"})).await);
+}
+
+#[tokio::test]
+async fn permission_request_after_grant_auto_approves_without_card() {
+    use router::router::RouterHandle;
+    use router::state::SessionMap;
+    use feishu::events::SessionKey;
+
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    let session_id = "sess-1".to_string();
+    // Seed the session map so apply_event_to_out can resolve the key.
+    router
+        .map
+        .insert(key.clone(), router::state::Mapping::active(session_id.clone()))
+        .await;
+
+    // Pre-grant: the (Bash, ls) call is on the allowlist.
+    router
+        .allowlist
+        .grant(&key, "Bash", &json!({"command": "ls /tmp"}))
+        .await;
+
+    // Drive a PermissionRequest through the same path production uses
+    // (apply_event_to_out, immediate branch for permission prompts).
+    router
+        .dispatch_acp_event(AcpEvent::PermissionRequest {
+            session_id: session_id.clone(),
+            request_id: "req-auto".into(),
+            tool_name: "Bash".into(),
+            args: json!({"command": "ls /tmp"}),
+        })
+        .await;
+
+    // Expected: NO SendCard (user shouldn't see anything). Only the
+    // auto-approved PermissionReply flows downstream to the bridge.
+    let out = tokio::time::timeout(std::time::Duration::from_millis(200), out_rx.recv())
+        .await
+        .expect("no Out within 200ms")
+        .expect("channel closed");
+    match out {
+        Out::SendAcp {
+            cmd:
+                AcpCommand::PermissionReply {
+                    session_id: sid,
+                    request_id: rid,
+                    decision,
+                },
+            ..
+        } => {
+            assert_eq!(sid, session_id);
+            assert_eq!(rid, "req-auto");
+            // The router's auto-approve path uses AllowSession (the same
+            // decision that "Allow session" maps to) — the bridge can't
+            // tell them apart, and the allowlist already accepted it.
+            assert!(matches!(decision, Decision::AllowSession));
+        }
+        other => panic!("expected SendAcp, got {other:?}"),
+    }
+    // No further Out (no card).
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), out_rx.recv())
+            .await
+            .is_err(),
+        "auto-approve should not render a card"
+    );
+}
+
+#[tokio::test]
+async fn permission_request_without_grant_still_renders_card() {
+    // Sanity counterpart to the auto-approve test: a fresh (Bash, ls)
+    // call when nothing is on the allowlist must still show the card so
+    // the user can decide.
+    use router::router::RouterHandle;
+    use router::state::SessionMap;
+    use feishu::events::SessionKey;
+
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    let session_id = "sess-1".to_string();
+    router
+        .map
+        .insert(key.clone(), router::state::Mapping::active(session_id.clone()))
+        .await;
+
+    router
+        .dispatch_acp_event(AcpEvent::PermissionRequest {
+            session_id: session_id.clone(),
+            request_id: "req-fresh".into(),
+            tool_name: "Bash".into(),
+            args: json!({"command": "ls /tmp"}),
+        })
+        .await;
+
+    let out = tokio::time::timeout(std::time::Duration::from_millis(200), out_rx.recv())
+        .await
+        .expect("Out within 200ms")
+        .expect("channel closed");
+    match out {
+        Out::SendCard { key: k, perm_request_id, .. } => {
+            assert_eq!(k.chat_id, "oc_x");
+            assert_eq!(perm_request_id.as_deref(), Some("req-fresh"));
+        }
+        other => panic!("expected SendCard, got {other:?}"),
+    }
 }

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, RwLock};
+use serde_json::Value;
 
 #[derive(Debug)]
 pub enum Out {
@@ -39,6 +40,11 @@ pub enum Out {
         /// the card in place (used for permission cards). When `None`, the
         /// card is fire-and-forget.
         perm_request_id: Option<String>,
+        /// Tool call metadata for permission cards: `(tool_name, args)`. Stashed
+        /// alongside `perm_request_id` so the click handler can register the
+        /// call in the session allowlist when the user picks "Allow session".
+        /// Ignored for non-permission cards.
+        perm_meta: Option<(String, serde_json::Value)>,
     },
     /// Update a previously-sent card by its Feishu `message_id` (not session_id).
     /// Used for permission-card click feedback: the dispatcher resolved the
@@ -74,6 +80,14 @@ pub struct RouterHandle {
     /// the user clicks (or to mark it expired on a stale click). Entries are
     /// removed once resolved so a duplicate click doesn't re-update.
     perm_cards: PermCardMap,
+    /// Per-session allowlist of `(tool_name, args)` signatures the user
+    /// approved with "Allow session" / "Allow for this chat". When a new
+    /// `PermissionRequest` arrives, the router checks this list and auto-
+    /// approves matching calls without rendering a card. The bridge sees
+    /// the same approve/deny either way; the difference is purely UX.
+    /// Scope: per-SessionKey (= per Feishu chat/thread). Cleared when the
+    /// session is removed (`/new`, terminal error, daemon restart).
+    allowlist: SessionAllowlist,
 }
 
 impl Clone for RouterHandle {
@@ -85,6 +99,7 @@ impl Clone for RouterHandle {
             card_states: self.card_states.clone(),
             card_cfg: self.card_cfg.clone(),
             perm_cards: self.perm_cards.clone(),
+            allowlist: self.allowlist.clone(),
         }
     }
 }
@@ -115,6 +130,7 @@ impl RouterHandle {
                 card_states: crate::card_state::CardStateMap::default(),
                 card_cfg,
                 perm_cards: PermCardMap::default(),
+                allowlist: SessionAllowlist::default(),
             },
             rx,
         )
@@ -149,14 +165,20 @@ impl RouterHandle {
         request_id: String,
         key: SessionKey,
         msg_id: String,
+        tool_name: String,
+        args: Value,
     ) {
-        self.perm_cards.record(request_id, key, msg_id).await;
+        self.perm_cards
+            .record(request_id, key, msg_id, tool_name, args)
+            .await;
     }
 
     /// Take (and remove) the permission-card entry for a `request_id`.
-    /// Returns the chat and msg_id so the caller can PATCH the card.
-    /// Returns `None` if no live card (already resolved, or never existed).
-    pub async fn take_perm_card(&self, request_id: &str) -> Option<(SessionKey, String)> {
+    /// Returns the entry (chat, msg_id, tool_name, args) so the caller can
+    /// PATCH the card and, on "Allow session", register the call in the
+    /// session allowlist. Returns `None` if no live card (already resolved,
+    /// or never existed).
+    pub async fn take_perm_card(&self, request_id: &str) -> Option<PermCardEntry> {
         self.perm_cards.take(request_id).await
     }
 
@@ -301,7 +323,6 @@ impl RouterHandle {
                 tool_name,
                 args,
             } => {
-                let card = render_permission_card(session_id, request_id, tool_name, args);
                 // Resolve the SessionKey that owns this session so Feishu has a
                 // real `receive_id`. Without this the card would carry an empty
                 // chat_id and Feishu rejects it.
@@ -309,6 +330,27 @@ impl RouterHandle {
                     tracing::warn!(%session_id, "no SessionKey for permission request; dropping card");
                     return;
                 };
+                // Auto-approve if this (tool, args) was previously granted with
+                // "Allow session" in this chat. No card, no user click — the
+                // bridge gets the same AllowSession reply as a manual click
+                // would have produced.
+                if self.allowlist.is_allowed(&key, tool_name, args).await {
+                    tracing::info!(
+                        %session_id, %tool_name, %request_id,
+                        "permission auto-approved by session allowlist"
+                    );
+                    self.emit(Out::SendAcp {
+                        session_id: session_id.clone(),
+                        cmd: AcpCommand::PermissionReply {
+                            session_id: session_id.clone(),
+                            request_id: request_id.clone(),
+                            decision: Decision::AllowSession,
+                        },
+                    })
+                    .await;
+                    return;
+                }
+                let card = render_permission_card(session_id, request_id, tool_name, args);
                 self.emit(Out::SendCard {
                     key,
                     card: serde_json::to_value(&card).unwrap(),
@@ -319,6 +361,10 @@ impl RouterHandle {
                     // or "请求已过期" instead of leaving the user staring at
                     // a stale prompt they keep re-clicking.
                     perm_request_id: Some(request_id.clone()),
+                    // Stash the call metadata so the click handler can
+                    // register the (tool, args) signature in the session
+                    // allowlist when the user picks "Allow session".
+                    perm_meta: Some((tool_name.clone(), args.clone())),
                 })
                 .await;
             }
@@ -330,6 +376,11 @@ impl RouterHandle {
                 self.flush_card(session_id.as_str()).await;
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
+                }
+                // Look up the chat key before removal so we can also drop
+                // the session allowlist (per-chat "Allow session" memory).
+                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
+                    self.allowlist.clear(&key).await;
                 }
                 self.map.remove_by_session(session_id.as_str()).await;
                 self.drop_card(session_id.as_str()).await;
@@ -416,6 +467,7 @@ impl RouterHandle {
                 card: serde_json::to_value(&card).unwrap(),
                 msg_id: None,
                 perm_request_id: None,
+                perm_meta: None,
             })
             .await;
             return;
@@ -431,7 +483,18 @@ impl RouterHandle {
         // The dispatcher will see no perm-card entry on stale clicks (we
         // take it below) and render "请求已过期" instead.
         if let Some(rid) = action.request_id.as_deref() {
-            if let Some((card_key, msg_id)) = self.take_perm_card(rid).await {
+            if let Some(entry) = self.take_perm_card(rid).await {
+                // "Allow session" registers the (tool, args) signature so
+                // subsequent matching calls auto-approve without prompting.
+                // The bridge side can't see the difference (AllowSession
+                // maps to "allow_always" which is just approve-per-call) —
+                // the allowlist lives on the sebas side and intercepts
+                // before the user is even asked.
+                if matches!(decision, Decision::AllowSession) {
+                    self.allowlist
+                        .grant(&entry.key, &entry.tool_name, &entry.args)
+                        .await;
+                }
                 let label = match decision {
                     Decision::AllowOnce => "✅ 已允许（仅此一次）",
                     Decision::AllowSession => "✅ 已允许（本会话）",
@@ -439,8 +502,8 @@ impl RouterHandle {
                 };
                 let card = render_resolved_permission_card(label);
                 self.emit(Out::UpdateCardByMsgId {
-                    key: card_key,
-                    msg_id,
+                    key: entry.key,
+                    msg_id: entry.msg_id,
                     card: serde_json::to_value(&card).unwrap(),
                 })
                 .await;
@@ -454,6 +517,7 @@ impl RouterHandle {
                     card: serde_json::to_value(&card).unwrap(),
                     msg_id: None,
                     perm_request_id: None,
+                    perm_meta: None,
                 })
                 .await;
                 return;
@@ -621,25 +685,100 @@ impl MsgIdMap {
     }
 }
 
+/// One outstanding permission card: the chat to PATCH, the Feishu message_id
+/// to PATCH by, and the (tool_name, args) needed to register the call in
+/// the session allowlist when the user picks "Allow session".
+#[derive(Debug, Clone)]
+pub struct PermCardEntry {
+    pub key: SessionKey,
+    pub msg_id: String,
+    pub tool_name: String,
+    pub args: Value,
+}
+
 /// Tracks outstanding permission cards by `request_id` so the router can flip
 /// them in place when the user clicks (or mark them expired on a stale click).
-/// Keyed by request_id; the value carries the (chat, msg_id) needed to PATCH.
+/// Keyed by request_id.
 #[derive(Default, Clone)]
 pub struct PermCardMap {
-    inner: Arc<RwLock<HashMap<String, (SessionKey, String)>>>,
+    inner: Arc<RwLock<HashMap<String, PermCardEntry>>>,
 }
 
 impl PermCardMap {
-    pub async fn record(&self, request_id: String, key: SessionKey, msg_id: String) {
-        self.inner.write().await.insert(request_id, (key, msg_id));
+    pub async fn record(
+        &self,
+        request_id: String,
+        key: SessionKey,
+        msg_id: String,
+        tool_name: String,
+        args: Value,
+    ) {
+        self.inner
+            .write()
+            .await
+            .insert(request_id, PermCardEntry { key, msg_id, tool_name, args });
     }
 
     /// Take the entry for a given request_id. The entry is removed on
     /// `take` so a duplicate click finds nothing and is a no-op (Feishu still
     /// shows the resolved card; we don't re-update it).
-    pub async fn take(&self, request_id: &str) -> Option<(SessionKey, String)> {
+    pub async fn take(&self, request_id: &str) -> Option<PermCardEntry> {
         self.inner.write().await.remove(request_id)
     }
+}
+
+/// Per-session tool allowlist. When a user clicks "Allow session" / "Allow
+/// for this chat" on a permission card, the (tool_name, args) signature is
+/// added here. Subsequent `PermissionRequest`s for the same signature in the
+/// same chat are auto-approved without a card.
+///
+/// Signature is `format!("{tool_name}|{args_json}")` where `args_json` is
+/// `serde_json::to_string` of the args value. Exact match — if Claude asks
+/// with slightly different args (e.g. different cwd), it's a different entry.
+#[derive(Default, Clone)]
+pub struct SessionAllowlist {
+    inner: Arc<RwLock<HashMap<SessionKey, std::collections::HashSet<String>>>>,
+}
+
+impl SessionAllowlist {
+    /// Check whether a (tool_name, args) call is allowed for the given chat.
+    /// Exact match on the canonical signature.
+    pub async fn is_allowed(&self, key: &SessionKey, tool_name: &str, args: &Value) -> bool {
+        let sig = tool_signature(tool_name, args);
+        self.inner
+            .read()
+            .await
+            .get(key)
+            .map(|s| s.contains(&sig))
+            .unwrap_or(false)
+    }
+
+    /// Record an "Allow session" approval. Idempotent.
+    pub async fn grant(&self, key: &SessionKey, tool_name: &str, args: &Value) {
+        let sig = tool_signature(tool_name, args);
+        self.inner
+            .write()
+            .await
+            .entry(key.clone())
+            .or_default()
+            .insert(sig);
+    }
+
+    /// Drop the allowlist for a chat (session ended). Called from
+    /// `remove_by_session` and similar lifecycle hooks.
+    pub async fn clear(&self, key: &SessionKey) {
+        self.inner.write().await.remove(key);
+    }
+}
+
+/// Canonical signature for matching tool calls. Uses `serde_json::to_string`
+/// (key order is preserved by the bridge/claude — they're stable sources)
+/// so two identical (tool_name, args) calls hash to the same string.
+pub fn tool_signature(tool_name: &str, args: &Value) -> String {
+    // Compact JSON to keep the set small; null/empty objects both serialize
+    // to "{}" so the signature is consistent.
+    let args_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+    format!("{tool_name}|{args_str}")
 }
 
 #[cfg(test)]
