@@ -389,7 +389,9 @@ async fn continue_after_done_flips_reaction_back_to_working() {
         "回切 reaction WORKING: {o2:?}"
     );
     let o3 = recv(&mut out_rx).await;
-    assert!(matches!(o3, Out::SendAcp { .. }), "继续会话: {o3:?}");
+    assert!(matches!(o3, Out::SendCard { root_id: None, .. }), "per-turn card: {o3:?}");
+    let o4 = recv(&mut out_rx).await;
+    assert!(matches!(o4, Out::SendAcp { .. }), "继续会话: {o4:?}");
     assert_no_more(&mut out_rx).await;
 }
 

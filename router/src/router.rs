@@ -417,7 +417,7 @@ impl RouterHandle {
         }
     }
 
-    async fn on_text(&self, key: SessionKey, text: String, _reply_to: Option<String>) {
+    async fn on_text(&self, key: SessionKey, text: String, reply_to: Option<String>) {
         match parse_command(&text) {
             Command::New => {
                 match self.map.begin_spawn(key.clone()).await {
@@ -439,7 +439,7 @@ impl RouterHandle {
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
-                        self.continue_session(sid, p).await
+                        self.continue_session(sid, p, reply_to, key.clone()).await
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
@@ -572,7 +572,13 @@ impl RouterHandle {
         self.emit(Out::SpawnAcp { key, prompt }).await;
     }
 
-    async fn continue_session(&self, session_id: String, prompt: String) {
+    async fn continue_session(
+        &self,
+        session_id: String,
+        prompt: String,
+        root_id: Option<String>,
+        key: SessionKey,
+    ) {
         // 新 turn 回切（spec §5 回边）：上一 turn 已 settled（DONE/FAILED）时
         // 重置为 WORKING，先刷出回切后的卡再换 reaction，让用户看到会话重新
         // 进入工作状态。
@@ -594,6 +600,31 @@ impl RouterHandle {
             self.flush_card(&session_id).await;
             self.emit_reaction(&session_id, crate::card_state::phase::WORKING).await;
         }
+
+        // Emit per-turn card with root_id so the dispatcher sends a fresh card
+        // that becomes the new streaming target (MsgIdMap flips to this card).
+        // Reset CardState so streaming body accumulates fresh (not appended to
+        // previous turn's body).
+        self.card_states.drop(&session_id).await;
+        self.seed_card(session_id.clone(), prompt.clone()).await;
+        let seed_emoji = phase_visual(crate::card_state::phase::SEED);
+        let card = render_accumulated_card(
+            &prompt,
+            &session_id,
+            seed_emoji,
+            &[],
+            &self.card_cfg.theme_color,
+        );
+        self.emit(Out::SendCard {
+            key,
+            card: serde_json::to_value(&card).unwrap(),
+            msg_id: None,
+            perm_request_id: None,
+            perm_meta: None,
+            root_id,
+        })
+        .await;
+
         self.emit(Out::SendAcp {
             session_id: session_id.clone(),
             cmd: AcpCommand::ContinueSession { session_id, prompt },
