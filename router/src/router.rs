@@ -306,14 +306,14 @@ impl RouterHandle {
 
     pub async fn dispatch(&self, evt: FeishuIn) {
         match evt {
-            FeishuIn::Text { key, text, .. } => self.on_text(key, text).await,
+            FeishuIn::Text { key, text, reply_to } => self.on_text(key, text, reply_to).await,
             FeishuIn::Media {
                 key,
                 files,
                 caption,
             } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
-                self.on_text(key, prompt).await;
+                self.on_text(key, prompt, None).await;
             }
             FeishuIn::ButtonCb { key, action } => self.on_button(key, action).await,
         }
@@ -417,7 +417,7 @@ impl RouterHandle {
         }
     }
 
-    async fn on_text(&self, key: SessionKey, text: String) {
+    async fn on_text(&self, key: SessionKey, text: String, _reply_to: Option<String>) {
         match parse_command(&text) {
             Command::New => {
                 match self.map.begin_spawn(key.clone()).await {
