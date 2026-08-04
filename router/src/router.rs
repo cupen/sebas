@@ -3,7 +3,8 @@ use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
 use feishu::cards::{phase_visual, CardConfig};
 use feishu::cards::{
-    apply_event_to_card, render_accumulated_card, render_dead_session_card, render_permission_card,
+    apply_event_to_card, render_accumulated_card, render_dead_session_card,
+    render_expired_permission_card, render_permission_card, render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use std::collections::HashMap;
@@ -33,6 +34,21 @@ pub enum Out {
         key: SessionKey,
         card: serde_json::Value,
         msg_id: Option<String>,
+        /// When `Some(req_id)`, the dispatcher records the Feishu message_id
+        /// of this card keyed by `req_id` so a later button click can flip
+        /// the card in place (used for permission cards). When `None`, the
+        /// card is fire-and-forget.
+        perm_request_id: Option<String>,
+    },
+    /// Update a previously-sent card by its Feishu `message_id` (not session_id).
+    /// Used for permission-card click feedback: the dispatcher resolved the
+    /// responder or hit a stale request, and we want to flip the card in
+    /// place rather than let Feishu show a stale prompt the user can keep
+    /// clicking. Keyed by message_id so we don't need a per-session map.
+    UpdateCardByMsgId {
+        key: SessionKey,
+        msg_id: String,
+        card: serde_json::Value,
     },
     UpdateCard {
         session_id: String,
@@ -53,6 +69,11 @@ pub struct RouterHandle {
     msgid: MsgIdMap,
     card_states: crate::card_state::CardStateMap,
     card_cfg: CardConfig,
+    /// Tracks the Feishu `message_id` of each outstanding permission card,
+    /// keyed by the card's `request_id`. Used to flip the card in place when
+    /// the user clicks (or to mark it expired on a stale click). Entries are
+    /// removed once resolved so a duplicate click doesn't re-update.
+    perm_cards: PermCardMap,
 }
 
 impl Clone for RouterHandle {
@@ -63,6 +84,7 @@ impl Clone for RouterHandle {
             msgid: self.msgid.clone(),
             card_states: self.card_states.clone(),
             card_cfg: self.card_cfg.clone(),
+            perm_cards: self.perm_cards.clone(),
         }
     }
 }
@@ -92,6 +114,7 @@ impl RouterHandle {
                 msgid: MsgIdMap::default(),
                 card_states: crate::card_state::CardStateMap::default(),
                 card_cfg,
+                perm_cards: PermCardMap::default(),
             },
             rx,
         )
@@ -115,6 +138,26 @@ impl RouterHandle {
     /// pump after the first `send_card` returns its message_id.
     pub async fn record_root_msg_id(&self, session_id: String, msg_id: String) {
         self.msgid.record(session_id, msg_id).await;
+    }
+
+    /// Record the Feishu message_id of a permission card keyed by its
+    /// `request_id`. The dispatcher calls this after `send_card` returns
+    /// the actual message_id; a later button click looks it up via
+    /// `take_perm_card` to PATCH the card in place.
+    pub async fn record_perm_card_msg_id(
+        &self,
+        request_id: String,
+        key: SessionKey,
+        msg_id: String,
+    ) {
+        self.perm_cards.record(request_id, key, msg_id).await;
+    }
+
+    /// Take (and remove) the permission-card entry for a `request_id`.
+    /// Returns the chat and msg_id so the caller can PATCH the card.
+    /// Returns `None` if no live card (already resolved, or never existed).
+    pub async fn take_perm_card(&self, request_id: &str) -> Option<(SessionKey, String)> {
+        self.perm_cards.take(request_id).await
     }
 
     /// Look up the root card message_id for a session (used by `UpdateCard`).
@@ -270,6 +313,12 @@ impl RouterHandle {
                     key,
                     card: serde_json::to_value(&card).unwrap(),
                     msg_id: None,
+                    // Mark this card for in-place update on click. The dispatcher
+                    // records the Feishu message_id keyed by request_id so a
+                    // later button click can flip the card to "已允许/已拒绝"
+                    // or "请求已过期" instead of leaving the user staring at
+                    // a stale prompt they keep re-clicking.
+                    perm_request_id: Some(request_id.clone()),
                 })
                 .await;
             }
@@ -366,6 +415,7 @@ impl RouterHandle {
                 key,
                 card: serde_json::to_value(&card).unwrap(),
                 msg_id: None,
+                perm_request_id: None,
             })
             .await;
             return;
@@ -376,6 +426,39 @@ impl RouterHandle {
             // Fail closed: unknown or missing decision is a deny.
             _ => Decision::Deny,
         };
+        // Optimistically flip the card in place to "已处理" so a follow-up
+        // click on the same card from a misclick doesn't show a stale prompt.
+        // The dispatcher will see no perm-card entry on stale clicks (we
+        // take it below) and render "请求已过期" instead.
+        if let Some(rid) = action.request_id.as_deref() {
+            if let Some((card_key, msg_id)) = self.take_perm_card(rid).await {
+                let label = match decision {
+                    Decision::AllowOnce => "✅ 已允许（仅此一次）",
+                    Decision::AllowSession => "✅ 已允许（本会话）",
+                    Decision::Deny => "❌ 已拒绝",
+                };
+                let card = render_resolved_permission_card(label);
+                self.emit(Out::UpdateCardByMsgId {
+                    key: card_key,
+                    msg_id,
+                    card: serde_json::to_value(&card).unwrap(),
+                })
+                .await;
+            } else {
+                // Stale click — the request was already resolved (by a prior
+                // click) or the card was never tracked. Show expired so the
+                // user knows their click had no effect.
+                let card = render_expired_permission_card();
+                self.emit(Out::SendCard {
+                    key: key.clone(),
+                    card: serde_json::to_value(&card).unwrap(),
+                    msg_id: None,
+                    perm_request_id: None,
+                })
+                .await;
+                return;
+            }
+        }
         match (action.session_id.clone(), action.request_id.clone()) {
             (sid, Some(rid)) => {
                 self.emit(Out::SendAcp {
@@ -535,6 +618,27 @@ impl MsgIdMap {
 
     pub async fn get(&self, session_id: &str) -> Option<String> {
         self.inner.read().await.get(session_id).cloned()
+    }
+}
+
+/// Tracks outstanding permission cards by `request_id` so the router can flip
+/// them in place when the user clicks (or mark them expired on a stale click).
+/// Keyed by request_id; the value carries the (chat, msg_id) needed to PATCH.
+#[derive(Default, Clone)]
+pub struct PermCardMap {
+    inner: Arc<RwLock<HashMap<String, (SessionKey, String)>>>,
+}
+
+impl PermCardMap {
+    pub async fn record(&self, request_id: String, key: SessionKey, msg_id: String) {
+        self.inner.write().await.insert(request_id, (key, msg_id));
+    }
+
+    /// Take the entry for a given request_id. The entry is removed on
+    /// `take` so a duplicate click finds nothing and is a no-op (Feishu still
+    /// shows the resolved card; we don't re-update it).
+    pub async fn take(&self, request_id: &str) -> Option<(SessionKey, String)> {
+        self.inner.write().await.remove(request_id)
     }
 }
 

@@ -9,15 +9,37 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        // 写 stderr：bridge 的 stdout 是 JSON-RPC 通道；写 stdout 会污染帧导致
-        // acp-claude SDK 的 JSON parser 失败。
-        .with_writer(std::io::stderr)
-        .init();
+    // bridge 自己的 stdout 是 JSON-RPC 通道，stderr 默认被 agent-client-protocol SDK
+    // 通过 pipe 接管（sebas 端抓不到）。诊断模式下设 SEBAS_BRIDGE_LOG=/path/to.log
+    // 直接落盘，避开 SDK 的 stdio 管理；未设则走 stderr（默认）。
+    let bridge_log = env::var("SEBAS_BRIDGE_LOG").ok();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    if let Some(path) = bridge_log.as_deref() {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(file)
+                .init();
+        } else {
+            // Fall back to stderr if the file can't be opened; better than silent.
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            // 写 stderr：bridge 的 stdout 是 JSON-RPC 通道；写 stdout 会污染帧导致
+            // acp-claude SDK 的 JSON parser 失败。
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     // Args: <path-to-claude> [claude-args...]
     // In production, sebas's acp-claude spawns this binary with no args; the

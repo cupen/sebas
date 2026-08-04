@@ -265,14 +265,18 @@ impl SessionManager {
             } => {
                 let mut map = m.handle.pending_responders.lock().await;
                 let slot = map.remove(request_id);
-                drop(map);
-                let Some(slot) = slot else {
+                if slot.is_none() {
+                    let known: Vec<String> = map.keys().cloned().collect();
+                    drop(map);
                     tracing::warn!(
                         request_id,
+                        known_keys = ?known,
                         "no pending responder; dropping permission reply"
                     );
                     return Ok(());
-                };
+                }
+                let slot = slot.unwrap();
+                drop(map);
                 let response =
                     RequestPermissionResponse::new(decision_to_outcome(decision.clone()));
                 slot(response)

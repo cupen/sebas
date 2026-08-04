@@ -392,3 +392,122 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     assert!(matches!(o3, Out::SendAcp { .. }), "继续会话: {o3:?}");
     assert_no_more(&mut out_rx).await;
 }
+
+// ---- sebas card-flip: permission card click feedback ----
+
+use feishu::cards::render_resolved_permission_card;
+use feishu::events::{CardAction, FeishuIn, SessionKey};
+
+#[tokio::test]
+async fn permission_card_click_emits_resolved_card_flip() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_perm".into(),
+        thread_id: None,
+    };
+    // Simulate the dispatch_out step that records the Feishu message_id
+    // keyed by request_id (production: after `send_card` returns).
+    router
+        .record_perm_card_msg_id(
+            "req-1".into(),
+            key.clone(),
+            "om_real".into(),
+        )
+        .await;
+    // User clicks Allow once on the card.
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
+            action: CardAction {
+                decision: Some("allow_once".into()),
+                session_id: "sess-1".into(),
+                request_id: Some("req-1".into()),
+                value: serde_json::json!({}),
+            },
+        })
+        .await;
+    // First Out: UpdateCardByMsgId that flips the original card in place.
+    let o1 = recv(&mut out_rx).await;
+    let msg_id = match &o1 {
+        Out::UpdateCardByMsgId { key: k, msg_id, .. } => {
+            assert_eq!(k.chat_id, "oc_perm");
+            assert_eq!(msg_id, "om_real");
+            msg_id.clone()
+        }
+        other => panic!("expected UpdateCardByMsgId, got {other:?}"),
+    };
+    // The card body should carry the resolved label.
+    if let Out::UpdateCardByMsgId { card, .. } = &o1 {
+        let s = serde_json::to_string(card).unwrap();
+        assert!(s.contains("已允许"), "resolved card body: {s}");
+    }
+    // Second Out: SendAcp carrying PermissionReply (the actual decision
+    // forwarded to the bridge).
+    let o2 = recv(&mut out_rx).await;
+    match o2 {
+        Out::SendAcp {
+            cmd: acp_claude::session::AcpCommand::PermissionReply { request_id, decision, .. },
+            ..
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert!(matches!(
+                decision,
+                acp_claude::session::Decision::AllowOnce
+            ));
+        }
+        other => panic!("expected SendAcp, got {other:?}"),
+    }
+    // take_perm_card removed the entry on click — a second click now
+    // hits the stale path and emits a fresh "已过期" card instead of
+    // trying to update a gone message.
+    assert!(router.take_perm_card("req-1").await.is_none());
+    let _ = msg_id; // silence unused if pattern changes
+}
+
+#[tokio::test]
+async fn stale_permission_click_emits_expired_card() {
+    // No record_perm_card_msg_id call — simulates the case where the
+    // request was already resolved (responder consumed) or never tracked.
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_perm".into(),
+        thread_id: None,
+    };
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
+            action: CardAction {
+                decision: Some("allow_once".into()),
+                session_id: "sess-1".into(),
+                request_id: Some("req-stale".into()),
+                value: serde_json::json!({}),
+            },
+        })
+        .await;
+    // Stale click should NOT emit UpdateCardByMsgId (nothing to update
+    // by message_id) and should NOT emit SendAcp (no responder to call).
+    // Instead it emits a fresh SendCard carrying the "已过期" body.
+    let got = loop {
+        let o = recv(&mut out_rx).await;
+        // Drain any react/update noise from unrelated FSM work.
+        if matches!(o, Out::SendCard { .. }) {
+            break o;
+        }
+    };
+    let Out::SendCard { key: k, card, .. } = got else {
+        panic!("expected SendCard for expired");
+    };
+    assert_eq!(k.chat_id, "oc_perm");
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("已过期"), "expired card body: {s}");
+    assert_no_more(&mut out_rx).await;
+}
+
+#[test]
+fn render_resolved_card_includes_label() {
+    // Sanity: the resolved card body echoes whatever the router hands in.
+    let card = render_resolved_permission_card("✅ 已允许（仅此一次）");
+    let v = serde_json::to_value(&card).unwrap();
+    let s = v.to_string();
+    assert!(s.contains("已允许（仅此一次）"), "resolved label: {s}");
+}

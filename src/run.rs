@@ -251,7 +251,12 @@ async fn dispatch_out(
     out: Out,
 ) -> anyhow::Result<()> {
     match out {
-        Out::SendCard { key, card, msg_id } => {
+        Out::SendCard {
+            key,
+            card,
+            msg_id,
+            perm_request_id,
+        } => {
             // The MsgIdMap is keyed by session_id (never chat_id) so that
             // `UpdateCard`/`React`, which only know the session_id, can resolve
             // the message_id. Only record when a session_id is supplied; plain
@@ -261,6 +266,15 @@ async fn dispatch_out(
                 router.record_root_msg_id(session_id, new_id.clone()).await;
                 debug!(message_id = %new_id, "recorded card msg_id");
             }
+            // Permission cards are tracked by request_id so a later button
+            // click can flip them in place (resolved/expired). Recorded
+            // after the send round-trip so we only store real message_ids.
+            if let (false, Some(req_id)) = (new_id.is_empty(), perm_request_id) {
+                router
+                    .record_perm_card_msg_id(req_id.clone(), key.clone(), new_id.clone())
+                    .await;
+                debug!(%req_id, message_id = %new_id, "recorded perm card msg_id");
+            }
         }
         Out::UpdateCard { session_id, card } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
@@ -268,6 +282,17 @@ async fn dispatch_out(
             } else {
                 debug!(?session_id, "no root msg_id recorded; skipping update");
             }
+        }
+        Out::UpdateCardByMsgId { key, msg_id, card } => {
+            // PATCH the card by its Feishu message_id (no session lookup
+            // needed). Used for permission-card click feedback where the
+            // session is still alive but we just want to flip the prompt in
+            // place. Failure is non-fatal: a stale msg_id is a no-op on
+            // Feishu's side.
+            if let Err(e) = feishu.update_card(http, tokens, &msg_id, card).await {
+                warn!(%msg_id, error=%e, "perm card update failed");
+            }
+            let _ = key; // chat context — currently unused; the API only needs msg_id
         }
         Out::React { session_id, emoji } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {

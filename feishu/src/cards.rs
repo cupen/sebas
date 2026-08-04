@@ -243,6 +243,25 @@ pub fn render_dead_session_card() -> Card {
     card
 }
 
+/// In-place replacement for a permission card after the user clicks an
+/// option. `label` is one of "✅ 已允许（仅此一次）" / "✅ 已允许（本会话）" /
+/// "❌ 已拒绝". No buttons — the click is already done.
+pub fn render_resolved_permission_card(label: &str) -> Card {
+    let mut card = Card::new("权限请求", "blue");
+    card.push_text(label);
+    card
+}
+
+/// Card sent on a stale permission click (the request was already
+/// resolved by an earlier click, or the original tool_use never
+/// produced a tracked permission card). Tells the user their click
+/// had no effect without making the bot look broken.
+pub fn render_expired_permission_card() -> Card {
+    let mut card = Card::new("权限请求", "grey");
+    card.push_text("⚠ 请求已过期，该工具调用已被处理或取消。");
+    card
+}
+
 /// Shown when the agent fails to spawn or times out during handshake.
 pub fn render_error_card(message: &str) -> Card {
     let mut card = Card::new("❌ 启动失败", "red");

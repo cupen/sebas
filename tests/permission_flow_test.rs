@@ -120,6 +120,13 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         "permission card missing session_id: {card}"
     );
 
+    // Simulate the dispatch_out step that production performs after
+    // send_card returns: record the Feishu message_id keyed by request_id
+    // so a subsequent click can flip the card in place.
+    router
+        .record_perm_card_msg_id(request_id.clone(), key.clone(), "om_fake".into())
+        .await;
+
     // 2) (Fake) user clicks "Allow once": router maps to Decision::AllowOnce
     //    and emits Out::SendAcp{PermissionReply}. Send it through, then
     //    probe SessionManager to confirm the bridge side actually received
@@ -142,6 +149,10 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
             .expect("Out::SendAcp not received in time")
             .expect("channel closed");
         match got {
+            // Click also emits a card-flip (resolved/expired) before the
+            // downstream SendAcp. Drain those.
+            Out::UpdateCardByMsgId { .. } | Out::SendCard { .. } => continue,
+            Out::UpdateCard { .. } | Out::React { .. } => continue,
             Out::SendAcp {
                 cmd:
                     AcpCommand::PermissionReply {
@@ -151,7 +162,6 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
                     },
                 ..
             } => break (sid, rid, decision),
-            Out::UpdateCard { .. } | Out::React { .. } => continue,
             other => panic!("unexpected Out before SendAcp: {other:?}"),
         }
     };
