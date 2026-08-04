@@ -397,19 +397,24 @@ impl RouterHandle {
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
                 }
-                // Look up the chat key before removal so we can also drop
-                // the session allowlist (per-chat "Allow session" memory).
                 if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
                     self.allowlist.clear(&key).await;
+                    self.map.remove_by_session(session_id.as_str()).await;
+                    self.drop_card(session_id.as_str()).await;
+                } else {
+                    self.drop_card(session_id.as_str()).await;
                 }
-                self.map.remove_by_session(session_id.as_str()).await;
-                self.drop_card(session_id.as_str()).await;
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
                 // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）。
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
+                // Drain queued turn BEFORE the reaction so SendCard + SendAcp appear
+                // before the DONE/FAILED emoji on the previous turn's card.
+                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
+                    self.drain_queue_if_terminal(&key, session_id.as_str()).await;
+                }
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
                 }
@@ -646,6 +651,66 @@ impl RouterHandle {
         self.emit(Out::SendAcp {
             session_id: session_id.clone(),
             cmd: AcpCommand::ContinueSession { session_id, prompt },
+        })
+        .await;
+    }
+
+    /// Drain ONE queued turn if the session is in a terminal state (DONE/FAILED)
+    /// and the queue is non-empty. Resets CardState and emits SendCard + SendAcp
+    /// for the next turn.
+    ///
+    /// Only called for non-terminal settle paths (Finished + streaming-event paths
+    /// that incidentally settled). Terminal errors abandon the queue — the session
+    /// is being torn down and queued turns are dropped alongside.
+    async fn drain_queue_if_terminal(&self, key: &SessionKey, session_id: &str) {
+        use crate::card_state::phase::{DONE, FAILED};
+
+        // Only drain if status is terminal and queue has entries.
+        let Some(emoji) = self.card_states.status_emoji(session_id).await else {
+            return;
+        };
+        if !matches!(emoji.as_str(), DONE | FAILED) {
+            return;
+        }
+        if self.map.queue_len(key).await == 0 {
+            return;
+        }
+
+        // Pop the next turn (FIFO, /btw priority slot already applied at enqueue time).
+        let Some(next) = self.map.pop_next_turn(key).await else {
+            return;
+        };
+
+        // Reset CardState: drop the old turn's state, seed fresh for the new turn.
+        self.card_states.drop(session_id).await;
+        self.seed_card(session_id.to_string(), next.prompt.clone()).await;
+
+        // Emit per-turn card with root_id = next.reply_to (threading via reply_to).
+        let seed_emoji = phase_visual(crate::card_state::phase::SEED);
+        let card = render_accumulated_card(
+            &next.prompt,
+            session_id,
+            seed_emoji,
+            &[],
+            &self.card_cfg.theme_color,
+        );
+        self.emit(Out::SendCard {
+            key: key.clone(),
+            card: serde_json::to_value(&card).unwrap(),
+            msg_id: None,
+            perm_request_id: None,
+            perm_meta: None,
+            root_id: next.reply_to,
+        })
+        .await;
+
+        // Emit ContinueSession for the new turn.
+        self.emit(Out::SendAcp {
+            session_id: session_id.to_string(),
+            cmd: AcpCommand::ContinueSession {
+                session_id: session_id.to_string(),
+                prompt: next.prompt,
+            },
         })
         .await;
     }
