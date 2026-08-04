@@ -579,9 +579,27 @@ impl RouterHandle {
         root_id: Option<String>,
         key: SessionKey,
     ) {
-        // 新 turn 回切（spec §5 回边）：上一 turn 已 settled（DONE/FAILED）时
-        // 重置为 WORKING，先刷出回切后的卡再换 reaction，让用户看到会话重新
-        // 进入工作状态。
+        use crate::card_state::phase::WORKING;
+
+        // In-flight check: if the session's card is still streaming (WORKING),
+        // don't reset/don't POST a new card/don't SendAcp. Instead enqueue this
+        // turn and emit a ⏳ reaction on the in-flight card to signal back-pressure.
+        let in_flight = matches!(
+            self.card_states.status_emoji(&session_id).await.as_deref(),
+            Some(WORKING)
+        );
+        if in_flight {
+            self.map.enqueue_turn(&key, crate::state::QueuedTurn {
+                prompt,
+                reply_to: root_id,
+                priority: false,
+            }).await;
+            self.emit_reaction(&session_id, "⏳").await;
+            return;
+        }
+
+        // Settled path: DONE/FAILED -> flip to WORKING, flush, react, then emit
+        // per-turn card + SendAcp.
         let flipped = self
             .card_states
             .apply(&session_id, |st| {
@@ -589,7 +607,7 @@ impl RouterHandle {
                     st.status_emoji.as_str(),
                     crate::card_state::phase::DONE | crate::card_state::phase::FAILED
                 ) {
-                    st.status_emoji = crate::card_state::phase::WORKING.into();
+                    st.status_emoji = WORKING.into();
                     true
                 } else {
                     false
@@ -598,7 +616,7 @@ impl RouterHandle {
             .await;
         if flipped {
             self.flush_card(&session_id).await;
-            self.emit_reaction(&session_id, crate::card_state::phase::WORKING).await;
+            self.emit_reaction(&session_id, WORKING).await;
         }
 
         // Emit per-turn card with root_id so the dispatcher sends a fresh card

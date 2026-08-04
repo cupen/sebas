@@ -78,4 +78,10 @@ impl CardStateMap {
     pub async fn drop(&self, session_id: &str) {
         self.inner.write().await.remove(session_id);
     }
+
+    /// Returns the current status emoji for the given session, or None if
+    /// the session has no CardState entry.
+    pub async fn status_emoji(&self, session_id: &str) -> Option<String> {
+        self.inner.read().await.get(session_id).map(|st| st.status_emoji.clone())
+    }
 }
