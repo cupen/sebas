@@ -143,10 +143,22 @@ async fn restored_mapping_falls_back_to_fresh_session_when_unloadable() {
             reply_to: None,
         })
         .await;
-    let Out::SendAcp { session_id, .. } = first_out(&mut out_rx).await else {
-        panic!("expected SendAcp (ContinueSession)")
-    };
-    assert_eq!(session_id, "sess-1");
+    // After Task 5, continue_session emits [SendCard, SendAcp] for a fresh
+    // continuation (no flip needed since CardState was lazy-seeded with SEED,
+    // not DONE/FAILED). Drain any UpdateCard/React/SendCard noise before
+    // asserting the SendAcp.
+    loop {
+        match tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await {
+            Ok(Some(Out::SendAcp { session_id, .. })) => {
+                assert_eq!(session_id, "sess-1");
+                break;
+            }
+            Ok(Some(Out::UpdateCard { .. } | Out::React { .. } | Out::SendCard { .. })) => {
+                // expected intermediate messages — keep draining
+            }
+            _ => panic!("expected SendAcp (ContinueSession) after draining intermediates"),
+        }
+    }
 
     drop(rx);
     mgr.kill(&sid).await;

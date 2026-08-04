@@ -3,6 +3,7 @@
 //! Task 8: drain queue when in-flight turn settles
 //! Task 8 (fix): terminal error abandons queued turns (do NOT drain on terminal Error)
 //! Task 9: /btw command — priority slot in turn queue
+//! Task 11: gap-filling — reply_to None is fire-and-forget; explicit 3-turn sequential
 
 use std::time::Duration;
 
@@ -194,5 +195,162 @@ async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
     match second {
         Out::SendAcp { .. } => {}
         other => panic!("expected SendAcp, got {other:?}"),
+    }
+}
+
+/// Task 11: verify that a message with no reply_to (reply_to: None) emits a
+/// SendCard with root_id: None — fire-and-forget per-turn card with no threading.
+#[tokio::test]
+async fn missing_reply_to_is_fire_and_forget_root_id_none() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey { chat_id: "oc".into(), thread_id: None };
+    let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
+    router.seed_card("s1".into(), "first".into()).await;
+
+    // Finish the first turn so the session is DONE.
+    let _ = router.apply_event("s1", &AcpEvent::Finished { session_id: "s1".into() }).await;
+
+    // User sends a message with NO reply_to (e.g. fresh message, no quote).
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(),
+        text: "hello".into(),
+        reply_to: None, // <-- missing reply_to
+    }).await;
+
+    // Drain DONE->WORKING flip (UpdateCard + React).
+    let _ = out_rx.recv().await; // UpdateCard
+    let _ = out_rx.recv().await; // React
+
+    // The per-turn SendCard must have root_id: None (fire-and-forget).
+    let first = out_rx.recv().await.unwrap();
+    let second = out_rx.recv().await.unwrap();
+    match (&first, &second) {
+        (Out::SendCard { root_id: None, .. }, Out::SendAcp { .. }) => {}
+        _ => panic!("expected SendCard(root_id=None) then SendAcp, got {first:?} then {second:?}"),
+    }
+}
+
+/// Task 11: three sequential turns — each dispatch yields a distinct root_id.
+#[tokio::test]
+async fn three_turns_three_distinct_root_ids() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey { chat_id: "oc".into(), thread_id: None };
+    let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
+    router.seed_card("s1".into(), "first".into()).await;
+
+    // ── Turn 1 ──────────────────────────────────────────────────────────────
+    // Finish the seeded turn so session is DONE.
+    let _ = router.apply_event("s1", &AcpEvent::Finished { session_id: "s1".into() }).await;
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(),
+        text: "turn 1".into(),
+        reply_to: Some("om1".into()),
+    }).await;
+    let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
+    let _ = out_rx.recv().await; // React
+    let (sc1, acp1) = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
+    let root1 = match (&sc1, &acp1) {
+        (Out::SendCard { root_id: Some(r), .. }, Out::SendAcp { .. }) => r.clone(),
+        _ => panic!("turn 1: expected SendCard(Some) + SendAcp"),
+    };
+    assert_eq!(root1, "om1");
+
+    // ── Turn 2 ──────────────────────────────────────────────────────────────
+    router.apply_event_to_out("s1".into(), &AcpEvent::Finished { session_id: "s1".into() }).await;
+    let _ = out_rx.recv().await; // UpdateCard
+    let _ = out_rx.recv().await; // React
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(),
+        text: "turn 2".into(),
+        reply_to: Some("om2".into()),
+    }).await;
+    let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
+    let _ = out_rx.recv().await; // React
+    let (sc2, acp2) = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
+    let root2 = match (&sc2, &acp2) {
+        (Out::SendCard { root_id: Some(r), .. }, Out::SendAcp { .. }) => r.clone(),
+        _ => panic!("turn 2: expected SendCard(Some) + SendAcp"),
+    };
+    assert_eq!(root2, "om2");
+    assert_ne!(root2, root1, "turn 2 root_id must differ from turn 1");
+
+    // ── Turn 3 ──────────────────────────────────────────────────────────────
+    router.apply_event_to_out("s1".into(), &AcpEvent::Finished { session_id: "s1".into() }).await;
+    let _ = out_rx.recv().await; // UpdateCard
+    let _ = out_rx.recv().await; // React
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(),
+        text: "turn 3".into(),
+        reply_to: Some("om3".into()),
+    }).await;
+    let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
+    let _ = out_rx.recv().await; // React
+    let (sc3, acp3) = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
+    let root3 = match (&sc3, &acp3) {
+        (Out::SendCard { root_id: Some(r), .. }, Out::SendAcp { .. }) => r.clone(),
+        _ => panic!("turn 3: expected SendCard(Some) + SendAcp"),
+    };
+    assert_eq!(root3, "om3");
+    assert_ne!(root3, root2, "turn 3 root_id must differ from turn 2");
+    assert_ne!(root3, root1, "turn 3 root_id must differ from turn 1");
+}
+
+/// Task 11 (reviewer gap-fill): after a 2nd turn's SendCard is emitted, the
+/// MsgIdMap flips to the new msg_id. A streaming event after that must produce
+/// an UpdateCard that the dispatcher will resolve via MsgIdMap -> msg_id_2
+/// (the new turn's card), not msg_id_1 (the previous turn's card, which stays frozen).
+#[tokio::test]
+async fn streaming_update_after_second_turn_targets_current_card() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey { chat_id: "oc".into(), thread_id: None };
+    let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
+    router.seed_card("s1".into(), "first".into()).await;
+
+    // Settle turn 1.
+    router.apply_event_to_out("s1".into(), &AcpEvent::Finished { session_id: "s1".into() }).await;
+    // Drain 2 (UpdateCard + React from the settled state)
+    let _ = out_rx.recv().await;
+    let _ = out_rx.recv().await;
+
+    // Manually record msg_id for the first turn (simulating dispatcher having POSTed the seed card).
+    router.record_root_msg_id("s1".into(), "om_msg_1".into()).await;
+
+    // User sends turn 2.
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(),
+        text: "follow-up".into(),
+        reply_to: Some("om_user_2".into()),
+    }).await;
+    // Drain 4 messages from turn 2: UpdateCard (DONE→WORKING flip) + React + SendCard + SendAcp
+    let _ = out_rx.recv().await;
+    let _ = out_rx.recv().await;
+    let send_card_msg = out_rx.recv().await.unwrap();
+    let _ = out_rx.recv().await;
+    // Confirm turn 2 emitted SendCard with root_id=om_user_2.
+    match send_card_msg {
+        Out::SendCard { root_id: Some(rid), .. } => assert_eq!(rid, "om_user_2"),
+        other => panic!("expected SendCard(root_id=om_user_2), got {other:?}"),
+    }
+
+    // Simulate dispatcher POSTing turn 2's card and recording its msg_id (msg_id_2).
+    router.record_root_msg_id("s1".into(), "om_msg_2".into()).await;
+
+    // Streaming event for turn 2 (TextDelta).
+    router.apply_event_to_out("s1".into(), &AcpEvent::TextDelta {
+        session_id: "s1".into(),
+        delta: "streaming chunk".into(),
+    }).await;
+    // Drain 2: UpdateCard (with the new body content) + React if emoji changed.
+    let update_msg = out_rx.recv().await.unwrap();
+    match update_msg {
+        Out::UpdateCard { session_id, .. } => {
+            // The router emits by session_id; the dispatcher resolves via
+            // MsgIdMap (which now points to msg_id_2). Assert the MsgIdMap
+            // is indeed pointing at msg_id_2.
+            assert_eq!(router.root_msg_id("s1").await.as_deref(), Some("om_msg_2"),
+                "MsgIdMap should point at the most recent (2nd turn) msg_id");
+            assert_eq!(session_id, "s1");
+        }
+        other => panic!("expected UpdateCard, got {other:?}"),
     }
 }
