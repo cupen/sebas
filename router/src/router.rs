@@ -45,6 +45,10 @@ pub enum Out {
         /// call in the session allowlist when the user picks "Allow session".
         /// Ignored for non-permission cards.
         perm_meta: Option<(String, serde_json::Value)>,
+        /// Feishu message_id of the root card for this session. When `Some`,
+        /// the card is a reply-to threaded card. `None` for fire-and-forget
+        /// cards (permission prompts, help, dead-session, expired).
+        root_id: Option<String>,
     },
     /// Update a previously-sent card by its Feishu `message_id` (not session_id).
     /// Used for permission-card click feedback: the dispatcher resolved the
@@ -379,6 +383,8 @@ impl RouterHandle {
                     // register the (tool, args) signature in the session
                     // allowlist when the user picks "Allow session".
                     perm_meta: Some((tool_name.clone(), args.clone())),
+                    // Permission cards are fire-and-forget (no threading).
+                    root_id: None,
                 })
                 .await;
             }
@@ -482,6 +488,8 @@ impl RouterHandle {
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
+                // Dead-session card is fire-and-forget (no thread reply).
+                root_id: None,
             })
             .await;
             return;
@@ -532,6 +540,8 @@ impl RouterHandle {
                     msg_id: None,
                     perm_request_id: None,
                     perm_meta: None,
+                    // Expired permission card is fire-and-forget.
+                    root_id: None,
                 })
                 .await;
                 return;
