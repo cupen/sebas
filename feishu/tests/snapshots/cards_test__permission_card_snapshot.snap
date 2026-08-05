@@ -21,31 +21,46 @@ body:
         text_size: notation
         text_color: grey
     - tag: actions
-      actions:
-        - text:
+      elements:
+        - tag: button
+          text:
             tag: plain_text
             content: Allow once
           type: primary
+          value:
+            session_id: s1
+            request_id: r1
+            decision: allow_once
           behaviors:
             - type: callback
               value:
                 session_id: s1
                 request_id: r1
                 decision: allow_once
-        - text:
+        - tag: button
+          text:
             tag: plain_text
             content: Allow session
           type: default
+          value:
+            session_id: s1
+            request_id: r1
+            decision: allow_session
           behaviors:
             - type: callback
               value:
                 session_id: s1
                 request_id: r1
                 decision: allow_session
-        - text:
+        - tag: button
+          text:
             tag: plain_text
             content: Deny
           type: danger
+          value:
+            session_id: s1
+            request_id: r1
+            decision: deny
           behaviors:
             - type: callback
               value:

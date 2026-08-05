@@ -362,7 +362,8 @@ fn permission_card_uses_actions_block_for_buttons() {
     // Feishu silently ignores the button (no click callback registered).
     let s = serde_json::to_string(&card).unwrap();
     assert!(s.contains("\"tag\":\"actions\""), "actions tag must be present");
-    assert!(s.contains("\"actions\":["), "actions array must be present");
+    assert!(s.contains("\"elements\":["), "elements field must be present (Feishu uses 'elements' not 'actions')");
+    assert!(s.contains("\"tag\":\"button\""), "each button needs explicit tag:button");
     assert!(s.contains("\"behaviors\":["), "each button must have behaviors array");
     assert!(s.contains("\"type\":\"callback\""), "behavior type must be callback");
     // 3 decisions.
