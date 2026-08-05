@@ -1,6 +1,8 @@
 use feishu::events::SessionKey;
 use router::state::Mapping;
+use router::state::QueuedTurn;
 use router::state::SessionMap;
+use router::MsgIdMap;
 
 #[tokio::test]
 async fn insert_and_lookup() {
@@ -120,4 +122,39 @@ async fn overflow_rejects() {
         )
         .await;
     assert!(r.is_err());
+}
+
+#[tokio::test]
+async fn msgid_map_record_overwrites_previous_entry() {
+    let m = MsgIdMap::default();
+    m.record("s1".into(), "om_first".into()).await;
+    m.record("s1".into(), "om_second".into()).await;
+    assert_eq!(m.get("s1").await.as_deref(), Some("om_second"));
+}
+
+#[tokio::test]
+async fn queue_fifo_by_default_priority_jumps_front() {
+    let m = SessionMap::new();
+    let k = SessionKey { chat_id: "oc".into(), thread_id: None };
+    m.insert(k.clone(), Mapping::active("s1")).await;
+    m.enqueue_turn(&k, QueuedTurn { prompt: "first".into(), reply_to: None, priority: false }).await;
+    m.enqueue_turn(&k, QueuedTurn { prompt: "second".into(), reply_to: None, priority: false }).await;
+    m.enqueue_turn(&k, QueuedTurn { prompt: "btw".into(), reply_to: None, priority: true }).await;
+    assert_eq!(m.queue_len(&k).await, 3);
+    assert_eq!(m.pop_next_turn(&k).await.unwrap().prompt, "btw");  // priority front
+    assert_eq!(m.pop_next_turn(&k).await.unwrap().prompt, "first");
+    assert_eq!(m.pop_next_turn(&k).await.unwrap().prompt, "second");
+    assert!(m.pop_next_turn(&k).await.is_none());
+}
+
+#[tokio::test]
+async fn pop_next_turn_cleans_up_empty_entry() {
+    let m = SessionMap::new();
+    let k = SessionKey { chat_id: "oc".into(), thread_id: None };
+    m.insert(k.clone(), Mapping::active("s1")).await;
+    m.enqueue_turn(&k, QueuedTurn { prompt: "one".into(), reply_to: None, priority: false }).await;
+    assert_eq!(m.queue_len(&k).await, 1);
+    let popped = m.pop_next_turn(&k).await;
+    assert!(popped.is_some());
+    assert_eq!(m.queue_len(&k).await, 0);
 }

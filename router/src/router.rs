@@ -45,6 +45,10 @@ pub enum Out {
         /// call in the session allowlist when the user picks "Allow session".
         /// Ignored for non-permission cards.
         perm_meta: Option<(String, serde_json::Value)>,
+        /// Feishu message_id of the root card for this session. When `Some`,
+        /// the card is a reply-to threaded card. `None` for fire-and-forget
+        /// cards (permission prompts, help, dead-session, expired).
+        root_id: Option<String>,
     },
     /// Update a previously-sent card by its Feishu `message_id` (not session_id).
     /// Used for permission-card click feedback: the dispatcher resolved the
@@ -302,14 +306,14 @@ impl RouterHandle {
 
     pub async fn dispatch(&self, evt: FeishuIn) {
         match evt {
-            FeishuIn::Text { key, text, .. } => self.on_text(key, text).await,
+            FeishuIn::Text { key, text, reply_to } => self.on_text(key, text, reply_to).await,
             FeishuIn::Media {
                 key,
                 files,
                 caption,
             } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
-                self.on_text(key, prompt).await;
+                self.on_text(key, prompt, None).await;
             }
             FeishuIn::ButtonCb { key, action } => self.on_button(key, action).await,
         }
@@ -379,6 +383,8 @@ impl RouterHandle {
                     // register the (tool, args) signature in the session
                     // allowlist when the user picks "Allow session".
                     perm_meta: Some((tool_name.clone(), args.clone())),
+                    // Permission cards are fire-and-forget (no threading).
+                    root_id: None,
                 })
                 .await;
             }
@@ -391,27 +397,34 @@ impl RouterHandle {
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
                 }
-                // Look up the chat key before removal so we can also drop
-                // the session allowlist (per-chat "Allow session" memory).
                 if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
                     self.allowlist.clear(&key).await;
+                    self.map.remove_by_session(session_id.as_str()).await;
+                    self.drop_card(session_id.as_str()).await;
+                } else {
+                    self.drop_card(session_id.as_str()).await;
                 }
-                self.map.remove_by_session(session_id.as_str()).await;
-                self.drop_card(session_id.as_str()).await;
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
                 // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）。
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
+                // Emit the terminal reaction BEFORE draining: once the drained
+                // turn's SendCard is dispatched, MsgIdMap points at the NEW
+                // card, so a later React would land the DONE/FAILED emoji on
+                // the wrong card.
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
+                }
+                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
+                    self.drain_queue_if_terminal(&key, session_id.as_str()).await;
                 }
             }
         }
     }
 
-    async fn on_text(&self, key: SessionKey, text: String) {
+    async fn on_text(&self, key: SessionKey, text: String, reply_to: Option<String>) {
         match parse_command(&text) {
             Command::New => {
                 match self.map.begin_spawn(key.clone()).await {
@@ -433,7 +446,7 @@ impl RouterHandle {
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
-                        self.continue_session(sid, p).await
+                        self.continue_session(sid, p, reply_to, key.clone(), false).await
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
@@ -442,6 +455,28 @@ impl RouterHandle {
                             key,
                             session_id: old_sid,
                             prompt: p,
+                        })
+                        .await;
+                    }
+                    Ok(crate::state::TextRoute::Enqueued) => {}
+                    Err(e) => {
+                        tracing::warn!(?e, "route_text failed");
+                        self.emit(Out::HelpText { key }).await;
+                    }
+                }
+            }
+            Command::Btw(text) => {
+                // /btw: same routing as PassThrough, but priority=true so it jumps the queue.
+                match self.map.route_text(key.clone(), text.clone()).await {
+                    Ok(crate::state::TextRoute::Continue(sid)) => {
+                        self.continue_session(sid, text, reply_to, key.clone(), true).await
+                    }
+                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, text).await,
+                    Ok(crate::state::TextRoute::Resume(old_sid)) => {
+                        self.emit(Out::SpawnResume {
+                            key,
+                            session_id: old_sid,
+                            prompt: text,
                         })
                         .await;
                     }
@@ -482,6 +517,8 @@ impl RouterHandle {
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
+                // Permission cards are fire-and-forget (no threading).
+                root_id: None,
             })
             .await;
             return;
@@ -532,6 +569,8 @@ impl RouterHandle {
                     msg_id: None,
                     perm_request_id: None,
                     perm_meta: None,
+                    // Expired permission card is fire-and-forget.
+                    root_id: None,
                 })
                 .await;
                 return;
@@ -562,10 +601,35 @@ impl RouterHandle {
         self.emit(Out::SpawnAcp { key, prompt }).await;
     }
 
-    async fn continue_session(&self, session_id: String, prompt: String) {
-        // 新 turn 回切（spec §5 回边）：上一 turn 已 settled（DONE/FAILED）时
-        // 重置为 WORKING，先刷出回切后的卡再换 reaction，让用户看到会话重新
-        // 进入工作状态。
+    async fn continue_session(
+        &self,
+        session_id: String,
+        prompt: String,
+        root_id: Option<String>,
+        key: SessionKey,
+        priority: bool,
+    ) {
+        use crate::card_state::phase::WORKING;
+
+        // In-flight check: if the session's card is still streaming (WORKING),
+        // don't reset/don't POST a new card/don't SendAcp. Instead enqueue this
+        // turn and emit a ⏳ reaction on the in-flight card to signal back-pressure.
+        let in_flight = matches!(
+            self.card_states.status_emoji(&session_id).await.as_deref(),
+            Some(WORKING)
+        );
+        if in_flight {
+            self.map.enqueue_turn(&key, crate::state::QueuedTurn {
+                prompt,
+                reply_to: root_id,
+                priority,
+            }).await;
+            self.emit_reaction(&session_id, "⏳").await;
+            return;
+        }
+
+        // Settled path: DONE/FAILED -> flip to WORKING, flush, react, then emit
+        // per-turn card + SendAcp.
         let flipped = self
             .card_states
             .apply(&session_id, |st| {
@@ -573,7 +637,7 @@ impl RouterHandle {
                     st.status_emoji.as_str(),
                     crate::card_state::phase::DONE | crate::card_state::phase::FAILED
                 ) {
-                    st.status_emoji = crate::card_state::phase::WORKING.into();
+                    st.status_emoji = WORKING.into();
                     true
                 } else {
                     false
@@ -582,11 +646,100 @@ impl RouterHandle {
             .await;
         if flipped {
             self.flush_card(&session_id).await;
-            self.emit_reaction(&session_id, crate::card_state::phase::WORKING).await;
+            self.emit_reaction(&session_id, WORKING).await;
         }
+
+        // Emit per-turn card with root_id so the dispatcher sends a fresh card
+        // that becomes the new streaming target (MsgIdMap flips to this card).
+        // Reset CardState so streaming body accumulates fresh (not appended to
+        // previous turn's body).
+        self.card_states.drop(&session_id).await;
+        self.seed_card(session_id.clone(), prompt.clone()).await;
+        let seed_emoji = phase_visual(crate::card_state::phase::SEED);
+        let card = render_accumulated_card(
+            &prompt,
+            &session_id,
+            seed_emoji,
+            &[],
+            &self.card_cfg.theme_color,
+        );
+        self.emit(Out::SendCard {
+            key,
+            card: serde_json::to_value(&card).unwrap(),
+            // Record the new card under the session so streaming UpdateCards
+            // resolve to THIS turn's card (previous turn stays frozen).
+            msg_id: Some(session_id.clone()),
+            perm_request_id: None,
+            perm_meta: None,
+            root_id,
+        })
+        .await;
+
         self.emit(Out::SendAcp {
             session_id: session_id.clone(),
             cmd: AcpCommand::ContinueSession { session_id, prompt },
+        })
+        .await;
+    }
+
+    /// Drain ONE queued turn if the session is in a terminal state (DONE/FAILED)
+    /// and the queue is non-empty. Resets CardState and emits SendCard + SendAcp
+    /// for the next turn.
+    ///
+    /// Only called for non-terminal settle paths (Finished + streaming-event paths
+    /// that incidentally settled). Terminal errors abandon the queue — the session
+    /// is being torn down and queued turns are dropped alongside.
+    async fn drain_queue_if_terminal(&self, key: &SessionKey, session_id: &str) {
+        use crate::card_state::phase::{DONE, FAILED};
+
+        // Only drain if status is terminal and queue has entries.
+        let Some(emoji) = self.card_states.status_emoji(session_id).await else {
+            return;
+        };
+        if !matches!(emoji.as_str(), DONE | FAILED) {
+            return;
+        }
+        if self.map.queue_len(key).await == 0 {
+            return;
+        }
+
+        // Pop the next turn (FIFO, /btw priority slot already applied at enqueue time).
+        let Some(next) = self.map.pop_next_turn(key).await else {
+            return;
+        };
+
+        // Reset CardState: drop the old turn's state, seed fresh for the new turn.
+        self.card_states.drop(session_id).await;
+        self.seed_card(session_id.to_string(), next.prompt.clone()).await;
+
+        // Emit per-turn card with root_id = next.reply_to (threading via reply_to).
+        let seed_emoji = phase_visual(crate::card_state::phase::SEED);
+        let card = render_accumulated_card(
+            &next.prompt,
+            session_id,
+            seed_emoji,
+            &[],
+            &self.card_cfg.theme_color,
+        );
+        self.emit(Out::SendCard {
+            key: key.clone(),
+            card: serde_json::to_value(&card).unwrap(),
+            // Record the new card under the session so streaming UpdateCards
+            // resolve to THIS turn's card (previous turn stays frozen).
+            msg_id: Some(session_id.to_string()),
+            perm_request_id: None,
+            perm_meta: None,
+            root_id: next.reply_to,
+        })
+        .await;
+
+        // Emit ContinueSession for the new turn.
+        self.emit(Out::SendAcp {
+            session_id: session_id.to_string(),
+            cmd: AcpCommand::ContinueSession {
+                session_id: session_id.to_string(),
+                prompt: next.prompt,
+            },
         })
         .await;
     }
@@ -690,6 +843,11 @@ pub struct MsgIdMap {
 }
 
 impl MsgIdMap {
+    /// Record the message_id of the **most recent** per-turn card for a session.
+    /// Called by the dispatcher after each `send_card` returns. Streaming
+    /// `UpdateCard`s resolve through `get(session_id)`, so each new turn's
+    /// card "takes over" as the PATCH target — earlier turns stay frozen
+    /// at their final state. See `docs/superpowers/plans/2026-08-04-per-turn-reply-quote.md`.
     pub async fn record(&self, session_id: String, msg_id: String) {
         self.inner.write().await.insert(session_id, msg_id);
     }

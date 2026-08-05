@@ -389,7 +389,9 @@ async fn continue_after_done_flips_reaction_back_to_working() {
         "回切 reaction WORKING: {o2:?}"
     );
     let o3 = recv(&mut out_rx).await;
-    assert!(matches!(o3, Out::SendAcp { .. }), "继续会话: {o3:?}");
+    assert!(matches!(o3, Out::SendCard { root_id: None, .. }), "per-turn card: {o3:?}");
+    let o4 = recv(&mut out_rx).await;
+    assert!(matches!(o4, Out::SendAcp { .. }), "继续会话: {o4:?}");
     assert_no_more(&mut out_rx).await;
 }
 
@@ -742,6 +744,49 @@ async fn permission_request_after_grant_auto_approves_without_card() {
             .is_err(),
         "auto-approve should not render a card"
     );
+}
+
+// ---- sebas-per-turn: Out::SendCard carries root_id (Task 2) ----
+
+#[test]
+fn out_send_card_carries_root_id() {
+    let out = Out::SendCard {
+        key: feishu::events::SessionKey {
+            chat_id: "oc_test".into(),
+            thread_id: None,
+        },
+        card: serde_json::json!({"type": "card"}),
+        msg_id: None,
+        perm_request_id: None,
+        perm_meta: None,
+        root_id: Some("om_user_msg".into()),
+    };
+    let s = format!("{:?}", out);
+    assert!(
+        s.contains("root_id"),
+        "Debug output should contain root_id: {s}"
+    );
+    assert!(
+        s.contains("om_user_msg"),
+        "Debug output should contain the root_id value: {s}"
+    );
+}
+
+#[test]
+fn out_send_card_root_id_none_round_trips() {
+    let out = Out::SendCard {
+        key: feishu::events::SessionKey {
+            chat_id: "oc_test".into(),
+            thread_id: None,
+        },
+        card: serde_json::json!({"type": "card"}),
+        msg_id: None,
+        perm_request_id: None,
+        perm_meta: None,
+        root_id: None,
+    };
+    let s = format!("{:?}", out);
+    assert!(s.contains("root_id"), "Debug output should contain root_id: {s}");
 }
 
 #[tokio::test]

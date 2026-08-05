@@ -55,6 +55,16 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
             reply_to: None,
         })
         .await;
+    // Per-turn flow: a fresh card is posted first, then the prompt is
+    // forwarded to the session.
+    let third_card = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(third_card, Out::SendCard { .. }),
+        "expected per-turn SendCard, got {third_card:?}"
+    );
     let third = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
         .unwrap()
