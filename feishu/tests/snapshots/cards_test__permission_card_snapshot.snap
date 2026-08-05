@@ -12,42 +12,58 @@ body:
   elements:
     - tag: markdown
       content: "**Bash** 想要执行："
+    - tag: markdown
+      content: "```json\n{\n  \"cmd\": \"rm -rf\"\n}\n```"
     - tag: div
       text:
         tag: plain_text
-        content: "{\n  \"cmd\": \"rm -rf\"\n}"
+        content: Allow once = 这一次 · Allow session = 本会话同签名全部 · Deny = 拒绝
         text_size: notation
         text_color: grey
-    - tag: button
-      text:
-        tag: plain_text
-        content: Allow once
-      type: primary
-      behaviors:
-        - type: callback
+    - tag: action
+      actions:
+        - tag: button
+          text:
+            tag: plain_text
+            content: Allow once
+          type: primary
           value:
             session_id: s1
             request_id: r1
             decision: allow_once
-    - tag: button
-      text:
-        tag: plain_text
-        content: Allow session
-      type: default
-      behaviors:
-        - type: callback
+          behaviors:
+            - type: callback
+              value:
+                session_id: s1
+                request_id: r1
+                decision: allow_once
+        - tag: button
+          text:
+            tag: plain_text
+            content: Allow session
+          type: default
           value:
             session_id: s1
             request_id: r1
             decision: allow_session
-    - tag: button
-      text:
-        tag: plain_text
-        content: Deny
-      type: danger
-      behaviors:
-        - type: callback
+          behaviors:
+            - type: callback
+              value:
+                session_id: s1
+                request_id: r1
+                decision: allow_session
+        - tag: button
+          text:
+            tag: plain_text
+            content: Deny
+          type: danger
           value:
             session_id: s1
             request_id: r1
             decision: deny
+          behaviors:
+            - type: callback
+              value:
+                session_id: s1
+                request_id: r1
+                decision: deny
