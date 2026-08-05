@@ -335,6 +335,12 @@ async fn insert_mapping_marks_alive_and_routes() {
             reply_to: None,
         })
         .await;
+    // Per-turn flow: a fresh card is posted first, then the prompt is
+    // forwarded to the session.
+    match next_out(&mut out_rx).await {
+        Out::SendCard { .. } => {}
+        other => panic!("expected per-turn SendCard, got {other:?}"),
+    }
     match next_out(&mut out_rx).await {
         Out::SendAcp { session_id, .. } => assert_eq!(session_id, "s7"),
         other => panic!("expected SendAcp, got {other:?}"),
