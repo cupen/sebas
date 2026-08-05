@@ -186,7 +186,13 @@ impl Serialize for CardElement {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         match self {
-            CardElement::Hr => ser.serialize_struct("CardElement", 0)?.end(),
+              CardElement::Hr => {
+                  // Feishu requires the tag on structural elements; without it
+                  // the card schema is invalid and the API rejects the card.
+                  let mut s = ser.serialize_struct("CardElement", 1)?;
+                  s.serialize_field("tag", "hr")?;
+                  s.end()
+              }
             CardElement::Markdown { content } => {
                 let mut s = ser.serialize_struct("CardElement", 2)?;
                 s.serialize_field("tag", "markdown")?;
