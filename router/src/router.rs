@@ -410,13 +410,15 @@ impl RouterHandle {
                 // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）。
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
-                // Drain queued turn BEFORE the reaction so SendCard + SendAcp appear
-                // before the DONE/FAILED emoji on the previous turn's card.
-                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
-                    self.drain_queue_if_terminal(&key, session_id.as_str()).await;
-                }
+                // Emit the terminal reaction BEFORE draining: once the drained
+                // turn's SendCard is dispatched, MsgIdMap points at the NEW
+                // card, so a later React would land the DONE/FAILED emoji on
+                // the wrong card.
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
+                }
+                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
+                    self.drain_queue_if_terminal(&key, session_id.as_str()).await;
                 }
             }
         }
@@ -664,7 +666,9 @@ impl RouterHandle {
         self.emit(Out::SendCard {
             key,
             card: serde_json::to_value(&card).unwrap(),
-            msg_id: None,
+            // Record the new card under the session so streaming UpdateCards
+            // resolve to THIS turn's card (previous turn stays frozen).
+            msg_id: Some(session_id.clone()),
             perm_request_id: None,
             perm_meta: None,
             root_id,
@@ -720,7 +724,9 @@ impl RouterHandle {
         self.emit(Out::SendCard {
             key: key.clone(),
             card: serde_json::to_value(&card).unwrap(),
-            msg_id: None,
+            // Record the new card under the session so streaming UpdateCards
+            // resolve to THIS turn's card (previous turn stays frozen).
+            msg_id: Some(session_id.to_string()),
             perm_request_id: None,
             perm_meta: None,
             root_id: next.reply_to,

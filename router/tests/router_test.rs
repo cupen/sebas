@@ -53,6 +53,16 @@ async fn existing_session_dispatches_continue() {
             .await;
     });
 
+    // Per-turn flow: a fresh card is posted first, then the prompt is
+    // forwarded to the session.
+    let card = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(card, Out::SendCard { .. }),
+        "expected per-turn SendCard, got {card:?}"
+    );
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
         .unwrap()

@@ -39,10 +39,55 @@ async fn continue_session_emits_per_turn_send_card_with_root_id() {
     let first = out_rx.recv().await.unwrap();
     let second = out_rx.recv().await.unwrap();
     match (&first, &second) {
-        (Out::SendCard { root_id: Some(rid), .. }, Out::SendAcp { .. }) => {
+        (
+            Out::SendCard {
+                root_id: Some(rid),
+                msg_id: Some(mid),
+                ..
+            },
+            Out::SendAcp { .. },
+        ) => {
             assert_eq!(rid, "om_user_2");
+            // The per-turn card must be recorded under the session so the
+            // dispatcher flips MsgIdMap to it (streaming PATCHes this card,
+            // not the previous turn's).
+            assert_eq!(mid, "sess-1");
         }
         _ => panic!("expected SendCard(root_id=Some(_)) then SendAcp, got {first:?} then {second:?}"),
+    }
+}
+
+#[tokio::test]
+async fn terminal_error_clears_queued_turns() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey { chat_id: "oc".into(), thread_id: None };
+    let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
+    router.seed_card("s1".into(), "first".into()).await;
+
+    // Mid-flight.
+    router.apply_event_to_out("s1".into(), &AcpEvent::TextDelta {
+        session_id: "s1".into(), delta: "x".into(),
+    }).await;
+    let _ = out_rx.recv().await;
+
+    // Queue a turn while in-flight.
+    router.dispatch(FeishuIn::Text {
+        key: key.clone(), text: "second".into(), reply_to: Some("om2".into()),
+    }).await;
+    let _ = out_rx.recv().await; // ⏳ react
+    assert_eq!(router.map.queue_len(&key).await, 1);
+
+    // Terminal error tears the session down and must drop the queue so the
+    // prompt never drains into a future session for the same chat.
+    router.apply_event_to_out("s1".into(), &AcpEvent::Error {
+        session_id: "s1".into(), message: "dead".into(), terminal: true,
+    }).await;
+    assert!(!router.session_alive(&key).await);
+    assert_eq!(router.map.queue_len(&key).await, 0, "queue must be cleared on teardown");
+
+    // No SendAcp was emitted for the abandoned queued turn.
+    while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await {
+        assert!(!matches!(msg, Out::SendAcp { .. }), "unexpected SendAcp: {msg:?}");
     }
 }
 
@@ -90,7 +135,8 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
     // Mid-flight.
     router.apply_event_to_out("s1".into(), &AcpEvent::TextDelta {
         session_id: "s1".into(), delta: "x".into(),
-    }).await; let _ = out_rx.recv().await;
+    }).await; let _ = out_rx.recv().await; // UpdateCard
+    let _ = out_rx.recv().await; // React WORKING
     // Queue 2 turns while in-flight.
     router.dispatch(FeishuIn::Text {
         key: key.clone(), text: "second".into(), reply_to: Some("om2".into()),
@@ -170,7 +216,8 @@ async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
     router.seed_card("s1".into(), "first".into()).await;
     router.apply_event_to_out("s1".into(), &AcpEvent::TextDelta {
         session_id: "s1".into(), delta: "x".into(),
-    }).await; let _ = out_rx.recv().await;
+    }).await; let _ = out_rx.recv().await; // UpdateCard
+    let _ = out_rx.recv().await; // React WORKING
 
     // Queue a normal FIFO turn first.
     router.dispatch(FeishuIn::Text {
