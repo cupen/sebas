@@ -80,8 +80,7 @@ pub struct CardTitle {
     pub tag: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "tag", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum CardElement {
     Hr,
     Markdown {
@@ -104,6 +103,9 @@ pub enum CardElement {
     /// place where 2+ buttons should sit side-by-side instead of stacking
     /// vertically.
     Actions {
+        /// Each entry is a callback button. Serialized in the wire shape
+        /// Feishu expects: `{text, type, behaviors: [{type: "callback",
+        /// value: <card.button.value>}]}`. See custom Serialize impl below.
         buttons: Vec<CardButton>,
     },
 }
@@ -135,6 +137,98 @@ pub struct CardButton {
     pub text: CardText,
     pub r#type: String, // "primary" | "danger" | "default"
     pub value: Value,
+}
+
+/// Wrapper around `CardButton` that serializes in the wire shape Feishu
+/// expects inside an `actions` block: `{text, type, behaviors: [{type:
+/// "callback", value}]}`. Used by the custom Serialize for `CardElement::Actions`.
+#[derive(Debug, Clone)]
+struct ActionButtonWire<'a> {
+    text: &'a CardText,
+    r#type: &'a str,
+    behaviors: Vec<ActionBehaviorWire<'a>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActionBehaviorWire<'a> {
+    r#type: &'a str,
+    value: &'a Value,
+}
+
+impl Serialize for ActionButtonWire<'_> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = ser.serialize_struct("ActionButton", 3)?;
+        s.serialize_field("text", &self.text)?;
+        s.serialize_field("type", self.r#type)?;
+        s.serialize_field("behaviors", &self.behaviors)?;
+        s.end()
+    }
+}
+
+impl Serialize for ActionBehaviorWire<'_> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = ser.serialize_map(Some(2))?;
+        m.serialize_key("type")?;
+        m.serialize_value(self.r#type)?;
+        m.serialize_key("value")?;
+        m.serialize_value(self.value)?;
+        m.end()
+    }
+}
+
+impl Serialize for CardElement {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        match self {
+            CardElement::Hr => ser.serialize_struct("CardElement", 0)?.end(),
+            CardElement::Markdown { content } => {
+                let mut s = ser.serialize_struct("CardElement", 2)?;
+                s.serialize_field("tag", "markdown")?;
+                s.serialize_field("content", content)?;
+                s.end()
+            }
+            CardElement::Div { text } => {
+                let mut s = ser.serialize_struct("CardElement", 2)?;
+                s.serialize_field("tag", "div")?;
+                s.serialize_field("text", text)?;
+                s.end()
+            }
+            CardElement::Button {
+                text,
+                r#type,
+                behaviors,
+            } => {
+                let mut s = ser.serialize_struct("CardElement", 4)?;
+                s.serialize_field("tag", "button")?;
+                s.serialize_field("text", text)?;
+                s.serialize_field("type", r#type.as_str())?;
+                s.serialize_field("behaviors", behaviors)?;
+                s.end()
+            }
+            CardElement::Actions { buttons } => {
+                // Feishu v2.0 actions block: `{tag: "actions", actions:
+                // [<callback button>, ...]}`. Each button gets a single
+                // `behaviors` entry of type `callback` carrying its value.
+                let wire_buttons: Vec<ActionButtonWire<'_>> = buttons
+                    .iter()
+                    .map(|b| ActionButtonWire {
+                        text: &b.text,
+                        r#type: &b.r#type,
+                        behaviors: vec![ActionBehaviorWire {
+                            r#type: "callback",
+                            value: &b.value,
+                        }],
+                    })
+                    .collect();
+                let mut s = ser.serialize_struct("CardElement", 2)?;
+                s.serialize_field("tag", "actions")?;
+                s.serialize_field("actions", &wire_buttons)?;
+                s.end()
+            }
+        }
+    }
 }
 
 impl Card {

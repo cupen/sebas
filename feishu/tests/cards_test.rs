@@ -357,8 +357,15 @@ fn permission_card_uses_actions_block_for_buttons() {
         .count();
     assert_eq!(button_count, 0, "no raw Button elements allowed alongside Actions");
 
-    // The JSON must contain the actions tag + all 3 decision labels.
+    // Wire format: each button inside the actions block must carry a
+    // `behaviors: [{type: "callback", value: {...}}]` wrapper, otherwise
+    // Feishu silently ignores the button (no click callback registered).
     let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("\"tag\":\"actions\""), "actions tag must be present");
+    assert!(s.contains("\"actions\":["), "actions array must be present");
+    assert!(s.contains("\"behaviors\":["), "each button must have behaviors array");
+    assert!(s.contains("\"type\":\"callback\""), "behavior type must be callback");
+    // 3 decisions.
     assert!(s.contains("Allow once"));
     assert!(s.contains("Allow session"));
     assert!(s.contains("Deny"));

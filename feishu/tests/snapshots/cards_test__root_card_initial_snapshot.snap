@@ -12,7 +12,7 @@ body:
   elements:
     - tag: markdown
       content: "> 重构 src/foo.rs"
-    - tag: hr
+    - {}
     - tag: div
       text:
         tag: plain_text
