@@ -57,6 +57,10 @@ async fn reads_init_and_turn_end_from_hello_scenario() {
 #[test]
 fn parses_a_text_delta_line_directly() {
     let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}}"#;
-    let ev = parse_line(line).unwrap().unwrap();
+    let ev = parse_line(line)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("expected one event");
     assert_eq!(ev, StreamEvent::TextDelta { text: "x".into() });
 }

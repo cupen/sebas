@@ -81,6 +81,7 @@ level = "info"
     std::fs::write(&path, body).expect("write config.toml");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "opt-in integration test; run with: cargo test --workspace -- sigterm_cleanup -- --ignored --nocapture"]
 async fn sigterm_cleans_up_child_and_persists_state() {

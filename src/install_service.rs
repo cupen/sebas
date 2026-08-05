@@ -118,8 +118,18 @@ pub fn unit_path(scope: Scope) -> anyhow::Result<PathBuf> {
 /// Return current effective UID. Wraps `libc::geteuid` so callers don't need
 /// to plumb the unsafe import everywhere. (`nix` is not a dependency.)
 fn current_euid() -> u32 {
-    // SAFETY: `geteuid` is async-signal-safe and has no preconditions.
-    unsafe { libc::geteuid() }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` is async-signal-safe and has no preconditions.
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        // Non-Unix platforms (Windows) have no EUID concept. `run()` exits 6
+        // before this is ever consulted; return a non-zero placeholder so the
+        // system-scope root check would fail loudly if that ever changes.
+        1000
+    }
 }
 
 /// Build a tagged `anyhow::Error` that carries the desired process exit
@@ -155,11 +165,11 @@ fn print_usage() {
 /// the step-by-step. Errors are returned as `anyhow::Error`; the caller
 /// (`main.rs`) maps the `.exit_code` downcast to a process exit.
 pub async fn run(args: InstallServiceArgs) -> anyhow::Result<()> {
-    // 0. macOS has no systemd. Exit 6.
-    if cfg!(target_os = "macos") {
+    // 0. systemd only exists on Linux; macOS has no systemd either. Exit 6.
+    if cfg!(not(unix)) || cfg!(target_os = "macos") {
         return Err(exit_err(
             6,
-            "systemd is not available on macOS; hand-write a launchd plist or use `cargo run`",
+            "systemd is not available on this platform; use `sebas run` directly",
         ));
     }
 

@@ -331,7 +331,10 @@ mod tests {
             StreamEvent::System { session_id, model, tool_names } => {
                 assert_eq!(session_id, "abc-123");
                 assert_eq!(model, "claude-sonnet-4-5");
-                assert_eq!(tool_names, vec!["Bash", "Read", "Edit"]);
+                assert_eq!(
+                    tool_names,
+                    &["Bash".to_string(), "Read".to_string(), "Edit".to_string()]
+                );
             }
             other => panic!("expected System, got {other:?}"),
         }
@@ -352,7 +355,7 @@ mod tests {
             StreamEvent::ToolUse { id, name, input } => {
                 assert_eq!(id, "toolu_01");
                 assert_eq!(name, "Bash");
-                assert_eq!(input, serde_json::json!({"command": "ls"}));
+                assert_eq!(input, &serde_json::json!({"command": "ls"}));
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }

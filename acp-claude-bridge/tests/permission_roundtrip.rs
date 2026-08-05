@@ -6,7 +6,10 @@
 
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(not(unix))]
+use tokio::net::TcpStream;
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
@@ -83,19 +86,31 @@ async fn hook_socket_round_trip() {
         .expect("read");
     assert!(line.contains("sessionId"), "no sessionId in: {line}");
 
-    // Now: try the unix socket sidecar.
+    // Now: try the hook endpoint via the sidecar.
     let sidecar = std::env::temp_dir().join("sebras-bridge.sock.path");
     let sidecar_content = std::fs::read_to_string(&sidecar).expect("sidecar");
-    let sock_path = sidecar_content.trim();
-    assert!(!sock_path.is_empty(), "empty sidecar");
+    assert!(!sidecar_content.trim().is_empty(), "empty sidecar");
 
-    let mut client = UnixStream::connect(sock_path).await.expect("connect to hook socket");
+    #[cfg(unix)]
+    let mut client = {
+        let sock_path = sidecar_content.trim();
+        UnixStream::connect(sock_path)
+            .await
+            .expect("connect to hook socket")
+    };
+    #[cfg(not(unix))]
+    let mut client = {
+        let addr = sidecar_content.trim();
+        TcpStream::connect(addr)
+            .await
+            .expect("connect to hook socket")
+    };
     client
         .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
         .await
         .unwrap();
     client.flush().await.unwrap();
-    let mut resp = String::new();
+    let _resp = String::new();
     // Bridge will block on decisions.recv() forever (no decision sender in this
     // test). Use a short timeout to verify the broker accepted the connection.
     let r = timeout(Duration::from_secs(2), client.readable()).await;
