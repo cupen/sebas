@@ -191,6 +191,9 @@ impl SessionMap {
                 Ok(BeginSpawn::AlreadySpawning)
             }
             Some(_) => {
+                // A fresh session replaces the active one: queued turns from
+                // the old session must not drain into the new one.
+                self.clear_queue(&key).await;
                 g.insert(key, Mapping::spawning());
                 Ok(BeginSpawn::ReplacedActive)
             }
@@ -271,7 +274,16 @@ impl SessionMap {
             .map(|(k, _)| k.clone())
         {
             g.remove(&k);
+            // Session torn down: drop queued turns so they never drain into a
+            // future session for the same chat key.
+            self.clear_queue(&k).await;
         }
+    }
+
+    /// Drop any queued turns for a session key. Called when a session is torn
+    /// down or replaced so stale prompts never drain into a future session.
+    pub async fn clear_queue(&self, key: &SessionKey) {
+        self.turn_queue.write().await.remove(key);
     }
 
     /// Enqueue a turn for the given session. Priority turns are inserted at
