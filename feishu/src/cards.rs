@@ -212,10 +212,13 @@ impl Serialize for CardElement {
                 s.end()
             }
             CardElement::Actions { buttons } => {
-                // Feishu v2.0 actions block: `{tag: "actions", elements:
-                // [<callback button>, ...]}`. NOTE: the field is `elements`
-                // (NOT `actions`), and each button must carry its own
-                // `tag: "button"` + `value` at the top level.
+                // Feishu v2.0 action container: `{tag: "action", actions:
+                // [<callback button>, ...]}`. NOTE: tag is singular
+                // ("action"), field is plural ("actions"). Each button
+                // carries its own {tag: "button", text, type, value,
+                // behaviors} with a single callback behavior carrying the
+                // callback value. Verified against Feishu Open API error
+                // 200621: "not support tag: actions" → correct is "action".
                 let wire_buttons: Vec<ActionButtonWire<'_>> = buttons
                     .iter()
                     .map(|b| ActionButtonWire {
@@ -229,8 +232,8 @@ impl Serialize for CardElement {
                     })
                     .collect();
                 let mut s = ser.serialize_struct("CardElement", 2)?;
-                s.serialize_field("tag", "actions")?;
-                s.serialize_field("elements", &wire_buttons)?;
+                s.serialize_field("tag", "action")?;
+                s.serialize_field("actions", &wire_buttons)?;
                 s.end()
             }
         }

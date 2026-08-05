@@ -20,8 +20,8 @@ body:
         content: Allow once = 这一次 · Allow session = 本会话同签名全部 · Deny = 拒绝
         text_size: notation
         text_color: grey
-    - tag: actions
-      elements:
+    - tag: action
+      actions:
         - tag: button
           text:
             tag: plain_text
