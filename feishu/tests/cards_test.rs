@@ -108,11 +108,13 @@ fn append_revives_thinking_toolend_toolprogress() {
         },
         &cfg(),
     );
-    // ThinkingDelta -> Div; ToolProgress -> Div; ToolEnd -> Div（各 1 个元素）
-    assert_eq!(body.len(), 3);
-    assert!(matches!(body[0], CardElement::Div { .. }));
+    // ThinkingDelta -> Hr + Div (separator added in card-readability refactor);
+    // ToolProgress -> Div; ToolEnd -> Div.
+    assert_eq!(body.len(), 4);
+    assert!(matches!(body[0], CardElement::Hr));
     assert!(matches!(body[1], CardElement::Div { .. }));
     assert!(matches!(body[2], CardElement::Div { .. }));
+    assert!(matches!(body[3], CardElement::Div { .. }));
 }
 
 #[test]
@@ -332,4 +334,66 @@ fn render_accumulated_card_empty_body_matches_seed() {
     assert!(s.contains("👀 Claude Code"));
     assert!(s.contains("> hi"));
     assert!(s.contains("msg_id: msg_1"));
+}
+
+#[test]
+fn permission_card_uses_actions_block_for_buttons() {
+    use feishu::cards::CardElement;
+    let card = render_permission_card("s1", "r1", "Bash", &serde_json::json!({"cmd": "ls"}));
+    // Exactly one Actions element containing all 3 buttons (not 3 separate
+    // Button elements stacked vertically).
+    let actions_count = card
+        .body
+        .elements
+        .iter()
+        .filter(|e| matches!(e, CardElement::Actions { .. }))
+        .count();
+    assert_eq!(actions_count, 1, "permission card must use a single Actions block");
+    let button_count = card
+        .body
+        .elements
+        .iter()
+        .filter(|e| matches!(e, CardElement::Button { .. }))
+        .count();
+    assert_eq!(button_count, 0, "no raw Button elements allowed alongside Actions");
+
+    // The JSON must contain the actions tag + all 3 decision labels.
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("Allow once"));
+    assert!(s.contains("Allow session"));
+    assert!(s.contains("Deny"));
+}
+
+#[test]
+fn permission_card_args_in_code_fence_and_explanation_note() {
+    let card = render_permission_card("s1", "r1", "Bash", &serde_json::json!({"cmd": "ls /tmp"}));
+    let s = serde_json::to_string(&card).unwrap();
+    // Args rendered in a JSON code fence, not a plain grey note.
+    // Inside the JSON-of-the-card the fence's quotes are escaped as \", so
+    // look for the escaped forms.
+    assert!(s.contains("```json"), "args must be in a fenced code block");
+    assert!(s.contains("\\\"cmd\\\""), "args must contain escaped cmd key");
+    assert!(s.contains("ls /tmp"), "args must contain the command value");
+    // Explanation note present so users know what each button does.
+    assert!(s.contains("Allow once = 这一次"));
+    assert!(s.contains("Allow session = 本会话同签名全部"));
+    assert!(s.contains("Deny = 拒绝"));
+}
+
+#[test]
+fn tool_start_renders_args_in_code_fence() {
+    let mut body = vec![];
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"command": "ls /tmp"}),
+        },
+        &cfg(),
+    );
+    let s = serde_json::to_string(&body).unwrap();
+    assert!(s.contains("```json"), "ToolStart args must be fenced");
+    assert!(s.contains("\\\"command\\\""), "ToolStart args must contain escaped command key");
+    assert!(s.contains("ls /tmp"), "ToolStart args must contain the command value");
 }

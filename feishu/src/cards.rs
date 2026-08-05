@@ -99,6 +99,13 @@ pub enum CardElement {
         r#type: String,
         behaviors: Vec<CardBehavior>,
     },
+    /// Horizontal button group (Feishu card v2.0 `actions` block, which
+    /// renders as a row by default). Use for permission cards and any
+    /// place where 2+ buttons should sit side-by-side instead of stacking
+    /// vertically.
+    Actions {
+        buttons: Vec<CardButton>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,16 +174,12 @@ impl Card {
     }
 
     pub fn push_actions(&mut self, actions: Vec<CardButton>) {
-        for a in actions {
-            self.body.elements.push(CardElement::Button {
-                text: a.text,
-                r#type: a.r#type,
-                behaviors: vec![CardBehavior {
-                    r#type: "callback".into(),
-                    value: a.value,
-                }],
-            });
+        // Group as a single `actions` block (horizontal by default in card
+        // v2.0). Avoids the "wall of stacked buttons" feel.
+        if actions.is_empty() {
+            return;
         }
+        self.body.elements.push(CardElement::Actions { buttons: actions });
     }
 }
 
@@ -214,7 +217,12 @@ pub fn render_permission_card(
 ) -> Card {
     let mut card = Card::new("⚠ 权限请求", "orange");
     card.push_text(format!("**{tool_name}** 想要执行："));
-    card.push_note(serde_json::to_string_pretty(args).unwrap_or_default());
+    // Render args as a fenced JSON code block so Feishu gives it a
+    // scrollable code-style container instead of a grey note div that
+    // looks like a wall of JSON.
+    let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
+    card.push_text(format!("```json\n{args_str}\n```"));
+    card.push_note("Allow once = 这一次 · Allow session = 本会话同签名全部 · Deny = 拒绝");
     let btn = |label: &str, kind: &str, decision: &str| CardButton {
         text: CardText {
             tag: "plain_text".into(),
@@ -265,7 +273,13 @@ pub fn render_expired_permission_card() -> Card {
 /// Shown when the agent fails to spawn or times out during handshake.
 pub fn render_error_card(message: &str) -> Card {
     let mut card = Card::new("❌ 启动失败", "red");
-    card.push_text(message.to_string());
+    // If message spans multiple lines or has structured content, render in
+    // a code fence so it doesn't reflow awkwardly as inline text.
+    if message.contains('\n') || message.len() > 120 {
+        card.push_text(format!("```\n{message}\n```"));
+    } else {
+        card.push_text(message.to_string());
+    }
     card
 }
 
@@ -278,15 +292,21 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             push_text_truncated(body, delta, cfg.max_user_text_chars, cfg.fold_long_output);
         }
         AcpEvent::ThinkingDelta { delta, .. } => {
+            // Visual separator before the thinking note so it's distinct
+            // from the previous event's text output.
+            body.push(CardElement::Hr);
             body.push(note_element(format!("💭 {delta}")));
         }
         AcpEvent::ToolStart {
             tool_name, args, ..
         } => {
             body.push(CardElement::Hr);
+            // Tool args in a fenced JSON code block — readable for nested
+            // objects/arrays, vs inline backtick which collapses to one line.
+            let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
             push_text_truncated(
                 body,
-                &format!("📖 **{tool_name}** `{args}`"),
+                &format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
                 cfg.max_user_text_chars,
                 cfg.fold_long_output,
             );
