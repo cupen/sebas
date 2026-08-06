@@ -64,7 +64,7 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
         &old,
         &prompt,
         fake().to_str().unwrap(),
-        vec!["--enable-load".into()],
+        vec![],
         None,
     )
     .await
@@ -95,11 +95,16 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
 }
 
 #[tokio::test]
-async fn restored_mapping_falls_back_to_fresh_session_when_unloadable() {
+async fn restored_mapping_resume_rejected_by_cli_surfaces_error() {
+    // Post-ACP (Phase 1, sebas-dk8.2): there is no capability negotiation or
+    // transparent session/new fallback. `resume` is claude-native; if the CLI
+    // rejects the id (session files gone), the spawn itself fails and the
+    // dispatcher drops the placeholder (fail_spawn) instead of silently
+    // starting a fresh session. Phase 3 (sebas-dk8.4) makes this graceful.
     let json = r#"{"oc_restart":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let mgr = Arc::new(SessionManager::new(Duration::from_millis(800)));
 
     router
         .dispatch(FeishuIn::Text {
@@ -116,52 +121,30 @@ async fn restored_mapping_falls_back_to_fresh_session_when_unloadable() {
     else {
         panic!("expected SpawnResume")
     };
+    assert_eq!(old, "sess-old");
 
-    // Plain fake-claude lacks loadSession → fresh session; the mapping is
-    // re-keyed to the NEW id so the user is never stuck in the black hole.
-    let (sid, _pending, rx, resumed) = sebas::run::acp_resume_and_activate(
+    // --resume-fails: the fake exits(1) at startup, modelling claude's
+    // "No conversation found" — the resume must surface an error.
+    let res = sebas::run::acp_resume_and_activate(
         &mgr,
         &router,
         &k,
         &old,
         &prompt,
         fake().to_str().unwrap(),
-        vec![],
+        vec!["--resume-fails".into()],
         None,
     )
-    .await
-    .expect("resume-with-fallback ok");
-    assert!(!resumed, "no capability → fresh session");
-    assert_eq!(sid, "sess-1");
-    assert_eq!(map.get(&key()).await.unwrap().session_id(), Some("sess-1"));
+    .await;
+    assert!(res.is_err(), "rejected resume must error, got ok: {res:?}");
 
-    // A follow-up text now routes as Continue on the fresh session.
-    router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "again".into(),
-            reply_to: None,
-        })
-        .await;
-    // After Task 5, continue_session emits [SendCard, SendAcp] for a fresh
-    // continuation (no flip needed since CardState was lazy-seeded with SEED,
-    // not DONE/FAILED). Drain any UpdateCard/React/SendCard noise before
-    // asserting the SendAcp.
-    loop {
-        match tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await {
-            Ok(Some(Out::SendAcp { session_id, .. })) => {
-                assert_eq!(session_id, "sess-1");
-                break;
-            }
-            Ok(Some(Out::UpdateCard { .. } | Out::React { .. } | Out::SendCard { .. })) => {
-                // expected intermediate messages — keep draining
-            }
-            _ => panic!("expected SendAcp (ContinueSession) after draining intermediates"),
-        }
-    }
-
-    drop(rx);
-    mgr.kill(&sid).await;
+    // The dispatcher's error arm drops the Spawning placeholder so the next
+    // text starts clean (this is what run.rs's SpawnResume arm does on Err).
+    router.fail_spawn(&k).await;
+    assert!(
+        map.get(&key()).await.is_none(),
+        "placeholder dropped after failed resume"
+    );
 }
 
 #[tokio::test]

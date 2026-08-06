@@ -1,3 +1,4 @@
+pub mod driver;
 pub mod manager;
 pub mod session;
 

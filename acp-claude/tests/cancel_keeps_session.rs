@@ -11,7 +11,7 @@ fn fake() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude")
+        .join("target/debug/fake-claude-cli")
 }
 
 async fn drain_until_finished(mgr: &SessionManager, id: &str) {

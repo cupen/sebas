@@ -73,30 +73,52 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     // 跑 production pump。
     sebas::run::spawn_acp_pump(rx, router.clone(), session_id.clone());
 
-    // 第一个 UpdateCard：含 5 个 chunk0..chunk4，emoji 🚧。
-    let first = tokio::time::timeout(Duration::from_millis(600), out_rx.recv())
-        .await
-        .expect("first merged UpdateCard within 600ms")
-        .expect("channel open");
-    let s = card_str(&first);
-    for i in 0..5 {
-        assert!(
-            s.contains(&format!("chunk{i}")),
-            "chunk{i} in merged card: {s}"
-        );
+    // 某张 🚧 UpdateCard：含全部 5 个 chunk0..chunk4。
+    // 不在第一张卡上硬断言：并行测试负载下 150ms tick 可能在 5 个 chunk 到齐前
+    // 先刷一版（部分合并同样是 debounce 的合法行为）。总 deadline 内等到一张
+    // 🚧 + 全 chunk 的卡即证明合并成立。
+    let phase1_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut merged = String::new();
+    loop {
+        if std::time::Instant::now() > phase1_deadline {
+            panic!("no 🚧 card with all 5 chunks within 5s; last card: {merged}");
+        }
+        let o = match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
+            Ok(Some(o)) => o,
+            Ok(None) => panic!("channel closed"),
+            Err(_) => continue,
+        };
+        match o {
+            Out::UpdateCard { .. } | Out::SendCard { .. } => {
+                let s = card_str(&o);
+                let all = (0..5).all(|i| s.contains(&format!("chunk{i}")));
+                if s.contains("🚧") && all {
+                    break;
+                }
+                merged = s; // keep last for the panic message
+            }
+            Out::React { .. } => continue,
+            other => panic!("unexpected out: {other:?}"),
+        }
     }
-    assert!(s.contains("🚧"));
-
     // Finished 立即产 ✅ 卡（视觉由 phase_visual 把 DONE 映成 ✅）。p3g 起 Out
     // 序列里还混有 reaction（tick 的 OnIt、Finished 自带的 DONE），按类别找：
     // ✅ 卡 + DONE reaction 都必须出现。
     let mut got_done = false;
     let mut got_done_react = false;
-    for _ in 0..4 {
-        let o = tokio::time::timeout(Duration::from_millis(400), out_rx.recv())
-            .await
-            .expect("recv in time")
-            .expect("channel open");
+    // Overall-deadline loop: the fake pauses mid-turn (800ms) so the 🚧 card
+    // gets its own flush; the silence before the result frame must not kill
+    // the test — timeouts just continue.
+    let phase2_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::time::Instant::now() > phase2_deadline {
+            panic!("no ✅ card / DONE react within 5s");
+        }
+        let o = match tokio::time::timeout(Duration::from_millis(400), out_rx.recv()).await {
+            Ok(Some(o)) => o,
+            Ok(None) => panic!("channel closed"),
+            Err(_) => continue,
+        };
         match o {
             Out::UpdateCard { .. } | Out::SendCard { .. } => {
                 if card_str(&o).contains("✅") {

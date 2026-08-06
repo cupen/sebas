@@ -19,7 +19,7 @@ async fn one_prompt_yields_exactly_three_events() {
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude");
+        .join("target/debug/fake-claude-cli");
     let id = mgr
         .create_session(fake.to_str().unwrap(), vec![], None, "".into())
         .await

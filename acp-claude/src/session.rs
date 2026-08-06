@@ -1,27 +1,25 @@
-//! Public session/command/event types and private session-state helpers
-//! that bridge the official `agent-client-protocol` v2 SDK to the
-//! `acp-claude` manager.
+//! Public session/command/event types for the claude-backed engine.
+//!
+//! Post-ACP (docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md):
+//! `AcpEvent`/`AcpCommand`/`Decision` are the stable internal vocabulary the
+//! router consumes — the name is historical, no ACP wire protocol is involved
+//! anymore. The engine adapter lives in `crate::driver`.
 
-use agent_client_protocol::schema::v1::{
-    ContentBlock, RequestPermissionResponse, SessionNotification, SessionUpdate, TextContent,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-/// A type-erased callback that, when invoked, replies to a previously
-/// captured `Responder<RequestPermissionResponse>`. We type-erase so the
-/// pending-responder map does not have to be generic over every request
-/// response type the SDK may add.
-pub(crate) type ResponderSlot =
-    Box<dyn FnOnce(RequestPermissionResponse) -> Result<(), agent_client_protocol::Error> + Send>;
+/// A parked permission decision: the driver's PreToolUse hook callback
+/// blocks on the receiving end; `SessionManager::send(PermissionReply)`
+/// resolves it. `oneshot::Sender` gives exact FnOnce semantics — a request
+/// can be answered at most once.
+pub(crate) type ResponderSlot = oneshot::Sender<Decision>;
 
-/// Backwards-compat shim retained so `manager.rs` (and anything else
-/// holding `AcpSessionHandle`) keeps compiling while we rewire the
-/// internals onto the official SDK. No process handle is exposed any
-/// more — the SDK owns the child. (No `Debug` derive: `ResponderSlot`
-/// is a `Box<dyn FnOnce>` and does not implement `Debug`.)
+/// Per-session handle stored in the manager's table. No process handle is
+/// exposed — the SDK owns the child; `cancel_tx` signals the driver loop to
+/// exit (which disconnects and SIGKILLs the child).
+/// (No `Debug` derive: `ResponderSlot` does not implement `Debug`.)
 pub struct AcpSessionHandle {
     pub session_id: String,
     pub cmd_tx: mpsc::Sender<AcpCommand>,
@@ -111,220 +109,4 @@ pub enum AcpEvent {
         #[serde(default)]
         terminal: bool,
     },
-}
-
-/// Extract the text payload from a `ContentBlock` if it carries one.
-/// Anything else (image / audio / resource link / resource) is returned
-/// as an empty string — the agent's text-only pipeline doesn't surface
-/// it.
-pub(crate) fn content_block_text(block: &ContentBlock) -> String {
-    match block {
-        ContentBlock::Text(TextContent { text, .. }) => text.clone(),
-        _ => String::new(),
-    }
-}
-
-/// Translate a single `SessionUpdate` into the consumer-facing
-/// `AcpEvent` set. Returns `None` for updates the consumer does not
-/// care about (user-message echo, plan, mode/config changes, info
-/// updates, usage updates).
-pub(crate) fn translate_update(
-    session_id: &str,
-    notification: &SessionNotification,
-) -> Option<AcpEvent> {
-    match &notification.update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            let delta = content_block_text(&chunk.content);
-            if delta.is_empty() {
-                None
-            } else {
-                Some(AcpEvent::TextDelta {
-                    session_id: session_id.to_string(),
-                    delta,
-                })
-            }
-        }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            let delta = content_block_text(&chunk.content);
-            if delta.is_empty() {
-                None
-            } else {
-                Some(AcpEvent::ThinkingDelta {
-                    session_id: session_id.to_string(),
-                    delta,
-                })
-            }
-        }
-        SessionUpdate::ToolCall(call) => Some(AcpEvent::ToolStart {
-            session_id: session_id.to_string(),
-            tool_name: call.title.clone(),
-            args: call.raw_input.clone().unwrap_or(Value::Null),
-        }),
-        SessionUpdate::ToolCallUpdate(update) => {
-            use agent_client_protocol::schema::v1::ToolCallStatus;
-            let tool_name = update.fields.title.clone().unwrap_or_default();
-            let progress = match update.fields.status {
-                Some(ToolCallStatus::InProgress) => "in_progress".to_string(),
-                Some(ToolCallStatus::Completed) => "completed".to_string(),
-                Some(ToolCallStatus::Failed) => "failed".to_string(),
-                Some(ToolCallStatus::Pending) => "pending".to_string(),
-                Some(_) => "unknown".to_string(),
-                None => String::new(),
-            };
-            if update.fields.raw_output.is_some() || update.fields.status.is_some() {
-                if update.fields.raw_output.is_some() {
-                    let result = update
-                        .fields
-                        .raw_output
-                        .clone()
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
-                    Some(AcpEvent::ToolEnd {
-                        session_id: session_id.to_string(),
-                        tool_name,
-                        result,
-                    })
-                } else {
-                    Some(AcpEvent::ToolProgress {
-                        session_id: session_id.to_string(),
-                        tool_name,
-                        progress,
-                    })
-                }
-            } else {
-                None
-            }
-        }
-        SessionUpdate::UserMessageChunk(_)
-        | SessionUpdate::Plan(_)
-        | SessionUpdate::AvailableCommandsUpdate(_)
-        | SessionUpdate::CurrentModeUpdate(_)
-        | SessionUpdate::ConfigOptionUpdate(_)
-        | SessionUpdate::SessionInfoUpdate(_)
-        | SessionUpdate::UsageUpdate(_) => None,
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn notif(update: serde_json::Value) -> SessionNotification {
-        let v = serde_json::json!({
-            "sessionId": "s1",
-            "update": update,
-        });
-        serde_json::from_value(v).expect("SessionNotification parses")
-    }
-
-    #[test]
-    fn agent_message_chunk_maps_to_text_delta() {
-        let n = notif(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": "hello"}
-        }));
-        match translate_update("s1", &n) {
-            Some(AcpEvent::TextDelta { session_id, delta }) => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(delta, "hello");
-            }
-            other => panic!("expected TextDelta, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn thought_chunk_maps_to_thinking_delta() {
-        let n = notif(serde_json::json!({
-            "sessionUpdate": "agent_thought_chunk",
-            "content": {"type": "text", "text": "hmm"}
-        }));
-        match translate_update("s1", &n) {
-            Some(AcpEvent::ThinkingDelta { delta, .. }) => assert_eq!(delta, "hmm"),
-            other => panic!("expected ThinkingDelta, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn empty_text_chunk_is_dropped() {
-        let n = notif(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": ""}
-        }));
-        assert!(translate_update("s1", &n).is_none());
-    }
-
-    #[test]
-    fn tool_call_maps_to_tool_start() {
-        let n = notif(serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "tc1",
-            "title": "Bash",
-            "rawInput": {"cmd": "ls"}
-        }));
-        match translate_update("s1", &n) {
-            Some(AcpEvent::ToolStart {
-                tool_name, args, ..
-            }) => {
-                assert_eq!(tool_name, "Bash");
-                assert_eq!(args, serde_json::json!({"cmd": "ls"}));
-            }
-            other => panic!("expected ToolStart, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tool_call_update_in_progress_maps_to_progress() {
-        let n = notif(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc1",
-            "title": "Bash",
-            "status": "in_progress"
-        }));
-        match translate_update("s1", &n) {
-            Some(AcpEvent::ToolProgress {
-                tool_name,
-                progress,
-                ..
-            }) => {
-                assert_eq!(tool_name, "Bash");
-                assert_eq!(progress, "in_progress");
-            }
-            other => panic!("expected ToolProgress, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tool_call_update_with_output_maps_to_tool_end() {
-        let n = notif(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc1",
-            "title": "Bash",
-            "status": "completed",
-            "rawOutput": {"stdout": "done"}
-        }));
-        match translate_update("s1", &n) {
-            Some(AcpEvent::ToolEnd {
-                tool_name, result, ..
-            }) => {
-                assert_eq!(tool_name, "Bash");
-                assert!(result.contains("done"), "raw output stringified: {result}");
-            }
-            other => panic!("expected ToolEnd, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn user_echo_and_plan_are_ignored() {
-        let user = notif(serde_json::json!({
-            "sessionUpdate": "user_message_chunk",
-            "content": {"type": "text", "text": "echo"}
-        }));
-        assert!(translate_update("s1", &user).is_none());
-        let plan = notif(serde_json::json!({
-            "sessionUpdate": "plan",
-            "entries": []
-        }));
-        assert!(translate_update("s1", &plan).is_none());
-    }
 }

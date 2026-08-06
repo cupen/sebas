@@ -1,7 +1,7 @@
-//! D1 regression: create_session must issue exactly ONE session/new, and the
-//! id it returns must be the id the agent actually works on (updates carry
-//! the same id). The pre-fix code sent session/new twice (manual + SDK
-//! start_session), splitting the routing id from the working id.
+//! D1 regression (post-ACP rewrite): create_session must deliver exactly ONE
+//! initialize handshake and the initial prompt must arrive as exactly ONE
+//! user message; the routing id the manager returns must be the id the fake
+//! CLI works on (every frame it emits carries the same session_id).
 
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
@@ -12,7 +12,7 @@ fn fake() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude")
+        .join("target/debug/fake-claude-cli")
 }
 
 fn journal_path(tag: &str) -> PathBuf {
@@ -35,15 +35,8 @@ fn journal_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn count_method(lines: &[serde_json::Value], method: &str) -> usize {
-    lines
-        .iter()
-        .filter(|l| l.pointer("/msg/method").and_then(|m| m.as_str()) == Some(method))
-        .count()
-}
-
 #[tokio::test]
-async fn exactly_one_session_new_and_routing_id_matches() {
+async fn exactly_one_initialize_one_user_message_and_routing_id_matches() {
     let journal = journal_path("single-new");
     let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
@@ -77,29 +70,62 @@ async fn exactly_one_session_new_and_routing_id_matches() {
     }
 
     let lines = journal_lines(&journal);
+    let inbound: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|l| l.get("dir").and_then(|d| d.as_str()) == Some("in"))
+        .filter_map(|l| l.get("msg"))
+        .collect();
+
+    // Exactly one initialize control_request…
+    let inits = inbound
+        .iter()
+        .filter(|m| {
+            m.get("type").and_then(|t| t.as_str()) == Some("control_request")
+                && m.pointer("/request/subtype").and_then(|s| s.as_str()) == Some("initialize")
+        })
+        .count();
     assert_eq!(
-        count_method(&lines, "session/new"),
-        1,
-        "expected exactly one session/new, journal: {lines:?}"
+        inits, 1,
+        "expected exactly one initialize, journal: {lines:?}"
     );
-    // cwd plumbing: the one session/new must carry the work_dir we passed.
+
+    // …and exactly one user message (the prompt, delivered once).
+    let user_msgs = inbound
+        .iter()
+        .filter(|m| m.get("type").and_then(|t| t.as_str()) == Some("user"))
+        .count();
+    assert_eq!(
+        user_msgs, 1,
+        "prompt must be delivered exactly once: {lines:?}"
+    );
+
+    // cwd plumbing: the fake reports its process cwd in the init frame.
     let cwd = lines
         .iter()
-        .find(|l| l.pointer("/msg/method").and_then(|m| m.as_str()) == Some("session/new"))
-        .and_then(|l| l.pointer("/msg/params/cwd"))
-        .and_then(|c| c.as_str());
-    assert_eq!(cwd, Some("/tmp"), "session/new cwd mismatch");
-    // Routing integrity: every session/update the agent sent must be tagged
-    // with the SAME id create_session returned.
-    let update_sids: Vec<&str> = lines
+        .filter(|l| l.get("dir").and_then(|d| d.as_str()) == Some("out"))
+        .filter_map(|l| l.get("msg"))
+        .find(|m| {
+            m.get("type").and_then(|t| t.as_str()) == Some("system")
+                && m.get("subtype").and_then(|s| s.as_str()) == Some("init")
+        })
+        .and_then(|m| m.get("cwd"))
+        .and_then(|c| c.as_str())
+        .map(str::to_owned);
+    assert_eq!(cwd.as_deref(), Some("/tmp"), "child cwd mismatch");
+
+    // Routing integrity: every assistant frame the agent sent must be tagged
+    // with the SAME id create_session returned (the fake echoes --session-id).
+    let frame_sids: Vec<&str> = lines
         .iter()
-        .filter(|l| l.pointer("/msg/method").and_then(|m| m.as_str()) == Some("session/update"))
-        .filter_map(|l| l.pointer("/msg/params/sessionId").and_then(|s| s.as_str()))
+        .filter(|l| l.get("dir").and_then(|d| d.as_str()) == Some("out"))
+        .filter_map(|l| l.get("msg"))
+        .filter(|m| m.get("type").and_then(|t| t.as_str()) == Some("assistant"))
+        .filter_map(|m| m.get("session_id").and_then(|s| s.as_str()))
         .collect();
-    assert!(!update_sids.is_empty(), "agent sent no updates");
+    assert!(!frame_sids.is_empty(), "agent sent no assistant frames");
     assert!(
-        update_sids.iter().all(|s| *s == id.as_str()),
-        "updates tagged with a different session id than the routing id {id}: {update_sids:?}"
+        frame_sids.iter().all(|s| *s == id.as_str()),
+        "frames tagged with a different session id than the routing id {id}: {frame_sids:?}"
     );
     let _ = std::fs::remove_file(&journal);
 }

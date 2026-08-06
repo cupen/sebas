@@ -11,7 +11,7 @@ async fn fake_claude_emits_finished() {
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude");
+        .join("target/debug/fake-claude-cli");
     let id = mgr
         .create_session(fake.to_str().unwrap(), vec![], None, "".into())
         .await

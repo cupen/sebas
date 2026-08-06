@@ -1,7 +1,8 @@
-//! End-to-end permission chain: prompt "perm" -> agent issues
-//! session/request_permission -> AcpEvent::PermissionRequest (carrying the
-//! ROUTING session id, not a split second id) -> PermissionReply reaches the
-//! agent -> turn completes. Journal asserts the protocol facts.
+//! End-to-end permission chain (post-ACP): prompt → fake CLI tool_use →
+//! control hook_callback → driver's PreToolUse callback →
+//! AcpEvent::PermissionRequest (carrying the ROUTING session id) →
+//! PermissionReply resolves the parked oneshot → hook returns allow →
+//! tool_result flows → turn completes. Journal asserts the protocol facts.
 
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
@@ -12,7 +13,7 @@ fn fake() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude")
+        .join("target/debug/fake-claude-cli")
 }
 
 #[tokio::test]
@@ -29,7 +30,12 @@ async fn permission_round_trip() {
     let id = mgr
         .create_session(
             fake().to_str().unwrap(),
-            vec!["--journal".into(), journal.to_str().unwrap().into()],
+            vec![
+                "--scenario".into(),
+                "bash".into(),
+                "--journal".into(),
+                journal.to_str().unwrap().into(),
+            ],
             None,
             "".into(),
         )
@@ -39,7 +45,7 @@ async fn permission_round_trip() {
         &id,
         AcpCommand::CreateSession {
             session_id: id.clone(),
-            prompt: "perm".into(),
+            prompt: "please run bash".into(),
         },
     )
     .await
@@ -72,7 +78,7 @@ async fn permission_round_trip() {
     }
     let request_id = request_id.expect("no PermissionRequest within 10 events");
 
-    // Reply allow_once; the turn must then complete.
+    // Reply allow; the turn must then complete with a ToolEnd + Finished.
     mgr.send(
         &id,
         AcpCommand::PermissionReply {
@@ -84,28 +90,41 @@ async fn permission_round_trip() {
     .await
     .expect("reply");
 
+    let mut saw_tool_end = false;
     let mut finished = false;
     for _ in 0..10 {
         let evt = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
             .await
             .expect("event timeout")
             .expect("stream open");
-        if matches!(evt, AcpEvent::Finished { .. }) {
-            finished = true;
-            break;
+        match evt {
+            AcpEvent::ToolEnd {
+                tool_name, result, ..
+            } => {
+                assert_eq!(tool_name, "Bash");
+                assert!(result.contains("hi"), "tool result: {result}");
+                saw_tool_end = true;
+            }
+            AcpEvent::Finished { .. } => {
+                finished = true;
+                break;
+            }
+            _ => {}
         }
     }
+    assert!(saw_tool_end, "no ToolEnd after permission allow");
     assert!(finished, "turn did not complete after permission reply");
 
-    // Journal: the permission RESPONSE we sent selected allow_once.
+    // Journal: the hook_callback control_response we sent carried "allow".
     let raw = std::fs::read_to_string(&journal).expect("journal exists");
     let resp_line = raw
         .lines()
-        .find(|l| l.contains("\"perm-1\"") && l.contains("\"result\""))
-        .expect("permission response in journal");
+        .filter(|l| l.contains("\"dir\":\"in\""))
+        .find(|l| l.contains("control_response") && l.contains("permissionDecision"))
+        .expect("hook control_response in journal");
     assert!(
-        resp_line.contains("allow_once"),
-        "expected allow_once in permission response: {resp_line}"
+        resp_line.contains("allow"),
+        "expected allow in hook response: {resp_line}"
     );
     let _ = std::fs::remove_file(&journal);
 }

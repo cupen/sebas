@@ -103,13 +103,15 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
     .await;
     assert!(guard.is_ok() && finished == 2, "both turns should complete");
 
-    // Journal: exactly one session/new; two session/prompt; second prompt
-    // carries msg2.
+    // Journal (new dialect): exactly one initialize; two user messages
+    // (initial prompt + flushed queue); second prompt carries msg2.
     let raw = std::fs::read_to_string(&journal).expect("journal");
-    let news = raw.matches("\"session/new\"").count();
-    assert_eq!(news, 1, "expected exactly one session/new: {raw}");
-    let prompts = raw.matches("\"session/prompt\"").count();
-    assert_eq!(prompts, 2, "expected two session/prompt calls: {raw}");
+    let news = raw.matches("\"subtype\": \"initialize\"").count()
+        + raw.matches("\"subtype\":\"initialize\"").count();
+    assert_eq!(news, 1, "expected exactly one initialize: {raw}");
+    let prompts =
+        raw.matches("\"type\": \"user\"").count() + raw.matches("\"type\":\"user\"").count();
+    assert_eq!(prompts, 2, "expected two user messages: {raw}");
     assert!(
         raw.contains("msg2"),
         "pending prompt must reach the agent: {raw}"

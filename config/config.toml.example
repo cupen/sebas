@@ -12,13 +12,12 @@ app_secret = ""
 # env 覆盖（spec §6.3，优先级高于本文件）：
 #   SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL
 
-# Claude Code integration: the bridge binary built from this workspace
-# (member crate `acp-claude-bridge/`). It spawns `claude --print --input-format
-# stream-json --output-format stream-json` under the hood and speaks ACP to
-# sebas. Default path works for `cargo run` / `cargo build` from this repo;
-# install the binary to /usr/local/bin for production.
+# Claude Code integration: sebas spawns the `claude` CLI directly
+# (stream-json + control protocol via cc-agent-sdk). `path` is the claude
+# binary (PATH lookup works); `args` are extra CLI flags.
+# (Post-ACP: the `acp-claude-bridge` binary is no longer part of the chain.)
 [acp.claude]
-path = "./target/debug/claude-acp-bridge"
+path = "claude"
 args = []
 
 # Optional: router, card, media, log sections all have defaults.

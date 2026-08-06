@@ -34,15 +34,12 @@ fn workspace_target() -> PathBuf {
 /// `Out::SendAcp{PermissionReply}` that reaches `mgr.send`.
 #[tokio::test]
 async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
-    let bridge = workspace_target().join("claude-acp-bridge");
-    let fake = workspace_target().join("fake-stream-claude");
-    assert!(bridge.exists());
+    // Post-ACP: the manager drives the new-dialect fake CLI directly.
+    let fake = workspace_target().join("fake-claude");
     assert!(fake.exists());
-    unsafe { std::env::set_var("SEBAS_CLAUDE_PATH", &fake); }
 
     let map = SessionMap::new();
-    let (router, mut out_rx) =
-        RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
 
     let key = SessionKey {
@@ -71,19 +68,17 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         &router,
         &key,
         &prompt,
-        bridge.to_str().unwrap(),
-        vec!["hello".into()],
+        fake.to_str().unwrap(),
+        vec![],
         Some("/tmp".into()),
     )
     .await
-    .expect("spawn bridge");
+    .expect("spawn fake CLI");
 
     // Router needs a SessionKey→session_id mapping so the permission
     // card lookup resolves a `receive_id` (otherwise the router logs
     // and drops the card — production invariant).
-    router
-        .insert_mapping(key.clone(), session_id.clone())
-        .await;
+    router.insert_mapping(key.clone(), session_id.clone()).await;
 
     // 1) Bridge asks for permission: feed a synthetic PermissionRequest
     //    event into the router as if it came from the SDK. Production
@@ -175,10 +170,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     };
     assert_eq!(reply.0, session_id);
     assert_eq!(reply.1, request_id);
-    assert!(matches!(
-        reply.2,
-        acp_claude::session::Decision::AllowOnce
-    ));
+    assert!(matches!(reply.2, acp_claude::session::Decision::AllowOnce));
 
     // Probe the manager path: a second permission round-trip will hit
     // mgr.send (also via our router). We don't have the bridge connected

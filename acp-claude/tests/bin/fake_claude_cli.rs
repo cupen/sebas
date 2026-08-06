@@ -31,7 +31,7 @@
 //! - user text == "stream" → 5 text frames with a 250ms pause before the
 //!   result frame (exercises the 150ms-debounce pump's transient states).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
 struct Flags {

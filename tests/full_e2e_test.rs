@@ -1,5 +1,5 @@
-//! Full integration: feishu → router → SessionManager → in-tree bridge →
-//! fake-stream-claude, exercised through the same production functions
+//! Full integration: feishu → router → SessionManager → (cc-agent-sdk) →
+//! fake-claude (new dialect), exercised through the same production functions
 //! `run()` uses for its spawn path (`acp_spawn_and_activate` +
 //! `spawn_acp_pump` + `flush_pending_prompts`). This skips the Feishu
 //! HTTP/WS transport (no `FeishuClient`, no `dispatch_out`): `FeishuIn`
@@ -24,18 +24,12 @@ fn workspace_target() -> PathBuf {
 
 #[tokio::test]
 async fn dispatch_text_drives_bridge_to_finished_emoji() {
-    let bridge = workspace_target().join("claude-acp-bridge");
-    let fake = workspace_target().join("fake-stream-claude");
-    assert!(bridge.exists(), "missing build artifact {}", bridge.display());
+    let fake = workspace_target().join("fake-claude");
     assert!(fake.exists(), "missing build artifact {}", fake.display());
-    // Bridge reads SEBAS_CLAUDE_PATH → fake-stream-claude; default is "claude"
-    // on PATH which doesn't exist on this build host.
-    unsafe { std::env::set_var("SEBAS_CLAUDE_PATH", &fake); }
 
     // Build the same shape `run()` constructs (run.rs:43–49).
     let map = SessionMap::new();
-    let (router, mut out_rx) =
-        RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
 
     // 1) Inject a Feishu text. Router dispatch goes on_text → spawn_new →
@@ -71,12 +65,12 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         &router,
         &key,
         &prompt,
-        bridge.to_str().unwrap(),
-        vec!["hello".into()],
+        fake.to_str().unwrap(),
+        vec![],
         Some("/tmp".into()),
     )
     .await
-    .expect("spawn bridge through production fn");
+    .expect("spawn fake CLI through production fn");
 
     // 3) Whatever `wire_session_card_and_pump` does that's NOT a Feishu
     //    HTTP call: seed the card state, fake a recorded message_id (the
@@ -127,9 +121,8 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         }
     }
 
-    // Stop the bridge subprocess so spawn_acp_pump's recv() can return
-    // None and the pump task can exit (otherwise it would block forever
-    // holding the bridge alive).
+    // Stop the session so spawn_acp_pump's recv() can return None and the
+    // pump task can exit.
     mgr.kill_all().await;
     drop(mgr);
 
@@ -137,21 +130,19 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
     assert!(saw_react_done, "no React ✅ within {OVERALL:?}");
 }
 
-/// Same flow as the fast test but the bridge pauses 250 ms between
-/// text_delta and result so the production pump's 150 ms debounce ticks
+/// Same flow as the fast test but the fake pauses between
+/// the content frames and the result so the production pump's 150 ms debounce ticks
 /// at least once before Finished arrives. That window is what exposes
 /// the full 👀→🚧→✅ FSM on `out_rx`: the fast test can only show the
 /// terminal ✅ because Finished takes the immediate path before any
 /// `ticker.tick()`.
 #[tokio::test]
 async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
-    let bridge = workspace_target().join("claude-acp-bridge");
-    let fake = workspace_target().join("fake-stream-claude");
-    unsafe { std::env::set_var("SEBAS_CLAUDE_PATH", &fake); }
+    let fake = workspace_target().join("fake-claude");
+    assert!(fake.exists());
 
     let map = SessionMap::new();
-    let (router, mut out_rx) =
-        RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
 
     let key = SessionKey {
@@ -179,12 +170,15 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         &router,
         &key,
         &prompt,
-        bridge.to_str().unwrap(),
-        vec!["hello".into(), "--slow-ms".into(), "250".into()],
+        fake.to_str().unwrap(),
+        // 800ms of mid-turn silence: pump startup (two process spawns) +
+        // the 150ms debounce tick must both land before the result frame,
+        // or the transient 🚧 flush is preempted by Finished.
+        vec!["--slow-ms".into(), "800".into()],
         Some("/tmp".into()),
     )
     .await
-    .expect("spawn bridge");
+    .expect("spawn fake CLI");
     router.seed_card(session_id.clone(), prompt.clone()).await;
     router
         .record_root_msg_id(session_id.clone(), "om_fake_slow".into())

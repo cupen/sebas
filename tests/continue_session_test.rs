@@ -7,10 +7,8 @@
 //!   2. React 🚧 (FSM flip)
 //!   3. SendAcp ContinueSession (forward to bridge)
 //!
-//! The actual second-turn event stream from the bridge is exercised by
-//! `full_e2e_test`/`router_bridge_e2e`; mixing both responsibilities in
-//! one place would also need fake-stream-claude multi-turn support
-//! (covered by `--loop` and a future multi-prompt bridge test).
+//! The actual second-turn event stream is exercised by `full_e2e_test`;
+//! the fake CLI serves multi-turn prompts in streaming mode by default.
 
 use acp_claude::manager::SessionManager;
 use acp_claude::session::AcpCommand;
@@ -30,15 +28,12 @@ fn workspace_target() -> PathBuf {
 
 #[tokio::test]
 async fn second_text_flips_fsm_and_forwards_continue() {
-    let bridge = workspace_target().join("claude-acp-bridge");
-    let fake = workspace_target().join("fake-stream-claude");
-    assert!(bridge.exists());
+    // Post-ACP: the manager drives the new-dialect fake CLI directly.
+    let fake = workspace_target().join("fake-claude");
     assert!(fake.exists());
-    unsafe { std::env::set_var("SEBAS_CLAUDE_PATH", &fake); }
 
     let map = SessionMap::new();
-    let (router, mut out_rx) =
-        RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
 
     let key = SessionKey {
@@ -66,8 +61,8 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         &router,
         &key,
         &prompt,
-        bridge.to_str().unwrap(),
-        vec!["hello".into(), "--slow-ms".into(), "200".into()],
+        fake.to_str().unwrap(),
+        vec!["--slow-ms".into(), "200".into()],
         Some("/tmp".into()),
     )
     .await
@@ -90,10 +85,10 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Ok(None) => panic!("out_rx closed early"),
             Err(_) => continue,
         };
-        if let Out::React { emoji, .. } = got {
-            if emoji == router::card_state::phase::DONE {
-                first_done = true;
-            }
+        if let Out::React { emoji, .. } = got
+            && emoji == router::card_state::phase::DONE
+        {
+            first_done = true;
         }
     }
     assert!(first_done, "first turn did not settle at React ✅");
@@ -125,7 +120,9 @@ async fn second_text_flips_fsm_and_forwards_continue() {
                     saw_card_working = true;
                 }
             }
-            Out::React { emoji, .. } if emoji == router::card_state::phase::WORKING => saw_react_working = true,
+            Out::React { emoji, .. } if emoji == router::card_state::phase::WORKING => {
+                saw_react_working = true
+            }
             Out::SendAcp {
                 cmd: AcpCommand::ContinueSession { prompt, .. },
                 ..

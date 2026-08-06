@@ -1,6 +1,6 @@
-//! `sebas record` 录制链路：以 fake-claude 为被录 agent，驱动
-//! initialize → session/new → session/prompt 一轮对话，断言 fixture
-//! 文件按 fake-claude journal 格式（{"dir","msg"}）记下双向流量。
+//! `sebas record` 录制链路：以 fake-claude 为被录 agent，驱动新方言
+//! （control_request initialize → user message 一轮对话），断言 fixture
+//! 文件按 {"dir","msg"} journal 格式记下双向流量。
 
 use sebas::config::Config;
 use std::path::PathBuf;
@@ -41,11 +41,9 @@ async fn records_both_directions_in_journal_format() {
     // 用户输入一轮最小对话；EOF（Cursor 自然结束）关闭子进程 stdin →
     // fake-claude 退出 → 录制结束。
     let input = concat!(
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#,
+        r#"{"type":"control_request","request_id":"r1","request":{"subtype":"initialize"}}"#,
         "\n",
-        r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}"#,
-        "\n",
-        r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess-1","prompt":[{"type":"text","text":"hi"}]}}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         "\n",
     );
     let term: Vec<u8> = Vec::new();
@@ -61,30 +59,29 @@ async fn records_both_directions_in_journal_format() {
     .expect("record completes on child exit");
 
     let journal = read_journal(&out);
-    assert!(journal.len() >= 6, "in+out lines recorded: {journal:?}");
+    assert!(journal.len() >= 5, "in+out lines recorded: {journal:?}");
 
     // in 方向逐条保留。
     let ins: Vec<_> = journal.iter().filter(|j| j["dir"] == "in").collect();
-    assert_eq!(ins.len(), 3);
-    assert_eq!(ins[0]["msg"]["method"], "initialize");
-    assert_eq!(ins[2]["msg"]["method"], "session/prompt");
+    assert_eq!(ins.len(), 2);
+    assert_eq!(ins[0]["msg"]["request"]["subtype"], "initialize");
+    assert_eq!(ins[1]["msg"]["type"], "user");
 
-    // out 方向：initialize 响应、session/new 响应、update、prompt 响应。
+    // out 方向：initialize 应答、system init、assistant 帧、result 帧。
     let outs: Vec<_> = journal.iter().filter(|j| j["dir"] == "out").collect();
     assert!(outs.len() >= 3, "agent responses recorded: {outs:?}");
     assert!(
-        outs.iter()
-            .any(|j| j["msg"]["result"]["sessionId"] == "sess-1"),
-        "session/new response captured: {outs:?}"
+        outs.iter().any(|j| j["msg"]["type"] == "control_response"),
+        "initialize ack captured: {outs:?}"
     );
     assert!(
-        outs.iter().any(|j| j["msg"]["method"] == "session/update"),
-        "streaming update captured: {outs:?}"
+        outs.iter().any(|j| j["msg"]["type"] == "assistant"),
+        "assistant frames captured: {outs:?}"
     );
 
-    // 顺序：首条必为 in/initialize。
+    // 顺序：首条必为 in 的 initialize。
     assert_eq!(journal[0]["dir"], "in");
-    assert_eq!(journal[0]["msg"]["method"], "initialize");
+    assert_eq!(journal[0]["msg"]["request"]["subtype"], "initialize");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -96,7 +93,7 @@ async fn non_json_lines_are_forwarded_but_not_recorded() {
     let out = dir.join("fixture.jsonl");
 
     // 一行非 JSON 混在中间：fake-claude 跳过它（保真行为），record 也跳过。
-    let input = "not json at all\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n";
+    let input = "not json at all\n{\"type\":\"control_request\",\"request_id\":\"r1\",\"request\":{\"subtype\":\"initialize\"}}\n";
     let term: Vec<u8> = Vec::new();
 
     sebas::record::record_with_io(
@@ -117,7 +114,7 @@ async fn non_json_lines_are_forwarded_but_not_recorded() {
     assert!(
         journal
             .iter()
-            .any(|j| j["dir"] == "in" && j["msg"]["method"] == "initialize"),
+            .any(|j| j["dir"] == "in" && j["msg"]["request"]["subtype"] == "initialize"),
         "valid line still recorded"
     );
 

@@ -1,20 +1,20 @@
-//! spec §3.3e lazy-resume coverage against fake-claude:
-//! - load-capable agent resumes with the requested id
-//! - agent without the capability falls back to session/new
-//! - agent whose session/load errors falls back to session/new
+//! spec §3.3e lazy-resume coverage (post-ACP rewrite):
+//! - resuming a live conversation id keeps the id and answers prompts
+//! - resuming with a CLI that rejects the resume errors the spawn
+//!   (Phase 1 semantics: NO transparent fallback — that is Phase 3,
+//!   sebas-dk8.4; the old "capability"/"load error → session/new" tests
+//!   tested ACP-session/load fallback machinery that no longer exists)
 
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 
-fn fake_claude() -> PathBuf {
-    // `cargo test` runs from the package dir (acp-claude/), so resolve the
-    // workspace-root target/ via CARGO_MANIFEST_DIR's parent.
+fn fake() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude")
+        .join("target/debug/fake-claude-cli")
 }
 
 /// Drain events until a Finished arrives (or timeout); returns the deltas seen.
@@ -35,19 +35,15 @@ async fn drain_until_finished(mgr: &SessionManager, id: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn resume_with_load_capable_agent_keeps_id() {
+async fn resume_keeps_old_id_and_answers() {
     let mgr = SessionManager::new(Duration::from_secs(30));
+    // The fake accepts --resume <id> and echoes it as its session_id.
     let outcome = mgr
-        .resume_session(
-            fake_claude().to_str().unwrap(),
-            vec!["--enable-load".into()],
-            None,
-            "sess-old-1",
-        )
+        .resume_session(fake().to_str().unwrap(), vec![], None, "sess-old-1")
         .await
         .expect("resume_session");
-    assert!(outcome.resumed, "load-capable agent must resume");
-    assert_eq!(outcome.session_id, "sess-old-1");
+    assert!(outcome.resumed, "native resume path must report resumed");
+    assert_eq!(outcome.session_id, "sess-old-1", "routing id = resumed id");
 
     // The resumed session answers prompts under the OLD id.
     mgr.send(
@@ -66,60 +62,18 @@ async fn resume_with_load_capable_agent_keeps_id() {
 }
 
 #[tokio::test]
-async fn resume_without_capability_falls_back_to_new() {
-    let mgr = SessionManager::new(Duration::from_secs(30));
-    // Plain fake-claude advertises loadSession:false → the manager must not
-    // even send session/load; it falls straight back to session/new.
-    let outcome = mgr
-        .resume_session(fake_claude().to_str().unwrap(), vec![], None, "sess-gone")
-        .await
-        .expect("resume_session");
-    assert!(!outcome.resumed, "no capability → fallback to session/new");
-    assert_eq!(outcome.session_id, "sess-1", "fresh id from session/new");
-
-    mgr.send(
-        &outcome.session_id,
-        AcpCommand::CreateSession {
-            session_id: outcome.session_id.clone(),
-            prompt: "hi".into(),
-        },
-    )
-    .await
-    .expect("send prompt");
-    let deltas = drain_until_finished(&mgr, &outcome.session_id).await;
-    assert_eq!(deltas.concat(), "hello world");
-
-    mgr.kill(&outcome.session_id).await;
-}
-
-#[tokio::test]
-async fn resume_with_load_error_falls_back_to_new() {
-    let mgr = SessionManager::new(Duration::from_secs(30));
-    // Capability advertised but session/load errors (session files deleted)
-    // → transparent fallback to session/new (spec §3.3e).
-    let outcome = mgr
+async fn resume_rejected_by_cli_errors_spawn() {
+    let mgr = SessionManager::new(Duration::from_millis(800));
+    // --resume-fails: the fake exits(1) immediately, modelling claude's
+    // "No conversation found" startup failure. The spawn must surface an
+    // error (Phase 1: no silent fresh-session fallback).
+    let res = mgr
         .resume_session(
-            fake_claude().to_str().unwrap(),
-            vec!["--load-fails".into()],
+            fake().to_str().unwrap(),
+            vec!["--resume-fails".into()],
             None,
             "sess-deleted",
         )
-        .await
-        .expect("resume_session");
-    assert!(!outcome.resumed, "load error → fallback to session/new");
-    assert_eq!(outcome.session_id, "sess-1", "fresh id from session/new");
-
-    mgr.send(
-        &outcome.session_id,
-        AcpCommand::CreateSession {
-            session_id: outcome.session_id.clone(),
-            prompt: "hi".into(),
-        },
-    )
-    .await
-    .expect("send prompt");
-    let deltas = drain_until_finished(&mgr, &outcome.session_id).await;
-    assert_eq!(deltas.concat(), "hello world");
-
-    mgr.kill(&outcome.session_id).await;
+        .await;
+    assert!(res.is_err(), "rejected resume must error, got {res:?}");
 }

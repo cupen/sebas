@@ -1,7 +1,8 @@
-//! Regression: production daemon path can drive the in-tree bridge through
-//! `acp_spawn_and_activate` to a finished session, not just the hand-rolled
-//! `fake-claude` agent. Catches path-resolution, env-propagation and
-//! handshake-deadlock regressions on the daemon-side spawn flow.
+//! Regression: the production daemon path drives the new-dialect fake CLI
+//! through `acp_spawn_and_activate` to an established session. Catches
+//! path-resolution, env-propagation and handshake-deadlock regressions on
+//! the daemon-side spawn flow. (Post-ACP: the "agent" is now the claude
+//! CLI itself — fake-claude speaks its stream-json + control protocol.)
 
 use acp_claude::manager::SessionManager;
 use feishu::events::SessionKey;
@@ -17,21 +18,18 @@ fn workspace_target() -> PathBuf {
 }
 
 #[tokio::test]
-async fn daemon_handshake_with_in_tree_bridge_finishes_under_5s() {
-    let bridge = workspace_target().join("claude-acp-bridge");
-    let fake = workspace_target().join("fake-stream-claude");
-    assert!(bridge.exists(), "missing build artifact {}", bridge.display());
+async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
+    let fake = workspace_target().join("fake-claude");
     assert!(fake.exists(), "missing build artifact {}", fake.display());
-
-    // Bridge reads SEBAS_CLAUDE_PATH to locate its claude child; default is
-    // "claude" on PATH. Override so we drive fake-stream-claude "hello".
-    unsafe { std::env::set_var("SEBAS_CLAUDE_PATH", &fake); }
 
     let map = SessionMap::new();
     let (router, _out_rx) = RouterHandle::new(map);
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
 
-    let key = SessionKey { chat_id: "oc_x".into(), thread_id: None };
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
 
     let t0 = std::time::Instant::now();
     let (_sid, _pending, _rx) = sebas::run::acp_spawn_and_activate(
@@ -39,12 +37,12 @@ async fn daemon_handshake_with_in_tree_bridge_finishes_under_5s() {
         &router,
         &key,
         "hello",
-        bridge.to_str().unwrap(),
-        vec!["hello".into()],
+        fake.to_str().unwrap(),
+        vec![],
         Some("/tmp".into()),
     )
     .await
-    .expect("spawn bridge through production path");
+    .expect("spawn fake CLI through production path");
 
     assert!(
         t0.elapsed() < Duration::from_secs(5),

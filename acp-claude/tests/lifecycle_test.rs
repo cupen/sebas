@@ -6,7 +6,7 @@ fn fake_claude_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("target/debug/fake-claude")
+        .join("target/debug/fake-claude-cli")
 }
 
 #[tokio::test]
