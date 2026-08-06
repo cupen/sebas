@@ -49,6 +49,12 @@ struct Flags {
     /// — resume rejection only applies to actual resume attempts, so the
     /// manager's fresh-session fallback still spawns fine.
     resume_used: bool,
+    /// True when argv carried `--session-id`. The real CLI rejects it
+    /// combined with `--resume`/`--continue` unless `--fork-session` is
+    /// also specified — replicated in main() so tests catch bad argv.
+    session_id_flag_used: bool,
+    continue_used: bool,
+    fork_session: bool,
     session_id: String,
 }
 
@@ -90,6 +96,9 @@ fn parse_flags() -> Flags {
         journal: None,
         resume_fails: false,
         resume_used: false,
+        session_id_flag_used: false,
+        continue_used: false,
+        fork_session: false,
         session_id: "fake-1".into(),
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -129,6 +138,7 @@ fn parse_flags() -> Flags {
                 i += 1;
             }
             "--session-id" => {
+                f.session_id_flag_used = true;
                 if let Some(v) = args.get(i + 1) {
                     f.session_id = v.clone();
                 }
@@ -141,6 +151,8 @@ fn parse_flags() -> Flags {
                 }
                 i += 1;
             }
+            "--continue" => f.continue_used = true,
+            "--fork-session" => f.fork_session = true,
             s if VALUE_FLAGS.contains(&s) => {
                 i += 1; // consume the value, ignore it
             }
@@ -180,6 +192,17 @@ fn main() {
         return;
     }
     let flags = parse_flags();
+    // The real CLI rejects `--session-id` combined with `--resume` /
+    // `--continue` unless `--fork-session` is also specified. Replicate the
+    // validation so a bad argv construction fails fast here instead of
+    // hanging until the startup timeout against the real binary.
+    if flags.session_id_flag_used && (flags.resume_used || flags.continue_used) && !flags.fork_session
+    {
+        eprintln!(
+            "Error: --session-id can only be used with --continue or --resume if --fork-session is also specified."
+        );
+        std::process::exit(1);
+    }
     // Like the real CLI, only an actual `--resume` of an unknown id is
     // rejected; a fresh `--session-id` spawn with the same flags works.
     if flags.resume_fails && flags.resume_used {

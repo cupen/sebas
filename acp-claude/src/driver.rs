@@ -4,8 +4,10 @@
 //!
 //! Post-ACP design (docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md):
 //! - One `ClaudeClient` per sebas session; the sebas routing id IS the claude
-//!   conversation id (we mint a uuid and pass `--session-id`), so resume is
-//!   just `options.resume = Some(same_id)`.
+//!   conversation id. Fresh spawns mint a uuid and pass `--session-id`;
+//!   resume passes ONLY `--resume <id>` — the real CLI rejects
+//!   `--session-id` combined with `--resume`/`--continue` unless
+//!   `--fork-session` is also given (and forking would change the id).
 //! - Permissions ride the PreToolUse hook callback (process-internal,
 //!   control-request correlated — no socket/hook-script/positional pairing).
 //! - `/cancel` = `interrupt()` + respawn-with-resume: the CLI is unusable
@@ -124,7 +126,14 @@ impl CcDriver {
         } = cfg;
 
         let mut extra_args = args_to_extra_args(&claude_args);
-        extra_args.insert("session-id".into(), Some(session_id.clone()));
+        // Only fresh spawns may pin the conversation id: the real CLI
+        // rejects `--session-id` together with `--resume`/`--continue`
+        // unless `--fork-session` is also specified (and forking would
+        // change the id we route by). On resume the conversation keeps its
+        // existing id, which IS our `session_id`.
+        if !resume {
+            extra_args.insert("session-id".into(), Some(session_id.clone()));
+        }
 
         let cb = permission_hook(session_id.clone(), evt_tx.clone(), pending_perms.clone());
         let mut hooks: HashMap<HookEvent, Vec<HookMatcher>> = HashMap::new();
