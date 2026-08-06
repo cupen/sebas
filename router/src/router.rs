@@ -1,17 +1,17 @@
-use crate::commands::{parse_command, Command};
+use crate::commands::{Command, parse_command};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
-use feishu::cards::{phase_visual, CardConfig};
+use feishu::cards::{CardConfig, phase_visual};
 use feishu::cards::{
     apply_event_to_card, render_accumulated_card, render_dead_session_card,
     render_expired_permission_card, render_permission_card, render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, RwLock};
-use serde_json::Value;
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Debug)]
 pub enum Out {
@@ -306,7 +306,11 @@ impl RouterHandle {
 
     pub async fn dispatch(&self, evt: FeishuIn) {
         match evt {
-            FeishuIn::Text { key, text, reply_to } => self.on_text(key, text, reply_to).await,
+            FeishuIn::Text {
+                key,
+                text,
+                reply_to,
+            } => self.on_text(key, text, reply_to).await,
             FeishuIn::Media {
                 key,
                 files,
@@ -418,7 +422,8 @@ impl RouterHandle {
                     self.emit_reaction(session_id.as_str(), emoji).await;
                 }
                 if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
-                    self.drain_queue_if_terminal(&key, session_id.as_str()).await;
+                    self.drain_queue_if_terminal(&key, session_id.as_str())
+                        .await;
                 }
             }
         }
@@ -446,7 +451,8 @@ impl RouterHandle {
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
-                        self.continue_session(sid, p, reply_to, key.clone(), false).await
+                        self.continue_session(sid, p, reply_to, key.clone(), false)
+                            .await
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
@@ -469,7 +475,8 @@ impl RouterHandle {
                 // /btw: same routing as PassThrough, but priority=true so it jumps the queue.
                 match self.map.route_text(key.clone(), text.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
-                        self.continue_session(sid, text, reply_to, key.clone(), true).await
+                        self.continue_session(sid, text, reply_to, key.clone(), true)
+                            .await
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, text).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
@@ -619,11 +626,16 @@ impl RouterHandle {
             Some(WORKING)
         );
         if in_flight {
-            self.map.enqueue_turn(&key, crate::state::QueuedTurn {
-                prompt,
-                reply_to: root_id,
-                priority,
-            }).await;
+            self.map
+                .enqueue_turn(
+                    &key,
+                    crate::state::QueuedTurn {
+                        prompt,
+                        reply_to: root_id,
+                        priority,
+                    },
+                )
+                .await;
             self.emit_reaction(&session_id, "⏳").await;
             return;
         }
@@ -710,7 +722,8 @@ impl RouterHandle {
 
         // Reset CardState: drop the old turn's state, seed fresh for the new turn.
         self.card_states.drop(session_id).await;
-        self.seed_card(session_id.to_string(), next.prompt.clone()).await;
+        self.seed_card(session_id.to_string(), next.prompt.clone())
+            .await;
 
         // Emit per-turn card with root_id = next.reply_to (threading via reply_to).
         let seed_emoji = phase_visual(crate::card_state::phase::SEED);
@@ -885,10 +898,15 @@ impl PermCardMap {
         tool_name: String,
         args: Value,
     ) {
-        self.inner
-            .write()
-            .await
-            .insert(request_id, PermCardEntry { key, msg_id, tool_name, args });
+        self.inner.write().await.insert(
+            request_id,
+            PermCardEntry {
+                key,
+                msg_id,
+                tool_name,
+                args,
+            },
+        );
     }
 
     /// Take the entry for a given request_id. The entry is removed on

@@ -263,7 +263,9 @@ async fn dispatch_out(
             // `UpdateCard`/`React`, which only know the session_id, can resolve
             // the message_id. Only record when a session_id is supplied; plain
             // cards (permission prompts, help) don't need to be updated later.
-            let new_id = feishu.send_card(http, tokens, &key, card, root_id.as_deref()).await?;
+            let new_id = feishu
+                .send_card(http, tokens, &key, card, root_id.as_deref())
+                .await?;
             if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
                 router.record_root_msg_id(session_id, new_id.clone()).await;
                 debug!(message_id = %new_id, "recorded card msg_id");
@@ -315,7 +317,8 @@ async fn dispatch_out(
                     ReactPlan::Swap { unreact_id } => {
                         // Best-effort: a stale reaction already gone is not fatal,
                         // but failing to add the new one would strand the state.
-                        if let Err(e) = feishu.unreact(http, tokens, &message_id, &unreact_id).await {
+                        if let Err(e) = feishu.unreact(http, tokens, &message_id, &unreact_id).await
+                        {
                             warn!(%session_id, "unreact before swap failed (continuing): {e}");
                         }
                         let rid = feishu.react(http, tokens, &message_id, &emoji).await?;
@@ -593,12 +596,15 @@ async fn wire_session_card_and_pump(
     // status_emoji 在 state 里是 Feishu emoji_type（"Typing"），渲染时通过
     // phase_visual 映射成 💬。
     let seed_emoji = feishu::cards::phase_visual(router::card_state::phase::SEED);
-    let card = render_accumulated_card(&prompt, &session_id, seed_emoji, &[], &cfg.card.theme_color);
+    let card =
+        render_accumulated_card(&prompt, &session_id, seed_emoji, &[], &cfg.card.theme_color);
     let msg_id = feishu
         .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
         .await?;
     if !msg_id.is_empty() {
-        router.record_root_msg_id(session_id.clone(), msg_id.clone()).await;
+        router
+            .record_root_msg_id(session_id.clone(), msg_id.clone())
+            .await;
         // Stamp the initial reaction on the root card. emoji_type 是 Feishu
         // API 合法值（"Typing"），不再是 unicode 👀 —— 那个会被 231001 拒绝。
         // Best-effort: a reaction failure must not abort session creation.
@@ -606,9 +612,11 @@ async fn wire_session_card_and_pump(
             .react(http, tokens, &msg_id, router::card_state::phase::SEED)
             .await
         {
-            Ok(rid) => reactions
-                .record(&session_id, router::card_state::phase::SEED.into(), rid)
-                .await,
+            Ok(rid) => {
+                reactions
+                    .record(&session_id, router::card_state::phase::SEED.into(), rid)
+                    .await
+            }
             Err(e) => warn!(%session_id, "initial react failed: {e}"),
         }
     }

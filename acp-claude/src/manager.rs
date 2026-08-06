@@ -10,7 +10,7 @@ use crate::driver::{CcDriver, ConnectConfig};
 use crate::session::{AcpCommand, AcpEvent, AcpSessionHandle, SessionMeta};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// How the background session task should establish the claude session.
 #[derive(Debug, Clone)]

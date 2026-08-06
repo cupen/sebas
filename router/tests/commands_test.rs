@@ -1,4 +1,4 @@
-use router::commands::{parse_command, Command};
+use router::commands::{Command, parse_command};
 
 #[test]
 fn parses_new() {

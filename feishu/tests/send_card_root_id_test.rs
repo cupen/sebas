@@ -20,12 +20,18 @@ fn build_send_card_body_includes_root_id_when_some() {
     let body = FeishuClient::build_send_card_body(&card_json, &key, Some("msg_parent_1"))
         .expect("build_send_card_body must not fail");
 
-    assert_eq!(body.get("receive_id").and_then(|v| v.as_str()), Some("oc_chat_1"));
-    assert_eq!(body.get("msg_type").and_then(|v| v.as_str()), Some("interactive"));
+    assert_eq!(
+        body.get("receive_id").and_then(|v| v.as_str()),
+        Some("oc_chat_1")
+    );
+    assert_eq!(
+        body.get("msg_type").and_then(|v| v.as_str()),
+        Some("interactive")
+    );
 
     let content_val = body.get("content").expect("content must be present");
-    let content: serde_json::Value = serde_json::from_str(content_val.as_str().unwrap())
-        .expect("content must be valid JSON");
+    let content: serde_json::Value =
+        serde_json::from_str(content_val.as_str().unwrap()).expect("content must be valid JSON");
     assert_eq!(content.get("type").and_then(|v| v.as_str()), Some("card"));
     assert_eq!(content.get("body").and_then(|v| v.as_str()), Some("hello"));
 
@@ -48,8 +54,14 @@ fn build_send_card_body_excludes_root_id_when_none() {
     let body = FeishuClient::build_send_card_body(&card_json, &key, None)
         .expect("build_send_card_body must not fail");
 
-    assert_eq!(body.get("receive_id").and_then(|v| v.as_str()), Some("oc_chat_2"));
-    assert_eq!(body.get("msg_type").and_then(|v| v.as_str()), Some("interactive"));
+    assert_eq!(
+        body.get("receive_id").and_then(|v| v.as_str()),
+        Some("oc_chat_2")
+    );
+    assert_eq!(
+        body.get("msg_type").and_then(|v| v.as_str()),
+        Some("interactive")
+    );
     assert!(
         body.get("root_id").is_none(),
         "root_id must not be present when root_id is None"
@@ -69,8 +81,14 @@ fn build_send_card_body_excludes_root_id_when_empty_string() {
     let body = FeishuClient::build_send_card_body(&card_json, &key, Some(""))
         .expect("build_send_card_body must not fail");
 
-    assert_eq!(body.get("receive_id").and_then(|v| v.as_str()), Some("oc_chat_3"));
-    assert_eq!(body.get("msg_type").and_then(|v| v.as_str()), Some("interactive"));
+    assert_eq!(
+        body.get("receive_id").and_then(|v| v.as_str()),
+        Some("oc_chat_3")
+    );
+    assert_eq!(
+        body.get("msg_type").and_then(|v| v.as_str()),
+        Some("interactive")
+    );
     assert!(
         body.get("root_id").is_none(),
         "root_id must not be present when root_id is Some(\"\")"
@@ -99,21 +117,42 @@ fn build_send_card_body_full_structure_with_root_id() {
     let content_str = body.get("content").and_then(|v| v.as_str());
     let root_id = body.get("root_id").and_then(|v| v.as_str());
 
-    assert_eq!(receive_id, Some("oc_full_test"), "receive_id must match chat_id");
-    assert_eq!(msg_type, Some("interactive"), "msg_type must be 'interactive'");
-    assert!(content_str.is_some(), "content must be present and a string");
-    assert_eq!(root_id, Some("parent_123"), "root_id must match the provided parent id");
+    assert_eq!(
+        receive_id,
+        Some("oc_full_test"),
+        "receive_id must match chat_id"
+    );
+    assert_eq!(
+        msg_type,
+        Some("interactive"),
+        "msg_type must be 'interactive'"
+    );
+    assert!(
+        content_str.is_some(),
+        "content must be present and a string"
+    );
+    assert_eq!(
+        root_id,
+        Some("parent_123"),
+        "root_id must match the provided parent id"
+    );
 
     // Content must be valid JSON containing the card elements
-    let content_parsed: serde_json::Value = serde_json::from_str(content_str.unwrap())
-        .expect("content must be valid JSON");
+    let content_parsed: serde_json::Value =
+        serde_json::from_str(content_str.unwrap()).expect("content must be valid JSON");
     assert_eq!(
-        content_parsed.get("header").and_then(|v| v.get("title").and_then(|t| t.get("content")).and_then(|c| c.as_str())),
+        content_parsed.get("header").and_then(|v| v
+            .get("title")
+            .and_then(|t| t.get("content"))
+            .and_then(|c| c.as_str())),
         Some("Hello"),
         "card header title must be preserved in content"
     );
     assert_eq!(
-        content_parsed.get("elements").and_then(|v| v.as_array()).map(|a| a.len()),
+        content_parsed
+            .get("elements")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
         Some(1),
         "card elements must be preserved in content"
     );

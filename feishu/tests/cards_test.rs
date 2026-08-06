@@ -1,6 +1,6 @@
 use acp_claude::session::AcpEvent;
 use feishu::cards::{
-    apply_event_to_card, render_permission_card, render_root_card, CardConfig, CardElement,
+    CardConfig, CardElement, apply_event_to_card, render_permission_card, render_root_card,
 };
 
 #[test]
@@ -244,11 +244,11 @@ fn total_budget_drops_hr_with_following_element() {
             &c,
         );
     } // body = [Hr, Markdown, M, M, M, M, M, M, M] -> Hr 最旧
-      // 总量超 24000 -> 丢 Hr + 其后 1 个 Markdown（共 2 个），剩余 7-1=6 段 text + 原 Markdown? 需算:
-      //   元素: [Hr, Markdown(ToolStart的), M, M, M, M, M, M, M] = 1 Hr + 8 Markdown
-      //   字符: 8*4000 = 32000 -> 丢 Hr+第1个M -> 7*4000=28000 -> 继续 -> 丢第2个M -> 6*4000=24000 -> 停.
-      //   但丢 Hr 时连后一个 -> 第一次丢 [Hr, Markdown(ToolStart)] -> 剩 7 M = 28000 -> 再丢 1 M -> 6 M = 24000.
-      //   最终 body.len() = 6 (6 个 Markdown).
+    // 总量超 24000 -> 丢 Hr + 其后 1 个 Markdown（共 2 个），剩余 7-1=6 段 text + 原 Markdown? 需算:
+    //   元素: [Hr, Markdown(ToolStart的), M, M, M, M, M, M, M] = 1 Hr + 8 Markdown
+    //   字符: 8*4000 = 32000 -> 丢 Hr+第1个M -> 7*4000=28000 -> 继续 -> 丢第2个M -> 6*4000=24000 -> 停.
+    //   但丢 Hr 时连后一个 -> 第一次丢 [Hr, Markdown(ToolStart)] -> 剩 7 M = 28000 -> 再丢 1 M -> 6 M = 24000.
+    //   最终 body.len() = 6 (6 个 Markdown).
     assert_eq!(body.len(), 6);
     // 最旧的 Hr 已被连带丢掉.
     assert!(matches!(body[0], CardElement::Markdown { .. }));
@@ -302,7 +302,7 @@ fn finished_and_error_append_markdown() {
 
 #[test]
 fn render_accumulated_card_structure() {
-    use feishu::cards::{render_accumulated_card, CardElement};
+    use feishu::cards::{CardElement, render_accumulated_card};
     let body = vec![
         CardElement::Markdown {
             content: "hello".into(),
@@ -355,11 +355,26 @@ fn permission_card_buttons_are_first_class_v2_elements() {
     // `behaviors: [{type: "callback", value: {...}}]` wrapper, otherwise
     // Feishu silently ignores the button (no click callback registered).
     let s = serde_json::to_string(&card).unwrap();
-    assert!(!s.contains("\"tag\":\"action\""), "V2 forbids the action container");
-    assert!(!s.contains("\"actions\":["), "no actions array without a container");
-    assert!(s.contains("\"tag\":\"button\""), "each button needs explicit tag:button");
-    assert!(s.contains("\"behaviors\":["), "each button must have behaviors array");
-    assert!(s.contains("\"type\":\"callback\""), "behavior type must be callback");
+    assert!(
+        !s.contains("\"tag\":\"action\""),
+        "V2 forbids the action container"
+    );
+    assert!(
+        !s.contains("\"actions\":["),
+        "no actions array without a container"
+    );
+    assert!(
+        s.contains("\"tag\":\"button\""),
+        "each button needs explicit tag:button"
+    );
+    assert!(
+        s.contains("\"behaviors\":["),
+        "each button must have behaviors array"
+    );
+    assert!(
+        s.contains("\"type\":\"callback\""),
+        "behavior type must be callback"
+    );
     // 3 decisions.
     assert!(s.contains("Allow once"));
     assert!(s.contains("Allow session"));
@@ -374,7 +389,10 @@ fn permission_card_args_in_code_fence_and_explanation_note() {
     // Inside the JSON-of-the-card the fence's quotes are escaped as \", so
     // look for the escaped forms.
     assert!(s.contains("```json"), "args must be in a fenced code block");
-    assert!(s.contains("\\\"cmd\\\""), "args must contain escaped cmd key");
+    assert!(
+        s.contains("\\\"cmd\\\""),
+        "args must contain escaped cmd key"
+    );
     assert!(s.contains("ls /tmp"), "args must contain the command value");
     // Explanation note present so users know what each button does.
     assert!(s.contains("Allow once = 这一次"));
@@ -396,6 +414,12 @@ fn tool_start_renders_args_in_code_fence() {
     );
     let s = serde_json::to_string(&body).unwrap();
     assert!(s.contains("```json"), "ToolStart args must be fenced");
-    assert!(s.contains("\\\"command\\\""), "ToolStart args must contain escaped command key");
-    assert!(s.contains("ls /tmp"), "ToolStart args must contain the command value");
+    assert!(
+        s.contains("\\\"command\\\""),
+        "ToolStart args must contain escaped command key"
+    );
+    assert!(
+        s.contains("ls /tmp"),
+        "ToolStart args must contain the command value"
+    );
 }

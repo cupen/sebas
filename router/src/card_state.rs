@@ -11,9 +11,9 @@ use tokio::sync::RwLock;
 /// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. The display
 /// glyph for the card header is derived via `feishu::cards::phase_visual`.
 pub mod phase {
-    pub const SEED: &str = "Typing";     // watching / waiting on first event
-    pub const WORKING: &str = "OnIt";     // streaming response in progress
-    pub const DONE: &str = "DONE";       // Finished event
+    pub const SEED: &str = "Typing"; // watching / waiting on first event
+    pub const WORKING: &str = "OnIt"; // streaming response in progress
+    pub const DONE: &str = "DONE"; // Finished event
     pub const FAILED: &str = "CrossMark"; // terminal Error event
 }
 
@@ -82,6 +82,10 @@ impl CardStateMap {
     /// Returns the current status emoji for the given session, or None if
     /// the session has no CardState entry.
     pub async fn status_emoji(&self, session_id: &str) -> Option<String> {
-        self.inner.read().await.get(session_id).map(|st| st.status_emoji.clone())
+        self.inner
+            .read()
+            .await
+            .get(session_id)
+            .map(|st| st.status_emoji.clone())
     }
 }
