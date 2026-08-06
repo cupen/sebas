@@ -19,6 +19,7 @@ pub struct GatewayArgs {
 
 /// CLI entry: read + parse the gateway config, then run the server.
 pub async fn run(args: GatewayArgs) -> Result<()> {
+    init_tracing();
     let raw = std::fs::read_to_string(&args.config)
         .map_err(|e| SebasError::Gateway(format!("read config {}: {e}", args.config)))?;
     let cfg = GatewayConfig::parse(&raw).map_err(|e| SebasError::Gateway(e.to_string()))?;
@@ -26,4 +27,16 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
         .await
         .map_err(|e| SebasError::Gateway(e.to_string()))?;
     Ok(())
+}
+
+/// Install a `tracing_subscriber` for the gateway path. `GatewayConfig` has no
+/// `[log]` section, so the filter comes from `RUST_LOG` (default `"info"`),
+/// mirroring `run.rs::init_tracing` minus the log-file writer. `try_init`
+/// returns `Err` if a global subscriber is already installed — e.g. when a test
+/// sets one up first — so the error is ignored: the first caller wins and
+/// later calls are a no-op.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = fmt().with_env_filter(filter).try_init();
 }
