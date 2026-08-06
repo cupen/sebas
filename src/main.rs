@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Cmd, InstallServiceArgs, RecordArgs, ReplayArgs};
+use cli::{Cli, Cmd, GatewayArgs, InstallServiceArgs, RecordArgs, ReplayArgs};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -30,6 +30,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Record(args) => {
             if let Err(e) = sebas::record::run(args.into()).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Gateway(args) => {
+            if let Err(e) = sebas::gateway_cmd::run(args.into()).await {
                 eprintln!("error: {e:?}");
                 std::process::exit(1);
             }
@@ -84,6 +91,12 @@ impl From<RecordArgs> for sebas::record::RecordArgs {
     }
 }
 
+impl From<GatewayArgs> for sebas::gateway_cmd::GatewayArgs {
+    fn from(a: GatewayArgs) -> Self {
+        Self { config: a.config }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +124,15 @@ mod tests {
     fn top_level_config_flag_is_rejected() {
         // 入口是显式 run 子命令；顶层不再吞 run 模式的 flags。
         assert!(Cli::try_parse_from(["sebas", "--config", "x.toml"]).is_err());
+    }
+
+    #[test]
+    fn gateway_subcommand_accepts_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "gateway", "--config", "x.toml"])
+            .expect("`sebas gateway --config <path>` must parse");
+        let Cmd::Gateway(args) = cli.cmd else {
+            panic!("expected Gateway subcommand");
+        };
+        assert_eq!(args.config, "x.toml");
     }
 }

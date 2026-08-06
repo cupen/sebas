@@ -19,6 +19,9 @@ pub enum Cmd {
     /// Type/paste JSON-RPC lines on stdin; responses print to stdout; both
     /// directions are appended to --output as {"dir","msg"} journal lines.
     Record(RecordArgs),
+    /// Run the LLM provider gateway (Anthropic/OpenAI dual-protocol
+    /// transparent proxy). See docs/superpowers/specs/2026-08-06-gateway-design.md.
+    Gateway(GatewayArgs),
 }
 
 /// Run mode — the long-lived sebas service.
@@ -90,4 +93,11 @@ pub struct RecordArgs {
     /// (appended to the configured acp.claude.args).
     #[arg(last = true)]
     pub agent_args: Vec<String>,
+}
+
+/// `sebas gateway` — run the LLM provider gateway.
+#[derive(Parser)]
+pub struct GatewayArgs {
+    #[arg(long, default_value = "./config.toml")]
+    pub config: String,
 }

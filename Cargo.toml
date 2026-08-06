@@ -12,6 +12,7 @@ members = ["router", "feishu", "acp-claude", "gateway"]
 router = { path = "router" }
 feishu = { path = "feishu" }
 acp-claude = { path = "acp-claude" }
+gateway = { path = "gateway" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
