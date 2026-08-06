@@ -70,21 +70,33 @@ const PENDING: &[(&str, &str, &str)] = &[("*", "P1 全量 contract tests", "seba
 ///
 /// 规则：`^  /<path>:`（恰好 2 空格缩进）为 path 行；紧随其后直到下一个 path
 /// 行之间，`^    <method>:`（恰好 4 空格缩进）为该 path 下的 method。
+///
+/// **paths: 作用域限定**：只在顶级 `paths:` 块内收集 endpoint。遇到 0 缩进
+/// 顶级 key（如 `webhooks:`、`components:`、`x-oaiMeta:`）即离开 paths 块，
+/// `current_path` 置 None，防止后续 4 空格 `    post:` 被误挂到上个 path 上
+/// （vendored OpenAI spec 的 `webhooks:` 块有 16 个 `    post:`，不定作用域
+/// 会产出 16 个幻影重复端点：304 vs 真实 288）。
 fn parse_openai(yaml: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut current_path: Option<String> = None;
 
     for line in yaml.lines() {
-        // path 行：恰好 2 空格缩进 + 以 / 开头 + 以 : 结尾
         let trimmed = line.trim_start_matches(' ');
         let indent = line.len() - trimmed.len();
+        // 0 缩进顶级 key：离开 paths: 块（webhooks:/components:/x-oaiMeta: 等）。
+        // 防止上个 path 残留，误吞后续 4 空格 method 行。
+        if indent == 0 && trimmed.ends_with(':') && !trimmed.starts_with('#') {
+            current_path = None;
+            continue;
+        }
+        // path 行：恰好 2 空格缩进 + 以 / 开头 + 以 : 结尾
         if indent == 2 && trimmed.starts_with('/') && trimmed.ends_with(':') {
             // 去掉末尾 ':'
             let path = &trimmed[..trimmed.len() - 1];
             current_path = Some(format!("/v1{path}"));
             continue;
         }
-        // method 行：恰好 4 空格缩进 + 已知 method + ':'
+        // method 行：恰好 4 空格缩进 + 已知 method + ':'，且仍在某 path 下
         if indent == 4
             && let Some(path) = &current_path
         {
@@ -227,6 +239,48 @@ components:
     assert_eq!(
         got, want,
         "OpenAI parser must extract (METHOD, /v1+path) in document order"
+    );
+}
+
+/// 回归：`paths:` 之外的 4 空格 method 行不得挂数到上个 path。
+///
+/// vendored OpenAI spec 的 `webhooks:` 块有 16 个 `    post:`，不定作用域会
+/// 全部挂数到最后一个 path（`/v1/responses/input_tokens?beta=true`），产出
+/// 16 个幻影重复端点（304 vs 真实 288）。此 fixture 复现该结构。
+#[test]
+fn parser_selftest_openai_scopes_to_paths_block() {
+    let fixture = "\
+openapi: 3.1.0
+paths:
+  /responses:
+    post:
+      operationId: createResponse
+  /responses/input_tokens?beta=true:
+    post:
+      operationId: createResponseInputTokens
+webhooks:
+  batch_cancelled:
+    post:
+      description: Sent when a batch has been cancelled.
+  batch_completed:
+    post:
+      description: Sent when a batch has completed processing.
+components:
+  schemas:
+    WebhookBatchCancelled:
+      type: object
+x-oaiMeta:
+  someMeta: true
+";
+    let got = parse_openai(fixture);
+    let want: Vec<(String, String)> = vec![
+        ("POST".into(), "/v1/responses".into()),
+        ("POST".into(), "/v1/responses/input_tokens?beta=true".into()),
+    ];
+    assert_eq!(
+        got, want,
+        "parse_openai must not attach 4-space method lines outside `paths:` to the last path; \
+         the 16 `    post:` lines under `webhooks:` must yield zero phantom endpoints"
     );
 }
 

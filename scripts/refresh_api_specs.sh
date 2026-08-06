@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # 刷新 vendored 官方 API 清单（spec-diff 门禁用，Task 10 / sebas-lva.10）。
 #
-# 用法：./scripts/refresh_api_specs.sh
+# 用法：./scripts/refresh_api_specs.sh [--cached]
 #
-# 从 GitHub API 拉取官方源文件最新版，写入 gateway/tests/specs/：
-#   - openai-openapi.yaml   ← openai/openai-openapi  openapi.yaml
+# 默认：从 GitHub 实时拉取官方源文件最新版，写入 gateway/tests/specs/：
+#   - openai-openapi.yaml   ← openai/openai-openapi          openapi.yaml
 #   - anthropic-api.md      ← anthropics/anthropic-sdk-typescript  api.md
 #
-# 优先使用本地 /tmp 副本（CI 已预置时）；否则 curl 下载。
+# --cached：不联网。从本地 /tmp 种子副本（CI 已预置 / 之前下载过）复制到
+# vendor 目标，便于离线环境。/tmp 副本缺失时报错退出。
+#
 # Accept: application/vnd.github.raw 返回文件原始内容（不经 base64/JSON 包裹）。
 set -euo pipefail
 
@@ -16,10 +18,28 @@ mkdir -p "$SPECS_DIR"
 
 GH_RAW="Accept: application/vnd.github.raw"
 
+CACHED=0
+for arg in "$@"; do
+  case "$arg" in
+    --cached) CACHED=1 ;;
+    -h|--help)
+      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+      exit 0 ;;
+    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+  esac
+done
+
 fetch() { # fetch <url> <out_path>
   local url="$1" out="$2"
-  if [ -s "$out" ] && head -c 1 "$out" >/dev/null 2>&1; then
-    echo "skip (exists): $out"
+  if [[ "$CACHED" -eq 1 ]]; then
+    local cache="/tmp/$(basename "$out")"
+    if [[ -s "$cache" ]]; then
+      echo "cached: $cache -> $out"
+      cp -f "$cache" "$out"
+    else
+      echo "error: --cached but $cache missing; run without --cached first" >&2
+      exit 1
+    fi
     return 0
   fi
   echo "fetch: $url -> $out"
