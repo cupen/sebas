@@ -139,7 +139,7 @@ async fn queue_fifo_by_default_priority_jumps_front() {
         chat_id: "oc".into(),
         thread_id: None,
     };
-    m.insert(k.clone(), Mapping::active("s1")).await;
+    let _ = m.insert(k.clone(), Mapping::active("s1")).await;
     m.enqueue_turn(
         &k,
         QueuedTurn {
@@ -181,7 +181,7 @@ async fn pop_next_turn_cleans_up_empty_entry() {
         chat_id: "oc".into(),
         thread_id: None,
     };
-    m.insert(k.clone(), Mapping::active("s1")).await;
+    let _ = m.insert(k.clone(), Mapping::active("s1")).await;
     m.enqueue_turn(
         &k,
         QueuedTurn {

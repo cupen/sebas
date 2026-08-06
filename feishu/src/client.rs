@@ -233,10 +233,10 @@ impl FeishuClient {
             "msg_type": "interactive",
             "content": content,
         });
-        if let Some(rid) = root_id {
-            if !rid.is_empty() {
-                body["root_id"] = serde_json::Value::String(rid.to_string());
-            }
+        if let Some(rid) = root_id
+            && !rid.is_empty()
+        {
+            body["root_id"] = serde_json::Value::String(rid.to_string());
         }
         Ok(body)
     }

@@ -968,6 +968,7 @@ impl SessionAllowlist {
 ///     keys in different order on different invocations)
 ///   - null fields (Claude sometimes emits `parent_tool_use_id: null`
 ///     or other optional wrappers)
+///
 /// Array order is preserved (semantically meaningful for command args,
 /// env, etc.).
 pub fn tool_signature(tool_name: &str, args: &Value) -> String {

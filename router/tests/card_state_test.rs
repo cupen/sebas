@@ -427,7 +427,7 @@ async fn permission_card_click_emits_resolved_card_flip() {
     // Seed an active session mapping so `on_button` passes the
     // `session_alive` check (production: the session is alive while
     // there's a Claude child process for this chat).
-    router
+    let _ = router
         .map
         .insert(key.clone(), router::state::Mapping::active("sess-flip"))
         .await;
@@ -506,7 +506,7 @@ async fn stale_permission_click_emits_expired_card() {
     // Seed an active session so `on_button` reaches the click path
     // (the stale branch is taken because perm_cards.take returns None,
     // not because the session is dead).
-    router
+    let _ = router
         .map
         .insert(key.clone(), router::state::Mapping::active("sess-stale"))
         .await;
@@ -742,7 +742,7 @@ async fn permission_request_after_grant_auto_approves_without_card() {
     };
     let session_id = "sess-1".to_string();
     // Seed the session map so apply_event_to_out can resolve the key.
-    router
+    let _ = router
         .map
         .insert(
             key.clone(),
@@ -862,7 +862,7 @@ async fn permission_request_without_grant_still_renders_card() {
         thread_id: None,
     };
     let session_id = "sess-1".to_string();
-    router
+    let _ = router
         .map
         .insert(
             key.clone(),

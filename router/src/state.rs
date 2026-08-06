@@ -302,10 +302,10 @@ impl SessionMap {
     pub async fn pop_next_turn(&self, key: &SessionKey) -> Option<QueuedTurn> {
         let mut q = self.turn_queue.write().await;
         let popped = q.get_mut(key).and_then(|deque| deque.pop_front());
-        if let Some(ref deque) = q.get(key) {
-            if deque.is_empty() {
-                q.remove(key);
-            }
+        if let Some(deque) = q.get(key)
+            && deque.is_empty()
+        {
+            q.remove(key);
         }
         popped
     }
