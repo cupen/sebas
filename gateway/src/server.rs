@@ -25,16 +25,18 @@ use crate::auth::require_key;
 use crate::config::{GatewayConfig, KeyConfig};
 use crate::error::{GatewayError, Result, error_response};
 use crate::proto::Protocol;
+use crate::quota::Quota;
 
 /// Shared server state. All heavy fields are `Arc`-wrapped so the type is
 /// cheaply `Clone` (axum `State<S>` requires `Clone + Send + Sync + 'static`).
-/// Later tasks append `quota`/`table`/`sink` (also `Arc`).
+/// Later tasks append `table`/`sink` (also `Arc`). Task 6 added `quota`.
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<GatewayConfig>,
     pub keys: Arc<HashMap<String, KeyConfig>>,
     pub api_keys: Arc<HashMap<String, String>>,
     pub client: reqwest::Client,
+    pub quota: Arc<Quota>,
 }
 
 /// Resolve api keys + build the upstream client. Called once at startup.
@@ -58,6 +60,7 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
         keys: Arc::new(keys),
         api_keys: Arc::new(api_keys),
         client,
+        quota: Arc::new(Quota::new()),
     })
 }
 
