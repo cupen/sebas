@@ -14,6 +14,9 @@
 //! 安全铁律：下游 key 绝不出现在转发请求里；上游 key 只注入到 outbound
 //! header，不落日志/响应；5xx 用通用 message。
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -23,9 +26,11 @@ use crate::auth::KeyIdentity;
 use crate::config::ProviderConfig;
 use crate::error::error_response;
 use crate::proto::{Protocol, resolve_target};
-use crate::quota::QuotaVerdict;
+use crate::quota::{Quota, QuotaVerdict};
 use crate::routing::{RouteError, extract_model_from_body, extract_model_from_path};
 use crate::server::AppState;
+use crate::sse::{SseUsageParser, UsageInfo, parse_json_usage};
+use crate::usage::{UsageRecord, UsageSink};
 
 /// hop-by-hop + 下游 auth header：请求侧剥离集合（spec §4.3）。
 /// `host` 由 reqwest 按目标 URL 重算；`content-length` 按新 body 重算；
@@ -210,6 +215,8 @@ fn upstream_error_response(proto: Protocol, message: &str) -> Response {
 ///
 /// 上游响应（含 4xx/5xx + 上游 retry-after）原样透传，status/body/headers 不改。
 pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
+    // 请求起始时刻，用于 latency/ttft。settling 用 `elapsed()`，无需 pin。
+    let start = Instant::now();
     // 1. 协议嗅探 + 路径解析。非 /v1 → 404（默认 OpenAI 协议面，与 auth.rs 一致）。
     let target = match resolve_target(req.headers(), req.uri().path()) {
         Some(t) => t,
@@ -359,6 +366,22 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, %upstream_url, "upstream request failed");
+            // 网关侧失败：error 字段承载原因，status=502。token 字段全 None
+            // （请求未到达上游，无 usage）。
+            settle_usage(
+                &state.sink,
+                &state.quota,
+                &identity,
+                proto,
+                model.as_deref(),
+                &decision.provider,
+                decision.upstream_model.as_deref(),
+                StatusCode::BAD_GATEWAY.as_u16(),
+                start,
+                None,
+                UsageInfo::default(),
+                Some("failed to reach upstream provider"),
+            );
             return upstream_error_response(proto, "failed to reach upstream provider");
         }
     };
@@ -371,15 +394,65 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     // 用 `Response::new(body)` 起手（200 + 空 header），再覆盖 status/headers，
     // 避开 `Builder::headers_mut` 返回 `Option<&mut HeaderMap>` 的繁琐。
     let mut resp = if is_sse {
-        // SSE：逐 chunk flush 不缓冲。Task 8 在此插 usage tee（per-chunk 边界）。
-        let stream = sse_passthrough_stream(upstream_resp);
+        // SSE：逐 chunk flush 不缓冲。usage tee：闭包内喂 parser + 记 TTFT
+        // （首个 chunk）。`UsageFinalizer` 实现 `Drop`——流结束或客户端断开
+        // 都结算（写 record + quota.record_tokens），无需 pin_project。
+        let finalizer = UsageFinalizer {
+            sink: state.sink.clone(),
+            quota: state.quota.clone(),
+            identity: identity.clone(),
+            proto,
+            model: model.clone(),
+            provider: decision.provider.clone(),
+            upstream_model: decision.upstream_model.clone(),
+            status: status.as_u16(),
+            start,
+            ttft: None,
+            parser: Some(SseUsageParser::new(proto)),
+            info: UsageInfo::default(),
+            settled: false,
+        };
+        let stream = sse_passthrough_stream(upstream_resp, finalizer);
         Response::new(Body::from_stream(stream))
     } else {
-        // 非 SSE：缓冲回传。读取失败 → 502 upstream_error。
+        // 非 SSE：缓冲回传。读取失败 → 502 upstream_error + 结算（error）。
         match upstream_resp.bytes().await {
-            Ok(b) => Response::new(Body::from(b)),
+            Ok(b) => {
+                // 上游 4xx/5xx 也记 record：status 承载错误语义，error=None。
+                // 解析 usage（错误响应可能无 usage → 全 None，正常）。
+                let info = parse_json_usage(proto, &b);
+                settle_usage(
+                    &state.sink,
+                    &state.quota,
+                    &identity,
+                    proto,
+                    model.as_deref(),
+                    &decision.provider,
+                    decision.upstream_model.as_deref(),
+                    status.as_u16(),
+                    start,
+                    None,
+                    info,
+                    None,
+                );
+                Response::new(Body::from(b))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, %upstream_url, "upstream body read failed");
+                settle_usage(
+                    &state.sink,
+                    &state.quota,
+                    &identity,
+                    proto,
+                    model.as_deref(),
+                    &decision.provider,
+                    decision.upstream_model.as_deref(),
+                    StatusCode::BAD_GATEWAY.as_u16(),
+                    start,
+                    None,
+                    UsageInfo::default(),
+                    Some("failed to read upstream response body"),
+                );
                 return upstream_error_response(proto, "failed to read upstream response body");
             }
         }
@@ -400,17 +473,159 @@ fn build_upstream_url(base_url: &str, target_path: &str, uri: &axum::http::Uri) 
 /// SSE 透传流：把 reqwest response 的 bytes_stream 转成 axum `Body::from_stream`
 /// 可消费的 `Stream<Item = Result<Bytes, BoxError>>`。
 ///
-/// 把流单独函数化是 Task 8 的 SPI 边界：未来在此函数内对每 chunk 做增量解析
-/// （usage tee），不影响 `handle` 主流程。当前实现是纯字节透传——`map_err`
-/// 把 `reqwest::Error` 装箱为 `BoxError` 以满足 axum `Body::from_stream` 的
-/// `Error: Into<BoxError>` 约束。
+/// 每 chunk 在透传前喂 `UsageFinalizer.parser`（增量 SSE usage 解析）并记 TTFT
+/// （首个 chunk 到达时刻）。`finalizer` 由闭包拥有——流结束（上游 `None`）
+/// 或客户端断开（`Body` drop）都会 drop 闭包 → drop finalizer → `Drop` 结算
+/// （写 `UsageRecord` + `quota.record_tokens`）。无需 pin_project：`Drop` 是
+/// 闭包所有权链的自然终态。
 fn sse_passthrough_stream(
     upstream_resp: reqwest::Response,
-) -> impl futures_core::Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> {
-    use futures_util::TryStreamExt;
+    mut finalizer: UsageFinalizer,
+) -> impl futures_core::Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> + Send
+{
+    use futures_util::{StreamExt, TryStreamExt};
     upstream_resp
         .bytes_stream()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        .map(move |res| {
+            if let Ok(ref bytes) = res {
+                if finalizer.ttft.is_none() {
+                    finalizer.ttft = Some(finalizer.start.elapsed());
+                }
+                if let Some(p) = finalizer.parser.as_mut() {
+                    let info = p.feed(bytes);
+                    finalizer.info.merge(info);
+                }
+            }
+            res
+        })
+}
+
+/// SSE 流的断流安全结算器。`Drop` 在流结束**或**客户端断开时触发，flush
+/// parser 残余缓冲并写一条 `UsageRecord` + 调 `quota.record_tokens`。
+/// `settled` 防御性防止重复结算（理论上 `Drop` 只调一次，但 future cancel
+/// 路径下编译器可能插入多次 drop）。
+struct UsageFinalizer {
+    sink: UsageSink,
+    quota: Arc<Quota>,
+    identity: KeyIdentity,
+    proto: Protocol,
+    model: Option<String>,
+    provider: String,
+    upstream_model: Option<String>,
+    status: u16,
+    start: Instant,
+    ttft: Option<Duration>,
+    parser: Option<SseUsageParser>,
+    info: UsageInfo,
+    settled: bool,
+}
+
+impl Drop for UsageFinalizer {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        self.settled = true;
+        // flush parser 残余缓冲（未闭合的尾事件也尝试解析一次）。
+        if let Some(mut p) = self.parser.take() {
+            self.info.merge(p.finish());
+        }
+        settle_inner(
+            &self.sink,
+            &self.quota,
+            &self.identity,
+            self.proto,
+            self.model.as_deref(),
+            &self.provider,
+            self.upstream_model.as_deref(),
+            self.status,
+            self.start,
+            self.ttft,
+            std::mem::take(&mut self.info),
+            None,
+        );
+    }
+}
+
+/// 同步结算（非 SSE 分支 + connect/body-read 失败）。写一条 `UsageRecord` +
+/// 调 `quota.record_tokens`（map key = 下游 key 字符串 = `KeyIdentity.config.key`；
+/// `UsageRecord.key` 记 `name` 不记 key 本体）。
+///
+/// 参数多是因为 record 字段直接对应 brief 契约（ts/key/proto/model/provider/
+/// upstream_model/status/latency/ttft/token/error）；强行打包成 struct 会让
+/// 调用点（3 处不同错误路径）反而难读。allow 即可。
+#[allow(clippy::too_many_arguments)]
+fn settle_usage(
+    sink: &UsageSink,
+    quota: &Quota,
+    identity: &KeyIdentity,
+    proto: Protocol,
+    model: Option<&str>,
+    provider: &str,
+    upstream_model: Option<&str>,
+    status: u16,
+    start: Instant,
+    ttft: Option<Duration>,
+    info: UsageInfo,
+    error: Option<&str>,
+) {
+    settle_inner(
+        sink,
+        quota,
+        identity,
+        proto,
+        model,
+        provider,
+        upstream_model,
+        status,
+        start,
+        ttft,
+        info,
+        error,
+    );
+}
+
+/// `settle_usage` 与 `UsageFinalizer::drop` 共用的内部实现。
+#[allow(clippy::too_many_arguments)]
+fn settle_inner(
+    sink: &UsageSink,
+    quota: &Quota,
+    identity: &KeyIdentity,
+    proto: Protocol,
+    model: Option<&str>,
+    provider: &str,
+    upstream_model: Option<&str>,
+    status: u16,
+    start: Instant,
+    ttft: Option<Duration>,
+    info: UsageInfo,
+    error: Option<&str>,
+) {
+    // quota 记账：map key = 下游 key 字符串（事后记账，下次 check 才生效）。
+    // total = input + output（cache_* 不计日配额——Anthropic cache_read 是
+    // 复用命中的折扣 token，brief 未要求计入配额；保持与 quota.rs 语义一致）。
+    let total = info.input_tokens.unwrap_or(0) + info.output_tokens.unwrap_or(0);
+    quota.record_tokens(&identity.config.key, total);
+
+    let rec = UsageRecord {
+        ts: chrono::Utc::now().to_rfc3339(),
+        // key 字段记 name，绝不记 key 本体（安全约束）。
+        key: identity.config.name.clone(),
+        protocol: proto.as_str().to_string(),
+        model: model.map(String::from),
+        provider: provider.to_string(),
+        upstream_model: upstream_model.map(String::from),
+        status,
+        latency_ms: start.elapsed().as_millis() as u64,
+        ttft_ms: ttft.map(|d| d.as_millis() as u64),
+        input_tokens: info.input_tokens,
+        output_tokens: info.output_tokens,
+        cache_read_tokens: info.cache_read_tokens,
+        cache_creation_tokens: info.cache_creation_tokens,
+        error: error.map(String::from),
+    };
+    sink.record(rec);
 }
 
 #[cfg(test)]

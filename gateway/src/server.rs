@@ -23,10 +23,12 @@ use crate::error::{GatewayError, Result};
 use crate::proxy;
 use crate::quota::Quota;
 use crate::routing::RouteTable;
+use crate::usage::UsageSink;
 
 /// Shared server state. All heavy fields are `Arc`-wrapped so the type is
 /// cheaply `Clone` (axum `State<S>` requires `Clone + Send + Sync + 'static`).
-/// Task 7 added `table`. Subsequent tasks append `sink` (also `Arc`).
+/// Task 7 added `table`; Task 8 adds `sink`（`mpsc::Sender` 自身 `Clone`，
+/// 不需 `Arc` 包裹）。
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<GatewayConfig>,
@@ -35,6 +37,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub quota: Arc<Quota>,
     pub table: Arc<RouteTable>,
+    pub sink: UsageSink,
 }
 
 /// Resolve api keys + build the upstream client + route table. Called once
@@ -55,6 +58,14 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
         .build()
         .map_err(|e| GatewayError::Upstream(format!("构建 reqwest client 失败: {e}")))?;
     let table = RouteTable::from_config(&cfg);
+    // usage jsonl sink：spawn_writer 起后台 task + 建父目录。失败 → Config
+    // 错误拒绝启动（spec：usage_file 父目录由 spawn_writer 创建）。
+    let sink = UsageSink::spawn_writer(&cfg.usage_file).map_err(|e| {
+        GatewayError::Config(format!(
+            "usage sink (path {}) spawn failed: {e}",
+            cfg.usage_file
+        ))
+    })?;
     Ok(AppState {
         cfg: Arc::new(cfg),
         keys: Arc::new(keys),
@@ -62,6 +73,7 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
         client,
         quota: Arc::new(Quota::new()),
         table: Arc::new(table),
+        sink,
     })
 }
 
