@@ -1,6 +1,6 @@
 # sebas
 
-A Rust daemon that bridges Claude Code (via ACP) to Feishu. Run Claude Code remotely from any Feishu chat.
+A Rust daemon that bridges Claude Code to Feishu (via claude's native stream-json + control protocol). Run Claude Code remotely from any Feishu chat.
 
 ## Quick start
 
@@ -12,9 +12,8 @@ A Rust daemon that bridges Claude Code (via ACP) to Feishu. Run Claude Code remo
 #    Enable "Long connection" event subscription in app capabilities.
 # 2. cp config/config.toml.example config.toml
 # 3. Edit config.toml: set app_id, app_secret, owner_id (your open_id)
-# 4. cargo build -p acp-claude-bridge --release
-# 5. cargo build --release
-# 6. ./target/release/sebas run --config ./config.toml
+# 4. cargo build --release
+# 5. ./target/release/sebas run --config ./config.toml
 ```
 
 ## Configuration

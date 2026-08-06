@@ -1,7 +1,7 @@
 # sebas 弃用 ACP、直连 claude 协议重构设计文档
 
 > 日期：2026-08-06
-> 状态：待评审（**Phase 0 spike 已完成：GO**，见 §6.0；spike 报告 `~/workbench/spikes/cc-agent-sdk-spike/REPORT.md`）
+> 状态：全部 4 个 Phase 已完成（2026-08-06）。**Phase 0 spike：GO**（spike 报告 `~/workbench/spikes/cc-agent-sdk-spike/REPORT.md`）；剩余跟进：真实 claude 手动冒烟（README §Manual smoke test，sebas-vw5.4）
 > 作者：Claude
 > 前置：[`2026-08-01-sebas-acp-bridge-design.md`](2026-08-01-sebas-acp-bridge-design.md)（bridge 原始设计，本设计落地后其作废）、[`2026-08-01-acp-bridge-permission-design.md`](2026-08-01-acp-bridge-permission-design.md)（hook/broker 权限流，同作废）、[`../../perm-flow/sequence.md`](../../perm-flow/sequence.md)（权限时序图，需重画）
 
@@ -166,7 +166,7 @@ hook 脚本、broker、sidecar、nc、macOS nc 兼容 follow-up、位置配对 �
 | 1 | acp-claude 内部换引擎（适配层 + trait），公共 API 不变；引入 `transport` flag | ✅ **已完成**（transport flag 经 K6 修正为直接替换；`cargo test --workspace` 绿，router/feishu 零改动） | ~1-2d |
 | 2 | 权限回调接 PermissionRequest/Reply；permission_flow_test 改编 | ✅ **已完成**（PreToolUse hook 进程内回调，request_id 关联；permission_roundtrip/permission_flow 绿） | ~0.5-1d |
 | 3 | resume 接 claude 原生 resume；restart_recovery_test 预期从"回退新会话"改"真恢复" | ✅ **已完成**（真恢复 + 拒绝时 stderr 监听快速回退新会话并发卡提示；恢复 e2e 绿；README 更新） | ~0.5d |
-| 4 | 默认切 `direct`；观察一周；删 bridge crate + hooks + ACP SDK 依赖 + transport flag | 全量测试 + 手动冒烟清单（README §Manual smoke test） | ~0.5d + 观察期 |
+| 4 | 默认切 `direct`；观察一周；删 bridge crate + hooks + ACP SDK 依赖 + transport flag | ✅ **已完成**（K6 修正后无 transport flag/观察期：bridge crate、pretooluse.sh、agent-client-protocol 依赖、router_bridge_e2e 全部删除；perm-flow/sequence.md 重画；三篇 2026-08-01 spec 标注已被取代；全量测试绿） | ~0.5d |
 
 **No-Go 退回路径**：Phase 0 若发现 wire 格式与 claude 2.1.206 不兼容或 SDK 行为有坑 → 决策点改为"自写 stream-json driver"（bridge parser 搬回 + 控制协议自实现），其余阶段不变。
 

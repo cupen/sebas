@@ -1,7 +1,7 @@
 # sebas ↔ Claude Code ACP Bridge (Design)
 
 **Date:** 2026-08-01
-**Status:** Proposed — pending review
+**Status:** ⛔ SUPERSEDED (2026-08-06) — the ACP bridge was removed (sebas-dk8). sebas now drives claude directly via `cc-agent-sdk`; see [`2026-08-06-claude-direct-sdk-refactor-design.md`](2026-08-06-claude-direct-sdk-refactor-design.md). Kept for history only.
 **Replaces:** implicit dependency on `@agentclientprotocol/claude-agent-acp` (npm shim)
 
 ## Problem

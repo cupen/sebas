@@ -1,7 +1,7 @@
 # acp-bridge PromptRequest handler — 设计文档
 
 > 日期：2026-08-01
-> 状态：待评审
+> 状态：⛔ **已被取代**（2026-08-06，sebas-dk8）—— ACP bridge 已删除，sebas 改为经 `cc-agent-sdk` 直连 claude；见 [`2026-08-06-claude-direct-sdk-refactor-design.md`](2026-08-06-claude-direct-sdk-refactor-design.md)。本文档仅留档。
 > 作者：Claude
 > 前置：[`2026-08-01-sebas-acp-bridge-design.md`](2026-08-01-sebas-acp-bridge-design.md) §3.1；Plan `2026-08-01-sebas-acp-bridge-impl.md` §Known gaps
 > Beads：sebas-x4g（P1：把 PromptRequest handler 接到 event-pump loop）

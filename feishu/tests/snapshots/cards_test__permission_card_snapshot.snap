@@ -1,5 +1,6 @@
 ---
 source: feishu/tests/cards_test.rs
+assertion_line: 22
 expression: card
 ---
 schema: "2.0"
@@ -28,42 +29,42 @@ body:
             content: Allow once
           type: primary
           value:
-            session_id: s1
-            request_id: r1
             decision: allow_once
+            request_id: r1
+            session_id: s1
           behaviors:
             - type: callback
               value:
-                session_id: s1
-                request_id: r1
                 decision: allow_once
+                request_id: r1
+                session_id: s1
         - tag: button
           text:
             tag: plain_text
             content: Allow session
           type: default
           value:
-            session_id: s1
-            request_id: r1
             decision: allow_session
+            request_id: r1
+            session_id: s1
           behaviors:
             - type: callback
               value:
-                session_id: s1
-                request_id: r1
                 decision: allow_session
+                request_id: r1
+                session_id: s1
         - tag: button
           text:
             tag: plain_text
             content: Deny
           type: danger
           value:
-            session_id: s1
-            request_id: r1
             decision: deny
+            request_id: r1
+            session_id: s1
           behaviors:
             - type: callback
               value:
-                session_id: s1
-                request_id: r1
                 decision: deny
+                request_id: r1
+                session_id: s1
