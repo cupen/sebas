@@ -235,12 +235,16 @@ provider = "openai"
 | Moonshot Kimi | ✅ `api.moonshot.cn/anthropic` | ✅ |
 | 智谱 GLM | ✅ `open.bigmodel.cn/api/anthropic` | ✅ |
 | MiniMax | ✅ `api.minimaxi.com/anthropic` | ✅ |
-| 通义 DashScope | 待确认 | ✅ compatible-mode |
-| 豆包（火山方舟） | 待确认 | ✅ |
+| 通义 DashScope | — | ✅ compatible-mode |
+| 豆包（火山方舟） | ✅ `ark.cn-beijing.volces.com/api/coding` | ✅ `ark.cn-beijing.volces.com/api/coding/v3` |
 | Google Gemini | — | ✅ openai-compat |
 | xAI / Mistral / Groq / Together / Fireworks / OpenRouter / SiliconFlow | — | ✅ |
 
-> 要点：国产主力（DeepSeek/Kimi/GLM/MiniMax）都提供 **Anthropic 兼容端点**，纯透传即可让 Claude Code 流量直达国产模型，无需协议转换。"待确认"项在 P0 实施时核实。
+> 要点：国产主力（DeepSeek/Kimi/GLM/MiniMax/豆包）都提供 **Anthropic 兼容端点**，纯透传即可让 Claude Code 流量直达国产模型，无需协议转换。
+>
+> P0 实施期核实结论：
+> - **豆包（火山方舟）**：官方文档《接入 AI 工具 / Claude Code》（docs.volcengine.com/docs/82379/1928262，2026-08-04 更新）明确给出 Anthropic 协议 base `https://ark.cn-beijing.volces.com/api/coding`（用作 `ANTHROPIC_BASE_URL`）与 OpenAI 协议 base `.../api/coding/v3`，并注明「请勿使用 `.../api/v3`」。结论：两端点均有。
+> - **通义 DashScope**：未提供 Anthropic 协议端点。endpoint 探测（2026-08-07）：`POST /compatible-mode/v1/messages`、`/anthropic/v1/messages`、`/v1/messages` 均 404；`/compatible-mode/v1/chat/completions` 返回 OpenAI 格式 401（`invalid_api_key`）。DashScope 仅提供 OpenAI 兼容端点 `compatible-mode/v1`，Anthropic 协议面无对应路径。结论：Anthropic 端点无。
 
 ## 7. 关键风险与技术难点
 

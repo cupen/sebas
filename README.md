@@ -31,6 +31,51 @@ Only 3 fields are required: `feishu.app_id`, `feishu.app_secret`, `feishu.owner_
 
 See `docs/superpowers/specs/2026-07-26-sebas-design.md`.
 
+## Gateway（LLM provider router）
+
+sebas 自带一个双协议面（Anthropic / OpenAI）纯透传 LLM 网关：按模型名把请求路由到对应上游 provider，同协议字节无损转发，附带 per-key 鉴权、限流/配额、用量统计。一句话用途：让 Claude Code（或任意 anthropic/openai SDK）经 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 指向本网关，即可把流量分流到国产/海外任一兼容 provider，无需协议转换。
+
+最小配置（见 `config/config.toml.example` 的 `[gateway]` 段）：
+
+```toml
+[gateway]
+listen = "127.0.0.1:8787"
+
+[[gateway.keys]]                      # 下游客户端 key（鉴权 + 限流/配额）
+key = "sk-gw-local-dev"
+name = "claude-code"
+
+[gateway.providers.anthropic]        # 上游 provider；密钥只从 env 读
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[[gateway.routes]]                    # 按序匹配 model glob
+model = "claude-*"
+provider = "anthropic"
+```
+
+启动：
+
+```bash
+./target/debug/sebas gateway --config ./config.toml
+# /healthz 免鉴权；其余端点需下游 key（Authorization: Bearer 或 x-api-key）
+```
+
+把客户端 BASE_URL 指向网关：
+
+```bash
+# Claude Code → 经网关到 Anthropic（或任一 anthropic 协议 provider，如 DeepSeek/Kimi/GLM/MiniMax）
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claude
+
+# OpenAI SDK → 经网关到 OpenAI（或任一 openai 兼容 provider）
+OPENAI_BASE_URL=http://127.0.0.1:8787 OPENAI_API_KEY=sk-gw-local-dev ...
+```
+
+用量记录：每个 proxied 请求落一条 record 到 `gateway.usage_file`（默认 `~/.local/state/sebas/gateway-usage.jsonl`），含 ts/key/protocol/model/provider/status/latency/ttft/input+output+cache tokens/error。
+
+端到端验证脚本：`./scripts/e2e_gateway.sh`（build → 起 gateway → `/healthz` → 真 upstream 流式调用 [env key 在场时] → usage.jsonl 非空校验 → 清理）。详见 `docs/superpowers/specs/2026-08-06-gateway-design.md`。
+
 ## Status
 
 This is an MVP / work-in-progress. The WebSocket long-connection is fully wired (handshake, event dispatch, exponential-backoff reconnect). No CI is configured at all (tracked: sebas-nya). The `record` subcommand (§4.4 of the spec) is not implemented; `--dump-inbound` plus the `replay` subcommand cover the capture/replay path in the meantime (tracked: sebas-nya).
