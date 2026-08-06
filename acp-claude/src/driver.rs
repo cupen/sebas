@@ -54,6 +54,40 @@ pub struct CcDriver {
     /// with the tool name (the frames themselves only carry the id).
     tool_names: HashMap<String, String>,
     terminal_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Capped tail of the child's stderr, appended to terminal errors so a
+    /// crash usually carries its own explanation (the SDK pipes stderr but
+    /// drops it unless a callback is installed).
+    stderr_tail: Arc<std::sync::Mutex<String>>,
+}
+
+/// Why a connect attempt failed. `ResumeRejected` is carved out so the
+/// manager can transparently fall back to a fresh session (sebas-dk8.4)
+/// instead of surfacing a raw spawn error for a very expected case
+/// (daemon restart after claude's session files were cleaned).
+#[derive(Debug)]
+pub enum ConnectError {
+    /// claude rejected `resume` — the conversation id is unknown to it
+    /// (its stderr said "No conversation found").
+    ResumeRejected,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResumeRejected => write!(f, "claude rejected resume: conversation not found"),
+            Self::Other(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ResumeRejected => None,
+            Self::Other(e) => Some(e.as_ref()),
+        }
+    }
 }
 
 /// The parts of ConnectConfig needed again for a respawn (post-cancel).
@@ -68,7 +102,15 @@ impl CcDriver {
     /// Spawn the claude child and complete the SDK initialize handshake.
     /// On timeout the client is dropped, which SIGKILLs the child
     /// (`SubprocessTransport::drop` → `start_kill`).
-    pub async fn connect(cfg: ConnectConfig) -> anyhow::Result<Self> {
+    ///
+    /// Resume rejection (sebas-dk8.4): the SDK awaits the initialize
+    /// control-response forever even when the child already exited (pending
+    /// control oneshots are never errored on stdout EOF), so a rejected
+    /// `resume` would otherwise hang until `startup_timeout`. We race the
+    /// handshake against the child's stderr: the moment claude prints
+    /// "No conversation found" we return `ConnectError::ResumeRejected` —
+    /// fast and exact (fresh spawns never print that line).
+    pub async fn connect(cfg: ConnectConfig) -> Result<Self, ConnectError> {
         let ConnectConfig {
             claude_path,
             claude_args,
@@ -91,6 +133,33 @@ impl CcDriver {
             vec![HookMatcher::builder().hooks(vec![cb]).build()],
         );
 
+        // Capture child stderr (capped) for diagnostics + resume rejection.
+        let stderr_tail: Arc<std::sync::Mutex<String>> =
+            Arc::new(std::sync::Mutex::new(String::new()));
+        let resume_rejected = Arc::new(tokio::sync::Notify::new());
+        let stderr_cb = {
+            let tail = stderr_tail.clone();
+            let rejected = resume_rejected.clone();
+            Arc::new(move |line: String| {
+                if line.contains("No conversation found") {
+                    rejected.notify_one();
+                }
+                tracing::debug!(stderr = %line.trim_end(), "claude child");
+                let mut b = tail.lock().unwrap_or_else(|p| p.into_inner());
+                const CAP: usize = 4096;
+                if b.len() + line.len() > CAP {
+                    // Drop the oldest bytes, landing on a char boundary; a
+                    // single oversized line simply empties the buffer first.
+                    let mut from = b.len().saturating_sub(CAP.saturating_sub(line.len()));
+                    while from < b.len() && !b.is_char_boundary(from) {
+                        from += 1;
+                    }
+                    b.drain(..from);
+                }
+                b.push_str(&line);
+            }) as Arc<dyn Fn(String) + Send + Sync>
+        };
+
         let options = ClaudeAgentOptions {
             cli_path: Some(claude_path.clone().into()),
             cwd: work_dir.clone().map(Into::into),
@@ -103,15 +172,42 @@ impl CcDriver {
             },
             // Hermetic: never load the host user's settings/hooks (spike §8b).
             setting_sources: Some(vec![]),
+            stderr_callback: Some(stderr_cb),
             ..Default::default()
         };
 
         let mut client = ClaudeClient::new(options);
-        tokio::time::timeout(startup_timeout, client.connect())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("acp session start timed out after {:?}", startup_timeout)
-            })??;
+        let res = {
+            // Scoped: the pinned connect future borrows &mut client; it
+            // must drop at block end so `client` can move into Self below.
+            let connect = client.connect();
+            tokio::pin!(connect);
+            tokio::select! {
+                r = tokio::time::timeout(startup_timeout, &mut connect) => r,
+                // Armed only for resume attempts (fresh spawns never print
+                // the line). `Notify` holds one permit, so a line printed
+                // before we get here still resolves immediately.
+                _ = resume_rejected.notified(), if resume => {
+                    return Err(ConnectError::ResumeRejected);
+                }
+            }
+        };
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(ConnectError::Other(anyhow::anyhow!(
+                    "{e:#}{}",
+                    stderr_suffix(&stderr_tail)
+                )));
+            }
+            Err(_) => {
+                return Err(ConnectError::Other(anyhow::anyhow!(
+                    "acp session start timed out after {:?}{}",
+                    startup_timeout,
+                    stderr_suffix(&stderr_tail)
+                )));
+            }
+        }
 
         Ok(Self {
             client,
@@ -126,6 +222,7 @@ impl CcDriver {
             pending_perms,
             tool_names: HashMap::new(),
             terminal_sent,
+            stderr_tail,
         })
     }
 
@@ -289,10 +386,22 @@ impl CcDriver {
             .evt_tx
             .send(AcpEvent::Error {
                 session_id: self.session_id.clone(),
-                message: message.into(),
+                message: format!("{message}{}", stderr_suffix(&self.stderr_tail)),
                 terminal: true,
             })
             .await;
+    }
+}
+
+/// Render the captured child stderr as an error-message suffix ("" when
+/// the child said nothing — e.g. a silent hang).
+fn stderr_suffix(tail: &Arc<std::sync::Mutex<String>>) -> String {
+    let b = tail.lock().unwrap_or_else(|p| p.into_inner());
+    let t = b.trim();
+    if t.is_empty() {
+        String::new()
+    } else {
+        format!("; claude stderr: {t}")
     }
 }
 

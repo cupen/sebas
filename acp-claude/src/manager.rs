@@ -23,11 +23,14 @@ pub enum SessionStart {
 }
 
 /// What `spawn` actually established. `session_id` is always the id to
-/// route by; for `Load` it is the resumed conversation id.
+/// route by: for a successful `Load` it is the resumed conversation id;
+/// after a resume-rejection fallback it is the freshly minted id.
 #[derive(Debug, Clone)]
 pub struct SpawnOutcome {
     pub session_id: String,
-    /// True only when this spawn was a resume.
+    /// True only when a `Load` actually resumed the old conversation;
+    /// false means either a fresh spawn or a resume-rejection fallback
+    /// (old conversation gone — the caller should tell the user).
     pub resumed: bool,
 }
 
@@ -68,9 +71,11 @@ impl SessionManager {
 
     /// Lazily respawn a previously persisted session (spec §3.3e): spawn
     /// claude with `resume = old_session_id`. The routing id IS the resumed
-    /// conversation id. NOTE (Phase 1): if claude cannot load the id the
-    /// first prompt will fail terminally; the transparent fallback to a
-    /// fresh session is Phase 3 work (sebas-dk8.4).
+    /// conversation id. Graceful fallback (sebas-dk8.4): if claude rejects
+    /// the resume (conversation files gone — "No conversation found"), a
+    /// fresh session is started transparently with a NEW id and
+    /// `SpawnOutcome.resumed == false` tells the caller to inform the user
+    /// that the old conversation is gone.
     pub async fn resume_session(
         &self,
         path: &str,
@@ -110,18 +115,37 @@ impl SessionManager {
         let expected_exit = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let driver = CcDriver::connect(ConnectConfig {
+        let make_config = |sid: String, resume: bool| ConnectConfig {
             claude_path: path.to_string(),
-            claude_args: args,
-            work_dir,
-            session_id: session_id.clone(),
+            claude_args: args.clone(),
+            work_dir: work_dir.clone(),
+            session_id: sid,
             resume,
             startup_timeout: self.startup_timeout,
             evt_tx: evt_tx.clone(),
             pending_perms: pending_responders.clone(),
             terminal_sent: terminal_sent.clone(),
-        })
-        .await?;
+        };
+
+        let (driver, session_id, resumed) =
+            match CcDriver::connect(make_config(session_id.clone(), resume)).await {
+                Ok(d) => (d, session_id, resume),
+                Err(crate::driver::ConnectError::ResumeRejected) => {
+                    // Graceful fallback (sebas-dk8.4): the old conversation is
+                    // gone (claude's session files were cleaned). Start fresh
+                    // with a NEW id instead of failing the spawn; `resumed:
+                    // false` tells run.rs to show the user a notice.
+                    let fresh = uuid::Uuid::new_v4().to_string();
+                    tracing::warn!(
+                        old = %session_id,
+                        fresh = %fresh,
+                        "claude rejected resume; falling back to a fresh session"
+                    );
+                    let d = CcDriver::connect(make_config(fresh.clone(), false)).await?;
+                    (d, fresh, false)
+                }
+                Err(crate::driver::ConnectError::Other(e)) => return Err(e),
+            };
 
         tokio::spawn({
             let inner = self.inner.clone();
@@ -174,7 +198,7 @@ impl SessionManager {
 
         Ok(SpawnOutcome {
             session_id,
-            resumed: resume,
+            resumed,
         })
     }
 

@@ -375,11 +375,12 @@ async fn dispatch_out(
             prompt,
         } => {
             let claude = &cfg.acp.claude;
-            // Lazy respawn of a restored mapping (spec §3.3e): try
-            // `session/load` with the persisted id; the manager falls back
-            // to `session/new` when the agent can't load. `resumed` says
-            // which happened — on fallback the old conversation is gone, so
-            // tell the user instead of silently continuing fresh.
+            // Lazy respawn of a restored mapping (spec §3.3e): claude-native
+            // `resume` of the persisted id; the manager transparently falls
+            // back to a fresh session when the conversation is gone
+            // (sebas-dk8.4). `resumed` says which happened — on fallback the
+            // old context did NOT carry over, so tell the user instead of
+            // silently continuing fresh.
             let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
                 mgr,
                 router,
@@ -410,6 +411,13 @@ async fn dispatch_out(
             };
             if !resumed {
                 info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
+                let card = feishu::cards::render_session_lost_card();
+                if let Err(e2) = feishu
+                    .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
+                    .await
+                {
+                    warn!(?e2, "failed to send session-lost notice");
+                }
             }
             wire_session_card_and_pump(
                 feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
@@ -473,13 +481,13 @@ pub async fn acp_spawn_and_activate(
     Ok((session_id, pending, rx))
 }
 
-/// Resume variant of [`acp_spawn_and_activate`] (spec §3.3e): ask the agent
-/// to `session/load` the persisted id (the manager falls back to
-/// `session/new` when it can't), then push the triggering prompt as a
-/// continuation and flip the router's placeholder to Active. The returned
-/// bool is `SpawnOutcome.resumed` — false means the old conversation is
-/// gone and the id is a fresh one. The event receiver is cloned
-/// IMMEDIATELY after the spawn returns, before any slow I/O (D6).
+/// Resume variant of [`acp_spawn_and_activate`] (spec §3.3e): ask claude to
+/// `resume` the persisted conversation id (the manager transparently falls
+/// back to a fresh session when the id is rejected — sebas-dk8.4), then push
+/// the triggering prompt as a continuation and flip the router's placeholder
+/// to Active. The returned bool is `SpawnOutcome.resumed` — false means the
+/// old conversation is gone and the id is a fresh one. The event receiver is
+/// cloned IMMEDIATELY after the spawn returns, before any slow I/O (D6).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub async fn acp_resume_and_activate(
     mgr: &Arc<SessionManager>,

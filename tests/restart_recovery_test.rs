@@ -1,6 +1,7 @@
 //! spec §3.3e restart-recovery integration: a state file written by a
 //! previous daemon run must restore as Dormant mappings; the first inbound
-//! text lazily respawns via `session/load` (falling back to `session/new`),
+//! text lazily respawns via claude-native `resume` (transparently falling
+//! back to a fresh session when the conversation is gone — sebas-dk8.4),
 //! and a corrupt state file is quarantined instead of aborting startup.
 
 use acp_claude::manager::SessionManager;
@@ -95,16 +96,16 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
 }
 
 #[tokio::test]
-async fn restored_mapping_resume_rejected_by_cli_surfaces_error() {
-    // Post-ACP (Phase 1, sebas-dk8.2): there is no capability negotiation or
-    // transparent session/new fallback. `resume` is claude-native; if the CLI
-    // rejects the id (session files gone), the spawn itself fails and the
-    // dispatcher drops the placeholder (fail_spawn) instead of silently
-    // starting a fresh session. Phase 3 (sebas-dk8.4) makes this graceful.
+async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
+    // sebas-dk8.4: claude rejecting the resume (session files cleaned —
+    // the fake exits(1) with "No conversation found") must NOT surface as a
+    // spawn failure. The manager transparently starts a fresh session under
+    // a NEW id and reports resumed=false; run.rs then sends the user a
+    // session-lost notice (asserted at the card level in the e2e suite).
     let json = r#"{"oc_restart":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let mgr = Arc::new(SessionManager::new(Duration::from_millis(800)));
+    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
 
     router
         .dispatch(FeishuIn::Text {
@@ -123,28 +124,48 @@ async fn restored_mapping_resume_rejected_by_cli_surfaces_error() {
     };
     assert_eq!(old, "sess-old");
 
-    // --resume-fails: the fake exits(1) at startup, modelling claude's
-    // "No conversation found" — the resume must surface an error.
-    let res = sebas::run::acp_resume_and_activate(
-        &mgr,
-        &router,
-        &k,
-        &old,
-        &prompt,
-        fake().to_str().unwrap(),
-        vec!["--resume-fails".into()],
-        None,
+    // The 15s guard proves the fallback fires via the stderr watch, not
+    // by riding out the 30s startup timeout.
+    let (sid, _pending, rx, resumed) = tokio::time::timeout(
+        Duration::from_secs(15),
+        sebas::run::acp_resume_and_activate(
+            &mgr,
+            &router,
+            &k,
+            &old,
+            &prompt,
+            fake().to_str().unwrap(),
+            vec!["--resume-fails".into()],
+            None,
+        ),
     )
-    .await;
-    assert!(res.is_err(), "rejected resume must error, got ok: {res:?}");
+    .await
+    .expect("fallback must be fast, not a startup-timeout hang")
+    .expect("rejected resume falls back instead of erroring");
 
-    // The dispatcher's error arm drops the Spawning placeholder so the next
-    // text starts clean (this is what run.rs's SpawnResume arm does on Err).
-    router.fail_spawn(&k).await;
-    assert!(
-        map.get(&key()).await.is_none(),
-        "placeholder dropped after failed resume"
+    assert!(!resumed, "fallback reports resumed=false");
+    assert_ne!(sid, "sess-old", "fallback mints a fresh routing id");
+    // The mapping activated under the FRESH id (no fail_spawn, no stale id).
+    assert_eq!(
+        map.get(&key()).await.unwrap().session_id(),
+        Some(sid.as_str())
     );
+
+    // The triggering prompt still completes its turn on the fresh session.
+    let mut got_finished = false;
+    let guard = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut rx = rx.lock().await;
+        while let Some(evt) = rx.recv().await {
+            if matches!(evt, acp_claude::session::AcpEvent::Finished { .. }) {
+                got_finished = true;
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(guard.is_ok() && got_finished, "prompt turn should complete");
+
+    mgr.kill(&sid).await;
 }
 
 #[tokio::test]

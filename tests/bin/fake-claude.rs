@@ -21,6 +21,9 @@
 //!   fake-claude-cli [scenario] [--loop] [--slow-ms N] [--hang-on-init]
 //!                   [--delay-init-ms N] [--journal PATH] [--resume-fails]
 //!   scenario: hello (default) | bash | deny | thinking
+//!   --resume-fails: exit(1) with "No conversation found" on stderr, but ONLY
+//!   when argv carries --resume — a fresh --session-id spawn still works
+//!   (mirrors the real CLI; exercises the manager's fresh-session fallback).
 //!
 //! Content-triggered behaviors (for regression tests; take precedence over
 //! the argv scenario):
@@ -42,6 +45,10 @@ struct Flags {
     delay_init_ms: u64,
     journal: Option<String>,
     resume_fails: bool,
+    /// True when argv carried `--resume <id>` (as opposed to `--session-id`)
+    /// — resume rejection only applies to actual resume attempts, so the
+    /// manager's fresh-session fallback still spawns fine.
+    resume_used: bool,
     session_id: String,
 }
 
@@ -82,6 +89,7 @@ fn parse_flags() -> Flags {
         delay_init_ms: 0,
         journal: None,
         resume_fails: false,
+        resume_used: false,
         session_id: "fake-1".into(),
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -120,7 +128,14 @@ fn parse_flags() -> Flags {
                 }
                 i += 1;
             }
-            "--session-id" | "--resume" => {
+            "--session-id" => {
+                if let Some(v) = args.get(i + 1) {
+                    f.session_id = v.clone();
+                }
+                i += 1;
+            }
+            "--resume" => {
+                f.resume_used = true;
                 if let Some(v) = args.get(i + 1) {
                     f.session_id = v.clone();
                 }
@@ -165,7 +180,9 @@ fn main() {
         return;
     }
     let flags = parse_flags();
-    if flags.resume_fails {
+    // Like the real CLI, only an actual `--resume` of an unknown id is
+    // rejected; a fresh `--session-id` spawn with the same flags works.
+    if flags.resume_fails && flags.resume_used {
         eprintln!("Error: No conversation found with session ID");
         std::process::exit(1);
     }

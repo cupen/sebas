@@ -1,9 +1,8 @@
 //! spec §3.3e lazy-resume coverage (post-ACP rewrite):
 //! - resuming a live conversation id keeps the id and answers prompts
-//! - resuming with a CLI that rejects the resume errors the spawn
-//!   (Phase 1 semantics: NO transparent fallback — that is Phase 3,
-//!   sebas-dk8.4; the old "capability"/"load error → session/new" tests
-//!   tested ACP-session/load fallback machinery that no longer exists)
+//! - resume rejection (conversation files gone) transparently falls back to
+//!   a fresh session with a NEW id, `resumed == false` (sebas-dk8.4), and
+//!   the fallback is FAST (stderr watch, not the startup-timeout path)
 
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
@@ -62,18 +61,42 @@ async fn resume_keeps_old_id_and_answers() {
 }
 
 #[tokio::test]
-async fn resume_rejected_by_cli_errors_spawn() {
-    let mgr = SessionManager::new(Duration::from_millis(800));
-    // --resume-fails: the fake exits(1) immediately, modelling claude's
-    // "No conversation found" startup failure. The spawn must surface an
-    // error (Phase 1: no silent fresh-session fallback).
-    let res = mgr
-        .resume_session(
+async fn resume_rejected_falls_back_to_fresh_session() {
+    // Generous startup timeout: the fallback must fire via the driver's
+    // stderr watch ("No conversation found"), NOT by timing out — the 10s
+    // outer guard fails the test if we ever regress to the hang path.
+    let mgr = SessionManager::new(Duration::from_secs(30));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        mgr.resume_session(
             fake().to_str().unwrap(),
             vec!["--resume-fails".into()],
             None,
             "sess-deleted",
-        )
-        .await;
-    assert!(res.is_err(), "rejected resume must error, got {res:?}");
+        ),
+    )
+    .await
+    .expect("fallback must be fast (stderr watch), not a startup-timeout hang")
+    .expect("rejected resume falls back instead of erroring");
+
+    assert!(!outcome.resumed, "fallback reports resumed=false");
+    assert_ne!(
+        outcome.session_id, "sess-deleted",
+        "fallback mints a fresh routing id"
+    );
+
+    // The fresh session is fully functional under the new id.
+    mgr.send(
+        &outcome.session_id,
+        AcpCommand::ContinueSession {
+            session_id: outcome.session_id.clone(),
+            prompt: "hi".into(),
+        },
+    )
+    .await
+    .expect("send prompt");
+    let deltas = drain_until_finished(&mgr, &outcome.session_id).await;
+    assert_eq!(deltas.concat(), "hello world");
+
+    mgr.kill(&outcome.session_id).await;
 }

@@ -360,6 +360,16 @@ pub fn render_dead_session_card() -> Card {
     card
 }
 
+/// Shown when a restored mapping's conversation is gone on the claude side
+/// (resume rejected: session files cleaned) and sebas transparently fell
+/// back to a fresh session (sebas-dk8.4). The old context did NOT carry
+/// over — say so instead of silently continuing.
+pub fn render_session_lost_card() -> Card {
+    let mut card = Card::new("已开启新会话", "orange");
+    card.push_text("⚠️ 未找到原会话记录（可能已被清理），本次对话将作为新会话继续。");
+    card
+}
+
 /// In-place replacement for a permission card after the user clicks an
 /// option. `label` is one of "✅ 已允许（仅此一次）" / "✅ 已允许（本会话）" /
 /// "❌ 已拒绝". No buttons — the click is already done.

@@ -38,9 +38,9 @@ This is an MVP / work-in-progress. The WebSocket long-connection is fully wired 
 
 ## Known limitations
 
-- SessionMap is persisted to `state_file` and restored on restart, but no lazy respawn exists: after restart the restored mappings point at dead `session_id`s, `mgr.send` returns `unknown session`, and the next message for that chat is silently dropped; in-progress work in the dead Claude Code child is not resumable (tracked: sebas-bob).
-- `tests/bin/fake-claude.rs` is a real-protocol ACP harness used by several integration tests; what is missing is wire-level fixtures (real JSON-RPC frames) and the canned-binary replay harness (tracked: sebas-vw5.3).
-- `/compact` and `/cost` are forwarded to ACP as literal prompts; `/model`, `/cd`, `/status`, and `/help` are parsed but not wired (they fall through to HelpText or a no-op). Protocol-level behavior of the forwarded commands has not been validated end-to-end (tracked: sebas-3ti for the unwired commands; tracked: sebas-vw5.4 for end-to-end validation).
+- SessionMap is persisted to `state_file` and restored on restart; the first message in a restored chat lazily respawns via claude-native `resume`, so real conversation history carries over. If claude's session files were cleaned in the meantime the resume is rejected and sebas transparently falls back to a fresh session (with a "已开启新会话" notice card). A turn that was mid-flight at shutdown is still lost.
+- `tests/bin/fake-claude.rs` is a real-protocol stream-json/control harness used by several integration tests; what is missing is wire-level fixtures (real frames captured from claude) and the canned-binary replay harness (tracked: sebas-vw5.3).
+- `/compact` and `/cost` are forwarded to claude as literal prompts; `/model`, `/cd`, `/status`, and `/help` are parsed but not wired (they fall through to HelpText or a no-op). Protocol-level behavior of the forwarded commands has not been validated end-to-end (tracked: sebas-3ti for the unwired commands; tracked: sebas-vw5.4 for end-to-end validation).
 - No CI at all; the router ≥90%, cards ≥90%, overall ≥80% coverage targets are stated goals only (tracked: sebas-nya).
 - The `record` subcommand for fixture capture (§4.4) is not implemented; `--dump-inbound` + `replay` cover the WS capture/replay path in the meantime (tracked: sebas-nya).
 

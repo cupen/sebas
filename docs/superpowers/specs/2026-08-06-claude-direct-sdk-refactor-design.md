@@ -163,9 +163,9 @@ hook 脚本、broker、sidecar、nc、macOS nc 兼容 follow-up、位置配对 �
 | Phase | 内容 | 验证 | 规模 |
 |---|---|---|---|
 | 0 | **Go/No-Go spike**：cc-agent-sdk 起本机 claude 2.1.206，跑通 connect/query/流式事件/权限回调/interrupt/resume 六件事；记录真实 wire 帧（喂给 `record` 留 fixture） | ✅ **已完成：GO**（权限改走 hooks 路径；详见 spike 报告与 §8a/8b） | ~0.5d（实际） |
-| 1 | acp-claude 内部换引擎（适配层 + trait），公共 API 不变；引入 `transport` flag | `cargo test --workspace` 全绿（router/feishu 测试零改动） | ~1-2d |
-| 2 | 权限回调接 PermissionRequest/Reply；permission_flow_test 改编 | 权限 e2e 绿 | ~0.5-1d |
-| 3 | resume 接 claude 原生 resume；restart_recovery_test 预期从"回退新会话"改"真恢复" | 恢复 e2e 绿；README 更新 | ~0.5d |
+| 1 | acp-claude 内部换引擎（适配层 + trait），公共 API 不变；引入 `transport` flag | ✅ **已完成**（transport flag 经 K6 修正为直接替换；`cargo test --workspace` 绿，router/feishu 零改动） | ~1-2d |
+| 2 | 权限回调接 PermissionRequest/Reply；permission_flow_test 改编 | ✅ **已完成**（PreToolUse hook 进程内回调，request_id 关联；permission_roundtrip/permission_flow 绿） | ~0.5-1d |
+| 3 | resume 接 claude 原生 resume；restart_recovery_test 预期从"回退新会话"改"真恢复" | ✅ **已完成**（真恢复 + 拒绝时 stderr 监听快速回退新会话并发卡提示；恢复 e2e 绿；README 更新） | ~0.5d |
 | 4 | 默认切 `direct`；观察一周；删 bridge crate + hooks + ACP SDK 依赖 + transport flag | 全量测试 + 手动冒烟清单（README §Manual smoke test） | ~0.5d + 观察期 |
 
 **No-Go 退回路径**：Phase 0 若发现 wire 格式与 claude 2.1.206 不兼容或 SDK 行为有坑 → 决策点改为"自写 stream-json driver"（bridge parser 搬回 + 控制协议自实现），其余阶段不变。
