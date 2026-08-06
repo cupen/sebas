@@ -1,35 +1,32 @@
 //! axum server skeleton for the gateway (Task 2).
 //!
-//! `build_state` resolves upstream api keys and constructs the shared
-//! `reqwest::Client` (connect/read timeouts). `build_router` mounts the
-//! liveness probe `GET /healthz` (no auth, `"ok\n"`) and a placeholder
-//! `fallback` that returns 501 with a protocol-shaped error body — Task 7
-//! swaps the fallback for `proxy::handle`.
+//! `build_state` resolves upstream api keys, constructs the shared
+//! `reqwest::Client` (connect/read timeouts), and builds the `RouteTable`.
+//! `build_router` mounts the liveness probe `GET /healthz` (no auth,
+//! `"ok\n"`) and the `proxy::handle` fallback for everything else, both
+//! behind the `require_key` auth layer.
 //!
 //! `run` binds `cfg.listen` and serves with graceful shutdown (ctrl_c +
-//! unix SIGTERM). Subsequent tasks append `quota`/`table`/`sink` to
-//! `AppState`, each `Arc`-wrapped.
+//! unix SIGTERM).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
-use axum::response::Response;
 use axum::routing::get;
 
 use crate::auth::require_key;
 use crate::config::{GatewayConfig, KeyConfig};
-use crate::error::{GatewayError, Result, error_response};
-use crate::proto::Protocol;
+use crate::error::{GatewayError, Result};
+use crate::proxy;
 use crate::quota::Quota;
+use crate::routing::RouteTable;
 
 /// Shared server state. All heavy fields are `Arc`-wrapped so the type is
 /// cheaply `Clone` (axum `State<S>` requires `Clone + Send + Sync + 'static`).
-/// Later tasks append `table`/`sink` (also `Arc`). Task 6 added `quota`.
+/// Task 7 added `table`. Subsequent tasks append `sink` (also `Arc`).
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<GatewayConfig>,
@@ -37,9 +34,11 @@ pub struct AppState {
     pub api_keys: Arc<HashMap<String, String>>,
     pub client: reqwest::Client,
     pub quota: Arc<Quota>,
+    pub table: Arc<RouteTable>,
 }
 
-/// Resolve api keys + build the upstream client. Called once at startup.
+/// Resolve api keys + build the upstream client + route table. Called once
+/// at startup.
 pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
     let api_keys = cfg.resolve_api_keys()?;
     let keys: HashMap<String, KeyConfig> = cfg
@@ -55,23 +54,25 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
         .read_timeout(Duration::from_secs(cfg.read_timeout_secs))
         .build()
         .map_err(|e| GatewayError::Upstream(format!("构建 reqwest client 失败: {e}")))?;
+    let table = RouteTable::from_config(&cfg);
     Ok(AppState {
         cfg: Arc::new(cfg),
         keys: Arc::new(keys),
         api_keys: Arc::new(api_keys),
         client,
         quota: Arc::new(Quota::new()),
+        table: Arc::new(table),
     })
 }
 
-/// Mount routes. `GET /healthz` + placeholder fallback, both behind the
+/// Mount routes. `GET /healthz` + `proxy::handle` fallback, both behind the
 /// `require_key` auth layer. The layer sits above the fallback so `/healthz`
-/// also passes through `require_key`, which exempts it by path. Task 7
-/// replaces the placeholder fallback with `proxy::handle`.
+/// also passes through `require_key`, which exempts it by path. Everything
+/// else flows through `proxy::handle`.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .fallback(placeholder)
+        .fallback(proxy::handle)
         .layer(from_fn_with_state(state.clone(), require_key))
         .with_state(state)
 }
@@ -79,19 +80,6 @@ pub fn build_router(state: AppState) -> Router {
 /// Liveness probe — no auth, no state, returns literal `"ok\n"`.
 async fn healthz() -> &'static str {
     "ok\n"
-}
-
-/// Pre-routing placeholder: every non-healthz path returns 501 with a
-/// protocol-shaped error. The protocol is unknown until Task 3 sniffs it,
-/// so we default to Anthropic (the gateway's primary surface). Task 7
-/// replaces this handler with `proxy::handle`.
-async fn placeholder(_state: State<AppState>) -> Response {
-    error_response(
-        Protocol::Anthropic,
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "gateway 未实现该端点的透传（占位 fallback，Task 7 接入 proxy::handle）",
-    )
 }
 
 /// Bind `cfg.listen`, serve with graceful shutdown (ctrl_c + unix SIGTERM).
