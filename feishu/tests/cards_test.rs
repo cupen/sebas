@@ -337,32 +337,26 @@ fn render_accumulated_card_empty_body_matches_seed() {
 }
 
 #[test]
-fn permission_card_uses_actions_block_for_buttons() {
+fn permission_card_buttons_are_first_class_v2_elements() {
     use feishu::cards::CardElement;
     let card = render_permission_card("s1", "r1", "Bash", &serde_json::json!({"cmd": "ls"}));
-    // Exactly one Actions element containing all 3 buttons (not 3 separate
-    // Button elements stacked vertically).
-    let actions_count = card
-        .body
-        .elements
-        .iter()
-        .filter(|e| matches!(e, CardElement::Actions { .. }))
-        .count();
-    assert_eq!(actions_count, 1, "permission card must use a single Actions block");
+    // Card JSON 2.0 removed the V1 `action` container (API error 200861
+    // "unsupported tag action"), so the 3 decision buttons are first-class
+    // body elements (stacked vertically, full width).
     let button_count = card
         .body
         .elements
         .iter()
         .filter(|e| matches!(e, CardElement::Button { .. }))
         .count();
-    assert_eq!(button_count, 0, "no raw Button elements allowed alongside Actions");
+    assert_eq!(button_count, 3, "3 first-class V2 button elements");
 
-    // Wire format: each button inside the actions block must carry a
+    // Wire format: no action container anywhere; each button carries a
     // `behaviors: [{type: "callback", value: {...}}]` wrapper, otherwise
     // Feishu silently ignores the button (no click callback registered).
     let s = serde_json::to_string(&card).unwrap();
-    assert!(s.contains("\"tag\":\"action\""), "tag must be 'action' (singular)");
-    assert!(s.contains("\"actions\":["), "actions array must be present");
+    assert!(!s.contains("\"tag\":\"action\""), "V2 forbids the action container");
+    assert!(!s.contains("\"actions\":["), "no actions array without a container");
     assert!(s.contains("\"tag\":\"button\""), "each button needs explicit tag:button");
     assert!(s.contains("\"behaviors\":["), "each button must have behaviors array");
     assert!(s.contains("\"type\":\"callback\""), "behavior type must be callback");

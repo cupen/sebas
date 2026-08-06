@@ -21,50 +21,36 @@ body:
         content: Allow once = 这一次 · Allow session = 本会话同签名全部 · Deny = 拒绝
         text_size: notation
         text_color: grey
-    - tag: action
-      actions:
-        - tag: button
-          text:
-            tag: plain_text
-            content: Allow once
-          type: primary
+    - tag: button
+      text:
+        tag: plain_text
+        content: Allow once
+      type: primary
+      behaviors:
+        - type: callback
           value:
             decision: allow_once
             request_id: r1
             session_id: s1
-          behaviors:
-            - type: callback
-              value:
-                decision: allow_once
-                request_id: r1
-                session_id: s1
-        - tag: button
-          text:
-            tag: plain_text
-            content: Allow session
-          type: default
+    - tag: button
+      text:
+        tag: plain_text
+        content: Allow session
+      type: default
+      behaviors:
+        - type: callback
           value:
             decision: allow_session
             request_id: r1
             session_id: s1
-          behaviors:
-            - type: callback
-              value:
-                decision: allow_session
-                request_id: r1
-                session_id: s1
-        - tag: button
-          text:
-            tag: plain_text
-            content: Deny
-          type: danger
+    - tag: button
+      text:
+        tag: plain_text
+        content: Deny
+      type: danger
+      behaviors:
+        - type: callback
           value:
             decision: deny
             request_id: r1
             session_id: s1
-          behaviors:
-            - type: callback
-              value:
-                decision: deny
-                request_id: r1
-                session_id: s1
