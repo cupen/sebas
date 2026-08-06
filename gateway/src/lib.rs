@@ -9,6 +9,7 @@
 //!
 //! edition 2024：let-chains 可用（`if let A = b && cond`）。
 
+pub mod auth;
 pub mod config;
 pub mod error;
 pub mod proto;

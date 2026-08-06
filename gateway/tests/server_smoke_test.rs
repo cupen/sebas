@@ -3,8 +3,9 @@
 //! Starts a real axum server on an OS-assigned port (127.0.0.1:0) using
 //! `build_router`, then asserts:
 //!   - GET /healthz -> 200 "ok\n" (no auth, liveness probe).
-//!   - GET /v1/messages (unimplemented) -> 501 with a protocol-shaped error
-//!     body (Anthropic shape until protocol sniffing lands in Task 3/7).
+//!   - GET /v1/messages (unimplemented, valid key) -> 501 with a protocol-shaped
+//!     error body (Anthropic shape). Task 5 added the auth layer in front of the
+//!     placeholder, so a valid downstream key is required to reach it.
 //!
 //! The real `run` path (graceful shutdown via ctrl_c/SIGTERM) is exercised by
 //! manual smoke (`cargo run -- gateway --config …` + curl), not here — it
@@ -57,6 +58,10 @@ async fn healthz_ok_and_placeholder_returns_501() {
 
     let placeholder = client
         .get(format!("http://{addr}/v1/messages"))
+        // Task 5 auth layer gates the placeholder; send the configured key to
+        // reach it and still assert 501 (Task 7 swaps it for proxy::handle).
+        .header("authorization", "Bearer sk-gw-test")
+        .header("anthropic-version", "2023-06-01")
         .send()
         .await
         .expect("GET /v1/messages");
@@ -64,7 +69,7 @@ async fn healthz_ok_and_placeholder_returns_501() {
     let body: serde_json::Value =
         serde_json::from_str(&placeholder.text().await.expect("placeholder body"))
             .expect("placeholder body is valid JSON");
-    // Anthropic error shape (default for the pre-sniff placeholder):
+    // Anthropic error shape (placeholder hardcodes Anthropic pre-Task-7):
     // {"type":"error","error":{"type":..,"message":..}}
     assert_eq!(body["type"], "error");
     assert!(body["error"]["type"].is_string());

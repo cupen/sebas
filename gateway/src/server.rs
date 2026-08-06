@@ -17,9 +17,11 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::middleware::from_fn_with_state;
 use axum::response::Response;
 use axum::routing::get;
 
+use crate::auth::require_key;
 use crate::config::{GatewayConfig, KeyConfig};
 use crate::error::{GatewayError, Result, error_response};
 use crate::proto::Protocol;
@@ -59,11 +61,15 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
     })
 }
 
-/// Mount routes. `GET /healthz` (no auth, `"ok\n"`) + placeholder fallback.
+/// Mount routes. `GET /healthz` + placeholder fallback, both behind the
+/// `require_key` auth layer. The layer sits above the fallback so `/healthz`
+/// also passes through `require_key`, which exempts it by path. Task 7
+/// replaces the placeholder fallback with `proxy::handle`.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .fallback(placeholder)
+        .layer(from_fn_with_state(state.clone(), require_key))
         .with_state(state)
 }
 
