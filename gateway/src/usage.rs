@@ -113,12 +113,10 @@ async fn write_record(path: &Path, rec: &UsageRecord) {
             return;
         }
     };
-    if let Err(e) = f.write_all(line.as_bytes()).await {
+    if let Err(e) = f.write_all(format!("{line}\n").as_bytes()).await {
         tracing::warn!(error = %e, "usage jsonl write failed; dropping record");
         return;
     }
-    // 行尾换行独立写一次：即便 line 内含换行（理论不会），jsonl 边界仍清晰。
-    let _ = f.write_all(b"\n").await;
     let _ = f.flush().await;
 }
 

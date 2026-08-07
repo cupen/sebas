@@ -3,9 +3,10 @@
 //! 纯透传网关核心：同协议转发，不改写协议体。`handle` 是 axum fallback
 //! handler，承接 `require_key` 中间件放行后的所有非 `/healthz` 请求。
 //!
-//! 流程：协议嗅探 (`resolve_target`) → model 提取（buffered JSON body /
-//! `/v1/models/{id}` path）→ 路由解析 (`RouteTable::resolve`) → 限流 (`Quota::check`)
-//! → header 改写 + 上游 key 注入 → body 改写（model rename）或流式透传 →
+//! 流程：协议嗅探 (`resolve_target`) → `KeyIdentity` 提取 → 限流 (`Quota::check`)
+//! → model 提取（buffered JSON body / `/v1/models/{id}` path）→ 路由解析
+//! (`RouteTable::resolve`) → header 改写 + 上游 key 注入 → body 改写（model rename）
+//! 或流式透传 → 上游响应原样回传（SSE 逐 chunk flush，非 SSE 缓冲）→ settle。
 //! 上游响应原样回传（SSE 逐 chunk flush，非 SSE 缓冲）。
 //!
 //! 纯函数拆分以便单测：`filtered_request_headers` / `filtered_response_headers` /
@@ -503,8 +504,8 @@ fn sse_passthrough_stream(
 
 /// SSE 流的断流安全结算器。`Drop` 在流结束**或**客户端断开时触发，flush
 /// parser 残余缓冲并写一条 `UsageRecord` + 调 `quota.record_tokens`。
-/// `settled` 防御性防止重复结算（理论上 `Drop` 只调一次，但 future cancel
-/// 路径下编译器可能插入多次 drop）。
+/// `settled` 防御性防止重复结算（`Drop` 虽只调一次，但重构时可能提前手动
+/// drop 后再正常 drop）。
 struct UsageFinalizer {
     sink: UsageSink,
     quota: Arc<Quota>,
