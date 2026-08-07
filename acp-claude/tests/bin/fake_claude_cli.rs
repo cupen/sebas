@@ -34,7 +34,7 @@
 //! - user text == "stream" → 5 text frames with a 250ms pause before the
 //!   result frame (exercises the 150ms-debounce pump's transient states).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
 struct Flags {
@@ -196,7 +196,9 @@ fn main() {
     // `--continue` unless `--fork-session` is also specified. Replicate the
     // validation so a bad argv construction fails fast here instead of
     // hanging until the startup timeout against the real binary.
-    if flags.session_id_flag_used && (flags.resume_used || flags.continue_used) && !flags.fork_session
+    if flags.session_id_flag_used
+        && (flags.resume_used || flags.continue_used)
+        && !flags.fork_session
     {
         eprintln!(
             "Error: --session-id can only be used with --continue or --resume if --fork-session is also specified."

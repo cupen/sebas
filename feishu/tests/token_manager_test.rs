@@ -6,8 +6,8 @@ use feishu::client::TokenManager;
 use feishu::events::SessionKey;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Stub {
     base: String,

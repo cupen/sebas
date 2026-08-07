@@ -21,4 +21,42 @@ path = "claude"
 args = []
 
 # Optional: router, card, media, log sections all have defaults.
-# See docs/superpowers/specs/2026-07-26-sebas-design.md §6.2 for full list.
+# See docs/superpowers/specs/2026-08-06-sebas-design.md §6.2 for full list.
+
+# ── gateway（LLM provider router；`sebas gateway` 子命令运行）──────────
+# 双协议面（Anthropic/OpenAI）纯透传网关。完整字段与路由语义见
+# docs/superpowers/specs/2026-08-06-gateway-design.md
+# [gateway]
+# listen = "127.0.0.1:8787"
+# max_body_bytes = 67_108_864            # 64 MiB
+# connect_timeout_secs = 10
+# read_timeout_secs = 600
+# usage_file = "~/.local/state/sebas/gateway-usage.jsonl"
+# default_provider = "anthropic"
+#
+# [[gateway.keys]]                      # 下游客户端 key（鉴权 + 限流/配额）
+# key = "sk-gw-local-dev"
+# name = "claude-code"
+# rpm = 600                             # 每分钟请求数
+# daily_token_quota = 50_000_000        # 每日 token 配额
+# allow_models = ["claude-*", "deepseek-*"]
+# # default_provider = "anthropic"      # key 级默认，覆盖全局
+#
+# [gateway.providers.anthropic]         # 上游 provider
+# protocol = "anthropic"
+# base_url = "https://api.anthropic.com"
+# api_key_env = "ANTHROPIC_API_KEY"     # 密钥只从 env 读，不落盘/不落日志
+# # api_key = "..."                     # 明文仅测试用（启动时 warn）
+# # model_map = { "claude-3.5-sonnet" = "claude-3-5-sonnet-20241022" }
+#
+# [gateway.providers.deepseek]
+# protocol = "anthropic"                # DeepSeek 的 Anthropic 兼容端点
+# base_url = "https://api.deepseek.com/anthropic"
+# api_key_env = "DEEPSEEK_API_KEY"
+#
+# [[gateway.routes]]                    # 路由表（按序匹配 model glob）
+# model = "claude-*"
+# provider = "anthropic"
+#
+# env 覆盖（spec §6.3，优先级高于本文件）：
+#   SEBAS_GATEWAY_LISTEN

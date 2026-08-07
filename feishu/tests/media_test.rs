@@ -1,4 +1,4 @@
-use feishu::media::{download_file, MediaMeta};
+use feishu::media::{MediaMeta, download_file};
 use std::path::PathBuf;
 
 #[tokio::test]

@@ -4,7 +4,7 @@
 
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
 use feishu::events::{CardAction, FeishuIn, SessionKey};
-use router::router::{compose_media_prompt, Out, RouterHandle};
+use router::router::{Out, RouterHandle, compose_media_prompt};
 use router::state::{Mapping, SessionMap};
 use std::time::Duration;
 

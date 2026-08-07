@@ -17,6 +17,9 @@ pub enum SebasError {
 
     #[error("router error: {0}")]
     Router(String),
+
+    #[error("gateway error: {0}")]
+    Gateway(String),
 }
 
 pub type Result<T> = std::result::Result<T, SebasError>;

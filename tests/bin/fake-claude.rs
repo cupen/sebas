@@ -196,7 +196,9 @@ fn main() {
     // `--continue` unless `--fork-session` is also specified. Replicate the
     // validation so a bad argv construction fails fast here instead of
     // hanging until the startup timeout against the real binary.
-    if flags.session_id_flag_used && (flags.resume_used || flags.continue_used) && !flags.fork_session
+    if flags.session_id_flag_used
+        && (flags.resume_used || flags.continue_used)
+        && !flags.fork_session
     {
         eprintln!(
             "Error: --session-id can only be used with --continue or --resume if --fork-session is also specified."

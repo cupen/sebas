@@ -26,7 +26,7 @@ use futures::{FutureExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Everything needed to establish one claude-backed session.
 pub struct ConnectConfig {

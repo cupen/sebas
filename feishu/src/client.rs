@@ -233,10 +233,10 @@ impl FeishuClient {
             "msg_type": "interactive",
             "content": content,
         });
-        if let Some(rid) = root_id {
-            if !rid.is_empty() {
-                body["root_id"] = serde_json::Value::String(rid.to_string());
-            }
+        if let Some(rid) = root_id
+            && !rid.is_empty()
+        {
+            body["root_id"] = serde_json::Value::String(rid.to_string());
         }
         Ok(body)
     }
@@ -276,9 +276,7 @@ impl FeishuClient {
         message_id: &str,
         emoji_type: &str,
     ) -> anyhow::Result<String> {
-        let url = format!(
-            "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions"
-        );
+        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions");
         let body = serde_json::json!({ "reaction_type": { "emoji_type": emoji_type } });
         let out: ReactionOut = self
             .request_with_retry_data(http, tokens, reqwest::Method::POST, &url, body)

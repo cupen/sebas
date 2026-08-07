@@ -309,7 +309,12 @@ async fn phase_transitions_emit_reactions_card_first() {
 
     // Finished → ✅
     router
-        .apply_event_to_out("r1".into(), &AcpEvent::Finished { session_id: "r1".into() })
+        .apply_event_to_out(
+            "r1".into(),
+            &AcpEvent::Finished {
+                session_id: "r1".into(),
+            },
+        )
         .await;
     let o4 = recv(&mut out_rx).await;
     assert!(matches!(o4, Out::UpdateCard { .. }), "先出卡: {o4:?}");
@@ -362,9 +367,18 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     router.seed_card("r3".into(), "第一题".into()).await;
     // 驱动到 DONE（纯状态，无 Out）
     let react = router
-        .apply_event("r3", &AcpEvent::Finished { session_id: "r3".into() })
+        .apply_event(
+            "r3",
+            &AcpEvent::Finished {
+                session_id: "r3".into(),
+            },
+        )
         .await;
-    assert_eq!(react, Some(router::card_state::phase::DONE), "apply_event 报告 SEED→DONE 转移");
+    assert_eq!(
+        react,
+        Some(router::card_state::phase::DONE),
+        "apply_event 报告 SEED→DONE 转移"
+    );
 
     // 用户追问：continue 回切 WORKING —— 先刷卡，再换 reaction，最后 SendAcp
     router
@@ -389,7 +403,10 @@ async fn continue_after_done_flips_reaction_back_to_working() {
         "回切 reaction WORKING: {o2:?}"
     );
     let o3 = recv(&mut out_rx).await;
-    assert!(matches!(o3, Out::SendCard { root_id: None, .. }), "per-turn card: {o3:?}");
+    assert!(
+        matches!(o3, Out::SendCard { root_id: None, .. }),
+        "per-turn card: {o3:?}"
+    );
     let o4 = recv(&mut out_rx).await;
     assert!(matches!(o4, Out::SendAcp { .. }), "继续会话: {o4:?}");
     assert_no_more(&mut out_rx).await;
@@ -410,7 +427,7 @@ async fn permission_card_click_emits_resolved_card_flip() {
     // Seed an active session mapping so `on_button` passes the
     // `session_alive` check (production: the session is alive while
     // there's a Claude child process for this chat).
-    router
+    let _ = router
         .map
         .insert(key.clone(), router::state::Mapping::active("sess-flip"))
         .await;
@@ -457,14 +474,16 @@ async fn permission_card_click_emits_resolved_card_flip() {
     let o2 = recv(&mut out_rx).await;
     match o2 {
         Out::SendAcp {
-            cmd: acp_claude::session::AcpCommand::PermissionReply { request_id, decision, .. },
+            cmd:
+                acp_claude::session::AcpCommand::PermissionReply {
+                    request_id,
+                    decision,
+                    ..
+                },
             ..
         } => {
             assert_eq!(request_id, "req-1");
-            assert!(matches!(
-                decision,
-                acp_claude::session::Decision::AllowOnce
-            ));
+            assert!(matches!(decision, acp_claude::session::Decision::AllowOnce));
         }
         other => panic!("expected SendAcp, got {other:?}"),
     }
@@ -487,7 +506,7 @@ async fn stale_permission_click_emits_expired_card() {
     // Seed an active session so `on_button` reaches the click path
     // (the stale branch is taken because perm_cards.take returns None,
     // not because the session is dead).
-    router
+    let _ = router
         .map
         .insert(key.clone(), router::state::Mapping::active("sess-stale"))
         .await;
@@ -557,8 +576,14 @@ fn tool_signature_canonicalizes_key_order() {
     // different invocations. A naive `serde_json::to_string` would produce
     // different strings, and the allowlist would miss a "second same call".
     // The signature must be order-insensitive.
-    let a = tool_signature("Bash", &json!({"command": "ls /tmp", "description": "list /tmp"}));
-    let b = tool_signature("Bash", &json!({"description": "list /tmp", "command": "ls /tmp"}));
+    let a = tool_signature(
+        "Bash",
+        &json!({"command": "ls /tmp", "description": "list /tmp"}),
+    );
+    let b = tool_signature(
+        "Bash",
+        &json!({"description": "list /tmp", "command": "ls /tmp"}),
+    );
     assert_eq!(a, b, "key order must not affect signature");
 }
 
@@ -575,8 +600,14 @@ fn tool_signature_ignores_null_fields() {
 #[test]
 fn tool_signature_nested_object_keys_canonicalized() {
     // Nested objects should also be canonicalized recursively.
-    let a = tool_signature("Bash", &json!({"command": "ls", "env": {"PATH": "/usr/bin", "HOME": "/root"}}));
-    let b = tool_signature("Bash", &json!({"env": {"HOME": "/root", "PATH": "/usr/bin"}, "command": "ls"}));
+    let a = tool_signature(
+        "Bash",
+        &json!({"command": "ls", "env": {"PATH": "/usr/bin", "HOME": "/root"}}),
+    );
+    let b = tool_signature(
+        "Bash",
+        &json!({"env": {"HOME": "/root", "PATH": "/usr/bin"}, "command": "ls"}),
+    );
     assert_eq!(a, b, "nested object key order must not affect signature");
 }
 
@@ -609,9 +640,9 @@ fn tool_signature_claude_style_bash_args_match_across_invocations() {
 
 #[tokio::test]
 async fn allowlist_grant_and_check() {
+    use feishu::events::SessionKey;
     use router::router::RouterHandle;
     use router::state::SessionMap;
-    use feishu::events::SessionKey;
 
     let (router, _rx) = RouterHandle::new(SessionMap::new());
     let key = SessionKey {
@@ -620,27 +651,27 @@ async fn allowlist_grant_and_check() {
     };
     // Initial state: not allowed.
     assert!(
-        !router.allowlist()
-            
+        !router
+            .allowlist()
             .is_allowed(&key, "Bash", &json!({"command": "ls"}))
             .await
     );
     // Grant.
-    router.allowlist()
-        
+    router
+        .allowlist()
         .grant(&key, "Bash", &json!({"command": "ls"}))
         .await;
     // Now allowed.
     assert!(
-        router.allowlist()
-            
+        router
+            .allowlist()
             .is_allowed(&key, "Bash", &json!({"command": "ls"}))
             .await
     );
     // Different args → not allowed.
     assert!(
-        !router.allowlist()
-            
+        !router
+            .allowlist()
             .is_allowed(&key, "Bash", &json!({"command": "rm -rf /"}))
             .await
     );
@@ -650,8 +681,8 @@ async fn allowlist_grant_and_check() {
         thread_id: None,
     };
     assert!(
-        !router.allowlist()
-            
+        !router
+            .allowlist()
             .is_allowed(&other_key, "Bash", &json!({"command": "ls"}))
             .await
     );
@@ -659,29 +690,50 @@ async fn allowlist_grant_and_check() {
 
 #[tokio::test]
 async fn allowlist_clear_drops_everything_for_chat() {
+    use feishu::events::SessionKey;
     use router::router::RouterHandle;
     use router::state::SessionMap;
-    use feishu::events::SessionKey;
 
     let (router, _rx) = RouterHandle::new(SessionMap::new());
     let key = SessionKey {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    router.allowlist().grant(&key, "Bash", &json!({"command": "ls"})).await;
-    router.allowlist().grant(&key, "Read", &json!({"path": "/etc"})).await;
-    assert!(router.allowlist().is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
+    router
+        .allowlist()
+        .grant(&key, "Bash", &json!({"command": "ls"}))
+        .await;
+    router
+        .allowlist()
+        .grant(&key, "Read", &json!({"path": "/etc"}))
+        .await;
+    assert!(
+        router
+            .allowlist()
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
     // Clear wipes the whole entry (no leak across sessions).
     router.allowlist().clear(&key).await;
-    assert!(!router.allowlist().is_allowed(&key, "Bash", &json!({"command": "ls"})).await);
-    assert!(!router.allowlist().is_allowed(&key, "Read", &json!({"path": "/etc"})).await);
+    assert!(
+        !router
+            .allowlist()
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
+    assert!(
+        !router
+            .allowlist()
+            .is_allowed(&key, "Read", &json!({"path": "/etc"}))
+            .await
+    );
 }
 
 #[tokio::test]
 async fn permission_request_after_grant_auto_approves_without_card() {
+    use feishu::events::SessionKey;
     use router::router::RouterHandle;
     use router::state::SessionMap;
-    use feishu::events::SessionKey;
 
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
     let key = SessionKey {
@@ -690,14 +742,17 @@ async fn permission_request_after_grant_auto_approves_without_card() {
     };
     let session_id = "sess-1".to_string();
     // Seed the session map so apply_event_to_out can resolve the key.
-    router
+    let _ = router
         .map
-        .insert(key.clone(), router::state::Mapping::active(session_id.clone()))
+        .insert(
+            key.clone(),
+            router::state::Mapping::active(session_id.clone()),
+        )
         .await;
 
     // Pre-grant: the (Bash, ls) call is on the allowlist.
-    router.allowlist()
-        
+    router
+        .allowlist()
         .grant(&key, "Bash", &json!({"command": "ls /tmp"}))
         .await;
 
@@ -786,7 +841,10 @@ fn out_send_card_root_id_none_round_trips() {
         root_id: None,
     };
     let s = format!("{:?}", out);
-    assert!(s.contains("root_id"), "Debug output should contain root_id: {s}");
+    assert!(
+        s.contains("root_id"),
+        "Debug output should contain root_id: {s}"
+    );
 }
 
 #[tokio::test]
@@ -794,9 +852,9 @@ async fn permission_request_without_grant_still_renders_card() {
     // Sanity counterpart to the auto-approve test: a fresh (Bash, ls)
     // call when nothing is on the allowlist must still show the card so
     // the user can decide.
+    use feishu::events::SessionKey;
     use router::router::RouterHandle;
     use router::state::SessionMap;
-    use feishu::events::SessionKey;
 
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
     let key = SessionKey {
@@ -804,9 +862,12 @@ async fn permission_request_without_grant_still_renders_card() {
         thread_id: None,
     };
     let session_id = "sess-1".to_string();
-    router
+    let _ = router
         .map
-        .insert(key.clone(), router::state::Mapping::active(session_id.clone()))
+        .insert(
+            key.clone(),
+            router::state::Mapping::active(session_id.clone()),
+        )
         .await;
 
     router
@@ -823,7 +884,11 @@ async fn permission_request_without_grant_still_renders_card() {
         .expect("Out within 200ms")
         .expect("channel closed");
     match out {
-        Out::SendCard { key: k, perm_request_id, .. } => {
+        Out::SendCard {
+            key: k,
+            perm_request_id,
+            ..
+        } => {
             assert_eq!(k.chat_id, "oc_x");
             assert_eq!(perm_request_id.as_deref(), Some("req-fresh"));
         }

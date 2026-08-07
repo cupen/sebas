@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// A parked permission decision: the driver's PreToolUse hook callback
 /// blocks on the receiving end; `SessionManager::send(PermissionReply)`
