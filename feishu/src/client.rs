@@ -1,4 +1,5 @@
 use crate::events::SessionKey;
+use crate::messages::{ReactRequest, ReceiveIdType, SendCardRequest, UpdateCardRequest};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -222,25 +223,6 @@ impl FeishuClient {
     /// Builds the JSON body for a card POST request.
     /// When `root_id` is `Some` and non-empty, `root_id` is included in the
     /// body so Feishu renders the card as a reply to the parent message.
-    pub fn build_send_card_body(
-        card_json: &serde_json::Value,
-        key: &SessionKey,
-        root_id: Option<&str>,
-    ) -> anyhow::Result<serde_json::Value> {
-        let content = serde_json::to_string(card_json)?;
-        let mut body = serde_json::json!({
-            "receive_id": key.chat_id,
-            "msg_type": "interactive",
-            "content": content,
-        });
-        if let Some(rid) = root_id
-            && !rid.is_empty()
-        {
-            body["root_id"] = serde_json::Value::String(rid.to_string());
-        }
-        Ok(body)
-    }
-
     pub async fn send_card(
         &self,
         http: &reqwest::Client,
@@ -250,7 +232,11 @@ impl FeishuClient {
         root_id: Option<&str>,
     ) -> anyhow::Result<String> {
         let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
-        let body = Self::build_send_card_body(&card_json, key, root_id)?;
+        let mut req = SendCardRequest::new(&key.chat_id, ReceiveIdType::ChatId, &card_json);
+        if let Some(rid) = root_id {
+            req = req.with_reply(rid);
+        }
+        let body = serde_json::to_value(&req)?;
         self.post_card_with_retry(http, tokens, url, body).await
     }
 
@@ -262,7 +248,10 @@ impl FeishuClient {
         card_json: serde_json::Value,
     ) -> anyhow::Result<()> {
         let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}");
-        let body = serde_json::json!({ "content": serde_json::to_string(&card_json)? });
+        let req = UpdateCardRequest {
+            content: card_json.to_string(),
+        };
+        let body = serde_json::to_value(&req)?;
         self.request_with_retry(http, tokens, reqwest::Method::PATCH, &url, body)
             .await
     }
@@ -277,7 +266,8 @@ impl FeishuClient {
         emoji_type: &str,
     ) -> anyhow::Result<String> {
         let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions");
-        let body = serde_json::json!({ "reaction_type": { "emoji_type": emoji_type } });
+        let req = ReactRequest::new(emoji_type);
+        let body = serde_json::to_value(&req)?;
         let out: ReactionOut = self
             .request_with_retry_data(http, tokens, reqwest::Method::POST, &url, body)
             .await?;
