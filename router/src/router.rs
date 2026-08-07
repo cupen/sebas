@@ -1,10 +1,11 @@
+use crate::card_events::apply_event_to_card;
 use crate::commands::{Command, parse_command};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent, Decision};
 use feishu::cards::{CardConfig, phase_visual};
 use feishu::cards::{
-    apply_event_to_card, render_accumulated_card, render_dead_session_card,
-    render_expired_permission_card, render_permission_card, render_resolved_permission_card,
+    render_accumulated_card, render_dead_session_card, render_expired_permission_card,
+    render_permission_card, render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use serde_json::Value;
