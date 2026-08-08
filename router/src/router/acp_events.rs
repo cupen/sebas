@@ -59,7 +59,7 @@ impl RouterHandle {
                 let card = render_permission_card(session_id, request_id, tool_name, args);
                 self.emit(Out::SendCard {
                     key,
-                    card: serde_json::to_value(&card).unwrap(),
+                    card: serde_json::to_value(&card).expect("permission card serializes"),
                     msg_id: None,
                     // Mark this card for in-place update on click. The dispatcher
                     // records the Feishu message_id keyed by request_id so a
@@ -79,19 +79,19 @@ impl RouterHandle {
             AcpEvent::Error { terminal: true, .. } => {
                 // terminal Error 并入累积模型（spec §8）：apply_event（置 ❌ + append
                 // 错误正文，保留死前 transcript）→ flush_card → 换 reaction →
-                // remove_by_session → drop_card。
+                // remove_by_session → drop_card。drop_card 无条件执行（无论
+                // SessionKey 是否还在都该清 CardState 防无界增长）。
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
                 if let Some(emoji) = react {
                     self.emit_reaction(session_id.as_str(), emoji).await;
                 }
-                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
+                let sid = session_id.as_str();
+                if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.allowlist.clear(&key).await;
-                    self.map.remove_by_session(session_id.as_str()).await;
-                    self.drop_card(session_id.as_str()).await;
-                } else {
-                    self.drop_card(session_id.as_str()).await;
+                    self.map.remove_by_session(sid).await;
                 }
+                self.drop_card(sid).await;
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。

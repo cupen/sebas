@@ -265,7 +265,7 @@ impl RouterHandle {
         );
         self.emit(Out::UpdateCard {
             session_id: session_id.to_string(),
-            card: serde_json::to_value(&card).unwrap(),
+            card: serde_json::to_value(&card).expect("accumulated card serializes"),
         })
         .await;
     }

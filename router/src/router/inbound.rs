@@ -6,9 +6,10 @@
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
 use crate::commands::{Command, parse_command};
 use acp_claude::session::{AcpCommand, Decision};
-use feishu::cards::{phase_visual, render_accumulated_card};
-use feishu::cards::{render_dead_session_card, render_expired_permission_card};
-use feishu::cards::render_resolved_permission_card;
+use feishu::cards::{
+    phase_visual, render_accumulated_card, render_dead_session_card,
+    render_expired_permission_card, render_resolved_permission_card,
+};
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 
 impl RouterHandle {
@@ -122,7 +123,7 @@ impl RouterHandle {
             let card = render_dead_session_card();
             self.emit(Out::SendCard {
                 key,
-                card: serde_json::to_value(&card).unwrap(),
+                card: serde_json::to_value(&card).expect("dead-session card serializes"),
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
@@ -164,7 +165,7 @@ impl RouterHandle {
                 self.emit(Out::UpdateCardByMsgId {
                     key: entry.key,
                     msg_id: entry.msg_id,
-                    card: serde_json::to_value(&card).unwrap(),
+                    card: serde_json::to_value(&card).expect("resolved-permission card serializes"),
                 })
                 .await;
             } else {
@@ -174,7 +175,7 @@ impl RouterHandle {
                 let card = render_expired_permission_card();
                 self.emit(Out::SendCard {
                     key: key.clone(),
-                    card: serde_json::to_value(&card).unwrap(),
+                    card: serde_json::to_value(&card).expect("expired-permission card serializes"),
                     msg_id: None,
                     perm_request_id: None,
                     perm_meta: None,
