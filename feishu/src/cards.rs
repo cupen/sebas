@@ -266,7 +266,7 @@ pub fn render_permission_card(
     // looks like a wall of JSON.
     let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
     card.push_text(format!("```json\n{args_str}\n```"));
-    card.push_note("Allow once = 这一次 · Allow session = 本会话同签名全部 · Deny = 拒绝");
+    card.push_note("相同调用 = 工具名和参数完全一致；仅当前会话有效，/new 后失效");
     let btn = |label: &str, kind: &str, decision: &str| CardButton {
         text: CardText {
             tag: "plain_text".into(),
@@ -280,9 +280,9 @@ pub fn render_permission_card(
         }),
     };
     card.push_actions(vec![
-        btn("Allow once", "primary", "allow_once"),
-        btn("Allow session", "default", "allow_session"),
-        btn("Deny", "danger", "deny"),
+        btn("本次允许", "primary", "allow_once"),
+        btn("相同调用不再询问", "default", "allow_session"),
+        btn("拒绝", "danger", "deny"),
     ]);
     card
 }
@@ -306,7 +306,7 @@ pub fn render_session_lost_card() -> Card {
 }
 
 /// In-place replacement for a permission card after the user clicks an
-/// option. `label` is one of "✅ 已允许（仅此一次）" / "✅ 已允许（本会话）" /
+/// option. `label` is one of "✅ 已允许（仅此一次）" / "✅ 已允许（本会话相同调用不再询问）" /
 /// "❌ 已拒绝". No buttons — the click is already done.
 pub fn render_resolved_permission_card(label: &str) -> Card {
     let mut card = Card::new("权限请求", "blue");

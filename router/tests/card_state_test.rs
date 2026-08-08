@@ -730,6 +730,47 @@ async fn allowlist_clear_drops_everything_for_chat() {
 }
 
 #[tokio::test]
+async fn new_command_clears_session_allowlist() {
+    use feishu::events::{FeishuIn, SessionKey};
+    use router::router::RouterHandle;
+    use router::state::SessionMap;
+
+    let (router, _rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    router
+        .allowlist()
+        .grant(&key, "Bash", &json!({"command": "ls"}))
+        .await;
+    assert!(
+        router
+            .allowlist()
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
+
+    // /new starts a FRESH session in the same chat: "Allow session" grants
+    // are scoped to the session that approved them and must not carry over.
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "/new".into(),
+            reply_to: None,
+        })
+        .await;
+
+    assert!(
+        !router
+            .allowlist()
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await,
+        "/new must clear the session allowlist for the chat"
+    );
+}
+
+#[tokio::test]
 async fn permission_request_after_grant_auto_approves_without_card() {
     use feishu::events::SessionKey;
     use router::router::RouterHandle;

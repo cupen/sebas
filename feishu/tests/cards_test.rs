@@ -376,9 +376,9 @@ fn permission_card_buttons_are_first_class_v2_elements() {
         "behavior type must be callback"
     );
     // 3 decisions.
-    assert!(s.contains("Allow once"));
-    assert!(s.contains("Allow session"));
-    assert!(s.contains("Deny"));
+    assert!(s.contains("本次允许"));
+    assert!(s.contains("相同调用不再询问"));
+    assert!(s.contains("拒绝"));
 }
 
 #[test]
@@ -394,10 +394,9 @@ fn permission_card_args_in_code_fence_and_explanation_note() {
         "args must contain escaped cmd key"
     );
     assert!(s.contains("ls /tmp"), "args must contain the command value");
-    // Explanation note present so users know what each button does.
-    assert!(s.contains("Allow once = 这一次"));
-    assert!(s.contains("Allow session = 本会话同签名全部"));
-    assert!(s.contains("Deny = 拒绝"));
+    // Explanation note present so users know what "相同调用" means.
+    assert!(s.contains("相同调用 = 工具名和参数完全一致"));
+    assert!(s.contains("/new 后失效"));
 }
 
 #[test]

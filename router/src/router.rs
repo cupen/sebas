@@ -540,6 +540,12 @@ impl RouterHandle {
         // click on the same card from a misclick doesn't show a stale prompt.
         // The dispatcher will see no perm-card entry on stale clicks (we
         // take it below) and render "请求已过期" instead.
+        // Stale click = no tracked perm-card entry (already resolved by a
+        // prior click, or the click raced the dispatcher's msg_id record).
+        // We still send the PermissionReply below — the bridge drops replies
+        // for unknown request_ids, but withholding the reply when the hook
+        // IS still parked would leave the tool call hanging forever.
+        let mut stale_click = false;
         if let Some(rid) = action.request_id.as_deref() {
             if let Some(entry) = self.take_perm_card(rid).await {
                 // "Allow session" registers the (tool, args) signature so
@@ -555,7 +561,7 @@ impl RouterHandle {
                 }
                 let label = match decision {
                     Decision::AllowOnce => "✅ 已允许（仅此一次）",
-                    Decision::AllowSession => "✅ 已允许（本会话）",
+                    Decision::AllowSession => "✅ 已允许（本会话相同调用不再询问）",
                     Decision::Deny => "❌ 已拒绝",
                 };
                 let card = render_resolved_permission_card(label);
@@ -566,21 +572,7 @@ impl RouterHandle {
                 })
                 .await;
             } else {
-                // Stale click — the request was already resolved (by a prior
-                // click) or the card was never tracked. Show expired so the
-                // user knows their click had no effect.
-                let card = render_expired_permission_card();
-                self.emit(Out::SendCard {
-                    key: key.clone(),
-                    card: serde_json::to_value(&card).unwrap(),
-                    msg_id: None,
-                    perm_request_id: None,
-                    perm_meta: None,
-                    // Expired permission card is fire-and-forget.
-                    root_id: None,
-                })
-                .await;
-                return;
+                stale_click = true;
             }
         }
         match (action.session_id.clone(), action.request_id.clone()) {
@@ -596,12 +588,32 @@ impl RouterHandle {
                 .await;
             }
             _ => {
-                self.emit(Out::HelpText { key }).await;
+                self.emit(Out::HelpText { key: key.clone() }).await;
             }
+        }
+        if stale_click {
+            // The card couldn't be flipped in place — show expired so the
+            // user knows it was already handled. Emitted after the reply so
+            // the bridge hook unblocks first.
+            let card = render_expired_permission_card();
+            self.emit(Out::SendCard {
+                key: key.clone(),
+                card: serde_json::to_value(&card).unwrap(),
+                msg_id: None,
+                perm_request_id: None,
+                perm_meta: None,
+                // Expired permission card is fire-and-forget.
+                root_id: None,
+            })
+            .await;
         }
     }
 
     async fn spawn_new(&self, key: SessionKey, prompt: String) {
+        // A fresh session must not inherit "Allow session" grants from the
+        // previous session in this chat — the user approved those for the
+        // session that asked, not for whatever comes next.
+        self.allowlist.clear(&key).await;
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.

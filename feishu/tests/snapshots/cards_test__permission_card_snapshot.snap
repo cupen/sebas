@@ -1,6 +1,5 @@
 ---
 source: feishu/tests/cards_test.rs
-assertion_line: 22
 expression: card
 ---
 schema: "2.0"
@@ -18,13 +17,13 @@ body:
     - tag: div
       text:
         tag: plain_text
-        content: Allow once = 这一次 · Allow session = 本会话同签名全部 · Deny = 拒绝
+        content: 相同调用 = 工具名和参数完全一致；仅当前会话有效，/new 后失效
         text_size: notation
         text_color: grey
     - tag: button
       text:
         tag: plain_text
-        content: Allow once
+        content: 本次允许
       type: primary
       behaviors:
         - type: callback
@@ -35,7 +34,7 @@ body:
     - tag: button
       text:
         tag: plain_text
-        content: Allow session
+        content: 相同调用不再询问
       type: default
       behaviors:
         - type: callback
@@ -46,7 +45,7 @@ body:
     - tag: button
       text:
         tag: plain_text
-        content: Deny
+        content: 拒绝
       type: danger
       behaviors:
         - type: callback
