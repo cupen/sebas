@@ -12,7 +12,6 @@ tracing = "0.1"
 thiserror = "1"
 anyhow = "1"
 chrono = "0.4"
-acp-claude = { path = "../acp-claude" }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

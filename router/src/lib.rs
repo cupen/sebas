@@ -1,3 +1,4 @@
+pub mod card_events;
 pub mod card_state;
 pub mod commands;
 pub mod error;

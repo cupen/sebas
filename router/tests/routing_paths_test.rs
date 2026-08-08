@@ -82,6 +82,17 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
     let map = SessionMap::new();
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
+    // In-place flip (commit 658b312) requires a pre-recorded perm_card entry;
+    // see tests/permission_flow_test.rs:128 for the recipe.
+    router
+        .record_perm_card_msg_id(
+            "r9".into(),
+            key(),
+            "om_fake".into(),
+            "Bash".into(),
+            serde_json::json!({"cmd": "yolo"}),
+        )
+        .await;
     router
         .dispatch(FeishuIn::ButtonCb {
             key: key(),
@@ -93,7 +104,14 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
             },
         })
         .await;
-    match next_out(&mut out_rx).await {
+    // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
+    let out = loop {
+        let got = next_out(&mut out_rx).await;
+        if matches!(got, Out::SendAcp { .. }) {
+            break got;
+        }
+    };
+    match out {
         Out::SendAcp { cmd, .. } => match cmd {
             AcpCommand::PermissionReply {
                 decision,

@@ -1,4 +1,5 @@
 pub mod config;
+mod dispatch;
 pub mod error;
 pub mod gateway_cmd;
 pub mod install_service;
@@ -6,3 +7,5 @@ pub mod reactions;
 pub mod record;
 pub mod replay;
 pub mod run;
+mod session_boot;
+mod ws_loop;
