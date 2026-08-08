@@ -17,7 +17,7 @@ body:
     - tag: div
       text:
         tag: plain_text
-        content: 相同调用 = 工具名和参数完全一致；仅当前会话有效，/new 后失效
+        content: 本会话不再询问 = 之后本会话所有权限请求自动放行；/new 或会话结束后失效
         text_size: notation
         text_color: grey
     - tag: button
@@ -34,7 +34,7 @@ body:
     - tag: button
       text:
         tag: plain_text
-        content: 相同调用不再询问
+        content: 本会话不再询问
       type: default
       behaviors:
         - type: callback

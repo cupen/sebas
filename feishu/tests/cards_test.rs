@@ -377,7 +377,7 @@ fn permission_card_buttons_are_first_class_v2_elements() {
     );
     // 3 decisions.
     assert!(s.contains("本次允许"));
-    assert!(s.contains("相同调用不再询问"));
+    assert!(s.contains("本会话不再询问"));
     assert!(s.contains("拒绝"));
 }
 
@@ -394,9 +394,9 @@ fn permission_card_args_in_code_fence_and_explanation_note() {
         "args must contain escaped cmd key"
     );
     assert!(s.contains("ls /tmp"), "args must contain the command value");
-    // Explanation note present so users know what "相同调用" means.
-    assert!(s.contains("相同调用 = 工具名和参数完全一致"));
-    assert!(s.contains("/new 后失效"));
+    // Explanation note present so users know what 本会话不再询问 means.
+    assert!(s.contains("本会话不再询问 = 之后本会话所有权限请求自动放行"));
+    assert!(s.contains("/new 或会话结束后失效"));
 }
 
 #[test]
