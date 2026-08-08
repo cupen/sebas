@@ -59,6 +59,19 @@ async fn button_callback_emits_permission_reply() {
         .await
         .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
+    // In-place flip (commit 658b312) requires a pre-recorded perm_card entry:
+    // on_button takes it to flip the card to "已处理", then emits SendAcp. Without
+    // this seed it sees no entry and emits "请求已过期" instead. Same recipe as
+    // tests/permission_flow_test.rs:128.
+    router
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_fake".into(),
+            "Bash".into(),
+            serde_json::json!({"cmd": "ls"}),
+        )
+        .await;
     let action = CardAction {
         session_id: "s1".into(),
         request_id: Some("r1".into()),
@@ -68,10 +81,16 @@ async fn button_callback_emits_permission_reply() {
 
     router.dispatch(FeishuIn::ButtonCb { key, action }).await;
 
-    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
+    let out = loop {
+        let got = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(got, Out::SendAcp { .. }) {
+            break got;
+        }
+    };
     match out {
         Out::SendAcp {
             session_id,
@@ -133,6 +152,17 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
         .await
         .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
+    // In-place flip (commit 658b312) requires a pre-recorded perm_card entry;
+    // see tests/permission_flow_test.rs:128 for the recipe.
+    router
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_fake".into(),
+            "Bash".into(),
+            serde_json::json!({"cmd": "ls"}),
+        )
+        .await;
     let action = CardAction {
         session_id: "s1".into(),
         request_id: Some("r1".into()),
@@ -140,10 +170,16 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
         value: serde_json::json!({}),
     };
     router.dispatch(FeishuIn::ButtonCb { key, action }).await;
-    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    // Drain the in-place flip (UpdateCardByMsgId) before SendAcp.
+    let out = loop {
+        let got = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(got, Out::SendAcp { .. }) {
+            break got;
+        }
+    };
     match out {
         Out::SendAcp {
             cmd: AcpCommand::PermissionReply { decision, .. },
