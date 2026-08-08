@@ -8,6 +8,15 @@ rust-version = "1.90"
 resolver = "2"
 members = ["router", "feishu", "acp-claude", "gateway"]
 
+# Debug profile: 产物最小化（与 release 同等设置）
+[profile.dev]
+opt-level = "z"        # 体积优先
+lto = true             # 跨 crate LTO
+codegen-units = 1      # 单 codegen unit，最大化内联/去重
+panic = "abort"        # 去掉 unwinding 表与 landing pads
+strip = true           # 移除符号表
+debug = false          # 不带 debug info
+
 [dependencies]
 router = { path = "router" }
 feishu = { path = "feishu" }
