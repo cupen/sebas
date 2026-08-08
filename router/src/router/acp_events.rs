@@ -36,9 +36,9 @@ impl RouterHandle {
                     tracing::warn!(%session_id, "no SessionKey for permission request; dropping card");
                     return;
                 };
-                // Auto-approve if this (tool, args) was previously granted with
-                // "Allow session" in this chat. No card, no user click — the
-                // bridge gets the same AllowSession reply as a manual click
+                // Auto-approve if the user previously clicked "本会话不再
+                // 询问" in this chat. No card, no user click — the bridge
+                // gets the same AllowSession reply as a manual click
                 // would have produced.
                 if self.allowlist.is_allowed(&key, tool_name, args).await {
                     tracing::info!(
@@ -67,9 +67,7 @@ impl RouterHandle {
                     // or "请求已过期" instead of leaving the user staring at
                     // a stale prompt they keep re-clicking.
                     perm_request_id: Some(request_id.clone()),
-                    // Stash the call metadata so the click handler can
-                    // register the (tool, args) signature in the session
-                    // allowlist when the user picks "Allow session".
+                    // Stash the call metadata for the click handler.
                     perm_meta: Some((tool_name.clone(), args.clone())),
                     // Permission cards are fire-and-forget (no threading).
                     root_id: None,

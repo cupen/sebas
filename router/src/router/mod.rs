@@ -48,9 +48,8 @@ pub enum Out {
         /// card is fire-and-forget.
         perm_request_id: Option<String>,
         /// Tool call metadata for permission cards: `(tool_name, args)`. Stashed
-        /// alongside `perm_request_id` so the click handler can register the
-        /// call in the session allowlist when the user picks "Allow session".
-        /// Ignored for non-permission cards.
+        /// alongside `perm_request_id` for the click handler (diagnostics /
+        /// future granular grants). Ignored for non-permission cards.
         perm_meta: Option<(String, serde_json::Value)>,
         /// Feishu message_id of the root card for this session. When `Some`,
         /// the card is a reply-to threaded card. `None` for fire-and-forget
@@ -96,11 +95,10 @@ pub struct RouterHandle {
     /// the user clicks (or to mark it expired on a stale click). Entries are
     /// removed once resolved so a duplicate click doesn't re-update.
     perm_cards: PermCardMap,
-    /// Per-session allowlist of `(tool_name, args)` signatures the user
-    /// approved with "Allow session" / "Allow for this chat". When a new
-    /// `PermissionRequest` arrives, the router checks this list and auto-
-    /// approves matching calls without rendering a card. The bridge sees
-    /// the same approve/deny either way; the difference is purely UX.
+    /// Per-chat approval state for "本会话不再询问". When a new
+    /// `PermissionRequest` arrives, the router checks this and auto-
+    /// approves without rendering a card. The bridge sees the same
+    /// approve/deny either way; the difference is purely UX.
     /// Scope: per-SessionKey (= per Feishu chat/thread). Cleared when the
     /// session is removed (`/new`, terminal error, daemon restart).
     allowlist: SessionAllowlist,
@@ -191,18 +189,17 @@ impl RouterHandle {
 
     /// Take (and remove) the permission-card entry for a `request_id`.
     /// Returns the entry (chat, msg_id, tool_name, args) so the caller can
-    /// PATCH the card and, on "Allow session", register the call in the
-    /// session allowlist. Returns `None` if no live card (already resolved,
-    /// or never existed).
+    /// PATCH the card and, on "本会话不再询问", put the chat in allow-all
+    /// mode. Returns `None` if no live card (already resolved, or never
+    /// existed).
     pub async fn take_perm_card(&self, request_id: &str) -> Option<PermCardEntry> {
         self.perm_cards.take(request_id).await
     }
 
-    /// Per-chat allowlist of (tool, args) signatures the user approved with
-    /// "Allow session". Tests use this to seed and inspect entries; the
-    /// production path goes through `apply_event_to_out` (auto-approve)
-    /// and `on_button` (grant on click) without reaching for the field
-    /// directly.
+    /// Per-chat approval state set by "本会话不再询问". Tests use this to
+    /// seed and inspect entries; the production path goes through
+    /// `apply_event_to_out` (auto-approve) and `on_button` (grant on click)
+    /// without reaching for the field directly.
     pub fn allowlist(&self) -> &SessionAllowlist {
         &self.allowlist
     }

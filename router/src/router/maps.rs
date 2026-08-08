@@ -78,33 +78,53 @@ impl PermCardMap {
     }
 }
 
-/// Per-session tool allowlist. When a user clicks "Allow session" / "Allow
-/// for this chat" on a permission card, the (tool_name, args) signature is
-/// added here. Subsequent `PermissionRequest`s for the same signature in the
-/// same chat are auto-approved without a card.
-///
-/// Signature is `format!("{tool_name}|{args_json}")` where `args_json` is
-/// `serde_json::to_string` of the args value. Exact match — if Claude asks
-/// with slightly different args (e.g. different cwd), it's a different entry.
+/// Per-chat permission allowlist. When a user clicks "本会话不再询问" on a
+/// permission card, the chat enters allow-all mode; subsequent
+/// `PermissionRequest`s in the same chat are auto-approved without a card.
 #[derive(Default, Clone)]
 pub struct SessionAllowlist {
-    inner: Arc<RwLock<HashMap<SessionKey, std::collections::HashSet<String>>>>,
+    inner: Arc<RwLock<HashMap<SessionKey, AllowEntry>>>,
+}
+
+/// Per-chat approval state. `allow_all` is set by "本会话不再询问" and
+/// auto-approves every subsequent permission request in the chat;
+/// `sigs` holds individual (tool, args) signatures (kept for the
+/// granular-grant API and its tests).
+///
+/// Signature is `format!("{tool_name}|{args_json}")` where `args_json` is
+/// `serde_json::to_string` of the canonicalized args value.
+#[derive(Default)]
+struct AllowEntry {
+    allow_all: bool,
+    sigs: std::collections::HashSet<String>,
 }
 
 impl SessionAllowlist {
-    /// Check whether a (tool_name, args) call is allowed for the given chat.
-    /// Exact match on the canonical signature.
+    /// Check whether a (tool_name, args) call is allowed for the given chat:
+    /// either the chat is in allow-all mode, or the exact signature was
+    /// granted individually.
     pub async fn is_allowed(&self, key: &SessionKey, tool_name: &str, args: &Value) -> bool {
         let sig = tool_signature(tool_name, args);
         self.inner
             .read()
             .await
             .get(key)
-            .map(|s| s.contains(&sig))
+            .map(|e| e.allow_all || e.sigs.contains(&sig))
             .unwrap_or(false)
     }
 
-    /// Record an "Allow session" approval. Idempotent.
+    /// Record an "Allow session" approval: from now on, auto-approve every
+    /// permission request in this chat. Idempotent.
+    pub async fn grant_all(&self, key: &SessionKey) {
+        self.inner
+            .write()
+            .await
+            .entry(key.clone())
+            .or_default()
+            .allow_all = true;
+    }
+
+    /// Record a single-signature approval. Idempotent.
     pub async fn grant(&self, key: &SessionKey, tool_name: &str, args: &Value) {
         let sig = tool_signature(tool_name, args);
         self.inner
@@ -112,6 +132,7 @@ impl SessionAllowlist {
             .await
             .entry(key.clone())
             .or_default()
+            .sigs
             .insert(sig);
     }
 

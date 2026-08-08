@@ -21,6 +21,7 @@ use crate::reactions::ReactionTracker;
 use crate::ws_loop::{run_ws_loop, spawn_test_session};
 use acp_claude::manager::SessionManager;
 use feishu::client::{FeishuClient, FeishuConfig};
+use feishu::messages::{ReceiveIdType, SendTextRequest};
 use router::router::RouterHandle;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -92,11 +93,12 @@ pub async fn run(
     // If owner_id is empty, do nothing.
     if !cfg.feishu.hello_msg.is_empty() && !cfg.feishu.owner_id.is_empty() {
         let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
-        let body = serde_json::json!({
-            "receive_id": cfg.feishu.owner_id,
-            "msg_type": "text",
-            "content": serde_json::to_string(&serde_json::json!({"text": cfg.feishu.hello_msg})).unwrap_or_default(),
-        });
+        let req = SendTextRequest::new(
+            &cfg.feishu.owner_id,
+            ReceiveIdType::OpenId,
+            &cfg.feishu.hello_msg,
+        );
+        let body = serde_json::to_value(&req).unwrap_or_default();
         let bearer = tokens.token().await.unwrap_or_default();
         match http.post(url).bearer_auth(&bearer).json(&body).send().await {
             Ok(resp) => {
@@ -113,11 +115,8 @@ pub async fn run(
     // set receive_id_type=open_id below). Default to chat_id for groups.
     if let Some(receive_id) = test_msg {
         let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
-        let body = serde_json::json!({
-            "receive_id": receive_id,
-            "msg_type": "text",
-            "content": serde_json::to_string(&serde_json::json!({"text": "✅ sebas 已启动"})).unwrap_or_default(),
-        });
+        let req = SendTextRequest::new(receive_id, ReceiveIdType::ChatId, "✅ sebas 已启动");
+        let body = serde_json::to_value(&req).unwrap_or_default();
         async {
             let bearer = tokens.token().await.unwrap_or_default();
             let resp = http

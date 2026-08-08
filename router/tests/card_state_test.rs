@@ -730,6 +730,263 @@ async fn allowlist_clear_drops_everything_for_chat() {
 }
 
 #[tokio::test]
+async fn new_command_clears_session_allowlist() {
+    use feishu::events::{FeishuIn, SessionKey};
+    use router::router::RouterHandle;
+    use router::state::SessionMap;
+
+    let (router, _rx) = RouterHandle::new(SessionMap::new());
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    router
+        .allowlist()
+        .grant(&key, "Bash", &json!({"command": "ls"}))
+        .await;
+    assert!(
+        router
+            .allowlist()
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await
+    );
+
+    // /new starts a FRESH session in the same chat: "Allow session" grants
+    // are scoped to the session that approved them and must not carry over.
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "/new".into(),
+            reply_to: None,
+        })
+        .await;
+
+    assert!(
+        !router
+            .allowlist()
+            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
+            .await,
+        "/new must clear the session allowlist for the chat"
+    );
+}
+
+#[tokio::test]
+async fn allow_session_click_grants_and_auto_approves_identical_call() {
+    use acp_claude::session::AcpEvent;
+    use feishu::events::{CardAction, FeishuIn, SessionKey};
+    use router::router::{Out, RouterHandle};
+    use router::state::{Mapping, SessionMap};
+    use std::time::Duration;
+
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+
+    let args = json!({"command": "ls /tmp"});
+    // First call: nothing granted yet, so a card must go out carrying the
+    // (tool, args) stash for the click handler.
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::PermissionRequest {
+                session_id: "s1".into(),
+                request_id: "r1".into(),
+                tool_name: "Bash".into(),
+                args: args.clone(),
+            },
+        )
+        .await;
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match out {
+        Out::SendCard {
+            perm_request_id,
+            perm_meta,
+            ..
+        } => {
+            assert_eq!(perm_request_id.as_deref(), Some("r1"));
+            assert_eq!(
+                perm_meta,
+                Some(("Bash".to_string(), args.clone())),
+                "card must stash (tool, args) for the allowlist grant"
+            );
+        }
+        other => panic!("expected SendCard, got {other:?}"),
+    }
+    // Dispatcher records the msg_id (production: after send_card returns).
+    router
+        .record_perm_card_msg_id("r1".into(), key.clone(), "om_1".into(), "Bash".into(), args.clone())
+        .await;
+
+    // User clicks 相同调用不再询问.
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
+            action: CardAction {
+                session_id: "s1".into(),
+                request_id: Some("r1".into()),
+                decision: Some("allow_session".into()),
+                value: json!({}),
+            },
+        })
+        .await;
+    // Expect: card flip + PermissionReply(AllowSession), and the grant
+    // registered.
+    let mut saw_reply = false;
+    for _ in 0..2 {
+        match tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Out::UpdateCardByMsgId { .. } => {}
+            Out::SendAcp {
+                cmd: AcpCommand::PermissionReply { decision, .. },
+                ..
+            } => {
+                assert!(matches!(decision, Decision::AllowSession));
+                saw_reply = true;
+            }
+            other => panic!("unexpected Out after click: {other:?}"),
+        }
+    }
+    assert!(saw_reply, "click must emit a PermissionReply");
+    assert!(
+        router.allowlist().is_allowed(&key, "Bash", &args).await,
+        "click must grant the (tool, args) signature"
+    );
+
+    // Second identical call: auto-approved — SendAcp straight away, no card.
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::PermissionRequest {
+                session_id: "s1".into(),
+                request_id: "r2".into(),
+                tool_name: "Bash".into(),
+                args: args.clone(),
+            },
+        )
+        .await;
+    match tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        Out::SendAcp {
+            cmd:
+                AcpCommand::PermissionReply {
+                    request_id,
+                    decision,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(request_id, "r2");
+            assert!(matches!(decision, Decision::AllowSession));
+        }
+        other => panic!("expected auto-approve SendAcp, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
+    use acp_claude::session::AcpEvent;
+    use feishu::events::{CardAction, FeishuIn, SessionKey};
+    use router::router::{Out, RouterHandle};
+    use router::state::{Mapping, SessionMap};
+    use std::time::Duration;
+
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+
+    // First call prompts; user clicks 本会话不再询问.
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::PermissionRequest {
+                session_id: "s1".into(),
+                request_id: "r1".into(),
+                tool_name: "Bash".into(),
+                args: json!({"command": "ls /tmp"}),
+            },
+        )
+        .await;
+    let _card = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    router
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_1".into(),
+            "Bash".into(),
+            json!({"command": "ls /tmp"}),
+        )
+        .await;
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
+            action: CardAction {
+                session_id: "s1".into(),
+                request_id: Some("r1".into()),
+                decision: Some("allow_session".into()),
+                value: json!({}),
+            },
+        })
+        .await;
+    // Drain card flip + reply.
+    for _ in 0..2 {
+        let _ = tokio::time::timeout(Duration::from_millis(200), out_rx.recv()).await;
+    }
+
+    // A DIFFERENT tool with different args must also auto-approve: the grant
+    // is session-wide, not signature-scoped.
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::PermissionRequest {
+                session_id: "s1".into(),
+                request_id: "r2".into(),
+                tool_name: "Write".into(),
+                args: json!({"path": "/etc/hostname", "content": "x"}),
+            },
+        )
+        .await;
+    match tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        Out::SendAcp {
+            cmd:
+                AcpCommand::PermissionReply {
+                    request_id,
+                    decision,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(request_id, "r2");
+            assert!(matches!(decision, Decision::AllowSession));
+        }
+        other => panic!("expected session-wide auto-approve, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn permission_request_after_grant_auto_approves_without_card() {
     use feishu::events::SessionKey;
     use router::router::RouterHandle;
