@@ -48,7 +48,9 @@ fn default_read_timeout_secs() -> u64 {
     600
 }
 fn default_usage_file() -> String {
-    "~/.local/state/sebas/gateway-usage.jsonl".into()
+    // $HOME/.sebas/ works on both Unix and Windows (tilde expansion below
+    // resolves it through dirs::home_dir()).
+    "~/.sebas/gateway-usage.jsonl".into()
 }
 
 /// 下游客户端 key：鉴权身份 + 限流/配额参数。`key` 是网关签发给客户端的
@@ -265,9 +267,13 @@ provider = "deepseek"
         assert_eq!(cfg.max_body_bytes, 67_108_864);
         assert_eq!(cfg.connect_timeout_secs, 10);
         assert_eq!(cfg.read_timeout_secs, 600);
+        let expected_suffix =
+            std::path::Path::new(".sebas").join("gateway-usage.jsonl");
+        let usage_path = std::path::Path::new(&cfg.usage_file);
         assert!(
+            usage_path.ends_with(expected_suffix),
+            "usage_file {:?} should end with the .sebas suffix",
             cfg.usage_file
-                .ends_with("/.local/state/sebas/gateway-usage.jsonl")
         );
         assert_eq!(cfg.default_provider.as_deref(), Some("anthropic"));
         assert_eq!(cfg.keys.len(), 1);

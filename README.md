@@ -72,7 +72,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claud
 OPENAI_BASE_URL=http://127.0.0.1:8787 OPENAI_API_KEY=sk-gw-local-dev ...
 ```
 
-用量记录：每个 proxied 请求落一条 record 到 `gateway.usage_file`（默认 `~/.local/state/sebas/gateway-usage.jsonl`），含 ts/key/protocol/model/provider/status/latency/ttft/input+output+cache tokens/error。
+用量记录：每个 proxied 请求落一条 record 到 `gateway.usage_file`（默认 `~/.sebas/gateway-usage.jsonl`），含 ts/key/protocol/model/provider/status/latency/ttft/input+output+cache tokens/error。
 
 端到端验证脚本：`./scripts/e2e_gateway.sh`（build → 起 gateway → `/healthz` → 真 upstream 流式调用 [env key 在场时] → usage.jsonl 非空校验 → 清理）。详见 `docs/superpowers/specs/2026-08-06-gateway-design.md`。
 

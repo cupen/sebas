@@ -31,7 +31,7 @@ args = []
 # max_body_bytes = 67_108_864            # 64 MiB
 # connect_timeout_secs = 10
 # read_timeout_secs = 600
-# usage_file = "~/.local/state/sebas/gateway-usage.jsonl"
+# usage_file = "~/.sebas/gateway-usage.jsonl"
 # default_provider = "anthropic"
 #
 # [[gateway.keys]]                      # 下游客户端 key（鉴权 + 限流/配额）

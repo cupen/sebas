@@ -161,7 +161,7 @@ provider = "openai"
 
 - **鉴权**：静态 key 表（P0，TOML 配置）→ 管理 API 签发/吊销 + sqlite 持久化（P1）。中间件提取 `Authorization: Bearer` 或 `x-api-key`。
 - **限流**：单进程内存令牌桶：per-key RPM + 每日 token 配额（usage 事后记账）。超限按协议格式返回 429 + `retry-after`。
-- **用量**：每请求一条 record：`{ts, key, protocol, model, provider, upstream_model, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read/creation_tokens, error}` → jsonl 落盘（`~/.local/state/sebas/gateway-usage.jsonl`）+ tracing。Prometheus metrics 与成本估算（provider 价格表）放 P1。
+- **用量**：每请求一条 record：`{ts, key, protocol, model, provider, upstream_model, status, latency_ms, ttft_ms, input_tokens, output_tokens, cache_read/creation_tokens, error}` → jsonl 落盘（`~/.sebas/gateway-usage.jsonl`）+ tracing。Prometheus metrics 与成本估算（provider 价格表）放 P1。
 
 ### 4.6 "100% 覆盖"的验证策略
 
