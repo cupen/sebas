@@ -24,6 +24,7 @@ use feishu::client::{FeishuClient, FeishuConfig};
 use feishu::messages::{ReceiveIdType, SendTextRequest};
 use gateway::config::GatewayConfig;
 use router::router::RouterHandle;
+use router::settings;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -67,8 +68,17 @@ pub async fn run(
 
     let map = restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
 
+    // TOML is bootstrap; settings.json (if present) wins wholesale.
+    // Strict: malformed settings.json refuses to start with a clear error.
+    let merged_card_cfg = match settings::load_settings(&settings::settings_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "settings.json 解析失败，拒绝启动");
+            return Err(crate::error::SebasError::Config(e));
+        }
+    };
     let (router, mut out_rx) =
-        RouterHandle::new_with_config(map, cfg.card.clone(), cfg.router.channel_buffer);
+        RouterHandle::new_with_config(map, merged_card_cfg, cfg.router.channel_buffer);
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,
     )));
