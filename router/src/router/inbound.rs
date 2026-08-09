@@ -4,7 +4,7 @@
 //! `drain_queue_if_terminal` 被 [`acp_events`] 复用，故放在 mod.rs 里。
 
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
-use crate::commands::{Command, parse_command};
+use crate::commands::{Command, HELP_TEXT, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
@@ -51,7 +51,11 @@ impl RouterHandle {
                 }
             }
             Command::Help => {
-                self.emit(Out::HelpText { key }).await;
+                self.emit(Out::PlainText {
+                    key,
+                    content: HELP_TEXT.into(),
+                })
+                .await;
             }
             Command::Settings(setting_key, val) => {
                 self.handle_settings(key, setting_key, val, &settings::settings_path())

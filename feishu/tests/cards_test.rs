@@ -27,6 +27,41 @@ fn card_config_rejects_unknown_thinking_value() {
     assert!(res.is_err(), "disable is not exposed yet, must fail to parse");
 }
 
+/// 用户手写 `settings.json` 时写错字段名（典型：把 `theme_color` 写成
+/// `theme`）必须立刻报错；不能被 serde 静默忽略后被下一次 save_settings
+/// 抹平成 default。这个守护靠 `CardConfig` 上的 `deny_unknown_fields`。
+#[test]
+fn card_config_rejects_unknown_field() {
+    // 正确键是 `theme_color`；`theme` 拼错了。
+    let json = r#"{ "theme": "blue", "max_user_text_chars": 4000 }"#;
+    let res: Result<feishu::cards::CardConfig, _> = serde_json::from_str(json);
+    assert!(res.is_err(), "unknown field 'theme' must surface as parse error");
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown field") || err.contains("theme"),
+        "expected unknown-field error, got: {err}"
+    );
+}
+
+/// 守护的反面：所有已知字段都能正常反序列化；加 deny_unknown_fields 不能
+/// 误伤合法输入。
+#[test]
+fn card_config_accepts_all_known_fields() {
+    let json = r#"{
+        "theme_color": "orange",
+        "max_user_text_chars": 1234,
+        "max_tool_output_chars": 567,
+        "fold_long_output": false,
+        "thinking": "hide"
+    }"#;
+    let c: feishu::cards::CardConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(c.theme_color, "orange");
+    assert_eq!(c.max_user_text_chars, 1234);
+    assert_eq!(c.max_tool_output_chars, 567);
+    assert!(!c.fold_long_output);
+    assert_eq!(c.thinking, feishu::cards::ThinkingDisplay::Hide);
+}
+
 #[test]
 fn root_card_initial_snapshot() {
     let card = render_root_card("重构 src/foo.rs", "msg_1", "👀");

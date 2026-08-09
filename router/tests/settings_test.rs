@@ -76,6 +76,19 @@ fn toml_cardconfig_survives_when_settings_json_absent() {
     assert_eq!(merged, toml_cfg, "TOML bootstrap must not be overwritten by defaults");
 }
 
+/// settings.json 写盘后必须 0600，防止多用户主机上其他用户读到 bot 的
+/// 卡片配置。仅 Unix —— Windows 没 POSIX 权限位概念。
+#[cfg(unix)]
+#[test]
+fn save_settings_chmods_0600_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir();
+    let path = dir.join("settings.json");
+    save_settings(&path, &CardConfig::default()).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+}
+
 fn tempdir() -> std::path::PathBuf {
     // 把测试目录按 process::id() + 计数器隔离，避开 cargo test 的并行 race。
     use std::sync::atomic::{AtomicU64, Ordering};

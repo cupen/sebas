@@ -1,3 +1,20 @@
+/// `/help` 回复给用户的可用命令清单。命令本身在 [`parse_command`] 里，
+/// 这里只负责文案 —— 增删命令时改两处。
+pub const HELP_TEXT: &str = "可用命令:\n\
+/new — 开新会话\n\
+/sessions — 列出会话\n\
+/switch <n> — 切换到第 n 个会话\n\
+/resume <sid> — 恢复指定会话\n\
+/cancel — 中断当前轮\n\
+/status — 查看当前会话状态\n\
+/compact — 压缩上下文\n\
+/cost — 查看会话开销\n\
+/model <name> — 切换模型\n\
+/cd <path> — 切换工作目录\n\
+/settings [key [value]] — 查看/修改卡片配置\n\
+/btw <text> — 插队提问\n\
+/help — 显示本帮助";
+
 #[derive(Debug, PartialEq)]
 pub enum Command {
     New,

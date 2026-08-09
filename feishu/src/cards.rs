@@ -19,7 +19,12 @@ pub fn phase_visual(phase: &str) -> &str {
 
 /// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
 /// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
+///
+/// `deny_unknown_fields`: 用户手写 `settings.json` 时写错字段名
+/// （比如 `theme` 而非 `theme_color`）必须立刻报错，而不是被 serde 静默
+/// 忽略后被下一次 save_settings 抹平。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CardConfig {
     #[serde(default = "default_theme_color")]
     pub theme_color: String,

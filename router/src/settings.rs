@@ -40,7 +40,9 @@ pub fn load_settings(path: &Path) -> Result<Option<CardConfig>, String> {
 
 /// Pretty-print the full CardConfig to the file. Creates parent dirs.
 /// Uses write-to-temp + rename for atomicity so a crash mid-write can't
-/// leave a half-written settings.json on disk.
+/// leave a half-written settings.json on disk. On Unix, the final file is
+/// chmod 0600 so the settings don't leak to other users on a shared host;
+/// failure to chmod logs a warn but does not fail the save.
 pub fn save_settings(path: &Path, cfg: &CardConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -51,5 +53,12 @@ pub fn save_settings(path: &Path, cfg: &CardConfig) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, s).map_err(|e| format!("写 settings 临时文件失败: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename settings 失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(error = %e, path = %path.display(), "failed to chmod 0600 settings.json");
+        }
+    }
     Ok(())
 }
