@@ -41,7 +41,10 @@ pub async fn start_gateway(config_toml: &str) -> TestGateway {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let usage_path = dir.path().join("usage.jsonl");
-    let raw = config_toml.replace("__USAGE__", &usage_path.to_string_lossy());
+    // Windows 临时路径含反斜杠（`C:\Users\...\Temp\...`），TOML 会把 `\U` 当
+    // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
+    let usage = usage_path.to_string_lossy().replace('\\', "/");
+    let raw = config_toml.replace("__USAGE__", &usage);
     let cfg = GatewayConfig::parse(&raw).expect("parse test config");
     let state = server::build_state(cfg).expect("build_state");
     let app = server::build_router(state);

@@ -5,8 +5,9 @@
 //!   - GET /healthz -> 200 "ok\n" (no auth, liveness probe).
 //!   - GET /v1/messages (valid key, no model, no default_provider) -> 502
 //!     `no_route` in Anthropic shape. Task 7 replaced the 501 placeholder
-//!     with `proxy::handle`; with this minimal cfg there is no route for a
-//!     model-less request, so the proxy returns 502 NoRoute.
+//!     with `proxy::handle`; with this two-provider cfg there is no route for
+//!     a model-less request (no implicit default — that only applies to a
+//!     single-provider config), so the proxy returns 502 NoRoute.
 //!
 //! The real `run` path (graceful shutdown via ctrl_c/SIGTERM) is exercised by
 //! manual smoke (`cargo run -- gateway --config …` + curl), not here — it
@@ -15,9 +16,10 @@
 use gateway::config::GatewayConfig;
 use gateway::server;
 
-/// Minimal valid [gateway] config: one provider with a plaintext api_key
+/// Minimal valid [gateway] config: two providers with plaintext api_keys
 /// (test-only; never touches the network). listen=0 lets the OS pick a port.
-/// No `default_provider` so a model-less request yields NoRoute (502).
+/// No `default_provider` so a model-less request yields NoRoute (502) — a
+/// single-provider config would implicitly default.
 const CFG: &str = r#"
 [gateway]
 listen = "127.0.0.1:0"
@@ -27,6 +29,10 @@ key = "sk-gw-test"
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
+[gateway.providers.openai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "test-key-oai"
 "#;
 
 #[tokio::test]

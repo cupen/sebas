@@ -1,3 +1,16 @@
+//! gateway 配置模型与解析（spec §3）。
+//!
+//! provider 有两个等价位置：顶层 `[provider.<name>]`（推荐，可与 run 共用）与
+//! `[gateway.providers.<name>]`（兼容旧写法；同名时后者覆盖前者）。
+//! 只有顶层 provider、无 `[gateway]` 段时，其余字段全部走默认值。
+//!
+//! provider 支持「名称即 preset」（可选显式 `preset = "..."` 别名）：
+//! anthropic / openai / deepseek / kimi / glm / minimax / ark / dashscope /
+//! gemini 自带 `protocol` / `base_url` / `api_key_env` 惯例默认，显式字段永远
+//! 覆盖；双协议 provider 必须显式 `protocol`（不猜）。
+//! 下游 key 支持 `key_env`（从 env 读，不落盘/不落日志），与 `key` 至少二选一、
+//! 不可同时设置。
+
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -7,10 +20,18 @@ use crate::proto::Protocol;
 /// 顶层包装：容忍同一 config.toml 中的 `[feishu]` / `[acp.*]` 等无关段，
 /// 只取 `[gateway]`。有意不复用 root `Config::parse`——gateway 的运行边界
 /// 与配置 schema 独立于 sebas 主进程（spec §3）。
+///
+/// provider 采用「raw → resolved」两段解析：TOML 先落到 `RawGatewayConfig`
+/// （provider 字段全 Option），再经 `resolve_providers` 应用 preset 得到对外
+/// `GatewayConfig`。对外结构不含 preset 痕迹，routing/proxy 零改动。
+/// 顶层 `[provider.*]` 与 `[gateway.providers.*]` 在此合并（后者同名覆盖）。
 #[derive(Deserialize)]
 struct GatewayFile {
     #[serde(default)]
-    gateway: Option<GatewayConfig>,
+    gateway: Option<RawGatewayConfig>,
+    /// 顶层 provider 表（推荐写法）：`[provider.<name>]`，与 `run` 共用。
+    #[serde(default)]
+    provider: HashMap<String, RawProviderConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,10 +75,15 @@ fn default_usage_file() -> String {
 }
 
 /// 下游客户端 key：鉴权身份 + 限流/配额参数。`key` 是网关签发给客户端的
-/// 令牌（非上游 provider 密钥），非空且全局不重复。
+/// 令牌（非上游 provider 密钥）；解析后非空且全局不重复。
+/// `key_env` 是可选替代：从 env 读下游 key（不落盘/不落日志），与 `key`
+/// 至少二选一、不可同时设置。
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyConfig {
+    #[serde(default)]
     pub key: String,
+    #[serde(default)]
+    pub key_env: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -93,15 +119,258 @@ pub struct RouteRule {
     pub provider: String,
 }
 
+/// TOML 原始形态的 `[gateway]` 段：字段全 Option / 默认值，供 preset 解析。
+/// 与对外 `GatewayConfig` 的区别仅在 `providers`（raw 字段可缺省）。
+#[derive(Deserialize)]
+struct RawGatewayConfig {
+    #[serde(default = "default_listen")]
+    listen: String,
+    #[serde(default = "default_max_body_bytes")]
+    max_body_bytes: u64,
+    #[serde(default = "default_connect_timeout_secs")]
+    connect_timeout_secs: u64,
+    #[serde(default = "default_read_timeout_secs")]
+    read_timeout_secs: u64,
+    #[serde(default = "default_usage_file")]
+    usage_file: String,
+    #[serde(default)]
+    default_provider: Option<String>,
+    #[serde(default)]
+    keys: Vec<KeyConfig>,
+    #[serde(default)]
+    providers: HashMap<String, RawProviderConfig>,
+    #[serde(default)]
+    routes: Vec<RouteRule>,
+}
+
+/// TOML 原始形态的 provider 段：字段全 Option，preset 填充后再收敛成
+/// 对外 `ProviderConfig`（protocol/base_url 必填）。
+#[derive(Deserialize)]
+struct RawProviderConfig {
+    /// 显式 preset 别名；缺省时「名称即 preset」。
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    protocol: Option<Protocol>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    model_map: HashMap<String, String>,
+}
+
+/// provider 惯例默认（spec §6 Provider 格局调研 + 2026-08-04/07 端点探测）。
+/// 双协议 provider（anthropic + openai 端点都有）必须显式 `protocol`，不猜。
+/// 默认 env 名均可被 `api_key_env` 覆盖。
+struct ProviderPreset {
+    name: &'static str,
+    /// anthropic 协议端点；`None` = 该 preset 不提供 anthropic 端点。
+    anthropic_base_url: Option<&'static str>,
+    /// openai 协议端点；`None` = 该 preset 不提供 openai 端点。
+    openai_base_url: Option<&'static str>,
+    /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
+    api_key_env: &'static str,
+}
+
+const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        name: "anthropic",
+        anthropic_base_url: Some("https://api.anthropic.com"),
+        openai_base_url: None,
+        api_key_env: "ANTHROPIC_API_KEY",
+    },
+    ProviderPreset {
+        name: "openai",
+        anthropic_base_url: None,
+        openai_base_url: Some("https://api.openai.com/v1"),
+        api_key_env: "OPENAI_API_KEY",
+    },
+    ProviderPreset {
+        name: "deepseek",
+        anthropic_base_url: Some("https://api.deepseek.com/anthropic"),
+        openai_base_url: Some("https://api.deepseek.com/v1"),
+        api_key_env: "DEEPSEEK_API_KEY",
+    },
+    ProviderPreset {
+        name: "kimi",
+        anthropic_base_url: Some("https://api.moonshot.cn/anthropic"),
+        openai_base_url: Some("https://api.moonshot.cn/v1"),
+        api_key_env: "MOONSHOT_API_KEY",
+    },
+    ProviderPreset {
+        name: "glm",
+        anthropic_base_url: Some("https://open.bigmodel.cn/api/anthropic"),
+        openai_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
+        api_key_env: "ZHIPU_API_KEY",
+    },
+    ProviderPreset {
+        name: "minimax",
+        anthropic_base_url: Some("https://api.minimaxi.com/anthropic"),
+        openai_base_url: Some("https://api.minimaxi.com/v1"),
+        api_key_env: "MINIMAX_API_KEY",
+    },
+    ProviderPreset {
+        name: "ark",
+        anthropic_base_url: Some("https://ark.cn-beijing.volces.com/api/coding"),
+        openai_base_url: Some("https://ark.cn-beijing.volces.com/api/coding/v3"),
+        api_key_env: "ARK_API_KEY",
+    },
+    ProviderPreset {
+        name: "dashscope",
+        anthropic_base_url: None,
+        openai_base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        api_key_env: "DASHSCOPE_API_KEY",
+    },
+    ProviderPreset {
+        name: "gemini",
+        anthropic_base_url: None,
+        openai_base_url: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+        api_key_env: "GEMINI_API_KEY",
+    },
+];
+
+fn find_preset(name: &str) -> Option<&'static ProviderPreset> {
+    PROVIDER_PRESETS.iter().find(|p| p.name == name)
+}
+
+/// raw → resolved：把每个 provider 收敛成对外 `ProviderConfig`。
+/// - 名称即 preset（或显式 `preset = "..."` 别名）：先填预设默认值，
+///   显式字段（protocol/base_url/api_key_env）永远覆盖；
+/// - 双协议 preset 未写 `protocol` → 配置错误（不猜）；
+/// - 单协议 preset 显式写了对方协议 → 配置错误（preset 不提供该端点）；
+/// - 无 preset（自定义 provider）→ 维持现状：protocol + base_url 必填。
+fn resolve_providers(
+    raw: HashMap<String, RawProviderConfig>,
+) -> Result<HashMap<String, ProviderConfig>> {
+    let mut out = HashMap::with_capacity(raw.len());
+    for (name, r) in raw {
+        let preset_name = r.preset.as_deref().unwrap_or(&name);
+        let preset = find_preset(preset_name);
+        let (protocol, base_url) = match preset {
+            Some(p) => resolve_preset_protocol_base(p, &name, preset_name, r.protocol, r.base_url)?,
+            None => {
+                let protocol = r.protocol.ok_or_else(|| {
+                    GatewayError::Config(format!(
+                        "gateway.providers.{name}.protocol 不能为空（自定义 provider 无 preset，需显式 protocol）"
+                    ))
+                })?;
+                let base_url = r.base_url.unwrap_or_default();
+                (protocol, base_url)
+            }
+        };
+        // 默认 env 名只在「未显式指定任何 key 来源」时注入：显式 `api_key_env`
+        // 优先；显式 `api_key`（明文，仅测试用）则不应被 preset 默认 env 覆盖。
+        let api_key_env = r.api_key_env.or_else(|| {
+            if r.api_key.is_none() {
+                preset.map(|p| p.api_key_env.to_string())
+            } else {
+                None
+            }
+        });
+        out.insert(
+            name,
+            ProviderConfig {
+                protocol,
+                base_url,
+                api_key_env,
+                api_key: r.api_key,
+                model_map: r.model_map,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// 按 preset 解析 `(protocol, base_url)`。显式字段优先；歧义/缺失端点报错。
+fn resolve_preset_protocol_base(
+    p: &ProviderPreset,
+    name: &str,
+    preset_name: &str,
+    explicit_protocol: Option<Protocol>,
+    explicit_base_url: Option<String>,
+) -> Result<(Protocol, String)> {
+    let protocol = match explicit_protocol {
+        Some(proto) => proto,
+        None => match (p.anthropic_base_url, p.openai_base_url) {
+            (Some(_), None) => Protocol::Anthropic,
+            (None, Some(_)) => Protocol::OpenAi,
+            _ => {
+                return Err(GatewayError::Config(format!(
+                    "gateway.providers.{name}: preset '{preset_name}' 同时提供 anthropic/openai 端点，必须显式 protocol"
+                )));
+            }
+        },
+    };
+    let base_url = match explicit_base_url {
+        Some(b) => b,
+        None => match protocol {
+            Protocol::Anthropic => p.anthropic_base_url,
+            Protocol::OpenAi => p.openai_base_url,
+        }
+        .ok_or_else(|| {
+            GatewayError::Config(format!(
+                "gateway.providers.{name}: preset '{preset_name}' 不提供 {} 端点",
+                protocol.as_str()
+            ))
+        })?
+        .to_string(),
+    };
+    Ok((protocol, base_url))
+}
+
 impl GatewayConfig {
     /// 解析顺序对齐 root house style（src/config.rs）：
-    /// toml → env 覆盖（`SEBAS_GATEWAY_LISTEN`）→ validate → tilde 展开（`usage_file`）。
+    /// toml → preset 填充（raw → resolved）→ env 覆盖（`SEBAS_GATEWAY_LISTEN`）
+    /// → validate → tilde 展开（`usage_file`）。
     pub fn parse(raw: &str) -> Result<Self> {
         let file: GatewayFile =
             toml::from_str(raw).map_err(|e| GatewayError::Config(format!("toml parse: {e}")))?;
-        let mut cfg = file
-            .gateway
-            .ok_or_else(|| GatewayError::Config("config 缺少 [gateway] 段".into()))?;
+
+        // provider 合并：顶层 `[provider.*]` 为基准，`[gateway.providers.*]`
+        // 同名覆盖（更具体的旧位置优先）。
+        let mut providers = file.provider;
+        let raw_cfg = match file.gateway {
+            Some(mut g) => {
+                providers.extend(g.providers.drain());
+                Some(g)
+            }
+            None => None,
+        };
+        if raw_cfg.is_none() && providers.is_empty() {
+            return Err(GatewayError::Config(
+                "config 缺少 [gateway] 段或 [provider] 段".into(),
+            ));
+        }
+        let providers = resolve_providers(providers)?;
+
+        let mut cfg = match raw_cfg {
+            Some(g) => GatewayConfig {
+                listen: g.listen,
+                max_body_bytes: g.max_body_bytes,
+                connect_timeout_secs: g.connect_timeout_secs,
+                read_timeout_secs: g.read_timeout_secs,
+                usage_file: g.usage_file,
+                default_provider: g.default_provider,
+                keys: g.keys,
+                providers,
+                routes: g.routes,
+            },
+            // 只有顶层 `[provider.*]`：无 [gateway] 段，其余字段全部走默认。
+            None => GatewayConfig {
+                listen: default_listen(),
+                max_body_bytes: default_max_body_bytes(),
+                connect_timeout_secs: default_connect_timeout_secs(),
+                read_timeout_secs: default_read_timeout_secs(),
+                usage_file: default_usage_file(),
+                default_provider: None,
+                keys: Vec::new(),
+                providers,
+                routes: Vec::new(),
+            },
+        };
         cfg.apply_env_overrides();
         cfg.validate()?;
         Ok(cfg.with_expanded_paths())
@@ -145,17 +414,28 @@ impl GatewayConfig {
         }
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for (i, k) in self.keys.iter().enumerate() {
-            if k.key.is_empty() {
-                return Err(GatewayError::Config(format!(
-                    "gateway.keys[{i}].key 不能为空"
-                )));
+            let key_set = !k.key.is_empty();
+            match (key_set, k.key_env.is_some()) {
+                (false, false) => {
+                    return Err(GatewayError::Config(format!(
+                        "gateway.keys[{i}] 必须配置 key 或 key_env（两者皆空）"
+                    )));
+                }
+                (true, true) => {
+                    return Err(GatewayError::Config(format!(
+                        "gateway.keys[{i}] 不能同时配置 key 和 key_env"
+                    )));
+                }
+                _ => {}
             }
-            if let Some(&first) = seen.get(k.key.as_str()) {
-                return Err(GatewayError::Config(format!(
-                    "gateway.keys[{i}] 与 keys[{first}] 的 key 重复"
-                )));
+            if key_set {
+                if let Some(&first) = seen.get(k.key.as_str()) {
+                    return Err(GatewayError::Config(format!(
+                        "gateway.keys[{i}] 与 keys[{first}] 的 key 重复"
+                    )));
+                }
+                seen.insert(k.key.as_str(), i);
             }
-            seen.insert(k.key.as_str(), i);
             if let Some(dp) = &k.default_provider
                 && !self.providers.contains_key(dp)
             {
@@ -170,6 +450,47 @@ impl GatewayConfig {
     fn with_expanded_paths(mut self) -> Self {
         self.usage_file = expand_tilde(&self.usage_file);
         self
+    }
+
+    /// 解析下游 key（含 `key_env` 环境变量读取），返回 `呈现 key → KeyConfig` 表。
+    /// - `key` 非空 → 直接用；
+    /// - `key_env` 指向的 env 变量必须存在且非空（错误信息只含变量名，绝不含值）；
+    /// - 解析后的 key 全局不重复（`key_env` 的重复只能在运行时发现）。
+    ///
+    /// 返回值中的 `KeyConfig.key` 已被替换为解析后的真实密钥（`key_env` 场景），
+    /// 保证 `KeyIdentity.config.key` / quota 记账用的是真实呈现值。
+    pub fn resolve_keys(&self) -> Result<HashMap<String, KeyConfig>> {
+        let mut out = HashMap::with_capacity(self.keys.len());
+        let mut seen: HashMap<String, usize> = HashMap::with_capacity(self.keys.len());
+        for (i, k) in self.keys.iter().enumerate() {
+            let resolved = if !k.key.is_empty() {
+                k.key.clone()
+            } else if let Some(env_var) = &k.key_env {
+                match std::env::var(env_var) {
+                    Ok(v) if !v.is_empty() => v,
+                    _ => {
+                        return Err(GatewayError::Config(format!(
+                            "gateway.keys[{i}].key_env 指向的环境变量 '{env_var}' 未设置或为空"
+                        )));
+                    }
+                }
+            } else {
+                // validate() 已保证至少一个；防御性错误（不含值）。
+                return Err(GatewayError::Config(format!(
+                    "gateway.keys[{i}] 未配置 key 或 key_env"
+                )));
+            };
+            if let Some(&first) = seen.get(&resolved) {
+                return Err(GatewayError::Config(format!(
+                    "gateway.keys[{i}] 与 keys[{first}] 解析后的 key 重复"
+                )));
+            }
+            let mut kc = k.clone();
+            kc.key = resolved.clone();
+            seen.insert(resolved.clone(), i);
+            out.insert(resolved, kc);
+        }
+        Ok(out)
     }
 
     /// 解析每个 provider 的上游 api key：
@@ -267,8 +588,7 @@ provider = "deepseek"
         assert_eq!(cfg.max_body_bytes, 67_108_864);
         assert_eq!(cfg.connect_timeout_secs, 10);
         assert_eq!(cfg.read_timeout_secs, 600);
-        let expected_suffix =
-            std::path::Path::new(".sebas").join("gateway-usage.jsonl");
+        let expected_suffix = std::path::Path::new(".sebas").join("gateway-usage.jsonl");
         let usage_path = std::path::Path::new(&cfg.usage_file);
         assert!(
             usage_path.ends_with(expected_suffix),
@@ -386,6 +706,349 @@ api_key = "test-key"
             home.join("sebas/gateway-usage.jsonl")
                 .to_string_lossy()
                 .into_owned()
+        );
+    }
+
+    // -------------------- provider preset --------------------
+
+    #[test]
+    fn preset_fills_defaults_and_explicit_fields_override() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+
+# 名称即 preset：只写 protocol，base_url/api_key_env 自动填充
+[gateway.providers.deepseek]
+protocol = "anthropic"
+
+# 显式字段覆盖 preset 默认
+[gateway.providers.openai]
+base_url = "http://localhost:9099/v1"
+api_key_env = "MY_OPENAI_KEY"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("preset config should parse");
+
+        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        assert_eq!(ds.protocol, Protocol::Anthropic);
+        assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+
+        let oai = cfg.providers.get("openai").expect("openai provider");
+        // 单协议 preset：protocol 缺省自动填 openai
+        assert_eq!(oai.protocol, Protocol::OpenAi);
+        // 显式 base_url / api_key_env 覆盖 preset
+        assert_eq!(oai.base_url, "http://localhost:9099/v1");
+        assert_eq!(oai.api_key_env.as_deref(), Some("MY_OPENAI_KEY"));
+    }
+
+    #[test]
+    fn preset_dual_protocol_requires_explicit_protocol() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+[gateway.providers.deepseek]
+"#;
+        let err = GatewayConfig::parse(raw).expect_err("dual-protocol preset without protocol");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deepseek") && msg.contains("protocol"),
+            "error should name provider and require protocol: {msg}"
+        );
+    }
+
+    #[test]
+    fn preset_alias_reuses_table_defaults() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+[gateway.providers.my-openai]
+preset = "openai"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("preset alias should parse");
+        let p = cfg.providers.get("my-openai").expect("aliased provider");
+        assert_eq!(p.protocol, Protocol::OpenAi);
+        assert_eq!(p.base_url, "https://api.openai.com/v1");
+        assert_eq!(p.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn preset_single_protocol_with_foreign_protocol_errors() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+[gateway.providers.openai]
+protocol = "anthropic"
+"#;
+        let err = GatewayConfig::parse(raw).expect_err("openai preset with anthropic protocol");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("openai") && msg.contains("anthropic"),
+            "error should name preset and missing endpoint: {msg}"
+        );
+    }
+
+    #[test]
+    fn custom_provider_without_protocol_errors() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+[gateway.providers.my-custom]
+base_url = "http://localhost:1234"
+"#;
+        let err = GatewayConfig::parse(raw).expect_err("custom provider without protocol");
+        assert!(
+            err.to_string().contains("protocol"),
+            "custom provider must require explicit protocol: {err}"
+        );
+    }
+
+    #[test]
+    fn preset_explicit_api_key_skips_default_env() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        // anthropic preset + 显式明文 api_key（仅测试用）：不得再注入
+        // ANTHROPIC_API_KEY 默认 env，否则 resolve_api_keys 会误读 env。
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+[gateway.providers.anthropic]
+api_key = "test-key"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("preset + api_key should parse");
+        let p = cfg.providers.get("anthropic").expect("anthropic provider");
+        assert_eq!(p.protocol, Protocol::Anthropic);
+        assert_eq!(p.base_url, "https://api.anthropic.com");
+        assert_eq!(
+            p.api_key_env, None,
+            "explicit api_key must not get preset env"
+        );
+        assert_eq!(p.api_key.as_deref(), Some("test-key"));
+    }
+
+    // -------------------- 顶层 [provider.*] --------------------
+
+    #[test]
+    fn top_level_provider_table_parses_with_gateway_section() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+default_provider = "deepseek"
+
+[[gateway.keys]]
+key = "sk-test"
+
+[provider.deepseek]
+protocol = "anthropic"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("top-level provider should parse");
+        assert_eq!(cfg.default_provider.as_deref(), Some("deepseek"));
+        assert_eq!(cfg.keys.len(), 1);
+        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        assert_eq!(ds.protocol, Protocol::Anthropic);
+        assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn top_level_provider_without_gateway_section_uses_defaults() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        // run --gateway 场景：只有顶层 [provider.*]，无 [gateway] 段。
+        let raw = r#"
+[feishu]
+app_id = "x"
+
+[provider.anthropic]
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("provider-only config should parse");
+        assert_eq!(cfg.listen, "127.0.0.1:8787");
+        assert_eq!(cfg.keys.len(), 0);
+        assert_eq!(cfg.routes.len(), 0);
+        let p = cfg.providers.get("anthropic").expect("anthropic provider");
+        assert_eq!(p.protocol, Protocol::Anthropic);
+        assert_eq!(p.base_url, "https://api.anthropic.com");
+        assert_eq!(p.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn gateway_providers_override_top_level_provider_on_name_collision() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+
+[provider.deepseek]
+protocol = "anthropic"
+
+[gateway.providers.deepseek]
+protocol = "openai"
+base_url = "http://localhost:9099/v1"
+api_key = "test-key"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("collision should parse");
+        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        assert_eq!(ds.protocol, Protocol::OpenAi);
+        assert_eq!(ds.base_url, "http://localhost:9099/v1");
+        assert_eq!(ds.api_key.as_deref(), Some("test-key"));
+        assert_eq!(
+            ds.api_key_env, None,
+            "explicit api_key must win over preset default env"
+        );
+    }
+
+    // -------------------- key_env --------------------
+
+    #[test]
+    fn key_env_only_parses_and_resolves_from_env() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+            std::env::set_var("SEBAS_GATEWAY_TEST_KEY_ENV", "sk-from-env-123");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key_env = "SEBAS_GATEWAY_TEST_KEY_ENV"
+name = "env-key"
+[gateway.providers.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("key_env config should parse");
+        // env 变量仍在场时解析（parse 之后、remove 之前）。
+        let keys = cfg.resolve_keys().expect("resolve_keys");
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_TEST_KEY_ENV");
+        }
+        let kc = keys.get("sk-from-env-123").expect("env key in map");
+        assert_eq!(kc.name, "env-key");
+        assert_eq!(kc.key, "sk-from-env-123");
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn key_env_missing_env_var_errors_without_value() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+            std::env::remove_var("SEBAS_GATEWAY_TEST_MISSING_KEY");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key_env = "SEBAS_GATEWAY_TEST_MISSING_KEY"
+[gateway.providers.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("key_env config should parse");
+        let err = cfg.resolve_keys().expect_err("missing env must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SEBAS_GATEWAY_TEST_MISSING_KEY"),
+            "error should name the env var: {msg}"
+        );
+        assert!(
+            !msg.contains("sk-") && !msg.contains("secret"),
+            "error must not echo env values: {msg}"
+        );
+    }
+
+    #[test]
+    fn key_and_key_env_both_set_errors() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-plain"
+key_env = "SEBAS_GATEWAY_TEST_KEY_ENV"
+[gateway.providers.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let err = GatewayConfig::parse(raw).expect_err("key + key_env must error");
+        assert!(
+            err.to_string().contains("key_env"),
+            "error should mention key_env conflict: {err}"
+        );
+    }
+
+    #[test]
+    fn key_neither_set_errors() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+name = "no-key"
+[gateway.providers.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let err = GatewayConfig::parse(raw).expect_err("neither key nor key_env must error");
+        assert!(
+            err.to_string().contains("key_env"),
+            "error should mention key/key_env requirement: {err}"
         );
     }
 }

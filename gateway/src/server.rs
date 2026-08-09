@@ -44,11 +44,9 @@ pub struct AppState {
 /// at startup.
 pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
     let api_keys = cfg.resolve_api_keys()?;
-    let keys: HashMap<String, KeyConfig> = cfg
-        .keys
-        .iter()
-        .map(|k| (k.key.clone(), k.clone()))
-        .collect();
+    // resolve_keys 会把 `key_env` 解析成真实密钥，并作为 map key 与
+    // `KeyIdentity.config.key`（quota 记账用）。
+    let keys = cfg.resolve_keys()?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(cfg.connect_timeout_secs))
         // per-read timeout: resets on activity, so long SSE streams that keep
@@ -100,11 +98,29 @@ pub async fn run(cfg: GatewayConfig) -> Result<()> {
     let state = build_state(cfg)?;
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
-    tracing::info!(%listen, "sebas gateway listening");
+    let addr = listener.local_addr()?;
+    tracing::info!(%addr, "sebas gateway listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// 以外部提供的 listener 启动 gateway（不接管 ctrl_c/SIGTERM），返回实际监听
+/// 地址与 serve task。供嵌入方（`sebas run --gateway`）在随机端口（`127.0.0.1:0`）
+/// 上启动并向日志输出真实端口；进程生命周期由调用方/runtime 管理。
+pub fn serve_with_listener(
+    cfg: GatewayConfig,
+    listener: tokio::net::TcpListener,
+) -> Result<(
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+)> {
+    let state = build_state(cfg)?;
+    let app = build_router(state);
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await });
+    Ok((addr, handle))
 }
 
 /// Wait for ctrl_c (any platform) or SIGTERM (unix). First signal wins.

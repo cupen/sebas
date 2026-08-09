@@ -29,40 +29,58 @@ args = []
 # Optional: router, card, media, log sections all have defaults.
 # See docs/superpowers/specs/2026-08-06-sebas-design.md §6.2 for full list.
 
-# ── gateway（LLM provider router；`sebas gateway` 子命令运行）──────────
-# 双协议面（Anthropic/OpenAI）纯透传网关。完整字段与路由语义见
-# docs/superpowers/specs/2026-08-06-gateway-design.md
-# [gateway]
-# listen = "127.0.0.1:8787"
-# max_body_bytes = 67_108_864            # 64 MiB
+# ── gateway（LLM provider router）────────────────────────────────────
+# 双协议面（Anthropic/OpenAI）纯透传网关。两种运行方式：
+#   `sebas gateway --config <path>`：前台独立运行（listen 用配置值）；
+#   `sebas run --gateway`：随主服务在**随机端口**（127.0.0.1:0）启动内置
+#   gateway，真实端口输出到日志（把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL
+#   指向 http://127.0.0.1:<port> 即可接入）。
+# 完整字段与路由语义见 docs/superpowers/specs/2026-08-06-gateway-design.md
+#
+# provider 定义推荐放顶层 `[provider.<name>]`（run 与 gateway 共用）：
+# 兼容旧写法 `[gateway.providers.<name>]`（同名时后者覆盖前者）。
+# provider 支持「名称即 preset」：anthropic / openai / deepseek / kimi / glm /
+# minimax / ark / dashscope / gemini 自带 protocol / base_url / api_key_env
+# 惯例默认，显式字段永远覆盖。双协议 provider（deepseek/kimi/glm/minimax/ark）
+# 必须显式 protocol，不猜。
+#
+# 最小单 provider 示例（顶层 provider + key_env，run --gateway 可直接用）：
+# [provider.anthropic]                  # 名称即 preset：protocol/base_url/
+#                                       # api_key_env 自动填充，单行即可用
+# # api_key = "..."                     # 明文仅测试用（启动时 warn）
+# # model_map = { "claude-3.5-sonnet" = "claude-3-5-sonnet-20241022" }
+#
+# [gateway]                             # 独立 `sebas gateway` 时的网关段：
+# listen = "127.0.0.1:8787"             # run --gateway 忽略此值（强制随机端口）
+# max_body_bytes = 67_108_864           # 64 MiB
 # connect_timeout_secs = 10
 # read_timeout_secs = 600
 # usage_file = "~/.sebas/gateway-usage.jsonl"
-# default_provider = "anthropic"
 #
 # [[gateway.keys]]                      # 下游客户端 key（鉴权 + 限流/配额）
-# key = "sk-gw-local-dev"
+# key_env = "SEBAS_GATEWAY_LOCAL_KEY"   # 从 env 读下游 key（与 key 至少二选一）
 # name = "claude-code"
 # rpm = 600                             # 每分钟请求数
 # daily_token_quota = 50_000_000        # 每日 token 配额
 # allow_models = ["claude-*", "deepseek-*"]
 # # default_provider = "anthropic"      # key 级默认，覆盖全局
 #
-# [gateway.providers.anthropic]         # 上游 provider
-# protocol = "anthropic"
-# base_url = "https://api.anthropic.com"
-# api_key_env = "ANTHROPIC_API_KEY"     # 密钥只从 env 读，不落盘/不落日志
-# # api_key = "..."                     # 明文仅测试用（启动时 warn）
-# # model_map = { "claude-3.5-sonnet" = "claude-3-5-sonnet-20241022" }
+# 双 provider + 路由示例：
+# [gateway]
+# default_provider = "anthropic"
 #
-# [gateway.providers.deepseek]
-# protocol = "anthropic"                # DeepSeek 的 Anthropic 兼容端点
-# base_url = "https://api.deepseek.com/anthropic"
-# api_key_env = "DEEPSEEK_API_KEY"
+# [provider.deepseek]
+# protocol = "anthropic"                # 双协议 preset 必须显式 protocol
+# # base_url = "https://api.deepseek.com/anthropic"  # 自动填充，可覆盖
+# # api_key_env = "DEEPSEEK_API_KEY"                  # 自动填充，可覆盖
 #
 # [[gateway.routes]]                    # 路由表（按序匹配 model glob）
 # model = "claude-*"
 # provider = "anthropic"
+#
+# [[gateway.routes]]
+# model = "deepseek-*"
+# provider = "deepseek"
 #
 # env 覆盖（spec §6.3，优先级高于本文件）：
 #   SEBAS_GATEWAY_LISTEN
