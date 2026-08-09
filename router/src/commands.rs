@@ -12,6 +12,8 @@ pub enum Command {
     Cd(String),
     Help,
     Btw(String),
+    /// `/settings` | `/settings <key>` | `/settings <key> <value>`.
+    Settings(Option<String>, Option<String>),
     PassThrough(String),
 }
 
@@ -38,6 +40,14 @@ pub fn parse_command(input: &str) -> Command {
         "/model" => Command::Model(arg.into()),
         "/cd" => Command::Cd(arg.into()),
         "/help" => Command::Help,
+        "/settings" => {
+            let mut kv = arg.splitn(2, char::is_whitespace);
+            let key = kv.next().unwrap_or("").trim();
+            let val = kv.next().unwrap_or("").trim();
+            let key = if key.is_empty() { None } else { Some(key.to_string()) };
+            let val = if val.is_empty() { None } else { Some(val.to_string()) };
+            Command::Settings(key, val)
+        }
         "/btw" => {
             if arg.is_empty() {
                 Command::PassThrough(input.into())
