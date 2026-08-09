@@ -8,6 +8,7 @@ RUN apt-get update \
         ca-certificates \
         clang \
         cmake \
+        libprotobuf-dev \
         pkg-config \
         protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
