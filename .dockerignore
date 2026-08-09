@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+.beads/
+.agents/
+.claude/
+.vscode/
+config.toml
+logs/
+*.md

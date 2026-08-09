@@ -1,0 +1,49 @@
+name: Release
+
+permissions:
+  contents: read
+
+on:
+  push:
+    # 只在推送匹配的 tag（如 v0.1.0）时触发；
+    # main 和其它开发分支的 push 不触发发布构建。
+    tags:
+      - v[0-9]+.*
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        # 仓库目前没有 CHANGELOG.md，先不传 changelog
+        # 有 changelog 后可加: changelog: CHANGELOG.md
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # 上传 release assets
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NASM (aws-lc-rs 在 Windows 上需要)
+        if: runner.os == 'Windows'
+        run: choco install nasm -y --no-progress
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: sebas
+          target: ${{ matrix.target }}
+          archive: sebas-$tag-$target
+          tar: unix   # Linux 发 tar.gz
+          zip: windows # Windows 发 zip
+          checksum: sha256
+          locked: true
