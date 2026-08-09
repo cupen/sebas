@@ -5,10 +5,12 @@
 
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
 use crate::commands::{Command, parse_command};
+use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
-    phase_visual, render_accumulated_card, render_dead_session_card,
-    render_expired_permission_card, render_resolved_permission_card,
+    CardConfig, ThinkingDisplay, phase_visual, render_accumulated_card,
+    render_dead_session_card, render_expired_permission_card,
+    render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 
@@ -50,6 +52,9 @@ impl RouterHandle {
             }
             Command::Help => {
                 self.emit(Out::HelpText { key }).await;
+            }
+            Command::Settings(setting_key, val) => {
+                self.handle_settings(key, setting_key, val).await;
             }
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
@@ -324,5 +329,100 @@ impl RouterHandle {
             cmd,
         })
         .await;
+    }
+
+    async fn handle_settings(
+        &self,
+        key: SessionKey,
+        setting_key: Option<String>,
+        val: Option<String>,
+    ) {
+        let path = settings::settings_path();
+        let mut cfg = self.card_cfg.read().await.clone();
+
+        let content = match (setting_key, val) {
+            (None, _) => self.render_settings_list(&cfg),
+            (Some(k), None) => self.render_setting(&cfg, &k),
+            (Some(k), Some(v)) => match self.apply_setting(&mut cfg, &k, &v) {
+                Ok(()) => {
+                    // Persist + apply live.
+                    if let Err(e) = settings::save_settings(&path, &cfg) {
+                        self.emit(Out::PlainText {
+                            key,
+                            content: format!("保存失败: {e}"),
+                        })
+                        .await;
+                        return;
+                    }
+                    self.set_card_config(cfg.clone()).await;
+                    format!("{k} = {v} (已写入 {})", path.display())
+                }
+                Err(msg) => msg,
+            },
+        };
+        self.emit(Out::PlainText { key, content }).await;
+    }
+
+    fn render_settings_list(&self, cfg: &CardConfig) -> String {
+        format!(
+            "当前设置（来源：{}）:\n\
+             thinking = {}\n\
+             max_user_text_chars = {}\n\
+             max_tool_output_chars = {}\n\
+             fold_long_output = {}\n\
+             theme_color = {}",
+            settings::settings_path().display(),
+            Self::thinking_label(cfg.thinking),
+            cfg.max_user_text_chars,
+            cfg.max_tool_output_chars,
+            cfg.fold_long_output,
+            cfg.theme_color,
+        )
+    }
+
+    fn render_setting(&self, cfg: &CardConfig, k: &str) -> String {
+        match k {
+            "thinking" => format!("thinking = {}", Self::thinking_label(cfg.thinking)),
+            "max_user_text_chars" => format!("max_user_text_chars = {}", cfg.max_user_text_chars),
+            "max_tool_output_chars" => format!("max_tool_output_chars = {}", cfg.max_tool_output_chars),
+            "fold_long_output" => format!("fold_long_output = {}", cfg.fold_long_output),
+            "theme_color" => format!("theme_color = {}", cfg.theme_color),
+            other => format!(
+                "未知键: {other}\n可用键: thinking, max_user_text_chars, max_tool_output_chars, fold_long_output, theme_color"
+            ),
+        }
+    }
+
+    fn apply_setting(&self, cfg: &mut CardConfig, k: &str, v: &str) -> Result<(), String> {
+        match k {
+            "thinking" => match v {
+                "show" => cfg.thinking = ThinkingDisplay::Show,
+                "hide" => cfg.thinking = ThinkingDisplay::Hide,
+                other => return Err(format!(
+                    "thinking 可选值: show, hide（拒绝: {other})"
+                )),
+            },
+            "max_user_text_chars" => {
+                cfg.max_user_text_chars = v.parse().map_err(|e| format!("数字解析失败: {e}"))?
+            }
+            "max_tool_output_chars" => {
+                cfg.max_tool_output_chars = v.parse().map_err(|e| format!("数字解析失败: {e}"))?
+            }
+            "fold_long_output" => match v {
+                "true" => cfg.fold_long_output = true,
+                "false" => cfg.fold_long_output = false,
+                other => return Err(format!("布尔值应为 true / false（拒绝: {other}）")),
+            },
+            "theme_color" => cfg.theme_color = v.into(),
+            other => return Err(format!("未知键: {other}")),
+        }
+        Ok(())
+    }
+
+    fn thinking_label(t: ThinkingDisplay) -> &'static str {
+        match t {
+            ThinkingDisplay::Show => "show",
+            ThinkingDisplay::Hide => "hide",
+        }
     }
 }
