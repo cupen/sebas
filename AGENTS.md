@@ -13,6 +13,16 @@ This project uses **bd** (beads) for issue tracking. Run `bd prime` for full wor
 > source of truth; don't `bd import` during normal operation; don't
 > reach for third-party Dolt hosting before trying the default).
 
+## Git Workflow
+
+- New features are developed on `feat/*` branches, never directly on `main`.
+- Commit messages are a single sentence following
+  [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0-beta.4/).
+- Merging a `feat/*` branch back to `main`:
+  1. Rebase the branch onto `main` first, then merge with `--no-ff`.
+  2. Exception: if the branch has few commits and adds no new feature, just
+     rebase onto `main` and fast-forward it into `main` (no merge commit).
+
 ## Quick Reference
 
 ```bash
