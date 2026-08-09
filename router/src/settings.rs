@@ -10,12 +10,10 @@ use feishu::cards::CardConfig;
 use std::path::{Path, PathBuf};
 
 /// `~/.sebas/settings.json`, expanded at call time so the env is honoured.
-/// Falls back to `./.sebas/settings.json` when `$HOME` is unset (Windows
-/// without HOME, or sandboxed test envs).
+/// Falls back to `./.sebas/settings.json` when home can't be resolved
+/// (Windows without HOME, or sandboxed test envs).
 pub fn settings_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".sebas").join("settings.json")
 }
 

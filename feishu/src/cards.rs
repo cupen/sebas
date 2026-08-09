@@ -19,7 +19,7 @@ pub fn phase_visual(phase: &str) -> &str {
 
 /// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
 /// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CardConfig {
     #[serde(default = "default_theme_color")]
     pub theme_color: String,

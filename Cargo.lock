@@ -1918,6 +1918,7 @@ name = "router"
 version = "0.1.0"
 dependencies = [
  "acp-claude",
+ "dirs",
  "feishu",
  "serde",
  "serde_json",

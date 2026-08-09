@@ -25,13 +25,7 @@ fn load_missing_returns_default() {
     let dir = tempdir();
     let path = dir.join("missing.json");
     let loaded = load_settings(&path).unwrap();
-    // CardConfig doesn't derive PartialEq; compare field-by-field.
-    let default = CardConfig::default();
-    assert_eq!(loaded.theme_color, default.theme_color);
-    assert_eq!(loaded.max_user_text_chars, default.max_user_text_chars);
-    assert_eq!(loaded.max_tool_output_chars, default.max_tool_output_chars);
-    assert_eq!(loaded.fold_long_output, default.fold_long_output);
-    assert_eq!(loaded.thinking, default.thinking);
+    assert_eq!(loaded, CardConfig::default());
 }
 
 #[test]

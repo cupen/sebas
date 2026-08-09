@@ -9,5 +9,6 @@ serde_json = "1"
 tokio = { version = "1.40", features = ["sync", "macros", "rt-multi-thread"] }
 tracing = "0.1"
 thiserror = "1"
+dirs = "5"
 feishu = { path = "../feishu" }
 acp-claude = { path = "../acp-claude" }
