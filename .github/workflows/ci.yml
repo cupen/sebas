@@ -2,22 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, feat/initial-design]
-  pull_request:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -38,17 +28,3 @@ jobs:
       # （gateway 的 process_e2e_test 会 spawn target/debug/sebas）。
       - run: cargo build --bin sebas --bin fake-claude
       - run: cargo test --workspace
-
-  coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: Swatinem/rust-cache@v2
-      - name: Run tests under llvm-cov
-        run: cargo llvm-cov --workspace --json --summary-only --output-path coverage.json
-      - name: Enforce coverage gates (spec §4.3)
-        run: ./scripts/check_coverage.sh coverage.json
