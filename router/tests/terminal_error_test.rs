@@ -2,6 +2,7 @@
 //! emit an ❌ UpdateCard. Non-terminal errors keep the existing behaviour.
 
 use acp_claude::session::AcpEvent;
+use feishu::cards::CardConfig;
 use feishu::events::SessionKey;
 use router::router::{Out, RouterHandle};
 use router::state::{Mapping, SessionMap};
@@ -96,7 +97,14 @@ async fn terminal_error_preserves_pre_death_transcript() {
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
-    let (router, mut out_rx) = RouterHandle::new(map.clone());
+    // 显式允许输出 tool result，验证死前 ToolEnd 内容保留（默认 0 会屏蔽）。
+    let (router, mut out_rx) = RouterHandle::new_with_card_config(
+        map.clone(),
+        CardConfig {
+            max_tool_output_chars: 100,
+            ..CardConfig::default()
+        },
+    );
 
     // 累积若干事件（死前 transcript）。
     router
@@ -105,6 +113,17 @@ async fn terminal_error_preserves_pre_death_transcript() {
             &AcpEvent::TextDelta {
                 session_id: "s1".into(),
                 delta: "step1".into(),
+            },
+        )
+        .await;
+    let _ = drain(&mut out_rx).await;
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::ToolStart {
+                session_id: "s1".into(),
+                tool_name: "Bash".into(),
+                args: serde_json::json!({}),
             },
         )
         .await;

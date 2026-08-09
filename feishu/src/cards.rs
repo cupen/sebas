@@ -26,13 +26,14 @@ pub struct CardConfig {
     /// 单元素文本软上限：超过则截断 + 追加灰注（(已折叠 N 字)）。
     #[serde(default = "default_max_user_text")]
     pub max_user_text_chars: usize,
-    /// tool result 软上限：超过该值（且 fold_long_output=true）折叠进
-    /// collapsible_panel，完整内容保留；0 = 完全不输出 tool call 的结果内容。
+    /// tool result 软上限：0（默认）= 完全不输出 tool call 的结果内容；
+    /// >0 时结果收进工具折叠面板，超过该值则折叠，完整内容保留。
     /// 代码另有 10240 硬上限兜底，配置无法放宽。
     #[serde(default = "default_max_tool_output")]
     pub max_tool_output_chars: usize,
-    /// true：长内容折叠（tool result 用原生 collapsible_panel，默认折叠）；
-    /// false：不折叠，全文内联展示（仍受 10240 硬上限约束）。
+    /// true（默认）：tool call 折叠成 collapsible_panel（默认收起），
+    /// tool result 按 max_tool_output_chars 屏蔽/收纳；
+    /// false：不折叠，全文内联展示（结果仍受 10240 硬上限约束）。
     #[serde(default = "default_true")]
     pub fold_long_output: bool,
 }
@@ -55,7 +56,7 @@ fn default_max_user_text() -> usize {
     4000
 }
 fn default_max_tool_output() -> usize {
-    1024
+    0
 }
 fn default_true() -> bool {
     true

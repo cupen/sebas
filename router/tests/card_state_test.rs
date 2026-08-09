@@ -91,6 +91,16 @@ async fn apply_event_accumulates_without_emitting_out() {
     let _ = router
         .apply_event(
             "s1",
+            &AcpEvent::ToolStart {
+                session_id: "s1".into(),
+                tool_name: "Bash".into(),
+                args: serde_json::json!({}),
+            },
+        )
+        .await;
+    let _ = router
+        .apply_event(
+            "s1",
             &AcpEvent::ToolEnd {
                 session_id: "s1".into(),
                 tool_name: "Bash".into(),
