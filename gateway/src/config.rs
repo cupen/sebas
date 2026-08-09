@@ -153,9 +153,7 @@ where
                     .ok_or_else(|| D::Error::custom("auth_token 数组元素必须是字符串"))
             })
             .collect(),
-        _ => Err(D::Error::custom(
-            "auth_token 必须是字符串或字符串数组",
-        )),
+        _ => Err(D::Error::custom("auth_token 必须是字符串或字符串数组")),
     }
 }
 
@@ -650,7 +648,7 @@ mod tests {
                 "__sebas_test_no_overlay__.json",
             );
         }
-        parse_isolated(raw)
+        GatewayConfig::parse(raw)
     }
 
     const FULL_EXAMPLE: &str = r#"
@@ -1050,10 +1048,7 @@ base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
         let cfg = parse_isolated(many).expect("array auth_token should parse");
-        assert_eq!(
-            cfg.auth_token,
-            vec!["sk-a".to_string(), "sk-b".to_string()]
-        );
+        assert_eq!(cfg.auth_token, vec!["sk-a".to_string(), "sk-b".to_string()]);
     }
 
     #[test]
@@ -1157,7 +1152,9 @@ api_key = "test-key"
 [provider.anthropic]
 [provider.openai]
 "#;
-        let cfg = parse_isolated(raw).expect("parse with overlay");
+        // 注意：不能用 parse_isolated——它会重置 overlay 环境变量；本测试
+        // 自己设置了 overlay 文件，必须直接 parse。
+        let cfg = GatewayConfig::parse(raw).expect("parse with overlay");
 
         assert!(
             !cfg.providers.contains_key("openai"),
