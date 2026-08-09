@@ -9,6 +9,7 @@ RUN apt-get update \
         clang \
         cmake \
         pkg-config \
+        protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -16,7 +16,7 @@ jobs:
     permissions:
       contents: write # 创建 GitHub Release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: taiki-e/create-gh-release-action@v1
         # 仓库目前没有 CHANGELOG.md，先不传 changelog
         # 有 changelog 后可加: changelog: CHANGELOG.md
@@ -34,7 +34,11 @@ jobs:
     permissions:
       contents: write # 上传 release assets
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      # openlark 的 lark-websocket-protobuf 构建时需要 protoc（prost-build）
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
       - name: Install NASM (aws-lc-rs 在 Windows 上需要)
         if: runner.os == 'Windows'
         run: choco install nasm -y --no-progress

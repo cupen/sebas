@@ -12,6 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # openlark 的 lark-websocket-protobuf 构建时需要 protoc（prost-build）
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -22,6 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # fake-claude 与 sebas 都是集成测试的被测进程，必须先于测试构建
