@@ -6,7 +6,7 @@
 use acp_claude::session::AcpEvent;
 use feishu::cards::{
     CardConfig, CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, DivText,
-    StandardIcon,
+    StandardIcon, ThinkingDisplay,
 };
 
 /// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
@@ -21,10 +21,11 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             push_text_truncated(body, delta, cfg.max_user_text_chars, cfg.fold_long_output);
         }
         AcpEvent::ThinkingDelta { delta, .. } => {
-            // Visual separator before the thinking note so it's distinct
-            // from the previous event's text output.
-            body.push(CardElement::Hr);
-            body.push(note_element(format!("💭 {delta}")));
+            if cfg.thinking == ThinkingDisplay::Hide {
+                // 完全丢弃：模型仍在思考，只是卡片不展示。
+            } else {
+                append_thinking_delta(body, delta);
+            }
         }
         AcpEvent::ToolStart {
             tool_name, args, ..
@@ -189,7 +190,7 @@ fn tool_result_elements(tool_name: &str, result: &str, cfg: &CardConfig) -> Vec<
 /// 取 body 末尾属于 `tool_name` 的折叠面板（标题形如 `📖 Bash` / `⏳ Bash`）。
 /// 事件按顺序到达（ToolStart → ToolProgress* → ToolEnd），末尾即当前工具的面板。
 fn last_tool_panel_mut<'a>(
-    body: &'a mut Vec<CardElement>,
+    body: &'a mut [CardElement],
     tool_name: &str,
 ) -> Option<&'a mut CollapsiblePanel> {
     let suffix = format!(" {tool_name}");
@@ -215,6 +216,55 @@ fn panel_header(title: String) -> CollapsiblePanelHeader {
         },
         icon_position: "right".into(),
         icon_expanded_angle: -180,
+    }
+}
+
+/// ThinkingDelta 折叠面板的标准标题。所有 thinking 面板共用此常量，
+/// `is_thinking_panel` 据此判断。改这里必须连测试一起改。
+const THINKING_PANEL_TITLE: &str = "💭 思考";
+
+/// 判断一个 panel 是否是 thinking 折叠面板。聚合逻辑专用 —— 字符串
+/// `contains` 容易把任何标题含 💭 的 panel 都吞掉，相邻 deltas 会串到
+/// 错的面板里。
+fn is_thinking_panel(panel: &CollapsiblePanel) -> bool {
+    panel.header.title.content == THINKING_PANEL_TITLE
+}
+
+/// ThinkingDelta 折叠面板的 header（复用 panel_header 的标准图标）。
+fn thinking_panel_header() -> CollapsiblePanelHeader {
+    panel_header(THINKING_PANEL_TITLE.into())
+}
+
+/// 把 ThinkingDelta 累积进尾部 thinking 面板；body 末尾不是 thinking 面板则开新面板
+/// （boundary aggregation：相邻 thinking chunk 共享一个面板；任何非 thinking
+/// 事件结束当前 burst）。
+fn append_thinking_delta(body: &mut Vec<CardElement>, delta: &str) {
+    if let Some(CardElement::CollapsiblePanel(panel)) = body.last_mut()
+        && is_thinking_panel(panel)
+    {
+        // 扩展尾部 thinking 面板：往末位 Markdown 追加换行 + delta。
+        append_to_thinking_panel(panel, delta);
+        return;
+    }
+    body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+        expanded: false,
+        header: thinking_panel_header(),
+        elements: vec![CardElement::Markdown {
+            content: delta.to_string(),
+        }],
+    }));
+}
+
+/// 在已存在的 thinking 面板里追加 delta：末位是 Markdown 就接一行，否则新建 Markdown。
+fn append_to_thinking_panel(panel: &mut CollapsiblePanel, delta: &str) {
+    match panel.elements.last_mut() {
+        Some(CardElement::Markdown { content }) => {
+            content.push('\n');
+            content.push_str(delta);
+        }
+        _ => panel.elements.push(CardElement::Markdown {
+            content: delta.to_string(),
+        }),
     }
 }
 

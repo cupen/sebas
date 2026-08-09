@@ -19,7 +19,12 @@ pub fn phase_visual(phase: &str) -> &str {
 
 /// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
 /// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `deny_unknown_fields`: 用户手写 `settings.json` 时写错字段名
+/// （比如 `theme` 而非 `theme_color`）必须立刻报错，而不是被 serde 静默
+/// 忽略后被下一次 save_settings 抹平。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CardConfig {
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
@@ -28,7 +33,7 @@ pub struct CardConfig {
     pub max_user_text_chars: usize,
     /// tool result 软上限：0（默认）= 完全不输出 tool call 的结果内容；
     /// >0 时结果收进工具折叠面板，超过该值则折叠，完整内容保留。
-    /// 代码另有 10240 硬上限兜底，配置无法放宽。
+    /// > 代码另有 10240 硬上限兜底，配置无法放宽。
     #[serde(default = "default_max_tool_output")]
     pub max_tool_output_chars: usize,
     /// true（默认）：tool call 折叠成 collapsible_panel（默认收起），
@@ -36,6 +41,22 @@ pub struct CardConfig {
     /// false：不折叠，全文内联展示（结果仍受 10240 硬上限约束）。
     #[serde(default = "default_true")]
     pub fold_long_output: bool,
+    #[serde(default)]
+    pub thinking: ThinkingDisplay,
+}
+
+/// How to render the model's `thinking` content into the Feishu card.
+/// `disable` is intentionally not exposed — reserved for a future
+/// feature that would also turn off thinking tokens at the agent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    /// Fold each thinking burst into a collapsible_panel (default).
+    #[default]
+    Show,
+    /// Drop ThinkingDelta events from the card body entirely. The model
+    /// still produces thinking tokens; we just don't surface them.
+    Hide,
 }
 
 impl Default for CardConfig {
@@ -44,7 +65,8 @@ impl Default for CardConfig {
             theme_color: default_theme_color(),
             max_user_text_chars: default_max_user_text(),
             max_tool_output_chars: default_max_tool_output(),
-            fold_long_output: true,
+            fold_long_output: default_true(),
+            thinking: ThinkingDisplay::default(),
         }
     }
 }
@@ -471,21 +493,21 @@ fn full_args_panel(args: &Value) -> CardElement {
 /// - 文件/链接类工具路径或 URL 摘要行 + 其余 field 行；
 /// - 长文本字段行内预览，完整参数收进折叠面板；
 /// - 未知/嵌套参数回退 pretty JSON 代码块（原行为）。
+///
 /// 所有输出受硬上限保护，整卡不会超飞书 30KB。
 fn permission_args_elements(tool_name: &str, args: &Value) -> Vec<CardElement> {
     // Bash：命令是放行决策的关键，独立成行完整展示。
-    if tool_name.eq_ignore_ascii_case("bash") {
-        if let Some(cmd) = args
+    if tool_name.eq_ignore_ascii_case("bash")
+        && let Some(cmd) = args
             .get("command")
             .or_else(|| args.get("cmd"))
             .and_then(Value::as_str)
-        {
-            let mut els = vec![command_headline(cmd)];
-            if let Some(rows) = args_field_rows(args, &["command", "cmd"]) {
-                els.push(rows);
-            }
-            return els;
+    {
+        let mut els = vec![command_headline(cmd)];
+        if let Some(rows) = args_field_rows(args, &["command", "cmd"]) {
+            els.push(rows);
         }
+        return els;
     }
     if is_flat_object(args) {
         let mut els = vec![];

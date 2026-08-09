@@ -1,9 +1,20 @@
 use acp_claude::session::AcpEvent;
-use feishu::cards::{CardConfig, CardElement};
+use feishu::cards::{CardConfig, CardElement, ThinkingDisplay};
 use router::card_events::apply_event_to_card;
 
 fn cfg() -> CardConfig {
     CardConfig::default()
+}
+
+fn cfg_show() -> CardConfig {
+    CardConfig::default() // thinking = Show
+}
+
+fn cfg_hide() -> CardConfig {
+    CardConfig {
+        thinking: ThinkingDisplay::Hide,
+        ..CardConfig::default()
+    }
 }
 
 fn cfg_small() -> CardConfig {
@@ -44,40 +55,103 @@ fn append_text_delta() {
 }
 
 #[test]
-fn append_revives_thinking_toolend_toolprogress() {
+fn thinking_hide_drops_delta() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
         &AcpEvent::ThinkingDelta {
             session_id: "s".into(),
-            delta: "thinking".into(),
+            delta: "hidden".into(),
         },
-        &cfg(),
+        &cfg_hide(),
+    );
+    assert!(body.is_empty(), "hide 模式必须完全丢弃 ThinkingDelta");
+}
+
+#[test]
+fn thinking_show_aggregates_adjacent_deltas() {
+    let mut body = vec![];
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ThinkingDelta {
+            session_id: "s".into(),
+            delta: "A".into(),
+        },
+        &cfg_show(),
     );
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolProgress {
+        &AcpEvent::ThinkingDelta {
             session_id: "s".into(),
-            tool_name: "Bash".into(),
-            progress: "in_progress".into(),
+            delta: "B".into(),
         },
-        &cfg(),
+        &cfg_show(),
+    );
+    // 单个 CollapsiblePanel，无分隔符，内容 "A\nB"。
+    assert_eq!(body.len(), 1);
+    let CardElement::CollapsiblePanel(panel) = &body[0] else {
+        panic!("expected CollapsiblePanel, got {:?}", &body[0]);
+    };
+    assert_eq!(panel.elements.len(), 1);
+    match &panel.elements[0] {
+        CardElement::Markdown { content } => assert_eq!(content, "A\nB"),
+        other => panic!("expected Markdown, got {other:?}"),
+    }
+}
+
+#[test]
+fn thinking_show_starts_new_panel_on_non_thinking_event() {
+    let mut body = vec![];
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ThinkingDelta {
+            session_id: "s".into(),
+            delta: "first".into(),
+        },
+        &cfg_show(),
     );
     apply_event_to_card(
         &mut body,
-        &AcpEvent::ToolEnd {
+        &AcpEvent::TextDelta {
             session_id: "s".into(),
-            tool_name: "Bash".into(),
-            result: "ok".into(),
+            delta: "interlude".into(),
         },
-        &cfg(),
+        &cfg_show(),
     );
-    // ThinkingDelta -> Hr + Div；ToolProgress（无 tool 面板）-> 独立 Div；
-    // ToolEnd（默认 max_tool_output_chars=0 且无面板可归属）-> 静默。
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ThinkingDelta {
+            session_id: "s".into(),
+            delta: "second".into(),
+        },
+        &cfg_show(),
+    );
+    // 3 个元素：panel1, markdown("interlude"), panel2。
     assert_eq!(body.len(), 3);
-    assert!(matches!(body[0], CardElement::Hr));
-    assert!(matches!(body[1], CardElement::Div { .. }));
-    assert!(matches!(body[2], CardElement::Div { .. }));
+    assert!(matches!(&body[0], CardElement::CollapsiblePanel(_)));
+    match &body[1] {
+        CardElement::Markdown { content } => assert_eq!(content, "interlude"),
+        other => panic!("expected Markdown, got {other:?}"),
+    }
+    assert!(matches!(&body[2], CardElement::CollapsiblePanel(_)));
+}
+
+#[test]
+fn thinking_show_panel_header_is_thinking_label() {
+    let mut body = vec![];
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ThinkingDelta {
+            session_id: "s".into(),
+            delta: "x".into(),
+        },
+        &cfg_show(),
+    );
+    let CardElement::CollapsiblePanel(panel) = &body[0] else {
+        panic!("not a panel");
+    };
+    assert!(panel.header.title.content.contains("💭"));
+    assert!(!panel.expanded, "默认折叠");
 }
 
 #[test]

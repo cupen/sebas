@@ -208,7 +208,15 @@ pub(crate) async fn dispatch_out(
             mgr.send(&session_id, cmd).await?;
         }
         Out::HelpText { key } => {
-            info!(?key, "send help");
+            info!(?key, "send help (no-op: help text not implemented)");
+        }
+        Out::PlainText { key, content } => {
+            if let Err(e) = feishu
+                .send_text(http, tokens, &key, &content)
+                .await
+            {
+                warn!(?e, "send_text failed");
+            }
         }
     }
     Ok(())

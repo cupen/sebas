@@ -389,7 +389,7 @@ async fn fail_spawn_ignores_active_and_missing_entries() {
 }
 
 #[tokio::test]
-async fn help_command_emits_help_text() {
+async fn help_command_emits_plain_text() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
@@ -399,5 +399,13 @@ async fn help_command_emits_help_text() {
             reply_to: None,
         })
         .await;
-    assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
+    let out = next_out(&mut out_rx).await;
+    match out {
+        Out::PlainText { content, .. } => {
+            // 至少包含 /help 自身和 /settings（覆盖关键命令）+ 中文标识。
+            assert!(content.contains("/help"), "help text missing /help: {content}");
+            assert!(content.contains("/settings"), "help text missing /settings: {content}");
+        }
+        other => panic!("expected PlainText (help), got {other:?}"),
+    }
 }

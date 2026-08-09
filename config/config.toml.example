@@ -26,6 +26,7 @@ args = []
 # max_user_text_chars = 4000    # 单元素文本软上限，超过则截断 + 灰注
 # max_tool_output_chars = 0     # 0 = 不输出 tool call 结果内容（默认）；>0 时超过则折叠进工具面板
 # fold_long_output = true       # true：tool call 折叠成可收起面板；false：内联全文
+# thinking = "show"             # 模型思考内容的卡片展示：show（折叠面板，默认）/ hide（不渲染）
 
 
 # LLM provider 网关（Anthropic/OpenAI 双协议面纯透传）。完整说明见
