@@ -32,8 +32,8 @@ pub struct CardConfig {
     #[serde(default = "default_max_user_text")]
     pub max_user_text_chars: usize,
     /// tool result 软上限：0（默认）= 完全不输出 tool call 的结果内容；
-    /// >0 时结果收进工具折叠面板，超过该值则折叠，完整内容保留。
-    /// > 代码另有 10240 硬上限兜底，配置无法放宽。
+    /// \>0 时结果收进工具折叠面板，超过该值则折叠，完整内容保留。
+    /// 代码另有 10240 硬上限兜底，配置无法放宽。
     #[serde(default = "default_max_tool_output")]
     pub max_tool_output_chars: usize,
     /// true（默认）：tool call 折叠成 collapsible_panel（默认收起），
@@ -489,6 +489,7 @@ fn full_args_panel(args: &Value) -> CardElement {
 }
 
 /// 把工具调用参数渲染成易读元素序列（方案 A+B）：
+///
 /// - Bash 命令独立成摘要行（`$ ...`），其余参数 field 行；
 /// - 文件/链接类工具路径或 URL 摘要行 + 其余 field 行；
 /// - 长文本字段行内预览，完整参数收进折叠面板；

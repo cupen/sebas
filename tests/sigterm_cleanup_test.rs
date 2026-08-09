@@ -37,13 +37,17 @@
 //! missing, since building that binary is the responsibility of the
 //! workspace's regular `cargo build --workspace`.
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use tempfile::tempdir;
 
 /// Locate the workspace `target/debug` directory by walking up from
 /// `CARGO_MANIFEST_DIR` (the `sebas` crate root). Assumes the standard
 /// cargo workspace layout (`target/debug` at the workspace root).
+#[cfg(unix)]
 fn workspace_target_debug() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR is always set during cargo test");
@@ -54,6 +58,7 @@ fn workspace_target_debug() -> PathBuf {
 /// pick up via its default `./config.toml` lookup. The state file path
 /// is baked into the config so the daemon writes to the same on-disk
 /// file the test inspects afterwards.
+#[cfg(unix)]
 fn write_config_in(dir: &Path, state_path: &Path, fake_claude_path: &str) {
     let path = dir.join("config.toml");
     let body = format!(
