@@ -54,7 +54,8 @@ impl RouterHandle {
                 self.emit(Out::HelpText { key }).await;
             }
             Command::Settings(setting_key, val) => {
-                self.handle_settings(key, setting_key, val).await;
+                self.handle_settings(key, setting_key, val, &settings::settings_path())
+                    .await;
             }
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
@@ -331,22 +332,22 @@ impl RouterHandle {
         .await;
     }
 
-    async fn handle_settings(
+    pub async fn handle_settings(
         &self,
         key: SessionKey,
         setting_key: Option<String>,
         val: Option<String>,
+        path: &std::path::Path,
     ) {
-        let path = settings::settings_path();
         let mut cfg = self.card_cfg.read().await.clone();
 
         let content = match (setting_key, val) {
-            (None, _) => self.render_settings_list(&cfg),
+            (None, _) => self.render_settings_list(&cfg, path),
             (Some(k), None) => self.render_setting(&cfg, &k),
             (Some(k), Some(v)) => match self.apply_setting(&mut cfg, &k, &v) {
                 Ok(()) => {
                     // Persist + apply live.
-                    if let Err(e) = settings::save_settings(&path, &cfg) {
+                    if let Err(e) = settings::save_settings(path, &cfg) {
                         self.emit(Out::PlainText {
                             key,
                             content: format!("保存失败: {e}"),
@@ -363,7 +364,7 @@ impl RouterHandle {
         self.emit(Out::PlainText { key, content }).await;
     }
 
-    fn render_settings_list(&self, cfg: &CardConfig) -> String {
+    pub fn render_settings_list(&self, cfg: &CardConfig, path: &std::path::Path) -> String {
         format!(
             "当前设置（来源：{}）:\n\
              thinking = {}\n\
@@ -371,7 +372,7 @@ impl RouterHandle {
              max_tool_output_chars = {}\n\
              fold_long_output = {}\n\
              theme_color = {}",
-            settings::settings_path().display(),
+            path.display(),
             Self::thinking_label(cfg.thinking),
             cfg.max_user_text_chars,
             cfg.max_tool_output_chars,
