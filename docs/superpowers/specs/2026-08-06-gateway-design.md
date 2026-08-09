@@ -110,32 +110,25 @@ rpm = 600                           # 限流：每分钟请求数
 daily_token_quota = 50_000_000      # 每日 token 配额
 allow_models = ["claude-*", "deepseek-*"]
 
-[gateway.providers.anthropic]       # 上游 provider
+[provider.anthropic]       # 上游 provider
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"   # 密钥从 env 读，不落盘、不落日志
 
-[gateway.providers.deepseek]
+[provider.deepseek]
 protocol = "anthropic"              # DeepSeek 的 Anthropic 兼容端点
 base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
 
-[gateway.providers.deepseek-oai]
+[provider.deepseek-oai]
 protocol = "openai"
 base_url = "https://api.deepseek.com/v1"
 api_key_env = "DEEPSEEK_API_KEY"
 
-[[gateway.routes]]                  # 路由表（按序匹配）
-model = "claude-*"
-provider = "anthropic"
-
-[[gateway.routes]]
-model = "deepseek-*"
-provider = "deepseek"
-
-[[gateway.routes]]
-model = "gpt-*"
-provider = "openai"
+[gateway.routes]                    # 路由表：model → provider 数组，
+"claude-*" = ["anthropic"]          # 数组顺序 = 优先级（先 = 主）
+"deepseek-*" = ["deepseek"]
+"gpt-*" = ["openai"]
 ```
 
 ### 4.3 透传引擎（axum + reqwest）

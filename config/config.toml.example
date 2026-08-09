@@ -1,86 +1,88 @@
+# 飞书机器人接入。app_id / app_secret 必填，或由 env 覆盖。
 [feishu]
 app_id = ""
 app_secret = ""
-# owner_id 单用户鉴权（你的 open_id，ou_ 开头）。
-# 决策（sebas-nya）：可选，偏离 spec §6.1 的必填 —— 留空 = 不过滤发送者，
-# 任何能给 bot 发消息的飞书用户都可驱动本机 claude，启动时会有 warn 提示。
-# 强烈建议填上：open_id 可在飞书开放平台或 bot 收到的消息事件里查到。
+
+# 单用户鉴权：填你的 open_id（ou_ 开头），只允许该用户驱动 bot。
+# 留空 = 不过滤发送者（任何能私聊 bot 的用户都可驱动本机 claude），启动时会有 warn。
+# 强烈建议填上；open_id 可在飞书开放平台或 bot 收到的消息事件里查到。
 # owner_id = "ou_xxx"
+#
 # 启动时发给每个恢复会话的消息（空 = 不发）
 # hello_msg = "你好，我又回来了"
+#
+# env 覆盖（优先级高于本文件）：SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL
 
-# env 覆盖（spec §6.3，优先级高于本文件）：
-#   SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL
 
-# Claude Code integration: sebas spawns the `claude` CLI directly
-# (stream-json + control protocol via cc-agent-sdk). `path` is the claude
-# binary (PATH lookup works); `args` are extra CLI flags.
-# (Post-ACP: the `acp-claude-bridge` binary is no longer part of the chain.)
+# Claude Code 接入：sebas 直接以 stream-json + control protocol 拉起 `claude` CLI。
+# path 支持 PATH 查找；args 为附加 CLI 参数。
 [acp.claude]
 path = "claude"
 args = []
 
-# ── card（卡片流配置，全部可选，见 2026-07-26-sebas-design.md §6.2）───
+
+# 卡片流配置（全部可选，默认值见 docs/superpowers/specs/2026-07-26-sebas-design.md §6.2）
 # [card]
-# max_user_text_chars = 4000     # 单元素文本软上限：超过则截断 + 灰注
-# max_tool_output_chars = 0      # 0 = 不输出 tool call 结果内容（默认）；>0 时超过则折叠进工具面板
-# fold_long_output = true        # true：tool call 折叠成 collapsible_panel（默认收起）；false：内联全文
+# max_user_text_chars = 4000    # 单元素文本软上限，超过则截断 + 灰注
+# max_tool_output_chars = 0     # 0 = 不输出 tool call 结果内容（默认）；>0 时超过则折叠进工具面板
+# fold_long_output = true       # true：tool call 折叠成可收起面板；false：内联全文
 
-# Optional: router, card, media, log sections all have defaults.
-# See docs/superpowers/specs/2026-08-06-sebas-design.md §6.2 for full list.
 
-# ── gateway（LLM provider router）────────────────────────────────────
-# 双协议面（Anthropic/OpenAI）纯透传网关。两种运行方式：
-#   `sebas gateway --config <path>`：前台独立运行（listen 用配置值）；
-#   `sebas run --gateway`：随主服务在**随机端口**（127.0.0.1:0）启动内置
-#   gateway，真实端口输出到日志（把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL
-#   指向 http://127.0.0.1:<port> 即可接入）。
-# 完整字段与路由语义见 docs/superpowers/specs/2026-08-06-gateway-design.md
+# LLM provider 网关（Anthropic/OpenAI 双协议面纯透传）。完整说明见
+# docs/superpowers/specs/2026-08-06-gateway-design.md。
 #
-# provider 定义推荐放顶层 `[provider.<name>]`（run 与 gateway 共用）：
-# 兼容旧写法 `[gateway.providers.<name>]`（同名时后者覆盖前者）。
-# provider 支持「名称即 preset」：anthropic / openai / deepseek / kimi / glm /
-# minimax / ark / dashscope / gemini 自带 protocol / base_url / api_key_env
-# 惯例默认，显式字段永远覆盖。双协议 provider（deepseek/kimi/glm/minimax/ark）
-# 必须显式 protocol，不猜。
+# 运行方式：
+#   sebas gateway -c <path>    独立进程，listen 用下面配置（--config 等价）
+#   sebas run --gateway        随主服务启动，随机端口（127.0.0.1:0），真实端口
+#                              输出到日志；把 ANTHROPIC_BASE_URL / OPENAI_BASE_URL
+#                              指向 http://127.0.0.1:<port> 即可接入
 #
-# 最小单 provider 示例（顶层 provider + key_env，run --gateway 可直接用）：
-# [provider.anthropic]                  # 名称即 preset：protocol/base_url/
-#                                       # api_key_env 自动填充，单行即可用
-# # api_key = "..."                     # 明文仅测试用（启动时 warn）
-# # model_map = { "claude-3.5-sonnet" = "claude-3-5-sonnet-20241022" }
+# provider 统一写在顶层 [provider.<name>]（唯一写法，run 与 gateway 共用）：
+# 名称即 preset——anthropic / openai / deepseek / kimi / glm / minimax / ark /
+# dashscope / gemini 自带 protocol / base_url / api_key_env 默认值，显式字段覆盖；
+# 双协议 provider（deepseek/kimi/glm/minimax/ark）必须显式 protocol，不猜。
 #
-# [gateway]                             # 独立 `sebas gateway` 时的网关段：
-# listen = "127.0.0.1:8787"             # run --gateway 忽略此值（强制随机端口）
-# max_body_bytes = 67_108_864           # 64 MiB
+# debug 模式：sebas gateway --debug（或 run --gateway --debug），parse 后注入内置
+# test provider（model=test，gateway 自身应答固定文字 + 回显输入，不拨号上游）；
+# 同时跳过下游鉴权，key 可留空/不配置。
+#
+# Claude Code 接入提示：/model 选择器会请求 GET /v1/models（无 model 的请求），
+# 需要配 default_provider 兜底，否则返回 502 no_route。
+# [gateway]
+# default_provider = "deepseek"
+# listen = "127.0.0.1:8787"     # run --gateway 忽略此值（强制随机端口）
+# max_body_bytes = 67_108_864
 # connect_timeout_secs = 10
 # read_timeout_secs = 600
 # usage_file = "~/.sebas/gateway-usage.jsonl"
 #
-# [[gateway.keys]]                      # 下游客户端 key（鉴权 + 限流/配额）
-# key_env = "SEBAS_GATEWAY_LOCAL_KEY"   # 从 env 读下游 key（与 key 至少二选一）
+# env 覆盖（优先级高于本文件）：SEBAS_GATEWAY_LISTEN
+#
+# # 下游客户端 key（鉴权 + 限流/配额）；key 与 key_env 至少二选一
+# [[gateway.keys]]
+# key_env = "SEBAS_GATEWAY_LOCAL_KEY"
 # name = "claude-code"
-# rpm = 600                             # 每分钟请求数
-# daily_token_quota = 50_000_000        # 每日 token 配额
+# rpm = 600                     # 每分钟请求数
+# daily_token_quota = 50_000_000
 # allow_models = ["claude-*", "deepseek-*"]
-# # default_provider = "anthropic"      # key 级默认，覆盖全局
+# # default_provider = "anthropic"    # key 级默认，覆盖全局
 #
-# 双 provider + 路由示例：
-# [gateway]
-# default_provider = "anthropic"
 #
+# # 单行即用：protocol / base_url / api_key_env 由 preset 自动填充
+# [provider.anthropic]
+# # api_key = "..."                   # 明文仅测试用（启动时 warn）
+# # model_map = { "claude-3.5-sonnet" = "claude-3-5-sonnet-20241022" }
+#
+#
+# # 双协议 preset 必须显式 protocol
 # [provider.deepseek]
-# protocol = "anthropic"                # 双协议 preset 必须显式 protocol
-# # base_url = "https://api.deepseek.com/anthropic"  # 自动填充，可覆盖
-# # api_key_env = "DEEPSEEK_API_KEY"                  # 自动填充，可覆盖
+# protocol = "anthropic"
+# # base_url = "https://api.deepseek.com/anthropic"   # 自动填充，可覆盖
+# # api_key_env = "DEEPSEEK_API_KEY"                   # 自动填充，可覆盖
 #
-# [[gateway.routes]]                    # 路由表（按序匹配 model glob）
-# model = "claude-*"
-# provider = "anthropic"
 #
-# [[gateway.routes]]
-# model = "deepseek-*"
-# provider = "deepseek"
-#
-# env 覆盖（spec §6.3，优先级高于本文件）：
-#   SEBAS_GATEWAY_LISTEN
+# # 路由表：model（可含 glob）→ provider 数组，数组顺序 = 优先级（先 = 主）。
+# # glob 键需加引号；故障转移（主失败自动切换）暂未实现。
+# [gateway.routes]
+# "claude-*" = ["anthropic"]
+# "deepseek-*" = ["deepseek", "ark"]
