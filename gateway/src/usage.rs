@@ -2,7 +2,7 @@
 //!
 //! `UsageSink::spawn_writer` 起 mpsc(256) + tokio task 追加写 jsonl（先建父目录）。
 //! `record` 用 `try_send`，满则 warn 丢弃。`UsageRecord` 含本次请求的元数据与
-//! token 计数；`key` 字段记下游 key 的 `name`（非 key 本体，安全约束）。
+//! token 计数；`key` 字段恒为空（无 per-key 身份，绝不写 token 本体，安全约束）。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-/// 一次请求的用量记录。`key` = 下游 key 的 `name` 字段（绝不记 key 本体）。
+/// 一次请求的用量记录。`key` 恒为空（无 per-key 身份；绝不记 token 本体）。
 /// `error` 留给网关侧失败（如 connect 502）；上游 4xx/5xx 不填 `error`（status
 /// 字段承载其错误语义）。token 字段为 `None` 表示本次未观测到该计数（如
 /// 解析失败、流被截断、或上游错误响应无 usage）。

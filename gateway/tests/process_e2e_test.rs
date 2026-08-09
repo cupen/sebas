@@ -60,9 +60,7 @@ listen = "127.0.0.1:{port}"
 usage_file = "{usage}"
 default_provider = "anthropic"
 
-[[gateway.keys]]
-key = "sk-gw-process"
-name = "process-e2e"
+auth_token = "sk-gw-process"
 
 [gateway.routes]
 "claude-*" = ["anthropic"]
@@ -84,7 +82,7 @@ api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 }
 
 /// 独立 `sebas gateway` 进程 + 顶层 `[provider.*]` 的配置：`[gateway]` 只放
-/// listen/keys/usage，provider 定义在顶层（与 run 共用）。protocol 省略 →
+/// listen/auth_token/usage，provider 定义在顶层（与 run 共用）。protocol 省略 →
 /// preset 自动填 anthropic；base_url 显式指向 mock；api_key_env 显式。
 fn write_top_level_provider_config(
     dir: &tempfile::TempDir,
@@ -100,9 +98,7 @@ fn write_top_level_provider_config(
 listen = "127.0.0.1:{port}"
 usage_file = "{usage}"
 
-[[gateway.keys]]
-key = "sk-gw-top"
-name = "top-level-provider"
+auth_token = "sk-gw-top"
 
 [provider.anthropic]
 base_url = "{anth_url}"
@@ -305,7 +301,8 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
 
     // 6. usage.jsonl 至少一条 record（前四次 200 调用任意一条即可）
     let records = poll_usage_jsonl(&usage_path, 1).await;
-    assert_eq!(records[0]["key"], "process-e2e");
+    // 无 per-key 身份：key 恒为空（绝不写 token 本体）。
+    assert_eq!(records[0]["key"], "");
     assert_eq!(records[0]["status"], 200);
 
     // 7. mock 收到注入的上游 key（child 真转发，非仅返回 fixture）
@@ -431,7 +428,8 @@ async fn standalone_gateway_reads_top_level_provider_table() {
 
     // usage 落盘（独立进程同样写 usage.jsonl）
     let records = poll_usage_jsonl(&usage_path, 1).await;
-    assert_eq!(records[0]["key"], "top-level-provider");
+    // 无 per-key 身份：key 恒为空（绝不写 token 本体）。
+    assert_eq!(records[0]["key"], "");
     assert_eq!(records[0]["status"], 200);
 
     let stderr = gw.kill_and_capture_stderr();

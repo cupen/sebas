@@ -21,8 +21,8 @@ use support::*;
 // ===== 配置 =====
 
 /// 双协议面标准 config：anthropic + openai 两 provider 指向各自 mock；
-/// 两把下游 key（`sk-gw-contract` 默认走 anthropic，`sk-gw-openai` 默认走 openai）；
-/// 三条路由规则（claude-* / gpt-* / text-*）。
+/// 两把下游 token（`sk-gw-contract` / `sk-gw-openai`）；三条路由规则
+/// （claude-* / gpt-* / text-*）。
 fn base_config(anth_url: &str, oai_url: &str) -> String {
     format!(
         r#"
@@ -31,14 +31,7 @@ listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
 default_provider = "anthropic"
 
-[[gateway.keys]]
-key = "sk-gw-contract"
-name = "contract-test"
-
-[[gateway.keys]]
-key = "sk-gw-openai"
-name = "contract-openai"
-default_provider = "openai"
+auth_token = ["sk-gw-contract", "sk-gw-openai"]
 
 [gateway.routes]
 "claude-*" = ["anthropic"]
@@ -67,9 +60,7 @@ listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
 default_provider = "anthropic"
 
-[[gateway.keys]]
-key = "sk-gw-contract"
-name = "contract-test"
+auth_token = "sk-gw-contract"
 
 [gateway.routes]
 "claude-*" = ["anthropic"]
@@ -90,19 +81,17 @@ api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
     )
 }
 
-/// rate-limit config：一把 rpm=1 的 key（`sk-gw-rpm1`），默认走 anthropic。
-fn rate_limit_config(anth_url: &str, oai_url: &str) -> String {
+/// openai 默认 config：无 model 的 GET 类请求落到 openai mock
+/// （无 per-key default_provider 后，用全局 default_provider 表达）。
+fn openai_default_config(anth_url: &str, oai_url: &str) -> String {
     format!(
         r#"
 [gateway]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
-default_provider = "anthropic"
+default_provider = "openai"
 
-[[gateway.keys]]
-key = "sk-gw-rpm1"
-name = "rpm1-test"
-rpm = 1
+auth_token = "sk-gw-openai"
 
 [gateway.routes]
 "claude-*" = ["anthropic"]
@@ -545,7 +534,11 @@ async fn case_9_openai_embeddings_byte_passthrough() {
 
 #[tokio::test]
 async fn case_10_get_models_no_header_routes_to_openai_mock() {
-    let env = setup().await;
+    let anth = start_mock_upstream(Protocol::Anthropic).await;
+    let oai = start_mock_upstream(Protocol::OpenAi).await;
+    let cfg = openai_default_config(&anth.url, &oai.url);
+    let gw = start_gateway(&cfg).await;
+    let env = TestEnv { gw, anth, oai };
     let client = client();
     let resp = client
         .get(format!("{}/v1/models", env.url()))
@@ -702,106 +695,3 @@ async fn case_13_model_rename_rewrites_upstream_model_field() {
     assert_key_injection(&rec, Protocol::Anthropic, "sk-gw-contract");
 }
 
-// ===== 14. 限流：rpm=1 的 key 第二请求 → 429 + retry-after；无 key → 401（回归）=====
-
-#[tokio::test]
-async fn case_14_rate_limit_rpm1_second_request_429_and_no_key_401() {
-    let anth = start_mock_upstream(Protocol::Anthropic).await;
-    let oai = start_mock_upstream(Protocol::OpenAi).await;
-    let cfg = rate_limit_config(&anth.url, &oai.url);
-    let gw = start_gateway(&cfg).await;
-    let env = TestEnv { gw, anth, oai };
-    let client = client();
-
-    let body = r#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}"#;
-    let url = format!("{}/v1/messages", env.url());
-
-    // 第一请求 → 200（rpm 计数 0→1，放行，到达 mock）
-    let resp1 = client
-        .post(&url)
-        .header("authorization", "Bearer sk-gw-rpm1")
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .expect("first request");
-    assert_eq!(
-        resp1.status(),
-        reqwest::StatusCode::OK,
-        "first request should pass quota"
-    );
-    let bytes1 = resp1.bytes().await.expect("body1");
-    assert_eq!(
-        &bytes1[..],
-        ANTHROPIC_MESSAGES_JSON.as_bytes(),
-        "first response byte-equal"
-    );
-
-    // 第二请求 → 429 + retry-after（quota 在路由前判定，不到达 mock）
-    let resp2 = client
-        .post(&url)
-        .header("authorization", "Bearer sk-gw-rpm1")
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .expect("second request");
-    assert_eq!(
-        resp2.status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS,
-        "second request must be 429"
-    );
-    assert!(
-        resp2.headers().get("retry-after").is_some(),
-        "429 must carry Retry-After header"
-    );
-    let retry_after = resp2
-        .headers()
-        .get("retry-after")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .parse::<u64>()
-        .expect("retry-after is numeric");
-    assert!(
-        retry_after > 0 && retry_after <= 60,
-        "retry-after in (0,60]: {retry_after}"
-    );
-    let err_body: serde_json::Value =
-        serde_json::from_str(&resp2.text().await.expect("body2")).expect("valid JSON");
-    assert_eq!(err_body["type"], "error");
-    assert_eq!(
-        err_body["error"]["type"], "rpm_exceeded",
-        "429 reason = rpm_exceeded"
-    );
-
-    // mock 恰好收到 1 条请求（第二请求被 quota 在路由前拦截）
-    let reqs = env.anth.requests.lock().await;
-    assert_eq!(
-        reqs.len(),
-        1,
-        "mock must receive exactly 1 request (second denied pre-route)"
-    );
-
-    // 无 key → 401（回归）
-    drop(reqs);
-    let resp3 = client
-        .post(&url)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .expect("no key request");
-    assert_eq!(
-        resp3.status(),
-        reqwest::StatusCode::UNAUTHORIZED,
-        "no key must be 401"
-    );
-    let body401: serde_json::Value =
-        serde_json::from_str(&resp3.text().await.expect("body3")).expect("valid JSON");
-    assert_eq!(body401["type"], "error");
-    assert_eq!(body401["error"]["type"], "authentication_error");
-}

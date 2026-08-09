@@ -103,12 +103,12 @@ gateway/
 [gateway]
 listen = "127.0.0.1:8787"
 
-[[gateway.keys]]                    # 下游客户端 key
-key = "sk-gw-local-dev"
-name = "claude-code"
-rpm = 600                           # 限流：每分钟请求数
-daily_token_quota = 50_000_000      # 每日 token 配额
-allow_models = ["claude-*", "deepseek-*"]
+auth_token = ["sk-gw-local-dev"]    # 下游客户端 token（单个字符串或数组）
+                                     # 不配置 = 不校验 token（裸奔，启动时 warn）
+
+# 注：`[[gateway.keys]]`（name/rpm/daily_token_quota/allow_models/key 级
+# default_provider）已简化移除——下游只做 Bearer/x-api-key 匹配，不再有
+# per-key 限流/配额/模型白名单。
 
 [provider.anthropic]       # 上游 provider
 protocol = "anthropic"

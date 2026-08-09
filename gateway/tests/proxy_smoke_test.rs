@@ -84,7 +84,7 @@ async fn start_mini_upstream() -> (std::net::SocketAddr, Arc<Mutex<UpstreamCaptu
 /// 构造一个指向 `upstream_addr` 的 gateway config：
 /// - provider `anthropic` base_url = `http://{upstream_addr}`，明文 api_key
 ///   `test-upstream-anthropic-key`（仅测试用，resolve_api_keys 会 warn）。
-/// - 下游 key `sk-downstream-gw`。
+/// - 下游 token `sk-downstream-gw`。
 /// - model_map：claude-sonnet → upstream-claude-sonnet-4，用于验证 rename 透传。
 fn gateway_cfg(upstream_addr: std::net::SocketAddr) -> String {
     format!(
@@ -94,8 +94,7 @@ listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
 default_provider = "anthropic"
 
-[[gateway.keys]]
-key = "sk-downstream-gw"
+auth_token = "sk-downstream-gw"
 name = "proxy-smoke"
 
 [provider.anthropic]
@@ -223,8 +222,7 @@ listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
 default_provider = "unreachable"
 
-[[gateway.keys]]
-key = "sk-downstream-gw"
+auth_token = "sk-downstream-gw"
 name = "proxy-smoke"
 
 [provider.unreachable]

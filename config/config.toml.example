@@ -58,14 +58,9 @@ args = []
 #
 # env 覆盖（优先级高于本文件）：SEBAS_GATEWAY_LISTEN
 #
-# # 下游客户端 key（鉴权 + 限流/配额）；key 与 key_env 至少二选一
-# [[gateway.keys]]
-# key_env = "SEBAS_GATEWAY_LOCAL_KEY"
-# name = "claude-code"
-# rpm = 600                     # 每分钟请求数
-# daily_token_quota = 50_000_000
-# allow_models = ["claude-*", "deepseek-*"]
-# # default_provider = "anthropic"    # key 级默认，覆盖全局
+# # 下游客户端 token（鉴权用；单个字符串或数组）
+# # 不配置 = 不校验 token（裸奔，启动时 warn）
+# auth_token = ["sk-local-dev"]
 #
 #
 # # 单行即用：protocol / base_url / api_key_env 由 preset 自动填充

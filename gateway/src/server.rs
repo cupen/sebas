@@ -9,7 +9,7 @@
 //! `run` binds `cfg.listen` and serves with graceful shutdown (ctrl_c +
 //! unix SIGTERM).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,10 +19,9 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::get;
 
 use crate::auth::require_key;
-use crate::config::{GatewayConfig, KeyConfig};
+use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
 use crate::proxy;
-use crate::quota::Quota;
 use crate::routing::RouteTable;
 use crate::usage::UsageSink;
 
@@ -33,10 +32,10 @@ use crate::usage::UsageSink;
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<GatewayConfig>,
-    pub keys: Arc<HashMap<String, KeyConfig>>,
+    /// 合法下游 token 集合（`[gateway] auth_token`，单串或数组）。
+    pub auth_tokens: Arc<HashSet<String>>,
     pub api_keys: Arc<HashMap<String, String>>,
     pub client: reqwest::Client,
-    pub quota: Arc<Quota>,
     pub table: Arc<RouteTable>,
     pub sink: UsageSink,
 }
@@ -45,9 +44,12 @@ pub struct AppState {
 /// at startup.
 pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
     let api_keys = cfg.resolve_api_keys()?;
-    // resolve_keys 会把 `key_env` 解析成真实密钥，并作为 map key 与
-    // `KeyIdentity.config.key`（quota 记账用）。
-    let keys = cfg.resolve_keys()?;
+    let auth_tokens: HashSet<String> = cfg.auth_token.iter().cloned().collect();
+    if auth_tokens.is_empty() {
+        tracing::warn!(
+            "[gateway] 未配置 auth_token：不校验下游 token（裸奔）。生产环境请配置 auth_token。"
+        );
+    }
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(cfg.connect_timeout_secs))
         // per-read timeout: resets on activity, so long SSE streams that keep
@@ -67,10 +69,9 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
     })?;
     Ok(AppState {
         cfg: Arc::new(cfg),
-        keys: Arc::new(keys),
+        auth_tokens: Arc::new(auth_tokens),
         api_keys: Arc::new(api_keys),
         client,
-        quota: Arc::new(Quota::new()),
         table: Arc::new(table),
         sink,
     })

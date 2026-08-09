@@ -18,9 +18,7 @@ const CFG: &str = r#"
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
 
-[[gateway.keys]]
-key = "sk-gw-test"
-name = "test-key"
+auth_token = "sk-gw-test"
 
 [provider.anthropic]
 protocol = "anthropic"
@@ -72,6 +70,33 @@ async fn no_key_anthropic_format_401() {
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], "authentication_error");
     assert!(body["error"]["message"].is_string());
+}
+
+#[tokio::test]
+async fn no_auth_token_configured_skips_authentication() {
+    // 未配置 auth_token：不校验 token（裸奔）。无 key 请求应直达路由层
+    // （此处无 default_provider + 双 provider → 502 no_route），而非 401。
+    let cfg = CFG.replace("auth_token = \"sk-gw-test\"\n", "");
+    let gw = start_gateway(&cfg).await;
+    let client = client();
+    let resp = client
+        .post(format!("http://{}/v1/messages", gw.addr))
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"claude-sonnet-4","messages":[]}"#)
+        .send()
+        .await
+        .expect("POST /v1/messages without auth_token");
+    assert_ne!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "no auth_token configured must not 401"
+    );
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_GATEWAY,
+        "no auth_token → request reaches routing (502 no_route)"
+    );
 }
 
 #[tokio::test]

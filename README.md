@@ -41,9 +41,8 @@ sebas 自带一个双协议面（Anthropic / OpenAI）纯透传 LLM 网关：按
 [gateway]
 listen = "127.0.0.1:8787"
 
-[[gateway.keys]]                      # 下游客户端 key（鉴权 + 限流/配额）
-key = "sk-gw-local-dev"
-name = "claude-code"
+auth_token = "sk-gw-local-dev"        # 下游客户端 token（鉴权用；单个字符串或数组；
+                                      # 不配置 = 不校验 token，裸奔 + 启动 warn）
 
 [provider.anthropic]        # 上游 provider；密钥只从 env 读
 protocol = "anthropic"

@@ -100,8 +100,7 @@ usage_file = "__USAGE__"
 {extra_gateway_fields}
 default_provider = "up"
 
-[[gateway.keys]]
-key = "sk-gw-fail"
+auth_token = "sk-gw-fail"
 name = "failure-test"
 
 [provider.up]

@@ -3,19 +3,18 @@
 //! 纯透传网关核心：同协议转发，不改写协议体。`handle` 是 axum fallback
 //! handler，承接 `require_key` 中间件放行后的所有非 `/healthz` 请求。
 //!
-//! 流程：协议嗅探 (`resolve_target`) → `KeyIdentity` 提取 → 限流 (`Quota::check`)
-//! → model 提取（buffered JSON body / `/v1/models/{id}` path）→ 路由解析
+//! 流程：协议嗅探 (`resolve_target`) → model 提取（buffered JSON body /
+//! `/v1/models/{id}` path）→ 路由解析
 //! (`RouteTable::resolve`) → header 改写 + 上游 key 注入 → body 改写（model rename）
 //! 或流式透传 → 上游响应原样回传（SSE 逐 chunk flush，非 SSE 缓冲）→ settle。
 //! 上游响应原样回传（SSE 逐 chunk flush，非 SSE 缓冲）。
 //!
 //! 纯函数拆分以便单测：`filtered_request_headers` / `filtered_response_headers` /
-//! `rename_model_in_body`。`handle` 串联这些 + 路由/限流/客户端，映射错误。
+//! `rename_model_in_body`。`handle` 串联这些 + 路由/客户端，映射错误。
 //!
 //! 安全铁律：下游 key 绝不出现在转发请求里；上游 key 只注入到 outbound
 //! header，不落日志/响应；5xx 用通用 message。
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes, to_bytes};
@@ -23,11 +22,9 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 
-use crate::auth::KeyIdentity;
 use crate::config::ProviderConfig;
 use crate::error::error_response;
 use crate::proto::{Protocol, resolve_target};
-use crate::quota::{Quota, QuotaVerdict};
 use crate::routing::{RouteError, extract_model_from_body, extract_model_from_path};
 use crate::server::AppState;
 use crate::sse::{SseUsageParser, UsageInfo, parse_json_usage};
@@ -156,15 +153,10 @@ fn is_buffer_method(method: &Method) -> bool {
 }
 
 /// 把 `RouteError` 映射成协议面错误响应。状态码与 err_type 按 brief 契约：
-/// `ModelNotAllowed` → 403 `permission_error`；`ProtocolMismatch` → 400
-/// `invalid_request_error`；`NoRoute` → 502 `no_route`。message 通用，不含 key。
+/// `ProtocolMismatch` → 400 `invalid_request_error`；`NoRoute` → 502
+/// `no_route`。message 通用，不含 key。
 fn route_error_response(proto: Protocol, err: &RouteError) -> Response {
     let (status, err_type, message): (StatusCode, &str, String) = match err {
-        RouteError::ModelNotAllowed => (
-            StatusCode::FORBIDDEN,
-            "permission_error",
-            "model not allowed by this key".to_string(),
-        ),
         RouteError::ProtocolMismatch { provider } => (
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -180,26 +172,6 @@ fn route_error_response(proto: Protocol, err: &RouteError) -> Response {
     error_response(proto, status, err_type, &message)
 }
 
-/// 429 限流响应：按 protocol 渲染错误体 + `Retry-After` header。
-/// `reason` 串来自 `Quota::check`（`REASON_RPM` / `REASON_DAILY_TOKEN_QUOTA`），
-/// 直接作为 err_type 入协议面错误体。
-fn quota_denied_response(proto: Protocol, retry_after_secs: u64, reason: &str) -> Response {
-    let mut resp = error_response(
-        proto,
-        StatusCode::TOO_MANY_REQUESTS,
-        reason,
-        "rate limit or quota exceeded",
-    );
-    let _ = resp.headers_mut().insert(
-        "retry-after",
-        retry_after_secs
-            .to_string()
-            .parse()
-            .expect("retry_after_secs as ascii digits is a valid header value"),
-    );
-    resp
-}
-
 /// 网关自身 5xx（上游不可达 / 配置缺失）。通用 message，不含 key/内部细节。
 fn upstream_error_response(proto: Protocol, message: &str) -> Response {
     error_response(proto, StatusCode::BAD_GATEWAY, "upstream_error", message)
@@ -209,8 +181,6 @@ fn upstream_error_response(proto: Protocol, message: &str) -> Response {
 ///
 /// 错误映射（brief 契约）：
 /// - 非 `/v1` 路径 → 404（默认 OpenAI 格式）
-/// - quota Deny → 429 + `Retry-After`
-/// - `ModelNotAllowed` → 403；`ProtocolMismatch` → 400；`NoRoute` → 502
 /// - 上游连接/读取失败 → 502 `upstream_error`
 /// - 上游 key 缺失（provider 未配 api_key_env/api_key）→ 502 `upstream_error`
 /// - body 超 `max_body_bytes` → 413
@@ -233,31 +203,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     };
     let proto = target.protocol;
 
-    // 2. 取 KeyIdentity（require_key 中间件已注入）。缺失 → 500（防御性，正常不触发）。
-    let identity = match req.extensions().get::<KeyIdentity>().cloned() {
-        Some(i) => i,
-        None => {
-            return error_response(
-                proto,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "gateway state missing key identity",
-            );
-        }
-    };
-
-    // 3. 限流/配额判定。Deny → 429 + Retry-After（网关自身 429，区别于上游 429）。
-    match state.quota.check(&identity) {
-        QuotaVerdict::Allow => {}
-        QuotaVerdict::Deny {
-            retry_after_secs,
-            reason,
-        } => {
-            return quota_denied_response(proto, retry_after_secs, reason);
-        }
-    }
-
-    // 4. 拆解 Request：method/uri/headers/body。
+    // 2. 拆解 Request：method/uri/headers/body。
     let method = req.method().clone();
     let uri = req.uri().clone();
     let req_headers = req.headers().clone();
@@ -270,7 +216,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     // 的条件移动——避免编译器对「if 分支 move 而 else 不 move」的报错。
     let mut body_opt = Some(req.into_body());
 
-    // 5. body 策略：buffer-method + JSON content-type → 缓冲（超限 413）；其余流式。
+    // 3. body 策略：buffer-method + JSON content-type → 缓冲（超限 413）；其余流式。
     //    缓冲路径用于 model 提取与 rename；流式路径 model 仅从 path 取。
     let buffered_bytes: Option<Bytes> =
         if is_buffer_method(&method) && is_json_content_type(&req_headers) {
@@ -303,7 +249,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
             None
         };
 
-    // 6. model 提取：buffered JSON body 优先；否则从 `/v1/models/{id}` path 取。
+    // 4. model 提取：buffered JSON body 优先；否则从 `/v1/models/{id}` path 取。
     let model: Option<String> = buffered_bytes
         .as_ref()
         .and_then(extract_model_from_body)
@@ -312,11 +258,8 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         h.set_model(model.as_deref().unwrap_or("-"));
     }
 
-    // 7. 路由解析。错误按 brief 映射；成功拿到 provider + upstream_model。
-    let decision = match state
-        .table
-        .resolve(model.as_deref(), proto, Some(&identity.config))
-    {
+    // 5. 路由解析。错误按 brief 映射；成功拿到 provider + upstream_model。
+    let decision = match state.table.resolve(model.as_deref(), proto) {
         Ok(d) => d,
         Err(e) => return route_error_response(proto, &e),
     };
@@ -332,8 +275,6 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         let stream = test_provider::wants_stream(buffered_bytes.as_ref());
         settle_usage(
             &state.sink,
-            &state.quota,
-            &identity,
             proto,
             Some("test"),
             "test",
@@ -406,8 +347,6 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
             // （请求未到达上游，无 usage）。
             settle_usage(
                 &state.sink,
-                &state.quota,
-                &identity,
                 proto,
                 model.as_deref(),
                 &decision.provider,
@@ -432,11 +371,9 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     let mut resp = if is_sse {
         // SSE：逐 chunk flush 不缓冲。usage tee：闭包内喂 parser + 记 TTFT
         // （首个 chunk）。`UsageFinalizer` 实现 `Drop`——流结束或客户端断开
-        // 都结算（写 record + quota.record_tokens），无需 pin_project。
+        // 都结算（写 record），无需 pin_project。
         let finalizer = UsageFinalizer {
             sink: state.sink.clone(),
-            quota: state.quota.clone(),
-            identity: identity.clone(),
             proto,
             model: model.clone(),
             provider: decision.provider.clone(),
@@ -459,8 +396,6 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
                 let info = parse_json_usage(proto, &b);
                 settle_usage(
                     &state.sink,
-                    &state.quota,
-                    &identity,
                     proto,
                     model.as_deref(),
                     &decision.provider,
@@ -477,8 +412,6 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
                 tracing::warn!(error = %e, %upstream_url, "upstream body read failed");
                 settle_usage(
                     &state.sink,
-                    &state.quota,
-                    &identity,
                     proto,
                     model.as_deref(),
                     &decision.provider,
@@ -538,13 +471,11 @@ fn sse_passthrough_stream(
 }
 
 /// SSE 流的断流安全结算器。`Drop` 在流结束**或**客户端断开时触发，flush
-/// parser 残余缓冲并写一条 `UsageRecord` + 调 `quota.record_tokens`。
+/// parser 残余缓冲并写一条 `UsageRecord`。
 /// `settled` 防御性防止重复结算（`Drop` 虽只调一次，但重构时可能提前手动
 /// drop 后再正常 drop）。
 struct UsageFinalizer {
     sink: UsageSink,
-    quota: Arc<Quota>,
-    identity: KeyIdentity,
     proto: Protocol,
     model: Option<String>,
     provider: String,
@@ -569,8 +500,6 @@ impl Drop for UsageFinalizer {
         }
         settle_inner(
             &self.sink,
-            &self.quota,
-            &self.identity,
             self.proto,
             self.model.as_deref(),
             &self.provider,
@@ -584,9 +513,8 @@ impl Drop for UsageFinalizer {
     }
 }
 
-/// 同步结算（非 SSE 分支 + connect/body-read 失败）。写一条 `UsageRecord` +
-/// 调 `quota.record_tokens`（map key = 下游 key 字符串 = `KeyIdentity.config.key`；
-/// `UsageRecord.key` 记 `name` 不记 key 本体）。
+/// 同步结算（非 SSE 分支 + connect/body-read 失败）。写一条 `UsageRecord`。
+/// `UsageRecord.key` 恒为空——无 per-key 身份，且绝不写 token 本体（安全约束）。
 ///
 /// 参数多是因为 record 字段直接对应 brief 契约（ts/key/proto/model/provider/
 /// upstream_model/status/latency/ttft/token/error）；强行打包成 struct 会让
@@ -594,8 +522,6 @@ impl Drop for UsageFinalizer {
 #[allow(clippy::too_many_arguments)]
 fn settle_usage(
     sink: &UsageSink,
-    quota: &Quota,
-    identity: &KeyIdentity,
     proto: Protocol,
     model: Option<&str>,
     provider: &str,
@@ -608,8 +534,6 @@ fn settle_usage(
 ) {
     settle_inner(
         sink,
-        quota,
-        identity,
         proto,
         model,
         provider,
@@ -626,8 +550,6 @@ fn settle_usage(
 #[allow(clippy::too_many_arguments)]
 fn settle_inner(
     sink: &UsageSink,
-    quota: &Quota,
-    identity: &KeyIdentity,
     proto: Protocol,
     model: Option<&str>,
     provider: &str,
@@ -638,16 +560,10 @@ fn settle_inner(
     info: UsageInfo,
     error: Option<&str>,
 ) {
-    // quota 记账：map key = 下游 key 字符串（事后记账，下次 check 才生效）。
-    // total = input + output（cache_* 不计日配额——Anthropic cache_read 是
-    // 复用命中的折扣 token，brief 未要求计入配额；保持与 quota.rs 语义一致）。
-    let total = info.input_tokens.unwrap_or(0) + info.output_tokens.unwrap_or(0);
-    quota.record_tokens(&identity.config.key, total);
-
     let rec = UsageRecord {
         ts: chrono::Utc::now().to_rfc3339(),
-        // key 字段记 name，绝不记 key 本体（安全约束）。
-        key: identity.config.name.clone(),
+        // 无 per-key 身份，key 恒为空（绝不写 token 本体，安全约束）。
+        key: String::new(),
         protocol: proto.as_str().to_string(),
         model: model.map(String::from),
         provider: provider.to_string(),

@@ -25,8 +25,7 @@ use gateway::server;
 const CFG: &str = r#"
 [gateway]
 listen = "127.0.0.1:0"
-[[gateway.keys]]
-key = "sk-gw-test"
+auth_token = "sk-gw-test"
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"

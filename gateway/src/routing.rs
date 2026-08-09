@@ -1,4 +1,4 @@
-//! 路由表与 model 提取（Task 4，spec §4.2）。
+﻿//! 路由表与 model 提取（Task 4，spec §4.2）。
 //!
 //! - `RouteTable::from_config` / `RouteTable::resolve`：按优先级链解析 model
 //!   → provider + 经 `model_map` 重命名后的 upstream_model。
@@ -7,8 +7,9 @@
 //!
 //! 优先级（高 → 低）：`provider/model` 命名空间（provider 须存在，否则按普通
 //! model 名继续走）> 精确 > glob（routes 按 model 名排序，glob 撞车取字典序
-//! 首个命中；每个路由组内 provider 数组顺序即优先级，当前取第一个）> key 级
-//! 默认 > 全局默认。model 缺失（GET 类）直接走默认链，`upstream_model` 为 `None`。
+//! 首个命中；每个路由组内 provider 数组顺序即优先级，当前取第一个）> 全局默认
+//! （唯一 provider 的隐式默认折叠进 `default_provider`）。model 缺失（GET 类）
+//! 直接走默认链，`upstream_model` 为 `None`。
 //!
 //! 协议一致性：解析到的 `provider.protocol` ≠ 请求 `proto` → `ProtocolMismatch`，
 //! 纯透传，不做协议转换。
@@ -17,11 +18,11 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::config::{GatewayConfig, KeyConfig, ProviderConfig, RouteGroup};
+use crate::config::{GatewayConfig, ProviderConfig, RouteGroup};
 use crate::proto::Protocol;
 
 /// 路由解析错误（spec §4.2）。proxy 按变体映射 HTTP 状态：
-/// `NoRoute` → 502、`ProtocolMismatch` → 400、`ModelNotAllowed` → 403。
+/// `NoRoute` → 502、`ProtocolMismatch` → 400。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RouteError {
     /// 无任何路由/默认可解析（proxy 映 502）。
@@ -30,9 +31,6 @@ pub enum RouteError {
     /// 解析到的 provider 协议与请求协议不一致（proxy 映 400）。
     #[error("protocol mismatch: provider '{provider}' does not speak the request protocol")]
     ProtocolMismatch { provider: String },
-    /// key 的 `allow_models` 门禁拒绝该 model（proxy 映 403）。
-    #[error("model not allowed by key allow_models")]
-    ModelNotAllowed,
 }
 
 /// 路由决策：上游 provider 名 + 经 `model_map` 重命名后的 upstream_model。
@@ -50,7 +48,7 @@ pub struct RouteTable {
     routes: Vec<RouteGroup>,
     default_provider: Option<String>,
     /// debug 模式：内置 `test` provider 由 gateway 自身应答，绕过
-    /// allow_models 门禁与协议一致性检查（双协议面都可命中）。
+    /// 协议一致性检查（双协议面都可命中）。
     debug: bool,
 }
 
@@ -75,31 +73,19 @@ impl RouteTable {
 
     /// 按优先级链解析 model → provider + upstream_model。
     ///
-    /// 优先级：命名空间 > 精确 > glob > key 默认 > 全局默认。
+    /// 优先级：命名空间 > 精确 > glob > 全局默认（唯一 provider 的隐式默认
+    /// 已在 `from_config` 折叠进 `default_provider`）。
     /// `model` 为 `None`（GET 类）直接走默认链，`upstream_model` 置 `None`。
     pub fn resolve(
         &self,
         model: Option<&str>,
         proto: Protocol,
-        key: Option<&KeyConfig>,
     ) -> Result<RouteDecision, RouteError> {
-        // allow_models 门禁：key 有限制且 model 已知时，无 glob 命中 → 拒绝。
-        // 门禁在路由前做，按客户端原始 model 串判定（spec §4.5）。
-        if let Some(k) = key
-            && !k.allow_models.is_empty()
-            && let Some(m) = model
-        {
-            let allowed = k.allow_models.iter().any(|p| glob_match(p, m));
-            if !allowed && !(self.debug && m == "test") {
-                return Err(RouteError::ModelNotAllowed);
-            }
-        }
-
         // 解析 (provider 名, 待 rename 的 model)。model_for_map 为 None 仅当
         // 请求未携带 model（GET 类）；命名空间命中时取 `rest`，其余取原 model。
         let (provider_name, model_for_map): (String, Option<&str>) = match model {
             None => {
-                let p = self.default_provider_for(key).ok_or(RouteError::NoRoute)?;
+                let p = self.default_provider.clone().ok_or(RouteError::NoRoute)?;
                 (p, None)
             }
             Some(m) => {
@@ -111,7 +97,10 @@ impl RouteTable {
                 } else {
                     let p: String = match self.match_route(m) {
                         Some(p) => p.to_string(),
-                        None => self.default_provider_for(key).ok_or(RouteError::NoRoute)?,
+                        None => self
+                            .default_provider
+                            .clone()
+                            .ok_or(RouteError::NoRoute)?,
                     };
                     (p, Some(m))
                 }
@@ -167,15 +156,6 @@ impl RouteTable {
         None
     }
 
-    /// 默认链：key 级 `default_provider` 优先于全局 `default_provider`。
-    fn default_provider_for(&self, key: Option<&KeyConfig>) -> Option<String> {
-        if let Some(k) = key
-            && let Some(dp) = &k.default_provider
-        {
-            return Some(dp.clone());
-        }
-        self.default_provider.clone()
-    }
 }
 
 /// 手写 glob 匹配（无 glob crate）。`*` 匹配任意字符（含空）；无 `*` 时精确相等。
@@ -231,7 +211,7 @@ pub fn extract_model_from_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GatewayConfig, KeyConfig, ProviderConfig, RouteGroup};
+    use crate::config::{GatewayConfig, ProviderConfig, RouteGroup};
     use crate::proto::Protocol;
     use axum::body::Bytes;
     use std::collections::HashMap;
@@ -242,7 +222,6 @@ mod tests {
         providers: HashMap<String, ProviderConfig>,
         routes: &[(&str, &[&str])],
         default: Option<&str>,
-        keys: Vec<KeyConfig>,
     ) -> GatewayConfig {
         GatewayConfig {
             listen: "127.0.0.1:8787".into(),
@@ -252,7 +231,7 @@ mod tests {
             usage_file: "/tmp/sebas-gateway-usage.jsonl".into(),
             debug: false,
             default_provider: default.map(String::from),
-            keys,
+            auth_token: Vec::new(),
             providers,
             routes: routes
                 .iter()
@@ -279,18 +258,6 @@ mod tests {
 
     fn simple_providers(names: &[(&str, Protocol)]) -> HashMap<String, ProviderConfig> {
         names.iter().map(|(n, p)| simple_provider(n, *p)).collect()
-    }
-
-    fn key_with(allow: &[&str], default: Option<&str>) -> KeyConfig {
-        KeyConfig {
-            key: "sk-test".into(),
-            key_env: None,
-            name: "test".into(),
-            rpm: None,
-            daily_token_quota: None,
-            allow_models: allow.iter().map(|s| (*s).to_string()).collect(),
-            default_provider: default.map(String::from),
-        }
     }
 
     // -------------------- glob_match 各形态 --------------------
@@ -348,13 +315,12 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[],
-            Some("anthropic"),
-            vec![],
-        );
+            Some("anthropic")
+                    );
         let table = RouteTable::from_config(&cfg);
         // "anthropic/claude-sonnet" → provider anthropic，model claude-sonnet
         let d = table
-            .resolve(Some("anthropic/claude-sonnet"), Protocol::Anthropic, None)
+            .resolve(Some("anthropic/claude-sonnet"), Protocol::Anthropic)
             .expect("namespace direct should resolve");
         assert_eq!(d.provider, "anthropic");
         assert_eq!(d.upstream_model.as_deref(), Some("claude-sonnet"));
@@ -370,12 +336,11 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[("foo/claude-sonnet", &["openai"])],
-            Some("anthropic"),
-            vec![],
-        );
+            Some("anthropic")
+                    );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(Some("foo/claude-sonnet"), Protocol::OpenAi, None)
+            .resolve(Some("foo/claude-sonnet"), Protocol::OpenAi)
             .expect("unknown namespace should fall back to exact route");
         assert_eq!(d.provider, "openai");
         assert_eq!(d.upstream_model.as_deref(), Some("foo/claude-sonnet"));
@@ -394,12 +359,11 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[("claude-*", &["anthropic"]), ("claude-sonnet", &["openai"])],
-            None,
-            vec![],
-        );
+            None
+                    );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(Some("claude-sonnet"), Protocol::OpenAi, None)
+            .resolve(Some("claude-sonnet"), Protocol::OpenAi)
             .expect("exact should match");
         assert_eq!(d.provider, "openai");
     }
@@ -413,36 +377,13 @@ mod tests {
                 ("ark", Protocol::Anthropic),
             ]),
             &[("deepseek-chat", &["deepseek", "ark"])],
-            None,
-            vec![],
-        );
+            None
+                    );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(Some("deepseek-chat"), Protocol::Anthropic, None)
+            .resolve(Some("deepseek-chat"), Protocol::Anthropic)
             .expect("deepseek-chat should resolve");
         assert_eq!(d.provider, "deepseek", "first provider in array must win");
-    }
-
-    #[test]
-    fn key_default_beats_global_default() {
-        // 全局默认 anthropic；key 级默认 openai。model "gpt-4" 无路由 → 默认链
-        // → key 级优先 → openai。
-        let cfg = build_cfg(
-            simple_providers(&[
-                ("anthropic", Protocol::Anthropic),
-                ("openai", Protocol::OpenAi),
-            ]),
-            &[],
-            Some("anthropic"),
-            vec![key_with(&[], Some("openai"))],
-        );
-        let table = RouteTable::from_config(&cfg);
-        let key = cfg.keys.first().unwrap();
-        let d = table
-            .resolve(Some("gpt-4"), Protocol::OpenAi, Some(key))
-            .expect("key default should resolve");
-        assert_eq!(d.provider, "openai");
-        assert_eq!(d.upstream_model.as_deref(), Some("gpt-4"));
     }
 
     // -------------------- 协议一致性 --------------------
@@ -453,12 +394,11 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
             &[("claude-*", &["anthropic"])],
-            None,
-            vec![],
-        );
+            None
+                    );
         let table = RouteTable::from_config(&cfg);
         let err = table
-            .resolve(Some("claude-sonnet"), Protocol::OpenAi, None)
+            .resolve(Some("claude-sonnet"), Protocol::OpenAi)
             .expect_err("protocol mismatch");
         assert_eq!(
             err,
@@ -478,13 +418,12 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[],
-            None,
-            vec![],
-        );
+            None
+                    );
         let table = RouteTable::from_config(&cfg);
         // 两个 provider 且无默认/路由 → 无隐式默认，NoRoute。
         let err = table
-            .resolve(Some("gpt-4"), Protocol::OpenAi, None)
+            .resolve(Some("gpt-4"), Protocol::OpenAi)
             .expect_err("no route should error");
         assert_eq!(err, RouteError::NoRoute);
     }
@@ -498,19 +437,18 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
             &[],
-            None,
-            vec![],
-        );
+            None
+                    );
         let table = RouteTable::from_config(&cfg);
 
         let d = table
-            .resolve(Some("claude-sonnet"), Protocol::Anthropic, None)
+            .resolve(Some("claude-sonnet"), Protocol::Anthropic)
             .expect("single provider should implicitly default for model requests");
         assert_eq!(d.provider, "anthropic");
         assert_eq!(d.upstream_model.as_deref(), Some("claude-sonnet"));
 
         let d = table
-            .resolve(None, Protocol::Anthropic, None)
+            .resolve(None, Protocol::Anthropic)
             .expect("single provider should implicitly default for model-less requests");
         assert_eq!(d.provider, "anthropic");
         assert_eq!(d.upstream_model, None);
@@ -523,12 +461,11 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
             &[],
-            None,
-            vec![],
-        );
+            None
+                    );
         let table = RouteTable::from_config(&cfg);
         let err = table
-            .resolve(Some("claude-sonnet"), Protocol::OpenAi, None)
+            .resolve(Some("claude-sonnet"), Protocol::OpenAi)
             .expect_err("protocol mismatch must still surface");
         assert_eq!(
             err,
@@ -536,33 +473,6 @@ mod tests {
                 provider: "anthropic".into()
             }
         );
-    }
-
-    // -------------------- allow_models 门禁 --------------------
-
-    #[test]
-    fn allow_models_pass_and_deny() {
-        let cfg = build_cfg(
-            simple_providers(&[
-                ("anthropic", Protocol::Anthropic),
-                ("openai", Protocol::OpenAi),
-            ]),
-            &[("claude-*", &["anthropic"]), ("gpt-*", &["openai"])],
-            Some("anthropic"),
-            vec![key_with(&["claude-*"], None)],
-        );
-        let table = RouteTable::from_config(&cfg);
-        let key = cfg.keys.first().unwrap();
-        // 放行：claude-sonnet 命中 allow_models glob
-        let d = table
-            .resolve(Some("claude-sonnet"), Protocol::Anthropic, Some(key))
-            .expect("allow_models should pass claude-*");
-        assert_eq!(d.provider, "anthropic");
-        // 拒绝：gpt-4 不在 allow_models
-        let err = table
-            .resolve(Some("gpt-4"), Protocol::OpenAi, Some(key))
-            .expect_err("allow_models should deny gpt-4");
-        assert_eq!(err, RouteError::ModelNotAllowed);
     }
 
     // -------------------- model_map 重命名 --------------------
@@ -576,11 +486,11 @@ mod tests {
             b.model_map
                 .insert("claude-sonnet".into(), "anthropic.claude-sonnet-4".into());
         }
-        let cfg = build_cfg(providers, &[], Some("bedrock"), vec![]);
+        let cfg = build_cfg(providers, &[], Some("bedrock"));
         let table = RouteTable::from_config(&cfg);
         // 命中 model_map → 改名
         let d = table
-            .resolve(Some("claude-sonnet"), Protocol::Anthropic, None)
+            .resolve(Some("claude-sonnet"), Protocol::Anthropic)
             .expect("mapped model resolves");
         assert_eq!(d.provider, "bedrock");
         assert_eq!(
@@ -589,7 +499,7 @@ mod tests {
         );
         // 未命中 → 原样
         let d2 = table
-            .resolve(Some("claude-opus"), Protocol::Anthropic, None)
+            .resolve(Some("claude-opus"), Protocol::Anthropic)
             .expect("unmapped model resolves");
         assert_eq!(d2.provider, "bedrock");
         assert_eq!(d2.upstream_model.as_deref(), Some("claude-opus"));
@@ -605,12 +515,11 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[],
-            Some("openai"),
-            vec![],
-        );
+            Some("openai")
+                    );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(None, Protocol::OpenAi, None)
+            .resolve(None, Protocol::OpenAi)
             .expect("default should resolve when model absent");
         assert_eq!(d.provider, "openai");
         assert_eq!(d.upstream_model, None);

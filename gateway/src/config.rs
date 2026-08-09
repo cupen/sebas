@@ -1,4 +1,4 @@
-//! gateway 配置模型与解析（spec §3）。
+﻿//! gateway 配置模型与解析（spec §3）。
 //!
 //! provider 统一放在顶层 `[provider.<name>]`（run 与 gateway 共用），不再支持
 //! 复数 `[providers.*]` 或 `[gateway.providers.*]` 旧写法。
@@ -8,8 +8,9 @@
 //! anthropic / openai / deepseek / kimi / glm / minimax / ark / dashscope /
 //! gemini 自带 `protocol` / `base_url` / `api_key_env` 惯例默认，显式字段永远
 //! 覆盖；双协议 provider 必须显式 `protocol`（不猜）。
-//! 下游 key 支持 `key_env`（从 env 读，不落盘/不落日志），与 `key` 至少二选一、
-//! 不可同时设置。
+//! 下游客户端鉴权用 `[gateway] auth_token`（单个字符串或字符串数组），只做
+//! Bearer/x-api-key 匹配，无 per-key 限流/配额/模型白名单等特性。
+//! 不配置则网关不校验下游 token（裸奔，启动时 warn）。
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -50,8 +51,11 @@ pub struct GatewayConfig {
     pub debug: bool,
     #[serde(default)]
     pub default_provider: Option<String>,
-    #[serde(default)]
-    pub keys: Vec<KeyConfig>,
+    /// 下游客户端鉴权 token：单个字符串或字符串数组（TOML 两者都接受）。
+    /// 只做 Bearer/x-api-key 匹配，无 per-key 限流/配额/模型白名单等特性。
+    /// 不配置则不校验（裸奔，启动时 warn）。
+    #[serde(default, deserialize_with = "de_auth_token")]
+    pub auth_token: Vec<String>,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
@@ -74,29 +78,6 @@ fn default_usage_file() -> String {
     // $HOME/.sebas/ works on both Unix and Windows (tilde expansion below
     // resolves it through dirs::home_dir()).
     "~/.sebas/gateway-usage.jsonl".into()
-}
-
-/// 下游客户端 key：鉴权身份 + 限流/配额参数。`key` 是网关签发给客户端的
-/// 令牌（非上游 provider 密钥）；解析后非空且全局不重复。
-/// `key_env` 是可选替代：从 env 读下游 key（不落盘/不落日志），与 `key`
-/// 至少二选一、不可同时设置。
-#[derive(Debug, Clone, Deserialize)]
-pub struct KeyConfig {
-    #[serde(default)]
-    pub key: String,
-    #[serde(default)]
-    pub key_env: Option<String>,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub rpm: Option<u32>,
-    #[serde(default)]
-    pub daily_token_quota: Option<u64>,
-    #[serde(default)]
-    pub allow_models: Vec<String>,
-    /// 该 key 级别的默认 provider，覆盖全局 `default_provider`。
-    #[serde(default)]
-    pub default_provider: Option<String>,
 }
 
 /// 上游 provider。`api_key_env` 优先（密钥只从 env 读，不落盘/不落日志）；
@@ -139,11 +120,35 @@ struct RawGatewayConfig {
     usage_file: String,
     #[serde(default)]
     default_provider: Option<String>,
-    #[serde(default)]
-    keys: Vec<KeyConfig>,
+    #[serde(default, deserialize_with = "de_auth_token")]
+    auth_token: Vec<String>,
     #[serde(default)]
     /// `[gateway.routes]`：`model = ["provider", ...]`，数组顺序 = 优先级。
     routes: HashMap<String, Vec<String>>,
+}
+
+/// `auth_token` 反序列化：接受单个字符串或字符串数组（`auth_token = "sk-..."`
+/// 或 `auth_token = ["sk-a", "sk-b"]`）。
+fn de_auth_token<'de, D>(de: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let v = serde_json::Value::deserialize(de)?;
+    match v {
+        serde_json::Value::String(s) => Ok(vec![s]),
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| D::Error::custom("auth_token 数组元素必须是字符串"))
+            })
+            .collect(),
+        _ => Err(D::Error::custom(
+            "auth_token 必须是字符串或字符串数组",
+        )),
+    }
 }
 
 /// TOML 原始形态的 provider 段：字段全 Option，preset 填充后再收敛成
@@ -170,9 +175,11 @@ struct RawProviderConfig {
 /// 默认 env 名均可被 `api_key_env` 覆盖。
 struct ProviderPreset {
     name: &'static str,
-    /// anthropic 协议端点；`None` = 该 preset 不提供 anthropic 端点。
+    /// anthropic 协议端点；
+    /// `None` = 该 preset 不提供 anthropic 端点。
     anthropic_base_url: Option<&'static str>,
-    /// openai 协议端点；`None` = 该 preset 不提供 openai 端点。
+    /// openai 协议端点；
+    /// `None` = 该 preset 不提供 openai 端点。
     openai_base_url: Option<&'static str>,
     /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
     api_key_env: &'static str,
@@ -361,7 +368,7 @@ impl GatewayConfig {
                     usage_file: g.usage_file,
                     debug: false,
                     default_provider: g.default_provider,
-                    keys: g.keys,
+                    auth_token: g.auth_token,
                     providers,
                     routes,
                 }
@@ -375,7 +382,7 @@ impl GatewayConfig {
                 usage_file: default_usage_file(),
                 debug: false,
                 default_provider: None,
-                keys: Vec::new(),
+                auth_token: Vec::new(),
                 providers,
                 routes: Vec::new(),
             },
@@ -429,35 +436,10 @@ impl GatewayConfig {
                 }
             }
         }
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        for (i, k) in self.keys.iter().enumerate() {
-            let key_set = !k.key.is_empty();
-            match (key_set, k.key_env.is_some()) {
-                (false, false) => {
-                    return Err(GatewayError::Config(format!(
-                        "gateway.keys[{i}] 必须配置 key 或 key_env（两者皆空）"
-                    )));
-                }
-                (true, true) => {
-                    return Err(GatewayError::Config(format!(
-                        "gateway.keys[{i}] 不能同时配置 key 和 key_env"
-                    )));
-                }
-                _ => {}
-            }
-            if key_set {
-                if let Some(&first) = seen.get(k.key.as_str()) {
-                    return Err(GatewayError::Config(format!(
-                        "gateway.keys[{i}] 与 keys[{first}] 的 key 重复"
-                    )));
-                }
-                seen.insert(k.key.as_str(), i);
-            }
-            if let Some(dp) = &k.default_provider
-                && !self.providers.contains_key(dp)
-            {
+        for (i, t) in self.auth_token.iter().enumerate() {
+            if t.is_empty() {
                 return Err(GatewayError::Config(format!(
-                    "gateway.keys[{i}].default_provider 引用了未定义的 provider '{dp}'"
+                    "gateway.auth_token[{i}] 不能为空字符串"
                 )));
             }
         }
@@ -467,50 +449,6 @@ impl GatewayConfig {
     fn with_expanded_paths(mut self) -> Self {
         self.usage_file = expand_tilde(&self.usage_file);
         self
-    }
-
-    /// 解析下游 key（含 `key_env` 环境变量读取），返回 `呈现 key → KeyConfig` 表。
-    /// - `key` 非空 → 直接用；
-    /// - `key_env` 指向的 env 变量必须存在且非空（错误信息只含变量名，绝不含值）；
-    /// - 解析后的 key 全局不重复（`key_env` 的重复只能在运行时发现）。
-    ///
-    /// 返回值中的 `KeyConfig.key` 已被替换为解析后的真实密钥（`key_env` 场景），
-    /// 保证 `KeyIdentity.config.key` / quota 记账用的是真实呈现值。
-    pub fn resolve_keys(&self) -> Result<HashMap<String, KeyConfig>> {
-        let mut out = HashMap::with_capacity(self.keys.len());
-        let mut seen: HashMap<String, usize> = HashMap::with_capacity(self.keys.len());
-        for (i, k) in self.keys.iter().enumerate() {
-            let resolved = if !k.key.is_empty() {
-                k.key.clone()
-            } else if let Some(env_var) = &k.key_env {
-                match std::env::var(env_var) {
-                    Ok(v) if !v.is_empty() => v,
-                    // debug 模式：缺失/空 env 的 key 直接跳过，不阻塞启动
-                    // （debug 下鉴权本身也跳过，见 auth.rs）。
-                    _ if self.debug => continue,
-                    _ => {
-                        return Err(GatewayError::Config(format!(
-                            "gateway.keys[{i}].key_env 指向的环境变量 '{env_var}' 未设置或为空"
-                        )));
-                    }
-                }
-            } else {
-                // validate() 已保证至少一个；防御性错误（不含值）。
-                return Err(GatewayError::Config(format!(
-                    "gateway.keys[{i}] 未配置 key 或 key_env"
-                )));
-            };
-            if let Some(&first) = seen.get(&resolved) {
-                return Err(GatewayError::Config(format!(
-                    "gateway.keys[{i}] 与 keys[{first}] 解析后的 key 重复"
-                )));
-            }
-            let mut kc = k.clone();
-            kc.key = resolved.clone();
-            seen.insert(resolved.clone(), i);
-            out.insert(resolved, kc);
-        }
-        Ok(out)
     }
 
     /// 解析每个 provider 的上游 api key：
@@ -606,12 +544,7 @@ mod tests {
 [gateway]
 default_provider = "anthropic"
 
-[[gateway.keys]]
-key = "sk-gw-local-dev"
-name = "claude-code"
-rpm = 600
-daily_token_quota = 50_000_000
-allow_models = ["claude-*", "deepseek-*"]
+auth_token = "sk-gw-local-dev"
 
 [provider.anthropic]
 protocol = "anthropic"
@@ -648,12 +581,7 @@ api_key_env = "DEEPSEEK_API_KEY"
             cfg.usage_file
         );
         assert_eq!(cfg.default_provider.as_deref(), Some("anthropic"));
-        assert_eq!(cfg.keys.len(), 1);
-        assert_eq!(cfg.keys[0].key, "sk-gw-local-dev");
-        assert_eq!(cfg.keys[0].name, "claude-code");
-        assert_eq!(cfg.keys[0].rpm, Some(600));
-        assert_eq!(cfg.keys[0].daily_token_quota, Some(50_000_000));
-        assert_eq!(cfg.keys[0].allow_models, vec!["claude-*", "deepseek-*"]);
+        assert_eq!(cfg.auth_token, vec!["sk-gw-local-dev".to_string()]);
         assert_eq!(cfg.providers.len(), 2);
         let anth = cfg.providers.get("anthropic").expect("anthropic provider");
         assert_eq!(anth.protocol, Protocol::Anthropic);
@@ -717,8 +645,7 @@ api_key_env = "DEEPSEEK_API_KEY"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
@@ -745,8 +672,7 @@ api_key = "test-key"
         let raw = r#"
 [gateway]
 usage_file = "~/sebas/gateway-usage.jsonl"
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
@@ -772,9 +698,7 @@ api_key = "test-key"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
-
+auth_token = "sk-test"
 # 名称即 preset：只写 protocol，base_url/api_key_env 自动填充
 [provider.deepseek]
 protocol = "anthropic"
@@ -808,8 +732,7 @@ api_key_env = "MY_OPENAI_KEY"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.deepseek]
 "#;
         let err = GatewayConfig::parse(raw).expect_err("dual-protocol preset without protocol");
@@ -829,8 +752,7 @@ key = "sk-test"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.my-openai]
 preset = "openai"
 "#;
@@ -850,8 +772,7 @@ preset = "openai"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.openai]
 protocol = "anthropic"
 "#;
@@ -872,8 +793,7 @@ protocol = "anthropic"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.my-custom]
 base_url = "http://localhost:1234"
 "#;
@@ -895,8 +815,7 @@ base_url = "http://localhost:1234"
         // ANTHROPIC_API_KEY 默认 env，否则 resolve_api_keys 会误读 env。
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.anthropic]
 api_key = "test-key"
 "#;
@@ -924,15 +843,13 @@ api_key = "test-key"
 [gateway]
 default_provider = "deepseek"
 
-[[gateway.keys]]
-key = "sk-test"
-
+auth_token = "sk-test"
 [provider.deepseek]
 protocol = "anthropic"
 "#;
         let cfg = GatewayConfig::parse(raw).expect("top-level provider should parse");
         assert_eq!(cfg.default_provider.as_deref(), Some("deepseek"));
-        assert_eq!(cfg.keys.len(), 1);
+        assert_eq!(cfg.auth_token, vec!["sk-test".to_string()]);
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
         assert_eq!(ds.protocol, Protocol::Anthropic);
         assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
@@ -955,7 +872,7 @@ app_id = "x"
 "#;
         let cfg = GatewayConfig::parse(raw).expect("provider-only config should parse");
         assert_eq!(cfg.listen, "127.0.0.1:8787");
-        assert_eq!(cfg.keys.len(), 0);
+        assert_eq!(cfg.auth_token.len(), 0);
         assert_eq!(cfg.routes.len(), 0);
         let p = cfg.providers.get("anthropic").expect("anthropic provider");
         assert_eq!(p.protocol, Protocol::Anthropic);
@@ -992,71 +909,43 @@ api_key = "test-ark-key"
         assert_eq!(ark.api_key_env, None);
     }
 
-    // -------------------- key_env --------------------
+    // -------------------- auth_token --------------------
 
     #[test]
-    fn key_env_only_parses_and_resolves_from_env() {
+    fn auth_token_accepts_single_string_or_array() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-            std::env::set_var("SEBAS_GATEWAY_TEST_KEY_ENV", "sk-from-env-123");
         }
-        let raw = r#"
+        let single = r#"
 [gateway]
-[[gateway.keys]]
-key_env = "SEBAS_GATEWAY_TEST_KEY_ENV"
-name = "env-key"
+auth_token = "sk-one"
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
-        let cfg = GatewayConfig::parse(raw).expect("key_env config should parse");
-        // env 变量仍在场时解析（parse 之后、remove 之前）。
-        let keys = cfg.resolve_keys().expect("resolve_keys");
-        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
-        unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_TEST_KEY_ENV");
-        }
-        let kc = keys.get("sk-from-env-123").expect("env key in map");
-        assert_eq!(kc.name, "env-key");
-        assert_eq!(kc.key, "sk-from-env-123");
-        assert_eq!(keys.len(), 1);
-    }
+        let cfg = GatewayConfig::parse(single).expect("single auth_token should parse");
+        assert_eq!(cfg.auth_token, vec!["sk-one".to_string()]);
 
-    #[test]
-    fn key_env_missing_env_var_errors_without_value() {
-        let _g = LOCK.lock().unwrap();
-        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
-        unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-            std::env::remove_var("SEBAS_GATEWAY_TEST_MISSING_KEY");
-        }
-        let raw = r#"
+        let many = r#"
 [gateway]
-[[gateway.keys]]
-key_env = "SEBAS_GATEWAY_TEST_MISSING_KEY"
+auth_token = ["sk-a", "sk-b"]
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
-        let cfg = GatewayConfig::parse(raw).expect("key_env config should parse");
-        let err = cfg.resolve_keys().expect_err("missing env must error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("SEBAS_GATEWAY_TEST_MISSING_KEY"),
-            "error should name the env var: {msg}"
-        );
-        assert!(
-            !msg.contains("sk-") && !msg.contains("secret"),
-            "error must not echo env values: {msg}"
+        let cfg = GatewayConfig::parse(many).expect("array auth_token should parse");
+        assert_eq!(
+            cfg.auth_token,
+            vec!["sk-a".to_string(), "sk-b".to_string()]
         );
     }
 
     #[test]
-    fn key_and_key_env_both_set_errors() {
+    fn auth_token_empty_string_errors() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
@@ -1064,41 +953,16 @@ api_key = "test-key"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-plain"
-key_env = "SEBAS_GATEWAY_TEST_KEY_ENV"
+auth_token = ""
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
-        let err = GatewayConfig::parse(raw).expect_err("key + key_env must error");
+        let err = GatewayConfig::parse(raw).expect_err("empty auth_token must error");
         assert!(
-            err.to_string().contains("key_env"),
-            "error should mention key_env conflict: {err}"
-        );
-    }
-
-    #[test]
-    fn key_neither_set_errors() {
-        let _g = LOCK.lock().unwrap();
-        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
-        unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-        }
-        let raw = r#"
-[gateway]
-[[gateway.keys]]
-name = "no-key"
-[provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
-api_key = "test-key"
-"#;
-        let err = GatewayConfig::parse(raw).expect_err("neither key nor key_env must error");
-        assert!(
-            err.to_string().contains("key_env"),
-            "error should mention key/key_env requirement: {err}"
+            err.to_string().contains("auth_token"),
+            "error should mention auth_token: {err}"
         );
     }
 
@@ -1111,8 +975,7 @@ api_key = "test-key"
         }
         let raw = r#"
 [gateway]
-[[gateway.keys]]
-key = "sk-test"
+auth_token = "sk-test"
 [provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
@@ -1154,32 +1017,4 @@ api_key = "test-key"
         );
     }
 
-    #[test]
-    fn debug_mode_skips_missing_key_env_at_resolve() {
-        let _g = LOCK.lock().unwrap();
-        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
-        unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-            std::env::remove_var("SEBAS_GATEWAY_TEST_MISSING_KEY");
-        }
-        let raw = r#"
-[gateway]
-[[gateway.keys]]
-key_env = ""
-[provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
-api_key = "test-key"
-"#;
-        let mut cfg = GatewayConfig::parse(raw).expect("parse");
-        cfg.enable_debug_test_provider();
-        // debug 模式：key_env 留空（或指向未设置的变量）直接跳过而不是报错。
-        let keys = cfg
-            .resolve_keys()
-            .expect("debug must tolerate missing key_env");
-        assert!(
-            keys.is_empty(),
-            "missing-env key must be skipped in debug mode"
-        );
-    }
 }
