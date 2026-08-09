@@ -105,6 +105,9 @@ pub enum CardElement {
         r#type: String,
         behaviors: Vec<CardBehavior>,
     },
+    /// V2 `div` 的字段行组合：`fields` 数组里每个 field 是加粗 label + value
+    /// （权限卡参数用 key-value 行展示，替代 JSON 代码墙）。
+    Fields(Vec<CardField>),
     /// Card JSON 2.0 `collapsible_panel` container: secondary/long content
     /// behind a tappable header. Defaults to collapsed; Feishu renders it on
     /// client V7.9+ (older clients show an upgrade placeholder instead).
@@ -119,6 +122,13 @@ pub struct DivText {
     pub text_size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_color: Option<String>,
+}
+
+/// V2 `div.fields` 里的单个字段行：`is_short=false` 独占一行，label 加粗。
+#[derive(Debug, Clone, Serialize)]
+pub struct CardField {
+    pub is_short: bool,
+    pub text: CardText,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +199,12 @@ impl Serialize for CardElement {
                 let mut s = ser.serialize_struct("CardElement", 2)?;
                 s.serialize_field("tag", "div")?;
                 s.serialize_field("text", text)?;
+                s.end()
+            }
+            CardElement::Fields(fields) => {
+                let mut s = ser.serialize_struct("CardElement", 2)?;
+                s.serialize_field("tag", "div")?;
+                s.serialize_field("fields", fields)?;
                 s.end()
             }
             CardElement::Button {
@@ -303,6 +319,212 @@ pub fn render_root_card(user_prompt: &str, msg_id: &str, status_emoji: &str) -> 
     render_accumulated_card(user_prompt, msg_id, status_emoji, &[], "blue")
 }
 
+/// 权限卡参数展示的代码级硬上限：完整参数（含折叠面板里的 JSON）超过即截断，
+/// 防止整卡超过飞书卡片消息体 30KB 上限导致发卡失败、权限流程卡死。
+const PERMISSION_ARGS_HARD_LIMIT_CHARS: usize = 8192;
+
+/// 单行字段值的预览长度；长文本（Write content、Edit old/new）只显示开头，
+/// 完整内容由折叠面板收纳。
+const PERMISSION_FIELD_PREVIEW_CHARS: usize = 300;
+
+/// 常见参数的展示标签（B 方案字段行用），未知 key 保留原名。
+fn permission_field_label(key: &str) -> &str {
+    match key {
+        "command" | "cmd" => "命令",
+        "file_path" | "path" => "路径",
+        "pattern" => "模式",
+        "url" => "链接",
+        "prompt" => "提示",
+        "query" => "查询",
+        "offset" => "起始行",
+        "limit" => "读取行数",
+        "timeout" => "超时",
+        "description" => "描述",
+        "restart" => "重启终端",
+        "replace_all" => "全部替换",
+        "old_string" => "原文",
+        "new_string" => "替换为",
+        "content" => "内容",
+        "session_id" => "会话",
+        _ => key,
+    }
+}
+
+/// 按字符数截取（UTF-8 安全），超长追加省略号。
+fn preview_chars(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(limit).collect();
+        format!("{cut}…")
+    }
+}
+
+/// 标量值的展示文本；对象/数组只出现在回退路径，不会走到这里。
+fn scalar_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "—".into(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "…".into()),
+    }
+}
+
+/// 扁平对象：所有值都是标量（string/number/bool/null），适合字段行展示。
+fn is_flat_object(args: &Value) -> bool {
+    matches!(
+        args,
+        Value::Object(map)
+            if map.values().all(|v| matches!(
+                v,
+                Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null
+            ))
+    )
+}
+
+/// 是否有字段值长到需要行内预览 + 折叠完整参数。
+fn has_long_value(args: &Value) -> bool {
+    args.as_object()
+        .map(|map| {
+            map.values().any(|v| {
+                matches!(v, Value::String(s) if s.chars().count() > PERMISSION_FIELD_PREVIEW_CHARS)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Bash 命令摘要行：短命令用行内代码（`$ cmd`），多行/超长用 bash 代码块。
+fn command_headline(cmd: &str) -> CardElement {
+    let capped = preview_chars(cmd, PERMISSION_ARGS_HARD_LIMIT_CHARS);
+    let content = if capped.contains('\n') || capped.chars().count() > 160 {
+        format!("```bash\n{capped}\n```")
+    } else {
+        format!("`$ {capped}`")
+    };
+    CardElement::Markdown { content }
+}
+
+/// 把 args 里没被摘要行消费的 key 渲染成 div.fields 行（B 方案）。
+/// `skip` 里的 key 已出现在摘要行，不再重复。返回 None 表示没有可展示字段。
+fn args_field_rows(args: &Value, skip: &[&str]) -> Option<CardElement> {
+    let map = args.as_object()?;
+    let fields: Vec<CardField> = map
+        .iter()
+        .filter(|(k, _)| !skip.contains(&k.as_str()))
+        .map(|(k, v)| CardField {
+            is_short: false,
+            text: CardText {
+                tag: "lark_md".into(),
+                content: format!(
+                    "**{}**\n{}",
+                    permission_field_label(k),
+                    preview_chars(&scalar_display(v), PERMISSION_FIELD_PREVIEW_CHARS)
+                ),
+            },
+        })
+        .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    Some(CardElement::Fields(fields))
+}
+
+/// 折叠面板：收纳完整参数 JSON（默认收起），受硬上限保护，截断时附灰注。
+fn full_args_panel(args: &Value) -> CardElement {
+    let pretty = serde_json::to_string_pretty(args).unwrap_or_default();
+    let capped = preview_chars(&pretty, PERMISSION_ARGS_HARD_LIMIT_CHARS);
+    let mut elements = vec![CardElement::Markdown {
+        content: format!("```json\n{capped}\n```"),
+    }];
+    if capped.chars().count() < pretty.chars().count() {
+        elements.push(CardElement::Div {
+            text: DivText {
+                tag: "plain_text".into(),
+                content: "（参数过长，已截断）".into(),
+                text_size: Some("notation".into()),
+                text_color: Some("grey".into()),
+            },
+        });
+    }
+    CardElement::CollapsiblePanel(CollapsiblePanel {
+        expanded: false,
+        header: CollapsiblePanelHeader {
+            title: CardText {
+                tag: "plain_text".into(),
+                content: "完整参数".into(),
+            },
+            icon: StandardIcon {
+                tag: "standard_icon".into(),
+                token: "down-small-ccm_outlined".into(),
+                size: "16px 16px".into(),
+            },
+            icon_position: "right".into(),
+            icon_expanded_angle: -180,
+        },
+        elements,
+    })
+}
+
+/// 把工具调用参数渲染成易读元素序列（方案 A+B）：
+/// - Bash 命令独立成摘要行（`$ ...`），其余参数 field 行；
+/// - 文件/链接类工具路径或 URL 摘要行 + 其余 field 行；
+/// - 长文本字段行内预览，完整参数收进折叠面板；
+/// - 未知/嵌套参数回退 pretty JSON 代码块（原行为）。
+/// 所有输出受硬上限保护，整卡不会超飞书 30KB。
+fn permission_args_elements(tool_name: &str, args: &Value) -> Vec<CardElement> {
+    // Bash：命令是放行决策的关键，独立成行完整展示。
+    if tool_name.eq_ignore_ascii_case("bash") {
+        if let Some(cmd) = args
+            .get("command")
+            .or_else(|| args.get("cmd"))
+            .and_then(Value::as_str)
+        {
+            let mut els = vec![command_headline(cmd)];
+            if let Some(rows) = args_field_rows(args, &["command", "cmd"]) {
+                els.push(rows);
+            }
+            return els;
+        }
+    }
+    if is_flat_object(args) {
+        let mut els = vec![];
+        if let Some(p) = args
+            .get("file_path")
+            .or_else(|| args.get("path"))
+            .and_then(Value::as_str)
+        {
+            els.push(CardElement::Markdown {
+                content: format!("📄 `{}`", preview_chars(p, PERMISSION_FIELD_PREVIEW_CHARS)),
+            });
+            if let Some(rows) = args_field_rows(args, &["file_path", "path"]) {
+                els.push(rows);
+            }
+        } else if let Some(u) = args.get("url").and_then(Value::as_str) {
+            els.push(CardElement::Markdown {
+                content: format!("🌐 `{}`", preview_chars(u, PERMISSION_FIELD_PREVIEW_CHARS)),
+            });
+            if let Some(rows) = args_field_rows(args, &["url"]) {
+                els.push(rows);
+            }
+        } else if let Some(rows) = args_field_rows(args, &[]) {
+            els.push(rows);
+        }
+        if has_long_value(args) {
+            els.push(full_args_panel(args));
+        }
+        if !els.is_empty() {
+            return els;
+        }
+    }
+    // 嵌套/未知/空参数：回退 pretty JSON 代码块（原行为），仍受硬上限保护。
+    let pretty = serde_json::to_string_pretty(args).unwrap_or_default();
+    let capped = preview_chars(&pretty, PERMISSION_ARGS_HARD_LIMIT_CHARS);
+    vec![CardElement::Markdown {
+        content: format!("```json\n{capped}\n```"),
+    }]
+}
+
 pub fn render_permission_card(
     session_id: &str,
     request_id: &str,
@@ -311,11 +533,11 @@ pub fn render_permission_card(
 ) -> Card {
     let mut card = Card::new("⚠ 权限请求", "orange");
     card.push_text(format!("**{tool_name}** 想要执行："));
-    // Render args as a fenced JSON code block so Feishu gives it a
-    // scrollable code-style container instead of a grey note div that
-    // looks like a wall of JSON.
-    let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
-    card.push_text(format!("```json\n{args_str}\n```"));
+    // A+B 方案：常见工具渲染成一行摘要 + 字段行，长参数折叠收纳；
+    // 未知/嵌套参数回退 pretty JSON 代码块。
+    for el in permission_args_elements(tool_name, args) {
+        card.body.elements.push(el);
+    }
     card.push_note("本会话不再询问 = 之后本会话所有权限请求自动放行；/new 或会话结束后失效");
     let btn = |label: &str, kind: &str, decision: &str| CardButton {
         text: CardText {

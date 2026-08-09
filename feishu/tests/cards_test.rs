@@ -127,21 +127,111 @@ fn permission_card_buttons_are_first_class_v2_elements() {
 }
 
 #[test]
-fn permission_card_args_in_code_fence_and_explanation_note() {
+fn permission_card_bash_args_rendered_as_command_headline() {
     let card = render_permission_card("s1", "r1", "Bash", &serde_json::json!({"cmd": "ls /tmp"}));
     let s = serde_json::to_string(&card).unwrap();
-    // Args rendered in a JSON code fence, not a plain grey note.
-    // Inside the JSON-of-the-card the fence's quotes are escaped as \", so
-    // look for the escaped forms.
-    assert!(s.contains("```json"), "args must be in a fenced code block");
+    // 命令独立成行内代码摘要，不再整段 JSON。
     assert!(
-        s.contains("\\\"cmd\\\""),
-        "args must contain escaped cmd key"
+        s.contains("`$ ls /tmp`"),
+        "command must be an inline-code headline: {s}"
     );
-    assert!(s.contains("ls /tmp"), "args must contain the command value");
-    // Explanation note present so users know what 本会话不再询问 means.
+    assert!(
+        !s.contains("```json"),
+        "no raw JSON wall for flat Bash args: {s}"
+    );
+    // 说明 note 保留。
     assert!(s.contains("本会话不再询问 = 之后本会话所有权限请求自动放行"));
     assert!(s.contains("/new 或会话结束后失效"));
+}
+
+#[test]
+fn permission_card_bash_extra_args_use_field_rows() {
+    let card = render_permission_card(
+        "s1",
+        "r1",
+        "Bash",
+        &serde_json::json!({"command": "ls -la /tmp", "timeout": 30, "description": "list tmp"}),
+    );
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("`$ ls -la /tmp`"));
+    // 其余参数走 div.fields 的加粗 label + value 行。
+    assert!(s.contains("\"fields\":["));
+    assert!(s.contains("**超时**"));
+    assert!(s.contains("**描述**"));
+    assert!(s.contains("30"));
+    assert!(s.contains("list tmp"));
+}
+
+#[test]
+fn permission_card_file_path_headline_and_fields() {
+    let card = render_permission_card(
+        "s1",
+        "r1",
+        "Read",
+        &serde_json::json!({"file_path": "src/main.rs", "offset": 100, "limit": 200}),
+    );
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("📄 `src/main.rs`"));
+    assert!(s.contains("**起始行**"));
+    assert!(s.contains("**读取行数**"));
+    assert!(!s.contains("```json"), "flat args must not fall back to JSON");
+}
+
+#[test]
+fn permission_card_long_content_preview_and_panel() {
+    let long = "x".repeat(500);
+    let card = render_permission_card(
+        "s1",
+        "r1",
+        "Write",
+        &serde_json::json!({"file_path": "src/out.txt", "content": long}),
+    );
+    let s = serde_json::to_string(&card).unwrap();
+    // 行内预览截断到 300 字符，完整 500 字符收进折叠面板。
+    assert!(s.contains("…"), "preview must be truncated with ellipsis");
+    assert!(s.contains("\"tag\":\"collapsible_panel\""));
+    assert!(s.contains("完整参数"));
+    // 完整内容只在折叠面板出现一次：行内预览已截断到 300，不会出现第二段 500。
+    assert_eq!(
+        s.matches(&"x".repeat(500)).count(),
+        1,
+        "full content must live in the panel only"
+    );
+}
+
+#[test]
+fn permission_card_nested_args_fall_back_to_json_fence() {
+    let card = render_permission_card(
+        "s1",
+        "r1",
+        "MCP::custom",
+        &serde_json::json!({"items": [{"a": 1}, {"b": 2}], "nested": {"deep": true}}),
+    );
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(s.contains("```json"), "nested args keep the JSON fence");
+    assert!(s.contains("\\\"items\\\""));
+}
+
+#[test]
+fn permission_card_hard_limit_caps_giant_args() {
+    let huge = "z".repeat(20_000);
+    let card = render_permission_card(
+        "s1",
+        "r1",
+        "Write",
+        &serde_json::json!({"file_path": "f", "content": huge}),
+    );
+    let s = serde_json::to_string(&card).unwrap();
+    // 完整参数面板受 8192 硬上限截断，行内预览 300。
+    assert!(s.contains("参数过长，已截断"));
+    assert!(
+        !s.contains(&"z".repeat(8193)),
+        "panel must cap the giant arg below 8193 chars"
+    );
+    assert!(
+        s.contains(&"z".repeat(8000)),
+        "capped panel keeps an 8000-char prefix"
+    );
 }
 
 #[test]

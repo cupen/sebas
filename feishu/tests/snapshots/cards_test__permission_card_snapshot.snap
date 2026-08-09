@@ -1,5 +1,6 @@
 ---
 source: feishu/tests/cards_test.rs
+assertion_line: 19
 expression: card
 ---
 schema: "2.0"
@@ -13,7 +14,7 @@ body:
     - tag: markdown
       content: "**Bash** 想要执行："
     - tag: markdown
-      content: "```json\n{\n  \"cmd\": \"rm -rf\"\n}\n```"
+      content: "`$ rm -rf`"
     - tag: div
       text:
         tag: plain_text
