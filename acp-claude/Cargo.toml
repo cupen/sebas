@@ -19,8 +19,10 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 tempfile = "3"
 
-# Test fake speaking the claude stream-json + control-protocol dialect
-# (scenarios: hello/bash/deny/thinking; --loop/--hang-on-init/... flags).
+# Test fake speaking the claude stream-json + control-protocol dialect.
+# Shares the workspace-root source with sebas's `fake-claude` bin — the two
+# binaries are byte-identical apart from the name, so acp-claude keeps its
+# own test binary name without a second copy of the code.
 [[bin]]
 name = "fake-claude-cli"
-path = "tests/bin/fake_claude_cli.rs"
+path = "../tests/bin/fake-claude.rs"
