@@ -18,13 +18,13 @@
 
 use feishu::client::{FeishuClient, TokenManager};
 use feishu::events::{FeishuEnvelope, FeishuIn, SessionKey};
-use feishu::forms::{FormField, FormSpec, SelectOption};
 use feishu::messages::{ReceiveIdType, SendCardRequest};
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use router::Out;
-use router::crud::{CrudForm, InMemoryStore};
+use router::crud::{CrudForm, FileStore};
 use sebas::config::Config;
+use sebas::provider::build_form;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,7 +60,7 @@ struct Handler {
     http: reqwest::Client,
     client: FeishuClient,
     tokens: TokenManager,
-    crud: Arc<CrudForm<InMemoryStore>>,
+    crud: Arc<CrudForm<FileStore>>,
     /// 发送目标：启动时可由 CLI 指定；否则等第一条入站消息自动确定。
     target: Arc<tokio::sync::Mutex<Option<Target>>>,
 }
@@ -251,11 +251,12 @@ async fn main() -> anyhow::Result<()> {
     });
     let tokens = TokenManager::new(cfg.feishu.app_id.clone(), cfg.feishu.app_secret.clone());
 
-    let crud = Arc::new(CrudForm::new(
-        provider_demo_spec(),
-        "id",
-        InMemoryStore::new("id"),
-    ));
+    // 直接复用 /provider 的真实表单：FileStore overlay 持久化 + preset
+    // 规范化，种子来自 config.toml 顶层 [provider.*]。
+    let crud = match build_form(&cfg_text) {
+        Some(crud) => crud,
+        None => anyhow::bail!("provider 表单不可用（overlay 加载失败），见上面的日志"),
+    };
     let handler = Handler {
         http,
         client,
@@ -308,50 +309,4 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(max_backoff);
     }
-}
-
-/// 与未来 provider 表单同构的演示 schema（模块本身与实体无关）。
-fn provider_demo_spec() -> FormSpec {
-    FormSpec::new(
-        "provider",
-        "Provider 冒烟测试",
-        vec![
-            FormField::Text {
-                name: "name".into(),
-                label: "名称".into(),
-                required: true,
-                placeholder: "如 deepseek".into(),
-                secret: false,
-            },
-            FormField::Select {
-                name: "protocol".into(),
-                label: "协议".into(),
-                required: true,
-                options: vec![
-                    SelectOption {
-                        value: "anthropic".into(),
-                        label: "Anthropic".into(),
-                    },
-                    SelectOption {
-                        value: "openai".into(),
-                        label: "OpenAI".into(),
-                    },
-                ],
-            },
-            FormField::Text {
-                name: "base_url".into(),
-                label: "Base URL".into(),
-                required: true,
-                placeholder: "https://api.xxx.com".into(),
-                secret: false,
-            },
-            FormField::Text {
-                name: "api_key".into(),
-                label: "API Key".into(),
-                required: false,
-                placeholder: "粘贴 API Key（保存后不回显）".into(),
-                secret: true,
-            },
-        ],
-    )
 }
