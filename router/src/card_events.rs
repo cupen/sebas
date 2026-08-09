@@ -190,7 +190,7 @@ fn tool_result_elements(tool_name: &str, result: &str, cfg: &CardConfig) -> Vec<
 /// 取 body 末尾属于 `tool_name` 的折叠面板（标题形如 `📖 Bash` / `⏳ Bash`）。
 /// 事件按顺序到达（ToolStart → ToolProgress* → ToolEnd），末尾即当前工具的面板。
 fn last_tool_panel_mut<'a>(
-    body: &'a mut Vec<CardElement>,
+    body: &'a mut [CardElement],
     tool_name: &str,
 ) -> Option<&'a mut CollapsiblePanel> {
     let suffix = format!(" {tool_name}");

@@ -13,8 +13,7 @@ fn settings_path_under_home_sebas_dir() {
 fn save_then_load_round_trips() {
     let dir = tempdir();
     let path = dir.join("settings.json");
-    let mut cfg = CardConfig::default();
-    cfg.thinking = ThinkingDisplay::Hide;
+    let cfg = CardConfig { thinking: ThinkingDisplay::Hide, ..CardConfig::default() };
     save_settings(&path, &cfg).unwrap();
     let loaded = load_settings(&path).unwrap();
     assert_eq!(loaded.thinking, ThinkingDisplay::Hide);
