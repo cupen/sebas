@@ -15,6 +15,8 @@ use crate::error::{Result, SebasError};
 /// Arguments for `sebas gateway --config <path>`.
 pub struct GatewayArgs {
     pub config: String,
+    /// debug 模式：内置 test 模型，gateway 自身应答。
+    pub debug: bool,
 }
 
 /// CLI entry: read + parse the gateway config, then run the server.
@@ -22,7 +24,11 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
     init_tracing();
     let raw = std::fs::read_to_string(&args.config)
         .map_err(|e| SebasError::Gateway(format!("read config {}: {e}", args.config)))?;
-    let cfg = GatewayConfig::parse(&raw).map_err(|e| SebasError::Gateway(e.to_string()))?;
+    let mut cfg = GatewayConfig::parse(&raw).map_err(|e| SebasError::Gateway(e.to_string()))?;
+    if args.debug {
+        // parse 完成后注入内置 test provider（不改变配置解析语义）。
+        cfg.enable_debug_test_provider();
+    }
     server::run(cfg)
         .await
         .map_err(|e| SebasError::Gateway(e.to_string()))?;

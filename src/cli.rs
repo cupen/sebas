@@ -31,9 +31,14 @@ pub struct RunArgs {
     pub config: String,
 
     /// 同时在随机端口（127.0.0.1:0）上启动内置 gateway；实际端口在日志中输出。
-    /// provider 从配置顶层 `[provider.*]`（或 `[gateway.providers.*]`）读取。
+    /// provider 从配置顶层 `[provider.*]` 读取。
     #[arg(long)]
     pub gateway: bool,
+
+    /// 同时让内置 gateway 进入 debug 模式：增加 `test` 模型，由 gateway 自身
+    /// 应答（固定文字 + 回显输入），不转发外部上游。
+    #[arg(long)]
+    pub debug: bool,
 
     /// Send a startup "sebas 已启动" message to this chat_id, then continue running.
     /// Useful for verifying outbound is wired correctly. chat_id format depends on
@@ -105,4 +110,9 @@ pub struct RecordArgs {
 pub struct GatewayArgs {
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
+
+    /// 启用 debug 模式：增加内置 `test` 模型，gateway 自身应答
+    /// （固定文字 + 回显输入），不转发外部上游。
+    #[arg(long)]
+    pub debug: bool,
 }
