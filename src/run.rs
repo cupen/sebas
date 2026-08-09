@@ -22,6 +22,7 @@ use crate::ws_loop::{run_ws_loop, spawn_test_session};
 use acp_claude::manager::SessionManager;
 use feishu::client::{FeishuClient, FeishuConfig};
 use feishu::messages::{ReceiveIdType, SendTextRequest};
+use gateway::config::GatewayConfig;
 use router::router::RouterHandle;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -30,6 +31,7 @@ pub async fn run(
     cfg: Config,
     test_msg: Option<String>,
     dump_inbound: Option<String>,
+    gateway_cfg: Option<GatewayConfig>,
 ) -> Result<()> {
     // openlark 0.19 uses reqwest 0.13, whose Rustls connector consults the
     // process-wide provider. Our reqwest 0.12 clients use ring explicitly;
@@ -41,6 +43,17 @@ pub async fn run(
     // spec §6.4 startup checks: directories writable + ACP binary reachable.
     // Friendly Config error, no panic; runs before any network/spawn work.
     cfg.validate_runtime()?;
+
+    // `run --gateway`：在随机端口上启动内置 gateway，实际端口记入日志
+    // （调用方按需把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL 指向该地址）。
+    if let Some(gw_cfg) = gateway_cfg {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| crate::error::SebasError::Gateway(format!("绑定随机端口失败: {e}")))?;
+        let (addr, _handle) = gateway::server::serve_with_listener(gw_cfg, listener)
+            .map_err(|e| crate::error::SebasError::Gateway(e.to_string()))?;
+        info!(%addr, "gateway started (run --gateway); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
+    }
 
     if cfg.feishu.owner_id.is_empty() {
         // owner_id 决策（sebas-nya，文档化于 config.rs validate）：可选。

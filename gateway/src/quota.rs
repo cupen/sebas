@@ -175,6 +175,7 @@ mod tests {
         KeyIdentity {
             config: KeyConfig {
                 key: key.into(),
+                key_env: None,
                 name: String::new(),
                 rpm,
                 daily_token_quota,

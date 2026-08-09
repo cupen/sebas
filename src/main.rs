@@ -52,7 +52,15 @@ async fn main() -> anyhow::Result<()> {
                 )
             });
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-            sebas::run::run(cfg, run.test_msg, run.dump_inbound)
+            let gateway_cfg = if run.gateway {
+                Some(
+                    gateway::config::GatewayConfig::parse(&raw)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            } else {
+                None
+            };
+            sebas::run::run(cfg, run.test_msg, run.dump_inbound, gateway_cfg)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
@@ -121,6 +129,26 @@ mod tests {
     }
 
     #[test]
+    fn run_subcommand_accepts_gateway_flag() {
+        let cli = Cli::try_parse_from(["sebas", "run", "--gateway", "--config", "x.toml"])
+            .expect("`sebas run --gateway --config <path>` must parse");
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("expected Run subcommand");
+        };
+        assert!(args.gateway, "--gateway flag must be captured");
+    }
+
+    #[test]
+    fn run_subcommand_accepts_short_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "run", "-c", "x.toml"])
+            .expect("`sebas run -c <path>` must parse");
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("expected Run subcommand");
+        };
+        assert_eq!(args.config, "x.toml");
+    }
+
+    #[test]
     fn top_level_config_flag_is_rejected() {
         // 入口是显式 run 子命令；顶层不再吞 run 模式的 flags。
         assert!(Cli::try_parse_from(["sebas", "--config", "x.toml"]).is_err());
@@ -130,6 +158,16 @@ mod tests {
     fn gateway_subcommand_accepts_config_flag() {
         let cli = Cli::try_parse_from(["sebas", "gateway", "--config", "x.toml"])
             .expect("`sebas gateway --config <path>` must parse");
+        let Cmd::Gateway(args) = cli.cmd else {
+            panic!("expected Gateway subcommand");
+        };
+        assert_eq!(args.config, "x.toml");
+    }
+
+    #[test]
+    fn gateway_subcommand_accepts_short_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "gateway", "-c", "x.toml"])
+            .expect("`sebas gateway -c <path>` must parse");
         let Cmd::Gateway(args) = cli.cmd else {
             panic!("expected Gateway subcommand");
         };

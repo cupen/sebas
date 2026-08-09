@@ -52,10 +52,19 @@ pub struct RouteTable {
 
 impl RouteTable {
     pub fn from_config(cfg: &GatewayConfig) -> RouteTable {
+        // 唯一 provider 隐式默认：`default_provider` 未配置且 providers 恰有一个
+        // 时，默认指向它——单 provider 场景可整体省略 `default_provider` 与 `routes`。
+        let default_provider = cfg.default_provider.clone().or_else(|| {
+            if cfg.providers.len() == 1 {
+                cfg.providers.keys().next().cloned()
+            } else {
+                None
+            }
+        });
         RouteTable {
             providers: cfg.providers.clone(),
             routes: cfg.routes.clone(),
-            default_provider: cfg.default_provider.clone(),
+            default_provider,
         }
     }
 
@@ -263,6 +272,7 @@ mod tests {
     fn key_with(allow: &[&str], default: Option<&str>) -> KeyConfig {
         KeyConfig {
             key: "sk-test".into(),
+            key_env: None,
             name: "test".into(),
             rpm: None,
             daily_token_quota: None,
@@ -432,16 +442,69 @@ mod tests {
     #[test]
     fn no_default_and_no_route_yields_no_route() {
         let cfg = build_cfg(
+            simple_providers(&[
+                ("anthropic", Protocol::Anthropic),
+                ("openai", Protocol::OpenAi),
+            ]),
+            &[],
+            None,
+            vec![],
+        );
+        let table = RouteTable::from_config(&cfg);
+        // 两个 provider 且无默认/路由 → 无隐式默认，NoRoute。
+        let err = table
+            .resolve(Some("gpt-4"), Protocol::OpenAi, None)
+            .expect_err("no route should error");
+        assert_eq!(err, RouteError::NoRoute);
+    }
+
+    // -------------------- 唯一 provider 隐式默认 --------------------
+
+    #[test]
+    fn single_provider_becomes_implicit_default() {
+        // 唯一 provider，无 default_provider、无 routes：
+        // model 请求与无 model（GET 类）请求都应落到该 provider。
+        let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
-            &[("claude-*", "anthropic")],
+            &[],
+            None,
+            vec![],
+        );
+        let table = RouteTable::from_config(&cfg);
+
+        let d = table
+            .resolve(Some("claude-sonnet"), Protocol::Anthropic, None)
+            .expect("single provider should implicitly default for model requests");
+        assert_eq!(d.provider, "anthropic");
+        assert_eq!(d.upstream_model.as_deref(), Some("claude-sonnet"));
+
+        let d = table
+            .resolve(None, Protocol::Anthropic, None)
+            .expect("single provider should implicitly default for model-less requests");
+        assert_eq!(d.provider, "anthropic");
+        assert_eq!(d.upstream_model, None);
+    }
+
+    #[test]
+    fn single_provider_implicit_default_does_not_hide_protocol_mismatch() {
+        // 隐式默认仍受协议一致性约束：唯一 anthropic provider 收到 OpenAI
+        // 协议请求 → ProtocolMismatch（而非静默转发）。
+        let cfg = build_cfg(
+            simple_providers(&[("anthropic", Protocol::Anthropic)]),
+            &[],
             None,
             vec![],
         );
         let table = RouteTable::from_config(&cfg);
         let err = table
-            .resolve(Some("gpt-4"), Protocol::Anthropic, None)
-            .expect_err("no route should error");
-        assert_eq!(err, RouteError::NoRoute);
+            .resolve(Some("claude-sonnet"), Protocol::OpenAi, None)
+            .expect_err("protocol mismatch must still surface");
+        assert_eq!(
+            err,
+            RouteError::ProtocolMismatch {
+                provider: "anthropic".into()
+            }
+        );
     }
 
     // -------------------- allow_models 门禁 --------------------
