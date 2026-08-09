@@ -17,8 +17,9 @@ use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::{CardConfig, phase_visual, render_accumulated_card};
 use feishu::events::SessionKey;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Debug)]
 pub enum Out {
@@ -89,7 +90,7 @@ pub struct RouterHandle {
     /// `root_msg_id`.
     pub msgid: MsgIdMap,
     card_states: crate::card_state::CardStateMap,
-    card_cfg: CardConfig,
+    card_cfg: Arc<RwLock<CardConfig>>,
     /// Tracks the Feishu `message_id` of each outstanding permission card,
     /// keyed by the card's `request_id`. Used to flip the card in place when
     /// the user clicks (or to mark it expired on a stale click). Entries are
@@ -142,12 +143,26 @@ impl RouterHandle {
                 tx,
                 msgid: MsgIdMap::default(),
                 card_states: crate::card_state::CardStateMap::default(),
-                card_cfg,
+                card_cfg: Arc::new(RwLock::new(card_cfg)),
                 perm_cards: PermCardMap::default(),
                 allowlist: SessionAllowlist::default(),
             },
             rx,
         )
+    }
+
+    /// Replace the live `CardConfig` at runtime (used by the `/settings`
+    /// handler in a later task). Takes the write lock; blocks readers
+    /// (cheap — config is small and writes are rare).
+    pub async fn set_card_config(&self, new_cfg: CardConfig) {
+        let mut g = self.card_cfg.write().await;
+        *g = new_cfg;
+    }
+
+    /// Snapshot the current `CardConfig` (cloned out of the lock so callers
+    /// can hold it without holding the read guard).
+    pub async fn card_config(&self) -> CardConfig {
+        self.card_cfg.read().await.clone()
     }
 
     /// Send an `Out` to the outbound pump. Per spec §4.1 ("Channel send
@@ -221,7 +236,7 @@ impl RouterHandle {
     /// 返回 `Some(新 emoji)` 表示 FSM 发生转移 —— 由调用方决定是否发
     /// `Out::React`（本方法保持纯状态契约），见 `emit_reaction`。
     pub async fn apply_event(&self, session_id: &str, event: &AcpEvent) -> Option<&'static str> {
-        let cfg = &self.card_cfg;
+        let cfg = self.card_cfg.read().await;
         self.card_states
             .apply(session_id, |st| {
                 // FSM（spec §5）
@@ -229,7 +244,7 @@ impl RouterHandle {
                 if let Some(e) = next {
                     st.status_emoji = e.into();
                 }
-                apply_event_to_card(&mut st.body, event, cfg);
+                apply_event_to_card(&mut st.body, event, &cfg);
                 next
             })
             .await
@@ -253,12 +268,13 @@ impl RouterHandle {
         let Some(st) = self.card_states.snapshot(session_id).await else {
             return;
         };
+        let theme_color = self.card_cfg.read().await.theme_color.clone();
         let card = render_accumulated_card(
             &st.user_prompt,
             session_id,
             phase_visual(&st.status_emoji),
             &st.body,
-            &self.card_cfg.theme_color,
+            &theme_color,
         );
         self.emit(Out::UpdateCard {
             session_id: session_id.to_string(),
@@ -343,12 +359,13 @@ impl RouterHandle {
 
         // Emit per-turn card with root_id = next.reply_to (threading via reply_to).
         let seed_emoji = phase_visual(crate::card_state::phase::SEED);
+        let theme_color = self.card_cfg.read().await.theme_color.clone();
         let card = render_accumulated_card(
             &next.prompt,
             session_id,
             seed_emoji,
             &[],
-            &self.card_cfg.theme_color,
+            &theme_color,
         );
         self.emit(Out::SendCard {
             key: key.clone(),

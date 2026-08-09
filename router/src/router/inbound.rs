@@ -277,12 +277,13 @@ impl RouterHandle {
         self.card_states.drop(&session_id).await;
         self.seed_card(session_id.clone(), prompt.clone()).await;
         let seed_emoji = phase_visual(crate::card_state::phase::SEED);
+        let theme_color = self.card_cfg.read().await.theme_color.clone();
         let card = render_accumulated_card(
             &prompt,
             &session_id,
             seed_emoji,
             &[],
-            &self.card_cfg.theme_color,
+            &theme_color,
         );
         self.emit(Out::SendCard {
             key,
