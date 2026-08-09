@@ -230,6 +230,7 @@ mod tests {
             read_timeout_secs: 600,
             usage_file: "/tmp/sebas-gateway-usage.jsonl".into(),
             debug: false,
+            provider_overlay: "__test_no_overlay__.json".into(),
             default_provider: default.map(String::from),
             auth_token: Vec::new(),
             providers,

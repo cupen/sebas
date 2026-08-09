@@ -27,6 +27,11 @@ fn parses_help() {
 }
 
 #[test]
+fn parses_provider() {
+    assert!(matches!(parse_command("/provider"), Command::Provider));
+}
+
+#[test]
 fn double_slash_escapes_to_prompt() {
     assert_eq!(
         parse_command("//compact"),

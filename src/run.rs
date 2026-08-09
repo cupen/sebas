@@ -30,6 +30,7 @@ use tracing::{error, info, warn};
 
 pub async fn run(
     cfg: Config,
+    raw_config: String,
     test_msg: Option<String>,
     dump_inbound: Option<String>,
     gateway_cfg: Option<GatewayConfig>,
@@ -80,8 +81,13 @@ pub async fn run(
             return Err(crate::error::SebasError::Config(e));
         }
     };
-    let (router, mut out_rx) =
-        RouterHandle::new_with_config(map, merged_card_cfg, cfg.router.channel_buffer);
+    let provider_form = crate::provider::build_form(&raw_config);
+    let (router, mut out_rx) = RouterHandle::new_with_provider_form(
+        map,
+        merged_card_cfg,
+        cfg.router.channel_buffer,
+        provider_form,
+    );
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,
     )));

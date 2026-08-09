@@ -1,0 +1,626 @@
+//! 通用 CRUD 表单状态机：给定 [`FormSpec`] + [`CrudStore`]，把卡片回调
+//! （按钮点击 / 表单提交）翻译成 [`Out`] 指令，实现 列表 / 新增 / 编辑 /
+//! 删除 的最小闭环。不依赖任何业务实体——`Item` 是 serde_json 对象，
+//! 字段由 `FormSpec` 与 `id_field` 决定，存储通过 trait 注入
+//! （参考实现：[`InMemoryStore`]）。
+//!
+//! ## 回调负载协议（按钮 `behaviors[].value` / 表单提交的 `action.value`）
+//!
+//! - `{"form": <form_name>, "op": "create"}` —— 打开空表单
+//! - `{"form": <form_name>, "op": "edit", "id": <id>}` —— 打开预填表单
+//! - `{"form": <form_name>, "op": "submit"[, "id": <id>]}` —— 提交表单；
+//!   携带 `id` 且存在则更新，否则新增（模块生成 id）
+//! - `{"form": <form_name>, "op": "delete", "id": <id>}` —— 删除并回到列表
+//! - `{"form": <form_name>, "op": "cancel"}` —— 回到列表
+//!
+//! 所有交互都优先原地更新触发回调的那张卡片（`context.open_message_id`），
+//! 拿不到 message_id 时才退回新发一张卡片。
+
+use crate::router::Out;
+use feishu::cards::{Card, CardButton, CardText};
+use feishu::events::SessionKey;
+use feishu::forms::{FormField, FormSpec, render_form_card, values_to_strings};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
+
+/// 一条记录：字段名 -> 值（必须含 `id_field` 指向的 id）。
+pub type Item = Map<String, Value>;
+
+pub const OP_CREATE: &str = "create";
+pub const OP_EDIT: &str = "edit";
+pub const OP_SUBMIT: &str = "submit";
+pub const OP_DELETE: &str = "delete";
+pub const OP_CANCEL: &str = "cancel";
+
+const KEY_FORM: &str = "form";
+const KEY_OP: &str = "op";
+const KEY_ID: &str = "id";
+
+/// 存储抽象：CRUD 状态机只依赖这五个操作。
+pub trait CrudStore: Send + Sync {
+    fn list(&self) -> impl std::future::Future<Output = Vec<Item>> + Send;
+    fn get(&self, id: &str) -> impl std::future::Future<Output = Option<Item>> + Send;
+    fn insert(&self, item: Item) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    fn update(&self, item: Item) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    fn delete(&self, id: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
+/// 进程内内存存储：重启即失，作为参考实现与测试替身。
+/// 需要持久化的场景实现 [`CrudStore`] 后注入即可（如文件/数据库存储）。
+#[derive(Clone)]
+pub struct InMemoryStore {
+    id_field: String,
+    items: Arc<Mutex<Vec<Item>>>,
+}
+
+impl InMemoryStore {
+    pub fn new(id_field: impl Into<String>) -> Self {
+        Self {
+            id_field: id_field.into(),
+            items: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn with_items(id_field: impl Into<String>, items: Vec<Item>) -> Self {
+        Self {
+            id_field: id_field.into(),
+            items: Arc::new(Mutex::new(items)),
+        }
+    }
+}
+
+impl CrudStore for InMemoryStore {
+    async fn list(&self) -> Vec<Item> {
+        self.items.lock().await.clone()
+    }
+
+    async fn get(&self, id: &str) -> Option<Item> {
+        self.items
+            .lock()
+            .await
+            .iter()
+            .find(|i| i.get(&self.id_field).and_then(Value::as_str) == Some(id))
+            .cloned()
+    }
+
+    async fn insert(&self, item: Item) -> Result<(), String> {
+        self.items.lock().await.push(item);
+        Ok(())
+    }
+
+    async fn update(&self, item: Item) -> Result<(), String> {
+        let id = item
+            .get(&self.id_field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("item 缺少 id 字段 '{}'", self.id_field))?
+            .to_string();
+        let mut items = self.items.lock().await;
+        let slot = items
+            .iter_mut()
+            .find(|i| i.get(&self.id_field).and_then(Value::as_str) == Some(id.as_str()));
+        match slot {
+            Some(slot) => {
+                *slot = item;
+                Ok(())
+            }
+            None => Err(format!("记录不存在: {id}")),
+        }
+    }
+
+    async fn delete(&self, id: &str) -> Result<(), String> {
+        let mut items = self.items.lock().await;
+        let before = items.len();
+        items.retain(|i| i.get(&self.id_field).and_then(Value::as_str) != Some(id));
+        if items.len() == before {
+            Err(format!("记录不存在: {id}"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// 文件存储：把 CRUD 变更以 delta 形式持久化到 JSON 文件，与只读种子
+/// （如 config.toml 里的条目）合并后得到最终视图。
+///
+/// 文件格式：
+/// ```json
+/// {
+///   "providers": { "<id>": { ...字段... } },
+///   "deleted": ["<id>", ...]
+/// }
+/// ```
+/// - `providers`：新增/修改过的条目（覆盖种子）；
+/// - `deleted`：从种子删除的名字（墓碑，防止重启后从只读源复活）。
+///
+/// 网关侧（gateway crate）读同一份文件做同样的合并，实现「bot 里改、
+/// gateway 启动时生效」。
+#[derive(Clone)]
+pub struct FileStore {
+    path: PathBuf,
+    id_field: String,
+    state: Arc<Mutex<FileState>>,
+}
+
+#[derive(Default)]
+struct FileState {
+    /// 合并后的最终视图（种子 + 变更）。
+    items: Vec<Item>,
+    /// 新增/修改项：<id> -> item。
+    overrides: BTreeMap<String, Item>,
+    /// 删除墓碑：从种子/配置中删除的名字。
+    deleted: Vec<String>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct OverlayFile {
+    #[serde(default)]
+    providers: BTreeMap<String, Item>,
+    #[serde(default)]
+    deleted: Vec<String>,
+}
+
+impl FileStore {
+    /// `seed` 是只读源（config.toml）里已有的条目；若文件已存在，
+    /// 文件的变更会叠加/覆盖种子。
+    pub fn load(
+        path: impl Into<PathBuf>,
+        id_field: impl Into<String>,
+        seed: Vec<Item>,
+    ) -> Result<Self, String> {
+        let path = path.into();
+        let id_field = id_field.into();
+        let mut state = FileState {
+            items: seed,
+            ..FileState::default()
+        };
+        if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+            let file: OverlayFile = serde_json::from_str(&raw)
+                .map_err(|e| format!("解析 {} 失败: {e}", path.display()))?;
+            state.deleted = file.deleted;
+            state.overrides = file.providers;
+            state
+                .items
+                .retain(|i| !state.deleted.contains(&id_of(i, &id_field).to_string()));
+            for item in state.overrides.values() {
+                upsert_item(&mut state.items, item.clone(), &id_field);
+            }
+        }
+        Ok(Self {
+            path,
+            id_field,
+            state: Arc::new(Mutex::new(state)),
+        })
+    }
+
+    async fn persist(&self, state: &FileState) -> Result<(), String> {
+        let file = OverlayFile {
+            providers: state.overrides.clone(),
+            deleted: state.deleted.clone(),
+        };
+        let raw = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&self.path, raw)
+            .map_err(|e| format!("写入 {} 失败: {e}", self.path.display()))
+    }
+}
+
+impl CrudStore for FileStore {
+    fn list(&self) -> impl std::future::Future<Output = Vec<Item>> + Send {
+        let this = self.clone();
+        async move { this.state.lock().await.items.clone() }
+    }
+
+    fn get(&self, id: &str) -> impl std::future::Future<Output = Option<Item>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.state
+                .lock()
+                .await
+                .items
+                .iter()
+                .find(|i| id_of(i, &this.id_field) == id)
+                .cloned()
+        }
+    }
+
+    fn insert(&self, item: Item) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let this = self.clone();
+        async move {
+            let mut state = this.state.lock().await;
+            let id = id_of(&item, &this.id_field).to_string();
+            state.overrides.insert(id.clone(), item.clone());
+            state.deleted.retain(|d| d != &id);
+            upsert_item(&mut state.items, item, &this.id_field);
+            this.persist(&state).await
+        }
+    }
+
+    fn update(&self, item: Item) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        // 与 insert 同语义：按 id 覆盖（新增或修改统一走 overrides）。
+        self.insert(item)
+    }
+
+    fn delete(&self, id: &str) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            let mut state = this.state.lock().await;
+            state.items.retain(|i| id_of(i, &this.id_field) != id);
+            state.overrides.remove(&id);
+            if !state.deleted.contains(&id) {
+                state.deleted.push(id.clone());
+            }
+            this.persist(&state).await
+        }
+    }
+}
+
+/// 一个实体的 CRUD 表单实例：schema（[`FormSpec`]）+ 存储（[`CrudStore`]）。
+pub struct CrudForm<S: CrudStore> {
+    pub spec: FormSpec,
+    pub id_field: String,
+    pub store: S,
+}
+
+impl<S: CrudStore> CrudForm<S> {
+    pub fn new(spec: FormSpec, id_field: impl Into<String>, store: S) -> Self {
+        Self {
+            spec,
+            id_field: id_field.into(),
+            store,
+        }
+    }
+
+    /// 打开 CRUD：发送列表卡（含「＋ 新增」和每条记录的 编辑/删除）。
+    pub async fn open(&self, key: SessionKey) -> Out {
+        self.reply(key, self.render_list_card().await, None)
+    }
+
+    /// 表单名（回调负载里的 `form` 字段），用于路由到具体实例。
+    pub fn form_name(&self) -> &str {
+        &self.spec.form_name
+    }
+
+    /// 处理一次卡片回调（按钮点击或表单提交），返回要执行的 [`Out`]。
+    /// 回调负载见模块文档；表单字段值走 `form_value`（组件 `name` -> 值）。
+    pub async fn handle(
+        &self,
+        key: SessionKey,
+        value: &Value,
+        form_value: &BTreeMap<String, Value>,
+        message_id: Option<String>,
+    ) -> Out {
+        // 不是本表单的负载（如权限卡的 value）——安全兜底回列表，不误伤。
+        if value.get(KEY_FORM).and_then(Value::as_str) != Some(self.spec.form_name.as_str()) {
+            return self.reply(key, self.render_list_card().await, message_id);
+        }
+
+        let op = value
+            .get(KEY_OP)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match op {
+            OP_CREATE => {
+                let card = self.render_edit_card(&BTreeMap::new(), None);
+                self.reply(key, card, message_id)
+            }
+            OP_EDIT => {
+                let id = value
+                    .get(KEY_ID)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let item = self.store.get(id).await;
+                let initial = item
+                    .as_ref()
+                    .map(|it| self.item_to_initial(it))
+                    .unwrap_or_default();
+                self.reply(key, self.render_edit_card(&initial, Some(id)), message_id)
+            }
+            OP_SUBMIT => {
+                let id = value.get(KEY_ID).and_then(Value::as_str);
+                self.apply_submit(id, form_value).await;
+                self.reply(key, self.render_list_card().await, message_id)
+            }
+            OP_DELETE => {
+                if let Some(id) = value.get(KEY_ID).and_then(Value::as_str)
+                    && let Err(e) = self.store.delete(id).await
+                {
+                    tracing::warn!(form = %self.spec.form_name, id, error = %e, "crud delete failed");
+                }
+                self.reply(key, self.render_list_card().await, message_id)
+            }
+            // cancel 由表单容器的 reset 按钮触发；未知 op 也回列表。
+            _ => self.reply(key, self.render_list_card().await, message_id),
+        }
+    }
+
+    async fn apply_submit(&self, id: Option<&str>, form_value: &BTreeMap<String, Value>) {
+        match id {
+            Some(id) => {
+                let existing = self.store.get(id).await;
+                let exists = existing.is_some();
+                let item = self.item_from_form(Some(id), form_value, existing.as_ref());
+                let result = if exists {
+                    self.store.update(item).await
+                } else {
+                    self.store.insert(item).await
+                };
+                if let Err(e) = result {
+                    tracing::warn!(form = %self.spec.form_name, id, error = %e, "crud submit failed");
+                }
+            }
+            None => {
+                let id = format!("{}-{}", self.spec.form_name, now_unix_millis());
+                let item = self.item_from_form(Some(id.as_str()), form_value, None);
+                if let Err(e) = self.store.insert(item).await {
+                    tracing::warn!(form = %self.spec.form_name, id, error = %e, "crud insert failed");
+                }
+            }
+        }
+    }
+
+    fn item_from_form(
+        &self,
+        id: Option<&str>,
+        form_value: &BTreeMap<String, Value>,
+        existing: Option<&Item>,
+    ) -> Item {
+        let mut item = Map::new();
+        if let Some(id) = id {
+            item.insert(self.id_field.clone(), Value::String(id.to_string()));
+        }
+        let values = values_to_strings(form_value);
+        for f in &self.spec.fields {
+            let submitted = values.get(f.name());
+            if f.is_secret() {
+                // 敏感字段：留空保留旧值（编辑场景），避免误清空密钥；
+                // 新增场景留空则不写入。
+                if let Some(v) = submitted
+                    && !v.is_empty()
+                {
+                    item.insert(f.name().to_string(), Value::String(v.clone()));
+                } else if let Some(old) = existing.and_then(|e| e.get(f.name())) {
+                    item.insert(f.name().to_string(), old.clone());
+                }
+            } else if let Some(v) = submitted {
+                item.insert(f.name().to_string(), Value::String(v.clone()));
+            }
+        }
+        item
+    }
+
+    /// 编辑表单的预填值：敏感字段不预填（避免把密钥回显到卡片）。
+    fn item_to_initial(&self, item: &Item) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for f in &self.spec.fields {
+            if f.is_secret() {
+                continue;
+            }
+            if let Some(v) = item.get(f.name()) {
+                out.insert(f.name().to_string(), scalar_display(v));
+            }
+        }
+        out
+    }
+
+    fn render_edit_card(&self, initial: &BTreeMap<String, String>, id: Option<&str>) -> Card {
+        let mut submit = Map::new();
+        submit.insert(KEY_FORM.into(), Value::String(self.spec.form_name.clone()));
+        submit.insert(KEY_OP.into(), Value::String(OP_SUBMIT.into()));
+        if let Some(id) = id {
+            submit.insert(KEY_ID.into(), Value::String(id.to_string()));
+        }
+        let mut card = render_form_card(&self.spec, initial, Value::Object(submit));
+        // 「取消/返回列表」必须是表单容器外的普通回调按钮：容器内的 reset
+        // 按钮不允许带 behaviors（飞书 API 11310），无法驱动服务端状态。
+        card.push_actions(vec![CardButton {
+            text: CardText {
+                tag: "plain_text".into(),
+                content: "取消".into(),
+            },
+            r#type: "default".into(),
+            value: self.payload(OP_CANCEL, None),
+        }]);
+        card
+    }
+
+    async fn render_list_card(&self) -> Card {
+        let items = self.store.list().await;
+        let mut card = Card::new(&format!("{}列表", self.spec.title), &self.spec.template);
+        if items.is_empty() {
+            card.push_text("暂无记录");
+        } else {
+            card.push_text(format!("共 {} 条", items.len()));
+        }
+        card.push_divider();
+        for item in items {
+            let id = item
+                .get(&self.id_field)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let lines: Vec<String> = self
+                .spec
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    item.get(f.name())
+                        .map(|v| format!("**{}**：{}", f.label(), field_display(f, v)))
+                })
+                .collect();
+            if !lines.is_empty() {
+                card.push_text(lines.join("\n"));
+            }
+            card.push_actions(vec![
+                CardButton {
+                    text: CardText {
+                        tag: "plain_text".into(),
+                        content: "编辑".into(),
+                    },
+                    r#type: "default".into(),
+                    value: self.payload(OP_EDIT, Some(&id)),
+                },
+                CardButton {
+                    text: CardText {
+                        tag: "plain_text".into(),
+                        content: "删除".into(),
+                    },
+                    r#type: "danger".into(),
+                    value: self.payload(OP_DELETE, Some(&id)),
+                },
+            ]);
+            card.push_divider();
+        }
+        card.push_actions(vec![CardButton {
+            text: CardText {
+                tag: "plain_text".into(),
+                content: "＋ 新增".into(),
+            },
+            r#type: "primary".into(),
+            value: self.payload(OP_CREATE, None),
+        }]);
+        card
+    }
+
+    fn payload(&self, op: &str, id: Option<&str>) -> Value {
+        let mut m = Map::new();
+        m.insert(KEY_FORM.into(), Value::String(self.spec.form_name.clone()));
+        m.insert(KEY_OP.into(), Value::String(op.into()));
+        if let Some(id) = id {
+            m.insert(KEY_ID.into(), Value::String(id.into()));
+        }
+        Value::Object(m)
+    }
+
+    fn reply(&self, key: SessionKey, card: Card, message_id: Option<String>) -> Out {
+        let card = serde_json::to_value(&card).expect("crud card serializes");
+        match message_id {
+            Some(msg_id) => Out::UpdateCardByMsgId { key, msg_id, card },
+            None => Out::SendCard {
+                key,
+                card,
+                msg_id: None,
+                perm_request_id: None,
+                perm_meta: None,
+                root_id: None,
+            },
+        }
+    }
+}
+
+fn field_display(f: &FormField, v: &Value) -> String {
+    if f.is_secret() {
+        return match v {
+            Value::String(s) if !s.is_empty() => "••••••".to_string(),
+            _ => "未设置".to_string(),
+        };
+    }
+    scalar_display(v)
+}
+
+fn scalar_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "—".into(),
+        other => other.to_string(),
+    }
+}
+
+fn now_unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn id_of<'a>(item: &'a Item, id_field: &str) -> &'a str {
+    item.get(id_field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+fn upsert_item(items: &mut Vec<Item>, item: Item, id_field: &str) {
+    let id = id_of(&item, id_field).to_string();
+    if let Some(slot) = items.iter_mut().find(|i| id_of(i, id_field) == id) {
+        *slot = item;
+    } else {
+        items.push(item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str, protocol: &str) -> Item {
+        let mut m = Map::new();
+        m.insert("name".into(), Value::String(id.into()));
+        m.insert("protocol".into(), Value::String(protocol.into()));
+        m
+    }
+
+    #[tokio::test]
+    async fn load_without_file_uses_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::load(
+            dir.path().join("providers.json"),
+            "name",
+            vec![item("deepseek", "anthropic")],
+        )
+        .unwrap();
+        assert_eq!(store.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_persists_and_delete_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        let store = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
+
+        // 新增：覆盖种子 + 落盘。
+        store.insert(item("openai", "openai")).await.unwrap();
+        assert_eq!(store.list().await.len(), 2);
+
+        // 删除种子里已有的条目：写墓碑，重启后不复活。
+        store.delete("deepseek").await.unwrap();
+        assert_eq!(store.list().await.len(), 1);
+        let reloaded = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
+        assert_eq!(reloaded.list().await.len(), 1);
+        assert_eq!(
+            reloaded.list().await[0].get("name").and_then(Value::as_str),
+            Some("openai")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_overrides_seed_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        let mut seed = item("deepseek", "anthropic");
+        seed.insert("base_url".into(), Value::String("old".into()));
+        let store = FileStore::load(&path, "name", vec![seed]).unwrap();
+
+        let mut updated = item("deepseek", "openai");
+        updated.insert("base_url".into(), Value::String("new".into()));
+        store.update(updated).await.unwrap();
+
+        let reloaded = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
+        let got = reloaded.get("deepseek").await.unwrap();
+        assert_eq!(got.get("protocol").and_then(Value::as_str), Some("openai"));
+        assert_eq!(got.get("base_url").and_then(Value::as_str), Some("new"));
+    }
+}

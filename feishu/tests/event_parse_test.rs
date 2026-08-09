@@ -212,3 +212,79 @@ fn parses_card_action_trigger_with_context_open_chat_id() {
     assert_eq!(action.request_id.as_deref(), Some("req_real"));
     assert_eq!(action.decision.as_deref(), Some("allow_once"));
 }
+
+/// Form-container submission: the submit button's custom payload lands in
+/// `action.value`, the filled fields in `action.form_value`, and the card's
+/// `context.open_message_id` lets the handler flip the card in place.
+#[test]
+fn parses_form_container_submission_to_formcb() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "card.action.trigger", "tenant_key": "tk" },
+        "event": {
+            "chat_id": "oc_form",
+            "action": {
+                "value": { "form": "note", "op": "submit", "id": "n1" },
+                "tag": "button",
+                "form_value": {
+                    "title": "旧标题",
+                    "priority": "p0"
+                }
+            },
+            "context": {
+                "open_message_id": "om_form",
+                "open_chat_id": "oc_form"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").expect("form submission parses");
+    let FeishuIn::FormCb {
+        key,
+        value,
+        form_value,
+        message_id,
+    } = evt
+    else {
+        panic!("expected FormCb");
+    };
+    assert_eq!(key.chat_id, "oc_form");
+    assert_eq!(value["form"], "note");
+    assert_eq!(value["op"], "submit");
+    assert_eq!(value["id"], "n1");
+    assert_eq!(
+        form_value.get("title").and_then(serde_json::Value::as_str),
+        Some("旧标题")
+    );
+    assert_eq!(
+        form_value
+            .get("priority")
+            .and_then(serde_json::Value::as_str),
+        Some("p0")
+    );
+    assert_eq!(message_id.as_deref(), Some("om_form"));
+}
+
+/// Discriminator regression: routing keys off the *presence* of
+/// `action.form_value`, so an all-optional empty submission still parses as
+/// a form instead of silently becoming a ButtonCb.
+#[test]
+fn empty_form_value_object_still_routes_as_formcb() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "card.action.trigger" },
+        "event": {
+            "chat_id": "oc_form",
+            "action": {
+                "value": { "form": "note", "op": "submit" },
+                "form_value": {}
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").expect("empty form submission parses");
+    match evt {
+        FeishuIn::FormCb { form_value, .. } => assert!(form_value.is_empty()),
+        other => panic!("expected FormCb, got {other:?}"),
+    }
+}

@@ -23,6 +23,9 @@ pub enum Command {
     Resume(String),
     Cancel,
     Status,
+    /// Open the provider CRUD card (`/provider`): list current providers
+    /// with 新增 / 编辑 / 删除 buttons.
+    Provider,
     Compact,
     Cost,
     Model(String),
@@ -52,6 +55,7 @@ pub fn parse_command(input: &str) -> Command {
         "/resume" => Command::Resume(arg.into()),
         "/cancel" => Command::Cancel,
         "/status" => Command::Status,
+        "/provider" => Command::Provider,
         "/compact" => Command::Compact,
         "/cost" => Command::Cost,
         "/model" => Command::Model(arg.into()),

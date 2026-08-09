@@ -1,6 +1,7 @@
 pub mod cards;
 pub mod client;
 pub mod events;
+pub mod forms;
 pub mod media;
 pub mod messages;
 

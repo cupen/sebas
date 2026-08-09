@@ -134,6 +134,16 @@ pub enum CardElement {
     /// behind a tappable header. Defaults to collapsed; Feishu renders it on
     /// client V7.9+ (older clients show an upgrade placeholder instead).
     CollapsiblePanel(CollapsiblePanel),
+    /// Card JSON 2.0 `form` container: collects several form items locally
+    /// and submits them in ONE callback (`action.form_value`) when the user
+    /// clicks a `form_action_type: "submit"` button. Must sit at the card
+    /// root (cannot be nested in other containers); inner interactive
+    /// components need globally-unique `name`s. Inner elements are
+    /// pre-serialized values produced by `crate::forms`.
+    Form {
+        name: String,
+        elements: Vec<serde_json::Value>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -254,6 +264,13 @@ impl Serialize for CardElement {
                 )?;
                 s.serialize_field("vertical_spacing", "8px")?;
                 s.serialize_field("padding", "8px 8px 8px 8px")?;
+                s.end()
+            }
+            CardElement::Form { name, elements } => {
+                let mut s = ser.serialize_struct("CardElement", 3)?;
+                s.serialize_field("tag", "form")?;
+                s.serialize_field("name", name)?;
+                s.serialize_field("elements", elements)?;
                 s.end()
             }
         }

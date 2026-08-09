@@ -12,6 +12,7 @@ mod maps;
 pub use maps::{MsgIdMap, PermCardEntry, PermCardMap, SessionAllowlist, tool_signature};
 
 use crate::card_events::apply_event_to_card;
+use crate::crud::{CrudForm, FileStore};
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::{CardConfig, phase_visual, render_accumulated_card};
@@ -109,6 +110,9 @@ pub struct RouterHandle {
     /// Scope: per-SessionKey (= per Feishu chat/thread). Cleared when the
     /// session is removed (`/new`, terminal error, daemon restart).
     allowlist: SessionAllowlist,
+    /// Provider CRUD 表单实例（`/provider` 命令 + 卡片回调路由）。
+    /// 未接线（None）时 `/provider` 落到 HelpText，表单回调仅记日志。
+    provider_form: Option<Arc<CrudForm<FileStore>>>,
 }
 
 impl Clone for RouterHandle {
@@ -121,6 +125,7 @@ impl Clone for RouterHandle {
             card_cfg: self.card_cfg.clone(),
             perm_cards: self.perm_cards.clone(),
             allowlist: self.allowlist.clone(),
+            provider_form: self.provider_form.clone(),
         }
     }
 }
@@ -142,6 +147,16 @@ impl RouterHandle {
         card_cfg: CardConfig,
         channel_buffer: usize,
     ) -> (Self, mpsc::Receiver<Out>) {
+        Self::new_with_provider_form(map, card_cfg, channel_buffer, None)
+    }
+
+    /// 带 provider CRUD 表单的完整构造（root crate 启动时注入）。
+    pub fn new_with_provider_form(
+        map: SessionMap,
+        card_cfg: CardConfig,
+        channel_buffer: usize,
+        provider_form: Option<Arc<CrudForm<FileStore>>>,
+    ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(channel_buffer);
         (
             Self {
@@ -152,6 +167,7 @@ impl RouterHandle {
                 card_cfg: Arc::new(RwLock::new(card_cfg)),
                 perm_cards: PermCardMap::default(),
                 allowlist: SessionAllowlist::default(),
+                provider_form,
             },
             rx,
         )
