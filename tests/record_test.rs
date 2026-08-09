@@ -6,7 +6,9 @@ use sebas::config::Config;
 use std::path::PathBuf;
 
 fn fake() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/fake-claude")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/debug")
+        .join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn test_cfg() -> Config {

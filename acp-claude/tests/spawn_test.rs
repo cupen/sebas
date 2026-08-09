@@ -1,6 +1,9 @@
+#[cfg(unix)]
 use std::process::Stdio;
+#[cfg(unix)]
 use tokio::process::Command;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn echo_subprocess_round_trip() {
     let mut child = Command::new("cat")

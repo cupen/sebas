@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn fake() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/fake-claude")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/debug")
+        .join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn key() -> SessionKey {

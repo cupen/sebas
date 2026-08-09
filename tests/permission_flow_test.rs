@@ -35,7 +35,7 @@ fn workspace_target() -> PathBuf {
 #[tokio::test]
 async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     // Post-ACP: the manager drives the new-dialect fake CLI directly.
-    let fake = workspace_target().join("fake-claude");
+    let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     assert!(fake.exists());
 
     let map = SessionMap::new();

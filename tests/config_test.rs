@@ -81,6 +81,9 @@ owner_id = "ou_x"
 #[test]
 fn validate_runtime_accepts_reachable_binary_and_writable_dirs() {
     let dir = std::env::temp_dir().join(format!("sebas-vr-{}", std::process::id()));
+    // Windows 路径含反斜杠，嵌入 TOML 字符串必须转义。
+    let dir_toml = dir.display().to_string().replace('\\', "\\\\");
+    let bin = if cfg!(windows) { "cmd.exe" } else { "/bin/cat" };
     let toml = format!(
         r#"
 [feishu]
@@ -88,7 +91,7 @@ app_id = "cli_x"
 app_secret = "sec"
 
 [acp.claude]
-path = "/bin/cat"
+path = "{bin}"
 
 [router]
 state_file = "{}/state/sessions.json"
@@ -99,9 +102,7 @@ download_dir = "{}/dl"
 [log]
 file = "{}/logs/sebas.log"
 "#,
-        dir.display(),
-        dir.display(),
-        dir.display()
+        dir_toml, dir_toml, dir_toml
     );
     let cfg = Config::parse(&toml).unwrap();
     cfg.validate_runtime().expect("runtime checks pass");
@@ -136,6 +137,7 @@ fn validate_runtime_rejects_unwritable_dir() {
     // A regular FILE where a directory should be: create_dir_all must fail.
     let blocker = dir.join("blocker");
     std::fs::write(&blocker, "x").unwrap();
+    let blocker_toml = blocker.display().to_string().replace('\\', "\\\\");
     let toml = format!(
         r#"
 [feishu]
@@ -148,7 +150,7 @@ path = "/bin/cat"
 [media]
 download_dir = "{}/sub"
 "#,
-        blocker.display()
+        blocker_toml
     );
     let cfg = Config::parse(&toml).unwrap();
     assert!(cfg.validate_runtime().is_err());
