@@ -219,9 +219,20 @@ fn panel_header(title: String) -> CollapsiblePanelHeader {
     }
 }
 
+/// ThinkingDelta 折叠面板的标准标题。所有 thinking 面板共用此常量，
+/// `is_thinking_panel` 据此判断。改这里必须连测试一起改。
+const THINKING_PANEL_TITLE: &str = "💭 思考";
+
+/// 判断一个 panel 是否是 thinking 折叠面板。聚合逻辑专用 —— 字符串
+/// `contains` 容易把任何标题含 💭 的 panel 都吞掉，相邻 deltas 会串到
+/// 错的面板里。
+fn is_thinking_panel(panel: &CollapsiblePanel) -> bool {
+    panel.header.title.content == THINKING_PANEL_TITLE
+}
+
 /// ThinkingDelta 折叠面板的 header（复用 panel_header 的标准图标）。
 fn thinking_panel_header() -> CollapsiblePanelHeader {
-    panel_header("💭 思考".into())
+    panel_header(THINKING_PANEL_TITLE.into())
 }
 
 /// 把 ThinkingDelta 累积进尾部 thinking 面板；body 末尾不是 thinking 面板则开新面板
@@ -229,7 +240,7 @@ fn thinking_panel_header() -> CollapsiblePanelHeader {
 /// 事件结束当前 burst）。
 fn append_thinking_delta(body: &mut Vec<CardElement>, delta: &str) {
     if let Some(CardElement::CollapsiblePanel(panel)) = body.last_mut()
-        && panel.header.title.content.contains("💭")
+        && is_thinking_panel(panel)
     {
         // 扩展尾部 thinking 面板：往末位 Markdown 追加换行 + delta。
         append_to_thinking_panel(panel, delta);
