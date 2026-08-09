@@ -446,9 +446,47 @@ impl GatewayConfig {
             self.providers.remove(name);
         }
         for (name, item) in file.providers {
-            let provider = provider_from_item(&item).map_err(|e| {
-                GatewayError::Config(format!("provider overlay 里 '{name}' 无效: {e}"))
-            })?;
+            // overlay 条目与顶层 `[provider.*]` 同语义：preset / protocol /
+            // base_url / api_key_env / api_key，交给同一个 raw→resolved 管线，
+            // 支持「选 preset + 填密钥」的最小写法（地址由 preset 补全）。
+            let protocol = item
+                .get("protocol")
+                .cloned()
+                .map(|v| {
+                    serde_json::from_value::<Protocol>(v).map_err(|e| {
+                        GatewayError::Config(format!(
+                            "provider overlay 里 '{name}' protocol 无效: {e}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let raw = RawProviderConfig {
+                preset: item
+                    .get("preset")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                protocol,
+                base_url: item
+                    .get("base_url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                api_key_env: item
+                    .get("api_key_env")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                api_key: item
+                    .get("api_key")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                model_map: HashMap::new(),
+            };
+            let mut resolved =
+                resolve_providers(HashMap::from([(name.clone(), raw)])).map_err(|e| {
+                    GatewayError::Config(format!("provider overlay 里 '{name}' 无效: {e}"))
+                })?;
+            let provider = resolved
+                .remove(&name)
+                .expect("resolve_providers keeps the input name");
             self.providers.insert(name, provider);
         }
         Ok(())
@@ -579,40 +617,6 @@ struct ProviderOverlay {
     providers: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     deleted: Vec<String>,
-}
-
-fn provider_from_item(
-    item: &serde_json::Map<String, serde_json::Value>,
-) -> std::result::Result<ProviderConfig, String> {
-    let protocol = serde_json::from_value::<Protocol>(
-        item.get("protocol")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    )
-    .map_err(|e| format!("protocol 无效: {e}"))?;
-    let base_url = item
-        .get("base_url")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if base_url.is_empty() {
-        return Err("base_url 不能为空".into());
-    }
-    let api_key_env = item
-        .get("api_key_env")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let api_key = item
-        .get("api_key")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    Ok(ProviderConfig {
-        protocol,
-        base_url,
-        api_key_env,
-        api_key,
-        model_map: HashMap::new(),
-    })
 }
 
 /// tilde 展开（与 root `src/config.rs` 同款 let-chain 形式）。
@@ -1137,10 +1141,10 @@ api_key = "test-key"
             &overlay,
             r#"{
                 "providers": {
-                    "openai": { "protocol": "openai", "base_url": "https://api.openai.com", "api_key": "sk-overlay" },
-                    "anthropic": { "protocol": "anthropic", "base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY_V2" }
+                    "deepseek": { "preset": "deepseek", "protocol": "anthropic", "api_key": "sk-ds" },
+                    "anthropic": { "api_key_env": "ANTHROPIC_API_KEY_V2" }
                 },
-                "deleted": ["deepseek"]
+                "deleted": ["openai"]
             }"#,
         )
         .unwrap();
@@ -1148,27 +1152,38 @@ api_key = "test-key"
             std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", overlay.to_str().unwrap());
         }
 
-        // 新语法：顶层 [provider.*]；deepseek 是双协议 preset，需显式 protocol。
+        // 新语法：顶层 [provider.*]；overlay 条目走同一个 preset 解析管线。
         let raw = r#"
 [provider.anthropic]
-[provider.deepseek]
-protocol = "anthropic"
+[provider.openai]
 "#;
         let cfg = parse_isolated(raw).expect("parse with overlay");
 
         assert!(
-            !cfg.providers.contains_key("deepseek"),
-            "tombstone must remove deepseek"
+            !cfg.providers.contains_key("openai"),
+            "tombstone must remove openai"
         );
-        let openai = cfg.providers.get("openai").expect("overlay added openai");
-        assert_eq!(openai.protocol, Protocol::OpenAi);
-        assert_eq!(openai.base_url, "https://api.openai.com");
+        let ds = cfg
+            .providers
+            .get("deepseek")
+            .expect("overlay added deepseek");
+        assert_eq!(ds.protocol, Protocol::Anthropic);
         assert_eq!(
-            openai.api_key.as_deref(),
-            Some("sk-overlay"),
+            ds.base_url, "https://api.deepseek.com/anthropic",
+            "preset must fill the endpoint from the hardcoded table"
+        );
+        assert_eq!(
+            ds.api_key.as_deref(),
+            Some("sk-ds"),
             "overlay api_key must be consumed"
         );
+        assert_eq!(
+            ds.api_key_env, None,
+            "explicit api_key must not get preset env"
+        );
         let anth = cfg.providers.get("anthropic").expect("anthropic kept");
+        assert_eq!(anth.protocol, Protocol::Anthropic);
+        assert_eq!(anth.base_url, "https://api.anthropic.com");
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY_V2"));
     }
 }

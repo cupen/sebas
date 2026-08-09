@@ -53,7 +53,9 @@ pub fn spec() -> FormSpec {
             FormField::Select {
                 name: "protocol".into(),
                 label: "协议".into(),
-                required: true,
+                // 选 preset 时可留空：单协议 preset 自动推断，双协议 preset
+                // 默认 anthropic（可在表单里显式改 openai）。
+                required: false,
                 options: vec![
                     SelectOption {
                         value: "anthropic".into(),
@@ -141,8 +143,9 @@ pub fn build_form(raw_config: &str) -> Option<Arc<CrudForm<FileStore>>> {
 }
 
 /// 提交规范化：选中 preset 时补全默认值（与 config.toml preset 解析一致）。
-/// - base_url 留空 → 按已选 protocol 填 preset 端点；protocol 留空且 preset
-///   单协议 → 顺带填 protocol；
+/// - protocol 留空 → 单协议 preset 自动推断；双协议 preset（deepseek/kimi/glm/
+///   minimax/ark）默认 anthropic（可在表单里显式改 openai）；
+/// - base_url 留空 → 按 protocol 填 preset 端点；
 /// - api_key / api_key_env 都没填 → 注入 preset 默认 env 名。
 fn apply_preset_defaults(item: &mut Item) {
     let Some(preset_name) = item.get("preset").and_then(Value::as_str) else {
@@ -155,16 +158,26 @@ fn apply_preset_defaults(item: &mut Item) {
         return;
     };
 
-    let protocol = item
+    let mut protocol = item
         .get("protocol")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
+    if protocol.is_empty() {
+        protocol = match (p.anthropic_base_url, p.openai_base_url) {
+            (Some(_), None) => "anthropic".into(),
+            (None, Some(_)) => "openai".into(),
+            // 双协议 preset：默认 anthropic，用户可在表单显式改 openai。
+            _ => "anthropic".into(),
+        };
+        item.insert("protocol".into(), Value::String(protocol.clone()));
+    }
     let base_url_empty = item
         .get("base_url")
         .and_then(Value::as_str)
         .is_none_or(|s| s.is_empty());
     if base_url_empty {
-        let base = match protocol {
+        let base = match protocol.as_str() {
             "anthropic" => p.anthropic_base_url,
             "openai" => p.openai_base_url,
             _ => None,
@@ -218,6 +231,49 @@ mod tests {
             item.get("api_key_env").and_then(Value::as_str),
             Some("DEEPSEEK_API_KEY")
         );
+    }
+
+    #[test]
+    fn preset_with_only_api_key_fills_protocol_and_endpoint() {
+        // 用户视角：选 deepseek 预设 + 粘密钥，其余全部补全。
+        let mut item = item_with(&[
+            ("name", "deepseek"),
+            ("preset", "deepseek"),
+            ("api_key", "sk-ds"),
+        ]);
+        apply_preset_defaults(&mut item);
+        assert_eq!(
+            item.get("protocol").and_then(Value::as_str),
+            Some("anthropic"),
+            "双协议 preset 默认 anthropic"
+        );
+        assert_eq!(
+            item.get("base_url").and_then(Value::as_str),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert!(
+            item.get("api_key_env").is_none(),
+            "有 api_key 时不注入默认 env"
+        );
+    }
+
+    #[test]
+    fn single_protocol_preset_infers_protocol_and_endpoint() {
+        let mut item = item_with(&[
+            ("name", "anthropic"),
+            ("preset", "anthropic"),
+            ("api_key", "sk-anthropic"),
+        ]);
+        apply_preset_defaults(&mut item);
+        assert_eq!(
+            item.get("protocol").and_then(Value::as_str),
+            Some("anthropic")
+        );
+        assert_eq!(
+            item.get("base_url").and_then(Value::as_str),
+            Some("https://api.anthropic.com")
+        );
+        assert!(item.get("api_key_env").is_none());
     }
 
     #[test]
