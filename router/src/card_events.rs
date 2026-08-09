@@ -6,7 +6,7 @@
 use acp_claude::session::AcpEvent;
 use feishu::cards::{
     CardConfig, CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, DivText,
-    StandardIcon,
+    StandardIcon, ThinkingDisplay,
 };
 
 /// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
@@ -21,10 +21,11 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             push_text_truncated(body, delta, cfg.max_user_text_chars, cfg.fold_long_output);
         }
         AcpEvent::ThinkingDelta { delta, .. } => {
-            // Visual separator before the thinking note so it's distinct
-            // from the previous event's text output.
-            body.push(CardElement::Hr);
-            body.push(note_element(format!("💭 {delta}")));
+            if cfg.thinking == ThinkingDisplay::Hide {
+                // 完全丢弃：模型仍在思考，只是卡片不展示。
+            } else {
+                append_thinking_delta(body, delta);
+            }
         }
         AcpEvent::ToolStart {
             tool_name, args, ..
@@ -215,6 +216,44 @@ fn panel_header(title: String) -> CollapsiblePanelHeader {
         },
         icon_position: "right".into(),
         icon_expanded_angle: -180,
+    }
+}
+
+/// ThinkingDelta 折叠面板的 header（复用 panel_header 的标准图标）。
+fn thinking_panel_header() -> CollapsiblePanelHeader {
+    panel_header("💭 思考".into())
+}
+
+/// 把 ThinkingDelta 累积进尾部 thinking 面板；body 末尾不是 thinking 面板则开新面板
+/// （boundary aggregation：相邻 thinking chunk 共享一个面板；任何非 thinking
+/// 事件结束当前 burst）。
+fn append_thinking_delta(body: &mut Vec<CardElement>, delta: &str) {
+    if let Some(CardElement::CollapsiblePanel(panel)) = body.last_mut()
+        && panel.header.title.content.contains("💭")
+    {
+        // 扩展尾部 thinking 面板：往末位 Markdown 追加换行 + delta。
+        append_to_thinking_panel(panel, delta);
+        return;
+    }
+    body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+        expanded: false,
+        header: thinking_panel_header(),
+        elements: vec![CardElement::Markdown {
+            content: delta.to_string(),
+        }],
+    }));
+}
+
+/// 在已存在的 thinking 面板里追加 delta：末位是 Markdown 就接一行，否则新建 Markdown。
+fn append_to_thinking_panel(panel: &mut CollapsiblePanel, delta: &str) {
+    match panel.elements.last_mut() {
+        Some(CardElement::Markdown { content }) => {
+            content.push('\n');
+            content.push_str(delta);
+        }
+        _ => panel.elements.push(CardElement::Markdown {
+            content: delta.to_string(),
+        }),
     }
 }
 
