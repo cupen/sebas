@@ -104,7 +104,7 @@ default_provider = "up"
 key = "sk-gw-fail"
 name = "failure-test"
 
-[gateway.providers.up]
+[provider.up]
 protocol = "anthropic"
 base_url = "{upstream}"
 api_key = "test-upstream-key"

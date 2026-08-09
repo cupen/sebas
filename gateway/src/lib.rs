@@ -9,6 +9,7 @@
 //!
 //! edition 2024：let-chains 可用（`if let A = b && cond`）。
 
+pub mod access_log;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -18,4 +19,5 @@ pub mod quota;
 pub mod routing;
 pub mod server;
 pub mod sse;
+pub mod test_provider;
 pub mod usage;

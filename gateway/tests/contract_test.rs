@@ -40,24 +40,17 @@ key = "sk-gw-openai"
 name = "contract-openai"
 default_provider = "openai"
 
-[[gateway.routes]]
-model = "claude-*"
-provider = "anthropic"
+[gateway.routes]
+"claude-*" = ["anthropic"]
+"gpt-*" = ["openai"]
+"text-*" = ["openai"]
 
-[[gateway.routes]]
-model = "gpt-*"
-provider = "openai"
-
-[[gateway.routes]]
-model = "text-*"
-provider = "openai"
-
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
-[gateway.providers.openai]
+[provider.openai]
 protocol = "openai"
 base_url = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
@@ -78,19 +71,18 @@ default_provider = "anthropic"
 key = "sk-gw-contract"
 name = "contract-test"
 
-[[gateway.routes]]
-model = "claude-*"
-provider = "anthropic"
+[gateway.routes]
+"claude-*" = ["anthropic"]
 
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
-[gateway.providers.anthropic.model_map]
+[provider.anthropic.model_map]
 claude-sonnet = "claude-sonnet-4-20250514"
 
-[gateway.providers.openai]
+[provider.openai]
 protocol = "openai"
 base_url = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
@@ -112,16 +104,15 @@ key = "sk-gw-rpm1"
 name = "rpm1-test"
 rpm = 1
 
-[[gateway.routes]]
-model = "claude-*"
-provider = "anthropic"
+[gateway.routes]
+"claude-*" = ["anthropic"]
 
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
-[gateway.providers.openai]
+[provider.openai]
 protocol = "openai"
 base_url = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
@@ -360,7 +351,8 @@ async fn case_4_get_models_anthropic_routes_to_anthropic_mock() {
     let env = setup().await;
     let client = client();
     let resp = client
-        .get(format!("{}/v1/models", env.url()))
+        // Claude Code /model 的请求形态：带 ?limit 查询串。
+        .get(format!("{}/v1/models?limit=1000", env.url()))
         .header("authorization", "Bearer sk-gw-contract")
         .header("anthropic-version", "2023-06-01")
         .send()
@@ -376,7 +368,7 @@ async fn case_4_get_models_anthropic_routes_to_anthropic_mock() {
     .await;
 
     let rec = sole_request(&env.anth).await;
-    assert_recorded_request(&rec, "GET", "/v1/models", "");
+    assert_recorded_request(&rec, "GET", "/v1/models?limit=1000", "");
     assert_key_injection(&rec, Protocol::Anthropic, "sk-gw-contract");
     // 路由断言：openai mock 未收到任何请求
     let oai_reqs = env.oai.requests.lock().await;

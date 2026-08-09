@@ -10,6 +10,7 @@
 //! unix SIGTERM).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,6 +85,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .fallback(proxy::handle)
         .layer(from_fn_with_state(state.clone(), require_key))
+        // 最外层：nginx 风格 access log，覆盖 /healthz 与全部透传请求。
+        .layer(axum::middleware::from_fn(crate::access_log::access_log))
         .with_state(state)
 }
 
@@ -100,9 +103,12 @@ pub async fn run(cfg: GatewayConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     let addr = listener.local_addr()?;
     tracing::info!(%addr, "sebas gateway listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -119,7 +125,13 @@ pub fn serve_with_listener(
     let state = build_state(cfg)?;
     let app = build_router(state);
     let addr = listener.local_addr()?;
-    let handle = tokio::spawn(async move { axum::serve(listener, app).await });
+    let handle = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+    });
     Ok((addr, handle))
 }
 
