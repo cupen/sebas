@@ -38,12 +38,16 @@ fn journal_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn exactly_one_initialize_one_user_message_and_routing_id_matches() {
     let journal = journal_path("single-new");
+    // 工作目录用 tempdir：/tmp 是 Unix 硬编码，Windows 下会被解析成
+    // 当前盘符的 C:\tmp，导致 cwd 断言必然失败（child cwd mismatch）。
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let work_dir_str = work_dir.path().to_string_lossy().into_owned();
     let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
         .create_session(
             fake().to_str().unwrap(),
             vec!["--journal".into(), journal.to_str().unwrap().into()],
-            Some("/tmp".into()),
+            Some(work_dir_str.clone()),
             "".into(),
         )
         .await
@@ -111,7 +115,11 @@ async fn exactly_one_initialize_one_user_message_and_routing_id_matches() {
         .and_then(|m| m.get("cwd"))
         .and_then(|c| c.as_str())
         .map(str::to_owned);
-    assert_eq!(cwd.as_deref(), Some("/tmp"), "child cwd mismatch");
+    assert_eq!(
+        cwd.as_deref(),
+        Some(work_dir_str.as_str()),
+        "child cwd mismatch"
+    );
 
     // Routing integrity: every assistant frame the agent sent must be tagged
     // with the SAME id create_session returned (the fake echoes --session-id).

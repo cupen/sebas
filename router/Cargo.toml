@@ -12,3 +12,6 @@ thiserror = "1"
 dirs = "5"
 feishu = { path = "../feishu" }
 acp-claude = { path = "../acp-claude" }
+
+[dev-dependencies]
+tempfile = "3"

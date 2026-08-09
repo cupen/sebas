@@ -29,7 +29,8 @@ fn workspace_target() -> PathBuf {
 #[tokio::test]
 async fn second_text_flips_fsm_and_forwards_continue() {
     // Post-ACP: the manager drives the new-dialect fake CLI directly.
-    let fake = workspace_target().join("fake-claude");
+    // Windows 下可执行文件带 .exe 后缀。
+    let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     assert!(fake.exists());
 
     let map = SessionMap::new();

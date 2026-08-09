@@ -19,8 +19,11 @@ fn workspace_target() -> PathBuf {
 
 #[tokio::test]
 async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
-    let fake = workspace_target().join("fake-claude");
+    // Windows 下可执行文件带 .exe 后缀。
+    let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     assert!(fake.exists(), "missing build artifact {}", fake.display());
+    // /tmp 是 Unix 硬编码；Windows 上会被解析成 C:\tmp 且可能不存在，改用 tempdir。
+    let work_dir = tempfile::tempdir().expect("work dir");
 
     let map = SessionMap::new();
     let (router, _out_rx) = RouterHandle::new(map);
@@ -39,7 +42,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
         "hello",
         fake.to_str().unwrap(),
         vec![],
-        Some("/tmp".into()),
+        Some(work_dir.path().to_string_lossy().into_owned()),
     )
     .await
     .expect("spawn fake CLI through production path");

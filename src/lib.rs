@@ -3,6 +3,7 @@ mod dispatch;
 pub mod error;
 pub mod gateway_cmd;
 pub mod install_service;
+pub mod provider;
 pub mod reactions;
 pub mod record;
 pub mod replay;

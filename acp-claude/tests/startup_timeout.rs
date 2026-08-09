@@ -37,13 +37,16 @@ async fn hanging_agent_times_out_and_is_reaped() {
     );
     // Give the teardown a moment, then assert no fake-claude child lingers.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let out = std::process::Command::new("pgrep")
-        .args(["-f", "fake-claude-cli --hang-on-init"])
-        .output()
-        .expect("pgrep");
-    assert!(
-        out.stdout.is_empty(),
-        "fake-claude child leaked after timeout: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("pgrep")
+            .args(["-f", "fake-claude-cli --hang-on-init"])
+            .output()
+            .expect("pgrep");
+        assert!(
+            out.stdout.is_empty(),
+            "fake-claude child leaked after timeout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }

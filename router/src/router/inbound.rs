@@ -13,6 +13,8 @@ use feishu::cards::{
     render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 impl RouterHandle {
     pub async fn dispatch(&self, evt: FeishuIn) {
@@ -31,6 +33,40 @@ impl RouterHandle {
                 self.on_text(key, prompt, None).await;
             }
             FeishuIn::ButtonCb { key, action } => self.on_button(key, action).await,
+            FeishuIn::FormCb {
+                key,
+                value,
+                form_value,
+                message_id,
+            } => self.on_form_cb(key, value, form_value, message_id).await,
+        }
+    }
+
+    /// 表单容器提交回调：按负载里的 `form` 字段路由到已接线的 CRUD 表单
+    /// （当前为 provider）。未接线的表单仅记日志，不静默吞掉。
+    async fn on_form_cb(
+        &self,
+        key: SessionKey,
+        value: Value,
+        form_value: BTreeMap<String, Value>,
+        message_id: Option<String>,
+    ) {
+        tracing::debug!(?key, ?value, "form callback received");
+        let routed = match &self.provider_form {
+            Some(form)
+                if value
+                    .get("form")
+                    .and_then(Value::as_str)
+                    .is_some_and(|f| f == form.form_name()) =>
+            {
+                let out = form.handle(key, &value, &form_value, message_id).await;
+                self.emit(out).await;
+                true
+            }
+            _ => false,
+        };
+        if !routed {
+            tracing::debug!("form callback for unwired form; ignored");
         }
     }
 
@@ -61,6 +97,7 @@ impl RouterHandle {
                 self.handle_settings(key, setting_key, val, &settings::settings_path())
                     .await;
             }
+            Command::Provider => self.on_provider(key).await,
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
@@ -126,6 +163,32 @@ impl RouterHandle {
     }
 
     async fn on_button(&self, key: SessionKey, action: CardAction) {
+        // Provider CRUD 按钮（新增/编辑/删除）与 ACP 会话无关，优先路由，
+        // 避免权限卡的 session 存活检查误伤（例如聊天里没有活跃会话时仍可管理 provider）。
+        if let Some(form) = &self.provider_form {
+            let payload = action.value.pointer("/action/value").cloned();
+            let is_provider = payload
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|p| p.get("form").and_then(Value::as_str) == Some(form.form_name()));
+            if is_provider {
+                let message_id = action
+                    .value
+                    .pointer("/context/open_message_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let out = form
+                    .handle(
+                        key,
+                        payload.as_ref().unwrap_or(&Value::Null),
+                        &BTreeMap::new(),
+                        message_id,
+                    )
+                    .await;
+                self.emit(out).await;
+                return;
+            }
+        }
         // If the session is gone (process exited / daemon restarted), the
         // permission reply has nowhere to go — tell the user instead of sending
         // a command into the void.
@@ -213,6 +276,15 @@ impl RouterHandle {
                 root_id: None,
             })
             .await;
+        }
+    }
+
+    /// `/provider`：打开 provider CRUD 列表卡（展示当前 provider +
+    /// 新增/编辑/删除按钮）。未接线时退回帮助。
+    async fn on_provider(&self, key: SessionKey) {
+        match &self.provider_form {
+            Some(form) => self.emit(form.open(key).await).await,
+            None => self.emit(Out::HelpText { key }).await,
         }
     }
 
@@ -335,7 +407,6 @@ impl RouterHandle {
         })
         .await;
     }
-
     pub async fn handle_settings(
         &self,
         key: SessionKey,

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub enum FeishuIn {
@@ -15,6 +16,18 @@ pub enum FeishuIn {
     ButtonCb {
         key: SessionKey,
         action: CardAction,
+    },
+    /// Form-container submission: the user filled a `form` container and
+    /// clicked its submit button. `value` is the submit button's custom
+    /// payload (`behaviors[].value`), `form_value` maps component `name` to
+    /// the submitted value, and `message_id` is the card's
+    /// `context.open_message_id` so the handler can flip the card in place
+    /// after processing (see `router::crud`).
+    FormCb {
+        key: SessionKey,
+        value: serde_json::Value,
+        form_value: BTreeMap<String, serde_json::Value>,
+        message_id: Option<String>,
     },
 }
 
@@ -113,6 +126,38 @@ impl FeishuEnvelope {
                 pick("/action/value/session_id", "/action/session_id").unwrap_or_default();
             let request_id = pick("/action/value/request_id", "/action/request_id");
             let decision = pick("/action/value/decision", "/action/decision");
+            // Form-container submissions carry `action.form_value`; plain
+            // button clicks never do. Discriminate on the key's presence so
+            // even an all-optional empty submission routes as a form.
+            let has_form_value = self.event.pointer("/action/form_value").is_some();
+            if has_form_value {
+                let form_value = self
+                    .event
+                    .pointer("/action/form_value")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|m| {
+                        m.iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                let value = self
+                    .event
+                    .pointer("/action/value")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let message_id = self
+                    .event
+                    .pointer("/context/open_message_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                return Some(FeishuIn::FormCb {
+                    key: SessionKey { chat_id, thread_id },
+                    value,
+                    form_value,
+                    message_id,
+                });
+            }
             return Some(FeishuIn::ButtonCb {
                 key: SessionKey { chat_id, thread_id },
                 action: CardAction {

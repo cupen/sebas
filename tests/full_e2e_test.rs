@@ -24,7 +24,7 @@ fn workspace_target() -> PathBuf {
 
 #[tokio::test]
 async fn dispatch_text_drives_bridge_to_finished_emoji() {
-    let fake = workspace_target().join("fake-claude");
+    let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     assert!(fake.exists(), "missing build artifact {}", fake.display());
 
     // Build the same shape `run()` constructs (run.rs:43–49).
@@ -138,7 +138,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
 /// `ticker.tick()`.
 #[tokio::test]
 async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
-    let fake = workspace_target().join("fake-claude");
+    let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     assert!(fake.exists());
 
     let map = SessionMap::new();
