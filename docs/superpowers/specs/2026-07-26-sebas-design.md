@@ -300,8 +300,8 @@ owner_id = "ou_xxx"
 | `[router] max_concurrent_sessions` | `32` | 超出时新飞书消息回 "系统繁忙" 卡片，不创建新 session |
 | `[card] theme_color` | `"blue"` | |
 | `[card] max_user_text_chars` | `4000` | |
-| `[card] max_tool_output_chars` | `2000` | |
-| `[card] fold_long_output` | `true` | |
+| `[card] max_tool_output_chars` | `1024` | tool result 软上限：超过则折叠进 collapsible_panel；`0` = 不输出 tool call 结果内容 |
+| `[card] fold_long_output` | `true` | true：长内容折叠（原生 collapsible_panel，默认折叠）；false：内联全文（仍受 10240 硬上限约束） |
 | `[media] download_dir` | `"~/.cache/sebas/downloads"` | |
 | `[media] max_file_size` | `52428800` | 50 MB |
 | `[log] level` | `"info"` | trace / debug / info / warn / error |

@@ -23,10 +23,16 @@ pub fn phase_visual(phase: &str) -> &str {
 pub struct CardConfig {
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
+    /// 单元素文本软上限：超过则截断 + 追加灰注（(已折叠 N 字)）。
     #[serde(default = "default_max_user_text")]
     pub max_user_text_chars: usize,
+    /// tool result 软上限：超过该值（且 fold_long_output=true）折叠进
+    /// collapsible_panel，完整内容保留；0 = 完全不输出 tool call 的结果内容。
+    /// 代码另有 10240 硬上限兜底，配置无法放宽。
     #[serde(default = "default_max_tool_output")]
     pub max_tool_output_chars: usize,
+    /// true：长内容折叠（tool result 用原生 collapsible_panel，默认折叠）；
+    /// false：不折叠，全文内联展示（仍受 10240 硬上限约束）。
     #[serde(default = "default_true")]
     pub fold_long_output: bool,
 }
@@ -49,7 +55,7 @@ fn default_max_user_text() -> usize {
     4000
 }
 fn default_max_tool_output() -> usize {
-    2000
+    1024
 }
 fn default_true() -> bool {
     true
@@ -98,6 +104,10 @@ pub enum CardElement {
         r#type: String,
         behaviors: Vec<CardBehavior>,
     },
+    /// Card JSON 2.0 `collapsible_panel` container: secondary/long content
+    /// behind a tappable header. Defaults to collapsed; Feishu renders it on
+    /// client V7.9+ (older clients show an upgrade placeholder instead).
+    CollapsiblePanel(CollapsiblePanel),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +140,31 @@ pub struct CardButton {
     pub text: CardText,
     pub r#type: String, // "primary" | "danger" | "default"
     pub value: Value,
+}
+
+/// V2 `collapsible_panel` container. `expanded=false` renders the panel
+/// folded; tapping the header toggles it in the client.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollapsiblePanel {
+    pub expanded: bool,
+    pub header: CollapsiblePanelHeader,
+    pub elements: Vec<CardElement>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollapsiblePanelHeader {
+    pub title: CardText,
+    pub icon: StandardIcon,
+    pub icon_position: String,
+    pub icon_expanded_angle: i32,
+}
+
+/// Icon library reference (`standard_icon`) used in panel headers.
+#[derive(Debug, Clone, Serialize)]
+pub struct StandardIcon {
+    pub tag: String,
+    pub token: String,
+    pub size: String,
 }
 
 impl Serialize for CardElement {
@@ -165,6 +200,21 @@ impl Serialize for CardElement {
                 s.serialize_field("text", text)?;
                 s.serialize_field("type", r#type.as_str())?;
                 s.serialize_field("behaviors", behaviors)?;
+                s.end()
+            }
+            CardElement::CollapsiblePanel(panel) => {
+                let mut s = ser.serialize_struct("CardElement", 7)?;
+                s.serialize_field("tag", "collapsible_panel")?;
+                s.serialize_field("expanded", &panel.expanded)?;
+                s.serialize_field("header", &panel.header)?;
+                s.serialize_field("elements", &panel.elements)?;
+                // 与官方示例一致的浅边框 + 内边距，让折叠面板在卡片里可辨。
+                s.serialize_field(
+                    "border",
+                    &serde_json::json!({ "color": "grey", "corner_radius": "5px" }),
+                )?;
+                s.serialize_field("vertical_spacing", "8px")?;
+                s.serialize_field("padding", "8px 8px 8px 8px")?;
                 s.end()
             }
         }

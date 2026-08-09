@@ -138,7 +138,7 @@ fn fold_disabled_skips_truncation() {
 }
 
 #[test]
-fn long_toolend_result_truncated() {
+fn long_toolend_result_folded_into_collapsible_panel() {
     let mut body = vec![];
     let big = "x".repeat(20);
     apply_event_to_card(
@@ -150,8 +150,93 @@ fn long_toolend_result_truncated() {
         },
         &cfg_small(),
     );
-    // ToolEnd.result 截断到 5 + 灰注，共 2 个元素。
-    assert_eq!(body.len(), 2);
+    // 超过软上限(5) -> 单个默认折叠的 collapsible_panel，全文保留（20 字）。
+    assert_eq!(body.len(), 1);
+    match &body[0] {
+        CardElement::CollapsiblePanel(panel) => {
+            assert!(!panel.expanded, "默认折叠");
+            assert_eq!(panel.elements.len(), 1);
+            match &panel.elements[0] {
+                CardElement::Markdown { content } => assert_eq!(content.chars().count(), 20),
+                other => panic!("expected Markdown, got {other:?}"),
+            }
+        }
+        other => panic!("expected CollapsiblePanel, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_end_zero_suppresses_result_output() {
+    let mut body = vec![];
+    let c = CardConfig {
+        max_tool_output_chars: 0,
+        ..cfg_small()
+    };
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolEnd {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            result: "whatever".into(),
+        },
+        &c,
+    );
+    assert!(body.is_empty(), "0 = 不输出 tool call 结果内容");
+}
+
+#[test]
+fn tool_end_hard_limit_truncates_inside_panel() {
+    let mut body = vec![];
+    let big = "y".repeat(10240 + 10);
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolEnd {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            result: big,
+        },
+        &cfg_small(),
+    );
+    match &body[0] {
+        CardElement::CollapsiblePanel(panel) => {
+            // 硬上限 10240：面板内是截断后的内容 + 截断灰注。
+            assert_eq!(panel.elements.len(), 2);
+            match &panel.elements[0] {
+                CardElement::Markdown { content } => assert_eq!(content.chars().count(), 10240),
+                other => panic!("expected Markdown, got {other:?}"),
+            }
+            match &panel.elements[1] {
+                CardElement::Div { text } => assert!(text.content.contains("已截断 10 字")),
+                other => panic!("expected truncation note, got {other:?}"),
+            }
+        }
+        other => panic!("expected CollapsiblePanel, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_end_fold_disabled_shows_full_content_inline() {
+    let mut body = vec![];
+    let big = "z".repeat(20);
+    let c = CardConfig {
+        fold_long_output: false,
+        ..cfg_small()
+    };
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolEnd {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            result: big,
+        },
+        &c,
+    );
+    // 不折叠：单条灰注内联，全文保留（仍受 10240 硬上限保护）。
+    assert_eq!(body.len(), 1);
+    match &body[0] {
+        CardElement::Div { text } => assert!(text.content.contains(&"z".repeat(20))),
+        other => panic!("expected Div note, got {other:?}"),
+    }
 }
 
 #[test]

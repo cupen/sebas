@@ -4,10 +4,13 @@
 //! 事件到卡片的翻译放在 router，避免 feishu 反向依赖 acp-claude。
 
 use acp_claude::session::AcpEvent;
-use feishu::cards::{CardConfig, CardElement, DivText};
+use feishu::cards::{
+    CardConfig, CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, DivText,
+    StandardIcon,
+};
 
 /// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
-/// 单元素截断（max_user_text_chars / max_tool_output_chars + fold_long_output）
+/// 单元素截断/折叠（max_user_text_chars / max_tool_output_chars + fold_long_output）
 /// + 总量兜底（24000 丢旧，Hr 连后一个一起丢）。PermissionRequest 不累积（走独立 SendCard）。
 pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &CardConfig) {
     match event {
@@ -36,14 +39,7 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
         }
         AcpEvent::ToolEnd {
             tool_name, result, ..
-        } => {
-            let (text, note) =
-                truncate_with_note(result, cfg.max_tool_output_chars, cfg.fold_long_output);
-            body.push(note_element(format!("✓ {tool_name} done: {text}")));
-            if let Some(n) = note {
-                body.push(note_element(format!("（已折叠 {n} 字）")));
-            }
-        }
+        } => push_tool_end_result(body, tool_name, result, cfg),
         AcpEvent::ToolProgress {
             tool_name,
             progress,
@@ -96,6 +92,80 @@ fn note_element(content: String) -> CardElement {
     }
 }
 
+/// ToolEnd 结果渲染：
+/// - `max_tool_output_chars == 0`：完全不输出 tool call 的结果内容；
+/// - 结果 <= 软上限：沿用灰注 `✓ {tool} done: ...`；
+/// - 结果 > 软上限（且 fold_long_output=true）：装进默认折叠的
+///   `collapsible_panel`，完整内容保留（超出 10240 硬上限才截断）；
+/// - fold_long_output=false：不折叠，全文内联展示（仍受硬上限保护）。
+fn push_tool_end_result(
+    body: &mut Vec<CardElement>,
+    tool_name: &str,
+    result: &str,
+    cfg: &CardConfig,
+) {
+    if cfg.max_tool_output_chars == 0 {
+        return;
+    }
+    let content = cap_chars(result, TOOL_RESULT_HARD_LIMIT_CHARS);
+    let overflow = result
+        .chars()
+        .count()
+        .saturating_sub(content.chars().count());
+    if cfg.fold_long_output && result.chars().count() > cfg.max_tool_output_chars {
+        let mut elements = vec![];
+        // 多行输出用代码围栏包住，避免在 markdown 里被重排。
+        if content.contains('\n') {
+            elements.push(CardElement::Markdown {
+                content: format!("```\n{content}\n```"),
+            });
+        } else {
+            elements.push(CardElement::Markdown {
+                content: content.clone(),
+            });
+        }
+        if overflow > 0 {
+            elements.push(note_element(format!("（已截断 {overflow} 字）")));
+        }
+        body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+            expanded: false,
+            header: CollapsiblePanelHeader {
+                title: CardText {
+                    tag: "plain_text".into(),
+                    content: format!("✓ {tool_name} 输出"),
+                },
+                icon: StandardIcon {
+                    tag: "standard_icon".into(),
+                    token: "down-small-ccm_outlined".into(),
+                    size: "16px 16px".into(),
+                },
+                icon_position: "right".into(),
+                icon_expanded_angle: -180,
+            },
+            elements,
+        }));
+        return;
+    }
+    body.push(note_element(format!("✓ {tool_name} done: {content}")));
+    if overflow > 0 {
+        body.push(note_element(format!("（已截断 {overflow} 字）")));
+    }
+}
+
+/// 代码级硬上限：单次 tool result 在卡片里最多展示的字符数。
+/// 软上限（max_tool_output_chars）只决定“多长才折叠”，硬上限不管配置如何
+/// 都生效，防止异常输出把整张卡片撑爆。
+const TOOL_RESULT_HARD_LIMIT_CHARS: usize = 10240;
+
+/// 按字符数截取（UTF-8 安全），返回不超过 `limit` 字符的前缀。
+fn cap_chars(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit {
+        s.to_string()
+    } else {
+        s.chars().take(limit).collect()
+    }
+}
+
 /// 总量兜底（spec §7）：body 累积字符 > 24000 -> 丢最旧；最旧是 Hr 则连后一个一起丢。
 fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
     const TOTAL_BUDGET: usize = 24000;
@@ -113,11 +183,14 @@ fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
 }
 
 fn total_chars(body: &[CardElement]) -> usize {
-    body.iter()
-        .map(|e| match e {
-            CardElement::Markdown { content } => content.chars().count(),
-            CardElement::Div { text } => text.content.chars().count(),
-            _ => 0,
-        })
-        .sum()
+    body.iter().map(element_chars).sum()
+}
+
+fn element_chars(el: &CardElement) -> usize {
+    match el {
+        CardElement::Markdown { content } => content.chars().count(),
+        CardElement::Div { text } => text.content.chars().count(),
+        CardElement::CollapsiblePanel(panel) => panel.elements.iter().map(element_chars).sum(),
+        _ => 0,
+    }
 }
