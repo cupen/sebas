@@ -19,7 +19,7 @@ pub fn phase_visual(phase: &str) -> &str {
 
 /// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
 /// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CardConfig {
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
@@ -36,6 +36,27 @@ pub struct CardConfig {
     /// false：不折叠，全文内联展示（结果仍受 10240 硬上限约束）。
     #[serde(default = "default_true")]
     pub fold_long_output: bool,
+    #[serde(default)]
+    pub thinking: ThinkingDisplay,
+}
+
+/// How to render the model's `thinking` content into the Feishu card.
+/// `disable` is intentionally not exposed — reserved for a future
+/// feature that would also turn off thinking tokens at the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    /// Fold each thinking burst into a collapsible_panel (default).
+    Show,
+    /// Drop ThinkingDelta events from the card body entirely. The model
+    /// still produces thinking tokens; we just don't surface them.
+    Hide,
+}
+
+impl Default for ThinkingDisplay {
+    fn default() -> Self {
+        Self::Show
+    }
 }
 
 impl Default for CardConfig {
@@ -44,7 +65,8 @@ impl Default for CardConfig {
             theme_color: default_theme_color(),
             max_user_text_chars: default_max_user_text(),
             max_tool_output_chars: default_max_tool_output(),
-            fold_long_output: true,
+            fold_long_output: default_true(),
+            thinking: ThinkingDisplay::default(),
         }
     }
 }

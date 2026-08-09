@@ -1,6 +1,33 @@
 use feishu::cards::{render_permission_card, render_root_card};
 
 #[test]
+fn card_config_thinking_default_is_show() {
+    let cfg = feishu::cards::CardConfig::default();
+    assert_eq!(cfg.thinking, feishu::cards::ThinkingDisplay::Show);
+}
+
+#[test]
+fn card_config_serializes_thinking_as_lowercase() {
+    let cfg = feishu::cards::CardConfig::default();
+    let v = serde_json::to_value(&cfg).unwrap();
+    assert_eq!(v["thinking"], "show");
+}
+
+#[test]
+fn card_config_deserializes_thinking_from_lowercase() {
+    let v = serde_json::json!({ "thinking": "hide" });
+    let cfg: feishu::cards::CardConfig = serde_json::from_value(v).unwrap();
+    assert_eq!(cfg.thinking, feishu::cards::ThinkingDisplay::Hide);
+}
+
+#[test]
+fn card_config_rejects_unknown_thinking_value() {
+    let v = serde_json::json!({ "thinking": "disable" });
+    let res: Result<feishu::cards::CardConfig, _> = serde_json::from_value(v);
+    assert!(res.is_err(), "disable is not exposed yet, must fail to parse");
+}
+
+#[test]
 fn root_card_initial_snapshot() {
     let card = render_root_card("重构 src/foo.rs", "msg_1", "👀");
     insta::assert_yaml_snapshot!(card);
