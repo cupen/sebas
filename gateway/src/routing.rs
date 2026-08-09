@@ -6,8 +6,9 @@
 //!   `extract_model_from_path`：路由层公共辅助。
 //!
 //! 优先级（高 → 低）：`provider/model` 命名空间（provider 须存在，否则按普通
-//! model 名继续走）> 精确 > glob（按 `routes` 配置序取首命中）> key 级默认 >
-//! 全局默认。model 缺失（GET 类）直接走默认链，`upstream_model` 为 `None`。
+//! model 名继续走）> 精确 > glob（routes 按 model 名排序，glob 撞车取字典序
+//! 首个命中；每个路由组内 provider 数组顺序即优先级，当前取第一个）> key 级
+//! 默认 > 全局默认。model 缺失（GET 类）直接走默认链，`upstream_model` 为 `None`。
 //!
 //! 协议一致性：解析到的 `provider.protocol` ≠ 请求 `proto` → `ProtocolMismatch`，
 //! 纯透传，不做协议转换。
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::config::{GatewayConfig, KeyConfig, ProviderConfig, RouteRule};
+use crate::config::{GatewayConfig, KeyConfig, ProviderConfig, RouteGroup};
 use crate::proto::Protocol;
 
 /// 路由解析错误（spec §4.2）。proxy 按变体映射 HTTP 状态：
@@ -46,8 +47,11 @@ pub struct RouteDecision {
 #[derive(Debug, Clone)]
 pub struct RouteTable {
     providers: HashMap<String, ProviderConfig>,
-    routes: Vec<RouteRule>,
+    routes: Vec<RouteGroup>,
     default_provider: Option<String>,
+    /// debug 模式：内置 `test` provider 由 gateway 自身应答，绕过
+    /// allow_models 门禁与协议一致性检查（双协议面都可命中）。
+    debug: bool,
 }
 
 impl RouteTable {
@@ -65,6 +69,7 @@ impl RouteTable {
             providers: cfg.providers.clone(),
             routes: cfg.routes.clone(),
             default_provider,
+            debug: cfg.debug,
         }
     }
 
@@ -85,7 +90,7 @@ impl RouteTable {
             && let Some(m) = model
         {
             let allowed = k.allow_models.iter().any(|p| glob_match(p, m));
-            if !allowed {
+            if !allowed && !(self.debug && m == "test") {
                 return Err(RouteError::ModelNotAllowed);
             }
         }
@@ -119,7 +124,7 @@ impl RouteTable {
             .providers
             .get(&provider_name)
             .expect("provider existence guaranteed by from_config mirror + config::validate");
-        if provider_cfg.protocol != proto {
+        if provider_cfg.protocol != proto && !(self.debug && provider_name == "test") {
             return Err(RouteError::ProtocolMismatch {
                 provider: provider_name,
             });
@@ -140,17 +145,23 @@ impl RouteTable {
         })
     }
 
-    /// 按 `routes` 配置序匹配 model。精确优先于 glob：先扫一遍精确相等，
-    /// 再扫一遍 glob 命中；各自取首个命中。无命中 → `None`。
+    /// 按 routes 匹配 model：先精确、后 glob（routes 已按 model 名排序，
+    /// glob 撞车时字典序首个命中）。每个路由组取 provider 数组第一个（主）。
+    /// 无命中 → `None`。
     fn match_route(&self, model: &str) -> Option<&str> {
         for r in &self.routes {
             if r.model == model {
-                return Some(&r.provider);
+                // TODO(故障转移): provider 数组已按优先级排好（先 = 主），
+                // 当前只取第一个；实现时改为「主失败（网络/5xx）按序切换
+                // 下一个」，并注意 SSE 只能在响应头发出前切换、超时预算、
+                // usage 结算语义。
+                return r.providers.first().map(String::as_str);
             }
         }
         for r in &self.routes {
             if r.model.contains('*') && glob_match(&r.model, model) {
-                return Some(&r.provider);
+                // TODO(故障转移): 同上一处，glob 命中后同样只取主 provider。
+                return r.providers.first().map(String::as_str);
             }
         }
         None
@@ -220,7 +231,7 @@ pub fn extract_model_from_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GatewayConfig, KeyConfig, ProviderConfig, RouteRule};
+    use crate::config::{GatewayConfig, KeyConfig, ProviderConfig, RouteGroup};
     use crate::proto::Protocol;
     use axum::body::Bytes;
     use std::collections::HashMap;
@@ -229,7 +240,7 @@ mod tests {
     /// 与 config.rs 的 env-lock 测试串行约束耦合）。
     fn build_cfg(
         providers: HashMap<String, ProviderConfig>,
-        routes: &[(&str, &str)],
+        routes: &[(&str, &[&str])],
         default: Option<&str>,
         keys: Vec<KeyConfig>,
     ) -> GatewayConfig {
@@ -239,14 +250,15 @@ mod tests {
             connect_timeout_secs: 10,
             read_timeout_secs: 600,
             usage_file: "/tmp/sebas-gateway-usage.jsonl".into(),
+            debug: false,
             default_provider: default.map(String::from),
             keys,
             providers,
             routes: routes
                 .iter()
-                .map(|(m, p)| RouteRule {
+                .map(|(m, ps)| RouteGroup {
                     model: (*m).to_string(),
-                    provider: (*p).to_string(),
+                    providers: ps.iter().map(|p| (*p).to_string()).collect(),
                 })
                 .collect(),
         }
@@ -357,7 +369,7 @@ mod tests {
                 ("anthropic", Protocol::Anthropic),
                 ("openai", Protocol::OpenAi),
             ]),
-            &[("foo/claude-sonnet", "openai")],
+            &[("foo/claude-sonnet", &["openai"])],
             Some("anthropic"),
             vec![],
         );
@@ -381,7 +393,7 @@ mod tests {
                 ("anthropic", Protocol::Anthropic),
                 ("openai", Protocol::OpenAi),
             ]),
-            &[("claude-*", "anthropic"), ("claude-sonnet", "openai")],
+            &[("claude-*", &["anthropic"]), ("claude-sonnet", &["openai"])],
             None,
             vec![],
         );
@@ -390,6 +402,25 @@ mod tests {
             .resolve(Some("claude-sonnet"), Protocol::OpenAi, None)
             .expect("exact should match");
         assert_eq!(d.provider, "openai");
+    }
+
+    #[test]
+    fn route_provider_array_priority_takes_first() {
+        // 同一 model 的 provider 数组顺序 = 优先级：取第一个。
+        let cfg = build_cfg(
+            simple_providers(&[
+                ("deepseek", Protocol::Anthropic),
+                ("ark", Protocol::Anthropic),
+            ]),
+            &[("deepseek-chat", &["deepseek", "ark"])],
+            None,
+            vec![],
+        );
+        let table = RouteTable::from_config(&cfg);
+        let d = table
+            .resolve(Some("deepseek-chat"), Protocol::Anthropic, None)
+            .expect("deepseek-chat should resolve");
+        assert_eq!(d.provider, "deepseek", "first provider in array must win");
     }
 
     #[test]
@@ -421,7 +452,7 @@ mod tests {
         // route claude-* → anthropic（Anthropic）。请求协议 OpenAi → 不一致。
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
-            &[("claude-*", "anthropic")],
+            &[("claude-*", &["anthropic"])],
             None,
             vec![],
         );
@@ -516,7 +547,7 @@ mod tests {
                 ("anthropic", Protocol::Anthropic),
                 ("openai", Protocol::OpenAi),
             ]),
-            &[("claude-*", "anthropic"), ("gpt-*", "openai")],
+            &[("claude-*", &["anthropic"]), ("gpt-*", &["openai"])],
             Some("anthropic"),
             vec![key_with(&["claude-*"], None)],
         );

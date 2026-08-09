@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
                 )
             });
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let gateway_cfg = if run.gateway {
+            let mut gateway_cfg = if run.gateway {
                 Some(
                     gateway::config::GatewayConfig::parse(&raw)
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
@@ -60,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            if run.debug
+                && let Some(c) = gateway_cfg.as_mut()
+            {
+                c.enable_debug_test_provider();
+            }
             sebas::run::run(cfg, run.test_msg, run.dump_inbound, gateway_cfg)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -101,7 +106,10 @@ impl From<RecordArgs> for sebas::record::RecordArgs {
 
 impl From<GatewayArgs> for sebas::gateway_cmd::GatewayArgs {
     fn from(a: GatewayArgs) -> Self {
-        Self { config: a.config }
+        Self {
+            config: a.config,
+            debug: a.debug,
+        }
     }
 }
 
@@ -172,5 +180,15 @@ mod tests {
             panic!("expected Gateway subcommand");
         };
         assert_eq!(args.config, "x.toml");
+    }
+
+    #[test]
+    fn gateway_subcommand_accepts_debug_flag() {
+        let cli = Cli::try_parse_from(["sebas", "gateway", "--debug", "-c", "x.toml"])
+            .expect("`sebas gateway --debug -c <path>` must parse");
+        let Cmd::Gateway(args) = cli.cmd else {
+            panic!("expected Gateway subcommand");
+        };
+        assert!(args.debug, "--debug flag must be captured");
     }
 }

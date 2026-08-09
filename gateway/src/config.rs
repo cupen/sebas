@@ -1,7 +1,7 @@
 //! gateway 配置模型与解析（spec §3）。
 //!
-//! provider 有两个等价位置：顶层 `[provider.<name>]`（推荐，可与 run 共用）与
-//! `[gateway.providers.<name>]`（兼容旧写法；同名时后者覆盖前者）。
+//! provider 统一放在顶层 `[provider.<name>]`（run 与 gateway 共用），不再支持
+//! 复数 `[providers.*]` 或 `[gateway.providers.*]` 旧写法。
 //! 只有顶层 provider、无 `[gateway]` 段时，其余字段全部走默认值。
 //!
 //! provider 支持「名称即 preset」（可选显式 `preset = "..."` 别名）：
@@ -24,12 +24,11 @@ use crate::proto::Protocol;
 /// provider 采用「raw → resolved」两段解析：TOML 先落到 `RawGatewayConfig`
 /// （provider 字段全 Option），再经 `resolve_providers` 应用 preset 得到对外
 /// `GatewayConfig`。对外结构不含 preset 痕迹，routing/proxy 零改动。
-/// 顶层 `[provider.*]` 与 `[gateway.providers.*]` 在此合并（后者同名覆盖）。
 #[derive(Deserialize)]
 struct GatewayFile {
     #[serde(default)]
     gateway: Option<RawGatewayConfig>,
-    /// 顶层 provider 表（推荐写法）：`[provider.<name>]`，与 `run` 共用。
+    /// 顶层 provider 表（唯一写法）：`[provider.<name>]`，与 `run` 共用。
     #[serde(default)]
     provider: HashMap<String, RawProviderConfig>,
 }
@@ -46,6 +45,9 @@ pub struct GatewayConfig {
     pub read_timeout_secs: u64,
     #[serde(default = "default_usage_file")]
     pub usage_file: String,
+    /// debug 模式（`--debug` 启动参数触发，parse 后注入内置 test provider）：
+    /// 由 gateway 自身应答（固定文字 + 回显输入），不转发外部上游。
+    pub debug: bool,
     #[serde(default)]
     pub default_provider: Option<String>,
     #[serde(default)]
@@ -53,7 +55,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
-    pub routes: Vec<RouteRule>,
+    pub routes: Vec<RouteGroup>,
 }
 
 fn default_listen() -> String {
@@ -112,11 +114,13 @@ pub struct ProviderConfig {
     pub model_map: HashMap<String, String>,
 }
 
-/// 路由规则：按序匹配 model（glob），命中后转发到 `provider`。
+/// 路由：model（可含 glob）→ 有序 provider 列表。数组顺序即优先级，
+/// 第一个为主 provider；后续为备选。
+/// TODO(故障转移): 当前路由只取第一个，切换逻辑见 routing.rs 的 TODO。
 #[derive(Debug, Clone, Deserialize)]
-pub struct RouteRule {
+pub struct RouteGroup {
     pub model: String,
-    pub provider: String,
+    pub providers: Vec<String>,
 }
 
 /// TOML 原始形态的 `[gateway]` 段：字段全 Option / 默认值，供 preset 解析。
@@ -138,9 +142,8 @@ struct RawGatewayConfig {
     #[serde(default)]
     keys: Vec<KeyConfig>,
     #[serde(default)]
-    providers: HashMap<String, RawProviderConfig>,
-    #[serde(default)]
-    routes: Vec<RouteRule>,
+    /// `[gateway.routes]`：`model = ["provider", ...]`，数组顺序 = 优先级。
+    routes: HashMap<String, Vec<String>>,
 }
 
 /// TOML 原始形态的 provider 段：字段全 Option，preset 填充后再收敛成
@@ -254,7 +257,7 @@ fn resolve_providers(
             None => {
                 let protocol = r.protocol.ok_or_else(|| {
                     GatewayError::Config(format!(
-                        "gateway.providers.{name}.protocol 不能为空（自定义 provider 无 preset，需显式 protocol）"
+                        "provider.{name}.protocol 不能为空（自定义 provider 无 preset，需显式 protocol）"
                     ))
                 })?;
                 let base_url = r.base_url.unwrap_or_default();
@@ -299,7 +302,7 @@ fn resolve_preset_protocol_base(
             (None, Some(_)) => Protocol::OpenAi,
             _ => {
                 return Err(GatewayError::Config(format!(
-                    "gateway.providers.{name}: preset '{preset_name}' 同时提供 anthropic/openai 端点，必须显式 protocol"
+                    "provider.{name}: preset '{preset_name}' 同时提供 anthropic/openai 端点，必须显式 protocol"
                 )));
             }
         },
@@ -312,7 +315,7 @@ fn resolve_preset_protocol_base(
         }
         .ok_or_else(|| {
             GatewayError::Config(format!(
-                "gateway.providers.{name}: preset '{preset_name}' 不提供 {} 端点",
+                "provider.{name}: preset '{preset_name}' 不提供 {} 端点",
                 protocol.as_str()
             ))
         })?
@@ -329,16 +332,9 @@ impl GatewayConfig {
         let file: GatewayFile =
             toml::from_str(raw).map_err(|e| GatewayError::Config(format!("toml parse: {e}")))?;
 
-        // provider 合并：顶层 `[provider.*]` 为基准，`[gateway.providers.*]`
-        // 同名覆盖（更具体的旧位置优先）。
-        let mut providers = file.provider;
-        let raw_cfg = match file.gateway {
-            Some(mut g) => {
-                providers.extend(g.providers.drain());
-                Some(g)
-            }
-            None => None,
-        };
+        // provider 唯一来源：顶层 `[provider.*]`。
+        let providers = file.provider;
+        let raw_cfg = file.gateway;
         if raw_cfg.is_none() && providers.is_empty() {
             return Err(GatewayError::Config(
                 "config 缺少 [gateway] 段或 [provider] 段".into(),
@@ -347,17 +343,29 @@ impl GatewayConfig {
         let providers = resolve_providers(providers)?;
 
         let mut cfg = match raw_cfg {
-            Some(g) => GatewayConfig {
-                listen: g.listen,
-                max_body_bytes: g.max_body_bytes,
-                connect_timeout_secs: g.connect_timeout_secs,
-                read_timeout_secs: g.read_timeout_secs,
-                usage_file: g.usage_file,
-                default_provider: g.default_provider,
-                keys: g.keys,
-                providers,
-                routes: g.routes,
-            },
+            Some(g) => {
+                // `[gateway.routes]` map → 有序 RouteGroup 列表。TOML map 本身
+                // 无配置序保证，按 model 名排序保证确定性（glob 撞车时字典序
+                // 首个命中；精确键天然唯一）。
+                let mut routes: Vec<RouteGroup> = g
+                    .routes
+                    .into_iter()
+                    .map(|(model, providers)| RouteGroup { model, providers })
+                    .collect();
+                routes.sort_by(|a, b| a.model.cmp(&b.model));
+                GatewayConfig {
+                    listen: g.listen,
+                    max_body_bytes: g.max_body_bytes,
+                    connect_timeout_secs: g.connect_timeout_secs,
+                    read_timeout_secs: g.read_timeout_secs,
+                    usage_file: g.usage_file,
+                    debug: false,
+                    default_provider: g.default_provider,
+                    keys: g.keys,
+                    providers,
+                    routes,
+                }
+            }
             // 只有顶层 `[provider.*]`：无 [gateway] 段，其余字段全部走默认。
             None => GatewayConfig {
                 listen: default_listen(),
@@ -365,6 +373,7 @@ impl GatewayConfig {
                 connect_timeout_secs: default_connect_timeout_secs(),
                 read_timeout_secs: default_read_timeout_secs(),
                 usage_file: default_usage_file(),
+                debug: false,
                 default_provider: None,
                 keys: Vec::new(),
                 providers,
@@ -388,12 +397,12 @@ impl GatewayConfig {
 
     fn validate(&self) -> Result<()> {
         if self.providers.is_empty() {
-            return Err(GatewayError::Config("gateway.providers 不能为空".into()));
+            return Err(GatewayError::Config("provider 不能为空".into()));
         }
         for (name, p) in &self.providers {
             if p.base_url.is_empty() {
                 return Err(GatewayError::Config(format!(
-                    "gateway.providers.{name}.base_url 不能为空"
+                    "provider.{name}.base_url 不能为空"
                 )));
             }
         }
@@ -405,11 +414,19 @@ impl GatewayConfig {
             )));
         }
         for r in &self.routes {
-            if !self.providers.contains_key(&r.provider) {
+            if r.providers.is_empty() {
                 return Err(GatewayError::Config(format!(
-                    "gateway.routes 引用了未定义的 provider '{}'",
-                    r.provider
+                    "gateway.routes.{} 的 provider 列表不能为空",
+                    r.model
                 )));
+            }
+            for p in &r.providers {
+                if !self.providers.contains_key(p) {
+                    return Err(GatewayError::Config(format!(
+                        "gateway.routes.{} 引用了未定义的 provider '{p}'",
+                        r.model
+                    )));
+                }
             }
         }
         let mut seen: HashMap<&str, usize> = HashMap::new();
@@ -468,6 +485,9 @@ impl GatewayConfig {
             } else if let Some(env_var) = &k.key_env {
                 match std::env::var(env_var) {
                     Ok(v) if !v.is_empty() => v,
+                    // debug 模式：缺失/空 env 的 key 直接跳过，不阻塞启动
+                    // （debug 下鉴权本身也跳过，见 auth.rs）。
+                    _ if self.debug => continue,
                     _ => {
                         return Err(GatewayError::Config(format!(
                             "gateway.keys[{i}].key_env 指向的环境变量 '{env_var}' 未设置或为空"
@@ -500,12 +520,16 @@ impl GatewayConfig {
     pub fn resolve_api_keys(&self) -> Result<HashMap<String, String>> {
         let mut out = HashMap::with_capacity(self.providers.len());
         for (name, p) in &self.providers {
+            // 内置 test provider（debug 模式注入）不触达外部上游，无需 key。
+            if self.debug && name == "test" {
+                continue;
+            }
             let key = if let Some(env_var) = &p.api_key_env {
                 match std::env::var(env_var) {
                     Ok(v) if !v.is_empty() => v,
                     _ => {
                         return Err(GatewayError::Config(format!(
-                            "gateway.providers.{name}.api_key_env 指向的环境变量 '{env_var}' 未设置或为空"
+                            "provider.{name}.api_key_env 指向的环境变量 '{env_var}' 未设置或为空"
                         )));
                     }
                 }
@@ -516,12 +540,44 @@ impl GatewayConfig {
                 plain.clone()
             } else {
                 return Err(GatewayError::Config(format!(
-                    "gateway.providers.{name} 未配置 api_key_env 或 api_key"
+                    "provider.{name} 未配置 api_key_env 或 api_key"
                 )));
             };
             out.insert(name.clone(), key);
         }
         Ok(out)
+    }
+
+    /// `--debug`：配置解析完成后注入内置 test provider——provider 名 `test`、
+    /// base_url 指向 gateway 自身（哨兵值，不实际拨号），并加一条
+    /// `test → test` 路由（插到路由表最前，debug 模式下优先于用户配置）。
+    /// 路由命中后由 proxy 短路应答，见 `test_provider` 模块。
+    pub fn enable_debug_test_provider(&mut self) {
+        self.debug = true;
+        tracing::debug!("debug mode: injecting built-in test provider");
+        self.providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                protocol: Protocol::Anthropic,
+                base_url: "gateway://self".to_string(),
+                api_key_env: None,
+                api_key: None,
+                model_map: HashMap::new(),
+            },
+        );
+        if !self
+            .routes
+            .iter()
+            .any(|r| r.model == "test" && r.providers.len() == 1 && r.providers[0] == "test")
+        {
+            self.routes.insert(
+                0,
+                RouteGroup {
+                    model: "test".to_string(),
+                    providers: vec!["test".to_string()],
+                },
+            );
+        }
     }
 }
 
@@ -557,23 +613,19 @@ rpm = 600
 daily_token_quota = 50_000_000
 allow_models = ["claude-*", "deepseek-*"]
 
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[gateway.providers.deepseek]
+[provider.deepseek]
 protocol = "anthropic"
 base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
 
-[[gateway.routes]]
-model = "claude-*"
-provider = "anthropic"
-
-[[gateway.routes]]
-model = "deepseek-*"
-provider = "deepseek"
+[gateway.routes]
+"claude-*" = ["anthropic"]
+"deepseek-*" = ["deepseek"]
 "#;
 
     #[test]
@@ -609,7 +661,8 @@ provider = "deepseek"
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert_eq!(cfg.routes.len(), 2);
         assert_eq!(cfg.routes[0].model, "claude-*");
-        assert_eq!(cfg.routes[0].provider, "anthropic");
+        assert_eq!(cfg.routes[0].providers, vec!["anthropic"]);
+        assert_eq!(cfg.routes[1].providers, vec!["deepseek"]);
     }
 
     #[test]
@@ -666,13 +719,12 @@ provider = "deepseek"
 [gateway]
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
-[[gateway.routes]]
-model = "gpt-*"
-provider = "openai"
+[gateway.routes]
+"gpt-*" = ["openai"]
 "#;
         let err = GatewayConfig::parse(raw).expect_err("unknown provider should error");
         let msg = err.to_string();
@@ -695,7 +747,7 @@ provider = "openai"
 usage_file = "~/sebas/gateway-usage.jsonl"
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
@@ -724,11 +776,11 @@ api_key = "test-key"
 key = "sk-test"
 
 # 名称即 preset：只写 protocol，base_url/api_key_env 自动填充
-[gateway.providers.deepseek]
+[provider.deepseek]
 protocol = "anthropic"
 
 # 显式字段覆盖 preset 默认
-[gateway.providers.openai]
+[provider.openai]
 base_url = "http://localhost:9099/v1"
 api_key_env = "MY_OPENAI_KEY"
 "#;
@@ -758,7 +810,7 @@ api_key_env = "MY_OPENAI_KEY"
 [gateway]
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.deepseek]
+[provider.deepseek]
 "#;
         let err = GatewayConfig::parse(raw).expect_err("dual-protocol preset without protocol");
         let msg = err.to_string();
@@ -779,7 +831,7 @@ key = "sk-test"
 [gateway]
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.my-openai]
+[provider.my-openai]
 preset = "openai"
 "#;
         let cfg = GatewayConfig::parse(raw).expect("preset alias should parse");
@@ -800,7 +852,7 @@ preset = "openai"
 [gateway]
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.openai]
+[provider.openai]
 protocol = "anthropic"
 "#;
         let err = GatewayConfig::parse(raw).expect_err("openai preset with anthropic protocol");
@@ -822,7 +874,7 @@ protocol = "anthropic"
 [gateway]
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.my-custom]
+[provider.my-custom]
 base_url = "http://localhost:1234"
 "#;
         let err = GatewayConfig::parse(raw).expect_err("custom provider without protocol");
@@ -845,7 +897,7 @@ base_url = "http://localhost:1234"
 [gateway]
 [[gateway.keys]]
 key = "sk-test"
-[gateway.providers.anthropic]
+[provider.anthropic]
 api_key = "test-key"
 "#;
         let cfg = GatewayConfig::parse(raw).expect("preset + api_key should parse");
@@ -912,34 +964,32 @@ app_id = "x"
     }
 
     #[test]
-    fn gateway_providers_override_top_level_provider_on_name_collision() {
+    fn top_level_provider_table_with_explicit_base_url_and_plain_key() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
         }
+        // 顶层 `[provider.*]`：preset 自动填充 + 显式 base_url/api_key 覆盖。
         let raw = r#"
-[gateway]
-[[gateway.keys]]
-key = "sk-test"
-
 [provider.deepseek]
 protocol = "anthropic"
 
-[gateway.providers.deepseek]
-protocol = "openai"
-base_url = "http://localhost:9099/v1"
-api_key = "test-key"
+[provider.ark]
+protocol = "anthropic"
+base_url = "https://ark.cn-beijing.volces.com/api/plan"
+api_key = "test-ark-key"
 "#;
-        let cfg = GatewayConfig::parse(raw).expect("collision should parse");
+        let cfg = GatewayConfig::parse(raw).expect("top-level provider table should parse");
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.protocol, Protocol::OpenAi);
-        assert_eq!(ds.base_url, "http://localhost:9099/v1");
-        assert_eq!(ds.api_key.as_deref(), Some("test-key"));
-        assert_eq!(
-            ds.api_key_env, None,
-            "explicit api_key must win over preset default env"
-        );
+        assert_eq!(ds.protocol, Protocol::Anthropic);
+        assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+
+        let ark = cfg.providers.get("ark").expect("ark provider");
+        assert_eq!(ark.base_url, "https://ark.cn-beijing.volces.com/api/plan");
+        assert_eq!(ark.api_key.as_deref(), Some("test-ark-key"));
+        assert_eq!(ark.api_key_env, None);
     }
 
     // -------------------- key_env --------------------
@@ -957,7 +1007,7 @@ api_key = "test-key"
 [[gateway.keys]]
 key_env = "SEBAS_GATEWAY_TEST_KEY_ENV"
 name = "env-key"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
@@ -987,7 +1037,7 @@ api_key = "test-key"
 [gateway]
 [[gateway.keys]]
 key_env = "SEBAS_GATEWAY_TEST_MISSING_KEY"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
@@ -1017,7 +1067,7 @@ api_key = "test-key"
 [[gateway.keys]]
 key = "sk-plain"
 key_env = "SEBAS_GATEWAY_TEST_KEY_ENV"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
@@ -1040,7 +1090,7 @@ api_key = "test-key"
 [gateway]
 [[gateway.keys]]
 name = "no-key"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
@@ -1049,6 +1099,87 @@ api_key = "test-key"
         assert!(
             err.to_string().contains("key_env"),
             "error should mention key/key_env requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn enable_debug_test_provider_injects_test_provider_and_route() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key = "sk-test"
+[provider.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let mut cfg = GatewayConfig::parse(raw).expect("parse");
+        assert!(!cfg.debug);
+        cfg.enable_debug_test_provider();
+
+        assert!(cfg.debug);
+        let test = cfg.providers.get("test").expect("test provider injected");
+        assert_eq!(test.base_url, "gateway://self");
+        assert_eq!(test.api_key, None);
+        assert_eq!(test.api_key_env, None);
+        assert!(
+            cfg.routes
+                .iter()
+                .any(|r| r.model == "test" && r.providers.len() == 1 && r.providers[0] == "test"),
+            "test → test route must be injected"
+        );
+        assert_eq!(
+            cfg.routes[0].model, "test",
+            "debug route should lead the table"
+        );
+
+        // resolve_api_keys 跳过内置 test provider（不触达上游，无需 key）。
+        let keys = cfg.resolve_api_keys().expect("resolve_api_keys");
+        assert!(!keys.contains_key("test"));
+        assert!(keys.contains_key("anthropic"));
+
+        // 幂等：重复注入不产生重复路由。
+        cfg.enable_debug_test_provider();
+        assert_eq!(
+            cfg.routes
+                .iter()
+                .filter(|r| r.model == "test" && r.providers.len() == 1 && r.providers[0] == "test")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn debug_mode_skips_missing_key_env_at_resolve() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+            std::env::remove_var("SEBAS_GATEWAY_TEST_MISSING_KEY");
+        }
+        let raw = r#"
+[gateway]
+[[gateway.keys]]
+key_env = ""
+[provider.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let mut cfg = GatewayConfig::parse(raw).expect("parse");
+        cfg.enable_debug_test_provider();
+        // debug 模式：key_env 留空（或指向未设置的变量）直接跳过而不是报错。
+        let keys = cfg
+            .resolve_keys()
+            .expect("debug must tolerate missing key_env");
+        assert!(
+            keys.is_empty(),
+            "missing-env key must be skipped in debug mode"
         );
     }
 }

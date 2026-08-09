@@ -31,6 +31,7 @@ use crate::quota::{Quota, QuotaVerdict};
 use crate::routing::{RouteError, extract_model_from_body, extract_model_from_path};
 use crate::server::AppState;
 use crate::sse::{SseUsageParser, UsageInfo, parse_json_usage};
+use crate::test_provider;
 use crate::usage::{UsageRecord, UsageSink};
 
 /// hop-by-hop + 下游 auth header：请求侧剥离集合（spec §4.3）。
@@ -260,6 +261,11 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
     let req_headers = req.headers().clone();
+    // access log 句柄（外层中间件注入）：解析出 model 后回填。
+    let access_log = req
+        .extensions()
+        .get::<crate::access_log::AccessLogHandle>()
+        .cloned();
     // 用 Option 包 body，便于「buffer 路径 take 走，stream 路径保留到 wrap_stream」
     // 的条件移动——避免编译器对「if 分支 move 而 else 不 move」的报错。
     let mut body_opt = Some(req.into_body());
@@ -302,6 +308,9 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         .as_ref()
         .and_then(extract_model_from_body)
         .or_else(|| extract_model_from_path(&target.path));
+    if let Some(h) = &access_log {
+        h.set_model(model.as_deref().unwrap_or("-"));
+    }
 
     // 7. 路由解析。错误按 brief 映射；成功拿到 provider + upstream_model。
     let decision = match state
@@ -311,6 +320,32 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         Ok(d) => d,
         Err(e) => return route_error_response(proto, &e),
     };
+    if let Some(h) = &access_log {
+        h.set_provider(&decision.provider);
+    }
+
+    // 7.5 debug test provider：路由命中内置 `test` provider 时，由 gateway
+    //     自身应答（固定文字 + 回显输入），不拨号上游。流式/非流式、
+    //     Anthropic/OpenAI 两个协议面都支持（路由层已对 test 豁免协议检查）。
+    if state.cfg.debug && decision.provider == "test" {
+        let echoed = test_provider::echo_text(buffered_bytes.as_ref());
+        let stream = test_provider::wants_stream(buffered_bytes.as_ref());
+        settle_usage(
+            &state.sink,
+            &state.quota,
+            &identity,
+            proto,
+            Some("test"),
+            "test",
+            Some("test"),
+            StatusCode::OK.as_u16(),
+            start,
+            None,
+            UsageInfo::default(),
+            None,
+        );
+        return test_provider::test_response(proto, &echoed, stream);
+    }
 
     // 8. 取上游 provider 配置 + 上游 key。任一缺失（配置不一致）→ 502 防御性错误。
     let provider_cfg: &ProviderConfig = match state.cfg.providers.get(&decision.provider) {

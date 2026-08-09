@@ -13,6 +13,8 @@
 //! manual smoke (`cargo run -- gateway --config …` + curl), not here — it
 //! blocks forever and is covered by build_router/build_state being correct.
 
+mod support;
+
 use gateway::config::GatewayConfig;
 use gateway::server;
 
@@ -25,11 +27,11 @@ const CFG: &str = r#"
 listen = "127.0.0.1:0"
 [[gateway.keys]]
 key = "sk-gw-test"
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "test-key"
-[gateway.providers.openai]
+[provider.openai]
 protocol = "openai"
 base_url = "https://api.openai.com/v1"
 api_key = "test-key-oai"
@@ -85,4 +87,47 @@ async fn healthz_ok_and_proxy_returns_502_no_route_for_modelless_request() {
 
     server_task.abort();
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn modelless_get_models_without_default_provider_returns_502() {
+    // Claude Code 的 /model 选择器会请求 GET /v1/models（无 model、带 query）。
+    // 两个 provider 且无 default_provider → 默认链落空 → 502 no_route。
+    // 这是 /model 报错的回归测试：模型列表请求必须在无默认时给出明确错误。
+    let cfg = r#"
+[gateway]
+listen = "127.0.0.1:0"
+usage_file = "__USAGE__"
+
+[[gateway.keys]]
+key = "sk-gw-test"
+
+[provider.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+
+[provider.openai]
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "test-key-oai"
+"#;
+    let gw = support::start_gateway(cfg).await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let resp = client
+        .get(format!("http://{}/v1/models?limit=1000", gw.addr))
+        .header("authorization", "Bearer sk-gw-test")
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .expect("GET /v1/models?limit=1000");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.text().await.expect("body")).expect("valid JSON");
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "no_route");
 }

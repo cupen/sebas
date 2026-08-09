@@ -98,12 +98,12 @@ default_provider = "anthropic"
 key = "sk-downstream-gw"
 name = "proxy-smoke"
 
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "http://{upstream_addr}"
 api_key = "test-upstream-anthropic-key"
 
-[gateway.providers.anthropic.model_map]
+[provider.anthropic.model_map]
 claude-sonnet = "upstream-claude-sonnet-4"
 "#
     )
@@ -227,7 +227,7 @@ default_provider = "unreachable"
 key = "sk-downstream-gw"
 name = "proxy-smoke"
 
-[gateway.providers.unreachable]
+[provider.unreachable]
 protocol = "anthropic"
 base_url = "http://127.0.0.1:1"
 api_key = "test-unreachable-key"

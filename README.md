@@ -45,14 +45,13 @@ listen = "127.0.0.1:8787"
 key = "sk-gw-local-dev"
 name = "claude-code"
 
-[gateway.providers.anthropic]        # 上游 provider；密钥只从 env 读
+[provider.anthropic]        # 上游 provider；密钥只从 env 读
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[[gateway.routes]]                    # 按序匹配 model glob
-model = "claude-*"
-provider = "anthropic"
+[gateway.routes]                      # model（可含 glob）→ provider 数组，
+"claude-*" = ["anthropic"]            # 数组顺序 = 优先级（先 = 主）
 ```
 
 启动：

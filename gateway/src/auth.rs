@@ -71,6 +71,23 @@ pub async fn require_key(State(state): State<AppState>, req: Request, next: Next
     if req.uri().path() == "/healthz" {
         return next.run(req).await;
     }
+    // debug 模式（--debug）：内置 test provider 仅用于测试，跳过下游鉴权，
+    // key 可留空。仍挂一个默认 KeyIdentity 供 proxy 走正常流程。
+    if state.cfg.debug {
+        let mut req = req;
+        req.extensions_mut().insert(KeyIdentity {
+            config: KeyConfig {
+                key: String::new(),
+                key_env: None,
+                name: "debug".into(),
+                rpm: None,
+                daily_token_quota: None,
+                allow_models: Vec::new(),
+                default_provider: None,
+            },
+        });
+        return next.run(req).await;
+    }
     match extract_key(req.headers()) {
         Some(key) => match state.keys.get(&key) {
             Some(cfg) => {

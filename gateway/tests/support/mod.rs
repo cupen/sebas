@@ -37,6 +37,15 @@ use gateway::server;
 /// Task 8 的 usage sink 会写经 `__USAGE__` 替换出的 tempdir 路径，故测试
 /// 不会触及 `~/.local/state`。
 pub async fn start_gateway(config_toml: &str) -> TestGateway {
+    start_gateway_impl(config_toml, false).await
+}
+
+/// 以 debug 模式启动：parse 完成后注入内置 test provider（`--debug` 语义）。
+pub async fn start_gateway_debug(config_toml: &str) -> TestGateway {
+    start_gateway_impl(config_toml, true).await
+}
+
+async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     ensure_test_env_keys();
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -45,7 +54,10 @@ pub async fn start_gateway(config_toml: &str) -> TestGateway {
     // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
     let usage = usage_path.to_string_lossy().replace('\\', "/");
     let raw = config_toml.replace("__USAGE__", &usage);
-    let cfg = GatewayConfig::parse(&raw).expect("parse test config");
+    let mut cfg = GatewayConfig::parse(&raw).expect("parse test config");
+    if debug {
+        cfg.enable_debug_test_provider();
+    }
     let state = server::build_state(cfg).expect("build_state");
     let app = server::build_router(state);
 
@@ -54,7 +66,12 @@ pub async fn start_gateway(config_toml: &str) -> TestGateway {
         .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("server ran");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("server ran");
     });
 
     TestGateway {

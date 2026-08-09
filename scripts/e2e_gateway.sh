@@ -87,7 +87,7 @@ echo "[1/7] cargo build --bin sebas"
 echo "[2/7] 生成临时 config → $CONFIG"
 write_provider() { # write_provider <name> <protocol> <real_base> <env_var> <real_model_route>
   local name="$1" proto="$2" real_base="$3" env_var="$4"
-  echo "[gateway.providers.$name]"
+  echo "[provider.$name]"
   echo "protocol = \"$proto\""
   if [[ -n "$env_var" && -n "${!env_var:-}" ]]; then
     echo "base_url = \"$real_base\""
@@ -115,15 +115,16 @@ export GATEWAY_KEY USAGE_FILE PORT
   write_provider openai     openai     "https://api.openai.com/v1"   "OPENAI_API_KEY"
   write_provider deepseek   anthropic  "https://api.deepseek.com/anthropic" "DEEPSEEK_API_KEY"
   # 始终存在的 smoke provider（不可达），供 smoke 透传调用产出 usage record。
-  echo "[gateway.providers.smoke]"
+  echo "[provider.smoke]"
   echo "protocol = \"anthropic\""
   echo "base_url = \"http://127.0.0.1:9\""
   echo "api_key = \"sk-e2e-smoke-plumbing\""
   echo
-  echo "[[gateway.routes]]"; echo "model = \"claude-*\"";   echo "provider = \"anthropic\""; echo
-  echo "[[gateway.routes]]"; echo "model = \"gpt-*\"";       echo "provider = \"openai\"";    echo
-  echo "[[gateway.routes]]"; echo "model = \"deepseek-*\"";  echo "provider = \"deepseek\"";  echo
-  echo "[[gateway.routes]]"; echo "model = \"smoke-*\"";     echo "provider = \"smoke\""
+  echo "[gateway.routes]"
+  echo "\"claude-*\" = [\"anthropic\"]"
+  echo "\"gpt-*\" = [\"openai\"]"
+  echo "\"deepseek-*\" = [\"deepseek\"]"
+  echo "\"smoke-*\" = [\"smoke\"]"
 } > "$CONFIG"
 
 # ---- 3. 起 gateway ----

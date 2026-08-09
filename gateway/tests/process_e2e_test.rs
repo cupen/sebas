@@ -64,20 +64,16 @@ default_provider = "anthropic"
 key = "sk-gw-process"
 name = "process-e2e"
 
-[[gateway.routes]]
-model = "claude-*"
-provider = "anthropic"
+[gateway.routes]
+"claude-*" = ["anthropic"]
+"gpt-*" = ["openai"]
 
-[[gateway.routes]]
-model = "gpt-*"
-provider = "openai"
-
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
-[gateway.providers.openai]
+[provider.openai]
 protocol = "openai"
 base_url = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"

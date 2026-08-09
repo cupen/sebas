@@ -22,12 +22,12 @@ usage_file = "__USAGE__"
 key = "sk-gw-test"
 name = "test-key"
 
-[gateway.providers.anthropic]
+[provider.anthropic]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
-[gateway.providers.openai]
+[provider.openai]
 protocol = "openai"
 base_url = "https://api.openai.com"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
