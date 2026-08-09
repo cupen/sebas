@@ -66,7 +66,7 @@ async fn settings_set_persists_and_updates_router() {
     assert_eq!(cfg.thinking, ThinkingDisplay::Hide);
 
     // Verify file written at the tempdir path, not the developer's real one.
-    let loaded = load_settings(&path).unwrap();
+    let loaded = load_settings(&path).unwrap().expect("file exists");
     assert_eq!(loaded.thinking, ThinkingDisplay::Hide);
 }
 

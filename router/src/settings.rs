@@ -5,6 +5,12 @@
 //! the TOML defaults at the time of first write). Strict parse: malformed
 //! JSON or wrong-typed fields cause `load_settings` to return an error so
 //! `run::run` can refuse to start with a clear message.
+//!
+//! `load_settings` returns `Ok(None)` (not `Err` and not `Some(default())`)
+//! when the file is absent: TOML `[card]` is the bootstrap and the caller
+//! is responsible for falling back to it. This avoids silently overwriting
+//! a TOML-tuned `theme_color` / `max_user_text_chars` / `thinking` with the
+//! default on every restart where the user hasn't yet run `/settings`.
 
 use feishu::cards::CardConfig;
 use std::path::{Path, PathBuf};
@@ -17,14 +23,17 @@ pub fn settings_path() -> PathBuf {
     home.join(".sebas").join("settings.json")
 }
 
-/// Read + parse settings.json. Returns `Ok(CardConfig::default())` when
-/// the file doesn't exist. Returns `Err` on any parse / IO error — the
-/// caller decides whether to refuse to start.
-pub fn load_settings(path: &Path) -> Result<CardConfig, String> {
+/// Read + parse settings.json.
+/// - `Ok(Some(cfg))` — file present and parses; this wins wholesale over TOML.
+/// - `Ok(None)` — file absent; caller should use its TOML bootstrap.
+/// - `Err(msg)` — present but malformed / wrong-typed fields / IO error.
+///   The caller decides whether to refuse to start.
+pub fn load_settings(path: &Path) -> Result<Option<CardConfig>, String> {
     match std::fs::read_to_string(path) {
         Ok(s) => serde_json::from_str(&s)
+            .map(Some)
             .map_err(|e| format!("settings.json 解析失败 ({}): {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CardConfig::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("读取 settings.json 失败: {e}")),
     }
 }

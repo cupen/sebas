@@ -70,8 +70,11 @@ pub async fn run(
 
     // TOML is bootstrap; settings.json (if present) wins wholesale.
     // Strict: malformed settings.json refuses to start with a clear error.
+    // Missing settings.json → fall back to TOML [card] so first-boot users
+    // get the configured values rather than serde defaults.
     let merged_card_cfg = match settings::load_settings(&settings::settings_path()) {
-        Ok(s) => s,
+        Ok(Some(s)) => s,
+        Ok(None) => cfg.card.clone(),
         Err(e) => {
             error!(error = %e, "settings.json 解析失败，拒绝启动");
             return Err(crate::error::SebasError::Config(e));

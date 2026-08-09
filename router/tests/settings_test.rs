@@ -15,16 +15,19 @@ fn save_then_load_round_trips() {
     let path = dir.join("settings.json");
     let cfg = CardConfig { thinking: ThinkingDisplay::Hide, ..CardConfig::default() };
     save_settings(&path, &cfg).unwrap();
-    let loaded = load_settings(&path).unwrap();
+    let loaded = load_settings(&path).unwrap().expect("file exists");
     assert_eq!(loaded.thinking, ThinkingDisplay::Hide);
 }
 
 #[test]
-fn load_missing_returns_default() {
+fn load_missing_returns_none_so_caller_keeps_toml() {
+    // 文件不存在 → Ok(None) 而不是默认 CardConfig。
+    // 调用方（run.rs）见到 None 时回落 TOML [card]，避免每次启动把
+    // TOML 调好的 theme_color / max_user_text_chars / thinking 默默抹平。
     let dir = tempdir();
     let path = dir.join("missing.json");
     let loaded = load_settings(&path).unwrap();
-    assert_eq!(loaded, CardConfig::default());
+    assert!(loaded.is_none(), "missing file must signal 'use TOML', got {loaded:?}");
 }
 
 #[test]
@@ -42,6 +45,35 @@ fn save_writes_pretty_json() {
     save_settings(&path, &CardConfig::default()).unwrap();
     let s = std::fs::read_to_string(&path).unwrap();
     assert!(s.contains('\n'), "expected pretty-printed JSON, got: {s}");
+}
+
+/// TOML bootstrap 回归保护：settings.json 缺失时 TOML 的 CardConfig 字段
+/// 必须保留原值，不得被 `CardConfig::default()` 抹平。
+/// 这里模拟 run.rs 的合并：load_settings Ok(None) → 用 TOML 配置。
+#[test]
+fn toml_cardconfig_survives_when_settings_json_absent() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "sebas-toml-bootstrap-{}-{}",
+        std::process::id(),
+        n
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json"); // 不创建 → 模拟首次启动
+    let toml_cfg = CardConfig {
+        theme_color: "orange".into(),
+        max_user_text_chars: 1234,
+        max_tool_output_chars: 567,
+        fold_long_output: false,
+        thinking: ThinkingDisplay::Hide,
+    };
+    let merged = match load_settings(&path).unwrap() {
+        Some(s) => s,
+        None => toml_cfg.clone(),
+    };
+    assert_eq!(merged, toml_cfg, "TOML bootstrap must not be overwritten by defaults");
 }
 
 fn tempdir() -> std::path::PathBuf {
