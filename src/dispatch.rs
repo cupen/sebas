@@ -9,10 +9,61 @@ use crate::session_boot::{
     wire_session_card_and_pump,
 };
 use acp_claude::manager::SessionManager;
-use feishu::client::FeishuClient;
+use feishu::client::{FeishuApiError, FeishuClient};
+use feishu::events::SessionKey;
 use router::router::{Out, RouterHandle};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// 话题失效提示文案（Q8）：不重试、不重发，告诉用户话题已失效。
+const TOPIC_INVALID_NOTICE: &str =
+    "该话题已失效，无法在此回复。请开一个新话题，或直接在会话里发消息。";
+
+/// 话题出站卡统一回复目标：`root_id` 为空且 key 是话题会话时，用 router 存的
+/// 最近入站回复目标（话题根消息 message_id）；主线（thread_id=None）保持
+/// `None`（Q7 现状不变）。
+pub(crate) async fn topic_reply_target(
+    router: &RouterHandle,
+    key: &SessionKey,
+    root_id: Option<String>,
+) -> Option<String> {
+    match root_id {
+        Some(r) if !r.is_empty() => Some(r),
+        _ if key.thread_id.is_some() => router.reply_target(key).await,
+        _ => None,
+    }
+}
+
+/// 发送卡片；话题失效（230019/230071）时不重试、不重发，改为向会话发一条
+/// 文本提示并返回空 message_id（调用方按"未发出"处理）。
+pub(crate) async fn send_card_topic_aware(
+    feishu: &FeishuClient,
+    http: &reqwest::Client,
+    tokens: &feishu::client::TokenManager,
+    key: &SessionKey,
+    card: serde_json::Value,
+    root_id: Option<String>,
+) -> anyhow::Result<String> {
+    match feishu
+        .send_card(http, tokens, key, card, root_id.as_deref())
+        .await
+    {
+        Ok(id) => Ok(id),
+        Err(e) => {
+            if let Some(api) = e.downcast_ref::<FeishuApiError>() {
+                if api.is_topic_invalid() {
+                    warn!(code = api.code, error = %api.msg, "topic send failed; notifying user");
+                    if let Err(e2) = feishu.send_text(http, tokens, key, TOPIC_INVALID_NOTICE).await
+                    {
+                        warn!(?e2, "topic-invalid notice send failed");
+                    }
+                    return Ok(String::new());
+                }
+            }
+            Err(e)
+        }
+    }
+}
 
 // 参数即 outbound 共享上下文（client/http/tokens/cfg/router/mgr/reactions），
 // 打包 struct 只会给每个 match arm 增加 `ctx.` 噪音。
@@ -40,9 +91,10 @@ pub(crate) async fn dispatch_out(
             // `UpdateCard`/`React`, which only know the session_id, can resolve
             // the message_id. Only record when a session_id is supplied; plain
             // cards (permission prompts, help) don't need to be updated later.
-            let new_id = feishu
-                .send_card(http, tokens, &key, card, root_id.as_deref())
-                .await?;
+            // 话题会话且 Out 未带 root_id 时，用 router 存的最近回复目标兜底
+            // （覆盖权限卡等所有 Out::SendCard 出站卡，Q5）。
+            let reply = topic_reply_target(router, &key, root_id).await;
+            let new_id = send_card_topic_aware(feishu, http, tokens, &key, card, reply).await?;
             if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
                 router.record_root_msg_id(session_id, new_id.clone()).await;
                 debug!(message_id = %new_id, "recorded card msg_id");
@@ -144,8 +196,15 @@ pub(crate) async fn dispatch_out(
                     let card = feishu::cards::render_error_card(&format!(
                         "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
-                    if let Err(e2) = feishu
-                        .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
+                    let reply = topic_reply_target(router, &key, None).await;
+                    if let Err(e2) = send_card_topic_aware(
+                        feishu,
+                        http,
+                        tokens,
+                        &key,
+                        serde_json::to_value(&card)?,
+                        reply,
+                    )
                         .await
                     {
                         warn!(?e2, "failed to send spawn-failure card");
@@ -234,8 +293,15 @@ pub(crate) async fn dispatch_out(
                     let card = feishu::cards::render_error_card(&format!(
                         "agent 恢复失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
-                    if let Err(e2) = feishu
-                        .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
+                    let reply = topic_reply_target(router, &key, None).await;
+                    if let Err(e2) = send_card_topic_aware(
+                        feishu,
+                        http,
+                        tokens,
+                        &key,
+                        serde_json::to_value(&card)?,
+                        reply,
+                    )
                         .await
                     {
                         warn!(?e2, "failed to send resume-failure card");
@@ -247,8 +313,15 @@ pub(crate) async fn dispatch_out(
             if !resumed {
                 info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
                 let card = feishu::cards::render_session_lost_card();
-                if let Err(e2) = feishu
-                    .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
+                let reply = topic_reply_target(router, &key, None).await;
+                if let Err(e2) = send_card_topic_aware(
+                    feishu,
+                    http,
+                    tokens,
+                    &key,
+                    serde_json::to_value(&card)?,
+                    reply,
+                )
                     .await
                 {
                     warn!(?e2, "failed to send session-lost notice");

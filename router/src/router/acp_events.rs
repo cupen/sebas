@@ -57,6 +57,13 @@ impl RouterHandle {
                     return;
                 }
                 let card = render_permission_card(session_id, request_id, tool_name, args);
+                // 话题会话：权限卡回复到话题根消息，保证聚合在原话题（Q5）。
+                // 主线保持现状（root_id=None，Q7）。
+                let root_id = if key.thread_id.is_some() {
+                    self.reply_target(&key).await
+                } else {
+                    None
+                };
                 self.emit(Out::SendCard {
                     key,
                     card: serde_json::to_value(&card).expect("permission card serializes"),
@@ -70,7 +77,7 @@ impl RouterHandle {
                     // Stash the call metadata for the click handler.
                     perm_meta: Some((tool_name.clone(), args.clone())),
                     // Permission cards are fire-and-forget (no threading).
-                    root_id: None,
+                    root_id,
                 })
                 .await;
             }
@@ -87,6 +94,7 @@ impl RouterHandle {
                 let sid = session_id.as_str();
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.allowlist.clear(&key).await;
+                    self.reply_targets.clear(&key).await;
                     self.map.remove_by_session(sid).await;
                 }
                 self.drop_card(sid).await;

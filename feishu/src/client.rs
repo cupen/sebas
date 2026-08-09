@@ -24,6 +24,30 @@ pub struct FeishuClient {
     pub config: FeishuConfig,
 }
 
+/// 飞书 API 业务错误（HTTP 成功但 `code != 0`）。类型化以便调用方区分
+/// 具体错误码（如话题失效 230019 / 群不支持话题回复 230071）做降级处理。
+#[derive(Debug)]
+pub struct FeishuApiError {
+    pub code: i32,
+    pub msg: String,
+}
+
+impl FeishuApiError {
+    /// 话题失效类错误：话题不存在（230019）或消息所属群不支持话题回复
+    /// （230071）。按 Q8，这类错误不再重发，改为向会话发文本提示。
+    pub fn is_topic_invalid(&self) -> bool {
+        matches!(self.code, 230019 | 230071)
+    }
+}
+
+impl std::fmt::Display for FeishuApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "feishu api error {}: {}", self.code, self.msg)
+    }
+}
+
+impl std::error::Error for FeishuApiError {}
+
 impl FeishuClient {
     pub fn new(config: FeishuConfig) -> Self {
         Self { config }
@@ -156,11 +180,11 @@ impl FeishuClient {
             }
             attempt += 1;
             if attempt > 1 {
-                anyhow::bail!(
-                    "feishu api failed after token refresh: {} {}",
-                    resp.code,
-                    resp.msg
-                );
+                return Err(FeishuApiError {
+                    code: resp.code,
+                    msg: resp.msg,
+                }
+                .into());
             }
             tokens.force_refresh().await?;
         }
@@ -366,5 +390,23 @@ mod tests {
         let body = r#"{"code":0,"msg":"success","data":{"reaction_id":"rid_1"}}"#;
         let resp: ApiResp<ReactionOut> = serde_json::from_str(body).unwrap();
         assert_eq!(resp.data.reaction_id.as_deref(), Some("rid_1"));
+    }
+
+    #[test]
+    fn topic_invalid_error_codes_are_recognized() {
+        let mk = |code: i32| {
+            let err: anyhow::Error = FeishuApiError {
+                code,
+                msg: "x".into(),
+            }
+            .into();
+            err.downcast_ref::<FeishuApiError>()
+                .expect("typed error survives anyhow")
+                .is_topic_invalid()
+        };
+        assert!(mk(230019), "topic missing must be topic-invalid");
+        assert!(mk(230071), "group without thread support must be topic-invalid");
+        assert!(!mk(230013), "unrelated code must not be topic-invalid");
+        assert!(!mk(0), "success must not be topic-invalid");
     }
 }

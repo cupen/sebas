@@ -4,6 +4,7 @@
 //! 对外的稳定入口经 `crate::run` 的 re-export 暴露，integration tests 路径不变。
 
 use crate::config::Config;
+use crate::dispatch::{send_card_topic_aware, topic_reply_target};
 use crate::reactions::ReactionTracker;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
@@ -175,18 +176,20 @@ pub(crate) async fn wire_session_card_and_pump(
     // real session_id (so streaming UpdateCards resolve correctly).
     // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
     //（避免初始卡蓝、后续卡变色的跳变）。
-    // `input_msg_id` 作为 root_id，让首卡以 reply 形式挂在输入消息下，方便
-    // 在飞书里沿 thread 跟踪整段对话。
     let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
-    let msg_id = feishu
-        .send_card(
-            http,
-            tokens,
-            &key,
-            serde_json::to_value(&card)?,
-            input_msg_id.as_deref(),
-        )
-        .await?;
+    // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
+    // 原话题；主线保持 None（Q7）。话题失效时 send_card_topic_aware 会发
+    // 文本提示并返回空 message_id（不冒泡错误）。
+    let reply = topic_reply_target(router, &key, None).await;
+    let msg_id = send_card_topic_aware(
+        feishu,
+        http,
+        tokens,
+        &key,
+        serde_json::to_value(&card)?,
+        reply,
+    )
+    .await?;
     if !msg_id.is_empty() {
         router
             .record_root_msg_id(session_id.clone(), msg_id.clone())

@@ -205,6 +205,7 @@ async fn media_message_composes_prompt_and_spawns() {
             key: key(),
             files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()],
             caption: Some("看这两张".into()),
+            reply_to: None,
         })
         .await;
     match next_out(&mut out_rx).await {

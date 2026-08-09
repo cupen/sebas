@@ -155,6 +155,33 @@ impl SessionAllowlist {
     }
 }
 
+/// Per-SessionKey 最近一次入站消息的回复目标。话题内 = 话题根消息的
+/// `message_id`（`root_id` 归一化后）；主线 = 触发消息 `message_id`。
+///
+/// 话题出站卡（权限卡、初始 root 卡、失败提示卡）用它作为 `root_id`，保证
+/// 回复聚合在同一个话题里。纯内存、不持久化：重启后由下一条入站消息重建。
+#[derive(Default, Clone)]
+pub struct ReplyTargetMap {
+    inner: Arc<RwLock<HashMap<SessionKey, String>>>,
+}
+
+impl ReplyTargetMap {
+    /// 记录最近入站消息的回复目标。幂等覆盖。
+    pub async fn set(&self, key: SessionKey, target: String) {
+        self.inner.write().await.insert(key, target);
+    }
+
+    /// 取最近一次入站回复目标（如果有）。
+    pub async fn get(&self, key: &SessionKey) -> Option<String> {
+        self.inner.read().await.get(key).cloned()
+    }
+
+    /// 删除一个 key 的回复目标（会话结束时调用，防无界增长）。
+    pub async fn clear(&self, key: &SessionKey) {
+        self.inner.write().await.remove(key);
+    }
+}
+
 /// Canonical signature for matching tool calls. Canonicalizes `args` so
 /// that two semantically-equal (tool, args) calls hash to the same string
 /// regardless of:
