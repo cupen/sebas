@@ -95,7 +95,7 @@ pump 改造为 select 循环：事件到达 vs debounce 计时。
 `CardConfig` 从 config 传入 router（`RouterHandle::new(map, card_cfg)` 或字段）。`render_accumulated_card` / `apply_event` 接收 `&CardConfig`。
 
 - **单元素截断**：append 后，单个 markdown 元素文本 > `max_user_text_chars`(4000) → 截断到上限 + 追加灰注 `(已折叠 N 字)`。`fold_long_output=true` 时启用；`false` 时不截断（但仍有 §总量兜底）。
-- **fold 语义（tool result）**：`ToolEnd.result` > `max_tool_output_chars`(1024，软上限) 且 `fold_long_output=true` → 装进原生 `collapsible_panel`（默认折叠），完整内容保留；`max_tool_output_chars=0` → 完全不输出 tool call 结果内容；代码硬上限 10240，超出才在面板内截断 + 灰注。面板需飞书客户端 V7.9+。
+- **fold 语义（tool call）**：`fold_long_output=true` 时，`ToolStart` 折叠成一个原生 `collapsible_panel`（默认收起，标题 `📖 {tool}`），`ToolProgress`/`ToolEnd` 都收进对应面板——卡片里每个工具只占一行；`max_tool_output_chars` 默认 `0` = 完全不输出 tool call 结果内容，`>0` 时结果收进面板，超过软上限则折叠、完整内容保留；代码硬上限 10240，超出才在面板内截断 + 灰注。面板需飞书客户端 V7.9+。
 - **总量上限**：body 累积字符 > 24000（飞书 interactive 卡 ~30KB 内容上限留余量）→ 从最旧的非 divider 行丢弃，直到回到预算内。divider（`CardElement::Hr`）随其后的内容一起丢弃。
 - `theme_color`：`render_accumulated_card` 用它替代硬编码 `"blue"`；权限卡 `"orange"` 保留（独立卡路径）。
 

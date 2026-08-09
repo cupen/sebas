@@ -23,8 +23,8 @@ args = []
 # ── card（卡片流配置，全部可选，见 2026-07-26-sebas-design.md §6.2）───
 # [card]
 # max_user_text_chars = 4000     # 单元素文本软上限：超过则截断 + 灰注
-# max_tool_output_chars = 1024   # tool result 软上限：超过则折叠进面板；0 = 不输出 tool call 结果内容
-# fold_long_output = true        # true：长内容折叠进 collapsible_panel（默认折叠）；false：内联全文
+# max_tool_output_chars = 0      # 0 = 不输出 tool call 结果内容（默认）；>0 时超过则折叠进工具面板
+# fold_long_output = true        # true：tool call 折叠成 collapsible_panel（默认收起）；false：内联全文
 
 # Optional: router, card, media, log sections all have defaults.
 # See docs/superpowers/specs/2026-08-06-sebas-design.md §6.2 for full list.

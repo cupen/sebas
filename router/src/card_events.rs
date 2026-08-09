@@ -10,7 +10,10 @@ use feishu::cards::{
 };
 
 /// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
-/// 单元素截断/折叠（max_user_text_chars / max_tool_output_chars + fold_long_output）
+/// fold_long_output=true 时：ToolStart 折叠成一个 collapsible_panel（默认收起），
+/// ToolProgress/ToolEnd 都收进对应工具面板，卡片里每个工具只占一行；
+/// tool result 默认屏蔽（max_tool_output_chars=0），>0 时结果也收进面板。
+/// fold_long_output=false 时：保持内联展示（结果仍受 10240 硬上限保护）。
 /// + 总量兜底（24000 丢旧，Hr 连后一个一起丢）。PermissionRequest 不累积（走独立 SendCard）。
 pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &CardConfig) {
     match event {
@@ -26,26 +29,54 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
         AcpEvent::ToolStart {
             tool_name, args, ..
         } => {
-            body.push(CardElement::Hr);
             // Tool args in a fenced JSON code block — readable for nested
             // objects/arrays, vs inline backtick which collapses to one line.
             let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
-            push_text_truncated(
-                body,
-                &format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
-                cfg.max_user_text_chars,
-                cfg.fold_long_output,
-            );
+            if cfg.fold_long_output {
+                // 每个工具一个默认折叠的面板，展开才看得到 args。
+                body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+                    expanded: false,
+                    header: panel_header(format!("📖 {tool_name}")),
+                    elements: text_with_truncation_note(
+                        format!("```json\n{args_str}\n```"),
+                        cfg.max_user_text_chars,
+                        true,
+                    ),
+                }));
+            } else {
+                body.push(CardElement::Hr);
+                push_text_truncated(
+                    body,
+                    &format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
+                    cfg.max_user_text_chars,
+                    cfg.fold_long_output,
+                );
+            }
         }
         AcpEvent::ToolEnd {
             tool_name, result, ..
-        } => push_tool_end_result(body, tool_name, result, cfg),
+        } => {
+            if cfg.fold_long_output {
+                if let Some(panel) = last_tool_panel_mut(body, tool_name) {
+                    panel.header.title.content = format!("✓ {tool_name}");
+                    panel.elements.extend(tool_result_elements(tool_name, result, cfg));
+                    return;
+                }
+                // fold 模式下没有可归属的面板（异常时序）：静默，不输出结果。
+            } else {
+                push_tool_end_result(body, tool_name, result, cfg);
+            }
+        }
         AcpEvent::ToolProgress {
             tool_name,
             progress,
             ..
         } => {
-            body.push(note_element(format!("⏳ {tool_name}: {progress}")));
+            if let Some(panel) = last_tool_panel_mut(body, tool_name) {
+                panel.elements.push(note_element(format!("⏳ {progress}")));
+            } else {
+                body.push(note_element(format!("⏳ {tool_name}: {progress}")));
+            }
         }
         AcpEvent::Finished { .. } => body.push(CardElement::Markdown {
             content: "✅ 完成".into(),
@@ -71,13 +102,19 @@ fn truncate_with_note(s: &str, limit: usize, fold: bool) -> (String, Option<usiz
     (truncated, Some(count - limit))
 }
 
+/// 生成一段 Markdown 文本元素，必要时截断 + 追加灰注（供面板内使用）。
+fn text_with_truncation_note(text: String, limit: usize, fold: bool) -> Vec<CardElement> {
+    let (content, note) = truncate_with_note(&text, limit, fold);
+    let mut elements = vec![CardElement::Markdown { content }];
+    if let Some(n) = note {
+        elements.push(note_element(format!("（已折叠 {n} 字）")));
+    }
+    elements
+}
+
 /// push 一段 Markdown 文本，必要时截断 + 追加灰注。
 fn push_text_truncated(body: &mut Vec<CardElement>, text: &str, limit: usize, fold: bool) {
-    let (content, note) = truncate_with_note(text, limit, fold);
-    body.push(CardElement::Markdown { content });
-    if let Some(n) = note {
-        body.push(note_element(format!("（已折叠 {n} 字）")));
-    }
+    body.extend(text_with_truncation_note(text.to_string(), limit, fold));
 }
 
 /// 构造一个灰注 Div 元素（notation size + grey）。
@@ -92,12 +129,9 @@ fn note_element(content: String) -> CardElement {
     }
 }
 
-/// ToolEnd 结果渲染：
+/// ToolEnd 结果渲染（fold_long_output=false 的内联路径）：
 /// - `max_tool_output_chars == 0`：完全不输出 tool call 的结果内容；
-/// - 结果 <= 软上限：沿用灰注 `✓ {tool} done: ...`；
-/// - 结果 > 软上限（且 fold_long_output=true）：装进默认折叠的
-///   `collapsible_panel`，完整内容保留（超出 10240 硬上限才截断）；
-/// - fold_long_output=false：不折叠，全文内联展示（仍受硬上限保护）。
+/// - 否则灰注内联展示，超过 10240 硬上限才截断 + 灰注。
 fn push_tool_end_result(
     body: &mut Vec<CardElement>,
     tool_name: &str,
@@ -112,9 +146,28 @@ fn push_tool_end_result(
         .chars()
         .count()
         .saturating_sub(content.chars().count());
-    if cfg.fold_long_output && result.chars().count() > cfg.max_tool_output_chars {
-        let mut elements = vec![];
-        // 多行输出用代码围栏包住，避免在 markdown 里被重排。
+    body.push(note_element(format!("✓ {tool_name} done: {content}")));
+    if overflow > 0 {
+        body.push(note_element(format!("（已截断 {overflow} 字）")));
+    }
+}
+
+/// 生成 tool result 的展示元素（fold 模式下收进对应工具面板）：
+/// - `max_tool_output_chars == 0`：不输出结果内容（返回空）；
+/// - 结果 <= 软上限：灰注 `✓ {tool} done: ...`；
+/// - 结果 > 软上限：markdown 全文保留（多行用代码围栏），超出 10240 硬上限才截断。
+fn tool_result_elements(tool_name: &str, result: &str, cfg: &CardConfig) -> Vec<CardElement> {
+    if cfg.max_tool_output_chars == 0 {
+        return vec![];
+    }
+    let content = cap_chars(result, TOOL_RESULT_HARD_LIMIT_CHARS);
+    let overflow = result
+        .chars()
+        .count()
+        .saturating_sub(content.chars().count());
+    let mut elements = vec![];
+    if result.chars().count() > cfg.max_tool_output_chars {
+        // 长结果：多行用代码围栏包住，避免在 markdown 里被重排。
         if content.contains('\n') {
             elements.push(CardElement::Markdown {
                 content: format!("```\n{content}\n```"),
@@ -124,31 +177,44 @@ fn push_tool_end_result(
                 content: content.clone(),
             });
         }
-        if overflow > 0 {
-            elements.push(note_element(format!("（已截断 {overflow} 字）")));
-        }
-        body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
-            expanded: false,
-            header: CollapsiblePanelHeader {
-                title: CardText {
-                    tag: "plain_text".into(),
-                    content: format!("✓ {tool_name} 输出"),
-                },
-                icon: StandardIcon {
-                    tag: "standard_icon".into(),
-                    token: "down-small-ccm_outlined".into(),
-                    size: "16px 16px".into(),
-                },
-                icon_position: "right".into(),
-                icon_expanded_angle: -180,
-            },
-            elements,
-        }));
-        return;
+    } else {
+        elements.push(note_element(format!("✓ {tool_name} done: {content}")));
     }
-    body.push(note_element(format!("✓ {tool_name} done: {content}")));
     if overflow > 0 {
-        body.push(note_element(format!("（已截断 {overflow} 字）")));
+        elements.push(note_element(format!("（已截断 {overflow} 字）")));
+    }
+    elements
+}
+
+/// 取 body 末尾属于 `tool_name` 的折叠面板（标题形如 `📖 Bash` / `⏳ Bash`）。
+/// 事件按顺序到达（ToolStart → ToolProgress* → ToolEnd），末尾即当前工具的面板。
+fn last_tool_panel_mut<'a>(
+    body: &'a mut Vec<CardElement>,
+    tool_name: &str,
+) -> Option<&'a mut CollapsiblePanel> {
+    let suffix = format!(" {tool_name}");
+    match body.last_mut()? {
+        CardElement::CollapsiblePanel(panel) if panel.header.title.content.ends_with(&suffix) => {
+            Some(panel)
+        }
+        _ => None,
+    }
+}
+
+/// 折叠面板的标准 header（右侧箭头图标，展开时旋转 180°）。
+fn panel_header(title: String) -> CollapsiblePanelHeader {
+    CollapsiblePanelHeader {
+        title: CardText {
+            tag: "plain_text".into(),
+            content: title,
+        },
+        icon: StandardIcon {
+            tag: "standard_icon".into(),
+            token: "down-small-ccm_outlined".into(),
+            size: "16px 16px".into(),
+        },
+        icon_position: "right".into(),
+        icon_expanded_angle: -180,
     }
 }
 

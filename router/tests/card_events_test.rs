@@ -15,6 +15,16 @@ fn cfg_small() -> CardConfig {
     }
 }
 
+/// fold 模式下跑工具链路的配置：args 不截断（上限足够），结果软上限很小。
+fn cfg_fold_tool() -> CardConfig {
+    CardConfig {
+        max_user_text_chars: 1000,
+        max_tool_output_chars: 5,
+        fold_long_output: true,
+        ..cfg()
+    }
+}
+
 #[test]
 fn append_text_delta() {
     let mut body = vec![];
@@ -62,17 +72,16 @@ fn append_revives_thinking_toolend_toolprogress() {
         },
         &cfg(),
     );
-    // ThinkingDelta -> Hr + Div (separator added in card-readability refactor);
-    // ToolProgress -> Div; ToolEnd -> Div.
-    assert_eq!(body.len(), 4);
+    // ThinkingDelta -> Hr + Div；ToolProgress（无 tool 面板）-> 独立 Div；
+    // ToolEnd（默认 max_tool_output_chars=0 且无面板可归属）-> 静默。
+    assert_eq!(body.len(), 3);
     assert!(matches!(body[0], CardElement::Hr));
     assert!(matches!(body[1], CardElement::Div { .. }));
     assert!(matches!(body[2], CardElement::Div { .. }));
-    assert!(matches!(body[3], CardElement::Div { .. }));
 }
 
 #[test]
-fn tool_start_emits_hr_then_markdown() {
+fn tool_start_folds_into_collapsible_panel() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
@@ -82,6 +91,34 @@ fn tool_start_emits_hr_then_markdown() {
             args: serde_json::json!({"cmd":"ls"}),
         },
         &cfg(),
+    );
+    // 默认折叠：单个 collapsible_panel，标题 📖 Bash，args 在面板内。
+    assert_eq!(body.len(), 1);
+    match &body[0] {
+        CardElement::CollapsiblePanel(panel) => {
+            assert!(!panel.expanded, "默认折叠");
+            assert_eq!(panel.header.title.content, "📖 Bash");
+            assert!(matches!(panel.elements[0], CardElement::Markdown { .. }));
+        }
+        other => panic!("expected CollapsiblePanel, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_start_fold_disabled_emits_hr_then_markdown() {
+    let mut body = vec![];
+    let c = CardConfig {
+        fold_long_output: false,
+        ..cfg()
+    };
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"cmd":"ls"}),
+        },
+        &c,
     );
     assert!(matches!(body[0], CardElement::Hr));
     assert!(matches!(body[1], CardElement::Markdown { .. }));
@@ -138,27 +175,54 @@ fn fold_disabled_skips_truncation() {
 }
 
 #[test]
-fn long_toolend_result_folded_into_collapsible_panel() {
+fn tool_lifecycle_folds_into_single_panel() {
+    // ToolStart + ToolProgress + ToolEnd 全部收进同一个折叠面板。
     let mut body = vec![];
-    let big = "x".repeat(20);
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"cmd": "ls"}),
+        },
+        &cfg_fold_tool(),
+    );
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolProgress {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            progress: "in_progress".into(),
+        },
+        &cfg_fold_tool(),
+    );
     apply_event_to_card(
         &mut body,
         &AcpEvent::ToolEnd {
             session_id: "s".into(),
             tool_name: "Bash".into(),
-            result: big,
+            result: "x".repeat(20),
         },
-        &cfg_small(),
+        &cfg_fold_tool(),
     );
-    // 超过软上限(5) -> 单个默认折叠的 collapsible_panel，全文保留（20 字）。
+    // 一个工具 = 一行面板；标题随生命周期变成 ✓ Bash。
     assert_eq!(body.len(), 1);
     match &body[0] {
         CardElement::CollapsiblePanel(panel) => {
-            assert!(!panel.expanded, "默认折叠");
-            assert_eq!(panel.elements.len(), 1);
+            assert_eq!(panel.header.title.content, "✓ Bash");
+            // [args markdown, 进度灰注, 结果 markdown（超过软上限 5，全文保留 20 字）]
+            assert_eq!(panel.elements.len(), 3);
             match &panel.elements[0] {
+                CardElement::Markdown { content } => assert!(content.contains("```json")),
+                other => panic!("expected args Markdown, got {other:?}"),
+            }
+            match &panel.elements[1] {
+                CardElement::Div { text } => assert!(text.content.contains("in_progress")),
+                other => panic!("expected progress Div, got {other:?}"),
+            }
+            match &panel.elements[2] {
                 CardElement::Markdown { content } => assert_eq!(content.chars().count(), 20),
-                other => panic!("expected Markdown, got {other:?}"),
+                other => panic!("expected result Markdown, got {other:?}"),
             }
         }
         other => panic!("expected CollapsiblePanel, got {other:?}"),
@@ -167,11 +231,17 @@ fn long_toolend_result_folded_into_collapsible_panel() {
 
 #[test]
 fn tool_end_zero_suppresses_result_output() {
+    // 默认 max_tool_output_chars=0：结果内容不输出，面板只保留 args + 完成标记。
     let mut body = vec![];
-    let c = CardConfig {
-        max_tool_output_chars: 0,
-        ..cfg_small()
-    };
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"cmd": "ls"}),
+        },
+        &cfg(),
+    );
     apply_event_to_card(
         &mut body,
         &AcpEvent::ToolEnd {
@@ -179,9 +249,18 @@ fn tool_end_zero_suppresses_result_output() {
             tool_name: "Bash".into(),
             result: "whatever".into(),
         },
-        &c,
+        &cfg(),
     );
-    assert!(body.is_empty(), "0 = 不输出 tool call 结果内容");
+    assert_eq!(body.len(), 1);
+    match &body[0] {
+        CardElement::CollapsiblePanel(panel) => {
+            assert_eq!(panel.header.title.content, "✓ Bash");
+            assert_eq!(panel.elements.len(), 1, "只有 args，没有结果内容");
+        }
+        other => panic!("expected CollapsiblePanel, got {other:?}"),
+    }
+    let s = serde_json::to_string(&body).unwrap();
+    assert!(!s.contains("whatever"), "结果内容必须被屏蔽");
 }
 
 #[test]
@@ -190,22 +269,31 @@ fn tool_end_hard_limit_truncates_inside_panel() {
     let big = "y".repeat(10240 + 10);
     apply_event_to_card(
         &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({}),
+        },
+        &cfg_fold_tool(),
+    );
+    apply_event_to_card(
+        &mut body,
         &AcpEvent::ToolEnd {
             session_id: "s".into(),
             tool_name: "Bash".into(),
             result: big,
         },
-        &cfg_small(),
+        &cfg_fold_tool(),
     );
     match &body[0] {
         CardElement::CollapsiblePanel(panel) => {
-            // 硬上限 10240：面板内是截断后的内容 + 截断灰注。
-            assert_eq!(panel.elements.len(), 2);
-            match &panel.elements[0] {
+            // [args markdown, 硬上限截断后的结果 markdown, 截断灰注]
+            assert_eq!(panel.elements.len(), 3);
+            match &panel.elements[1] {
                 CardElement::Markdown { content } => assert_eq!(content.chars().count(), 10240),
                 other => panic!("expected Markdown, got {other:?}"),
             }
-            match &panel.elements[1] {
+            match &panel.elements[2] {
                 CardElement::Div { text } => assert!(text.content.contains("已截断 10 字")),
                 other => panic!("expected truncation note, got {other:?}"),
             }
@@ -262,7 +350,11 @@ fn total_budget_drops_oldest() {
 fn total_budget_drops_hr_with_following_element() {
     // 最旧是 Hr -> 连后一个一起丢。
     let mut body = vec![];
-    let c = cfg();
+    // fold=false 才产生 Hr（fold=true 时 ToolStart 是折叠面板）。
+    let c = CardConfig {
+        fold_long_output: false,
+        ..cfg()
+    };
     // 先 push 一个 Hr + 一个 text，再 push 大量 text 触发总量。
     apply_event_to_card(
         &mut body,

@@ -25,7 +25,7 @@ fn card_config_defaults() {
     let c = CardConfig::default();
     assert_eq!(c.theme_color, "blue");
     assert_eq!(c.max_user_text_chars, 4000);
-    assert_eq!(c.max_tool_output_chars, 1024);
+    assert_eq!(c.max_tool_output_chars, 0);
     assert!(c.fold_long_output);
 }
 
