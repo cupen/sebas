@@ -10,6 +10,7 @@ use router::crud::{
 };
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 fn spec() -> FormSpec {
     FormSpec::new(
@@ -254,4 +255,29 @@ async fn create_button_opens_empty_form() {
         }
         other => panic!("expected UpdateCardByMsgId, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn submit_normalizer_transforms_item_before_store() {
+    let store = InMemoryStore::new("id");
+    let crud =
+        CrudForm::new(spec(), "id", store.clone()).with_normalizer(Arc::new(|item: &mut Item| {
+            if let Some(Value::String(s)) = item.get_mut("title") {
+                *s = s.to_uppercase();
+            }
+        }));
+
+    let mut fv = BTreeMap::new();
+    fv.insert("title".into(), json!("hello"));
+    let out = crud
+        .handle(key(), &payload(OP_SUBMIT, None), &fv, None)
+        .await;
+    assert!(matches!(out, Out::SendCard { .. }));
+
+    let items = store.list().await;
+    assert_eq!(
+        items[0].get("title").and_then(Value::as_str),
+        Some("HELLO"),
+        "normalizer must run before insert"
+    );
 }

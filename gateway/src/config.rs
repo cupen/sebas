@@ -180,17 +180,16 @@ struct RawProviderConfig {
 
 /// provider 惯例默认（spec §6 Provider 格局调研 + 2026-08-04/07 端点探测）。
 /// 双协议 provider（anthropic + openai 端点都有）必须显式 `protocol`，不猜。
-/// 默认 env 名均可被 `api_key_env` 覆盖。
-struct ProviderPreset {
-    name: &'static str,
-    /// anthropic 协议端点；
-    /// `None` = 该 preset 不提供 anthropic 端点。
-    anthropic_base_url: Option<&'static str>,
-    /// openai 协议端点；
-    /// `None` = 该 preset 不提供 openai 端点。
-    openai_base_url: Option<&'static str>,
+/// 默认 env 名均可被 `api_key_env` 覆盖。pub 暴露供 bot 侧 `/provider` 表单
+/// 预填默认值（见 `src/provider.rs` 的 preset 规范化）。
+pub struct ProviderPreset {
+    pub name: &'static str,
+    /// anthropic 协议端点；`None` = 该 preset 不提供 anthropic 端点。
+    pub anthropic_base_url: Option<&'static str>,
+    /// openai 协议端点；`None` = 该 preset 不提供 openai 端点。
+    pub openai_base_url: Option<&'static str>,
     /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
-    api_key_env: &'static str,
+    pub api_key_env: &'static str,
 }
 
 const PROVIDER_PRESETS: &[ProviderPreset] = &[
@@ -252,6 +251,11 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
 
 fn find_preset(name: &str) -> Option<&'static ProviderPreset> {
     PROVIDER_PRESETS.iter().find(|p| p.name == name)
+}
+
+/// 内置 provider preset 表（供 bot 侧表单选项与默认值预填使用）。
+pub fn presets() -> &'static [ProviderPreset] {
+    PROVIDER_PRESETS
 }
 
 /// raw → resolved：把每个 provider 收敛成对外 `ProviderConfig`。
@@ -673,9 +677,6 @@ api_key_env = "DEEPSEEK_API_KEY"
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
         }
-        unsafe {
-            isolate_overlay();
-        }
         let cfg = parse_isolated(FULL_EXAMPLE).expect("full example should parse");
         assert_eq!(cfg.listen, "127.0.0.1:8787");
         assert_eq!(cfg.max_body_bytes, 67_108_864);
@@ -708,9 +709,6 @@ api_key_env = "DEEPSEEK_API_KEY"
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
         }
-        unsafe {
-            isolate_overlay();
-        }
         let raw = format!("{FULL_EXAMPLE}\n[feishu]\napp_id = \"x\"\napp_secret = \"y\"\n");
         let cfg = parse_isolated(&raw).expect("should parse with [feishu] present");
         assert_eq!(cfg.providers.len(), 2);
@@ -723,11 +721,7 @@ api_key_env = "DEEPSEEK_API_KEY"
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
         }
-        unsafe {
-            isolate_overlay();
-        }
-        let err =
-            parse_isolated("[feishu]\napp_id = \"x\"\n").expect_err("missing [gateway]");
+        let err = parse_isolated("[feishu]\napp_id = \"x\"\n").expect_err("missing [gateway]");
         let msg = err.to_string();
         assert!(
             msg.contains("[gateway]"),
@@ -741,9 +735,6 @@ api_key_env = "DEEPSEEK_API_KEY"
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::set_var("SEBAS_GATEWAY_LISTEN", "0.0.0.0:9999");
-        }
-        unsafe {
-            isolate_overlay();
         }
         let cfg = parse_isolated(FULL_EXAMPLE).expect("parse");
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
@@ -759,9 +750,6 @@ api_key_env = "DEEPSEEK_API_KEY"
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-        }
-        unsafe {
-            isolate_overlay();
         }
         let raw = r#"
 [gateway]
@@ -787,9 +775,6 @@ api_key = "test-key"
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-        }
-        unsafe {
-            isolate_overlay();
         }
         let home = dirs::home_dir().expect("HOME must be set for this test");
         let raw = r#"

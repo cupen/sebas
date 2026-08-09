@@ -41,6 +41,10 @@ const KEY_FORM: &str = "form";
 const KEY_OP: &str = "op";
 const KEY_ID: &str = "id";
 
+/// 提交规范化钩子：对表单提交产生的 item 做字段级修正
+/// （如 provider preset 默认值填充），在写入存储之前执行。
+pub type ItemNormalizer = Arc<dyn Fn(&mut Item) + Send + Sync>;
+
 /// 存储抽象：CRUD 状态机只依赖这五个操作。
 pub trait CrudStore: Send + Sync {
     fn list(&self) -> impl std::future::Future<Output = Vec<Item>> + Send;
@@ -272,6 +276,9 @@ pub struct CrudForm<S: CrudStore> {
     pub spec: FormSpec,
     pub id_field: String,
     pub store: S,
+    /// 提交时的字段规范化钩子（如 provider preset 默认值填充）。
+    /// 在 item_from_form 之后、写入存储之前执行。
+    normalizer: Option<ItemNormalizer>,
 }
 
 impl<S: CrudStore> CrudForm<S> {
@@ -280,7 +287,14 @@ impl<S: CrudStore> CrudForm<S> {
             spec,
             id_field: id_field.into(),
             store,
+            normalizer: None,
         }
+    }
+
+    /// 注入提交规范化钩子（对每次表单提交的 item 生效，种子数据不经过它）。
+    pub fn with_normalizer(mut self, f: ItemNormalizer) -> Self {
+        self.normalizer = Some(f);
+        self
     }
 
     /// 打开 CRUD：发送列表卡（含「＋ 新增」和每条记录的 编辑/删除）。
@@ -351,7 +365,10 @@ impl<S: CrudStore> CrudForm<S> {
             Some(id) => {
                 let existing = self.store.get(id).await;
                 let exists = existing.is_some();
-                let item = self.item_from_form(Some(id), form_value, existing.as_ref());
+                let mut item = self.item_from_form(Some(id), form_value, existing.as_ref());
+                if let Some(f) = &self.normalizer {
+                    f(&mut item);
+                }
                 let result = if exists {
                     self.store.update(item).await
                 } else {
@@ -363,7 +380,10 @@ impl<S: CrudStore> CrudForm<S> {
             }
             None => {
                 let id = format!("{}-{}", self.spec.form_name, now_unix_millis());
-                let item = self.item_from_form(Some(id.as_str()), form_value, None);
+                let mut item = self.item_from_form(Some(id.as_str()), form_value, None);
+                if let Some(f) = &self.normalizer {
+                    f(&mut item);
+                }
                 if let Err(e) = self.store.insert(item).await {
                     tracing::warn!(form = %self.spec.form_name, id, error = %e, "crud insert failed");
                 }
