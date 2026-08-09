@@ -27,8 +27,13 @@ pub enum Cmd {
 /// Run mode — the long-lived sebas service.
 #[derive(Parser)]
 pub struct RunArgs {
-    #[arg(long, default_value = "./config.toml")]
+    #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
+
+    /// 同时在随机端口（127.0.0.1:0）上启动内置 gateway；实际端口在日志中输出。
+    /// provider 从配置顶层 `[provider.*]`（或 `[gateway.providers.*]`）读取。
+    #[arg(long)]
+    pub gateway: bool,
 
     /// Send a startup "sebas 已启动" message to this chat_id, then continue running.
     /// Useful for verifying outbound is wired correctly. chat_id format depends on
@@ -66,7 +71,7 @@ pub struct InstallServiceArgs {
     pub force: bool,
 
     /// Path to the sebas config.toml to bake into ExecStart. Must be absolute.
-    #[arg(long, default_value = "./config.toml")]
+    #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 }
 
@@ -86,7 +91,7 @@ pub struct RecordArgs {
     pub output: String,
 
     /// Config supplying acp.claude.path/args for the agent to record.
-    #[arg(long, default_value = "./config.toml")]
+    #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 
     /// Extra args for the agent binary, after `--`
@@ -98,6 +103,6 @@ pub struct RecordArgs {
 /// `sebas gateway` — run the LLM provider gateway.
 #[derive(Parser)]
 pub struct GatewayArgs {
-    #[arg(long, default_value = "./config.toml")]
+    #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 }
