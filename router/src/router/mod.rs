@@ -78,6 +78,12 @@ pub enum Out {
     HelpText {
         key: SessionKey,
     },
+    /// Plain-text reply to the originating chat (e.g. `/settings`, `/help`).
+    /// The dispatcher uses FeishuClient::send_text — not a card.
+    PlainText {
+        key: SessionKey,
+        content: String,
+    },
 }
 
 pub struct RouterHandle {

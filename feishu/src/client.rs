@@ -1,5 +1,5 @@
 use crate::events::SessionKey;
-use crate::messages::{ReactRequest, ReceiveIdType, SendCardRequest, UpdateCardRequest};
+use crate::messages::{ReactRequest, ReceiveIdType, SendCardRequest, SendTextRequest, UpdateCardRequest};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -238,6 +238,26 @@ impl FeishuClient {
         }
         let body = serde_json::to_value(&req)?;
         self.post_card_with_retry(http, tokens, url, body).await
+    }
+
+    /// Send a plain-text message to the chat. Same endpoint + auth+retry
+    /// path as `send_card`; the `text` is wrapped in the typed
+    /// `SendTextRequest` (Feishu requires `content` as a JSON-stringified
+    /// `{"text": "..."}`). Returns `()` — unlike `send_card`, callers don't
+    /// need the new `message_id` (used for fire-and-forget replies like
+    /// `/settings` / `/help`).
+    pub async fn send_text(
+        &self,
+        http: &reqwest::Client,
+        tokens: &TokenManager,
+        key: &SessionKey,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
+        let req = SendTextRequest::new(&key.chat_id, ReceiveIdType::ChatId, text);
+        let body = serde_json::to_value(&req)?;
+        self.request_with_retry(http, tokens, reqwest::Method::POST, url, body)
+            .await
     }
 
     pub async fn update_card(
