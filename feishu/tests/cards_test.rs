@@ -25,7 +25,7 @@ fn card_config_defaults() {
     let c = CardConfig::default();
     assert_eq!(c.theme_color, "blue");
     assert_eq!(c.max_user_text_chars, 4000);
-    assert_eq!(c.max_tool_output_chars, 2000);
+    assert_eq!(c.max_tool_output_chars, 1024);
     assert!(c.fold_long_output);
 }
 
@@ -142,4 +142,36 @@ fn permission_card_args_in_code_fence_and_explanation_note() {
     // Explanation note present so users know what 本会话不再询问 means.
     assert!(s.contains("本会话不再询问 = 之后本会话所有权限请求自动放行"));
     assert!(s.contains("/new 或会话结束后失效"));
+}
+
+#[test]
+fn collapsible_panel_serializes_v2_shape() {
+    use feishu::cards::{
+        CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, StandardIcon,
+    };
+    let panel = CardElement::CollapsiblePanel(CollapsiblePanel {
+        expanded: false,
+        header: CollapsiblePanelHeader {
+            title: CardText {
+                tag: "plain_text".into(),
+                content: "Bash 输出".into(),
+            },
+            icon: StandardIcon {
+                tag: "standard_icon".into(),
+                token: "down-small-ccm_outlined".into(),
+                size: "16px 16px".into(),
+            },
+            icon_position: "right".into(),
+            icon_expanded_angle: -180,
+        },
+        elements: vec![CardElement::Markdown {
+            content: "long output".into(),
+        }],
+    });
+    let s = serde_json::to_string(&panel).unwrap();
+    assert!(s.contains("\"tag\":\"collapsible_panel\""));
+    assert!(s.contains("\"expanded\":false"));
+    assert!(s.contains("\"header\":{"));
+    assert!(s.contains("\"elements\":["));
+    assert!(s.contains("long output"));
 }
