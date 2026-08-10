@@ -8,9 +8,8 @@ use crate::commands::{Command, HELP_TEXT, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
-    CardConfig, ThinkingDisplay, phase_visual, render_accumulated_card,
-    render_dead_session_card, render_expired_permission_card,
-    render_resolved_permission_card,
+    CardConfig, ThinkingDisplay, render_dead_session_card,
+    render_expired_permission_card, render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use serde_json::Value;
@@ -352,38 +351,11 @@ impl RouterHandle {
             self.emit_reaction(&session_id, WORKING).await;
         }
 
-        // Emit per-turn card with root_id so the dispatcher sends a fresh card
-        // that becomes the new streaming target (MsgIdMap flips to this card).
-        // Reset CardState so streaming body accumulates fresh (not appended to
-        // previous turn's body).
-        self.card_states.drop(&session_id).await;
-        self.seed_card(session_id.clone(), prompt.clone()).await;
-        let seed_emoji = phase_visual(crate::card_state::phase::SEED);
-        let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(
-            &prompt,
-            &session_id,
-            seed_emoji,
-            &[],
-            &theme_color,
-        );
-        self.emit(Out::SendCard {
-            key,
-            card: serde_json::to_value(&card).unwrap(),
-            // Record the new card under the session so streaming UpdateCards
-            // resolve to THIS turn's card (previous turn stays frozen).
-            msg_id: Some(session_id.clone()),
-            perm_request_id: None,
-            perm_meta: None,
-            root_id,
-        })
-        .await;
-
-        self.emit(Out::SendAcp {
-            session_id: session_id.clone(),
-            cmd: AcpCommand::ContinueSession { session_id, prompt },
-        })
-        .await;
+        // Emit the per-turn card that becomes the new streaming target
+        // (MsgIdMap flips to this card). Reset CardState so streaming
+        // body accumulates fresh (not appended to previous turn's body).
+        self.emit_turn_card(key, &session_id, prompt, root_id)
+            .await;
     }
 
     async fn forward_to_session(&self, session_id: &str, text: String) {

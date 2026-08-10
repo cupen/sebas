@@ -346,6 +346,47 @@ impl RouterHandle {
         self.map.fail_spawn(key).await;
     }
 
+    /// Emit a per-turn card and ContinueSession command.
+    ///
+    /// Shared by `inbound::continue_session` and `drain_queue_if_terminal`
+    /// to eliminate the identical card-emission logic between them. Resets
+    /// CardState, seeds a fresh card, emits SendCard, then emits SendAcp
+    /// to drive the next turn.
+    async fn emit_turn_card(
+        &self,
+        key: SessionKey,
+        session_id: &str,
+        prompt: String,
+        root_id: Option<String>,
+    ) {
+        use crate::card_state::phase::SEED;
+
+        self.card_states.drop(session_id).await;
+        self.seed_card(session_id.to_string(), prompt.clone()).await;
+        let seed_emoji = phase_visual(SEED);
+        let theme_color = self.card_cfg.read().await.theme_color.clone();
+        let card = render_accumulated_card(&prompt, session_id, seed_emoji, &[], &theme_color);
+        self.emit(Out::SendCard {
+            key,
+            card: serde_json::to_value(&card).unwrap(),
+            // Record the new card under the session so streaming UpdateCards
+            // resolve to THIS turn's card (previous turn stays frozen).
+            msg_id: Some(session_id.to_string()),
+            perm_request_id: None,
+            perm_meta: None,
+            root_id,
+        })
+        .await;
+        self.emit(Out::SendAcp {
+            session_id: session_id.to_string(),
+            cmd: AcpCommand::ContinueSession {
+                session_id: session_id.to_string(),
+                prompt,
+            },
+        })
+        .await;
+    }
+
     /// Drain ONE queued turn if the session is in a terminal state (DONE/FAILED)
     /// and the queue is non-empty. Resets CardState and emits SendCard + SendAcp
     /// for the next turn.
@@ -374,42 +415,9 @@ impl RouterHandle {
             return;
         };
 
-        // Reset CardState: drop the old turn's state, seed fresh for the new turn.
-        self.card_states.drop(session_id).await;
-        self.seed_card(session_id.to_string(), next.prompt.clone())
+        // Reset CardState and emit the per-turn card + ContinueSession.
+        self.emit_turn_card(key.clone(), session_id, next.prompt, next.reply_to)
             .await;
-
-        // Emit per-turn card with root_id = next.reply_to (threading via reply_to).
-        let seed_emoji = phase_visual(crate::card_state::phase::SEED);
-        let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(
-            &next.prompt,
-            session_id,
-            seed_emoji,
-            &[],
-            &theme_color,
-        );
-        self.emit(Out::SendCard {
-            key: key.clone(),
-            card: serde_json::to_value(&card).unwrap(),
-            // Record the new card under the session so streaming UpdateCards
-            // resolve to THIS turn's card (previous turn stays frozen).
-            msg_id: Some(session_id.to_string()),
-            perm_request_id: None,
-            perm_meta: None,
-            root_id: next.reply_to,
-        })
-        .await;
-
-        // Emit ContinueSession for the new turn.
-        self.emit(Out::SendAcp {
-            session_id: session_id.to_string(),
-            cmd: AcpCommand::ContinueSession {
-                session_id: session_id.to_string(),
-                prompt: next.prompt,
-            },
-        })
-        .await;
     }
 }
 

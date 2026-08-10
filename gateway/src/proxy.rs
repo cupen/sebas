@@ -273,7 +273,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     if state.cfg.debug && decision.provider == "test" {
         let echoed = test_provider::echo_text(buffered_bytes.as_ref());
         let stream = test_provider::wants_stream(buffered_bytes.as_ref());
-        settle_usage(
+        settle_inner(
             &state.sink,
             proto,
             Some("test"),
@@ -345,7 +345,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
             tracing::warn!(error = %e, %upstream_url, "upstream request failed");
             // 网关侧失败：error 字段承载原因，status=502。token 字段全 None
             // （请求未到达上游，无 usage）。
-            settle_usage(
+            settle_inner(
                 &state.sink,
                 proto,
                 model.as_deref(),
@@ -394,7 +394,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
                 // 上游 4xx/5xx 也记 record：status 承载错误语义，error=None。
                 // 解析 usage（错误响应可能无 usage → 全 None，正常）。
                 let info = parse_json_usage(proto, &b);
-                settle_usage(
+                settle_inner(
                     &state.sink,
                     proto,
                     model.as_deref(),
@@ -410,7 +410,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
             }
             Err(e) => {
                 tracing::warn!(error = %e, %upstream_url, "upstream body read failed");
-                settle_usage(
+                settle_inner(
                     &state.sink,
                     proto,
                     model.as_deref(),
@@ -513,40 +513,7 @@ impl Drop for UsageFinalizer {
     }
 }
 
-/// 同步结算（非 SSE 分支 + connect/body-read 失败）。写一条 `UsageRecord`。
-/// `UsageRecord.key` 恒为空——无 per-key 身份，且绝不写 token 本体（安全约束）。
-///
-/// 参数多是因为 record 字段直接对应 brief 契约（ts/key/proto/model/provider/
-/// upstream_model/status/latency/ttft/token/error）；强行打包成 struct 会让
-/// 调用点（3 处不同错误路径）反而难读。allow 即可。
-#[allow(clippy::too_many_arguments)]
-fn settle_usage(
-    sink: &UsageSink,
-    proto: Protocol,
-    model: Option<&str>,
-    provider: &str,
-    upstream_model: Option<&str>,
-    status: u16,
-    start: Instant,
-    ttft: Option<Duration>,
-    info: UsageInfo,
-    error: Option<&str>,
-) {
-    settle_inner(
-        sink,
-        proto,
-        model,
-        provider,
-        upstream_model,
-        status,
-        start,
-        ttft,
-        info,
-        error,
-    );
-}
-
-/// `settle_usage` 与 `UsageFinalizer::drop` 共用的内部实现。
+/// `UsageFinalizer::drop` 调用的内部实现。
 #[allow(clippy::too_many_arguments)]
 fn settle_inner(
     sink: &UsageSink,
