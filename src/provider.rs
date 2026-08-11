@@ -15,19 +15,28 @@
 use feishu::forms::{FormField, FormSpec, SelectOption};
 use gateway::config::GatewayConfig;
 use router::crud::{CrudForm, FileStore, Item};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
-pub const FORM_NAME: &str = "provider";
+/// 预设表单：用户从代码里写好的 provider 里选一个，只填名称 + 密钥。
+/// base_url 在 normalizer 提交时按 preset 推断并以「只读」回填展示。
+pub const FORM_PRESET: &str = "provider-preset";
+/// 自定义表单：用户手填所有参数（与原单表单形态一致）。
+pub const FORM_CUSTOM: &str = "provider-custom";
 pub const ID_FIELD: &str = "name";
 
-/// provider 表单 schema（与 gateway `ProviderConfig` 字段对齐）。
-/// `preset` 选填：选中的 preset 会在提交时按协议补全 base_url，并在未显式
-/// 指定任何密钥来源时注入 preset 默认 env 名（与 config.toml 的解析行为一致）。
-pub fn spec() -> FormSpec {
+/// 预设模式表单：name + preset + api_key + 只读 base_url。
+///
+/// base_url 字段：
+/// - 新建时为空 —— 飞书 `select_static` 在 form 容器里挂 behaviors 不稳定
+///   触发（`select` tag 报 200621 不可用），无法做"选 preset 实时回填"。
+/// - 编辑已有 provider 时由 `item_to_initial()` 从存储读出预填；
+///   disabled 让用户不能改（preset 已经决定了地址），但能看到实际值。
+/// - 提交时 `apply_preset_defaults` 按 preset 推断并写回存储。
+pub fn spec_preset() -> FormSpec {
     FormSpec::new(
-        FORM_NAME,
-        "Provider",
+        FORM_PRESET,
+        "Provider（预设）",
         vec![
             FormField::Text {
                 name: "name".into(),
@@ -35,45 +44,39 @@ pub fn spec() -> FormSpec {
                 required: true,
                 placeholder: "如 deepseek".into(),
                 secret: false,
+                disabled: false,
             },
             FormField::Select {
                 name: "preset".into(),
-                label: "预设（可选）".into(),
-                required: false,
-                options: std::iter::once(SelectOption {
-                    value: String::new(),
-                    label: "无（自定义）".into(),
-                })
-                .chain(gateway::config::presets().iter().map(|p| SelectOption {
-                    value: p.name.to_string(),
-                    label: p.name.to_string(),
-                }))
-                .collect(),
-            },
-            FormField::Select {
-                name: "protocol".into(),
-                label: "协议".into(),
-                // 选 preset 时可留空：单协议 preset 自动推断，双协议 preset
-                // 默认 anthropic（可在表单里显式改 openai）。
-                required: false,
-                options: vec![
-                    SelectOption {
-                        value: "anthropic".into(),
-                        label: "Anthropic".into(),
-                    },
-                    SelectOption {
-                        value: "openai".into(),
-                        label: "OpenAI".into(),
-                    },
-                ],
+                label: "预设".into(),
+                required: true,
+                options: gateway::config::presets()
+                    .iter()
+                    .map(|p| SelectOption {
+                        value: p.name.to_string(),
+                        label: p.name.to_string(),
+                    })
+                    .collect(),
+                on_change: Some(json!({
+                    "form": FORM_PRESET,
+                    "op": "recompute",
+                })),
             },
             FormField::Text {
-                name: "base_url".into(),
-                label: "Base URL".into(),
-                // 选 preset 时可留空，提交时按协议自动填充。
+                name: "base_url_anthropic".into(),
+                label: "Base URL(Anthropic)".into(),
                 required: false,
-                placeholder: "https://api.xxx.com".into(),
+                placeholder: "新建时为空，提交后由 preset 决定".into(),
                 secret: false,
+                disabled: true,
+            },
+            FormField::Text {
+                name: "base_url_openai".into(),
+                label: "Base URL(OpenAI)".into(),
+                required: false,
+                placeholder: "新建时为空，提交后由 preset 决定".into(),
+                secret: false,
+                disabled: true,
             },
             FormField::Text {
                 name: "api_key".into(),
@@ -81,24 +84,78 @@ pub fn spec() -> FormSpec {
                 required: false,
                 placeholder: "粘贴 API Key（保存后不回显）".into(),
                 secret: true,
+                disabled: false,
+            },
+        ],
+    )
+}
+
+/// 自定义模式表单：所有字段都让用户填（与 gateway `ProviderConfig` 字段对齐）。
+/// base_url_anthropic / base_url_openai 各自独立，可只填一个（只支持对应协议）。
+pub fn spec_custom() -> FormSpec {
+    FormSpec::new(
+        FORM_CUSTOM,
+        "Provider（自定义）",
+        vec![
+            FormField::Text {
+                name: "name".into(),
+                label: "名称".into(),
+                required: true,
+                placeholder: "如 my-openai".into(),
+                secret: false,
+                disabled: false,
+            },
+            FormField::Text {
+                name: "base_url_anthropic".into(),
+                label: "Base URL(Anthropic)".into(),
+                required: false,
+                placeholder: "留空表示不提供 Anthropic 协议".into(),
+                secret: false,
+                disabled: false,
+            },
+            FormField::Text {
+                name: "base_url_openai".into(),
+                label: "Base URL(OpenAI)".into(),
+                required: false,
+                placeholder: "留空表示不提供 OpenAI 协议".into(),
+                secret: false,
+                disabled: false,
+            },
+            FormField::Text {
+                name: "api_key".into(),
+                label: "API Key".into(),
+                required: false,
+                placeholder: "粘贴 API Key（保存后不回显）".into(),
+                secret: true,
+                disabled: false,
             },
             FormField::Text {
                 name: "api_key_env".into(),
                 label: "API Key 环境变量".into(),
                 required: false,
-                placeholder: "如 DEEPSEEK_API_KEY".into(),
+                placeholder: "如 MY_OPENAI_API_KEY".into(),
                 secret: false,
+                disabled: false,
             },
         ],
     )
+}
+
+/// 兼容老引用（测试 / 旧调用方）。
+pub fn spec() -> FormSpec {
+    spec_custom()
 }
 
 /// 把 gateway 配置里的 provider 转成 CRUD item（种子）。
 pub fn item_from_provider(name: &str, p: &gateway::config::ProviderConfig) -> Item {
     let mut m = Map::new();
     m.insert("name".into(), Value::String(name.into()));
-    m.insert("protocol".into(), Value::String(p.protocol.as_str().into()));
-    m.insert("base_url".into(), Value::String(p.base_url.clone()));
+    if let Some(u) = &p.base_url_anthropic {
+        m.insert("base_url_anthropic".into(), Value::String(u.clone()));
+    }
+    if let Some(u) = &p.base_url_openai {
+        m.insert("base_url_openai".into(), Value::String(u.clone()));
+    }
     if let Some(key) = &p.api_key {
         m.insert("api_key".into(), Value::String(key.clone()));
     }
@@ -116,9 +173,13 @@ pub fn overlay_path() -> std::path::PathBuf {
     std::path::PathBuf::from(crate::config::expand_tilde(&raw))
 }
 
-/// 构造 provider CRUD 表单：种子来自 config.toml 的顶层 `[provider.*]`，
+/// `/provider` 命令的两张表单（共享同一个 overlay 存储）。
+/// 定义在 router 里；sebas root crate 只是装配。
+pub use router::crud::ProviderForms;
+
+/// 构造两套 provider CRUD 表单：种子来自 config.toml 的顶层 `[provider.*]`，
 /// 变更持久化到 overlay 文件。加载失败时返回 None（`/provider` 退化为帮助）。
-pub fn build_form(raw_config: &str) -> Option<Arc<CrudForm<FileStore>>> {
+pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
     let seed = match GatewayConfig::parse(raw_config) {
         Ok(g) => g
             .providers
@@ -132,9 +193,16 @@ pub fn build_form(raw_config: &str) -> Option<Arc<CrudForm<FileStore>>> {
     };
     let path = overlay_path();
     match FileStore::load(path.clone(), ID_FIELD, seed) {
-        Ok(store) => Some(Arc::new(
-            CrudForm::new(spec(), ID_FIELD, store).with_normalizer(Arc::new(apply_preset_defaults)),
-        )),
+        Ok(store) => Some(Arc::new(ProviderForms {
+            preset: Arc::new(
+                CrudForm::new(spec_preset(), ID_FIELD, store.clone())
+                    .with_normalizer(Arc::new(apply_preset_defaults)),
+            ),
+            custom: Arc::new(
+                CrudForm::new(spec_custom(), ID_FIELD, store)
+                    .with_normalizer(Arc::new(noop_normalizer)),
+            ),
+        })),
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "provider overlay 加载失败；/provider 不可用");
             None
@@ -142,10 +210,12 @@ pub fn build_form(raw_config: &str) -> Option<Arc<CrudForm<FileStore>>> {
     }
 }
 
+/// 自定义模式表单的 normalizer：什么都不做（用户已填全所有字段）。
+/// 保留签名一致让两套表单可以共享 `with_normalizer` 调用点。
+fn noop_normalizer(_item: &mut Item) {}
+
 /// 提交规范化：选中 preset 时补全默认值（与 config.toml preset 解析一致）。
-/// - protocol 留空 → 单协议 preset 自动推断；双协议 preset（deepseek/kimi/glm/
-///   minimax/ark）默认 anthropic（可在表单里显式改 openai）；
-/// - base_url 留空 → 按 protocol 填 preset 端点；
+/// - `base_url_anthropic` / `base_url_openai` 各自按 preset 填缺项；
 /// - api_key / api_key_env 都没填 → 注入 preset 默认 env 名。
 fn apply_preset_defaults(item: &mut Item) {
     let Some(preset_name) = item.get("preset").and_then(Value::as_str) else {
@@ -158,33 +228,23 @@ fn apply_preset_defaults(item: &mut Item) {
         return;
     };
 
-    let mut protocol = item
-        .get("protocol")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if protocol.is_empty() {
-        protocol = match (p.anthropic_base_url, p.openai_base_url) {
-            (Some(_), None) => "anthropic".into(),
-            (None, Some(_)) => "openai".into(),
-            // 双协议 preset：默认 anthropic，用户可在表单显式改 openai。
-            _ => "anthropic".into(),
-        };
-        item.insert("protocol".into(), Value::String(protocol.clone()));
-    }
-    let base_url_empty = item
-        .get("base_url")
+    let anth_empty = item
+        .get("base_url_anthropic")
         .and_then(Value::as_str)
         .is_none_or(|s| s.is_empty());
-    if base_url_empty {
-        let base = match protocol.as_str() {
-            "anthropic" => p.anthropic_base_url,
-            "openai" => p.openai_base_url,
-            _ => None,
-        };
-        if let Some(b) = base {
-            item.insert("base_url".into(), Value::String(b.to_string()));
-        }
+    if anth_empty
+        && let Some(u) = p.base_url_anthropic
+    {
+        item.insert("base_url_anthropic".into(), Value::String(u.to_string()));
+    }
+    let oai_empty = item
+        .get("base_url_openai")
+        .and_then(Value::as_str)
+        .is_none_or(|s| s.is_empty());
+    if oai_empty
+        && let Some(u) = p.base_url_openai
+    {
+        item.insert("base_url_openai".into(), Value::String(u.to_string()));
     }
 
     let has_key = item
@@ -216,16 +276,16 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_preset_fills_base_url_and_default_env() {
-        let mut item = item_with(&[
-            ("name", "deepseek"),
-            ("preset", "deepseek"),
-            ("protocol", "anthropic"),
-        ]);
+    fn deepseek_preset_fills_both_urls_and_default_env() {
+        let mut item = item_with(&[("name", "deepseek"), ("preset", "deepseek")]);
         apply_preset_defaults(&mut item);
         assert_eq!(
-            item.get("base_url").and_then(Value::as_str),
+            item.get("base_url_anthropic").and_then(Value::as_str),
             Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            item.get("base_url_openai").and_then(Value::as_str),
+            Some("https://api.deepseek.com")
         );
         assert_eq!(
             item.get("api_key_env").and_then(Value::as_str),
@@ -234,8 +294,8 @@ mod tests {
     }
 
     #[test]
-    fn preset_with_only_api_key_fills_protocol_and_endpoint() {
-        // 用户视角：选 deepseek 预设 + 粘密钥，其余全部补全。
+    fn preset_with_only_api_key_fills_both_urls() {
+        // 用户视角：选 deepseek 预设 + 粘密钥，两个 URL 全部补全。
         let mut item = item_with(&[
             ("name", "deepseek"),
             ("preset", "deepseek"),
@@ -243,13 +303,12 @@ mod tests {
         ]);
         apply_preset_defaults(&mut item);
         assert_eq!(
-            item.get("protocol").and_then(Value::as_str),
-            Some("anthropic"),
-            "双协议 preset 默认 anthropic"
+            item.get("base_url_anthropic").and_then(Value::as_str),
+            Some("https://api.deepseek.com/anthropic")
         );
         assert_eq!(
-            item.get("base_url").and_then(Value::as_str),
-            Some("https://api.deepseek.com/anthropic")
+            item.get("base_url_openai").and_then(Value::as_str),
+            Some("https://api.deepseek.com")
         );
         assert!(
             item.get("api_key_env").is_none(),
@@ -258,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn single_protocol_preset_infers_protocol_and_endpoint() {
+    fn single_protocol_preset_fills_only_its_url() {
         let mut item = item_with(&[
             ("name", "anthropic"),
             ("preset", "anthropic"),
@@ -266,30 +325,34 @@ mod tests {
         ]);
         apply_preset_defaults(&mut item);
         assert_eq!(
-            item.get("protocol").and_then(Value::as_str),
-            Some("anthropic")
-        );
-        assert_eq!(
-            item.get("base_url").and_then(Value::as_str),
+            item.get("base_url_anthropic").and_then(Value::as_str),
             Some("https://api.anthropic.com")
+        );
+        assert!(
+            item.get("base_url_openai").is_none(),
+            "anthropic preset 不提供 openai 端点"
         );
         assert!(item.get("api_key_env").is_none());
     }
 
     #[test]
-    fn explicit_base_url_and_key_override_preset() {
+    fn explicit_base_urls_and_key_override_preset() {
         let mut item = item_with(&[
             ("name", "deepseek"),
             ("preset", "deepseek"),
-            ("protocol", "anthropic"),
-            ("base_url", "http://localhost:9999"),
+            ("base_url_anthropic", "http://localhost:9999/anth"),
+            ("base_url_openai", "http://localhost:9999/oai"),
             ("api_key", "sk-test"),
         ]);
         apply_preset_defaults(&mut item);
         // 显式字段不被 preset 覆盖。
         assert_eq!(
-            item.get("base_url").and_then(Value::as_str),
-            Some("http://localhost:9999")
+            item.get("base_url_anthropic").and_then(Value::as_str),
+            Some("http://localhost:9999/anth")
+        );
+        assert_eq!(
+            item.get("base_url_openai").and_then(Value::as_str),
+            Some("http://localhost:9999/oai")
         );
         // 显式 api_key 时不注入默认 env（否则 resolve_api_keys 会读错 env）。
         assert!(item.get("api_key_env").is_none());
@@ -297,9 +360,10 @@ mod tests {
 
     #[test]
     fn no_preset_leaves_item_untouched() {
-        let mut item = item_with(&[("name", "my-custom"), ("protocol", "openai")]);
+        let mut item = item_with(&[("name", "my-custom")]);
         apply_preset_defaults(&mut item);
-        assert!(item.get("base_url").is_none());
+        assert!(item.get("base_url_anthropic").is_none());
+        assert!(item.get("base_url_openai").is_none());
         assert!(item.get("api_key_env").is_none());
     }
 }

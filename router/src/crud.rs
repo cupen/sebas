@@ -19,7 +19,10 @@
 use crate::router::Out;
 use feishu::cards::{Card, CardButton, CardText};
 use feishu::events::SessionKey;
-use feishu::forms::{FormField, FormSpec, render_form_card, values_to_strings};
+// `SelectOption` 仅在 #[cfg(test)] 的 provider_spec helper 里用到，lib 构建
+// 会触发 unused_imports warning，故显式 allow。
+#[allow(unused_imports)]
+use feishu::forms::{FormField, FormSpec, SelectOption, render_form_card, values_to_strings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -36,6 +39,10 @@ pub const OP_EDIT: &str = "edit";
 pub const OP_SUBMIT: &str = "submit";
 pub const OP_DELETE: &str = "delete";
 pub const OP_CANCEL: &str = "cancel";
+/// 交互式表单字段（带 `behaviors` 的 select）在用户切换选项时触发的
+/// 重算回调：跑 normalizer 把派生字段写回表单预填值，但不写存储。
+/// （提交还是走 OP_SUBMIT。）
+pub const OP_RECOMPUTE: &str = "recompute";
 
 const KEY_FORM: &str = "form";
 const KEY_OP: &str = "op";
@@ -281,6 +288,169 @@ pub struct CrudForm<S: CrudStore> {
     normalizer: Option<ItemNormalizer>,
 }
 
+/// 两套共享同一存储的 CRUD 表单，用于「同一个实体有两种入口」的场景
+/// （如 provider：「预设」只填 name+key、「自定义」手填全部字段）。
+pub struct ProviderForms {
+    pub preset: Arc<CrudForm<FileStore>>,
+    pub custom: Arc<CrudForm<FileStore>>,
+}
+
+impl ProviderForms {
+    /// 按 `form_name` 把回调路由到对应表单；都不匹配则 `None`。
+    pub fn dispatch(&self, form_name: &str) -> Option<&Arc<CrudForm<FileStore>>> {
+        if form_name == self.preset.spec.form_name {
+            Some(&self.preset)
+        } else if form_name == self.custom.spec.form_name {
+            Some(&self.custom)
+        } else {
+            None
+        }
+    }
+
+    /// 「取消」按钮专用：从任意表单回到 ProviderForms 的双入口列表卡。
+    /// 与单表单 `render_list_card` 不同——保留「＋ 新增（预设/自定义）」
+    /// 两个按钮以及双 form 调度。
+    pub async fn cancel(&self, key: SessionKey, message_id: Option<String>) -> crate::router::Out {
+        self.handle_cancel(key, message_id).await
+    }
+
+    async fn handle_cancel(
+        &self,
+        key: SessionKey,
+        message_id: Option<String>,
+    ) -> crate::router::Out {
+        let card = self.build_list_card().await;
+        let card_value = serde_json::to_value(&card).expect("provider list card serializes");
+        match message_id {
+            Some(msg_id) => crate::router::Out::UpdateCardByMsgId {
+                key,
+                msg_id,
+                card: card_value,
+            },
+            None => crate::router::Out::SendCard {
+                key,
+                card: card_value,
+                msg_id: None,
+                perm_request_id: None,
+                perm_meta: None,
+                root_id: None,
+            },
+        }
+    }
+
+    async fn build_list_card(&self) -> Card {
+        let items = self.preset.store.list().await;
+        let spec = &self.preset.spec;
+        let mut card = Card::new(&format!("{}列表", spec.title), &spec.template);
+        if items.is_empty() {
+            card.push_text("暂无记录");
+        } else {
+            card.push_text(format!("共 {} 条", items.len()));
+        }
+        card.push_divider();
+        for item in &items {
+            let id = item
+                .get(&self.preset.id_field)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let has_preset = item
+                .get("preset")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            let row_spec = if has_preset {
+                &self.preset.spec
+            } else {
+                &self.custom.spec
+            };
+            let lines: Vec<String> = row_spec
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    item.get(f.name())
+                        .map(|v| format!("**{}**：{}", f.label(), field_display(f, v)))
+                })
+                .collect();
+            if !lines.is_empty() {
+                card.push_text(lines.join("\n"));
+            }
+            let edit_form = if has_preset { &self.preset } else { &self.custom };
+            card.push_actions(vec![
+                CardButton {
+                    text: CardText { tag: "plain_text".into(), content: "编辑".into() },
+                    r#type: "default".into(),
+                    value: payload(edit_form.spec.form_name.as_str(), OP_EDIT, Some(&id)),
+                },
+                CardButton {
+                    text: CardText { tag: "plain_text".into(), content: "删除".into() },
+                    r#type: "danger".into(),
+                    value: payload(edit_form.spec.form_name.as_str(), OP_DELETE, Some(&id)),
+                },
+            ]);
+            card.push_divider();
+        }
+        card.push_actions(vec![
+            CardButton {
+                text: CardText {
+                    tag: "plain_text".into(),
+                    content: "＋ 新增（预设）".into(),
+                },
+                r#type: "primary".into(),
+                value: payload(self.preset.spec.form_name.as_str(), OP_CREATE, None),
+            },
+            CardButton {
+                text: CardText {
+                    tag: "plain_text".into(),
+                    content: "＋ 新增（自定义）".into(),
+                },
+                r#type: "default".into(),
+                value: payload(self.custom.spec.form_name.as_str(), OP_CREATE, None),
+            },
+        ]);
+        card
+    }
+
+    /// 编辑时按 item 的 preset 字段判定走哪张表单：有 preset 走 preset
+    /// 表单，否则走 custom 表单。item 缺失则 None（由调用方决定兜底）。
+    pub async fn pick_for_edit(&self, id: &str) -> Option<Arc<CrudForm<FileStore>>> {
+        let item = self.preset.store.get(id).await?;
+        if item.get("preset").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+            Some(self.preset.clone())
+        } else {
+            Some(self.custom.clone())
+        }
+    }
+
+    /// `/provider` 命令入口：拉任意一张表单的存储列表（两张共享同一 store），
+    /// 渲染一张带两个「＋ 新增」按钮的列表卡。
+    pub async fn open(&self, key: SessionKey) -> crate::router::Out {
+        self.render_list_card(key).await
+    }
+
+    async fn render_list_card(&self, key: SessionKey) -> crate::router::Out {
+        let card = self.build_list_card().await;
+        // 列表卡没有 context open_message_id：新发一张。
+        crate::router::Out::SendCard {
+            key,
+            card: serde_json::to_value(&card).expect("provider list card serializes"),
+            msg_id: None,
+            perm_request_id: None,
+            perm_meta: None,
+            root_id: None,
+        }
+    }
+}
+
+fn payload(form_name: &str, op: &str, id: Option<&str>) -> Value {
+    let mut m = Map::new();
+    m.insert(KEY_FORM.into(), Value::String(form_name.into()));
+    m.insert(KEY_OP.into(), Value::String(op.into()));
+    if let Some(id) = id {
+        m.insert(KEY_ID.into(), Value::String(id.into()));
+    }
+    Value::Object(m)
+}
+
 impl<S: CrudStore> CrudForm<S> {
     pub fn new(spec: FormSpec, id_field: impl Into<String>, store: S) -> Self {
         Self {
@@ -347,6 +517,12 @@ impl<S: CrudStore> CrudForm<S> {
                 self.apply_submit(id, form_value).await;
                 self.reply(key, self.render_list_card().await, message_id)
             }
+            OP_RECOMPUTE => {
+                let id = value.get(KEY_ID).and_then(Value::as_str);
+                let initial = self.recompute_initial(id, form_value).await;
+                let card = self.render_edit_card(&initial, id);
+                self.reply(key, card, message_id)
+            }
             OP_DELETE => {
                 if let Some(id) = value.get(KEY_ID).and_then(Value::as_str)
                     && let Err(e) = self.store.delete(id).await
@@ -389,6 +565,26 @@ impl<S: CrudStore> CrudForm<S> {
                 }
             }
         }
+    }
+
+    /// 用户在表单里切换了某个交互式字段（带 `on_change` 的 select）：
+    /// 把当前表单值按 normalizer 跑一遍得到派生字段，再转成 initial
+    /// 让编辑卡片就地重渲。注意：不写存储——提交还是要点提交按钮。
+    async fn recompute_initial(
+        &self,
+        id: Option<&str>,
+        form_value: &BTreeMap<String, Value>,
+    ) -> BTreeMap<String, String> {
+        // 编辑场景下用存储里的旧 item 来兜底敏感字段（避免把已有密钥抹掉）。
+        let existing = match id {
+            Some(id) => self.store.get(id).await,
+            None => None,
+        };
+        let mut item = self.item_from_form(id, form_value, existing.as_ref());
+        if let Some(f) = &self.normalizer {
+            f(&mut item);
+        }
+        self.item_to_initial(&item)
     }
 
     fn item_from_form(
@@ -589,7 +785,8 @@ mod tests {
     fn item(id: &str, protocol: &str) -> Item {
         let mut m = Map::new();
         m.insert("name".into(), Value::String(id.into()));
-        m.insert("protocol".into(), Value::String(protocol.into()));
+        m.insert("base_url_anthropic".into(), Value::String(format!("https://{id}.example")));
+        let _ = protocol;
         m
     }
 
@@ -631,16 +828,163 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("providers.json");
         let mut seed = item("deepseek", "anthropic");
-        seed.insert("base_url".into(), Value::String("old".into()));
+        seed.insert("base_url_anthropic".into(), Value::String("old".into()));
         let store = FileStore::load(&path, "name", vec![seed]).unwrap();
 
         let mut updated = item("deepseek", "openai");
-        updated.insert("base_url".into(), Value::String("new".into()));
+        updated.insert("base_url_anthropic".into(), Value::String("new".into()));
         store.update(updated).await.unwrap();
 
         let reloaded = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
         let got = reloaded.get("deepseek").await.unwrap();
-        assert_eq!(got.get("protocol").and_then(Value::as_str), Some("openai"));
-        assert_eq!(got.get("base_url").and_then(Value::as_str), Some("new"));
+        assert_eq!(
+            got.get("base_url_anthropic").and_then(Value::as_str),
+            Some("new")
+        );
+    }
+
+    fn provider_spec() -> FormSpec {
+        FormSpec::new(
+            "provider",
+            "Provider",
+            vec![
+                FormField::Text {
+                    name: "name".into(),
+                    label: "名称".into(),
+                    required: true,
+                    placeholder: String::new(),
+                    secret: false,
+                    disabled: false,
+                },
+                FormField::Select {
+                    name: "preset".into(),
+                    label: "预设".into(),
+                    required: false,
+                    options: vec![
+                        SelectOption { value: "".into(), label: "无".into() },
+                        SelectOption { value: "deepseek".into(), label: "deepseek".into() },
+                    ],
+                    on_change: Some(serde_json::json!({"form": "provider", "op": "recompute"})),
+                },
+                FormField::Text {
+                    name: "base_url_anthropic".into(),
+                    label: "Base URL(Anthropic)".into(),
+                    required: false,
+                    placeholder: String::new(),
+                    secret: false,
+                    disabled: false,
+                },
+                FormField::Text {
+                    name: "api_key".into(),
+                    label: "API Key".into(),
+                    required: false,
+                    placeholder: String::new(),
+                    secret: true,
+                    disabled: false,
+                },
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn recompute_runs_normalizer_without_persisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::load(dir.path().join("providers.json"), "name", Vec::new()).unwrap();
+        let form = CrudForm::new(provider_spec(), "name", store.clone())
+            .with_normalizer(Arc::new(|item: &mut Item| {
+                // 与 apply_preset_defaults 等价的最小复刻：选 deepseek 时补全
+                // base_url_anthropic/api_key_env，留空字段不覆盖用户输入。
+                if item.get("preset").and_then(Value::as_str) == Some("deepseek") {
+                    let anth_empty = item
+                        .get("base_url_anthropic")
+                        .and_then(Value::as_str)
+                        .is_none_or(|s| s.is_empty());
+                    if anth_empty {
+                        item.insert(
+                            "base_url_anthropic".into(),
+                            Value::String("https://api.deepseek.com/anthropic".into()),
+                        );
+                    }
+                    let has_env = item
+                        .get("api_key_env")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty());
+                    if !has_env {
+                        item.insert(
+                            "api_key_env".into(),
+                            Value::String("DEEPSEEK_API_KEY".into()),
+                        );
+                    }
+                }
+            }));
+
+        // 模拟用户选 deepseek 后从客户端回传：preset=deepseek, base_url_anthropic="".
+        let mut fv = BTreeMap::new();
+        fv.insert("preset".into(), Value::String("deepseek".into()));
+        fv.insert("name".into(), Value::String("ds".into()));
+        fv.insert("base_url_anthropic".into(), Value::String("".into()));
+
+        let initial = form.recompute_initial(None, &fv).await;
+        // 派生字段被填回 initial，准备渲染。
+        assert_eq!(
+            initial.get("base_url_anthropic").map(String::as_str),
+            Some("https://api.deepseek.com/anthropic")
+        );
+
+        // 关键：recompute 不应写入存储。
+        assert_eq!(store.list().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn recompute_preserves_existing_secret_on_edit() {
+        // 编辑已有条目时，recompute 不能把已有的密钥抹掉。
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = item("ds", "anthropic");
+        seed.insert("base_url_anthropic".into(), Value::String("https://old".into()));
+        seed.insert("api_key".into(), Value::String("sk-keep".into()));
+        let store = FileStore::load(
+            dir.path().join("providers.json"),
+            "name",
+            vec![seed],
+        )
+        .unwrap();
+        let form = CrudForm::new(provider_spec(), "name", store.clone())
+            .with_normalizer(Arc::new(|item: &mut Item| {
+                if item.get("preset").and_then(Value::as_str) == Some("deepseek") {
+                    let base_empty = item
+                        .get("base_url_anthropic")
+                        .and_then(Value::as_str)
+                        .is_none_or(|s| s.is_empty());
+                    if base_empty {
+                        item.insert(
+                            "base_url_anthropic".into(),
+                            Value::String("https://api.deepseek.com/anthropic".into()),
+                        );
+                    }
+                }
+            }));
+
+        // 模拟编辑场景：用户只切了 preset，没碰 api_key 字段。
+        let mut fv = BTreeMap::new();
+        fv.insert("name".into(), Value::String("ds".into()));
+        fv.insert("preset".into(), Value::String("deepseek".into()));
+        fv.insert("base_url_anthropic".into(), Value::String("".into()));
+        fv.insert("api_key".into(), Value::String("".into()));
+
+        let initial = form.recompute_initial(Some("ds"), &fv).await;
+        // 关键断言是 secret 没出现在 initial 里——它本来也不该回显。
+        assert!(initial.get("api_key").is_none());
+        // base_url_anthropic 被 preset 默认值覆盖了（用户的意图：切 preset 就用新端点）。
+        assert_eq!(
+            initial.get("base_url_anthropic").map(String::as_str),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        // 存储原样不动。
+        let stored = store.get("ds").await.unwrap();
+        assert_eq!(
+            stored.get("api_key").and_then(Value::as_str),
+            Some("sk-keep"),
+            "recompute 不能写入存储"
+        );
     }
 }

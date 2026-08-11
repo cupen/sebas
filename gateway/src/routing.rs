@@ -108,12 +108,13 @@ impl RouteTable {
         };
 
         // 协议一致性：纯透传，不做协议转换。
-        // provider 存在性由 from_config 镜像 + config.rs validate 保证。
+        // provider 存在性由 from_config 镜像 + config.rs validate 保证；
+        // 现在每个 provider 按请求协议选 URL：缺该协议位 → ProtocolMismatch。
         let provider_cfg = self
             .providers
             .get(&provider_name)
             .expect("provider existence guaranteed by from_config mirror + config::validate");
-        if provider_cfg.protocol != proto && !(self.debug && provider_name == "test") {
+        if provider_cfg.url_for(proto).is_none() && !(self.debug && provider_name == "test") {
             return Err(RouteError::ProtocolMismatch {
                 provider: provider_name,
             });
@@ -245,11 +246,12 @@ mod tests {
     }
 
     fn simple_provider(name: &str, proto: Protocol) -> (String, ProviderConfig) {
+        let url = format!("https://{name}.example.com");
         (
             name.to_string(),
             ProviderConfig {
-                protocol: proto,
-                base_url: format!("https://{name}.example.com"),
+                base_url_anthropic: (proto == Protocol::Anthropic).then(|| url.clone()),
+                base_url_openai: (proto == Protocol::OpenAi).then(|| url),
                 api_key_env: None,
                 api_key: Some("test-key".into()),
                 model_map: HashMap::new(),

@@ -12,6 +12,7 @@ fn demo_spec() -> FormSpec {
                 required: true,
                 placeholder: "标题".into(),
                 secret: false,
+                disabled: false,
             },
             FormField::Text {
                 name: "body".into(),
@@ -19,6 +20,7 @@ fn demo_spec() -> FormSpec {
                 required: false,
                 placeholder: "正文".into(),
                 secret: false,
+                disabled: false,
             },
             FormField::Select {
                 name: "priority".into(),
@@ -34,6 +36,7 @@ fn demo_spec() -> FormSpec {
                         label: "P1".into(),
                     },
                 ],
+                on_change: None,
             },
         ],
     )
@@ -99,4 +102,46 @@ fn values_to_strings_flattens_scalars() {
     assert_eq!(out.get("priority").map(String::as_str), Some("p0"));
     assert_eq!(out.get("count").map(String::as_str), Some("3"));
     assert_eq!(out.get("flag").map(String::as_str), Some("true"));
+}
+
+/// 重新渲染时 single-select 必须带上 `initial_value`，否则下拉只能展示
+/// placeholder，看起来像 on_change 没生效（provider preset → base_url 自动
+/// 填充的视觉断点就是这个）。空字符串与 None 都不输出 `initial_value`。
+#[test]
+fn select_renders_initial_value_for_preselected_option() {
+    let mut initial = BTreeMap::new();
+    initial.insert("priority".into(), "p0".into());
+    let card = render_form_card(
+        &demo_spec(),
+        &initial,
+        serde_json::json!({ "form": "note", "op": "submit" }),
+    );
+    let s = serde_json::to_string(&card).unwrap();
+    assert!(
+        s.contains("\"initial_value\":[\"p0\"]"),
+        "select 缺 initial_value，重渲时无法高亮已选项：{s}"
+    );
+
+    // 没填/空字符串 → 不输出 initial_value（保留原 placeholder 行为）。
+    let empty = render_form_card(
+        &demo_spec(),
+        &BTreeMap::new(),
+        serde_json::json!({ "form": "note", "op": "submit" }),
+    );
+    let s = serde_json::to_string(&empty).unwrap();
+    assert!(
+        !s.contains("initial_value"),
+        "无预选时不应输出 initial_value：{s}"
+    );
+
+    let blank = render_form_card(
+        &demo_spec(),
+        &BTreeMap::from([("priority".into(), String::new())]),
+        serde_json::json!({ "form": "note", "op": "submit" }),
+    );
+    let s = serde_json::to_string(&blank).unwrap();
+    assert!(
+        !s.contains("initial_value"),
+        "空字符串等同于无预选：{s}"
+    );
 }

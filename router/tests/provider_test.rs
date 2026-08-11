@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 fn spec() -> FormSpec {
     FormSpec::new(
-        "provider",
-        "Provider",
+        "provider-custom",
+        "Provider（自定义）",
         vec![
             FormField::Text {
                 name: "name".into(),
@@ -24,6 +24,7 @@ fn spec() -> FormSpec {
                 required: true,
                 placeholder: "".into(),
                 secret: false,
+                disabled: false,
             },
             FormField::Text {
                 name: "base_url".into(),
@@ -31,6 +32,7 @@ fn spec() -> FormSpec {
                 required: true,
                 placeholder: "".into(),
                 secret: false,
+                disabled: false,
             },
             FormField::Text {
                 name: "api_key".into(),
@@ -38,6 +40,7 @@ fn spec() -> FormSpec {
                 required: false,
                 placeholder: "粘贴密钥".into(),
                 secret: true,
+                disabled: false,
             },
         ],
     )
@@ -85,12 +88,20 @@ fn provider_router(dir: &tempfile::TempDir) -> (RouterHandle, tokio::sync::mpsc:
         vec![item("deepseek")],
     )
     .unwrap();
-    let form = CrudForm::new(spec(), "name", store);
+    let form = CrudForm::new(spec(), "name", store.clone());
+    let forms = router::ProviderForms {
+        preset: Arc::new(CrudForm::new(
+            FormSpec::new("provider-preset", "Provider（预设）", vec![]),
+            "name",
+            store,
+        )),
+        custom: Arc::new(form),
+    };
     RouterHandle::new_with_provider_form(
         SessionMap::new(),
         Default::default(),
         16,
-        Some(Arc::new(form)),
+        Some(Arc::new(forms)),
     )
 }
 
@@ -128,7 +139,7 @@ async fn provider_create_submit_delete_round_trip() {
     router
         .dispatch(FeishuIn::ButtonCb {
             key: key(),
-            action: card_action(json!({"form": "provider", "op": "create"}), "om_1"),
+            action: card_action(json!({"form": "provider-custom", "op": "create"}), "om_1"),
         })
         .await;
     let out = rx.recv().await.unwrap();
@@ -145,7 +156,7 @@ async fn provider_create_submit_delete_round_trip() {
     router
         .dispatch(FeishuIn::FormCb {
             key: key(),
-            value: json!({"form": "provider", "op": "submit"}),
+            value: json!({"form": "provider-custom", "op": "submit"}),
             form_value: fv,
             message_id: Some("om_1".into()),
         })
@@ -161,7 +172,7 @@ async fn provider_create_submit_delete_round_trip() {
         .dispatch(FeishuIn::ButtonCb {
             key: key(),
             action: card_action(
-                json!({"form": "provider", "op": "delete", "id": "deepseek"}),
+                json!({"form": "provider-custom", "op": "delete", "id": "deepseek"}),
                 "om_2",
             ),
         })
@@ -208,6 +219,33 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
 }
 
 #[tokio::test]
+async fn cancel_button_returns_to_list_not_to_dead_session_card() {
+    // 回归：表单容器外的「取消」按钮带 op=cancel，必须被 on_button 识别为
+    // CRUD 路由并回列表卡；如果被吞掉就会落到 ACP session 死会话路径。
+    let dir = tempfile::tempdir().unwrap();
+    let (router, mut rx) = provider_router(&dir);
+
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key(),
+            action: card_action(json!({"form": "provider-custom", "op": "cancel"}), "om_cancel"),
+        })
+        .await;
+
+    let out = rx.recv().await.unwrap();
+    match out {
+        Out::UpdateCardByMsgId { msg_id, card, .. } => {
+            assert_eq!(msg_id, "om_cancel", "cancel 应原地更新原表单卡");
+            // 列表卡包含「＋ 新增（预设/自定义）」按钮，证明回到 CRUD 列表。
+            let s = card.to_string();
+            assert!(s.contains("＋ 新增（预设）"), "{s}");
+            assert!(s.contains("＋ 新增（自定义）"), "{s}");
+        }
+        other => panic!("cancel 应回到 CRUD 列表卡，得到 {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
     let dir = tempfile::tempdir().unwrap();
     let store = FileStore::load(
@@ -216,12 +254,20 @@ async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
         vec![item_with_key("deepseek", "sk-super-secret")],
     )
     .unwrap();
-    let form = CrudForm::new(spec(), "name", store);
+    let form = CrudForm::new(spec(), "name", store.clone());
+    let forms = router::ProviderForms {
+        preset: Arc::new(CrudForm::new(
+            FormSpec::new("provider-preset", "Provider（预设）", vec![]),
+            "name",
+            store,
+        )),
+        custom: Arc::new(form),
+    };
     let (router, mut rx) = RouterHandle::new_with_provider_form(
         SessionMap::new(),
         Default::default(),
         16,
-        Some(Arc::new(form)),
+        Some(Arc::new(forms)),
     );
 
     // 列表卡：密钥掩码显示，绝不回显明文。
@@ -245,7 +291,7 @@ async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
         .dispatch(FeishuIn::ButtonCb {
             key: key(),
             action: card_action(
-                json!({"form": "provider", "op": "edit", "id": "deepseek"}),
+                json!({"form": "provider-custom", "op": "edit", "id": "deepseek"}),
                 "om_e",
             ),
         })
@@ -270,12 +316,20 @@ async fn empty_secret_submit_preserves_existing_key() {
         vec![item_with_key("deepseek", "sk-old")],
     )
     .unwrap();
-    let form = CrudForm::new(spec(), "name", store);
+    let form = CrudForm::new(spec(), "name", store.clone());
+    let forms = router::ProviderForms {
+        preset: Arc::new(CrudForm::new(
+            FormSpec::new("provider-preset", "Provider（预设）", vec![]),
+            "name",
+            store,
+        )),
+        custom: Arc::new(form),
+    };
     let (router, mut rx) = RouterHandle::new_with_provider_form(
         SessionMap::new(),
         Default::default(),
         16,
-        Some(Arc::new(form)),
+        Some(Arc::new(forms)),
     );
 
     // 编辑提交：api_key 留空（不提交），改 base_url。
@@ -285,7 +339,7 @@ async fn empty_secret_submit_preserves_existing_key() {
     router
         .dispatch(FeishuIn::FormCb {
             key: key(),
-            value: json!({"form": "provider", "op": "submit", "id": "deepseek"}),
+            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}),
             form_value: fv,
             message_id: Some("om_s".into()),
         })

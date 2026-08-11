@@ -27,12 +27,10 @@ const CFG: &str = r#"
 listen = "127.0.0.1:0"
 auth_token = "sk-gw-test"
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
+base_url_anthropic = "https://api.anthropic.com"
 api_key = "test-key"
 [provider.openai]
-protocol = "openai"
-base_url = "https://api.openai.com/v1"
+base_url_openai = "https://api.openai.com/v1"
 api_key = "test-key-oai"
 "#;
 
@@ -102,13 +100,11 @@ usage_file = "__USAGE__"
 key = "sk-gw-test"
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
+base_url_anthropic = "https://api.anthropic.com"
 api_key = "test-key"
 
 [provider.openai]
-protocol = "openai"
-base_url = "https://api.openai.com/v1"
+base_url_openai = "https://api.openai.com/v1"
 api_key = "test-key-oai"
 "#;
     let gw = support::start_gateway(cfg).await;

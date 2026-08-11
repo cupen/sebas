@@ -22,8 +22,7 @@ key = "sk-gw-debug"
 name = "debug-test"
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "http://127.0.0.1:9"
+base_url_anthropic = "http://127.0.0.1:9"
 api_key = "test-key"
 "#;
 
@@ -38,13 +37,11 @@ usage_file = "__USAGE__"
 key = "sk-gw-debug"
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "http://127.0.0.1:9"
+base_url_anthropic = "http://127.0.0.1:9"
 api_key = "test-key"
 
 [provider.openai]
-protocol = "openai"
-base_url = "http://127.0.0.1:9"
+base_url_openai = "http://127.0.0.1:9"
 api_key = "test-key-oai"
 
 [gateway.routes]

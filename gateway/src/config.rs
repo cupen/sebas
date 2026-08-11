@@ -90,17 +90,32 @@ fn default_provider_overlay() -> String {
 
 /// 上游 provider。`api_key_env` 优先（密钥只从 env 读，不落盘/不落日志）；
 /// `api_key` 明文仅测试用（resolve 时 warn）。两者均无 → Config 错误。
+///
+/// `base_url_anthropic` / `base_url_openai` 各自独立：同一 provider 可同时
+/// 暴露两种协议（如 deepseek、ark），各自指向不同的上游路径；请求按协议取
+/// 对应 URL，缺位 → `ProtocolMismatch`。至少一项必填。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
-    pub protocol: Protocol,
     #[serde(default)]
-    pub base_url: String,
+    pub base_url_anthropic: Option<String>,
+    #[serde(default)]
+    pub base_url_openai: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub model_map: HashMap<String, String>,
+}
+
+/// 给定请求协议返回对应上游 URL；两项都为 None 视为未配置。
+impl ProviderConfig {
+    pub fn url_for(&self, proto: Protocol) -> Option<&str> {
+        match proto {
+            Protocol::Anthropic => self.base_url_anthropic.as_deref(),
+            Protocol::OpenAi => self.base_url_openai.as_deref(),
+        }
+    }
 }
 
 /// 路由：model（可含 glob）→ 有序 provider 列表。数组顺序即优先级，
@@ -158,16 +173,16 @@ where
 }
 
 /// TOML 原始形态的 provider 段：字段全 Option，preset 填充后再收敛成
-/// 对外 `ProviderConfig`（protocol/base_url 必填）。
+/// 对外 `ProviderConfig`（至少一个 `*_base_url` 必填）。
 #[derive(Deserialize)]
 struct RawProviderConfig {
     /// 显式 preset 别名；缺省时「名称即 preset」。
     #[serde(default)]
     preset: Option<String>,
     #[serde(default)]
-    protocol: Option<Protocol>,
+    base_url_anthropic: Option<String>,
     #[serde(default)]
-    base_url: Option<String>,
+    base_url_openai: Option<String>,
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
@@ -183,9 +198,9 @@ struct RawProviderConfig {
 pub struct ProviderPreset {
     pub name: &'static str,
     /// anthropic 协议端点；`None` = 该 preset 不提供 anthropic 端点。
-    pub anthropic_base_url: Option<&'static str>,
+    pub base_url_anthropic: Option<&'static str>,
     /// openai 协议端点；`None` = 该 preset 不提供 openai 端点。
-    pub openai_base_url: Option<&'static str>,
+    pub base_url_openai: Option<&'static str>,
     /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
     pub api_key_env: &'static str,
 }
@@ -193,56 +208,56 @@ pub struct ProviderPreset {
 const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "anthropic",
-        anthropic_base_url: Some("https://api.anthropic.com"),
-        openai_base_url: None,
+        base_url_anthropic: Some("https://api.anthropic.com"),
+        base_url_openai: None,
         api_key_env: "ANTHROPIC_API_KEY",
     },
     ProviderPreset {
         name: "openai",
-        anthropic_base_url: None,
-        openai_base_url: Some("https://api.openai.com/v1"),
+        base_url_anthropic: None,
+        base_url_openai: Some("https://api.openai.com/v1"),
         api_key_env: "OPENAI_API_KEY",
     },
     ProviderPreset {
         name: "deepseek",
-        anthropic_base_url: Some("https://api.deepseek.com/anthropic"),
-        openai_base_url: Some("https://api.deepseek.com/v1"),
+        base_url_anthropic: Some("https://api.deepseek.com/anthropic"),
+        base_url_openai: Some("https://api.deepseek.com"),
         api_key_env: "DEEPSEEK_API_KEY",
     },
     ProviderPreset {
         name: "kimi",
-        anthropic_base_url: Some("https://api.moonshot.cn/anthropic"),
-        openai_base_url: Some("https://api.moonshot.cn/v1"),
+        base_url_anthropic: Some("https://api.moonshot.cn/anthropic"),
+        base_url_openai: Some("https://api.moonshot.cn/v1"),
         api_key_env: "MOONSHOT_API_KEY",
     },
     ProviderPreset {
         name: "glm",
-        anthropic_base_url: Some("https://open.bigmodel.cn/api/anthropic"),
-        openai_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
+        base_url_anthropic: Some("https://open.bigmodel.cn/api/anthropic"),
+        base_url_openai: Some("https://open.bigmodel.cn/api/paas/v4"),
         api_key_env: "ZHIPU_API_KEY",
     },
     ProviderPreset {
         name: "minimax",
-        anthropic_base_url: Some("https://api.minimaxi.com/anthropic"),
-        openai_base_url: Some("https://api.minimaxi.com/v1"),
+        base_url_anthropic: Some("https://api.minimaxi.com/anthropic"),
+        base_url_openai: Some("https://api.minimaxi.com/v1"),
         api_key_env: "MINIMAX_API_KEY",
     },
     ProviderPreset {
         name: "ark",
-        anthropic_base_url: Some("https://ark.cn-beijing.volces.com/api/coding"),
-        openai_base_url: Some("https://ark.cn-beijing.volces.com/api/coding/v3"),
+        base_url_anthropic: Some("https://ark.cn-beijing.volces.com/api/plan"),
+        base_url_openai: Some("https://ark.cn-beijing.volces.com/api/plan/v3"),
         api_key_env: "ARK_API_KEY",
     },
     ProviderPreset {
         name: "dashscope",
-        anthropic_base_url: None,
-        openai_base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        base_url_anthropic: None,
+        base_url_openai: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         api_key_env: "DASHSCOPE_API_KEY",
     },
     ProviderPreset {
         name: "gemini",
-        anthropic_base_url: None,
-        openai_base_url: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+        base_url_anthropic: None,
+        base_url_openai: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
         api_key_env: "GEMINI_API_KEY",
     },
 ];
@@ -257,11 +272,12 @@ pub fn presets() -> &'static [ProviderPreset] {
 }
 
 /// raw → resolved：把每个 provider 收敛成对外 `ProviderConfig`。
-/// - 名称即 preset（或显式 `preset = "..."` 别名）：先填预设默认值，
-///   显式字段（protocol/base_url/api_key_env）永远覆盖；
-/// - 双协议 preset 未写 `protocol` → 配置错误（不猜）；
-/// - 单协议 preset 显式写了对方协议 → 配置错误（preset 不提供该端点）；
-/// - 无 preset（自定义 provider）→ 维持现状：protocol + base_url 必填。
+/// - 名称即 preset（或显式 `preset = "..."` 别名）：preset 默认填入
+///   `base_url_anthropic` / `base_url_openai`（各自独立，可同时存在），
+///   显式字段覆盖对应协议位；
+/// - 单协议 preset（缺某协议位 URL）→ 显式字段必须留空；显式填了对方
+///   端点 → 配置错误（preset 不提供）；
+/// - 无 preset（自定义 provider）→ 至少一个 `*_base_url` 必填。
 fn resolve_providers(
     raw: HashMap<String, RawProviderConfig>,
 ) -> Result<HashMap<String, ProviderConfig>> {
@@ -269,16 +285,17 @@ fn resolve_providers(
     for (name, r) in raw {
         let preset_name = r.preset.as_deref().unwrap_or(&name);
         let preset = find_preset(preset_name);
-        let (protocol, base_url) = match preset {
-            Some(p) => resolve_preset_protocol_base(p, &name, preset_name, r.protocol, r.base_url)?,
+        let (base_url_anthropic, base_url_openai) = match preset {
+            Some(p) => resolve_preset_urls(p, &name, preset_name, r.base_url_anthropic, r.base_url_openai)?,
             None => {
-                let protocol = r.protocol.ok_or_else(|| {
-                    GatewayError::Config(format!(
-                        "provider.{name}.protocol 不能为空（自定义 provider 无 preset，需显式 protocol）"
-                    ))
-                })?;
-                let base_url = r.base_url.unwrap_or_default();
-                (protocol, base_url)
+                let a = r.base_url_anthropic.unwrap_or_default();
+                let o = r.base_url_openai.unwrap_or_default();
+                if a.is_empty() && o.is_empty() {
+                    return Err(GatewayError::Config(format!(
+                        "provider.{name}: 自定义 provider 至少需要 base_url_anthropic / base_url_openai 之一"
+                    )));
+                }
+                (a, o)
             }
         };
         // 默认 env 名只在「未显式指定任何 key 来源」时注入：显式 `api_key_env`
@@ -293,8 +310,8 @@ fn resolve_providers(
         out.insert(
             name,
             ProviderConfig {
-                protocol,
-                base_url,
+                base_url_anthropic: option_string(base_url_anthropic),
+                base_url_openai: option_string(base_url_openai),
                 api_key_env,
                 api_key: r.api_key,
                 model_map: r.model_map,
@@ -304,41 +321,44 @@ fn resolve_providers(
     Ok(out)
 }
 
-/// 按 preset 解析 `(protocol, base_url)`。显式字段优先；歧义/缺失端点报错。
-fn resolve_preset_protocol_base(
+/// 空字符串归 None（非空为 Some）。
+fn option_string(s: String) -> Option<String> {
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// 按 preset 解析 `base_url_anthropic` / `base_url_openai`：preset 默认 +
+/// 显式覆盖。preset 不提供的端点显式写了 → 错（避免误把错误的 URL 落到错
+/// 的协议位）。
+fn resolve_preset_urls(
     p: &ProviderPreset,
     name: &str,
     preset_name: &str,
-    explicit_protocol: Option<Protocol>,
-    explicit_base_url: Option<String>,
-) -> Result<(Protocol, String)> {
-    let protocol = match explicit_protocol {
-        Some(proto) => proto,
-        None => match (p.anthropic_base_url, p.openai_base_url) {
-            (Some(_), None) => Protocol::Anthropic,
-            (None, Some(_)) => Protocol::OpenAi,
-            _ => {
+    explicit_anthropic: Option<String>,
+    explicit_openai: Option<String>,
+) -> Result<(String, String)> {
+    let anthropic = match explicit_anthropic {
+        Some(b) => {
+            if p.base_url_anthropic.is_none() {
                 return Err(GatewayError::Config(format!(
-                    "provider.{name}: preset '{preset_name}' 同时提供 anthropic/openai 端点，必须显式 protocol"
+                    "provider.{name}: preset '{preset_name}' 不提供 anthropic 端点，不能写 base_url_anthropic"
                 )));
             }
-        },
-    };
-    let base_url = match explicit_base_url {
-        Some(b) => b,
-        None => match protocol {
-            Protocol::Anthropic => p.anthropic_base_url,
-            Protocol::OpenAi => p.openai_base_url,
+            b
         }
-        .ok_or_else(|| {
-            GatewayError::Config(format!(
-                "provider.{name}: preset '{preset_name}' 不提供 {} 端点",
-                protocol.as_str()
-            ))
-        })?
-        .to_string(),
+        None => p.base_url_anthropic.unwrap_or_default().to_string(),
     };
-    Ok((protocol, base_url))
+    let openai = match explicit_openai {
+        Some(b) => {
+            if p.base_url_openai.is_none() {
+                return Err(GatewayError::Config(format!(
+                    "provider.{name}: preset '{preset_name}' 不提供 openai 端点，不能写 base_url_openai"
+                )));
+            }
+            b
+        }
+        None => p.base_url_openai.unwrap_or_default().to_string(),
+    };
+    Ok((anthropic, openai))
 }
 
 impl GatewayConfig {
@@ -444,28 +464,22 @@ impl GatewayConfig {
             self.providers.remove(name);
         }
         for (name, item) in file.providers {
-            // overlay 条目与顶层 `[provider.*]` 同语义：preset / protocol /
-            // base_url / api_key_env / api_key，交给同一个 raw→resolved 管线，
-            // 支持「选 preset + 填密钥」的最小写法（地址由 preset 补全）。
-            let protocol = item
-                .get("protocol")
-                .cloned()
-                .map(|v| {
-                    serde_json::from_value::<Protocol>(v).map_err(|e| {
-                        GatewayError::Config(format!(
-                            "provider overlay 里 '{name}' protocol 无效: {e}"
-                        ))
-                    })
-                })
-                .transpose()?;
+            // overlay 条目与顶层 `[provider.*]` 同语义：preset / *_base_url /
+            // api_key_env / api_key，交给同一个 raw→resolved 管线，支持「选
+            // preset + 填密钥」的最小写法（地址由 preset 补全）。
+            // 注：旧 overlay 里若残留 `protocol` 字段会被静默忽略——schema
+            // 已切到 per-protocol base_url。
             let raw = RawProviderConfig {
                 preset: item
                     .get("preset")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
-                protocol,
-                base_url: item
-                    .get("base_url")
+                base_url_anthropic: item
+                    .get("base_url_anthropic")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                base_url_openai: item
+                    .get("base_url_openai")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
                 api_key_env: item
@@ -495,9 +509,9 @@ impl GatewayConfig {
             return Err(GatewayError::Config("provider 不能为空".into()));
         }
         for (name, p) in &self.providers {
-            if p.base_url.is_empty() {
+            if p.base_url_anthropic.is_none() && p.base_url_openai.is_none() {
                 return Err(GatewayError::Config(format!(
-                    "provider.{name}.base_url 不能为空"
+                    "provider.{name}: base_url_anthropic / base_url_openai 至少需要一项"
                 )));
             }
         }
@@ -585,8 +599,8 @@ impl GatewayConfig {
         self.providers.insert(
             "test".to_string(),
             ProviderConfig {
-                protocol: Protocol::Anthropic,
-                base_url: "gateway://self".to_string(),
+                base_url_anthropic: Some("gateway://self".to_string()),
+                base_url_openai: Some("gateway://self".to_string()),
                 api_key_env: None,
                 api_key: None,
                 model_map: HashMap::new(),
@@ -658,13 +672,9 @@ default_provider = "anthropic"
 auth_token = "sk-gw-local-dev"
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
 [provider.deepseek]
-protocol = "anthropic"
-base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
 
 [gateway.routes]
@@ -695,8 +705,8 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert_eq!(cfg.auth_token, vec!["sk-gw-local-dev".to_string()]);
         assert_eq!(cfg.providers.len(), 2);
         let anth = cfg.providers.get("anthropic").expect("anthropic provider");
-        assert_eq!(anth.protocol, Protocol::Anthropic);
-        assert_eq!(anth.base_url, "https://api.anthropic.com");
+        assert_eq!(anth.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert!(anth.base_url_openai.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert_eq!(cfg.routes.len(), 2);
         assert_eq!(cfg.routes[0].model, "claude-*");
@@ -757,8 +767,6 @@ api_key_env = "DEEPSEEK_API_KEY"
 [gateway]
 auth_token = "sk-test"
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key = "test-key"
 [gateway.routes]
 "gpt-*" = ["openai"]
@@ -784,8 +792,6 @@ api_key = "test-key"
 usage_file = "~/sebas/gateway-usage.jsonl"
 auth_token = "sk-test"
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
         let cfg = parse_isolated(raw).expect("parse");
@@ -809,48 +815,51 @@ api_key = "test-key"
         let raw = r#"
 [gateway]
 auth_token = "sk-test"
-# 名称即 preset：只写 protocol，base_url/api_key_env 自动填充
+# 名称即 preset：base_url_anthropic / api_key_env 自动按 preset 填
 [provider.deepseek]
-protocol = "anthropic"
+# 不写任何 *_base_url → preset 默认填双协议 URL
 
 # 显式字段覆盖 preset 默认
 [provider.openai]
-base_url = "http://localhost:9099/v1"
+base_url_openai = "http://localhost:9099/v1"
 api_key_env = "MY_OPENAI_KEY"
 "#;
         let cfg = parse_isolated(raw).expect("preset config should parse");
 
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.protocol, Protocol::Anthropic);
-        assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(ds.base_url_anthropic.as_deref(), Some("https://api.deepseek.com/anthropic"));
+        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 
         let oai = cfg.providers.get("openai").expect("openai provider");
-        // 单协议 preset：protocol 缺省自动填 openai
-        assert_eq!(oai.protocol, Protocol::OpenAi);
-        // 显式 base_url / api_key_env 覆盖 preset
-        assert_eq!(oai.base_url, "http://localhost:9099/v1");
+        // 单协议 preset（openai）：只填 base_url_openai，anthropic 缺位
+        assert!(oai.base_url_anthropic.is_none());
+        // 显式 base_url_openai 覆盖 preset 默认
+        assert_eq!(oai.base_url_openai.as_deref(), Some("http://localhost:9099/v1"));
         assert_eq!(oai.api_key_env.as_deref(), Some("MY_OPENAI_KEY"));
     }
 
     #[test]
-    fn preset_dual_protocol_requires_explicit_protocol() {
+    fn preset_dual_protocol_fills_both_urls() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
         }
+        // 双协议 preset 不再需要显式 protocol：两条 base_url 各自按 preset 填入，
+        // 由请求方按协议选 URL（缺位 → ProtocolMismatch）。
         let raw = r#"
 [gateway]
 auth_token = "sk-test"
 [provider.deepseek]
 "#;
-        let err = parse_isolated(raw).expect_err("dual-protocol preset without protocol");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("deepseek") && msg.contains("protocol"),
-            "error should name provider and require protocol: {msg}"
+        let cfg = parse_isolated(raw).expect("dual-protocol preset without explicit url");
+        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        assert_eq!(
+            ds.base_url_anthropic.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
         );
+        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
     }
 
     #[test]
@@ -868,13 +877,13 @@ preset = "openai"
 "#;
         let cfg = parse_isolated(raw).expect("preset alias should parse");
         let p = cfg.providers.get("my-openai").expect("aliased provider");
-        assert_eq!(p.protocol, Protocol::OpenAi);
-        assert_eq!(p.base_url, "https://api.openai.com/v1");
+        assert!(p.base_url_anthropic.is_none());
+        assert_eq!(p.base_url_openai.as_deref(), Some("https://api.openai.com/v1"));
         assert_eq!(p.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
     }
 
     #[test]
-    fn preset_single_protocol_with_foreign_protocol_errors() {
+    fn preset_single_protocol_with_foreign_url_errors() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
@@ -884,9 +893,9 @@ preset = "openai"
 [gateway]
 auth_token = "sk-test"
 [provider.openai]
-protocol = "anthropic"
+base_url_anthropic = "https://anthropic-from-openai.example"
 "#;
-        let err = parse_isolated(raw).expect_err("openai preset with anthropic protocol");
+        let err = parse_isolated(raw).expect_err("openai preset with base_url_anthropic");
         let msg = err.to_string();
         assert!(
             msg.contains("openai") && msg.contains("anthropic"),
@@ -895,7 +904,7 @@ protocol = "anthropic"
     }
 
     #[test]
-    fn custom_provider_without_protocol_errors() {
+    fn custom_provider_without_any_url_errors() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
@@ -905,12 +914,14 @@ protocol = "anthropic"
 [gateway]
 auth_token = "sk-test"
 [provider.my-custom]
-base_url = "http://localhost:1234"
+api_key_env = "MY_KEY"
 "#;
-        let err = parse_isolated(raw).expect_err("custom provider without protocol");
+        let err = parse_isolated(raw).expect_err("custom provider without URLs");
         assert!(
-            err.to_string().contains("protocol"),
-            "custom provider must require explicit protocol: {err}"
+            err.to_string().contains("base_url_anthropic")
+                || err.to_string().contains("base_url_openai")
+                || err.to_string().contains("provider.my-custom"),
+            "custom provider must require at least one URL: {err}"
         );
     }
 
@@ -931,8 +942,8 @@ api_key = "test-key"
 "#;
         let cfg = parse_isolated(raw).expect("preset + api_key should parse");
         let p = cfg.providers.get("anthropic").expect("anthropic provider");
-        assert_eq!(p.protocol, Protocol::Anthropic);
-        assert_eq!(p.base_url, "https://api.anthropic.com");
+        assert_eq!(p.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert!(p.base_url_openai.is_none());
         assert_eq!(
             p.api_key_env, None,
             "explicit api_key must not get preset env"
@@ -955,14 +966,13 @@ default_provider = "deepseek"
 
 auth_token = "sk-test"
 [provider.deepseek]
-protocol = "anthropic"
 "#;
         let cfg = parse_isolated(raw).expect("top-level provider should parse");
         assert_eq!(cfg.default_provider.as_deref(), Some("deepseek"));
         assert_eq!(cfg.auth_token, vec!["sk-test".to_string()]);
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.protocol, Protocol::Anthropic);
-        assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(ds.base_url_anthropic.as_deref(), Some("https://api.deepseek.com/anthropic"));
+        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
     }
 
@@ -985,36 +995,34 @@ app_id = "x"
         assert_eq!(cfg.auth_token.len(), 0);
         assert_eq!(cfg.routes.len(), 0);
         let p = cfg.providers.get("anthropic").expect("anthropic provider");
-        assert_eq!(p.protocol, Protocol::Anthropic);
-        assert_eq!(p.base_url, "https://api.anthropic.com");
+        assert_eq!(p.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert!(p.base_url_openai.is_none());
         assert_eq!(p.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
     #[test]
-    fn top_level_provider_table_with_explicit_base_url_and_plain_key() {
+    fn top_level_provider_table_with_explicit_url_and_plain_key() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_LISTEN");
         }
-        // 顶层 `[provider.*]`：preset 自动填充 + 显式 base_url/api_key 覆盖。
+        // 顶层 `[provider.*]`：preset 自动填充 + 显式 base_url_anthropic/api_key 覆盖。
         let raw = r#"
 [provider.deepseek]
-protocol = "anthropic"
 
 [provider.ark]
-protocol = "anthropic"
-base_url = "https://ark.cn-beijing.volces.com/api/plan"
+base_url_anthropic = "https://ark.cn-beijing.volces.com/api/plan"
 api_key = "test-ark-key"
 "#;
         let cfg = parse_isolated(raw).expect("top-level provider table should parse");
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.protocol, Protocol::Anthropic);
-        assert_eq!(ds.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(ds.base_url_anthropic.as_deref(), Some("https://api.deepseek.com/anthropic"));
+        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 
         let ark = cfg.providers.get("ark").expect("ark provider");
-        assert_eq!(ark.base_url, "https://ark.cn-beijing.volces.com/api/plan");
+        assert_eq!(ark.base_url_anthropic.as_deref(), Some("https://ark.cn-beijing.volces.com/api/plan"));
         assert_eq!(ark.api_key.as_deref(), Some("test-ark-key"));
         assert_eq!(ark.api_key_env, None);
     }
@@ -1032,8 +1040,6 @@ api_key = "test-ark-key"
 [gateway]
 auth_token = "sk-one"
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
         let cfg = parse_isolated(single).expect("single auth_token should parse");
@@ -1043,8 +1049,6 @@ api_key = "test-key"
 [gateway]
 auth_token = ["sk-a", "sk-b"]
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
         let cfg = parse_isolated(many).expect("array auth_token should parse");
@@ -1062,8 +1066,6 @@ api_key = "test-key"
 [gateway]
 auth_token = ""
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
         let err = parse_isolated(raw).expect_err("empty auth_token must error");
@@ -1084,8 +1086,6 @@ api_key = "test-key"
 [gateway]
 auth_token = "sk-test"
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
 api_key = "test-key"
 "#;
         let mut cfg = parse_isolated(raw).expect("parse");
@@ -1094,7 +1094,7 @@ api_key = "test-key"
 
         assert!(cfg.debug);
         let test = cfg.providers.get("test").expect("test provider injected");
-        assert_eq!(test.base_url, "gateway://self");
+        assert_eq!(test.base_url_anthropic.as_deref(), Some("gateway://self"));
         assert_eq!(test.api_key, None);
         assert_eq!(test.api_key_env, None);
         assert!(
@@ -1164,10 +1164,15 @@ api_key = "test-key"
             .providers
             .get("deepseek")
             .expect("overlay added deepseek");
-        assert_eq!(ds.protocol, Protocol::Anthropic);
         assert_eq!(
-            ds.base_url, "https://api.deepseek.com/anthropic",
-            "preset must fill the endpoint from the hardcoded table"
+            ds.base_url_anthropic.as_deref(),
+            Some("https://api.deepseek.com/anthropic"),
+            "preset must fill the anthropic endpoint from the hardcoded table"
+        );
+        assert_eq!(
+            ds.base_url_openai.as_deref(),
+            Some("https://api.deepseek.com"),
+            "preset must fill the openai endpoint from the hardcoded table"
         );
         assert_eq!(
             ds.api_key.as_deref(),
@@ -1179,8 +1184,8 @@ api_key = "test-key"
             "explicit api_key must not get preset env"
         );
         let anth = cfg.providers.get("anthropic").expect("anthropic kept");
-        assert_eq!(anth.protocol, Protocol::Anthropic);
-        assert_eq!(anth.base_url, "https://api.anthropic.com");
+        assert_eq!(anth.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert!(anth.base_url_openai.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY_V2"));
     }
 }

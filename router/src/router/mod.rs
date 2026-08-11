@@ -12,7 +12,7 @@ mod maps;
 pub use maps::{MsgIdMap, PermCardEntry, PermCardMap, SessionAllowlist, tool_signature};
 
 use crate::card_events::apply_event_to_card;
-use crate::crud::{CrudForm, FileStore};
+use crate::crud::ProviderForms;
 use crate::state::SessionMap;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::{CardConfig, phase_visual, render_accumulated_card};
@@ -112,7 +112,10 @@ pub struct RouterHandle {
     allowlist: SessionAllowlist,
     /// Provider CRUD 表单实例（`/provider` 命令 + 卡片回调路由）。
     /// 未接线（None）时 `/provider` 落到 HelpText，表单回调仅记日志。
-    provider_form: Option<Arc<CrudForm<FileStore>>>,
+    /// `ProviderForms` 包含 preset + custom 两张表单（共享同一个 overlay 文件），
+    /// 列表卡上有两个「＋ 新增」按钮分别走对应表单；编辑/删除按 item.preset
+    /// 是否设置路由到对应表单。
+    provider_forms: Option<Arc<ProviderForms>>,
 }
 
 impl Clone for RouterHandle {
@@ -125,7 +128,7 @@ impl Clone for RouterHandle {
             card_cfg: self.card_cfg.clone(),
             perm_cards: self.perm_cards.clone(),
             allowlist: self.allowlist.clone(),
-            provider_form: self.provider_form.clone(),
+            provider_forms: self.provider_forms.clone(),
         }
     }
 }
@@ -155,7 +158,7 @@ impl RouterHandle {
         map: SessionMap,
         card_cfg: CardConfig,
         channel_buffer: usize,
-        provider_form: Option<Arc<CrudForm<FileStore>>>,
+        provider_forms: Option<Arc<ProviderForms>>,
     ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(channel_buffer);
         (
@@ -167,7 +170,7 @@ impl RouterHandle {
                 card_cfg: Arc::new(RwLock::new(card_cfg)),
                 perm_cards: PermCardMap::default(),
                 allowlist: SessionAllowlist::default(),
-                provider_form,
+                provider_forms,
             },
             rx,
         )

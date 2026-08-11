@@ -104,8 +104,7 @@ auth_token = "sk-gw-fail"
 name = "failure-test"
 
 [provider.up]
-protocol = "anthropic"
-base_url = "{upstream}"
+base_url_anthropic = "{upstream}"
 api_key = "test-upstream-key"
 "#
     )

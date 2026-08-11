@@ -21,13 +21,11 @@ usage_file = "__USAGE__"
 auth_token = "sk-gw-test"
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com"
+base_url_anthropic = "https://api.anthropic.com"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
 [provider.openai]
-protocol = "openai"
-base_url = "https://api.openai.com"
+base_url_openai = "https://api.openai.com"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 "#;
 

@@ -23,6 +23,7 @@ fn spec() -> FormSpec {
                 required: true,
                 placeholder: "标题".into(),
                 secret: false,
+                disabled: false,
             },
             FormField::Text {
                 name: "body".into(),
@@ -30,6 +31,7 @@ fn spec() -> FormSpec {
                 required: false,
                 placeholder: "正文".into(),
                 secret: false,
+                disabled: false,
             },
         ],
     )
