@@ -308,8 +308,21 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         }
     };
 
-    // 9. 构造上游 URL：base_url + target.path + preserved query string。
-    let upstream_url = build_upstream_url(&provider_cfg.base_url, &target.path, &uri);
+    // 9. 构造上游 URL：provider_cfg.url_for(proto) + target.path + preserved query string。
+    let base = match provider_cfg.url_for(proto) {
+        Some(b) => b,
+        None => {
+            return upstream_error_response(
+                proto,
+                &format!(
+                    "provider '{}' 未配置 {} 端点 URL",
+                    decision.provider,
+                    proto.as_str()
+                ),
+            );
+        }
+    };
+    let upstream_url = build_upstream_url(base, &target.path, &uri);
 
     // 10. 改写请求 header（剥离 hop-by-hop + 下游 key，注入上游 key）。
     let out_headers = filtered_request_headers(&req_headers, proto, upstream_key);

@@ -98,8 +98,7 @@ auth_token = "sk-downstream-gw"
 name = "proxy-smoke"
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "http://{upstream_addr}"
+base_url_anthropic = "http://{upstream_addr}"
 api_key = "test-upstream-anthropic-key"
 
 [provider.anthropic.model_map]
@@ -226,8 +225,7 @@ auth_token = "sk-downstream-gw"
 name = "proxy-smoke"
 
 [provider.unreachable]
-protocol = "anthropic"
-base_url = "http://127.0.0.1:1"
+base_url_anthropic = "http://127.0.0.1:1"
 api_key = "test-unreachable-key"
 "#;
     let gw = support::start_gateway(cfg).await;

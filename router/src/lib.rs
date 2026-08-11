@@ -8,6 +8,6 @@ pub mod settings;
 pub mod state;
 
 pub use commands::{Command, parse_command};
-pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item};
+pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};
 pub use router::{MsgIdMap, Out, RouterHandle};
 pub use state::{Mapping, SessionMap};

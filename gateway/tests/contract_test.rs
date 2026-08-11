@@ -39,13 +39,11 @@ auth_token = ["sk-gw-contract", "sk-gw-openai"]
 "text-*" = ["openai"]
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "{anth_url}"
+base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
 [provider.openai]
-protocol = "openai"
-base_url = "{oai_url}"
+base_url_openai = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 "#
     )
@@ -66,16 +64,14 @@ auth_token = "sk-gw-contract"
 "claude-*" = ["anthropic"]
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "{anth_url}"
+base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
 [provider.anthropic.model_map]
 claude-sonnet = "claude-sonnet-4-20250514"
 
 [provider.openai]
-protocol = "openai"
-base_url = "{oai_url}"
+base_url_openai = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 "#
     )
@@ -97,13 +93,11 @@ auth_token = "sk-gw-openai"
 "claude-*" = ["anthropic"]
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "{anth_url}"
+base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
 [provider.openai]
-protocol = "openai"
-base_url = "{oai_url}"
+base_url_openai = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 "#
     )

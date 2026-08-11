@@ -22,7 +22,7 @@ use feishu::messages::{ReceiveIdType, SendCardRequest};
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use router::Out;
-use router::crud::{CrudForm, FileStore};
+use router::crud::{CrudForm, FileStore, ProviderForms};
 use sebas::config::Config;
 use sebas::provider::build_form;
 use serde_json::Value;
@@ -60,7 +60,7 @@ struct Handler {
     http: reqwest::Client,
     client: FeishuClient,
     tokens: TokenManager,
-    crud: Arc<CrudForm<FileStore>>,
+    forms: Arc<ProviderForms>,
     /// 发送目标：启动时可由 CLI 指定；否则等第一条入站消息自动确定。
     target: Arc<tokio::sync::Mutex<Option<Target>>>,
 }
@@ -99,28 +99,61 @@ impl Handler {
                 message_id,
             } => {
                 info!(?key, ?form_value, ?message_id, "form submission received");
-                let out = self.crud.handle(key, &value, &form_value, message_id).await;
+                let form_name = value.get("form").and_then(Value::as_str).unwrap_or("");
+                let Some(form) = self.forms.dispatch(form_name) else {
+                    warn!(form_name, "unwired form callback ignored");
+                    return Ok(());
+                };
+                let out = form.handle(key, &value, &form_value, message_id).await;
                 self.dispatch(out).await?;
             }
             FeishuIn::ButtonCb { key, action } => {
                 // 列表卡上的 新增/编辑/删除 是普通按钮回调（无 form_value），
                 // 负载在 action.value 里，message_id 在 context 里。
-                let value = action
-                    .value
-                    .pointer("/action/value")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let message_id = action
-                    .value
-                    .pointer("/context/open_message_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                info!(?key, ?value, ?message_id, "button callback received");
-                let out = self
-                    .crud
-                    .handle(key, &value, &BTreeMap::new(), message_id)
-                    .await;
-                self.dispatch(out).await?;
+                let payload = action.value.pointer("/action/value").cloned();
+                let op = payload
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .and_then(|p| p.get("op"))
+                    .and_then(Value::as_str);
+                let target = match op {
+                    Some("create") => payload
+                        .as_ref()
+                        .and_then(Value::as_object)
+                        .and_then(|p| p.get("form"))
+                        .and_then(Value::as_str)
+                        .and_then(|n| self.forms.dispatch(n))
+                        .map(Arc::clone),
+                    Some("edit") | Some("delete") => {
+                        let id = payload
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .and_then(|p| p.get("id"))
+                            .and_then(Value::as_str);
+                        match id {
+                            Some(id) => self.forms.pick_for_edit(id).await,
+                            None => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(form) = target {
+                    let message_id = action
+                        .value
+                        .pointer("/context/open_message_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    info!(
+                        ?key,
+                        ?payload,
+                        ?message_id,
+                        "button callback received"
+                    );
+                    let out = form
+                        .handle(key, &payload.unwrap_or(Value::Null), &BTreeMap::new(), message_id)
+                        .await;
+                    self.dispatch(out).await?;
+                }
             }
             other => debug!("ignoring inbound event: {other:?}"),
         }
@@ -136,7 +169,7 @@ impl Handler {
         *target = Some(Target::Chat(key.chat_id.clone()));
         drop(target);
         info!(?key, text = %text, "target resolved from inbound message; sending CRUD card");
-        let out = self.crud.open(key).await;
+        let out = self.forms.open(key).await;
         self.dispatch(out).await?;
         Ok(())
     }
@@ -253,24 +286,24 @@ async fn main() -> anyhow::Result<()> {
 
     // 直接复用 /provider 的真实表单：FileStore overlay 持久化 + preset
     // 规范化，种子来自 config.toml 顶层 [provider.*]。
-    let crud = match build_form(&cfg_text) {
-        Some(crud) => crud,
+    let forms = match build_form(&cfg_text) {
+        Some(forms) => forms,
         None => anyhow::bail!("provider 表单不可用（overlay 加载失败），见上面的日志"),
     };
     let handler = Handler {
         http,
         client,
         tokens,
-        crud: crud.clone(),
+        forms: forms.clone(),
         target: Arc::new(tokio::sync::Mutex::new(target.clone())),
     };
 
     // 先发初始列表卡，然后进入长连接等待交互。
     if let Some(target) = &target {
         handler
-            .dispatch(crud.open(target.placeholder_key()).await)
+            .dispatch(forms.open(target.placeholder_key()).await)
             .await?;
-        info!("初始列表卡已发送：请点「＋ 新增」→ 填写 → 提交 → 编辑 → 删除");
+        info!("初始列表卡已发送：请点「＋ 新增（预设/自定义）」→ 填写 → 提交 → 编辑 → 删除");
     } else {
         info!("等待入站消息……");
     }

@@ -81,12 +81,12 @@ pub async fn run(
             return Err(crate::error::SebasError::Config(e));
         }
     };
-    let provider_form = crate::provider::build_form(&raw_config);
+    let provider_forms = crate::provider::build_form(&raw_config);
     let (router, mut out_rx) = RouterHandle::new_with_provider_form(
         map,
         merged_card_cfg,
         cfg.router.channel_buffer,
-        provider_form,
+        provider_forms,
     );
     let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
         cfg.acp.claude.startup_timeout_secs,

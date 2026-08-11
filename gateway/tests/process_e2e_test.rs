@@ -67,13 +67,11 @@ auth_token = "sk-gw-process"
 "gpt-*" = ["openai"]
 
 [provider.anthropic]
-protocol = "anthropic"
-base_url = "{anth_url}"
+base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 
 [provider.openai]
-protocol = "openai"
-base_url = "{oai_url}"
+base_url_openai = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 "#
     );
@@ -101,7 +99,7 @@ usage_file = "{usage}"
 auth_token = "sk-gw-top"
 
 [provider.anthropic]
-base_url = "{anth_url}"
+base_url_anthropic = "{anth_url}"
 api_key_env = "ANTHROPIC_API_KEY"
 "#
     );
@@ -351,8 +349,8 @@ async fn standalone_gateway_reads_top_level_provider_table() {
             .arg("--config")
             .arg(&config_path)
             .env("ANTHROPIC_API_KEY", "test-anthropic-key")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn standalone sebas gateway"),
     };
