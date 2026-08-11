@@ -8,7 +8,7 @@ rust-version = "1.90"
 resolver = "2"
 members = ["router", "feishu", "acp-claude", "gateway"]
 
-# Debug profile: 产物最小化（与 release 同等设置）
+# Debug profile: 产物最小化
 [profile.dev]
 opt-level = "z"        # 体积优先
 # lto = true             # 跨 crate LTO
@@ -31,22 +31,23 @@ gateway = { path = "gateway" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-thiserror = "1"
+toml = "1.1"
+thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
-dirs = "5"
+dirs = "6"
 libc = "0.2"
 chrono = "0.4"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 futures-util = "0.3"
+
 # Feishu WebSocket long-connection inbound. v0.19.0+ adds `register_raw`
 # which sidesteps the dispatcher-key bug present in v0.14.0 (handlers
 # never matched because registered keys vs. emit keys were different).
-openlark = { version = "0.19", default-features = false, features = ["communication", "websocket"] }
+openlark = { version = "0.20", default-features = false, features = ["communication", "websocket"] }
 
 [dev-dependencies]
 tempfile = "3"
