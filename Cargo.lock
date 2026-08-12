@@ -7,7 +7,7 @@ name = "acp-claude"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cc-agent-sdk 0.1.6",
+ "cc-agent-sdk",
  "futures",
  "serde",
  "serde_json",
@@ -255,30 +255,6 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
-]
-
-[[package]]
-name = "cc-agent-sdk"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "chrono",
- "futures",
- "indexmap",
- "paste",
- "regex",
- "reqwest 0.12.28",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "typed-builder",
- "uuid",
 ]
 
 [[package]]
@@ -2057,7 +2033,7 @@ version = "0.1.0"
 dependencies = [
  "acp-claude",
  "anyhow",
- "cc-agent-sdk 0.1.7",
+ "cc-agent-sdk",
  "chrono",
  "clap",
  "dirs 6.0.0",

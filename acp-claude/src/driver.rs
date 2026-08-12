@@ -323,6 +323,20 @@ impl CcDriver {
                     }
                 }
                 Sel::Msg(Some(Err(e))) => {
+                    // MessageParseError = unknown message type from CLI, not
+                    // a real error. Log the raw data and continue instead of
+                    // killing the session.
+                    if let claude_agent_sdk::ClaudeError::MessageParse(inner) = &e {
+                        if let Some(raw) = &inner.data {
+                            tracing::warn!(
+                                raw = %serde_json::to_string(raw).unwrap_or_default(),
+                                "ignoring unknown message type from claude"
+                            );
+                        } else {
+                            tracing::warn!("ignoring unknown message from claude");
+                        }
+                        continue;
+                    }
                     self.terminal(&format!("claude stream error: {e}")).await;
                     return;
                 }
