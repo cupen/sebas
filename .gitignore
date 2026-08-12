@@ -12,3 +12,6 @@ config.toml
 .claude/worktrees
 .worktree/
 logs/
+.codebase-memory/
+*.xml
+
