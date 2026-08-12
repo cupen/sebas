@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Session Detail - sebas{% endblock %}
+{% block content %}
+<h1>Session Detail</h1>
+
+<div class="detail-header">
+  <div class="detail-field">
+    <span class="detail-label">Chat ID</span>
+    <span class="detail-value">{{ chat_id }}</span>
+  </div>
+  <div class="detail-field">
+    <span class="detail-label">Thread ID</span>
+    <span class="detail-value">{{ thread_id if thread_id else "—" }}</span>
+  </div>
+  <div class="detail-field">
+    <span class="detail-label">Session ID</span>
+    <span class="detail-value">
+      {% if session_id %}
+      <code>{{ session_id }}</code>
+      {% else %}
+      <span class="muted">—</span>
+      {% endif %}
+    </span>
+  </div>
+  <div class="detail-field">
+    <span class="detail-label">Status</span>
+    <span class="badge badge-{{ status }}">{{ status }}</span>
+  </div>
+  <div class="detail-field">
+    <span class="detail-label">Phase</span>
+    <span>{{ phase if phase else "—" }}</span>
+  </div>
+  <div class="detail-field">
+    <span class="detail-label">Last Active</span>
+    <span>{{ last_active }}</span>
+  </div>
+  <div class="detail-field">
+    <span class="detail-label">Message ID</span>
+    <span>
+      {% if msg_id %}
+      <code>{{ msg_id }}</code>
+      {% else %}
+      <span class="muted">—</span>
+      {% endif %}
+    </span>
+  </div>
+</div>
+
+<h2>Card Body</h2>
+<div id="card-body">
+{% if body %}
+<div class="card-body">
+  {% for el in body %}
+    {% if el.element_type == "markdown" %}
+    <div class="el-markdown">{{ el.content }}</div>
+    {% elif el.element_type == "div" %}
+    <div class="el-div">{{ el.content }}</div>
+    {% elif el.element_type == "collapsible" %}
+    <div class="el-collapsible">{{ el.content }}</div>
+    {% elif el.element_type == "hr" %}
+    <hr>
+    {% else %}
+    <div class="el-other">{{ el.content }}</div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty-state">No card content yet. Start a conversation below.</p>
+{% endif %}
+</div>
+
+<!-- Message input -->
+<div class="message-form">
+  <form hx-post="/api/sessions/{{ encoded_key }}/message"
+        hx-trigger="submit"
+        hx-swap="none"
+        hx-on::after-request="
+          document.getElementById('msg-input').value = '';
+          htmx.ajax('GET', '/sessions/{{ encoded_key }}', {target:'#card-body', swap:'outerHTML'});
+        ">
+    <textarea id="msg-input" name="message" class="msg-input" rows="2" placeholder="Type a message for Claude Code..."></textarea>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Send</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

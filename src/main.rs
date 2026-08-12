@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 c.enable_debug_test_provider();
             }
-            sebas::run::run(cfg, raw, run.test_msg, run.dump_inbound, gateway_cfg)
+            sebas::run::run(cfg, raw, run.test_msg, run.dump_inbound, gateway_cfg, run.webui, run.webui_port)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())

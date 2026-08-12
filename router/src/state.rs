@@ -320,6 +320,14 @@ impl SessionMap {
     /// (`{"session_id": ..., "last_active_unix": ...}`) so the on-disk format
     /// is unchanged and restores work across versions. Spawning placeholders
     /// are never persisted (their child is tied to this process).
+    /// Return a snapshot of all current mappings. Used by the WebUI to render
+    /// the session list. Returns a `Vec<(SessionKey, Mapping)>` so callers
+    /// can iterate without holding the lock.
+    pub async fn snapshot_all(&self) -> Vec<(SessionKey, Mapping)> {
+        let g = self.inner.read().await;
+        g.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
     pub async fn dump_json(&self) -> serde_json::Result<String> {
         let g = self.inner.read().await;
         let active: HashMap<&SessionKey, MappingDto> = g

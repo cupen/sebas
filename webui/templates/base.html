@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}sebas dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body hx-sse="connect:/events">
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">⚡</span>
+        <span class="brand-text">sebas</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">Main</div>
+          <a href="/" class="nav-item {{ "active" if page == "dashboard" else "" }}" hx-boost="true">
+            <span class="nav-icon">📊</span>
+            <span class="nav-label">Dashboard</span>
+          </a>
+          <a href="/sessions" class="nav-item {{ "active" if page == "sessions" else "" }}" hx-boost="true">
+            <span class="nav-icon">💬</span>
+            <span class="nav-label">Sessions</span>
+          </a>
+        </div>
+        <div class="nav-section">
+          <div class="nav-section-title">System</div>
+          <a href="/settings" class="nav-item {{ "active" if page == "settings" else "" }}" hx-boost="true">
+            <span class="nav-icon">⚙️</span>
+            <span class="nav-label">Settings</span>
+          </a>
+          <a href="/gateway" class="nav-item {{ "active" if page == "gateway" else "" }}" hx-boost="true">
+            <span class="nav-icon">📡</span>
+            <span class="nav-label">Gateway</span>
+          </a>
+          <a href="/about" class="nav-item {{ "active" if page == "about" else "" }}" hx-boost="true">
+            <span class="nav-icon">ℹ️</span>
+            <span class="nav-label">About</span>
+          </a>
+        </div>
+      </nav>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content" hx-sse="swap:update">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

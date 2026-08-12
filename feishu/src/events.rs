@@ -47,6 +47,23 @@ impl Serialize for SessionKey {
     }
 }
 
+impl SessionKey {
+    /// Create a SessionKey for web-originated sessions (not from Feishu).
+    /// Uses a nanosecond timestamp + random component for uniqueness.
+    pub fn web_key() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let chat_id = format!("web-{ts}");
+        SessionKey {
+            chat_id,
+            thread_id: None,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for SessionKey {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let s = String::deserialize(de)?;

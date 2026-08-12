@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - sebas{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats-row">
+  <div class="stat-card stat-active">
+    <div class="stat-value">{{ active_count }}</div>
+    <div class="stat-label">Active</div>
+  </div>
+  <div class="stat-card stat-dormant">
+    <div class="stat-value">{{ dormant_count }}</div>
+    <div class="stat-label">Dormant</div>
+  </div>
+  <div class="stat-card stat-spawning">
+    <div class="stat-value">{{ spawning_count }}</div>
+    <div class="stat-label">Spawning</div>
+  </div>
+  <div class="stat-card stat-total">
+    <div class="stat-value">{{ total_sessions }}</div>
+    <div class="stat-label">Total</div>
+  </div>
+  <div class="stat-card stat-uptime">
+    <div class="stat-value">{{ uptime_seconds }}</div>
+    <div class="stat-label">Uptime (s)</div>
+  </div>
+</div>
+
+<h2>Recent Sessions</h2>
+{% if recent_sessions %}
+<table class="session-table">
+  <thead>
+    <tr>
+      <th>Chat ID</th>
+      <th>Thread</th>
+      <th>Session ID</th>
+      <th>Status</th>
+      <th>Phase</th>
+      <th>Last Active</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in recent_sessions %}
+    <tr>
+      <td>{{ s.chat_id }}</td>
+      <td>{{ s.thread_id if s.thread_id else "—" }}</td>
+      <td>{{ s.session_id if s.session_id else "—" }}</td>
+      <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
+      <td>{{ s.phase }}</td>
+      <td>{{ s.last_active }}</td>
+      <td><a href="/sessions/{{ s.encoded_key }}" hx-boost="true">View</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty-state">No sessions yet. Start one in Feishu with <code>/new</code>.</p>
+{% endif %}
+{% endblock %}

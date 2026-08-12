@@ -29,6 +29,11 @@ impl MsgIdMap {
     pub async fn get(&self, session_id: &str) -> Option<String> {
         self.inner.read().await.get(session_id).cloned()
     }
+
+    /// Return a snapshot of all message_id mappings.
+    pub async fn snapshot_all(&self) -> HashMap<String, String> {
+        self.inner.read().await.clone()
+    }
 }
 
 /// One outstanding permission card: the chat to PATCH, the Feishu message_id

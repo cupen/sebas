@@ -34,6 +34,8 @@ pub async fn run(
     test_msg: Option<String>,
     dump_inbound: Option<String>,
     gateway_cfg: Option<GatewayConfig>,
+    webui: bool,
+    webui_port: u16,
 ) -> Result<()> {
     // openlark 0.19 uses reqwest 0.13, whose Rustls connector consults the
     // process-wide provider. Our reqwest 0.12 clients use ring explicitly;
@@ -48,11 +50,11 @@ pub async fn run(
 
     // `run --gateway`：在随机端口上启动内置 gateway，实际端口记入日志
     // （调用方按需把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL 指向该地址）。
-    if let Some(gw_cfg) = gateway_cfg {
+    if let Some(ref gw_cfg) = gateway_cfg {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定随机端口失败: {e}")))?;
-        let (addr, _handle) = gateway::server::serve_with_listener(gw_cfg, listener)
+        let (addr, _handle) = gateway::server::serve_with_listener(gw_cfg.clone(), listener)
             .map_err(|e| crate::error::SebasError::Gateway(e.to_string()))?;
         info!(%addr, "gateway started (run --gateway); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
     }
@@ -199,6 +201,19 @@ pub async fn run(
         }
     });
 
+    // Start WebUI dashboard server if requested
+    if webui {
+        let router_for_webui = router.clone();
+        let gateway_info = build_gateway_info(gateway_cfg.as_ref());
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
+            .await
+            .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
+        tokio::spawn(async move {
+            webui::run(router_for_webui, gateway_info, listener).await;
+        });
+        info!("webui dashboard starting on 127.0.0.1:{webui_port}");
+    }
+
     // Run the long-connection event loop inline in a `tokio::select!` so the
     // shutdown signal can drop the WebSocket future and close the connection
     // promptly. If the reconnect loop ever exits, keep waiting for ctrl_c so
@@ -290,4 +305,27 @@ fn init_tracing(cfg: &Config) {
         return;
     }
     subscriber.init();
+}
+
+/// Build a GatewayInfo from the optional gateway config for the WebUI.
+fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> webui::models::GatewayInfo {
+    let Some(gw) = gateway_cfg else {
+        return webui::models::GatewayInfo::default();
+    };
+    let providers = gw
+        .providers
+        .iter()
+        .map(|(name, p)| webui::models::ProviderInfo {
+            name: name.clone(),
+            base_url_anthropic: p.base_url_anthropic.clone(),
+            base_url_openai: p.base_url_openai.clone(),
+        })
+        .collect();
+    webui::models::GatewayInfo {
+        listen: Some(gw.listen.clone()),
+        provider_count: gw.providers.len(),
+        debug: gw.debug,
+        has_auth: !gw.auth_token.is_empty(),
+        providers,
+    }
 }

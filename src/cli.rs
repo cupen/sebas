@@ -46,6 +46,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub test_msg: Option<String>,
 
+    /// Start the WebUI dashboard server.
+    #[arg(long)]
+    pub webui: bool,
+
+    /// Port for the WebUI server (default: 9797).
+    #[arg(long, default_value = "9797")]
+    pub webui_port: u16,
+
     /// Dump every raw inbound WS payload to this directory as one .json file per
     /// event (timestamp-prefixed). Useful for local replay/debug without needing
     /// the live Feishu connection. Disabled when omitted.

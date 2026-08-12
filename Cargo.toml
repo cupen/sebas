@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["router", "feishu", "acp-claude", "gateway"]
+members = ["router", "feishu", "acp-claude", "gateway", "webui"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -28,6 +28,7 @@ router = { path = "router" }
 feishu = { path = "feishu" }
 acp-claude = { path = "acp-claude" }
 gateway = { path = "gateway" }
+webui = { path = "webui" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,6 +49,8 @@ futures-util = "0.3"
 # which sidesteps the dispatcher-key bug present in v0.14.0 (handlers
 # never matched because registered keys vs. emit keys were different).
 openlark = { version = "0.20", default-features = false, features = ["communication", "websocket"] }
+cc-agent-sdk = { version = "0.1.7"}
+# cc-agent-sdk = { version = "0.1.6", path = "vendor/cc-agent-sdk" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,0 +1,18 @@
+[package]
+name = "webui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+router = { path = "../router" }
+feishu = { path = "../feishu" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+minijinja = "2.0"
+chrono = "0.4"
+urlencoding = "2"

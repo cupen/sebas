@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Sessions - sebas{% endblock %}
+{% block content %}
+<h1>Sessions</h1>
+
+<!-- New Session -->
+<div class="action-bar">
+  <button class="btn btn-primary" id="new-session-btn"
+          onclick="document.getElementById('new-session-form').style.display='block'; this.style.display='none'">
+    + New Session
+  </button>
+</div>
+
+<div id="new-session-form" class="message-form" style="display: none;">
+  <form hx-post="/api/sessions"
+        hx-target="#new-session-result"
+        hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) { const d = JSON.parse(event.detail.xhr.response); window.location.href = '/sessions/' + d.key; }">
+    <textarea name="prompt" class="msg-input" rows="3" placeholder="Enter prompt for Claude Code..."></textarea>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Start</button>
+      <button type="button" class="btn btn-secondary"
+              onclick="document.getElementById('new-session-form').style.display='none'; document.getElementById('new-session-btn').style.display='inline-block'">Cancel</button>
+    </div>
+  </form>
+  <div id="new-session-result"></div>
+</div>
+
+{% if recent_sessions %}
+<table class="session-table">
+  <thead>
+    <tr>
+      <th>Chat ID</th>
+      <th>Thread</th>
+      <th>Session ID</th>
+      <th>Status</th>
+      <th>Phase</th>
+      <th>Last Active</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in recent_sessions %}
+    <tr>
+      <td>{{ s.chat_id }}</td>
+      <td>{{ s.thread_id if s.thread_id else "—" }}</td>
+      <td>
+        {% if s.session_id %}
+        <code>{{ s.session_id }}</code>
+        {% else %}
+        <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
+      <td>{{ s.phase }}</td>
+      <td>{{ s.last_active }}</td>
+      <td><a href="/sessions/{{ s.encoded_key }}" hx-boost="true">View</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty-state">No sessions. Start one above or from Feishu with <code>/new</code>.</p>
+{% endif %}
+{% endblock %}

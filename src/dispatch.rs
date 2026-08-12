@@ -5,7 +5,8 @@
 use crate::config::Config;
 use crate::reactions::{ReactPlan, ReactionTracker};
 use crate::session_boot::{
-    acp_resume_and_activate, acp_spawn_and_activate, wire_session_card_and_pump,
+    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, spawn_acp_pump,
+    wire_session_card_and_pump,
 };
 use acp_claude::manager::SessionManager;
 use feishu::client::FeishuClient;
@@ -147,6 +148,37 @@ pub(crate) async fn dispatch_out(
                 pending, rx,
             )
             .await?;
+        }
+        Out::WebSpawn { key, prompt } => {
+            let claude = &cfg.acp.claude;
+            // Web-originated spawn: create the ACP session and wire the pump,
+            // but skip the Feishu send_card / react operations. Card content
+            // is still accumulated in CardStateMap and readable via the WebUI.
+            let (session_id, pending, rx) = match acp_spawn_and_activate(
+                mgr,
+                router,
+                &key,
+                &prompt,
+                &claude.path,
+                claude.args.clone(),
+                claude.work_dir.clone(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    router.fail_spawn(&key).await;
+                    warn!(?e, "web_spawn: acp_spawn_and_activate failed");
+                    return Ok(());
+                }
+            };
+            // Seed card state and wire the pump (no Feishu card operations).
+            router.seed_card(session_id.clone(), prompt.clone()).await;
+            spawn_acp_pump(rx, router.clone(), session_id.clone());
+            // Flush prompts queued during spawn.
+            if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+                warn!(?e, "web_spawn: flush_pending_prompts failed");
+            }
         }
         Out::SpawnResume {
             key,

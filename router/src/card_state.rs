@@ -88,4 +88,9 @@ impl CardStateMap {
             .get(session_id)
             .map(|st| st.status_emoji.clone())
     }
+
+    /// Return a snapshot of all card states. Used by the WebUI.
+    pub async fn snapshot_all(&self) -> HashMap<String, CardState> {
+        self.inner.read().await.clone()
+    }
 }

@@ -12,12 +12,14 @@ mod maps;
 pub use maps::{MsgIdMap, PermCardEntry, PermCardMap, SessionAllowlist, tool_signature};
 
 use crate::card_events::apply_event_to_card;
+use crate::card_state::CardState;
 use crate::crud::ProviderForms;
-use crate::state::SessionMap;
+use crate::state::{Mapping, SessionMap};
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::{CardConfig, phase_visual, render_accumulated_card};
 use feishu::events::SessionKey;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, mpsc};
@@ -84,6 +86,14 @@ pub enum Out {
     PlainText {
         key: SessionKey,
         content: String,
+    },
+    /// Spawn a session without sending a root card to Feishu (web-originated
+    /// sessions). The dispatcher creates the ACP session and wires the pump,
+    /// but skips the Feishu send_card / react operations. Card content is
+    /// still accumulated in CardStateMap and readable via the WebUI.
+    WebSpawn {
+        key: SessionKey,
+        prompt: String,
     },
 }
 
@@ -190,10 +200,25 @@ impl RouterHandle {
         self.card_cfg.read().await.clone()
     }
 
+    /// Snapshot all session mappings (for WebUI dashboard).
+    pub async fn session_snapshot(&self) -> Vec<(SessionKey, Mapping)> {
+        self.map.snapshot_all().await
+    }
+
+    /// Snapshot all card states (for WebUI session detail).
+    pub async fn card_state_snapshot(&self) -> HashMap<String, CardState> {
+        self.card_states.snapshot_all().await
+    }
+
+    /// Snapshot the MsgIdMap (for message_id lookup).
+    pub async fn msgid_snapshot(&self) -> HashMap<String, String> {
+        self.msgid.snapshot_all().await
+    }
+
     /// Send an `Out` to the outbound pump. Per spec §4.1 ("Channel send
     /// fail"): a closed channel is a bug in dev (panic via debug_assert)
     /// and an error-log-and-continue in prod — never a silent drop.
-    async fn emit(&self, out: Out) {
+    pub async fn emit(&self, out: Out) {
         if let Err(e) = self.tx.send(out).await {
             tracing::error!(?e, "router→outbound channel closed; dropping message");
             debug_assert!(false, "router→outbound channel send failed: {e}");
@@ -347,6 +372,54 @@ impl RouterHandle {
     /// Spawn failed/timeout: remove the Spawning placeholder for `key`.
     pub async fn fail_spawn(&self, key: &SessionKey) {
         self.map.fail_spawn(key).await;
+    }
+
+    /// Start a new session from the WebUI (no Feishu card operations).
+    /// Uses `Out::WebSpawn` which the dispatcher handles without sending
+    /// cards to Feishu. Returns the SessionKey for the new session.
+    pub async fn web_spawn(&self, prompt: String) -> SessionKey {
+        let key = SessionKey::web_key();
+        match self.map.begin_spawn(key.clone()).await {
+            Ok(_) => {
+                self.emit(Out::WebSpawn { key: key.clone(), prompt }).await;
+                key
+            }
+            Err(e) => {
+                tracing::warn!(?e, "web_spawn: begin_spawn failed");
+                key
+            }
+        }
+    }
+
+    /// Send a message to an existing session from the WebUI.
+    /// Routes the message through the session map (same logic as Feishu
+    /// text messages) and emits the appropriate Out instruction.
+    pub async fn web_send_message(&self, key: SessionKey, message: String) {
+        match self.map.route_text(key.clone(), message.clone()).await {
+            Ok(crate::state::TextRoute::Continue(sid)) => {
+                self.emit(Out::SendAcp {
+                    session_id: sid.clone(),
+                    cmd: AcpCommand::ContinueSession {
+                        session_id: sid,
+                        prompt: message,
+                    },
+                })
+                .await;
+            }
+            Ok(crate::state::TextRoute::SpawnNew) => {
+                self.emit(Out::WebSpawn { key, prompt: message }).await;
+            }
+            Ok(crate::state::TextRoute::Resume(old_sid)) => {
+                self.emit(Out::SpawnResume { key, session_id: old_sid, prompt: message })
+                    .await;
+            }
+            Ok(crate::state::TextRoute::Enqueued) => {
+                tracing::debug!("web message queued (session already spawning)");
+            }
+            Err(e) => {
+                tracing::warn!(?e, "web_send_message: route_text failed");
+            }
+        }
     }
 
     /// Emit a per-turn card and ContinueSession command.
