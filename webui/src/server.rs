@@ -80,6 +80,16 @@ pub async fn run(
 
 /// Initialize MiniJinja templates embedded at compile time.
 fn init_templates() -> Environment<'static> {
+    init_templates_inner()
+}
+
+/// Public-facing template initializer for integration tests in `tests/`.
+#[doc(hidden)]
+pub fn init_templates_for_tests() -> Environment<'static> {
+    init_templates_inner()
+}
+
+fn init_templates_inner() -> Environment<'static> {
     let mut env = Environment::new();
     env.add_template("base.html", include_str!("../templates/base.html"))
         .expect("base.html template");

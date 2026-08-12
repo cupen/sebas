@@ -11,4 +11,6 @@ pub mod routes;
 pub mod server;
 pub mod sse;
 
-pub use server::run;
+pub use server::{build_router, run};
+#[doc(hidden)]
+pub use server::{init_templates_for_tests, WebUiState};
