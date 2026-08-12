@@ -5,8 +5,8 @@ use crate::models::{
 };
 use crate::server::WebUiState;
 use axum::extract::{Path, State};
-use axum::response::{Html, IntoResponse};
-use axum::Json;
+use axum::response::{Html, IntoResponse, Json};
+use axum::Form;
 use feishu::cards::CardElement;
 use feishu::events::SessionKey;
 use router::card_state::CardState;
@@ -162,12 +162,12 @@ pub struct CreateSessionRequest {
 
 pub async fn api_create_session(
     State(state): State<WebUiState>,
-    Json(req): Json<CreateSessionRequest>,
+    Form(req): Form<CreateSessionRequest>,
 ) -> impl IntoResponse {
     let key = state.router.web_spawn(req.prompt).await;
     let encoded = encode_session_key(&key);
-    // Session is still spawning; session_id will be available after ACP starts.
-    Json(serde_json::json!({ "key": encoded }))
+    // Session is still spawning; client redirects to detail page.
+    (axum::http::StatusCode::CREATED, Json(serde_json::json!({ "key": encoded })))
 }
 
 #[derive(Deserialize)]
@@ -178,14 +178,14 @@ pub struct SendMessageRequest {
 pub async fn api_send_message(
     State(state): State<WebUiState>,
     Path(key): Path<String>,
-    Json(req): Json<SendMessageRequest>,
+    Form(req): Form<SendMessageRequest>,
 ) -> impl IntoResponse {
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
-        None => return Json(serde_json::json!({ "error": "Invalid session key" })),
+        None => return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid session key" }))),
     };
     state.router.web_send_message(session_key, req.message).await;
-    Json(serde_json::json!({"status": "ok"}))
+    (axum::http::StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
 // ---- Helper functions ----
