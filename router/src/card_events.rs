@@ -13,8 +13,10 @@ use feishu::cards::{
 /// fold_long_output=true 时：ToolStart 折叠成一个 collapsible_panel（默认收起），
 /// ToolProgress/ToolEnd 都收进对应工具面板，卡片里每个工具只占一行；
 /// tool result 默认屏蔽（max_tool_output_chars=0），>0 时结果也收进面板。
+/// ThinkingDelta 也收进同一个父级折叠面板，与工具调用统一收纳。
 /// fold_long_output=false 时：保持内联展示（结果仍受 10240 硬上限保护）。
-/// + 总量兜底（24000 丢旧，Hr 连后一个一起丢）。PermissionRequest 不累积（走独立 SendCard）。
+/// + 总量兜底（24000 字符上限 + 80 递归元素上限，Hr 连后一个一起丢）。
+/// PermissionRequest 不累积（走独立 SendCard）。
 pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &CardConfig) {
     match event {
         AcpEvent::TextDelta { delta, .. } => {
@@ -24,7 +26,7 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             if cfg.thinking == ThinkingDisplay::Hide {
                 // 完全丢弃：模型仍在思考，只是卡片不展示。
             } else {
-                append_thinking_delta(body, delta);
+                append_thinking_delta(body, delta, cfg.fold_long_output);
             }
         }
         AcpEvent::ToolStart {
@@ -35,7 +37,9 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
             if cfg.fold_long_output {
                 // 每个工具一个默认折叠的面板，展开才看得到 args。
-                body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+                // 所有工具面板统一收进一个父级工具面板（"🛠️ 工具"），
+                // 对话流更干净。
+                let tool_panel = CardElement::CollapsiblePanel(CollapsiblePanel {
                     expanded: false,
                     header: panel_header(format!("📖 {tool_name}")),
                     elements: text_with_truncation_note(
@@ -43,7 +47,11 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
                         cfg.max_user_text_chars,
                         true,
                     ),
-                }));
+                });
+                let parent_idx = ensure_tools_parent(body);
+                if let CardElement::CollapsiblePanel(parent) = &mut body[parent_idx] {
+                    parent.elements.push(tool_panel);
+                }
             } else {
                 body.push(CardElement::Hr);
                 push_text_truncated(
@@ -74,6 +82,19 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             ..
         } => {
             if let Some(panel) = last_tool_panel_mut(body, tool_name) {
+                // 限制进度通知数量：超过上限时移除最旧的进度通知，
+                // 防止工具面板内部元素超 100 上限。
+                let progress_positions: Vec<usize> = panel
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, el)| matches!(el, CardElement::Div { text } if text.content.starts_with("⏳ ")))
+                    .map(|(i, _)| i)
+                    .collect();
+                if progress_positions.len() >= MAX_PROGRESS_NOTES {
+                    // 移除最旧的进度通知
+                    panel.elements.remove(progress_positions[0]);
+                }
                 panel.elements.push(note_element(format!("⏳ {progress}")));
             } else {
                 body.push(note_element(format!("⏳ {tool_name}: {progress}")));
@@ -187,13 +208,31 @@ fn tool_result_elements(tool_name: &str, result: &str, cfg: &CardConfig) -> Vec<
     elements
 }
 
-/// 取 body 末尾属于 `tool_name` 的折叠面板（标题形如 `📖 Bash` / `⏳ Bash`）。
+/// 取 body 末尾属于 `tool_name` 的折叠面板（标题形如 `📖 Bash` / `✓ Bash`）。
 /// 事件按顺序到达（ToolStart → ToolProgress* → ToolEnd），末尾即当前工具的面板。
+///
+/// 搜索顺序：
+/// 1. 如果 body 中存在父级面板（"🤔 折腾中"），在其 elements 内搜索；
+/// 2. 否则直接在 body 末尾搜索（兼容非折叠模式）。
 fn last_tool_panel_mut<'a>(
     body: &'a mut [CardElement],
     tool_name: &str,
 ) -> Option<&'a mut CollapsiblePanel> {
     let suffix = format!(" {tool_name}");
+    // 先在 body 中搜索父面板
+    if let Some(idx) = find_tools_parent_index(body) {
+        let parent = match &mut body[idx] {
+            CardElement::CollapsiblePanel(p) => p,
+            _ => return None,
+        };
+        return parent.elements.iter_mut().rev().find_map(|el| {
+            match el {
+                CardElement::CollapsiblePanel(panel) if panel.header.title.content.ends_with(&suffix) => Some(panel),
+                _ => None,
+            }
+        });
+    }
+    // 无父面板：直接在 body 末尾搜索（fold_long_output=false 或单工具早期兼容）
     match body.last_mut()? {
         CardElement::CollapsiblePanel(panel) if panel.header.title.content.ends_with(&suffix) => {
             Some(panel)
@@ -219,6 +258,41 @@ fn panel_header(title: String) -> CollapsiblePanelHeader {
     }
 }
 
+/// 父级折叠面板的标题常量。所有思考面板和工具调用面板统一收进一个父面板，
+/// 内层仍保持各自独立折叠。`is_tools_parent` 根据此常量判断。
+const TOOLS_PARENT_TITLE: &str = "🤔 折腾中";
+
+/// 确保 body 中存在一个父级折叠面板，返回其索引。
+/// 已存在则直接返回；否则新建一个并 push 到 body 末尾。
+fn ensure_tools_parent(body: &mut Vec<CardElement>) -> usize {
+    // 搜索整个 body（父面板可能不在末尾，TextDelta 等事件会插在它后面）
+    for (i, el) in body.iter().enumerate() {
+        if let CardElement::CollapsiblePanel(panel) = el {
+            if is_tools_parent(panel) {
+                return i;
+            }
+        }
+    }
+    body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+        expanded: false,
+        header: panel_header(TOOLS_PARENT_TITLE.into()),
+        elements: vec![],
+    }));
+    body.len() - 1
+}
+
+/// 判断一个 panel 是否是父级折叠面板。
+fn is_tools_parent(panel: &CollapsiblePanel) -> bool {
+    panel.header.title.content == TOOLS_PARENT_TITLE
+}
+
+/// 在 body 中查找父级折叠面板的索引。
+fn find_tools_parent_index(body: &[CardElement]) -> Option<usize> {
+    body.iter().position(|el| {
+        matches!(el, CardElement::CollapsiblePanel(panel) if is_tools_parent(panel))
+    })
+}
+
 /// ThinkingDelta 折叠面板的标准标题。所有 thinking 面板共用此常量，
 /// `is_thinking_panel` 据此判断。改这里必须连测试一起改。
 const THINKING_PANEL_TITLE: &str = "💭 思考";
@@ -238,7 +312,32 @@ fn thinking_panel_header() -> CollapsiblePanelHeader {
 /// 把 ThinkingDelta 累积进尾部 thinking 面板；body 末尾不是 thinking 面板则开新面板
 /// （boundary aggregation：相邻 thinking chunk 共享一个面板；任何非 thinking
 /// 事件结束当前 burst）。
-fn append_thinking_delta(body: &mut Vec<CardElement>, delta: &str) {
+///
+/// 当 `fold_long_output=true` 时，thinking 面板收进父级折叠面板。
+fn append_thinking_delta(body: &mut Vec<CardElement>, delta: &str, fold_long_output: bool) {
+    if fold_long_output {
+        // 收进父面板：先确保父面板存在，再追加或新建 thinking 面板
+        let parent_idx = ensure_tools_parent(body);
+        if let CardElement::CollapsiblePanel(parent) = &mut body[parent_idx] {
+            // 检查父面板末尾是否是 thinking 面板（聚合相邻 delta）
+            if let Some(CardElement::CollapsiblePanel(panel)) = parent.elements.last_mut()
+                && is_thinking_panel(panel)
+            {
+                append_to_thinking_panel(panel, delta);
+                return;
+            }
+            // 新建 thinking 面板收进父面板
+            parent.elements.push(CardElement::CollapsiblePanel(CollapsiblePanel {
+                expanded: false,
+                header: thinking_panel_header(),
+                elements: vec![CardElement::Markdown {
+                    content: delta.to_string(),
+                }],
+            }));
+            return;
+        }
+    }
+    // 不折叠或父面板创建失败：原行为（直接 push 到 body）
     if let Some(CardElement::CollapsiblePanel(panel)) = body.last_mut()
         && is_thinking_panel(panel)
     {
@@ -269,9 +368,17 @@ fn append_to_thinking_panel(panel: &mut CollapsiblePanel, delta: &str) {
 }
 
 /// 代码级硬上限：单次 tool result 在卡片里最多展示的字符数。
-/// 软上限（max_tool_output_chars）只决定“多长才折叠”，硬上限不管配置如何
+/// 软上限（max_tool_output_chars）只决定”多长才折叠”，硬上限不管配置如何
 /// 都生效，防止异常输出把整张卡片撑爆。
 const TOOL_RESULT_HARD_LIMIT_CHARS: usize = 10240;
+
+/// 飞书卡片 JSON 2.0 限制：每个容器（collapsible_panel/div 等）最多 100 个元素。
+/// 根 body 和所有嵌套容器的递归元素总数超过此上限会导致卡片渲染失败。
+/// 留 20 个余量，到 80 就开始丢旧。
+const MAX_ELEMENTS: usize = 80;
+
+/// 单个工具面板内最多保留的进度通知数。进度通知过多会撑爆容器的 100 元素上限。
+const MAX_PROGRESS_NOTES: usize = 5;
 
 /// 按字符数截取（UTF-8 安全），返回不超过 `limit` 字符的前缀。
 fn cap_chars(s: &str, limit: usize) -> String {
@@ -282,19 +389,16 @@ fn cap_chars(s: &str, limit: usize) -> String {
     }
 }
 
-/// 总量兜底（spec §7）：body 累积字符 > 24000 -> 丢最旧；最旧是 Hr 则连后一个一起丢。
+/// 总量兜底（spec §7）：body 累积字符 > 24000 或递归元素总数 > 80
+/// 时丢最旧元素；最旧是 Hr 则连后一个一起丢。CollapsiblePanel 优先从内部丢，
+/// 避免整个面板被一次性丢弃。
 fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
     const TOTAL_BUDGET: usize = 24000;
-    while total_chars(body) > TOTAL_BUDGET {
+    while total_chars(body) > TOTAL_BUDGET || total_elements(body) > MAX_ELEMENTS {
         if body.is_empty() {
             break;
         }
-        // 最旧是 Hr -> 连后一个一起丢（不留悬空分隔线）。
-        let drop_two = matches!(body.first(), Some(CardElement::Hr));
-        body.remove(0);
-        if drop_two && !body.is_empty() {
-            body.remove(0);
-        }
+        drop_oldest_element(body);
     }
 }
 
@@ -308,5 +412,48 @@ fn element_chars(el: &CardElement) -> usize {
         CardElement::Div { text } => text.content.chars().count(),
         CardElement::CollapsiblePanel(panel) => panel.elements.iter().map(element_chars).sum(),
         _ => 0,
+    }
+}
+
+/// 递归计算 body 中所有元素（含嵌套 CollapsiblePanel 内部）的总数。
+fn total_elements(body: &[CardElement]) -> usize {
+    body.iter().map(count_elements).sum()
+}
+
+/// 递归计算单个元素及其嵌套子元素的总数。
+fn count_elements(el: &CardElement) -> usize {
+    match el {
+        CardElement::CollapsiblePanel(panel) => {
+            1 + panel.elements.iter().map(count_elements).sum::<usize>()
+        }
+        _ => 1,
+    }
+}
+
+/// 从 body 中丢掉最旧的 1 个元素。
+/// - 如果最旧是 CollapsiblePanel，直接从其内部丢掉最旧的子元素（不递归）；
+/// - 如果最旧是 Hr，连后一个一起丢（不留悬空分隔线）。
+/// - 内部丢空后，再丢面板本身。
+fn drop_oldest_element(body: &mut Vec<CardElement>) {
+    if body.is_empty() {
+        return;
+    }
+    // 最旧是 CollapsiblePanel → 从内部直接丢掉最旧的子元素（不递归嵌套）
+    if let CardElement::CollapsiblePanel(panel) = &mut body[0] {
+        if !panel.elements.is_empty() {
+            // 直接移除最旧的子元素，避免递归进入子面板内部（如工具面板内的
+            // Markdown），导致面板变空却不被丢弃。
+            panel.elements.remove(0);
+            return;
+        }
+        // 内部已空 → 丢面板本身
+        body.remove(0);
+        return;
+    }
+    // 普通元素：Hr 连后一个一起丢
+    let drop_two = matches!(body[0], CardElement::Hr);
+    body.remove(0);
+    if drop_two && !body.is_empty() {
+        body.remove(0);
     }
 }

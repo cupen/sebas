@@ -87,10 +87,14 @@ fn thinking_show_aggregates_adjacent_deltas() {
         },
         &cfg_show(),
     );
-    // 单个 CollapsiblePanel，无分隔符，内容 "A\nB"。
+    // 收在父面板内：body[0] 是父面板，其内子面板内容 "A\nB"。
     assert_eq!(body.len(), 1);
-    let CardElement::CollapsiblePanel(panel) = &body[0] else {
-        panic!("expected CollapsiblePanel, got {:?}", &body[0]);
+    let CardElement::CollapsiblePanel(parent) = &body[0] else {
+        panic!("expected parent CollapsiblePanel, got {:?}", &body[0]);
+    };
+    assert_eq!(parent.elements.len(), 1);
+    let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
+        panic!("expected thinking CollapsiblePanel, got {:?}", &parent.elements[0]);
     };
     assert_eq!(panel.elements.len(), 1);
     match &panel.elements[0] {
@@ -126,14 +130,27 @@ fn thinking_show_starts_new_panel_on_non_thinking_event() {
         },
         &cfg_show(),
     );
-    // 3 个元素：panel1, markdown("interlude"), panel2。
-    assert_eq!(body.len(), 3);
-    assert!(matches!(&body[0], CardElement::CollapsiblePanel(_)));
+    // 2 个元素：父面板（内含 1 个 thinking 子面板，两段 delta 已合并）, markdown("interlude")。
+    assert_eq!(body.len(), 2);
+    match &body[0] {
+        CardElement::CollapsiblePanel(parent) => {
+            // 两个 thinking delta 收进同一个面板（TextDelta 在 body 层级，
+            // 不影响父面板内的聚合）
+            assert_eq!(parent.elements.len(), 1);
+            let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
+                panic!("expected thinking CollapsiblePanel");
+            };
+            match &panel.elements[0] {
+                CardElement::Markdown { content } => assert_eq!(content, "first\nsecond"),
+                other => panic!("expected Markdown, got {other:?}"),
+            }
+        }
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
+    }
     match &body[1] {
         CardElement::Markdown { content } => assert_eq!(content, "interlude"),
         other => panic!("expected Markdown, got {other:?}"),
     }
-    assert!(matches!(&body[2], CardElement::CollapsiblePanel(_)));
 }
 
 #[test]
@@ -147,8 +164,11 @@ fn thinking_show_panel_header_is_thinking_label() {
         },
         &cfg_show(),
     );
-    let CardElement::CollapsiblePanel(panel) = &body[0] else {
-        panic!("not a panel");
+    let CardElement::CollapsiblePanel(parent) = &body[0] else {
+        panic!("not a parent panel");
+    };
+    let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
+        panic!("not a thinking panel");
     };
     assert!(panel.header.title.content.contains("💭"));
     assert!(!panel.expanded, "默认折叠");
@@ -166,15 +186,23 @@ fn tool_start_folds_into_collapsible_panel() {
         },
         &cfg(),
     );
-    // 默认折叠：单个 collapsible_panel，标题 📖 Bash，args 在面板内。
+    // 默认折叠：body[0] 是父级面板，其内子面板标题 📖 Bash，args 在面板内。
     assert_eq!(body.len(), 1);
     match &body[0] {
-        CardElement::CollapsiblePanel(panel) => {
-            assert!(!panel.expanded, "默认折叠");
-            assert_eq!(panel.header.title.content, "📖 Bash");
-            assert!(matches!(panel.elements[0], CardElement::Markdown { .. }));
+        CardElement::CollapsiblePanel(parent) => {
+            assert!(!parent.expanded, "父面板默认折叠");
+            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.elements.len(), 1);
+            match &parent.elements[0] {
+                CardElement::CollapsiblePanel(tool_panel) => {
+                    assert!(!tool_panel.expanded, "工具面板默认折叠");
+                    assert_eq!(tool_panel.header.title.content, "📖 Bash");
+                    assert!(matches!(tool_panel.elements[0], CardElement::Markdown { .. }));
+                }
+                other => panic!("expected tool CollapsiblePanel, got {other:?}"),
+            }
         }
-        other => panic!("expected CollapsiblePanel, got {other:?}"),
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
     }
 }
 
@@ -250,7 +278,8 @@ fn fold_disabled_skips_truncation() {
 
 #[test]
 fn tool_lifecycle_folds_into_single_panel() {
-    // ToolStart + ToolProgress + ToolEnd 全部收进同一个折叠面板。
+    // ToolStart + ToolProgress + ToolEnd 全部收进同一个折叠面板，
+    // 该面板再收进父级工具面板。
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
@@ -279,27 +308,34 @@ fn tool_lifecycle_folds_into_single_panel() {
         },
         &cfg_fold_tool(),
     );
-    // 一个工具 = 一行面板；标题随生命周期变成 ✓ Bash。
+    // 一个工具 = 父级面板内一行子面板；标题随生命周期变成 ✓ Bash。
     assert_eq!(body.len(), 1);
     match &body[0] {
-        CardElement::CollapsiblePanel(panel) => {
-            assert_eq!(panel.header.title.content, "✓ Bash");
-            // [args markdown, 进度灰注, 结果 markdown（超过软上限 5，全文保留 20 字）]
-            assert_eq!(panel.elements.len(), 3);
-            match &panel.elements[0] {
-                CardElement::Markdown { content } => assert!(content.contains("```json")),
-                other => panic!("expected args Markdown, got {other:?}"),
-            }
-            match &panel.elements[1] {
-                CardElement::Div { text } => assert!(text.content.contains("in_progress")),
-                other => panic!("expected progress Div, got {other:?}"),
-            }
-            match &panel.elements[2] {
-                CardElement::Markdown { content } => assert_eq!(content.chars().count(), 20),
-                other => panic!("expected result Markdown, got {other:?}"),
+        CardElement::CollapsiblePanel(parent) => {
+            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.elements.len(), 1);
+            match &parent.elements[0] {
+                CardElement::CollapsiblePanel(panel) => {
+                    assert_eq!(panel.header.title.content, "✓ Bash");
+                    // [args markdown, 进度灰注, 结果 markdown（超过软上限 5，全文保留 20 字）]
+                    assert_eq!(panel.elements.len(), 3);
+                    match &panel.elements[0] {
+                        CardElement::Markdown { content } => assert!(content.contains("```json")),
+                        other => panic!("expected args Markdown, got {other:?}"),
+                    }
+                    match &panel.elements[1] {
+                        CardElement::Div { text } => assert!(text.content.contains("in_progress")),
+                        other => panic!("expected progress Div, got {other:?}"),
+                    }
+                    match &panel.elements[2] {
+                        CardElement::Markdown { content } => assert_eq!(content.chars().count(), 20),
+                        other => panic!("expected result Markdown, got {other:?}"),
+                    }
+                }
+                other => panic!("expected tool CollapsiblePanel, got {other:?}"),
             }
         }
-        other => panic!("expected CollapsiblePanel, got {other:?}"),
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
     }
 }
 
@@ -327,11 +363,18 @@ fn tool_end_zero_suppresses_result_output() {
     );
     assert_eq!(body.len(), 1);
     match &body[0] {
-        CardElement::CollapsiblePanel(panel) => {
-            assert_eq!(panel.header.title.content, "✓ Bash");
-            assert_eq!(panel.elements.len(), 1, "只有 args，没有结果内容");
+        CardElement::CollapsiblePanel(parent) => {
+            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.elements.len(), 1);
+            match &parent.elements[0] {
+                CardElement::CollapsiblePanel(panel) => {
+                    assert_eq!(panel.header.title.content, "✓ Bash");
+                    assert_eq!(panel.elements.len(), 1, "只有 args，没有结果内容");
+                }
+                other => panic!("expected tool CollapsiblePanel, got {other:?}"),
+            }
         }
-        other => panic!("expected CollapsiblePanel, got {other:?}"),
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
     }
     let s = serde_json::to_string(&body).unwrap();
     assert!(!s.contains("whatever"), "结果内容必须被屏蔽");
@@ -360,19 +403,26 @@ fn tool_end_hard_limit_truncates_inside_panel() {
         &cfg_fold_tool(),
     );
     match &body[0] {
-        CardElement::CollapsiblePanel(panel) => {
-            // [args markdown, 硬上限截断后的结果 markdown, 截断灰注]
-            assert_eq!(panel.elements.len(), 3);
-            match &panel.elements[1] {
-                CardElement::Markdown { content } => assert_eq!(content.chars().count(), 10240),
-                other => panic!("expected Markdown, got {other:?}"),
-            }
-            match &panel.elements[2] {
-                CardElement::Div { text } => assert!(text.content.contains("已截断 10 字")),
-                other => panic!("expected truncation note, got {other:?}"),
+        CardElement::CollapsiblePanel(parent) => {
+            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.elements.len(), 1);
+            match &parent.elements[0] {
+                CardElement::CollapsiblePanel(panel) => {
+                    // [args markdown, 硬上限截断后的结果 markdown, 截断灰注]
+                    assert_eq!(panel.elements.len(), 3);
+                    match &panel.elements[1] {
+                        CardElement::Markdown { content } => assert_eq!(content.chars().count(), 10240),
+                        other => panic!("expected Markdown, got {other:?}"),
+                    }
+                    match &panel.elements[2] {
+                        CardElement::Div { text } => assert!(text.content.contains("已截断 10 字")),
+                        other => panic!("expected truncation note, got {other:?}"),
+                    }
+                }
+                other => panic!("expected tool CollapsiblePanel, got {other:?}"),
             }
         }
-        other => panic!("expected CollapsiblePanel, got {other:?}"),
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
     }
 }
 
@@ -527,4 +577,109 @@ fn tool_start_renders_args_in_code_fence() {
         s.contains("ls /tmp"),
         "ToolStart args must contain the command value"
     );
+}
+
+#[test]
+fn parent_element_count_limit_drops_oldest_child() {
+    // 父面板子元素超过 PARENT_ELEMENT_LIMIT(80) 时，最旧的子元素被丢弃。
+    let mut body = vec![];
+    // 先创建父面板 + 第一个工具面板
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"cmd":"echo 1"}),
+        },
+        &cfg(),
+    );
+    // 再添加 81 个工具，总工具数 = 82，超过 80 上限
+    for i in 2..=82 {
+        apply_event_to_card(
+            &mut body,
+            &AcpEvent::ToolStart {
+                session_id: "s".into(),
+                tool_name: format!("Tool{i}"),
+                args: serde_json::json!({"cmd": format!("echo {i}")}),
+            },
+            &cfg(),
+        );
+    }
+    // 父面板应在 80 个递归元素限制内（每个工具面板自身 + 内部 Markdown 计 2 个元素）
+    match &body[0] {
+        CardElement::CollapsiblePanel(parent) => {
+            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            // 82 工具面板 × 2 + 1(父面板) = 165 > 80 → 丢到 39 个工具面板 = 79 个元素
+            let remaining = parent.elements.len();
+            assert!(remaining > 0, "should have some tool panels left");
+            assert!(remaining <= 39, "should have at most 39 tool panels (79 elements)");
+            // 第一个子面板应是 Tool44（Bash + Tool2~Tool43 被丢弃了）
+            let CardElement::CollapsiblePanel(first) = &parent.elements[0] else {
+                panic!("expected tool panel");
+            };
+            assert_eq!(first.header.title.content, "📖 Tool44");
+            // 最后一个子面板应是 Tool82
+            let CardElement::CollapsiblePanel(last) = &parent.elements[remaining - 1] else {
+                panic!("expected tool panel");
+            };
+            assert_eq!(last.header.title.content, "📖 Tool82");
+        }
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
+    }
+}
+
+#[test]
+fn progress_note_limit_keeps_only_latest() {
+    // 工具面板内最多保留 MAX_PROGRESS_NOTES(5) 条进度通知，超过时丢弃最旧的。
+    let mut body = vec![];
+    apply_event_to_card(
+        &mut body,
+        &AcpEvent::ToolStart {
+            session_id: "s".into(),
+            tool_name: "Bash".into(),
+            args: serde_json::json!({"cmd":"sleep"}),
+        },
+        &cfg_fold_tool(),
+    );
+    // 发送 8 条进度通知，应该只保留最后 5 条
+    for i in 1..=8 {
+        apply_event_to_card(
+            &mut body,
+            &AcpEvent::ToolProgress {
+                session_id: "s".into(),
+                tool_name: "Bash".into(),
+                progress: format!("step {i}"),
+            },
+            &cfg_fold_tool(),
+        );
+    }
+    // 验证进度通知数量
+    match &body[0] {
+        CardElement::CollapsiblePanel(parent) => {
+            let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
+                panic!("expected tool panel");
+            };
+            let progress_notes: Vec<&CardElement> = panel
+                .elements
+                .iter()
+                .filter(|el| matches!(el, CardElement::Div { text } if text.content.starts_with("⏳ ")))
+                .collect();
+            assert_eq!(progress_notes.len(), 5, "最多保留 5 条进度通知");
+            // 最后一条应是 "step 8"
+            let last_note = progress_notes.last().unwrap();
+            let last_content = match last_note {
+                CardElement::Div { text } => &text.content,
+                _ => panic!("expected Div"),
+            };
+            assert!(last_content.contains("step 8"));
+            // 第一条应是 "step 4"（step 1-3 被丢弃）
+            let first_note = progress_notes.first().unwrap();
+            let first_content = match first_note {
+                CardElement::Div { text } => &text.content,
+                _ => panic!("expected Div"),
+            };
+            assert!(first_content.contains("step 4"));
+        }
+        other => panic!("expected parent CollapsiblePanel, got {other:?}"),
+    }
 }
