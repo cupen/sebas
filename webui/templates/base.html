@@ -27,6 +27,11 @@
             <span class="nav-label">Sessions</span>
           </a>
         </div>
+        {# Active-session indicator. Re-rendered on every page load (navigating
+           triggers a page reload, so live updates aren't strictly required). #}
+        <div class="nav-section sidebar-active-wrap">
+          {% include "sidebar_active.html" %}
+        </div>
         <div class="nav-section">
           <div class="nav-section-title">System</div>
           <a href="/settings" class="nav-item {{ "active" if page == "settings" else "" }}" hx-boost="true">

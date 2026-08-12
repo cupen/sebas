@@ -83,16 +83,17 @@ pub async fn run(
             return Err(crate::error::SebasError::Config(e));
         }
     };
+    let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
+        cfg.acp.claude.startup_timeout_secs,
+    )));
     let provider_forms = crate::provider::build_form(&raw_config);
     let (router, mut out_rx) = RouterHandle::new_with_provider_form(
         map,
         merged_card_cfg,
         cfg.router.channel_buffer,
         provider_forms,
+        Some(mgr.clone()),
     );
-    let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
-        cfg.acp.claude.startup_timeout_secs,
-    )));
     // Tracks the current emoji reaction on each session's root card so the
     // router's phase machine can swap 👀→🚧→✅ rather than pile them up.
     let reactions = Arc::new(ReactionTracker::default());
@@ -204,12 +205,13 @@ pub async fn run(
     // Start WebUI dashboard server if requested
     if webui {
         let router_for_webui = router.clone();
+        let mgr_for_webui = mgr.clone();
         let gateway_info = build_gateway_info(gateway_cfg.as_ref());
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
         tokio::spawn(async move {
-            webui::run(router_for_webui, gateway_info, listener).await;
+            webui::run(router_for_webui, mgr_for_webui, gateway_info, listener).await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }

@@ -196,3 +196,44 @@ async fn pop_next_turn_cleans_up_empty_entry() {
     assert!(popped.is_some());
     assert_eq!(m.queue_len(&k).await, 0);
 }
+
+#[tokio::test]
+async fn remove_by_key_drops_mapping_and_queue() {
+    let m = SessionMap::new();
+    let k = SessionKey {
+        chat_id: "oc_orphan".into(),
+        thread_id: None,
+    };
+    m.insert(k.clone(), Mapping::spawning()).await.unwrap();
+    m.enqueue_turn(
+        &k,
+        QueuedTurn {
+            prompt: "queued".into(),
+            reply_to: None,
+            priority: false,
+        },
+    )
+    .await;
+    assert_eq!(m.queue_len(&k).await, 1);
+
+    m.remove_by_key(&k).await;
+    assert!(m.get(&k).await.is_none(), "mapping must be gone");
+    assert_eq!(
+        m.queue_len(&k).await,
+        0,
+        "queue must drop alongside the mapping (no zombie prompts)"
+    );
+
+    // Idempotent: removing again is a no-op.
+    m.remove_by_key(&k).await;
+}
+
+#[tokio::test]
+async fn msgid_drop_removes_entry() {
+    let m = MsgIdMap::default();
+    m.record("s1".into(), "om_a".into()).await;
+    m.record("s2".into(), "om_b".into()).await;
+    m.drop("s1").await;
+    assert!(m.get("s1").await.is_none());
+    assert_eq!(m.get("s2").await.as_deref(), Some("om_b"));
+}

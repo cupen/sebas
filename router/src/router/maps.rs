@@ -34,6 +34,13 @@ impl MsgIdMap {
     pub async fn snapshot_all(&self) -> HashMap<String, String> {
         self.inner.read().await.clone()
     }
+
+    /// Drop the mapping for `session_id`. Called when a session is torn down
+    /// (closed via the WebUI, process died) so a future session with a
+    /// recycled id never inherits a stale message_id.
+    pub async fn drop(&self, session_id: &str) {
+        self.inner.write().await.remove(session_id);
+    }
 }
 
 /// One outstanding permission card: the chat to PATCH, the Feishu message_id

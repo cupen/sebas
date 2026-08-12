@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 router = { path = "../router" }
 feishu = { path = "../feishu" }
+acp-claude = { path = "../acp-claude" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.40", features = ["full"] }

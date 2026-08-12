@@ -15,6 +15,7 @@ use crate::card_events::apply_event_to_card;
 use crate::card_state::CardState;
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
+use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
 use feishu::cards::{CardConfig, phase_visual, render_accumulated_card};
 use feishu::events::SessionKey;
@@ -97,6 +98,17 @@ pub enum Out {
     },
 }
 
+/// Result of `RouterHandle::web_close_session` — callers use this to
+/// render a useful error message when the key isn't found (vs. silently
+/// no-op'ing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// Session was found and torn down (mapping dropped, child killed).
+    Closed,
+    /// No mapping exists for `key` (already closed, or stale URL).
+    NotFound,
+}
+
 pub struct RouterHandle {
     /// Public so integration tests in `tests/` can seed mappings without
     /// going through `/new`. Production callers should use `insert_mapping`
@@ -126,6 +138,15 @@ pub struct RouterHandle {
     /// 列表卡上有两个「＋ 新增」按钮分别走对应表单；编辑/删除按 item.preset
     /// 是否设置路由到对应表单。
     provider_forms: Option<Arc<ProviderForms>>,
+    /// SessionManager handle used by WebUI close (kills the child process)
+    /// and by tests that drive `web_send_message` flows. `None` for router
+    /// instances that never spawn a child (e.g. pure mapping tests).
+    mgr: Option<Arc<SessionManager>>,
+    /// The session currently focused by the WebUI. The dashboard uses this
+    /// to highlight the active row and to decide which session's detail
+    /// page to deep-link into. `None` until the user clicks Switch on a
+    /// row (or opens a session detail page).
+    active_session: Arc<RwLock<Option<SessionKey>>>,
 }
 
 impl Clone for RouterHandle {
@@ -139,6 +160,8 @@ impl Clone for RouterHandle {
             perm_cards: self.perm_cards.clone(),
             allowlist: self.allowlist.clone(),
             provider_forms: self.provider_forms.clone(),
+            mgr: self.mgr.clone(),
+            active_session: self.active_session.clone(),
         }
     }
 }
@@ -160,7 +183,16 @@ impl RouterHandle {
         card_cfg: CardConfig,
         channel_buffer: usize,
     ) -> (Self, mpsc::Receiver<Out>) {
-        Self::new_with_provider_form(map, card_cfg, channel_buffer, None)
+        Self::new_with_provider_form(map, card_cfg, channel_buffer, None, None)
+    }
+
+    /// 带 SessionManager 的构造（生产/WebUI 用法）。
+    pub fn new_with_manager(
+        map: SessionMap,
+        card_cfg: CardConfig,
+        mgr: Arc<SessionManager>,
+    ) -> (Self, mpsc::Receiver<Out>) {
+        Self::new_with_provider_form(map, card_cfg, 256, None, Some(mgr))
     }
 
     /// 带 provider CRUD 表单的完整构造（root crate 启动时注入）。
@@ -169,6 +201,7 @@ impl RouterHandle {
         card_cfg: CardConfig,
         channel_buffer: usize,
         provider_forms: Option<Arc<ProviderForms>>,
+        mgr: Option<Arc<SessionManager>>,
     ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(channel_buffer);
         (
@@ -181,6 +214,8 @@ impl RouterHandle {
                 perm_cards: PermCardMap::default(),
                 allowlist: SessionAllowlist::default(),
                 provider_forms,
+                mgr,
+                active_session: Arc::new(RwLock::new(None)),
             },
             rx,
         )
@@ -420,6 +455,63 @@ impl RouterHandle {
                 tracing::warn!(?e, "web_send_message: route_text failed");
             }
         }
+    }
+
+    /// Mark `key` as the currently focused WebUI session. The dashboard
+    /// highlights the active row and the sidebar shows it under "Active".
+    /// Idempotent; safe to call on every page load.
+    pub async fn web_set_active(&self, key: SessionKey) {
+        let mut g = self.active_session.write().await;
+        *g = Some(key);
+    }
+
+    /// Snapshot of the currently focused session, if any.
+    pub async fn active_session_snapshot(&self) -> Option<SessionKey> {
+        self.active_session.read().await.clone()
+    }
+
+    /// Tear down the session mapped to `key` from the WebUI.
+    /// - Looks up the mapping; if Active, kills the child process via the
+    ///   SessionManager.
+    /// - Removes the mapping + drain queue (SessionMap does both).
+    /// - Drops card state and root msg_id so recycled ids don't inherit
+    ///   stale entries.
+    /// - Clears the chat-level permission allowlist.
+    /// - Clears `active_session` if this key was the focused one.
+    pub async fn web_close_session(&self, key: SessionKey) -> CloseOutcome {
+        let Some(mapping) = self.map.get(&key).await else {
+            return CloseOutcome::NotFound;
+        };
+        let session_id_opt = mapping.session_id().map(|s| s.to_string());
+
+        // Active sessions have a live child — kill it before dropping state.
+        // Dormant mappings (restored from disk) have no child; Spawning
+        // placeholders have a child we never tracked, so we don't kill
+        // anything there.
+        if let Some(sid) = &session_id_opt {
+            if let Some(mgr) = &self.mgr {
+                mgr.kill(sid).await;
+            }
+            self.card_states.drop(sid).await;
+            self.msgid.drop(sid).await;
+        }
+
+        // Remove the mapping. Active/Dormant keys are indexed by session_id;
+        // Spawning placeholders (no session_id) must be removed by key.
+        if let Some(sid) = &session_id_opt {
+            self.map.remove_by_session(sid).await;
+        } else {
+            self.map.remove_by_key(&key).await;
+        }
+
+        self.allowlist.clear(&key).await;
+
+        // Clear the active pointer if this was the focused session.
+        let mut active = self.active_session.write().await;
+        if active.as_ref() == Some(&key) {
+            *active = None;
+        }
+        CloseOutcome::Closed
     }
 
     /// Emit a per-turn card and ContinueSession command.

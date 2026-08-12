@@ -3028,6 +3028,7 @@ dependencies = [
 name = "webui"
 version = "0.1.0"
 dependencies = [
+ "acp-claude",
  "axum",
  "chrono",
  "feishu",

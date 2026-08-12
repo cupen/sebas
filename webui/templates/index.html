@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Dashboard - sebas{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <p class="page-subtitle">Overview of every Claude Code session managed by this daemon.</p>
+</div>
 
 <div class="stats-row">
   <div class="stat-card stat-active">
@@ -26,35 +29,42 @@
   </div>
 </div>
 
+{# Active session summary card. #}
+{% if active_session %}
+<div class="active-banner" id="active-banner">
+  <div class="active-banner-icon">⚡</div>
+  <div class="active-banner-body">
+    <div class="active-banner-label">Focused session</div>
+    <div class="active-banner-meta">
+      <span class="badge badge-{{ active_session.status }}">{{ active_session.status }}</span>
+      <code>{{ active_session.chat_id }}{% if active_session.thread_id %} · {{ active_session.thread_id }}{% endif %}</code>
+      {% if active_session.session_id %}<span class="muted">· {{ active_session.session_id }}</span>{% endif %}
+    </div>
+  </div>
+  <a class="btn btn-secondary btn-sm" href="/sessions/{{ active_session_key }}" hx-boost="true">Open</a>
+  <button class="btn btn-danger btn-sm"
+          hx-post="/api/sessions/{{ active_session_key }}/close"
+          hx-swap="none"
+          hx-on::after-request="
+            if(event.detail.successful) {
+              const d = JSON.parse(event.detail.xhr.response);
+              window.location.href = '/sessions';
+            }
+          ">
+    Close
+  </button>
+</div>
+{% endif %}
+
 <h2>Recent Sessions</h2>
-{% if recent_sessions %}
-<table class="session-table">
-  <thead>
-    <tr>
-      <th>Chat ID</th>
-      <th>Thread</th>
-      <th>Session ID</th>
-      <th>Status</th>
-      <th>Phase</th>
-      <th>Last Active</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for s in recent_sessions %}
-    <tr>
-      <td>{{ s.chat_id }}</td>
-      <td>{{ s.thread_id if s.thread_id else "—" }}</td>
-      <td>{{ s.session_id if s.session_id else "—" }}</td>
-      <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
-      <td>{{ s.phase }}</td>
-      <td>{{ s.last_active }}</td>
-      <td><a href="/sessions/{{ s.encoded_key }}" hx-boost="true">View</a></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="empty-state">No sessions yet. Start one in Feishu with <code>/new</code>.</p>
+<div id="sessions-list"
+     hx-get="/sessions/partial"
+     hx-trigger="sse:update"
+     hx-swap="innerHTML">
+  {% include "sessions_partial.html" %}
+</div>
+
+{% if not recent_sessions %}
+<p class="empty-state">No sessions yet. Start one in Feishu with <code>/new</code> or from the Sessions page.</p>
 {% endif %}
 {% endblock %}

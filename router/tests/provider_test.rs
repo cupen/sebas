@@ -102,6 +102,7 @@ fn provider_router(dir: &tempfile::TempDir) -> (RouterHandle, tokio::sync::mpsc:
         Default::default(),
         16,
         Some(Arc::new(forms)),
+        None,
     )
 }
 
@@ -268,6 +269,7 @@ async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
         Default::default(),
         16,
         Some(Arc::new(forms)),
+        None,
     );
 
     // 列表卡：密钥掩码显示，绝不回显明文。
@@ -330,6 +332,7 @@ async fn empty_secret_submit_preserves_existing_key() {
         Default::default(),
         16,
         Some(Arc::new(forms)),
+        None,
     );
 
     // 编辑提交：api_key 留空（不提交），改 base_url。

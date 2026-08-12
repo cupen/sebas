@@ -1,7 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Sessions - sebas{% endblock %}
 {% block content %}
-<h1>Sessions</h1>
+<div class="page-header">
+  <h1>Sessions</h1>
+  <p class="page-subtitle">Browse, switch, and close Claude Code sessions.</p>
+</div>
+
+<!-- Active session banner -->
+{% if active_session_key %}
+<div class="active-banner" id="active-banner">
+  <div class="active-banner-icon">⚡</div>
+  <div class="active-banner-body">
+    <div class="active-banner-label">Focused session</div>
+    <div class="active-banner-meta">
+      <code>{{ active_session_key }}</code>
+    </div>
+  </div>
+  <a class="btn btn-secondary btn-sm" href="/sessions/{{ active_session_key }}" hx-boost="true">Open</a>
+</div>
+{% endif %}
 
 <!-- New Session -->
 <div class="action-bar">
@@ -9,6 +26,12 @@
           onclick="document.getElementById('new-session-form').style.display='block'; this.style.display='none'">
     + New Session
   </button>
+  <div class="session-counts">
+    <span class="count-pill count-active" title="Active">{{ active_count }} active</span>
+    <span class="count-pill count-dormant" title="Dormant">{{ dormant_count }} dormant</span>
+    <span class="count-pill count-spawning" title="Spawning">{{ spawning_count }} spawning</span>
+    <span class="count-pill count-total">{{ total_sessions }} total</span>
+  </div>
 </div>
 
 <div id="new-session-form" class="message-form" style="display: none;">
@@ -26,40 +49,21 @@
   <div id="new-session-result"></div>
 </div>
 
-{% if recent_sessions %}
-<table class="session-table">
-  <thead>
-    <tr>
-      <th>Chat ID</th>
-      <th>Thread</th>
-      <th>Session ID</th>
-      <th>Status</th>
-      <th>Phase</th>
-      <th>Last Active</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for s in recent_sessions %}
-    <tr>
-      <td>{{ s.chat_id }}</td>
-      <td>{{ s.thread_id if s.thread_id else "—" }}</td>
-      <td>
-        {% if s.session_id %}
-        <code>{{ s.session_id }}</code>
-        {% else %}
-        <span class="muted">—</span>
-        {% endif %}
-      </td>
-      <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
-      <td>{{ s.phase }}</td>
-      <td>{{ s.last_active }}</td>
-      <td><a href="/sessions/{{ s.encoded_key }}" hx-boost="true">View</a></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="empty-state">No sessions. Start one above or from Feishu with <code>/new</code>.</p>
-{% endif %}
+<!-- Filter tabs (purely visual — full list rendered below). -->
+<div class="filter-tabs">
+  <span class="filter-tab filter-tab-active">All</span>
+  <span class="filter-tab">Active</span>
+  <span class="filter-tab">Dormant</span>
+  <span class="filter-tab">Spawning</span>
+</div>
+
+<!-- htmx-driven live list. Outer swap re-renders the table body when
+     the SSE event stream signals a session change. -->
+<div id="sessions-list"
+     hx-get="/sessions/partial"
+     hx-trigger="sse:update"
+     hx-swap="innerHTML">
+  {% include "sessions_partial.html" %}
+</div>
+
 {% endblock %}

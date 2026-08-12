@@ -1,7 +1,35 @@
 {% extends "base.html" %}
 {% block title %}Session Detail - sebas{% endblock %}
 {% block content %}
-<h1>Session Detail</h1>
+<div class="page-header">
+  <div class="page-header-actions">
+    <h1>Session Detail</h1>
+    <button class="btn btn-danger"
+            onclick="document.getElementById('confirm-close').style.display='block'; this.style.display='none'">
+      Close session
+    </button>
+  </div>
+</div>
+
+<div id="confirm-close" class="confirm-banner" style="display: none;">
+  <div class="confirm-prompt">
+    <span class="confirm-prompt-text">
+      Close <code>{{ chat_id }}</code>? The child Claude Code process will be terminated.
+    </span>
+    <div class="confirm-actions">
+      <button class="btn btn-secondary"
+              onclick="document.getElementById('confirm-close').style.display='none'; document.querySelector('.btn-danger[onclick]').style.display='inline-flex'">
+        Cancel
+      </button>
+      <button class="btn btn-danger"
+              hx-post="/api/sessions/{{ encoded_key }}/close"
+              hx-swap="none"
+              hx-on::after-request="window.location.href = '/sessions'">
+        Yes, close
+      </button>
+    </div>
+  </div>
+</div>
 
 <div class="detail-header">
   <div class="detail-field">

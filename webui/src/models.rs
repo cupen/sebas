@@ -17,6 +17,9 @@ pub struct SessionRow {
     pub phase: String,
     /// Human-readable relative time.
     pub last_active: String,
+    /// True if this session is the WebUI's currently focused one. The
+    /// template renders an "active" indicator and gates the Switch button.
+    pub is_active: bool,
 }
 
 /// Dashboard overview data.
@@ -28,6 +31,10 @@ pub struct DashboardData {
     pub total_sessions: usize,
     pub uptime_seconds: i64,
     pub recent_sessions: Vec<SessionRow>,
+    /// Summary of the WebUI's currently focused session, if any.
+    pub active_session: Option<serde_json::Value>,
+    /// URL-encoded key of the active session (shortcut for the template).
+    pub active_session_key: Option<String>,
 }
 
 /// Gateway info for the settings page.

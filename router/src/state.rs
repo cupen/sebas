@@ -280,6 +280,16 @@ impl SessionMap {
         }
     }
 
+    /// Remove the mapping for a specific `SessionKey`, regardless of state.
+    /// Used by the WebUI close path to drop Spawning placeholders that have
+    /// no session_id (so `remove_by_session` cannot find them).
+    pub async fn remove_by_key(&self, key: &SessionKey) {
+        let mut g = self.inner.write().await;
+        if g.remove(key).is_some() {
+            self.clear_queue(key).await;
+        }
+    }
+
     /// Drop any queued turns for a session key. Called when a session is torn
     /// down or replaced so stale prompts never drain into a future session.
     pub async fn clear_queue(&self, key: &SessionKey) {
