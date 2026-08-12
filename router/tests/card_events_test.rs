@@ -526,7 +526,7 @@ fn permission_request_is_noop_for_body() {
 }
 
 #[test]
-fn finished_and_error_append_markdown() {
+fn finished_is_noop() {
     let mut body = vec![];
     apply_event_to_card(
         &mut body,
@@ -535,6 +535,12 @@ fn finished_and_error_append_markdown() {
         },
         &cfg(),
     );
+    assert!(body.is_empty(), "Finished 不再向卡片追加元素");
+}
+
+#[test]
+fn error_append_markdown() {
+    let mut body = vec![];
     apply_event_to_card(
         &mut body,
         &AcpEvent::Error {
@@ -544,12 +550,8 @@ fn finished_and_error_append_markdown() {
         },
         &cfg(),
     );
-    assert_eq!(body.len(), 2);
+    assert_eq!(body.len(), 1);
     match &body[0] {
-        CardElement::Markdown { content } => assert_eq!(content, "✅ 完成"),
-        other => panic!("expected Finished Markdown, got {other:?}"),
-    }
-    match &body[1] {
         CardElement::Markdown { content } => assert_eq!(content, "❌ boom"),
         other => panic!("expected Error Markdown, got {other:?}"),
     }

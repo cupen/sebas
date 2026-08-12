@@ -100,9 +100,7 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
                 body.push(note_element(format!("⏳ {tool_name}: {progress}")));
             }
         }
-        AcpEvent::Finished { .. } => body.push(CardElement::Markdown {
-            content: "✅ 完成".into(),
-        }),
+        AcpEvent::Finished { .. } => {} // 已完成，无需额外标记
         AcpEvent::Error { message, .. } => body.push(CardElement::Markdown {
             content: format!("❌ {message}"),
         }),
