@@ -2018,7 +2018,7 @@ dependencies = [
  "gateway",
  "libc",
  "openlark",
- "reqwest 0.13.4",
+ "reqwest 0.12.28",
  "router",
  "rustls",
  "serde",
