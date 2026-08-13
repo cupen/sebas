@@ -100,7 +100,10 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
                 body.push(note_element(format!("⏳ {tool_name}: {progress}")));
             }
         }
-        AcpEvent::Finished { .. } => {} // 已完成，无需额外标记
+        AcpEvent::Finished { .. } => {
+            // 父面板标题从 "折腾中" → "已搞定"
+            mark_parent_completed(body);
+        }
         AcpEvent::Error { message, .. } => body.push(CardElement::Markdown {
             content: format!("❌ {message}"),
         }),
@@ -260,6 +263,9 @@ fn panel_header(title: String) -> CollapsiblePanelHeader {
 /// 内层仍保持各自独立折叠。`is_tools_parent` 根据此常量判断。
 const TOOLS_PARENT_TITLE: &str = "🤔 折腾中";
 
+/// 完成后的父面板标题 —— 与 `TOOLS_PARENT_TITLE` 呼应，表示 AI 思考+工具调用结束。
+const TOOLS_PARENT_DONE_TITLE: &str = "✅ 已完成";
+
 /// 确保 body 中存在一个父级折叠面板，返回其索引。
 /// 已存在则直接返回；否则新建一个并 push 到 body 末尾。
 fn ensure_tools_parent(body: &mut Vec<CardElement>) -> usize {
@@ -282,6 +288,18 @@ fn ensure_tools_parent(body: &mut Vec<CardElement>) -> usize {
 /// 判断一个 panel 是否是父级折叠面板。
 fn is_tools_parent(panel: &CollapsiblePanel) -> bool {
     panel.header.title.content == TOOLS_PARENT_TITLE
+        || panel.header.title.content == TOOLS_PARENT_DONE_TITLE
+}
+
+/// Finished 时把父面板标题从 "🤔 折腾中" 更新为 "✅ 已完成"。
+fn mark_parent_completed(body: &mut Vec<CardElement>) {
+    if let Some(idx) = find_tools_parent_index(body) {
+        if let CardElement::CollapsiblePanel(panel) = &mut body[idx] {
+            if panel.header.title.content == TOOLS_PARENT_TITLE {
+                panel.header.title.content = TOOLS_PARENT_DONE_TITLE.into();
+            }
+        }
+    }
 }
 
 /// 在 body 中查找父级折叠面板的索引。
