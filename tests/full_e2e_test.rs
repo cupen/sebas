@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 const OVERALL: Duration = Duration::from_secs(8);
 
 fn workspace_target() -> PathBuf {
@@ -60,6 +62,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
     //    subprocess, completes the initialize handshake, sends the initial
     //    prompt, and returns the cloned event receiver taken before any
     //    slow I/O (D6 guarantee).
+    let work_dir_a = support::TestDir::new("full_e2e", "first");
     let (session_id, pending, rx) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
@@ -67,7 +70,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         &prompt,
         fake.to_str().unwrap(),
         vec![],
-        Some("/tmp".into()),
+        Some(work_dir_a.path().to_string_lossy().into_owned()),
     )
     .await
     .expect("spawn fake CLI through production fn");
@@ -165,6 +168,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         other => panic!("expected SpawnAcp, got {other:?}"),
     };
 
+    let work_dir_b = support::TestDir::new("full_e2e", "second");
     let (session_id, pending, rx) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
@@ -175,7 +179,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         // the 150ms debounce tick must both land before the result frame,
         // or the transient 🚧 flush is preempted by Finished.
         vec!["--slow-ms".into(), "800".into()],
-        Some("/tmp".into()),
+        Some(work_dir_b.path().to_string_lossy().into_owned()),
     )
     .await
     .expect("spawn fake CLI");

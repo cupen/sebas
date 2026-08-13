@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 const OVERALL: Duration = Duration::from_secs(8);
 
 fn workspace_target() -> PathBuf {
@@ -63,6 +65,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         other => panic!("expected SpawnAcp, got {other:?}"),
     };
 
+    let work_dir = support::TestDir::new("permission_flow", "work");
     let (session_id, _pending, _rx) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
@@ -70,7 +73,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         &prompt,
         fake.to_str().unwrap(),
         vec![],
-        Some("/tmp".into()),
+        Some(work_dir.path().to_string_lossy().into_owned()),
     )
     .await
     .expect("spawn fake CLI");

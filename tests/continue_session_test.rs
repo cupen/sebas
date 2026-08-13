@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 const OVERALL: Duration = Duration::from_secs(15);
 
 fn workspace_target() -> PathBuf {
@@ -57,6 +59,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         other => panic!("expected SpawnAcp, got {other:?}"),
     };
 
+    let work_dir = support::TestDir::new("continue_session", "work");
     let (session_id, _pending, _rx) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
@@ -64,7 +67,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         &prompt,
         fake.to_str().unwrap(),
         vec!["--slow-ms".into(), "200".into()],
-        Some("/tmp".into()),
+        Some(work_dir.path().to_string_lossy().into_owned()),
     )
     .await
     .expect("spawn bridge");

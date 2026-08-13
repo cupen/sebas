@@ -41,8 +41,11 @@
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
+
 #[cfg(unix)]
-use tempfile::tempdir;
+mod support;
+#[cfg(unix)]
+use support::TestDir;
 
 /// Locate the workspace `target/debug` directory by walking up from
 /// `CARGO_MANIFEST_DIR` (the `sebas` crate root). Assumes the standard
@@ -56,10 +59,17 @@ fn workspace_target_debug() -> PathBuf {
 
 /// Write a minimal `config.toml` into `dir` for the spawned sebas to
 /// pick up via its default `./config.toml` lookup. The state file path
-/// is baked into the config so the daemon writes to the same on-disk
-/// file the test inspects afterwards.
+/// and the agent sessions directory are baked into the config so the
+/// daemon writes to the same on-disk locations the test inspects.
+/// `sessions_dir` lives under `target/tests/` (NOT `/tmp`) so a stray
+/// `cargo clean` removes it along with build artefacts.
 #[cfg(unix)]
-fn write_config_in(dir: &Path, state_path: &Path, fake_claude_path: &str) {
+fn write_config_in(
+    dir: &Path,
+    state_path: &Path,
+    fake_claude_path: &str,
+    sessions_dir: &Path,
+) {
     let path = dir.join("config.toml");
     let body = format!(
         r#"[feishu]
@@ -69,7 +79,7 @@ owner_id = ""
 
 [acp.claude]
 path = {fake_claude_path:?}
-sessions_dir = "/tmp/sebas-test-sessions"
+sessions_dir = {sessions_dir:?}
 idle_kill_secs = 60
 
 [router]
@@ -82,6 +92,7 @@ level = "info"
 "#,
         fake_claude_path = fake_claude_path,
         state_path = state_path.display().to_string(),
+        sessions_dir = sessions_dir.display().to_string(),
     );
     std::fs::write(&path, body).expect("write config.toml");
 }
@@ -106,8 +117,11 @@ async fn sigterm_cleans_up_child_and_persists_state() {
     // ---- 2. Lay down a temp working directory containing both the config
     //         and the state file. Pre-populate the state file with a known
     //         mapping so we can verify the daemon re-serialises it on exit
-    //         (rather than trampling the restore path).
-    let work_dir = tempdir().expect("tempdir for work dir");
+    //         (rather than trampling the restore path). All scratch lives
+    //         under `target/tests/sebas/sigterm_cleanup/` so a stray `cargo
+    //         clean` removes it; nothing is written to /tmp or $HOME.
+    let work_dir = TestDir::new("sigterm_cleanup", "work");
+    let sessions_dir = TestDir::new("sigterm_cleanup", "sessions");
     let state_path = work_dir.path().join("sessions.json");
     let pre_mapping = serde_json::json!({
         "test-sigterm-pre": {
@@ -124,6 +138,7 @@ async fn sigterm_cleans_up_child_and_persists_state() {
         work_dir.path(),
         &state_path,
         fake_claude_bin.to_str().unwrap(),
+        sessions_dir.path(),
     );
 
     // ---- 3. Spawn sebas with cwd=work_dir so it picks up our config. -----

@@ -11,23 +11,23 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
-use tempfile::TempDir;
 use tokio::sync::Mutex;
 
 use gateway::config::GatewayConfig;
 use gateway::proto::Protocol;
 use gateway::server;
 
-/// 启动一个 gateway 实例并返回其监听地址 + 持有 TempDir（drop 即清理）。
+/// 启动一个 gateway 实例并返回其监听地址 + 持有 scratch dir（drop 即清理）。
 ///
 /// `config_toml` 中：
 /// - `usage_file = "__USAGE__"` 会被替换为 tempdir 内 `usage.jsonl`；
@@ -48,8 +48,8 @@ pub async fn start_gateway_debug(config_toml: &str) -> TestGateway {
 async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     ensure_test_env_keys();
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let usage_path = dir.path().join("usage.jsonl");
+    let dir = test_target_dir("start_gateway");
+    let usage_path = dir.join("usage.jsonl");
     // Windows 临时路径含反斜杠（`C:\Users\...\Temp\...`），TOML 会把 `\U` 当
     // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
     let usage = usage_path.to_string_lossy().replace('\\', "/");
@@ -81,18 +81,61 @@ async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     }
 }
 
-/// 运行中的 gateway 测试实例。drop 时 abort 后台 task + 清理 TempDir。
+/// 运行中的 gateway 测试实例。drop 时 abort 后台 task + 清理 scratch dir。
 pub struct TestGateway {
     pub addr: SocketAddr,
-    /// 持有以保持 tempdir 存活至 drop；Task 9 读 `dir.path()` 轮询 usage.jsonl。
-    pub dir: TempDir,
+    /// 持有以保持 scratch dir 存活至 drop；Task 9 读 `dir` 轮询 usage.jsonl。
+    pub dir: PathBuf,
     _server: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for TestGateway {
     fn drop(&mut self) {
         self._server.abort();
+        // Best-effort scratch cleanup; a stray `cargo clean` is the
+        // hammer-of-last-resort if removal races.
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Create a fresh scratch dir under `target/tests/gateway/<test>/`
+/// (NOT `/tmp` or `$HOME` — the workspace `target/` is wiped by
+/// `cargo clean`, so a leftover directory never survives a clean
+/// rebuild). Caller owns the path; `TestGateway::drop` removes it.
+pub fn test_target_dir(test_name: &str) -> PathBuf {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
+        panic!(
+            "CARGO_MANIFEST_DIR unset — test_target_dir must be called from a cargo test binary"
+        )
+    });
+    let manifest = PathBuf::from(manifest_dir);
+    let workspace_root = manifest
+        .parent()
+        .filter(|p| p.join("Cargo.toml").exists())
+        .map(|p| p.to_path_buf())
+        .unwrap_or(manifest);
+    let stamp = unique_stamp();
+    let path = workspace_root
+        .join("target")
+        .join("tests")
+        .join("gateway")
+        .join(test_name)
+        .join(format!("{stamp}-scratch"));
+    std::fs::create_dir_all(&path)
+        .unwrap_or_else(|e| panic!("create scratch dir {}: {e}", path.display()));
+    path
+}
+
+/// Nanos + atomic counter so two `test_target_dir` calls in the same
+/// `#[tokio::test]` never share a path.
+fn unique_stamp() -> u128 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (t << 16) | (n & 0xFFFF)
 }
 
 static ENV_ONCE: Once = Once::new();

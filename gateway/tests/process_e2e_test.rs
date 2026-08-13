@@ -42,17 +42,17 @@ async fn pick_free_port() -> u16 {
     addr.port()
 }
 
-/// 写临时 gateway config：双 provider 指向两个 mock，usage 落到 tempdir。
+/// 写临时 gateway config：双 provider 指向两个 mock，usage 落到 target/tests/。
 /// 返回 config 路径（TOML 里路径统一用 `/`，兼容 Windows 反斜杠转义问题）。
 fn write_config(
-    dir: &tempfile::TempDir,
+    dir: &Path,
     port: u16,
     anth_url: &str,
     oai_url: &str,
     usage_path: &Path,
 ) -> PathBuf {
     let usage = usage_path.to_string_lossy().replace('\\', "/");
-    let path = dir.path().join("gateway.toml");
+    let path = dir.join("gateway.toml");
     let body = format!(
         r#"
 [gateway]
@@ -83,13 +83,13 @@ api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
 /// listen/auth_token/usage，provider 定义在顶层（与 run 共用）。protocol 省略 →
 /// preset 自动填 anthropic；base_url 显式指向 mock；api_key_env 显式。
 fn write_top_level_provider_config(
-    dir: &tempfile::TempDir,
+    dir: &Path,
     port: u16,
     anth_url: &str,
     usage_path: &Path,
 ) -> PathBuf {
     let usage = usage_path.to_string_lossy().replace('\\', "/");
-    let path = dir.path().join("gateway-top-level.toml");
+    let path = dir.join("gateway-top-level.toml");
     let body = format!(
         r#"
 [gateway]
@@ -155,8 +155,8 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
 
     let anth = start_mock_upstream(Protocol::Anthropic).await;
     let oai = start_mock_upstream(Protocol::OpenAi).await;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let usage_path = dir.path().join("usage.jsonl");
+    let dir = support::test_target_dir("process_e2e");
+    let usage_path = dir.join("usage.jsonl");
     let port = pick_free_port().await;
     let config_path = write_config(&dir, port, &anth.url, &oai.url, &usage_path);
 
@@ -338,8 +338,8 @@ async fn standalone_gateway_reads_top_level_provider_table() {
     }
 
     let anth = start_mock_upstream(Protocol::Anthropic).await;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let usage_path = dir.path().join("usage.jsonl");
+    let dir = support::test_target_dir("process_e2e_top");
+    let usage_path = dir.join("usage.jsonl");
     let port = pick_free_port().await;
     let config_path = write_top_level_provider_config(&dir, port, &anth.url, &usage_path);
 

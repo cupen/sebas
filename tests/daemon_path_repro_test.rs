@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 fn workspace_target() -> PathBuf {
     // sebas integration tests' CARGO_MANIFEST_DIR IS the workspace root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug")
@@ -22,8 +24,8 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
     // Windows 下可执行文件带 .exe 后缀。
     let fake = workspace_target().join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     assert!(fake.exists(), "missing build artifact {}", fake.display());
-    // /tmp 是 Unix 硬编码；Windows 上会被解析成 C:\tmp 且可能不存在，改用 tempdir。
-    let work_dir = tempfile::tempdir().expect("work dir");
+    // Sandbox work dir under target/tests/ (NOT /tmp) so cargo clean tidies up.
+    let work_dir = support::TestDir::new("daemon_path_repro", "work");
 
     let map = SessionMap::new();
     let (router, _out_rx) = RouterHandle::new(map);

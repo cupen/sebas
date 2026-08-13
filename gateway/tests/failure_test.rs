@@ -196,7 +196,7 @@ async fn upstream_read_timeout_returns_502_without_key_leak() {
 async fn truncated_sse_passthrough_and_usage_best_effort() {
     let url = start_failure_upstream(Scenario::TruncatedSse).await;
     let gw = start_gateway(&cfg(&url, "")).await;
-    let usage_path = gw.dir.path().join("usage.jsonl");
+    let usage_path = gw.dir.join("usage.jsonl");
     let resp = post_messages(&client(), &format!("http://{}", gw.addr))
         .send()
         .await
