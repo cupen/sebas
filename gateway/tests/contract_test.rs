@@ -117,7 +117,7 @@ impl TestEnv {
     }
 
     fn usage_path(&self) -> std::path::PathBuf {
-        self.gw.dir.join("usage.jsonl")
+        self.gw.dir.path().join("usage.jsonl")
     }
 }
 

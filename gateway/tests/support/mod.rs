@@ -49,7 +49,7 @@ async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     ensure_test_env_keys();
 
     let dir = test_target_dir("start_gateway");
-    let usage_path = dir.join("usage.jsonl");
+    let usage_path = dir.path().join("usage.jsonl");
     // Windows 临时路径含反斜杠（`C:\Users\...\Temp\...`），TOML 会把 `\U` 当
     // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
     let usage = usage_path.to_string_lossy().replace('\\', "/");
@@ -81,28 +81,65 @@ async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     }
 }
 
+/// RAII scratch directory rooted at `target/tests/gateway/<test>/<unique>`.
+///
+/// `Drop` removes the directory and everything under it. Call `keep()`
+/// to leak the directory (useful when a child process deliberately
+/// crashes the daemon and you want the leftover state inspectable —
+/// the next `cargo clean` still tidies up).
+///
+/// Mirrors `tests/support/mod.rs::TestDir` in the root crate but lives
+/// in `gateway/` because each crate sees a different `CARGO_PKG_NAME`
+/// (the root crate's `sebas` isn't gateway).
+pub struct TestDir {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TestDir {
+    /// Path to the scratch directory. Created; safe to write into.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Disable auto-cleanup on drop.
+    pub fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        // Best-effort: a parallel test might be holding a handle, or
+        // the dir might already be gone. `cargo clean` is the
+        // hammer-of-last-resort.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// 运行中的 gateway 测试实例。drop 时 abort 后台 task + 清理 scratch dir。
 pub struct TestGateway {
     pub addr: SocketAddr,
-    /// 持有以保持 scratch dir 存活至 drop；Task 9 读 `dir` 轮询 usage.jsonl。
-    pub dir: PathBuf,
+    /// 持有以保持 scratch dir 存活至 drop；Task 9 读 `dir.path()` 轮询 usage.jsonl。
+    pub dir: TestDir,
     _server: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for TestGateway {
     fn drop(&mut self) {
         self._server.abort();
-        // Best-effort scratch cleanup; a stray `cargo clean` is the
-        // hammer-of-last-resort if removal races.
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // TestDir::drop handles the scratch dir cleanup.
     }
 }
 
 /// Create a fresh scratch dir under `target/tests/gateway/<test>/`
 /// (NOT `/tmp` or `$HOME` — the workspace `target/` is wiped by
-/// `cargo clean`, so a leftover directory never survives a clean
-/// rebuild). Caller owns the path; `TestGateway::drop` removes it.
-pub fn test_target_dir(test_name: &str) -> PathBuf {
+/// `cargo clean`). Returns an RAII `TestDir` that auto-removes the
+/// directory on drop.
+pub fn test_target_dir(test_name: &str) -> TestDir {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
         panic!(
             "CARGO_MANIFEST_DIR unset — test_target_dir must be called from a cargo test binary"
@@ -123,7 +160,7 @@ pub fn test_target_dir(test_name: &str) -> PathBuf {
         .join(format!("{stamp}-scratch"));
     std::fs::create_dir_all(&path)
         .unwrap_or_else(|e| panic!("create scratch dir {}: {e}", path.display()));
-    path
+    TestDir { path, keep: false }
 }
 
 /// Nanos + atomic counter so two `test_target_dir` calls in the same
@@ -502,4 +539,49 @@ pub fn recorded_header_get<'a>(
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_target_dir_creates_unique_paths_and_cleans_up() {
+        let a = test_target_dir("self_a");
+        let b = test_target_dir("self_b");
+        assert_ne!(a.path(), b.path(), "unique stamps must produce distinct paths");
+        assert!(a.path().exists());
+        assert!(b.path().exists());
+        let pa = a.path().to_path_buf();
+        let pb = b.path().to_path_buf();
+        drop(a);
+        drop(b);
+        assert!(!pa.exists(), "alpha dir must be removed on drop");
+        assert!(!pb.exists(), "beta dir must be removed on drop");
+    }
+
+    #[test]
+    fn keep_survives_drop() {
+        let mut d = test_target_dir("self_keep");
+        d.keep();
+        let p = d.path().to_path_buf();
+        drop(d);
+        assert!(p.exists(), "keep() must prevent cleanup");
+        std::fs::remove_dir_all(&p).unwrap();
+    }
+
+    #[test]
+    fn path_lives_under_target_tests() {
+        let d = test_target_dir("self_layout");
+        assert!(
+            d.path().components().any(|c| c.as_os_str() == "tests"),
+            "TestDir path must include `tests/`: {}",
+            d.path().display()
+        );
+        assert!(
+            d.path().to_string_lossy().contains("target"),
+            "TestDir path must be under `target/`: {}",
+            d.path().display()
+        );
+    }
 }

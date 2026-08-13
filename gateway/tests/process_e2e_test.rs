@@ -156,9 +156,9 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
     let anth = start_mock_upstream(Protocol::Anthropic).await;
     let oai = start_mock_upstream(Protocol::OpenAi).await;
     let dir = support::test_target_dir("process_e2e");
-    let usage_path = dir.join("usage.jsonl");
+    let usage_path = dir.path().join("usage.jsonl");
     let port = pick_free_port().await;
-    let config_path = write_config(&dir, port, &anth.url, &oai.url, &usage_path);
+    let config_path = write_config(dir.path(), port, &anth.url, &oai.url, &usage_path);
 
     let mut gw = GatewayProcess {
         child: Command::new(&bin)
@@ -339,9 +339,9 @@ async fn standalone_gateway_reads_top_level_provider_table() {
 
     let anth = start_mock_upstream(Protocol::Anthropic).await;
     let dir = support::test_target_dir("process_e2e_top");
-    let usage_path = dir.join("usage.jsonl");
+    let usage_path = dir.path().join("usage.jsonl");
     let port = pick_free_port().await;
-    let config_path = write_top_level_provider_config(&dir, port, &anth.url, &usage_path);
+    let config_path = write_top_level_provider_config(dir.path(), port, &anth.url, &usage_path);
 
     let mut gw = GatewayProcess {
         child: Command::new(&bin)

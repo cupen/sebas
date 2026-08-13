@@ -148,7 +148,7 @@ async fn debug_openai_chat_sse_contains_text_and_done() {
 #[tokio::test]
 async fn debug_requests_write_usage_record() {
     let gw = start_gateway_debug(DEBUG_CFG).await;
-    let usage_path = gw.dir.join("usage.jsonl");
+    let usage_path = gw.dir.path().join("usage.jsonl");
     let resp = client()
         .post(format!("http://{}/v1/messages", gw.addr))
         .header("authorization", "Bearer sk-gw-debug")
