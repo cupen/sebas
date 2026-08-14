@@ -53,6 +53,17 @@ pub enum RpcControlResponse {
     Events {
         events: Vec<RpcControlEvent>,
     },
+    Services {
+        services: Vec<RpcServiceStatus>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RpcServiceStatus {
+    pub name: String,
+    pub status: String,
+    pub desired: String,
+    pub uptime_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,7 +206,7 @@ async fn handle_envelope(
             executor.submit_detached(actor, ControlRequest::RestartCore).await.into()
         }
         RpcControlRequest::ServiceStatus => {
-            accept_control_request(executor.control().clone(), envelope.actor, ControlRequest::ServiceStatus).await
+            executor.service_status().await
         }
     }
 }

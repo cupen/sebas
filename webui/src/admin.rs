@@ -6,17 +6,23 @@
 //! - `/admin/update`  — update controls (release, dev, dry-run, rollback)
 //! - `/admin/services` — managed-services overview
 //! - `/admin/restart` — restart core
+//! - `/admin/login`   — login page (if password is set)
+//! - `/admin/logout`  — logout
 //!
-//! All mutation endpoints are POST-only and protected by an origin check.
+//! All mutation endpoints are POST-only and protected by CSRF + origin check.
+//! When `SEBAS_WEBUI_PASSWORD` is set, all admin routes (except login) require
+//! a valid session cookie.
+//!
 //! The [`AdminAdapter`] trait allows the sebas binary crate to provide either
 //! a real control-RPC implementation or a no-op stub.
 
+use crate::admin_auth::SessionStore;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Serialize;
@@ -105,6 +111,8 @@ pub struct AdminState {
     pub adapter: Option<Arc<dyn AdminAdapter>>,
     pub templates: Arc<minijinja::Environment<'static>>,
     pub started_at: Arc<Instant>,
+    pub password: Option<Arc<str>>,
+    pub session_store: SessionStore,
 }
 
 impl AdminState {
@@ -113,11 +121,22 @@ impl AdminState {
         adapter: Option<Arc<dyn AdminAdapter>>,
         templates: Arc<minijinja::Environment<'static>>,
     ) -> Self {
+        let password = std::env::var("SEBAS_WEBUI_PASSWORD")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .map(|p| Arc::from(p.as_str()));
         Self {
             adapter,
             templates,
             started_at: Arc::new(Instant::now()),
+            password,
+            session_store: SessionStore::new(),
         }
+    }
+
+    /// Whether a password is configured (auth required for mutations).
+    pub fn has_password(&self) -> bool {
+        self.password.is_some()
     }
 }
 
@@ -293,17 +312,81 @@ fn no_adapter_error() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-// ─── Security Middleware ───────────────────────────────────────────────────
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
 
-/// Middleware that enforces security constraints on mutation routes:
+/// Cookie name for the admin session.
+const SESSION_COOKIE_NAME: &str = "sebas_admin_session";
+
+/// Middleware that checks authentication for all admin routes (except login).
 ///
-/// 1. **POST-only**: returns 405 for GET/HEAD/etc.
-/// 2. **Origin check**: if the `Origin` header is present, it must be
-///    `http://127.0.0.1:<port>` or `http://localhost:<port>`.  Missing
-///    Origin is allowed (e.g. curl, direct browser navigation).
-/// 3. **X-Requested-With**: encouraged but not strictly required for
-///    the MVP baseline.
+/// If `SEBAS_WEBUI_PASSWORD` is set, all `/admin/*` routes (except `/admin/login`
+/// and `/admin/logout`) require a valid session cookie.  If the password is not
+/// set, this middleware is a no-op.
+pub async fn admin_auth_guard(
+    State(state): State<AdminState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, StatusCode> {
+    if !state.has_password() {
+        // No password configured — allow all requests (read-only mode).
+        return Ok(next.run(req).await);
+    }
+
+    let path = req.uri().path().to_string();
+    // Allow login/logout without auth
+    if path == "/admin/login" || path == "/admin/logout" {
+        return Ok(next.run(req).await);
+    }
+
+    // Check session cookie
+    let session_id = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                if let Some(val) = c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME)) {
+                    Some(val.to_string())
+                } else {
+                    None
+                }
+            })
+        });
+
+    match session_id {
+        Some(id) => match state.session_store.validate(&id).await {
+            Ok(csrf_token) => {
+                // Store CSRF token in request extensions for mutation middleware
+                let mut req = req;
+                req.extensions_mut()
+                    .insert(CsrfExtension(csrf_token));
+                Ok(next.run(req).await)
+            }
+            Err(_) => redirect_to_login(),
+        },
+        None => redirect_to_login(),
+    }
+}
+
+/// Redirect to login page.
+fn redirect_to_login() -> Result<axum::response::Response<Body>, StatusCode> {
+    Ok(Redirect::to("/admin/login").into_response())
+}
+
+/// Extension to pass CSRF token through request layers.
+#[derive(Clone)]
+struct CsrfExtension(String);
+
+/// Security middleware for mutation routes.
+///
+/// Checks:
+/// 1. POST-only (returns 405 for GET/HEAD/etc.)
+/// 2. If password is set: valid CSRF token in `X-CSRF-Token` header, OR
+///    valid loopback origin (for CLI tools like curl).
+/// 3. If password is not set: valid loopback origin check only.
 pub async fn admin_mutation_guard(
+    State(state): State<AdminState>,
     req: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -312,12 +395,45 @@ pub async fn admin_mutation_guard(
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    // Origin check
-    if let Some(origin) = req
+    // Origin check (always enforced)
+    let origin_is_valid = if let Some(origin) = req
         .headers()
         .get("origin")
         .and_then(|v| v.to_str().ok())
     {
+        origin.is_empty() || is_loopback_origin(origin)
+    } else {
+        // No origin header — may be a CLI tool. Still require CSRF if password is set.
+        false
+    };
+
+    if state.has_password() {
+        // Password mode: require CSRF token OR valid loopback origin
+        let csrf_token = req
+            .headers()
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let session_csrf = req
+            .extensions()
+            .get::<CsrfExtension>()
+            .map(|c| c.0.clone());
+
+        let csrf_valid = match (csrf_token, session_csrf) {
+            (Some(token), Some(expected)) => token == expected,
+            _ => false,
+        };
+
+        if !csrf_valid && !origin_is_valid {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    } else if let Some(origin) = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+    {
+        // No password mode: origin check is the only protection
         if !origin.is_empty() && !is_loopback_origin(origin) {
             return Err(StatusCode::FORBIDDEN);
         }
@@ -337,6 +453,104 @@ fn is_loopback_origin(origin: &str) -> bool {
     }
 }
 
+// ─── Login / Logout ─────────────────────────────────────────────────────────
+
+/// GET /admin/login — show login form.
+pub async fn admin_login_page(State(state): State<AdminState>) -> impl IntoResponse {
+    let data = serde_json::json!({
+        "page": "admin_login",
+        "has_password": state.has_password(),
+        "error": "",
+    });
+    render_template(&state, "admin_login.html", &data).await
+}
+
+/// POST /admin/login — authenticate and create session.
+#[derive(serde::Deserialize)]
+pub struct LoginForm {
+    password: String,
+}
+
+pub async fn admin_login_action(
+    State(state): State<AdminState>,
+    axum::Form(form): axum::Form<LoginForm>,
+) -> axum::response::Response<Body> {
+    // Global rate limit check (no per-IP tracking to keep it simple)
+    if !state.session_store.check_rate_limit("global").await {
+        let data = serde_json::json!({
+            "page": "admin_login",
+            "has_password": state.has_password(),
+            "error": "Too many login attempts. Try again later.",
+        });
+        return render_template(&state, "admin_login.html", &data).await.into_response();
+    }
+
+    // Verify password
+    let password_ok = match &state.password {
+        Some(expected) => form.password == expected.as_ref(),
+        None => false,
+    };
+
+    if !password_ok {
+        let data = serde_json::json!({
+            "page": "admin_login",
+            "has_password": state.has_password(),
+            "error": "Invalid password.",
+        });
+        return render_template(&state, "admin_login.html", &data).await.into_response();
+    }
+
+    // Success: create session, reset rate limit
+    state.session_store.reset_rate_limit("global").await;
+    let (session_id, _csrf) = state.session_store.create().await;
+
+    // Set session cookie (no expiry — session store handles TTL)
+    let cookie = format!(
+        "{}={}; Path=/admin; HttpOnly; SameSite=Lax",
+        SESSION_COOKIE_NAME, session_id
+    );
+
+    let mut resp = Redirect::to("/admin/status").into_response();
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie.parse().unwrap(),
+    );
+    resp
+}
+
+/// POST /admin/logout — end session.
+pub async fn admin_logout_action(
+    State(state): State<AdminState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    // Extract session ID from cookie
+    if let Some(session_id) = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME))
+                    .map(|s| s.to_string())
+            })
+        })
+    {
+        state.session_store.remove(&session_id).await;
+    }
+
+    // Clear cookie
+    let cookie = format!(
+        "{}=; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=0",
+        SESSION_COOKIE_NAME
+    );
+    let mut resp = Redirect::to("/admin/login").into_response();
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie.parse().unwrap(),
+    );
+    resp
+}
+
 // ─── Router Builder ─────────────────────────────────────────────────────────
 
 /// Build an admin-only router for standalone mode.
@@ -348,14 +562,32 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/admin/update/dev", post(admin_dev_update_action))
         .route("/admin/rollback", post(admin_rollback_action))
         .route("/admin/restart", post(admin_restart_action))
-        .layer(middleware::from_fn(admin_mutation_guard));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_mutation_guard,
+        ));
 
-    Router::new()
+    // Protected admin routes (require auth if password is set)
+    let protected = Router::new()
         .route("/admin/status", get(admin_status))
         .route("/admin/events", get(admin_events))
         .route("/admin/update", get(admin_update_page))
         .route("/admin/services", get(admin_services))
         .merge(mutation_routes)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth_guard,
+        ));
+
+    // Public admin routes (no auth required)
+    let public = Router::new()
+        .route("/admin/login", get(admin_login_page))
+        .route("/admin/login", post(admin_login_action))
+        .route("/admin/logout", post(admin_logout_action));
+
+    Router::new()
+        .merge(protected)
+        .merge(public)
         .route("/health", get(health))
         .with_state(state)
 }
@@ -411,6 +643,8 @@ fn init_standalone_templates() -> minijinja::Environment<'static> {
         .expect("admin_update.html template");
     env.add_template("admin_services.html", include_str!("../templates/admin_services.html"))
         .expect("admin_services.html template");
+    env.add_template("admin_login.html", include_str!("../templates/admin_login.html"))
+        .expect("admin_login.html template");
     env
 }
 

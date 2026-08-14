@@ -215,6 +215,14 @@ impl ControlService {
         self.operations.get(operation_id)
     }
 
+    pub fn running_exclusive(&self) -> Option<&str> {
+        self.running_exclusive.as_deref()
+    }
+
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+
     fn next_operation_id(&mut self) -> String {
         let id = format!("op_{}", self.next_operation);
         self.next_operation += 1;

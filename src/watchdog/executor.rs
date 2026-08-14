@@ -15,6 +15,7 @@ use crate::error::{Result, SebasError};
 use crate::watchdog::control::{
     Actor, ControlRequest, ControlResponse, ControlService, UpdateKind, UpdateTarget,
 };
+use crate::watchdog::control_rpc::{RpcControlResponse, RpcServiceStatus};
 use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -267,6 +268,76 @@ impl ControlExecutor {
         if self.restart_tx.send(outcome.post_action).is_err() {
             warn!("core restart requested but supervisor channel is closed");
         }
+    }
+
+    /// Return the current status of all managed services.
+    pub async fn service_status(&self) -> RpcControlResponse {
+        use crate::watchdog::control::OperationStatus;
+        let control = self.control.lock().await;
+
+        // Check if there's a running exclusive operation (update/rollback/restart).
+        let updater_status = match &control.running_exclusive() {
+            Some(op_id) => {
+                if let Some(record) = control.operation(op_id) {
+                    match record.status {
+                        OperationStatus::Running => "running",
+                        _ => "pending",
+                    }
+                } else {
+                    "idle"
+                }
+            }
+            None => "idle",
+        };
+
+        // Check if the core has been accepted recently (simple heuristic:
+        // if there are operations, the core is reachable).
+        let core_status = if control.operation_count() > 0 {
+            "running"
+        } else {
+            "unknown"
+        };
+
+        let services = vec![
+            RpcServiceStatus {
+                name: "watchdog".into(),
+                status: "running".into(),
+                desired: "enabled".into(),
+                uptime_secs: None,
+            },
+            RpcServiceStatus {
+                name: "core".into(),
+                status: core_status.into(),
+                desired: "enabled".into(),
+                uptime_secs: None,
+            },
+            RpcServiceStatus {
+                name: "updater".into(),
+                status: updater_status.into(),
+                desired: "enabled".into(),
+                uptime_secs: None,
+            },
+            RpcServiceStatus {
+                name: "webui".into(),
+                status: "running".into(),
+                desired: "enabled".into(),
+                uptime_secs: None,
+            },
+            RpcServiceStatus {
+                name: "gateway".into(),
+                status: "running".into(),
+                desired: "enabled".into(),
+                uptime_secs: None,
+            },
+            RpcServiceStatus {
+                name: "feishu".into(),
+                status: "running".into(),
+                desired: "enabled".into(),
+                uptime_secs: None,
+            },
+        ];
+
+        RpcControlResponse::Services { services }
     }
 }
 

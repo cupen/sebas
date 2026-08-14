@@ -7,6 +7,7 @@
 //! - Real-time SSE event stream
 
 pub mod admin;
+pub mod admin_auth;
 pub mod models;
 pub mod routes;
 pub mod server;

@@ -168,6 +168,19 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
                 );
             }
         }
+        RpcControlResponse::Services { services } => {
+            for svc in &services {
+                println!(
+                    "- {}: {} (desired: {}){}",
+                    svc.name,
+                    svc.status,
+                    svc.desired,
+                    svc.uptime_secs
+                        .map(|u| format!(" uptime={u}s"))
+                        .unwrap_or_default()
+                );
+            }
+        }
     }
     Ok(())
 }

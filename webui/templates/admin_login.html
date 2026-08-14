@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Login - sebas</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="login-layout">
+    <div class="login-card">
+      <div class="login-header">
+        <span class="brand-icon">&#9889;</span>
+        <span class="brand-text">sebas admin</span>
+      </div>
+      <p class="login-subtitle">Watchdog Control Plane</p>
+
+      {% if not has_password %}
+      <div class="alert alert-warning">
+        No password configured. Set <code>SEBAS_WEBUI_PASSWORD</code> to enable authentication.
+      </div>
+      <div class="login-actions">
+        <a href="/admin/status" class="btn btn-primary">Continue to Dashboard</a>
+      </div>
+      {% else %}
+      <form method="POST" action="/admin/login" class="login-form">
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" class="form-input" required autofocus>
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Login</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

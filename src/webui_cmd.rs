@@ -256,12 +256,22 @@ impl AdminAdapter for ControlRpcAdminAdapter {
     }
 
     async fn services(&self) -> std::result::Result<Vec<AdminService>, String> {
-        Ok(vec![AdminService {
-            name: "webui".into(),
-            status: "running".into(),
-            desired: "enabled".into(),
-            uptime_secs: None,
-        }])
+        match self.send_request(RpcControlRequest::ServiceStatus).await {
+            Ok(RpcControlResponse::Services { services }) => Ok(services
+                .into_iter()
+                .map(|s| AdminService {
+                    name: s.name,
+                    status: s.status,
+                    desired: s.desired,
+                    uptime_secs: s.uptime_secs,
+                })
+                .collect()),
+            Ok(RpcControlResponse::Rejected { code, message }) => {
+                Err(format!("rejected [{code}]: {message}"))
+            }
+            Ok(other) => Err(format!("unexpected response: {other:?}")),
+            Err(e) => Err(format!("control RPC failed: {e}")),
+        }
     }
 }
 

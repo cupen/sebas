@@ -334,6 +334,20 @@ async fn submit_watchdog_control(
                 lines.join("\n")
             }
         }
+        Ok(crate::watchdog::control_rpc::RpcControlResponse::Services { services }) => {
+            if services.is_empty() {
+                "watchdog 暂无服务状态信息".to_string()
+            } else {
+                let mut lines = vec!["watchdog 服务状态:".to_string()];
+                for svc in &services {
+                    lines.push(format!(
+                        "- {}: {} (期望: {})",
+                        svc.name, svc.status, svc.desired
+                    ));
+                }
+                lines.join("\n")
+            }
+        }
         Err(e) => format!("{label}请求失败: {e}"),
     }
 }

@@ -3036,6 +3036,7 @@ dependencies = [
  "axum",
  "chrono",
  "feishu",
+ "hex",
  "http-body-util",
  "minijinja",
  "router",

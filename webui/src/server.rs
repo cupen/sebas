@@ -170,5 +170,10 @@ fn init_templates_inner() -> Environment<'static> {
         include_str!("../templates/admin_services.html"),
     )
     .expect("admin_services.html template");
+    env.add_template(
+        "admin_login.html",
+        include_str!("../templates/admin_login.html"),
+    )
+    .expect("admin_login.html template");
     env
 }

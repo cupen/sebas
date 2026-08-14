@@ -21,6 +21,11 @@
           <a href="/admin/update" class="nav-item {{ "active" if page == "admin_update" else "" }}">Update</a>
           <a href="/admin/services" class="nav-item {{ "active" if page == "admin_services" else "" }}">Services</a>
         </div>
+        <div class="nav-section" style="margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(205,214,244,0.15);">
+          <form method="POST" action="/admin/logout" style="display:inline">
+            <button type="submit" class="nav-item" style="background:none;border:none;color:var(--sidebar-text);cursor:pointer;width:100%;text-align:left;padding:8px 16px;font-size:0.85rem;">Logout</button>
+          </form>
+        </div>
       </nav>
     </aside>
 
