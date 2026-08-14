@@ -3,7 +3,6 @@
 //! 从 `run.rs` 拆出；只被出站泵（`crate::run`）调用。
 
 use crate::config::Config;
-use crate::ipc::ChildMsg;
 use crate::reactions::{ReactPlan, ReactionTracker};
 use crate::session_boot::{
     acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, spawn_acp_pump,
@@ -254,28 +253,97 @@ pub(crate) async fn dispatch_out(
             }
         }
         Out::WatchdogUpgrade { key, dev, dry_run } => {
-            let cmd = if dev {
-                ChildMsg::UpgradeDev { dry_run }
-            } else {
-                ChildMsg::Upgrade { dry_run }
-            };
-            let content = match crate::ipc::send_watchdog_command(cmd) {
-                Ok(()) => "已提交升级请求给 watchdog".to_string(),
-                Err(e) => format!("升级请求失败: {e}"),
-            };
+            let request = crate::watchdog::control_rpc::RpcControlRequest::Update { dev, dry_run };
+            let content = submit_watchdog_control(request, "升级").await;
             if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
                 warn!(?e, "send_text failed");
             }
         }
         Out::WatchdogRollback { key } => {
-            let content = match crate::ipc::send_watchdog_command(ChildMsg::Rollback) {
-                Ok(()) => "已提交回滚请求给 watchdog".to_string(),
-                Err(e) => format!("回滚请求失败: {e}"),
-            };
+            let request = crate::watchdog::control_rpc::RpcControlRequest::Rollback { dry_run: false };
+            let content = submit_watchdog_control(request, "回滚").await;
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogRestart { key } => {
+            let content = submit_watchdog_control(
+                crate::watchdog::control_rpc::RpcControlRequest::RestartCore,
+                "重启 core",
+            )
+            .await;
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogServices { key } => {
+            let content = submit_watchdog_control(
+                crate::watchdog::control_rpc::RpcControlRequest::ServiceStatus,
+                "服务状态查询",
+            )
+            .await;
             if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
                 warn!(?e, "send_text failed");
             }
         }
     }
     Ok(())
+}
+
+async fn submit_watchdog_control(
+    request: crate::watchdog::control_rpc::RpcControlRequest,
+    label: &str,
+) -> String {
+    let secret = match std::env::var("SEBAS_CONTROL_SECRET") {
+        Ok(secret) if !secret.is_empty() => secret,
+        _ => return format!("{label}请求失败: 当前进程未获得 watchdog control secret"),
+    };
+
+    let envelope = crate::watchdog::control_rpc::ControlEnvelope {
+        version: 1,
+        request_id: format!("feishu_{label}"),
+        secret,
+        actor: crate::watchdog::control_rpc::RpcActor::Cli { uid: current_uid() },
+        request,
+    };
+
+    match crate::watchdog::control_rpc::request(
+        &crate::watchdog::control_rpc::default_socket_path(),
+        &envelope,
+    )
+    .await
+    {
+        Ok(crate::watchdog::control_rpc::RpcControlResponse::Accepted {
+            operation_id,
+            status,
+        }) => format!("已提交{label}请求给 watchdog: {operation_id} ({status})"),
+        Ok(crate::watchdog::control_rpc::RpcControlResponse::Rejected { code, message }) => {
+            format!("{label}请求被拒绝: {code}: {message}")
+        }
+        Ok(crate::watchdog::control_rpc::RpcControlResponse::Events { events }) => {
+            if events.is_empty() {
+                "watchdog 暂无服务事件".to_string()
+            } else {
+                let mut lines = vec!["watchdog 最近服务事件:".to_string()];
+                for event in events.iter().rev().take(5).rev() {
+                    lines.push(format!(
+                        "#{} [{}] {} {}",
+                        event.seq, event.kind, event.operation_id, event.public_message
+                    ));
+                }
+                lines.join("\n")
+            }
+        }
+        Err(e) => format!("{label}请求失败: {e}"),
+    }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
 }

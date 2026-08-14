@@ -104,6 +104,12 @@ impl RouterHandle {
             Command::Rollback => {
                 self.request_watchdog_rollback(key).await;
             }
+            Command::Restart => {
+                self.request_watchdog_restart(key).await;
+            }
+            Command::Services => {
+                self.request_watchdog_services(key).await;
+            }
             Command::Provider => self.on_provider(key).await,
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
@@ -175,6 +181,14 @@ impl RouterHandle {
 
     async fn request_watchdog_rollback(&self, key: SessionKey) {
         self.emit(Out::WatchdogRollback { key }).await;
+    }
+
+    async fn request_watchdog_restart(&self, key: SessionKey) {
+        self.emit(Out::WatchdogRestart { key }).await;
+    }
+
+    async fn request_watchdog_services(&self, key: SessionKey) {
+        self.emit(Out::WatchdogServices { key }).await;
     }
 
     async fn on_button(&self, key: SessionKey, action: CardAction) {

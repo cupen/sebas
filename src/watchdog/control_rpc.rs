@@ -36,6 +36,7 @@ pub enum RpcControlRequest {
     Update { dev: bool, dry_run: bool },
     Rollback { dry_run: bool },
     RestartCore,
+    ServiceStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +193,9 @@ async fn handle_envelope(
                 RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
             };
             executor.submit_detached(actor, ControlRequest::RestartCore).await.into()
+        }
+        RpcControlRequest::ServiceStatus => {
+            accept_control_request(executor.control().clone(), envelope.actor, ControlRequest::ServiceStatus).await
         }
     }
 }

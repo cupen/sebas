@@ -147,6 +147,38 @@ fn parse_rollback() {
 }
 
 #[test]
+fn parse_upgrade_accepts_bare_dev() {
+    assert_eq!(
+        parse_command("/upgrade dev"),
+        Command::Upgrade {
+            dev: true,
+            dry_run: false,
+        }
+    );
+    assert_eq!(
+        parse_command("/upgrade dev --dry-run"),
+        Command::Upgrade {
+            dev: true,
+            dry_run: true,
+        }
+    );
+}
+
+#[test]
+fn parse_watchdog_service_commands() {
+    assert_eq!(parse_command("/restart"), Command::Restart);
+    assert_eq!(parse_command("/services"), Command::Services);
+    assert!(matches!(
+        parse_command("/restart now"),
+        Command::PassThrough(_)
+    ));
+    assert!(matches!(
+        parse_command("/services all"),
+        Command::PassThrough(_)
+    ));
+}
+
+#[test]
 fn parses_goal_as_passthrough() {
     assert_eq!(
         parse_command("/goal 做某件事"),
