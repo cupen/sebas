@@ -6,8 +6,8 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use serde::Serialize;
 use std::convert::Infallible;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::BroadcastStream;
 
 /// Events that the WebUI can push to connected clients.
 #[derive(Debug, Clone, Serialize)]
@@ -27,14 +27,14 @@ pub enum WebUiEvent {
 /// SSE handler: subscribes to the broadcast channel and streams events.
 pub async fn event_stream(State(state): State<WebUiState>) -> impl IntoResponse {
     let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        match result {
-            Ok(event) => {
-                let data = serde_json::to_string(&event).unwrap_or_default();
-                Some(Ok::<_, Infallible>(Event::default().event("update").data(data)))
-            }
-            Err(_) => None,
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(event) => {
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            Some(Ok::<_, Infallible>(
+                Event::default().event("update").data(data),
+            ))
         }
+        Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

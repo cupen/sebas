@@ -213,7 +213,7 @@ pub async fn api_create_session(
     State(state): State<WebUiState>,
     Form(req): Form<CreateSessionRequest>,
 ) -> impl IntoResponse {
-    let key = state.router.web_spawn(req.prompt).await;
+    let key = state.router.web_spawn(req.prompt, None).await;
     let encoded = encode_session_key(&key);
     state.router.web_set_active(key.clone()).await;
     let _ = state.event_tx.send(WebUiEvent::SessionCreated {

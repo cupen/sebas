@@ -3,11 +3,154 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}sebas dashboard{% endblock %}</title>
+  <title>{% block title %}sebas{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
+  <!-- Highlight.js for code syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="highlight-theme">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- Marked.js for markdown rendering -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
   <script src="/static/htmx.min.js"></script>
+  <script>
+    // Configure marked
+    marked.setOptions({
+      breaks: true,
+      gfm: true,
+      highlight: function(code, lang) {
+        if (lang && hljs.getLanguage(lang)) {
+          try {
+            return hljs.highlight(code, { language: lang }).value;
+          } catch (e) {}
+        }
+        try {
+          return hljs.highlightAuto(code).value;
+        } catch (e) {}
+        return code;
+      }
+    });
+
+    // Render markdown in elements with class "md-content"
+    function renderMarkdown() {
+      document.querySelectorAll('.md-content').forEach(function(el) {
+        if (el.dataset.rendered) return;
+        var raw = el.textContent;
+        try {
+          el.innerHTML = marked.parse(raw);
+        } catch(e) {
+          el.innerHTML = raw;
+        }
+        el.dataset.rendered = '1';
+        // Apply syntax highlighting to code blocks
+        el.querySelectorAll('pre code').forEach(function(block) {
+          hljs.highlightElement(block);
+        });
+        // Add copy buttons to code blocks
+        el.querySelectorAll('pre').forEach(function(pre) {
+          if (pre.parentElement.classList.contains('code-block-wrapper')) return;
+          var wrapper = document.createElement('div');
+          wrapper.className = 'code-block-wrapper';
+          var header = document.createElement('div');
+          header.className = 'code-block-header';
+          var lang = '';
+          var code = pre.querySelector('code');
+          if (code && code.className) {
+            var match = code.className.match(/language-(\w+)/);
+            if (match) lang = match[1];
+          }
+          header.innerHTML = '<span>' + (lang || 'code') + '</span>';
+          var copyBtn = document.createElement('button');
+          copyBtn.className = 'copy-btn';
+          copyBtn.textContent = 'Copy';
+          copyBtn.addEventListener('click', function() {
+            var text = code ? code.textContent : pre.textContent;
+            navigator.clipboard.writeText(text).then(function() {
+              copyBtn.textContent = 'Copied!';
+              copyBtn.classList.add('copied');
+              setTimeout(function() {
+                copyBtn.textContent = 'Copy';
+                copyBtn.classList.remove('copied');
+              }, 2000);
+            });
+          });
+          header.appendChild(copyBtn);
+          pre.parentNode.insertBefore(wrapper, pre);
+          wrapper.appendChild(header);
+          wrapper.appendChild(pre);
+        });
+      });
+    }
+
+    // Auto-scroll timeline to bottom
+    function scrollToBottom(el) {
+      if (!el) el = document.querySelector('.agent-timeline');
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+
+    // Auto-scroll when new content is loaded
+    document.addEventListener('DOMContentLoaded', function() {
+      scrollToBottom();
+      renderMarkdown();
+    });
+
+    // HTMX event handlers
+    document.addEventListener('htmx:afterSwap', function(evt) {
+      renderMarkdown();
+      scrollToBottom();
+    });
+
+    // Keyboard shortcut: Cmd/Ctrl+Enter to send
+    document.addEventListener('keydown', function(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        var target = e.target;
+        if (target && target.matches('.composer-input, .agent-new-input, .msg-input')) {
+          var form = target.closest('form');
+          if (form) {
+            e.preventDefault();
+            // Find submit button or trigger htmx request
+            var submitBtn = form.querySelector('[type="submit"]');
+            if (submitBtn) {
+              submitBtn.click();
+            } else {
+              htmx.trigger(form, 'submit');
+            }
+          }
+        }
+      }
+    });
+
+    // Auto-resize textarea
+    document.addEventListener('input', function(e) {
+      if (e.target.matches('.composer-input, .agent-new-input, .msg-input')) {
+        e.target.style.height = 'auto';
+        e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+      }
+    });
+
+    // Toast notification system
+    function showToast(message, type) {
+      type = type || 'info';
+      var container = document.getElementById('toast-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+      }
+      var toast = document.createElement('div');
+      toast.className = 'toast toast-' + type;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(function() {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(function() { toast.remove(); }, 300);
+      }, 3000);
+    }
+  </script>
 </head>
-<body hx-sse="connect:/events">
+<body>
   <div class="layout">
     <!-- Sidebar -->
     <aside class="sidebar">
@@ -25,6 +168,10 @@
           <a href="/sessions" class="nav-item {{ "active" if page == "sessions" else "" }}" hx-boost="true">
             <span class="nav-icon">💬</span>
             <span class="nav-label">Sessions</span>
+          </a>
+          <a href="/agent" class="nav-item {{ "active" if page == "agent" else "" }}" hx-boost="true">
+            <span class="nav-icon">🤖</span>
+            <span class="nav-label">Agent</span>
           </a>
         </div>
         {# Active-session indicator. Re-rendered on every page load (navigating
@@ -51,7 +198,7 @@
     </aside>
 
     <!-- Main content -->
-    <main class="main-content" hx-sse="swap:update">
+    <main class="main-content">
       {% block content %}{% endblock %}
     </main>
   </div>

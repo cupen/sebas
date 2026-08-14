@@ -1,58 +1,61 @@
 {% extends "base.html" %}
 {% block title %}Gateway - sebas{% endblock %}
 {% block content %}
-<h1>Gateway</h1>
-
-<div class="gateway-status">
-  <div class="gateway-card">
-    <div class="label">Status</div>
-    <div class="value {% if gateway.listen %}ok{% else %}off{% endif %}">
-      {% if gateway.listen %}Running{% else %}Off{% endif %}
-    </div>
-  </div>
-  <div class="gateway-card">
-    <div class="label">Listen</div>
-    <div class="value"><code>{{ gateway.listen if gateway.listen else "—" }}</code></div>
-  </div>
-  <div class="gateway-card">
-    <div class="label">Providers</div>
-    <div class="value">{{ gateway.provider_count }}</div>
-  </div>
-  <div class="gateway-card">
-    <div class="label">Auth</div>
-    <div class="value {% if gateway.has_auth %}ok{% else %}warn{% endif %}">
-      {{ "Enabled" if gateway.has_auth else "Disabled" }}
-    </div>
-  </div>
-  <div class="gateway-card">
-    <div class="label">Debug</div>
-    <div class="value {% if gateway.debug %}warn{% else %}ok{% endif %}">
-      {{ "On" if gateway.debug else "Off" }}
-    </div>
-  </div>
+<div class="page-header">
+  <h1>Gateway</h1>
 </div>
+<div class="page-body">
+  <div class="gateway-status">
+    <div class="gateway-card">
+      <div class="label">Status</div>
+      <div class="value {% if gateway.listen %}ok{% else %}off{% endif %}">
+        {% if gateway.listen %}Running{% else %}Off{% endif %}
+      </div>
+    </div>
+    <div class="gateway-card">
+      <div class="label">Listen</div>
+      <div class="value"><code>{{ gateway.listen if gateway.listen else "—" }}</code></div>
+    </div>
+    <div class="gateway-card">
+      <div class="label">Providers</div>
+      <div class="value">{{ gateway.provider_count }}</div>
+    </div>
+    <div class="gateway-card">
+      <div class="label">Auth</div>
+      <div class="value {% if gateway.has_auth %}ok{% else %}warn{% endif %}">
+        {{ "Enabled" if gateway.has_auth else "Disabled" }}
+      </div>
+    </div>
+    <div class="gateway-card">
+      <div class="label">Debug</div>
+      <div class="value {% if gateway.debug %}warn{% else %}ok{% endif %}">
+        {{ "On" if gateway.debug else "Off" }}
+      </div>
+    </div>
+  </div>
 
-{% if gateway.providers %}
-<h2>Providers</h2>
-<table class="session-table">
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Anthropic Base URL</th>
-      <th>OpenAI Base URL</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for p in gateway.providers %}
-    <tr>
-      <td><strong>{{ p.name }}</strong></td>
-      <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
-      <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="empty-state">No providers configured.</p>
-{% endif %}
+  {% if gateway.providers %}
+  <h2>Providers</h2>
+  <table class="session-table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Anthropic Base URL</th>
+        <th>OpenAI Base URL</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in gateway.providers %}
+      <tr>
+        <td><strong>{{ p.name }}</strong></td>
+        <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
+        <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No providers configured.</p>
+  {% endif %}
+</div>
 {% endblock %}

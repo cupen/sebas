@@ -1,32 +1,35 @@
 {% extends "base.html" %}
 {% block title %}About - sebas{% endblock %}
 {% block content %}
-<h1>About</h1>
-
-<div class="about-section">
-  <div class="about-row">
-    <span class="about-label">Version</span>
-    <span class="about-value">{{ version }}</span>
-  </div>
-  <div class="about-row">
-    <span class="about-label">Rust Version</span>
-    <span class="about-value">{{ rustc_version }}</span>
-  </div>
-  <div class="about-row">
-    <span class="about-label">Uptime</span>
-    <span class="about-value">{{ uptime }}</span>
-  </div>
-  <div class="about-row">
-    <span class="about-label">Gateway Listen</span>
-    <span class="about-value"><code>{{ gateway_listen if gateway_listen else "Not running" }}</code></span>
-  </div>
-  <div class="about-row">
-    <span class="about-label">Providers</span>
-    <span class="about-value">{{ provider_count }}</span>
-  </div>
+<div class="page-header">
+  <h1>About</h1>
 </div>
+<div class="page-body">
+  <div class="about-section">
+    <div class="about-row">
+      <span class="about-label">Version</span>
+      <span class="about-value">{{ version }}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">Rust Version</span>
+      <span class="about-value">{{ rustc_version }}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">Uptime</span>
+      <span class="about-value">{{ uptime }}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">Gateway Listen</span>
+      <span class="about-value"><code>{{ gateway_listen if gateway_listen else "Not running" }}</code></span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">Providers</span>
+      <span class="about-value">{{ provider_count }}</span>
+    </div>
+  </div>
 
-<p class="empty-state" style="margin-top: 24px;">
-  sebas — Agent bridge to Feishu, put AI assistant in your pocket.
-</p>
+  <p class="empty-state" style="margin-top: 24px;">
+    sebas — Agent bridge to Feishu, put AI assistant in your pocket.
+  </p>
+</div>
 {% endblock %}

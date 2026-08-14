@@ -1,48 +1,51 @@
 {% extends "base.html" %}
 {% block title %}Settings - sebas{% endblock %}
 {% block content %}
-<h1>Settings</h1>
+<div class="page-header">
+  <h1>Settings</h1>
+</div>
+<div class="page-body">
+  <h2>Card Config</h2>
+  <table class="settings-table">
+    <tbody>
+      <tr><td>Theme Color</td><td><code>{{ card_config.theme_color }}</code></td></tr>
+      <tr><td>Fold Long Output</td><td>{{ card_config.fold_long_output }}</td></tr>
+      <tr><td>Thinking Display</td><td>{{ card_config.thinking_display }}</td></tr>
+      <tr><td>Max User Text Chars</td><td>{{ card_config.max_user_text_chars }}</td></tr>
+      <tr><td>Max Tool Output Chars</td><td>{{ card_config.max_tool_output_chars }}</td></tr>
+    </tbody>
+  </table>
 
-<h2>Card Config</h2>
-<table class="settings-table">
-  <tbody>
-    <tr><td>Theme Color</td><td><code>{{ card_config.theme_color }}</code></td></tr>
-    <tr><td>Fold Long Output</td><td>{{ card_config.fold_long_output }}</td></tr>
-    <tr><td>Thinking Display</td><td>{{ card_config.thinking_display }}</td></tr>
-    <tr><td>Max User Text Chars</td><td>{{ card_config.max_user_text_chars }}</td></tr>
-    <tr><td>Max Tool Output Chars</td><td>{{ card_config.max_tool_output_chars }}</td></tr>
-  </tbody>
-</table>
+  <h2>Gateway</h2>
+  <table class="settings-table">
+    <tbody>
+      <tr><td>Listen</td><td><code>{{ gateway.listen if gateway.listen else "N/A" }}</code></td></tr>
+      <tr><td>Providers</td><td>{{ gateway.provider_count }}</td></tr>
+      <tr><td>Debug Mode</td><td>{{ gateway.debug }}</td></tr>
+      <tr><td>Auth Enabled</td><td>{{ gateway.has_auth }}</td></tr>
+    </tbody>
+  </table>
 
-<h2>Gateway</h2>
-<table class="settings-table">
-  <tbody>
-    <tr><td>Listen</td><td><code>{{ gateway.listen if gateway.listen else "N/A" }}</code></td></tr>
-    <tr><td>Providers</td><td>{{ gateway.provider_count }}</td></tr>
-    <tr><td>Debug Mode</td><td>{{ gateway.debug }}</td></tr>
-    <tr><td>Auth Enabled</td><td>{{ gateway.has_auth }}</td></tr>
-  </tbody>
-</table>
-
-{% if gateway.providers %}
-<h3>Provider Details</h3>
-<table class="session-table">
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Anthropic Base URL</th>
-      <th>OpenAI Base URL</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for p in gateway.providers %}
-    <tr>
-      <td><strong>{{ p.name }}</strong></td>
-      <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
-      <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+  {% if gateway.providers %}
+  <h3>Provider Details</h3>
+  <table class="session-table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Anthropic Base URL</th>
+        <th>OpenAI Base URL</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in gateway.providers %}
+      <tr>
+        <td><strong>{{ p.name }}</strong></td>
+        <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
+        <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
 {% endblock %}
