@@ -8,13 +8,15 @@ use crate::commands::{Command, HELP_TEXT, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
-    CardConfig, ThinkingDisplay, render_dead_session_card, render_expired_permission_card,
+    CardConfig, CardElement, DivText, ThinkingDisplay, phase_visual, render_accumulated_card,
+    render_dead_session_card, render_expired_permission_card,
     render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 impl RouterHandle {
     pub async fn dispatch(&self, evt: FeishuIn) {
@@ -157,7 +159,19 @@ impl RouterHandle {
                     }
                 }
             }
-            Command::Compact | Command::Cost | Command::Cancel | Command::Status => {
+            Command::Compact => {
+                let sid = self
+                    .map
+                    .get(&key)
+                    .await
+                    .and_then(|m| m.session_id().map(str::to_owned));
+                if let Some(sid) = sid {
+                    self.forward_compact(&sid, key.clone()).await;
+                } else {
+                    self.emit(Out::HelpText { key }).await;
+                }
+            }
+            Command::Cost | Command::Cancel | Command::Status => {
                 let sid = self
                     .map
                     .get(&key)
@@ -427,10 +441,6 @@ impl RouterHandle {
 
     async fn forward_to_session(&self, session_id: &str, text: String) {
         let cmd = match parse_command(&text) {
-            Command::Compact => AcpCommand::ContinueSession {
-                session_id: session_id.into(),
-                prompt: "/compact".into(),
-            },
             Command::Cost => AcpCommand::ContinueSession {
                 session_id: session_id.into(),
                 prompt: "/cost".into(),
@@ -443,6 +453,83 @@ impl RouterHandle {
         self.emit(Out::SendAcp {
             session_id: session_id.into(),
             cmd,
+        })
+        .await;
+    }
+
+    /// `/compact` 命令：发送进度卡片，每 1s×5 次 → 3s 间隔更新，完成后自动停止。
+    async fn forward_compact(&self, session_id: &str, key: SessionKey) {
+        use crate::card_state::phase::SEED;
+
+        let prompt = "⚙️ 压缩上下文...";
+        self.card_states
+            .seed(session_id.to_string(), prompt.into())
+            .await;
+
+        // Send initial card
+        let seed_emoji = phase_visual(SEED);
+        let theme_color = self.card_cfg.read().await.theme_color.clone();
+        let card = render_accumulated_card(prompt, session_id, seed_emoji, &[], &theme_color);
+        self.emit(Out::SendCard {
+            key: key.clone(),
+            card: serde_json::to_value(&card).unwrap(),
+            msg_id: Some(session_id.to_string()),
+            perm_request_id: None,
+            perm_meta: None,
+            root_id: None,
+        })
+        .await;
+
+        // Spawn background progress task
+        let handle = self.clone();
+        let sid = session_id.to_string();
+        tokio::spawn(async move {
+            // 1s × 5, then 3s for remaining iterations
+            for i in 0..30 {
+                let secs = if i < 5 { 1u64 } else { 3 };
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+
+                // Check if done or card state dropped
+                let emoji = handle.card_states.status_emoji(&sid).await;
+                let done = match emoji.as_deref() {
+                    Some(e) => {
+                        e == crate::card_state::phase::DONE
+                            || e == crate::card_state::phase::FAILED
+                    }
+                    None => true,
+                };
+                if done {
+                    break;
+                }
+
+                // Update body with elapsed time
+                handle
+                    .card_states
+                    .apply(&sid, |st| {
+                        let elapsed = st.started_at.elapsed();
+                        let secs = elapsed.as_secs();
+                        st.body = vec![CardElement::Div {
+                            text: DivText {
+                                tag: "plain_text".into(),
+                                content: format!("⏱ 正在压缩... {secs}s"),
+                                text_size: Some("standard".into()),
+                                text_color: None,
+                            },
+                        }];
+                    })
+                    .await;
+
+                handle.flush_card(&sid).await;
+            }
+        });
+
+        // Send compact command to the CLI
+        self.emit(Out::SendAcp {
+            session_id: session_id.to_string(),
+            cmd: AcpCommand::ContinueSession {
+                session_id: session_id.to_string(),
+                prompt: "/compact".into(),
+            },
         })
         .await;
     }

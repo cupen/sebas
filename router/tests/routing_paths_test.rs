@@ -143,6 +143,15 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
                 reply_to: None,
             })
             .await;
+
+        if text == "/compact" {
+            // /compact now sends a progress card first, then the command
+            match next_out(&mut out_rx).await {
+                Out::SendCard { .. } => {} // progress card
+                other => panic!("expected SendCard for /compact, got {other:?}"),
+            }
+        }
+
         match next_out(&mut out_rx).await {
             Out::SendAcp {
                 cmd: AcpCommand::ContinueSession { session_id, prompt },
