@@ -11,13 +11,13 @@ mod maps;
 
 pub use maps::{MsgIdMap, PermCardEntry, PermCardMap, SessionAllowlist, tool_signature};
 
-use crate::card_events::apply_event_to_card;
+use crate::card_events::{apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title};
 use crate::card_state::CardState;
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::cards::{CardConfig, phase_visual, render_accumulated_card};
+use feishu::cards::{CardConfig, CardElement, DivText, phase_visual, render_accumulated_card};
 use feishu::events::SessionKey;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -88,13 +88,24 @@ pub enum Out {
         key: SessionKey,
         content: String,
     },
+    WatchdogUpgrade {
+        key: SessionKey,
+        dev: bool,
+        dry_run: bool,
+    },
+    WatchdogRollback {
+        key: SessionKey,
+    },
     /// Spawn a session without sending a root card to Feishu (web-originated
     /// sessions). The dispatcher creates the ACP session and wires the pump,
     /// but skips the Feishu send_card / react operations. Card content is
     /// still accumulated in CardStateMap and readable via the WebUI.
+    /// `project_dir` specifies the working directory for the Claude Code
+    /// process (if None, falls back to the config default).
     WebSpawn {
         key: SessionKey,
         prompt: String,
+        project_dir: Option<String>,
     },
 }
 
@@ -354,11 +365,16 @@ impl RouterHandle {
             return;
         };
         let theme_color = self.card_cfg.read().await.theme_color.clone();
+        // 更新父面板标题：添加已折叠项数和经过时间（"🤔 折腾中 · 3项 · 45s"）。
+        let elapsed = st.started_at.elapsed();
+        let count = count_folded_items(&st.body);
+        let mut body = st.body.clone();
+        update_parent_title(&mut body, count, &elapsed);
         let card = render_accumulated_card(
             &st.user_prompt,
             session_id,
             phase_visual(&st.status_emoji),
-            &st.body,
+            &body,
             &theme_color,
         );
         self.emit(Out::UpdateCard {
@@ -366,6 +382,83 @@ impl RouterHandle {
             card: serde_json::to_value(&card).expect("accumulated card serializes"),
         })
         .await;
+    }
+
+    /// 检查当前卡是否接近上限，需要换卡。
+    pub async fn card_needs_rotation(&self, session_id: &str) -> bool {
+        let Some(st) = self.card_states.snapshot(session_id).await else {
+            return false;
+        };
+        card_needs_rotation(&st.body)
+    }
+
+    /// 换卡：冻结当前卡（UpdateCard），发一条新卡（SendCard），重置 body。
+    /// 新卡以旧卡的 message_id 作为 root_id，在飞书里呈现为回复关系。
+    /// 返回 true 表示成功换卡；false 表示无需换卡或无法换卡。
+    pub async fn rotate_card(&self, session_id: &str) -> bool {
+        let Some(st) = self.card_states.snapshot(session_id).await else {
+            return false;
+        };
+        if !card_needs_rotation(&st.body) {
+            return false;
+        }
+        let Some(key) = self.map.lookup_key_by_session(session_id).await else {
+            return false;
+        };
+        let theme_color = self.card_cfg.read().await.theme_color.clone();
+
+        // 1. 发射最终 UpdateCard（冻结当前卡，保留全部内容）
+        let elapsed = st.started_at.elapsed();
+        let count = count_folded_items(&st.body);
+        let mut body = st.body.clone();
+        update_parent_title(&mut body, count, &elapsed);
+        let card = render_accumulated_card(
+            &st.user_prompt,
+            session_id,
+            phase_visual(&st.status_emoji),
+            &body,
+            &theme_color,
+        );
+        self.emit(Out::UpdateCard {
+            session_id: session_id.to_string(),
+            card: serde_json::to_value(&card).expect("accumulated card serializes"),
+        })
+        .await;
+
+        // 2. 构造"接上条"提示，重置 body
+        let continuation_note = CardElement::Div {
+            text: DivText {
+                tag: "plain_text".into(),
+                content: "📎 接上条，内容继续".into(),
+                text_size: Some("notation".into()),
+                text_color: Some("grey".into()),
+            },
+        };
+        let fresh_body = vec![continuation_note.clone()];
+        self.card_states
+            .reset_body(session_id, vec![continuation_note])
+            .await;
+
+        // 3. 发射新卡（SendCard），附带旧卡 message_id 作为 root_id 实现回复关系
+        let old_msg_id = self.msgid.get(session_id).await;
+        let new_card = render_accumulated_card(
+            &st.user_prompt,
+            session_id,
+            phase_visual(&st.status_emoji),
+            &fresh_body,
+            &theme_color,
+        );
+        self.emit(Out::SendCard {
+            key,
+            card: serde_json::to_value(&new_card).expect("new card serializes"),
+            msg_id: Some(session_id.to_string()),
+            perm_request_id: None,
+            perm_meta: None,
+            root_id: old_msg_id,
+        })
+        .await;
+
+        true
     }
 
     /// drop_card：session 死亡/通道关时清 CardState（防无界增长）。spec §4.2。
@@ -412,11 +505,20 @@ impl RouterHandle {
     /// Start a new session from the WebUI (no Feishu card operations).
     /// Uses `Out::WebSpawn` which the dispatcher handles without sending
     /// cards to Feishu. Returns the SessionKey for the new session.
-    pub async fn web_spawn(&self, prompt: String) -> SessionKey {
+    /// `project_dir` specifies the working directory for Claude Code.
+    pub async fn web_spawn(&self, prompt: String, project_dir: Option<String>) -> SessionKey {
         let key = SessionKey::web_key();
         match self.map.begin_spawn(key.clone()).await {
             Ok(_) => {
-                self.emit(Out::WebSpawn { key: key.clone(), prompt }).await;
+                // Record project_dir on the mapping before emitting, so the
+                // WebUI can display it even before the session is active.
+                self.map.set_project_dir(&key, project_dir.clone()).await;
+                self.emit(Out::WebSpawn {
+                    key: key.clone(),
+                    prompt,
+                    project_dir,
+                })
+                .await;
                 key
             }
             Err(e) => {
@@ -442,11 +544,20 @@ impl RouterHandle {
                 .await;
             }
             Ok(crate::state::TextRoute::SpawnNew) => {
-                self.emit(Out::WebSpawn { key, prompt: message }).await;
+                self.emit(Out::WebSpawn {
+                    key,
+                    prompt: message,
+                    project_dir: None,
+                })
+                .await;
             }
             Ok(crate::state::TextRoute::Resume(old_sid)) => {
-                self.emit(Out::SpawnResume { key, session_id: old_sid, prompt: message })
-                    .await;
+                self.emit(Out::SpawnResume {
+                    key,
+                    session_id: old_sid,
+                    prompt: message,
+                })
+                .await;
             }
             Ok(crate::state::TextRoute::Enqueued) => {
                 tracing::debug!("web message queued (session already spawning)");

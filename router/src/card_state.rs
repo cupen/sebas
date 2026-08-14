@@ -4,6 +4,7 @@
 use feishu::cards::CardElement;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 /// Phase token: string IS the Feishu `emoji_type` (e.g. `"Typing"`, `"OnIt"`,
@@ -21,6 +22,9 @@ pub mod phase {
 pub struct CardState {
     pub user_prompt: String,
     pub status_emoji: String,
+    /// Session start timestamp — used to compute elapsed time for the
+    /// parent panel title ("🤔 折腾中 · 3项 · 45s").
+    pub started_at: Instant,
     pub body: Vec<CardElement>,
 }
 
@@ -30,6 +34,7 @@ impl CardState {
         Self {
             user_prompt: user_prompt.into(),
             status_emoji: phase::SEED.into(),
+            started_at: Instant::now(),
             body: Vec::new(),
         }
     }
@@ -39,6 +44,7 @@ impl CardState {
         Self {
             user_prompt: String::new(),
             status_emoji: phase::SEED.into(),
+            started_at: Instant::now(),
             body: Vec::new(),
         }
     }
@@ -92,5 +98,14 @@ impl CardStateMap {
     /// Return a snapshot of all card states. Used by the WebUI.
     pub async fn snapshot_all(&self) -> HashMap<String, CardState> {
         self.inner.read().await.clone()
+    }
+
+    /// 替换 session 的 body，重置 started_at。用于卡片换卡（rotate_card）后清空 body。
+    pub async fn reset_body(&self, session_id: &str, elements: Vec<CardElement>) {
+        let mut g = self.inner.write().await;
+        if let Some(st) = g.get_mut(session_id) {
+            st.body = elements;
+            st.started_at = Instant::now();
+        }
     }
 }

@@ -68,7 +68,9 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             if cfg.fold_long_output {
                 if let Some(panel) = last_tool_panel_mut(body, tool_name) {
                     panel.header.title.content = format!("✓ {tool_name}");
-                    panel.elements.extend(tool_result_elements(tool_name, result, cfg));
+                    panel
+                        .elements
+                        .extend(tool_result_elements(tool_name, result, cfg));
                     return;
                 }
                 // fold 模式下没有可归属的面板（异常时序）：静默，不输出结果。
@@ -226,11 +228,13 @@ fn last_tool_panel_mut<'a>(
             CardElement::CollapsiblePanel(p) => p,
             _ => return None,
         };
-        return parent.elements.iter_mut().rev().find_map(|el| {
-            match el {
-                CardElement::CollapsiblePanel(panel) if panel.header.title.content.ends_with(&suffix) => Some(panel),
-                _ => None,
+        return parent.elements.iter_mut().rev().find_map(|el| match el {
+            CardElement::CollapsiblePanel(panel)
+                if panel.header.title.content.ends_with(&suffix) =>
+            {
+                Some(panel)
             }
+            _ => None,
         });
     }
     // 无父面板：直接在 body 末尾搜索（fold_long_output=false 或单工具早期兼容）
@@ -304,9 +308,8 @@ fn mark_parent_completed(body: &mut Vec<CardElement>) {
 
 /// 在 body 中查找父级折叠面板的索引。
 fn find_tools_parent_index(body: &[CardElement]) -> Option<usize> {
-    body.iter().position(|el| {
-        matches!(el, CardElement::CollapsiblePanel(panel) if is_tools_parent(panel))
-    })
+    body.iter()
+        .position(|el| matches!(el, CardElement::CollapsiblePanel(panel) if is_tools_parent(panel)))
 }
 
 /// ThinkingDelta 折叠面板的标准标题。所有 thinking 面板共用此常量，
@@ -343,13 +346,15 @@ fn append_thinking_delta(body: &mut Vec<CardElement>, delta: &str, fold_long_out
                 return;
             }
             // 新建 thinking 面板收进父面板
-            parent.elements.push(CardElement::CollapsiblePanel(CollapsiblePanel {
-                expanded: false,
-                header: thinking_panel_header(),
-                elements: vec![CardElement::Markdown {
-                    content: delta.to_string(),
-                }],
-            }));
+            parent
+                .elements
+                .push(CardElement::CollapsiblePanel(CollapsiblePanel {
+                    expanded: false,
+                    header: thinking_panel_header(),
+                    elements: vec![CardElement::Markdown {
+                        content: delta.to_string(),
+                    }],
+                }));
             return;
         }
     }
@@ -391,7 +396,13 @@ const TOOL_RESULT_HARD_LIMIT_CHARS: usize = 10240;
 /// 飞书卡片 JSON 2.0 限制：每个容器（collapsible_panel/div 等）最多 100 个元素。
 /// 根 body 和所有嵌套容器的递归元素总数超过此上限会导致卡片渲染失败。
 /// 留 20 个余量，到 80 就开始丢旧。
-const MAX_ELEMENTS: usize = 80;
+///
+/// 也用于 `card_needs_rotation` 的换卡阈值判断（80% ≈ 64 元素）。
+pub(crate) const MAX_ELEMENTS: usize = 80;
+
+/// 总量兜底常量（spec §7）：body 累积字符上限。
+/// 也用于 `card_needs_rotation` 的换卡阈值判断（80% ≈ 19200 字符）。
+pub(crate) const TOTAL_BUDGET: usize = 24000;
 
 /// 单个工具面板内最多保留的进度通知数。进度通知过多会撑爆容器的 100 元素上限。
 const MAX_PROGRESS_NOTES: usize = 5;
@@ -409,7 +420,6 @@ fn cap_chars(s: &str, limit: usize) -> String {
 /// 时丢最旧元素；最旧是 Hr 则连后一个一起丢。CollapsiblePanel 优先从内部丢，
 /// 避免整个面板被一次性丢弃。
 fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
-    const TOTAL_BUDGET: usize = 24000;
     while total_chars(body) > TOTAL_BUDGET || total_elements(body) > MAX_ELEMENTS {
         if body.is_empty() {
             break;
@@ -418,7 +428,7 @@ fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {
     }
 }
 
-fn total_chars(body: &[CardElement]) -> usize {
+pub(crate) fn total_chars(body: &[CardElement]) -> usize {
     body.iter().map(element_chars).sum()
 }
 
@@ -472,4 +482,59 @@ fn drop_oldest_element(body: &mut Vec<CardElement>) {
     if drop_two && !body.is_empty() {
         body.remove(0);
     }
+}
+
+/// 统计父折叠面板内已折叠的工具/思考面板数量（CollapsiblePanel 子元素数）。
+pub fn count_folded_items(body: &[CardElement]) -> usize {
+    let Some(idx) = find_tools_parent_index(body) else {
+        return 0;
+    };
+    let CardElement::CollapsiblePanel(panel) = &body[idx] else {
+        return 0;
+    };
+    panel
+        .elements
+        .iter()
+        .filter(|el| matches!(el, CardElement::CollapsiblePanel(_)))
+        .count()
+}
+
+/// 格式化经过时间为人类可读字符串。
+/// 小于 60s → "45s"，超过 1 分钟 → "1m 23s"。
+pub fn format_elapsed(d: &std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+/// 更新父折叠面板标题，添加项数和经过时间。
+/// 标题格式：`"🤔 折腾中 · 3项 · 45s"` → Finished 后 `"✅ 已完成 · 5项 · 2m 30s"`。
+pub fn update_parent_title(
+    body: &mut Vec<CardElement>,
+    count: usize,
+    elapsed: &std::time::Duration,
+) {
+    let Some(idx) = find_tools_parent_index(body) else {
+        return;
+    };
+    let CardElement::CollapsiblePanel(panel) = &mut body[idx] else {
+        return;
+    };
+    let base = if panel.header.title.content == TOOLS_PARENT_DONE_TITLE {
+        TOOLS_PARENT_DONE_TITLE
+    } else {
+        TOOLS_PARENT_TITLE
+    };
+    panel.header.title.content = format!("{base} · {count}项 · {}", format_elapsed(elapsed));
+}
+
+/// 检查 body 是否接近上限，需要换卡。
+/// 阈值：TOTAL_BUDGET 的 80%（19200 字符）或 MAX_ELEMENTS 的 80%（64 元素）。
+pub fn card_needs_rotation(body: &[CardElement]) -> bool {
+    const ROTATION_CHAR_THRESHOLD: usize = (TOTAL_BUDGET as f64 * 0.8) as usize;
+    const ROTATION_ELEMENT_THRESHOLD: usize = (MAX_ELEMENTS as f64 * 0.8) as usize;
+    total_chars(body) > ROTATION_CHAR_THRESHOLD || total_elements(body) > ROTATION_ELEMENT_THRESHOLD
 }

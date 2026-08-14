@@ -299,7 +299,15 @@ pub fn spawn_acp_pump(
                 _ = ticker.tick() => {
                     if dirty {
                         dirty = false;
-                        router.flush_card(&session_id).await;
+                        // 检查是否需要换卡（接近 80% 上限时自动发新消息）
+                        if router.card_needs_rotation(&session_id).await {
+                            router.rotate_card(&session_id).await;
+                            // rotate_card 已发射最终 UpdateCard 和新 SendCard，
+                            // 跳过本次 flush 避免与新卡 race。
+                            // 下个 tick（150ms 后）会正常 flush 新卡。
+                        } else {
+                            router.flush_card(&session_id).await;
+                        }
                     }
                     if let Some(emoji) = pending_react.take() {
                         router.emit_reaction(&session_id, emoji).await;
