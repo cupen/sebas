@@ -103,3 +103,77 @@ fn parse_settings_unknown_key_value_passes_through_value() {
         Command::Settings(Some("foo".into()), Some("bar baz".into()))
     );
 }
+
+#[test]
+fn parse_upgrade_variants() {
+    assert_eq!(
+        parse_command("/upgrade"),
+        Command::Upgrade {
+            dev: false,
+            dry_run: false
+        }
+    );
+    assert_eq!(
+        parse_command("/upgrade --dry-run"),
+        Command::Upgrade {
+            dev: false,
+            dry_run: true
+        }
+    );
+    assert_eq!(
+        parse_command("/upgrade --dev --dry-run"),
+        Command::Upgrade {
+            dev: true,
+            dry_run: true
+        }
+    );
+}
+
+#[test]
+fn parse_upgrade_rejects_unknown_flags() {
+    assert!(matches!(
+        parse_command("/upgrade --force"),
+        Command::PassThrough(_)
+    ));
+}
+
+#[test]
+fn parse_rollback() {
+    assert_eq!(parse_command("/rollback"), Command::Rollback);
+    assert!(matches!(
+        parse_command("/rollback now"),
+        Command::PassThrough(_)
+    ));
+}
+
+#[test]
+fn parses_goal_as_passthrough() {
+    assert_eq!(
+        parse_command("/goal 做某件事"),
+        Command::PassThrough("/goal 做某件事".into())
+    );
+}
+
+#[test]
+fn parses_model_as_passthrough() {
+    assert_eq!(
+        parse_command("/model abc"),
+        Command::PassThrough("/model abc".into())
+    );
+}
+
+#[test]
+fn parses_model_alone_as_passthrough() {
+    assert_eq!(
+        parse_command("/model"),
+        Command::PassThrough("/model".into())
+    );
+}
+
+#[test]
+fn parses_goal_alone_as_passthrough() {
+    assert_eq!(
+        parse_command("/goal"),
+        Command::PassThrough("/goal".into())
+    );
+}
