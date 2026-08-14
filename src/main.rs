@@ -3,6 +3,7 @@ mod cli;
 use clap::Parser;
 use cli::{
     Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, InstallServiceArgs, RecordArgs, ReplayArgs,
+    WebUiArgs,
 };
 use std::path::PathBuf;
 
@@ -39,6 +40,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Gateway(args) => {
             if let Err(e) = sebas::gateway_cmd::run(args.into()).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::WebUi(args) => {
+            if let Err(e) = sebas::webui_cmd::run(args.into()).await {
                 eprintln!("error: {e:?}");
                 std::process::exit(1);
             }
@@ -108,29 +116,34 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
         .socket
         .map(PathBuf::from)
         .unwrap_or_else(default_socket_path);
+    let secret = args.secret.unwrap_or_default();
     let uid = current_uid();
     let envelope = match args.cmd {
         ControlCmd::Status => ControlEnvelope {
             version: 1,
             request_id: "cli_status".into(),
+            secret: secret.clone(),
             actor: RpcActor::Cli { uid },
             request: RpcControlRequest::Status,
         },
         ControlCmd::Events { since } => ControlEnvelope {
             version: 1,
             request_id: "cli_events".into(),
+            secret: secret.clone(),
             actor: RpcActor::Cli { uid },
             request: RpcControlRequest::EventsSince { seq: since },
         },
         ControlCmd::Update { dev, dry_run } => ControlEnvelope {
             version: 1,
             request_id: "cli_update".into(),
+            secret: secret.clone(),
             actor: RpcActor::Cli { uid },
             request: RpcControlRequest::Update { dev, dry_run },
         },
         ControlCmd::Rollback { dry_run } => ControlEnvelope {
             version: 1,
             request_id: "cli_rollback".into(),
+            secret: secret.clone(),
             actor: RpcActor::Cli { uid },
             request: RpcControlRequest::Rollback { dry_run },
         },
@@ -206,6 +219,12 @@ impl From<GatewayArgs> for sebas::gateway_cmd::GatewayArgs {
             config: a.config,
             debug: a.debug,
         }
+    }
+}
+
+impl From<WebUiArgs> for sebas::webui_cmd::WebUiArgs {
+    fn from(a: WebUiArgs) -> Self {
+        Self::new(a.config)
     }
 }
 
@@ -351,5 +370,35 @@ mod tests {
     #[test]
     fn update_rollback_conflicts_with_dev() {
         assert!(Cli::try_parse_from(["sebas", "update", "--rollback", "--dev"]).is_err());
+    }
+
+    #[test]
+    fn webui_subcommand_accepts_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "webui", "--config", "x.toml"])
+            .expect("`sebas webui --config <path>` must parse");
+        let Cmd::WebUi(args) = cli.cmd else {
+            panic!("expected WebUi subcommand");
+        };
+        assert_eq!(args.config, "x.toml");
+    }
+
+    #[test]
+    fn webui_subcommand_short_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "webui", "-c", "x.toml"])
+            .expect("`sebas webui -c <path>` must parse");
+        let Cmd::WebUi(args) = cli.cmd else {
+            panic!("expected WebUi subcommand");
+        };
+        assert_eq!(args.config, "x.toml");
+    }
+
+    #[test]
+    fn webui_subcommand_defaults_to_cwd_config_toml() {
+        let cli = Cli::try_parse_from(["sebas", "webui"])
+            .expect("bare `sebas webui` must parse");
+        let Cmd::WebUi(args) = cli.cmd else {
+            panic!("expected WebUi subcommand");
+        };
+        assert_eq!(args.config, "./config.toml");
     }
 }

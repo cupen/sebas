@@ -1,8 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::SystemTime;
 
-const DEFAULT_TIMELINE_CAPACITY: usize = 200;
+// Re-export event types extracted to events.rs for backward compatibility.
+pub use crate::watchdog::events::{
+    ControlEvent, ControlEventKind, ControlEventTimeline, ErrorCode, OperationStatus,
+    RedactedDiagnostic,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlRequest {
@@ -74,30 +77,6 @@ pub enum Actor {
     System,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationStatus {
-    PendingConfirmation,
-    Accepted,
-    Running,
-    Succeeded,
-    Failed,
-    Canceled,
-    TimedOut,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCode {
-    Busy,
-    Unauthorized,
-    ConfirmationRequired,
-    ConfirmationExpired,
-    InvalidTarget,
-    Timeout,
-    UpdaterFailed,
-    ServiceUnavailable,
-    Internal,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlResponse {
     Accepted {
@@ -110,79 +89,6 @@ pub enum ControlResponse {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ControlEventKind {
-    Started,
-    Progress,
-    Done,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub struct ControlEvent {
-    pub seq: u64,
-    pub timestamp: SystemTime,
-    pub operation_id: String,
-    pub kind: ControlEventKind,
-    pub public_message: String,
-}
-
-#[derive(Debug)]
-pub struct ControlEventTimeline {
-    capacity: usize,
-    next_seq: u64,
-    events: VecDeque<ControlEvent>,
-}
-
-impl Default for ControlEventTimeline {
-    fn default() -> Self {
-        Self::new(DEFAULT_TIMELINE_CAPACITY)
-    }
-}
-
-impl ControlEventTimeline {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            next_seq: 1,
-            events: VecDeque::new(),
-        }
-    }
-
-    pub fn push(
-        &mut self,
-        operation_id: impl Into<String>,
-        kind: ControlEventKind,
-        public_message: impl Into<String>,
-    ) -> ControlEvent {
-        let event = ControlEvent {
-            seq: self.next_seq,
-            timestamp: SystemTime::now(),
-            operation_id: operation_id.into(),
-            kind,
-            public_message: public_message.into(),
-        };
-        self.next_seq += 1;
-        self.events.push_back(event.clone());
-        while self.events.len() > self.capacity {
-            self.events.pop_front();
-        }
-        event
-    }
-
-    pub fn since(&self, seq: u64) -> Vec<ControlEvent> {
-        self.events
-            .iter()
-            .filter(|event| event.seq > seq)
-            .cloned()
-            .collect()
-    }
-
-    pub fn all(&self) -> Vec<ControlEvent> {
-        self.events.iter().cloned().collect()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct OperationRecord {
     pub operation_id: String,
@@ -191,12 +97,13 @@ pub struct OperationRecord {
     pub status: OperationStatus,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ControlService {
     timeline: ControlEventTimeline,
     operations: HashMap<String, OperationRecord>,
     running_exclusive: Option<String>,
     next_operation: u64,
+    idempotent_ops: HashMap<String, String>,
 }
 
 impl ControlService {
@@ -206,7 +113,30 @@ impl ControlService {
             operations: HashMap::new(),
             running_exclusive: None,
             next_operation: 1,
+            idempotent_ops: HashMap::new(),
         }
+    }
+
+    pub fn accept_idempotent(
+        &mut self,
+        idempotency_key: &str,
+        actor: Actor,
+        request: ControlRequest,
+    ) -> ControlResponse {
+        if let Some(op_id) = self.idempotent_ops.get(idempotency_key) {
+            if let Some(record) = self.operations.get(op_id) {
+                return ControlResponse::Accepted {
+                    operation_id: op_id.clone(),
+                    status: record.status,
+                };
+            }
+        }
+        let response = self.accept(actor, request);
+        if let ControlResponse::Accepted { ref operation_id, .. } = response {
+            self.idempotent_ops
+                .insert(idempotency_key.to_string(), operation_id.clone());
+        }
+        response
     }
 
     pub fn accept(&mut self, actor: Actor, request: ControlRequest) -> ControlResponse {
@@ -261,6 +191,22 @@ impl ControlService {
             .push(operation_id, ControlEventKind::Error, message);
     }
 
+    /// Mark an operation as canceled by a user or external signal.
+    pub fn mark_canceled(&mut self, operation_id: &str, message: impl Into<String>) {
+        self.set_status(operation_id, OperationStatus::Canceled);
+        self.finish_exclusive(operation_id);
+        self.timeline
+            .push(operation_id, ControlEventKind::Canceled, message);
+    }
+
+    /// Mark an operation as timed out (exceeded its deadline).
+    pub fn mark_timed_out(&mut self, operation_id: &str, message: impl Into<String>) {
+        self.set_status(operation_id, OperationStatus::TimedOut);
+        self.finish_exclusive(operation_id);
+        self.timeline
+            .push(operation_id, ControlEventKind::TimedOut, message);
+    }
+
     pub fn events_since(&self, seq: u64) -> Vec<ControlEvent> {
         self.timeline.since(seq)
     }
@@ -288,6 +234,12 @@ impl ControlService {
     }
 }
 
+impl Default for ControlService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn is_exclusive(request: &ControlRequest) -> bool {
     matches!(
         request,
@@ -302,19 +254,6 @@ fn is_exclusive(request: &ControlRequest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn timeline_evicts_old_events() {
-        let mut timeline = ControlEventTimeline::new(2);
-        timeline.push("op_1", ControlEventKind::Progress, "one");
-        timeline.push("op_1", ControlEventKind::Progress, "two");
-        timeline.push("op_1", ControlEventKind::Done, "three");
-
-        let events = timeline.all();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].public_message, "two");
-        assert_eq!(events[1].public_message, "three");
-    }
 
     #[test]
     fn exclusive_operations_return_busy_until_finished() {

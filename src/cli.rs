@@ -22,6 +22,10 @@ pub enum Cmd {
     /// Run the LLM provider gateway (Anthropic/OpenAI dual-protocol
     /// transparent proxy). See docs/superpowers/specs/2026-08-07-gateway-design.md.
     Gateway(GatewayArgs),
+    /// Start the standalone WebUI dashboard server.
+    /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
+    #[command(name = "webui")]
+    WebUi(WebUiArgs),
     /// Start the watchdog daemon.
     Watchdog(WatchdogArgs),
     /// One-shot update implementation used by watchdog.
@@ -131,6 +135,15 @@ pub struct GatewayArgs {
     pub debug: bool,
 }
 
+/// `sebas webui` — start the standalone WebUI dashboard server.
+/// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
+#[derive(Parser)]
+pub struct WebUiArgs {
+    /// Path to the sebas config.toml.
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+}
+
 /// `sebas watchdog` — start the watchdog daemon.
 /// Manages the sebas child process and handles self-upgrade.
 #[derive(Parser)]
@@ -170,6 +183,10 @@ pub struct ControlArgs {
     /// Path to the watchdog control socket. Defaults to XDG_RUNTIME_DIR/sebas/control.sock.
     #[arg(long)]
     pub socket: Option<String>,
+
+    /// Control RPC secret for authentication. Required by the watchdog server.
+    #[arg(long)]
+    pub secret: Option<String>,
 
     #[command(subcommand)]
     pub cmd: ControlCmd,

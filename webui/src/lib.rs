@@ -6,11 +6,12 @@
 //! - Configuration display
 //! - Real-time SSE event stream
 
+pub mod admin;
 pub mod models;
 pub mod routes;
 pub mod server;
 pub mod sse;
 
-pub use server::{build_router, run};
+pub use server::{build_router, run, run_with_admin_adapter};
 #[doc(hidden)]
 pub use server::{init_templates_for_tests, WebUiState};

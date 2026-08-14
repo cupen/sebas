@@ -1,5 +1,6 @@
 //! axum server setup for the WebUI dashboard.
 
+use crate::admin::{self, AdminAdapter, AdminState};
 use crate::models::GatewayInfo;
 use crate::routes;
 use crate::sse::WebUiEvent;
@@ -32,6 +33,17 @@ pub fn build_router(
     gateway: GatewayInfo,
     templates: Arc<Environment<'static>>,
 ) -> Router {
+    build_router_with_admin_adapter(router, mgr, gateway, templates, None)
+}
+
+/// Build the axum Router with optional watchdog admin adapter.
+pub fn build_router_with_admin_adapter(
+    router: RouterHandle,
+    mgr: Arc<SessionManager>,
+    gateway: GatewayInfo,
+    templates: Arc<Environment<'static>>,
+    admin_adapter: Option<Arc<dyn AdminAdapter>>,
+) -> Router {
     let (tx, _) = broadcast::channel::<WebUiEvent>(256);
     let state = WebUiState {
         router,
@@ -39,10 +51,10 @@ pub fn build_router(
         gateway,
         started_at: Instant::now(),
         event_tx: Arc::new(tx),
-        templates,
+        templates: templates.clone(),
     };
 
-    Router::new()
+    let mut app = Router::new()
         .route("/", get(routes::dashboard))
         .route("/sessions", get(routes::session_list))
         .route("/sessions/partial", get(routes::session_list_partial))
@@ -56,10 +68,19 @@ pub fn build_router(
         .route("/api/sessions/{key}/message", post(routes::api_send_message))
         .route("/api/sessions/{key}/close", post(routes::api_close_session))
         .route("/api/sessions/{key}/switch", post(routes::api_switch_session))
-        .nest_service("/static", ServeDir::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/static"),
-        ))
-        .with_state(state)
+        .nest_service(
+            "/static",
+            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        )
+        .with_state(state);
+
+    if let Some(adapter) = admin_adapter {
+        app = app.merge(admin::build_admin_router(AdminState::new(
+            Some(adapter),
+            templates.clone(),
+        )));
+    }
+    app
 }
 
 /// Run the WebUI server on the given listener.
@@ -69,8 +90,19 @@ pub async fn run(
     gateway: GatewayInfo,
     listener: tokio::net::TcpListener,
 ) {
+    run_with_admin_adapter(router, mgr, gateway, listener, None).await;
+}
+
+/// Run the WebUI server with an optional watchdog admin adapter.
+pub async fn run_with_admin_adapter(
+    router: RouterHandle,
+    mgr: Arc<SessionManager>,
+    gateway: GatewayInfo,
+    listener: tokio::net::TcpListener,
+    admin_adapter: Option<Arc<dyn AdminAdapter>>,
+) {
     let templates = Arc::new(init_templates());
-    let app = build_router(router, mgr, gateway, templates);
+    let app = build_router_with_admin_adapter(router, mgr, gateway, templates, admin_adapter);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
     if let Err(e) = serve(listener, app).await {
@@ -118,5 +150,25 @@ fn init_templates_inner() -> Environment<'static> {
         include_str!("../templates/sidebar_active.html"),
     )
     .expect("sidebar_active.html template");
+    env.add_template(
+        "admin_status.html",
+        include_str!("../templates/admin_status.html"),
+    )
+    .expect("admin_status.html template");
+    env.add_template(
+        "admin_events.html",
+        include_str!("../templates/admin_events.html"),
+    )
+    .expect("admin_events.html template");
+    env.add_template(
+        "admin_update.html",
+        include_str!("../templates/admin_update.html"),
+    )
+    .expect("admin_update.html template");
+    env.add_template(
+        "admin_services.html",
+        include_str!("../templates/admin_services.html"),
+    )
+    .expect("admin_services.html template");
     env
 }

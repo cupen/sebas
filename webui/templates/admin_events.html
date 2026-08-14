@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Events - sebas</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">&#9889;</span>
+        <span class="brand-text">sebas admin</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">Admin</div>
+          <a href="/admin/status" class="nav-item {{ "active" if page == "admin_status" else "" }}">Status</a>
+          <a href="/admin/events" class="nav-item {{ "active" if page == "admin_events" else "" }}">Events</a>
+          <a href="/admin/update" class="nav-item {{ "active" if page == "admin_update" else "" }}">Update</a>
+          <a href="/admin/services" class="nav-item {{ "active" if page == "admin_services" else "" }}">Services</a>
+        </div>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="page-header">
+        <h1>Control Plane Events</h1>
+      </div>
+      <div class="page-body">
+        {% if not adapter_ok %}
+        <div class="alert alert-warning">Control plane not connected.</div>
+        {% endif %}
+
+        {% if events %}
+        <table class="session-table">
+          <thead>
+            <tr>
+              <th>Seq</th>
+              <th>Operation</th>
+              <th>Kind</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ev in events %}
+            <tr>
+              <td><code>{{ ev.seq }}</code></td>
+              <td><code>{{ ev.operation_id }}</code></td>
+              <td><span class="badge badge-{{ ev.kind }}">{{ ev.kind }}</span></td>
+              <td>{{ ev.message }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty-state">No events recorded.</p>
+        {% endif %}
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Update - sebas</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">&#9889;</span>
+        <span class="brand-text">sebas admin</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">Admin</div>
+          <a href="/admin/status" class="nav-item {{ "active" if page == "admin_status" else "" }}">Status</a>
+          <a href="/admin/events" class="nav-item {{ "active" if page == "admin_events" else "" }}">Events</a>
+          <a href="/admin/update" class="nav-item {{ "active" if page == "admin_update" else "" }}">Update</a>
+          <a href="/admin/services" class="nav-item {{ "active" if page == "admin_services" else "" }}">Services</a>
+        </div>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="page-header">
+        <h1>Update Control</h1>
+      </div>
+      <div class="page-body">
+        {% if not adapter_ok %}
+        <div class="alert alert-warning">Control plane not connected. Run <code>sebas watchdog</code> to enable update controls.</div>
+        {% endif %}
+
+        <div class="action-grid">
+          <div class="form-card">
+            <h2>Release Update</h2>
+            <p>Download and install the latest release from GitHub.</p>
+            <button class="btn btn-primary"
+                    hx-post="/admin/update"
+                    hx-swap="none"
+                    hx-headers='{"origin": "http://127.0.0.1"}'
+                    hx-on::after-request="if(event.detail.successful){showToast('Update accepted','success')}else{showToast('Update failed','error')}">
+              Update
+            </button>
+          </div>
+
+          <div class="form-card">
+            <h2>Dry-Run</h2>
+            <p>Check for updates without installing.</p>
+            <button class="btn btn-secondary"
+                    hx-post="/admin/update/dry-run"
+                    hx-swap="none"
+                    hx-headers='{"origin": "http://127.0.0.1"}'
+                    hx-on::after-request="if(event.detail.successful){showToast('Dry-run accepted','success')}else{showToast('Dry-run failed','error')}">
+              Dry-Run
+            </button>
+          </div>
+
+          <div class="form-card">
+            <h2>Dev Update</h2>
+            <p>Build from local source (requires <code>cargo build --release</code>).</p>
+            <button class="btn btn-warning"
+                    hx-post="/admin/update/dev"
+                    hx-swap="none"
+                    hx-headers='{"origin": "http://127.0.0.1"}'
+                    hx-on::after-request="if(event.detail.successful){showToast('Dev update accepted','success')}else{showToast('Dev update failed','error')}">
+              Dev Update
+            </button>
+          </div>
+
+          <div class="form-card">
+            <h2>Rollback</h2>
+            <p>Revert to the previously installed version.</p>
+            <button class="btn btn-danger"
+                    hx-post="/admin/rollback"
+                    hx-swap="none"
+                    hx-headers='{"origin": "http://127.0.0.1"}'
+                    hx-on::after-request="if(event.detail.successful){showToast('Rollback accepted','success')}else{showToast('Rollback failed','error')}">
+              Rollback
+            </button>
+          </div>
+
+          <div class="form-card">
+            <h2>Restart Core</h2>
+            <p>Restart the core sebas process without recompiling.</p>
+            <button class="btn btn-danger"
+                    hx-post="/admin/restart"
+                    hx-swap="none"
+                    hx-headers='{"origin": "http://127.0.0.1"}'
+                    hx-on::after-request="if(event.detail.successful){showToast('Restart accepted','success')}else{showToast('Restart failed','error')}">
+              Restart Core
+            </button>
+          </div>
+        </div>
+
+        <div id="toast-container" class="toast-container"></div>
+        <script>
+          function showToast(message, type) {
+            type = type || 'info';
+            var container = document.getElementById('toast-container');
+            var toast = document.createElement('div');
+            toast.className = 'toast toast-' + type;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(function() {
+              toast.style.opacity = '0';
+              toast.style.transition = 'opacity 0.3s';
+              setTimeout(function() { toast.remove(); }, 300);
+            }, 3000);
+          }
+        </script>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

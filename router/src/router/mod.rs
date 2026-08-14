@@ -96,6 +96,12 @@ pub enum Out {
     WatchdogRollback {
         key: SessionKey,
     },
+    WatchdogRestart {
+        key: SessionKey,
+    },
+    WatchdogServices {
+        key: SessionKey,
+    },
     /// Spawn a session without sending a root card to Feishu (web-originated
     /// sessions). The dispatcher creates the ACP session and wires the pump,
     /// but skips the Feishu send_card / react operations. Card content is

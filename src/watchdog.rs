@@ -1,14 +1,18 @@
+pub mod auth;
+pub mod confirmation;
 pub mod control;
 pub mod control_rpc;
+pub mod events;
+pub mod executor;
+pub mod services;
 pub mod updater;
 
 use crate::config::WatchdogConfig;
 use crate::error::{Result, SebasError};
 use crate::ipc::{ChildMsg, ParentIpc};
 use crate::upgrade;
-use crate::watchdog::control::{
-    Actor, ControlRequest, ControlResponse, ControlService, UpdateKind,
-};
+use crate::watchdog::control::{Actor, ControlRequest, ControlResponse, ControlService, UpdateKind};
+use crate::watchdog::executor::{ControlExecutor, PostAction};
 use crate::watchdog::updater::{SubprocessUpdaterRunner, UpdatePlan, UpdaterRunner};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +38,15 @@ enum IpcOutcome {
 /// 版本号
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn create_control_secret() -> String {
+    let pid = std::process::id();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{pid:x}-{ts:x}")
+}
+
 pub struct Watchdog {
     /// 连续崩溃计数
     crash_count: u32,
@@ -45,21 +58,25 @@ pub struct Watchdog {
     config: WatchdogConfig,
     /// control-plane state shared by adapters.
     control: Arc<Mutex<ControlService>>,
+    /// Restart requests produced by in-process control adapters (RPC/WebUI).
+    restart_rx: tokio::sync::mpsc::UnboundedReceiver<PostAction>,
+    /// Per-watchdog-instance secret accepted by the private control RPC.
+    control_secret: String,
 }
 
 impl Watchdog {
     pub fn new(config: WatchdogConfig, config_path: String) -> Self {
-        Self::with_control(
-            config,
-            config_path,
-            Arc::new(Mutex::new(ControlService::new())),
-        )
+        let control = Arc::new(Mutex::new(ControlService::new()));
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self::with_control(config, config_path, control, rx, create_control_secret())
     }
 
     pub fn with_control(
         config: WatchdogConfig,
         config_path: String,
         control: Arc<Mutex<ControlService>>,
+        restart_rx: tokio::sync::mpsc::UnboundedReceiver<PostAction>,
+        control_secret: String,
     ) -> Self {
         Self {
             crash_count: 0,
@@ -67,6 +84,8 @@ impl Watchdog {
             config_path,
             config,
             control,
+            restart_rx,
+            control_secret,
         }
     }
 
@@ -88,6 +107,7 @@ impl Watchdog {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .env("SEBAS_IPC", "1")
+            .env("SEBAS_CONTROL_SECRET", &self.control_secret)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| SebasError::Upgrade(format!("启动子进程失败: {e}")))?;
@@ -121,7 +141,18 @@ impl Watchdog {
     async fn handle_ipc(&mut self, mut ipc: ParentIpc) -> Result<IpcOutcome> {
         // 现有 IPC 逻辑先保留，后续 Phase 1/3 再迁到 ControlService/RPC。
         loop {
-            match ipc.recv().await {
+            let msg = tokio::select! {
+                msg = ipc.recv() => msg,
+                action = self.restart_rx.recv() => {
+                    match action {
+                        Some(PostAction::RestartCore) => return Ok(IpcOutcome::RestartRequested),
+                        Some(PostAction::None) => continue,
+                        None => return Ok(IpcOutcome::ChildExited),
+                    }
+                }
+            };
+
+            match msg {
                 Ok(ChildMsg::Ready) => {
                     info!("sebas 子进程就绪");
                     break;
@@ -273,15 +304,46 @@ impl Watchdog {
 pub async fn run_watchdog(config: WatchdogConfig, config_path: String) -> Result<()> {
     init_watchdog_tracing();
     let control = Arc::new(Mutex::new(ControlService::new()));
+    let (restart_tx, restart_rx) = tokio::sync::mpsc::unbounded_channel();
+    let executor = ControlExecutor::new(
+        control.clone(),
+        Arc::new(SubprocessUpdaterRunner),
+        config.clone(),
+        config_path.clone(),
+        restart_tx,
+    );
     let socket_path = control_rpc::default_socket_path();
-    tokio::spawn(control_rpc::serve(socket_path.clone(), control.clone()));
+    let sock_for_rpc = socket_path.clone();
+    let executor_for_rpc = executor.clone();
+    // Per-watchdog-instance startup secret for private control RPC.
+    // No persistence: restarting watchdog invalidates outstanding local clients.
+    let secret = create_control_secret();
+    let secret_for_rpc = secret.clone();
+    tokio::spawn(async move {
+        if let Err(e) = control_rpc::serve(sock_for_rpc, secret_for_rpc, executor_for_rpc).await {
+            tracing::error!("control RPC server error: {e}");
+        }
+    });
     info!(
         "watchdog control RPC listening at {}",
         socket_path.display()
     );
 
-    let mut watchdog = Watchdog::with_control(config, config_path, control);
-    watchdog.run().await
+    let mut webui_child = spawn_webui_process(&config, &config_path, &secret).await;
+
+    let mut watchdog = Watchdog::with_control(
+        config,
+        config_path,
+        control,
+        restart_rx,
+        secret,
+    );
+    let result = watchdog.run().await;
+    if let Some(child) = webui_child.as_mut() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    result
 }
 
 impl Watchdog {
@@ -309,6 +371,47 @@ impl Watchdog {
             }
 
             tokio::time::sleep(Duration::from_millis(RESTART_DELAY_MS)).await;
+        }
+    }
+}
+
+async fn spawn_webui_process(config: &WatchdogConfig, config_path: &str, control_secret: &str) -> Option<Child> {
+    use crate::watchdog::services::should_start_watchdog_webui;
+
+    if !should_start_watchdog_webui(&config.webui) {
+        return None;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("cannot determine current exe for webui process: {e}");
+            return None;
+        }
+    };
+
+    match Command::new(&exe)
+        .arg("webui")
+        .arg("--config")
+        .arg(config_path)
+        .env("SEBAS_CONTROL_SECRET", control_secret)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => {
+            info!(
+                "webui process spawned (pid={}), dashboard at {}:{}",
+                child.id().unwrap_or(0),
+                config.webui.host,
+                config.webui.port,
+            );
+            Some(child)
+        }
+        Err(e) => {
+            warn!("failed to spawn webui process: {e}");
+            None
         }
     }
 }

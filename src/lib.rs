@@ -13,4 +13,5 @@ mod session_boot;
 pub mod update;
 pub mod upgrade;
 pub mod watchdog;
+pub mod webui_cmd;
 mod ws_loop;

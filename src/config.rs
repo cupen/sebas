@@ -185,6 +185,8 @@ pub struct WatchdogConfig {
     pub upgrade: WatchdogUpgradeConfig,
     #[serde(default)]
     pub storage: WatchdogStorageConfig,
+    #[serde(default)]
+    pub webui: WatchdogWebUiConfig,
 }
 
 impl Default for WatchdogConfig {
@@ -192,8 +194,40 @@ impl Default for WatchdogConfig {
         Self {
             upgrade: WatchdogUpgradeConfig::default(),
             storage: WatchdogStorageConfig::default(),
+            webui: WatchdogWebUiConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WatchdogWebUiConfig {
+    /// Let watchdog own the WebUI lifecycle.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bind address. Phase 2.3 tightens non-loopback security.
+    #[serde(default = "default_webui_host")]
+    pub host: String,
+    /// Bind port for watchdog-owned WebUI.
+    #[serde(default = "default_webui_port")]
+    pub port: u16,
+}
+
+impl Default for WatchdogWebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_webui_host(),
+            port: default_webui_port(),
+        }
+    }
+}
+
+fn default_webui_host() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_webui_port() -> u16 {
+    9797
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,9 +241,16 @@ pub struct WatchdogUpgradeConfig {
     /// 最大重试次数
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-    /// 重试间隔（秒）
+    /// 重试间隔（秒）。仅用于失败重试的等待，**不是**子进程超时。
     #[serde(default = "default_retry_delay")]
     pub retry_delay_secs: u64,
+    /// release 更新（下载 + 校验 + 安装）的 updater 子进程超时（秒）。
+    #[serde(default = "default_updater_timeout")]
+    pub updater_timeout_secs: u64,
+    /// dev 更新（cargo build --release）的 updater 子进程超时（秒）。
+    /// 编译整个 workspace 可能耗时数分钟，故默认远大于 release 路径。
+    #[serde(default = "default_dev_build_timeout")]
+    pub dev_build_timeout_secs: u64,
 }
 
 impl Default for WatchdogUpgradeConfig {
@@ -219,7 +260,21 @@ impl Default for WatchdogUpgradeConfig {
             check_on_start: default_true(),
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay(),
+            updater_timeout_secs: default_updater_timeout(),
+            dev_build_timeout_secs: default_dev_build_timeout(),
         }
+    }
+}
+
+impl WatchdogUpgradeConfig {
+    /// updater 子进程超时：dev 走编译路径，给足编译时间；release 只下载安装。
+    pub fn updater_timeout(&self, dev: bool) -> std::time::Duration {
+        let secs = if dev {
+            self.dev_build_timeout_secs
+        } else {
+            self.updater_timeout_secs
+        };
+        std::time::Duration::from_secs(secs.max(1))
     }
 }
 
@@ -234,6 +289,12 @@ fn default_max_retries() -> u32 {
 }
 fn default_retry_delay() -> u64 {
     5
+}
+fn default_updater_timeout() -> u64 {
+    600
+}
+fn default_dev_build_timeout() -> u64 {
+    1800
 }
 
 #[derive(Debug, Clone, Deserialize)]

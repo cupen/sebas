@@ -13,8 +13,10 @@ pub const HELP_TEXT: &str = "可用命令:\n\
 /goal <text> — 透传 /goal 指令给 claude code\n\
 /cd <path> — 切换工作目录\n\
 /settings [key [value]] — 查看/修改卡片配置\n\
-/upgrade [--dry-run|--dev|--dev --dry-run] — 通过 watchdog 升级并重启\n\
+/upgrade [dev|--dev] [dry-run|--dry-run] — 通过 watchdog 升级并重启\n\
 /rollback — 通过 watchdog 回滚并重启\n\
+/restart — 通过 watchdog 重启 core\n\
+/services — 查看 watchdog 服务状态\n\
 /btw <text> — 插队提问\n\
 /help — 显示本帮助";
 
@@ -41,6 +43,8 @@ pub enum Command {
         dry_run: bool,
     },
     Rollback,
+    Restart,
+    Services,
     PassThrough(String),
 }
 
@@ -86,16 +90,22 @@ pub fn parse_command(input: &str) -> Command {
         }
         "/upgrade" => {
             let args: Vec<_> = arg.split_whitespace().collect();
-            if args.iter().all(|a| matches!(*a, "--dev" | "--dry-run")) {
+            let normalized: Vec<&str> = args
+                .iter()
+                .map(|a| if *a == "dev" { "--dev" } else { *a })
+                .collect();
+            if normalized.iter().all(|a| matches!(*a, "--dev" | "--dry-run")) {
                 Command::Upgrade {
-                    dev: args.contains(&"--dev"),
-                    dry_run: args.contains(&"--dry-run"),
+                    dev: normalized.contains(&"--dev"),
+                    dry_run: normalized.contains(&"--dry-run"),
                 }
             } else {
                 Command::PassThrough(input.into())
             }
         }
         "/rollback" if arg.is_empty() => Command::Rollback,
+        "/restart" if arg.is_empty() => Command::Restart,
+        "/services" if arg.is_empty() => Command::Services,
         "/btw" => {
             if arg.is_empty() {
                 Command::PassThrough(input.into())

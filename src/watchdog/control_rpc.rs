@@ -1,7 +1,8 @@
 use crate::error::{Result, SebasError};
 use crate::watchdog::control::{
-    Actor, ControlEvent, ControlRequest, ControlResponse, ControlService, UpdateKind,
+    ControlEvent, ControlResponse, ControlRequest, ControlService, UpdateKind,
 };
+use crate::watchdog::executor::ControlExecutor;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +16,8 @@ pub struct ControlEnvelope {
     pub version: u16,
     #[serde(default)]
     pub request_id: String,
+    #[serde(default)]
+    pub secret: String,
     pub actor: RpcActor,
     pub request: RpcControlRequest,
 }
@@ -32,6 +35,7 @@ pub enum RpcControlRequest {
     EventsSince { seq: u64 },
     Update { dev: bool, dry_run: bool },
     Rollback { dry_run: bool },
+    RestartCore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,7 +69,7 @@ pub fn default_socket_path() -> PathBuf {
     std::env::temp_dir().join("sebas-control.sock")
 }
 
-pub async fn serve(path: PathBuf, control: Arc<Mutex<ControlService>>) -> Result<()> {
+pub async fn serve(path: PathBuf, secret: String, executor: ControlExecutor) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -77,9 +81,10 @@ pub async fn serve(path: PathBuf, control: Arc<Mutex<ControlService>>) -> Result
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let control = control.clone();
+        let executor = executor.clone();
+        let secret = secret.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_stream(stream, control).await {
+            if let Err(e) = handle_stream(stream, executor, secret).await {
                 warn!("control RPC connection failed: {e}");
             }
         });
@@ -108,7 +113,7 @@ pub async fn request(path: &Path, envelope: &ControlEnvelope) -> Result<RpcContr
         .map_err(|e| SebasError::Upgrade(format!("control RPC parse response failed: {e}")))
 }
 
-async fn handle_stream(stream: UnixStream, control: Arc<Mutex<ControlService>>) -> Result<()> {
+async fn handle_stream(stream: UnixStream, executor: ControlExecutor, secret: String) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
@@ -118,7 +123,7 @@ async fn handle_stream(stream: UnixStream, control: Arc<Mutex<ControlService>>) 
     }
 
     let response = match serde_json::from_str::<ControlEnvelope>(&line) {
-        Ok(envelope) => handle_envelope(envelope, control).await,
+        Ok(envelope) => handle_envelope(envelope, executor, &secret).await,
         Err(e) => RpcControlResponse::Rejected {
             code: "invalid_request".into(),
             message: format!("invalid control RPC request: {e}"),
@@ -134,7 +139,8 @@ async fn handle_stream(stream: UnixStream, control: Arc<Mutex<ControlService>>) 
 
 async fn handle_envelope(
     envelope: ControlEnvelope,
-    control: Arc<Mutex<ControlService>>,
+    executor: ControlExecutor,
+    server_secret: &str,
 ) -> RpcControlResponse {
     if envelope.version != 1 {
         return RpcControlResponse::Rejected {
@@ -143,12 +149,19 @@ async fn handle_envelope(
         };
     }
 
+    if envelope.secret.is_empty() || envelope.secret != server_secret {
+        return RpcControlResponse::Rejected {
+            code: "unauthorized".into(),
+            message: "missing or invalid control RPC secret".into(),
+        };
+    }
+
     match envelope.request {
         RpcControlRequest::Status => {
-            accept_control_request(control, envelope.actor, ControlRequest::Status).await
+            accept_control_request(executor.control().clone(), envelope.actor, ControlRequest::Status).await
         }
         RpcControlRequest::EventsSince { seq } => {
-            let control = control.lock().await;
+            let control = executor.control().lock().await;
             RpcControlResponse::Events {
                 events: control
                     .events_since(seq)
@@ -158,28 +171,27 @@ async fn handle_envelope(
             }
         }
         RpcControlRequest::Update { dev, dry_run } => {
-            accept_control_request(
-                control,
-                envelope.actor,
-                ControlRequest::Update {
-                    kind: if dev {
-                        UpdateKind::Dev
-                    } else {
-                        UpdateKind::Release
-                    },
-                    dry_run,
-                    target: None,
-                },
-            )
-            .await
+            let actor = match envelope.actor {
+                RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
+            };
+            let request = ControlRequest::Update {
+                kind: if dev { UpdateKind::Dev } else { UpdateKind::Release },
+                dry_run,
+                target: None,
+            };
+            executor.submit_detached(actor, request).await.into()
         }
         RpcControlRequest::Rollback { dry_run } => {
-            accept_control_request(
-                control,
-                envelope.actor,
-                ControlRequest::Rollback { dry_run },
-            )
-            .await
+            let actor = match envelope.actor {
+                RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
+            };
+            executor.submit_detached(actor, ControlRequest::Rollback { dry_run }).await.into()
+        }
+        RpcControlRequest::RestartCore => {
+            let actor = match envelope.actor {
+                RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
+            };
+            executor.submit_detached(actor, ControlRequest::RestartCore).await.into()
         }
     }
 }
@@ -190,10 +202,7 @@ async fn accept_control_request(
     request: ControlRequest,
 ) -> RpcControlResponse {
     let mut control = control.lock().await;
-    let actor = match actor {
-        RpcActor::Cli { uid } => Actor::Cli { uid },
-    };
-    match control.accept(actor, request) {
+    match control.accept(actor.into(), request) {
         ControlResponse::Accepted {
             operation_id,
             status,
@@ -205,6 +214,29 @@ async fn accept_control_request(
             code: format!("{code:?}"),
             message,
         },
+    }
+}
+
+impl From<ControlResponse> for RpcControlResponse {
+    fn from(r: ControlResponse) -> Self {
+        match r {
+            ControlResponse::Accepted { operation_id, status } => RpcControlResponse::Accepted {
+                operation_id,
+                status: format!("{status:?}"),
+            },
+            ControlResponse::Rejected { code, message } => RpcControlResponse::Rejected {
+                code: format!("{code:?}"),
+                message,
+            },
+        }
+    }
+}
+
+impl From<RpcActor> for crate::watchdog::control::Actor {
+    fn from(a: RpcActor) -> Self {
+        match a {
+            RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
+        }
     }
 }
 
@@ -234,23 +266,56 @@ fn set_socket_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WatchdogConfig;
+    use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
+
+    const TEST_SECRET: &str = "test-secret-42";
+
+    struct NoopRunner;
+
+    #[async_trait::async_trait]
+    impl UpdaterRunner for NoopRunner {
+        async fn run(&self, _plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_executor() -> ControlExecutor {
+        let control = Arc::new(Mutex::new(ControlService::new()));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ControlExecutor::new(
+            control,
+            Arc::new(NoopRunner),
+            WatchdogConfig::default(),
+            "./config.toml".into(),
+            tx,
+        )
+    }
 
     #[test]
     fn default_socket_path_ends_with_control_sock() {
         assert!(default_socket_path().ends_with("control.sock"));
     }
 
+    #[test]
+    fn forged_system_actor_rejected() {
+        let rpc = RpcActor::Cli { uid: 42 };
+        let actor: crate::watchdog::control::Actor = rpc.into();
+        assert!(matches!(actor, crate::watchdog::control::Actor::Cli { uid: 42 }));
+    }
+
     #[tokio::test]
     async fn rejects_unsupported_protocol_version() {
-        let control = Arc::new(Mutex::new(ControlService::new()));
         let response = handle_envelope(
             ControlEnvelope {
                 version: 99,
                 request_id: "req_test".into(),
+                secret: TEST_SECRET.into(),
                 actor: RpcActor::Cli { uid: 1000 },
                 request: RpcControlRequest::Status,
             },
-            control,
+            test_executor(),
+            TEST_SECRET,
         )
         .await;
 
@@ -258,5 +323,75 @@ mod tests {
             response,
             RpcControlResponse::Rejected { code, .. } if code == "unsupported_version"
         ));
+    }
+
+    #[tokio::test]
+    async fn missing_secret_rejected() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "test".into(),
+                secret: String::new(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Status,
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            RpcControlResponse::Rejected { code, .. } if code == "unauthorized"
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_secret_rejected() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "test".into(),
+                secret: "wrong-secret".into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Status,
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            RpcControlResponse::Rejected { code, .. } if code == "unauthorized"
+        ));
+    }
+
+    #[tokio::test]
+    async fn valid_secret_allows_status() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "test".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Status,
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        assert!(
+            !matches!(
+                response,
+                RpcControlResponse::Rejected { ref code, .. } if code == "unauthorized"
+            ),
+            "valid secret must not be rejected as unauthorized, got {response:?}"
+        );
+        assert!(
+            matches!(response, RpcControlResponse::Accepted { .. }),
+            "expected Accepted for Status with valid secret, got {response:?}"
+        );
     }
 }

@@ -17,6 +17,7 @@ tracing = "0.1"
 minijinja = "2.0"
 chrono = "0.4"
 urlencoding = "2"
+async-trait = "0.1"
 
 [dev-dependencies]
 http-body-util = "0.1"

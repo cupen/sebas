@@ -412,7 +412,11 @@ allow_remote_feishu = false
 - watchdog 重启 core child 时使用 `current/sebas run`。
 - watchdog 自身暂不 reexec。
 - 要求 watchdog-child IPC 保持至少一版向后兼容。
-- 若新 core ready 失败，watchdog 执行 rollback/restart 或提示用户手动 rollback。
+- 若新 core ready 失败，watchdog 必须进入可恢复状态：
+  - 记录失败原因；
+  - 不把失败当作无限自动重试的成功；
+  - 允许用户执行 rollback 或手动恢复。
+- 当这次 update 触及 watchdog/control plane 语义时，控制响应必须显式提示 `watchdog service restart required`。
 
 ### 后续策略：watchdog self-reexec
 
