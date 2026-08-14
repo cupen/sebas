@@ -37,10 +37,7 @@ async fn permission_request_emits_card_with_buttons() {
                 "expected resolved SessionKey, got {key:?}"
             );
             let s = serde_json::to_string(&card).unwrap();
-            assert!(
-                s.contains("本次允许"),
-                "missing '本次允许' in card: {s}"
-            );
+            assert!(s.contains("本次允许"), "missing '本次允许' in card: {s}");
             assert!(s.contains("拒绝"), "missing '拒绝' in card: {s}");
         }
         other => panic!("expected SendCard, got {other:?}"),

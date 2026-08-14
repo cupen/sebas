@@ -20,8 +20,14 @@ pub enum Cmd {
     /// directions are appended to --output as {"dir","msg"} journal lines.
     Record(RecordArgs),
     /// Run the LLM provider gateway (Anthropic/OpenAI dual-protocol
-    /// transparent proxy). See docs/superpowers/specs/2026-08-06-gateway-design.md.
+    /// transparent proxy). See docs/superpowers/specs/2026-08-07-gateway-design.md.
     Gateway(GatewayArgs),
+    /// Start the watchdog daemon.
+    Watchdog(WatchdogArgs),
+    /// One-shot update implementation used by watchdog.
+    Update(UpdateArgs),
+    /// Send a command to the watchdog control plane.
+    Control(ControlArgs),
 }
 
 /// Run mode — the long-lived sebas service.
@@ -123,4 +129,74 @@ pub struct GatewayArgs {
     /// （固定文字 + 回显输入），不转发外部上游。
     #[arg(long)]
     pub debug: bool,
+}
+
+/// `sebas watchdog` — start the watchdog daemon.
+/// Manages the sebas child process and handles self-upgrade.
+#[derive(Parser)]
+pub struct WatchdogArgs {
+    /// Path to the sebas config.toml.
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+}
+
+/// `sebas update` — one-shot update implementation used by watchdog.
+#[derive(Parser)]
+pub struct UpdateArgs {
+    /// Path to the sebas config.toml.
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+
+    /// Build from a local checkout instead of downloading a release.
+    #[arg(long)]
+    pub dev: bool,
+
+    /// Only print the planned operation.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Roll back to the previous installed version.
+    #[arg(long, conflicts_with = "dev")]
+    pub rollback: bool,
+
+    /// Project directory for --dev builds. Defaults to the current directory.
+    #[arg(long)]
+    pub project_dir: Option<String>,
+}
+
+/// `sebas control` — send a request to the watchdog control plane.
+#[derive(Parser)]
+pub struct ControlArgs {
+    /// Path to the watchdog control socket. Defaults to XDG_RUNTIME_DIR/sebas/control.sock.
+    #[arg(long)]
+    pub socket: Option<String>,
+
+    #[command(subcommand)]
+    pub cmd: ControlCmd,
+}
+
+#[derive(Subcommand)]
+pub enum ControlCmd {
+    /// Ask the watchdog for a control-plane status operation.
+    Status,
+    /// Print control events after this sequence number.
+    Events {
+        #[arg(long, default_value_t = 0)]
+        since: u64,
+    },
+    /// Admit an update operation in the watchdog control plane.
+    Update {
+        /// Build from the configured/local dev target instead of release.
+        #[arg(long)]
+        dev: bool,
+        /// Only plan the update.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Admit a rollback operation in the watchdog control plane.
+    Rollback {
+        /// Only plan the rollback.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

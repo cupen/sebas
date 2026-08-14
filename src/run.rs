@@ -37,6 +37,11 @@ pub async fn run(
     webui: bool,
     webui_port: u16,
 ) -> Result<()> {
+    // 在 watchdog 下运行时初始化 IPC
+    if crate::ipc::is_under_watchdog() {
+        init_watchdog_ipc().await;
+    }
+
     // openlark 0.19 uses reqwest 0.13, whose Rustls connector consults the
     // process-wide provider. Our reqwest 0.12 clients use ring explicitly;
     // install one provider up front so the mixed dependency graph is
@@ -330,4 +335,58 @@ fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> webui::models::Gat
         has_auth: !gw.auth_token.is_empty(),
         providers,
     }
+}
+
+/// 在 watchdog 下运行时初始化 IPC 连接
+async fn init_watchdog_ipc() {
+    use crate::ipc::{ChildIpc, install_watchdog_sender};
+    use tokio::sync::mpsc;
+    use tracing::info;
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    if let Err(e) = install_watchdog_sender(tx) {
+        tracing::warn!("watchdog IPC sender 初始化失败: {e}");
+    }
+
+    let mut ipc = ChildIpc::new();
+    if let Err(e) = ipc.ready().await {
+        tracing::warn!("watchdog IPC ready 发送失败: {e}");
+        return;
+    }
+    info!("watchdog IPC 连接就绪");
+
+    // 后台任务：串行发送子进程命令并监听父进程消息。stdout/stdin 只有
+    // 这个任务持有，避免多个请求同时读写同一条 JSON Lines pipe。
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some(cmd) = rx.recv() => {
+                    if let Err(e) = ipc.send(&cmd).await {
+                        tracing::warn!("watchdog IPC 命令发送失败: {e}");
+                        break;
+                    }
+                }
+                result = ipc.recv() => {
+                    match result {
+                        Ok(msg) => {
+                            info!("watchdog 消息: {} ({})", msg.status, msg.msg);
+                            match msg.status.as_str() {
+                                "done" => {
+                                    info!("watchdog 通知完毕，等待父进程重启当前进程");
+                                }
+                                "error" => {
+                                    tracing::error!("watchdog 错误: {}", msg.msg);
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("watchdog IPC 连接断开: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
 }

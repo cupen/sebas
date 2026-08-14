@@ -1,7 +1,9 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Cmd, GatewayArgs, InstallServiceArgs, RecordArgs, ReplayArgs};
+use cli::{
+    Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, InstallServiceArgs, RecordArgs, ReplayArgs,
+};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -42,6 +44,21 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::Control(args) => run_control(args).await,
+        Cmd::Watchdog(args) => {
+            let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
+            let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+            sebas::watchdog::run_watchdog(cfg.watchdog, args.config)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        }
+        Cmd::Update(args) => {
+            sebas::update::run(args.into())
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        }
         Cmd::Run(run) => {
             let raw = std::fs::read_to_string(&run.config).unwrap_or_else(|_| {
                 // No file -> use minimal defaults; require env vars for credentials
@@ -65,12 +82,91 @@ async fn main() -> anyhow::Result<()> {
             {
                 c.enable_debug_test_provider();
             }
-            sebas::run::run(cfg, raw, run.test_msg, run.dump_inbound, gateway_cfg, run.webui, run.webui_port)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sebas::run::run(
+                cfg,
+                raw,
+                run.test_msg,
+                run.dump_inbound,
+                gateway_cfg,
+                run.webui,
+                run.webui_port,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         }
     }
+}
+
+async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
+    use sebas::watchdog::control_rpc::{
+        ControlEnvelope, RpcActor, RpcControlRequest, RpcControlResponse, default_socket_path,
+        request,
+    };
+
+    let path = args
+        .socket
+        .map(PathBuf::from)
+        .unwrap_or_else(default_socket_path);
+    let uid = current_uid();
+    let envelope = match args.cmd {
+        ControlCmd::Status => ControlEnvelope {
+            version: 1,
+            request_id: "cli_status".into(),
+            actor: RpcActor::Cli { uid },
+            request: RpcControlRequest::Status,
+        },
+        ControlCmd::Events { since } => ControlEnvelope {
+            version: 1,
+            request_id: "cli_events".into(),
+            actor: RpcActor::Cli { uid },
+            request: RpcControlRequest::EventsSince { seq: since },
+        },
+        ControlCmd::Update { dev, dry_run } => ControlEnvelope {
+            version: 1,
+            request_id: "cli_update".into(),
+            actor: RpcActor::Cli { uid },
+            request: RpcControlRequest::Update { dev, dry_run },
+        },
+        ControlCmd::Rollback { dry_run } => ControlEnvelope {
+            version: 1,
+            request_id: "cli_rollback".into(),
+            actor: RpcActor::Cli { uid },
+            request: RpcControlRequest::Rollback { dry_run },
+        },
+    };
+
+    match request(&path, &envelope).await? {
+        RpcControlResponse::Accepted {
+            operation_id,
+            status,
+        } => {
+            println!("accepted operation={operation_id} status={status}");
+        }
+        RpcControlResponse::Rejected { code, message } => {
+            eprintln!("rejected code={code} message={message}");
+            std::process::exit(2);
+        }
+        RpcControlResponse::Events { events } => {
+            for event in events {
+                println!(
+                    "#{} [{}] {} {}",
+                    event.seq, event.kind, event.operation_id, event.public_message
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
 }
 
 impl From<InstallServiceArgs> for sebas::install_service::InstallServiceArgs {
@@ -109,6 +205,18 @@ impl From<GatewayArgs> for sebas::gateway_cmd::GatewayArgs {
         Self {
             config: a.config,
             debug: a.debug,
+        }
+    }
+}
+
+impl From<cli::UpdateArgs> for sebas::update::UpdateArgs {
+    fn from(a: cli::UpdateArgs) -> Self {
+        Self {
+            config: a.config,
+            dev: a.dev,
+            dry_run: a.dry_run,
+            rollback: a.rollback,
+            project_dir: a.project_dir.map(PathBuf::from),
         }
     }
 }
@@ -190,5 +298,58 @@ mod tests {
             panic!("expected Gateway subcommand");
         };
         assert!(args.debug, "--debug flag must be captured");
+    }
+
+    #[test]
+    fn control_status_subcommand_parses() {
+        let cli = Cli::try_parse_from(["sebas", "control", "status"])
+            .expect("`sebas control status` must parse");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control subcommand");
+        };
+        assert!(matches!(args.cmd, ControlCmd::Status));
+    }
+
+    #[test]
+    fn control_update_dev_subcommand_parses() {
+        let cli = Cli::try_parse_from(["sebas", "control", "update", "--dev", "--dry-run"])
+            .expect("`sebas control update --dev --dry-run` must parse");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control subcommand");
+        };
+        assert!(matches!(
+            args.cmd,
+            ControlCmd::Update {
+                dev: true,
+                dry_run: true
+            }
+        ));
+    }
+
+    #[test]
+    fn update_subcommand_accepts_dev_project_dir_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "update",
+            "--dev",
+            "--dry-run",
+            "--project-dir",
+            "/tmp/sebas",
+            "--config",
+            "x.toml",
+        ])
+        .expect("`sebas update --dev --dry-run --project-dir <path>` must parse");
+        let Cmd::Update(args) = cli.cmd else {
+            panic!("expected Update subcommand");
+        };
+        assert!(args.dev);
+        assert!(args.dry_run);
+        assert_eq!(args.project_dir.as_deref(), Some("/tmp/sebas"));
+        assert_eq!(args.config, "x.toml");
+    }
+
+    #[test]
+    fn update_rollback_conflicts_with_dev() {
+        assert!(Cli::try_parse_from(["sebas", "update", "--rollback", "--dev"]).is_err());
     }
 }

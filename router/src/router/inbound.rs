@@ -8,8 +8,8 @@ use crate::commands::{Command, HELP_TEXT, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
-    CardConfig, ThinkingDisplay, render_dead_session_card,
-    render_expired_permission_card, render_resolved_permission_card,
+    CardConfig, ThinkingDisplay, render_dead_session_card, render_expired_permission_card,
+    render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use serde_json::Value;
@@ -98,6 +98,12 @@ impl RouterHandle {
                 self.handle_settings(key, setting_key, val, &settings::settings_path())
                     .await;
             }
+            Command::Upgrade { dev, dry_run } => {
+                self.request_watchdog_upgrade(key, dev, dry_run).await;
+            }
+            Command::Rollback => {
+                self.request_watchdog_rollback(key).await;
+            }
             Command::Provider => self.on_provider(key).await,
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
@@ -161,6 +167,14 @@ impl RouterHandle {
                 self.emit(Out::HelpText { key }).await;
             }
         }
+    }
+
+    async fn request_watchdog_upgrade(&self, key: SessionKey, dev: bool, dry_run: bool) {
+        self.emit(Out::WatchdogUpgrade { key, dev, dry_run }).await;
+    }
+
+    async fn request_watchdog_rollback(&self, key: SessionKey) {
+        self.emit(Out::WatchdogRollback { key }).await;
     }
 
     async fn on_button(&self, key: SessionKey, action: CardAction) {
@@ -394,8 +408,7 @@ impl RouterHandle {
         // Emit the per-turn card that becomes the new streaming target
         // (MsgIdMap flips to this card). Reset CardState so streaming
         // body accumulates fresh (not appended to previous turn's body).
-        self.emit_turn_card(key, &session_id, prompt, root_id)
-            .await;
+        self.emit_turn_card(key, &session_id, prompt, root_id).await;
     }
 
     async fn forward_to_session(&self, session_id: &str, text: String) {
@@ -472,7 +485,9 @@ impl RouterHandle {
         match k {
             "thinking" => format!("thinking = {}", Self::thinking_label(cfg.thinking)),
             "max_user_text_chars" => format!("max_user_text_chars = {}", cfg.max_user_text_chars),
-            "max_tool_output_chars" => format!("max_tool_output_chars = {}", cfg.max_tool_output_chars),
+            "max_tool_output_chars" => {
+                format!("max_tool_output_chars = {}", cfg.max_tool_output_chars)
+            }
             "fold_long_output" => format!("fold_long_output = {}", cfg.fold_long_output),
             "theme_color" => format!("theme_color = {}", cfg.theme_color),
             other => format!(
@@ -486,9 +501,7 @@ impl RouterHandle {
             "thinking" => match v {
                 "show" => cfg.thinking = ThinkingDisplay::Show,
                 "hide" => cfg.thinking = ThinkingDisplay::Hide,
-                other => return Err(format!(
-                    "thinking 可选值: show, hide（拒绝: {other})"
-                )),
+                other => return Err(format!("thinking 可选值: show, hide（拒绝: {other})")),
             },
             "max_user_text_chars" => {
                 cfg.max_user_text_chars = v.parse().map_err(|e| format!("数字解析失败: {e}"))?

@@ -1,5 +1,7 @@
 use crate::events::SessionKey;
-use crate::messages::{ReactRequest, ReceiveIdType, SendCardRequest, SendTextRequest, UpdateCardRequest};
+use crate::messages::{
+    ReactRequest, ReceiveIdType, SendCardRequest, SendTextRequest, UpdateCardRequest,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 

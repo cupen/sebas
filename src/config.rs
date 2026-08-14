@@ -15,6 +15,8 @@ pub struct Config {
     pub media: MediaConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub watchdog: WatchdogConfig,
 }
 
 /// Wrapper for all ACP agent configs. TOML section `[acp.<agent>]` nests here.
@@ -175,6 +177,86 @@ impl Default for LogConfig {
 
 fn default_log_level() -> String {
     "info".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchdogConfig {
+    #[serde(default)]
+    pub upgrade: WatchdogUpgradeConfig,
+    #[serde(default)]
+    pub storage: WatchdogStorageConfig,
+}
+
+impl Default for WatchdogConfig {
+    fn default() -> Self {
+        Self {
+            upgrade: WatchdogUpgradeConfig::default(),
+            storage: WatchdogStorageConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchdogUpgradeConfig {
+    /// GitHub 仓库（owner/repo）
+    #[serde(default = "default_github_repo")]
+    pub github_repo: String,
+    /// 启动时自动检查更新
+    #[serde(default = "default_true")]
+    pub check_on_start: bool,
+    /// 最大重试次数
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// 重试间隔（秒）
+    #[serde(default = "default_retry_delay")]
+    pub retry_delay_secs: u64,
+}
+
+impl Default for WatchdogUpgradeConfig {
+    fn default() -> Self {
+        Self {
+            github_repo: default_github_repo(),
+            check_on_start: default_true(),
+            max_retries: default_max_retries(),
+            retry_delay_secs: default_retry_delay(),
+        }
+    }
+}
+
+fn default_github_repo() -> String {
+    "cupen/sebas".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_retry_delay() -> u64 {
+    5
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchdogStorageConfig {
+    /// 数据存放目录（二进制、版本备份）
+    #[serde(default)]
+    pub data_dir: String,
+    /// 保留的旧版本数量
+    #[serde(default = "default_keep_versions")]
+    pub keep_versions: u32,
+}
+
+impl Default for WatchdogStorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: String::new(),
+            keep_versions: default_keep_versions(),
+        }
+    }
+}
+
+fn default_keep_versions() -> u32 {
+    1
 }
 
 impl Config {

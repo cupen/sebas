@@ -13,7 +13,10 @@ fn settings_path_under_home_sebas_dir() {
 fn save_then_load_round_trips() {
     let dir = tempdir();
     let path = dir.join("settings.json");
-    let cfg = CardConfig { thinking: ThinkingDisplay::Hide, ..CardConfig::default() };
+    let cfg = CardConfig {
+        thinking: ThinkingDisplay::Hide,
+        ..CardConfig::default()
+    };
     save_settings(&path, &cfg).unwrap();
     let loaded = load_settings(&path).unwrap().expect("file exists");
     assert_eq!(loaded.thinking, ThinkingDisplay::Hide);
@@ -27,7 +30,10 @@ fn load_missing_returns_none_so_caller_keeps_toml() {
     let dir = tempdir();
     let path = dir.join("missing.json");
     let loaded = load_settings(&path).unwrap();
-    assert!(loaded.is_none(), "missing file must signal 'use TOML', got {loaded:?}");
+    assert!(
+        loaded.is_none(),
+        "missing file must signal 'use TOML', got {loaded:?}"
+    );
 }
 
 #[test]
@@ -55,11 +61,8 @@ fn toml_cardconfig_survives_when_settings_json_absent() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "sebas-toml-bootstrap-{}-{}",
-        std::process::id(),
-        n
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("sebas-toml-bootstrap-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json"); // 不创建 → 模拟首次启动
     let toml_cfg = CardConfig {
@@ -73,7 +76,10 @@ fn toml_cardconfig_survives_when_settings_json_absent() {
         Some(s) => s,
         None => toml_cfg.clone(),
     };
-    assert_eq!(merged, toml_cfg, "TOML bootstrap must not be overwritten by defaults");
+    assert_eq!(
+        merged, toml_cfg,
+        "TOML bootstrap must not be overwritten by defaults"
+    );
 }
 
 /// settings.json 写盘后必须 0600，防止多用户主机上其他用户读到 bot 的
@@ -94,11 +100,7 @@ fn tempdir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let p = std::env::temp_dir().join(format!(
-        "sebas-settings-test-{}-{}",
-        std::process::id(),
-        n
-    ));
+    let p = std::env::temp_dir().join(format!("sebas-settings-test-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&p).unwrap();
     p
 }

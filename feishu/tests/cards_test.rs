@@ -24,7 +24,10 @@ fn card_config_deserializes_thinking_from_lowercase() {
 fn card_config_rejects_unknown_thinking_value() {
     let v = serde_json::json!({ "thinking": "disable" });
     let res: Result<feishu::cards::CardConfig, _> = serde_json::from_value(v);
-    assert!(res.is_err(), "disable is not exposed yet, must fail to parse");
+    assert!(
+        res.is_err(),
+        "disable is not exposed yet, must fail to parse"
+    );
 }
 
 /// 用户手写 `settings.json` 时写错字段名（典型：把 `theme_color` 写成
@@ -35,7 +38,10 @@ fn card_config_rejects_unknown_field() {
     // 正确键是 `theme_color`；`theme` 拼错了。
     let json = r#"{ "theme": "blue", "max_user_text_chars": 4000 }"#;
     let res: Result<feishu::cards::CardConfig, _> = serde_json::from_str(json);
-    assert!(res.is_err(), "unknown field 'theme' must surface as parse error");
+    assert!(
+        res.is_err(),
+        "unknown field 'theme' must surface as parse error"
+    );
     let err = res.unwrap_err().to_string();
     assert!(
         err.contains("unknown field") || err.contains("theme"),
@@ -236,7 +242,10 @@ fn permission_card_file_path_headline_and_fields() {
     assert!(s.contains("📄 `src/main.rs`"));
     assert!(s.contains("**起始行**"));
     assert!(s.contains("**读取行数**"));
-    assert!(!s.contains("```json"), "flat args must not fall back to JSON");
+    assert!(
+        !s.contains("```json"),
+        "flat args must not fall back to JSON"
+    );
 }
 
 #[test]

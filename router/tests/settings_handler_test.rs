@@ -1,8 +1,8 @@
 use feishu::cards::ThinkingDisplay;
+use feishu::events::SessionKey;
 use router::router::{Out, RouterHandle};
 use router::settings::load_settings;
 use router::state::SessionMap;
-use feishu::events::SessionKey;
 use std::path::PathBuf;
 
 fn key() -> SessionKey {
@@ -36,15 +36,19 @@ async fn settings_list_emits_all_keys() {
     let (router, mut rx) = RouterHandle::new(SessionMap::new());
     let path = tempdir().join("settings.json");
 
-    router
-        .handle_settings(key(), None, None, &path)
-        .await;
+    router.handle_settings(key(), None, None, &path).await;
     let out = next_out(&mut rx).await;
     let Out::PlainText { key: _k, content } = out else {
         panic!("expected PlainText, got {out:?}");
     };
-    assert!(content.contains("thinking"), "missing thinking in list: {content}");
-    assert!(content.contains("show"), "default thinking not shown: {content}");
+    assert!(
+        content.contains("thinking"),
+        "missing thinking in list: {content}"
+    );
+    assert!(
+        content.contains("show"),
+        "default thinking not shown: {content}"
+    );
 }
 
 #[tokio::test]
@@ -59,7 +63,10 @@ async fn settings_set_persists_and_updates_router() {
     let Out::PlainText { content, .. } = out else {
         panic!("expected PlainText, got {out:?}");
     };
-    assert!(content.contains("hide"), "expected hide in reply: {content}");
+    assert!(
+        content.contains("hide"),
+        "expected hide in reply: {content}"
+    );
 
     // Verify in-memory config updated.
     let cfg = router.card_config().await;
@@ -76,7 +83,12 @@ async fn settings_rejects_invalid_value() {
     let path = tempdir().join("settings.json");
 
     router
-        .handle_settings(key(), Some("thinking".into()), Some("disable".into()), &path)
+        .handle_settings(
+            key(),
+            Some("thinking".into()),
+            Some("disable".into()),
+            &path,
+        )
         .await;
     let out = next_out(&mut rx).await;
     let Out::PlainText { content, .. } = out else {

@@ -114,7 +114,10 @@ fn send_card_body_full_structure_with_root_id() {
 
     assert_eq!(receive_id, Some("oc_chat_test"));
     assert_eq!(msg_type, Some("interactive"));
-    assert!(content_str.is_some(), "content must be present and a string");
+    assert!(
+        content_str.is_some(),
+        "content must be present and a string"
+    );
     assert_eq!(root_id, Some("parent_123"));
 
     let content_parsed: serde_json::Value =

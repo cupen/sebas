@@ -232,18 +232,14 @@ fn apply_preset_defaults(item: &mut Item) {
         .get("base_url_anthropic")
         .and_then(Value::as_str)
         .is_none_or(|s| s.is_empty());
-    if anth_empty
-        && let Some(u) = p.base_url_anthropic
-    {
+    if anth_empty && let Some(u) = p.base_url_anthropic {
         item.insert("base_url_anthropic".into(), Value::String(u.to_string()));
     }
     let oai_empty = item
         .get("base_url_openai")
         .and_then(Value::as_str)
         .is_none_or(|s| s.is_empty());
-    if oai_empty
-        && let Some(u) = p.base_url_openai
-    {
+    if oai_empty && let Some(u) = p.base_url_openai {
         item.insert("base_url_openai".into(), Value::String(u.to_string()));
     }
 

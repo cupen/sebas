@@ -20,6 +20,9 @@ pub enum SebasError {
 
     #[error("gateway error: {0}")]
     Gateway(String),
+
+    #[error("upgrade error: {0}")]
+    Upgrade(String),
 }
 
 pub type Result<T> = std::result::Result<T, SebasError>;

@@ -143,14 +143,14 @@ impl Handler {
                         .pointer("/context/open_message_id")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
-                    info!(
-                        ?key,
-                        ?payload,
-                        ?message_id,
-                        "button callback received"
-                    );
+                    info!(?key, ?payload, ?message_id, "button callback received");
                     let out = form
-                        .handle(key, &payload.unwrap_or(Value::Null), &BTreeMap::new(), message_id)
+                        .handle(
+                            key,
+                            &payload.unwrap_or(Value::Null),
+                            &BTreeMap::new(),
+                            message_id,
+                        )
                         .await;
                     self.dispatch(out).await?;
                 }

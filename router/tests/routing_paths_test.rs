@@ -403,8 +403,14 @@ async fn help_command_emits_plain_text() {
     match out {
         Out::PlainText { content, .. } => {
             // 至少包含 /help 自身和 /settings（覆盖关键命令）+ 中文标识。
-            assert!(content.contains("/help"), "help text missing /help: {content}");
-            assert!(content.contains("/settings"), "help text missing /settings: {content}");
+            assert!(
+                content.contains("/help"),
+                "help text missing /help: {content}"
+            );
+            assert!(
+                content.contains("/settings"),
+                "help text missing /settings: {content}"
+            );
         }
         other => panic!("expected PlainText (help), got {other:?}"),
     }

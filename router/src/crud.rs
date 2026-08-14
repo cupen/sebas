@@ -374,15 +374,25 @@ impl ProviderForms {
             if !lines.is_empty() {
                 card.push_text(lines.join("\n"));
             }
-            let edit_form = if has_preset { &self.preset } else { &self.custom };
+            let edit_form = if has_preset {
+                &self.preset
+            } else {
+                &self.custom
+            };
             card.push_actions(vec![
                 CardButton {
-                    text: CardText { tag: "plain_text".into(), content: "编辑".into() },
+                    text: CardText {
+                        tag: "plain_text".into(),
+                        content: "编辑".into(),
+                    },
                     r#type: "default".into(),
                     value: payload(edit_form.spec.form_name.as_str(), OP_EDIT, Some(&id)),
                 },
                 CardButton {
-                    text: CardText { tag: "plain_text".into(), content: "删除".into() },
+                    text: CardText {
+                        tag: "plain_text".into(),
+                        content: "删除".into(),
+                    },
                     r#type: "danger".into(),
                     value: payload(edit_form.spec.form_name.as_str(), OP_DELETE, Some(&id)),
                 },
@@ -414,7 +424,11 @@ impl ProviderForms {
     /// 表单，否则走 custom 表单。item 缺失则 None（由调用方决定兜底）。
     pub async fn pick_for_edit(&self, id: &str) -> Option<Arc<CrudForm<FileStore>>> {
         let item = self.preset.store.get(id).await?;
-        if item.get("preset").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        if item
+            .get("preset")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
             Some(self.preset.clone())
         } else {
             Some(self.custom.clone())
@@ -785,7 +799,10 @@ mod tests {
     fn item(id: &str, protocol: &str) -> Item {
         let mut m = Map::new();
         m.insert("name".into(), Value::String(id.into()));
-        m.insert("base_url_anthropic".into(), Value::String(format!("https://{id}.example")));
+        m.insert(
+            "base_url_anthropic".into(),
+            Value::String(format!("https://{id}.example")),
+        );
         let _ = protocol;
         m
     }
@@ -861,8 +878,14 @@ mod tests {
                     label: "预设".into(),
                     required: false,
                     options: vec![
-                        SelectOption { value: "".into(), label: "无".into() },
-                        SelectOption { value: "deepseek".into(), label: "deepseek".into() },
+                        SelectOption {
+                            value: "".into(),
+                            label: "无".into(),
+                        },
+                        SelectOption {
+                            value: "deepseek".into(),
+                            label: "deepseek".into(),
+                        },
                     ],
                     on_change: Some(serde_json::json!({"form": "provider", "op": "recompute"})),
                 },
@@ -890,8 +913,8 @@ mod tests {
     async fn recompute_runs_normalizer_without_persisting() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileStore::load(dir.path().join("providers.json"), "name", Vec::new()).unwrap();
-        let form = CrudForm::new(provider_spec(), "name", store.clone())
-            .with_normalizer(Arc::new(|item: &mut Item| {
+        let form = CrudForm::new(provider_spec(), "name", store.clone()).with_normalizer(Arc::new(
+            |item: &mut Item| {
                 // 与 apply_preset_defaults 等价的最小复刻：选 deepseek 时补全
                 // base_url_anthropic/api_key_env，留空字段不覆盖用户输入。
                 if item.get("preset").and_then(Value::as_str) == Some("deepseek") {
@@ -916,7 +939,8 @@ mod tests {
                         );
                     }
                 }
-            }));
+            },
+        ));
 
         // 模拟用户选 deepseek 后从客户端回传：preset=deepseek, base_url_anthropic="".
         let mut fv = BTreeMap::new();
@@ -940,16 +964,14 @@ mod tests {
         // 编辑已有条目时，recompute 不能把已有的密钥抹掉。
         let dir = tempfile::tempdir().unwrap();
         let mut seed = item("ds", "anthropic");
-        seed.insert("base_url_anthropic".into(), Value::String("https://old".into()));
+        seed.insert(
+            "base_url_anthropic".into(),
+            Value::String("https://old".into()),
+        );
         seed.insert("api_key".into(), Value::String("sk-keep".into()));
-        let store = FileStore::load(
-            dir.path().join("providers.json"),
-            "name",
-            vec![seed],
-        )
-        .unwrap();
-        let form = CrudForm::new(provider_spec(), "name", store.clone())
-            .with_normalizer(Arc::new(|item: &mut Item| {
+        let store = FileStore::load(dir.path().join("providers.json"), "name", vec![seed]).unwrap();
+        let form = CrudForm::new(provider_spec(), "name", store.clone()).with_normalizer(Arc::new(
+            |item: &mut Item| {
                 if item.get("preset").and_then(Value::as_str) == Some("deepseek") {
                     let base_empty = item
                         .get("base_url_anthropic")
@@ -962,7 +984,8 @@ mod tests {
                         );
                     }
                 }
-            }));
+            },
+        ));
 
         // 模拟编辑场景：用户只切了 preset，没碰 api_key 字段。
         let mut fv = BTreeMap::new();

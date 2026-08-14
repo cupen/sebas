@@ -174,8 +174,8 @@ mod tests {
     #[test]
     fn send_card_request_serializes_with_root_id() {
         let card = serde_json::json!({"header": {}, "body": {}});
-        let r = SendCardRequest::new("oc_xyz", ReceiveIdType::ChatId, &card)
-            .with_reply("om_parent");
+        let r =
+            SendCardRequest::new("oc_xyz", ReceiveIdType::ChatId, &card).with_reply("om_parent");
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["msg_type"], "interactive");
         assert_eq!(v["root_id"], "om_parent");
@@ -194,8 +194,7 @@ mod tests {
     #[test]
     fn send_card_request_omits_empty_root_id() {
         let card = serde_json::json!({});
-        let r =
-            SendCardRequest::new("oc_xyz", ReceiveIdType::ChatId, &card).with_reply("");
+        let r = SendCardRequest::new("oc_xyz", ReceiveIdType::ChatId, &card).with_reply("");
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert!(v.get("root_id").is_none());
     }

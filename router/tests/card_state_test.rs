@@ -793,7 +793,9 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     let args = json!({"command": "ls /tmp"});
@@ -831,7 +833,13 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
     }
     // Dispatcher records the msg_id (production: after send_card returns).
     router
-        .record_perm_card_msg_id("r1".into(), key.clone(), "om_1".into(), "Bash".into(), args.clone())
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_1".into(),
+            "Bash".into(),
+            args.clone(),
+        )
         .await;
 
     // User clicks 相同调用不再询问.
@@ -918,7 +926,9 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     // First call prompts; user clicks 本会话不再询问.

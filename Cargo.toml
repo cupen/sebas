@@ -44,6 +44,7 @@ chrono = "0.4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 futures-util = "0.3"
+async-trait = "0.1"
 
 # Feishu WebSocket long-connection inbound. v0.19.0+ adds `register_raw`
 # which sidesteps the dispatcher-key bug present in v0.14.0 (handlers
@@ -51,6 +52,8 @@ futures-util = "0.3"
 openlark = { version = "0.20", default-features = false, features = ["communication", "websocket"] }
 cc-agent-sdk = { version = "0.1.7"}
 # cc-agent-sdk = { version = "0.1.6", path = "vendor/cc-agent-sdk" }
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

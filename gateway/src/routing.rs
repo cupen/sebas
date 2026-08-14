@@ -1,4 +1,4 @@
-﻿//! 路由表与 model 提取（Task 4，spec §4.2）。
+//! 路由表与 model 提取（Task 4，spec §4.2）。
 //!
 //! - `RouteTable::from_config` / `RouteTable::resolve`：按优先级链解析 model
 //!   → provider + 经 `model_map` 重命名后的 upstream_model。
@@ -97,10 +97,7 @@ impl RouteTable {
                 } else {
                     let p: String = match self.match_route(m) {
                         Some(p) => p.to_string(),
-                        None => self
-                            .default_provider
-                            .clone()
-                            .ok_or(RouteError::NoRoute)?,
+                        None => self.default_provider.clone().ok_or(RouteError::NoRoute)?,
                     };
                     (p, Some(m))
                 }
@@ -156,7 +153,6 @@ impl RouteTable {
         }
         None
     }
-
 }
 
 /// 手写 glob 匹配（无 glob crate）。`*` 匹配任意字符（含空）；无 `*` 时精确相等。
@@ -318,8 +314,8 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[],
-            Some("anthropic")
-                    );
+            Some("anthropic"),
+        );
         let table = RouteTable::from_config(&cfg);
         // "anthropic/claude-sonnet" → provider anthropic，model claude-sonnet
         let d = table
@@ -339,8 +335,8 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[("foo/claude-sonnet", &["openai"])],
-            Some("anthropic")
-                    );
+            Some("anthropic"),
+        );
         let table = RouteTable::from_config(&cfg);
         let d = table
             .resolve(Some("foo/claude-sonnet"), Protocol::OpenAi)
@@ -362,8 +358,8 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[("claude-*", &["anthropic"]), ("claude-sonnet", &["openai"])],
-            None
-                    );
+            None,
+        );
         let table = RouteTable::from_config(&cfg);
         let d = table
             .resolve(Some("claude-sonnet"), Protocol::OpenAi)
@@ -380,8 +376,8 @@ mod tests {
                 ("ark", Protocol::Anthropic),
             ]),
             &[("deepseek-chat", &["deepseek", "ark"])],
-            None
-                    );
+            None,
+        );
         let table = RouteTable::from_config(&cfg);
         let d = table
             .resolve(Some("deepseek-chat"), Protocol::Anthropic)
@@ -397,8 +393,8 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
             &[("claude-*", &["anthropic"])],
-            None
-                    );
+            None,
+        );
         let table = RouteTable::from_config(&cfg);
         let err = table
             .resolve(Some("claude-sonnet"), Protocol::OpenAi)
@@ -421,8 +417,8 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[],
-            None
-                    );
+            None,
+        );
         let table = RouteTable::from_config(&cfg);
         // 两个 provider 且无默认/路由 → 无隐式默认，NoRoute。
         let err = table
@@ -440,8 +436,8 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
             &[],
-            None
-                    );
+            None,
+        );
         let table = RouteTable::from_config(&cfg);
 
         let d = table
@@ -464,8 +460,8 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[("anthropic", Protocol::Anthropic)]),
             &[],
-            None
-                    );
+            None,
+        );
         let table = RouteTable::from_config(&cfg);
         let err = table
             .resolve(Some("claude-sonnet"), Protocol::OpenAi)
@@ -518,8 +514,8 @@ mod tests {
                 ("openai", Protocol::OpenAi),
             ]),
             &[],
-            Some("openai")
-                    );
+            Some("openai"),
+        );
         let table = RouteTable::from_config(&cfg);
         let d = table
             .resolve(None, Protocol::OpenAi)

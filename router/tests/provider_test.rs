@@ -229,7 +229,10 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
     router
         .dispatch(FeishuIn::ButtonCb {
             key: key(),
-            action: card_action(json!({"form": "provider-custom", "op": "cancel"}), "om_cancel"),
+            action: card_action(
+                json!({"form": "provider-custom", "op": "cancel"}),
+                "om_cancel",
+            ),
         })
         .await;
 

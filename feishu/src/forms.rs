@@ -162,12 +162,12 @@ pub fn render_form_card(
                 // 内报 200621 not support tag: select）。把交互回传挂到
                 // `behaviors` 上，部分客户端版本仍能触发 callback。
                 let tag = "select_static";
-                let behaviors = on_change
-                    .as_ref()
-                    .map(|v| vec![CardBehavior {
+                let behaviors = on_change.as_ref().map(|v| {
+                    vec![CardBehavior {
                         r#type: "callback".into(),
                         value: v.clone(),
-                    }]);
+                    }]
+                });
                 elements.push(to_value(FormSelect {
                     tag,
                     placeholder: CardText {

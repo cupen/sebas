@@ -688,4 +688,3 @@ async fn case_13_model_rename_rewrites_upstream_model_field() {
     // ③ key 注入 + 不泄漏
     assert_key_injection(&rec, Protocol::Anthropic, "sk-gw-contract");
 }
-

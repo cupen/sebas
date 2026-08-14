@@ -140,8 +140,5 @@ fn select_renders_initial_value_for_preselected_option() {
         serde_json::json!({ "form": "note", "op": "submit" }),
     );
     let s = serde_json::to_string(&blank).unwrap();
-    assert!(
-        !s.contains("initial_value"),
-        "空字符串等同于无预选：{s}"
-    );
+    assert!(!s.contains("initial_value"), "空字符串等同于无预选：{s}");
 }

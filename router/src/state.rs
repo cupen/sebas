@@ -32,6 +32,9 @@ pub enum MappingState {
 pub struct Mapping {
     pub state: MappingState,
     pub last_active_unix: i64,
+    /// Working directory for the project (set when spawned via WebUI).
+    /// `None` for Feishu-originated sessions or sessions without a project dir.
+    pub project_dir: Option<String>,
 }
 
 impl Mapping {
@@ -41,6 +44,7 @@ impl Mapping {
                 session_id: session_id.into(),
             },
             last_active_unix: crate::router::now_unix(),
+            project_dir: None,
         }
     }
 
@@ -50,6 +54,7 @@ impl Mapping {
                 pending: Vec::new(),
             },
             last_active_unix: crate::router::now_unix(),
+            project_dir: None,
         }
     }
 
@@ -59,6 +64,7 @@ impl Mapping {
                 session_id: session_id.into(),
             },
             last_active_unix,
+            project_dir: None,
         }
     }
 
@@ -251,6 +257,15 @@ impl SessionMap {
         }
         g.insert(key, mapping);
         Ok(())
+    }
+
+    /// Set the project_dir on an existing mapping. Used by WebUI to record
+    /// the working directory after spawning a project session.
+    pub async fn set_project_dir(&self, key: &SessionKey, project_dir: Option<String>) {
+        let mut g = self.inner.write().await;
+        if let Some(m) = g.get_mut(key) {
+            m.project_dir = project_dir;
+        }
     }
 
     pub async fn get(&self, key: &SessionKey) -> Option<Mapping> {

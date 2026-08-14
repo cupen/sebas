@@ -286,7 +286,13 @@ fn resolve_providers(
         let preset_name = r.preset.as_deref().unwrap_or(&name);
         let preset = find_preset(preset_name);
         let (base_url_anthropic, base_url_openai) = match preset {
-            Some(p) => resolve_preset_urls(p, &name, preset_name, r.base_url_anthropic, r.base_url_openai)?,
+            Some(p) => resolve_preset_urls(
+                p,
+                &name,
+                preset_name,
+                r.base_url_anthropic,
+                r.base_url_openai,
+            )?,
             None => {
                 let a = r.base_url_anthropic.unwrap_or_default();
                 let o = r.base_url_openai.unwrap_or_default();
@@ -705,7 +711,10 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert_eq!(cfg.auth_token, vec!["sk-gw-local-dev".to_string()]);
         assert_eq!(cfg.providers.len(), 2);
         let anth = cfg.providers.get("anthropic").expect("anthropic provider");
-        assert_eq!(anth.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(
+            anth.base_url_anthropic.as_deref(),
+            Some("https://api.anthropic.com")
+        );
         assert!(anth.base_url_openai.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert_eq!(cfg.routes.len(), 2);
@@ -827,15 +836,24 @@ api_key_env = "MY_OPENAI_KEY"
         let cfg = parse_isolated(raw).expect("preset config should parse");
 
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.base_url_anthropic.as_deref(), Some("https://api.deepseek.com/anthropic"));
-        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(
+            ds.base_url_anthropic.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            ds.base_url_openai.as_deref(),
+            Some("https://api.deepseek.com")
+        );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 
         let oai = cfg.providers.get("openai").expect("openai provider");
         // 单协议 preset（openai）：只填 base_url_openai，anthropic 缺位
         assert!(oai.base_url_anthropic.is_none());
         // 显式 base_url_openai 覆盖 preset 默认
-        assert_eq!(oai.base_url_openai.as_deref(), Some("http://localhost:9099/v1"));
+        assert_eq!(
+            oai.base_url_openai.as_deref(),
+            Some("http://localhost:9099/v1")
+        );
         assert_eq!(oai.api_key_env.as_deref(), Some("MY_OPENAI_KEY"));
     }
 
@@ -859,7 +877,10 @@ auth_token = "sk-test"
             ds.base_url_anthropic.as_deref(),
             Some("https://api.deepseek.com/anthropic")
         );
-        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(
+            ds.base_url_openai.as_deref(),
+            Some("https://api.deepseek.com")
+        );
     }
 
     #[test]
@@ -878,7 +899,10 @@ preset = "openai"
         let cfg = parse_isolated(raw).expect("preset alias should parse");
         let p = cfg.providers.get("my-openai").expect("aliased provider");
         assert!(p.base_url_anthropic.is_none());
-        assert_eq!(p.base_url_openai.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(
+            p.base_url_openai.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
         assert_eq!(p.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
     }
 
@@ -942,7 +966,10 @@ api_key = "test-key"
 "#;
         let cfg = parse_isolated(raw).expect("preset + api_key should parse");
         let p = cfg.providers.get("anthropic").expect("anthropic provider");
-        assert_eq!(p.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(
+            p.base_url_anthropic.as_deref(),
+            Some("https://api.anthropic.com")
+        );
         assert!(p.base_url_openai.is_none());
         assert_eq!(
             p.api_key_env, None,
@@ -971,8 +998,14 @@ auth_token = "sk-test"
         assert_eq!(cfg.default_provider.as_deref(), Some("deepseek"));
         assert_eq!(cfg.auth_token, vec!["sk-test".to_string()]);
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.base_url_anthropic.as_deref(), Some("https://api.deepseek.com/anthropic"));
-        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(
+            ds.base_url_anthropic.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            ds.base_url_openai.as_deref(),
+            Some("https://api.deepseek.com")
+        );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
     }
 
@@ -995,7 +1028,10 @@ app_id = "x"
         assert_eq!(cfg.auth_token.len(), 0);
         assert_eq!(cfg.routes.len(), 0);
         let p = cfg.providers.get("anthropic").expect("anthropic provider");
-        assert_eq!(p.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(
+            p.base_url_anthropic.as_deref(),
+            Some("https://api.anthropic.com")
+        );
         assert!(p.base_url_openai.is_none());
         assert_eq!(p.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
@@ -1017,12 +1053,21 @@ api_key = "test-ark-key"
 "#;
         let cfg = parse_isolated(raw).expect("top-level provider table should parse");
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(ds.base_url_anthropic.as_deref(), Some("https://api.deepseek.com/anthropic"));
-        assert_eq!(ds.base_url_openai.as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(
+            ds.base_url_anthropic.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            ds.base_url_openai.as_deref(),
+            Some("https://api.deepseek.com")
+        );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 
         let ark = cfg.providers.get("ark").expect("ark provider");
-        assert_eq!(ark.base_url_anthropic.as_deref(), Some("https://ark.cn-beijing.volces.com/api/plan"));
+        assert_eq!(
+            ark.base_url_anthropic.as_deref(),
+            Some("https://ark.cn-beijing.volces.com/api/plan")
+        );
         assert_eq!(ark.api_key.as_deref(), Some("test-ark-key"));
         assert_eq!(ark.api_key_env, None);
     }
@@ -1184,7 +1229,10 @@ api_key = "test-key"
             "explicit api_key must not get preset env"
         );
         let anth = cfg.providers.get("anthropic").expect("anthropic kept");
-        assert_eq!(anth.base_url_anthropic.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(
+            anth.base_url_anthropic.as_deref(),
+            Some("https://api.anthropic.com")
+        );
         assert!(anth.base_url_openai.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY_V2"));
     }

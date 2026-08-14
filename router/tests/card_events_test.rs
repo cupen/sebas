@@ -94,7 +94,10 @@ fn thinking_show_aggregates_adjacent_deltas() {
     };
     assert_eq!(parent.elements.len(), 1);
     let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
-        panic!("expected thinking CollapsiblePanel, got {:?}", &parent.elements[0]);
+        panic!(
+            "expected thinking CollapsiblePanel, got {:?}",
+            &parent.elements[0]
+        );
     };
     assert_eq!(panel.elements.len(), 1);
     match &panel.elements[0] {
@@ -197,7 +200,10 @@ fn tool_start_folds_into_collapsible_panel() {
                 CardElement::CollapsiblePanel(tool_panel) => {
                     assert!(!tool_panel.expanded, "工具面板默认折叠");
                     assert_eq!(tool_panel.header.title.content, "📖 Bash");
-                    assert!(matches!(tool_panel.elements[0], CardElement::Markdown { .. }));
+                    assert!(matches!(
+                        tool_panel.elements[0],
+                        CardElement::Markdown { .. }
+                    ));
                 }
                 other => panic!("expected tool CollapsiblePanel, got {other:?}"),
             }
@@ -328,7 +334,9 @@ fn tool_lifecycle_folds_into_single_panel() {
                         other => panic!("expected progress Div, got {other:?}"),
                     }
                     match &panel.elements[2] {
-                        CardElement::Markdown { content } => assert_eq!(content.chars().count(), 20),
+                        CardElement::Markdown { content } => {
+                            assert_eq!(content.chars().count(), 20)
+                        }
                         other => panic!("expected result Markdown, got {other:?}"),
                     }
                 }
@@ -411,7 +419,9 @@ fn tool_end_hard_limit_truncates_inside_panel() {
                     // [args markdown, 硬上限截断后的结果 markdown, 截断灰注]
                     assert_eq!(panel.elements.len(), 3);
                     match &panel.elements[1] {
-                        CardElement::Markdown { content } => assert_eq!(content.chars().count(), 10240),
+                        CardElement::Markdown { content } => {
+                            assert_eq!(content.chars().count(), 10240)
+                        }
                         other => panic!("expected Markdown, got {other:?}"),
                     }
                     match &panel.elements[2] {
@@ -614,7 +624,10 @@ fn parent_element_count_limit_drops_oldest_child() {
             // 82 工具面板 × 2 + 1(父面板) = 165 > 80 → 丢到 39 个工具面板 = 79 个元素
             let remaining = parent.elements.len();
             assert!(remaining > 0, "should have some tool panels left");
-            assert!(remaining <= 39, "should have at most 39 tool panels (79 elements)");
+            assert!(
+                remaining <= 39,
+                "should have at most 39 tool panels (79 elements)"
+            );
             // 第一个子面板应是 Tool44（Bash + Tool2~Tool43 被丢弃了）
             let CardElement::CollapsiblePanel(first) = &parent.elements[0] else {
                 panic!("expected tool panel");
@@ -664,7 +677,9 @@ fn progress_note_limit_keeps_only_latest() {
             let progress_notes: Vec<&CardElement> = panel
                 .elements
                 .iter()
-                .filter(|el| matches!(el, CardElement::Div { text } if text.content.starts_with("⏳ ")))
+                .filter(
+                    |el| matches!(el, CardElement::Div { text } if text.content.starts_with("⏳ ")),
+                )
                 .collect();
             assert_eq!(progress_notes.len(), 5, "最多保留 5 条进度通知");
             // 最后一条应是 "step 8"

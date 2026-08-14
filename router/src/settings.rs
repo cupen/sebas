@@ -45,11 +45,9 @@ pub fn load_settings(path: &Path) -> Result<Option<CardConfig>, String> {
 /// failure to chmod logs a warn but does not fail the save.
 pub fn save_settings(path: &Path, cfg: &CardConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建 settings 父目录失败: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 settings 父目录失败: {e}"))?;
     }
-    let s = serde_json::to_string_pretty(cfg)
-        .map_err(|e| format!("序列化 settings 失败: {e}"))?;
+    let s = serde_json::to_string_pretty(cfg).map_err(|e| format!("序列化 settings 失败: {e}"))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, s).map_err(|e| format!("写 settings 临时文件失败: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename settings 失败: {e}"))?;

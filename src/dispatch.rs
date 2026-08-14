@@ -3,6 +3,7 @@
 //! 从 `run.rs` 拆出；只被出站泵（`crate::run`）调用。
 
 use crate::config::Config;
+use crate::ipc::ChildMsg;
 use crate::reactions::{ReactPlan, ReactionTracker};
 use crate::session_boot::{
     acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, spawn_acp_pump,
@@ -149,11 +150,16 @@ pub(crate) async fn dispatch_out(
             )
             .await?;
         }
-        Out::WebSpawn { key, prompt } => {
+        Out::WebSpawn {
+            key,
+            prompt,
+            project_dir,
+        } => {
             let claude = &cfg.acp.claude;
             // Web-originated spawn: create the ACP session and wire the pump,
             // but skip the Feishu send_card / react operations. Card content
             // is still accumulated in CardStateMap and readable via the WebUI.
+            // `project_dir` takes precedence over the config default.
             let (session_id, pending, rx) = match acp_spawn_and_activate(
                 mgr,
                 router,
@@ -161,7 +167,7 @@ pub(crate) async fn dispatch_out(
                 &prompt,
                 &claude.path,
                 claude.args.clone(),
-                claude.work_dir.clone(),
+                project_dir.or_else(|| claude.work_dir.clone()),
             )
             .await
             {
@@ -243,10 +249,30 @@ pub(crate) async fn dispatch_out(
             info!(?key, "send help (no-op: help text not implemented)");
         }
         Out::PlainText { key, content } => {
-            if let Err(e) = feishu
-                .send_text(http, tokens, &key, &content)
-                .await
-            {
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogUpgrade { key, dev, dry_run } => {
+            let cmd = if dev {
+                ChildMsg::UpgradeDev { dry_run }
+            } else {
+                ChildMsg::Upgrade { dry_run }
+            };
+            let content = match crate::ipc::send_watchdog_command(cmd) {
+                Ok(()) => "已提交升级请求给 watchdog".to_string(),
+                Err(e) => format!("升级请求失败: {e}"),
+            };
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogRollback { key } => {
+            let content = match crate::ipc::send_watchdog_command(ChildMsg::Rollback) {
+                Ok(()) => "已提交回滚请求给 watchdog".to_string(),
+                Err(e) => format!("回滚请求失败: {e}"),
+            };
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
                 warn!(?e, "send_text failed");
             }
         }
