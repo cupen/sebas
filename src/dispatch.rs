@@ -83,6 +83,14 @@ pub(crate) async fn dispatch_out(
             }
             let _ = key; // chat context — currently unused; the API only needs msg_id
         }
+        Out::AckMsg { message_id, emoji } => {
+            // Fire-and-forget acknowledgment reaction on the user's message.
+            // No tracking needed — unlike Out::React, this is a one-shot
+            // notification that does not need to be swapped later.
+            if let Err(e) = feishu.react(http, tokens, &message_id, &emoji).await {
+                warn!(%message_id, error=%e, "ack reaction failed");
+            }
+        }
         Out::React { session_id, emoji } => {
             // 状态 reaction 优先落在用户输入消息上（本次功能）；无输入消息
             // 时（WebUI /new/replay）回退到会话卡片，保持旧行为。

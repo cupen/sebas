@@ -88,6 +88,14 @@ pub enum Out {
         session_id: String,
         emoji: String,
     },
+    /// Fire-and-forget reaction on a specific Feishu message (not a card).
+    /// Used to acknowledge user message receipt immediately with an emoji,
+    /// before any processing begins. The reaction is not tracked by the
+    /// ReactionTracker — it's a one-shot acknowledgment.
+    AckMsg {
+        message_id: String,
+        emoji: String,
+    },
     HelpText {
         key: SessionKey,
     },
