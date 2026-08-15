@@ -176,7 +176,7 @@ pub(crate) async fn wire_session_card_and_pump(
     // real session_id (so streaming UpdateCards resolve correctly).
     // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
     //（避免初始卡蓝、后续卡变色的跳变）。
-    let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
+let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
     // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
     // 原话题；主线保持 None（Q7）。话题失效时 send_card_topic_aware 会发
     // 文本提示并熔断（web_close_session 终止刚 spawn 的会话，返回
