@@ -85,10 +85,17 @@ pub(crate) async fn dispatch_out(
         }
         Out::AckMsg { message_id, emoji } => {
             // Fire-and-forget acknowledgment reaction on the user's message.
-            // No tracking needed — unlike Out::React, this is a one-shot
-            // notification that does not need to be swapped later.
-            if let Err(e) = feishu.react(http, tokens, &message_id, &emoji).await {
-                warn!(%message_id, error=%e, "ack reaction failed");
+            // Record the reaction_id so the phase reaction handler can later
+            // remove this ack emoji before adding the new one.
+            match feishu.react(http, tokens, &message_id, &emoji).await {
+                Ok(rid) => {
+                    reactions
+                        .record_ack(&message_id, emoji.clone(), rid)
+                        .await;
+                }
+                Err(e) => {
+                    warn!(%message_id, error=%e, "ack reaction failed");
+                }
             }
         }
         Out::React { session_id, emoji } => {
@@ -100,6 +107,14 @@ pub(crate) async fn dispatch_out(
                 None => router.root_msg_id(&session_id).await,
             };
             if let Some(message_id) = target {
+                // Before planning the phase reaction, check if there's a
+                // pending ack reaction (EYES) on this message. If so, remove
+                // it first so the phase emoji cleanly replaces the ack.
+                if let Some((_, ack_rid)) = reactions.take_ack(&message_id).await {
+                    if let Err(e) = feishu.unreact(http, tokens, &message_id, &ack_rid).await {
+                        warn!(%session_id, "removing ack reaction before phase swap failed: {e}");
+                    }
+                }
                 match reactions.plan(&session_id, &emoji).await {
                     ReactPlan::Skip => {}
                     ReactPlan::ReactOnly => {
