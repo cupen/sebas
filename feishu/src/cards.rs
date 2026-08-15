@@ -362,15 +362,72 @@ pub fn derive_topic(prompt: &str) -> String {
     out
 }
 
+/// 卡片 footer 的可选信息：替代 `msg_id: {session_id}` 灰注，展示模型名和
+/// token 用量，对用户更有用。
+#[derive(Debug, Clone, Default)]
+pub struct CardFooter {
+    /// 模型名，如 "claude-sonnet-4-20250514"
+    pub model: Option<String>,
+    /// 本轮输入 token 数
+    pub round_input: u64,
+    /// 本轮输出 token 数
+    pub round_output: u64,
+    /// 累计输入 token 数（整个会话）
+    pub total_input: u64,
+    /// 累计输出 token 数（整个会话）
+    pub total_output: u64,
+}
+
+/// 格式化 token 数为人类可读（<1000 显示原数，>=1000 显示 K 单位）。
+fn format_token_count(n: u64) -> String {
+    if n >= 1000 {
+        let k = n as f64 / 1000.0;
+        if k >= 100.0 {
+            format!("{:.0}K", k)
+        } else {
+            format!("{:.1}K", k)
+        }
+    } else {
+        n.to_string()
+    }
+}
+
+/// 从模型名中提取简短标识（去掉版本后缀），如 "claude-sonnet-4-20250514" → "sonnet"。
+fn short_model_name(model: &str) -> String {
+    // Known model prefixes: "claude-sonnet-4-…" → "sonnet", "claude-opus-4-…" → "opus"
+    let known = [
+        ("claude-sonnet-4", "sonnet"),
+        ("claude-sonnet-5", "sonnet"),
+        ("claude-opus-4", "opus"),
+        ("claude-opus-5", "opus"),
+        ("claude-haiku-3", "haiku"),
+        ("claude-haiku-4", "haiku"),
+    ];
+    for (prefix, short) in &known {
+        if model.starts_with(prefix) {
+            return short.to_string();
+        }
+    }
+    // Fallback: take the second segment if it looks like "claude-{name}"
+    if let Some(rest) = model.strip_prefix("claude-") {
+        if let Some(name) = rest.split('-').next() {
+            return name.to_string();
+        }
+    }
+    model.to_string()
+}
+
 /// 从累积状态构建完整卡（spec §4.3）：
 /// header(`{主题}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
-/// + body 各元素 + footer 灰注(`msg: {session_id}`)。
+/// + body 各元素 + footer 灰注。
 /// 标题由 `derive_topic(user_prompt)` 派生，不再携带状态 emoji。
+/// 当 `footer` 为 Some 时展示模型名和 token 用量，否则回退 `msg_id: {session_id}`。
 pub fn render_accumulated_card(
     user_prompt: &str,
     session_id: &str,
     body: &[CardElement],
     theme: &str,
+    footer: Option<&CardFooter>,
 ) -> Card {
     let mut card = Card::new(&derive_topic(user_prompt), theme);
     card.push_text(format!("> {user_prompt}"));
@@ -378,14 +435,31 @@ pub fn render_accumulated_card(
     for el in body {
         card.body.elements.push(el.clone());
     }
-    card.push_note(format!("msg_id: {session_id}"));
+    match footer {
+        Some(f) => {
+            let model = f
+                .model
+                .as_deref()
+                .map(short_model_name)
+                .unwrap_or_else(|| "?".to_string());
+            let round_in = format_token_count(f.round_input);
+            let round_out = format_token_count(f.round_output);
+            let total = format_token_count(f.total_input + f.total_output);
+            card.push_note(format!(
+                "{model}  ·  in: {round_in}  out: {round_out}  ·  ctx: {total}"
+            ));
+        }
+        None => {
+            card.push_note(format!("msg_id: {session_id}"));
+        }
+    }
     card
 }
 
 /// seed 时的初始卡构建器（不再被每个事件调用）。空 body 薄封装。
 /// 保留供 cards_test 快照；theme 固定 "blue" 以保持快照不变。
 pub fn render_root_card(user_prompt: &str, msg_id: &str) -> Card {
-    render_accumulated_card(user_prompt, msg_id, &[], "blue")
+    render_accumulated_card(user_prompt, msg_id, &[], "blue", None)
 }
 
 /// 权限卡参数展示的代码级硬上限：完整参数（含折叠面板里的 JSON）超过即截断，

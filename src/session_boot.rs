@@ -177,7 +177,7 @@ pub(crate) async fn wire_session_card_and_pump(
     //（避免初始卡蓝、后续卡变色的跳变）。
     // `input_msg_id` 作为 root_id，让首卡以 reply 形式挂在输入消息下，方便
     // 在飞书里沿 thread 跟踪整段对话。
-    let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color);
+    let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
     let msg_id = feishu
         .send_card(
             http,

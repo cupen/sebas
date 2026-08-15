@@ -16,7 +16,7 @@
 //! - `setting_sources = Some(vec![])` hermetically isolates the child from
 //!   the host user's settings/hooks (spike §8b).
 
-use crate::session::{AcpCommand, AcpEvent, Decision, ResponderSlot};
+use crate::session::{AcpCommand, AcpEvent, Decision, ResponderSlot, TurnUsage};
 use claude_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, HookCallback, HookEvent, HookInput,
     HookJsonOutput, HookMatcher, HookSpecificOutput, Message, PreToolUseHookSpecificOutput,
@@ -538,32 +538,56 @@ pub(crate) fn map_message(
 ) -> Vec<AcpEvent> {
     let sid = || session_id.to_string();
     match msg {
-        Message::Assistant(a) => a
-            .message
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text(t) if !t.text.is_empty() => Some(AcpEvent::TextDelta {
+        Message::Assistant(a) => {
+            let mut events: Vec<AcpEvent> = a
+                .message
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text(t) if !t.text.is_empty() => Some(AcpEvent::TextDelta {
+                        session_id: sid(),
+                        delta: t.text.clone(),
+                    }),
+                    ContentBlock::Thinking(t) if !t.thinking.is_empty() => {
+                        Some(AcpEvent::ThinkingDelta {
+                            session_id: sid(),
+                            delta: t.thinking.clone(),
+                        })
+                    }
+                    ContentBlock::ToolUse(t) => {
+                        tool_names.insert(t.id.clone(), t.name.clone());
+                        Some(AcpEvent::ToolStart {
+                            session_id: sid(),
+                            tool_name: t.name.clone(),
+                            args: t.input.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            // Extract model name and token usage from the assistant message.
+            if let Some(usage) = &a.message.usage {
+                let input = usage.get("input_tokens").and_then(|v| v.as_u64());
+                let output = usage.get("output_tokens").and_then(|v| v.as_u64());
+                let cache_read = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64());
+                let cache_creation = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64());
+                events.push(AcpEvent::UsageUpdate {
                     session_id: sid(),
-                    delta: t.text.clone(),
-                }),
-                ContentBlock::Thinking(t) if !t.thinking.is_empty() => {
-                    Some(AcpEvent::ThinkingDelta {
-                        session_id: sid(),
-                        delta: t.thinking.clone(),
-                    })
-                }
-                ContentBlock::ToolUse(t) => {
-                    tool_names.insert(t.id.clone(), t.name.clone());
-                    Some(AcpEvent::ToolStart {
-                        session_id: sid(),
-                        tool_name: t.name.clone(),
-                        args: t.input.clone(),
-                    })
-                }
-                _ => None,
-            })
-            .collect(),
+                    usage: TurnUsage {
+                        model: a.message.model.clone(),
+                        input_tokens: input,
+                        output_tokens: output,
+                        cache_read_input_tokens: cache_read,
+                        cache_creation_input_tokens: cache_creation,
+                    },
+                });
+            }
+            events
+        }
         Message::User(u) => {
             let Ok(v) = serde_json::to_value(u) else {
                 return vec![];
@@ -608,11 +632,46 @@ pub(crate) fn map_message(
                     terminal: true,
                 }]
             } else {
-                vec![AcpEvent::Finished { session_id: sid() }]
+                let mut events = vec![AcpEvent::Finished { session_id: sid() }];
+                if let Some(usage) = &r.usage {
+                    let input = usage.get("input_tokens").and_then(|v| v.as_u64());
+                    let output = usage.get("output_tokens").and_then(|v| v.as_u64());
+                    events.push(AcpEvent::UsageUpdate {
+                        session_id: sid(),
+                        usage: TurnUsage {
+                            model: None,
+                            input_tokens: input,
+                            output_tokens: output,
+                            cache_read_input_tokens: None,
+                            cache_creation_input_tokens: None,
+                        },
+                    });
+                }
+                events
             }
         }
-        // System (init / hook_started / thinking_tokens / ...), StreamEvent
-        // (partials disabled), ControlCancelRequest — nothing to surface.
+        // System messages carry model info on session_start; drop others.
+        Message::System(s) => {
+            if s.subtype == "session_start" {
+                if let Some(model) = &s.model {
+                    vec![AcpEvent::UsageUpdate {
+                        session_id: sid(),
+                        usage: TurnUsage {
+                            model: Some(model.clone()),
+                            input_tokens: None,
+                            output_tokens: None,
+                            cache_read_input_tokens: None,
+                            cache_creation_input_tokens: None,
+                        },
+                    }]
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        }
+        // StreamEvent (partials disabled), ControlCancelRequest — nothing.
         _ => vec![],
     }
 }
@@ -647,6 +706,27 @@ mod tests {
             "message": {"role": "assistant", "content": blocks}
         });
         serde_json::from_value(v).expect("assistant message parses")
+    }
+
+    fn assistant_msg_with_usage(
+        blocks: serde_json::Value,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Message {
+        let v = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": blocks,
+                "model": model,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens
+                }
+            }
+        });
+        serde_json::from_value(v).expect("assistant msg with usage parses")
     }
 
     #[test]
@@ -745,5 +825,96 @@ mod tests {
             serde_json::json!({"type": "system", "subtype": "thinking_tokens", "session_id": "s1"});
         let m: Message = serde_json::from_value(v).expect("system parses");
         assert!(map_message("s1", &mut names, &m).is_empty());
+    }
+
+    #[test]
+    fn assistant_with_usage_emits_usage_update() {
+        let mut names = HashMap::new();
+        let m = assistant_msg_with_usage(
+            serde_json::json!([{"type": "text", "text": "hello"}]),
+            "claude-sonnet-4-20250514",
+            123,
+            456,
+        );
+        let evts = map_message("s1", &mut names, &m);
+        // Expect TextDelta + UsageUpdate
+        assert_eq!(evts.len(), 2);
+        assert!(matches!(&evts[0], AcpEvent::TextDelta { delta, .. } if delta == "hello"));
+        match &evts[1] {
+            AcpEvent::UsageUpdate { session_id, usage } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-20250514"));
+                assert_eq!(usage.input_tokens, Some(123));
+                assert_eq!(usage.output_tokens, Some(456));
+            }
+            _ => panic!("expected UsageUpdate"),
+        }
+    }
+
+    #[test]
+    fn assistant_without_usage_does_not_emit_usage_update() {
+        let mut names = HashMap::new();
+        let m = assistant_msg(serde_json::json!([{"type": "text", "text": "hi"}]));
+        let evts = map_message("s1", &mut names, &m);
+        assert!(matches!(
+            &evts[..],
+            [AcpEvent::TextDelta { .. }]
+        ));
+    }
+
+    #[test]
+    fn result_success_with_usage_emits_usage_update() {
+        let mut names = HashMap::new();
+        let v = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "duration_ms": 100, "duration_api_ms": 80, "num_turns": 1, "session_id": "s1",
+            "usage": {"input_tokens": 200, "output_tokens": 300}
+        });
+        let m: Message = serde_json::from_value(v).expect("result parses");
+        let evts = map_message("s1", &mut names, &m);
+        assert_eq!(evts.len(), 2);
+        assert!(matches!(&evts[0], AcpEvent::Finished { .. }));
+        match &evts[1] {
+            AcpEvent::UsageUpdate { session_id, usage } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(usage.input_tokens, Some(200));
+                assert_eq!(usage.output_tokens, Some(300));
+                assert!(usage.model.is_none());
+            }
+            _ => panic!("expected UsageUpdate"),
+        }
+    }
+
+    #[test]
+    fn system_session_start_emits_model_usage_update() {
+        let mut names = HashMap::new();
+        let v = serde_json::json!({
+            "type": "system", "subtype": "session_start",
+            "session_id": "s1", "model": "claude-opus-4-20250514"
+        });
+        let m: Message = serde_json::from_value(v).expect("system parses");
+        let evts = map_message("s1", &mut names, &m);
+        assert_eq!(evts.len(), 1);
+        match &evts[0] {
+            AcpEvent::UsageUpdate { session_id, usage } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(usage.model.as_deref(), Some("claude-opus-4-20250514"));
+                assert!(usage.input_tokens.is_none());
+                assert!(usage.output_tokens.is_none());
+            }
+            _ => panic!("expected UsageUpdate"),
+        }
+    }
+
+    #[test]
+    fn system_session_start_without_model_emits_nothing() {
+        let mut names = HashMap::new();
+        let v = serde_json::json!({
+            "type": "system", "subtype": "session_start",
+            "session_id": "s1"
+        });
+        let m: Message = serde_json::from_value(v).expect("system parses");
+        let evts = map_message("s1", &mut names, &m);
+        assert!(evts.is_empty());
     }
 }

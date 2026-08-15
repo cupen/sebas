@@ -475,7 +475,7 @@ impl RouterHandle {
 
         // Send initial card
         let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(prompt, session_id, &[], &theme_color);
+        let card = render_accumulated_card(prompt, session_id, &[], &theme_color, None);
         self.emit(Out::SendCard {
             key: key.clone(),
             card: serde_json::to_value(&card).unwrap(),

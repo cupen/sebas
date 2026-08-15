@@ -372,10 +372,31 @@ impl RouterHandle {
         let cfg = self.card_cfg.read().await;
         self.card_states
             .apply(session_id, |st| {
+                // Handle usage updates separately — they don't affect the FSM
+                // or the card body, but update accumulated token counts.
+                if let AcpEvent::UsageUpdate { usage, .. } = event {
+                    if let Some(model) = &usage.model {
+                        st.usage.model = Some(model.clone());
+                    }
+                    if let Some(input) = usage.input_tokens {
+                        st.usage.round_input += input;
+                        st.usage.total_input += input;
+                    }
+                    if let Some(output) = usage.output_tokens {
+                        st.usage.round_output += output;
+                        st.usage.total_output += output;
+                    }
+                    return None;
+                }
                 // FSM（spec §5）
                 let next = next_emoji(&st.status_emoji, event);
                 if let Some(e) = next {
                     st.status_emoji = e.into();
+                }
+                // On Finished, reset round counters for the next turn.
+                if matches!(event, AcpEvent::Finished { .. }) {
+                    st.usage.round_input = 0;
+                    st.usage.round_output = 0;
                 }
                 apply_event_to_card(&mut st.body, event, &cfg);
                 next
@@ -412,6 +433,7 @@ impl RouterHandle {
             session_id,
             &body,
             &theme_color,
+            Some(&st.usage),
         );
         self.emit(Out::UpdateCard {
             session_id: session_id.to_string(),
@@ -453,6 +475,7 @@ impl RouterHandle {
             session_id,
             &body,
             &theme_color,
+            Some(&st.usage),
         );
         self.emit(Out::UpdateCard {
             session_id: session_id.to_string(),
@@ -481,6 +504,7 @@ impl RouterHandle {
             session_id,
             &fresh_body,
             &theme_color,
+            Some(&st.usage),
         );
         self.emit(Out::SendCard {
             key,
@@ -677,7 +701,7 @@ impl RouterHandle {
         self.card_states.drop(session_id).await;
         self.seed_card(session_id.to_string(), prompt.clone()).await;
         let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(&prompt, session_id, &[], &theme_color);
+        let card = render_accumulated_card(&prompt, session_id, &[], &theme_color, None);
         self.emit(Out::SendCard {
             key,
             card: serde_json::to_value(&card).unwrap(),
@@ -765,7 +789,8 @@ fn extract_session_id(event: &AcpEvent) -> &str {
         | AcpEvent::ToolEnd { session_id, .. }
         | AcpEvent::PermissionRequest { session_id, .. }
         | AcpEvent::Finished { session_id }
-        | AcpEvent::Error { session_id, .. } => session_id,
+        | AcpEvent::Error { session_id, .. }
+        | AcpEvent::UsageUpdate { session_id, .. } => session_id,
     }
 }
 
@@ -797,5 +822,6 @@ fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
             }
         }
         AcpEvent::PermissionRequest { .. } => None,
+        AcpEvent::UsageUpdate { .. } => None,
     }
 }

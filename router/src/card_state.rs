@@ -20,6 +20,11 @@ pub mod phase {
     pub const FAILED: &str = "CrossMark"; // terminal Error event
 }
 
+/// Accumulated token usage for a session. Reset at the start of each turn
+/// (round) so the footer can show per-round and cumulative totals.
+/// Re-exported from feishu::cards for convenience.
+pub use feishu::cards::CardFooter;
+
 #[derive(Debug, Clone)]
 pub struct CardState {
     pub user_prompt: String,
@@ -28,6 +33,8 @@ pub struct CardState {
     /// parent panel title ("🤔 折腾中 · 3项 · 45s").
     pub started_at: Instant,
     pub body: Vec<CardElement>,
+    /// Model name and token usage tracking.
+    pub usage: CardFooter,
 }
 
 impl CardState {
@@ -38,6 +45,7 @@ impl CardState {
             status_emoji: phase::SEED.into(),
             started_at: Instant::now(),
             body: Vec::new(),
+            usage: CardFooter::default(),
         }
     }
 
@@ -48,6 +56,7 @@ impl CardState {
             status_emoji: phase::SEED.into(),
             started_at: Instant::now(),
             body: Vec::new(),
+            usage: CardFooter::default(),
         }
     }
 }
