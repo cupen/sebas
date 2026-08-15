@@ -60,6 +60,19 @@ pub struct CcDriver {
     /// crash usually carries its own explanation (the SDK pipes stderr but
     /// drops it unless a callback is installed).
     stderr_tail: Arc<std::sync::Mutex<String>>,
+    /// Hang detection (sebas-9pz ①): `Instant` of the last activity
+    /// (any `Ok` message on the stream, or a permission request hand-off).
+    /// When the child produces nothing for `HANG_TIMEOUT`, the driver
+    /// escalates: interrupt() ×3 → disconnect (≈SIGTERM) → 5s → drop
+    /// (≈SIGKILL). Tied to spec §4.1 "5min 无任何 notification".
+    last_activity: tokio::time::Instant,
+    /// Escalation stage: 0..=3 interrupts already sent for the current hang.
+    hang_stage: u8,
+    /// True while a PreToolUse permission prompt is parked awaiting the
+    /// user's click (spec §4.1: permission wait is "永不超时"). Hang
+    /// detection is suspended while this is set, otherwise a slow user
+    /// click would look exactly like a hung child.
+    waiting_permission: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Why a connect attempt failed. `ResumeRejected` is carved out so the
@@ -135,7 +148,13 @@ impl CcDriver {
             extra_args.insert("session-id".into(), Some(session_id.clone()));
         }
 
-        let cb = permission_hook(session_id.clone(), evt_tx.clone(), pending_perms.clone());
+        let waiting_permission = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cb = permission_hook(
+            session_id.clone(),
+            evt_tx.clone(),
+            pending_perms.clone(),
+            waiting_permission.clone(),
+        );
         let mut hooks: HashMap<HookEvent, Vec<HookMatcher>> = HashMap::new();
         hooks.insert(
             HookEvent::PreToolUse,
@@ -232,6 +251,9 @@ impl CcDriver {
             tool_names: HashMap::new(),
             terminal_sent,
             stderr_tail,
+            last_activity: tokio::time::Instant::now(),
+            hang_stage: 0,
+            waiting_permission,
         })
     }
 
@@ -296,6 +318,64 @@ impl CcDriver {
                             .await;
                         return;
                     }
+
+                    // Hang detection (sebas-9pz ①, spec §4.1): the child is
+                    // alive but silent for HANG_TIMEOUT. The SDK exposes no
+                    // process handle, so SIGTERM/SIGKILL are approximated with
+                    // the SDK's own escalation: interrupt() (cancel, ×3), then
+                    // disconnect() (closes stdin ≈ SIGTERM), then a 5s grace
+                    // before the driver returns — dropping `self.client`
+                    // SIGKILLs the child (SubprocessTransport::drop).
+                    // HANG_TIMEOUT defaults to spec §4.1's 5min; tests override
+                    // via SEBAS_HANG_TIMEOUT_SECS so a hang regression test
+                    // doesn't have to sleep 5 minutes.
+                    let hang_timeout = std::env::var("SEBAS_HANG_TIMEOUT_SECS")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(Duration::from_secs)
+                        .unwrap_or(Duration::from_secs(5 * 60));
+                    const ESCALATE_GRACE: Duration = Duration::from_secs(2);
+                    const SIGKILL_GRACE: Duration = Duration::from_secs(5);
+                    const MAX_INTERRUPTS: u8 = 3;
+                    // Permission wait suspends hang detection (spec §4.1:
+                    // "永不超时"). A slow user click must not look like a
+                    // hung child.
+                    let awaiting_user = self
+                        .waiting_permission
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if awaiting_user {
+                        continue;
+                    }
+                    if self.last_activity.elapsed() > hang_timeout && self.hang_stage < 3 {
+                        self.hang_stage += 1;
+                        tracing::warn!(
+                            session_id = %self.session_id,
+                            stage = self.hang_stage,
+                            "agent silent for 5m; escalating (interrupt {}/{MAX_INTERRUPTS})",
+                            self.hang_stage
+                        );
+                        // `interrupt()` kills the current turn; on a live-but-
+                        // hung child it either wakes it (activity resumes, the
+                        // next Msg resets last_activity) or errors (child gone
+                        // → next probe trips `dead`).
+                        let _ = self.client.interrupt().await;
+                        tokio::time::sleep(ESCALATE_GRACE).await;
+                        continue;
+                    }
+                    if self.hang_stage >= MAX_INTERRUPTS {
+                        tracing::error!(
+                            session_id = %self.session_id,
+                            "agent unresponsive after 3 interrupts; force-restarting (SIGTERM→SIGKILL)"
+                        );
+                        // ≈SIGTERM: close the child's stdin and await exit.
+                        let _ = self.client.disconnect().await;
+                        tokio::time::sleep(SIGKILL_GRACE).await;
+                        self.terminal("agent hung (no activity for 5m; 3 cancels failed)")
+                            .await;
+                        // Returning drops `self.client` → SubprocessTransport
+                        // Drop → start_kill (≈SIGKILL) for any straggler.
+                        return;
+                    }
                 }
                 Sel::Cmd(Some(AcpCommand::Cancel { .. })) => {
                     if !self.handle_cancel().await {
@@ -315,6 +395,11 @@ impl CcDriver {
                     tracing::debug!("ignoring unexpected PermissionReply on session channel");
                 }
                 Sel::Msg(Some(Ok(m))) => {
+                    // Any real message from the child counts as activity:
+                    // resets the hang timer and clears the escalation stage
+                    // (sebas-9pz ①).
+                    self.last_activity = tokio::time::Instant::now();
+                    self.hang_stage = 0;
                     for evt in map_message(&self.session_id, &mut self.tool_names, &m) {
                         let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
                         if self.evt_tx.send(evt).await.is_err() || is_terminal {
@@ -435,11 +520,14 @@ fn permission_hook(
     session_id: String,
     evt_tx: mpsc::Sender<AcpEvent>,
     pending: Arc<Mutex<HashMap<String, ResponderSlot>>>,
+    waiting_permission: Arc<std::sync::atomic::AtomicBool>,
 ) -> HookCallback {
+    use std::sync::atomic::Ordering;
     Arc::new(move |input: HookInput, tool_use_id: Option<String>, _ctx| {
         let session_id = session_id.clone();
         let evt_tx = evt_tx.clone();
         let pending = pending.clone();
+        let waiting = waiting_permission.clone();
         async move {
             let HookInput::PreToolUse(pre) = input else {
                 return allow_output("non-PreToolUse hook passthrough");
@@ -447,6 +535,10 @@ fn permission_hook(
             let request_id = tool_use_id.unwrap_or_else(|| format!("req-{}", uuid::Uuid::new_v4()));
             let (tx, rx) = oneshot::channel();
             pending.lock().await.insert(request_id.clone(), tx);
+            // Suspend hang detection while the user decides (spec §4.1:
+            // permission wait never times out). Cleared on decision (or when
+            // the oneshot drops — the Err arm below).
+            waiting.store(true, Ordering::SeqCst);
             // Fire-and-forget: if the router is gone, deny (fail closed).
             let _ = evt_tx
                 .send(AcpEvent::PermissionRequest {
@@ -456,12 +548,14 @@ fn permission_hook(
                     args: pre.tool_input,
                 })
                 .await;
-            match rx.await {
+            let out = match rx.await {
                 Ok(Decision::AllowOnce) | Ok(Decision::AllowSession) => {
                     allow_output("allowed by sebas user")
                 }
                 Ok(Decision::Deny) | Err(_) => deny_output("denied by sebas user"),
-            }
+            };
+            waiting.store(false, Ordering::SeqCst);
+            out
         }
         .boxed()
     })
@@ -599,14 +693,35 @@ pub(crate) fn map_message(
         }
         Message::Result(r) => {
             if r.is_error {
-                vec![AcpEvent::Error {
-                    session_id: sid(),
-                    message: r
-                        .result
-                        .clone()
-                        .unwrap_or_else(|| format!("claude turn failed ({})", r.subtype)),
-                    terminal: true,
-                }]
+                // sebas-9pz ⑤: a *refusal* (agent declining the request) is
+                // NOT a session death — the process is healthy and the next
+                // prompt works. Mark it non-terminal so the router keeps the
+                // session mapping (card shows ❌ + the refusal text) instead
+                // of tearing the session down. Everything else that errors
+                // (subtype error_during_execution / error_during_request /
+                // ... ) keeps the honest terminal:true — post-error CLI state
+                // is unknown.
+                let text = r
+                    .result
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| format!("claude turn failed ({})", r.subtype));
+                let refused = r.subtype.to_lowercase().contains("refusal")
+                    || text.to_lowercase().contains("refusal")
+                    || text.to_lowercase().contains("refused");
+                if refused {
+                    vec![AcpEvent::Error {
+                        session_id: sid(),
+                        message: text,
+                        terminal: false,
+                    }]
+                } else {
+                    vec![AcpEvent::Error {
+                        session_id: sid(),
+                        message: text,
+                        terminal: true,
+                    }]
+                }
             } else {
                 vec![AcpEvent::Finished { session_id: sid() }]
             }
@@ -736,6 +851,41 @@ mod tests {
             &evts[..],
             [AcpEvent::Error { terminal: true, message, .. }] if message.contains("error_during_execution")
         ));
+    }
+
+    #[test]
+    fn result_refusal_subtype_is_non_terminal() {
+        // sebas-9pz ⑤: refusal (subtype carries "refusal") must NOT kill the
+        // session — the agent declined but the process is healthy.
+        let mut names = HashMap::new();
+        let v = serde_json::json!({
+            "type": "result", "subtype": "refusal", "is_error": true,
+            "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1, "session_id": "s1"
+        });
+        let m: Message = serde_json::from_value(v).expect("result parses");
+        let evts = map_message("s1", &mut names, &m);
+        assert!(matches!(
+            &evts[..],
+            [AcpEvent::Error { terminal: false, .. }]
+        ), "refusal must be non-terminal, got {evts:?}");
+    }
+
+    #[test]
+    fn result_refusal_in_result_text_is_non_terminal() {
+        // Some CLI builds report the refusal in the result body rather than
+        // the subtype; both must be treated the same.
+        let mut names = HashMap::new();
+        let v = serde_json::json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+            "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1, "session_id": "s1",
+            "result": "The model returned a refusal to complete the request"
+        });
+        let m: Message = serde_json::from_value(v).expect("result parses");
+        let evts = map_message("s1", &mut names, &m);
+        assert!(matches!(
+            &evts[..],
+            [AcpEvent::Error { terminal: false, message, .. }] if message.contains("refusal")
+        ), "refusal in result text must be non-terminal, got {evts:?}");
     }
 
     #[test]

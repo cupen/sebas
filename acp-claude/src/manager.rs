@@ -223,18 +223,29 @@ impl SessionManager {
     /// - Everything else (CreateSession, ContinueSession) is forwarded to
     ///   the command channel for the driver to handle.
     pub async fn send(&self, session_id: &str, cmd: AcpCommand) -> anyhow::Result<()> {
-        let g = self.inner.lock().await;
-        let m = g
-            .get(session_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
-
+        // Do NOT hold the global table lock across the await points below:
+        // `cmd_tx.send().await` blocks when the per-session command channel
+        // (capacity 64) is full, and `pending_responders.lock().await` can
+        // contend with the driver's hook callback. Holding `inner` across
+        // either would stall every other session's send (sebas-9pz §2.5).
+        //
+        // Strategy: clone the one Arc we need under the lock, drop the lock,
+        // then await. Clones are cheap (Arc bumps) and the map is only read
+        // for lookup.
         match &cmd {
             AcpCommand::PermissionReply {
                 request_id,
                 decision,
                 ..
             } => {
-                let mut map = m.handle.pending_responders.lock().await;
+                let pending = {
+                    let g = self.inner.lock().await;
+                    let m = g
+                        .get(session_id)
+                        .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
+                    m.handle.pending_responders.clone()
+                };
+                let mut map = pending.lock().await;
                 let slot = map.remove(request_id);
                 if slot.is_none() {
                     let known: Vec<String> = map.keys().cloned().collect();
@@ -252,19 +263,31 @@ impl SessionManager {
                     .map_err(|_| anyhow::anyhow!("permission responder dropped"))?;
                 Ok(())
             }
-            other => m
-                .handle
-                .cmd_tx
-                .send(other.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("send to session cmd channel: {e}")),
+            other => {
+                let cmd_tx = {
+                    let g = self.inner.lock().await;
+                    let m = g
+                        .get(session_id)
+                        .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
+                    m.handle.cmd_tx.clone()
+                };
+                cmd_tx
+                    .send(other.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("send to session cmd channel: {e}"))
+            }
         }
     }
 
     pub async fn next_event(&self, session_id: &str) -> Option<AcpEvent> {
-        let g = self.inner.lock().await;
-        let m = g.get(session_id)?;
-        let mut rx = m.handle.evt_rx.lock().await;
+        // Same lock-scope fix as `send`: `rx.recv().await` can block for the
+        // whole lifetime of a turn, so it must NOT run under the global
+        // table lock (sebas-9pz §2.5).
+        let rx = {
+            let g = self.inner.lock().await;
+            g.get(session_id)?.handle.evt_rx.clone()
+        };
+        let mut rx = rx.lock().await;
         rx.recv().await
     }
 

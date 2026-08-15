@@ -42,6 +42,7 @@ struct Flags {
     loop_mode: bool,
     slow_ms: u64,
     hang_on_init: bool,
+    ignore_interrupt: bool,
     delay_init_ms: u64,
     journal: Option<String>,
     resume_fails: bool,
@@ -92,6 +93,7 @@ fn parse_flags() -> Flags {
         loop_mode: false,
         slow_ms: 0,
         hang_on_init: false,
+        ignore_interrupt: false,
         delay_init_ms: 0,
         journal: None,
         resume_fails: false,
@@ -108,6 +110,7 @@ fn parse_flags() -> Flags {
         match a {
             "--loop" => f.loop_mode = true,
             "--hang-on-init" => f.hang_on_init = true,
+            "--ignore-interrupt" => f.ignore_interrupt = true,
             "--resume-fails" => f.resume_fails = true,
             "--delay-new-ms" => {
                 // Compat alias for the ACP-era flag: slow session/new ≈
@@ -233,6 +236,11 @@ fn main() {
     let mut lines = stdin.lock().lines().map_while(Result::ok);
     let mut init_sent = false;
     let mut hook_counter: u64 = 0;
+    // sebas-9pz ① hang test: once the "hang" prompt arrives, stop emitting
+    // content frames. control_request (liveness probe, interrupts) still gets
+    // acked so the process looks alive-and-healthy — only the driver's hang
+    // detector (no content for N seconds) can fire.
+    let mut hanging = false;
 
     while let Some(line) = lines.next() {
         let v: Value = match serde_json::from_str(&line) {
@@ -275,6 +283,13 @@ fn main() {
                             "type": "control_response",
                             "response": {"subtype": "success", "request_id": req_id, "response": {}}
                         }));
+                        if flags.ignore_interrupt {
+                            // sebas-9pz ① hang test: ack the interrupt but
+                            // keep going (do NOT exit) — models a child that
+                            // is alive but unresponsive to cancels, so the
+                            // driver's escalation has to run.
+                            continue;
+                        }
                         io.emit(&result_frame(
                             &flags.session_id,
                             "error_during_execution",
@@ -311,7 +326,20 @@ fn main() {
                         "cwd": cwd, "tools": ["Bash", "Read"],
                     }));
                 }
-                if text == "perm" {
+                if hanging {
+                    // Already hung: ignore any further prompts (no output).
+                    continue;
+                }
+                if text == "refuse" {
+                    // sebas-9pz ⑤: a refusal — subtype carries "refusal",
+                    // is_error=true. The driver must treat this as a
+                    // NON-terminal error (process stays healthy) so the
+                    // session survives and the next prompt still works.
+                    io.emit(&result_frame(&flags.session_id, "refusal", true));
+                } else if text == "hang" {
+                    // sebas-9pz ① hang test: enter the silent-hang state.
+                    hanging = true;
+                } else if text == "perm" {
                     perm_turn(&flags, &mut io, &mut lines, &mut hook_counter);
                 } else if text == "stream" {
                     stream_turn(&flags, &mut io);

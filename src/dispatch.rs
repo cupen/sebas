@@ -5,8 +5,8 @@
 use crate::config::Config;
 use crate::reactions::{ReactPlan, ReactionTracker};
 use crate::session_boot::{
-    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, spawn_acp_pump,
-    wire_session_card_and_pump,
+    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts,
+    spawn_acp_pump_with_idle, wire_session_card_and_pump,
 };
 use acp_claude::manager::SessionManager;
 use feishu::client::FeishuClient;
@@ -197,7 +197,16 @@ pub(crate) async fn dispatch_out(
             };
             // Seed card state and wire the pump (no Feishu card operations).
             router.seed_card(session_id.clone(), prompt.clone()).await;
-            spawn_acp_pump(rx, router.clone(), session_id.clone());
+            // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
+            let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
+                .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
+            spawn_acp_pump_with_idle(
+                rx,
+                router.clone(),
+                session_id.clone(),
+                idle_timeout,
+                Some(mgr.clone()),
+            );
             // Flush prompts queued during spawn.
             if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
                 warn!(?e, "web_spawn: flush_pending_prompts failed");
