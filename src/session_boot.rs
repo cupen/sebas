@@ -4,7 +4,7 @@
 //! 对外的稳定入口经 `crate::run` 的 re-export 暴露，integration tests 路径不变。
 
 use crate::config::Config;
-use crate::dispatch::{send_card_topic_aware, topic_reply_target};
+use crate::dispatch::{send_card_topic_aware, topic_reply_target, TopicSendOutcome};
 use crate::reactions::ReactionTracker;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
@@ -179,18 +179,20 @@ pub(crate) async fn wire_session_card_and_pump(
     let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
     // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
     // 原话题；主线保持 None（Q7）。话题失效时 send_card_topic_aware 会发
-    // 文本提示并返回空 message_id（不冒泡错误）。
+    // 文本提示并熔断（web_close_session 终止刚 spawn 的会话，返回
+    // TopicInvalid，不冒泡错误）—— 首次出站就失效更要终止。
     let reply = topic_reply_target(router, &key, None).await;
-    let msg_id = send_card_topic_aware(
+    let outcome = send_card_topic_aware(
         feishu,
         http,
         tokens,
+        router,
         &key,
         serde_json::to_value(&card)?,
         reply,
     )
     .await?;
-    if !msg_id.is_empty() {
+    if let TopicSendOutcome::Sent(msg_id) = outcome {
         router
             .record_root_msg_id(session_id.clone(), msg_id.clone())
             .await;
