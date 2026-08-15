@@ -53,7 +53,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         .expect("SpawnAcp not received in time")
         .expect("channel closed");
     let prompt = match spawn {
-        Out::SpawnAcp { key: _, prompt } => prompt,
+        Out::SpawnAcp { key: _, prompt, .. } => prompt,
         other => panic!("expected SpawnAcp, got {other:?}"),
     };
     assert_eq!(prompt, "hello");

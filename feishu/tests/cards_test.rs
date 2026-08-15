@@ -1,4 +1,23 @@
-use feishu::cards::{render_permission_card, render_root_card};
+use feishu::cards::{derive_topic, render_permission_card, render_root_card};
+
+#[test]
+fn derive_topic_extracts_first_line_and_truncates() {
+    // 首行做主题，去前后空白
+    assert_eq!(derive_topic("  重构 src/foo.rs  \n加个缓存"), "重构 src/foo.rs");
+    // 行首引用符 / 代码围栏剥离
+    assert_eq!(derive_topic("> 帮我看看：\n这段代码"), "帮我看看：");
+    assert_eq!(derive_topic("```\nselect * from t\n```\n然后呢"), "select * from t");
+    // 超长截断加省略号，UTF-8 安全（按字符而非字节）
+    let long = "解决国际象棋残局中非常复杂的递归搜索性能问题的优化思路并给出一个完整可行的实施方案";
+    let t = derive_topic(long);
+    let prefix: String = long.chars().take(40).collect();
+    assert_eq!(t, format!("{prefix}…"));
+    assert!(t.ends_with('…'));
+    assert_eq!(t.chars().count(), 41, "40 chars + ellipsis");
+    // 空 / 纯空白回退占位
+    assert_eq!(derive_topic(""), "Claude Code");
+    assert_eq!(derive_topic("  \n  "), "Claude Code");
+}
 
 #[test]
 fn card_config_thinking_default_is_show() {
@@ -70,13 +89,13 @@ fn card_config_accepts_all_known_fields() {
 
 #[test]
 fn root_card_initial_snapshot() {
-    let card = render_root_card("重构 src/foo.rs", "msg_1", "👀");
+    let card = render_root_card("重构 src/foo.rs", "msg_1");
     insta::assert_yaml_snapshot!(card);
 }
 
 #[test]
 fn root_card_after_text_delta_snapshot() {
-    let mut card = render_root_card("重构 src/foo.rs", "msg_1", "🚧");
+    let mut card = render_root_card("重构 src/foo.rs", "msg_1");
     card.push_text("我会先看一下 foo.rs 的结构。");
     insta::assert_yaml_snapshot!(card);
 }
@@ -125,10 +144,11 @@ fn render_accumulated_card_structure() {
             content: "world".into(),
         },
     ];
-    let card = render_accumulated_card("重构 foo", "msg_9", "🚧", &body, "orange");
+    let card = render_accumulated_card("重构 foo", "msg_9", &body, "orange");
     let s = serde_json::to_string(&card).unwrap();
-    // header title 含 emoji + "Claude Code"，template=orange
-    assert!(s.contains("🚧 Claude Code"));
+    // header title 是 prompt 派生的主题（不再带状态 emoji），template=orange
+    let v: serde_json::Value = serde_json::to_value(&card).unwrap();
+    assert_eq!(v["header"]["title"]["content"], "重构 foo");
     assert!(s.contains("\"template\":\"orange\""));
     // 引用块
     assert!(s.contains("> 重构 foo"));
@@ -142,9 +162,10 @@ fn render_accumulated_card_structure() {
 #[test]
 fn render_accumulated_card_empty_body_matches_seed() {
     use feishu::cards::render_accumulated_card;
-    let card = render_accumulated_card("hi", "msg_1", "👀", &[], "blue");
+    let card = render_accumulated_card("hi", "msg_1", &[], "blue");
     let s = serde_json::to_string(&card).unwrap();
-    assert!(s.contains("👀 Claude Code"));
+    let v: serde_json::Value = serde_json::to_value(&card).unwrap();
+    assert_eq!(v["header"]["title"]["content"], "hi");
     assert!(s.contains("> hi"));
     assert!(s.contains("msg_id: msg_1"));
 }

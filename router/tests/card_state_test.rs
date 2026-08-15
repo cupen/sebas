@@ -114,7 +114,8 @@ async fn apply_event_accumulates_without_emitting_out() {
             .is_err(),
         "apply_event 不得发 Out"
     );
-    // flush_card 产 1 张 UpdateCard，正文含全部事件渲染，emoji 🚧。
+    // flush_card 产 1 张 UpdateCard，正文含全部事件渲染；
+    // 状态 emoji 不再在标题中，而是由 emit_reaction 单独发 React。
     router.flush_card("s1").await;
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
@@ -127,7 +128,7 @@ async fn apply_event_accumulates_without_emitting_out() {
             assert!(s.contains("a"), "含 TextDelta: {s}");
             assert!(s.contains("think"), "含 ThinkingDelta: {s}");
             assert!(s.contains("Bash"), "含 ToolEnd: {s}");
-            assert!(s.contains("🚧"), "emoji 🚧: {s}");
+            assert!(s.contains("\"content\":\"hi\""), "标题为主题 hi（不再带状态 emoji）: {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -171,12 +172,13 @@ async fn fsm_eyes_to_construction_to_done() {
         .unwrap();
     match o {
         Out::UpdateCard { card, .. } => {
+            // 状态 emoji 不再进卡：标题是 prompt 派生的主题 "p"。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("🚧"));
+            assert!(s.contains("\"content\":\"p\""), "标题为主题 p: {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
-    // Finished -> ✅
+    // Finished -> ✅（apply_event_to_out 先出 UpdateCard，再出 React DONE）
     let (router3, mut out3) = RouterHandle::new(SessionMap::new());
     router3.seed_card("s3".into(), "p".into()).await;
     router3
@@ -191,13 +193,15 @@ async fn fsm_eyes_to_construction_to_done() {
         .await
         .unwrap()
         .unwrap();
-    match o3 {
-        Out::UpdateCard { card, .. } => {
-            let s3 = serde_json::to_string(&card).unwrap();
-            assert!(s3.contains("✅"));
-        }
-        other => panic!("expected UpdateCard, got {other:?}"),
-    }
+    assert!(matches!(o3, Out::UpdateCard { .. }), "先出卡: {o3:?}");
+    let o4 = tokio::time::timeout(Duration::from_millis(200), out3.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(o4, Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE),
+        "Finished 应换 DONE reaction: {o4:?}"
+    );
 }
 
 #[tokio::test]
@@ -219,13 +223,15 @@ async fn fsm_terminal_error_marks_red() {
         .await
         .unwrap()
         .unwrap();
-    match o {
-        Out::UpdateCard { card, .. } => {
-            let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("❌"));
-        }
-        other => panic!("expected UpdateCard, got {other:?}"),
-    }
+    assert!(matches!(o, Out::UpdateCard { .. }), "先出卡: {o:?}");
+    let o = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(o, Out::React { ref emoji, .. } if emoji == router::card_state::phase::FAILED),
+        "terminal Error 应换 FAILED reaction: {o:?}"
+    );
 }
 
 #[tokio::test]
@@ -402,8 +408,9 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     let o1 = recv(&mut out_rx).await;
     match o1 {
         Out::UpdateCard { card, .. } => {
+            // 状态 emoji 不再进卡：标题是 prompt 派生的主题 "第一题"。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("🚧"), "回切后卡片状态 🚧: {s}");
+            assert!(s.contains("\"content\":\"第一题\""), "标题为主题, 而非状态 emoji: {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }

@@ -17,7 +17,7 @@ use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::cards::{CardConfig, CardElement, DivText, phase_visual, render_accumulated_card};
+use feishu::cards::{CardConfig, CardElement, DivText, render_accumulated_card};
 use feishu::events::SessionKey;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -30,6 +30,11 @@ pub enum Out {
     SpawnAcp {
         key: SessionKey,
         prompt: String,
+        /// Feishu `message_id` of the input message that triggered this spawn
+        /// (the user's own message, i.e. `FeishuIn::Text.reply_to`). Recorded
+        /// so the session's state reactions (👀/🚧/✅/❌) land on that message
+        /// instead of the card. `None` for `/new`, WebUI, or replay spawns.
+        input_msg_id: Option<String>,
     },
     /// Lazily respawn a restored session (spec §3.3e): try `session/load`
     /// with `session_id`; the dispatcher falls back to a fresh session when
@@ -38,6 +43,10 @@ pub enum Out {
         key: SessionKey,
         session_id: String,
         prompt: String,
+        /// Feishu `message_id` of the input message that triggered this resume
+        /// (`FeishuIn::Text.reply_to`), threaded through so the resumed
+        /// session's cards reply to that message. `None` for WebUI resumes.
+        input_msg_id: Option<String>,
     },
     SendAcp {
         session_id: String,
@@ -135,6 +144,11 @@ pub struct RouterHandle {
     /// Public for tests; production goes through `record_root_msg_id` /
     /// `root_msg_id`.
     pub msgid: MsgIdMap,
+    /// Maps a session to the Feishu `message_id` of the input message that
+    /// spawned it, so state reactions land on the user's message rather than
+    /// the card. Mirrors `msgid` (same `HashMap<String,String>` shape) but a
+    /// distinct entry so card PATCH lookup and reaction target never collide.
+    input_msg: MsgIdMap,
     card_states: crate::card_state::CardStateMap,
     card_cfg: Arc<RwLock<CardConfig>>,
     /// Tracks the Feishu `message_id` of each outstanding permission card,
@@ -172,6 +186,7 @@ impl Clone for RouterHandle {
             map: self.map.clone(),
             tx: self.tx.clone(),
             msgid: self.msgid.clone(),
+            input_msg: self.input_msg.clone(),
             card_states: self.card_states.clone(),
             card_cfg: self.card_cfg.clone(),
             perm_cards: self.perm_cards.clone(),
@@ -226,6 +241,7 @@ impl RouterHandle {
                 map,
                 tx,
                 msgid: MsgIdMap::default(),
+                input_msg: MsgIdMap::default(),
                 card_states: crate::card_state::CardStateMap::default(),
                 card_cfg: Arc::new(RwLock::new(card_cfg)),
                 perm_cards: PermCardMap::default(),
@@ -285,6 +301,21 @@ impl RouterHandle {
     /// pump after the first `send_card` returns its message_id.
     pub async fn record_root_msg_id(&self, session_id: String, msg_id: String) {
         self.msgid.record(session_id, msg_id).await;
+    }
+
+    /// Record the Feishu `message_id` of the input message that spawned this
+    /// session, so state reactions target the user's message. The caller (the
+    /// outbound dispatcher, on `create_session`) passes the id that rode in on
+    /// `Out::SpawnAcp.input_msg_id`.
+    pub async fn record_input_msg_id(&self, session_id: String, msg_id: String) {
+        self.input_msg.record(session_id, msg_id).await;
+    }
+
+    /// The input message a session's state reactions should land on. `None`
+    /// when the session had no Feishu input message (WebUI/`/new`/replay) —
+    /// callers fall back to the card's `root_msg_id`.
+    pub async fn input_msg_id(&self, session_id: &str) -> Option<String> {
+        self.input_msg.get(session_id).await
     }
 
     /// Record the Feishu message_id of a permission card keyed by its
@@ -379,7 +410,6 @@ impl RouterHandle {
         let card = render_accumulated_card(
             &st.user_prompt,
             session_id,
-            phase_visual(&st.status_emoji),
             &body,
             &theme_color,
         );
@@ -421,7 +451,6 @@ impl RouterHandle {
         let card = render_accumulated_card(
             &st.user_prompt,
             session_id,
-            phase_visual(&st.status_emoji),
             &body,
             &theme_color,
         );
@@ -450,7 +479,6 @@ impl RouterHandle {
         let new_card = render_accumulated_card(
             &st.user_prompt,
             session_id,
-            phase_visual(&st.status_emoji),
             &fresh_body,
             &theme_color,
         );
@@ -562,6 +590,8 @@ impl RouterHandle {
                     key,
                     session_id: old_sid,
                     prompt: message,
+                    // WebUI resume: no Feishu input message to thread to.
+                    input_msg_id: None,
                 })
                 .await;
             }
@@ -644,13 +674,10 @@ impl RouterHandle {
         prompt: String,
         root_id: Option<String>,
     ) {
-        use crate::card_state::phase::SEED;
-
         self.card_states.drop(session_id).await;
         self.seed_card(session_id.to_string(), prompt.clone()).await;
-        let seed_emoji = phase_visual(SEED);
         let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(&prompt, session_id, seed_emoji, &[], &theme_color);
+        let card = render_accumulated_card(&prompt, session_id, &[], &theme_color);
         self.emit(Out::SendCard {
             key,
             card: serde_json::to_value(&card).unwrap(),
@@ -748,8 +775,8 @@ fn extract_session_id(event: &AcpEvent) -> &str {
 /// 已 WORKING/DONE/FAILED 不回退 SEED。
 ///
 /// 这些字符串是 Feishu reaction API 的合法 emoji_type（unicode 👀/🚧/✅/❌
-/// 会被 Feishu 拒绝 231001）。`cards::phase_visual` 把它们映射成 card 头部
-/// 显示用的 Unicode 字符。
+/// 会被 Feishu 拒绝 231001）。它们以 root 卡上的 reaction 呈现会话状态；
+/// 卡 header 标题则只显示主题（`cards::derive_topic`）。
 fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
     use crate::card_state::phase::{DONE, FAILED, SEED, WORKING};
     match event {

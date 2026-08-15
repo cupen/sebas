@@ -52,6 +52,7 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
         key: k,
         session_id: old,
         prompt,
+        ..
     } = first_out(&mut out_rx).await
     else {
         panic!("expected SpawnResume")
@@ -120,6 +121,7 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
         key: k,
         session_id: old,
         prompt,
+        ..
     } = first_out(&mut out_rx).await
     else {
         panic!("expected SpawnResume")

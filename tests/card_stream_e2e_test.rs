@@ -52,7 +52,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         .await
         .unwrap()
         .unwrap();
-    let Out::SpawnAcp { key: k, prompt } = out else {
+    let Out::SpawnAcp { key: k, prompt, .. } = out else {
         panic!("expected SpawnAcp, got {out:?}")
     };
 
@@ -75,15 +75,17 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     // 跑 production pump。
     sebas::run::spawn_acp_pump(rx, router.clone(), session_id.clone());
 
-    // 某张 🚧 UpdateCard：含全部 5 个 chunk0..chunk4。
+    // 某张 UpdateCard：含全部 5 个 chunk0..chunk4，且已见到 WORKING reaction。
     // 不在第一张卡上硬断言：并行测试负载下 150ms tick 可能在 5 个 chunk 到齐前
     // 先刷一版（部分合并同样是 debounce 的合法行为）。总 deadline 内等到一张
-    // 🚧 + 全 chunk 的卡即证明合并成立。
+    // 全 chunk 的卡 + WORKING reaction 即证明合并成立。
+    // 状态 emoji 不再进卡标题（标题为派生的"主题"），由 React 单独表达。
     let phase1_deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut merged = String::new();
+    let mut saw_working = false;
     loop {
         if std::time::Instant::now() > phase1_deadline {
-            panic!("no 🚧 card with all 5 chunks within 5s; last card: {merged}");
+            panic!("no full-5-chunk card with WORKING reaction within 5s; last: {merged}");
         }
         let o = match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
             Ok(Some(o)) => o,
@@ -94,27 +96,29 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
             Out::UpdateCard { .. } | Out::SendCard { .. } => {
                 let s = card_str(&o);
                 let all = (0..5).all(|i| s.contains(&format!("chunk{i}")));
-                if s.contains("🚧") && all {
+                if saw_working && all {
                     break;
                 }
                 merged = s; // keep last for the panic message
             }
-            Out::React { .. } => continue,
+            Out::React { emoji, .. } => {
+                if emoji == router::card_state::phase::WORKING {
+                    saw_working = true;
+                }
+            }
             other => panic!("unexpected out: {other:?}"),
         }
     }
-    // Finished 立即产 ✅ 卡（视觉由 phase_visual 把 DONE 映成 ✅）。p3g 起 Out
-    // 序列里还混有 reaction（tick 的 OnIt、Finished 自带的 DONE），按类别找：
-    // ✅ 卡 + DONE reaction 都必须出现。
-    let mut got_done = false;
+    // Finished 立即换 DONE reaction。p3g 起状态由 Feishu reaction 表达，
+    // 卡标题只显示主题，不再带 ✅ —— 故只等 DONE reaction。
     let mut got_done_react = false;
-    // Overall-deadline loop: the fake pauses mid-turn (800ms) so the 🚧 card
+    // Overall-deadline loop: the fake pauses mid-turn (800ms) so the card
     // gets its own flush; the silence before the result frame must not kill
     // the test — timeouts just continue.
     let phase2_deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if std::time::Instant::now() > phase2_deadline {
-            panic!("no ✅ card / DONE react within 5s");
+            panic!("no DONE react within 5s");
         }
         let o = match tokio::time::timeout(Duration::from_millis(400), out_rx.recv()).await {
             Ok(Some(o)) => o,
@@ -122,21 +126,16 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
             Err(_) => continue,
         };
         match o {
-            Out::UpdateCard { .. } | Out::SendCard { .. } => {
-                if card_str(&o).contains("✅") {
-                    got_done = true;
-                }
-            }
+            Out::UpdateCard { .. } | Out::SendCard { .. } => {} // 卡不携带状态 emoji，忽略
             Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE => {
                 got_done_react = true;
             }
             Out::React { .. } => {} // tick 补发的 OnIt，忽略
             other => panic!("unexpected out: {other:?}"),
         }
-        if got_done && got_done_react {
+        if got_done_react {
             break;
         }
     }
-    assert!(got_done, "Finished 必产 ✅ 卡");
     assert!(got_done_react, "Finished 必换 DONE reaction");
 }

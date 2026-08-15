@@ -47,7 +47,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
         .await
         .unwrap()
         .unwrap();
-    let Out::SpawnAcp { key: k, prompt } = out else {
+    let Out::SpawnAcp { key: k, prompt, .. } = out else {
         panic!("expected SpawnAcp, got {out:?}")
     };
 
@@ -153,7 +153,7 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
         .await
         .unwrap()
         .unwrap();
-    let Out::SpawnAcp { key: k, prompt } = out else {
+    let Out::SpawnAcp { key: k, prompt, .. } = out else {
         panic!("expected SpawnAcp, got {out:?}")
     };
 

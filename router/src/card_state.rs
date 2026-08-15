@@ -9,8 +9,10 @@ use tokio::sync::RwLock;
 
 /// Phase token: string IS the Feishu `emoji_type` (e.g. `"Typing"`, `"OnIt"`,
 /// `"DONE"`, `"CrossMark"`) — required because Feishu's reaction API rejects
-/// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. The display
-/// glyph for the card header is derived via `feishu::cards::phase_visual`.
+//// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. These values
+/// surface as reactions on the root card to reflect session state; the card
+/// header title is the topic derived from the prompt instead
+/// (`feishu::cards::derive_topic`).
 pub mod phase {
     pub const SEED: &str = "Typing"; // watching / waiting on first event
     pub const WORKING: &str = "OnIt"; // streaming response in progress

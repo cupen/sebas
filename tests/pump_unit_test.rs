@@ -49,8 +49,8 @@ async fn five_deltas_merge_into_one_updatecard() {
     for i in 0..5 {
         assert!(s.contains(&format!("chunk{i}")), "chunk{i} in card: {s}");
     }
-    assert!(s.contains("🚧"));
-    // p3g：合并卡落地后同一 tick 紧跟 👀→🚧 的 reaction（先卡后 reaction）。
+    // p3g：stater emoji 不再进卡标题（标题为主题），工作态由紧跟的
+    // reaction 表达 —— 见下方 second 的 WORKING 断言。
     let second = tokio::time::timeout(Duration::from_millis(120), out_rx.recv())
         .await
         .expect("React 🚧 follows the merged card")
@@ -90,13 +90,17 @@ async fn finished_flushes_immediately_after_stream() {
             .await
             .expect("recv in time")
             .expect("channel open");
-        let s = card_str(&o);
-        if s.contains("✅") {
-            got_done = true;
-            break;
+        // 状态由 Feishu reaction 表达，不再进卡：DONE 反应即 Finished 落地。
+        match o {
+            Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE => {
+                got_done = true;
+                break;
+            }
+            Out::UpdateCard { .. } | Out::SendCard { .. } | Out::React { .. } => continue,
+            other => panic!("unexpected out: {other:?}"),
         }
     }
-    assert!(got_done, "Finished 必产含 ✅ 的 UpdateCard");
+    assert!(got_done, "Finished 必产 DONE reaction");
 }
 
 #[tokio::test]

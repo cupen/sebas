@@ -162,6 +162,10 @@ pub(crate) async fn wire_session_card_and_pump(
     rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
     >,
+    // Feishu message_id this session's root card should reply to (the user's
+    // input message), so the card appears threaded under it for easy
+    // tracking. `None` = standalone card (WebUI / no input message).
+    input_msg_id: Option<String>,
 ) -> anyhow::Result<()> {
     // seed_card（spec §4.2）: 记录 user_prompt 供后续 flush 重渲染
     // 引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
@@ -171,13 +175,17 @@ pub(crate) async fn wire_session_card_and_pump(
     // real session_id (so streaming UpdateCards resolve correctly).
     // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
     //（避免初始卡蓝、后续卡变色的跳变）。
-    // status_emoji 在 state 里是 Feishu emoji_type（"Typing"），渲染时通过
-    // phase_visual 映射成 💬。
-    let seed_emoji = feishu::cards::phase_visual(router::card_state::phase::SEED);
-    let card =
-        render_accumulated_card(&prompt, &session_id, seed_emoji, &[], &cfg.card.theme_color);
+    // `input_msg_id` 作为 root_id，让首卡以 reply 形式挂在输入消息下，方便
+    // 在飞书里沿 thread 跟踪整段对话。
+    let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color);
     let msg_id = feishu
-        .send_card(http, tokens, &key, serde_json::to_value(&card)?, None)
+        .send_card(
+            http,
+            tokens,
+            &key,
+            serde_json::to_value(&card)?,
+            input_msg_id.as_deref(),
+        )
         .await?;
     if !msg_id.is_empty() {
         router

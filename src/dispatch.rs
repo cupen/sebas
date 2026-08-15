@@ -84,7 +84,14 @@ pub(crate) async fn dispatch_out(
             let _ = key; // chat context — currently unused; the API only needs msg_id
         }
         Out::React { session_id, emoji } => {
-            if let Some(message_id) = router.root_msg_id(&session_id).await {
+            // 状态 reaction 优先落在用户输入消息上（本次功能）；无输入消息
+            // 时（WebUI /new/replay）回退到会话卡片，保持旧行为。
+            let input_id = router.input_msg_id(&session_id).await;
+            let target = match input_id {
+                Some(id) => Some(id),
+                None => router.root_msg_id(&session_id).await,
+            };
+            if let Some(message_id) = target {
                 match reactions.plan(&session_id, &emoji).await {
                     ReactPlan::Skip => {}
                     ReactPlan::ReactOnly => {
@@ -103,10 +110,14 @@ pub(crate) async fn dispatch_out(
                     }
                 }
             } else {
-                debug!(?session_id, "no root msg_id recorded; skipping react");
+                debug!(?session_id, "no input/card msg_id; skipping react");
             }
         }
-        Out::SpawnAcp { key, prompt } => {
+        Out::SpawnAcp {
+            key,
+            prompt,
+            input_msg_id,
+        } => {
             let claude = &cfg.acp.claude;
             // 1) Spawn the claude subprocess, mint a session_id, send the
             //    initial prompt, and flip the router's Spawning placeholder
@@ -143,9 +154,16 @@ pub(crate) async fn dispatch_out(
                     return Ok(());
                 }
             };
+            // 把触发本次 spawn 的输入消息 id 记录到 session，供状态 reaction
+            // 落在用户消息上（替换卡片 reaction；见 `emit_reaction` 落点）。
+            if let Some(input_id) = &input_msg_id {
+                router
+                    .record_input_msg_id(session_id.clone(), input_id.clone())
+                    .await;
+            }
             wire_session_card_and_pump(
                 feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
-                pending, rx,
+                pending, rx, input_msg_id,
             )
             .await?;
         }
@@ -189,6 +207,7 @@ pub(crate) async fn dispatch_out(
             key,
             session_id: old_sid,
             prompt,
+            input_msg_id,
         } => {
             let claude = &cfg.acp.claude;
             // Lazy respawn of a restored mapping (spec §3.3e): claude-native
@@ -235,9 +254,15 @@ pub(crate) async fn dispatch_out(
                     warn!(?e2, "failed to send session-lost notice");
                 }
             }
+            // 与 SpawnAcp 一致：记录输入消息 id，供状态 reaction 落在用户消息上。
+            if let Some(input_id) = &input_msg_id {
+                router
+                    .record_input_msg_id(session_id.clone(), input_id.clone())
+                    .await;
+            }
             wire_session_card_and_pump(
                 feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
-                pending, rx,
+                pending, rx, input_msg_id,
             )
             .await?;
         }

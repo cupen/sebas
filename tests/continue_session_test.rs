@@ -108,7 +108,6 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         })
         .await;
 
-    let mut saw_card_working = false;
     let mut saw_react_working = false;
     let mut cmd_prompt: Option<String> = None;
     let deadline = std::time::Instant::now() + OVERALL;
@@ -119,11 +118,6 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Err(_) => continue,
         };
         match got {
-            Out::UpdateCard { card, .. } => {
-                if card.to_string().contains("🚧") {
-                    saw_card_working = true;
-                }
-            }
             Out::React { emoji, .. } if emoji == router::card_state::phase::WORKING => {
                 saw_react_working = true
             }
@@ -135,10 +129,6 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         }
     }
 
-    assert!(
-        saw_card_working,
-        "router did not emit UpdateCard🚧 on turn-2 dispatch"
-    );
     assert!(
         saw_react_working,
         "router did not emit React🚧 on turn-2 dispatch"

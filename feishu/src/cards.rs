@@ -2,11 +2,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Map a router FSM phase string (the Feishu `emoji_type`, e.g. `"Typing"`,
-/// `"OnIt"`, `"DONE"`, `"CrossMark"`) to the Unicode glyph shown in the card
-/// header. Feishu rejects arbitrary Unicode as reaction `emoji_type`
-/// (error 231001), so the state stores the API name and we render the visual
-/// separately. Unknown phases fall back to a neutral bullet so a bad value
-/// can't break the card.
+/// `"OnIt"`, `"DONE"`, `"CrossMark"`) to the Unicode glyph historically shown
+/// in the card header. Feishu rejects arbitrary Unicode as reaction
+/// `emoji_type` (error 231001), so the state stores the API name and we render
+/// the visual separately. Unknown phases fall back to a neutral bullet so a bad
+/// value can't break the card.
+///
+/// Card header titles are now topic-driven (`derive_topic`), so this mapping is
+/// no longer wired into the rendered header — the FSM state itself is surfaced
+/// as Feishu reactions (see `router::card_state::phase`). Kept as a pub helper
+/// for tests and any downstream that still needs the glyph ↔ phase map.
 pub fn phase_visual(phase: &str) -> &str {
     match phase {
         "Typing" => "👀",
@@ -332,17 +337,42 @@ impl Card {
     }
 }
 
+/// 卡片 header 标题的字符上限：主题过长即截断加省略号，防超飞书标题限长。
+const CARD_TITLE_MAX_CHARS: usize = 40;
+
+/// 从用户首条 prompt 派生卡片主题（header title）。
+///
+/// 取首个剥离后非空的行：去前后空白、行首引用符（`>`）与代码围栏/行内 ``
+/// 包裹，超长截断成 `…`；全部行剥离后仍为空（空 prompt / lazy seed / 纯围栏）
+/// 回退中性占位 `"Claude Code"`。`user_prompt` 会话内不变，故标题随会话保持
+/// 稳定，跨卡 / 换卡一致——正表达"主题"语义。状态（进行中/完成）由 Feishu
+/// reaction 表达，不再占标题（见 `phase_visual`）。
+pub fn derive_topic(prompt: &str) -> String {
+    let first_line = prompt
+        .lines()
+        .map(|l| l.trim().trim_start_matches('>').trim().trim_matches('`').trim())
+        .find(|l| !l.is_empty());
+    let Some(cleaned) = first_line else {
+        return "Claude Code".to_string();
+    };
+    let mut out: String = cleaned.chars().take(CARD_TITLE_MAX_CHARS).collect();
+    if cleaned.chars().count() > CARD_TITLE_MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
 /// 从累积状态构建完整卡（spec §4.3）：
-/// header(`{emoji} Claude Code`, theme) + 引用块(`> {user_prompt}`) + 分隔线
-/// + body 各元素 + footer 灰注(`msg_id: {session_id}`)。
+/// header(`{主题}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
+/// + body 各元素 + footer 灰注(`msg: {session_id}`)。
+/// 标题由 `derive_topic(user_prompt)` 派生，不再携带状态 emoji。
 pub fn render_accumulated_card(
     user_prompt: &str,
     session_id: &str,
-    status_emoji: &str,
     body: &[CardElement],
     theme: &str,
 ) -> Card {
-    let mut card = Card::new(&format!("{status_emoji} Claude Code"), theme);
+    let mut card = Card::new(&derive_topic(user_prompt), theme);
     card.push_text(format!("> {user_prompt}"));
     card.push_divider();
     for el in body {
@@ -354,8 +384,8 @@ pub fn render_accumulated_card(
 
 /// seed 时的初始卡构建器（不再被每个事件调用）。空 body 薄封装。
 /// 保留供 cards_test 快照；theme 固定 "blue" 以保持快照不变。
-pub fn render_root_card(user_prompt: &str, msg_id: &str, status_emoji: &str) -> Card {
-    render_accumulated_card(user_prompt, msg_id, status_emoji, &[], "blue")
+pub fn render_root_card(user_prompt: &str, msg_id: &str) -> Card {
+    render_accumulated_card(user_prompt, msg_id, &[], "blue")
 }
 
 /// 权限卡参数展示的代码级硬上限：完整参数（含折叠面板里的 JSON）超过即截断，

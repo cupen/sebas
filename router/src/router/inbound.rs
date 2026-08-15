@@ -8,7 +8,7 @@ use crate::commands::{Command, HELP_TEXT, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
-    CardConfig, CardElement, DivText, ThinkingDisplay, phase_visual, render_accumulated_card,
+    CardConfig, CardElement, DivText, ThinkingDisplay, render_accumulated_card,
     render_dead_session_card, render_expired_permission_card,
     render_resolved_permission_card,
 };
@@ -82,7 +82,7 @@ impl RouterHandle {
                         // /new would orphan the in-flight session.
                         tracing::debug!("spawn already in flight; ignoring duplicate /new");
                     }
-                    Ok(_) => self.spawn_new(key, String::new()).await,
+                    Ok(_) => self.spawn_new(key, String::new(), reply_to).await,
                     Err(e) => {
                         tracing::warn!(?e, "begin_spawn failed");
                         self.emit(Out::HelpText { key }).await;
@@ -119,13 +119,14 @@ impl RouterHandle {
                         self.continue_session(sid, p, reply_to, key.clone(), false)
                             .await
                     }
-                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p).await,
+                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p, reply_to).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
                         // Restored mapping claimed for lazy respawn (spec §3.3e).
                         self.emit(Out::SpawnResume {
                             key,
                             session_id: old_sid,
                             prompt: p,
+                            input_msg_id: reply_to,
                         })
                         .await;
                     }
@@ -143,12 +144,13 @@ impl RouterHandle {
                         self.continue_session(sid, text, reply_to, key.clone(), true)
                             .await
                     }
-                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, text).await,
+                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, text, reply_to).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
                         self.emit(Out::SpawnResume {
                             key,
                             session_id: old_sid,
                             prompt: text,
+                            input_msg_id: reply_to,
                         })
                         .await;
                     }
@@ -369,7 +371,7 @@ impl RouterHandle {
         }
     }
 
-    async fn spawn_new(&self, key: SessionKey, prompt: String) {
+    async fn spawn_new(&self, key: SessionKey, prompt: String, input_msg_id: Option<String>) {
         // A fresh session must not inherit "本会话不再询问" grants from the
         // previous session in this chat — the user approved those for the
         // session that asked, not for whatever comes next.
@@ -377,7 +379,14 @@ impl RouterHandle {
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.
-        self.emit(Out::SpawnAcp { key, prompt }).await;
+        // `input_msg_id` rides along so the dispatcher can point the session's
+        // state reactions at the user's input message.
+        self.emit(Out::SpawnAcp {
+            key,
+            prompt,
+            input_msg_id,
+        })
+        .await;
     }
 
     async fn continue_session(
@@ -459,17 +468,14 @@ impl RouterHandle {
 
     /// `/compact` 命令：发送进度卡片，每 1s×5 次 → 3s 间隔更新，完成后自动停止。
     async fn forward_compact(&self, session_id: &str, key: SessionKey) {
-        use crate::card_state::phase::SEED;
-
         let prompt = "⚙️ 压缩上下文...";
         self.card_states
             .seed(session_id.to_string(), prompt.into())
             .await;
 
         // Send initial card
-        let seed_emoji = phase_visual(SEED);
         let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(prompt, session_id, seed_emoji, &[], &theme_color);
+        let card = render_accumulated_card(prompt, session_id, &[], &theme_color);
         self.emit(Out::SendCard {
             key: key.clone(),
             card: serde_json::to_value(&card).unwrap(),
