@@ -45,6 +45,109 @@ async fn permission_request_emits_card_with_buttons() {
 }
 
 #[tokio::test]
+async fn permission_card_in_topic_leaves_root_id_none() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_topic".into(),
+        thread_id: Some("omt_t1".into()),
+    };
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+
+    // 入站话题消息写入 reply target（话题根消息 message_id，events 层归一化）。
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_to: Some("om_topic_root".into()),
+        })
+        .await;
+
+    let event = AcpEvent::PermissionRequest {
+        session_id: "s1".into(),
+        request_id: "r1".into(),
+        tool_name: "Bash".into(),
+        args: serde_json::json!({"cmd": "ls"}),
+    };
+    router.apply_event_to_out("s1".into(), &event).await;
+
+    // 排掉 continue 产生的 per-turn card / SendAcp，只取权限卡（perm_request_id
+    // 标记它）。权限卡的 root_id 由 dispatch 层 topic_reply_target 兜底，router
+    // 层不再预填 → 恒为 None（F3）。
+    let perm_card = loop {
+        let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
+            .await
+            .expect("permission card not received in time")
+            .expect("channel closed");
+        match out {
+            Out::SendCard {
+                perm_request_id: Some(_),
+                key: k,
+                root_id,
+                ..
+            } => break (k, root_id),
+            _ => continue,
+        }
+    };
+    assert_eq!(perm_card.0.thread_id.as_deref(), Some("omt_t1"));
+    assert_eq!(
+        perm_card.1,
+        None,
+        "话题内权限卡 root_id 恒为 None：话题聚合由 dispatch 层兜底"
+    );
+}
+
+#[tokio::test]
+async fn permission_card_mainline_keeps_root_id_none() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_x".into(),
+        thread_id: None,
+    };
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_to: Some("om_msg".into()),
+        })
+        .await;
+
+    let event = AcpEvent::PermissionRequest {
+        session_id: "s1".into(),
+        request_id: "r1".into(),
+        tool_name: "Bash".into(),
+        args: serde_json::json!({"cmd": "ls"}),
+    };
+    router.apply_event_to_out("s1".into(), &event).await;
+
+    let perm_card = loop {
+        let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
+            .await
+            .expect("permission card not received in time")
+            .expect("channel closed");
+        match out {
+            Out::SendCard {
+                perm_request_id: Some(_),
+                root_id,
+                ..
+            } => break root_id,
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        perm_card, None,
+        "主线权限卡保持现状：root_id=None（Q7）"
+    );
+}
+
+#[tokio::test]
 async fn button_callback_emits_permission_reply() {
     let map = SessionMap::new();
     let key = SessionKey {

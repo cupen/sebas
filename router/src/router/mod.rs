@@ -9,7 +9,9 @@ mod acp_events;
 mod inbound;
 mod maps;
 
-pub use maps::{MsgIdMap, PermCardEntry, PermCardMap, SessionAllowlist, tool_signature};
+pub use maps::{
+    MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
+};
 
 use crate::card_events::{apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title};
 use crate::card_state::CardState;
@@ -178,6 +180,10 @@ pub struct RouterHandle {
     /// page to deep-link into. `None` until the user clicks Switch on a
     /// row (or opens a session detail page).
     active_session: Arc<RwLock<Option<SessionKey>>>,
+    /// 最近入站回复目标（话题内 = 话题根消息 message_id）。话题出站卡
+    /// （权限卡等）用它作为 root_id；sebas 出站层（初始卡/失败提示卡）经
+    /// [`RouterHandle::reply_target`] 读取。纯内存、不持久化。
+    reply_targets: ReplyTargetMap,
 }
 
 impl Clone for RouterHandle {
@@ -194,6 +200,7 @@ impl Clone for RouterHandle {
             provider_forms: self.provider_forms.clone(),
             mgr: self.mgr.clone(),
             active_session: self.active_session.clone(),
+            reply_targets: self.reply_targets.clone(),
         }
     }
 }
@@ -249,6 +256,7 @@ impl RouterHandle {
                 provider_forms,
                 mgr,
                 active_session: Arc::new(RwLock::new(None)),
+                reply_targets: ReplyTargetMap::default(),
             },
             rx,
         )
@@ -538,6 +546,13 @@ impl RouterHandle {
         }
     }
 
+    /// 最近一次入站消息的回复目标（话题内 = 话题根消息 message_id）。
+    /// 话题出站卡（初始 root 卡、spawn/resume 失败提示卡）用它作为
+    /// `root_id`，保证回复聚合在原话题。主线 key 返回 `None`（Q7 现状）。
+    pub async fn reply_target(&self, key: &SessionKey) -> Option<String> {
+        self.reply_targets.get(key).await
+    }
+
     /// True if a live (Active) session is mapped for `key` (used to reject
     /// button callbacks that arrive after a session has ended, and to keep
     /// `/new` from double-spawning while a spawn is in flight).
@@ -647,7 +662,9 @@ impl RouterHandle {
     /// - Removes the mapping + drain queue (SessionMap does both).
     /// - Drops card state and root msg_id so recycled ids don't inherit
     ///   stale entries.
-    /// - Clears the chat-level permission allowlist.
+    /// - Clears the chat-level permission allowlist and the per-key reply
+    ///   target (topic root message_id) so recycled keys don't inherit
+    ///   stale aggregation targets.
     /// - Clears `active_session` if this key was the focused one.
     pub async fn web_close_session(&self, key: SessionKey) -> CloseOutcome {
         let Some(mapping) = self.map.get(&key).await else {
@@ -676,6 +693,7 @@ impl RouterHandle {
         }
 
         self.allowlist.clear(&key).await;
+        self.reply_targets.clear(&key).await;
 
         // Clear the active pointer if this was the focused session.
         let mut active = self.active_session.write().await;

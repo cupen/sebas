@@ -19,8 +19,127 @@ fn parses_text_message_event() {
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
     let evt = env.into_event("ou_x").unwrap();
     match evt {
-        FeishuIn::Text { text, .. } => assert_eq!(text, "hi"),
+        FeishuIn::Text {
+            text,
+            key,
+            reply_to,
+        } => {
+            assert_eq!(text, "hi");
+            // 主线消息：reply target = 触发消息 message_id（Q7 现状不变）。
+            assert_eq!(key.thread_id, None);
+            assert_eq!(reply_to.as_deref(), Some("om_x"));
+        }
         _ => panic!("expected Text"),
+    }
+}
+
+#[test]
+fn topic_message_reply_target_is_root_id() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "im.message.receive_v1", "tenant_key": "tk" },
+        "event": {
+            "sender": { "sender_id": { "open_id": "ou_x" } },
+            "message": {
+                "chat_id": "oc_topic_group",
+                "chat_type": "group",
+                "message_id": "om_child",
+                "root_id": "om_topic_root",
+                "parent_id": "om_topic_root",
+                "thread_id": "omt_t1",
+                "message_type": "text",
+                "content": "{\"text\":\"hi\"}"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").unwrap();
+    match evt {
+        FeishuIn::Text {
+            key,
+            reply_to,
+            ..
+        } => {
+            assert_eq!(
+                key,
+                SessionKey {
+                    chat_id: "oc_topic_group".into(),
+                    thread_id: Some("omt_t1".into()),
+                }
+            );
+            // 话题内子消息：reply target = 话题根消息 message_id。
+            assert_eq!(reply_to.as_deref(), Some("om_topic_root"));
+        }
+        _ => panic!("expected Text"),
+    }
+}
+
+#[test]
+fn topic_root_message_reply_target_is_own_id() {
+    // 话题根消息本身：有 thread_id 但没有 root_id，reply target 回退自身
+    // message_id，保证回复仍聚合在该话题。
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "im.message.receive_v1", "tenant_key": "tk" },
+        "event": {
+            "sender": { "sender_id": { "open_id": "ou_x" } },
+            "message": {
+                "chat_id": "oc_topic_group",
+                "chat_type": "group",
+                "message_id": "om_topic_root",
+                "thread_id": "omt_t1",
+                "message_type": "text",
+                "content": "{\"text\":\"start\"}"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").unwrap();
+    match evt {
+        FeishuIn::Text {
+            key,
+            reply_to,
+            ..
+        } => {
+            assert_eq!(key.thread_id.as_deref(), Some("omt_t1"));
+            assert_eq!(reply_to.as_deref(), Some("om_topic_root"));
+        }
+        _ => panic!("expected Text"),
+    }
+}
+
+#[test]
+fn topic_media_message_carries_reply_target() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "im.message.receive_v1", "tenant_key": "tk" },
+        "event": {
+            "sender": { "sender_id": { "open_id": "ou_x" } },
+            "message": {
+                "chat_id": "oc_topic_group",
+                "chat_type": "group",
+                "message_id": "om_child",
+                "root_id": "om_topic_root",
+                "thread_id": "omt_t1",
+                "message_type": "image",
+                "content": "{\"image_key\":\"img_1\"}"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").unwrap();
+    match evt {
+        FeishuIn::Media {
+            key,
+            reply_to,
+            files,
+            ..
+        } => {
+            assert_eq!(key.thread_id.as_deref(), Some("omt_t1"));
+            assert_eq!(reply_to.as_deref(), Some("om_topic_root"));
+            assert_eq!(files, vec!["om_child".to_string()]);
+        }
+        _ => panic!("expected Media"),
     }
 }
 

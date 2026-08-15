@@ -30,9 +30,10 @@ impl RouterHandle {
                 key,
                 files,
                 caption,
+                reply_to,
             } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
-                self.on_text(key, prompt, None).await;
+                self.on_text(key, prompt, reply_to).await;
             }
             FeishuIn::ButtonCb { key, action } => self.on_button(key, action).await,
             FeishuIn::FormCb {
@@ -74,6 +75,12 @@ impl RouterHandle {
     }
 
     async fn on_text(&self, key: SessionKey, text: String, reply_to: Option<String>) {
+        // 记录最近入站回复目标：话题内 = 话题根消息 message_id（events 层已
+        // 归一化），主线 = 触发消息 message_id。话题出站卡（权限卡/初始卡）
+        // 用它作为 root_id，保证回复聚合在原话题。
+        if let Some(target) = &reply_to {
+            self.reply_targets.set(key.clone(), target.clone()).await;
+        }
         match parse_command(&text) {
             Command::New => {
                 match self.map.begin_spawn(key.clone()).await {
@@ -376,6 +383,9 @@ impl RouterHandle {
         // previous session in this chat — the user approved those for the
         // session that asked, not for whatever comes next.
         self.allowlist.clear(&key).await;
+        // 新会话也不继承上一条入站的回复目标（话题内 root_id）。和 allowlist
+        // 一样随会话终止清理，防止 ReplyTargetMap 无界增长。
+        self.reply_targets.clear(&key).await;
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.

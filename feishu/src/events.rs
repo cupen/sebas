@@ -12,6 +12,9 @@ pub enum FeishuIn {
         key: SessionKey,
         files: Vec<String>,
         caption: Option<String>,
+        /// 归一化后的回复目标（话题内 = 话题根消息 message_id，主线 = 触发消息
+        /// message_id）。与 `Text` 的 `reply_to` 语义一致。
+        reply_to: Option<String>,
     },
     ButtonCb {
         key: SessionKey,
@@ -195,6 +198,19 @@ impl FeishuEnvelope {
             .pointer("/thread_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        // 话题内消息的 root_id = 话题根消息的 message_id（官方：话题内回复都是
+        // 回复根消息）。话题根消息本身没有 root_id，但有 thread_id。
+        // 归一化：话题内 reply target = root_id（缺省回退自身 message_id）；
+        // 主线保持触发消息 message_id（Q7 现状不变）。
+        let root_id = message
+            .pointer("/root_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let reply_target = if thread_id.is_some() {
+            root_id.unwrap_or_else(|| message_id.clone())
+        } else {
+            message_id.clone()
+        };
         let key = SessionKey { chat_id, thread_id };
 
         match (self.header.event_type.as_str(), message_type) {
@@ -203,13 +219,14 @@ impl FeishuEnvelope {
                 Some(FeishuIn::Text {
                     key,
                     text: body.text.unwrap_or_default(),
-                    reply_to: Some(message_id),
+                    reply_to: Some(reply_target),
                 })
             }
             ("im.message.receive_v1", "image" | "file" | "audio") => Some(FeishuIn::Media {
                 key,
                 files: vec![message_id],
                 caption: None,
+                reply_to: Some(reply_target),
             }),
             _ => None,
         }
