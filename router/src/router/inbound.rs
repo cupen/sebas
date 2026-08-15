@@ -25,7 +25,18 @@ impl RouterHandle {
                 key,
                 text,
                 reply_to,
-            } => self.on_text(key, text, reply_to).await,
+            } => {
+                // Acknowledge receipt immediately with an emoji reaction on
+                // the user's message, before any processing.
+                if let Some(ref msg_id) = reply_to {
+                    self.emit(Out::AckMsg {
+                        message_id: msg_id.clone(),
+                        emoji: "EYES".into(),
+                    })
+                    .await;
+                }
+                self.on_text(key, text, reply_to).await;
+            }
             FeishuIn::Media {
                 key,
                 files,
