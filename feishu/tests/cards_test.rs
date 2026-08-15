@@ -144,7 +144,7 @@ fn render_accumulated_card_structure() {
             content: "world".into(),
         },
     ];
-    let card = render_accumulated_card("重构 foo", "msg_9", &body, "orange");
+    let card = render_accumulated_card("重构 foo", "msg_9", &body, "orange", None);
     let s = serde_json::to_string(&card).unwrap();
     // header title 是 prompt 派生的主题（不再带状态 emoji），template=orange
     let v: serde_json::Value = serde_json::to_value(&card).unwrap();
@@ -162,12 +162,75 @@ fn render_accumulated_card_structure() {
 #[test]
 fn render_accumulated_card_empty_body_matches_seed() {
     use feishu::cards::render_accumulated_card;
-    let card = render_accumulated_card("hi", "msg_1", &[], "blue");
+    let card = render_accumulated_card("hi", "msg_1", &[], "blue", None);
     let s = serde_json::to_string(&card).unwrap();
     let v: serde_json::Value = serde_json::to_value(&card).unwrap();
     assert_eq!(v["header"]["title"]["content"], "hi");
     assert!(s.contains("> hi"));
     assert!(s.contains("msg_id: msg_1"));
+}
+
+#[test]
+fn render_accumulated_card_with_footer_shows_model_and_tokens() {
+    use feishu::cards::{CardFooter, render_accumulated_card};
+    let footer = CardFooter {
+        model: Some("claude-sonnet-4-20250514".into()),
+        round_input: 1234,
+        round_output: 5678,
+        total_input: 5000,
+        total_output: 3000,
+    };
+    let card = render_accumulated_card("hi", "msg_1", &[], "blue", Some(&footer));
+    let s = serde_json::to_string(&card).unwrap();
+    // Should show short model name "sonnet"
+    assert!(s.contains("sonnet"), "footer should contain short model name");
+    // Should show formatted token counts (1.2K, 5.7K, 8.0K)
+    assert!(s.contains("1.2K"), "round input should be 1.2K");
+    assert!(s.contains("5.7K"), "round output should be 5.7K");
+    assert!(s.contains("8.0K"), "ctx total should be 8.0K");
+    // Should NOT contain msg_id
+    assert!(!s.contains("msg_id:"), "footer should not show msg_id");
+}
+
+#[test]
+fn render_accumulated_card_with_footer_no_model_shows_question_mark() {
+    use feishu::cards::{CardFooter, render_accumulated_card};
+    let footer = CardFooter {
+        model: None,
+        round_input: 100,
+        round_output: 200,
+        total_input: 1000,
+        total_output: 500,
+    };
+    let card = render_accumulated_card("test", "msg_2", &[], "blue", Some(&footer));
+    let s = serde_json::to_string(&card).unwrap();
+    // Should show "?" for unknown model
+    assert!(s.contains("?"), "footer should show ? for unknown model");
+    // Raw numbers (<1000) shown as-is
+    assert!(s.contains("in: 100"), "round input 100 should be shown as-is");
+    assert!(s.contains("out: 200"), "round output 200 should be shown as-is");
+    // 1500 → 1.5K
+    assert!(s.contains("1.5K"), "ctx total 1500 should be 1.5K");
+}
+
+#[test]
+fn render_accumulated_card_with_footer_large_tokens_no_decimal() {
+    use feishu::cards::{CardFooter, render_accumulated_card};
+    let footer = CardFooter {
+        model: Some("claude-opus-4-20250514".into()),
+        round_input: 100_000,
+        round_output: 200_000,
+        total_input: 500_000,
+        total_output: 300_000,
+    };
+    let card = render_accumulated_card("big", "msg_3", &[], "blue", Some(&footer));
+    let s = serde_json::to_string(&card).unwrap();
+    // 100K+, show without decimal
+    assert!(s.contains("100K"), "100K should be shown as 100K");
+    assert!(s.contains("200K"), "200K should be shown as 200K");
+    assert!(s.contains("800K"), "ctx 800K should be shown as 800K");
+    // Short model name: opus
+    assert!(s.contains("opus"), "footer should show short model name opus");
 }
 
 #[test]

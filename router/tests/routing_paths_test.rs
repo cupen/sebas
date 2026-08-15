@@ -32,6 +32,48 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Vec<Out> {
     out
 }
 
+// ---------- ReplyTargetMap 生命周期（F2 修复） ----------
+
+/// spawn_new 必须清掉该 key 的 reply target：新会话不继承上一条入站的
+/// 回复目标（话题内 root_id），否则 ReplyTargetMap 随话题数无界增长。
+#[tokio::test]
+async fn spawn_new_clears_reply_target() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_topic".into(),
+        thread_id: Some("omt_t1".into()),
+    };
+    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map.clone());
+
+    // 入站话题消息写入 reply target；已映射会话走 Continue，不触发 spawn_new。
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_to: Some("om_root".into()),
+        })
+        .await;
+    assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));
+
+    // 摘掉映射后下一条消息走 SpawnNew → spawn_new 必须清 reply target。
+    map.remove_by_key(&key).await;
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "fresh".into(),
+            reply_to: Some("om_root".into()),
+        })
+        .await;
+    assert_eq!(
+        router.reply_target(&key).await,
+        None,
+        "spawn_new must clear the stale reply target"
+    );
+
+    let _ = drain(&mut out_rx).await;
+}
+
 // ---------- on_button 分支 ----------
 
 #[tokio::test]
@@ -205,6 +247,7 @@ async fn media_message_composes_prompt_and_spawns() {
             key: key(),
             files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()],
             caption: Some("看这两张".into()),
+            reply_to: None,
         })
         .await;
     match next_out(&mut out_rx).await {

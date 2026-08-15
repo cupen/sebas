@@ -69,7 +69,9 @@ impl RouterHandle {
                     perm_request_id: Some(request_id.clone()),
                     // Stash the call metadata for the click handler.
                     perm_meta: Some((tool_name.clone(), args.clone())),
-                    // Permission cards are fire-and-forget (no threading).
+                    // 话题回复目标由 dispatch 层 `topic_reply_target` 统一兜底
+                    // （话题内回复到话题根消息，主线保持 None）。这里不再预填
+                    // root_id，避免两处填充同一职责漂移（F3）。
                     root_id: None,
                 })
                 .await;
@@ -87,6 +89,7 @@ impl RouterHandle {
                 let sid = session_id.as_str();
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.allowlist.clear(&key).await;
+                    self.reply_targets.clear(&key).await;
                     self.map.remove_by_session(sid).await;
                 }
                 self.drop_card(sid).await;

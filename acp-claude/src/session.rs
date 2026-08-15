@@ -65,6 +65,15 @@ pub enum Decision {
     Deny,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnUsage {
+    pub model: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpEvent {
@@ -108,5 +117,14 @@ pub enum AcpEvent {
         /// `#[serde(default)]` keeps legacy fixtures/deserialization working.
         #[serde(default)]
         terminal: bool,
+    },
+    /// Emitted when the SDK reports model info or token usage for a message
+    /// or turn. Carries partial data: the model name may arrive on a
+    /// session_start system message, while token counts arrive on each
+    /// assistant message and the result message.
+    UsageUpdate {
+        session_id: String,
+        #[serde(flatten)]
+        usage: TurnUsage,
     },
 }

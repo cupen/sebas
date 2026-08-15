@@ -2,7 +2,7 @@
 //! `web_close_session` tears down the mapping + (when present) the live
 //! child process; `web_set_active` records the focused session.
 
-use feishu::events::SessionKey;
+use feishu::events::{FeishuIn, SessionKey};
 use router::router::CloseOutcome;
 use router::state::{Mapping, SessionMap};
 use router::RouterHandle;
@@ -73,6 +73,34 @@ async fn close_dormant_drops_without_killing() {
     let out = router.web_close_session(key.clone()).await;
     assert_eq!(out, CloseOutcome::Closed);
     assert!(map.get(&key).await.is_none());
+}
+
+#[tokio::test]
+async fn close_session_clears_reply_target() {
+    let map = SessionMap::new();
+    let key = web_key("r");
+    map.insert(key.clone(), Mapping::active("sid-r"))
+        .await
+        .unwrap();
+
+    let (router, _rx) = RouterHandle::new(map.clone());
+    // 模拟入站消息写入 reply target（话题内 = 话题根消息 message_id）。
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hello".into(),
+            reply_to: Some("om_root".into()),
+        })
+        .await;
+    assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));
+
+    let out = router.web_close_session(key.clone()).await;
+    assert_eq!(out, CloseOutcome::Closed);
+    assert_eq!(
+        router.reply_target(&key).await,
+        None,
+        "close must clear the stale reply target"
+    );
 }
 
 #[tokio::test]

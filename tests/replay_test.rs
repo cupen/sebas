@@ -59,6 +59,17 @@ async fn replay_one_text_message_emits_spawn_acp() {
         "replay_frame should accept a well-formed text envelope"
     );
 
+    // First event should be the ack reaction on the user's message.
+    let ack = recv_within(&mut rx, 64)
+        .await
+        .expect("expected Out::AckMsg after replay_frame");
+    let ack_ok = matches!(&ack, Out::AckMsg { message_id, emoji } if message_id == "om_1" && emoji == "EYES");
+    assert!(
+        ack_ok,
+        "expected Out::AckMsg with message_id=om_1 emoji=EYES, got {ack:?}"
+    );
+
+    // Then the actual spawn.
     let out = recv_within(&mut rx, 64)
         .await
         .expect("expected Out::SpawnAcp after replay_frame");
