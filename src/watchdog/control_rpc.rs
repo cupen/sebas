@@ -78,7 +78,28 @@ pub fn default_socket_path() -> PathBuf {
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime_dir).join("sebas/control.sock");
     }
-    std::env::temp_dir().join("sebas-control.sock")
+    // XDG_RUNTIME_DIR unset (common in containers / non-login shells): fall
+    // back to a per-user temp dir so multiple users on the same host do not
+    // stomp on each other. Always end in `control.sock` so clients can rely
+    // on the suffix.
+    let base = std::env::temp_dir().join("sebas");
+    if let Some(uid) = users_uid() {
+        base.join(format!("uid{uid}")).join("control.sock")
+    } else {
+        base.join("control.sock")
+    }
+}
+
+#[cfg(unix)]
+fn users_uid() -> Option<u32> {
+    // nix crate is not a dependency, so use libc directly to avoid pulling a
+    // new crate just for getuid(). Already used elsewhere in this crate.
+    unsafe { Some(libc::getuid()) }
+}
+
+#[cfg(not(unix))]
+fn users_uid() -> Option<u32> {
+    None
 }
 
 pub async fn serve(path: PathBuf, secret: String, executor: ControlExecutor) -> Result<()> {

@@ -2,8 +2,8 @@ mod cli;
 
 use clap::Parser;
 use cli::{
-    Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, InstallServiceArgs, RecordArgs, ReplayArgs,
-    WebUiArgs,
+    Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, InstallServiceArgs, OutputFormat, RecordArgs,
+    ReplayArgs, WebUiArgs,
 };
 use std::path::PathBuf;
 
@@ -112,11 +112,26 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
         request,
     };
 
+    // Resolve socket: --socket > $SEBAS_CONTROL_SOCKET > XDG default.
     let path = args
         .socket
         .map(PathBuf::from)
+        .or_else(|| std::env::var("SEBAS_CONTROL_SOCKET").ok().map(PathBuf::from))
         .unwrap_or_else(default_socket_path);
-    let secret = args.secret.unwrap_or_default();
+
+    // Resolve secret: --secret > $SEBAS_CONTROL_SECRET.
+    // Watchdog intentionally does not persist this (see spec §5.3), so a CLI
+    // client without the env var must be told to export it explicitly.
+    let secret = match args.secret.or_else(|| std::env::var("SEBAS_CONTROL_SECRET").ok()) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Err(friendly_error(
+                "missing control RPC secret",
+                "pass --secret or set SEBAS_CONTROL_SECRET (watchdog prints this env to its own child via stderr; for an external CLI use the value the watchdog started with)",
+            ));
+        }
+    };
+
     let uid = current_uid();
     let envelope = match args.cmd {
         ControlCmd::Status => ControlEnvelope {
@@ -147,42 +162,158 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
             actor: RpcActor::Cli { uid },
             request: RpcControlRequest::Rollback { dry_run },
         },
+        ControlCmd::RestartCore => ControlEnvelope {
+            version: 1,
+            request_id: "cli_restart_core".into(),
+            secret: secret.clone(),
+            actor: RpcActor::Cli { uid },
+            request: RpcControlRequest::RestartCore,
+        },
+        ControlCmd::Services => ControlEnvelope {
+            version: 1,
+            request_id: "cli_services".into(),
+            secret: secret.clone(),
+            actor: RpcActor::Cli { uid },
+            request: RpcControlRequest::ServiceStatus,
+        },
     };
 
-    match request(&path, &envelope).await? {
-        RpcControlResponse::Accepted {
-            operation_id,
-            status,
-        } => {
-            println!("accepted operation={operation_id} status={status}");
-        }
-        RpcControlResponse::Rejected { code, message } => {
-            eprintln!("rejected code={code} message={message}");
-            std::process::exit(2);
-        }
-        RpcControlResponse::Events { events } => {
-            for event in events {
-                println!(
-                    "#{} [{}] {} {}",
-                    event.seq, event.kind, event.operation_id, event.public_message
-                );
-            }
-        }
-        RpcControlResponse::Services { services } => {
-            for svc in &services {
-                println!(
-                    "- {}: {} (desired: {}){}",
-                    svc.name,
-                    svc.status,
-                    svc.desired,
-                    svc.uptime_secs
-                        .map(|u| format!(" uptime={u}s"))
-                        .unwrap_or_default()
-                );
-            }
-        }
+    let response = match request(&path, &envelope).await {
+        Ok(r) => r,
+        Err(e) => return Err(friendly_rpc_error(e.into(), &path)),
+    };
+
+    render_response(args.format, &response);
+
+    // Map watchdog-side rejections to exit code 2 so scripts can detect them
+    // without parsing strings.
+    if matches!(response, RpcControlResponse::Rejected { .. }) {
+        std::process::exit(2);
     }
     Ok(())
+}
+
+fn render_response(format: OutputFormat, response: &sebas::watchdog::control_rpc::RpcControlResponse) {
+    use sebas::watchdog::control_rpc::RpcControlResponse;
+    match format {
+        OutputFormat::Json => {
+            // Raw envelope; stable schema, machine-readable. serde_json's
+            // default formatter is preserved so downstream tooling can rely on
+            // field order / casing.
+            let json = serde_json::to_string_pretty(response)
+                .expect("RpcControlResponse is always serializable");
+            println!("{json}");
+        }
+        OutputFormat::Human => match response {
+            RpcControlResponse::Accepted {
+                operation_id,
+                status,
+            } => {
+                println!("accepted operation={operation_id} status={status}");
+            }
+            RpcControlResponse::Rejected { code, message } => {
+                eprintln!("rejected code={code} message={message}");
+            }
+            RpcControlResponse::Events { events } => {
+                if events.is_empty() {
+                    println!("(no events)");
+                    return;
+                }
+                for event in events {
+                    println!(
+                        "#{} [{}] {} {}",
+                        event.seq, event.kind, event.operation_id, event.public_message
+                    );
+                }
+            }
+            RpcControlResponse::Services { services } => {
+                if services.is_empty() {
+                    println!("(no managed services)");
+                    return;
+                }
+                for svc in services {
+                    println!(
+                        "- {}: {} (desired: {}){}",
+                        svc.name,
+                        svc.status,
+                        svc.desired,
+                        svc
+                            .uptime_secs
+                            .map(|u| format!(" uptime={u}s"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        },
+    }
+}
+
+/// Convert an anyhow-wrapped `SebasError` into a human-readable message plus
+/// the next-best action. CLI users hit three recurring failure modes:
+/// missing secret, missing/unwritable socket, and connection-refused.
+fn friendly_rpc_error(err: anyhow::Error, socket: &std::path::Path) -> anyhow::Error {
+    use sebas::error::SebasError;
+    use std::io::ErrorKind;
+
+    if let Some(se) = err.downcast_ref::<SebasError>() {
+        match se {
+            SebasError::Io(io_err) => match io_err.kind() {
+                ErrorKind::NotFound => {
+                    return anyhow::anyhow!(
+                        "watchdog control socket not found at {}\n\
+                         hint: is `sebas watchdog` running? override path with --socket \
+                         or $SEBAS_CONTROL_SOCKET",
+                        socket.display()
+                    );
+                }
+                ErrorKind::ConnectionRefused => {
+                    return anyhow::anyhow!(
+                        "watchdog control socket refused connection at {}\n\
+                         hint: the socket exists but watchdog is not listening; \
+                         check `sebas watchdog` logs",
+                        socket.display()
+                    );
+                }
+                ErrorKind::PermissionDenied => {
+                    return anyhow::anyhow!(
+                        "permission denied connecting to watchdog socket at {}\n\
+                         hint: socket is mode 0600 owned by the user running \
+                         `sebas watchdog`; run as that user, via sudo -u, or \
+                         systemd RunAsUser",
+                        socket.display()
+                    );
+                }
+                _ => {}
+            },
+            SebasError::Upgrade(msg) if msg.contains("closed without response") => {
+                return anyhow::anyhow!(
+                    "watchdog closed the socket without sending a response\n\
+                     hint: the daemon may be shutting down or the per-instance \
+                     secret rotated after restart (watchdog secrets are not \
+                     persisted by design)"
+                );
+            }
+            SebasError::Upgrade(msg) if msg.contains("parse response failed") => {
+                return anyhow::anyhow!(
+                    "watchdog returned a non-JSON response: {}\n\
+                     hint: watchdog and CLI versions may be out of sync; \
+                     rebuild from the same commit",
+                    msg
+                );
+            }
+            _ => {}
+        }
+    }
+
+    anyhow::anyhow!(
+        "control RPC request to {} failed: {}",
+        socket.display(),
+        err
+    )
+}
+
+fn friendly_error(what: &str, hint: &str) -> anyhow::Error {
+    anyhow::anyhow!("{what}\nhint: {hint}")
 }
 
 #[cfg(unix)]
@@ -413,5 +544,223 @@ mod tests {
             panic!("expected WebUi subcommand");
         };
         assert_eq!(args.config, "./config.toml");
+    }
+
+    // -----------------------------------------------------------------
+    // sebas-npc: public CLI client (Phase 6 Task 6.1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn control_restart_core_subcommand_parses() {
+        let cli = Cli::try_parse_from(["sebas", "control", "restart-core"])
+            .expect("`sebas control restart-core` must parse");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control subcommand");
+        };
+        assert!(matches!(args.cmd, ControlCmd::RestartCore));
+    }
+
+    #[test]
+    fn control_services_subcommand_parses() {
+        let cli = Cli::try_parse_from(["sebas", "control", "services"])
+            .expect("`sebas control services` must parse");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control subcommand");
+        };
+        assert!(matches!(args.cmd, ControlCmd::Services));
+    }
+
+    #[test]
+    fn control_format_defaults_to_human() {
+        let cli = Cli::try_parse_from(["sebas", "control", "status"])
+            .expect("parse with no --format");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control");
+        };
+        assert_eq!(args.format, OutputFormat::Human);
+    }
+
+    #[test]
+    fn control_format_json_parses() {
+        let cli =
+            Cli::try_parse_from(["sebas", "control", "status", "--format", "json"]).expect("json");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control");
+        };
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn control_format_human_explicit() {
+        let cli = Cli::try_parse_from([
+            "sebas", "control", "services", "--format", "human",
+        ])
+        .expect("human");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control");
+        };
+        assert_eq!(args.format, OutputFormat::Human);
+    }
+
+    #[test]
+    fn control_format_invalid_value_rejected() {
+        assert!(Cli::try_parse_from(["sebas", "control", "status", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn control_unknown_subcommand_rejected() {
+        // Snapshot: only the documented Phase 6 subcommands exist.
+        assert!(Cli::try_parse_from(["sebas", "control", "purge-everything"]).is_err());
+    }
+
+    #[test]
+    fn control_socket_and_secret_flags_are_optional() {
+        // Required secret/socket resolution happens at runtime, not parse time.
+        let cli = Cli::try_parse_from(["sebas", "control", "status"]).expect("parse");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control");
+        };
+        assert!(args.socket.is_none());
+        assert!(args.secret.is_none());
+    }
+
+    #[test]
+    fn control_socket_and_secret_flags_capture_values() {
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "control",
+            "--socket",
+            "/tmp/test.sock",
+            "--secret",
+            "abc",
+            "status",
+        ])
+        .expect("parse");
+        let Cmd::Control(args) = cli.cmd else {
+            panic!("expected Control");
+        };
+        assert_eq!(args.socket.as_deref(), Some("/tmp/test.sock"));
+        assert_eq!(args.secret.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn rpc_control_response_json_schema_stable() {
+        // The JSON envelope is the contract Phase 6 promises downstream tools
+        // can rely on. Pin field names + types for every variant.
+        use sebas::watchdog::control_rpc::{
+            RpcControlEvent, RpcControlResponse, RpcServiceStatus,
+        };
+
+        let cases: Vec<(&'static str, RpcControlResponse)> = vec![
+            (
+                "accepted",
+                RpcControlResponse::Accepted {
+                    operation_id: "op_42".into(),
+                    status: "Running".into(),
+                },
+            ),
+            (
+                "rejected",
+                RpcControlResponse::Rejected {
+                    code: "unauthorized".into(),
+                    message: "missing or invalid control RPC secret".into(),
+                },
+            ),
+            (
+                "events",
+                RpcControlResponse::Events {
+                    events: vec![RpcControlEvent {
+                        seq: 7,
+                        operation_id: "op_42".into(),
+                        kind: "Started".into(),
+                        public_message: "updater started".into(),
+                    }],
+                },
+            ),
+            (
+                "services",
+                RpcControlResponse::Services {
+                    services: vec![RpcServiceStatus {
+                        name: "gateway".into(),
+                        status: "Running".into(),
+                        desired: "Enabled".into(),
+                        uptime_secs: Some(120),
+                    }],
+                },
+            ),
+        ];
+
+        // Round-trip each variant: every field that survives a parse is part
+        // of the contract. If a field is added or renamed, this test breaks.
+        for (label, original) in &cases {
+            let json = serde_json::to_string(original).expect("serialize");
+            let parsed: RpcControlResponse =
+                serde_json::from_str(&json).expect(label);
+            assert_eq!(&parsed, original, "round-trip mismatch for {label}");
+        }
+
+        // Spot-check field casing/structure for `accepted` since that's the
+        // most machine-consumed variant.
+        let json = serde_json::to_string(&RpcControlResponse::Accepted {
+            operation_id: "op_x".into(),
+            status: "Running".into(),
+        })
+        .unwrap();
+        assert!(json.contains("\"type\":\"accepted\""), "tag field path: {json}");
+        assert!(json.contains("\"operation_id\":\"op_x\""));
+        assert!(json.contains("\"status\":\"Running\""));
+    }
+
+    #[test]
+    fn friendly_rpc_error_socket_not_found_mentions_running_watchdog() {
+        use std::path::Path;
+        let err = friendly_rpc_error(
+            anyhow::anyhow!(sebas::error::SebasError::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound
+            ))),
+            Path::new("/var/run/sebas/missing.sock"),
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("watchdog control socket not found"),
+            "expected not-found message, got: {msg}"
+        );
+        assert!(msg.contains("is `sebas watchdog` running"), "hint missing: {msg}");
+    }
+
+    #[test]
+    fn friendly_rpc_error_connection_refused_mentions_watchdog_logs() {
+        use std::path::Path;
+        let err = friendly_rpc_error(
+            anyhow::anyhow!(sebas::error::SebasError::Io(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            ))),
+            Path::new("/tmp/sebas.sock"),
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("refused connection"), "got: {msg}");
+        assert!(msg.contains("watchdog"), "got: {msg}");
+    }
+
+    #[test]
+    fn friendly_rpc_error_permission_denied_mentions_user_match() {
+        use std::path::Path;
+        let err = friendly_rpc_error(
+            anyhow::anyhow!(sebas::error::SebasError::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            Path::new("/tmp/sebas.sock"),
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("permission denied"), "got: {msg}");
+        assert!(msg.contains("sudo -u"), "hint missing: {msg}");
+    }
+
+    #[test]
+    fn friendly_error_includes_hint() {
+        let err = friendly_error("missing control RPC secret", "set SEBAS_CONTROL_SECRET");
+        let msg = format!("{err}");
+        assert!(msg.contains("missing control RPC secret"));
+        assert!(msg.contains("hint: set SEBAS_CONTROL_SECRET"));
     }
 }

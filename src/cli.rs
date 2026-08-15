@@ -180,18 +180,33 @@ pub struct UpdateArgs {
 /// `sebas control` — send a request to the watchdog control plane.
 #[derive(Parser)]
 pub struct ControlArgs {
-    /// Path to the watchdog control socket. Defaults to XDG_RUNTIME_DIR/sebas/control.sock.
+    /// Path to the watchdog control socket.
+    /// Precedence: --socket > $SEBAS_CONTROL_SOCKET > XDG_RUNTIME_DIR/sebas/control.sock.
     #[arg(long)]
     pub socket: Option<String>,
 
-    /// Control RPC secret for authentication. Required by the watchdog server.
+    /// Control RPC secret for authentication.
+    /// Precedence: --secret > $SEBAS_CONTROL_SECRET > error.
     #[arg(long)]
     pub secret: Option<String>,
+
+    /// Output format. `human` is one-line/key-value text; `json` is the raw
+    /// `RpcControlResponse` envelope, stable across releases.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human, global = true)]
+    pub format: OutputFormat,
 
     #[command(subcommand)]
     pub cmd: ControlCmd,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    Human,
+    Json,
+}
+
+/// Watchdog control-plane subcommands. Phase 6 (sebas-npc) freezes this surface
+/// so that WebUI/Feishu/CLI adapters all share the same normalized request.
 #[derive(Subcommand)]
 pub enum ControlCmd {
     /// Ask the watchdog for a control-plane status operation.
@@ -216,4 +231,8 @@ pub enum ControlCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Restart the sebas core child under the watchdog.
+    RestartCore,
+    /// Print the watchdog's managed-service status snapshot.
+    Services,
 }
