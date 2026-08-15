@@ -662,7 +662,9 @@ impl RouterHandle {
     /// - Removes the mapping + drain queue (SessionMap does both).
     /// - Drops card state and root msg_id so recycled ids don't inherit
     ///   stale entries.
-    /// - Clears the chat-level permission allowlist.
+    /// - Clears the chat-level permission allowlist and the per-key reply
+    ///   target (topic root message_id) so recycled keys don't inherit
+    ///   stale aggregation targets.
     /// - Clears `active_session` if this key was the focused one.
     pub async fn web_close_session(&self, key: SessionKey) -> CloseOutcome {
         let Some(mapping) = self.map.get(&key).await else {
@@ -691,6 +693,7 @@ impl RouterHandle {
         }
 
         self.allowlist.clear(&key).await;
+        self.reply_targets.clear(&key).await;
 
         // Clear the active pointer if this was the focused session.
         let mut active = self.active_session.write().await;

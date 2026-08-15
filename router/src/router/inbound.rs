@@ -383,6 +383,9 @@ impl RouterHandle {
         // previous session in this chat — the user approved those for the
         // session that asked, not for whatever comes next.
         self.allowlist.clear(&key).await;
+        // 新会话也不继承上一条入站的回复目标（话题内 root_id）。和 allowlist
+        // 一样随会话终止清理，防止 ReplyTargetMap 无界增长。
+        self.reply_targets.clear(&key).await;
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.

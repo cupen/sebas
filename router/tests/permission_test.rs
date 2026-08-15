@@ -45,7 +45,7 @@ async fn permission_request_emits_card_with_buttons() {
 }
 
 #[tokio::test]
-async fn permission_card_in_topic_uses_reply_target() {
+async fn permission_card_in_topic_leaves_root_id_none() {
     let map = SessionMap::new();
     let key = SessionKey {
         chat_id: "oc_topic".into(),
@@ -74,7 +74,8 @@ async fn permission_card_in_topic_uses_reply_target() {
     router.apply_event_to_out("s1".into(), &event).await;
 
     // 排掉 continue 产生的 per-turn card / SendAcp，只取权限卡（perm_request_id
-    // 标记它）。权限卡必须带上话题根消息作为 root_id（Q5）。
+    // 标记它）。权限卡的 root_id 由 dispatch 层 topic_reply_target 兜底，router
+    // 层不再预填 → 恒为 None（F3）。
     let perm_card = loop {
         let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
             .await
@@ -92,9 +93,9 @@ async fn permission_card_in_topic_uses_reply_target() {
     };
     assert_eq!(perm_card.0.thread_id.as_deref(), Some("omt_t1"));
     assert_eq!(
-        perm_card.1.as_deref(),
-        Some("om_topic_root"),
-        "话题内权限卡必须回复到话题根消息"
+        perm_card.1,
+        None,
+        "话题内权限卡 root_id 恒为 None：话题聚合由 dispatch 层兜底"
     );
 }
 
