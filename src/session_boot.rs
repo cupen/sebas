@@ -210,7 +210,18 @@ pub(crate) async fn wire_session_card_and_pump(
     // `rx` was cloned before any slow I/O (the send_card HTTP round trip
     // above) so a crash-on-first-prompt terminal event survives the
     // wrapper's eager table removal (D6).
-    spawn_acp_pump(rx, router.clone(), session_id.clone());
+    //
+    // sebas-9pz ②: idle_kill_secs 死配置接线 —— 配置 > 0 时,会话连续无事件
+    // 超过该时长会被 kill(子进程) + drop_card。默认 172800(48h)照常生效。
+    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
+        .then(|| Duration::from_secs(cfg.acp.claude.idle_kill_secs));
+    spawn_acp_pump_with_idle(
+        rx,
+        router.clone(),
+        session_id.clone(),
+        idle_timeout,
+        Some(mgr.clone()),
+    );
     // Flush queued prompts as ONE follow-up (sending them one by one would
     // violate ACP's one-prompt-in-flight rule).
     if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
@@ -267,19 +278,47 @@ pub fn spawn_acp_pump(
     router: RouterHandle,
     session_id: String,
 ) {
+    spawn_acp_pump_with_idle(rx, router, session_id, None, None);
+}
+
+/// `spawn_acp_pump` + `[acp.claude] idle_kill_secs`（sebas-9pz ②）：在会话
+/// **完全没有事件**超过 `idle_timeout` 时杀死子进程并撤卡。任意事件
+/// （TextDelta/ToolStart/…/Finished/PermissionRequest）都会重置计时器。
+///
+/// - `idle_timeout == None` → 原行为（永不过期，生产默认 48h 死配置的
+///   workaround：只在显式配置了非 48h 默认值时启用）。
+/// - 超时时：先 `mgr.kill(session_id)`（SIGKILL 子进程 + 撤表项），再
+///   `router.drop_card`（清 CardState 防无界增长），并附一条日志。
+///
+/// `mgr` 用于杀进程；`None` 时只撤卡不杀（供测试与旧调用点）。
+pub fn spawn_acp_pump_with_idle(
+    rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
+    >,
+    router: RouterHandle,
+    session_id: String,
+    idle_timeout: Option<Duration>,
+    mgr: Option<std::sync::Arc<SessionManager>>,
+) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(150));
         // 第一个 tick 立即触发（tokio interval 语义）；此时 dirty=false，是 no-op。
         let mut dirty = false;
         let mut pending_react: Option<&'static str> = None;
         let mut rx = rx.lock().await;
+        // idle-kill 计时（sebas-9pz ②）：距最近一次事件的时间。初始为
+        // 本次 pump 启动时刻，避免 spawn 后立刻被误杀。
+        let mut last_activity = tokio::time::Instant::now();
         loop {
+            let idle_deadline = idle_timeout.map(|t| last_activity + t);
             tokio::select! {
                 maybe_evt = rx.recv() => {
                     let Some(evt) = maybe_evt else {
                         router.drop_card(&session_id).await;
                         break;
                     };
+                    // 任意事件重置 idle 计时。
+                    last_activity = tokio::time::Instant::now();
                     let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
                     let is_immediate = matches!(
                         evt,
@@ -319,6 +358,23 @@ pub fn spawn_acp_pump(
                     }
                     if let Some(emoji) = pending_react.take() {
                         router.emit_reaction(&session_id, emoji).await;
+                    }
+                    // idle-kill 检查（sebas-9pz ②）：距最近事件超过阈值。
+                    // 一旦触发就 kill + 撤卡 + 退出，不会重复。
+                    if let Some(deadline) = idle_deadline
+                        && tokio::time::Instant::now() >= deadline
+                    {
+                        warn!(
+                            %session_id,
+                            timeout = ?idle_timeout,
+                            "session idle beyond idle_kill_secs; killing child"
+                        );
+                        // 杀子进程（若有 mgr）+ 撤卡。
+                        if let Some(mgr) = &mgr {
+                            mgr.kill(&session_id).await;
+                        }
+                        router.drop_card(&session_id).await;
+                        break;
                     }
                 }
             }
