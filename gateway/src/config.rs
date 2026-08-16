@@ -1083,7 +1083,7 @@ models = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]
         let pro = ds.model_caps("deepseek-v4-pro[1m]");
         assert_eq!(pro.context_window, Some(1_000_000));
         let flash = ds.model_caps("deepseek-v4-flash");
-        assert_eq!(flash.context_window, Some(128_000));
+        assert_eq!(flash.context_window, Some(1_000_000));
     }
 
     #[test]

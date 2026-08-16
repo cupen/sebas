@@ -1,4 +1,4 @@
-//! 模型能力参数 + provider 模型列表 → Claude Code 4 个 MODEL 环境变量的映射。
+//! 模型能力参数 + provider 模型列表 -> Claude Code 4 个 MODEL 环境变量的映射。
 //!
 //! 每种模型的参数是固定的，只在这里定义**一份**：不同 provider 背后的服务
 //! 商提供同名模型时参数一致，所以按模型名精确查找共享同一条目。
@@ -8,10 +8,10 @@
 //!   解析出来**覆盖**静态定义里的 context_window；
 //! - 注册表里认不出的模型回退默认值（`DEFAULT_CAPS`）。
 //!
-//! 强→弱映射规则（Claude Code 假定 `OPUS` 最强、`SONNET` 次之、`HAIKU`
+//! 强->弱映射规则（Claude Code 假定 `OPUS` 最强、`SONNET` 次之、`HAIKU`
 //! 最弱）：
-//! - provider 只给 1 个模型 → 4 个 MODEL 变量全设该模型；
-//! - 给 ≥2 个 → `ANTHROPIC_MODEL` + `ANTHROPIC_DEFAULT_OPUS_MODEL` = 最强
+//! - provider 只给 1 个模型 -> 4 个 MODEL 变量全设该模型；
+//! - 给 >=2 个 -> `ANTHROPIC_MODEL` + `ANTHROPIC_DEFAULT_OPUS_MODEL` = 最强
 //!   （列表头），`ANTHROPIC_DEFAULT_SONNET_MODEL` = 次强（第 2 个），
 //!   `ANTHROPIC_DEFAULT_HAIKU_MODEL` = 最弱（列表尾）。
 
@@ -37,52 +37,44 @@ pub struct ModelDef {
     pub max_output_tokens: u64,
 }
 
-/// 静态模型注册表。参数来自公开规格（数据来源：models.dev / 各 provider 文档）。
-/// 同名模型跨 provider 共享同一参数定义。
+/// 静态模型注册表。参数来自 models.dev（https://github.com/anomalyco/models.dev）。
 #[rustfmt::skip]
 const MODELS: &[ModelDef] = &[
-    // ---- DeepSeek V4 家族 ----
-    ModelDef { name: "deepseek-v4-flash", context_window: 128_000,  max_output_tokens: 8192 },
-    ModelDef { name: "deepseek-v4-pro",   context_window: 131_072,  max_output_tokens: 8192 },
-    // ---- Anthropic 自家 ----
-    ModelDef { name: "claude-opus",    context_window: 200_000, max_output_tokens: 32_768 },
-    ModelDef { name: "claude-sonnet",  context_window: 200_000, max_output_tokens: 32_768 },
-    ModelDef { name: "claude-haiku",   context_window: 200_000, max_output_tokens: 32_768 },
+    // ---- DeepSeek V4 ----
+    ModelDef { name: "deepseek-v4-flash", context_window: 1_000_000, max_output_tokens: 384_000 },
+    ModelDef { name: "deepseek-v4-pro",   context_window: 1_000_000, max_output_tokens: 384_000 },
+    // ---- Anthropic Claude ----
+    ModelDef { name: "claude-sonnet", context_window: 200_000, max_output_tokens: 64_000 },
+    ModelDef { name: "claude-opus",   context_window: 200_000, max_output_tokens: 32_000 },
+    ModelDef { name: "claude-haiku",  context_window: 200_000, max_output_tokens: 64_000 },
     // ---- OpenAI ----
-    ModelDef { name: "gpt-4o",        context_window: 128_000, max_output_tokens: 16_384 },
-    ModelDef { name: "gpt-4o-mini",   context_window: 128_000, max_output_tokens: 16_384 },
-    ModelDef { name: "o1",            context_window: 128_000, max_output_tokens: 32_768 },
-    ModelDef { name: "o1-pro",        context_window: 128_000, max_output_tokens: 100_000 },
-    ModelDef { name: "o3",            context_window: 200_000, max_output_tokens: 100_000 },
-    // ---- Kimi / Moonshot ----
-    ModelDef { name: "moonshot-v1-8k",   context_window: 8_192,     max_output_tokens: 4096 },
-    ModelDef { name: "moonshot-v1-32k",  context_window: 32_768,    max_output_tokens: 4096 },
-    ModelDef { name: "moonshot-v1-128k", context_window: 128_000,   max_output_tokens: 4096 },
-    ModelDef { name: "moonshot-v1-2m",   context_window: 2_000_000, max_output_tokens: 4096 },
-    ModelDef { name: "kimi-k1.5",        context_window: 128_000,   max_output_tokens: 4096 },
-    // ---- GLM (Zhipu) ----
-    ModelDef { name: "glm-4",       context_window: 128_000, max_output_tokens: 4096 },
-    ModelDef { name: "glm-4-plus",  context_window: 128_000, max_output_tokens: 8192 },
-    ModelDef { name: "glm-4-air",   context_window: 128_000, max_output_tokens: 8192 },
-    ModelDef { name: "glm-4-long",  context_window: 1_000_000, max_output_tokens: 1_000_000 },
+    ModelDef { name: "gpt-4o",        context_window: 128_000,   max_output_tokens: 16_384 },
+    ModelDef { name: "gpt-4o-mini",   context_window: 128_000,   max_output_tokens: 16_384 },
+    ModelDef { name: "o3",            context_window: 200_000,   max_output_tokens: 100_000 },
+    ModelDef { name: "o4-mini",       context_window: 200_000,   max_output_tokens: 100_000 },
+    ModelDef { name: "gpt-5.5-pro",   context_window: 1_050_000, max_output_tokens: 128_000 },
+    // ---- Google Gemini ----
+    ModelDef { name: "gemini-2.0-flash", context_window: 1_048_576, max_output_tokens: 8_192 },
+    ModelDef { name: "gemini-2.5-pro",   context_window: 1_048_576, max_output_tokens: 65_536 },
+    // ---- Alibaba Qwen ----
+    ModelDef { name: "qwen-max", context_window: 32_768, max_output_tokens: 8_192 },
+    // ---- Zhipu GLM ----
+    ModelDef { name: "glm-4.5",  context_window: 131_072, max_output_tokens: 98_304 },
+    ModelDef { name: "glm-4.6",  context_window: 204_800, max_output_tokens: 131_072 },
+    ModelDef { name: "glm-4.7",  context_window: 204_800, max_output_tokens: 131_072 },
+    ModelDef { name: "glm-5",    context_window: 204_800, max_output_tokens: 131_072 },
+    ModelDef { name: "glm-5.2",  context_window: 1_000_000, max_output_tokens: 131_072 },
+    // ---- Moonshot Kimi ----
+    ModelDef { name: "kimi-k2-thinking", context_window: 262_144,   max_output_tokens: 262_144 },
+    ModelDef { name: "kimi-k2.5",        context_window: 262_144,   max_output_tokens: 262_144 },
+    ModelDef { name: "kimi-k3",          context_window: 1_048_576, max_output_tokens: 131_072 },
     // ---- MiniMax ----
-    ModelDef { name: "minmax-01",   context_window: 4_000_000, max_output_tokens: 4096 },
-    // ---- Ark (ByteDance / Doubao) ----
-    ModelDef { name: "doubao-1-5-pro-256k", context_window: 256_000, max_output_tokens: 4096 },
-    ModelDef { name: "doubao-1-5-pro-128k", context_window: 128_000, max_output_tokens: 4096 },
-    ModelDef { name: "doubao-1-5-pro-32k",  context_window: 32_768,  max_output_tokens: 8192 },
-    ModelDef { name: "doubao-1-5-lite-32k", context_window: 32_768,  max_output_tokens: 4096 },
-    ModelDef { name: "doubao-pro-256k",     context_window: 256_000, max_output_tokens: 4096 },
-    ModelDef { name: "doubao-pro-128k",     context_window: 128_000, max_output_tokens: 4096 },
-    ModelDef { name: "doubao-pro-32k",      context_window: 32_768,  max_output_tokens: 8192 },
-    // ---- Dashscope (Qwen / Alibaba) ----
-    ModelDef { name: "qwen-max",        context_window: 128_000, max_output_tokens: 8192 },
-    ModelDef { name: "qwen2.5-72b",     context_window: 131_072, max_output_tokens: 8192 },
-    ModelDef { name: "qwen2.5-turbo",   context_window: 1_000_000, max_output_tokens: 8192 },
-    ModelDef { name: "qwen-max-long",   context_window: 2_000_000, max_output_tokens: 8192 },
-    // ---- Gemini (Google) ----
-    ModelDef { name: "gemini-2.0-flash", context_window: 1_048_576, max_output_tokens: 8192 },
-    ModelDef { name: "gemini-2.0-pro",   context_window: 2_097_152, max_output_tokens: 8192 },
+    ModelDef { name: "minimax-m2.5", context_window: 204_800, max_output_tokens: 131_072 },
+    ModelDef { name: "minimax-m3",   context_window: 512_000, max_output_tokens: 128_000 },
+    // ---- ByteDance Seed ----
+    ModelDef { name: "seed-1.6",      context_window: 256_000, max_output_tokens: 64_000 },
+    ModelDef { name: "seed-2.0-pro",  context_window: 256_000, max_output_tokens: 128_000 },
+    ModelDef { name: "seed-2.1-turbo", context_window: 256_000, max_output_tokens: 256_000 },
 ];
 
 /// 注册表按规范名精确查找。
@@ -96,7 +88,7 @@ fn table_match(name: &str) -> Option<ModelCaps> {
         })
 }
 
-/// 解析模型名末尾的 `[n]` 后缀：`[128k]`→128_000、`[1m]`→1_000_000（十进制）。
+/// 解析模型名末尾的 `[n]` 后缀：`[128k]`->128_000、`[1m]`->1_000_000（十进制）。
 /// 无后缀返回 `None`。`K`/`M` 大写也接受。
 pub fn parse_context_suffix(name: &str) -> Option<u64> {
     let bytes = name.as_bytes();
@@ -120,9 +112,9 @@ pub fn parse_context_suffix(name: &str) -> Option<u64> {
 
 /// 解析一个模型名的完整能力：
 /// 1. 剥离 `[n]` 后缀得到基准名 + 可选解析出的上下文；
-/// 2. 基准名查静态注册表 → context 与 output；
-/// 3. 后缀存在 → 覆盖 context_window；output 未给出时用 context / 4 兜底；
-/// 4. 注册表未命中 → `DEFAULT_CAPS`（后缀仍可覆盖 context）。
+/// 2. 基准名查静态注册表 -> context 与 output；
+/// 3. 后缀存在 -> 覆盖 context_window；output 未给出时用 context / 4 兜底；
+/// 4. 注册表未命中 -> `DEFAULT_CAPS`（后缀仍可覆盖 context）。
 pub fn resolve_caps(name: &str) -> ModelCaps {
     let (base, suffix) = match parse_context_suffix(name) {
         Some(ctx) => (&name[..name.rfind('[').unwrap_or(name.len())], Some(ctx)),
@@ -142,18 +134,13 @@ pub fn resolve_caps(name: &str) -> ModelCaps {
 /// Claude Code 消费的 4 个 MODEL 环境变量的取值。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaudeModelEnv {
-    /// ANTHROPIC_MODEL
     pub model: Option<String>,
-    /// ANTHROPIC_DEFAULT_OPUS_MODEL
     pub opus: Option<String>,
-    /// ANTHROPIC_DEFAULT_SONNET_MODEL
     pub sonnet: Option<String>,
-    /// ANTHROPIC_DEFAULT_HAIKU_MODEL
     pub haiku: Option<String>,
 }
 
 impl ClaudeModelEnv {
-    /// 生成 4 个环境变量名→值 的映射（仅含 `Some` 项）。
     pub fn to_env_map(&self) -> Vec<(&'static str, String)> {
         let mut v = Vec::new();
         if let Some(m) = &self.model {
@@ -172,7 +159,7 @@ impl ClaudeModelEnv {
     }
 }
 
-/// 按强→弱把 provider 的模型列表映射到 4 个 MODEL 变量。返回全 `None` 表示
+/// 按强->弱把 provider 的模型列表映射到 4 个 MODEL 变量。返回全 `None` 表示
 /// provider 没配 `models`（调用方跳过 env 注入）。
 pub fn map_to_env(models: &[String]) -> ClaudeModelEnv {
     match models {
@@ -211,18 +198,16 @@ mod tests {
 
     #[test]
     fn static_def_fills_known_model() {
-        // 注册表里的规范名精确命中
         let caps = resolve_caps("deepseek-v4-flash");
-        assert_eq!(caps.context_window, Some(128_000));
-        assert_eq!(caps.max_output_tokens, Some(8192));
+        assert_eq!(caps.context_window, Some(1_000_000));
+        assert_eq!(caps.max_output_tokens, Some(384_000));
     }
 
     #[test]
     fn suffix_overrides_static_context() {
-        // deepseek-v4-pro 静态定义 131072；[1m] 后缀覆盖成 1M
         let caps = resolve_caps("deepseek-v4-pro[1m]");
         assert_eq!(caps.context_window, Some(1_000_000));
-        assert_eq!(caps.max_output_tokens, Some(8192));
+        assert_eq!(caps.max_output_tokens, Some(384_000));
     }
 
     #[test]
@@ -233,10 +218,9 @@ mod tests {
 
     #[test]
     fn known_model_with_unknown_suffix_keeps_table_output() {
-        // claude-opus 有表；[99k] 后缀覆盖 context，output 保留表的
-        let caps = resolve_caps("claude-opus[99k]");
+        let caps = resolve_caps("claude-sonnet[99k]");
         assert_eq!(caps.context_window, Some(99_000));
-        assert_eq!(caps.max_output_tokens, Some(32_768));
+        assert_eq!(caps.max_output_tokens, Some(64_000));
     }
 
     #[test]
