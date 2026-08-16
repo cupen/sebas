@@ -63,6 +63,51 @@ pub fn state_path() -> PathBuf {
     PathBuf::from(expand_tilde(&raw))
 }
 
+/// `SEBAS_STATE_FILE` env 覆盖：让测试和隔离部署走自己的 state 文件，
+/// 不污染 `~/.sebas/state.json`。
+#[cfg(test)]
+mod env_override_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // 串行化所有 env 访问：和 spawn_env.rs 同源问题。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn sebas_state_file_env_overrides_state_path() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("custom_state.json");
+        // SAFETY: ENV_LOCK held.
+        unsafe {
+            std::env::set_var("SEBAS_STATE_FILE", &custom);
+        }
+
+        // state_path() 现在返回 env 指定的路径。
+        let resolved = state_path();
+        assert_eq!(resolved, custom, "SEBAS_STATE_FILE 应覆盖默认 ~/.sebas/state.json");
+
+        // load() 在新文件不存在时返回默认。
+        let loaded = load();
+        assert_eq!(loaded, ProviderRuntimeState::default());
+
+        // save() / load() 在 env 路径上往返成功。
+        let mut s = ProviderRuntimeState::default();
+        s.mode = ProviderMode::Direct { provider: "env-override".into() };
+        s.default_provider_for_direct = Some("env-override".into());
+        save(&s).expect("save to env-override path");
+        assert!(custom.exists(), "save 应创建 env 指定的文件");
+        let reloaded = load();
+        assert_eq!(reloaded.mode, ProviderMode::Direct { provider: "env-override".into() });
+        assert_eq!(reloaded.default_provider_for_direct.as_deref(), Some("env-override"));
+
+        // SAFETY: ENV_LOCK held.
+        unsafe {
+            std::env::remove_var("SEBAS_STATE_FILE");
+        }
+    }
+}
+
 /// 读盘并解析。失败语义（文件缺失、解析错误、IO 错）一律 warn 后返回
 /// `Default::default()` —— runtime 状态不应让 sebas 启动失败。
 pub fn load() -> ProviderRuntimeState {

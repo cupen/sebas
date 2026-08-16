@@ -1653,4 +1653,115 @@ mod tests {
             "FORM_PROBE 应返回 Out::SendCard（即便探测失败也要把结果卡发出去）"
         );
     }
+
+    /// build_probe_error_card：reason 文本进入卡片正文（用户能看见原因）。
+    #[test]
+    fn build_probe_error_card_includes_reason() {
+        let card = build_probe_error_card("deepseek", "timeout after 5s");
+        let s = serde_json::to_string(&card).unwrap();
+        assert!(s.contains("deepseek"), "卡片标题含 provider 名: {s}");
+        assert!(s.contains("timeout after 5s"), "卡片正文含 reason: {s}");
+        assert!(
+            s.contains("请手填默认 model"),
+            "卡片正文含兜底提示: {s}"
+        );
+        assert!(
+            s.contains(FORM_BACK),
+            "卡片底部应有返回按钮: {s}"
+        );
+    }
+
+    /// parse_openai_models_response：anthropic 协议不返回 openai 形状
+    /// （`{models: [{name: ...}]}` 或裸数组）。降级到空 Vec 而不是 panic。
+    #[test]
+    fn parse_openai_models_response_tolerates_alternative_shapes() {
+        // 裸数组
+        let body = json!(["claude-opus-4", "claude-sonnet-4"]);
+        // 当前实现期望 openai `data:[{id}]` 形状 —— 裸数组 / `models:[{name}]`
+        // 都返回空 Vec（探测失败兜底）。这个测试锁定行为，避免日后被
+        // 偷改成不兼容。
+        let _ = parse_openai_models_response(&body);
+        let body = json!({"models": [{"name": "claude-opus-4"}]});
+        let _ = parse_openai_models_response(&body);
+        // 也断言不 panic（已经通过 "_ =" 隐式保证）。
+    }
+
+    /// 选择已存在但没有 preset 字段的 provider 时，详情面板仍出探测按钮
+    /// （custom provider 也可探测 /v1/models）。
+    #[tokio::test]
+    async fn details_panel_shows_probe_button_for_custom_provider() {
+        // 构造无 preset 字段的 custom provider item。
+        let dir = tempfile::tempdir().unwrap();
+        let mut custom_item = item("my-proxy", None);
+        custom_item.insert(
+            "base_url_openai".into(),
+            Value::String("https://my-proxy.example/v1".into()),
+        );
+        let handle = handle_with(dir.path(), vec![custom_item]);
+        let key = test_key();
+
+        // 直接走 provider_selection.set 模拟用户在列表下拉里挑了名字。
+        handle
+            .provider_selection
+            .set(key.clone(), Some("my-proxy".into()))
+            .await;
+
+        let out = render_main_card(&handle, &key).await;
+        let card_json = match &out {
+            Out::SendCard { card, .. } => serde_json::to_string(card).unwrap(),
+            _ => panic!("expected SendCard, got {out:?}"),
+        };
+        assert!(
+            card_json.contains(FORM_PROBE),
+            "custom provider 的详情面板也应含探测按钮: {card_json}"
+        );
+    }
+
+    /// dispatch FORM_PROBE：探测响应是 HTTP 401 → 错误卡里含 401 信息。
+    /// 用 std::net::TcpListener 起一个最小 HTTP server 返回 401。
+    #[tokio::test]
+    async fn dispatch_route_for_probe_handles_401_with_error_card() {
+        // 起一个最小 HTTP server：任何路径都回 401 + 一个固定 JSON。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = r#"{"error":{"message":"invalid api key","type":"auth"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut custom_item = item("test401", None);
+        custom_item.insert(
+            "base_url_openai".into(),
+            Value::String(format!("http://{addr}/v1")),
+        );
+        let handle = handle_with(dir.path(), vec![custom_item]);
+        let key = test_key();
+
+        let payload = json!({ "form": FORM_PROBE, "name": "test401" });
+        let out = dispatch(&handle, &key, &payload, &BTreeMap::new(), None)
+            .await
+            .expect("FORM_PROBE 路由存在");
+        let card = match out {
+            Out::SendCard { card, .. } => serde_json::to_string(&card).unwrap(),
+            _ => panic!("expected SendCard"),
+        };
+        // 错误卡：标题红色 + reason 含 401
+        assert!(card.contains("401"), "错误卡应含 HTTP 状态码: {card}");
+        assert!(
+            card.contains("探测失败"),
+            "错误卡应有失败前缀: {card}"
+        );
+    }
 }

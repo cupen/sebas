@@ -839,4 +839,67 @@ api_key_env = "ANTHROPIC_API_KEY"
             std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
         }
     }
+
+    /// Direct provider 的 overlay item 同时填了 anthropic + openai base_url
+    /// 时，protocol 选择走 anthropic（设计约定：claude code 优先匹配 Anthropic
+    /// 协议面）。该测试锁定这个优先级，避免日后被偷改。
+    #[tokio::test]
+    async fn direct_prefers_anthropic_when_both_base_urls_set() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_overlay(
+            dir.path(),
+            r#"{
+              "providers": {
+                "dual": {
+                  "name": "dual",
+                  "base_url_anthropic": "https://example.com/anthropic",
+                  "base_url_openai": "https://example.com/openai",
+                  "api_key": "sk-test"
+                }
+              }
+            }"#,
+        );
+        unsafe {
+            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", dir.path().join("providers.json").to_str().unwrap());
+        }
+        let state = direct_state("dual");
+        let (resolution, _) = compute_provider_resolution(&state, None);
+        match resolution {
+            ProviderResolution::Direct { proto, base_url, .. } => {
+                assert_eq!(proto, Protocol::Anthropic, "anthropic 协议优先于 openai");
+                assert_eq!(base_url, "https://example.com/anthropic");
+            }
+            other => panic!("expected Direct, got {other:?}"),
+        }
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+        }
+    }
+
+    /// Gateway 模式 + gateway config 里有 listen 但 auth_token 是空数组：
+    /// 不应 panic / 不应拒绝；URL 仍构造，auth_token 是空字符串（agent 会
+    /// 在没 Bearer 的情况下调 gateway，gateway 自己拒）。这是用户故意不配
+    /// auth 的合法状态。
+    #[tokio::test]
+    async fn gateway_with_empty_auth_token_still_constructs_url() {
+        let raw = r#"
+[gateway]
+listen = "127.0.0.1:8787"
+auth_token = []
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("test gateway parses");
+        let state = ProviderRuntimeState {
+            mode: ProviderMode::Gateway,
+            default_provider_for_direct: None,
+        };
+        let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
+        match resolution {
+            ProviderResolution::Gateway { url, auth_token } => {
+                assert_eq!(url, "http://127.0.0.1:8787");
+                assert_eq!(auth_token, "", "空 auth_token 数组 → 空字符串（agent 调 gateway 不带 Bearer）");
+            }
+            other => panic!("expected Gateway, got {other:?}"),
+        }
+    }
 }
