@@ -46,7 +46,10 @@ async fn continue_session_emits_per_turn_send_card_with_root_id() {
         })
         .await;
 
-    // Drain the flip messages first (UpdateCard + React from DONE->WORKING).
+    // Drain the flip messages first. `dispatch` acks the user message with an
+    // immediate EYES reaction before processing (upstream ack mechanism), so
+    // order is: AckMsg(EYES), UpdateCard, React (DONE->WORKING flip).
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard
     let _ = out_rx.recv().await; // React
 
@@ -166,6 +169,7 @@ async fn continue_while_in_flight_enqueues_no_card_no_sendacp_only_queue_react()
             reply_to: Some("om_user_2".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
 
     // Expect: only a React with ⏳ — no SendCard, no SendAcp.
     let out = tokio::time::timeout(Duration::from_millis(50), out_rx.recv())
@@ -215,6 +219,7 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
             reply_to: Some("om2".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳ react
     router
         .dispatch(FeishuIn::Text {
@@ -223,6 +228,7 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
             reply_to: Some("om3".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳ react
     assert_eq!(router.map.queue_len(&key).await, 2);
 
@@ -366,6 +372,7 @@ async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
             reply_to: Some("omF".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳
 
     // Now a /btw turn — must jump to front.
@@ -376,6 +383,7 @@ async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
             reply_to: Some("omB".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳
 
     router
@@ -476,6 +484,7 @@ async fn three_turns_three_distinct_root_ids() {
             reply_to: Some("om1".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
     let _ = out_rx.recv().await; // React
     let (sc1, acp1) = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
@@ -508,6 +517,7 @@ async fn three_turns_three_distinct_root_ids() {
             reply_to: Some("om2".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
     let _ = out_rx.recv().await; // React
     let (sc2, acp2) = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
@@ -541,6 +551,7 @@ async fn three_turns_three_distinct_root_ids() {
             reply_to: Some("om3".into()),
         })
         .await;
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
     let _ = out_rx.recv().await; // React
     let (sc3, acp3) = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
@@ -598,7 +609,9 @@ async fn streaming_update_after_second_turn_targets_current_card() {
             reply_to: Some("om_user_2".into()),
         })
         .await;
-    // Drain 4 messages from turn 2: UpdateCard (DONE→WORKING flip) + React + SendCard + SendAcp
+    // Drain 5 messages from turn 2: AckMsg(EYES) + UpdateCard (DONE→WORKING
+    // flip) + React + SendCard + SendAcp
+    let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await;
     let _ = out_rx.recv().await;
     let send_card_msg = out_rx.recv().await.unwrap();
