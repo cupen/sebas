@@ -12,11 +12,14 @@
 
 use crate::config::WatchdogConfig;
 use crate::error::{Result, SebasError};
+use crate::watchdog::auth::{actor_to_principal, AssertionPrincipal};
+use crate::watchdog::confirmation::{ConfirmationError, ConfirmationService};
 use crate::watchdog::control::{
     Actor, ControlRequest, ControlResponse, ControlService, UpdateKind, UpdateTarget,
 };
 use crate::watchdog::control_rpc::{RpcControlResponse, RpcServiceStatus};
 use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
@@ -61,6 +64,32 @@ pub struct ControlExecutor {
     config: WatchdogConfig,
     config_path: String,
     restart_tx: mpsc::UnboundedSender<PostAction>,
+    /// Single-use, short-lived confirmation grants for dangerous actions
+    /// (spec §7). Shared across executor clones.
+    confirmation: Arc<ConfirmationService>,
+    /// Pending dangerous actions awaiting confirmation, keyed by the opaque
+    /// grant token. The `(Actor, ControlRequest)` is the canonical action
+    /// truth — the client only ever carries the token.
+    pending: Arc<Mutex<HashMap<String, PendingControl>>>,
+}
+
+/// A dangerous action held until its confirmation token is redeemed.
+#[derive(Debug, Clone)]
+struct PendingControl {
+    actor: Actor,
+    request: ControlRequest,
+}
+
+/// TTL for dangerous-action confirmation grants (spec §7: short-lived).
+const CONFIRMATION_TTL_SECS: u64 = 300;
+
+/// A dangerous action awaiting user confirmation.
+#[derive(Debug, Clone)]
+pub struct ConfirmationCreated {
+    pub token: String,
+    pub action: String,
+    pub message: String,
+    pub expires_in: u64,
 }
 
 impl ControlExecutor {
@@ -77,6 +106,8 @@ impl ControlExecutor {
             config,
             config_path,
             restart_tx,
+            confirmation: Arc::new(ConfirmationService::new()),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -122,6 +153,167 @@ impl ControlExecutor {
         });
 
         response
+    }
+
+    /// Route a dangerous control request (spec §7 dangerous ops list):
+    ///
+    /// - **Feishu** actors must confirm via a card. The watchdog creates a
+    ///   single-use, short-lived grant and holds the pending request keyed by
+    ///   the returned opaque token (`PendingConfirmation` response).
+    /// - **Cli** actors are a trusted local console (the private unix socket +
+    ///   startup secret): they execute directly, matching pre-Phase-3 behavior.
+    ///
+    /// This is the single gate for dangerous actions from the Feishu adapter.
+    pub async fn submit_or_confirm(
+        &self,
+        actor: Actor,
+        request: ControlRequest,
+    ) -> RpcControlResponse {
+        match &actor {
+            Actor::Feishu { chat_id: Some(chat), .. } => {
+                match self.create_confirmation(&actor, &request, chat).await {
+                    Ok(created) => RpcControlResponse::PendingConfirmation {
+                        token: created.token,
+                        action: created.action,
+                        message: created.message,
+                        expires_in: created.expires_in,
+                    },
+                    Err(e) => RpcControlResponse::Rejected {
+                        code: "confirmation_required".into(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            Actor::Feishu { chat_id: None, .. } => RpcControlResponse::Rejected {
+                code: "confirmation_required".into(),
+                message: "Feishu dangerous action requires a chat channel for confirmation"
+                    .into(),
+            },
+            _ => self.submit_detached(actor, request).await.into(),
+        }
+    }
+
+    /// Create a confirmation grant for a dangerous action and hold the pending
+    /// request keyed by the returned opaque token. The principal is derived by
+    /// the watchdog (not trusted from the envelope), and the channel is the
+    /// originating chat — both bound into the grant (spec §7/§6.3).
+    async fn create_confirmation(
+        &self,
+        actor: &Actor,
+        request: &ControlRequest,
+        channel: &str,
+    ) -> Result<ConfirmationCreated> {
+        let principal = actor_to_principal(actor).ok_or_else(|| {
+            SebasError::Upgrade("cannot derive a confirmation principal for this actor".into())
+        })?;
+        let (action, params) = confirmation_context(request);
+        let token = self.confirmation.create_grant(
+            principal,
+            action.clone(),
+            channel.to_string(),
+            "watchdog".to_string(),
+            params,
+            CONFIRMATION_TTL_SECS,
+        );
+        self.pending.lock().await.insert(
+            token.clone(),
+            PendingControl {
+                actor: actor.clone(),
+                request: request.clone(),
+            },
+        );
+        Ok(ConfirmationCreated {
+            token,
+            action,
+            message: confirmation_message(request),
+            expires_in: CONFIRMATION_TTL_SECS,
+        })
+    }
+
+    /// Finalize a pending dangerous action by redeeming its confirmation token.
+    ///
+    /// The client sends only the opaque token; the canonical params come from
+    /// the stored pending request, so params cannot be tampered with over the
+    /// wire (spec §6.3). The grant is single-use and atomic: concurrent
+    /// double-clicks yield exactly one execution.
+    pub async fn confirm(
+        &self,
+        token: &str,
+        principal: &AssertionPrincipal,
+        channel: &str,
+    ) -> RpcControlResponse {
+        let stored = { self.pending.lock().await.get(token).cloned() };
+        let Some(stored) = stored else {
+            return RpcControlResponse::Rejected {
+                code: "confirmation_required".into(),
+                message: "unknown or already handled confirmation token".into(),
+            };
+        };
+        let params = confirmation_params(&stored.request);
+        match self.confirmation.redeem(token, principal, channel, &params) {
+            Ok(_) => {
+                self.pending.lock().await.remove(token);
+                self.submit_detached(stored.actor, stored.request).await.into()
+            }
+            Err(ConfirmationError::AlreadyRedeemed) => RpcControlResponse::Rejected {
+                code: "already_redeemed".into(),
+                message: "this confirmation was already handled".into(),
+            },
+            Err(ConfirmationError::Expired) => RpcControlResponse::Rejected {
+                code: "confirmation_expired".into(),
+                message: "confirmation token has expired".into(),
+            },
+            Err(_) => RpcControlResponse::Rejected {
+                code: "unauthorized".into(),
+                message: "confirmation token does not match this actor/channel".into(),
+            },
+        }
+    }
+
+    /// Cancel a pending dangerous action. Redeems (consumes) the grant so it
+    /// cannot be confirmed afterwards, and records a Canceled event for the
+    /// audit trail (spec §9). Like confirm, validates the caller's principal
+    /// and channel against the grant.
+    pub async fn cancel(
+        &self,
+        token: &str,
+        principal: &AssertionPrincipal,
+        channel: &str,
+    ) -> RpcControlResponse {
+        let stored = { self.pending.lock().await.get(token).cloned() };
+        let Some(stored) = stored else {
+            return RpcControlResponse::Rejected {
+                code: "confirmation_required".into(),
+                message: "unknown or already handled confirmation token".into(),
+            };
+        };
+        let params = confirmation_params(&stored.request);
+        match self.confirmation.redeem(token, principal, channel, &params) {
+            Ok(_) => {
+                self.pending.lock().await.remove(token);
+                let op_id = format!("cfm_{token}");
+                self.control
+                    .lock()
+                    .await
+                    .record_canceled(&op_id, "confirmation canceled by user");
+                RpcControlResponse::Accepted {
+                    operation_id: op_id,
+                    status: "Canceled".into(),
+                }
+            }
+            Err(ConfirmationError::AlreadyRedeemed) => RpcControlResponse::Rejected {
+                code: "already_redeemed".into(),
+                message: "this confirmation was already handled".into(),
+            },
+            Err(ConfirmationError::Expired) => RpcControlResponse::Rejected {
+                code: "confirmation_expired".into(),
+                message: "confirmation token has expired".into(),
+            },
+            Err(_) => RpcControlResponse::Rejected {
+                code: "unauthorized".into(),
+                message: "confirmation token does not match this actor/channel".into(),
+            },
+        }
     }
 
     /// Reserve an operation slot, converting a rejection into an error.
@@ -353,6 +545,63 @@ impl ControlExecutor {
             },
             other => other,
         }
+    }
+}
+
+/// Human-readable action id + canonical normalized params for a dangerous
+/// control request (spec §7 dangerous ops list). The same context is used at
+/// grant creation and at redemption, so the wire only ever carries the opaque
+/// token — there is nothing for a client to tamper with.
+fn confirmation_context(request: &ControlRequest) -> (String, HashMap<String, String>) {
+    let mut params = HashMap::new();
+    let action = match request {
+        ControlRequest::Update {
+            kind,
+            dry_run,
+            target,
+        } => {
+            params.insert("dry_run".to_string(), dry_run.to_string());
+            if let Some(UpdateTarget::ProjectDir(dir)) = target {
+                params.insert("target".to_string(), dir.display().to_string());
+            }
+            match kind {
+                UpdateKind::Release => "update_release",
+                UpdateKind::Dev => "update_dev",
+            }
+            .to_string()
+        }
+        ControlRequest::Rollback { dry_run } => {
+            params.insert("dry_run".to_string(), dry_run.to_string());
+            "rollback".to_string()
+        }
+        ControlRequest::RestartCore => "restart_core".to_string(),
+        other => format!("{other:?}").to_lowercase(),
+    };
+    (action, params)
+}
+
+/// Canonical params for a request — used both at grant creation and at
+/// redemption. Since confirm/cancel only receive the opaque token, params are
+/// always the stored (canonical) ones.
+fn confirmation_params(request: &ControlRequest) -> HashMap<String, String> {
+    let (_, params) = confirmation_context(request);
+    params
+}
+
+/// User-facing message shown on the confirmation card.
+fn confirmation_message(request: &ControlRequest) -> String {
+    match request {
+        ControlRequest::Update {
+            kind: UpdateKind::Release,
+            ..
+        } => "将更新到最新发布版本（release）。".to_string(),
+        ControlRequest::Update {
+            kind: UpdateKind::Dev,
+            ..
+        } => "将更新到开发版本（dev）。".to_string(),
+        ControlRequest::Rollback { .. } => "将回滚到上一个可用版本。".to_string(),
+        ControlRequest::RestartCore => "将重启 core 进程（短暂中断）。".to_string(),
+        other => format!("将执行 {other:?}。"),
     }
 }
 

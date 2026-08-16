@@ -611,6 +611,14 @@ async fn submit_watchdog_control(
                 lines.join("\n")
             }
         }
+        Ok(crate::watchdog::control_rpc::RpcControlResponse::PendingConfirmation {
+            action,
+            message,
+            expires_in,
+            ..
+        }) => format!(
+            "{label}请求需要确认: {message} (action={action}, {expires_in}s 内有效)"
+        ),
         Err(e) => format!("{label}请求失败: {e}"),
     }
 }

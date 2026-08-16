@@ -207,6 +207,14 @@ impl ControlService {
             .push(operation_id, ControlEventKind::TimedOut, message);
     }
 
+    /// Record a Canceled event for an operation that never reached `Accepted`
+    /// (e.g. a pending confirmation canceled by the user, Phase 3 Task 3.2).
+    /// Pushes to the timeline only — there is no operation record to update.
+    pub fn record_canceled(&mut self, operation_id: &str, message: impl Into<String>) {
+        self.timeline
+            .push(operation_id, ControlEventKind::Canceled, message);
+    }
+
     pub fn events_since(&self, seq: u64) -> Vec<ControlEvent> {
         self.timeline.since(seq)
     }

@@ -1,6 +1,7 @@
 use crate::error::{Result, SebasError};
+use crate::watchdog::auth::{actor_to_principal, AssertionPrincipal};
 use crate::watchdog::control::{
-    ControlEvent, ControlResponse, ControlRequest, ControlService, UpdateKind,
+    Actor, ControlEvent, ControlResponse, ControlRequest, ControlService, UpdateKind,
 };
 use crate::watchdog::executor::ControlExecutor;
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,13 @@ pub enum RpcControlRequest {
     /// `/gateway restart`: restart a managed service. Same Phase 4
     /// limitation as `ServiceSet`.
     ServiceRestart { service: String },
+    /// Confirm a pending dangerous action via its opaque confirmation token
+    /// (Phase 3 Task 3.2, spec §7). The client sends only the token; the
+    /// canonical action/params live in the watchdog's pending registry.
+    Confirm { token: String },
+    /// Cancel a pending dangerous action via its opaque confirmation token.
+    /// Redeems (consumes) the grant and records a Canceled event.
+    Cancel { token: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +87,17 @@ pub enum RpcControlResponse {
     },
     Services {
         services: Vec<RpcServiceStatus>,
+    },
+    /// A dangerous action needs confirmation before it can run (spec §7).
+    /// `token` is opaque, single-use and short-lived; the client renders a
+    /// confirmation card carrying only this token — never the action truth,
+    /// which stays in the watchdog's pending registry. `action`/`message`/
+    /// `expires_in` are display-only.
+    PendingConfirmation {
+        token: String,
+        action: String,
+        message: String,
+        expires_in: u64,
     },
 }
 
@@ -235,15 +254,37 @@ async fn handle_envelope(
                 dry_run,
                 target: None,
             };
-            executor.submit_detached(actor, request).await.into()
+            executor.submit_or_confirm(actor, request).await
         }
         RpcControlRequest::Rollback { dry_run } => {
             let actor = crate::watchdog::control::Actor::from(envelope.actor);
-            executor.submit_detached(actor, ControlRequest::Rollback { dry_run }).await.into()
+            executor
+                .submit_or_confirm(actor, ControlRequest::Rollback { dry_run })
+                .await
         }
         RpcControlRequest::RestartCore => {
             let actor = crate::watchdog::control::Actor::from(envelope.actor);
-            executor.submit_detached(actor, ControlRequest::RestartCore).await.into()
+            executor
+                .submit_or_confirm(actor, ControlRequest::RestartCore)
+                .await
+        }
+        RpcControlRequest::Confirm { token } => {
+            match feishu_principal_channel(envelope.actor) {
+                Some((principal, channel)) => executor.confirm(&token, &principal, &channel).await,
+                None => RpcControlResponse::Rejected {
+                    code: "unauthorized".into(),
+                    message: "only Feishu actors may confirm a confirmation".into(),
+                },
+            }
+        }
+        RpcControlRequest::Cancel { token } => {
+            match feishu_principal_channel(envelope.actor) {
+                Some((principal, channel)) => executor.cancel(&token, &principal, &channel).await,
+                None => RpcControlResponse::Rejected {
+                    code: "unauthorized".into(),
+                    message: "only Feishu actors may cancel a confirmation".into(),
+                },
+            }
         }
         RpcControlRequest::ServiceStatus => {
             executor.service_status().await
@@ -270,6 +311,21 @@ async fn handle_envelope(
                 "service management not yet wired (Phase 4); received restart {service}"
             ),
         },
+    }
+}
+
+/// Derive the Feishu principal + channel for confirm/cancel (spec §6.2/§6.3).
+/// Only Feishu actors carry an assertion-based principal, and the watchdog —
+/// not the core — derives the identity from the actor, so a forged open_id in
+/// the envelope cannot impersonate an owner. Cli/System actors have no
+/// principal and cannot confirm/cancel.
+fn feishu_principal_channel(actor: RpcActor) -> Option<(AssertionPrincipal, String)> {
+    let actor = Actor::from(actor);
+    match &actor {
+        Actor::Feishu { chat_id: Some(chat), .. } => {
+            actor_to_principal(&actor).map(|p| (p, chat.clone()))
+        }
+        _ => None,
     }
 }
 
