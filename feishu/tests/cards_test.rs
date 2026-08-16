@@ -1,22 +1,21 @@
-use feishu::cards::{derive_topic, render_permission_card, render_root_card};
+use feishu::cards::{derive_session_title, render_permission_card, render_root_card};
 
 #[test]
-fn derive_topic_extracts_first_line_and_truncates() {
-    // 首行做主题，去前后空白
-    assert_eq!(derive_topic("  重构 src/foo.rs  \n加个缓存"), "重构 src/foo.rs");
-    // 行首引用符 / 代码围栏剥离
-    assert_eq!(derive_topic("> 帮我看看：\n这段代码"), "帮我看看：");
-    assert_eq!(derive_topic("```\nselect * from t\n```\n然后呢"), "select * from t");
-    // 超长截断加省略号，UTF-8 安全（按字符而非字节）
-    let long = "解决国际象棋残局中非常复杂的递归搜索性能问题的优化思路并给出一个完整可行的实施方案";
-    let t = derive_topic(long);
-    let prefix: String = long.chars().take(40).collect();
-    assert_eq!(t, format!("{prefix}…"));
-    assert!(t.ends_with('…'));
+fn derive_session_title_takes_short_id_and_truncates() {
+    // UUID 短形式（取前 8 字符）作标题。
+    let short = "c9f2e1a3-4b5d-4e7f-9a8b-1c2d3e4f5a6b";
+    let mut chars = short.chars();
+    let prefix: String = chars.by_ref().take(40).collect();
+    let rest: String = chars.collect();
+    assert_eq!(derive_session_title(short), format!("{prefix}{rest}"));
+    // 超长截断加省略号，UTF-8 安全（按字符而非字节）。
+    let long = "a".repeat(60);
+    let t = derive_session_title(&long);
     assert_eq!(t.chars().count(), 41, "40 chars + ellipsis");
-    // 空 / 纯空白回退占位
-    assert_eq!(derive_topic(""), "Claude Code");
-    assert_eq!(derive_topic("  \n  "), "Claude Code");
+    assert!(t.ends_with('…'));
+    // 空 / 纯空白回退占位。
+    assert_eq!(derive_session_title(""), "Claude Code");
+    assert_eq!(derive_session_title("   "), "Claude Code");
 }
 
 #[test]
@@ -146,9 +145,9 @@ fn render_accumulated_card_structure() {
     ];
     let card = render_accumulated_card("重构 foo", "msg_9", &body, "orange", None);
     let s = serde_json::to_string(&card).unwrap();
-    // header title 是 prompt 派生的主题（不再带状态 emoji），template=orange
+    // header title 改为 session_id（不再是 prompt 主题），template=orange
     let v: serde_json::Value = serde_json::to_value(&card).unwrap();
-    assert_eq!(v["header"]["title"]["content"], "重构 foo");
+    assert_eq!(v["header"]["title"]["content"], "msg_9");
     assert!(s.contains("\"template\":\"orange\""));
     // 引用块
     assert!(s.contains("> 重构 foo"));
@@ -165,7 +164,8 @@ fn render_accumulated_card_empty_body_matches_seed() {
     let card = render_accumulated_card("hi", "msg_1", &[], "blue", None);
     let s = serde_json::to_string(&card).unwrap();
     let v: serde_json::Value = serde_json::to_value(&card).unwrap();
-    assert_eq!(v["header"]["title"]["content"], "hi");
+    // 标题现在是 session_id（不再是 prompt 主题）。
+    assert_eq!(v["header"]["title"]["content"], "msg_1");
     assert!(s.contains("> hi"));
     assert!(s.contains("msg_id: msg_1"));
 }

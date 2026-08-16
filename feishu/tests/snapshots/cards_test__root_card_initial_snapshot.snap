@@ -5,7 +5,7 @@ expression: card
 schema: "2.0"
 header:
   title:
-    content: 重构 src/foo.rs
+    content: msg_1
     tag: plain_text
   template: blue
 body:

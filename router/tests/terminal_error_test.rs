@@ -162,12 +162,13 @@ async fn terminal_error_preserves_pre_death_transcript() {
     assert!(s.contains("step1"), "死前 TextDelta 保留: {s}");
     assert!(s.contains("step2"), "死前 ToolEnd 保留: {s}");
     assert!(s.contains("agent crashed"), "错误正文: {s}");
-    // p3g：terminal 还应把 root 卡 reaction 换成 CrossMark (❌)
+    // 终态视觉由 card body 表达（❌ 行已 push），不再 Out::React 换 FAILED。
     assert!(
-        outs.iter().any(
-            |o| matches!(o, Out::React { emoji, .. } if emoji == router::card_state::phase::FAILED)
-        ),
-        "terminal 换 FAILED reaction: {outs:?}"
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::React { emoji, .. } if emoji
+                == router::card_state::phase::FAILED)),
+        "terminal 不应发 Out::React FAILED: {outs:?}"
     );
     assert!(map.get(&key).await.is_none(), "terminal 必清 mapping");
 }

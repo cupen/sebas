@@ -367,12 +367,8 @@ async fn terminal_error_removes_mapping_and_drops_card() {
         .await;
     let out = next_out(&mut out_rx).await;
     assert!(matches!(out, Out::UpdateCard { .. }));
-    // p3g：terminal 连带 CrossMark reaction（先卡后 reaction）。
-    let react = next_out(&mut out_rx).await;
-    assert!(
-        matches!(react, Out::React { ref emoji, .. } if emoji == router::card_state::phase::FAILED),
-        "terminal 换 FAILED reaction: {react:?}"
-    );
+    // terminal Error 不再发 Out::React 换 FAILED（❌ 行已 push 到 body）；
+    // queue timeout 之后应无更多 Out。
     assert!(map.get(&key()).await.is_none(), "mapping removed");
     // CardState 已清：后续 flush 是 no-op。
     router.flush_card("s1").await;

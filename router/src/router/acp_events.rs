@@ -78,14 +78,13 @@ impl RouterHandle {
             }
             AcpEvent::Error { terminal: true, .. } => {
                 // terminal Error 并入累积模型（spec §8）：apply_event（置 ❌ + append
-                // 错误正文，保留死前 transcript）→ flush_card → 换 reaction →
-                // remove_by_session → drop_card。drop_card 无条件执行（无论
+                // 错误正文，保留死前 transcript）→ flush_card → remove_by_session
+                // → drop_card。**不** emit_reaction —— 终态视觉由 card body 表达
+                // （card_events::apply_event_to_card 把 ❌ 错误行 push 到 body），
+                // reaction 维持"已收到 / 折腾中"语义。drop_card 无条件执行（无论
                 // SessionKey 是否还在都该清 CardState 防无界增长）。
-                let react = self.apply_event(session_id.as_str(), event).await;
+                self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
-                if let Some(emoji) = react {
-                    self.emit_reaction(session_id.as_str(), emoji).await;
-                }
                 let sid = session_id.as_str();
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.allowlist.clear(&key).await;
@@ -96,15 +95,17 @@ impl RouterHandle {
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
-                // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）。
+                // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）—— 但
+                // 终态转移（DONE）不触发 emit_reaction（同上分支原因）。
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
-                // Emit the terminal reaction BEFORE draining: once the drained
-                // turn's SendCard is dispatched, MsgIdMap points at the NEW
-                // card, so a later React would land the DONE/FAILED emoji on
-                // the wrong card.
+                // SEED→WORKING 仍发 reaction（🚧 表示进行中）；WORKING→DONE
+                // 不发。Emit before draining: 排队下轮的 SendCard 会把 MsgIdMap
+                // 指向 NEW card，迟发的 React 会把 DONE/FAILED 落到错卡上。
                 if let Some(emoji) = react {
-                    self.emit_reaction(session_id.as_str(), emoji).await;
+                    if !is_terminal_reaction(emoji) {
+                        self.emit_reaction(session_id.as_str(), emoji).await;
+                    }
                 }
                 if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
                     self.drain_queue_if_terminal(&key, session_id.as_str())
@@ -113,4 +114,15 @@ impl RouterHandle {
             }
         }
     }
+}
+
+/// 终态 reaction 不触发 Out::React —— 终态视觉由 card body 表达（Finished
+/// 把父面板标题 🤔 折腾中 → ✅ 已完成；terminal Error 在 body 推 ❌ 行）。
+/// reaction 维持在"已收到 / 折腾中"语义，由 SEED→WORKING 这条唯一 reaction
+/// 转移覆盖用户感知。
+fn is_terminal_reaction(emoji: &str) -> bool {
+    matches!(
+        emoji,
+        crate::card_state::phase::DONE | crate::card_state::phase::FAILED
+    )
 }

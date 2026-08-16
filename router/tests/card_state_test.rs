@@ -128,7 +128,8 @@ async fn apply_event_accumulates_without_emitting_out() {
             assert!(s.contains("a"), "含 TextDelta: {s}");
             assert!(s.contains("think"), "含 ThinkingDelta: {s}");
             assert!(s.contains("Bash"), "含 ToolEnd: {s}");
-            assert!(s.contains("\"content\":\"hi\""), "标题为主题 hi（不再带状态 emoji）: {s}");
+            // 标题现在是 session_id 短形式（不再是 prompt 主题）。
+            assert!(s.contains("\"content\":\"s1\""), "标题为 session_id s1: {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -172,13 +173,14 @@ async fn fsm_eyes_to_construction_to_done() {
         .unwrap();
     match o {
         Out::UpdateCard { card, .. } => {
-            // 状态 emoji 不再进卡：标题是 prompt 派生的主题 "p"。
+            // 状态 emoji 不再进卡：标题是 session_id 短形式（不再是 prompt 主题）。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("\"content\":\"p\""), "标题为主题 p: {s}");
+            assert!(s.contains("\"content\":\"s2\""), "标题为 session_id s2: {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
-    // Finished -> ✅（apply_event_to_out 先出 UpdateCard，再出 React DONE）
+    // Finished -> 终态：apply_event_to_out 只出 UpdateCard（card body 推 ✅
+    // 已完成父面板），不再 Out::React 换 DONE。
     let (router3, mut out3) = RouterHandle::new(SessionMap::new());
     router3.seed_card("s3".into(), "p".into()).await;
     router3
@@ -194,21 +196,38 @@ async fn fsm_eyes_to_construction_to_done() {
         .unwrap()
         .unwrap();
     assert!(matches!(o3, Out::UpdateCard { .. }), "先出卡: {o3:?}");
-    let o4 = tokio::time::timeout(Duration::from_millis(200), out3.recv())
-        .await
-        .unwrap()
-        .unwrap();
     assert!(
-        matches!(o4, Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE),
-        "Finished 应换 DONE reaction: {o4:?}"
+        tokio::time::timeout(Duration::from_millis(150), out3.recv())
+            .await
+            .is_err(),
+        "Finished 不应再出 React DONE: 已由 card body 表达"
     );
 }
 
 #[tokio::test]
 async fn fsm_terminal_error_marks_red() {
+    // 终态视觉由 card body 表达（❌ 错误行 push 到 body），reaction 不再换
+    // FAILED：FSM 仍转 FAILED（apply_event 报告），但 Out::React 不出。
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router.seed_card("s4".into(), "p".into()).await;
+    // 直接验证 apply_event 报告 FAILED 转移。
+    let new_emoji = router
+        .apply_event(
+            "s4",
+            &AcpEvent::Error {
+                session_id: "s4".into(),
+                message: "dead".into(),
+                terminal: true,
+            },
+        )
+        .await;
+    assert_eq!(
+        new_emoji,
+        Some(router::card_state::phase::FAILED),
+        "apply_event 报告 terminal Error -> FAILED"
+    );
+    // Out 流水线不发射 FAILED reaction（reaction 维持"已收到"）。
     router
         .apply_event_to_out(
             "s4".into(),
@@ -224,13 +243,12 @@ async fn fsm_terminal_error_marks_red() {
         .unwrap()
         .unwrap();
     assert!(matches!(o, Out::UpdateCard { .. }), "先出卡: {o:?}");
-    let o = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    // 不应再有 FAILED reaction。
     assert!(
-        matches!(o, Out::React { ref emoji, .. } if emoji == router::card_state::phase::FAILED),
-        "terminal Error 应换 FAILED reaction: {o:?}"
+        tokio::time::timeout(Duration::from_millis(120), out_rx.recv())
+            .await
+            .is_err(),
+        "terminal 不再发 Out::React FAILED"
     );
 }
 
@@ -323,7 +341,8 @@ async fn phase_transitions_emit_reactions_card_first() {
     assert!(matches!(o3, Out::UpdateCard { .. }), "出卡: {o3:?}");
     assert_no_more(&mut out_rx).await;
 
-    // Finished → ✅
+    // Finished → 终态：内部 FSM 转 DONE，body 推"✅ 已完成"父面板；reaction
+    // 维持"已收到 / 折腾中"，不再 Out::React 换 DONE。
     router
         .apply_event_to_out(
             "r1".into(),
@@ -334,16 +353,12 @@ async fn phase_transitions_emit_reactions_card_first() {
         .await;
     let o4 = recv(&mut out_rx).await;
     assert!(matches!(o4, Out::UpdateCard { .. }), "先出卡: {o4:?}");
-    let o5 = recv(&mut out_rx).await;
-    assert!(
-        matches!(o5, Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE),
-        "Finished 换 DONE: {o5:?}"
-    );
     assert_no_more(&mut out_rx).await;
 }
 
 #[tokio::test]
-async fn terminal_error_emits_cross_reaction() {
+async fn terminal_error_does_not_emit_reaction() {
+    // 终态视觉由 card body 表达（❌ 错误行），reaction 维持"已收到"。
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
     router.seed_card("r2".into(), "p".into()).await;
     router
@@ -358,11 +373,6 @@ async fn terminal_error_emits_cross_reaction() {
         .await;
     let o1 = recv(&mut out_rx).await;
     assert!(matches!(o1, Out::UpdateCard { .. }), "先出卡: {o1:?}");
-    let o2 = recv(&mut out_rx).await;
-    assert!(
-        matches!(o2, Out::React { ref emoji, .. } if emoji == router::card_state::phase::FAILED),
-        "terminal Error 换 FAILED: {o2:?}"
-    );
     assert_no_more(&mut out_rx).await;
 }
 
@@ -408,9 +418,9 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     let o1 = recv(&mut out_rx).await;
     match o1 {
         Out::UpdateCard { card, .. } => {
-            // 状态 emoji 不再进卡：标题是 prompt 派生的主题 "第一题"。
+            // 状态 emoji 不再进卡：标题是 session_id 短形式（不再是 prompt 主题）。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("\"content\":\"第一题\""), "标题为主题, 而非状态 emoji: {s}");
+            assert!(s.contains("\"content\":\"r3\""), "标题为 session_id r3: {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
