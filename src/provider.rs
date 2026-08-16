@@ -162,6 +162,13 @@ pub fn item_from_provider(name: &str, p: &gateway::config::ProviderConfig) -> It
     if let Some(env) = &p.api_key_env {
         m.insert("api_key_env".into(), Value::String(env.clone()));
     }
+    // 回写 models（从强到弱），保证 /provider 保存时不被 overlay 抹掉。
+    if !p.models.is_empty() {
+        m.insert(
+            "models".into(),
+            Value::Array(p.models.iter().map(|s| Value::String(s.clone())).collect()),
+        );
+    }
     m
 }
 

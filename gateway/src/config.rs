@@ -120,6 +120,22 @@ impl ProviderConfig {
             Protocol::OpenAi => self.base_url_openai.as_deref(),
         }
     }
+
+    /// 把本 provider 手写的 `models`（从强到弱）映射成 Claude Code 的 4 个
+    /// MODEL 环境变量。`models` 为空 → 全 `None`（调用方跳过注入，用系统默认）。
+    pub fn model_env(&self) -> crate::models::ClaudeModelEnv {
+        crate::models::map_to_env(&self.models)
+    }
+
+    /// 解析某个模型的静态能力（上下文 / 输出上限）。`[n]` 后缀自动覆盖上下文。
+    pub fn model_caps(&self, model: &str) -> crate::models::ModelCaps {
+        crate::models::resolve_caps(model)
+    }
+
+    /// 最强模型（列表头）＝ provider 的默认模型。空列表 → `None`。
+    pub fn default_model(&self) -> Option<&str> {
+        self.models.first().map(String::as_str)
+    }
 }
 
 /// 路由：model（可含 glob）→ 有序 provider 列表。数组顺序即优先级，
@@ -1030,6 +1046,38 @@ auth_token = "sk-test"
             Some("https://api.deepseek.com")
         );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn provider_models_map_to_env_and_caps() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+default_provider = "deepseek"
+
+[provider.deepseek]
+models = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]
+"#;
+        let cfg = parse_isolated(raw).expect("provider with models should parse");
+        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        // models 手写列表按从强到弱保留
+        assert_eq!(ds.models, vec!["deepseek-v4-pro[1m]", "deepseek-v4-flash"]);
+        // 最强 = 默认
+        assert_eq!(ds.default_model(), Some("deepseek-v4-pro[1m]"));
+        // env 映射：MODEL=OPUS=最强、SONNET=次强、HAIKU=最弱
+        let env = ds.model_env();
+        assert_eq!(env.model.as_deref(), Some("deepseek-v4-pro[1m]"));
+        assert_eq!(env.opus.as_deref(), Some("deepseek-v4-pro[1m]"));
+        assert_eq!(env.sonnet.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(env.haiku.as_deref(), Some("deepseek-v4-flash"));
+        // 能力：无名 model 的 [1m] 后缀推导上下文，flash 查静态注册表
+        let pro = ds.model_caps("deepseek-v4-pro[1m]");
+        assert_eq!(pro.context_window, Some(1_000_000));
+        let flash = ds.model_caps("deepseek-v4-flash");
+        assert_eq!(flash.context_window, Some(128_000));
     }
 
     #[test]
