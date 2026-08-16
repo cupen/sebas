@@ -86,6 +86,14 @@ pub fn spec_preset() -> FormSpec {
                 secret: true,
                 disabled: false,
             },
+            FormField::Text {
+                name: "models".into(),
+                label: "模型列表".into(),
+                required: false,
+                placeholder: "用逗号分隔，从强到弱：如 deepseek-v4-pro[1m], deepseek-v4-flash".into(),
+                secret: false,
+                disabled: false,
+            },
         ],
     )
 }
@@ -137,6 +145,14 @@ pub fn spec_custom() -> FormSpec {
                 secret: false,
                 disabled: false,
             },
+            FormField::Text {
+                name: "models".into(),
+                label: "模型列表".into(),
+                required: false,
+                placeholder: "用逗号分隔，从强到弱：如 deepseek-v4-pro[1m], deepseek-v4-flash".into(),
+                secret: false,
+                disabled: false,
+            },
         ],
     )
 }
@@ -162,12 +178,10 @@ pub fn item_from_provider(name: &str, p: &gateway::config::ProviderConfig) -> It
     if let Some(env) = &p.api_key_env {
         m.insert("api_key_env".into(), Value::String(env.clone()));
     }
-    // 回写 models（从强到弱），保证 /provider 保存时不被 overlay 抹掉。
+    // 回写 models（从强到弱），表单用逗号分隔字符串，保证 /provider 保存时
+    // 不被 overlay 抹掉，且表单 Text 字段能展示。
     if !p.models.is_empty() {
-        m.insert(
-            "models".into(),
-            Value::Array(p.models.iter().map(|s| Value::String(s.clone())).collect()),
-        );
+        m.insert("models".into(), Value::String(p.models.join(",")));
     }
     m
 }

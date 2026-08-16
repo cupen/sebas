@@ -355,18 +355,24 @@ fn option_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// 从 provider overlay JSON 条目里读 `models` 数组（保持书写顺序 = 强→弱）。
-/// 非数组 / 缺省 → 空列表。
+/// 从 provider overlay JSON 条目里读 `models`。支持两种格式：
+/// - 数组（gateway 直接读）：`["a", "b"]`
+/// - 逗号分隔字符串（来自 `/provider` 表单提交）：`"a,b"`
+/// 保持书写顺序 = 强→弱。缺省 → 空列表。
 fn parse_models_list(item: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
-    item.get("models")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    match item.get("models") {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::String(s)) => s
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// 按 preset 解析 `base_url_anthropic` / `base_url_openai`：preset 默认 +

@@ -37,7 +37,8 @@ pub struct ModelDef {
     pub max_output_tokens: u64,
 }
 
-/// 静态模型注册表。参数来自公开规格 / models.dev，**待网页核对后补全校正**。
+/// 静态模型注册表。参数来自公开规格（数据来源：models.dev / 各 provider 文档）。
+/// 同名模型跨 provider 共享同一参数定义。
 #[rustfmt::skip]
 const MODELS: &[ModelDef] = &[
     // ---- DeepSeek V4 家族 ----
@@ -47,6 +48,41 @@ const MODELS: &[ModelDef] = &[
     ModelDef { name: "claude-opus",    context_window: 200_000, max_output_tokens: 32_768 },
     ModelDef { name: "claude-sonnet",  context_window: 200_000, max_output_tokens: 32_768 },
     ModelDef { name: "claude-haiku",   context_window: 200_000, max_output_tokens: 32_768 },
+    // ---- OpenAI ----
+    ModelDef { name: "gpt-4o",        context_window: 128_000, max_output_tokens: 16_384 },
+    ModelDef { name: "gpt-4o-mini",   context_window: 128_000, max_output_tokens: 16_384 },
+    ModelDef { name: "o1",            context_window: 128_000, max_output_tokens: 32_768 },
+    ModelDef { name: "o1-pro",        context_window: 128_000, max_output_tokens: 100_000 },
+    ModelDef { name: "o3",            context_window: 200_000, max_output_tokens: 100_000 },
+    // ---- Kimi / Moonshot ----
+    ModelDef { name: "moonshot-v1-8k",   context_window: 8_192,     max_output_tokens: 4096 },
+    ModelDef { name: "moonshot-v1-32k",  context_window: 32_768,    max_output_tokens: 4096 },
+    ModelDef { name: "moonshot-v1-128k", context_window: 128_000,   max_output_tokens: 4096 },
+    ModelDef { name: "moonshot-v1-2m",   context_window: 2_000_000, max_output_tokens: 4096 },
+    ModelDef { name: "kimi-k1.5",        context_window: 128_000,   max_output_tokens: 4096 },
+    // ---- GLM (Zhipu) ----
+    ModelDef { name: "glm-4",       context_window: 128_000, max_output_tokens: 4096 },
+    ModelDef { name: "glm-4-plus",  context_window: 128_000, max_output_tokens: 8192 },
+    ModelDef { name: "glm-4-air",   context_window: 128_000, max_output_tokens: 8192 },
+    ModelDef { name: "glm-4-long",  context_window: 1_000_000, max_output_tokens: 1_000_000 },
+    // ---- MiniMax ----
+    ModelDef { name: "minmax-01",   context_window: 4_000_000, max_output_tokens: 4096 },
+    // ---- Ark (ByteDance / Doubao) ----
+    ModelDef { name: "doubao-1-5-pro-256k", context_window: 256_000, max_output_tokens: 4096 },
+    ModelDef { name: "doubao-1-5-pro-128k", context_window: 128_000, max_output_tokens: 4096 },
+    ModelDef { name: "doubao-1-5-pro-32k",  context_window: 32_768,  max_output_tokens: 8192 },
+    ModelDef { name: "doubao-1-5-lite-32k", context_window: 32_768,  max_output_tokens: 4096 },
+    ModelDef { name: "doubao-pro-256k",     context_window: 256_000, max_output_tokens: 4096 },
+    ModelDef { name: "doubao-pro-128k",     context_window: 128_000, max_output_tokens: 4096 },
+    ModelDef { name: "doubao-pro-32k",      context_window: 32_768,  max_output_tokens: 8192 },
+    // ---- Dashscope (Qwen / Alibaba) ----
+    ModelDef { name: "qwen-max",        context_window: 128_000, max_output_tokens: 8192 },
+    ModelDef { name: "qwen2.5-72b",     context_window: 131_072, max_output_tokens: 8192 },
+    ModelDef { name: "qwen2.5-turbo",   context_window: 1_000_000, max_output_tokens: 8192 },
+    ModelDef { name: "qwen-max-long",   context_window: 2_000_000, max_output_tokens: 8192 },
+    // ---- Gemini (Google) ----
+    ModelDef { name: "gemini-2.0-flash", context_window: 1_048_576, max_output_tokens: 8192 },
+    ModelDef { name: "gemini-2.0-pro",   context_window: 2_097_152, max_output_tokens: 8192 },
 ];
 
 /// 注册表按规范名精确查找。
