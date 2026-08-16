@@ -417,20 +417,21 @@ pub(crate) async fn dispatch_out(
         }
         Out::WatchdogUpgrade { key, dev, dry_run } => {
             let request = crate::watchdog::control_rpc::RpcControlRequest::Update { dev, dry_run };
-            let content = submit_watchdog_control(request, "升级").await;
+            let content = submit_watchdog_control(&key, request, "升级").await;
             if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
                 warn!(?e, "send_text failed");
             }
         }
         Out::WatchdogRollback { key } => {
             let request = crate::watchdog::control_rpc::RpcControlRequest::Rollback { dry_run: false };
-            let content = submit_watchdog_control(request, "回滚").await;
+            let content = submit_watchdog_control(&key, request, "回滚").await;
             if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
                 warn!(?e, "send_text failed");
             }
         }
         Out::WatchdogRestart { key } => {
             let content = submit_watchdog_control(
+                &key,
                 crate::watchdog::control_rpc::RpcControlRequest::RestartCore,
                 "重启 core",
             )
@@ -441,8 +442,40 @@ pub(crate) async fn dispatch_out(
         }
         Out::WatchdogServices { key } => {
             let content = submit_watchdog_control(
+                &key,
                 crate::watchdog::control_rpc::RpcControlRequest::ServiceStatus,
                 "服务状态查询",
+            )
+            .await;
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogSystem { key } => {
+            let content = submit_watchdog_control(
+                &key,
+                crate::watchdog::control_rpc::RpcControlRequest::Status,
+                "系统状态查询",
+            )
+            .await;
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogGateway { key, action } => {
+            // Phase 3: route the command; ServiceManager (Phase 4) does the
+            // actual work. on/off/status → ServiceSet; restart → ServiceRestart.
+            let request = gateway_control_request(&action);
+            let content = submit_watchdog_control(&key, request, "gateway 服务").await;
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
+        Out::WatchdogWebui { key } => {
+            let content = submit_watchdog_control(
+                &key,
+                crate::watchdog::control_rpc::RpcControlRequest::ServiceStatus,
+                "webui 服务状态",
             )
             .await;
             if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
@@ -453,7 +486,53 @@ pub(crate) async fn dispatch_out(
     Ok(())
 }
 
+/// Build the Feishu proxy control envelope (spec §6.2 Phase 3). The core
+/// proxies on behalf of the Feishu chat, authenticated by the startup secret
+/// (the MAC basis). Pre-Phase-5 there is no per-inbound sender open_id on
+/// every message, so `chat_id` is authoritative and `open_id` is left empty.
+/// Pure and synchronous so adapter-contract tests can assert the normalized
+/// request without a live control socket.
+fn feishu_control_envelope(
+    key: &SessionKey,
+    label: &str,
+    secret: String,
+    request: crate::watchdog::control_rpc::RpcControlRequest,
+) -> crate::watchdog::control_rpc::ControlEnvelope {
+    crate::watchdog::control_rpc::ControlEnvelope {
+        version: 1,
+        request_id: format!("feishu_{label}"),
+        secret,
+        actor: crate::watchdog::control_rpc::RpcActor::Feishu {
+            open_id: String::new(),
+            chat_id: Some(key.chat_id.clone()),
+        },
+        request,
+    }
+}
+
+/// Normalize a `/gateway <action>` action into the watchdog control request
+/// (spec §12 control commands, plan Task 3.1). `restart` maps to
+/// `ServiceRestart`; every other allowed action (`on`/`off`/`status`) maps to
+/// `ServiceSet` with `persist=false` (persistence requires the Phase 4 atomic
+/// config write, per spec §15). Pure so adapter-contract tests can assert the
+/// normalized request without a live control socket.
+fn gateway_control_request(
+    action: &str,
+) -> crate::watchdog::control_rpc::RpcControlRequest {
+    match action {
+        "restart" => crate::watchdog::control_rpc::RpcControlRequest::ServiceRestart {
+            service: "gateway".into(),
+        },
+        desired => crate::watchdog::control_rpc::RpcControlRequest::ServiceSet {
+            service: "gateway".into(),
+            desired: desired.into(),
+            persist: false,
+        },
+    }
+}
+
 async fn submit_watchdog_control(
+    key: &SessionKey,
     request: crate::watchdog::control_rpc::RpcControlRequest,
     label: &str,
 ) -> String {
@@ -462,13 +541,7 @@ async fn submit_watchdog_control(
         _ => return format!("{label}请求失败: 当前进程未获得 watchdog control secret"),
     };
 
-    let envelope = crate::watchdog::control_rpc::ControlEnvelope {
-        version: 1,
-        request_id: format!("feishu_{label}"),
-        secret,
-        actor: crate::watchdog::control_rpc::RpcActor::Cli { uid: current_uid() },
-        request,
-    };
+    let envelope = feishu_control_envelope(key, label, secret, request);
 
     match crate::watchdog::control_rpc::request(
         &crate::watchdog::control_rpc::default_socket_path(),
@@ -513,16 +586,6 @@ async fn submit_watchdog_control(
         }
         Err(e) => format!("{label}请求失败: {e}"),
     }
-}
-
-#[cfg(unix)]
-fn current_uid() -> u32 {
-    unsafe { libc::geteuid() }
-}
-
-#[cfg(not(unix))]
-fn current_uid() -> u32 {
-    0
 }
 
 #[cfg(test)]
@@ -604,5 +667,77 @@ mod tests {
         assert_eq!(mk(99999), None, "无关错误码不熔断");
         let net_err: anyhow::Error = anyhow::anyhow!("network down");
         assert_eq!(classify_topic_invalid(&net_err), None, "非 Feishu 错误不熔断");
+    }
+
+    // ---------- Phase 3 Task 3.1: Feishu control adapter contract ----------
+
+    /// 核心代理必须以 Feishu 角色携带 chat_id 提交 control RPC（open_id 在
+    /// Phase 5 前为空），并保留归一化后的请求与 label 派生的 request_id。
+    #[test]
+    fn feishu_control_envelope_carries_chat_actor() {
+        let key = SessionKey {
+            chat_id: "oc_proxy".into(),
+            thread_id: Some("omt_t".into()),
+        };
+        let envelope = feishu_control_envelope(
+            &key,
+            "系统状态查询",
+            "secret-1".into(),
+            crate::watchdog::control_rpc::RpcControlRequest::Status,
+        );
+
+        assert_eq!(envelope.version, 1);
+        assert_eq!(envelope.secret, "secret-1");
+        assert_eq!(envelope.request_id, "feishu_系统状态查询");
+        match &envelope.actor {
+            crate::watchdog::control_rpc::RpcActor::Feishu { open_id, chat_id } => {
+                assert!(open_id.is_empty(), "Phase 5 前 open_id 应为空");
+                assert_eq!(chat_id.as_deref(), Some("oc_proxy"));
+            }
+            other => panic!("expected Feishu actor, got {other:?}"),
+        }
+        assert!(matches!(
+            envelope.request,
+            crate::watchdog::control_rpc::RpcControlRequest::Status
+        ));
+    }
+
+    /// `/gateway on|off|status` 归一化为 ServiceSet(gateway, persist=false)；
+    /// `/gateway restart` 归一化为 ServiceRestart(gateway)。这是 WebUI/Feishu
+    /// 共享的归一化契约（spec §12 / plan cross-phase adapter parity）。
+    #[test]
+    fn gateway_actions_normalize_to_control_requests() {
+        use crate::watchdog::control_rpc::RpcControlRequest;
+
+        assert_eq!(
+            gateway_control_request("on"),
+            RpcControlRequest::ServiceSet {
+                service: "gateway".into(),
+                desired: "on".into(),
+                persist: false,
+            }
+        );
+        assert_eq!(
+            gateway_control_request("off"),
+            RpcControlRequest::ServiceSet {
+                service: "gateway".into(),
+                desired: "off".into(),
+                persist: false,
+            }
+        );
+        assert_eq!(
+            gateway_control_request("status"),
+            RpcControlRequest::ServiceSet {
+                service: "gateway".into(),
+                desired: "status".into(),
+                persist: false,
+            }
+        );
+        assert_eq!(
+            gateway_control_request("restart"),
+            RpcControlRequest::ServiceRestart {
+                service: "gateway".into(),
+            }
+        );
     }
 }

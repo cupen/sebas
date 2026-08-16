@@ -26,6 +26,16 @@ pub struct ControlEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RpcActor {
     Cli { uid: u32 },
+    /// Feishu proxy actor (spec §6.2, Phase 3 core-hosted). The core submits
+    /// this with the startup secret as the signed-assertion MAC basis; the
+    /// watchdog maps it to `crate::watchdog::control::Actor::Feishu`.
+    /// `open_id` is the Feishu sender; `chat_id` the originating chat.
+    /// Pre-Phase-5 the core does not yet carry the sender's open_id on every
+    /// inbound, so `chat_id` is authoritative and `open_id` may be empty.
+    Feishu {
+        open_id: String,
+        chat_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +47,18 @@ pub enum RpcControlRequest {
     Rollback { dry_run: bool },
     RestartCore,
     ServiceStatus,
+    /// \`/gateway on|off|status\` / \`/webui status\`: set a managed
+    /// service's desired state. `service` ∈ {gateway, webui}, `desired` ∈
+    /// {on, off}. Serve side returns `service_unavailable` until Phase 4
+    /// (ServiceManager) lands.
+    ServiceSet {
+        service: String,
+        desired: String,
+        persist: bool,
+    },
+    /// \`/gateway restart\`: restart a managed service. Same Phase 4
+    /// limitation as `ServiceSet`.
+    ServiceRestart { service: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,9 +226,8 @@ async fn handle_envelope(
             }
         }
         RpcControlRequest::Update { dev, dry_run } => {
-            let actor = match envelope.actor {
-                RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
-            };
+            // Feishu/CLI actors both map via From<RpcActor> for Actor.
+            let actor = crate::watchdog::control::Actor::from(envelope.actor);
             let request = ControlRequest::Update {
                 kind: if dev { UpdateKind::Dev } else { UpdateKind::Release },
                 dry_run,
@@ -215,20 +236,35 @@ async fn handle_envelope(
             executor.submit_detached(actor, request).await.into()
         }
         RpcControlRequest::Rollback { dry_run } => {
-            let actor = match envelope.actor {
-                RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
-            };
+            let actor = crate::watchdog::control::Actor::from(envelope.actor);
             executor.submit_detached(actor, ControlRequest::Rollback { dry_run }).await.into()
         }
         RpcControlRequest::RestartCore => {
-            let actor = match envelope.actor {
-                RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
-            };
+            let actor = crate::watchdog::control::Actor::from(envelope.actor);
             executor.submit_detached(actor, ControlRequest::RestartCore).await.into()
         }
         RpcControlRequest::ServiceStatus => {
             executor.service_status().await
         }
+        // Phase 3 (Task 3.1) only routes the command; the ServiceManager that
+        // actually applies desired-state / restart lands in Phase 4. Until
+        // then, be explicit rather than silently no-op.
+        RpcControlRequest::ServiceSet {
+            service,
+            desired,
+            persist: _,
+        } => RpcControlResponse::Rejected {
+            code: "service_unavailable".into(),
+            message: format!(
+                "service management not yet wired (Phase 4); received set {service}={desired}"
+            ),
+        },
+        RpcControlRequest::ServiceRestart { service } => RpcControlResponse::Rejected {
+            code: "service_unavailable".into(),
+            message: format!(
+                "service management not yet wired (Phase 4); received restart {service}"
+            ),
+        },
     }
 }
 
@@ -272,6 +308,9 @@ impl From<RpcActor> for crate::watchdog::control::Actor {
     fn from(a: RpcActor) -> Self {
         match a {
             RpcActor::Cli { uid } => crate::watchdog::control::Actor::Cli { uid },
+            RpcActor::Feishu { open_id, chat_id } => {
+                crate::watchdog::control::Actor::Feishu { open_id, chat_id }
+            }
         }
     }
 }
@@ -429,5 +468,106 @@ mod tests {
             matches!(response, RpcControlResponse::Accepted { .. }),
             "expected Accepted for Status with valid secret, got {response:?}"
         );
+    }
+
+    /// Feishu proxy actor (spec §6.2 Phase 3) maps to the watchdog Actor
+    /// preserving open_id/chat_id, so downstream authorization can act on the
+    /// real chat while the sender open_id is still absent pre-Phase-5.
+    #[test]
+    fn feishu_actor_maps_to_watchdog_actor() {
+        let rpc = RpcActor::Feishu {
+            open_id: String::new(),
+            chat_id: Some("oc_abc".into()),
+        };
+        let actor: crate::watchdog::control::Actor = rpc.into();
+        assert!(matches!(
+            actor,
+            crate::watchdog::control::Actor::Feishu {
+                ref open_id,
+                ref chat_id,
+            } if open_id.is_empty() && chat_id.as_deref() == Some("oc_abc")
+        ));
+    }
+
+    /// Feishu actor with a valid secret may query Status: the new actor path
+    /// must not regress the authenticated control plane.
+    #[tokio::test]
+    async fn feishu_actor_with_valid_secret_allows_status() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "feishu_status".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_abc".into()),
+                },
+                request: RpcControlRequest::Status,
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        assert!(
+            matches!(response, RpcControlResponse::Accepted { .. }),
+            "expected Accepted for Feishu Status, got {response:?}"
+        );
+    }
+
+    /// ServiceSet is routed but rejected until Phase 4 (ServiceManager) lands;
+    /// be explicit rather than silently no-op (plan Task 3.1).
+    #[tokio::test]
+    async fn service_set_rejected_until_phase_4() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "feishu_gateway".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_abc".into()),
+                },
+                request: RpcControlRequest::ServiceSet {
+                    service: "gateway".into(),
+                    desired: "on".into(),
+                    persist: false,
+                },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            RpcControlResponse::Rejected { ref code, .. } if code == "service_unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn service_restart_rejected_until_phase_4() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "feishu_gateway_restart".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_abc".into()),
+                },
+                request: RpcControlRequest::ServiceRestart {
+                    service: "gateway".into(),
+                },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            RpcControlResponse::Rejected { ref code, .. } if code == "service_unavailable"
+        ));
     }
 }

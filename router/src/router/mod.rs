@@ -121,6 +121,20 @@ pub enum Out {
     WatchdogServices {
         key: SessionKey,
     },
+    /// \`/system\` — watchdog 系统状态（spec §12 control commands, Phase 3）。
+    WatchdogSystem {
+        key: SessionKey,
+    },
+    /// \`/gateway on|off|restart|status\` — 管理 gateway 服务（spec §12）。
+    /// `action` ∈ {on, off, restart, status}。
+    WatchdogGateway {
+        key: SessionKey,
+        action: String,
+    },
+    /// \`/webui status\` — 查看 webui 服务状态（spec §12）。
+    WatchdogWebui {
+        key: SessionKey,
+    },
     /// Spawn a session without sending a root card to Feishu (web-originated
     /// sessions). The dispatcher creates the ACP session and wires the pump,
     /// but skips the Feishu send_card / react operations. Card content is

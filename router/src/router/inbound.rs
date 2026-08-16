@@ -130,6 +130,15 @@ impl RouterHandle {
             Command::Services => {
                 self.request_watchdog_services(key).await;
             }
+            Command::System => {
+                self.request_watchdog_system(key).await;
+            }
+            Command::Gateway(action) => {
+                self.request_watchdog_gateway(key, action).await;
+            }
+            Command::Webui => {
+                self.request_watchdog_webui(key).await;
+            }
             Command::Provider => self.on_provider(key).await,
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
@@ -223,6 +232,18 @@ impl RouterHandle {
 
     async fn request_watchdog_services(&self, key: SessionKey) {
         self.emit(Out::WatchdogServices { key }).await;
+    }
+
+    async fn request_watchdog_system(&self, key: SessionKey) {
+        self.emit(Out::WatchdogSystem { key }).await;
+    }
+
+    async fn request_watchdog_gateway(&self, key: SessionKey, action: String) {
+        self.emit(Out::WatchdogGateway { key, action }).await;
+    }
+
+    async fn request_watchdog_webui(&self, key: SessionKey) {
+        self.emit(Out::WatchdogWebui { key }).await;
     }
 
     async fn on_button(&self, key: SessionKey, action: CardAction) {
