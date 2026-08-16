@@ -75,6 +75,11 @@ args = []
 # protocol = "anthropic"
 # # base_url = "https://api.deepseek.com/anthropic"   # 自动填充，可覆盖
 # # api_key_env = "DEEPSEEK_API_KEY"                   # 自动填充，可覆盖
+# # # 按从强到弱排列的模型名列表（手写）。`[n]` 后缀（如 `[1m]`）既是模型名
+# # # 一部分，也表示上下文长度。会映射到 Claude Code 的
+# # # ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_OPUS_MODEL / _SONNET_ / _HAIKU_。
+# # # 单模型 → 4 变量全设；多模型 → OPUS=最强、SONNET=次强、HAIKU=最弱。
+# # models = ["deepseek-chat", "deepseek-reasoner"]
 #
 #
 # # 路由表：model（可含 glob）→ provider 数组，数组顺序 = 优先级（先 = 主）。

@@ -251,6 +251,7 @@ mod tests {
                 api_key_env: None,
                 api_key: Some("test-key".into()),
                 model_map: HashMap::new(),
+                models: Vec::new(),
             },
         )
     }

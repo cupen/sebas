@@ -13,6 +13,7 @@ pub mod access_log;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod models;
 pub mod proto;
 pub mod proxy;
 pub mod routing;

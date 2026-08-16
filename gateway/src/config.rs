@@ -106,6 +106,10 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub model_map: HashMap<String, String>,
+    /// 按从强到弱排列的模型名列表（手写）。`[n]` 后缀（如 `[1m]`）既是
+    /// 模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 /// 给定请求协议返回对应上游 URL；两项都为 None 视为未配置。
@@ -189,6 +193,8 @@ struct RawProviderConfig {
     api_key: Option<String>,
     #[serde(default)]
     model_map: HashMap<String, String>,
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 /// provider 惯例默认（spec §6 Provider 格局调研 + 2026-08-04/07 端点探测）。
@@ -321,6 +327,7 @@ fn resolve_providers(
                 api_key_env,
                 api_key: r.api_key,
                 model_map: r.model_map,
+                models: r.models,
             },
         );
     }
@@ -330,6 +337,20 @@ fn resolve_providers(
 /// 空字符串归 None（非空为 Some）。
 fn option_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
+}
+
+/// 从 provider overlay JSON 条目里读 `models` 数组（保持书写顺序 = 强→弱）。
+/// 非数组 / 缺省 → 空列表。
+fn parse_models_list(item: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    item.get("models")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 按 preset 解析 `base_url_anthropic` / `base_url_openai`：preset 默认 +
@@ -497,6 +518,7 @@ impl GatewayConfig {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
                 model_map: HashMap::new(),
+                models: parse_models_list(&item),
             };
             let mut resolved =
                 resolve_providers(HashMap::from([(name.clone(), raw)])).map_err(|e| {
@@ -610,6 +632,7 @@ impl GatewayConfig {
                 api_key_env: None,
                 api_key: None,
                 model_map: HashMap::new(),
+                models: Vec::new(),
             },
         );
         if !self
