@@ -68,6 +68,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         fake.to_str().unwrap(),
         vec!["--slow-ms".into(), "200".into()],
         Some(work_dir.path().to_string_lossy().into_owned()),
+        None,
     )
     .await
     .expect("spawn bridge");

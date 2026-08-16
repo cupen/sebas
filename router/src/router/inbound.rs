@@ -27,11 +27,13 @@ impl RouterHandle {
                 reply_to,
             } => {
                 // Acknowledge receipt immediately with an emoji reaction on
-                // the user's message, before any processing.
+                // the user's message, before any processing. "Get" = 👌 =
+                // "已收到" 语义（Feishu `emoji_type`），不再是 "EYES"/"Typing"
+                // —— 后者暗示"正在输入"。
                 if let Some(ref msg_id) = reply_to {
                     self.emit(Out::AckMsg {
                         message_id: msg_id.clone(),
-                        emoji: "EYES".into(),
+                        emoji: crate::card_state::phase::SEED.into(),
                     })
                     .await;
                 }
@@ -57,8 +59,11 @@ impl RouterHandle {
     }
 
     /// 表单容器提交回调：按负载里的 `form` 字段路由到已接线的 CRUD 表单
-    /// （provider-preset / provider-custom 共两张）。未接线的表单仅记日志，
-    /// 不静默吞掉。
+    /// （provider-preset / provider-custom 共两张）或「Provider 管理」主卡的
+    /// 新交互（bead sebas-63f.5：provider-mode / provider-default-direct /
+    /// provider-list-select / provider-set-default-direct /
+    /// provider-delete-confirm / provider-create-preset / provider-create-custom）。
+    /// 未接线的表单仅记日志，不静默吞掉。
     async fn on_form_cb(
         &self,
         key: SessionKey,
@@ -67,9 +72,21 @@ impl RouterHandle {
         message_id: Option<String>,
     ) {
         tracing::debug!(?key, ?value, "form callback received");
+        let form_name = value.get("form").and_then(Value::as_str).unwrap_or("");
+
+        // Provider 管理主卡的新 form 名（select_static / 按钮的 callback
+        // value 共用此判别字段）。先于既有 provider_forms 路由尝试——
+        // 任何本模块接管的 form 名都不会落到既有表单上。
+        if let Some(out) =
+            super::provider_card::dispatch(self, &key, &value, &form_value, message_id.clone())
+                .await
+        {
+            self.emit(out).await;
+            return;
+        }
+
         let routed = match &self.provider_forms {
             Some(forms) => {
-                let form_name = value.get("form").and_then(Value::as_str).unwrap_or("");
                 if let Some(form) = forms.dispatch(form_name) {
                     let out = form.handle(key, &value, &form_value, message_id).await;
                     self.emit(out).await;
@@ -247,6 +264,44 @@ impl RouterHandle {
     }
 
     async fn on_button(&self, key: SessionKey, action: CardAction) {
+        // Provider 管理主卡的新按钮（mode / 设默认 / 删除 / ＋ 新增预设/自定义
+        // / 探测 model 列表 / 探测 apply / 返回）。优先路由于既有 provider_forms，
+        // 避免模式按钮被误投到既有 form 的 `{form, op, id}` 分发上。
+        let payload = action.value.pointer("/action/value").cloned();
+        if let Some(p) = payload.as_ref()
+            && p.get("form").and_then(Value::as_str).is_some_and(|f| {
+                matches!(
+                    f,
+                    super::provider_card::FORM_MODE
+                        | super::provider_card::FORM_SET_DEFAULT_DIRECT
+                        | super::provider_card::FORM_DELETE_CONFIRM
+                        | super::provider_card::FORM_CREATE_PRESET
+                        | super::provider_card::FORM_CREATE_CUSTOM
+                        | super::provider_card::FORM_PROBE
+                        | super::provider_card::FORM_PROBE_APPLY
+                        | super::provider_card::FORM_BACK
+                )
+            })
+        {
+            let message_id = action
+                .value
+                .pointer("/context/open_message_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(out) = super::provider_card::dispatch(
+                self,
+                &key,
+                p,
+                &BTreeMap::new(),
+                message_id,
+            )
+            .await
+            {
+                self.emit(out).await;
+                return;
+            }
+        }
+
         // Provider CRUD 按钮（新增/编辑/删除）与 ACP 会话无关，优先路由，
         // 避免权限卡的 session 存活检查误伤（例如聊天里没有活跃会话时仍可管理 provider）。
         if let Some(forms) = &self.provider_forms {
@@ -401,12 +456,14 @@ impl RouterHandle {
         }
     }
 
-    /// `/provider`：打开 provider CRUD 列表卡（展示当前 provider + 两套
-    /// 新增/编辑/删除按钮）。未接线时退回帮助。
+    /// `/provider`：渲染 Provider 管理主卡（mode + default-direct + 列表 +
+    /// 详情/新建面板，bead sebas-63f.5）。未接线时退回帮助。
     async fn on_provider(&self, key: SessionKey) {
-        match &self.provider_forms {
-            Some(forms) => self.emit(forms.open(key).await).await,
-            None => self.emit(Out::HelpText { key }).await,
+        if self.provider_forms.is_some() {
+            let out = super::provider_card::render_main_card(self, &key).await;
+            self.emit(out).await;
+        } else {
+            self.emit(Out::HelpText { key }).await;
         }
     }
 

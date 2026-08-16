@@ -156,6 +156,7 @@ pub(crate) async fn spawn_test_session(cfg: &Config, router: &RouterHandle, mgr:
             &claude.path,
             claude.args.clone(),
             claude.work_dir.clone(),
+            Vec::new(), // no provider-mode env in test harness
             "[test-mode] sigterm-cleanup probe".into(),
         )
         .await

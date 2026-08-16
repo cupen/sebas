@@ -74,6 +74,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         fake.to_str().unwrap(),
         vec![],
         Some(work_dir.path().to_string_lossy().into_owned()),
+        None,
     )
     .await
     .expect("spawn fake CLI");

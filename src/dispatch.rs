@@ -11,6 +11,7 @@ use crate::session_boot::{
 use acp_claude::manager::SessionManager;
 use feishu::client::{FeishuApiError, FeishuClient};
 use feishu::events::SessionKey;
+use gateway::config::GatewayConfig;
 use router::commands::GatewayAction;
 use router::router::{Out, RouterHandle};
 use std::sync::Arc;
@@ -104,6 +105,7 @@ pub(crate) async fn dispatch_out(
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
     reactions: &ReactionTracker,
+    gateway_cfg: Option<&GatewayConfig>,
     out: Out,
 ) -> anyhow::Result<()> {
     match out {
@@ -243,6 +245,7 @@ pub(crate) async fn dispatch_out(
                 &claude.path,
                 claude.args.clone(),
                 claude.work_dir.clone(),
+                gateway_cfg,
             )
             .await
             {
@@ -301,6 +304,7 @@ pub(crate) async fn dispatch_out(
                 &claude.path,
                 claude.args.clone(),
                 project_dir.or_else(|| claude.work_dir.clone()),
+                gateway_cfg,
             )
             .await
             {
@@ -350,6 +354,7 @@ pub(crate) async fn dispatch_out(
                 &claude.path,
                 claude.args.clone(),
                 claude.work_dir.clone(),
+                gateway_cfg,
             )
             .await
             {

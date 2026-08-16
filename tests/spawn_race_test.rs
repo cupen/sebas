@@ -69,6 +69,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
                 "500".into(),
             ],
             None,
+            None,
         )
         .await
     });
@@ -166,6 +167,7 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
         &prompt,
         fake().to_str().unwrap(),
         vec![],
+        None,
         None,
     )
     .await

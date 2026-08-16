@@ -10,8 +10,11 @@ tokio = { version = "1.40", features = ["sync", "macros", "rt-multi-thread"] }
 tracing = "0.1"
 thiserror = "1"
 dirs = "5"
+anyhow = "1"
 feishu = { path = "../feishu" }
 acp-claude = { path = "../acp-claude" }
+# 仅 provider 探测 `/v1/models` 用，少量依赖；rustls-tls 省掉 native-tls 链接。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

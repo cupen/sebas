@@ -65,6 +65,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         fake().to_str().unwrap(),
         vec![],
         None,
+        None,
     )
     .await
     .expect("spawn ok");

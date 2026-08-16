@@ -70,6 +70,7 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
         fake().to_str().unwrap(),
         vec![],
         None,
+        None,
     )
     .await
     .expect("resume ok");
@@ -140,6 +141,7 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
             &prompt,
             fake().to_str().unwrap(),
             vec!["--resume-fails".into()],
+            None,
             None,
         ),
     )

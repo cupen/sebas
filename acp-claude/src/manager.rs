@@ -56,15 +56,21 @@ impl SessionManager {
     /// `prompt` is part of the public API surface but is **not** sent here —
     /// the prompt is forwarded exactly once via `AcpCommand::CreateSession`
     /// (or `ContinueSession`) through `send`. (Unchanged contract.)
+    ///
+    /// `extra_env` is merged into the child process's environment on top of
+    /// the OS-given env (used by sebas to inject `ANTHROPIC_BASE_URL` /
+    /// `OPENAI_API_KEY` etc. derived from the active provider mode;
+    /// bead sebas-63f.8).
     pub async fn create_session(
         &self,
         path: &str,
         args: Vec<String>,
         work_dir: Option<String>,
+        extra_env: Vec<(String, String)>,
         _prompt: String,
     ) -> anyhow::Result<String> {
         Ok(self
-            .spawn(path, args, work_dir, SessionStart::New)
+            .spawn(path, args, work_dir, extra_env, SessionStart::New)
             .await?
             .session_id)
     }
@@ -76,17 +82,22 @@ impl SessionManager {
     /// fresh session is started transparently with a NEW id and
     /// `SpawnOutcome.resumed == false` tells the caller to inform the user
     /// that the old conversation is gone.
+    ///
+    /// `extra_env` semantics match `create_session` — provider-derived env
+    /// applies to resume just as it does to fresh spawn.
     pub async fn resume_session(
         &self,
         path: &str,
         args: Vec<String>,
         work_dir: Option<String>,
+        extra_env: Vec<(String, String)>,
         old_session_id: &str,
     ) -> anyhow::Result<SpawnOutcome> {
         self.spawn(
             path,
             args,
             work_dir,
+            extra_env,
             SessionStart::Load(old_session_id.to_string()),
         )
         .await
@@ -100,6 +111,7 @@ impl SessionManager {
         path: &str,
         args: Vec<String>,
         work_dir: Option<String>,
+        extra_env: Vec<(String, String)>,
         start: SessionStart,
     ) -> anyhow::Result<SpawnOutcome> {
         let (session_id, resume) = match &start {
@@ -119,6 +131,7 @@ impl SessionManager {
             claude_path: path.to_string(),
             claude_args: args.clone(),
             work_dir: work_dir.clone(),
+            extra_env: extra_env.clone(),
             session_id: sid,
             resume,
             startup_timeout: self.startup_timeout,
