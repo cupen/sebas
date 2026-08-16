@@ -14,6 +14,7 @@ pub use maps::{
 };
 
 use crate::card_events::{apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title};
+use crate::commands::GatewayAction;
 use crate::card_state::CardState;
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
@@ -121,17 +122,16 @@ pub enum Out {
     WatchdogServices {
         key: SessionKey,
     },
-    /// \`/system\` — watchdog 系统状态（spec §12 control commands, Phase 3）。
+    /// `/system` — watchdog 系统状态（spec §12 control commands, Phase 3）。
     WatchdogSystem {
         key: SessionKey,
     },
-    /// \`/gateway on|off|restart|status\` — 管理 gateway 服务（spec §12）。
-    /// `action` ∈ {on, off, restart, status}。
+    /// `/gateway on|off|restart|status` — 管理 gateway 服务（spec §12）。
     WatchdogGateway {
         key: SessionKey,
-        action: String,
+        action: GatewayAction,
     },
-    /// \`/webui status\` — 查看 webui 服务状态（spec §12）。
+    /// `/webui status` — 查看 webui 服务状态（spec §12）。
     WatchdogWebui {
         key: SessionKey,
     },

@@ -4,7 +4,7 @@
 //! `drain_queue_if_terminal` 被 [`acp_events`] 复用，故放在 mod.rs 里。
 
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
-use crate::commands::{Command, HELP_TEXT, parse_command};
+use crate::commands::{Command, GatewayAction, HELP_TEXT, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
@@ -238,7 +238,7 @@ impl RouterHandle {
         self.emit(Out::WatchdogSystem { key }).await;
     }
 
-    async fn request_watchdog_gateway(&self, key: SessionKey, action: String) {
+    async fn request_watchdog_gateway(&self, key: SessionKey, action: GatewayAction) {
         self.emit(Out::WatchdogGateway { key, action }).await;
     }
 

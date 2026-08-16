@@ -47,16 +47,18 @@ pub enum RpcControlRequest {
     Rollback { dry_run: bool },
     RestartCore,
     ServiceStatus,
-    /// \`/gateway on|off|status\` / \`/webui status\`: set a managed
-    /// service's desired state. `service` ∈ {gateway, webui}, `desired` ∈
-    /// {on, off}. Serve side returns `service_unavailable` until Phase 4
-    /// (ServiceManager) lands.
+    /// `/gateway status` / `/webui status`: query a single managed service's
+    /// status. The server filters `ServiceStatus` down to `service`.
+    ServiceStatusFor { service: String },
+    /// `/gateway on|off`: set a managed service's desired state.
+    /// `service` ∈ {gateway, webui}, `desired` ∈ {on, off}. Serve side
+    /// returns `service_unavailable` until Phase 4 (ServiceManager) lands.
     ServiceSet {
         service: String,
         desired: String,
         persist: bool,
     },
-    /// \`/gateway restart\`: restart a managed service. Same Phase 4
+    /// `/gateway restart`: restart a managed service. Same Phase 4
     /// limitation as `ServiceSet`.
     ServiceRestart { service: String },
 }
@@ -245,6 +247,9 @@ async fn handle_envelope(
         }
         RpcControlRequest::ServiceStatus => {
             executor.service_status().await
+        }
+        RpcControlRequest::ServiceStatusFor { service } => {
+            executor.service_status_for(&service).await
         }
         // Phase 3 (Task 3.1) only routes the command; the ServiceManager that
         // actually applies desired-state / restart lands in Phase 4. Until
@@ -513,6 +518,37 @@ mod tests {
             matches!(response, RpcControlResponse::Accepted { .. }),
             "expected Accepted for Feishu Status, got {response:?}"
         );
+    }
+
+    /// `/gateway status` and `/webui status` query a single service; the RPC
+    /// server filters the full service list down to the requested name.
+    #[tokio::test]
+    async fn service_status_for_filters_to_requested_service() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "feishu_gateway_status".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_abc".into()),
+                },
+                request: RpcControlRequest::ServiceStatusFor {
+                    service: "gateway".into(),
+                },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+
+        match response {
+            RpcControlResponse::Services { services } => {
+                assert_eq!(services.len(), 1);
+                assert_eq!(services[0].name, "gateway");
+            }
+            other => panic!("expected Services, got {other:?}"),
+        }
     }
 
     /// ServiceSet is routed but rejected until Phase 4 (ServiceManager) lands;

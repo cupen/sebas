@@ -22,7 +22,16 @@ pub const HELP_TEXT: &str = "可用命令:\n\
 /webui status — 查看 webui 服务状态\n\
 /btw <text> — 插队提问\n\
 /help — 显示本帮助\n\
-（注：watchdog 控制命令需核心进程存活才能转发，详见 /system）";
+（注：watchdog 控制命令需 watchdog 在线且核心已配置控制凭据）";
+
+/// `/gateway` 的动作域（spec §12 control commands）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayAction {
+    On,
+    Off,
+    Restart,
+    Status,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -52,7 +61,7 @@ pub enum Command {
     /// `/system` — watchdog 系统状态（spec §12 control commands）。
     System,
     /// `/gateway on|off|restart|status` — 管理 gateway 服务（spec §12）。
-    Gateway(String),
+    Gateway(GatewayAction),
     /// `/webui status` — 查看 webui 服务状态（spec §12）。
     Webui,
     PassThrough(String),
@@ -120,7 +129,10 @@ pub fn parse_command(input: &str) -> Command {
         // `/system  now` 仍视为 System），不要求空 arg。
         "/system" => Command::System,
         "/gateway" => match arg {
-            "on" | "off" | "restart" | "status" => Command::Gateway(arg.into()),
+            "on" => Command::Gateway(GatewayAction::On),
+            "off" => Command::Gateway(GatewayAction::Off),
+            "restart" => Command::Gateway(GatewayAction::Restart),
+            "status" => Command::Gateway(GatewayAction::Status),
             _ => Command::PassThrough(input.into()),
         },
         "/webui" if arg == "status" => Command::Webui,
@@ -148,10 +160,16 @@ mod tests {
 
     #[test]
     fn parses_gateway_actions() {
-        assert_eq!(parse_command("/gateway on"), Command::Gateway("on".into()));
-        assert_eq!(parse_command("/gateway off"), Command::Gateway("off".into()));
-        assert_eq!(parse_command("/gateway restart"), Command::Gateway("restart".into()));
-        assert_eq!(parse_command("/gateway status"), Command::Gateway("status".into()));
+        assert_eq!(parse_command("/gateway on"), Command::Gateway(GatewayAction::On));
+        assert_eq!(parse_command("/gateway off"), Command::Gateway(GatewayAction::Off));
+        assert_eq!(
+            parse_command("/gateway restart"),
+            Command::Gateway(GatewayAction::Restart)
+        );
+        assert_eq!(
+            parse_command("/gateway status"),
+            Command::Gateway(GatewayAction::Status)
+        );
         // invalid action falls through to passthrough
         assert_eq!(
             parse_command("/gateway foobar"),

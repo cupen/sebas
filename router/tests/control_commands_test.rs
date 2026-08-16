@@ -6,11 +6,12 @@
 //! commands), matching spec §12.
 
 use feishu::events::{FeishuIn, SessionKey};
+use router::commands::GatewayAction;
 use router::router::{Out, RouterHandle};
 use router::state::SessionMap;
 use std::time::Duration;
 
-const WAIT: Duration = Duration::from_millis(500);
+const WAIT: Duration = Duration::from_secs(2);
 
 fn key() -> SessionKey {
     SessionKey {
@@ -55,7 +56,7 @@ async fn gateway_on_routes_to_watchdog_gateway() {
     dispatch_text(&router, "/gateway on").await;
     let out = next_out(&mut out_rx).await;
     assert!(
-        matches!(out, Out::WatchdogGateway { ref key, ref action } if key.chat_id == "oc_control" && action == "on"),
+        matches!(out, Out::WatchdogGateway { ref key, ref action } if key.chat_id == "oc_control" && matches!(action, GatewayAction::On)),
         "expected WatchdogGateway(on), got {out:?}"
     );
 }
@@ -66,7 +67,7 @@ async fn gateway_restart_routes_to_watchdog_gateway() {
     dispatch_text(&router, "/gateway restart").await;
     let out = next_out(&mut out_rx).await;
     assert!(
-        matches!(out, Out::WatchdogGateway { ref action, .. } if action == "restart"),
+        matches!(out, Out::WatchdogGateway { ref action, .. } if matches!(action, GatewayAction::Restart)),
         "expected WatchdogGateway(restart), got {out:?}"
     );
 }

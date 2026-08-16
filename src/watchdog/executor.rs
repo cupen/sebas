@@ -339,6 +339,21 @@ impl ControlExecutor {
 
         RpcControlResponse::Services { services }
     }
+
+    /// Return the current status of a single managed service, or an empty
+    /// service list when the service is unknown (used by `/gateway status`
+    /// and `/webui status`, spec §12).
+    pub async fn service_status_for(&self, service: &str) -> RpcControlResponse {
+        match self.service_status().await {
+            RpcControlResponse::Services { services } => RpcControlResponse::Services {
+                services: services
+                    .into_iter()
+                    .filter(|s| s.name == service)
+                    .collect(),
+            },
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
