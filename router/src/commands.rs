@@ -17,8 +17,21 @@ pub const HELP_TEXT: &str = "可用命令:\n\
 /rollback — 通过 watchdog 回滚并重启\n\
 /restart — 通过 watchdog 重启 core\n\
 /services — 查看 watchdog 服务状态\n\
+/system — 查看 watchdog 系统状态\n\
+/gateway on|off|restart|status — 管理 gateway 服务\n\
+/webui status — 查看 webui 服务状态\n\
 /btw <text> — 插队提问\n\
-/help — 显示本帮助";
+/help — 显示本帮助\n\
+（注：watchdog 控制命令需 watchdog 在线且核心已配置控制凭据）";
+
+/// `/gateway` 的动作域（spec §12 control commands）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayAction {
+    On,
+    Off,
+    Restart,
+    Status,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -45,6 +58,12 @@ pub enum Command {
     Rollback,
     Restart,
     Services,
+    /// `/system` — watchdog 系统状态（spec §12 control commands）。
+    System,
+    /// `/gateway on|off|restart|status` — 管理 gateway 服务（spec §12）。
+    Gateway(GatewayAction),
+    /// `/webui status` — 查看 webui 服务状态（spec §12）。
+    Webui,
     PassThrough(String),
 }
 
@@ -106,6 +125,17 @@ pub fn parse_command(input: &str) -> Command {
         "/rollback" if arg.is_empty() => Command::Rollback,
         "/restart" if arg.is_empty() => Command::Restart,
         "/services" if arg.is_empty() => Command::Services,
+        // `/system` 是只读状态命令，与 `/status` 同级：忽略尾随参数（例如
+        // `/system  now` 仍视为 System），不要求空 arg。
+        "/system" => Command::System,
+        "/gateway" => match arg {
+            "on" => Command::Gateway(GatewayAction::On),
+            "off" => Command::Gateway(GatewayAction::Off),
+            "restart" => Command::Gateway(GatewayAction::Restart),
+            "status" => Command::Gateway(GatewayAction::Status),
+            _ => Command::PassThrough(input.into()),
+        },
+        "/webui" if arg == "status" => Command::Webui,
         "/btw" => {
             if arg.is_empty() {
                 Command::PassThrough(input.into())
@@ -114,5 +144,51 @@ pub fn parse_command(input: &str) -> Command {
             }
         }
         _ => Command::PassThrough(input.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_system_command() {
+        assert_eq!(parse_command("/system"), Command::System);
+        assert_eq!(parse_command("/system  extra"), Command::System);
+        assert_eq!(parse_command("/systemx"), Command::PassThrough("/systemx".into()));
+    }
+
+    #[test]
+    fn parses_gateway_actions() {
+        assert_eq!(parse_command("/gateway on"), Command::Gateway(GatewayAction::On));
+        assert_eq!(parse_command("/gateway off"), Command::Gateway(GatewayAction::Off));
+        assert_eq!(
+            parse_command("/gateway restart"),
+            Command::Gateway(GatewayAction::Restart)
+        );
+        assert_eq!(
+            parse_command("/gateway status"),
+            Command::Gateway(GatewayAction::Status)
+        );
+        // invalid action falls through to passthrough
+        assert_eq!(
+            parse_command("/gateway foobar"),
+            Command::PassThrough("/gateway foobar".into())
+        );
+        // bare /gateway with no action
+        assert_eq!(
+            parse_command("/gateway"),
+            Command::PassThrough("/gateway".into())
+        );
+    }
+
+    #[test]
+    fn parses_webui_status() {
+        assert_eq!(parse_command("/webui status"), Command::Webui);
+        // anything else for /webui falls through
+        assert_eq!(
+            parse_command("/webui on"),
+            Command::PassThrough("/webui on".into())
+        );
     }
 }

@@ -244,6 +244,15 @@ fn render_response(format: OutputFormat, response: &sebas::watchdog::control_rpc
                     );
                 }
             }
+            RpcControlResponse::PendingConfirmation {
+                action,
+                message,
+                expires_in,
+                ..
+            } => {
+                println!("confirmation required action={action} expires_in={expires_in}s");
+                println!("{message}");
+            }
         },
     }
 }

@@ -517,8 +517,9 @@ mod tests {
     // ─── RPC wire actor note ──────────────────────────────────────────────
 
     /// The RPC wire format (`RpcActor` in `control_rpc`) has no `System` variant.
-    /// Only `Cli { uid }` exists on the wire, so a remote caller cannot forge a
-    /// `System`-level actor. See `control_rpc::tests::forged_system_actor_rejected`.
+    /// `Cli { uid }` and `Feishu { .. }` exist on the wire, but a remote caller
+    /// cannot forge a `System`-level actor. See
+    /// `control_rpc::tests::forged_system_actor_rejected`.
     ///
     /// This test verifies that the auth layer also cannot produce `System` or
     /// `Cli` actors from assertion principals, keeping the same invariant.
