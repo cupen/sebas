@@ -1,11 +1,12 @@
 //! 模型能力参数 + provider 模型列表 → Claude Code 4 个 MODEL 环境变量的映射。
 //!
-//! 模型能力（context_window / max_output_tokens）每种模型是固定的，这里
-//! 硬编码一份已知模型能力表（数据来源：models.dev / 各 provider 公开规格）。
+//! 每种模型的参数是固定的，只在这里定义**一份**：不同 provider 背后的服务
+//! 商提供同名模型时参数一致，所以按模型名精确查找共享同一条目。
+//!
 //! 模型名可能是 provider 自定义名（如 `deepseek-v4-pro[1m]`），此时：
 //! - `[n]` 后缀（`[128k]` / `[1m]`）既是模型名的一部分，也表示上下文长度，
-//!   直接解析出来覆盖表里的 context_window；
-//! - 表里认不出的模型回退默认值（`DEFAULT_CAPS`）。
+//!   解析出来**覆盖**静态定义里的 context_window；
+//! - 注册表里认不出的模型回退默认值（`DEFAULT_CAPS`）。
 //!
 //! 强→弱映射规则（Claude Code 假定 `OPUS` 最强、`SONNET` 次之、`HAIKU`
 //! 最弱）：
@@ -21,33 +22,49 @@ pub struct ModelCaps {
     pub max_output_tokens: Option<u64>,
 }
 
-/// 无 `[n]` 后缀、表里也匹配不到时的兜底能力。
+/// 无 `[n]` 后缀、注册表里也匹配不到时的兜底能力。
 const DEFAULT_CAPS: ModelCaps = ModelCaps {
     context_window: Some(128_000),
     max_output_tokens: Some(8192),
 };
 
-/// 硬编码模型能力表。键为模型名前缀（最长匹配优先）；值给 context 与
-/// output 上限。`max_output_tokens: None` 意为「回退 DEFAULT_CAPS.output」。
+/// 静态模型定义：每种模型写一份，同名模型跨 provider 共享。
+#[derive(Debug, Clone, Copy)]
+pub struct ModelDef {
+    /// 规范模型名（提交的模型名与之精确匹配；`[n]` 后缀剥离后比对）。
+    pub name: &'static str,
+    pub context_window: u64,
+    pub max_output_tokens: u64,
+}
+
+/// 静态模型注册表。参数来自公开规格 / models.dev，**待网页核对后补全校正**。
 #[rustfmt::skip]
-const MODEL_CAPABILITIES: &[(&str, Option<u64>, Option<u64>)] = &[
-    // ---- DeepSeek（官方为 128K 上下文；output 各版本不同）----
-    ("deepseek-chat",       Some(131_072), Some(8192)),
-    ("deepseek-reasoner",   Some(131_072), Some(8192)),
-    ("deepseek-v3.1",       Some(131_072), Some(8192)),
-    ("deepseek-v3.2",       Some(131_072), Some(32_768)),
-    // ---- 通用 Anthropic 自家模型 ----
-    ("claude-opus", Some(200_000), Some(32_768)),
-    ("claude-sonnet", Some(200_000), Some(32_768)),
-    ("claude-haiku", Some(200_000), Some(32_768)),
+const MODELS: &[ModelDef] = &[
+    // ---- DeepSeek V4 家族 ----
+    ModelDef { name: "deepseek-v4-flash", context_window: 128_000,  max_output_tokens: 8192 },
+    ModelDef { name: "deepseek-v4-pro",   context_window: 131_072,  max_output_tokens: 8192 },
+    // ---- Anthropic 自家 ----
+    ModelDef { name: "claude-opus",    context_window: 200_000, max_output_tokens: 32_768 },
+    ModelDef { name: "claude-sonnet",  context_window: 200_000, max_output_tokens: 32_768 },
+    ModelDef { name: "claude-haiku",   context_window: 200_000, max_output_tokens: 32_768 },
 ];
 
+/// 注册表按规范名精确查找。
+fn table_match(name: &str) -> Option<ModelCaps> {
+    MODELS
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| ModelCaps {
+            context_window: Some(m.context_window),
+            max_output_tokens: Some(m.max_output_tokens),
+        })
+}
+
 /// 解析模型名末尾的 `[n]` 后缀：`[128k]`→128_000、`[1m]`→1_000_000（十进制）。
-/// 无后缀返回 `None`。求整用小写单位；`K`/`M` 大写也接受。
+/// 无后缀返回 `None`。`K`/`M` 大写也接受。
 pub fn parse_context_suffix(name: &str) -> Option<u64> {
     let bytes = name.as_bytes();
     let end = bytes.len();
-    // 从后往前找 `]`；必须在末尾且前面有 `[`。
     if end == 0 || bytes[end - 1] != b']' {
         return None;
     }
@@ -57,9 +74,6 @@ pub fn parse_context_suffix(name: &str) -> Option<u64> {
     }
     let inside = &name[open + 1..end - 1];
     let (digits, unit) = inside.split_at(inside.len().saturating_sub(1));
-    if digits.is_empty() {
-        return None;
-    }
     let n: u64 = digits.parse().ok()?;
     match unit {
         "k" | "K" => Some(n * 1000),
@@ -68,23 +82,17 @@ pub fn parse_context_suffix(name: &str) -> Option<u64> {
     }
 }
 
-/// 表里最长前缀匹配。
-fn table_match(name: &str) -> Option<ModelCaps> {
-    MODEL_CAPABILITIES
-        .iter()
-        .filter(|(prefix, _, _)| name.starts_with(prefix))
-        .max_by_key(|(prefix, _, _)| prefix.len())
-        .map(|(_, ctx, out)| ModelCaps {
-            context_window: *ctx,
-            max_output_tokens: *out,
-        })
-}
-
-/// 解析一个模型名的完整能力：`[n]` 后缀优先（覆盖 context），其次查表，
-/// 兜底 `DEFAULT_CAPS`。output 未在任一来源给出时用 `context / 4`。
+/// 解析一个模型名的完整能力：
+/// 1. 剥离 `[n]` 后缀得到基准名 + 可选解析出的上下文；
+/// 2. 基准名查静态注册表 → context 与 output；
+/// 3. 后缀存在 → 覆盖 context_window；output 未给出时用 context / 4 兜底；
+/// 4. 注册表未命中 → `DEFAULT_CAPS`（后缀仍可覆盖 context）。
 pub fn resolve_caps(name: &str) -> ModelCaps {
-    let suffix = parse_context_suffix(name);
-    let table = table_match(name).unwrap_or(DEFAULT_CAPS);
+    let (base, suffix) = match parse_context_suffix(name) {
+        Some(ctx) => (&name[..name.rfind('[').unwrap_or(name.len())], Some(ctx)),
+        None => (name, None),
+    };
+    let table = table_match(base).unwrap_or(DEFAULT_CAPS);
     let context_window = suffix.or(table.context_window);
     let max_output_tokens = table
         .max_output_tokens
@@ -140,10 +148,7 @@ pub fn map_to_env(models: &[String]) -> ClaudeModelEnv {
             haiku: Some(m.clone()),
         },
         [first, second, ..] => {
-            let last = models
-                .last()
-                .expect("non-empty slice has last")
-                .clone();
+            let last = models.last().expect("non-empty slice has last").clone();
             ClaudeModelEnv {
                 model: Some(first.clone()),
                 opus: Some(first.clone()),
@@ -169,18 +174,18 @@ mod tests {
     }
 
     #[test]
-    fn suffix_overrides_table_context() {
-        // 同一前缀；[1m] 后缀覆盖表里的 131072
-        let caps = resolve_caps("deepseek-v4-pro[1m]");
-        assert_eq!(caps.context_window, Some(1_000_000));
-        // output 走 DEFAULT_CAPS（表里匹配不到这个前缀）
+    fn static_def_fills_known_model() {
+        // 注册表里的规范名精确命中
+        let caps = resolve_caps("deepseek-v4-flash");
+        assert_eq!(caps.context_window, Some(128_000));
         assert_eq!(caps.max_output_tokens, Some(8192));
     }
 
     #[test]
-    fn table_match_fills_known_model() {
-        let caps = resolve_caps("deepseek-chat");
-        assert_eq!(caps.context_window, Some(131_072));
+    fn suffix_overrides_static_context() {
+        // deepseek-v4-pro 静态定义 131072；[1m] 后缀覆盖成 1M
+        let caps = resolve_caps("deepseek-v4-pro[1m]");
+        assert_eq!(caps.context_window, Some(1_000_000));
         assert_eq!(caps.max_output_tokens, Some(8192));
     }
 
@@ -191,25 +196,33 @@ mod tests {
     }
 
     #[test]
+    fn known_model_with_unknown_suffix_keeps_table_output() {
+        // claude-opus 有表；[99k] 后缀覆盖 context，output 保留表的
+        let caps = resolve_caps("claude-opus[99k]");
+        assert_eq!(caps.context_window, Some(99_000));
+        assert_eq!(caps.max_output_tokens, Some(32_768));
+    }
+
+    #[test]
     fn single_model_sets_all_vars() {
-        let env = map_to_env(&["only-model".to_string()]);
-        assert_eq!(env.model.as_deref(), Some("only-model"));
-        assert_eq!(env.opus.as_deref(), Some("only-model"));
-        assert_eq!(env.sonnet.as_deref(), Some("only-model"));
-        assert_eq!(env.haiku.as_deref(), Some("only-model"));
+        let env = map_to_env(&["deepseek-v4-flash".to_string()]);
+        assert_eq!(env.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(env.opus.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(env.sonnet.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(env.haiku.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]
     fn multi_model_maps_strong_to_weak() {
         let env = map_to_env(&[
-            "pro-max[1m]".to_string(),
-            "pro".to_string(),
-            "flash".to_string(),
+            "deepseek-v4-pro[1m]".to_string(),
+            "deepseek-v4-pro".to_string(),
+            "deepseek-v4-flash".to_string(),
         ]);
-        assert_eq!(env.model.as_deref(), Some("pro-max[1m]"));
-        assert_eq!(env.opus.as_deref(), Some("pro-max[1m]"));
-        assert_eq!(env.sonnet.as_deref(), Some("pro"));
-        assert_eq!(env.haiku.as_deref(), Some("flash"));
+        assert_eq!(env.model.as_deref(), Some("deepseek-v4-pro[1m]"));
+        assert_eq!(env.opus.as_deref(), Some("deepseek-v4-pro[1m]"));
+        assert_eq!(env.sonnet.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(env.haiku.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]
