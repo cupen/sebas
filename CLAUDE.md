@@ -72,6 +72,15 @@ _Add your build and test commands here_
 
 _Add a brief overview of your project architecture_
 
+### Provider 管理（`/provider` 命令，bead sebas-63f epic）
+
+- **运行态**：`ProviderMode`（`Off` / `Direct { provider }` / `Gateway`）持久化在 `~/.sebas/state.json`，读写逻辑在 `router/src/provider_state.rs`。
+- **数据**：provider 配置（base_url、api_key、default_model 等）存 `~/.sebas/providers.json`（overlay），schema / 表单 / 种子加载在 `src/provider.rs`。
+- **驱动抽象**：`AgentDriver` trait + `ClaudeCodeDriver` 实现位于 `acp-claude/src/agent_driver.rs`，把 `ProviderResolution` 翻成 agent 进程 env / argv。
+- **spawn 翻译**：中间环节在 `src/spawn_env.rs::compute_provider_resolution` —— mode → 解析 URL+密钥 → `ProviderResolution`，再喂给 driver 出 `(extra_env, extra_args)`。
+- **UI**：单一「Provider 管理」主卡在 `router/src/router/provider_card.rs`（详见 `.claude/rules/how-to.md`）。
+- **探测 model**：详情面板的「🔍 探测 model 列表」按钮是 best-effort 便利，优先试 openai-compatible `/models`，失败回退 `/v1/models`。
+
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_

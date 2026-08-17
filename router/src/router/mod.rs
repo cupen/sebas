@@ -8,9 +8,11 @@
 mod acp_events;
 mod inbound;
 mod maps;
+pub mod provider_card;
 
 pub use maps::{
-    MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
+    MsgIdMap, PermCardEntry, PermCardMap, ProviderSelectionMap, ReplyTargetMap, SessionAllowlist,
+    tool_signature,
 };
 
 use crate::card_events::{apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title};
@@ -206,6 +208,10 @@ pub struct RouterHandle {
     /// （权限卡等）用它作为 root_id；sebas 出站层（初始卡/失败提示卡）经
     /// [`RouterHandle::reply_target`] 读取。纯内存、不持久化。
     reply_targets: ReplyTargetMap,
+    /// `/provider` 卡片当前选中的 provider（per-SessionKey）。`None`/未记录
+    /// 都视为「（新建）」模式，由 [`provider_card`] 渲染层读取。
+    /// 纯内存、不持久化。
+    provider_selection: ProviderSelectionMap,
 }
 
 impl Clone for RouterHandle {
@@ -223,6 +229,7 @@ impl Clone for RouterHandle {
             mgr: self.mgr.clone(),
             active_session: self.active_session.clone(),
             reply_targets: self.reply_targets.clone(),
+            provider_selection: self.provider_selection.clone(),
         }
     }
 }
@@ -279,6 +286,7 @@ impl RouterHandle {
                 mgr,
                 active_session: Arc::new(RwLock::new(None)),
                 reply_targets: ReplyTargetMap::default(),
+                provider_selection: ProviderSelectionMap::default(),
             },
             rx,
         )
@@ -573,6 +581,13 @@ impl RouterHandle {
     /// `root_id`，保证回复聚合在原话题。主线 key 返回 `None`（Q7 现状）。
     pub async fn reply_target(&self, key: &SessionKey) -> Option<String> {
         self.reply_targets.get(key).await
+    }
+
+    /// `/provider` 卡片当前选中的 provider（per-SessionKey）。`None` =
+    /// 「（新建）」模式（默认 / 切回）。由 [`provider_card`] 读写；测试
+    /// 也可直接调用以 seed 状态。
+    pub fn provider_selection(&self) -> &ProviderSelectionMap {
+        &self.provider_selection
     }
 
     /// True if a live (Active) session is mapped for `key` (used to reject

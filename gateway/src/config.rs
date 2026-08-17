@@ -225,6 +225,9 @@ pub struct ProviderPreset {
     pub base_url_openai: Option<&'static str>,
     /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
     pub api_key_env: &'static str,
+    /// 该 provider 提供的 model 列表（静态约定，覆盖主页宣传的常用 model；
+    /// 不调 /v1/models 动态拉取，详见 docs/... 或 bead sebas-63f.2 设计讨论）。
+    pub models: &'static [&'static str],
 }
 
 const PROVIDER_PRESETS: &[ProviderPreset] = &[
@@ -233,54 +236,112 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_anthropic: Some("https://api.anthropic.com"),
         base_url_openai: None,
         api_key_env: "ANTHROPIC_API_KEY",
+        models: &[
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-haiku-4-20250514",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-haiku-20241022",
+        ],
     },
     ProviderPreset {
         name: "openai",
         base_url_anthropic: None,
         base_url_openai: Some("https://api.openai.com/v1"),
         api_key_env: "OPENAI_API_KEY",
+        models: &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4-turbo",
+            "o1",
+            "o1-mini",
+            "o3-mini",
+            "gpt-3.5-turbo",
+        ],
     },
     ProviderPreset {
         name: "deepseek",
         base_url_anthropic: Some("https://api.deepseek.com/anthropic"),
         base_url_openai: Some("https://api.deepseek.com"),
         api_key_env: "DEEPSEEK_API_KEY",
+        models: &[
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ],
     },
     ProviderPreset {
         name: "kimi",
         base_url_anthropic: Some("https://api.moonshot.cn/anthropic"),
         base_url_openai: Some("https://api.moonshot.cn/v1"),
         api_key_env: "MOONSHOT_API_KEY",
+        models: &[
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k",
+            "kimi-k2-0711-preview",
+        ],
     },
     ProviderPreset {
         name: "glm",
         base_url_anthropic: Some("https://open.bigmodel.cn/api/anthropic"),
         base_url_openai: Some("https://open.bigmodel.cn/api/paas/v4"),
         api_key_env: "ZHIPU_API_KEY",
+        models: &[
+            "glm-4-plus",
+            "glm-4-0520",
+            "glm-4-air",
+            "glm-4-airx",
+            "glm-4-flash",
+        ],
     },
     ProviderPreset {
         name: "minimax",
         base_url_anthropic: Some("https://api.minimaxi.com/anthropic"),
         base_url_openai: Some("https://api.minimaxi.com/v1"),
         api_key_env: "MINIMAX_API_KEY",
+        // TODO: 实际 ids 待确认 (MiniMax 官方 model 命名常变)
+        models: &[
+            "MiniMax-Text-01",
+            "MiniMax-VL-01",
+            "abab6.5s-chat",
+            "abab6.5g-chat",
+        ],
     },
     ProviderPreset {
         name: "ark",
         base_url_anthropic: Some("https://ark.cn-beijing.volces.com/api/plan"),
         base_url_openai: Some("https://ark.cn-beijing.volces.com/api/plan/v3"),
         api_key_env: "ARK_API_KEY",
+        // TODO: 实际 endpoint ids (doubao-pro / lite 等含版本号后缀) 待确认
+        models: &[
+            "doubao-pro",
+            "doubao-lite",
+            "doubao-1-5-pro",
+        ],
     },
     ProviderPreset {
         name: "dashscope",
         base_url_anthropic: None,
         base_url_openai: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         api_key_env: "DASHSCOPE_API_KEY",
+        models: &[
+            "qwen-turbo",
+            "qwen-plus",
+            "qwen-max",
+            "qwen-long",
+        ],
     },
     ProviderPreset {
         name: "gemini",
         base_url_anthropic: None,
         base_url_openai: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
         api_key_env: "GEMINI_API_KEY",
+        models: &[
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-2.0-flash-exp",
+        ],
     },
 ];
 

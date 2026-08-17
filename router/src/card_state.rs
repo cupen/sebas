@@ -11,13 +11,19 @@ use tokio::sync::RwLock;
 /// `"DONE"`, `"CrossMark"`) — required because Feishu's reaction API rejects
 //// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. These values
 /// surface as reactions on the root card to reflect session state; the card
-/// header title is the topic derived from the prompt instead
-/// (`feishu::cards::derive_topic`).
+/// header title is the short session_id instead (`feishu::cards::derive_session_title`).
 pub mod phase {
-    pub const SEED: &str = "Typing"; // watching / waiting on first event
+    // SEED reaction 表达"已收到"语义（Feishu `emoji_type` "Get" = 👌），不再是
+    // "Typing" —— 后者暗示"正在打字"。bot 首条回复卡 reaction 用 SEED，
+    // 用户入站消息的 ack reaction 也复用 SEED。
+    pub const SEED: &str = "Get"; // 已收到 — 首条回复卡 reaction + 用户入站 ack
     pub const WORKING: &str = "OnIt"; // streaming response in progress
-    pub const DONE: &str = "DONE"; // Finished event
-    pub const FAILED: &str = "CrossMark"; // terminal Error event
+    // DONE / FAILED 仍作为内部 FSM 终态（用于 in-flight 检查、queue drain），
+    // 但不再触发 Out::React —— 终态视觉由 card body 自身表达（父面板标题
+    // "🤔 折腾中" → "✅ 已完成"；terminal Error 的 ❌ 行），reaction 维持已收
+    // 到 / 折腾中视觉即可。
+    pub const DONE: &str = "DONE"; // Finished event (state only, no reaction emit)
+    pub const FAILED: &str = "CrossMark"; // terminal Error event (state only, no reaction emit)
 }
 
 /// Accumulated token usage for a session. Reset at the start of each turn

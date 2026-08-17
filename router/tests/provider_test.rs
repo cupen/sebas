@@ -107,7 +107,10 @@ fn provider_router(dir: &tempfile::TempDir) -> (RouterHandle, tokio::sync::mpsc:
 }
 
 #[tokio::test]
-async fn provider_command_opens_list_card_with_seed() {
+async fn provider_command_opens_main_card_with_seed() {
+    // bead sebas-63f.5：`/provider` 命令现在打开「Provider 管理」主卡
+    // （mode + default-direct 下拉 + 列表下拉 + 新建子区/详情面板），
+    // 取代了旧的「列表 + 每条 编辑/删除」双入口卡。
     let dir = tempfile::tempdir().unwrap();
     let (router, mut rx) = provider_router(&dir);
 
@@ -123,9 +126,30 @@ async fn provider_command_opens_list_card_with_seed() {
     match out {
         Out::SendCard { card, .. } => {
             let s = card.to_string();
+            // 标题。
+            assert!(s.contains("Provider 管理"), "{s}");
+            // 种子的 provider 名出现在下拉里。
             assert!(s.contains("deepseek"), "{s}");
-            assert!(s.contains("＋ 新增"), "{s}");
-            assert!(s.contains("\"op\":\"create\""), "{s}");
+            // 新建子区按钮：「＋ 新增（预设）」与「＋ 新增（自定义）」。
+            assert!(s.contains("＋ 新增（预设）"), "{s}");
+            assert!(s.contains("＋ 新增（自定义）"), "{s}");
+            // 新按钮 payload 用 form 名（provider-create-preset /
+            // provider-create-custom）取代旧的 `{form, op: "create"}`。
+            assert!(
+                s.contains("\"form\":\"provider-create-preset\""),
+                "{s}"
+            );
+            assert!(
+                s.contains("\"form\":\"provider-create-custom\""),
+                "{s}"
+            );
+            // 三个 mode 按钮。
+            for m in ["off", "direct", "gateway"] {
+                assert!(
+                    s.contains(&format!("\"mode\":\"{m}\"")),
+                    "应渲染 mode={m} 按钮：{s}"
+                );
+            }
         }
         other => panic!("expected SendCard, got {other:?}"),
     }
@@ -250,7 +274,11 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
 }
 
 #[tokio::test]
-async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
+async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
+    // bead sebas-63f.5：主卡详情面板只显示「API Key：已配置/未配置」两态，
+    // 取代了旧列表卡的 `••••••` 掩码（一样防泄露，只是文案更简洁）。
+    // 编辑表单的密钥不预填行为由既有 `CrudForm::item_to_initial()` 保证
+    // （见下方的「编辑表单不预填密钥」半边）。
     let dir = tempfile::tempdir().unwrap();
     let store = FileStore::load(
         dir.path().join("providers.json"),
@@ -275,7 +303,24 @@ async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
         None,
     );
 
-    // 列表卡：密钥掩码显示，绝不回显明文。
+    // 主卡：选 deepseek → 详情面板的 API Key 行应是「已配置」，且永远不
+    // 出现明文密钥（无论新旧设计）。
+    router
+        .dispatch(FeishuIn::Text {
+            key: key(),
+            text: "/provider".into(),
+            reply_to: None,
+        })
+        .await;
+    let _ = rx.recv().await.unwrap();
+
+    // 在 router handle 内手动把 selection 设为 deepseek（模拟用户在列表
+    // 下拉里选了它），然后重渲主卡——这一步覆盖详情面板的「已配置」分支。
+    router
+        .provider_selection()
+        .set(key(), Some("deepseek".into()))
+        .await;
+    // 触发一次「卡片刷新」：再次 /provider。
     router
         .dispatch(FeishuIn::Text {
             key: key(),
@@ -288,10 +333,44 @@ async fn secret_key_is_masked_in_list_and_not_prefilled_in_edit() {
         panic!("expected SendCard");
     };
     let s = card.to_string();
-    assert!(s.contains("••••••"), "{s}");
-    assert!(!s.contains("sk-super-secret"), "list must mask secret: {s}");
+    assert!(s.contains("已配置"), "应展示 API Key：已配置：{s}");
+    assert!(
+        !s.contains("sk-super-secret"),
+        "api_key 明文不应出现在主卡：{s}"
+    );
+}
 
-    // 编辑表单：不预填密钥。
+#[tokio::test]
+async fn edit_form_does_not_prefill_secret() {
+    // 主卡详情面板里点「编辑」按钮 → 走既有 `provider-custom` 表单的
+    // OP_EDIT 路径；表单的 `item_to_initial()` 应跳过 secret 字段，绝不
+    // 把密钥回显到表单（沿用 63f.5 之前的契约）。
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::load(
+        dir.path().join("providers.json"),
+        "name",
+        vec![item_with_key("deepseek", "sk-super-secret")],
+    )
+    .unwrap();
+    let form = CrudForm::new(spec(), "name", store.clone());
+    let forms = router::ProviderForms {
+        preset: Arc::new(CrudForm::new(
+            FormSpec::new("provider-preset", "Provider（预设）", vec![]),
+            "name",
+            store,
+        )),
+        custom: Arc::new(form),
+    };
+    let (router, mut rx) = RouterHandle::new_with_provider_form(
+        SessionMap::new(),
+        Default::default(),
+        16,
+        Some(Arc::new(forms)),
+        None,
+    );
+
+    // 直接触发既有表单的编辑路径（不走新主卡的按钮，因为我们只想验证
+    // 旧契约：编辑表单不预填密钥）。
     router
         .dispatch(FeishuIn::ButtonCb {
             key: key(),

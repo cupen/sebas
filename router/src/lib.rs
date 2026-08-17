@@ -3,6 +3,7 @@ pub mod card_state;
 pub mod commands;
 pub mod crud;
 pub mod error;
+pub mod provider_state;
 pub mod router;
 pub mod settings;
 pub mod state;

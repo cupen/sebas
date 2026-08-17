@@ -45,6 +45,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
         fake.to_str().unwrap(),
         vec![],
         Some(work_dir.path().to_string_lossy().into_owned()),
+        None,
     )
     .await
     .expect("spawn fake CLI through production path");

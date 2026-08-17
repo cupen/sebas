@@ -33,6 +33,11 @@ pub struct ConnectConfig {
     pub claude_path: String,
     pub claude_args: Vec<String>,
     pub work_dir: Option<String>,
+    /// Additional env vars merged into the child process's environment on
+    /// top of the OS-given env. Used by sebas to inject provider-driven
+    /// keys (`ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, etc.) at spawn time
+    /// (bead sebas-63f.8). Empty when no override applies (Off mode).
+    pub extra_env: Vec<(String, String)>,
     /// The sebas routing id (uuid minted by the manager; also becomes the
     /// claude conversation id via `--session-id`).
     pub session_id: String,
@@ -50,6 +55,7 @@ pub struct CcDriver {
     client: ClaudeClient,
     session_id: String,
     cfg: DriverCfg,
+    extra_env: Vec<(String, String)>,
     evt_tx: mpsc::Sender<AcpEvent>,
     pending_perms: Arc<Mutex<HashMap<String, ResponderSlot>>>,
     /// tool_use_id → tool_name, so User(tool_result) frames can emit ToolEnd
@@ -130,6 +136,7 @@ impl CcDriver {
             claude_path,
             claude_args,
             work_dir,
+            extra_env,
             session_id,
             resume,
             startup_timeout,
@@ -147,6 +154,11 @@ impl CcDriver {
         if !resume {
             extra_args.insert("session-id".into(), Some(session_id.clone()));
         }
+
+// Provider-driven env (sebas-63f.8): injected into the child so
+        // claude hits the resolved upstream URL/token rather than the OS env.
+        let env_map: std::collections::HashMap<String, String> =
+            extra_env.iter().cloned().collect();
 
         let waiting_permission = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cb = permission_hook(
@@ -192,6 +204,7 @@ impl CcDriver {
             cli_path: Some(claude_path.clone().into()),
             cwd: work_dir.clone().map(Into::into),
             hooks: Some(hooks),
+            env: env_map,
             extra_args,
             resume: if resume {
                 Some(session_id.clone())
@@ -246,6 +259,7 @@ impl CcDriver {
                 work_dir,
                 startup_timeout,
             },
+            extra_env,
             evt_tx,
             pending_perms,
             tool_names: HashMap::new(),
@@ -461,6 +475,7 @@ impl CcDriver {
             claude_path: self.cfg.claude_path.clone(),
             claude_args: self.cfg.claude_args.clone(),
             work_dir: self.cfg.work_dir.clone(),
+            extra_env: self.extra_env.clone(),
             session_id: self.session_id.clone(),
             resume: true,
             startup_timeout: self.cfg.startup_timeout,

@@ -71,6 +71,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         fake.to_str().unwrap(),
         vec![],
         Some(work_dir_a.path().to_string_lossy().into_owned()),
+        None,
     )
     .await
     .expect("spawn fake CLI through production fn");
@@ -180,6 +181,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         // or the transient 🚧 flush is preempted by Finished.
         vec!["--slow-ms".into(), "800".into()],
         Some(work_dir_b.path().to_string_lossy().into_owned()),
+        None,
     )
     .await
     .expect("spawn fake CLI");

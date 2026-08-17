@@ -188,6 +188,7 @@ pub async fn run(
     let router_for_outbound = router.clone();
     let mgr_for_outbound = mgr.clone();
     let reactions_for_outbound = reactions.clone();
+    let gateway_cfg_for_outbound = gateway_cfg.clone();
     tokio::spawn(async move {
         while let Some(out) = out_rx.recv().await {
             if let Err(e) = dispatch_out(
@@ -198,6 +199,7 @@ pub async fn run(
                 &router_for_outbound,
                 &mgr_for_outbound,
                 &reactions_for_outbound,
+                gateway_cfg_for_outbound.as_ref(),
                 out,
             )
             .await

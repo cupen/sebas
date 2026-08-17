@@ -6,16 +6,34 @@
 use crate::config::Config;
 use crate::dispatch::{send_card_topic_aware, topic_reply_target, TopicSendOutcome};
 use crate::reactions::ReactionTracker;
+use crate::spawn_env::resolve_spawn_overrides;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
+use acp_claude::ClaudeCodeDriver;
 use feishu::cards::render_accumulated_card;
 use feishu::client::FeishuClient;
 use feishu::events::SessionKey;
+use gateway::config::GatewayConfig;
 use router::router::RouterHandle;
 use router::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
+
+/// Compute (extra_env, claude_args+extra_args) from provider state + gateway
+/// config. Centralizes the spawn-time translation so spawn / resume /
+/// spawn_test_session all see the same view. Pure: same input → same output.
+fn spawn_overrides(
+    claude_args: Vec<String>,
+    gateway_cfg: Option<&GatewayConfig>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let state = router::provider_state::load();
+    let driver = ClaudeCodeDriver;
+    let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, gateway_cfg);
+    let mut full_args = claude_args;
+    full_args.extend(extra_args);
+    (extra_env, full_args)
+}
 
 /// Create the ACP session, send the initial prompt, and flip the router's
 /// Spawning placeholder to Active (draining queued prompts). No Feishu side
@@ -25,6 +43,10 @@ use tracing::{debug, warn};
 /// crash-on-first-prompt terminal event survives the wrapper's eager table
 /// removal (D6). `pub` for integration tests (tests/spawn_race_test.rs);
 /// not part of the stable API.
+///
+/// `gateway_cfg` is the parsed `[gateway]` config from config.toml (or
+/// `None` when the daemon runs without one). Used to resolve
+/// `ProviderMode::Gateway` → URL + auth token; ignored for Off / Direct.
 pub async fn acp_spawn_and_activate(
     mgr: &Arc<SessionManager>,
     router: &RouterHandle,
@@ -33,13 +55,15 @@ pub async fn acp_spawn_and_activate(
     claude_path: &str,
     claude_args: Vec<String>,
     work_dir: Option<String>,
+    gateway_cfg: Option<&GatewayConfig>,
 ) -> anyhow::Result<(
     String,
     Vec<String>,
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
 )> {
+    let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
     let session_id = mgr
-        .create_session(claude_path, claude_args, work_dir, prompt.to_string())
+        .create_session(claude_path, full_args, work_dir, extra_env, prompt.to_string())
         .await?;
     // Clone the event receiver IMMEDIATELY after create_session returns Ok
     // (entry is in the table, session alive — before any slow I/O or prompt
@@ -70,6 +94,9 @@ pub async fn acp_spawn_and_activate(
 /// to Active. The returned bool is `SpawnOutcome.resumed` — false means the
 /// old conversation is gone and the id is a fresh one. The event receiver is
 /// cloned IMMEDIATELY after the spawn returns, before any slow I/O (D6).
+///
+/// Provider-mode env/args apply on resume just as on fresh spawn — same
+/// `gateway_cfg` and same runtime state produce the same overrides.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub async fn acp_resume_and_activate(
     mgr: &Arc<SessionManager>,
@@ -80,14 +107,16 @@ pub async fn acp_resume_and_activate(
     claude_path: &str,
     claude_args: Vec<String>,
     work_dir: Option<String>,
+    gateway_cfg: Option<&GatewayConfig>,
 ) -> anyhow::Result<(
     String,
     Vec<String>,
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
     bool,
 )> {
+    let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
     let outcome = mgr
-        .resume_session(claude_path, claude_args, work_dir, old_session_id)
+        .resume_session(claude_path, full_args, work_dir, extra_env, old_session_id)
         .await?;
     let session_id = outcome.session_id.clone();
     let rx = mgr
@@ -199,8 +228,9 @@ let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_co
             .record_root_msg_id(session_id.clone(), msg_id.clone())
             .await;
         // Stamp the initial reaction on the root card. emoji_type 是 Feishu
-        // API 合法值（"Typing"），不再是 unicode 👀 —— 那个会被 231001 拒绝。
-        // Best-effort: a reaction failure must not abort session creation.
+        // API 合法值（"Get" = 👌 已收到），不再是 "Typing" / unicode 👀 ——
+        // "Typing" 暗示正在输入，"Get" 才契合"已收到"语义。Best-effort:
+        // a reaction failure must not abort session creation.
         match feishu
             .react(http, tokens, &msg_id, router::card_state::phase::SEED)
             .await

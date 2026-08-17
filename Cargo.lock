@@ -1877,8 +1877,10 @@ name = "router"
 version = "0.1.0"
 dependencies = [
  "acp-claude",
+ "anyhow",
  "dirs 5.0.1",
  "feishu",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",

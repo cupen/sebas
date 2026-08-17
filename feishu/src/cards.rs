@@ -149,6 +149,23 @@ pub enum CardElement {
         name: String,
         elements: Vec<serde_json::Value>,
     },
+    /// Card JSON 2.0 `select_static` rendered as a top-level body element
+    /// (not inside a `Form` container). Used by the `/provider` card for
+    /// 「Default provider for DIRECT」 and 「Provider list」 dropdowns.
+    /// `behaviors` carries a callback payload so changing the selection
+    /// fires `card.action.trigger` back to the router with the chosen
+    /// value keyed by `name` in `action.form_value`.
+    SelectStatic {
+        name: String,
+        placeholder: CardText,
+        options: Vec<(String, String)>,
+        /// Currently selected option's value; rendered with `initial_value`
+        /// so the dropdown doesn't reset to placeholder after a refresh.
+        initial: Option<String>,
+        /// On-change callback payload (matches the format used by
+        /// `CardElement::Button`'s `behaviors[].value`).
+        on_change: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,6 +295,47 @@ impl Serialize for CardElement {
                 s.serialize_field("elements", elements)?;
                 s.end()
             }
+            CardElement::SelectStatic {
+                name,
+                placeholder,
+                options,
+                initial,
+                on_change,
+            } => {
+                // Top-level select_static mirrors the form-container variant
+                // from `feishu::forms` (tag, placeholder, options, behaviors,
+                // initial_value, name) so on-change callbacks route the
+                // selected value through `action.form_value[name]`.
+                let opts: Vec<Value> = options
+                    .iter()
+                    .map(|(value, label)| {
+                        serde_json::json!({
+                            "text": {"tag": "plain_text", "content": label},
+                            "value": value,
+                        })
+                    })
+                    .collect();
+                let initial_value: Option<Vec<String>> = initial
+                    .as_ref()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| vec![v.clone()]);
+                let mut s = ser.serialize_struct("CardElement", 6)?;
+                s.serialize_field("tag", "select_static")?;
+                s.serialize_field("placeholder", placeholder)?;
+                s.serialize_field("options", &opts)?;
+                s.serialize_field(
+                    "behaviors",
+                    &[CardBehavior {
+                        r#type: "callback".into(),
+                        value: on_change.clone(),
+                    }],
+                )?;
+                s.serialize_field("name", name)?;
+                if let Some(iv) = initial_value {
+                    s.serialize_field("initial_value", &iv)?;
+                }
+                s.end()
+            }
         }
     }
 }
@@ -337,26 +395,23 @@ impl Card {
     }
 }
 
-/// 卡片 header 标题的字符上限：主题过长即截断加省略号，防超飞书标题限长。
+/// 卡片 header 标题的字符上限：标题过长即截断加省略号，防超飞书标题限长。
 const CARD_TITLE_MAX_CHARS: usize = 40;
 
-/// 从用户首条 prompt 派生卡片主题（header title）。
+/// 从 claude code 会话 id（UUID v4，36 字符）派生卡片 header title：
+/// 取前 8 字符（hex 短形式）作为稳定标识。同一会话内跨卡 / 换卡一致；
+/// 不同会话立刻能区分（聊天列表里多张卡片并列时也好识别）。
+/// 空 id（lazy seed 早到兜底场景）回退中性占位 `"Claude Code"`。
 ///
-/// 取首个剥离后非空的行：去前后空白、行首引用符（`>`）与代码围栏/行内 ``
-/// 包裹，超长截断成 `…`；全部行剥离后仍为空（空 prompt / lazy seed / 纯围栏）
-/// 回退中性占位 `"Claude Code"`。`user_prompt` 会话内不变，故标题随会话保持
-/// 稳定，跨卡 / 换卡一致——正表达"主题"语义。状态（进行中/完成）由 Feishu
-/// reaction 表达，不再占标题（见 `phase_visual`）。
-pub fn derive_topic(prompt: &str) -> String {
-    let first_line = prompt
-        .lines()
-        .map(|l| l.trim().trim_start_matches('>').trim().trim_matches('`').trim())
-        .find(|l| !l.is_empty());
-    let Some(cleaned) = first_line else {
+/// 旧版 `derive_topic(user_prompt)` 派生主题文字，但短 prompt / 多行 prompt
+/// 产出的标题常不可读；session_id 短形式既稳定又好追溯。
+pub fn derive_session_title(session_id: &str) -> String {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
         return "Claude Code".to_string();
-    };
-    let mut out: String = cleaned.chars().take(CARD_TITLE_MAX_CHARS).collect();
-    if cleaned.chars().count() > CARD_TITLE_MAX_CHARS {
+    }
+    let mut out: String = trimmed.chars().take(CARD_TITLE_MAX_CHARS).collect();
+    if trimmed.chars().count() > CARD_TITLE_MAX_CHARS {
         out.push('…');
     }
     out
@@ -418,9 +473,10 @@ fn short_model_name(model: &str) -> String {
 }
 
 /// 从累积状态构建完整卡（spec §4.3）：
-/// header(`{主题}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
+/// header(`{session_id 短形式}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
 /// + body 各元素 + footer 灰注。
-/// 标题由 `derive_topic(user_prompt)` 派生，不再携带状态 emoji。
+/// 标题由 `derive_session_title(session_id)` 派生（取前 8 字符），不再携带
+/// 状态 emoji；状态由 Feishu reaction 表达（见 `router::card_state::phase`）。
 /// 当 `footer` 为 Some 时展示模型名和 token 用量，否则回退 `msg_id: {session_id}`。
 pub fn render_accumulated_card(
     user_prompt: &str,
@@ -429,7 +485,7 @@ pub fn render_accumulated_card(
     theme: &str,
     footer: Option<&CardFooter>,
 ) -> Card {
-    let mut card = Card::new(&derive_topic(user_prompt), theme);
+    let mut card = Card::new(&derive_session_title(session_id), theme);
     card.push_text(format!("> {user_prompt}"));
     card.push_divider();
     for el in body {
