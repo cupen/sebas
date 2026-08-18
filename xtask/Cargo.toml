@@ -1,0 +1,27 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Build-time tooling only. Not part of sebas runtime; excluded from
+# workspace dependency graph via dedicated crate (no crate-level deps
+# on sebas/ router/ gateway). Pulls reqwest for the models.dev fetch
+# (build-time network access is fine — this bin is never run in prod).
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# blocking reqwest: this is a one-shot CLI, not a server. Sync
+# reqwest owns its own (tiny) tokio runtime, no async fn signatures
+# leak into the rest of the bin.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+thiserror = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+# parser unit tests use a tiny embedded JSON string — no fixtures dir needed
