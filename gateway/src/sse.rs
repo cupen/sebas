@@ -11,7 +11,7 @@
 //!   Responses API 是 `usage.{input_tokens, output_tokens}`（按 key 存在性探测）；
 //!   流式 Responses 的 `response.completed` 把 usage 放在 `response.usage`。
 
-use crate::proto::Protocol;
+use crate::proto::WireProtocol;
 
 /// 提取出的 usage 计数。全字段 `Option`：未观测到的字段保持 `None`，由
 /// `SseUsageParser::feed` 增量 merge（`Some` 覆盖 `None`）。cache_* 仅 Anthropic
@@ -49,12 +49,12 @@ impl UsageInfo {
 /// 跨 chunk 的不完整事件保留到下次 `feed`。`finish()` 在流结束时 flush 残余
 /// 缓冲（可能含未闭合的尾事件）。解析失败静默跳过，不报错。
 pub struct SseUsageParser {
-    proto: Protocol,
+    proto: WireProtocol,
     buf: Vec<u8>,
 }
 
 impl SseUsageParser {
-    pub fn new(proto: Protocol) -> Self {
+    pub fn new(proto: WireProtocol) -> Self {
         SseUsageParser {
             proto,
             buf: Vec::new(),
@@ -95,13 +95,13 @@ impl SseUsageParser {
 /// 非流式响应的 usage 解析（spec §4.4）。body 是完整 JSON。坏 JSON → 全 None。
 /// Anthropic 取 top-level `usage.{input,output,cache_read,cache_creation}`；
 /// OpenAI 按 key 存在性探测 chat（prompt/completion）vs responses（input/output）。
-pub fn parse_json_usage(proto: Protocol, body: &[u8]) -> UsageInfo {
+pub fn parse_json_usage(proto: WireProtocol, body: &[u8]) -> UsageInfo {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return UsageInfo::default();
     };
     match proto {
-        Protocol::Anthropic => extract_anthropic_json(&v),
-        Protocol::OpenAi => extract_openai_usage(&v),
+        WireProtocol::Anthropic => extract_anthropic_json(&v),
+        WireProtocol::OpenAi => extract_openai_usage(&v),
     }
 }
 
@@ -115,7 +115,7 @@ fn find_event_boundary(buf: &[u8]) -> Option<usize> {
 
 /// 解析一个完整事件（已剥 `\n\n`）：提取 `data:` 行负载，跳过 `[DONE]`，
 /// 解析 JSON 后按协议提取 usage。坏 JSON / 未知事件 → 全 None。
-fn parse_event(proto: Protocol, event_str: &str) -> UsageInfo {
+fn parse_event(proto: WireProtocol, event_str: &str) -> UsageInfo {
     // 拼接所有 `data:` 行的负载。SSE spec 多行 data 用换行拼接；LLM 上游
     // 单行居多，简单拼接即可。`data:` 后可能有一个前导空格（按 spec）。
     let mut data_parts: Vec<&str> = Vec::new();
@@ -142,10 +142,10 @@ fn parse_event(proto: Protocol, event_str: &str) -> UsageInfo {
 
 /// 按协议提取 usage。SSE 流走 type 路由（Anthropic）或 key 探测（OpenAI）。
 /// 非 SSE 的 Anthropic 走 `extract_anthropic_json`（top-level usage）。
-fn extract_usage_from_value(proto: Protocol, v: &serde_json::Value) -> UsageInfo {
+fn extract_usage_from_value(proto: WireProtocol, v: &serde_json::Value) -> UsageInfo {
     match proto {
-        Protocol::Anthropic => extract_anthropic_sse_event(v),
-        Protocol::OpenAi => extract_openai_usage(v),
+        WireProtocol::Anthropic => extract_anthropic_sse_event(v),
+        WireProtocol::OpenAi => extract_openai_usage(v),
     }
 }
 
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn anthropic_full_stream_input_cache_output() {
-        let mut p = SseUsageParser::new(Protocol::Anthropic);
+        let mut p = SseUsageParser::new(WireProtocol::Anthropic);
         // message_start 带 input + cache_read + cache_creation（output_tokens=1
         // 是占位，按 brief 不取——output 来自 message_delta）。
         let chunk1 = b"event: message_start\n\
@@ -266,7 +266,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
 
     #[test]
     fn anthropic_split_across_chunks_reassembled() {
-        let mut p = SseUsageParser::new(Protocol::Anthropic);
+        let mut p = SseUsageParser::new(WireProtocol::Anthropic);
         // 把 message_start 事件切成三段：header / usage 前半 / usage 后半 + 边界
         let part1 = b"event: message_start\ndata: {\"type\":\"message_start\",\
 \"message\":{\"id\":\"msg_x\",\"usage\":{\"input_tokens\":7";
@@ -295,7 +295,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
 
     #[test]
     fn openai_chat_shape_prompt_completion_tokens() {
-        let mut p = SseUsageParser::new(Protocol::OpenAi);
+        let mut p = SseUsageParser::new(WireProtocol::OpenAi);
         // 末尾 chunk 带 usage（chat completions shape）。
         let chunk = b"data: {\"id\":\"chatcmpl-1\",\"choices\":[],\
 \"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"total_tokens\":46}}\n\n\
@@ -312,7 +312,7 @@ data: [DONE]\n\n";
 
     #[test]
     fn openai_responses_shape_input_output_tokens() {
-        let mut p = SseUsageParser::new(Protocol::OpenAi);
+        let mut p = SseUsageParser::new(WireProtocol::OpenAi);
         // response.completed 事件把 usage 放在 response.usage 下。
         let chunk = b"event: response.completed\ndata: {\"type\":\"response.completed\",\
 \"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":8,\"output_tokens\":20,\
@@ -329,7 +329,7 @@ data: [DONE]\n\n";
 
     #[test]
     fn done_marker_and_unknown_events_tolerated() {
-        let mut p = SseUsageParser::new(Protocol::OpenAi);
+        let mut p = SseUsageParser::new(WireProtocol::OpenAi);
         let chunk = b": ping comment\n\nevent: unknown_thing\ndata: {\"foo\":\"bar\"}\n\n\
 data: [DONE]\n\n";
         // 全部应被容忍——无 panic、无 usage。
@@ -338,7 +338,7 @@ data: [DONE]\n\n";
         assert_eq!(info, UsageInfo::default());
 
         // Anthropic 侧未知事件同样容忍，且不破坏后续 message_delta。
-        let mut pa = SseUsageParser::new(Protocol::Anthropic);
+        let mut pa = SseUsageParser::new(WireProtocol::Anthropic);
         let chunk2 = b"event: ping\ndata: {\"type\":\"ping\"}\n\n\
 event: something_new\ndata: {\"type\":\"something_new\",\"x\":1}\n\n\
 event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":99}}\n\n";
@@ -351,7 +351,7 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_toke
 
     #[test]
     fn malformed_json_tolerated() {
-        let mut p = SseUsageParser::new(Protocol::Anthropic);
+        let mut p = SseUsageParser::new(WireProtocol::Anthropic);
         let chunk = b"event: message_start\ndata: {not valid json\n\n\
 event: message_delta\ndata: {\"type\":\"message_delta\",\
 \"usage\":{\"output_tokens\":7}}\n\n";
@@ -370,7 +370,7 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\
         let anth = b"{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\
 \"content\":[],\"model\":\"claude-sonnet\",\"usage\":{\"input_tokens\":11,\
 \"output_tokens\":22,\"cache_read_input_tokens\":4,\"cache_creation_input_tokens\":1}}";
-        let info = parse_json_usage(Protocol::Anthropic, anth);
+        let info = parse_json_usage(WireProtocol::Anthropic, anth);
         assert_eq!(info.input_tokens, Some(11));
         assert_eq!(info.output_tokens, Some(22));
         assert_eq!(info.cache_read_tokens, Some(4));
@@ -379,7 +379,7 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\
         // OpenAI chat 非流式：usage.{prompt_tokens, completion_tokens}
         let chat = b"{\"id\":\"chatcmpl-1\",\"choices\":[],\
 \"usage\":{\"prompt_tokens\":13,\"completion_tokens\":27,\"total_tokens\":40}}";
-        let info = parse_json_usage(Protocol::OpenAi, chat);
+        let info = parse_json_usage(WireProtocol::OpenAi, chat);
         assert_eq!(info.input_tokens, Some(13));
         assert_eq!(info.output_tokens, Some(27));
         assert_eq!(info.cache_read_tokens, None);
@@ -387,16 +387,16 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\
         // OpenAI Responses 非流式：usage.{input_tokens, output_tokens}
         let resp = b"{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":9,\"output_tokens\":14,\
 \"total_tokens\":23}}";
-        let info = parse_json_usage(Protocol::OpenAi, resp);
+        let info = parse_json_usage(WireProtocol::OpenAi, resp);
         assert_eq!(info.input_tokens, Some(9));
         assert_eq!(info.output_tokens, Some(14));
 
         // 坏 JSON → 全 None
-        let info = parse_json_usage(Protocol::Anthropic, b"not json");
+        let info = parse_json_usage(WireProtocol::Anthropic, b"not json");
         assert_eq!(info, UsageInfo::default());
 
         // 合法 JSON 但无 usage → 全 None
-        let info = parse_json_usage(Protocol::OpenAi, b"{\"id\":\"x\"}");
+        let info = parse_json_usage(WireProtocol::OpenAi, b"{\"id\":\"x\"}");
         assert_eq!(info, UsageInfo::default());
     }
 }

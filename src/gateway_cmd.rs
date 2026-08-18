@@ -8,6 +8,7 @@
 //! See docs/superpowers/specs/2026-08-06-gateway-design.md.
 
 use gateway::config::GatewayConfig;
+use gateway::debug;
 use gateway::server;
 
 use crate::error::{Result, SebasError};
@@ -27,7 +28,8 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
     let mut cfg = GatewayConfig::parse(&raw).map_err(|e| SebasError::Gateway(e.to_string()))?;
     if args.debug {
         // parse 完成后注入内置 test provider（不改变配置解析语义）。
-        cfg.enable_debug_test_provider();
+        // 实现在 `gateway::debug`（spec 2026-08-17 §2.14）。
+        debug::enable_debug_test_provider(&mut cfg);
     }
     server::run(cfg)
         .await

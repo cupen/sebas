@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use gateway::proto::Protocol;
+use gateway::proto::WireProtocol;
 use support::*;
 
 /// 定位 workspace 根 `target/debug`（gateway crate 的 manifest 在其子目录）。
@@ -153,8 +153,8 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
         return;
     }
 
-    let anth = start_mock_upstream(Protocol::Anthropic).await;
-    let oai = start_mock_upstream(Protocol::OpenAi).await;
+    let anth = start_mock_upstream(WireProtocol::Anthropic).await;
+    let oai = start_mock_upstream(WireProtocol::OpenAi).await;
     let dir = support::test_target_dir("process_e2e");
     let usage_path = dir.path().join("usage.jsonl");
     let port = pick_free_port().await;
@@ -337,7 +337,7 @@ async fn standalone_gateway_reads_top_level_provider_table() {
         return;
     }
 
-    let anth = start_mock_upstream(Protocol::Anthropic).await;
+    let anth = start_mock_upstream(WireProtocol::Anthropic).await;
     let dir = support::test_target_dir("process_e2e_top");
     let usage_path = dir.path().join("usage.jsonl");
     let port = pick_free_port().await;

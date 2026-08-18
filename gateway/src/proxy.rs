@@ -24,7 +24,7 @@ use axum::response::Response;
 
 use crate::config::ProviderConfig;
 use crate::error::error_response;
-use crate::proto::{Protocol, resolve_target};
+use crate::proto::{WireProtocol, resolve_target};
 use crate::routing::{RouteError, extract_model_from_body, extract_model_from_path};
 use crate::server::AppState;
 use crate::sse::{SseUsageParser, UsageInfo, parse_json_usage};
@@ -61,7 +61,7 @@ const RESPONSE_STRIP_HEADERS: &[&str] = &[
 /// 改写请求 header：剥离 hop-by-hop + 下游 key，按协议注入上游 key。
 /// 业务 header（`anthropic-version` / `anthropic-beta` / `content-type` / 自定义）
 /// 原样透传。HeaderName 与 `&str` 比较已 case-insensitive（http crate 行为）。
-pub fn filtered_request_headers(src: &HeaderMap, proto: Protocol, upstream_key: &str) -> HeaderMap {
+pub fn filtered_request_headers(src: &HeaderMap, proto: WireProtocol, upstream_key: &str) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in src.iter() {
         if REQUEST_STRIP_HEADERS.iter().any(|s| name == *s) {
@@ -109,9 +109,9 @@ pub fn rename_model_in_body(body: &Bytes, upstream_model: &str) -> Option<Bytes>
 
 /// 按 protocol 注入上游 auth header（`x-api-key` / `Authorization: Bearer`）。
 /// 用 `insert` 覆盖（取代 append）——上游 key 唯一来源，单值即可。
-fn inject_upstream_auth(out: &mut HeaderMap, proto: Protocol, upstream_key: &str) {
+fn inject_upstream_auth(out: &mut HeaderMap, proto: WireProtocol, upstream_key: &str) {
     match proto {
-        Protocol::Anthropic => {
+        WireProtocol::Anthropic => {
             out.insert(
                 "x-api-key",
                 upstream_key
@@ -119,7 +119,7 @@ fn inject_upstream_auth(out: &mut HeaderMap, proto: Protocol, upstream_key: &str
                     .expect("upstream key must be a valid header value"),
             );
         }
-        Protocol::OpenAi => {
+        WireProtocol::OpenAi => {
             let val = format!("Bearer {upstream_key}");
             out.insert(
                 "authorization",
@@ -155,7 +155,7 @@ fn is_buffer_method(method: &Method) -> bool {
 /// 把 `RouteError` 映射成协议面错误响应。状态码与 err_type 按 brief 契约：
 /// `ProtocolMismatch` → 400 `invalid_request_error`；`NoRoute` → 502
 /// `no_route`。message 通用，不含 key。
-fn route_error_response(proto: Protocol, err: &RouteError) -> Response {
+fn route_error_response(proto: WireProtocol, err: &RouteError) -> Response {
     let (status, err_type, message): (StatusCode, &str, String) = match err {
         RouteError::ProtocolMismatch { provider } => (
             StatusCode::BAD_REQUEST,
@@ -173,7 +173,7 @@ fn route_error_response(proto: Protocol, err: &RouteError) -> Response {
 }
 
 /// 网关自身 5xx（上游不可达 / 配置缺失）。通用 message，不含 key/内部细节。
-fn upstream_error_response(proto: Protocol, message: &str) -> Response {
+fn upstream_error_response(proto: WireProtocol, message: &str) -> Response {
     error_response(proto, StatusCode::BAD_GATEWAY, "upstream_error", message)
 }
 
@@ -194,7 +194,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         Some(t) => t,
         None => {
             return error_response(
-                Protocol::OpenAi,
+                WireProtocol::OpenAi,
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "path is not under /v1",
@@ -489,7 +489,7 @@ fn sse_passthrough_stream(
 /// drop 后再正常 drop）。
 struct UsageFinalizer {
     sink: UsageSink,
-    proto: Protocol,
+    proto: WireProtocol,
     model: Option<String>,
     provider: String,
     upstream_model: Option<String>,
@@ -530,7 +530,7 @@ impl Drop for UsageFinalizer {
 #[allow(clippy::too_many_arguments)]
 fn settle_inner(
     sink: &UsageSink,
-    proto: Protocol,
+    proto: WireProtocol,
     model: Option<&str>,
     provider: &str,
     upstream_model: Option<&str>,
@@ -596,7 +596,7 @@ mod tests {
             ("content-type", "application/json"),
             ("x-custom", "hello"),
         ]);
-        let out = filtered_request_headers(&src, Protocol::Anthropic, "sk-upstream-anthropic");
+        let out = filtered_request_headers(&src, WireProtocol::Anthropic, "sk-upstream-anthropic");
 
         // 注入的上游 key
         assert_eq!(out.get("x-api-key").unwrap(), "sk-upstream-anthropic");
@@ -650,7 +650,7 @@ mod tests {
             ("content-type", "application/json"),
             ("x-request-id", "abc-123"),
         ]);
-        let out = filtered_request_headers(&src, Protocol::OpenAi, "sk-upstream-openai");
+        let out = filtered_request_headers(&src, WireProtocol::OpenAi, "sk-upstream-openai");
 
         assert_eq!(
             out.get("authorization").unwrap(),

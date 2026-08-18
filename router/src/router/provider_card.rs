@@ -1,4 +1,5 @@
-//! Provider 管理卡 UI（`/provider` 命令主卡，bead sebas-63f.5）。
+//! Provider 管理卡 UI（`/provider` 命令主卡，bead sebas-63f.5，2026-08-17
+//! 按用户实测反馈重构）。
 //!
 //! 单一「Provider 管理」卡，自上而下：
 //!
@@ -8,23 +9,21 @@
 //! 2. **Default provider for DIRECT** — `select_static`，选项 = 全 provider
 //!    名（按字母序）。当前选中项以 `initial_value` 高亮。改动写
 //!    `state.json.default_provider_for_direct` 并刷卡。
-//! 3. **Provider 列表下拉** — `select_static`，选项 = `（新建）` + 全
-//!    provider 名。改动更新 `ProviderSelectionMap`：选「（新建）」清空
-//!    选择、显示「＋ 新增」按钮区；选具体 provider 写入选择、显示折叠
-//!    详情面板。
-//! 4. **详情面板**（选中现有 provider 时）— `CollapsiblePanel`（默认展开）
-//!    + markdown 字段行（预设 / Base URL Anthropic / Base URL OpenAI /
-//!    API Key 已配置/未配置 / 默认 model）+ 三按钮（编辑 / 删除 / 设为
-//!    默认（DIRECT））。「编辑」复用 `provider_forms.preset.handle()` /
-//!    `custom.handle()` 走既有 create/edit 路径；「删除」直接调
-//!    `store.delete(name)` 并清选择；「设为默认（DIRECT）」写 state 并刷。
-//! 5. **新建子区**（选中「（新建）」时）— 「＋ 新增（预设）」 / 「＋ 新增
+//! 3. **Provider 列表** — 每个 provider 一行：一个**默认折叠**的
+//!    `CollapsiblePanel`，header 只显示一行摘要（名字 + 默认 model +
+//!    「DIRECT 默认」标记）。展开/收起由飞书客户端本地完成，不走服务端
+//!    回调，因此不再需要 per-session 的选择状态（旧 `ProviderSelectionMap`
+//!    已删除）。面板内是 markdown 字段行（预设 / Base URL Anthropic /
+//!    Base URL OpenAI / API Key 已配置/未配置 / 默认 model）+ 四按钮
+//!    （🔍 探测 model 列表 / 编辑 / 删除 / 设为默认（DIRECT））。
+//! 4. **新建子区**（常驻底部）— 「＋ 新增（预设）」 / 「＋ 新增
 //!    （自定义）」两个按钮，走 `provider-create-preset` / `-custom`
 //!    form 名，最终转交给 `forms.preset.handle()` / `custom.handle()`
 //!    渲染创建表单。
 //!
-//! 选中现 provider 后，折叠面板里留一个 `// TODO(63f.7): 探测 model 按钮`
-//! 注释，63f.7 在此插入「探测 model」按钮。
+//! 「编辑」复用 `provider_forms.preset.handle()` / `custom.handle()` 走既
+//! 有 create/edit 路径；「删除」直接调 `store.delete(name)`；「设为默认
+//! （DIRECT）」写 state 并刷。
 //!
 //! 不在本卡处理：表单容器（form_value 路径）只在原有 `provider-preset` /
 //! `provider-custom` 提交时由 `CrudForm::handle()` 路由，**新卡不内嵌 form
@@ -34,6 +33,7 @@
 use super::{Out, RouterHandle};
 use crate::crud::{CrudStore, Item};
 use crate::provider_state::{self, ProviderMode, ProviderRuntimeState};
+use crate::state_store::DefaultSelection;
 use feishu::cards::{
     Card, CardBehavior, CardButton, CardElement, CardText, CollapsiblePanel,
     CollapsiblePanelHeader, StandardIcon,
@@ -46,7 +46,6 @@ use std::collections::BTreeMap;
 
 pub const FORM_MODE: &str = "provider-mode";
 pub const FORM_DEFAULT_DIRECT: &str = "provider-default-direct";
-pub const FORM_LIST_SELECT: &str = "provider-list-select";
 pub const FORM_SET_DEFAULT_DIRECT: &str = "provider-set-default-direct";
 pub const FORM_DELETE_CONFIRM: &str = "provider-delete-confirm";
 pub const FORM_CREATE_PRESET: &str = "provider-create-preset";
@@ -58,14 +57,16 @@ pub const FORM_PROBE: &str = "provider-probe";
 pub const FORM_PROBE_APPLY: &str = "provider-probe-apply";
 /// 探测结果卡底部「← 返回 Provider 管理」按钮：把当前结果卡就地翻回主卡。
 pub const FORM_BACK: &str = "provider-back";
-
-/// 列表下拉的「（新建）」伪 value。Feishu 不接受 `""` 作为 option value
-/// （form 容器内 200530），用显式非空字符串避免歧义。
-pub const NEW_OPTION_VALUE: &str = "__new__";
+/// spec 2026-08-17 §2.4：详情面板里「协议」radio 的 callback —— 选完直接
+/// 把 `protocol` 字段写回 store（不经表单容器，详情面板内的快捷切换）。
+pub const FORM_PROTOCOL: &str = "provider-set-protocol";
 
 /// select_static 触发回调时 `form_value` 里键名（也是 widget `name`）。
 pub const SELECT_NAME_DEFAULT_DIRECT: &str = "provider_default_direct";
-pub const SELECT_NAME_LIST: &str = "provider_list_select";
+/// spec 2026-08-17 §2.4：详情面板里「协议」radio 的 select_static `name`
+/// （与表单 spec 里的 `protocol` 字段名不同——表单字段名走 CRUD 存储，
+/// 这里走详情面板的就地 on_change 回调；两者最终写到同一份 item）。
+pub const SELECT_NAME_PROTOCOL: &str = "provider_protocol";
 
 /// 卡片标题。
 const CARD_TITLE: &str = "Provider 管理";
@@ -88,9 +89,8 @@ pub async fn render_main_card(handle: &RouterHandle, key: &SessionKey) -> Out {
         None => Vec::new(),
     };
     let provider_names = sorted_names(&items);
-    let selected = handle.provider_selection().get(key).await;
 
-    let card = build_card(&state, &provider_names, selected.as_deref(), &items);
+    let card = build_card(&state, &provider_names, &items);
     let card_value = serde_json::to_value(&card).expect("provider card serializes");
     let root_id = handle.reply_target(key).await;
     Out::SendCard {
@@ -126,7 +126,6 @@ pub async fn dispatch(
         FORM_DEFAULT_DIRECT => {
             Some(handle_default_direct(handle, key, form_value, message_id).await)
         }
-        FORM_LIST_SELECT => Some(handle_list_select(handle, key, form_value, message_id).await),
         FORM_SET_DEFAULT_DIRECT => {
             Some(handle_set_default_direct(handle, key, value, message_id).await)
         }
@@ -136,6 +135,9 @@ pub async fn dispatch(
         FORM_PROBE => Some(handle_probe(handle, key, value, message_id).await),
         FORM_PROBE_APPLY => Some(handle_probe_apply(handle, key, value, message_id).await),
         FORM_BACK => Some(handle_back(handle, key, message_id).await),
+        FORM_PROTOCOL => {
+            Some(handle_protocol(handle, key, value, form_value, message_id).await)
+        }
         _ => None,
     }
 }
@@ -170,7 +172,7 @@ async fn handle_mode(
         }
     };
 
-    // 切到 Direct 且 default_provider_for_direct 仍为 None 时，自动填第一个
+    // 切到 Direct 且 default_selection 仍为 None 时，自动填第一个
     // provider（设计意图：避免用户切到 Direct 后发现还没选默认）。
     let first_name = if matches!(new_mode, ProviderMode::Direct { .. }) {
         let items = match &handle.provider_forms {
@@ -185,13 +187,14 @@ async fn handle_mode(
     if let Err(e) = provider_state::update(|s| {
         if let Some(first) = &first_name
             && matches!(new_mode, ProviderMode::Direct { .. })
-            && s.default_provider_for_direct.is_none()
+            && s.default_selection.is_none()
         {
             tracing::info!(
                 default = %first,
-                "切到 Direct 且 default_provider_for_direct 未设，自动填第一个 provider"
+                "切到 Direct 且 default_selection 未设，自动填第一个 provider"
             );
-            s.default_provider_for_direct = Some(first.clone());
+            // 自动填的 selection 不带 model —— 用户还没显式选过 default model。
+            s.default_selection = Some(DefaultSelection::new(first.clone()));
         }
         s.mode = new_mode.clone();
     }) {
@@ -201,6 +204,10 @@ async fn handle_mode(
 }
 
 /// 「Default provider for DIRECT」下拉变化：取 `form_value[name]` 写 state。
+///
+/// spec §2.8：下拉变更也走 [`build_default_selection`] —— 同步把 overlay
+/// 里同名 provider 的 `default_model` 复制到 `default_selection.model`，让
+/// spawn-time 自动加 `--model`。
 async fn handle_default_direct(
     handle: &RouterHandle,
     key: &SessionKey,
@@ -212,56 +219,43 @@ async fn handle_default_direct(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .filter(|s| !s.is_empty());
+    let selection = match selected.as_deref() {
+        Some(name) => Some(build_default_selection(handle, name).await),
+        None => None,
+    };
     if let Err(e) = provider_state::update(|s| {
-        s.default_provider_for_direct = selected.clone();
+        s.default_selection = selection.clone();
     }) {
-        tracing::warn!(error = %e, "default_provider_for_direct 更新失败");
+        tracing::warn!(error = %e, "default_selection 更新失败");
     }
     refresh_card(handle, key, None).await
 }
 
-/// Provider 列表下拉变化：写 `ProviderSelectionMap`。
-async fn handle_list_select(
-    handle: &RouterHandle,
-    key: &SessionKey,
-    form_value: &BTreeMap<String, Value>,
-    _message_id: Option<String>,
-) -> Out {
-    let raw = form_value
-        .get(SELECT_NAME_LIST)
-        .and_then(Value::as_str)
-        .unwrap_or(NEW_OPTION_VALUE);
-    let selected = if raw == NEW_OPTION_VALUE {
-        None
-    } else {
-        Some(raw.to_string())
-    };
-    handle
-        .provider_selection()
-        .set(key.clone(), selected)
-        .await;
-    refresh_card(handle, key, None).await
-}
-
 /// 折叠面板里「设为默认（DIRECT）」按钮。
+///
+/// spec §2.8：动作按钮 = 唯一把 overlay `default_model` 复制到
+/// `default_selection.model` 的入口（[`build_default_selection`]）。
 async fn handle_set_default_direct(
     handle: &RouterHandle,
     key: &SessionKey,
     value: &Value,
     _message_id: Option<String>,
 ) -> Out {
-    let name = value.get("name").and_then(Value::as_str).map(str::to_owned);
+    let Some(name) = value.get("name").and_then(Value::as_str).map(str::to_owned) else {
+        tracing::warn!("provider-set-default-direct 缺少 name 字段");
+        return refresh_card(handle, key, None).await;
+    };
+    let selection = build_default_selection(handle, &name).await;
     if let Err(e) = provider_state::update(|s| {
-        s.default_provider_for_direct = name.clone();
+        s.default_selection = Some(selection.clone());
     }) {
-        tracing::warn!(error = %e, "default_provider_for_direct 更新失败");
+        tracing::warn!(error = %e, "default_selection 更新失败");
     }
     refresh_card(handle, key, None).await
 }
 
 /// 折叠面板里「删除」按钮。直接调 store.delete（与既有 form submit-delete
-/// 走同一份存储），然后清掉该 provider 的选择与 default_provider_for_direct
-/// 残留。
+/// 走同一份存储），然后清掉 default_provider_for_direct 残留。
 async fn handle_delete(
     handle: &RouterHandle,
     key: &SessionKey,
@@ -277,15 +271,43 @@ async fn handle_delete(
             tracing::warn!(name, error = %e, "provider delete failed");
         }
     }
-    handle.provider_selection().set(key.clone(), None).await;
     if let Err(e) = provider_state::update(|s| {
-        if s.default_provider_for_direct.as_deref() == Some(name) {
-            s.default_provider_for_direct = None;
+        if s.default_selection.as_ref().map(|d| d.provider.as_str()) == Some(name) {
+            s.default_selection = None;
         }
     }) {
-        tracing::warn!(error = %e, "default_provider_for_direct 清理失败");
+        tracing::warn!(error = %e, "default_selection 清理失败");
     }
     refresh_card(handle, key, None).await
+}
+
+/// spec §2.8：把「provider 名 + overlay 里同名 item 的 default_model」合并
+/// 成 `DefaultSelection`。overlay 找不到 / 没 default_model → model = None。
+///
+/// 这是「设为默认（DIRECT）」动作 + 下拉变更的**唯一**入口，避免两处独立
+/// 拼 `DefaultSelection` 时漂移。overlay 仍是 `default_model` 的 UI 源（`/provider`
+/// 详情面板的「默认 model」文本框直接读 overlay），`default_selection.model`
+/// 是 spawn 翻译的权威值。
+async fn build_default_selection(handle: &RouterHandle, name: &str) -> DefaultSelection {
+    let model = if let Some(forms) = &handle.provider_forms {
+        forms
+            .preset
+            .store
+            .get(name)
+            .await
+            .and_then(|item| {
+                item.get("default_model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .filter(|s| !s.is_empty())
+            })
+    } else {
+        None
+    };
+    match model {
+        Some(m) => DefaultSelection::with_model(name, m),
+        None => DefaultSelection::new(name),
+    }
 }
 
 /// 新建子区的「＋ 新增（预设/自定义）」按钮：复用既有 `CrudForm::handle()`
@@ -311,7 +333,12 @@ async fn handle_create(
 
 /// 「🔍 探测 model 列表」按钮（bead sebas-63f.7）：按 provider 的
 /// `base_url_openai` / `base_url_anthropic` 决定探测的端点，HTTP GET
-/// 拉一次，把成功 / 失败结果渲成一张新卡（不修改 provider 配置）。
+/// 拉一次，把成功 / 失败结果渲成一张新卡。
+///
+/// 探测成功（非空列表）时顺手把官方返回的完整 model 列表写回 provider 的
+/// `models` 目录字段（逗号分隔）——model 列表的权威来源是官方 `/models`
+/// 接口，手填只是探测不可用时的兜底。`default_model` 仍由用户在结果卡里
+/// 点「使用 <model>」显式回写。
 ///
 /// 探测是 best-effort：anthropic 协议没有 `/v1/models`，会得到错误卡（
 /// 提示用户手填）；openai 协议端点通常可用。失败 / 空列表都给一张单独
@@ -368,6 +395,14 @@ async fn handle_probe(
 
     let card = match probe_result {
         Ok(models) if !models.is_empty() => {
+            // 把官方返回的 model 列表写回 `models` 目录字段（best-effort：
+            // 写失败只记日志，不影响结果卡展示）。
+            if let Some(mut item) = forms.preset.store.get(name).await {
+                item.insert("models".into(), Value::String(models.join(",")));
+                if let Err(e) = forms.preset.store.update(item).await {
+                    tracing::warn!(name, error = %e, "探测结果写回 models 目录失败");
+                }
+            }
             build_probe_result_card(name, base_kind, &probe_url, &models)
         }
         Ok(_) => {
@@ -417,8 +452,6 @@ async fn handle_probe_apply(
     if let Err(e) = res {
         tracing::warn!(name, model, error = %e, "默认 model 写回失败");
     }
-    // 选择保持不动（沿用 handle_probe 之前的选择），让详情面板继续显示
-    // 这个 provider，方便用户立刻看到 default_model 已更新。
     refresh_card(handle, key, message_id).await
 }
 
@@ -431,6 +464,46 @@ async fn handle_back(
     refresh_card(handle, key, message_id).await
 }
 
+/// 详情面板里的「协议」radio（spec 2026-08-17 §2.4）：用户切换协议时
+/// 直接把 `protocol` 字段写回 store（不经表单容器）。不存在的 provider
+/// 走 refresh 兜底；非法值（不是 auto/anthropic/openai）也走兜底。
+async fn handle_protocol(
+    handle: &RouterHandle,
+    key: &SessionKey,
+    value: &Value,
+    form_value: &BTreeMap<String, Value>,
+    message_id: Option<String>,
+) -> Out {
+    let Some(name) = value.get("name").and_then(Value::as_str) else {
+        tracing::warn!("provider-set-protocol 缺少 name 字段");
+        return refresh_card(handle, key, message_id).await;
+    };
+    // select_static on_change 把选中值回传到 `form_value[SELECT_NAME_PROTOCOL]`。
+    let new_proto = form_value
+        .get(SELECT_NAME_PROTOCOL)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|s| matches!(s.as_str(), "auto" | "anthropic" | "openai"));
+    let Some(new_proto) = new_proto else {
+        tracing::warn!(name, "provider-set-protocol 收到非法或缺失的协议值，忽略");
+        return refresh_card(handle, key, message_id).await;
+    };
+    let Some(forms) = &handle.provider_forms else {
+        return Out::HelpText { key: key.clone() };
+    };
+    let res = match forms.preset.store.get(name).await {
+        Some(mut item) => {
+            item.insert("protocol".into(), Value::String(new_proto));
+            forms.preset.store.update(item).await
+        }
+        None => Err(format!("provider '{name}' 已不存在")),
+    };
+    if let Err(e) = res {
+        tracing::warn!(name, error = %e, "详情面板 protocol 写回失败");
+    }
+    refresh_card(handle, key, message_id).await
+}
+
 // ===========================================================================
 // 卡片构建（每个 section 一个 helper）
 // ===========================================================================
@@ -438,7 +511,6 @@ async fn handle_back(
 fn build_card(
     state: &ProviderRuntimeState,
     provider_names: &[String],
-    selected: Option<&str>,
     items: &[Item],
 ) -> Card {
     let mut card = Card::new(CARD_TITLE, "blue");
@@ -459,32 +531,30 @@ fn build_card(
         .elements
         .push(render_default_direct_select(
             provider_names,
-            state.default_provider_for_direct.as_deref(),
+            state.default_selection.as_ref(),
         ));
     card.push_divider();
 
-    // ---- 3. Provider list dropdown ----
+    // ---- 3. Provider 列表：每个 provider 一行折叠面板（默认折叠）----
     card.push_text("**Provider 列表**");
-    card.body
-        .elements
-        .push(render_list_select(provider_names, selected));
+    if provider_names.is_empty() {
+        card.push_text("（暂无 provider，先在下方新建）");
+    }
+    for name in provider_names {
+        let item = items
+            .iter()
+            .find(|i| i.get("name").and_then(Value::as_str) == Some(name.as_str()));
+        card.body.elements.push(render_provider_row(
+            name,
+            item,
+            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+        ));
+    }
     card.push_divider();
 
-    // ---- 4. Selected section ----
-    match selected {
-        None => {
-            for el in render_create_sub_section() {
-                card.body.elements.push(el);
-            }
-        }
-        Some(name) => {
-            let item = items
-                .iter()
-                .find(|i| i.get("name").and_then(Value::as_str) == Some(name));
-            for el in render_details_panel(name, item) {
-                card.body.elements.push(el);
-            }
-        }
+    // ---- 4. 新建子区（常驻）----
+    for el in render_create_sub_section() {
+        card.body.elements.push(el);
     }
     card
 }
@@ -554,51 +624,71 @@ fn button_from(b: CardButton) -> CardElement {
     }
 }
 
+/// spec 2026-08-17 §2.4：详情面板里的「协议」select_static —— 标签 +
+/// 三档（auto / anthropic / openai）。当前值取自 item.protocol（缺省
+/// "auto"）。on_change 直接写 store（不经表单容器）。
+fn render_protocol_select(name: &str, item: Option<&Item>) -> CardElement {
+    let current = item
+        .and_then(|i| i.get("protocol").and_then(Value::as_str))
+        .filter(|s| matches!(*s, "auto" | "anthropic" | "openai"))
+        .unwrap_or("auto");
+    let options = vec![
+        ("auto".to_string(), "Auto（Anthropic 优先）".to_string()),
+        ("anthropic".to_string(), "Anthropic".to_string()),
+        ("openai".to_string(), "OpenAI".to_string()),
+    ];
+    CardElement::SelectStatic {
+        name: SELECT_NAME_PROTOCOL.into(),
+        placeholder: CardText {
+            tag: "plain_text".into(),
+            content: "协议".into(),
+        },
+        options,
+        initial: Some(current.to_string()),
+        on_change: json!({ "form": FORM_PROTOCOL, "name": name }),
+    }
+}
+
 /// 「Default provider for DIRECT」下拉。
+///
+/// spec §2.8：每个选项的 label 包含 provider 名 + 该 provider 的 default_model
+/// （若设置）。`current` 是 `Option<&DefaultSelection>`：`Some(d)` 时高亮
+/// `d.provider`，placeholder 文案追加「· 默认 model: <d.model>」让用户看到
+/// 当前选择会带哪个 `--model`。
 fn render_default_direct_select(
     provider_names: &[String],
-    current: Option<&str>,
+    current: Option<&DefaultSelection>,
 ) -> CardElement {
+    // 当前选中的 provider 名（用于 `initial` 高亮 + 给每个 option 标注 default_model）。
+    let current_provider = current.map(|d| d.provider.clone());
+    // 当前 default_selection.model（None / 空都视作「未设」）。
+    let current_model = current
+        .and_then(|d| d.model.clone())
+        .filter(|s| !s.is_empty());
     let mut options: Vec<(String, String)> = Vec::with_capacity(provider_names.len() + 1);
     // 第一项空字符串表示「不选」——与 state 文件的 None 语义一致。
     options.push((String::new(), "（未设置）".into()));
     for n in provider_names {
         options.push((n.clone(), n.clone()));
     }
+    // placeholder 文案：默认「选择默认 provider」；有当前 model 时追加，让
+    // 用户看到 spawn 时会传哪个 --model。
+    let placeholder_text = match current_model.as_deref() {
+        Some(m) => format!("选择默认 provider（当前默认 model: {m}）"),
+        None => "选择默认 provider".into(),
+    };
     CardElement::SelectStatic {
         name: SELECT_NAME_DEFAULT_DIRECT.into(),
         placeholder: CardText {
             tag: "plain_text".into(),
-            content: "选择默认 provider".into(),
+            content: placeholder_text,
         },
         options,
         // `current` 为 None 时 initial 也是 None（展示 placeholder）；
-        // 空字符串 current 在 select_static 序列化里走 placeholder
-        // （filter 过滤空值），避免「（未设置）」与 state None 混在一起。
-        initial: current.map(str::to_owned),
+        // 当前有 selection 时 initial = provider 名（select_static 只能按
+        // option 的 value 高亮）。
+        initial: current_provider,
         on_change: json!({ "form": FORM_DEFAULT_DIRECT }),
-    }
-}
-
-/// Provider 列表下拉：「（新建）」 + 全 provider 名。
-fn render_list_select(
-    provider_names: &[String],
-    selected: Option<&str>,
-) -> CardElement {
-    let mut options = Vec::with_capacity(provider_names.len() + 1);
-    options.push((NEW_OPTION_VALUE.to_string(), "（新建）".to_string()));
-    for n in provider_names {
-        options.push((n.clone(), n.clone()));
-    }
-    CardElement::SelectStatic {
-        name: SELECT_NAME_LIST.into(),
-        placeholder: CardText {
-            tag: "plain_text".into(),
-            content: "选择 provider".into(),
-        },
-        options,
-        initial: selected.map(str::to_owned),
-        on_change: json!({ "form": FORM_LIST_SELECT }),
     }
 }
 
@@ -606,7 +696,7 @@ fn render_list_select(
 fn render_create_sub_section() -> Vec<CardElement> {
     vec![
         CardElement::Markdown {
-            content: "在下方选择新建方式：".into(),
+            content: "**新建 provider**".into(),
         },
         button_from(create_button("＋ 新增（预设）", FORM_CREATE_PRESET, "primary")),
         button_from(create_button(
@@ -628,10 +718,16 @@ fn create_button(label: &str, form_name: &str, kind: &str) -> CardButton {
     }
 }
 
-/// 详情面板：折叠面板（默认展开）+ markdown 字段 + 三个动作按钮。
+/// 单行 provider 条目：`CollapsiblePanel`（**默认折叠**），header 一行摘要
+/// （名字 + 「DIRECT 默认」标记 + 默认 model），面板内是 markdown 字段 +
+/// 四个动作按钮。展开/收起由飞书客户端本地完成，不走服务端回调。
 /// `item` 为 `None` 时只渲染折叠面板 + 「未找到该 provider」+「删除」按钮
-/// （删除后选择残留等异常场景的兜底）。
-fn render_details_panel(name: &str, item: Option<&Item>) -> Vec<CardElement> {
+/// （item 列表与名称来源不一致等异常场景的兜底）。
+fn render_provider_row(
+    name: &str,
+    item: Option<&Item>,
+    default_direct: Option<&str>,
+) -> CardElement {
     let mut elements: Vec<CardElement> = Vec::new();
 
     // markdown 字段行：预设 / Base URL(Anthropic) / Base URL(OpenAI) /
@@ -666,12 +762,23 @@ fn render_details_panel(name: &str, item: Option<&Item>) -> Vec<CardElement> {
     );
     elements.push(CardElement::Markdown { content: body });
 
-    // 探测 model 按钮（bead sebas-63f.7）：按下后 GET 该 provider 的
-    // openai-compatible `/models` 端点（优先 base_url_openai，回退
-    // best-effort 探测 `/v1/models`），结果渲成独立卡；用户从那张卡里再
-    // 选 model 写回。这里和 编辑 / 删除 / 设默认 同一行。
-    let probe_value = json!({ "form": FORM_PROBE, "name": name });
-    elements.push(button_with_value("🔍 探测 model 列表", "default", probe_value));
+    // 协议 radio（spec 2026-08-17 §2.4）：详情面板就地切换 Direct 模式的
+    // 协议面（auto / anthropic / openai）。选完直接写 overlay（不走表单
+    // 容器）；缺省 "auto" = 旧约定（Anthropic 优先）。
+    elements.push(render_protocol_select(name, item));
+
+    // 探测 model 按钮（bead sebas-63f.7 + spec 2026-08-17 §2.11）：
+    // 仅当 provider 暴露 openai 端点（base_url_openai 非空）时才显示——
+    // Anthropic 协议无 `/v1/models` 端点是已知坏掉的，按 spec 隐藏按钮
+    // 避免给用户一个必失败的入口。两个端点都设了 → 仍显示（probe 优先
+    // 打 OpenAI URL）。
+    let has_openai_url = item
+        .and_then(|i| i.get("base_url_openai").and_then(Value::as_str))
+        .is_some_and(|s| !s.is_empty());
+    if has_openai_url {
+        let probe_value = json!({ "form": FORM_PROBE, "name": name });
+        elements.push(button_with_value("🔍 探测 model 列表", "default", probe_value));
+    }
 
     // 三个动作按钮：编辑 / 删除 / 设为默认（DIRECT）。
     // 「编辑」走既有 form 的 OP_EDIT 路径：旧 `on_button` 的 provider_forms
@@ -693,12 +800,22 @@ fn render_details_panel(name: &str, item: Option<&Item>) -> Vec<CardElement> {
         set_default_value,
     ));
 
-    vec![CardElement::CollapsiblePanel(CollapsiblePanel {
-        expanded: true,
+    // header 一行摘要：`name · <默认 model>`，是 DIRECT 默认时加标记。
+    // 保持单行——列表的可扫读性全靠这一行。
+    let mut title = name.to_string();
+    if default_direct == Some(name) {
+        title.push_str(" ✓DIRECT默认");
+    }
+    if default_model != "—" {
+        title.push_str(&format!(" · {default_model}"));
+    }
+
+    CardElement::CollapsiblePanel(CollapsiblePanel {
+        expanded: false,
         header: CollapsiblePanelHeader {
             title: CardText {
                 tag: "plain_text".into(),
-                content: format!("📦 {name}"),
+                content: title,
             },
             icon: StandardIcon {
                 tag: "standard_icon".into(),
@@ -709,7 +826,7 @@ fn render_details_panel(name: &str, item: Option<&Item>) -> Vec<CardElement> {
             icon_expanded_angle: -180,
         },
         elements,
-    })]
+    })
 }
 
 fn button_with_value(label: &str, kind: &str, value: Value) -> CardElement {
@@ -791,6 +908,22 @@ fn trim_trailing_slash(s: &str) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// 供表单「🔍 获取模型列表」按钮复用的取数入口（`crud::ModelFetcher` 的
+/// provider 实现）：按 item 的 base_url / api_key 调官方 `/models`，成功
+/// 返回 model id 列表，失败给单行原因。与详情面板的探测按钮共享同一套
+/// URL 选择与认证解析逻辑。
+pub async fn fetch_models_for_item(item: &Item) -> Result<Vec<String>, String> {
+    let (url, _kind) = choose_probe_url(item)?;
+    let token = resolve_auth_token(item);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP client 不可用: {e}"))?;
+    probe_models(&client, &url, token.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 实际探测：`GET <url>` 带可选 `Authorization: Bearer <token>`，5s 超时。
@@ -931,8 +1064,7 @@ async fn refresh_card(
         None => Vec::new(),
     };
     let provider_names = sorted_names(&items);
-    let selected = handle.provider_selection().get(key).await;
-    let card = build_card(&state, &provider_names, selected.as_deref(), &items);
+    let card = build_card(&state, &provider_names, &items);
     let card_value = serde_json::to_value(&card).expect("provider card serializes");
     match message_id {
         Some(msg_id) => Out::UpdateCardByMsgId {
@@ -1001,8 +1133,28 @@ mod tests {
         m
     }
 
+    /// spec 2026-08-17 §2.6：所有走 FileStore / state_store 的测试需要
+    /// 串行化 env 访问（全局 mutex）。handle_with 内部已经获取并返回
+    /// guard，调用方需把 `_g` 绑到 test 局部以保证整个 test 期间锁不被
+    /// 释放 —— 锁释放后其他测试可能写入 SEBAS_STATE_FILE 覆盖本测试
+    /// 路径，导致 state_store 读到对方数据。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 构造一个带 FileStore 的 RouterHandle（与 provider_test.rs 一致）。
-    fn handle_with(dir: &std::path::Path, seed: Vec<Item>) -> RouterHandle {
+    /// 返回 `(handle, _guard)` —— 调用方必须把 `_guard` 绑到 test 局部
+    /// 以保持锁和 SEBAS_STATE_FILE 不被中途重置。
+    fn handle_with(
+        dir: &std::path::Path,
+        seed: Vec<Item>,
+    ) -> (RouterHandle, std::sync::MutexGuard<'static, ()>) {
+        let _g = TEST_LOCK.lock().unwrap();
+        // SAFETY: TEST_LOCK held.
+        unsafe {
+            std::env::set_var(
+                "SEBAS_STATE_FILE",
+                dir.join("state.json").to_str().unwrap(),
+            );
+        }
         let store = FileStore::load(dir.join("providers.json"), "name", seed).unwrap();
         let forms = ProviderForms {
             preset: Arc::new(CrudForm::new(
@@ -1023,7 +1175,7 @@ mod tests {
             Some(Arc::new(forms)),
             None,
         );
-        h
+        (h, _g)
     }
 
     fn serialised_button_values(card: &Value) -> Vec<String> {
@@ -1096,7 +1248,7 @@ mod tests {
     #[tokio::test]
     async fn render_main_card_includes_all_sections_and_three_mode_buttons() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         let out = render_main_card(&handle, &key).await;
@@ -1109,10 +1261,13 @@ mod tests {
         assert_eq!(title, Some("Provider 管理"));
 
         // 序列化 JSON 里数 button + select_static 个数。
+        // 3 模式 + 2 新建 + 详情面板 4（探测/编辑/删除/设为默认）= 9。
         let button_count = serialised.matches("\"tag\":\"button\"").count();
-        assert_eq!(button_count, 5, "3 个模式按钮 + 2 个新建按钮 = 5");
+        assert_eq!(button_count, 9, "3 模式 + 2 新建 + 面板 4 = 9");
+        // 两个 select_static：DIRECT 默认 provider（顶部）+ 详情面板的
+        // 「协议」radio（spec 2026-08-17 §2.4）。
         let sel_count = serialised.matches("\"tag\":\"select_static\"").count();
-        assert_eq!(sel_count, 2);
+        assert_eq!(sel_count, 2, "DIRECT 默认 provider + 详情面板协议 radio = 2");
 
         // button payload 应携带 form + mode 名。
         for m in ["off", "direct", "gateway"] {
@@ -1133,9 +1288,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn render_main_card_lists_provider_names_in_dropdowns() {
+    async fn render_main_card_lists_provider_names_as_collapsed_panels() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(
+        let (handle, _guard) = handle_with(
             dir.path(),
             vec![
                 item("openai", Some("openai")),
@@ -1153,12 +1308,15 @@ mod tests {
         for n in ["openai", "deepseek", "anthropic"] {
             assert!(
                 serialised.contains(n),
-                "下拉应包含 provider 名 {n}：{serialised}"
+                "列表应包含 provider 名 {n}：{serialised}"
             );
         }
+        // 每个 provider 一个折叠面板，且全部默认折叠。
+        let panel_count = serialised.matches("\"tag\":\"collapsible_panel\"").count();
+        assert_eq!(panel_count, 3, "3 个 provider = 3 个折叠面板");
         assert!(
-            serialised.contains("（新建）"),
-            "列表下拉应包含「（新建）」：{serialised}"
+            !serialised.contains("\"expanded\":true"),
+            "所有面板默认折叠：{serialised}"
         );
 
         // 字母序：anthropic < deepseek < openai。
@@ -1174,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn mode_buttons_highlight_current_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
 
         // 1) Off 默认 → Off primary。
         let out = render_main_card(&handle, &test_key()).await;
@@ -1203,25 +1361,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selecting_existing_provider_renders_details_panel() {
+    async fn provider_row_renders_details_inside_collapsed_panel() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
-        handle
-            .provider_selection()
-            .set(key.clone(), Some("deepseek".into()))
-            .await;
         let out = render_main_card(&handle, &key).await;
         let Out::SendCard { card, .. } = out else {
             panic!();
         };
         let serialised = serde_json::to_string(&card).unwrap();
 
-        // 折叠面板 + 详情字段。
+        // 折叠面板（默认折叠）+ 详情字段。
         assert!(
             serialised.contains("\"tag\":\"collapsible_panel\""),
-            "选中 provider 时应渲染折叠面板：{serialised}"
+            "每个 provider 应渲染折叠面板：{serialised}"
+        );
+        assert!(
+            serialised.contains("\"expanded\":false"),
+            "面板应默认折叠：{serialised}"
+        );
+        // header 一行摘要含默认 model。
+        assert!(
+            serialised.contains("deepseek · deepseek-model"),
+            "面板 header 应为「name · model」一行摘要：{serialised}"
         );
         assert!(serialised.contains("**预设**"));
         assert!(serialised.contains("https://deepseek.example/anthropic"));
@@ -1250,18 +1413,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selecting_new_renders_create_buttons() {
+    async fn create_buttons_always_rendered_and_empty_list_hint() {
+        // 空列表：显示「暂无 provider」提示，新建按钮仍在。
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
-        let key = test_key();
-
-        handle.provider_selection().set(key.clone(), None).await;
-        let out = render_main_card(&handle, &key).await;
+        let (handle, _guard) = handle_with(dir.path(), Vec::new());
+        let out = render_main_card(&handle, &test_key()).await;
         let card = match out {
             Out::SendCard { card, .. } => card,
             _ => panic!(),
         };
         let serialised = serde_json::to_string(&card).unwrap();
+        assert!(
+            serialised.contains("暂无 provider"),
+            "空列表应显示提示：{serialised}"
+        );
         assert!(
             serialised.contains(FORM_CREATE_PRESET),
             "应渲染「＋ 新增（预设）」按钮"
@@ -1270,21 +1435,21 @@ mod tests {
             serialised.contains(FORM_CREATE_CUSTOM),
             "应渲染「＋ 新增（自定义）」按钮"
         );
-        // 不应再有删除 / 设为默认按钮（选中「（新建）」时不显示详情面板）。
+        // 空列表时不应有删除 / 设为默认按钮。
         assert!(
             !serialised.contains(FORM_DELETE_CONFIRM),
-            "新建子区不应渲染删除按钮"
+            "空列表不应渲染删除按钮"
         );
         assert!(
             !serialised.contains(FORM_SET_DEFAULT_DIRECT),
-            "新建子区不应渲染设为默认按钮"
+            "空列表不应渲染设为默认按钮"
         );
     }
 
     #[tokio::test]
     async fn dispatch_route_for_mode_updates_state_and_refreshes() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         let payload = json!({ "form": FORM_MODE, "mode": "gateway" });
@@ -1300,7 +1465,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_mode_to_direct_auto_fills_first_provider() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(
+        let (handle, _guard) = handle_with(
             dir.path(),
             vec![
                 item("anthropic", Some("anthropic")),
@@ -1309,13 +1474,13 @@ mod tests {
         );
         let key = test_key();
 
-        // default_provider_for_direct 初始 None；切到 Direct 后应自动填
+        // default_selection 初始 None；切到 Direct 后应自动填
         // 字母序第一个 = "anthropic"。
         let payload = json!({ "form": FORM_MODE, "mode": "direct" });
         let _ = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
         let state = provider_state::load();
         assert_eq!(
-            state.default_provider_for_direct.as_deref(),
+            state.default_selection.as_ref().map(|d| d.provider.as_str()),
             Some("anthropic"),
             "切到 Direct 应自动填字母序第一个 provider"
         );
@@ -1324,44 +1489,15 @@ mod tests {
         // 重置。
         provider_state::update(|s| {
             s.mode = ProviderMode::Off;
-            s.default_provider_for_direct = None;
+            s.default_selection = None;
         })
         .unwrap();
     }
 
     #[tokio::test]
-    async fn dispatch_route_for_list_select_updates_selection() {
-        let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
-        let key = test_key();
-
-        // 选 deepseek → ProviderSelectionMap 应记下。
-        let mut fv = BTreeMap::new();
-        fv.insert(
-            SELECT_NAME_LIST.into(),
-            Value::String("deepseek".into()),
-        );
-        let payload = json!({ "form": FORM_LIST_SELECT });
-        let _ = dispatch(&handle, &key, &payload, &fv, None).await;
-        assert_eq!(
-            handle.provider_selection().get(&key).await.as_deref(),
-            Some("deepseek")
-        );
-
-        // 切回「（新建）」 → 清空选择。
-        let mut fv2 = BTreeMap::new();
-        fv2.insert(
-            SELECT_NAME_LIST.into(),
-            Value::String(NEW_OPTION_VALUE.into()),
-        );
-        let _ = dispatch(&handle, &key, &payload, &fv2, None).await;
-        assert!(handle.provider_selection().get(&key).await.is_none());
-    }
-
-    #[tokio::test]
     async fn dispatch_route_for_default_direct_writes_state() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         let mut fv = BTreeMap::new();
@@ -1372,26 +1508,25 @@ mod tests {
         let payload = json!({ "form": FORM_DEFAULT_DIRECT });
         let _ = dispatch(&handle, &key, &payload, &fv, None).await;
         let state = provider_state::load();
-        assert_eq!(state.default_provider_for_direct.as_deref(), Some("deepseek"));
+        assert_eq!(
+            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+            Some("deepseek")
+        );
 
         // 重置。
-        provider_state::update(|s| s.default_provider_for_direct = None).unwrap();
+        provider_state::update(|s| s.default_selection = None).unwrap();
     }
 
     #[tokio::test]
-    async fn dispatch_route_for_delete_removes_item_and_clears_selection() {
+    async fn dispatch_route_for_delete_removes_item_and_clears_default() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         provider_state::update(|s| {
-            s.default_provider_for_direct = Some("deepseek".into());
+            s.default_selection = Some(DefaultSelection::new("deepseek"));
         })
         .unwrap();
-        handle
-            .provider_selection()
-            .set(key.clone(), Some("deepseek".into()))
-            .await;
 
         let payload = json!({ "form": FORM_DELETE_CONFIRM, "name": "deepseek" });
         let _ = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
@@ -1405,30 +1540,32 @@ mod tests {
             .list()
             .await;
         assert!(items.is_empty(), "删除后 store 应为空");
-        assert!(handle.provider_selection().get(&key).await.is_none());
         let state = provider_state::load();
-        assert!(state.default_provider_for_direct.is_none());
+        assert!(state.default_selection.is_none());
     }
 
     #[tokio::test]
     async fn dispatch_route_for_set_default_direct_writes_state() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         let payload = json!({ "form": FORM_SET_DEFAULT_DIRECT, "name": "deepseek" });
         let _ = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
         let state = provider_state::load();
-        assert_eq!(state.default_provider_for_direct.as_deref(), Some("deepseek"));
+        assert_eq!(
+            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+            Some("deepseek")
+        );
 
         // 重置。
-        provider_state::update(|s| s.default_provider_for_direct = None).unwrap();
+        provider_state::update(|s| s.default_selection = None).unwrap();
     }
 
     #[tokio::test]
     async fn dispatch_returns_none_for_unknown_form_name() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), Vec::new());
+        let (handle, _guard) = handle_with(dir.path(), Vec::new());
         let key = test_key();
         let payload = json!({ "form": "totally-unknown" });
         let out = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
@@ -1440,13 +1577,9 @@ mod tests {
         // 「编辑」按钮必须发 `provider-preset` / `provider-custom` 老 form 名，
         // 让 `on_button` 的旧 provider_forms 分发按 item.preset 路由到正确表单。
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
-        handle
-            .provider_selection()
-            .set(key.clone(), Some("deepseek".into()))
-            .await;
         let out = render_main_card(&handle, &key).await;
         let card = match out {
             Out::SendCard { card, .. } => card,
@@ -1463,22 +1596,83 @@ mod tests {
         );
     }
 
+    /// spec §2.8：「DIRECT 模式默认 provider」下拉显示 default_selection
+    /// 的当前状态：provider 名出现在 placeholder 之外的位置（select_static
+    /// 的 initial 字段），有 model 时 placeholder 追加「· 当前默认 model:
+    /// <model>」。验证 dropdown 反映新字段。
+    #[tokio::test]
+    async fn default_direct_dropdown_shows_model_in_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let key = test_key();
+
+        // 设 default_selection 带 model。
+        provider_state::update(|s| {
+            s.default_selection = Some(DefaultSelection::with_model("deepseek", "deepseek-chat"));
+        })
+        .unwrap();
+
+        let out = render_main_card(&handle, &key).await;
+        let Out::SendCard { card, .. } = out else {
+            panic!("expected SendCard");
+        };
+        let s = serde_json::to_string(&card).unwrap();
+
+        // placeholder 应包含「当前默认 model: deepseek-chat」。
+        assert!(
+            s.contains("当前默认 model: deepseek-chat"),
+            "placeholder 应包含 default_selection.model：{s}"
+        );
+
+        // 重置。
+        provider_state::update(|s| s.default_selection = None).unwrap();
+    }
+
+    /// spec §2.8：default_selection 只设 provider 没设 model → placeholder
+    /// 用普通版本（不含「· 默认 model」），让用户看不到「虚假的 model」。
+    #[tokio::test]
+    async fn default_direct_dropdown_placeholder_omits_model_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let key = test_key();
+
+        provider_state::update(|s| {
+            s.default_selection = Some(DefaultSelection::new("deepseek"));
+        })
+        .unwrap();
+
+        let out = render_main_card(&handle, &key).await;
+        let Out::SendCard { card, .. } = out else {
+            panic!("expected SendCard");
+        };
+        let s = serde_json::to_string(&card).unwrap();
+
+        // 没 model → placeholder 不应出现「当前默认 model」。
+        assert!(
+            !s.contains("当前默认 model:"),
+            "model=None 时 placeholder 不应包含 model 提示：{s}"
+        );
+        // 但仍应有 placeholder 文本。
+        assert!(
+            s.contains("选择默认 provider"),
+            "应保留 placeholder 基础文本：{s}"
+        );
+
+        provider_state::update(|s| s.default_selection = None).unwrap();
+    }
+
     // -------------------------------------------------------------------
     // 探测功能（bead sebas-63f.7）相关测试
     // -------------------------------------------------------------------
 
-    /// 选中 provider 时详情面板里应出现「🔍 探测 model 列表」按钮，
+    /// provider 行的折叠面板里应出现「🔍 探测 model 列表」按钮，
     /// payload 携带 form=provider-probe 和 name。
     #[tokio::test]
-    async fn selecting_existing_provider_renders_probe_button() {
+    async fn provider_row_renders_probe_button() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
-        handle
-            .provider_selection()
-            .set(key.clone(), Some("deepseek".into()))
-            .await;
         let out = render_main_card(&handle, &key).await;
         let Out::SendCard { card, .. } = out else {
             panic!();
@@ -1605,7 +1799,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_route_for_probe_apply_updates_default_model() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         let payload = json!({
@@ -1628,7 +1822,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_route_for_back_refreshes_main_card() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
         let payload = json!({ "form": FORM_BACK });
         let out = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
@@ -1641,7 +1835,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_route_for_probe_emits_card() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
         let key = test_key();
 
         let payload = json!({ "form": FORM_PROBE, "name": "deepseek" });
@@ -1686,7 +1880,130 @@ mod tests {
         // 也断言不 panic（已经通过 "_ =" 隐式保证）。
     }
 
-    /// 选择已存在但没有 preset 字段的 provider 时，详情面板仍出探测按钮
+    /// spec 2026-08-17 §2.4：详情面板里的「协议」radio。选项 = auto /
+    /// anthropic / openai；initial 跟随 item.protocol（缺省 auto）。
+    #[tokio::test]
+    async fn provider_row_renders_protocol_radio_with_three_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let key = test_key();
+
+        let out = render_main_card(&handle, &key).await;
+        let Out::SendCard { card, .. } = out else {
+            panic!("expected SendCard");
+        };
+        let serialised = serde_json::to_string(&card).unwrap();
+
+        // select_static 节点：name=provider_protocol，payload form=provider-set-protocol + name=deepseek。
+        assert!(
+            serialised.contains("provider_protocol"),
+            "详情面板应渲染协议 radio：{serialised}"
+        );
+        assert!(
+            serialised.contains(FORM_PROTOCOL) && serialised.contains("\"name\":\"deepseek\""),
+            "协议 radio 的 on_change payload 应带 form=provider-set-protocol + name：{serialised}"
+        );
+        // 三档选项都应出现（label 文案）。
+        assert!(
+            serialised.contains("Auto（Anthropic 优先）"),
+            "应含 auto 选项 label：{serialised}"
+        );
+        assert!(
+            serialised.contains("\"Anthropic\""),
+            "应含 anthropic 选项 label：{serialised}"
+        );
+        assert!(
+            serialised.contains("\"OpenAI\""),
+            "应含 openai 选项 label：{serialised}"
+        );
+        // 缺省值（item 没 protocol）→ initial=auto。
+        assert!(
+            serialised.contains("\"initial_value\":[\"auto\"]"),
+            "缺省 initial 应为 auto：{serialised}"
+        );
+    }
+
+    /// spec 2026-08-17 §2.4：item 已有 `protocol=openai` → initial 也跟
+    /// 显式值（刷新后下拉不会重置回 auto）。
+    #[tokio::test]
+    async fn protocol_radio_reflects_existing_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds_item = item("deepseek", Some("deepseek"));
+        ds_item.insert("protocol".into(), Value::String("openai".into()));
+        let (handle, _guard) = handle_with(dir.path(), vec![ds_item]);
+        let key = test_key();
+
+        let out = render_main_card(&handle, &key).await;
+        let card = match out {
+            Out::SendCard { card, .. } => card,
+            _ => panic!(),
+        };
+        let serialised = serde_json::to_string(&card).unwrap();
+        assert!(
+            serialised.contains("\"initial_value\":[\"openai\"]"),
+            "initial 应跟 item.protocol：{serialised}"
+        );
+    }
+
+    /// spec 2026-08-17 §2.4：dispatch FORM_PROTOCOL 把选中的 protocol
+    /// 写回 store，其它字段不动。
+    #[tokio::test]
+    async fn dispatch_route_for_protocol_writes_to_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let key = test_key();
+
+        let mut fv = BTreeMap::new();
+        fv.insert(
+            SELECT_NAME_PROTOCOL.into(),
+            Value::String("openai".into()),
+        );
+        let payload = json!({ "form": FORM_PROTOCOL, "name": "deepseek" });
+        let out = dispatch(&handle, &key, &payload, &fv, None).await;
+        assert!(out.is_some(), "FORM_PROTOCOL 应被 provider_card 接管");
+
+        let store = &handle.provider_forms.as_ref().unwrap().preset.store;
+        let updated = store.get("deepseek").await.unwrap();
+        assert_eq!(
+            updated.get("protocol").and_then(Value::as_str),
+            Some("openai"),
+            "dispatch 应把 openai 写回 store"
+        );
+        // 其它字段（base_url_anthropic / api_key）原样不动。
+        assert!(
+            updated.contains_key("base_url_anthropic"),
+            "其它字段不应被 protocol 写入抹掉"
+        );
+    }
+
+    /// spec 2026-08-17 §2.4：dispatch FORM_PROTOCOL 收到非法值（不在
+    /// auto/anthropic/openai 三档内）→ 忽略（store 不变）。
+    #[tokio::test]
+    async fn dispatch_route_for_protocol_rejects_invalid_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds_item = item("deepseek", Some("deepseek"));
+        ds_item.insert("protocol".into(), Value::String("anthropic".into()));
+        let (handle, _guard) = handle_with(dir.path(), vec![ds_item]);
+        let key = test_key();
+
+        let mut fv = BTreeMap::new();
+        fv.insert(
+            SELECT_NAME_PROTOCOL.into(),
+            Value::String("bogus".into()),
+        );
+        let payload = json!({ "form": FORM_PROTOCOL, "name": "deepseek" });
+        let _ = dispatch(&handle, &key, &payload, &fv, None).await;
+
+        let store = &handle.provider_forms.as_ref().unwrap().preset.store;
+        let updated = store.get("deepseek").await.unwrap();
+        assert_eq!(
+            updated.get("protocol").and_then(Value::as_str),
+            Some("anthropic"),
+            "非法 protocol 值应被忽略，不覆盖原值"
+        );
+    }
+
+    /// 没有 preset 字段的 custom provider，其折叠面板里仍出探测按钮
     /// （custom provider 也可探测 /v1/models）。
     #[tokio::test]
     async fn details_panel_shows_probe_button_for_custom_provider() {
@@ -1697,14 +2014,8 @@ mod tests {
             "base_url_openai".into(),
             Value::String("https://my-proxy.example/v1".into()),
         );
-        let handle = handle_with(dir.path(), vec![custom_item]);
+        let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
         let key = test_key();
-
-        // 直接走 provider_selection.set 模拟用户在列表下拉里挑了名字。
-        handle
-            .provider_selection
-            .set(key.clone(), Some("my-proxy".into()))
-            .await;
 
         let out = render_main_card(&handle, &key).await;
         let card_json = match &out {
@@ -1714,6 +2025,67 @@ mod tests {
         assert!(
             card_json.contains(FORM_PROBE),
             "custom provider 的详情面板也应含探测按钮: {card_json}"
+        );
+    }
+
+    /// spec 2026-08-17 §2.11：仅 OpenAI 端点的 provider 仍渲染探测按钮。
+    /// 双协议 provider 的探测优先打 OpenAI URL，所以有 openai URL 即显示。
+    #[tokio::test]
+    async fn details_panel_shows_probe_button_when_only_openai_url_set() {
+        // 自定义 provider：只有 base_url_openai、无 base_url_anthropic。
+        let dir = tempfile::tempdir().unwrap();
+        let mut custom_item = item("oai-only", None);
+        custom_item.insert(
+            "base_url_openai".into(),
+            Value::String("https://oai-only.example/v1".into()),
+        );
+        // 显式移除 anthropic URL（item() helper 默认会填它）。
+        custom_item.remove("base_url_anthropic");
+        let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
+        let key = test_key();
+
+        let out = render_main_card(&handle, &key).await;
+        let card_json = match &out {
+            Out::SendCard { card, .. } => serde_json::to_string(card).unwrap(),
+            _ => panic!("expected SendCard, got {out:?}"),
+        };
+        assert!(
+            card_json.contains(FORM_PROBE),
+            "openai-only provider 的详情面板应含探测按钮: {card_json}"
+        );
+    }
+
+    /// spec 2026-08-17 §2.11：仅 Anthropic 端点的 provider **不**渲染
+    /// 探测按钮——Anthropic 协议无 `/v1/models` 端点是已知坏掉的，按
+    /// spec 隐藏入口避免用户点必失败的按钮。
+    #[tokio::test]
+    async fn details_panel_hides_probe_button_when_only_anthropic_url_set() {
+        // 自定义 provider：只有 base_url_anthropic、无 base_url_openai。
+        let dir = tempfile::tempdir().unwrap();
+        let mut custom_item = item("anth-only", None);
+        // item() helper 在 preset=None 时填了 base_url_anthropic；
+        // 显式确认没有 base_url_openai（应一直都没有），并写一个干净的 anthropic URL。
+        custom_item.remove("base_url_openai");
+        custom_item.insert(
+            "base_url_anthropic".into(),
+            Value::String("https://anth-only.example".into()),
+        );
+        let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
+        let key = test_key();
+
+        let out = render_main_card(&handle, &key).await;
+        let card_json = match &out {
+            Out::SendCard { card, .. } => serde_json::to_string(card).unwrap(),
+            _ => panic!("expected SendCard, got {out:?}"),
+        };
+        assert!(
+            !card_json.contains(FORM_PROBE),
+            "anthropic-only provider 的详情面板**不**应含探测按钮: {card_json}"
+        );
+        // 编辑 / 删除 / 设默认 这三个动作按钮仍应出现（条件渲染仅影响探测按钮）。
+        assert!(
+            card_json.contains(FORM_DELETE_CONFIRM) && card_json.contains("\"name\":\"anth-only\""),
+            "动作按钮应正常渲染: {card_json}"
         );
     }
 
@@ -1746,7 +2118,7 @@ mod tests {
             "base_url_openai".into(),
             Value::String(format!("http://{addr}/v1")),
         );
-        let handle = handle_with(dir.path(), vec![custom_item]);
+        let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
         let key = test_key();
 
         let payload = json!({ "form": FORM_PROBE, "name": "test401" });
@@ -1762,6 +2134,57 @@ mod tests {
         assert!(
             card.contains("探测失败"),
             "错误卡应有失败前缀: {card}"
+        );
+    }
+
+    /// dispatch FORM_PROBE：探测成功时把官方返回的 model 列表写回 store 的
+    /// `models` 目录字段（官方 `/models` 接口是 model 列表的权威来源）。
+    #[tokio::test]
+    async fn dispatch_route_for_probe_writes_models_catalog_on_success() {
+        // 最小 HTTP server：返回 openai-compatible 的 models 列表。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = r#"{"object":"list","data":[{"id":"m-pro"},{"id":"m-flash"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut custom_item = item("local", None);
+        custom_item.insert(
+            "base_url_openai".into(),
+            Value::String(format!("http://{addr}/v1")),
+        );
+        let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
+        let key = test_key();
+
+        let payload = json!({ "form": FORM_PROBE, "name": "local" });
+        let out = dispatch(&handle, &key, &payload, &BTreeMap::new(), None)
+            .await
+            .expect("FORM_PROBE 路由存在");
+        let card = match out {
+            Out::SendCard { card, .. } => serde_json::to_string(&card).unwrap(),
+            _ => panic!("expected SendCard"),
+        };
+        assert!(card.contains("m-pro"), "结果卡应列出探测到的 model: {card}");
+
+        let store = &handle.provider_forms.as_ref().unwrap().preset.store;
+        let updated = store.get("local").await.unwrap();
+        assert_eq!(
+            updated.get("models").and_then(Value::as_str),
+            Some("m-pro,m-flash"),
+            "探测成功应把 model 列表写回 models 目录字段"
         );
     }
 }

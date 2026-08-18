@@ -1,6 +1,7 @@
 //! `/provider` 命令 + provider CRUD 表单的路由集成测试：经 RouterHandle
 //! 驱动 列表 → 新增 → 提交 → 删除，验证按钮/表单回调被正确路由且
-//! 存储（FileStore + overlay 文件）随变更持久化。
+//! 存储（FileStore 委托给 unified state.json，spec 2026-08-17 §2.6）
+//! 随变更持久化。
 
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use feishu::forms::{FormField, FormSpec};
@@ -11,7 +12,28 @@ use router::router::RouterHandle;
 use router::state::SessionMap;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// spec 2026-08-17 §2.6：FileStore 持久化到 unified state.json（路径由
+// SEBAS_STATE_FILE 决定）。所有走 FileStore / state_store 的测试都要
+// 把 SEBAS_STATE_FILE 指到 tempdir，避免污染开发机 ~/.sebas/state.json，
+// 且避免同进程内测试互相覆盖。全局 mutex 串行化 env 访问。
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn isolate(dir: &tempfile::TempDir) {
+    let path = dir.path().join("state.json");
+    // SAFETY: ENV_LOCK held by caller.
+    unsafe {
+        std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
+    }
+}
+
+fn deisolate() {
+    // SAFETY: ENV_LOCK held by caller.
+    unsafe {
+        std::env::remove_var("SEBAS_STATE_FILE");
+    }
+}
 
 fn spec() -> FormSpec {
     FormSpec::new(
@@ -111,7 +133,9 @@ async fn provider_command_opens_main_card_with_seed() {
     // bead sebas-63f.5：`/provider` 命令现在打开「Provider 管理」主卡
     // （mode + default-direct 下拉 + 列表下拉 + 新建子区/详情面板），
     // 取代了旧的「列表 + 每条 编辑/删除」双入口卡。
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     router
@@ -153,11 +177,14 @@ async fn provider_command_opens_main_card_with_seed() {
         }
         other => panic!("expected SendCard, got {other:?}"),
     }
+    deisolate();
 }
 
 #[tokio::test]
 async fn provider_create_submit_delete_round_trip() {
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     // 点「＋ 新增」→ 表单卡原地出现。
@@ -205,7 +232,9 @@ async fn provider_create_submit_delete_round_trip() {
     let out = rx.recv().await.unwrap();
     assert!(matches!(out, Out::UpdateCardByMsgId { .. }), "{out:?}");
 
-    // 重启视角：重新加载 overlay + 种子 → 只剩 openai。
+    // 重启视角：重新加载 unified state.json + 种子 → 只剩 openai。
+    // spec 2026-08-17 §2.6：FileStore::load 不再读 providers.json，
+    // 直接走 state_store::load（SEBAS_STATE_FILE 已指到 dir/state.json）。
     let reloaded = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -215,11 +244,14 @@ async fn provider_create_submit_delete_round_trip() {
     let items = reloaded.list().await;
     assert_eq!(items.len(), 1, "deepseek 墓碑必须生效");
     assert_eq!(items[0].get("name").and_then(Value::as_str), Some("openai"));
+    deisolate();
 }
 
 #[tokio::test]
 async fn permission_shaped_button_is_not_routed_to_provider_crud() {
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     router
@@ -241,13 +273,16 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
     // UpdateCardByMsgId（带 om_perm），用这个区分。
     let out = rx.recv().await.unwrap();
     assert!(matches!(out, Out::SendCard { .. }), "{out:?}");
+    deisolate();
 }
 
 #[tokio::test]
 async fn cancel_button_returns_to_list_not_to_dead_session_card() {
     // 回归：表单容器外的「取消」按钮带 op=cancel，必须被 on_button 识别为
     // CRUD 路由并回列表卡；如果被吞掉就会落到 ACP session 死会话路径。
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let (router, mut rx) = provider_router(&dir);
 
     router
@@ -271,6 +306,7 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
         }
         other => panic!("cancel 应回到 CRUD 列表卡，得到 {other:?}"),
     }
+    deisolate();
 }
 
 #[tokio::test]
@@ -279,7 +315,9 @@ async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
     // 取代了旧列表卡的 `••••••` 掩码（一样防泄露，只是文案更简洁）。
     // 编辑表单的密钥不预填行为由既有 `CrudForm::item_to_initial()` 保证
     // （见下方的「编辑表单不预填密钥」半边）。
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let store = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -303,24 +341,8 @@ async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
         None,
     );
 
-    // 主卡：选 deepseek → 详情面板的 API Key 行应是「已配置」，且永远不
+    // 主卡：deepseek 的折叠面板里 API Key 行应是「已配置」，且永远不
     // 出现明文密钥（无论新旧设计）。
-    router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/provider".into(),
-            reply_to: None,
-        })
-        .await;
-    let _ = rx.recv().await.unwrap();
-
-    // 在 router handle 内手动把 selection 设为 deepseek（模拟用户在列表
-    // 下拉里选了它），然后重渲主卡——这一步覆盖详情面板的「已配置」分支。
-    router
-        .provider_selection()
-        .set(key(), Some("deepseek".into()))
-        .await;
-    // 触发一次「卡片刷新」：再次 /provider。
     router
         .dispatch(FeishuIn::Text {
             key: key(),
@@ -345,7 +367,9 @@ async fn edit_form_does_not_prefill_secret() {
     // 主卡详情面板里点「编辑」按钮 → 走既有 `provider-custom` 表单的
     // OP_EDIT 路径；表单的 `item_to_initial()` 应跳过 secret 字段，绝不
     // 把密钥回显到表单（沿用 63f.5 之前的契约）。
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let store = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -389,11 +413,14 @@ async fn edit_form_does_not_prefill_secret() {
         !s.contains("sk-super-secret"),
         "edit form must not prefill secret: {s}"
     );
+    deisolate();
 }
 
 #[tokio::test]
 async fn empty_secret_submit_preserves_existing_key() {
+    let _g = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    isolate(&dir);
     let store = FileStore::load(
         dir.path().join("providers.json"),
         "name",
@@ -447,4 +474,5 @@ async fn empty_secret_submit_preserves_existing_key() {
         got.get("base_url").and_then(Value::as_str),
         Some("https://new.example")
     );
+    deisolate();
 }

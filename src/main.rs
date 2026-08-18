@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
             if run.debug
                 && let Some(c) = gateway_cfg.as_mut()
             {
-                c.enable_debug_test_provider();
+                gateway::debug::enable_debug_test_provider(c);
             }
             sebas::run::run(
                 cfg,

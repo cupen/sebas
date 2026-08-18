@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::Value;
 
-use crate::proto::Protocol;
+use crate::proto::WireProtocol;
 
 /// 回显文案：`I'm test provider. I received your message "<echo>".`
 pub fn test_message(echo: &str) -> String {
@@ -65,25 +65,25 @@ pub fn wants_stream(body: Option<&axum::body::Bytes>) -> bool {
 }
 
 /// 生成 test provider 响应（200），按协议面 + stream 标志选形状。
-pub fn test_response(proto: Protocol, echoed: &str, stream: bool) -> Response {
+pub fn test_response(proto: WireProtocol, echoed: &str, stream: bool) -> Response {
     let text = test_message(echoed);
     match (proto, stream) {
-        (Protocol::Anthropic, false) => Response::builder()
+        (WireProtocol::Anthropic, false) => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
             .body(Body::from(anthropic_json(&text)))
             .expect("static response parts valid"),
-        (Protocol::Anthropic, true) => Response::builder()
+        (WireProtocol::Anthropic, true) => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
             .body(Body::from(anthropic_sse(&text)))
             .expect("static response parts valid"),
-        (Protocol::OpenAi, false) => Response::builder()
+        (WireProtocol::OpenAi, false) => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
             .body(Body::from(openai_json(&text)))
             .expect("static response parts valid"),
-        (Protocol::OpenAi, true) => Response::builder()
+        (WireProtocol::OpenAi, true) => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
             .body(Body::from(openai_sse(&text)))
@@ -211,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_json_response_contains_text_and_model() {
-        let resp = test_response(Protocol::Anthropic, "hello", false);
+        let resp = test_response(WireProtocol::Anthropic, "hello", false);
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -230,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_sse_response_contains_text() {
-        let resp = test_response(Protocol::Anthropic, "hi", true);
+        let resp = test_response(WireProtocol::Anthropic, "hi", true);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "text/event-stream"
@@ -245,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_json_response_contains_text() {
-        let resp = test_response(Protocol::OpenAi, "hello", false);
+        let resp = test_response(WireProtocol::OpenAi, "hello", false);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
@@ -262,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_sse_response_contains_text_and_done() {
-        let resp = test_response(Protocol::OpenAi, "hello", true);
+        let resp = test_response(WireProtocol::OpenAi, "hello", true);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "text/event-stream"

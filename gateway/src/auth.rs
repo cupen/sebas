@@ -14,7 +14,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 
 use crate::error::error_response;
-use crate::proto::{Protocol, resolve_target};
+use crate::proto::{WireProtocol, resolve_target};
 use crate::server::AppState;
 
 /// 从 `Authorization: Bearer <key>` 或 `x-api-key: <key>` 提取下游 key。
@@ -41,10 +41,10 @@ fn extract_key(headers: &HeaderMap) -> Option<String> {
 fn unauthorized(headers: &HeaderMap, path: &str) -> Response {
     let proto = resolve_target(headers, path)
         .map(|t| t.protocol)
-        .unwrap_or(Protocol::OpenAi);
+        .unwrap_or(WireProtocol::OpenAi);
     let err_type = match proto {
-        Protocol::Anthropic => "authentication_error",
-        Protocol::OpenAi => "invalid_request_error",
+        WireProtocol::Anthropic => "authentication_error",
+        WireProtocol::OpenAi => "invalid_request_error",
     };
     error_response(
         proto,
