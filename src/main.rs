@@ -2,8 +2,8 @@ mod cli;
 
 use clap::Parser;
 use cli::{
-    Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, InstallServiceArgs, OutputFormat, RecordArgs,
-    ReplayArgs, WebUiArgs,
+    Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, OutputFormat, RecordArgs, ReplayArgs,
+    ServiceArgs, WebUiArgs,
 };
 use std::path::PathBuf;
 
@@ -11,14 +11,22 @@ use std::path::PathBuf;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::InstallService(args) => {
-            // Map install-service's own exit codes (2/3/4/5/6) up to the
-            // process. Defaults to 1 for any other failure.
-            let err = match sebas::install_service::run(args.into()).await {
-                Ok(()) => return Ok(()),
-                Err(e) => e,
+        Cmd::Service(args) => {
+            // Map `service`'s own exit codes (2/3/4/5/6) up to the process.
+            // Defaults to 1 for any other failure.
+            let args = sebas::service::Args::from(args);
+            let err = if args.install {
+                match sebas::service::run_install(args).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => e,
+                }
+            } else {
+                match sebas::service::run_uninstall(args).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => e,
+                }
             };
-            let code = sebas::install_service::exit_code_of(&err).unwrap_or(1);
+            let code = sebas::service::exit_code_of(&err).unwrap_or(1);
             eprintln!("error: {err:?}");
             std::process::exit(code);
         }
@@ -335,14 +343,14 @@ fn current_uid() -> u32 {
     0
 }
 
-impl From<InstallServiceArgs> for sebas::install_service::InstallServiceArgs {
-    fn from(a: InstallServiceArgs) -> Self {
+impl From<ServiceArgs> for sebas::service::Args {
+    fn from(a: ServiceArgs) -> Self {
         Self {
+            install: a.install,
+            uninstall: a.uninstall,
             user: a.user,
-            system: a.system,
             auto_start: a.auto_start,
             force: a.force,
-            run_as: a.run_as,
             config: a.config,
         }
     }
@@ -405,6 +413,17 @@ mod tests {
             panic!("expected Run subcommand");
         };
         assert_eq!(args.config, "x.toml");
+    }
+
+/// The watchdog spawns its child and `service` bakes an `ExecStart`
+    /// both keyed on `sebas::CORE_SUBCOMMAND`; the clap subcommand here must
+    /// agree or the supervisor and unit silently target a different argv. If
+    /// this fails, rename `Cmd::Run` and `CORE_SUBCOMMAND` together.
+    #[test]
+    fn run_subcommand_name_matches_core_subcommand_const() {
+        let cli = Cli::try_parse_from(["sebas", sebas::CORE_SUBCOMMAND, "--config", "x.toml"])
+            .expect("`sebas {CORE_SUBCOMMAND} --config <path>` must parse");
+        assert!(matches!(cli.cmd, Cmd::Run(_)));
     }
 
     #[test]

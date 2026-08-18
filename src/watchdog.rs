@@ -65,7 +65,7 @@ pub struct Watchdog {
 }
 
 impl Watchdog {
-    pub fn new(config: WatchdogConfig, config_path: String) -> Self {
+pub fn new(config: WatchdogConfig, config_path: String) -> Self {
         let control = Arc::new(Mutex::new(ControlService::new()));
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self::with_control(config, config_path, control, rx, create_control_secret())
