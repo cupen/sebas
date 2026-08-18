@@ -24,7 +24,8 @@ use axum::response::Response;
 use tokio::sync::Mutex;
 
 use gateway::config::GatewayConfig;
-use gateway::proto::Protocol;
+use gateway::debug;
+use gateway::proto::WireProtocol;
 use gateway::server;
 
 /// 启动一个 gateway 实例并返回其监听地址 + 持有 scratch dir（drop 即清理）。
@@ -56,7 +57,7 @@ async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     let raw = config_toml.replace("__USAGE__", &usage);
     let mut cfg = GatewayConfig::parse(&raw).expect("parse test config");
     if debug {
-        cfg.enable_debug_test_provider();
+        debug::enable_debug_test_provider(&mut cfg);
     }
     let state = server::build_state(cfg).expect("build_state");
     let app = server::build_router(state);
@@ -224,7 +225,7 @@ impl Drop for MockUpstream {
 /// 启动一台 mock 上游（axum fallback），按 `flavor`（Anthropic / OpenAI）
 /// 在已记录的路径上回固定 fixture。两台各起一次，用「请求落在哪台 mock」
 /// 断言 gateway 路由。
-pub async fn start_mock_upstream(flavor: Protocol) -> MockUpstream {
+pub async fn start_mock_upstream(flavor: WireProtocol) -> MockUpstream {
     let requests: Arc<Mutex<Vec<RecordedRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let state = MockState {
         flavor,
@@ -247,7 +248,7 @@ pub async fn start_mock_upstream(flavor: Protocol) -> MockUpstream {
 
 #[derive(Clone)]
 struct MockState {
-    flavor: Protocol,
+    flavor: WireProtocol,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
@@ -297,73 +298,73 @@ async fn mock_handler(State(st): State<MockState>, req: Request) -> Response {
 /// 按 (flavor, path, method, stream) 选 fixture。返回
 /// (status, content-type, body, trace-sentinel)。无匹配 → 404。
 fn match_fixture(
-    flavor: Protocol,
+    flavor: WireProtocol,
     path: &str,
     method: &Method,
     wants_stream: bool,
 ) -> (StatusCode, &'static str, &'static str, &'static str) {
     match (flavor, path, method.clone()) {
-        (Protocol::Anthropic, "/v1/messages", Method::POST) if wants_stream => (
+        (WireProtocol::Anthropic, "/v1/messages", Method::POST) if wants_stream => (
             StatusCode::OK,
             "text/event-stream",
             ANTHROPIC_MESSAGES_SSE,
             "anthropic-messages-sse",
         ),
-        (Protocol::Anthropic, "/v1/messages", Method::POST) => (
+        (WireProtocol::Anthropic, "/v1/messages", Method::POST) => (
             StatusCode::OK,
             "application/json",
             ANTHROPIC_MESSAGES_JSON,
             "anthropic-messages-json",
         ),
-        (Protocol::Anthropic, "/v1/messages/count_tokens", Method::POST) => (
+        (WireProtocol::Anthropic, "/v1/messages/count_tokens", Method::POST) => (
             StatusCode::OK,
             "application/json",
             ANTHROPIC_COUNT_TOKENS,
             "anthropic-count-tokens",
         ),
-        (Protocol::Anthropic, "/v1/models", Method::GET) => (
+        (WireProtocol::Anthropic, "/v1/models", Method::GET) => (
             StatusCode::OK,
             "application/json",
             ANTHROPIC_MODELS_LIST,
             "anthropic-models-list",
         ),
-        (Protocol::Anthropic, p, Method::GET) if is_model_get(p) => (
+        (WireProtocol::Anthropic, p, Method::GET) if is_model_get(p) => (
             StatusCode::OK,
             "application/json",
             ANTHROPIC_MODEL_GET,
             "anthropic-model-get",
         ),
-        (Protocol::OpenAi, "/v1/chat/completions", Method::POST) if wants_stream => (
+        (WireProtocol::OpenAi, "/v1/chat/completions", Method::POST) if wants_stream => (
             StatusCode::OK,
             "text/event-stream",
             OPENAI_CHAT_SSE,
             "openai-chat-sse",
         ),
-        (Protocol::OpenAi, "/v1/chat/completions", Method::POST) => (
+        (WireProtocol::OpenAi, "/v1/chat/completions", Method::POST) => (
             StatusCode::OK,
             "application/json",
             OPENAI_CHAT_JSON,
             "openai-chat-json",
         ),
-        (Protocol::OpenAi, "/v1/responses", Method::POST) => (
+        (WireProtocol::OpenAi, "/v1/responses", Method::POST) => (
             StatusCode::OK,
             "application/json",
             OPENAI_RESPONSES_JSON,
             "openai-responses-json",
         ),
-        (Protocol::OpenAi, "/v1/embeddings", Method::POST) => (
+        (WireProtocol::OpenAi, "/v1/embeddings", Method::POST) => (
             StatusCode::OK,
             "application/json",
             OPENAI_EMBEDDINGS,
             "openai-embeddings",
         ),
-        (Protocol::OpenAi, "/v1/models", Method::GET) => (
+        (WireProtocol::OpenAi, "/v1/models", Method::GET) => (
             StatusCode::OK,
             "application/json",
             OPENAI_MODELS_LIST,
             "openai-models-list",
         ),
-        (Protocol::OpenAi, p, Method::GET) if is_model_get(p) => (
+        (WireProtocol::OpenAi, p, Method::GET) if is_model_get(p) => (
             StatusCode::OK,
             "application/json",
             OPENAI_MODEL_GET,

@@ -38,6 +38,12 @@ pub struct ModelDef {
 }
 
 /// 静态模型注册表。参数来自 models.dev（https://github.com/anomalyco/models.dev）。
+//
+// last synced: 2026-08-17 from models.dev (manual paste)
+//
+// 这是手工粘贴的静态数据，每次更新都靠手抄——commit log 看起来像是同步机制，
+// 实际不是。spec 2026-08-17 §2.10 记录了这个口径；如需自动同步请改成
+// vendored JSON 或 xtask 拉取。
 #[rustfmt::skip]
 const MODELS: &[ModelDef] = &[
     // ---- DeepSeek V4 ----

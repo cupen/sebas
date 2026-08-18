@@ -12,7 +12,9 @@
 pub mod access_log;
 pub mod auth;
 pub mod config;
+pub mod debug;
 pub mod error;
+pub mod key_resolver;
 pub mod models;
 pub mod proto;
 pub mod proxy;

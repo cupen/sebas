@@ -16,7 +16,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::error::{GatewayError, Result};
-use crate::proto::Protocol;
+use crate::key_resolver::{hint_from_provider, EnvKeyResolver, KeyResolver};
+use crate::proto::WireProtocol;
 
 /// 顶层包装：容忍同一 config.toml 中的 `[feishu]` / `[acp.*]` 等无关段，
 /// 只取 `[gateway]`。有意不复用 root `Config::parse`——gateway 的运行边界
@@ -104,20 +105,28 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// 上游 model id 改名映射：`{旧名: 新名}`。gateway 收到旧名时改写成
+    /// 新名再走路由；用于同一 provider 多名（同模型被官方重命名或别名）。
+    /// spec 2026-08-17 §2.12：与 `models` 功能部分重合但独立——
+    /// `models` 决定 OPUS/SONNET/HAIKU 赋值，`model_map` 决定请求时
+    /// model 字段的最终名字。
     #[serde(default)]
     pub model_map: HashMap<String, String>,
     /// 按从强到弱排列的模型名列表（手写）。`[n]` 后缀（如 `[1m]`）既是
     /// 模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
+    /// spec 2026-08-17 §2.12：`models` 顺序 = 强→弱，用于 Claude Code
+    /// 4 个 MODEL 环境变量（OPUS/SONNET/HAIKU）的赋值；与 `model_map`
+    /// 不重复，前者定 model 列表的强弱档位，后者定上游 id 重命名。
     #[serde(default)]
     pub models: Vec<String>,
 }
 
 /// 给定请求协议返回对应上游 URL；两项都为 None 视为未配置。
 impl ProviderConfig {
-    pub fn url_for(&self, proto: Protocol) -> Option<&str> {
+    pub fn url_for(&self, proto: WireProtocol) -> Option<&str> {
         match proto {
-            Protocol::Anthropic => self.base_url_anthropic.as_deref(),
-            Protocol::OpenAi => self.base_url_openai.as_deref(),
+            WireProtocol::Anthropic => self.base_url_anthropic.as_deref(),
+            WireProtocol::OpenAi => self.base_url_openai.as_deref(),
         }
     }
 
@@ -669,68 +678,41 @@ impl GatewayConfig {
     /// - `api_key_env` 指向的 env 变量必须存在且非空（错误信息只含变量名，绝不含 key 值）；
     /// - 否则回退明文 `api_key`（仅测试用，emit warn）；
     /// - 两者都缺 → Config 错误。
+    ///
+    /// spec 2026-08-17 §2.15：解析走 `KeyResolver` trait，默认 impl 是
+    /// `EnvKeyResolver`（env → plain → none）。未来接 vault / 1Password /
+    /// KMS 时可在 `build_state` 之前注入 `Arc<dyn KeyResolver>` 替代默认；
+    /// 当前调用方（`server::build_state` / `debug::tests`）签名不变，
+    /// 行为不变。
     pub fn resolve_api_keys(&self) -> Result<HashMap<String, String>> {
+        self.resolve_api_keys_with(&EnvKeyResolver)
+    }
+
+    /// 同 `resolve_api_keys`，但接受注入的 resolver —— 给测试用 stub
+    /// 或未来真接外部密钥后端时复用同一条路径。
+    pub fn resolve_api_keys_with(
+        &self,
+        resolver: &dyn KeyResolver,
+    ) -> Result<HashMap<String, String>> {
         let mut out = HashMap::with_capacity(self.providers.len());
         for (name, p) in &self.providers {
             // 内置 test provider（debug 模式注入）不触达外部上游，无需 key。
             if self.debug && name == "test" {
                 continue;
             }
-            let key = if let Some(env_var) = &p.api_key_env {
-                match std::env::var(env_var) {
-                    Ok(v) if !v.is_empty() => v,
-                    _ => {
-                        return Err(GatewayError::Config(format!(
-                            "provider.{name}.api_key_env 指向的环境变量 '{env_var}' 未设置或为空"
-                        )));
-                    }
+            let hint = hint_from_provider(p.api_key.as_deref(), p.api_key_env.as_deref());
+            match resolver.resolve(&hint) {
+                Ok(key) => {
+                    out.insert(name.clone(), key);
                 }
-            } else if let Some(plain) = &p.api_key {
-                tracing::warn!(
-                    "gateway provider '{name}' 使用明文 api_key（config 内联或 /provider overlay 写入；如需更严格的密钥管理请改用 api_key_env）"
-                );
-                plain.clone()
-            } else {
-                return Err(GatewayError::Config(format!(
-                    "provider.{name} 未配置 api_key_env 或 api_key"
-                )));
-            };
-            out.insert(name.clone(), key);
+                Err(reason) => {
+                    return Err(GatewayError::Config(format!(
+                        "provider.{name}: {reason}"
+                    )));
+                }
+            }
         }
         Ok(out)
-    }
-
-    /// `--debug`：配置解析完成后注入内置 test provider——provider 名 `test`、
-    /// base_url 指向 gateway 自身（哨兵值，不实际拨号），并加一条
-    /// `test → test` 路由（插到路由表最前，debug 模式下优先于用户配置）。
-    /// 路由命中后由 proxy 短路应答，见 `test_provider` 模块。
-    pub fn enable_debug_test_provider(&mut self) {
-        self.debug = true;
-        tracing::debug!("debug mode: injecting built-in test provider");
-        self.providers.insert(
-            "test".to_string(),
-            ProviderConfig {
-                base_url_anthropic: Some("gateway://self".to_string()),
-                base_url_openai: Some("gateway://self".to_string()),
-                api_key_env: None,
-                api_key: None,
-                model_map: HashMap::new(),
-                models: Vec::new(),
-            },
-        );
-        if !self
-            .routes
-            .iter()
-            .any(|r| r.model == "test" && r.providers.len() == 1 && r.providers[0] == "test")
-        {
-            self.routes.insert(
-                0,
-                RouteGroup {
-                    model: "test".to_string(),
-                    providers: vec!["test".to_string()],
-                },
-            );
-        }
     }
 }
 
@@ -758,7 +740,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::proto::Protocol;
+    use crate::proto::WireProtocol;
 
     // 所有 config 测试都经此锁串行：env 覆盖测试会 set/remove
     // `SEBAS_GATEWAY_LISTEN`，单进程内并行跑会与其他调用 parse 的测试竞争。
@@ -1255,55 +1237,6 @@ api_key = "test-key"
         assert!(
             err.to_string().contains("auth_token"),
             "error should mention auth_token: {err}"
-        );
-    }
-
-    #[test]
-    fn enable_debug_test_provider_injects_test_provider_and_route() {
-        let _g = LOCK.lock().unwrap();
-        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
-        unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
-        }
-        let raw = r#"
-[gateway]
-auth_token = "sk-test"
-[provider.anthropic]
-api_key = "test-key"
-"#;
-        let mut cfg = parse_isolated(raw).expect("parse");
-        assert!(!cfg.debug);
-        cfg.enable_debug_test_provider();
-
-        assert!(cfg.debug);
-        let test = cfg.providers.get("test").expect("test provider injected");
-        assert_eq!(test.base_url_anthropic.as_deref(), Some("gateway://self"));
-        assert_eq!(test.api_key, None);
-        assert_eq!(test.api_key_env, None);
-        assert!(
-            cfg.routes
-                .iter()
-                .any(|r| r.model == "test" && r.providers.len() == 1 && r.providers[0] == "test"),
-            "test → test route must be injected"
-        );
-        assert_eq!(
-            cfg.routes[0].model, "test",
-            "debug route should lead the table"
-        );
-
-        // resolve_api_keys 跳过内置 test provider（不触达上游，无需 key）。
-        let keys = cfg.resolve_api_keys().expect("resolve_api_keys");
-        assert!(!keys.contains_key("test"));
-        assert!(keys.contains_key("anthropic"));
-
-        // 幂等：重复注入不产生重复路由。
-        cfg.enable_debug_test_provider();
-        assert_eq!(
-            cfg.routes
-                .iter()
-                .filter(|r| r.model == "test" && r.providers.len() == 1 && r.providers[0] == "test")
-                .count(),
-            1
         );
     }
 

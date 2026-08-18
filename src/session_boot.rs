@@ -20,9 +20,58 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 
+/// 触发 abort 的 env var 名（spec 2026-08-17 §2.2）。
+///
+/// 当 [`crate::spawn_env::compute_provider_resolution`] 检测到配置错误
+/// （缺失 provider / `api_key_env` 未设 / gateway.listen 空等），driver
+/// 会把单一 env var `SEBAS_PROVIDER_ERROR=<reason>` 注入 `extra_env`。
+/// spawn wrapper 看到这条 var 就立刻 `eprintln!` + `exit(1)`，不真的去
+/// fork `claude` 子进程。这是把「silent Off fallback」升级为「in-band
+/// error signal」的关键链路：用户能从 sebas stderr 直接看到原因，而不是
+/// 看到 claude 启动了但啥都没发生（然后猜是 sebas / claude / 网络哪个环节）。
+pub(crate) const SEBAS_PROVIDER_ERROR_ENV: &str = "SEBAS_PROVIDER_ERROR";
+
+/// Pull the spec 2026-08-17 §2.2 abort reason out of an `extra_env` list,
+/// if present. Pure function, easy to unit-test. Returns `None` when the
+/// signal is absent (the common case).
+pub(crate) fn extract_provider_error(extra_env: &[(String, String)]) -> Option<&str> {
+    extra_env
+        .iter()
+        .find(|(k, _)| k == SEBAS_PROVIDER_ERROR_ENV)
+        .map(|(_, v)| v.as_str())
+}
+
+/// Check `extra_env` for the spec 2026-08-17 §2.2 abort signal. If the
+/// signal is present, print the reason to stderr and `std::process::exit(1)`.
+///
+/// `pub(crate)` so the spawn wrapper can call it directly; integration
+/// tests bypass this layer (they pass already-empty env) so they don't
+/// trigger the abort path by accident.
+///
+/// Why `std::process::exit` and not returning `Err`: the parent daemon
+/// has no way to surface the reason to the Feishu card cleanly mid-spawn
+/// (we haven't even recorded the `session_id` yet), and the user-visible
+/// failure mode of "claude started but produced nothing" is exactly what
+/// we're trying to eliminate. A noisy non-zero exit with a stderr line is
+/// strictly better than the silent fallback we're replacing.
+pub(crate) fn abort_if_provider_error(extra_env: &[(String, String)]) {
+    if let Some(reason) = extract_provider_error(extra_env) {
+        eprintln!(
+            "sebas: provider configuration error; refusing to launch claude.\n  reason: {reason}"
+        );
+        // exit code 1: 与 `sebas` 其它「配置错不启动」路径一致；reason 已
+        // 打到 stderr，daemon log 同步能看到。
+        std::process::exit(1);
+    }
+}
+
 /// Compute (extra_env, claude_args+extra_args) from provider state + gateway
 /// config. Centralizes the spawn-time translation so spawn / resume /
 /// spawn_test_session all see the same view. Pure: same input → same output.
+///
+/// Before returning, runs [`abort_if_provider_error`] — if `extra_env`
+/// carries the in-band error signal, the process exits here and never
+/// returns. The spawn call site therefore doesn't need to re-check.
 fn spawn_overrides(
     claude_args: Vec<String>,
     gateway_cfg: Option<&GatewayConfig>,
@@ -30,6 +79,7 @@ fn spawn_overrides(
     let state = router::provider_state::load();
     let driver = ClaudeCodeDriver;
     let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, gateway_cfg);
+    abort_if_provider_error(&extra_env);
     let mut full_args = claude_args;
     full_args.extend(extra_args);
     (extra_env, full_args)
@@ -418,4 +468,53 @@ pub fn spawn_acp_pump_with_idle(
         }
         debug!(%session_id, "acp event stream closed; pump exiting");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pure-logic test: `extract_provider_error` must find the
+    /// `SEBAS_PROVIDER_ERROR` key and return its value verbatim. No
+    /// subprocess, no panic — just the env list parsing. Spec 2026-08-17
+    /// §2.2 step 6: "just unit-test the env-detection logic if spawning
+    /// is too integration-heavy" — we go with the lighter approach.
+    #[test]
+    fn extract_provider_error_returns_reason_when_signal_present() {
+        let env = vec![(
+            "SEBAS_PROVIDER_ERROR".to_string(),
+            "direct provider 'foo' not found".to_string(),
+        )];
+        assert_eq!(
+            extract_provider_error(&env),
+            Some("direct provider 'foo' not found"),
+        );
+    }
+
+    #[test]
+    fn extract_provider_error_returns_none_for_empty_env() {
+        let env: Vec<(String, String)> = Vec::new();
+        assert_eq!(extract_provider_error(&env), None);
+    }
+
+    #[test]
+    fn extract_provider_error_returns_none_when_key_absent() {
+        let env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), "https://api.example".to_string()),
+            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-test".to_string()),
+        ];
+        assert_eq!(extract_provider_error(&env), None);
+    }
+
+    #[test]
+    fn extract_provider_error_returns_none_for_non_matching_signal() {
+        // Defensive: if some other code path accidentally injects a
+        // similar-looking key (`SEBAS_PROVIDER_ERROR_LOG` etc), we must
+        // NOT treat it as the abort signal.
+        let env = vec![(
+            "SEBAS_PROVIDER_ERROR_LOG".to_string(),
+            "not the real one".to_string(),
+        )];
+        assert_eq!(extract_provider_error(&env), None);
+    }
 }

@@ -7,6 +7,7 @@ pub mod provider_state;
 pub mod router;
 pub mod settings;
 pub mod state;
+pub mod state_store;
 
 pub use commands::{Command, GatewayAction, parse_command};
 pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};

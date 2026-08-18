@@ -182,37 +182,6 @@ impl ReplyTargetMap {
     }
 }
 
-/// Per-SessionKey 「provider 卡片当前选中哪个 provider」状态。
-/// `None`（含「未记录」）= 「（新建）」模式，详情面板渲染两个「＋ 新增」按钮；
-/// `Some(name)` = 该 provider 的折叠面板详情。
-///
-/// 由 `/provider` 主卡维护：用户改「Provider 列表」下拉时写入，删除该
-/// provider 时清空。不持久化——重启后默认回到「（新建）」模式，符合
-/// 用户「打开卡片即看现状」的预期。
-#[derive(Default, Clone)]
-pub struct ProviderSelectionMap {
-    inner: Arc<RwLock<HashMap<SessionKey, Option<String>>>>,
-}
-
-impl ProviderSelectionMap {
-    /// 记录用户的选择。`selected = None` 表示显式切到「（新建）」。
-    pub async fn set(&self, key: SessionKey, selected: Option<String>) {
-        self.inner.write().await.insert(key, selected);
-    }
-
-    /// 当前选中的 provider 名。`None` 同时表示「未记录」与「（新建）」——
-    /// 调用方应同样视为「新建模式」渲染。
-    pub async fn get(&self, key: &SessionKey) -> Option<String> {
-        self.inner.read().await.get(key).cloned().flatten()
-    }
-
-    /// 删除（清理）。通常不需要主动调——选择图谱无界增长但每条 entry
-    /// 只有几十字节，泄露风险低；保留 API 以便未来按 key 回收。
-    pub async fn clear(&self, key: &SessionKey) {
-        self.inner.write().await.remove(key);
-    }
-}
-
 /// Canonical signature for matching tool calls. Canonicalizes `args` so
 /// that two semantically-equal (tool, args) calls hash to the same string
 /// regardless of:
@@ -267,33 +236,4 @@ mod tests {
         assert_eq!(m.get("s2").await.as_deref(), Some("om_xyz"));
     }
 
-    fn key(name: &str) -> SessionKey {
-        SessionKey {
-            chat_id: name.into(),
-            thread_id: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn provider_selection_defaults_to_none() {
-        let m = ProviderSelectionMap::default();
-        // 未记录 → None（视为「新建」）。
-        assert!(m.get(&key("c1")).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn provider_selection_set_and_clear_round_trip() {
-        let m = ProviderSelectionMap::default();
-        m.set(key("c1"), Some("openai".into())).await;
-        assert_eq!(m.get(&key("c1")).await.as_deref(), Some("openai"));
-        // 显式 None = 「新建」模式。
-        m.set(key("c1"), None).await;
-        assert!(m.get(&key("c1")).await.is_none());
-        // 不同 chat 隔离。
-        m.set(key("c2"), Some("deepseek".into())).await;
-        assert_eq!(m.get(&key("c2")).await.as_deref(), Some("deepseek"));
-        // clear 删除条目。
-        m.clear(&key("c2")).await;
-        assert!(m.get(&key("c2")).await.is_none());
-    }
 }

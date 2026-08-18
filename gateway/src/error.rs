@@ -31,17 +31,17 @@ pub type Result<T> = std::result::Result<T, GatewayError>;
 ///
 /// `status` 由调用方按错误语义给出（401 鉴权 / 400 协议不匹配 / 502 无路由 …）。
 pub fn error_response(
-    proto: crate::proto::Protocol,
+    proto: crate::proto::WireProtocol,
     status: axum::http::StatusCode,
     err_type: &str,
     message: &str,
 ) -> axum::response::Response {
     let body = match proto {
-        crate::proto::Protocol::Anthropic => serde_json::json!({
+        crate::proto::WireProtocol::Anthropic => serde_json::json!({
             "type": "error",
             "error": { "type": err_type, "message": message }
         }),
-        crate::proto::Protocol::OpenAi => serde_json::json!({
+        crate::proto::WireProtocol::OpenAi => serde_json::json!({
             "error": { "message": message, "type": err_type, "code": null }
         }),
     };

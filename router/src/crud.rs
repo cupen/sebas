@@ -17,13 +17,12 @@
 //! 拿不到 message_id 时才退回新发一张卡片。
 
 use crate::router::Out;
-use feishu::cards::{Card, CardButton, CardText};
+use feishu::cards::{Card, CardButton, CardElement, CardText};
 use feishu::events::SessionKey;
 // `SelectOption` 仅在 #[cfg(test)] 的 provider_spec helper 里用到，lib 构建
 // 会触发 unused_imports warning，故显式 allow。
 #[allow(unused_imports)]
 use feishu::forms::{FormField, FormSpec, SelectOption, render_form_card, values_to_strings};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -43,6 +42,9 @@ pub const OP_CANCEL: &str = "cancel";
 /// 重算回调：跑 normalizer 把派生字段写回表单预填值，但不写存储。
 /// （提交还是走 OP_SUBMIT。）
 pub const OP_RECOMPUTE: &str = "recompute";
+/// 「获取模型列表」按钮：用当前表单值调外部接口取数，回填到指定文本
+/// 字段的预填值后重渲表单。不写存储（提交才落盘）。
+pub const OP_FETCH_MODELS: &str = "fetch-models";
 
 const KEY_FORM: &str = "form";
 const KEY_OP: &str = "op";
@@ -51,6 +53,18 @@ const KEY_ID: &str = "id";
 /// 提交规范化钩子：对表单提交产生的 item 做字段级修正
 /// （如 provider preset 默认值填充），在写入存储之前执行。
 pub type ItemNormalizer = Arc<dyn Fn(&mut Item) + Send + Sync>;
+
+/// 「获取模型列表」按钮的取数钩子：输入是当前表单值（已过 normalizer，
+/// 含派生字段）拼出的 item，输出是字符串列表或单行错误原因。
+/// 结果只回填表单预填值，不触碰存储。
+pub type ModelFetcher = Arc<
+    dyn Fn(
+            Item,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// 存储抽象：CRUD 状态机只依赖这五个操作。
 pub trait CrudStore: Send + Sync {
@@ -135,10 +149,18 @@ impl CrudStore for InMemoryStore {
     }
 }
 
-/// 文件存储：把 CRUD 变更以 delta 形式持久化到 JSON 文件，与只读种子
+/// 文件存储：把 CRUD 变更以 delta 形式持久化，与只读种子
 /// （如 config.toml 里的条目）合并后得到最终视图。
 ///
-/// 文件格式：
+/// spec 2026-08-17 §2.6 + §2.8：自 v2 schema 起，所有 provider CRUD 变更与
+/// runtime state（mode / default_selection）统一写入
+/// `~/.sebas/state.json`（详见 `crate::state_store`）。本类型保留
+/// `load(path, id_field, seed)` 旧 API（`path` 仅作为历史 hint 保留）
+/// —— 真实持久化委托给 `state_store::update` —— 实现「删 default
+/// provider」操作的单原子写：providers + deleted + mode + default
+/// 全部走同一个文件、一次写。
+///
+/// 文件格式（v2 state.json `providers` / `deleted` 字段）：
 /// ```json
 /// {
 ///   "providers": { "<id>": { ...字段... } },
@@ -148,10 +170,15 @@ impl CrudStore for InMemoryStore {
 /// - `providers`：新增/修改过的条目（覆盖种子）；
 /// - `deleted`：从种子删除的名字（墓碑，防止重启后从只读源复活）。
 ///
-/// 网关侧（gateway crate）读同一份文件做同样的合并，实现「bot 里改、
-/// gateway 启动时生效」。
+/// 旧 overlay 文件（`~/.sebas/providers.json`）由 `state_store` 一次性
+/// 迁移到 `state.json` 后删除（spec §2.6 路径 B）；本类型不再写它。
 #[derive(Clone)]
 pub struct FileStore {
+    /// **保留用于向后兼容（签名不变），写入时忽略** —— 持久化统一走
+    /// `state.json`。`state_store::providers_path()`（`SEBAS_GATEWAY_PROVIDER_OVERLAY`
+    /// 或默认 `~/.sebas/providers.json`）仍由 `state_store::load()` 在
+    /// 首次迁移路径上读取，本类型不再触达。
+    #[allow(dead_code)]
     path: PathBuf,
     id_field: String,
     state: Arc<Mutex<FileState>>,
@@ -161,23 +188,21 @@ pub struct FileStore {
 struct FileState {
     /// 合并后的最终视图（种子 + 变更）。
     items: Vec<Item>,
-    /// 新增/修改项：<id> -> item。
+    /// 新增/修改项：<id> -> item（来自 `state.json.providers`）。
     overrides: BTreeMap<String, Item>,
-    /// 删除墓碑：从种子/配置中删除的名字。
-    deleted: Vec<String>,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct OverlayFile {
-    #[serde(default)]
-    providers: BTreeMap<String, Item>,
-    #[serde(default)]
+    /// 删除墓碑：从种子/配置中删除的名字（来自 `state.json.deleted`）。
     deleted: Vec<String>,
 }
 
 impl FileStore {
-    /// `seed` 是只读源（config.toml）里已有的条目；若文件已存在，
-    /// 文件的变更会叠加/覆盖种子。
+    /// `seed` 是只读源（config.toml）里已有的条目；持久化的变更从
+    /// `state_store::load()` 读取（自动处理 `providers.json` →
+    /// `state.json` 一次性迁移）。
+    ///
+    /// `path` 参数**仅保留签名兼容**，不读取也不写入 —— 持久化统一
+    /// 走 `state.json`（`SEBAS_STATE_FILE` 或默认
+    /// `~/.sebas/state.json`）。`state_store` 内部仍会按需读取
+    /// 旧 overlay 文件做一次性迁移。
     pub fn load(
         path: impl Into<PathBuf>,
         id_field: impl Into<String>,
@@ -185,23 +210,20 @@ impl FileStore {
     ) -> Result<Self, String> {
         let path = path.into();
         let id_field = id_field.into();
+        // 从统一 store 读当前 overrides / deleted。state_store 内部
+        // 处理 v0/v1 state.json + legacy providers.json 的合并迁移
+        // （spec 2026-08-17 §2.6 路径 B）。
+        let persisted = crate::state_store::load();
         let mut state = FileState {
             items: seed,
-            ..FileState::default()
+            overrides: persisted.providers,
+            deleted: persisted.deleted,
         };
-        if path.exists() {
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
-            let file: OverlayFile = serde_json::from_str(&raw)
-                .map_err(|e| format!("解析 {} 失败: {e}", path.display()))?;
-            state.deleted = file.deleted;
-            state.overrides = file.providers;
-            state
-                .items
-                .retain(|i| !state.deleted.contains(&id_of(i, &id_field).to_string()));
-            for item in state.overrides.values() {
-                upsert_item(&mut state.items, item.clone(), &id_field);
-            }
+        state
+            .items
+            .retain(|i| !state.deleted.contains(&id_of(i, &id_field).to_string()));
+        for item in state.overrides.values() {
+            upsert_item(&mut state.items, item.clone(), &id_field);
         }
         Ok(Self {
             path,
@@ -210,19 +232,17 @@ impl FileStore {
         })
     }
 
+    /// 写入到统一 `state.json`（spec 2026-08-17 §2.6）：tmp + rename
+    /// 原子写，由 `state_store::update` 完成。**不再触碰 `self.path`**。
     async fn persist(&self, state: &FileState) -> Result<(), String> {
-        let file = OverlayFile {
-            providers: state.overrides.clone(),
-            deleted: state.deleted.clone(),
-        };
-        let raw = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-        if let Some(parent) = self.path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&self.path, raw)
-            .map_err(|e| format!("写入 {} 失败: {e}", self.path.display()))
+        let overrides = state.overrides.clone();
+        let deleted = state.deleted.clone();
+        crate::state_store::update(|s| {
+            s.providers = overrides;
+            s.deleted = deleted;
+        })
+        .map_err(|e| format!("state_store update 失败: {e}"))?;
+        Ok(())
     }
 }
 
@@ -286,6 +306,9 @@ pub struct CrudForm<S: CrudStore> {
     /// 提交时的字段规范化钩子（如 provider preset 默认值填充）。
     /// 在 item_from_form 之后、写入存储之前执行。
     normalizer: Option<ItemNormalizer>,
+    /// 「获取模型列表」按钮：目标字段名 + 取数钩子。设置后编辑/新建表单
+    /// 底部会多一个按钮，点击后用当前表单值取数并回填该字段预填值。
+    model_fetcher: Option<(String, ModelFetcher)>,
 }
 
 /// 两套共享同一存储的 CRUD 表单，用于「同一个实体有两种入口」的场景
@@ -472,12 +495,20 @@ impl<S: CrudStore> CrudForm<S> {
             id_field: id_field.into(),
             store,
             normalizer: None,
+            model_fetcher: None,
         }
     }
 
     /// 注入提交规范化钩子（对每次表单提交的 item 生效，种子数据不经过它）。
     pub fn with_normalizer(mut self, f: ItemNormalizer) -> Self {
         self.normalizer = Some(f);
+        self
+    }
+
+    /// 注入「获取模型列表」按钮：`field` 是结果要回填的文本字段名，
+    /// `fetcher` 用当前表单 item 取数。结果只进表单预填值，不写存储。
+    pub fn with_model_fetcher(mut self, field: impl Into<String>, fetcher: ModelFetcher) -> Self {
+        self.model_fetcher = Some((field.into(), fetcher));
         self
     }
 
@@ -535,6 +566,40 @@ impl<S: CrudStore> CrudForm<S> {
                 let id = value.get(KEY_ID).and_then(Value::as_str);
                 let initial = self.recompute_initial(id, form_value).await;
                 let card = self.render_edit_card(&initial, id);
+                self.reply(key, card, message_id)
+            }
+            OP_FETCH_MODELS => {
+                let id = value.get(KEY_ID).and_then(Value::as_str);
+                // 与 recompute 同款拼 item：当前表单值 + 存储旧值兜底敏感
+                // 字段 + normalizer 派生字段（preset 补全 base_url 等）。
+                let existing = match id {
+                    Some(id) => self.store.get(id).await,
+                    None => None,
+                };
+                let mut item = self.item_from_form(id, form_value, existing.as_ref());
+                if let Some(f) = &self.normalizer {
+                    f(&mut item);
+                }
+                let mut initial = self.item_to_initial(&item);
+                let note = match &self.model_fetcher {
+                    Some((field, fetch)) => match fetch(item).await {
+                        Ok(models) if !models.is_empty() => {
+                            initial.insert(field.clone(), models.join(","));
+                            format!(
+                                "✅ 已获取 {} 个模型并填入下方字段；确认后点「提交」保存（不提交不落盘）。",
+                                models.len()
+                            )
+                        }
+                        Ok(_) => "⚠️ 接口返回空列表，请手填。".to_string(),
+                        Err(e) => format!("⚠️ 获取失败：{e}。请手填。"),
+                    },
+                    None => "⚠️ 该表单未配置模型获取。".to_string(),
+                };
+                let mut card = self.render_edit_card(&initial, id);
+                // 结果提示放表单容器上方，重渲后第一眼可见。
+                card.body
+                    .elements
+                    .insert(0, CardElement::Markdown { content: note });
                 self.reply(key, card, message_id)
             }
             OP_DELETE => {
@@ -653,16 +718,30 @@ impl<S: CrudStore> CrudForm<S> {
             submit.insert(KEY_ID.into(), Value::String(id.to_string()));
         }
         let mut card = render_form_card(&self.spec, initial, Value::Object(submit));
-        // 「取消/返回列表」必须是表单容器外的普通回调按钮：容器内的 reset
-        // 按钮不允许带 behaviors（飞书 API 11310），无法驱动服务端状态。
-        card.push_actions(vec![CardButton {
+        // 「获取模型列表」（可选）与「取消/返回列表」都必须是表单容器外的
+        // 普通回调按钮：容器内的 reset 按钮不允许带 behaviors（飞书 API
+        // 11310），无法驱动服务端状态。获取按钮在容器外也能拿到整张卡的
+        // form_value（含容器内各字段当前值），所以新建未提交也能取数。
+        let mut actions: Vec<CardButton> = Vec::new();
+        if self.model_fetcher.is_some() {
+            actions.push(CardButton {
+                text: CardText {
+                    tag: "plain_text".into(),
+                    content: "🔍 获取模型列表".into(),
+                },
+                r#type: "default".into(),
+                value: self.payload(OP_FETCH_MODELS, id),
+            });
+        }
+        actions.push(CardButton {
             text: CardText {
                 tag: "plain_text".into(),
                 content: "取消".into(),
             },
             r#type: "default".into(),
             value: self.payload(OP_CANCEL, None),
-        }]);
+        });
+        card.push_actions(actions);
         card
     }
 
@@ -795,6 +874,13 @@ fn upsert_item(items: &mut Vec<Item>, item: Item, id_field: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // spec 2026-08-17 §2.6：FileStore 持久化到 unified state.json（路径由
+    // SEBAS_STATE_FILE 决定）。所有写盘的测试都要先把 SEBAS_STATE_FILE 指
+    // 向 tempdir，避免污染开发机 ~/.sebas/state.json，并避免互相覆盖。
+    // 全局 mutex 串行化 env 访问。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn item(id: &str, protocol: &str) -> Item {
         let mut m = Map::new();
@@ -807,9 +893,28 @@ mod tests {
         m
     }
 
+    /// 把 SEBAS_STATE_FILE 指向 tempdir/state.json，返回 guard。
+    fn isolate(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("state.json");
+        // SAFETY: ENV_LOCK held by caller.
+        unsafe {
+            std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
+        }
+        path
+    }
+
+    fn deisolate() {
+        // SAFETY: ENV_LOCK held by caller.
+        unsafe {
+            std::env::remove_var("SEBAS_STATE_FILE");
+        }
+    }
+
     #[tokio::test]
     async fn load_without_file_uses_seed() {
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let _path = isolate(&dir);
         let store = FileStore::load(
             dir.path().join("providers.json"),
             "name",
@@ -817,13 +922,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.list().await.len(), 1);
+        deisolate();
     }
 
     #[tokio::test]
     async fn insert_persists_and_delete_tombstones() {
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("providers.json");
-        let store = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
+        let _path = isolate(&dir);
+        let store = FileStore::load(
+            dir.path().join("providers.json"),
+            "name",
+            vec![item("deepseek", "anthropic")],
+        )
+        .unwrap();
 
         // 新增：覆盖种子 + 落盘。
         store.insert(item("openai", "openai")).await.unwrap();
@@ -832,32 +944,50 @@ mod tests {
         // 删除种子里已有的条目：写墓碑，重启后不复活。
         store.delete("deepseek").await.unwrap();
         assert_eq!(store.list().await.len(), 1);
-        let reloaded = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
+        let reloaded = FileStore::load(
+            dir.path().join("providers.json"),
+            "name",
+            vec![item("deepseek", "anthropic")],
+        )
+        .unwrap();
         assert_eq!(reloaded.list().await.len(), 1);
         assert_eq!(
             reloaded.list().await[0].get("name").and_then(Value::as_str),
             Some("openai")
         );
+        deisolate();
     }
 
     #[tokio::test]
     async fn update_overrides_seed_value() {
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("providers.json");
+        let _path = isolate(&dir);
         let mut seed = item("deepseek", "anthropic");
         seed.insert("base_url_anthropic".into(), Value::String("old".into()));
-        let store = FileStore::load(&path, "name", vec![seed]).unwrap();
+        let store = FileStore::load(
+            dir.path().join("providers.json"),
+            "name",
+            vec![seed],
+        )
+        .unwrap();
 
         let mut updated = item("deepseek", "openai");
         updated.insert("base_url_anthropic".into(), Value::String("new".into()));
         store.update(updated).await.unwrap();
 
-        let reloaded = FileStore::load(&path, "name", vec![item("deepseek", "anthropic")]).unwrap();
+        let reloaded = FileStore::load(
+            dir.path().join("providers.json"),
+            "name",
+            vec![item("deepseek", "anthropic")],
+        )
+        .unwrap();
         let got = reloaded.get("deepseek").await.unwrap();
         assert_eq!(
             got.get("base_url_anthropic").and_then(Value::as_str),
             Some("new")
         );
+        deisolate();
     }
 
     fn provider_spec() -> FormSpec {
@@ -911,7 +1041,9 @@ mod tests {
 
     #[tokio::test]
     async fn recompute_runs_normalizer_without_persisting() {
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let _path = isolate(&dir);
         let store = FileStore::load(dir.path().join("providers.json"), "name", Vec::new()).unwrap();
         let form = CrudForm::new(provider_spec(), "name", store.clone()).with_normalizer(Arc::new(
             |item: &mut Item| {
@@ -957,12 +1089,15 @@ mod tests {
 
         // 关键：recompute 不应写入存储。
         assert_eq!(store.list().await.len(), 0);
+        deisolate();
     }
 
     #[tokio::test]
     async fn recompute_preserves_existing_secret_on_edit() {
         // 编辑已有条目时，recompute 不能把已有的密钥抹掉。
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let _path = isolate(&dir);
         let mut seed = item("ds", "anthropic");
         seed.insert(
             "base_url_anthropic".into(),
@@ -1009,5 +1144,6 @@ mod tests {
             Some("sk-keep"),
             "recompute 不能写入存储"
         );
+        deisolate();
     }
 }
