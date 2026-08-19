@@ -110,14 +110,17 @@ impl RouterHandle {
             self.reply_targets.set(key.clone(), target.clone()).await;
         }
         match parse_command(&text) {
-            Command::New => {
+            Command::New(prompt) => {
                 match self.map.begin_spawn(key.clone()).await {
                     Ok(crate::state::BeginSpawn::AlreadySpawning) => {
                         // A spawn is already in flight for this chat; a second
                         // /new would orphan the in-flight session.
                         tracing::debug!("spawn already in flight; ignoring duplicate /new");
                     }
-                    Ok(_) => self.spawn_new(key, String::new(), reply_to).await,
+                    // trailing text 作为初始 prompt：`derive_topic(prompt)`
+                    // 派生卡片标题，引用块渲染 prompt；空 trailing 走旧行为
+                    // （无 prompt、卡标题回退 "Claude Code" 占位）。
+                    Ok(_) => self.spawn_new(key, prompt, reply_to).await,
                     Err(e) => {
                         tracing::warn!(?e, "begin_spawn failed");
                         self.emit(Out::HelpText { key }).await;

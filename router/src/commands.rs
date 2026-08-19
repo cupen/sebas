@@ -35,7 +35,10 @@ pub enum GatewayAction {
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
-    New,
+    /// `/new [prompt]` —— 开新会话，trailing text 作为初始 prompt：
+    /// `derive_topic(prompt)` 派生卡片标题、引用块渲染 prompt。空 trailing
+    /// 退化为旧行为（无 prompt、卡标题回退 `"Claude Code"` 占位）。
+    New(String),
     Sessions,
     Switch(usize),
     Resume(String),
@@ -76,7 +79,7 @@ pub fn parse_command(input: &str) -> Command {
     let head = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
     match head {
-        "/new" => Command::New,
+        "/new" => Command::New(arg.into()),
         "/sessions" => Command::Sessions,
         "/switch" => match arg.parse::<usize>() {
             Ok(n) => Command::Switch(n),
