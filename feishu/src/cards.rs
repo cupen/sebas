@@ -402,22 +402,19 @@ const CARD_TITLE_MAX_CHARS: usize = 40;
 
 /// 从用户首条 prompt 派生卡片主题（header title）。
 ///
-/// 取首个剥离后非空的行：去前后空白、行首引用符（`>`）与代码围栏/行内 `` `
-/// `` 包裹，超长截断成 `…`；全部行剥离后仍为空（空 prompt / lazy seed / 纯
-/// 围栏）回退中性占位 `"Claude Code"`。`user_prompt` 会话内不变（root 卡只
-/// 在 spawn 时种一次，flush 不重写），故标题随会话保持稳定，跨卡 / 换卡
-/// 一致 —— 正表达"主题"语义。
+/// 逐行清理后取首个非空行（`clean_topic_line`）。清理规则按顺序：
+/// 1. 纯代码围栏行（```` ``` ```` 或 ```` ```lang ````）整行跳过，看下一行。
+/// 2. 嵌套块引用：剥掉所有前导 `>` 和之后的空白（`>>` / `>>>` 一并处理）。
+/// 3. 行首/行尾 markdown 标题标记（`#` / `##` / `###` …）各剥一次。
+/// 4. 行首/行尾内联反引号各剥一次（避免 ```` `cargo build` 跑一下 ```` 留下
+///    游离 `` ` ``；中间的反引号保留）。
+///
+/// 全部行清理后仍为空（空 prompt / lazy seed / 纯围栏）回退中性占位
+/// `"Claude Code"`。超长截断成 `…`。`user_prompt` 会话内不变（root 卡只在
+/// spawn 时种一次，flush 不重写），故标题随会话保持稳定，跨卡 / 换卡一致
+/// —— 正表达"主题"语义。
 pub fn derive_topic(prompt: &str) -> String {
-    let first_line = prompt
-        .lines()
-        .map(|l| {
-            l.trim()
-                .trim_start_matches('>')
-                .trim()
-                .trim_matches('`')
-                .trim()
-        })
-        .find(|l| !l.is_empty());
+    let first_line = prompt.lines().map(clean_topic_line).find(|l| !l.is_empty());
     let Some(cleaned) = first_line else {
         return "Claude Code".to_string();
     };
@@ -426,6 +423,41 @@ pub fn derive_topic(prompt: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// 单行 prompt 清理：剥掉会让标题变难读的 markdown 噪音。
+///
+/// 顺序很关键 —— 先看是否围栏行（不剥围栏符以外的东西），再剥嵌套引用 / 标题
+/// 标记 / 行首尾内联反引号，最后 trim 一次。所有规则都是 best-effort：不试图
+/// 解析完整 markdown，只把常见噪音剥掉。
+fn clean_topic_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // 1. 纯代码围栏行（``` 或 ```lang）整行跳过：返回空串让调用方看下一行。
+    //    在其他清理之前判断，避免被 `>` / `#` 规则误吃。
+    if trimmed.starts_with("```") {
+        return String::new();
+    }
+    let mut s = trimmed.to_string();
+    // 2. 嵌套块引用：剥掉所有前导 `>` 和之后的空白。
+    while let Some(rest) = s.strip_prefix('>') {
+        s = rest.trim_start().to_string();
+        if s.is_empty() {
+            break;
+        }
+    }
+    // 3. 行首/行尾 markdown 标题标记各剥一次（`#` / `##` / `###` 都吃）。
+    s = s.trim_start_matches('#').trim_start().to_string();
+    // 4. 行首/行尾内联反引号各剥一次，避免游离 `` ` ``。
+    if let Some(rest) = s.strip_prefix('`') {
+        s = rest.to_string();
+    }
+    if let Some(rest) = s.strip_suffix('`') {
+        s = rest.to_string();
+    }
+    s.trim().to_string()
 }
 
 /// 卡片 footer 的可选信息：替代 `msg_id: {session_id}` 灰注，展示模型名和

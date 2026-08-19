@@ -24,6 +24,36 @@ fn derive_topic_uses_first_nonempty_line() {
 }
 
 #[test]
+fn derive_topic_strips_nested_blockquotes() {
+    // `>>` / `>>>` 嵌套引用一次性剥到底，旧版只剥一个 `>` 会留下 `> text`。
+    assert_eq!(derive_topic(">> nested quote"), "nested quote");
+    assert_eq!(derive_topic(">>> triple nested"), "triple nested");
+    assert_eq!(derive_topic("> > spaced nested"), "spaced nested");
+    // 仅 `>` 起头无内容（典型空引用块）→ 该行清空，回退占位。
+    assert_eq!(derive_topic(">>"), "Claude Code");
+}
+
+#[test]
+fn derive_topic_strips_markdown_headers() {
+    // `#` / `##` / `###` 标题前缀都剥，常用于用户复制 README 标题当主题。
+    assert_eq!(derive_topic("# Title"), "Title");
+    assert_eq!(derive_topic("## Subhead"), "Subhead");
+    assert_eq!(derive_topic("### Deep"), "Deep");
+    // 紧贴内容也行（剥完 `#` 再 trim 一次）。
+    assert_eq!(derive_topic("#title"), "title");
+}
+
+#[test]
+fn derive_topic_skips_code_fences() {
+    // 首行是 ```lang 的围栏 → 整行跳过，看下一行（不再退回 "Claude Code"
+    // 或残留 "rust"）。
+    let with_lang = "```rust\nfn main() {}\n```";
+    assert_eq!(derive_topic(with_lang), "fn main() {}");
+    // 首行是 ``` 但没有后续内容 → 回退占位。
+    assert_eq!(derive_topic("```\nbody"), "body");
+}
+
+#[test]
 fn card_config_thinking_default_is_show() {
     let cfg = feishu::cards::CardConfig::default();
     assert_eq!(cfg.thinking, feishu::cards::ThinkingDisplay::Show);
