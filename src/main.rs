@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Watchdog(args) => {
             let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-            sebas::watchdog::run_watchdog(cfg.watchdog, args.config)
+            sebas::watchdog::run_watchdog(cfg.watchdog, args.config, args.debug)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())

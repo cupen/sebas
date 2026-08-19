@@ -32,7 +32,7 @@ async fn drain_until<F: Fn(&AcpEvent) -> bool>(mgr: &SessionManager, id: &str, p
 async fn refusal_is_non_terminal_and_session_survives() {
     let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
-        .create_session(fake().to_str().unwrap(), vec![], None, "".into())
+        .create_session(fake().to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn");
 

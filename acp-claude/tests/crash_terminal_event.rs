@@ -23,7 +23,7 @@ fn fake() -> PathBuf {
 async fn crash_yields_terminal_error_and_cleanup() {
     let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
-        .create_session(fake().to_str().unwrap(), vec![], None, "".into())
+        .create_session(fake().to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn");
     // Clone the receiver BEFORE triggering death so the buffered terminal
@@ -86,7 +86,7 @@ async fn crash_yields_terminal_error_and_cleanup() {
 async fn explicit_kill_produces_no_terminal_error() {
     let mgr = SessionManager::new(Duration::from_secs(30));
     let id = mgr
-        .create_session(fake().to_str().unwrap(), vec![], None, "".into())
+        .create_session(fake().to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn");
     // Clone the receiver BEFORE kill so we can observe whatever the

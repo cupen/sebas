@@ -301,7 +301,11 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
 }
 
 /// 运行 watchdog 模式
-pub async fn run_watchdog(config: WatchdogConfig, config_path: String) -> Result<()> {
+pub async fn run_watchdog(
+    config: WatchdogConfig,
+    config_path: String,
+    debug: bool,
+) -> Result<()> {
     init_watchdog_tracing();
     let control = Arc::new(Mutex::new(ControlService::new()));
     let (restart_tx, restart_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -331,6 +335,16 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String) -> Result
 
     let mut webui_child = spawn_webui_process(&config, &config_path, &secret).await;
 
+    // Debug 模式：额外 spawn 一个独立 `gateway --debug` HTTP 子进程（固定端口、
+    // 内置 `test` 模型自应答、不转发上游），与 webui 相同的进程生命周期归 watchdog
+    // 所有，方便本地 `curl` 调试。配置沿用同一个 toml，监听地址来自 `[gateway] listen`
+    // （默认 127.0.0.1:8787）。
+    let mut gateway_child = if debug {
+        spawn_debug_gateway_process(&config_path, &secret).await
+    } else {
+        None
+    };
+
     let mut watchdog = Watchdog::with_control(
         config,
         config_path,
@@ -340,6 +354,10 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String) -> Result
     );
     let result = watchdog.run().await;
     if let Some(child) = webui_child.as_mut() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    if let Some(child) = gateway_child.as_mut() {
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
@@ -411,6 +429,58 @@ async fn spawn_webui_process(config: &WatchdogConfig, config_path: &str, control
         }
         Err(e) => {
             warn!("failed to spawn webui process: {e}");
+            None
+        }
+    }
+}
+
+/// `watchdog --debug`：额外 spawn 一个独立的 `gateway --debug` HTTP 子进程，
+/// 生命周期归 watchdog 所有（kill_on_drop + 退出时回收），与 webui 相同模式。
+/// 内置 `test` 模型由 gateway 自身应答（`gateway://self` 短路，不转发上游），
+/// 监听地址来自 `[gateway] listen`（默认 `127.0.0.1:8787`），方便本地 curl 调试。
+async fn spawn_debug_gateway_process(config_path: &str, control_secret: &str) -> Option<Child> {
+    // 解析 `[gateway] listen` 以便日志给出实际监听地址；解析失败则回退到
+    // 空 `[gateway]` 段的默认值（真正绑定/启动由 gateway 子进程自己负责）。
+    let listen = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|raw| gateway::config::GatewayConfig::parse(&raw).ok())
+        .map(|cfg| cfg.listen.clone())
+        .and_then(|listen| (!listen.is_empty()).then_some(listen))
+        .unwrap_or_else(|| {
+            gateway::config::GatewayConfig::parse("[gateway]")
+                .map(|cfg| cfg.listen)
+                .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
+        });
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("cannot determine current exe for debug gateway process: {e}");
+            return None;
+        }
+    };
+
+    match Command::new(&exe)
+        .arg("gateway")
+        .arg("--config")
+        .arg(config_path)
+        .arg("--debug")
+        .env("SEBAS_CONTROL_SECRET", control_secret)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => {
+            info!(
+                "debug gateway process spawned (pid={}), HTTP at http://{} (debug test-provider, no upstream)",
+                child.id().unwrap_or(0),
+                listen,
+            );
+            Some(child)
+        }
+        Err(e) => {
+            warn!("failed to spawn debug gateway process: {e}");
             None
         }
     }

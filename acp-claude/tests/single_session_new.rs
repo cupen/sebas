@@ -48,6 +48,7 @@ async fn exactly_one_initialize_one_user_message_and_routing_id_matches() {
             fake().to_str().unwrap(),
             vec!["--journal".into(), journal.to_str().unwrap().into()],
             Some(work_dir_str.clone()),
+            vec![],
             "".into(),
         )
         .await

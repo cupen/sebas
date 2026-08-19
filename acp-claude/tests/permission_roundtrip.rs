@@ -37,6 +37,7 @@ async fn permission_round_trip() {
                 journal.to_str().unwrap().into(),
             ],
             None,
+            vec![],
             "".into(),
         )
         .await

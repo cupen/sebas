@@ -38,6 +38,7 @@ async fn silent_child_is_detected_as_hung_and_torn_down() {
             // shot.
             vec!["--ignore-interrupt".into()],
             None,
+            vec![],
             "".into(),
         )
         .await

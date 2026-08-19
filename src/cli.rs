@@ -152,6 +152,11 @@ pub struct WatchdogArgs {
     /// Path to the sebas config.toml.
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
+
+    /// 同时在固定端口上以 debug 模式额外启动一个独立 gateway HTTP 服务
+    /// （内置 `test` 模型自应答、不转发上游），便于本地 curl 调试。
+    #[arg(long)]
+    pub debug: bool,
 }
 
 /// `sebas update` — one-shot update implementation used by watchdog.

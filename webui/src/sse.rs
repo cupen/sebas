@@ -18,8 +18,6 @@ pub enum WebUiEvent {
     SessionUpdated { session_id: String, status: String },
     /// A session was removed.
     SessionRemoved { session_id: String },
-    /// A card was updated (new content streamed).
-    CardUpdated { session_id: String },
     /// Configuration was updated.
     ConfigUpdated,
 }

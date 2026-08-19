@@ -79,6 +79,11 @@ pub struct CcDriver {
     /// detection is suspended while this is set, otherwise a slow user
     /// click would look exactly like a hung child.
     waiting_permission: Arc<std::sync::atomic::AtomicBool>,
+    /// True while a turn is in progress (between CreateSession/ContinueSession
+    /// and the matching Message::Result). Hang detection only fires when
+    /// a turn is active — otherwise the child is idle (waiting for the next
+    /// prompt) and must not be killed.
+    turn_active: bool,
 }
 
 /// Why a connect attempt failed. `ResumeRejected` is carved out so the
@@ -268,6 +273,7 @@ impl CcDriver {
             last_activity: tokio::time::Instant::now(),
             hang_stage: 0,
             waiting_permission,
+            turn_active: false,
         })
     }
 
@@ -360,7 +366,7 @@ impl CcDriver {
                     if awaiting_user {
                         continue;
                     }
-                    if self.last_activity.elapsed() > hang_timeout && self.hang_stage < 3 {
+                    if self.last_activity.elapsed() > hang_timeout && self.turn_active && self.hang_stage < 3 {
                         self.hang_stage += 1;
                         tracing::warn!(
                             session_id = %self.session_id,
@@ -398,6 +404,7 @@ impl CcDriver {
                 }
                 Sel::Cmd(Some(AcpCommand::CreateSession { prompt, .. }))
                 | Sel::Cmd(Some(AcpCommand::ContinueSession { prompt, .. })) => {
+                    self.turn_active = true;
                     if let Err(e) = self.client.query(prompt).await {
                         self.terminal(&format!("session/prompt failed: {e}")).await;
                         return;
@@ -414,6 +421,12 @@ impl CcDriver {
                     // (sebas-9pz ①).
                     self.last_activity = tokio::time::Instant::now();
                     self.hang_stage = 0;
+                    // Message::Result = turn finished (child will go silent
+                    // until next prompt). Clear turn_active so hang detection
+                    // doesn't mis-kill an idle-but-healthy child.
+                    if matches!(&m, Message::Result(_)) {
+                        self.turn_active = false;
+                    }
                     for evt in map_message(&self.session_id, &mut self.tool_names, &m) {
                         let is_terminal = matches!(evt, AcpEvent::Error { terminal: true, .. });
                         if self.evt_tx.send(evt).await.is_err() || is_terminal {

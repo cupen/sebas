@@ -22,6 +22,7 @@ async fn hanging_agent_times_out_and_is_reaped() {
             fake().to_str().unwrap(),
             vec!["--hang-on-init".into()],
             None,
+            vec![],
             "".into(),
         )
         .await;

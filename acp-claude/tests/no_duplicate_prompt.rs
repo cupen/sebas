@@ -21,7 +21,7 @@ async fn one_prompt_yields_exactly_three_events() {
         .expect("workspace root")
         .join("target/debug/fake-claude-cli");
     let id = mgr
-        .create_session(fake.to_str().unwrap(), vec![], None, "".into())
+        .create_session(fake.to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn fake-claude");
 

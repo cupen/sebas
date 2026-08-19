@@ -14,7 +14,7 @@ async fn create_and_kill() {
     let mgr = SessionManager::new(Duration::from_secs(30));
     let fake = fake_claude_path();
     let id = mgr
-        .create_session(fake.to_str().unwrap(), vec![], None, "hello".into())
+        .create_session(fake.to_str().unwrap(), vec![], None, vec![], "hello".into())
         .await
         .expect("spawn fake-claude");
     tokio::time::sleep(Duration::from_millis(100)).await;
