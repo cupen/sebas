@@ -3,8 +3,22 @@ use router::commands::{Command, parse_command};
 #[test]
 fn parses_new() {
     match parse_command("/new") {
-        Command::New => {}
+        Command::New(p) => assert!(p.is_empty(), "bare /new yields empty prompt"),
         _ => panic!("expected New"),
+    }
+}
+
+#[test]
+fn parses_new_with_prompt() {
+    // trailing text 作为初始 prompt（驱动 derive_topic 卡标题 + 引用块）。
+    match parse_command("/new 标题啊布拉啊布拉") {
+        Command::New(p) => assert_eq!(p, "标题啊布拉啊布拉"),
+        _ => panic!("expected New(prompt)"),
+    }
+    // 多个空格 trim 后保留内部空白（与 splitn(2) 行为一致）。
+    match parse_command("/new   hello   world  ") {
+        Command::New(p) => assert_eq!(p, "hello   world"),
+        _ => panic!("expected New(prompt)"),
     }
 }
 
