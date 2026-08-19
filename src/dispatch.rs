@@ -24,9 +24,13 @@ use tracing::{debug, info, warn};
 const TOPIC_INVALID_NOTICE: &str =
     "该话题已失效，本次会话已结束。请重新发消息开始新会话。";
 
-/// 话题出站卡统一回复目标：`root_id` 为空且 key 是话题会话时，用 router 存的
-/// 最近入站回复目标（话题根消息 message_id）；主线（thread_id=None）保持
-/// `None`（Q7 现状不变）。
+/// 出站卡统一回复目标：所有 `Out::SendCard` 都应走 reply 形式挂回用户发言。
+/// - 显式 `root_id`（如 `Out::SendCard.root_id`，换卡、permission 解析）原样透传；
+/// - 否则取 router 存的最近入站消息 `reply_target`：话题内 = 话题根消息
+///   message_id，主线 = 用户触发消息 message_id。
+///
+/// 主线保持 None 的旧 Q7 行为已废除：主线权限卡 / 失败提示卡现在也会挂在
+/// 用户发言下，方便沿 thread 跟踪整段对话。
 pub(crate) async fn topic_reply_target(
     router: &RouterHandle,
     key: &SessionKey,
@@ -34,8 +38,7 @@ pub(crate) async fn topic_reply_target(
 ) -> Option<String> {
     match root_id {
         Some(r) if !r.is_empty() => Some(r),
-        _ if key.thread_id.is_some() => router.reply_target(key).await,
-        _ => None,
+        _ => router.reply_target(key).await,
     }
 }
 
@@ -671,17 +674,37 @@ mod tests {
         );
     }
 
-    /// 主线会话保持 None（Q7 现状），不兜底。
+    /// 主线会话也兜底到最近入站消息（用户的触发消息）：权限卡 / 失败提示卡
+    /// 现在也会以 reply 形式挂回用户发言，与话题内行为对齐。
     #[tokio::test]
-    async fn topic_reply_target_stays_none_on_mainline() {
+    async fn topic_reply_target_falls_back_for_mainline_too() {
         let map = SessionMap::new();
         let key = SessionKey {
             chat_id: "oc_main".into(),
             thread_id: None,
         };
+        // 预映射 session，否则未映射的 PassThrough 会触发 spawn_new → 清掉
+        // reply_targets，让兜底拿不到值。
+        map.insert(key.clone(), Mapping::active("s1"))
+            .await
+            .unwrap();
         let (router, _rx) = RouterHandle::new(map);
-        assert_eq!(topic_reply_target(&router, &key, None).await, None);
-        // 显式 root_id 仍然透传。
+
+        // 入站主线消息写入 reply target（用户自己的 message_id）。
+        router
+            .dispatch(FeishuIn::Text {
+                key: key.clone(),
+                text: "hello".into(),
+                reply_to: Some("om_user_msg".into()),
+            })
+            .await;
+
+        // 空 root_id → 兜底到用户消息。
+        assert_eq!(
+            topic_reply_target(&router, &key, None).await.as_deref(),
+            Some("om_user_msg")
+        );
+        // 显式 root_id 仍然优先于兜底。
         assert_eq!(
             topic_reply_target(&router, &key, Some("explicit".into()))
                 .await

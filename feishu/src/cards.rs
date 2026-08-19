@@ -12,6 +12,8 @@ use serde_json::Value;
 /// no longer wired into the rendered header — the FSM state itself is surfaced
 /// as Feishu reactions (see `router::card_state::phase`). Kept as a pub helper
 /// for tests and any downstream that still needs the glyph ↔ phase map.
+// (derive_session_title 已废弃：UUID 短形式对用户不可读；标题回到
+// `derive_topic(user_prompt)` 首行非空 prompt。)
 pub fn phase_visual(phase: &str) -> &str {
     match phase {
         "Typing" => "👀",
@@ -395,23 +397,32 @@ impl Card {
     }
 }
 
-/// 卡片 header 标题的字符上限：标题过长即截断加省略号，防超飞书标题限长。
+/// 卡片 header 标题的字符上限：主题过长即截断加省略号，防超飞书标题限长。
 const CARD_TITLE_MAX_CHARS: usize = 40;
 
-/// 从 claude code 会话 id（UUID v4，36 字符）派生卡片 header title：
-/// 取前 8 字符（hex 短形式）作为稳定标识。同一会话内跨卡 / 换卡一致；
-/// 不同会话立刻能区分（聊天列表里多张卡片并列时也好识别）。
-/// 空 id（lazy seed 早到兜底场景）回退中性占位 `"Claude Code"`。
+/// 从用户首条 prompt 派生卡片主题（header title）。
 ///
-/// 旧版 `derive_topic(user_prompt)` 派生主题文字，但短 prompt / 多行 prompt
-/// 产出的标题常不可读；session_id 短形式既稳定又好追溯。
-pub fn derive_session_title(session_id: &str) -> String {
-    let trimmed = session_id.trim();
-    if trimmed.is_empty() {
+/// 取首个剥离后非空的行：去前后空白、行首引用符（`>`）与代码围栏/行内 `` `
+/// `` 包裹，超长截断成 `…`；全部行剥离后仍为空（空 prompt / lazy seed / 纯
+/// 围栏）回退中性占位 `"Claude Code"`。`user_prompt` 会话内不变（root 卡只
+/// 在 spawn 时种一次，flush 不重写），故标题随会话保持稳定，跨卡 / 换卡
+/// 一致 —— 正表达"主题"语义。
+pub fn derive_topic(prompt: &str) -> String {
+    let first_line = prompt
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches('>')
+                .trim()
+                .trim_matches('`')
+                .trim()
+        })
+        .find(|l| !l.is_empty());
+    let Some(cleaned) = first_line else {
         return "Claude Code".to_string();
-    }
-    let mut out: String = trimmed.chars().take(CARD_TITLE_MAX_CHARS).collect();
-    if trimmed.chars().count() > CARD_TITLE_MAX_CHARS {
+    };
+    let mut out: String = cleaned.chars().take(CARD_TITLE_MAX_CHARS).collect();
+    if cleaned.chars().count() > CARD_TITLE_MAX_CHARS {
         out.push('…');
     }
     out
@@ -473,11 +484,17 @@ fn short_model_name(model: &str) -> String {
 }
 
 /// 从累积状态构建完整卡（spec §4.3）：
-/// header(`{session_id 短形式}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
+/// header(`{主题}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
 /// + body 各元素 + footer 灰注。
-/// 标题由 `derive_session_title(session_id)` 派生（取前 8 字符），不再携带
+/// 标题由 `derive_topic(user_prompt)` 派生（首条非空 prompt 行），不再携带
 /// 状态 emoji；状态由 Feishu reaction 表达（见 `router::card_state::phase`）。
 /// 当 `footer` 为 Some 时展示模型名和 token 用量，否则回退 `msg_id: {session_id}`。
+///
+/// Footer 三段语义（避免把 in/out 当 round、ctx 当 in+out 求和的常见错）：
+/// - `in`  = 累计输入 token（整个会话的 prompt 累计，作为对话"成本"）
+/// - `out` = 累计输出 token（整个会话的生成累计）
+/// - `ctx` = 当前上下文窗口 token（=累计输入，因为输入就是填入上下文的全部
+///   内容；不应把 in+out 求和，那只是总流量不是上下文）
 pub fn render_accumulated_card(
     user_prompt: &str,
     session_id: &str,
@@ -485,7 +502,7 @@ pub fn render_accumulated_card(
     theme: &str,
     footer: Option<&CardFooter>,
 ) -> Card {
-    let mut card = Card::new(&derive_session_title(session_id), theme);
+    let mut card = Card::new(&derive_topic(user_prompt), theme);
     card.push_text(format!("> {user_prompt}"));
     card.push_divider();
     for el in body {
@@ -498,11 +515,11 @@ pub fn render_accumulated_card(
                 .as_deref()
                 .map(short_model_name)
                 .unwrap_or_else(|| "?".to_string());
-            let round_in = format_token_count(f.round_input);
-            let round_out = format_token_count(f.round_output);
-            let total = format_token_count(f.total_input + f.total_output);
+            let total_in = format_token_count(f.total_input);
+            let total_out = format_token_count(f.total_output);
+            let ctx = format_token_count(f.total_input);
             card.push_note(format!(
-                "{model}  ·  in: {round_in}  out: {round_out}  ·  ctx: {total}"
+                "{model}  ·  in: {total_in}  out: {total_out}  ·  ctx: {ctx}"
             ));
         }
         None => {
