@@ -11,8 +11,8 @@ pub struct Cli {
 pub enum Cmd {
     /// Run the long-lived sebas service.
     Run(RunArgs),
-    /// Install a systemd user or system unit for sebas.
-    InstallService(InstallServiceArgs),
+    /// Install or uninstall the systemd system unit for sebas (requires root).
+    Service(ServiceArgs),
     /// Replay captured inbound events from a directory of `.json` files.
     Replay(ReplayArgs),
     /// Record an ACP agent's stdio traffic as a fixture file (spec §4.4).
@@ -72,22 +72,23 @@ pub struct RunArgs {
 }
 
 #[derive(Parser)]
-pub struct InstallServiceArgs {
-    /// Install as a user unit (~/.config/systemd/user/sebas.service).
-    #[arg(long, conflicts_with = "system")]
-    pub user: bool,
+pub struct ServiceArgs {
+    /// Install the sebas system unit (/etc/systemd/system/sebas.service).
+    #[arg(long, conflicts_with = "uninstall", required = true)]
+    pub install: bool,
 
-    /// Install as a system unit (/etc/systemd/system/sebas.service). Requires root.
-    #[arg(long, conflicts_with = "user")]
-    pub system: bool,
+    /// Uninstall the sebas system unit.
+    #[arg(long, conflicts_with = "install")]
+    pub uninstall: bool,
 
-    /// After installing, also `systemctl enable` and `start` the unit.
+    /// OS account the service runs as (User=/Group=). Must not be root.
+    /// Required for --install (enforced at runtime); ignored by --uninstall.
+    #[arg(long, default_value = "")]
+    pub user: String,
+
+    /// After installing, also `systemctl enable --now` the unit.
     #[arg(long)]
     pub auto_start: bool,
-
-    /// Run the system unit as this user/group (system scope only).
-    #[arg(long)]
-    pub run_as: Option<String>,
 
     /// Overwrite an existing unit file.
     #[arg(long)]

@@ -128,8 +128,8 @@ async fn apply_event_accumulates_without_emitting_out() {
             assert!(s.contains("a"), "含 TextDelta: {s}");
             assert!(s.contains("think"), "含 ThinkingDelta: {s}");
             assert!(s.contains("Bash"), "含 ToolEnd: {s}");
-            // 标题现在是 session_id 短形式（不再是 prompt 主题）。
-            assert!(s.contains("\"content\":\"s1\""), "标题为 session_id s1: {s}");
+            // 标题现在是 user_prompt 首行（derive_topic）。
+            assert!(s.contains("\"content\":\"hi\""), "标题为 user_prompt 'hi': {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -173,9 +173,9 @@ async fn fsm_eyes_to_construction_to_done() {
         .unwrap();
     match o {
         Out::UpdateCard { card, .. } => {
-            // 状态 emoji 不再进卡：标题是 session_id 短形式（不再是 prompt 主题）。
+            // 状态 emoji 不再进卡：标题是 user_prompt 首行（derive_topic）。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("\"content\":\"s2\""), "标题为 session_id s2: {s}");
+            assert!(s.contains("\"content\":\"p\""), "标题为 user_prompt 'p': {s}");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -418,9 +418,12 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     let o1 = recv(&mut out_rx).await;
     match o1 {
         Out::UpdateCard { card, .. } => {
-            // 状态 emoji 不再进卡：标题是 session_id 短形式（不再是 prompt 主题）。
+            // flush_card 走在 emit_turn_card 之前，使用上一轮的 user_prompt。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("\"content\":\"r3\""), "标题为 session_id r3: {s}");
+            assert!(
+                s.contains("\"content\":\"第一题\""),
+                "本轮 UpdateCard 是上一轮的终态（user_prompt=第一题）: {s}"
+            );
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -430,10 +433,18 @@ async fn continue_after_done_flips_reaction_back_to_working() {
         "回切 reaction WORKING: {o2:?}"
     );
     let o3 = recv(&mut out_rx).await;
-    assert!(
-        matches!(o3, Out::SendCard { root_id: None, .. }),
-        "per-turn card: {o3:?}"
-    );
+    match o3 {
+        Out::SendCard { card, root_id, .. } => {
+            // emit_turn_card 重新 seed：新轮的 user_prompt 进入标题。
+            assert!(root_id.is_none(), "per-turn card reply target 由 Out 自己负责: {root_id:?}");
+            let s = serde_json::to_string(&card).unwrap();
+            assert!(
+                s.contains("\"content\":\"第二题\""),
+                "per-turn card 标题是本轮 user_prompt '第二题': {s}"
+            );
+        }
+        other => panic!("expected SendCard, got {other:?}"),
+    }
     let o4 = recv(&mut out_rx).await;
     assert!(matches!(o4, Out::SendAcp { .. }), "继续会话: {o4:?}");
     assert_no_more(&mut out_rx).await;

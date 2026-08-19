@@ -1,21 +1,26 @@
-use feishu::cards::{derive_session_title, render_permission_card, render_root_card};
+use feishu::cards::{derive_topic, render_permission_card, render_root_card};
 
 #[test]
-fn derive_session_title_takes_short_id_and_truncates() {
-    // UUID 短形式（取前 8 字符）作标题。
-    let short = "c9f2e1a3-4b5d-4e7f-9a8b-1c2d3e4f5a6b";
-    let mut chars = short.chars();
-    let prefix: String = chars.by_ref().take(40).collect();
-    let rest: String = chars.collect();
-    assert_eq!(derive_session_title(short), format!("{prefix}{rest}"));
+fn derive_topic_uses_first_nonempty_line() {
+    // 多行 prompt → 取首条非空行。
+    let prompt = "重构 src/foo.rs\n需要新增一个 util 模块\n加单测";
+    assert_eq!(derive_topic(prompt), "重构 src/foo.rs");
+    // 跳过行首 `>` 引用符（与卡片引用块渲染兼容）。
+    assert_eq!(derive_topic("> 重构 foo"), "重构 foo");
+    // 修剪首尾单边反引号（行首/行尾各削一个），常用于用户用代码片段当主题。
+    assert_eq!(derive_topic("`cargo build` 跑一下"), "cargo build` 跑一下");
+    // 首行空白 → 取下一非空行。
+    let prompt2 = "\n  \n真正的标题\n继续";
+    assert_eq!(derive_topic(prompt2), "真正的标题");
     // 超长截断加省略号，UTF-8 安全（按字符而非字节）。
     let long = "a".repeat(60);
-    let t = derive_session_title(&long);
+    let t = derive_topic(&long);
     assert_eq!(t.chars().count(), 41, "40 chars + ellipsis");
     assert!(t.ends_with('…'));
-    // 空 / 纯空白回退占位。
-    assert_eq!(derive_session_title(""), "Claude Code");
-    assert_eq!(derive_session_title("   "), "Claude Code");
+    // 空 / 纯空白 / 纯围栏回退占位。
+    assert_eq!(derive_topic(""), "Claude Code");
+    assert_eq!(derive_topic("   "), "Claude Code");
+    assert_eq!(derive_topic("```\n```"), "Claude Code");
 }
 
 #[test]
@@ -145,9 +150,9 @@ fn render_accumulated_card_structure() {
     ];
     let card = render_accumulated_card("重构 foo", "msg_9", &body, "orange", None);
     let s = serde_json::to_string(&card).unwrap();
-    // header title 改为 session_id（不再是 prompt 主题），template=orange
+    // header title 现在是首条 prompt 行（derive_topic），template=orange
     let v: serde_json::Value = serde_json::to_value(&card).unwrap();
-    assert_eq!(v["header"]["title"]["content"], "msg_9");
+    assert_eq!(v["header"]["title"]["content"], "重构 foo");
     assert!(s.contains("\"template\":\"orange\""));
     // 引用块
     assert!(s.contains("> 重构 foo"));
@@ -164,8 +169,8 @@ fn render_accumulated_card_empty_body_matches_seed() {
     let card = render_accumulated_card("hi", "msg_1", &[], "blue", None);
     let s = serde_json::to_string(&card).unwrap();
     let v: serde_json::Value = serde_json::to_value(&card).unwrap();
-    // 标题现在是 session_id（不再是 prompt 主题）。
-    assert_eq!(v["header"]["title"]["content"], "msg_1");
+    // 标题来自首行 prompt（不再是 session_id）。
+    assert_eq!(v["header"]["title"]["content"], "hi");
     assert!(s.contains("> hi"));
     assert!(s.contains("msg_id: msg_1"));
 }
@@ -184,10 +189,14 @@ fn render_accumulated_card_with_footer_shows_model_and_tokens() {
     let s = serde_json::to_string(&card).unwrap();
     // Should show short model name "sonnet"
     assert!(s.contains("sonnet"), "footer should contain short model name");
-    // Should show formatted token counts (1.2K, 5.7K, 8.0K)
-    assert!(s.contains("1.2K"), "round input should be 1.2K");
-    assert!(s.contains("5.7K"), "round output should be 5.7K");
-    assert!(s.contains("8.0K"), "ctx total should be 8.0K");
+    // 三段语义都按累计 total 渲染：in=total_input、out=total_output、
+    // ctx=total_input（不是 in+out 求和，那只是总流量不是上下文）。
+    assert!(s.contains("in: 5.0K"), "in should be cumulative total_input");
+    assert!(s.contains("out: 3.0K"), "out should be cumulative total_output");
+    assert!(s.contains("ctx: 5.0K"), "ctx should equal total_input");
+    // round_input/output 不再出现在 footer。
+    assert!(!s.contains("1.2K"), "round_input should not leak into footer");
+    assert!(!s.contains("5.7K"), "round_output should not leak into footer");
     // Should NOT contain msg_id
     assert!(!s.contains("msg_id:"), "footer should not show msg_id");
 }
@@ -199,18 +208,22 @@ fn render_accumulated_card_with_footer_no_model_shows_question_mark() {
         model: None,
         round_input: 100,
         round_output: 200,
-        total_input: 1000,
+        total_input: 1500,
         total_output: 500,
     };
     let card = render_accumulated_card("test", "msg_2", &[], "blue", Some(&footer));
     let s = serde_json::to_string(&card).unwrap();
     // Should show "?" for unknown model
     assert!(s.contains("?"), "footer should show ? for unknown model");
-    // Raw numbers (<1000) shown as-is
-    assert!(s.contains("in: 100"), "round input 100 should be shown as-is");
-    assert!(s.contains("out: 200"), "round output 200 should be shown as-is");
-    // 1500 → 1.5K
-    assert!(s.contains("1.5K"), "ctx total 1500 should be 1.5K");
+    // 三段都来自 cumulative total（不再读 round_input/round_output）；
+    // round_input/output 已不再影响 footer。
+    assert!(!s.contains("in: 100"), "round_input should not leak into footer");
+    assert!(!s.contains("out: 200"), "round_output should not leak into footer");
+    // 1500 → 1.5K（>= 1000 走 K 单位）
+    assert!(s.contains("in: 1.5K"), "in should be 1.5K from total_input 1500");
+    assert!(s.contains("out: 500"), "out should be raw 500 from total_output");
+    // ctx = total_input，不是 in+out 求和
+    assert!(s.contains("ctx: 1.5K"), "ctx should equal total_input, not 2.0K");
 }
 
 #[test]
@@ -225,10 +238,13 @@ fn render_accumulated_card_with_footer_large_tokens_no_decimal() {
     };
     let card = render_accumulated_card("big", "msg_3", &[], "blue", Some(&footer));
     let s = serde_json::to_string(&card).unwrap();
-    // 100K+, show without decimal
-    assert!(s.contains("100K"), "100K should be shown as 100K");
-    assert!(s.contains("200K"), "200K should be shown as 200K");
-    assert!(s.contains("800K"), "ctx 800K should be shown as 800K");
+    // 100K+, show without decimal —— in/out/ctx 都来自 cumulative total
+    assert!(s.contains("in: 500K"), "in should be cumulative total_input 500K");
+    assert!(s.contains("out: 300K"), "out should be cumulative total_output 300K");
+    assert!(s.contains("ctx: 500K"), "ctx should equal total_input, not in+out 800K");
+    // round_* 不再出现在 footer。
+    assert!(!s.contains("100K") || s.contains("in: 500K") && s.contains("ctx: 500K"),
+        "round_input 100K should not leak into footer");
     // Short model name: opus
     assert!(s.contains("opus"), "footer should show short model name opus");
 }

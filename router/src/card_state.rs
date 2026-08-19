@@ -11,7 +11,8 @@ use tokio::sync::RwLock;
 /// `"DONE"`, `"CrossMark"`) — required because Feishu's reaction API rejects
 //// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. These values
 /// surface as reactions on the root card to reflect session state; the card
-/// header title is the short session_id instead (`feishu::cards::derive_session_title`).
+/// header title is the topic from the first prompt line
+/// (`feishu::cards::derive_topic`).
 pub mod phase {
     // SEED reaction 表达"已收到"语义（Feishu `emoji_type` "Get" = 👌），不再是
     // "Typing" —— 后者暗示"正在打字"。bot 首条回复卡 reaction 用 SEED，
