@@ -4,12 +4,12 @@
 //! 对外的稳定入口经 `crate::run` 的 re-export 暴露，integration tests 路径不变。
 
 use crate::config::Config;
-use crate::dispatch::{send_card_topic_aware, topic_reply_target, TopicSendOutcome};
+use crate::dispatch::{TopicSendOutcome, send_card_topic_aware, topic_reply_target};
 use crate::reactions::ReactionTracker;
 use crate::spawn_env::resolve_spawn_overrides;
+use acp_claude::ClaudeCodeDriver;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::{AcpCommand, AcpEvent};
-use acp_claude::ClaudeCodeDriver;
 use feishu::cards::render_accumulated_card;
 use feishu::client::FeishuClient;
 use feishu::events::SessionKey;
@@ -113,7 +113,13 @@ pub async fn acp_spawn_and_activate(
 )> {
     let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
     let session_id = mgr
-        .create_session(claude_path, full_args, work_dir, extra_env, prompt.to_string())
+        .create_session(
+            claude_path,
+            full_args,
+            work_dir,
+            extra_env,
+            prompt.to_string(),
+        )
         .await?;
     // Clone the event receiver IMMEDIATELY after create_session returns Ok
     // (entry is in the table, session alive — before any slow I/O or prompt
@@ -255,14 +261,16 @@ pub(crate) async fn wire_session_card_and_pump(
     // real session_id (so streaming UpdateCards resolve correctly).
     // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
     //（避免初始卡蓝、后续卡变色的跳变）。
-let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
+    let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
     // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
     // 原话题；主线回退到用户输入消息（main 的 input_msg_id 行为，卡片
     // 以 reply 形式挂在输入消息下，方便沿 thread 跟踪）。话题失效时
     // send_card_topic_aware 会发文本提示并熔断（web_close_session 终止
     // 刚 spawn 的会话，返回 TopicInvalid，不冒泡错误）—— 首次出站就失效
     // 更要终止。
-    let reply = topic_reply_target(router, &key, None).await.or(input_msg_id);
+    let reply = topic_reply_target(router, &key, None)
+        .await
+        .or(input_msg_id);
     let outcome = send_card_topic_aware(
         feishu,
         http,
@@ -500,7 +508,10 @@ mod tests {
     #[test]
     fn extract_provider_error_returns_none_when_key_absent() {
         let env = vec![
-            ("ANTHROPIC_BASE_URL".to_string(), "https://api.example".to_string()),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.example".to_string(),
+            ),
             ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-test".to_string()),
         ];
         assert_eq!(extract_provider_error(&env), None);

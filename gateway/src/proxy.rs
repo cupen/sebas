@@ -61,7 +61,11 @@ const RESPONSE_STRIP_HEADERS: &[&str] = &[
 /// 改写请求 header：剥离 hop-by-hop + 下游 key，按协议注入上游 key。
 /// 业务 header（`anthropic-version` / `anthropic-beta` / `content-type` / 自定义）
 /// 原样透传。HeaderName 与 `&str` 比较已 case-insensitive（http crate 行为）。
-pub fn filtered_request_headers(src: &HeaderMap, proto: WireProtocol, upstream_key: &str) -> HeaderMap {
+pub fn filtered_request_headers(
+    src: &HeaderMap,
+    proto: WireProtocol,
+    upstream_key: &str,
+) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in src.iter() {
         if REQUEST_STRIP_HEADERS.iter().any(|s| name == *s) {

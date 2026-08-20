@@ -91,7 +91,8 @@ pub fn spec_preset() -> FormSpec {
                 name: "models".into(),
                 label: "模型列表".into(),
                 required: false,
-                placeholder: "用逗号分隔，从强到弱；或点下方「🔍 获取模型列表」从官方 API 拉取".into(),
+                placeholder: "用逗号分隔，从强到弱；或点下方「🔍 获取模型列表」从官方 API 拉取"
+                    .into(),
                 secret: false,
                 disabled: false,
             },
@@ -235,7 +236,8 @@ pub fn spec_custom() -> FormSpec {
                 name: "models".into(),
                 label: "模型列表".into(),
                 required: false,
-                placeholder: "用逗号分隔，从强到弱；或点下方「🔍 获取模型列表」从官方 API 拉取".into(),
+                placeholder: "用逗号分隔，从强到弱；或点下方「🔍 获取模型列表」从官方 API 拉取"
+                    .into(),
                 secret: false,
                 disabled: false,
             },
@@ -396,8 +398,8 @@ fn validate_legacy_overlay(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取 legacy overlay 失败: {e}"))?;
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 legacy overlay 失败: {e}"))?;
     #[derive(serde::Deserialize)]
     struct OverlayShape {
         #[serde(default)]
@@ -547,10 +549,7 @@ listen = "127.0.0.1:0"
         let state_path = path.with_file_name("state.json");
         // SAFETY: ENV_LOCK held by caller.
         unsafe {
-            std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
-                path.to_str().unwrap(),
-            );
+            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", path.to_str().unwrap());
             std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
         }
     }
@@ -772,7 +771,14 @@ listen = "127.0.0.1:0"
         // 的协议 radio 也用这个 name）。
         assert_eq!(
             names,
-            vec!["name", "preset", "api_key", "models", "default_model", "protocol"],
+            vec![
+                "name",
+                "preset",
+                "api_key",
+                "models",
+                "default_model",
+                "protocol"
+            ],
             "preset spec 字段顺序与 spec 锁定"
         );
 
@@ -814,11 +820,19 @@ listen = "127.0.0.1:0"
             .find(|f| f.name() == "protocol")
             .expect("preset spec must include protocol");
         match field {
-            FormField::Select { options, required, on_change, .. } => {
+            FormField::Select {
+                options,
+                required,
+                on_change,
+                ..
+            } => {
                 assert!(!required, "protocol 在 preset 表单里选填");
                 let values: Vec<&str> = options.iter().map(|o| o.value.as_str()).collect();
                 assert_eq!(values, vec!["auto", "anthropic", "openai"]);
-                assert!(on_change.is_none(), "protocol 在表单内是静默字段（on_change=None）");
+                assert!(
+                    on_change.is_none(),
+                    "protocol 在表单内是静默字段（on_change=None）"
+                );
             }
             _ => panic!("preset spec 的 protocol 应是 Select"),
         }
@@ -873,7 +887,10 @@ listen = "127.0.0.1:0"
             "默认 env 名应出现在面板内容：{rendered}"
         );
         // OpenAI 端点缺失时显示「—」占位（避免误以为有端点）。
-        assert!(rendered.contains('—'), "openai 端点缺失应显示占位：{rendered}");
+        assert!(
+            rendered.contains('—'),
+            "openai 端点缺失应显示占位：{rendered}"
+        );
     }
 
     /// 找不到 preset 时返回空 vec —— 调用方不叠加任何元素（不报错）。
@@ -948,9 +965,16 @@ listen = "127.0.0.1:0"
             backups.len(),
             1,
             "应恰好一个 .broken- 备份文件，实际：{:?}",
-            backups.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+            backups
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
         );
-        let backup_name = backups[0].file_name().unwrap().to_string_lossy().into_owned();
+        let backup_name = backups[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(
             backup_name.starts_with("providers.json.broken-"),
             "备份名前缀应为 `providers.json.broken-`，实际：{backup_name}"

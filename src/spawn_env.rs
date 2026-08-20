@@ -1292,12 +1292,17 @@ api_key_env = "ANTHROPIC_API_KEY"
         match compute_provider_resolution(&st, None).0 {
             ProviderResolution::Off => {}
             other => {
-                panic!("missing Direct provider 必须兜底回退 Off（不再 Error/abort）；got {other:?}")
+                panic!(
+                    "missing Direct provider 必须兜底回退 Off（不再 Error/abort）；got {other:?}"
+                )
             }
         }
         // 兜底 Off：env / args 都空（driver 不发 provider env），且绝无
         // SEBAS_PROVIDER_ERROR —— 否则 spawn wrapper 仍会拒绝启动。
-        assert!(env.is_empty(), "兜底 Off 不应给 driver 任何 env；got {env:?}");
+        assert!(
+            env.is_empty(),
+            "兜底 Off 不应给 driver 任何 env；got {env:?}"
+        );
         assert!(args.is_empty(), "兜底 Off 不应有任何 args；got {args:?}");
         assert!(
             !env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),

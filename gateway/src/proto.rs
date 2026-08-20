@@ -173,14 +173,20 @@ mod tests {
             sniff(&no_hdrs(), "/anthropic/v1/chat/completions"),
             WireProtocol::Anthropic
         );
-        assert_eq!(sniff(&no_hdrs(), "/openai/v1/messages"), WireProtocol::OpenAi);
+        assert_eq!(
+            sniff(&no_hdrs(), "/openai/v1/messages"),
+            WireProtocol::OpenAi
+        );
     }
 
     #[test]
     fn messages_family_is_anthropic_without_header() {
         // No explicit prefix, no anthropic-version header → Anthropic by path table
         assert_eq!(sniff(&no_hdrs(), "/v1/messages"), WireProtocol::Anthropic);
-        assert_eq!(sniff(&no_hdrs(), "/v1/messages/abc"), WireProtocol::Anthropic);
+        assert_eq!(
+            sniff(&no_hdrs(), "/v1/messages/abc"),
+            WireProtocol::Anthropic
+        );
 
         let t = resolve_target(&no_hdrs(), "/v1/messages").unwrap();
         assert_eq!(t.protocol, WireProtocol::Anthropic);
@@ -267,7 +273,10 @@ mod tests {
         // /v1/messagesfoo must NOT match the /v1/messages entry → default OpenAi,
         // proving the Anthropic table did not match.
         assert_eq!(sniff(&no_hdrs(), "/v1/messagesfoo"), WireProtocol::OpenAi);
-        assert_ne!(sniff(&no_hdrs(), "/v1/messagesfoo"), WireProtocol::Anthropic);
+        assert_ne!(
+            sniff(&no_hdrs(), "/v1/messagesfoo"),
+            WireProtocol::Anthropic
+        );
 
         // /v1/chat/completionsXYZ with anthropic-version header → Anthropic,
         // proving the OpenAI table did NOT match (table wins over header, so a

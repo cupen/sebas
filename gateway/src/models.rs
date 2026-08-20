@@ -85,13 +85,10 @@ const MODELS: &[ModelDef] = &[
 
 /// 注册表按规范名精确查找。
 fn table_match(name: &str) -> Option<ModelCaps> {
-    MODELS
-        .iter()
-        .find(|m| m.name == name)
-        .map(|m| ModelCaps {
-            context_window: Some(m.context_window),
-            max_output_tokens: Some(m.max_output_tokens),
-        })
+    MODELS.iter().find(|m| m.name == name).map(|m| ModelCaps {
+        context_window: Some(m.context_window),
+        max_output_tokens: Some(m.max_output_tokens),
+    })
 }
 
 /// 解析模型名末尾的 `[n]` 后缀：`[128k]`->128_000、`[1m]`->1_000_000（十进制）。

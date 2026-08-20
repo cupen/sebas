@@ -60,9 +60,9 @@ pub type ItemNormalizer = Arc<dyn Fn(&mut Item) + Send + Sync>;
 pub type ModelFetcher = Arc<
     dyn Fn(
             Item,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>, String>> + Send>>
-        + Send
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<String>, String>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -965,12 +965,7 @@ mod tests {
         let _path = isolate(&dir);
         let mut seed = item("deepseek", "anthropic");
         seed.insert("base_url_anthropic".into(), Value::String("old".into()));
-        let store = FileStore::load(
-            dir.path().join("providers.json"),
-            "name",
-            vec![seed],
-        )
-        .unwrap();
+        let store = FileStore::load(dir.path().join("providers.json"), "name", vec![seed]).unwrap();
 
         let mut updated = item("deepseek", "openai");
         updated.insert("base_url_anthropic".into(), Value::String("new".into()));

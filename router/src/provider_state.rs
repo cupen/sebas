@@ -97,7 +97,10 @@ mod env_override_tests {
 
         // state_path() 现在返回 env 指定的路径。
         let resolved = state_path();
-        assert_eq!(resolved, custom, "SEBAS_STATE_FILE 应覆盖默认 ~/.sebas/state.json");
+        assert_eq!(
+            resolved, custom,
+            "SEBAS_STATE_FILE 应覆盖默认 ~/.sebas/state.json"
+        );
 
         // load() 在新文件不存在时返回默认。
         let loaded = load();
@@ -105,14 +108,24 @@ mod env_override_tests {
 
         // save() / load() 在 env 路径上往返成功。
         let mut s = ProviderRuntimeState::default();
-        s.mode = ProviderMode::Direct { provider: "env-override".into() };
+        s.mode = ProviderMode::Direct {
+            provider: "env-override".into(),
+        };
         s.default_selection = Some(DefaultSelection::new("env-override"));
         save(&s).expect("save to env-override path");
         assert!(custom.exists(), "save 应创建 env 指定的文件");
         let reloaded = load();
-        assert_eq!(reloaded.mode, ProviderMode::Direct { provider: "env-override".into() });
         assert_eq!(
-            reloaded.default_selection.as_ref().map(|d| d.provider.as_str()),
+            reloaded.mode,
+            ProviderMode::Direct {
+                provider: "env-override".into()
+            }
+        );
+        assert_eq!(
+            reloaded
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str()),
             Some("env-override")
         );
 
@@ -247,7 +260,10 @@ mod tests {
         .unwrap();
         assert_eq!(updated.mode, ProviderMode::Gateway);
         assert_eq!(
-            updated.default_selection.as_ref().map(|d| d.provider.as_str()),
+            updated
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str()),
             Some("openai")
         );
         let reloaded = load();

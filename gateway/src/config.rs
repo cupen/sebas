@@ -16,7 +16,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::error::{GatewayError, Result};
-use crate::key_resolver::{hint_from_provider, EnvKeyResolver, KeyResolver};
+use crate::key_resolver::{EnvKeyResolver, KeyResolver, hint_from_provider};
 use crate::proto::WireProtocol;
 
 /// 顶层包装：容忍同一 config.toml 中的 `[feishu]` / `[acp.*]` 等无关段，
@@ -273,10 +273,7 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_anthropic: Some("https://api.deepseek.com/anthropic"),
         base_url_openai: Some("https://api.deepseek.com"),
         api_key_env: "DEEPSEEK_API_KEY",
-        models: &[
-            "deepseek-chat",
-            "deepseek-reasoner",
-        ],
+        models: &["deepseek-chat", "deepseek-reasoner"],
     },
     ProviderPreset {
         name: "kimi",
@@ -322,23 +319,14 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai: Some("https://ark.cn-beijing.volces.com/api/plan/v3"),
         api_key_env: "ARK_API_KEY",
         // TODO: 实际 endpoint ids (doubao-pro / lite 等含版本号后缀) 待确认
-        models: &[
-            "doubao-pro",
-            "doubao-lite",
-            "doubao-1-5-pro",
-        ],
+        models: &["doubao-pro", "doubao-lite", "doubao-1-5-pro"],
     },
     ProviderPreset {
         name: "dashscope",
         base_url_anthropic: None,
         base_url_openai: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         api_key_env: "DASHSCOPE_API_KEY",
-        models: &[
-            "qwen-turbo",
-            "qwen-plus",
-            "qwen-max",
-            "qwen-long",
-        ],
+        models: &["qwen-turbo", "qwen-plus", "qwen-max", "qwen-long"],
     },
     ProviderPreset {
         name: "gemini",
@@ -706,9 +694,7 @@ impl GatewayConfig {
                     out.insert(name.clone(), key);
                 }
                 Err(reason) => {
-                    return Err(GatewayError::Config(format!(
-                        "provider.{name}: {reason}"
-                    )));
+                    return Err(GatewayError::Config(format!("provider.{name}: {reason}")));
                 }
             }
         }

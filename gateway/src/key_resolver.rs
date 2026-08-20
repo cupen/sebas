@@ -59,9 +59,7 @@ impl KeyResolver for EnvKeyResolver {
         match hint {
             KeyHint::EnvVar(name) => match std::env::var(name) {
                 Ok(v) if !v.is_empty() => Ok(v),
-                _ => Err(format!(
-                    "api_key_env 指向的环境变量 '{name}' 未设置或为空"
-                )),
+                _ => Err(format!("api_key_env 指向的环境变量 '{name}' 未设置或为空")),
             },
             KeyHint::Plain(_) => {
                 // 进程级 warn-once：resolve 可能被多次调用（启动 + 热重载 +
@@ -104,10 +102,7 @@ impl KeyResolver for StubKeyResolver {
 ///
 /// 拆成 helper 而不是在 `resolve_api_keys` 里内联：方便后续 `VaultKeyResolver`
 /// 等实现独立测试 hint 派生逻辑，不必绕过 `GatewayConfig::parse`。
-pub fn hint_from_provider(
-    api_key: Option<&str>,
-    api_key_env: Option<&str>,
-) -> KeyHint {
+pub fn hint_from_provider(api_key: Option<&str>, api_key_env: Option<&str>) -> KeyHint {
     if let Some(plain) = api_key.filter(|s| !s.is_empty()) {
         KeyHint::Plain(plain.to_string())
     } else if let Some(name) = api_key_env.filter(|s| !s.is_empty()) {

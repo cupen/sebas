@@ -142,9 +142,7 @@ impl Drop for TestGateway {
 /// directory on drop.
 pub fn test_target_dir(test_name: &str) -> TestDir {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
-        panic!(
-            "CARGO_MANIFEST_DIR unset — test_target_dir must be called from a cargo test binary"
-        )
+        panic!("CARGO_MANIFEST_DIR unset — test_target_dir must be called from a cargo test binary")
     });
     let manifest = PathBuf::from(manifest_dir);
     let workspace_root = manifest
@@ -550,7 +548,11 @@ mod tests {
     fn test_target_dir_creates_unique_paths_and_cleans_up() {
         let a = test_target_dir("self_a");
         let b = test_target_dir("self_b");
-        assert_ne!(a.path(), b.path(), "unique stamps must produce distinct paths");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "unique stamps must produce distinct paths"
+        );
         assert!(a.path().exists());
         assert!(b.path().exists());
         let pa = a.path().to_path_buf();

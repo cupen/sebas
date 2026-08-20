@@ -130,14 +130,16 @@ pub async fn dispatch(
             Some(handle_set_default_direct(handle, key, value, message_id).await)
         }
         FORM_DELETE_CONFIRM => Some(handle_delete(handle, key, value, message_id).await),
-        FORM_CREATE_PRESET => Some(handle_create(handle, key, LEGACY_PRESET_FORM, message_id).await),
-        FORM_CREATE_CUSTOM => Some(handle_create(handle, key, LEGACY_CUSTOM_FORM, message_id).await),
+        FORM_CREATE_PRESET => {
+            Some(handle_create(handle, key, LEGACY_PRESET_FORM, message_id).await)
+        }
+        FORM_CREATE_CUSTOM => {
+            Some(handle_create(handle, key, LEGACY_CUSTOM_FORM, message_id).await)
+        }
         FORM_PROBE => Some(handle_probe(handle, key, value, message_id).await),
         FORM_PROBE_APPLY => Some(handle_probe_apply(handle, key, value, message_id).await),
         FORM_BACK => Some(handle_back(handle, key, message_id).await),
-        FORM_PROTOCOL => {
-            Some(handle_protocol(handle, key, value, form_value, message_id).await)
-        }
+        FORM_PROTOCOL => Some(handle_protocol(handle, key, value, form_value, message_id).await),
         _ => None,
     }
 }
@@ -290,17 +292,12 @@ async fn handle_delete(
 /// 是 spawn 翻译的权威值。
 async fn build_default_selection(handle: &RouterHandle, name: &str) -> DefaultSelection {
     let model = if let Some(forms) = &handle.provider_forms {
-        forms
-            .preset
-            .store
-            .get(name)
-            .await
-            .and_then(|item| {
-                item.get("default_model")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .filter(|s| !s.is_empty())
-            })
+        forms.preset.store.get(name).await.and_then(|item| {
+            item.get("default_model")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty())
+        })
     } else {
         None
     };
@@ -456,11 +453,7 @@ async fn handle_probe_apply(
 }
 
 /// 探测结果卡底部「← 返回 Provider 管理」按钮：原地把当前卡翻回主卡。
-async fn handle_back(
-    handle: &RouterHandle,
-    key: &SessionKey,
-    message_id: Option<String>,
-) -> Out {
+async fn handle_back(handle: &RouterHandle, key: &SessionKey, message_id: Option<String>) -> Out {
     refresh_card(handle, key, message_id).await
 }
 
@@ -508,11 +501,7 @@ async fn handle_protocol(
 // 卡片构建（每个 section 一个 helper）
 // ===========================================================================
 
-fn build_card(
-    state: &ProviderRuntimeState,
-    provider_names: &[String],
-    items: &[Item],
-) -> Card {
+fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[Item]) -> Card {
     let mut card = Card::new(CARD_TITLE, "blue");
     card.push_note("切换运行模式、设置默认 provider、增删 provider 条目。");
     card.push_divider();
@@ -527,12 +516,10 @@ fn build_card(
 
     // ---- 2. Default provider for DIRECT ----
     card.push_text("**DIRECT 模式默认 provider**");
-    card.body
-        .elements
-        .push(render_default_direct_select(
-            provider_names,
-            state.default_selection.as_ref(),
-        ));
+    card.body.elements.push(render_default_direct_select(
+        provider_names,
+        state.default_selection.as_ref(),
+    ));
     card.push_divider();
 
     // ---- 3. Provider 列表：每个 provider 一行折叠面板（默认折叠）----
@@ -547,7 +534,10 @@ fn build_card(
         card.body.elements.push(render_provider_row(
             name,
             item,
-            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+            state
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str()),
         ));
     }
     card.push_divider();
@@ -698,7 +688,11 @@ fn render_create_sub_section() -> Vec<CardElement> {
         CardElement::Markdown {
             content: "**新建 provider**".into(),
         },
-        button_from(create_button("＋ 新增（预设）", FORM_CREATE_PRESET, "primary")),
+        button_from(create_button(
+            "＋ 新增（预设）",
+            FORM_CREATE_PRESET,
+            "primary",
+        )),
         button_from(create_button(
             "＋ 新增（自定义）",
             FORM_CREATE_CUSTOM,
@@ -777,7 +771,11 @@ fn render_provider_row(
         .is_some_and(|s| !s.is_empty());
     if has_openai_url {
         let probe_value = json!({ "form": FORM_PROBE, "name": name });
-        elements.push(button_with_value("🔍 探测 model 列表", "default", probe_value));
+        elements.push(button_with_value(
+            "🔍 探测 model 列表",
+            "default",
+            probe_value,
+        ));
     }
 
     // 三个动作按钮：编辑 / 删除 / 设为默认（DIRECT）。
@@ -977,10 +975,7 @@ fn build_probe_result_card(
     probe_url: &str,
     models: &[String],
 ) -> Card {
-    let mut card = Card::new(
-        &format!("探测结果：{provider_name}"),
-        "blue",
-    );
+    let mut card = Card::new(&format!("探测结果：{provider_name}"), "blue");
     card.push_note(format!("base_url 类型：{base_kind} · {probe_url}"));
     card.push_divider();
 
@@ -1024,10 +1019,7 @@ fn build_probe_result_card(
 
 /// 探测失败 / 无 base_url 时的结果卡：单行说明 + 返回按钮。
 fn build_probe_error_card(provider_name: &str, reason: &str) -> Card {
-    let mut card = Card::new(
-        &format!("探测结果：{provider_name}"),
-        "red",
-    );
+    let mut card = Card::new(&format!("探测结果：{provider_name}"), "red");
     card.push_text(format!("探测失败：{reason}，请手填默认 model。"));
     card.push_divider();
     card.push_actions(vec![CardButton {
@@ -1053,11 +1045,7 @@ fn sorted_names(items: &[Item]) -> Vec<String> {
 
 /// 重新渲染主卡并通过 `UpdateCardByMsgId`（有原 message_id）或 `SendCard`
 /// （无原 message_id）发出去。
-async fn refresh_card(
-    handle: &RouterHandle,
-    key: &SessionKey,
-    message_id: Option<String>,
-) -> Out {
+async fn refresh_card(handle: &RouterHandle, key: &SessionKey, message_id: Option<String>) -> Out {
     let state = provider_state::load();
     let items = match &handle.provider_forms {
         Some(forms) => forms.preset.store.list().await,
@@ -1150,10 +1138,7 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         // SAFETY: TEST_LOCK held.
         unsafe {
-            std::env::set_var(
-                "SEBAS_STATE_FILE",
-                dir.join("state.json").to_str().unwrap(),
-            );
+            std::env::set_var("SEBAS_STATE_FILE", dir.join("state.json").to_str().unwrap());
         }
         let store = FileStore::load(dir.join("providers.json"), "name", seed).unwrap();
         let forms = ProviderForms {
@@ -1256,8 +1241,11 @@ mod tests {
             panic!("expected SendCard");
         };
         let serialised = serde_json::to_string(&card).unwrap();
-        let title = card.get("header").and_then(|h| h.get("title"))
-            .and_then(|t| t.get("content")).and_then(Value::as_str);
+        let title = card
+            .get("header")
+            .and_then(|h| h.get("title"))
+            .and_then(|t| t.get("content"))
+            .and_then(Value::as_str);
         assert_eq!(title, Some("Provider 管理"));
 
         // 序列化 JSON 里数 button + select_static 个数。
@@ -1267,7 +1255,10 @@ mod tests {
         // 两个 select_static：DIRECT 默认 provider（顶部）+ 详情面板的
         // 「协议」radio（spec 2026-08-17 §2.4）。
         let sel_count = serialised.matches("\"tag\":\"select_static\"").count();
-        assert_eq!(sel_count, 2, "DIRECT 默认 provider + 详情面板协议 radio = 2");
+        assert_eq!(
+            sel_count, 2,
+            "DIRECT 默认 provider + 详情面板协议 radio = 2"
+        );
 
         // button payload 应携带 form + mode 名。
         for m in ["off", "direct", "gateway"] {
@@ -1403,11 +1394,13 @@ mod tests {
             "编辑按钮 payload 应含 op=edit + id=deepseek"
         );
         assert!(
-            serialised.contains(FORM_DELETE_CONFIRM) && serialised.contains("\"name\":\"deepseek\""),
+            serialised.contains(FORM_DELETE_CONFIRM)
+                && serialised.contains("\"name\":\"deepseek\""),
             "删除按钮 payload 应含 name=deepseek"
         );
         assert!(
-            serialised.contains(FORM_SET_DEFAULT_DIRECT) && serialised.contains("\"name\":\"deepseek\""),
+            serialised.contains(FORM_SET_DEFAULT_DIRECT)
+                && serialised.contains("\"name\":\"deepseek\""),
             "设为默认按钮 payload 应含 name=deepseek"
         );
     }
@@ -1480,7 +1473,10 @@ mod tests {
         let _ = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
         let state = provider_state::load();
         assert_eq!(
-            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+            state
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str()),
             Some("anthropic"),
             "切到 Direct 应自动填字母序第一个 provider"
         );
@@ -1509,7 +1505,10 @@ mod tests {
         let _ = dispatch(&handle, &key, &payload, &fv, None).await;
         let state = provider_state::load();
         assert_eq!(
-            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+            state
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str()),
             Some("deepseek")
         );
 
@@ -1554,7 +1553,10 @@ mod tests {
         let _ = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
         let state = provider_state::load();
         assert_eq!(
-            state.default_selection.as_ref().map(|d| d.provider.as_str()),
+            state
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str()),
             Some("deepseek")
         );
 
@@ -1591,7 +1593,8 @@ mod tests {
             .find(|p| p.contains("\"op\":\"edit\""))
             .expect("应渲染编辑按钮");
         assert!(
-            edit_payload.contains(LEGACY_PRESET_FORM) && edit_payload.contains("\"id\":\"deepseek\""),
+            edit_payload.contains(LEGACY_PRESET_FORM)
+                && edit_payload.contains("\"id\":\"deepseek\""),
             "编辑按钮 payload 应为 {{form: provider-preset, op: edit, id}}: {edit_payload}"
         );
     }
@@ -1723,9 +1726,18 @@ mod tests {
     /// trim_trailing_slash：去掉末尾一个或多个 `/`，但保留中间 / 不动。
     #[test]
     fn trim_trailing_slash_normalises_trailing_slashes() {
-        assert_eq!(trim_trailing_slash("https://api.openai.com/v1/"), "https://api.openai.com/v1");
-        assert_eq!(trim_trailing_slash("https://api.openai.com/v1"), "https://api.openai.com/v1");
-        assert_eq!(trim_trailing_slash("https://api.openai.com/v1///"), "https://api.openai.com/v1");
+        assert_eq!(
+            trim_trailing_slash("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            trim_trailing_slash("https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            trim_trailing_slash("https://api.openai.com/v1///"),
+            "https://api.openai.com/v1"
+        );
         assert_eq!(trim_trailing_slash("/"), "");
         assert_eq!(trim_trailing_slash(""), "");
         assert_eq!(trim_trailing_slash("a/b"), "a/b");
@@ -1788,7 +1800,10 @@ mod tests {
 
         // api_key 空 + api_key_env 命中（设置环境变量再读）。
         item.remove("api_key");
-        item.insert("api_key_env".into(), Value::String("SEBAS_TEST_TOKEN_X".into()));
+        item.insert(
+            "api_key_env".into(),
+            Value::String("SEBAS_TEST_TOKEN_X".into()),
+        );
         // 该 env 变量在测试环境一般不存在 → None。
         let v = resolve_auth_token(&item);
         // 不严格断言（CI 环境可能无意设置），只断言类型。
@@ -1855,14 +1870,8 @@ mod tests {
         let s = serde_json::to_string(&card).unwrap();
         assert!(s.contains("deepseek"), "卡片标题含 provider 名: {s}");
         assert!(s.contains("timeout after 5s"), "卡片正文含 reason: {s}");
-        assert!(
-            s.contains("请手填默认 model"),
-            "卡片正文含兜底提示: {s}"
-        );
-        assert!(
-            s.contains(FORM_BACK),
-            "卡片底部应有返回按钮: {s}"
-        );
+        assert!(s.contains("请手填默认 model"), "卡片正文含兜底提示: {s}");
+        assert!(s.contains(FORM_BACK), "卡片底部应有返回按钮: {s}");
     }
 
     /// parse_openai_models_response：anthropic 协议不返回 openai 形状
@@ -1954,10 +1963,7 @@ mod tests {
         let key = test_key();
 
         let mut fv = BTreeMap::new();
-        fv.insert(
-            SELECT_NAME_PROTOCOL.into(),
-            Value::String("openai".into()),
-        );
+        fv.insert(SELECT_NAME_PROTOCOL.into(), Value::String("openai".into()));
         let payload = json!({ "form": FORM_PROTOCOL, "name": "deepseek" });
         let out = dispatch(&handle, &key, &payload, &fv, None).await;
         assert!(out.is_some(), "FORM_PROTOCOL 应被 provider_card 接管");
@@ -1987,10 +1993,7 @@ mod tests {
         let key = test_key();
 
         let mut fv = BTreeMap::new();
-        fv.insert(
-            SELECT_NAME_PROTOCOL.into(),
-            Value::String("bogus".into()),
-        );
+        fv.insert(SELECT_NAME_PROTOCOL.into(), Value::String("bogus".into()));
         let payload = json!({ "form": FORM_PROTOCOL, "name": "deepseek" });
         let _ = dispatch(&handle, &key, &payload, &fv, None).await;
 
@@ -2131,10 +2134,7 @@ mod tests {
         };
         // 错误卡：标题红色 + reason 含 401
         assert!(card.contains("401"), "错误卡应含 HTTP 状态码: {card}");
-        assert!(
-            card.contains("探测失败"),
-            "错误卡应有失败前缀: {card}"
-        );
+        assert!(card.contains("探测失败"), "错误卡应有失败前缀: {card}");
     }
 
     /// dispatch FORM_PROBE：探测成功时把官方返回的 model 列表写回 store 的

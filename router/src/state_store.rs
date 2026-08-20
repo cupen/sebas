@@ -159,8 +159,7 @@ impl<'de> Deserialize<'de> for DefaultSelection {
                         }
                     }
                 }
-                let provider = provider
-                    .ok_or_else(|| de::Error::missing_field("provider"))?;
+                let provider = provider.ok_or_else(|| de::Error::missing_field("provider"))?;
                 Ok(DefaultSelection { provider, model })
             }
         }
@@ -358,8 +357,9 @@ pub fn load() -> PersistedState {
 pub fn save(s: &PersistedState) -> anyhow::Result<()> {
     let path = state_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("创建 state.json 父目录 {} 失败: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("创建 state.json 父目录 {} 失败: {e}", parent.display())
+        })?;
     }
     let body = serde_json::to_string_pretty(s)
         .map_err(|e| anyhow::anyhow!("序列化 PersistedState 失败: {e}"))?;
@@ -414,9 +414,7 @@ pub fn delete_provider_and_clear_default(id: &str) -> anyhow::Result<PersistedSt
 /// 从 JSON 字符串里抽顶层 `version` 字段（数字）。无字段 / 非数字 → `None`。
 fn parse_version(raw: &str) -> Option<u32> {
     let v: Value = serde_json::from_str(raw).ok()?;
-    v.get("version")
-        .and_then(Value::as_u64)
-        .map(|n| n as u32)
+    v.get("version").and_then(Value::as_u64).map(|n| n as u32)
 }
 
 /// 旧版 state.json 的 wire 形状：只 mode + default_provider_for_direct。
@@ -583,7 +581,12 @@ mod tests {
 
         let s = load_from_paths(&state_p, &prov_p);
         assert_eq!(s.version, STATE_VERSION_V2);
-        assert_eq!(s.mode, ProviderMode::Direct { provider: "deepseek".into() });
+        assert_eq!(
+            s.mode,
+            ProviderMode::Direct {
+                provider: "deepseek".into()
+            }
+        );
         assert_eq!(
             s.default_selection.as_ref().map(|d| d.provider.as_str()),
             Some("deepseek"),
@@ -695,7 +698,9 @@ mod tests {
                 item_with(&[("name", "deepseek"), ("preset", "deepseek")]),
             )]),
             deleted: vec!["openai".to_string()],
-            mode: ProviderMode::Direct { provider: "deepseek".into() },
+            mode: ProviderMode::Direct {
+                provider: "deepseek".into(),
+            },
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
         };
         save_to_path(&state_p, &original).unwrap();
@@ -830,9 +835,14 @@ mod tests {
         let prov_p = dir.path().join("providers.json");
         let mut s = PersistedState {
             version: STATE_VERSION_V2,
-            providers: BTreeMap::from([("deepseek".to_string(), item_with(&[("name", "deepseek")]))]),
+            providers: BTreeMap::from([(
+                "deepseek".to_string(),
+                item_with(&[("name", "deepseek")]),
+            )]),
             deleted: Vec::new(),
-            mode: ProviderMode::Direct { provider: "deepseek".into() },
+            mode: ProviderMode::Direct {
+                provider: "deepseek".into(),
+            },
             default_selection: Some(DefaultSelection::new("deepseek")),
         };
         // delete_provider_and_clear_default 走 update 路径：写 state.json 一次。
@@ -869,7 +879,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        write_file(&state_p, r#"{ "version": 99, "providers": {}, "deleted": [] }"#);
+        write_file(
+            &state_p,
+            r#"{ "version": 99, "providers": {}, "deleted": [] }"#,
+        );
         let s = load_from_paths(&state_p, &prov_p);
         assert_eq!(s, PersistedState::default());
     }
@@ -957,19 +970,15 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let body = serde_json::to_string_pretty(s)
-            .map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+        let body =
+            serde_json::to_string_pretty(s).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, body)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
-    fn update_at<F: FnOnce(&mut PersistedState)>(
-        state_p: &Path,
-        prov_p: &Path,
-        f: F,
-    ) {
+    fn update_at<F: FnOnce(&mut PersistedState)>(state_p: &Path, prov_p: &Path, f: F) {
         let mut s = load_from_paths(state_p, prov_p);
         f(&mut s);
         save_to_path(state_p, &s).unwrap();

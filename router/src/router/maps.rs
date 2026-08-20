@@ -235,5 +235,4 @@ mod tests {
         m.record("s2".into(), "om_xyz".into()).await;
         assert_eq!(m.get("s2").await.as_deref(), Some("om_xyz"));
     }
-
 }

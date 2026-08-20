@@ -159,14 +159,8 @@ async fn provider_command_opens_main_card_with_seed() {
             assert!(s.contains("＋ 新增（自定义）"), "{s}");
             // 新按钮 payload 用 form 名（provider-create-preset /
             // provider-create-custom）取代旧的 `{form, op: "create"}`。
-            assert!(
-                s.contains("\"form\":\"provider-create-preset\""),
-                "{s}"
-            );
-            assert!(
-                s.contains("\"form\":\"provider-create-custom\""),
-                "{s}"
-            );
+            assert!(s.contains("\"form\":\"provider-create-preset\""), "{s}");
+            assert!(s.contains("\"form\":\"provider-create-custom\""), "{s}");
             // 三个 mode 按钮。
             for m in ["off", "direct", "gateway"] {
                 assert!(
