@@ -21,9 +21,9 @@
 //! —— 用户看到"启动了但啥都没发生"时无法定位是 sebas 的问题还是 claude
 //! 自己环境的问题。新行为把错误直接喂给用户。
 
-use router::provider_state::{ProviderMode, ProviderRuntimeState};
 use acp_claude::{ClaudeCodeDriver, ProviderResolution};
 use gateway::config::GatewayConfig;
+use router::provider_state::{ProviderMode, ProviderRuntimeState};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -174,9 +174,8 @@ fn direct_resolution_from_overlay(
         match std::env::var(env_var) {
             Ok(v) if !v.is_empty() => v,
             _ => {
-                let reason = format!(
-                    "direct provider '{name}' api_key_env '{env_var}' is unset or empty"
-                );
+                let reason =
+                    format!("direct provider '{name}' api_key_env '{env_var}' is unset or empty");
                 tracing::warn!(
                     provider = %name,
                     env_var = %env_var,
@@ -186,9 +185,7 @@ fn direct_resolution_from_overlay(
             }
         }
     } else {
-        let reason = format!(
-            "direct provider '{name}' has neither api_key nor api_key_env"
-        );
+        let reason = format!("direct provider '{name}' has neither api_key nor api_key_env");
         tracing::warn!(
             provider = %name,
             "Direct provider missing both api_key and api_key_env; aborting spawn"
@@ -298,14 +295,19 @@ pub fn compute_provider_resolution(
                 //   - api_key_env 读 env，api_key 明文兜底。
                 build_direct_from_gateway_config(provider, p)
             } else {
-                let reason = format!(
-                    "direct provider '{provider}' not found in overlay or gateway config"
-                );
+                // 两者都缺 → 这位 provider 名既不指向 overlay 项、也不指向
+                // gateway seed。按持久化层的约定（state_store.rs §虚引用、「必须
+                // 存在于 providers 或 gateway_cfg，否则 spawn-time 兜底回退
+                // Off + warn」），回退 Off + warn，而不是拒绝启动：这条路径可能
+                // 来自泄漏进 state.json 的幽灵 provider（如测试字面量
+                // "env-override"），不该让用户连 claude 都拉不起来。真正把
+                // provider 名拼错 / 配置残缺的 case，下面 direct_resolution_*
+                // 各自的 URL / 密钥校验仍会喷 Error（§2.2 语义保留）。
                 tracing::warn!(
                     provider = %provider,
-                    "Direct provider not found in overlay or gateway config; aborting spawn"
+                    "Direct provider not found in overlay or gateway config; falling back to Off"
                 );
-                (ProviderResolution::Error { reason }, None)
+                (ProviderResolution::Off, None)
             };
             // 第二元素合并：state.default_selection.model（仅在 provider 名
             // 匹配时采用）→ overlay_model → None。
@@ -346,9 +348,8 @@ fn build_direct_from_gateway_config(
         match std::env::var(env_var) {
             Ok(v) if !v.is_empty() => v,
             _ => {
-                let reason = format!(
-                    "direct provider '{name}' api_key_env '{env_var}' is unset or empty"
-                );
+                let reason =
+                    format!("direct provider '{name}' api_key_env '{env_var}' is unset or empty");
                 tracing::warn!(
                     provider = %name,
                     env_var = %env_var,
@@ -419,10 +420,10 @@ pub fn resolve_spawn_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use router::provider_state::{ProviderMode, ProviderRuntimeState};
-    use router::state_store::DefaultSelection;
     use acp_claude::{AgentProtocol, ClaudeCodeDriver};
     use gateway::config::GatewayConfig;
+    use router::provider_state::{ProviderMode, ProviderRuntimeState};
+    use router::state_store::DefaultSelection;
     use std::sync::Mutex;
 
     // 串行化所有 env 访问：`SEBAS_GATEWAY_PROVIDER_OVERLAY` 是全局变量，
@@ -612,7 +613,10 @@ auth_token = {auth_token:?}
         let state = direct_state("deepseek");
         let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
         // 验证 --model 出现在 args 末尾（顺序：resolve_args 返回空 + 我们加 --model）。
-        assert_eq!(args, vec!["--model".to_string(), "deepseek-reasoner".to_string()]);
+        assert_eq!(
+            args,
+            vec!["--model".to_string(), "deepseek-reasoner".to_string()]
+        );
         // env 仍包含 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN，证明 driver 也跑了。
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         // SAFETY: ENV_LOCK held.
@@ -650,7 +654,10 @@ auth_token = {auth_token:?}
         let mut state = direct_state("deepseek");
         state.default_selection = Some(DefaultSelection::with_model("deepseek", "deepseek-chat"));
         let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
-        assert_eq!(args, vec!["--model".to_string(), "deepseek-chat".to_string()]);
+        assert_eq!(
+            args,
+            vec!["--model".to_string(), "deepseek-chat".to_string()]
+        );
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         // SAFETY: ENV_LOCK held.
         unsafe {
@@ -682,7 +689,7 @@ auth_token = {auth_token:?}
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds");
         }
         let state = ProviderRuntimeState {
-            mode: ProviderMode::Off, // 显式 Off
+            mode: ProviderMode::Off,                                    // 显式 Off
             default_selection: Some(DefaultSelection::new("deepseek")), // 但有默认
         };
         let (resolution, model) = compute_provider_resolution(&state, None);
@@ -731,7 +738,10 @@ auth_token = {auth_token:?}
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
         };
         let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
-        assert_eq!(args, vec!["--model".to_string(), "deepseek-chat".to_string()]);
+        assert_eq!(
+            args,
+            vec!["--model".to_string(), "deepseek-chat".to_string()]
+        );
         assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         // SAFETY: ENV_LOCK held.
         unsafe {
@@ -785,7 +795,10 @@ auth_token = {auth_token:?}
         // 不一致 → default_selection.model 不被采用（避免「给 anthropic 加
         // deepseek 的 model」这种诡异行为）。overlay 没设 default_model →
         // 兜底 None。
-        assert_eq!(model, None, "provider 名不匹配时 default_selection.model 不用");
+        assert_eq!(
+            model, None,
+            "provider 名不匹配时 default_selection.model 不用"
+        );
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -818,7 +831,7 @@ auth_token = {auth_token:?}
     }
 
     #[test]
-    fn direct_overlay_missing_provider_returns_error() {
+    fn direct_overlay_missing_provider_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         write_overlay(
@@ -827,23 +840,16 @@ auth_token = {auth_token:?}
         );
         let state = direct_state("nonexistent");
         let (resolution, _) = compute_provider_resolution(&state, None);
-        match &resolution {
-            ProviderResolution::Error { reason } => {
-                assert!(
-                    reason.contains("nonexistent"),
-                    "reason must name the missing provider; got: {reason}"
-                );
-                assert!(
-                    reason.contains("not found"),
-                    "reason must explain it's a not-found error; got: {reason}"
-                );
-            }
-            other => panic!("missing provider must yield Error, got {other:?}"),
-        }
+        // 幽灵 / 拼错的 provider：overlay 与 gateway 都没有 → 兜底 Off + warn，
+        // 不拒绝启动（持久化层约定的 backoff）。
+        assert!(
+            matches!(resolution, ProviderResolution::Off),
+            "missing provider must fall back to Off, got {resolution:?}"
+        );
     }
 
     #[test]
-    fn direct_overlay_tombstoned_provider_returns_error() {
+    fn direct_overlay_tombstoned_provider_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         write_overlay(
@@ -855,19 +861,11 @@ auth_token = {auth_token:?}
         );
         let state = direct_state("openai");
         let (resolution, _) = compute_provider_resolution(&state, None);
-        match &resolution {
-            ProviderResolution::Error { reason } => {
-                assert!(
-                    reason.contains("openai"),
-                    "reason must name the tombstoned provider; got: {reason}"
-                );
-                assert!(
-                    reason.contains("not found"),
-                    "reason must explain it's a not-found error; got: {reason}"
-                );
-            }
-            other => panic!("tombstoned provider must yield Error, got {other:?}"),
-        }
+        // 已 tombstone 的 provider 视同「找不到」→ 兜底 Off + warn。
+        assert!(
+            matches!(resolution, ProviderResolution::Off),
+            "tombstoned provider must fall back to Off, got {resolution:?}"
+        );
     }
 
     #[test]
@@ -1087,7 +1085,10 @@ api_key_env = "ANTHROPIC_API_KEY"
             "Error variant must inject SEBAS_PROVIDER_ERROR; got env = {env:?}"
         );
         // 没解析出 provider → 不应有 --model / 其他 args。
-        assert!(args.is_empty(), "Error variant must not emit any args; got {args:?}");
+        assert!(
+            args.is_empty(),
+            "Error variant must not emit any args; got {args:?}"
+        );
         // 也不应有 provider-shaped env（不能给 agent 看 partial state）。
         assert!(
             !env.iter().any(|(k, _)| k.starts_with("ANTHROPIC_")),
@@ -1098,7 +1099,11 @@ api_key_env = "ANTHROPIC_API_KEY"
             "Error variant must not leak OPENAI_* env; got {env:?}"
         );
         // env 里只有 SEBAS_PROVIDER_ERROR 一条。
-        assert_eq!(env.len(), 1, "Error variant env must contain only the signal");
+        assert_eq!(
+            env.len(),
+            1,
+            "Error variant env must contain only the signal"
+        );
     }
 
     #[test]
@@ -1107,8 +1112,14 @@ api_key_env = "ANTHROPIC_API_KEY"
         let cfg = test_gateway("127.0.0.1:8787", vec!["sk-gw".to_string()]);
         let state = gateway_state();
         let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "http://127.0.0.1:8787"));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_AUTH_TOKEN" && v == "sk-gw"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "http://127.0.0.1:8787")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_AUTH_TOKEN" && v == "sk-gw")
+        );
         assert!(args.is_empty());
     }
 
@@ -1240,10 +1251,14 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
         // driver 必须把 Direct 翻译成 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN，
         // 并把这两个变量送给 subprocess。args 空因为 overlay 里没设 default_model。
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_BASE_URL"
-            && v == "https://example.test/anthropic"));
-        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_AUTH_TOKEN"
-            && v == "sk-test-direct"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://example.test/anthropic")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ANTHROPIC_AUTH_TOKEN" && v == "sk-test-direct")
+        );
         assert!(args.is_empty(), "no default_model → no --model args");
 
         // --- Scenario C: Gateway → Gateway ---
@@ -1262,8 +1277,11 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("expected Gateway, got {other:?}"),
         }
 
-        // --- Scenario D: Direct + 不存在的 provider → Error（spec 2026-08-17 §2.2；
-        //     旧行为回退 Off，新行为返回 Error 让 spawn wrapper abort）---
+        // --- Scenario D: Direct + 不存在的 provider → 兜底 Off（spec 2026-08-17
+        //     §2.6 持久化层约定「找不到就回退 Off + warn」）。此前这里返回
+        //     `ProviderResolution::Error` → spawn wrapper `exit(1)`，用户因一个
+        //     幽灵 provider 名（如泄漏的测试字面量 env-override）连 claude 都
+        //     拉不起来；改成回退 Off 后启动不被阻断。---
         std::fs::write(
             &state_path,
             r#"{"mode":{"kind":"direct","provider":"nonexistent"},"default_selection":null}"#,
@@ -1272,20 +1290,19 @@ api_key_env = "ANTHROPIC_API_KEY"
         let st = router::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
-            ProviderResolution::Error { reason } => {
-                assert!(
-                    reason.contains("nonexistent"),
-                    "Scenario D 错误 reason 必须点名 provider；got: {reason}"
-                );
+            ProviderResolution::Off => {}
+            other => {
+                panic!("missing Direct provider 必须兜底回退 Off（不再 Error/abort）；got {other:?}")
             }
-            other => panic!("missing Direct provider 必须返回 Error（不再静默回退 Off）；got {other:?}"),
         }
-        // env 里必须有 SEBAS_PROVIDER_ERROR（spawn wrapper 据此 abort），不能空。
+        // 兜底 Off：env / args 都空（driver 不发 provider env），且绝无
+        // SEBAS_PROVIDER_ERROR —— 否则 spawn wrapper 仍会拒绝启动。
+        assert!(env.is_empty(), "兜底 Off 不应给 driver 任何 env；got {env:?}");
+        assert!(args.is_empty(), "兜底 Off 不应有任何 args；got {args:?}");
         assert!(
-            env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),
-            "Error variant 必须给 env 注入 SEBAS_PROVIDER_ERROR；got env = {env:?}"
+            !env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),
+            "兜底 Off 不应注入 SEBAS_PROVIDER_ERROR（否则仍会 abort）；got {env:?}"
         );
-        assert!(args.is_empty(), "Error variant 不应有任何 args；got {args:?}");
 
         // 清理 env var，避免污染后续测试 / CI 环境。
         // SAFETY: ENV_LOCK held.
@@ -1317,13 +1334,22 @@ api_key_env = "ANTHROPIC_API_KEY"
             }"#,
         );
         unsafe {
-            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", dir.path().join("providers.json").to_str().unwrap());
+            std::env::set_var(
+                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                dir.path().join("providers.json").to_str().unwrap(),
+            );
         }
         let state = direct_state("dual");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match resolution {
-            ProviderResolution::Direct { proto, base_url, .. } => {
-                assert_eq!(proto, AgentProtocol::Anthropic, "anthropic 协议优先于 openai");
+            ProviderResolution::Direct {
+                proto, base_url, ..
+            } => {
+                assert_eq!(
+                    proto,
+                    AgentProtocol::Anthropic,
+                    "anthropic 协议优先于 openai"
+                );
                 assert_eq!(base_url, "https://example.com/anthropic");
             }
             other => panic!("expected Direct, got {other:?}"),
@@ -1333,7 +1359,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-/// spec 2026-08-17 §2.4：overlay 里 `protocol=openai` 显式声明 +
+    /// spec 2026-08-17 §2.4：overlay 里 `protocol=openai` 显式声明 +
     /// 两个 URL 都配了 → 强制走 OpenAI（不再走 auto 的 anthropic 优先）。
     #[tokio::test]
     async fn direct_explicit_protocol_openai_with_both_urls_uses_openai() {
@@ -1362,8 +1388,14 @@ api_key_env = "ANTHROPIC_API_KEY"
         let state = direct_state("dual");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match resolution {
-            ProviderResolution::Direct { proto, base_url, .. } => {
-                assert_eq!(proto, AgentProtocol::OpenAi, "显式 protocol=openai 必须强制 OpenAI");
+            ProviderResolution::Direct {
+                proto, base_url, ..
+            } => {
+                assert_eq!(
+                    proto,
+                    AgentProtocol::OpenAi,
+                    "显式 protocol=openai 必须强制 OpenAI"
+                );
                 assert_eq!(base_url, "https://example.com/openai");
             }
             other => panic!("expected Direct, got {other:?}"),
@@ -1416,7 +1448,9 @@ api_key_env = "ANTHROPIC_API_KEY"
                     "reason must explain which URL field is missing; got: {reason}"
                 );
             }
-            other => panic!("显式 protocol=anthropic 缺 base_url_anthropic → 必须 Error，不能 fallback 到 OpenAI；got {other:?}"),
+            other => panic!(
+                "显式 protocol=anthropic 缺 base_url_anthropic → 必须 Error，不能 fallback 到 OpenAI；got {other:?}"
+            ),
         }
         unsafe {
             std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
@@ -1501,7 +1535,9 @@ api_key_env = "ANTHROPIC_API_KEY"
         let state = direct_state("dual");
         let (resolution, _) = compute_provider_resolution(&state, None);
         match resolution {
-            ProviderResolution::Direct { proto, base_url, .. } => {
+            ProviderResolution::Direct {
+                proto, base_url, ..
+            } => {
                 assert_eq!(proto, AgentProtocol::Anthropic);
                 assert_eq!(base_url, "https://example.com/anthropic");
             }
@@ -1534,7 +1570,10 @@ base_url_anthropic = "https://api.anthropic.com"
         match resolution {
             ProviderResolution::Gateway { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8787");
-                assert_eq!(auth_token, "", "空 auth_token 数组 → 空字符串（agent 调 gateway 不带 Bearer）");
+                assert_eq!(
+                    auth_token, "",
+                    "空 auth_token 数组 → 空字符串（agent 调 gateway 不带 Bearer）"
+                );
             }
             other => panic!("expected Gateway, got {other:?}"),
         }
