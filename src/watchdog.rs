@@ -11,14 +11,16 @@ use crate::config::WatchdogConfig;
 use crate::error::{Result, SebasError};
 use crate::ipc::{ChildMsg, ParentIpc};
 use crate::upgrade;
-use crate::watchdog::control::{Actor, ControlRequest, ControlResponse, ControlService, UpdateKind};
+use crate::watchdog::control::{
+    Actor, ControlRequest, ControlResponse, ControlService, UpdateKind,
+};
 use crate::watchdog::executor::{ControlExecutor, PostAction};
 use crate::watchdog::updater::{SubprocessUpdaterRunner, UpdatePlan, UpdaterRunner};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// 崩溃计数器重置间隔（秒）
 const CRASH_WINDOW_SECS: u64 = 3600;
@@ -62,10 +64,16 @@ pub struct Watchdog {
     restart_rx: tokio::sync::mpsc::UnboundedReceiver<PostAction>,
     /// Per-watchdog-instance secret accepted by the private control RPC.
     control_secret: String,
+    /// True right after a non-dry-run upgrade completes and the watchdog is about
+    /// to (re)start the core child with the freshly-installed binary. Lets the
+    /// loop classify a crash-before-Ready as `NewBinaryNotReady` and roll back.
+    just_performed_update: bool,
+    /// Whether the *current* core child reported `ChildMsg::Ready`.
+    received_ready: bool,
 }
 
 impl Watchdog {
-pub fn new(config: WatchdogConfig, config_path: String) -> Self {
+    pub fn new(config: WatchdogConfig, config_path: String) -> Self {
         let control = Arc::new(Mutex::new(ControlService::new()));
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self::with_control(config, config_path, control, rx, create_control_secret())
@@ -86,6 +94,8 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
             control,
             restart_rx,
             control_secret,
+            just_performed_update: false,
+            received_ready: false,
         }
     }
 
@@ -145,7 +155,15 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
                 msg = ipc.recv() => msg,
                 action = self.restart_rx.recv() => {
                     match action {
-                        Some(PostAction::RestartCore) => return Ok(IpcOutcome::RestartRequested),
+                        // 控制 RPC / WebUI 触发的重启：若是一次升级产生的新二进制，
+                        // 标记 `just_performed_update` 供回滚判定。
+                        Some(PostAction::RestartCore { is_upgrade }) => {
+                            if is_upgrade {
+                                info!("control-plane 升级完成，重启以载入新二进制");
+                                self.just_performed_update = true;
+                            }
+                            return Ok(IpcOutcome::RestartRequested);
+                        }
                         Some(PostAction::None) => continue,
                         None => return Ok(IpcOutcome::ChildExited),
                     }
@@ -154,7 +172,11 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
 
             match msg {
                 Ok(ChildMsg::Ready) => {
-                    info!("sebas 子进程就绪");
+                    info!(
+                        "sebas 子进程就绪 (just_performed_update={})",
+                        self.just_performed_update
+                    );
+                    self.received_ready = true;
                     break;
                 }
                 Ok(ChildMsg::Upgrade { dry_run }) => {
@@ -200,7 +222,7 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
     }
 
     async fn run_update(
-        &self,
+        &mut self,
         dev: bool,
         dry_run: bool,
         rollback: bool,
@@ -276,6 +298,12 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
                 .await
                 .mark_done(&operation_id, format!("{action} completed"));
             let _ = ipc.done(&format!("{action} 完成，准备重启")).await;
+            // 非 rollback 的实升级会安装新二进制，启动下一次 child 前记住这个
+            // 事实，供 `run()` 回滚判定用。
+            if !rollback {
+                info!("{action} 完成，标记 just_performed_update 以便回滚判定");
+                self.just_performed_update = true;
+            }
             Ok(true)
         }
     }
@@ -301,11 +329,7 @@ pub fn new(config: WatchdogConfig, config_path: String) -> Self {
 }
 
 /// 运行 watchdog 模式
-pub async fn run_watchdog(
-    config: WatchdogConfig,
-    config_path: String,
-    debug: bool,
-) -> Result<()> {
+pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bool) -> Result<()> {
     init_watchdog_tracing();
     let control = Arc::new(Mutex::new(ControlService::new()));
     let (restart_tx, restart_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -345,13 +369,7 @@ pub async fn run_watchdog(
         None
     };
 
-    let mut watchdog = Watchdog::with_control(
-        config,
-        config_path,
-        control,
-        restart_rx,
-        secret,
-    );
+    let mut watchdog = Watchdog::with_control(config, config_path, control, restart_rx, secret);
     let result = watchdog.run().await;
     if let Some(child) = webui_child.as_mut() {
         let _ = child.start_kill();
@@ -367,33 +385,118 @@ pub async fn run_watchdog(
 impl Watchdog {
     async fn run(&mut self) -> Result<()> {
         loop {
-            let mut child = self.spawn_child().await?;
+            // 新子进程启动，重置 Ready 标记。
+            self.received_ready = false;
+
+            let mut child = match self.spawn_child().await {
+                Ok(c) => c,
+                Err(e) => {
+                    // spawn 失败（缺二进制等）：不能退出 watchdog，延迟后重试。
+                    error!("spawn_child 失败: {e}，5s 后重试");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
             let Some(stdout) = child.stdout.take() else {
-                return Err(SebasError::Upgrade("子进程 stdout 不可用".into()));
+                error!(
+                    "子进程 stdout 不可用（pid={}），5s 后重试",
+                    child.id().unwrap_or(0)
+                );
+                let _ = child.kill().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
             };
             let Some(stdin) = child.stdin.take() else {
-                return Err(SebasError::Upgrade("子进程 stdin 不可用".into()));
+                error!(
+                    "子进程 stdin 不可用（pid={}），5s 后重试",
+                    child.id().unwrap_or(0)
+                );
+                let _ = child.kill().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
             };
+            let pid = child.id().unwrap_or(0);
             let ipc = ParentIpc::new(stdin, stdout);
             match self.handle_ipc(ipc).await? {
                 IpcOutcome::RestartRequested => {
+                    info!(
+                        "重启请求，终止当前 core (pid={}, just_performed_update={})",
+                        pid, self.just_performed_update
+                    );
                     Self::terminate_child(&mut child).await;
                 }
                 IpcOutcome::ChildExited => {
+                    warn!(
+                        "core 子进程意外退出 (pid={}, just_performed_update={})",
+                        pid, self.just_performed_update
+                    );
                     let _ = child.wait().await;
                 }
             }
 
+            // 刚升级完、新二进制从未 Ready 就退出 → 分类为 NewBinaryNotReady，
+            // 自动回滚到上一版本。不计入 crash 计数。
+            if self.just_performed_update && !self.received_ready {
+                warn!("升级后新二进制未就绪即崩溃；自动回滚到上一版本");
+                if let Err(e) = self.rollback_to_previous().await {
+                    error!("自动回滚失败: {e}（watchdog 保持运行）");
+                } else {
+                    info!("自动回滚成功，使用上一版本继续运行");
+                }
+                // 回滚后 watchdog(本进程) 仍跑在旧版本逻辑上，二进制已切回上一版。
+                // 清标记，继续用下一个子进程。
+                self.just_performed_update = false;
+                tokio::time::sleep(Duration::from_millis(RESTART_DELAY_MS)).await;
+                continue;
+            }
+            // 否则（无升级，或新二进制一旦 Ready 过），只按普通 crash 策略重试。
+            self.just_performed_update = false;
+
             if !self.should_restart() {
-                return Err(SebasError::Upgrade("子进程连续崩溃过多，停止重启".into()));
+                // 连续崩溃过多：绝不退出 watchdog，降频重试（保留 webui/gateway）。
+                warn!(
+                    "连续崩溃过多（{} 次），暂停 30s 后降频重试，watchdog 保持存活",
+                    MAX_CRASHES
+                );
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                // 重置计数，避免永久停摆；下次仍走同一正常重试路径。
+                self.crash_count = 0;
+                continue;
             }
 
             tokio::time::sleep(Duration::from_millis(RESTART_DELAY_MS)).await;
         }
     }
+
+    /// 有可回滚备份时回滚 `current` 软链到上一版本；无备份 / 失败都返回 Err。
+    async fn has_rollback_backup(&self) -> bool {
+        let data_dir = crate::upgrade::data_dir(&self.config);
+        data_dir.join("rollback").join("sebas").exists()
+    }
+
+    /// 自动回滚：加升级锁 → `upgrade::rollback()` → 释放锁。
+    async fn rollback_to_previous(&self) -> Result<()> {
+        let data_dir = crate::upgrade::data_dir(&self.config);
+        if !self.has_rollback_backup().await {
+            return Err(SebasError::Upgrade(
+                "没有可回滚的版本（rollback/sebas 不存在）".into(),
+            ));
+        }
+        info!("开始回滚，data_dir={}", data_dir.display());
+        crate::upgrade::try_lock(&data_dir)?;
+        let result = crate::upgrade::rollback(&data_dir);
+        crate::upgrade::unlock(&data_dir);
+        result?;
+        info!("回滚完成，current 已切回上一版本");
+        Ok(())
+    }
 }
 
-async fn spawn_webui_process(config: &WatchdogConfig, config_path: &str, control_secret: &str) -> Option<Child> {
+async fn spawn_webui_process(
+    config: &WatchdogConfig,
+    config_path: &str,
+    control_secret: &str,
+) -> Option<Child> {
     use crate::watchdog::services::should_start_watchdog_webui;
 
     if !should_start_watchdog_webui(&config.webui) {
@@ -501,4 +604,119 @@ pub fn print_version() {
         "binary: {}",
         std::env::current_exe().unwrap_or_default().display()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{WatchdogStorageConfig, WatchdogUpgradeConfig};
+    use std::fs;
+
+    fn test_watchdog(tmp_data_dir: &std::path::Path) -> Watchdog {
+        let cfg = WatchdogConfig {
+            upgrade: WatchdogUpgradeConfig::default(),
+            storage: WatchdogStorageConfig {
+                data_dir: tmp_data_dir.display().to_string(),
+                keep_versions: 1,
+            },
+            webui: Default::default(),
+        };
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Watchdog::with_control(
+            cfg,
+            "/nonexistent/config.toml".into(),
+            Arc::new(Mutex::new(ControlService::new())),
+            rx,
+            "test-secret".into(),
+        )
+    }
+
+    #[test]
+    fn crash_window_resets_after_max_crashes() {
+        let tmp = std::env::temp_dir().join("sebas-wd-crash-test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let mut wd = test_watchdog(&tmp);
+        wd.crash_count = 0;
+        wd.last_crash_time = None;
+
+        // 3 次 crash 都在窗口内 → 前 3 次允许重启，第 4 次拒绝。
+        assert!(wd.should_restart(), "1st should restart");
+        assert!(wd.should_restart(), "2nd should restart");
+        assert!(wd.should_restart(), "3rd should restart");
+        assert!(!wd.should_restart(), "4th must be denied within window");
+
+        // 模拟时间窗口过期（>1h 前），计数应重置。
+        wd.last_crash_time =
+            Some(std::time::Instant::now() - Duration::from_secs(CRASH_WINDOW_SECS + 1));
+        wd.crash_count = MAX_CRASHES;
+        assert!(wd.should_restart(), "after window expiry, counter resets");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn has_rollback_backup_reflects_data_dir() {
+        let tmp = std::env::temp_dir().join("sebas-wd-backup-test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let wd_none = test_watchdog(&tmp);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // 无 backup → false。
+        rt.block_on(async {
+            assert!(!wd_none.has_rollback_backup().await);
+        });
+
+        fs::create_dir_all(tmp.join("rollback")).unwrap();
+        fs::write(tmp.join("rollback").join("sebas"), b"bak").unwrap();
+        let wd_has = test_watchdog(&tmp);
+        rt.block_on(async {
+            assert!(wd_has.has_rollback_backup().await);
+        });
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rollback_to_previous_restores_previous_version() {
+        let tmp = std::env::temp_dir().join("sebas-wd-rollback-test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // 安装 v1 → v2（v1 成为 rollback 备份），此时 current 指向 v2。
+        let v1 = tmp.join("sv1");
+        fs::write(&v1, b"v1").unwrap();
+        upgrade::install_version(&v1, "1.0.0", &tmp).unwrap();
+        let v2 = tmp.join("sv2");
+        fs::write(&v2, b"v2").unwrap();
+        upgrade::install_version(&v2, "2.0.0", &tmp).unwrap();
+
+        // 有新有旧，应能回滚到上一版本。
+        let wd = test_watchdog(&tmp);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            wd.rollback_to_previous()
+                .await
+                .expect("rollback should succeed");
+        });
+        let target = fs::read_link(tmp.join("current")).unwrap();
+        assert_eq!(target, std::path::Path::new("versions/rollback"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rollback_without_backup_is_err() {
+        let tmp = std::env::temp_dir().join("sebas-wd-rollback-empty");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let wd = test_watchdog(&tmp);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(wd.rollback_to_previous());
+        assert!(err.is_err(), "no backup should fail rollback");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

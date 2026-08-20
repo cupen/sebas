@@ -12,7 +12,7 @@
 
 use crate::config::WatchdogConfig;
 use crate::error::{Result, SebasError};
-use crate::watchdog::auth::{actor_to_principal, AssertionPrincipal};
+use crate::watchdog::auth::{AssertionPrincipal, actor_to_principal};
 use crate::watchdog::confirmation::{ConfirmationError, ConfirmationService};
 use crate::watchdog::control::{
     Actor, ControlRequest, ControlResponse, ControlService, UpdateKind, UpdateTarget,
@@ -29,8 +29,11 @@ use tracing::{info, warn};
 pub enum PostAction {
     /// Nothing to do (dry-run, status, or a failed operation).
     None,
-    /// A new binary is installed; the core child must be restarted to pick it up.
-    RestartCore,
+    /// The core child must be restarted. `is_upgrade` tells the watchdog whether
+    /// this restart launches a freshly-installed binary (so a subsequent crash
+    /// *before Ready* can be classified as NewBinaryNotReady and trigger an
+    /// automated rollback) vs. a plain restart of the current binary.
+    RestartCore { is_upgrade: bool },
 }
 
 /// Outcome of running an operation to completion.
@@ -135,11 +138,7 @@ impl ControlExecutor {
     /// Used by the control RPC so the socket connection is not held open for the
     /// duration of a multi-minute build. Callers observe progress via
     /// `events.since(seq)`. The returned response carries the operation id.
-    pub async fn submit_detached(
-        &self,
-        actor: Actor,
-        request: ControlRequest,
-    ) -> ControlResponse {
+    pub async fn submit_detached(&self, actor: Actor, request: ControlRequest) -> ControlResponse {
         let response = self.control.lock().await.accept(actor, request.clone());
         let ControlResponse::Accepted { operation_id, .. } = &response else {
             return response;
@@ -170,24 +169,24 @@ impl ControlExecutor {
         request: ControlRequest,
     ) -> RpcControlResponse {
         match &actor {
-            Actor::Feishu { chat_id: Some(chat), .. } => {
-                match self.create_confirmation(&actor, &request, chat).await {
-                    Ok(created) => RpcControlResponse::PendingConfirmation {
-                        token: created.token,
-                        action: created.action,
-                        message: created.message,
-                        expires_in: created.expires_in,
-                    },
-                    Err(e) => RpcControlResponse::Rejected {
-                        code: "confirmation_required".into(),
-                        message: e.to_string(),
-                    },
-                }
-            }
+            Actor::Feishu {
+                chat_id: Some(chat),
+                ..
+            } => match self.create_confirmation(&actor, &request, chat).await {
+                Ok(created) => RpcControlResponse::PendingConfirmation {
+                    token: created.token,
+                    action: created.action,
+                    message: created.message,
+                    expires_in: created.expires_in,
+                },
+                Err(e) => RpcControlResponse::Rejected {
+                    code: "confirmation_required".into(),
+                    message: e.to_string(),
+                },
+            },
             Actor::Feishu { chat_id: None, .. } => RpcControlResponse::Rejected {
                 code: "confirmation_required".into(),
-                message: "Feishu dangerous action requires a chat channel for confirmation"
-                    .into(),
+                message: "Feishu dangerous action requires a chat channel for confirmation".into(),
             },
             _ => self.submit_detached(actor, request).await.into(),
         }
@@ -253,7 +252,9 @@ impl ControlExecutor {
         match self.confirmation.redeem(token, principal, channel, &params) {
             Ok(_) => {
                 self.pending.lock().await.remove(token);
-                self.submit_detached(stored.actor, stored.request).await.into()
+                self.submit_detached(stored.actor, stored.request)
+                    .await
+                    .into()
             }
             Err(ConfirmationError::AlreadyRedeemed) => RpcControlResponse::Rejected {
                 code: "already_redeemed".into(),
@@ -329,7 +330,11 @@ impl ControlExecutor {
     /// Every exit path settles the operation, so the exclusive lock is always
     /// released. `AssertUnwindSafe` + `catch_unwind` covers a panicking runner:
     /// without it, a panic would leave `running_exclusive` set forever.
-    async fn run_accepted(&self, operation_id: String, request: ControlRequest) -> ExecutionOutcome {
+    async fn run_accepted(
+        &self,
+        operation_id: String,
+        request: ControlRequest,
+    ) -> ExecutionOutcome {
         let execution = self.plan_for(&request);
 
         match execution {
@@ -352,7 +357,7 @@ impl ControlExecutor {
                     .mark_done(&operation_id, "restarting core");
                 ExecutionOutcome {
                     operation_id,
-                    post_action: PostAction::RestartCore,
+                    post_action: PostAction::RestartCore { is_upgrade: false },
                 }
             }
             Execution::Updater { plan, label } => {
@@ -387,17 +392,14 @@ impl ControlExecutor {
                         let post_action = if plan.dry_run {
                             PostAction::None
                         } else {
-                            PostAction::RestartCore
+                            PostAction::RestartCore { is_upgrade: true }
                         };
                         let message = if plan.dry_run {
                             format!("{label} dry-run completed")
                         } else {
                             format!("{label} completed; restarting core")
                         };
-                        self.control
-                            .lock()
-                            .await
-                            .mark_done(&operation_id, message);
+                        self.control.lock().await.mark_done(&operation_id, message);
                         ExecutionOutcome {
                             operation_id,
                             post_action,
@@ -538,10 +540,7 @@ impl ControlExecutor {
     pub async fn service_status_for(&self, service: &str) -> RpcControlResponse {
         match self.service_status().await {
             RpcControlResponse::Services { services } => RpcControlResponse::Services {
-                services: services
-                    .into_iter()
-                    .filter(|s| s.name == service)
-                    .collect(),
+                services: services.into_iter().filter(|s| s.name == service).collect(),
             },
             other => other,
         }
@@ -672,9 +671,19 @@ mod tests {
             .await
             .expect("update must be accepted");
 
-        assert_eq!(runner.calls.load(Ordering::SeqCst), 1, "runner must execute");
-        assert_eq!(outcome.post_action, PostAction::RestartCore);
-        assert_eq!(rx.try_recv().ok(), Some(PostAction::RestartCore));
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            1,
+            "runner must execute"
+        );
+        assert_eq!(
+            outcome.post_action,
+            PostAction::RestartCore { is_upgrade: true }
+        );
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PostAction::RestartCore { is_upgrade: true })
+        );
 
         let control = control.lock().await;
         let op = control.operation(&outcome.operation_id).expect("record");
@@ -710,7 +719,10 @@ mod tests {
             .expect("accept succeeds even though the run fails");
 
         assert_eq!(outcome.post_action, PostAction::None);
-        assert!(rx.try_recv().is_err(), "failed update must not restart core");
+        assert!(
+            rx.try_recv().is_err(),
+            "failed update must not restart core"
+        );
 
         let control = control.lock().await;
         let op = control.operation(&outcome.operation_id).expect("record");
@@ -805,7 +817,7 @@ mod tests {
             .await
             .expect("background execution must finish")
             .expect("channel open");
-        assert_eq!(action, PostAction::RestartCore);
+        assert_eq!(action, PostAction::RestartCore { is_upgrade: true });
 
         let control = control.lock().await;
         let op = control.operation(&operation_id).expect("record");
