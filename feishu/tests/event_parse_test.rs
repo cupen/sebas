@@ -55,11 +55,7 @@ fn topic_message_reply_target_is_root_id() {
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
     let evt = env.into_event("").unwrap();
     match evt {
-        FeishuIn::Text {
-            key,
-            reply_to,
-            ..
-        } => {
+        FeishuIn::Text { key, reply_to, .. } => {
             assert_eq!(
                 key,
                 SessionKey {
@@ -96,11 +92,7 @@ fn topic_root_message_reply_target_is_own_id() {
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
     let evt = env.into_event("").unwrap();
     match evt {
-        FeishuIn::Text {
-            key,
-            reply_to,
-            ..
-        } => {
+        FeishuIn::Text { key, reply_to, .. } => {
             assert_eq!(key.thread_id.as_deref(), Some("omt_t1"));
             assert_eq!(reply_to.as_deref(), Some("om_topic_root"));
         }

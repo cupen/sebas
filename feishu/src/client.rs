@@ -405,7 +405,10 @@ mod tests {
                 .is_topic_invalid()
         };
         assert!(mk(230019), "topic missing must be topic-invalid");
-        assert!(mk(230071), "group without thread support must be topic-invalid");
+        assert!(
+            mk(230071),
+            "group without thread support must be topic-invalid"
+        );
         assert!(!mk(230013), "unrelated code must not be topic-invalid");
         assert!(!mk(0), "success must not be topic-invalid");
     }

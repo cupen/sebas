@@ -21,8 +21,7 @@ use tracing::{debug, info, warn};
 
 /// 话题失效提示文案（Q8→F1 熔断）：发一次提示并终止会话，不重试、不重发。
 /// 群聊/p2p 通用，不提「开新话题」。
-const TOPIC_INVALID_NOTICE: &str =
-    "该话题已失效，本次会话已结束。请重新发消息开始新会话。";
+const TOPIC_INVALID_NOTICE: &str = "该话题已失效，本次会话已结束。请重新发消息开始新会话。";
 
 /// 出站卡统一回复目标：所有 `Out::SendCard` 都应走 reply 形式挂回用户发言。
 /// - 显式 `root_id`（如 `Out::SendCard.root_id`，换卡、permission 解析）原样透传；
@@ -83,7 +82,9 @@ pub(crate) async fn send_card_topic_aware(
         Err(e) => {
             if let Some(code) = classify_topic_invalid(&e) {
                 warn!(code, error = %e, "topic send failed; notifying user and closing session");
-                if let Err(e2) = feishu.send_text(http, tokens, key, TOPIC_INVALID_NOTICE).await
+                if let Err(e2) = feishu
+                    .send_text(http, tokens, key, TOPIC_INVALID_NOTICE)
+                    .await
                 {
                     warn!(?e2, "topic-invalid notice send failed");
                 }
@@ -133,8 +134,14 @@ pub(crate) async fn dispatch_out(
             // 跳过 record_root_msg_id / record_perm_card_msg_id。
             if let TopicSendOutcome::Sent(new_id) = outcome {
                 if let (false, Some(session_id)) = (new_id.is_empty(), msg_id) {
-                    router.record_root_msg_id(session_id, new_id.clone()).await;
-                    debug!(message_id = %new_id, "recorded card msg_id");
+                    // 帮助卡片：记录 msg_id 供后续 tab 切换原地更新
+                    if session_id == "__help_card__" {
+                        router.record_help_card_msgid(&key, new_id.clone()).await;
+                        debug!(message_id = %new_id, "recorded help card msg_id");
+                    } else {
+                        router.record_root_msg_id(session_id, new_id.clone()).await;
+                        debug!(message_id = %new_id, "recorded card msg_id");
+                    }
                 }
                 // Permission cards are tracked by request_id so a later button
                 // click can flip them in place (resolved/expired). We also stash
@@ -179,9 +186,7 @@ pub(crate) async fn dispatch_out(
             // remove this ack emoji before adding the new one.
             match feishu.react(http, tokens, &message_id, &emoji).await {
                 Ok(rid) => {
-                    reactions
-                        .record_ack(&message_id, emoji.clone(), rid)
-                        .await;
+                    reactions.record_ack(&message_id, emoji.clone(), rid).await;
                 }
                 Err(e) => {
                     warn!(%message_id, error=%e, "ack reaction failed");
@@ -268,7 +273,7 @@ pub(crate) async fn dispatch_out(
                         serde_json::to_value(&card)?,
                         reply,
                     )
-                        .await
+                    .await
                     {
                         warn!(?e2, "failed to send spawn-failure card");
                     }
@@ -284,8 +289,19 @@ pub(crate) async fn dispatch_out(
                     .await;
             }
             wire_session_card_and_pump(
-                feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
-                pending, rx, input_msg_id,
+                feishu,
+                http,
+                tokens,
+                cfg,
+                router,
+                mgr,
+                reactions,
+                key,
+                session_id,
+                prompt,
+                pending,
+                rx,
+                input_msg_id,
             )
             .await?;
         }
@@ -377,7 +393,7 @@ pub(crate) async fn dispatch_out(
                         serde_json::to_value(&card)?,
                         reply,
                     )
-                        .await
+                    .await
                     {
                         warn!(?e2, "failed to send resume-failure card");
                     }
@@ -398,7 +414,7 @@ pub(crate) async fn dispatch_out(
                     serde_json::to_value(&card)?,
                     reply,
                 )
-                    .await
+                .await
                 {
                     warn!(?e2, "failed to send session-lost notice");
                 }
@@ -410,8 +426,19 @@ pub(crate) async fn dispatch_out(
                     .await;
             }
             wire_session_card_and_pump(
-                feishu, http, tokens, cfg, router, mgr, reactions, key, session_id, prompt,
-                pending, rx, input_msg_id,
+                feishu,
+                http,
+                tokens,
+                cfg,
+                router,
+                mgr,
+                reactions,
+                key,
+                session_id,
+                prompt,
+                pending,
+                rx,
+                input_msg_id,
             )
             .await?;
         }
@@ -434,7 +461,8 @@ pub(crate) async fn dispatch_out(
             }
         }
         Out::WatchdogRollback { key } => {
-            let request = crate::watchdog::control_rpc::RpcControlRequest::Rollback { dry_run: false };
+            let request =
+                crate::watchdog::control_rpc::RpcControlRequest::Rollback { dry_run: false };
             let content = submit_watchdog_control(&key, request, "回滚").await;
             if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
                 warn!(?e, "send_text failed");
@@ -624,9 +652,7 @@ async fn submit_watchdog_control(
             message,
             expires_in,
             ..
-        }) => format!(
-            "{label}请求需要确认: {message} (action={action}, {expires_in}s 内有效)"
-        ),
+        }) => format!("{label}请求需要确认: {message} (action={action}, {expires_in}s 内有效)"),
         Err(e) => format!("{label}请求失败: {e}"),
     }
 }
@@ -729,7 +755,11 @@ mod tests {
         assert_eq!(mk(230071), Some(230071), "群不支持话题回复必须熔断");
         assert_eq!(mk(99999), None, "无关错误码不熔断");
         let net_err: anyhow::Error = anyhow::anyhow!("network down");
-        assert_eq!(classify_topic_invalid(&net_err), None, "非 Feishu 错误不熔断");
+        assert_eq!(
+            classify_topic_invalid(&net_err),
+            None,
+            "非 Feishu 错误不熔断"
+        );
     }
 
     // ---------- Phase 3 Task 3.1: Feishu control adapter contract ----------

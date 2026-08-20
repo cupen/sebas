@@ -218,15 +218,30 @@ fn render_accumulated_card_with_footer_shows_model_and_tokens() {
     let card = render_accumulated_card("hi", "msg_1", &[], "blue", Some(&footer));
     let s = serde_json::to_string(&card).unwrap();
     // Should show short model name "sonnet"
-    assert!(s.contains("sonnet"), "footer should contain short model name");
+    assert!(
+        s.contains("sonnet"),
+        "footer should contain short model name"
+    );
     // 三段语义都按累计 total 渲染：in=total_input、out=total_output、
     // ctx=total_input（不是 in+out 求和，那只是总流量不是上下文）。
-    assert!(s.contains("in: 5.0K"), "in should be cumulative total_input");
-    assert!(s.contains("out: 3.0K"), "out should be cumulative total_output");
+    assert!(
+        s.contains("in: 5.0K"),
+        "in should be cumulative total_input"
+    );
+    assert!(
+        s.contains("out: 3.0K"),
+        "out should be cumulative total_output"
+    );
     assert!(s.contains("ctx: 5.0K"), "ctx should equal total_input");
     // round_input/output 不再出现在 footer。
-    assert!(!s.contains("1.2K"), "round_input should not leak into footer");
-    assert!(!s.contains("5.7K"), "round_output should not leak into footer");
+    assert!(
+        !s.contains("1.2K"),
+        "round_input should not leak into footer"
+    );
+    assert!(
+        !s.contains("5.7K"),
+        "round_output should not leak into footer"
+    );
     // Should NOT contain msg_id
     assert!(!s.contains("msg_id:"), "footer should not show msg_id");
 }
@@ -247,13 +262,28 @@ fn render_accumulated_card_with_footer_no_model_shows_question_mark() {
     assert!(s.contains("?"), "footer should show ? for unknown model");
     // 三段都来自 cumulative total（不再读 round_input/round_output）；
     // round_input/output 已不再影响 footer。
-    assert!(!s.contains("in: 100"), "round_input should not leak into footer");
-    assert!(!s.contains("out: 200"), "round_output should not leak into footer");
+    assert!(
+        !s.contains("in: 100"),
+        "round_input should not leak into footer"
+    );
+    assert!(
+        !s.contains("out: 200"),
+        "round_output should not leak into footer"
+    );
     // 1500 → 1.5K（>= 1000 走 K 单位）
-    assert!(s.contains("in: 1.5K"), "in should be 1.5K from total_input 1500");
-    assert!(s.contains("out: 500"), "out should be raw 500 from total_output");
+    assert!(
+        s.contains("in: 1.5K"),
+        "in should be 1.5K from total_input 1500"
+    );
+    assert!(
+        s.contains("out: 500"),
+        "out should be raw 500 from total_output"
+    );
     // ctx = total_input，不是 in+out 求和
-    assert!(s.contains("ctx: 1.5K"), "ctx should equal total_input, not 2.0K");
+    assert!(
+        s.contains("ctx: 1.5K"),
+        "ctx should equal total_input, not 2.0K"
+    );
 }
 
 #[test]
@@ -269,14 +299,28 @@ fn render_accumulated_card_with_footer_large_tokens_no_decimal() {
     let card = render_accumulated_card("big", "msg_3", &[], "blue", Some(&footer));
     let s = serde_json::to_string(&card).unwrap();
     // 100K+, show without decimal —— in/out/ctx 都来自 cumulative total
-    assert!(s.contains("in: 500K"), "in should be cumulative total_input 500K");
-    assert!(s.contains("out: 300K"), "out should be cumulative total_output 300K");
-    assert!(s.contains("ctx: 500K"), "ctx should equal total_input, not in+out 800K");
+    assert!(
+        s.contains("in: 500K"),
+        "in should be cumulative total_input 500K"
+    );
+    assert!(
+        s.contains("out: 300K"),
+        "out should be cumulative total_output 300K"
+    );
+    assert!(
+        s.contains("ctx: 500K"),
+        "ctx should equal total_input, not in+out 800K"
+    );
     // round_* 不再出现在 footer。
-    assert!(!s.contains("100K") || s.contains("in: 500K") && s.contains("ctx: 500K"),
-        "round_input 100K should not leak into footer");
+    assert!(
+        !s.contains("100K") || s.contains("in: 500K") && s.contains("ctx: 500K"),
+        "round_input 100K should not leak into footer"
+    );
     // Short model name: opus
-    assert!(s.contains("opus"), "footer should show short model name opus");
+    assert!(
+        s.contains("opus"),
+        "footer should show short model name opus"
+    );
 }
 
 #[test]

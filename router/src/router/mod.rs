@@ -14,9 +14,11 @@ pub use maps::{
     MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
 };
 
-use crate::card_events::{apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title};
-use crate::commands::GatewayAction;
+use crate::card_events::{
+    apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title,
+};
 use crate::card_state::CardState;
+use crate::commands::GatewayAction;
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use acp_claude::manager::SessionManager;
@@ -207,6 +209,11 @@ pub struct RouterHandle {
     /// （权限卡等）用它作为 root_id；sebas 出站层（初始卡/失败提示卡）经
     /// [`RouterHandle::reply_target`] 读取。纯内存、不持久化。
     reply_targets: ReplyTargetMap,
+    /// Tracks the Feishu `message_id` of the interactive help card per chat
+    /// (keyed by `SessionKey` serialized to string). When the user clicks a
+    /// group tab, the router looks up this msg_id and sends `UpdateCardByMsgId`
+    /// to flip the card in place rather than creating a new message.
+    help_card_msgid: MsgIdMap,
 }
 
 impl Clone for RouterHandle {
@@ -224,6 +231,7 @@ impl Clone for RouterHandle {
             mgr: self.mgr.clone(),
             active_session: self.active_session.clone(),
             reply_targets: self.reply_targets.clone(),
+            help_card_msgid: self.help_card_msgid.clone(),
         }
     }
 }
@@ -280,6 +288,7 @@ impl RouterHandle {
                 mgr,
                 active_session: Arc::new(RwLock::new(None)),
                 reply_targets: ReplyTargetMap::default(),
+                help_card_msgid: MsgIdMap::default(),
             },
             rx,
         )
@@ -386,6 +395,22 @@ impl RouterHandle {
     /// Look up the root card message_id for a session (used by `UpdateCard`).
     pub async fn root_msg_id(&self, session_id: &str) -> Option<String> {
         self.msgid.get(session_id).await
+    }
+
+    /// Record the Feishu `message_id` of the interactive help card for a chat.
+    /// Called from the outbound dispatcher after `send_card` returns the msg_id.
+    /// Keyed by `SessionKey` serialized to string so the router can later look it
+    /// up and PATCH the card in place when the user clicks a group tab.
+    pub async fn record_help_card_msgid(&self, key: &SessionKey, msg_id: String) {
+        let key_str = serde_json::to_string(key).expect("SessionKey serialization");
+        self.help_card_msgid.record(key_str, msg_id).await;
+    }
+
+    /// Look up the Feishu `message_id` of the help card for a chat.
+    /// Returns `None` if no help card was sent yet (or the msg_id was evicted).
+    pub async fn help_card_msg_id(&self, key: &SessionKey) -> Option<String> {
+        let key_str = serde_json::to_string(key).expect("SessionKey serialization");
+        self.help_card_msgid.get(&key_str).await
     }
 
     /// seed_card：SpawnAcp 臂发完 root 卡后调用（dispatch_out）。

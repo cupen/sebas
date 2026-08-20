@@ -43,7 +43,9 @@ async fn spawn_new_clears_reply_target() {
         chat_id: "oc_topic".into(),
         thread_id: Some("omt_t1".into()),
     };
-    map.insert(key.clone(), Mapping::active("s1")).await.unwrap();
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     // 入站话题消息写入 reply target；已映射会话走 Continue，不触发 spawn_new。
@@ -437,7 +439,7 @@ async fn fail_spawn_ignores_active_and_missing_entries() {
 }
 
 #[tokio::test]
-async fn help_command_emits_plain_text() {
+async fn help_command_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
@@ -449,17 +451,19 @@ async fn help_command_emits_plain_text() {
         .await;
     let out = next_out(&mut out_rx).await;
     match out {
-        Out::PlainText { content, .. } => {
-            // 至少包含 /help 自身和 /settings（覆盖关键命令）+ 中文标识。
-            assert!(
-                content.contains("/help"),
-                "help text missing /help: {content}"
+        Out::SendCard { msg_id, card, .. } => {
+            // 应携带帮助卡片哨兵 tag
+            assert_eq!(
+                msg_id.as_deref(),
+                Some("__help_card__"),
+                "help card should carry HELP_CARD_TAG"
             );
-            assert!(
-                content.contains("/settings"),
-                "help text missing /settings: {content}"
-            );
+            // 卡片应包含分组 tab 按钮和命令
+            let s = card.to_string();
+            assert!(s.contains("💬 会话管理"), "help card missing session tab");
+            assert!(s.contains("/new"), "help card missing /new command");
+            assert!(s.contains("/cancel"), "help card missing /cancel command");
         }
-        other => panic!("expected PlainText (help), got {other:?}"),
+        other => panic!("expected SendCard (help card), got {other:?}"),
     }
 }

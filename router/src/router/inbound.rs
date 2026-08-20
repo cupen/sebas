@@ -4,12 +4,12 @@
 //! `drain_queue_if_terminal` 被 [`acp_events`] 复用，故放在 mod.rs 里。
 
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
-use crate::commands::{Command, GatewayAction, HELP_TEXT, parse_command};
+use crate::commands::{Command, GatewayAction, parse_command};
 use crate::settings;
 use acp_claude::session::{AcpCommand, Decision};
 use feishu::cards::{
     CardConfig, CardElement, DivText, ThinkingDisplay, render_accumulated_card,
-    render_dead_session_card, render_expired_permission_card,
+    render_dead_session_card, render_expired_permission_card, render_help_card,
     render_resolved_permission_card,
 };
 use feishu::events::{CardAction, FeishuIn, SessionKey};
@@ -17,6 +17,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Sentinel value passed as `msg_id` in `Out::SendCard` for help cards.
+/// The dispatcher recognizes this tag and records the real Feishu message_id
+/// via `RouterHandle::record_help_card_msgid` for later in-place updates.
+const HELP_CARD_TAG: &str = "__help_card__";
 
 impl RouterHandle {
     pub async fn dispatch(&self, evt: FeishuIn) {
@@ -128,9 +133,15 @@ impl RouterHandle {
                 }
             }
             Command::Help => {
-                self.emit(Out::PlainText {
+                let theme = self.card_cfg.read().await.theme_color.clone();
+                let card = render_help_card("session", &theme);
+                self.emit(Out::SendCard {
                     key,
-                    content: HELP_TEXT.into(),
+                    card: serde_json::to_value(&card).expect("help card serializes"),
+                    msg_id: Some(HELP_CARD_TAG.into()),
+                    perm_request_id: None,
+                    perm_meta: None,
+                    root_id: None,
                 })
                 .await;
             }
@@ -191,7 +202,9 @@ impl RouterHandle {
                         self.continue_session(sid, text, reply_to, key.clone(), true)
                             .await
                     }
-                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, text, reply_to).await,
+                    Ok(crate::state::TextRoute::SpawnNew) => {
+                        self.spawn_new(key, text, reply_to).await
+                    }
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
                         self.emit(Out::SpawnResume {
                             key,
@@ -267,10 +280,43 @@ impl RouterHandle {
     }
 
     async fn on_button(&self, key: SessionKey, action: CardAction) {
+        // 帮助卡片交互：分组 tab 切换 / 命令执行。优先于其他所有路由。
+        let payload = action.value.pointer("/action/value").cloned();
+        if let Some(p) = payload.as_ref() {
+            // Tab 切换：原地更新卡片
+            if let Some(tab) = p.get("help_tab").and_then(Value::as_str) {
+                let theme = self.card_cfg.read().await.theme_color.clone();
+                let card = render_help_card(tab, &theme);
+                // 查找已有帮助卡 msg_id → 原地更新；没有则发新卡
+                if let Some(msg_id) = self.help_card_msg_id(&key).await {
+                    self.emit(Out::UpdateCardByMsgId {
+                        key,
+                        msg_id,
+                        card: serde_json::to_value(&card).expect("help card serializes"),
+                    })
+                    .await;
+                } else {
+                    self.emit(Out::SendCard {
+                        key,
+                        card: serde_json::to_value(&card).expect("help card serializes"),
+                        msg_id: Some(HELP_CARD_TAG.into()),
+                        perm_request_id: None,
+                        perm_meta: None,
+                        root_id: None,
+                    })
+                    .await;
+                }
+                return;
+            }
+            // 命令执行：复用文本命令处理流程
+            if let Some(cmd) = p.get("help_cmd").and_then(Value::as_str) {
+                self.on_text(key, cmd.to_string(), None).await;
+                return;
+            }
+        }
         // Provider 管理主卡的新按钮（mode / 设默认 / 删除 / ＋ 新增预设/自定义
         // / 探测 model 列表 / 探测 apply / 返回）。优先路由于既有 provider_forms，
         // 避免模式按钮被误投到既有 form 的 `{form, op, id}` 分发上。
-        let payload = action.value.pointer("/action/value").cloned();
         if let Some(p) = payload.as_ref()
             && p.get("form").and_then(Value::as_str).is_some_and(|f| {
                 matches!(
@@ -291,14 +337,8 @@ impl RouterHandle {
                 .pointer("/context/open_message_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            if let Some(out) = super::provider_card::dispatch(
-                self,
-                &key,
-                p,
-                &BTreeMap::new(),
-                message_id,
-            )
-            .await
+            if let Some(out) =
+                super::provider_card::dispatch(self, &key, p, &BTreeMap::new(), message_id).await
             {
                 self.emit(out).await;
                 return;
@@ -601,8 +641,7 @@ impl RouterHandle {
                 let emoji = handle.card_states.status_emoji(&sid).await;
                 let done = match emoji.as_deref() {
                     Some(e) => {
-                        e == crate::card_state::phase::DONE
-                            || e == crate::card_state::phase::FAILED
+                        e == crate::card_state::phase::DONE || e == crate::card_state::phase::FAILED
                     }
                     None => true,
                 };

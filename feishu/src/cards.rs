@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Map a router FSM phase string (the Feishu `emoji_type`, e.g. `"Typing"`,
 /// `"OnIt"`, `"DONE"`, `"CrossMark"`) to the Unicode glyph historically shown
@@ -842,6 +843,123 @@ pub fn render_resolved_permission_card(label: &str) -> Card {
 pub fn render_expired_permission_card() -> Card {
     let mut card = Card::new("权限请求", "grey");
     card.push_text("⚠ 请求已过期，该工具调用已被处理或取消。");
+    card
+}
+
+/// Command groups for the interactive help card.
+/// Maps group key → (tab label, list of (command, description)).
+fn help_command_groups() -> HashMap<&'static str, (&'static str, Vec<(&'static str, &'static str)>)>
+{
+    let mut m: HashMap<&str, (&str, Vec<(&str, &str)>)> = HashMap::new();
+    m.insert(
+        "session",
+        (
+            "💬 会话管理",
+            vec![
+                ("/new", "开新会话"),
+                ("/sessions", "列出会话"),
+                ("/switch ⟨n⟩", "切换到第 n 个会话"),
+                ("/resume ⟨sid⟩", "恢复指定会话"),
+                ("/cancel", "中断当前轮"),
+                ("/status", "查看当前会话状态"),
+                ("/compact", "压缩上下文"),
+                ("/cost", "查看会话开销"),
+            ],
+        ),
+    );
+    m.insert(
+        "system",
+        (
+            "⚙️ 系统功能",
+            vec![
+                ("/settings [key [val]]", "查看/修改配置"),
+                ("/model ⟨text⟩", "透传 /model 给 claude code"),
+                ("/goal ⟨text⟩", "透传 /goal 给 claude code"),
+                ("/cd ⟨path⟩", "切换工作目录"),
+                ("/btw ⟨text⟩", "插队提问"),
+            ],
+        ),
+    );
+    m.insert(
+        "service",
+        (
+            "🔧 服务管理",
+            vec![
+                ("/upgrade [dev] [dry-run]", "升级并重启"),
+                ("/rollback", "回滚并重启"),
+                ("/restart", "重启 core"),
+                ("/services", "查看服务状态"),
+                ("/system", "查看系统状态"),
+                ("/gateway on|off|restart|status", "管理 gateway"),
+                ("/webui status", "查看 webui 状态"),
+            ],
+        ),
+    );
+    m.insert(
+        "other",
+        (
+            "📦 其他",
+            vec![("/provider", "管理 Provider"), ("/help", "显示本帮助")],
+        ),
+    );
+    m
+}
+
+/// Render an interactive help card with group tabs and clickable command buttons.
+///
+/// `group` — the currently selected group key ("session" | "system" | "service" | "other").
+/// `theme` — card theme color (e.g. "blue").
+///
+/// The card includes:
+/// - A row of tab buttons for switching groups (in-place update via `UpdateCardByMsgId`).
+/// - A list of command buttons for the selected group (clicking executes the command).
+/// The `msg_id` of the card is stored by the dispatcher so tab switches can PATCH in place.
+pub fn render_help_card(group: &str, theme: &str) -> Card {
+    let groups = help_command_groups();
+    // Validate group key; fall back to "session".
+    let group = if groups.contains_key(group) {
+        group
+    } else {
+        "session"
+    };
+    let (tab_label, commands) = &groups[group];
+
+    let mut card = Card::new(&format!("📖 帮助 — {tab_label}"), theme);
+
+    // Tab buttons row: all groups as buttons, current group highlighted.
+    let tab_order = ["session", "system", "service", "other"];
+    let mut tab_buttons = Vec::new();
+    for key in tab_order.iter() {
+        let (label, _) = &groups[key];
+        let btn_type = if *key == group { "primary" } else { "default" };
+        tab_buttons.push(CardButton {
+            text: CardText {
+                tag: "plain_text".into(),
+                content: (*label).into(),
+            },
+            r#type: btn_type.into(),
+            value: serde_json::json!({"help_tab": key}),
+        });
+    }
+    card.push_actions(tab_buttons);
+
+    // Divider + command buttons for the selected group
+    card.push_divider();
+    for (cmd, desc) in commands {
+        card.body.elements.push(CardElement::Button {
+            text: CardText {
+                tag: "plain_text".into(),
+                content: format!("{cmd}  —  {desc}"),
+            },
+            r#type: "default".into(),
+            behaviors: vec![CardBehavior {
+                r#type: "callback".into(),
+                value: serde_json::json!({"help_cmd": cmd}),
+            }],
+        });
+    }
+
+    card.push_note("提示：点击分组 tab 切换，点击命令直接执行");
     card
 }
 
