@@ -92,6 +92,9 @@ impl RouterHandle {
                     self.map.remove_by_session(sid).await;
                 }
                 self.drop_card(sid).await;
+                // 终态会话同时清 root msg_id（与 web_close_session 对称），防止
+                // session_id→msg_id 条目长期积累内存泄漏 / 复用 id 继承 stale msg_id。
+                self.msgid.drop(sid).await;
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
