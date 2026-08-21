@@ -238,6 +238,31 @@ async fn slash_compact_without_session_gets_help() {
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
 }
 
+#[tokio::test]
+async fn slash_status_forwards_continue_session() {
+    let map = SessionMap::new();
+    map.insert(key(), Mapping::active("s1")).await.unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map);
+    router
+        .dispatch(FeishuIn::Text {
+            key: key(),
+            text: "/status".into(),
+            reply_to: None,
+        })
+        .await;
+
+    match next_out(&mut out_rx).await {
+        Out::SendAcp {
+            cmd: AcpCommand::ContinueSession { session_id, prompt },
+            ..
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(prompt, "/status");
+        }
+        other => panic!("expected ContinueSession(\"/status\"), got {other:?}"),
+    }
+}
+
 // ---------- Media 组合 ----------
 
 #[tokio::test]

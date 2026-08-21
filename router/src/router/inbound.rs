@@ -596,6 +596,10 @@ impl RouterHandle {
                 session_id: session_id.into(),
                 prompt: "/cost".into(),
             },
+            Command::Status => AcpCommand::ContinueSession {
+                session_id: session_id.into(),
+                prompt: "/status".into(),
+            },
             Command::Cancel => AcpCommand::Cancel {
                 session_id: session_id.into(),
             },
