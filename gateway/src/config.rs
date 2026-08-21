@@ -62,10 +62,53 @@ pub struct GatewayConfig {
     /// 不配置则不校验（裸奔，启动时 warn）。
     #[serde(default, deserialize_with = "de_auth_token")]
     pub auth_token: Vec<String>,
+    /// 限流配置（`[gateway.rate_limit]`）。缺省不限流。
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub routes: Vec<RouteGroup>,
+}
+
+/// `[gateway.rate_limit]`：token-bucket 限流。缺省不限流。
+///
+/// - `rpm`: 每分钟请求数（便捷写法，本实现忽略）
+/// - `capacity` + `refill_per_sec`: token-bucket 原始参数：
+///   容量 = 瞬时允许的突发请求数；refill_per_sec = 每秒补充速率。
+/// 都未设（capacity=None 且 rpm=None）→ 不限流。
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub struct RateLimitConfig {
+    /// 每分钟请求数简便写法。仅占位：语义与 capacity/refill_per_sec 一致，
+    /// 由 `RateLimiter` 统一解析；此处保留字段供配置书写。
+    #[serde(default)]
+    pub rpm: Option<u64>,
+    /// token-bucket 容量（允许的最大突发）。
+    #[serde(default)]
+    pub capacity: Option<u64>,
+    /// 每秒补充速率。
+    #[serde(default = "default_refill_per_sec")]
+    pub refill_per_sec: f64,
+}
+
+fn default_refill_per_sec() -> f64 {
+    1.0
+}
+
+impl RateLimitConfig {
+    /// 是否启用限流：capacity 或 rpm 任一设置即启用。
+    pub fn enabled(&self) -> bool {
+        self.capacity.is_some() || self.rpm.is_some()
+    }
+
+    /// 解析成 (capacity, refill_per_sec)。缺省均不限流时返回 None。
+    /// `rpm` 优先：capacity=rpm、refill=rpm/60。
+    pub fn bucket_params(&self) -> Option<(u64, f64)> {
+        if let Some(rpm) = self.rpm {
+            return Some((rpm, rpm as f64 / 60.0));
+        }
+        self.capacity.map(|cap| (cap, self.refill_per_sec))
+    }
 }
 
 fn default_listen() -> String {
@@ -174,6 +217,8 @@ struct RawGatewayConfig {
     default_provider: Option<String>,
     #[serde(default, deserialize_with = "de_auth_token")]
     auth_token: Vec<String>,
+    #[serde(default)]
+    rate_limit: RateLimitConfig,
     #[serde(default)]
     /// `[gateway.routes]`：`model = ["provider", ...]`，数组顺序 = 优先级。
     routes: HashMap<String, Vec<String>>,
@@ -507,6 +552,7 @@ impl GatewayConfig {
                     provider_overlay: default_provider_overlay(),
                     default_provider: g.default_provider,
                     auth_token: g.auth_token,
+                    rate_limit: g.rate_limit,
                     providers,
                     routes,
                 }
@@ -522,6 +568,7 @@ impl GatewayConfig {
                 provider_overlay: default_provider_overlay(),
                 default_provider: None,
                 auth_token: Vec::new(),
+                rate_limit: RateLimitConfig::default(),
                 providers,
                 routes: Vec::new(),
             },
@@ -652,6 +699,27 @@ impl GatewayConfig {
                     "gateway.auth_token[{i}] 不能为空字符串"
                 )));
             }
+        }
+        if let Some(rpm) = self.rate_limit.rpm
+            && rpm == 0
+        {
+            return Err(GatewayError::Config(
+                "gateway.rate_limit.rpm 必须 ≥ 1".into(),
+            ));
+        }
+        if let Some(cap) = self.rate_limit.capacity
+            && cap == 0
+        {
+            return Err(GatewayError::Config(
+                "gateway.rate_limit.capacity 必须 ≥ 1".into(),
+            ));
+        }
+        if self.rate_limit.enabled()
+            && self.rate_limit.refill_per_sec <= 0.0
+        {
+            return Err(GatewayError::Config(
+                "gateway.rate_limit.refill_per_sec 必须 > 0".into(),
+            ));
         }
         Ok(())
     }
@@ -1176,6 +1244,125 @@ api_key = "test-ark-key"
         );
         assert_eq!(ark.api_key.as_deref(), Some("test-ark-key"));
         assert_eq!(ark.api_key_env, None);
+    }
+
+    // -------------------- rate_limit --------------------
+
+    #[test]
+    fn rate_limit_defaults_to_disabled() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let cfg = parse_isolated(FULL_EXAMPLE).expect("parse");
+        assert!(!cfg.rate_limit.enabled(), "缺省必须不限流");
+        assert_eq!(cfg.rate_limit.bucket_params(), None);
+    }
+
+    #[test]
+    fn rate_limit_rpm_parses_and_derives_bucket() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+auth_token = "sk-test"
+[gateway.rate_limit]
+rpm = 60
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let cfg = parse_isolated(raw).expect("parse");
+        assert!(cfg.rate_limit.enabled());
+        let (cap, refill) = cfg.rate_limit.bucket_params().expect("bucket params");
+        assert_eq!(cap, 60);
+        assert!((refill - 1.0).abs() < 1e-9, "rpm/60 = 1 token/s, got {refill}");
+    }
+
+    #[test]
+    fn rate_limit_capacity_and_refill_parse() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+auth_token = "sk-test"
+[gateway.rate_limit]
+capacity = 100
+refill_per_sec = 5.0
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let cfg = parse_isolated(raw).expect("parse");
+        let (cap, refill) = cfg.rate_limit.bucket_params().expect("bucket params");
+        assert_eq!(cap, 100);
+        assert_eq!(refill, 5.0);
+    }
+
+    #[test]
+    fn rate_limit_rpm_zero_errors() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+auth_token = "sk-test"
+[gateway.rate_limit]
+rpm = 0
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let err = parse_isolated(raw).expect_err("rpm=0 must error");
+        assert!(
+            err.to_string().contains("rpm"),
+            "error should mention rpm: {err}"
+        );
+    }
+
+    #[test]
+    fn rate_limit_capacity_zero_errors() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+auth_token = "sk-test"
+[gateway.rate_limit]
+capacity = 0
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let err = parse_isolated(raw).expect_err("capacity=0 must error");
+        assert!(
+            err.to_string().contains("capacity"),
+            "error should mention capacity: {err}"
+        );
+    }
+
+    #[test]
+    fn rate_limit_zero_refill_errors() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let raw = r#"
+[gateway]
+auth_token = "sk-test"
+[gateway.rate_limit]
+capacity = 10
+refill_per_sec = 0.0
+[provider.anthropic]
+api_key = "test-key"
+"#;
+        let err = parse_isolated(raw).expect_err("refill=0 must error");
+        assert!(
+            err.to_string().contains("refill_per_sec"),
+            "error should mention refill_per_sec: {err}"
+        );
     }
 
     // -------------------- auth_token --------------------

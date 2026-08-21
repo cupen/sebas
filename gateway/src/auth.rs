@@ -19,7 +19,8 @@ use crate::server::AppState;
 
 /// 从 `Authorization: Bearer <key>` 或 `x-api-key: <key>` 提取下游 key。
 /// Authorization 优先；Bearer 令牌为空时回退 `x-api-key`。两者均无/空 → `None`。
-fn extract_key(headers: &HeaderMap) -> Option<String> {
+/// `pub(crate)`：限流中间件（rate_limit.rs）复用同一把 key 做 per-token 维度。
+pub(crate) fn extract_key(headers: &HeaderMap) -> Option<String> {
     if let Some(auth) = headers.get("authorization")
         && let Ok(s) = auth.to_str()
         && let Some(rest) = s.strip_prefix("Bearer ")

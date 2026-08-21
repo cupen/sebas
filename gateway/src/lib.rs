@@ -18,6 +18,7 @@ pub mod key_resolver;
 pub mod models;
 pub mod proto;
 pub mod proxy;
+pub mod rate_limit;
 pub mod routing;
 pub mod server;
 pub mod sse;
