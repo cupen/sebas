@@ -874,13 +874,12 @@ fn upsert_item(items: &mut Vec<Item>, item: Item, id_field: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::test_util::lock_state_file;
 
     // spec 2026-08-17 §2.6：FileStore 持久化到 unified state.json（路径由
     // SEBAS_STATE_FILE 决定）。所有写盘的测试都要先把 SEBAS_STATE_FILE 指
     // 向 tempdir，避免污染开发机 ~/.sebas/state.json，并避免互相覆盖。
     // 全局 mutex 串行化 env 访问。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn item(id: &str, protocol: &str) -> Item {
         let mut m = Map::new();
@@ -912,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_without_file_uses_seed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
         let _path = isolate(&dir);
         let store = FileStore::load(
@@ -927,7 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_persists_and_delete_tombstones() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
         let _path = isolate(&dir);
         let store = FileStore::load(
@@ -960,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_overrides_seed_value() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
         let _path = isolate(&dir);
         let mut seed = item("deepseek", "anthropic");
@@ -1036,7 +1035,7 @@ mod tests {
 
     #[tokio::test]
     async fn recompute_runs_normalizer_without_persisting() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
         let _path = isolate(&dir);
         let store = FileStore::load(dir.path().join("providers.json"), "name", Vec::new()).unwrap();
@@ -1090,7 +1089,7 @@ mod tests {
     #[tokio::test]
     async fn recompute_preserves_existing_secret_on_edit() {
         // 编辑已有条目时，recompute 不能把已有的密钥抹掉。
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
         let _path = isolate(&dir);
         let mut seed = item("ds", "anthropic");

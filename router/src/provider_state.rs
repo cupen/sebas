@@ -80,14 +80,13 @@ pub fn state_path() -> std::path::PathBuf {
 mod env_override_tests {
     use super::*;
     use crate::state_store::{self, PersistedState};
-    use std::sync::Mutex;
+    use crate::test_util::lock_state_file;
 
     // 串行化所有 env 访问：和 spawn_env.rs 同源问题。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn sebas_state_file_env_overrides_state_path() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_state_file();
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("custom_state.json");
         // SAFETY: ENV_LOCK held.
@@ -234,7 +233,7 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        set_state_file_for_test(&path);
+        let _g = set_state_file_for_test(&path);
         let original = ProviderRuntimeState {
             mode: ProviderMode::Direct {
                 provider: "anthropic".into(),
@@ -252,7 +251,7 @@ mod tests {
     fn update_mutates_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        set_state_file_for_test(&path);
+        let _g = set_state_file_for_test(&path);
         let updated = update(|s| {
             s.mode = ProviderMode::Gateway;
             s.default_selection = Some(DefaultSelection::new("openai"));
@@ -276,7 +275,7 @@ mod tests {
     fn save_creates_missing_parent_dir() {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("a").join("b").join("state.json");
-        set_state_file_for_test(&nested);
+        let _g = set_state_file_for_test(&nested);
         save(&ProviderRuntimeState::default()).unwrap();
         assert!(nested.exists());
         unset_state_file_for_test();
@@ -284,19 +283,20 @@ mod tests {
 
     // ---- helpers（test-only env var 切换，串行用） ----
 
-    /// 串行化测试用：所有需要切 SEBAS_STATE_FILE 的测试走同一把锁。
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn set_state_file_for_test(path: &std::path::Path) {
-        let _g = TEST_LOCK.lock().unwrap();
-        // SAFETY: TEST_LOCK held.
+    /// 锁住 STATE_FILE_LOCK, 设置 env, 返回 guard（guard 存活期间锁保持）。
+    fn set_state_file_for_test(
+        path: &std::path::Path,
+    ) -> std::sync::MutexGuard<'static, ()> {
+        let g = crate::test_util::lock_state_file();
+        // SAFETY: lock held.
         unsafe {
             std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
         }
+        g
     }
 
     fn unset_state_file_for_test() {
-        // SAFETY: TEST_LOCK held.
+        // SAFETY: lock held.
         unsafe {
             std::env::remove_var("SEBAS_STATE_FILE");
         }
