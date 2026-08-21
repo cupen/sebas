@@ -1073,9 +1073,12 @@ api_key_env = "ANTHROPIC_API_KEY"
     fn resolve_spawn_overrides_error_emits_sebas_provider_error_env() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_overlay_env();
-        // 走 gateway_mode_without_cfg 触发 Error。
+        // 触发 Error：用 gateway_state() 配 listen="" 的 GatewayConfig。
+        // 注：2e5ba41 之后 gateway_state()+None 改为回退 Off（旧路径不再
+        // 产生 Error），所以这里走 empty-listen 分支拿 Error 变体。
         let state = gateway_state();
-        let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
+        let cfg = test_gateway("", vec!["sk-gw".to_string()]);
+        let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
         assert!(
             env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),
             "Error variant must inject SEBAS_PROVIDER_ERROR; got env = {env:?}"

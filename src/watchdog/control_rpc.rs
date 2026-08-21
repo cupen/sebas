@@ -693,4 +693,197 @@ mod tests {
             RpcControlResponse::Rejected { ref code, .. } if code == "service_unavailable"
         ));
     }
+
+    // ── 真实 Unix-socket 往返（覆盖 line-framing + secret/version） ──
+    //
+    // 上面 handle_envelope 直调测试绕过了 `request`/`serve` 的 line-buffered
+    // JSON-over-Unix-socket framing；这里 spawn 真 listener 走完整链，证明
+    // 「core 提交 envelope → watchdog 收包 → 分类 → 回包」在 socket 边界上
+    // 不会因 framing / 版本号 / secret 字段顺序而出错。
+
+    /// 临时 socket 路径，每个用例独立，不与默认路径冲突。
+    fn unique_test_socket(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sebas-rpc-{label}-{nanos}-{}.sock", std::process::id()))
+    }
+
+    /// Spawn 真 serve()，等 listener 就绪后返回（client 即可发起 connect）。
+    async fn spawn_test_server(path: PathBuf) -> tokio::task::JoinHandle<()> {
+        let bind_path = path.clone();
+        let handle = tokio::spawn(async move {
+            // serve() 在 path 已存在时会 remove + bind；测试不需要重试循环。
+            let _ = serve(bind_path, TEST_SECRET.into(), test_executor()).await;
+        });
+        // 短暂等待 listener bind：UnixListener::bind 是同步 syscall，
+        // spawn 后几条调度足以完成。失败由 request 的 connect 错误暴露。
+        for _ in 0..50 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        handle
+    }
+
+    #[tokio::test]
+    async fn socket_roundtrip_status_with_valid_secret() {
+        let path = unique_test_socket("status-ok");
+        let server = spawn_test_server(path.clone()).await;
+
+        let resp = request(
+            &path,
+            &ControlEnvelope {
+                version: 1,
+                request_id: "rt_status".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Status,
+            },
+        )
+        .await
+        .expect("server reachable + valid secret");
+
+        assert!(
+            matches!(resp, RpcControlResponse::Accepted { .. }),
+            "valid Status envelope must round-trip to Accepted, got {resp:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn socket_roundtrip_update_dev_dry_run() {
+        let path = unique_test_socket("update-dev-dryrun");
+        let server = spawn_test_server(path.clone()).await;
+
+        let resp = request(
+            &path,
+            &ControlEnvelope {
+                version: 1,
+                request_id: "rt_update_dev".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_e2e".into()),
+                },
+                request: RpcControlRequest::Update {
+                    dev: true,
+                    dry_run: true,
+                },
+            },
+        )
+        .await
+        .expect("server reachable + valid secret");
+
+        assert!(
+            matches!(resp, RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. }),
+            "Update dev/dry_run must round-trip to Accepted or PendingConfirmation, got {resp:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn socket_roundtrip_rollback_and_restart_core() {
+        let path = unique_test_socket("rollback-restart");
+        let server = spawn_test_server(path.clone()).await;
+
+        // Rollback
+        let resp_rb = request(
+            &path,
+            &ControlEnvelope {
+                version: 1,
+                request_id: "rt_rb".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Rollback { dry_run: false },
+            },
+        )
+        .await
+        .expect("Rollback envelope must round-trip");
+        assert!(
+            matches!(resp_rb, RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. }),
+            "Rollback should reach Accepted/PendingConfirmation, got {resp_rb:?}"
+        );
+
+        // RestartCore
+        let resp_rc = request(
+            &path,
+            &ControlEnvelope {
+                version: 1,
+                request_id: "rt_rc".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::RestartCore,
+            },
+        )
+        .await
+        .expect("RestartCore envelope must round-trip");
+        assert!(
+            matches!(resp_rc, RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. }),
+            "RestartCore should reach Accepted/PendingConfirmation, got {resp_rc:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn socket_rejects_wrong_secret() {
+        let path = unique_test_socket("wrong-secret");
+        let server = spawn_test_server(path.clone()).await;
+
+        let resp = request(
+            &path,
+            &ControlEnvelope {
+                version: 1,
+                request_id: "rt_wrong".into(),
+                secret: "definitely-wrong".into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Status,
+            },
+        )
+        .await
+        .expect("server must respond even for unauthorized");
+
+        assert!(
+            matches!(resp, RpcControlResponse::Rejected { ref code, .. } if code == "unauthorized"),
+            "wrong secret must yield Rejected/unauthorized over real socket, got {resp:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn socket_rejects_unsupported_version() {
+        let path = unique_test_socket("bad-version");
+        let server = spawn_test_server(path.clone()).await;
+
+        let resp = request(
+            &path,
+            &ControlEnvelope {
+                version: 99,
+                request_id: "rt_bad_ver".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::Status,
+            },
+        )
+        .await
+        .expect("server must respond even for unsupported_version");
+
+        assert!(
+            matches!(resp, RpcControlResponse::Rejected { ref code, .. } if code == "unsupported_version"),
+            "version=99 must yield Rejected/unsupported_version, got {resp:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
 }
