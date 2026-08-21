@@ -15,7 +15,11 @@ fn fake() -> PathBuf {
         .join("target/debug/fake-claude-cli")
 }
 
-async fn drain_until<F: Fn(&AcpEvent) -> bool>(mgr: &SessionManager, id: &str, pred: F) -> AcpEvent {
+async fn drain_until<F: Fn(&AcpEvent) -> bool>(
+    mgr: &SessionManager,
+    id: &str,
+    pred: F,
+) -> AcpEvent {
     for _ in 0..10 {
         let evt = tokio::time::timeout(Duration::from_secs(3), mgr.next_event(id))
             .await
@@ -48,7 +52,9 @@ async fn refusal_is_non_terminal_and_session_survives() {
     .expect("refusal prompt");
     let evt = drain_until(&mgr, &id, |e| matches!(e, AcpEvent::Error { .. })).await;
     match evt {
-        AcpEvent::Error { terminal, message, .. } => {
+        AcpEvent::Error {
+            terminal, message, ..
+        } => {
             assert!(
                 !terminal,
                 "refusal must be non-terminal (session survives), got: {message}"
@@ -72,5 +78,8 @@ async fn refusal_is_non_terminal_and_session_survives() {
     .await
     .expect("follow-up prompt");
     let evt = drain_until(&mgr, &id, |e| matches!(e, AcpEvent::Finished { .. })).await;
-    assert!(matches!(evt, AcpEvent::Finished { .. }), "session survived the refusal");
+    assert!(
+        matches!(evt, AcpEvent::Finished { .. }),
+        "session survived the refusal"
+    );
 }

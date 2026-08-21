@@ -216,7 +216,11 @@ impl ActorVerifier for Verifier {
             .unwrap_or_default()
             .as_secs();
 
-        if now < assertion.issued_at.saturating_sub(self.config.max_clock_skew_secs) {
+        if now
+            < assertion
+                .issued_at
+                .saturating_sub(self.config.max_clock_skew_secs)
+        {
             return Err(RejectionReason::Expired);
         }
         if now > assertion.expires_at {
@@ -443,8 +447,12 @@ mod tests {
     #[test]
     fn replayed_assertion_rejected() {
         let verifier = test_verifier();
-        let assertion =
-            make_valid_assertion(feishu_principal("user_a"), "update", "op_1", "unique_nonce_42");
+        let assertion = make_valid_assertion(
+            feishu_principal("user_a"),
+            "update",
+            "op_1",
+            "unique_nonce_42",
+        );
 
         // First use should succeed.
         let first = verifier.verify(&assertion);

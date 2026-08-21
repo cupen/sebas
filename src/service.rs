@@ -183,7 +183,10 @@ fn validate_config(config: &str) -> anyhow::Result<PathBuf> {
     if !config_path.exists() {
         return Err(exit_err(
             5,
-            format!("config not found at {} (use --config)", config_path.display()),
+            format!(
+                "config not found at {} (use --config)",
+                config_path.display()
+            ),
         ));
     }
     Ok(config_path)
@@ -260,7 +263,10 @@ pub async fn run_uninstall(_args: Args) -> anyhow::Result<()> {
     if !path.exists() {
         return Err(exit_err(
             3,
-            format!("unit does not exist at {}; nothing to uninstall", path.display()),
+            format!(
+                "unit does not exist at {}; nothing to uninstall",
+                path.display()
+            ),
         ));
     }
 
@@ -286,7 +292,10 @@ fn run_systemctl(args: &[&str]) -> anyhow::Result<()> {
         .status()
         .with_context(|| format!("spawn systemctl {}", args.join(" ")))?;
     if !status.success() {
-        return Err(anyhow!("systemctl {} failed with status {status}", args.join(" ")));
+        return Err(anyhow!(
+            "systemctl {} failed with status {status}",
+            args.join(" ")
+        ));
     }
     Ok(())
 }

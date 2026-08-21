@@ -129,7 +129,10 @@ async fn apply_event_accumulates_without_emitting_out() {
             assert!(s.contains("think"), "含 ThinkingDelta: {s}");
             assert!(s.contains("Bash"), "含 ToolEnd: {s}");
             // 标题现在是 user_prompt 首行（derive_topic）。
-            assert!(s.contains("\"content\":\"hi\""), "标题为 user_prompt 'hi': {s}");
+            assert!(
+                s.contains("\"content\":\"hi\""),
+                "标题为 user_prompt 'hi': {s}"
+            );
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -175,7 +178,10 @@ async fn fsm_eyes_to_construction_to_done() {
         Out::UpdateCard { card, .. } => {
             // 状态 emoji 不再进卡：标题是 user_prompt 首行（derive_topic）。
             let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("\"content\":\"p\""), "标题为 user_prompt 'p': {s}");
+            assert!(
+                s.contains("\"content\":\"p\""),
+                "标题为 user_prompt 'p': {s}"
+            );
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -436,7 +442,10 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     match o3 {
         Out::SendCard { card, root_id, .. } => {
             // emit_turn_card 重新 seed：新轮的 user_prompt 进入标题。
-            assert!(root_id.is_none(), "per-turn card reply target 由 Out 自己负责: {root_id:?}");
+            assert!(
+                root_id.is_none(),
+                "per-turn card reply target 由 Out 自己负责: {root_id:?}"
+            );
             let s = serde_json::to_string(&card).unwrap();
             assert!(
                 s.contains("\"content\":\"第二题\""),

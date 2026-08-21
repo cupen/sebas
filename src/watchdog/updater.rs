@@ -91,12 +91,7 @@ async fn terminate_then_kill(child: &mut tokio::process::Child) {
     #[cfg(not(unix))]
     let _ = child.start_kill();
 
-    match tokio::time::timeout(
-        Duration::from_secs(UPDATER_KILL_GRACE_SECS),
-        child.wait(),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(UPDATER_KILL_GRACE_SECS), child.wait()).await {
         Ok(_) => {}
         Err(_) => {
             let _ = child.kill().await;
@@ -400,6 +395,9 @@ dev_build_timeout_secs = 4567
 
     #[test]
     fn recovery_without_backup_recommends_manual_intervention() {
-        assert_eq!(recommended_recovery(false), RecoveryAction::ManualIntervention);
+        assert_eq!(
+            recommended_recovery(false),
+            RecoveryAction::ManualIntervention
+        );
     }
 }

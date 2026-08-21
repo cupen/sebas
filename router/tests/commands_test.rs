@@ -218,8 +218,5 @@ fn parses_model_alone_as_passthrough() {
 
 #[test]
 fn parses_goal_alone_as_passthrough() {
-    assert_eq!(
-        parse_command("/goal"),
-        Command::PassThrough("/goal".into())
-    );
+    assert_eq!(parse_command("/goal"), Command::PassThrough("/goal".into()));
 }

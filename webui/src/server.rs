@@ -65,9 +65,15 @@ pub fn build_router_with_admin_adapter(
         .route("/events", get(crate::sse::event_stream))
         .route("/health", get(routes::health))
         .route("/api/sessions", post(routes::api_create_session))
-        .route("/api/sessions/{key}/message", post(routes::api_send_message))
+        .route(
+            "/api/sessions/{key}/message",
+            post(routes::api_send_message),
+        )
         .route("/api/sessions/{key}/close", post(routes::api_close_session))
-        .route("/api/sessions/{key}/switch", post(routes::api_switch_session))
+        .route(
+            "/api/sessions/{key}/switch",
+            post(routes::api_switch_session),
+        )
         .nest_service(
             "/static",
             ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),

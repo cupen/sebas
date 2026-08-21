@@ -168,10 +168,14 @@ pub fn generate_token(byte_len: usize) -> String {
     let seed = (nanos as u128).to_le_bytes();
     let mut state = 0u64;
     for b in seed.chunks(2) {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(b[0] as u64);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(b[0] as u64);
     }
     for chunk in buf.chunks_mut(8) {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let val = state.to_le_bytes();
         for (dst, src) in chunk.iter_mut().zip(val.iter()) {
             *dst = *src;

@@ -48,9 +48,7 @@ impl TestDir {
     /// `CARGO_PKG_NAME`).
     pub fn with_crate(test_name: &str, sub: &str, crate_name: &str) -> Self {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
-            panic!(
-                "CARGO_MANIFEST_DIR unset — TestDir must be called from a cargo test binary"
-            )
+            panic!("CARGO_MANIFEST_DIR unset — TestDir must be called from a cargo test binary")
         });
         let manifest = PathBuf::from(manifest_dir);
         // Workspace root is the parent of every member crate's manifest dir
@@ -120,7 +118,11 @@ mod tests {
     fn creates_unique_paths_and_cleans_up() {
         let a = TestDir::new("self", "alpha");
         let b = TestDir::new("self", "beta");
-        assert_ne!(a.path(), b.path(), "unique stamps must produce distinct paths");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "unique stamps must produce distinct paths"
+        );
         assert!(a.path().exists());
         assert!(b.path().exists());
         let pa = a.path().to_path_buf();

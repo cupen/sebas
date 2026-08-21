@@ -28,13 +28,7 @@ impl RedactedDiagnostic {
 
 impl fmt::Display for RedactedDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        static KEYS: &[&str] = &[
-            "secret",
-            "token",
-            "password",
-            "api_key",
-            "authorization",
-        ];
+        static KEYS: &[&str] = &["secret", "token", "password", "api_key", "authorization"];
         let s = redact_keys(&self.0, KEYS);
         write!(f, "{s}")
     }

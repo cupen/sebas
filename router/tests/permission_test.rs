@@ -93,8 +93,7 @@ async fn permission_card_in_topic_leaves_root_id_none() {
     };
     assert_eq!(perm_card.0.thread_id.as_deref(), Some("omt_t1"));
     assert_eq!(
-        perm_card.1,
-        None,
+        perm_card.1, None,
         "话题内权限卡 root_id 恒为 None：话题聚合由 dispatch 层兜底"
     );
 }
@@ -141,10 +140,7 @@ async fn permission_card_mainline_keeps_root_id_none() {
             _ => continue,
         }
     };
-    assert_eq!(
-        perm_card, None,
-        "主线权限卡保持现状：root_id=None（Q7）"
-    );
+    assert_eq!(perm_card, None, "主线权限卡保持现状：root_id=None（Q7）");
 }
 
 #[tokio::test]

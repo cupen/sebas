@@ -60,7 +60,10 @@ fn run_update_models(extra_args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if !extra_args.is_empty() {
-        eprintln!("xtask update-models: unexpected arguments: {:?}", extra_args);
+        eprintln!(
+            "xtask update-models: unexpected arguments: {:?}",
+            extra_args
+        );
         return ExitCode::from(2);
     }
 
@@ -82,7 +85,10 @@ fn run_update_models(extra_args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("xtask update-models: parsed {} model entries", entries.len());
+    eprintln!(
+        "xtask update-models: parsed {} model entries",
+        entries.len()
+    );
 
     let rendered = render::render_models_body(&entries);
     let report = match render::patch_models_rs(&models_rs_path, &rendered) {
@@ -109,8 +115,7 @@ fn run_update_models(extra_args: &[String]) -> ExitCode {
 /// `CARGO_MANIFEST_DIR`. xtask lives at `<repo>/xtask/`, the target
 /// lives at `<repo>/gateway/src/models.rs`.
 fn locate_models_rs() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
         .parent()
         .map(|p| p.join("gateway/src/models.rs"))

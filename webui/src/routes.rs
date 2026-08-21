@@ -1,13 +1,11 @@
 //! Route handlers for the WebUI dashboard.
 
-use crate::models::{
-    CardConfigInfo, CardElementView, DashboardData, SessionRow,
-};
+use crate::models::{CardConfigInfo, CardElementView, DashboardData, SessionRow};
 use crate::server::WebUiState;
 use crate::sse::WebUiEvent;
+use axum::Form;
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Json};
-use axum::Form;
 use feishu::cards::CardElement;
 use feishu::events::SessionKey;
 use router::card_state::CardState;
@@ -16,9 +14,7 @@ use router::state::{Mapping, MappingState};
 use serde::Deserialize;
 
 /// Dashboard overview: session counts, recent sessions, uptime, active session.
-pub async fn dashboard(
-    State(state): State<WebUiState>,
-) -> impl IntoResponse {
+pub async fn dashboard(State(state): State<WebUiState>) -> impl IntoResponse {
     let sessions = state.router.session_snapshot().await;
     let card_states = state.router.card_state_snapshot().await;
     let active_key = state.router.active_session_snapshot().await;
@@ -42,9 +38,7 @@ pub async fn dashboard(
 }
 
 /// Full session list (full page with action bar).
-pub async fn session_list(
-    State(state): State<WebUiState>,
-) -> impl IntoResponse {
+pub async fn session_list(State(state): State<WebUiState>) -> impl IntoResponse {
     let sessions = state.router.session_snapshot().await;
     let card_states = state.router.card_state_snapshot().await;
     let active_key = state.router.active_session_snapshot().await;
@@ -64,9 +58,7 @@ pub async fn session_list(
 
 /// htmx partial: just the table body + counts. Used by SSE-driven refresh
 /// so the list updates live without a full page reload.
-pub async fn session_list_partial(
-    State(state): State<WebUiState>,
-) -> impl IntoResponse {
+pub async fn session_list_partial(State(state): State<WebUiState>) -> impl IntoResponse {
     let sessions = state.router.session_snapshot().await;
     let card_states = state.router.card_state_snapshot().await;
     let active_key = state.router.active_session_snapshot().await;
@@ -121,8 +113,7 @@ pub async fn session_detail(
             .get(sid)
             .map(|st| {
                 let phase = st.status_emoji.clone();
-                let body: Vec<CardElementView> =
-                    st.body.iter().map(card_element_to_view).collect();
+                let body: Vec<CardElementView> = st.body.iter().map(card_element_to_view).collect();
                 (phase, st.user_prompt.clone(), body)
             })
             .unwrap_or_default(),
@@ -152,9 +143,7 @@ pub async fn session_detail(
 }
 
 /// Settings page: card config and basic gateway info.
-pub async fn settings(
-    State(state): State<WebUiState>,
-) -> impl IntoResponse {
+pub async fn settings(State(state): State<WebUiState>) -> impl IntoResponse {
     let card_cfg = state.router.card_config().await;
     let card_config_info = CardConfigInfo {
         theme_color: card_cfg.theme_color,
@@ -173,9 +162,7 @@ pub async fn settings(
 }
 
 /// Gateway page: detailed provider status.
-pub async fn gateway_page(
-    State(state): State<WebUiState>,
-) -> impl IntoResponse {
+pub async fn gateway_page(State(state): State<WebUiState>) -> impl IntoResponse {
     let data = serde_json::json!({
         "gateway": state.gateway,
     });
@@ -183,9 +170,7 @@ pub async fn gateway_page(
 }
 
 /// About page: version info and system status.
-pub async fn about(
-    State(state): State<WebUiState>,
-) -> impl IntoResponse {
+pub async fn about(State(state): State<WebUiState>) -> impl IntoResponse {
     let uptime = state.started_at.elapsed();
     let data = serde_json::json!({
         "uptime": format_uptime(uptime),
@@ -271,10 +256,7 @@ pub async fn api_close_session(
         }
     };
 
-    let outcome = state
-        .router
-        .web_close_session(session_key.clone())
-        .await;
+    let outcome = state.router.web_close_session(session_key.clone()).await;
     match outcome {
         CloseOutcome::NotFound => (
             axum::http::StatusCode::NOT_FOUND,
@@ -400,10 +382,7 @@ fn build_session_rows(
 }
 
 /// Compact summary used by the dashboard's "active session" panel.
-fn session_summary(
-    key: &SessionKey,
-    sessions: &[(SessionKey, Mapping)],
-) -> serde_json::Value {
+fn session_summary(key: &SessionKey, sessions: &[(SessionKey, Mapping)]) -> serde_json::Value {
     let mapping = sessions
         .iter()
         .find(|(k, _)| k.chat_id == key.chat_id && k.thread_id == key.thread_id)

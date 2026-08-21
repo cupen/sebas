@@ -116,7 +116,10 @@ pub fn parse_command(input: &str) -> Command {
                 .iter()
                 .map(|a| if *a == "dev" { "--dev" } else { *a })
                 .collect();
-            if normalized.iter().all(|a| matches!(*a, "--dev" | "--dry-run")) {
+            if normalized
+                .iter()
+                .all(|a| matches!(*a, "--dev" | "--dry-run"))
+            {
                 Command::Upgrade {
                     dev: normalized.contains(&"--dev"),
                     dry_run: normalized.contains(&"--dry-run"),
@@ -158,13 +161,22 @@ mod tests {
     fn parses_system_command() {
         assert_eq!(parse_command("/system"), Command::System);
         assert_eq!(parse_command("/system  extra"), Command::System);
-        assert_eq!(parse_command("/systemx"), Command::PassThrough("/systemx".into()));
+        assert_eq!(
+            parse_command("/systemx"),
+            Command::PassThrough("/systemx".into())
+        );
     }
 
     #[test]
     fn parses_gateway_actions() {
-        assert_eq!(parse_command("/gateway on"), Command::Gateway(GatewayAction::On));
-        assert_eq!(parse_command("/gateway off"), Command::Gateway(GatewayAction::Off));
+        assert_eq!(
+            parse_command("/gateway on"),
+            Command::Gateway(GatewayAction::On)
+        );
+        assert_eq!(
+            parse_command("/gateway off"),
+            Command::Gateway(GatewayAction::Off)
+        );
         assert_eq!(
             parse_command("/gateway restart"),
             Command::Gateway(GatewayAction::Restart)

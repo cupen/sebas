@@ -17,8 +17,8 @@
 
 use crate::watchdog::auth::AssertionPrincipal;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── Grant Model ───────────────────────────────────────────────────────────────

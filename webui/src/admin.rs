@@ -18,13 +18,13 @@
 
 use crate::admin_auth::SessionStore;
 use async_trait::async_trait;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json, Redirect};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -359,8 +359,7 @@ pub async fn admin_auth_guard(
             Ok(csrf_token) => {
                 // Store CSRF token in request extensions for mutation middleware
                 let mut req = req;
-                req.extensions_mut()
-                    .insert(CsrfExtension(csrf_token));
+                req.extensions_mut().insert(CsrfExtension(csrf_token));
                 Ok(next.run(req).await)
             }
             Err(_) => redirect_to_login(),
@@ -396,16 +395,13 @@ pub async fn admin_mutation_guard(
     }
 
     // Origin check (always enforced)
-    let origin_is_valid = if let Some(origin) = req
-        .headers()
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-    {
-        origin.is_empty() || is_loopback_origin(origin)
-    } else {
-        // No origin header — may be a CLI tool. Still require CSRF if password is set.
-        false
-    };
+    let origin_is_valid =
+        if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
+            origin.is_empty() || is_loopback_origin(origin)
+        } else {
+            // No origin header — may be a CLI tool. Still require CSRF if password is set.
+            false
+        };
 
     if state.has_password() {
         // Password mode: require CSRF token OR valid loopback origin
@@ -415,10 +411,7 @@ pub async fn admin_mutation_guard(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let session_csrf = req
-            .extensions()
-            .get::<CsrfExtension>()
-            .map(|c| c.0.clone());
+        let session_csrf = req.extensions().get::<CsrfExtension>().map(|c| c.0.clone());
 
         let csrf_valid = match (csrf_token, session_csrf) {
             (Some(token), Some(expected)) => token == expected,
@@ -428,11 +421,7 @@ pub async fn admin_mutation_guard(
         if !csrf_valid && !origin_is_valid {
             return Err(StatusCode::FORBIDDEN);
         }
-    } else if let Some(origin) = req
-        .headers()
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-    {
+    } else if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
         // No password mode: origin check is the only protection
         if !origin.is_empty() && !is_loopback_origin(origin) {
             return Err(StatusCode::FORBIDDEN);
@@ -482,7 +471,9 @@ pub async fn admin_login_action(
             "has_password": state.has_password(),
             "error": "Too many login attempts. Try again later.",
         });
-        return render_template(&state, "admin_login.html", &data).await.into_response();
+        return render_template(&state, "admin_login.html", &data)
+            .await
+            .into_response();
     }
 
     // Verify password
@@ -497,7 +488,9 @@ pub async fn admin_login_action(
             "has_password": state.has_password(),
             "error": "Invalid password.",
         });
-        return render_template(&state, "admin_login.html", &data).await.into_response();
+        return render_template(&state, "admin_login.html", &data)
+            .await
+            .into_response();
     }
 
     // Success: create session, reset rate limit
@@ -511,10 +504,8 @@ pub async fn admin_login_action(
     );
 
     let mut resp = Redirect::to("/admin/status").into_response();
-    resp.headers_mut().insert(
-        axum::http::header::SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
+    resp.headers_mut()
+        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
     resp
 }
 
@@ -544,10 +535,8 @@ pub async fn admin_logout_action(
         SESSION_COOKIE_NAME
     );
     let mut resp = Redirect::to("/admin/login").into_response();
-    resp.headers_mut().insert(
-        axum::http::header::SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
+    resp.headers_mut()
+        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
     resp
 }
 
@@ -635,16 +624,31 @@ async fn render_template(
 /// Initialize templates for standalone mode.
 fn init_standalone_templates() -> minijinja::Environment<'static> {
     let mut env = minijinja::Environment::new();
-    env.add_template("admin_status.html", include_str!("../templates/admin_status.html"))
-        .expect("admin_status.html template");
-    env.add_template("admin_events.html", include_str!("../templates/admin_events.html"))
-        .expect("admin_events.html template");
-    env.add_template("admin_update.html", include_str!("../templates/admin_update.html"))
-        .expect("admin_update.html template");
-    env.add_template("admin_services.html", include_str!("../templates/admin_services.html"))
-        .expect("admin_services.html template");
-    env.add_template("admin_login.html", include_str!("../templates/admin_login.html"))
-        .expect("admin_login.html template");
+    env.add_template(
+        "admin_status.html",
+        include_str!("../templates/admin_status.html"),
+    )
+    .expect("admin_status.html template");
+    env.add_template(
+        "admin_events.html",
+        include_str!("../templates/admin_events.html"),
+    )
+    .expect("admin_events.html template");
+    env.add_template(
+        "admin_update.html",
+        include_str!("../templates/admin_update.html"),
+    )
+    .expect("admin_update.html template");
+    env.add_template(
+        "admin_services.html",
+        include_str!("../templates/admin_services.html"),
+    )
+    .expect("admin_services.html template");
+    env.add_template(
+        "admin_login.html",
+        include_str!("../templates/admin_login.html"),
+    )
+    .expect("admin_login.html template");
     env
 }
 
@@ -768,14 +772,23 @@ mod tests {
     fn test_state(adapter: Option<Arc<dyn AdminAdapter>>) -> AdminState {
         let mut env = minijinja::Environment::new();
         // Register minimal templates for tests
-        env.add_template("admin_status.html", "admin_status:{{status.version}}|{{page}}|{{adapter_ok}}")
-            .ok();
-        env.add_template("admin_events.html", "admin_events:{{events|length}}|{{page}}|{{adapter_ok}}")
-            .ok();
+        env.add_template(
+            "admin_status.html",
+            "admin_status:{{status.version}}|{{page}}|{{adapter_ok}}",
+        )
+        .ok();
+        env.add_template(
+            "admin_events.html",
+            "admin_events:{{events|length}}|{{page}}|{{adapter_ok}}",
+        )
+        .ok();
         env.add_template("admin_update.html", "admin_update:{{page}}|{{adapter_ok}}")
             .ok();
-        env.add_template("admin_services.html", "admin_services:{{services|length}}|{{page}}|{{adapter_ok}}")
-            .ok();
+        env.add_template(
+            "admin_services.html",
+            "admin_services:{{services|length}}|{{page}}|{{adapter_ok}}",
+        )
+        .ok();
         AdminState::new(adapter, Arc::new(env))
     }
 
@@ -791,7 +804,12 @@ mod tests {
         let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
         let app = build_admin_router(test_state(adapter));
         let resp = app
-            .oneshot(Request::builder().uri("/admin/status").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -805,7 +823,12 @@ mod tests {
         let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
         let app = build_admin_router(test_state(adapter));
         let resp = app
-            .oneshot(Request::builder().uri("/admin/events").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -818,7 +841,12 @@ mod tests {
         let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
         let app = build_admin_router(test_state(adapter));
         let resp = app
-            .oneshot(Request::builder().uri("/admin/update").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/update")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -831,7 +859,12 @@ mod tests {
         let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
         let app = build_admin_router(test_state(adapter));
         let resp = app
-            .oneshot(Request::builder().uri("/admin/services").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/services")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -843,7 +876,12 @@ mod tests {
     async fn health_returns_ok() {
         let app = build_admin_router(test_state(None));
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -971,24 +1009,36 @@ mod tests {
     async fn adapter_update_produces_normalized_request() {
         let adapter = FakeAdapter { fail: false };
         // Test release update (dev=false, dry_run=false)
-        let result = adapter.update(false, false).await.expect("update must succeed");
+        let result = adapter
+            .update(false, false)
+            .await
+            .expect("update must succeed");
         assert_eq!(result.operation_id, "op_update");
         assert!(result.message.contains("dev=false"));
         assert!(result.message.contains("dry_run=false"));
 
         // Test dev update (dev=true, dry_run=false)
-        let result = adapter.update(true, false).await.expect("dev update must succeed");
+        let result = adapter
+            .update(true, false)
+            .await
+            .expect("dev update must succeed");
         assert!(result.message.contains("dev=true"));
 
         // Test dry-run (dev=false, dry_run=true)
-        let result = adapter.update(false, true).await.expect("dry-run must succeed");
+        let result = adapter
+            .update(false, true)
+            .await
+            .expect("dry-run must succeed");
         assert!(result.message.contains("dry_run=true"));
     }
 
     #[tokio::test]
     async fn adapter_rollback_produces_normalized_request() {
         let adapter = FakeAdapter { fail: false };
-        let result = adapter.rollback(false).await.expect("rollback must succeed");
+        let result = adapter
+            .rollback(false)
+            .await
+            .expect("rollback must succeed");
         assert_eq!(result.operation_id, "op_rollback");
         assert!(result.message.contains("dry_run=false"));
     }
@@ -1006,15 +1056,15 @@ mod tests {
     #[tokio::test]
     async fn no_adapter_still_renders_pages() {
         let app = build_admin_router(test_state(None));
-        for path in &["/admin/status", "/admin/events", "/admin/update", "/admin/services"] {
+        for path in &[
+            "/admin/status",
+            "/admin/events",
+            "/admin/update",
+            "/admin/services",
+        ] {
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(*path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "path {path} must return 200");
@@ -1047,7 +1097,12 @@ mod tests {
         // Non-mutation routes should still work with GET
         let app = build_admin_router(test_state(None));
         let resp = app
-            .oneshot(Request::builder().uri("/admin/status").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

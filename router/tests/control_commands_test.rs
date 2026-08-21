@@ -92,7 +92,10 @@ async fn core_command_does_not_route_to_watchdog() {
     dispatch_text(&router, "/provider").await;
     let out = next_out(&mut out_rx).await;
     assert!(
-        !matches!(out, Out::WatchdogSystem { .. } | Out::WatchdogGateway { .. } | Out::WatchdogWebui { .. }),
+        !matches!(
+            out,
+            Out::WatchdogSystem { .. } | Out::WatchdogGateway { .. } | Out::WatchdogWebui { .. }
+        ),
         "core command must not emit watchdog Out, got {out:?}"
     );
 }

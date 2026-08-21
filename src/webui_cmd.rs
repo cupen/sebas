@@ -78,10 +78,8 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     let merged_card_cfg = load_card_config(&cfg);
 
     // Restore session map from the state file (same path as the core child).
-    let map = crate::run::restore_session_map(
-        &cfg.router.state_file,
-        cfg.router.max_concurrent_sessions,
-    );
+    let map =
+        crate::run::restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
 
     // Create a throwaway session manager. No actual ACP sessions run in this
     // process, so the manager is a stub that accepts calls but has no children.

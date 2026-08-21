@@ -24,7 +24,11 @@ fn key(id: &str) -> SessionKey {
 }
 
 fn encode(key: &SessionKey) -> String {
-    let raw = format!("{}\0{}", key.chat_id, key.thread_id.as_deref().unwrap_or(""));
+    let raw = format!(
+        "{}\0{}",
+        key.chat_id,
+        key.thread_id.as_deref().unwrap_or("")
+    );
     urlencoding::encode(&raw).into_owned()
 }
 
@@ -37,7 +41,9 @@ async fn fixture() -> (RouterHandle, axum::Router) {
     let k2 = key("b");
     let k3 = key("c");
     map.insert(k1.clone(), Mapping::active("s1")).await.unwrap();
-    map.insert(k2.clone(), Mapping::dormant("s2", 1)).await.unwrap();
+    map.insert(k2.clone(), Mapping::dormant("s2", 1))
+        .await
+        .unwrap();
     map.insert(k3.clone(), Mapping::spawning()).await.unwrap();
 
     let (router, _rx) = RouterHandle::new(map);
@@ -56,7 +62,12 @@ async fn body_string(body: Body) -> String {
 async fn sessions_list_renders_all_sessions_and_buttons() {
     let (_router, app) = fixture().await;
     let resp = app
-        .oneshot(Request::builder().uri("/sessions").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -90,7 +101,10 @@ async fn sessions_partial_returns_table_without_layout_chrome() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp.into_body()).await;
     // Partial = table only; no <html> wrapper, no sidebar.
-    assert!(!body.contains("<html"), "partial should not render full layout");
+    assert!(
+        !body.contains("<html"),
+        "partial should not render full layout"
+    );
     assert!(
         body.contains("session-table"),
         "partial should render the session table"
@@ -141,7 +155,12 @@ async fn switch_session_marks_active_and_returns_redirect() {
         templates,
     );
     let resp2 = app2
-        .oneshot(Request::builder().uri("/sessions").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let body2 = body_string(resp2.into_body()).await;
@@ -307,8 +326,7 @@ async fn close_malformed_key_returns_400() {
     // server to refuse rather than panic. Most commonly this surfaces as
     // 404 (router doesn't match) or 400 (decode failure).
     assert!(
-        resp.status() == StatusCode::NOT_FOUND
-            || resp.status() == StatusCode::BAD_REQUEST,
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
         "malformed key must not crash the server; got {}",
         resp.status()
     );

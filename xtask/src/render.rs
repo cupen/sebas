@@ -54,9 +54,7 @@ pub fn render_models_body(entries: &[RawEntry]) -> String {
             );
             continue;
         };
-        let max_out = entry
-            .max_output_tokens
-            .unwrap_or_else(|| ctx / 4);
+        let max_out = entry.max_output_tokens.unwrap_or_else(|| ctx / 4);
         if current_provider != Some(entry.provider_name.as_str()) {
             if current_provider.is_some() {
                 out.push('\n');
@@ -101,10 +99,7 @@ pub struct PatchReport {
 /// Returns an error if either marker is missing — that means the
 /// file shape drifted and a human needs to reconcile, not us
 /// silently massaging the file into something unexpected.
-pub fn patch_models_rs(
-    path: &Path,
-    new_body: &str,
-) -> Result<PatchReport, PatchError> {
+pub fn patch_models_rs(path: &Path, new_body: &str) -> Result<PatchReport, PatchError> {
     let original = fs::read_to_string(path)
         .map_err(|e| PatchError::Io(path.display().to_string(), e.to_string()))?;
 
@@ -165,9 +160,7 @@ pub fn patch_models_rs(
     }
 
     // Count entries written (one per `\n` in new_body matching our format).
-    let entries_written = new_body
-        .matches("ModelDef { name:")
-        .count();
+    let entries_written = new_body.matches("ModelDef { name:").count();
 
     // Atomic write.
     let tmp = path.with_extension("rs.tmp");
@@ -252,7 +245,9 @@ mod tests {
         // Every ModelDef line carries the right numbers.
         assert!(body.contains(r#"ModelDef { name: "acme-small", context_window: 128_000, max_output_tokens: 16_384 },"#));
         assert!(body.contains(r#"ModelDef { name: "acme-big", context_window: 1_000_000, max_output_tokens: 64_000 },"#));
-        assert!(body.contains(r#"ModelDef { name: "beta-1", context_window: 32_768, max_output_tokens: 8_192 },"#));
+        assert!(body.contains(
+            r#"ModelDef { name: "beta-1", context_window: 32_768, max_output_tokens: 8_192 },"#
+        ));
         // Each line ends with a trailing newline.
         assert!(body.ends_with('\n'));
     }
@@ -325,8 +320,7 @@ mod tests {
                 }
             }
         }"#;
-        let entries = crate::parser::parse_api_json(fixture.as_bytes())
-            .expect("fixture parse");
+        let entries = crate::parser::parse_api_json(fixture.as_bytes()).expect("fixture parse");
         assert_eq!(entries.len(), 2);
         let body = render_models_body(&entries);
 
@@ -340,9 +334,6 @@ mod tests {
             "    ModelDef { name: \"deepseek-v4-flash\", context_window: 1_000_000, max_output_tokens: 384_000 },\n",
             "    ModelDef { name: \"deepseek-v4-pro\", context_window: 1_000_000, max_output_tokens: 384_000 },\n",
         );
-        assert_eq!(
-            body, expected,
-            "rendered MODELS body must match exactly"
-        );
+        assert_eq!(body, expected, "rendered MODELS body must match exactly");
     }
 }

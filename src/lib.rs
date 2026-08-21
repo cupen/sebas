@@ -11,9 +11,9 @@ pub mod config;
 mod dispatch;
 pub mod error;
 pub mod gateway_cmd;
-pub mod service;
 pub mod ipc;
 pub mod provider;
+pub mod service;
 // `provider_state` 已迁到 router crate（sebas-63f.5 解决 sebas→router 反向依赖）；
 // sebas 内部用 `router::provider_state`。
 pub mod reactions;

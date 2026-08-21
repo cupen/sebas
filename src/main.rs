@@ -124,13 +124,20 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
     let path = args
         .socket
         .map(PathBuf::from)
-        .or_else(|| std::env::var("SEBAS_CONTROL_SOCKET").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("SEBAS_CONTROL_SOCKET")
+                .ok()
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(default_socket_path);
 
     // Resolve secret: --secret > $SEBAS_CONTROL_SECRET.
     // Watchdog intentionally does not persist this (see spec §5.3), so a CLI
     // client without the env var must be told to export it explicitly.
-    let secret = match args.secret.or_else(|| std::env::var("SEBAS_CONTROL_SECRET").ok()) {
+    let secret = match args
+        .secret
+        .or_else(|| std::env::var("SEBAS_CONTROL_SECRET").ok())
+    {
         Some(s) if !s.is_empty() => s,
         _ => {
             return Err(friendly_error(
@@ -201,7 +208,10 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_response(format: OutputFormat, response: &sebas::watchdog::control_rpc::RpcControlResponse) {
+fn render_response(
+    format: OutputFormat,
+    response: &sebas::watchdog::control_rpc::RpcControlResponse,
+) {
     use sebas::watchdog::control_rpc::RpcControlResponse;
     match format {
         OutputFormat::Json => {
@@ -245,8 +255,7 @@ fn render_response(format: OutputFormat, response: &sebas::watchdog::control_rpc
                         svc.name,
                         svc.status,
                         svc.desired,
-                        svc
-                            .uptime_secs
+                        svc.uptime_secs
                             .map(|u| format!(" uptime={u}s"))
                             .unwrap_or_default()
                     );
@@ -415,7 +424,7 @@ mod tests {
         assert_eq!(args.config, "x.toml");
     }
 
-/// The watchdog spawns its child and `service` bakes an `ExecStart`
+    /// The watchdog spawns its child and `service` bakes an `ExecStart`
     /// both keyed on `sebas::CORE_SUBCOMMAND`; the clap subcommand here must
     /// agree or the supervisor and unit silently target a different argv. If
     /// this fails, rename `Cmd::Run` and `CORE_SUBCOMMAND` together.
@@ -566,8 +575,7 @@ mod tests {
 
     #[test]
     fn webui_subcommand_defaults_to_cwd_config_toml() {
-        let cli = Cli::try_parse_from(["sebas", "webui"])
-            .expect("bare `sebas webui` must parse");
+        let cli = Cli::try_parse_from(["sebas", "webui"]).expect("bare `sebas webui` must parse");
         let Cmd::WebUi(args) = cli.cmd else {
             panic!("expected WebUi subcommand");
         };
@@ -600,8 +608,8 @@ mod tests {
 
     #[test]
     fn control_format_defaults_to_human() {
-        let cli = Cli::try_parse_from(["sebas", "control", "status"])
-            .expect("parse with no --format");
+        let cli =
+            Cli::try_parse_from(["sebas", "control", "status"]).expect("parse with no --format");
         let Cmd::Control(args) = cli.cmd else {
             panic!("expected Control");
         };
@@ -620,10 +628,8 @@ mod tests {
 
     #[test]
     fn control_format_human_explicit() {
-        let cli = Cli::try_parse_from([
-            "sebas", "control", "services", "--format", "human",
-        ])
-        .expect("human");
+        let cli = Cli::try_parse_from(["sebas", "control", "services", "--format", "human"])
+            .expect("human");
         let Cmd::Control(args) = cli.cmd else {
             panic!("expected Control");
         };
@@ -675,9 +681,7 @@ mod tests {
     fn rpc_control_response_json_schema_stable() {
         // The JSON envelope is the contract Phase 6 promises downstream tools
         // can rely on. Pin field names + types for every variant.
-        use sebas::watchdog::control_rpc::{
-            RpcControlEvent, RpcControlResponse, RpcServiceStatus,
-        };
+        use sebas::watchdog::control_rpc::{RpcControlEvent, RpcControlResponse, RpcServiceStatus};
 
         let cases: Vec<(&'static str, RpcControlResponse)> = vec![
             (
@@ -722,8 +726,7 @@ mod tests {
         // of the contract. If a field is added or renamed, this test breaks.
         for (label, original) in &cases {
             let json = serde_json::to_string(original).expect("serialize");
-            let parsed: RpcControlResponse =
-                serde_json::from_str(&json).expect(label);
+            let parsed: RpcControlResponse = serde_json::from_str(&json).expect(label);
             assert_eq!(&parsed, original, "round-trip mismatch for {label}");
         }
 
@@ -734,7 +737,10 @@ mod tests {
             status: "Running".into(),
         })
         .unwrap();
-        assert!(json.contains("\"type\":\"accepted\""), "tag field path: {json}");
+        assert!(
+            json.contains("\"type\":\"accepted\""),
+            "tag field path: {json}"
+        );
         assert!(json.contains("\"operation_id\":\"op_x\""));
         assert!(json.contains("\"status\":\"Running\""));
     }
@@ -753,7 +759,10 @@ mod tests {
             msg.contains("watchdog control socket not found"),
             "expected not-found message, got: {msg}"
         );
-        assert!(msg.contains("is `sebas watchdog` running"), "hint missing: {msg}");
+        assert!(
+            msg.contains("is `sebas watchdog` running"),
+            "hint missing: {msg}"
+        );
     }
 
     #[test]

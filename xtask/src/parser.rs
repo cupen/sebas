@@ -81,8 +81,8 @@ struct LimitJson {
 /// metadata-only entries) are skipped — they have no `models` map
 /// in practice and break the schema otherwise.
 pub fn parse_api_json(bytes: &[u8]) -> Result<Vec<RawEntry>, ParseError> {
-    let parsed: ProviderMap = serde_json::from_slice(bytes)
-        .map_err(|e| ParseError::Json(e.to_string()))?;
+    let parsed: ProviderMap =
+        serde_json::from_slice(bytes).map_err(|e| ParseError::Json(e.to_string()))?;
     let mut out = Vec::new();
     for (provider_id, provider) in parsed.providers {
         if provider_id.starts_with('_') {
@@ -161,7 +161,12 @@ mod tests {
     fn parses_fixture_into_expected_entries() {
         let entries = parse_api_json(FIXTURE.as_bytes()).expect("parse ok");
 
-        assert_eq!(entries.len(), 3, "fixture has 3 models, got {}", entries.len());
+        assert_eq!(
+            entries.len(),
+            3,
+            "fixture has 3 models, got {}",
+            entries.len()
+        );
 
         // BTreeMap -> alphabetic provider order: acme, beta.
         assert_eq!(entries[0].provider_id, "acme");

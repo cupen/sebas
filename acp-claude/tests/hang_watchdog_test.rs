@@ -68,7 +68,11 @@ async fn silent_child_is_detected_as_hung_and_torn_down() {
         );
         let evt = mgr.next_event(&id).await.expect("stream open");
         match evt {
-            AcpEvent::Error { terminal: true, message, .. } => {
+            AcpEvent::Error {
+                terminal: true,
+                message,
+                ..
+            } => {
                 assert!(
                     message.contains("hung") || message.contains("unresponsive"),
                     "expected hang message, got: {message}"

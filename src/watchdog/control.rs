@@ -132,7 +132,10 @@ impl ControlService {
             }
         }
         let response = self.accept(actor, request);
-        if let ControlResponse::Accepted { ref operation_id, .. } = response {
+        if let ControlResponse::Accepted {
+            ref operation_id, ..
+        } = response
+        {
             self.idempotent_ops
                 .insert(idempotency_key.to_string(), operation_id.clone());
         }

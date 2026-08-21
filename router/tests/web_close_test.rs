@@ -3,9 +3,9 @@
 //! child process; `web_set_active` records the focused session.
 
 use feishu::events::{FeishuIn, SessionKey};
+use router::RouterHandle;
 use router::router::CloseOutcome;
 use router::state::{Mapping, SessionMap};
-use router::RouterHandle;
 
 fn web_key(id: &str) -> SessionKey {
     SessionKey {
@@ -17,9 +17,7 @@ fn web_key(id: &str) -> SessionKey {
 #[tokio::test]
 async fn close_unknown_key_returns_not_found() {
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let out = router
-        .web_close_session(web_key("ghost"))
-        .await;
+    let out = router.web_close_session(web_key("ghost")).await;
     assert_eq!(out, CloseOutcome::NotFound);
 }
 
@@ -126,8 +124,12 @@ async fn close_unfocused_session_leaves_active_untouched() {
     let map = SessionMap::new();
     let a = web_key("a");
     let b = web_key("b");
-    map.insert(a.clone(), Mapping::active("sid-a")).await.unwrap();
-    map.insert(b.clone(), Mapping::active("sid-b")).await.unwrap();
+    map.insert(a.clone(), Mapping::active("sid-a"))
+        .await
+        .unwrap();
+    map.insert(b.clone(), Mapping::active("sid-b"))
+        .await
+        .unwrap();
 
     let (router, _rx) = RouterHandle::new(map.clone());
     router.web_set_active(a.clone()).await;

@@ -160,7 +160,7 @@ impl CcDriver {
             extra_args.insert("session-id".into(), Some(session_id.clone()));
         }
 
-// Provider-driven env (sebas-63f.8): injected into the child so
+        // Provider-driven env (sebas-63f.8): injected into the child so
         // claude hits the resolved upstream URL/token rather than the OS env.
         let env_map: std::collections::HashMap<String, String> =
             extra_env.iter().cloned().collect();
@@ -366,7 +366,10 @@ impl CcDriver {
                     if awaiting_user {
                         continue;
                     }
-                    if self.last_activity.elapsed() > hang_timeout && self.turn_active && self.hang_stage < 3 {
+                    if self.last_activity.elapsed() > hang_timeout
+                        && self.turn_active
+                        && self.hang_stage < 3
+                    {
                         self.hang_stage += 1;
                         tracing::warn!(
                             session_id = %self.session_id,
@@ -972,10 +975,16 @@ mod tests {
         });
         let m: Message = serde_json::from_value(v).expect("result parses");
         let evts = map_message("s1", &mut names, &m);
-        assert!(matches!(
-            &evts[..],
-            [AcpEvent::Error { terminal: false, .. }]
-        ), "refusal must be non-terminal, got {evts:?}");
+        assert!(
+            matches!(
+                &evts[..],
+                [AcpEvent::Error {
+                    terminal: false,
+                    ..
+                }]
+            ),
+            "refusal must be non-terminal, got {evts:?}"
+        );
     }
 
     #[test]
@@ -990,10 +999,13 @@ mod tests {
         });
         let m: Message = serde_json::from_value(v).expect("result parses");
         let evts = map_message("s1", &mut names, &m);
-        assert!(matches!(
-            &evts[..],
-            [AcpEvent::Error { terminal: false, message, .. }] if message.contains("refusal")
-        ), "refusal in result text must be non-terminal, got {evts:?}");
+        assert!(
+            matches!(
+                &evts[..],
+                [AcpEvent::Error { terminal: false, message, .. }] if message.contains("refusal")
+            ),
+            "refusal in result text must be non-terminal, got {evts:?}"
+        );
     }
 
     #[test]
@@ -1034,10 +1046,7 @@ mod tests {
         let mut names = HashMap::new();
         let m = assistant_msg(serde_json::json!([{"type": "text", "text": "hi"}]));
         let evts = map_message("s1", &mut names, &m);
-        assert!(matches!(
-            &evts[..],
-            [AcpEvent::TextDelta { .. }]
-        ));
+        assert!(matches!(&evts[..], [AcpEvent::TextDelta { .. }]));
     }
 
     #[test]

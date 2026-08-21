@@ -1,7 +1,7 @@
 use crate::error::{Result, SebasError};
-use crate::watchdog::auth::{actor_to_principal, AssertionPrincipal};
+use crate::watchdog::auth::{AssertionPrincipal, actor_to_principal};
 use crate::watchdog::control::{
-    Actor, ControlEvent, ControlResponse, ControlRequest, ControlService, UpdateKind,
+    Actor, ControlEvent, ControlRequest, ControlResponse, ControlService, UpdateKind,
 };
 use crate::watchdog::executor::ControlExecutor;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,9 @@ pub struct ControlEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RpcActor {
-    Cli { uid: u32 },
+    Cli {
+        uid: u32,
+    },
     /// Feishu proxy actor (spec §6.2, Phase 3 core-hosted). The core submits
     /// this with the startup secret as the signed-assertion MAC basis; the
     /// watchdog maps it to `crate::watchdog::control::Actor::Feishu`.
@@ -43,14 +45,23 @@ pub enum RpcActor {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum RpcControlRequest {
     Status,
-    EventsSince { seq: u64 },
-    Update { dev: bool, dry_run: bool },
-    Rollback { dry_run: bool },
+    EventsSince {
+        seq: u64,
+    },
+    Update {
+        dev: bool,
+        dry_run: bool,
+    },
+    Rollback {
+        dry_run: bool,
+    },
     RestartCore,
     ServiceStatus,
     /// `/gateway status` / `/webui status`: query a single managed service's
     /// status. The server filters `ServiceStatus` down to `service`.
-    ServiceStatusFor { service: String },
+    ServiceStatusFor {
+        service: String,
+    },
     /// `/gateway on|off`: set a managed service's desired state.
     /// `service` ∈ {gateway, webui}, `desired` ∈ {on, off}. Serve side
     /// returns `service_unavailable` until Phase 4 (ServiceManager) lands.
@@ -61,14 +72,20 @@ pub enum RpcControlRequest {
     },
     /// `/gateway restart`: restart a managed service. Same Phase 4
     /// limitation as `ServiceSet`.
-    ServiceRestart { service: String },
+    ServiceRestart {
+        service: String,
+    },
     /// Confirm a pending dangerous action via its opaque confirmation token
     /// (Phase 3 Task 3.2, spec §7). The client sends only the token; the
     /// canonical action/params live in the watchdog's pending registry.
-    Confirm { token: String },
+    Confirm {
+        token: String,
+    },
     /// Cancel a pending dangerous action via its opaque confirmation token.
     /// Redeems (consumes) the grant and records a Canceled event.
-    Cancel { token: String },
+    Cancel {
+        token: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,7 +206,11 @@ pub async fn request(path: &Path, envelope: &ControlEnvelope) -> Result<RpcContr
         .map_err(|e| SebasError::Upgrade(format!("control RPC parse response failed: {e}")))
 }
 
-async fn handle_stream(stream: UnixStream, executor: ControlExecutor, secret: String) -> Result<()> {
+async fn handle_stream(
+    stream: UnixStream,
+    executor: ControlExecutor,
+    secret: String,
+) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
@@ -234,7 +255,12 @@ async fn handle_envelope(
 
     match envelope.request {
         RpcControlRequest::Status => {
-            accept_control_request(executor.control().clone(), envelope.actor, ControlRequest::Status).await
+            accept_control_request(
+                executor.control().clone(),
+                envelope.actor,
+                ControlRequest::Status,
+            )
+            .await
         }
         RpcControlRequest::EventsSince { seq } => {
             let control = executor.control().lock().await;
@@ -250,7 +276,11 @@ async fn handle_envelope(
             // Feishu/CLI actors both map via From<RpcActor> for Actor.
             let actor = crate::watchdog::control::Actor::from(envelope.actor);
             let request = ControlRequest::Update {
-                kind: if dev { UpdateKind::Dev } else { UpdateKind::Release },
+                kind: if dev {
+                    UpdateKind::Dev
+                } else {
+                    UpdateKind::Release
+                },
                 dry_run,
                 target: None,
             };
@@ -268,27 +298,21 @@ async fn handle_envelope(
                 .submit_or_confirm(actor, ControlRequest::RestartCore)
                 .await
         }
-        RpcControlRequest::Confirm { token } => {
-            match feishu_principal_channel(envelope.actor) {
-                Some((principal, channel)) => executor.confirm(&token, &principal, &channel).await,
-                None => RpcControlResponse::Rejected {
-                    code: "unauthorized".into(),
-                    message: "only Feishu actors may confirm a confirmation".into(),
-                },
-            }
-        }
-        RpcControlRequest::Cancel { token } => {
-            match feishu_principal_channel(envelope.actor) {
-                Some((principal, channel)) => executor.cancel(&token, &principal, &channel).await,
-                None => RpcControlResponse::Rejected {
-                    code: "unauthorized".into(),
-                    message: "only Feishu actors may cancel a confirmation".into(),
-                },
-            }
-        }
-        RpcControlRequest::ServiceStatus => {
-            executor.service_status().await
-        }
+        RpcControlRequest::Confirm { token } => match feishu_principal_channel(envelope.actor) {
+            Some((principal, channel)) => executor.confirm(&token, &principal, &channel).await,
+            None => RpcControlResponse::Rejected {
+                code: "unauthorized".into(),
+                message: "only Feishu actors may confirm a confirmation".into(),
+            },
+        },
+        RpcControlRequest::Cancel { token } => match feishu_principal_channel(envelope.actor) {
+            Some((principal, channel)) => executor.cancel(&token, &principal, &channel).await,
+            None => RpcControlResponse::Rejected {
+                code: "unauthorized".into(),
+                message: "only Feishu actors may cancel a confirmation".into(),
+            },
+        },
+        RpcControlRequest::ServiceStatus => executor.service_status().await,
         RpcControlRequest::ServiceStatusFor { service } => {
             executor.service_status_for(&service).await
         }
@@ -322,9 +346,10 @@ async fn handle_envelope(
 fn feishu_principal_channel(actor: RpcActor) -> Option<(AssertionPrincipal, String)> {
     let actor = Actor::from(actor);
     match &actor {
-        Actor::Feishu { chat_id: Some(chat), .. } => {
-            actor_to_principal(&actor).map(|p| (p, chat.clone()))
-        }
+        Actor::Feishu {
+            chat_id: Some(chat),
+            ..
+        } => actor_to_principal(&actor).map(|p| (p, chat.clone())),
         _ => None,
     }
 }
@@ -353,7 +378,10 @@ async fn accept_control_request(
 impl From<ControlResponse> for RpcControlResponse {
     fn from(r: ControlResponse) -> Self {
         match r {
-            ControlResponse::Accepted { operation_id, status } => RpcControlResponse::Accepted {
+            ControlResponse::Accepted {
+                operation_id,
+                status,
+            } => RpcControlResponse::Accepted {
                 operation_id,
                 status: format!("{status:?}"),
             },
@@ -437,7 +465,10 @@ mod tests {
     fn forged_system_actor_rejected() {
         let rpc = RpcActor::Cli { uid: 42 };
         let actor: crate::watchdog::control::Actor = rpc.into();
-        assert!(matches!(actor, crate::watchdog::control::Actor::Cli { uid: 42 }));
+        assert!(matches!(
+            actor,
+            crate::watchdog::control::Actor::Cli { uid: 42 }
+        ));
     }
 
     #[tokio::test]

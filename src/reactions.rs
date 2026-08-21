@@ -115,8 +115,7 @@ mod tests {
     #[tokio::test]
     async fn record_ack_and_take_ack_round_trip() {
         let t = ReactionTracker::default();
-        t.record_ack("om_1", "EYES".into(), "rid_eyes".into())
-            .await;
+        t.record_ack("om_1", "EYES".into(), "rid_eyes".into()).await;
         let taken = t.take_ack("om_1").await;
         assert_eq!(taken, Some(("EYES".into(), "rid_eyes".into())));
         // Second take returns None

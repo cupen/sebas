@@ -121,8 +121,7 @@ async fn dry_run_rejects_project_without_cargo_toml() {
     .await
     .expect_err("缺 Cargo.toml 的 dry-run dev 应报错");
     assert!(
-        err.contains("不是 Rust 项目目录")
-            || err.contains("Cargo.toml"),
+        err.contains("不是 Rust 项目目录") || err.contains("Cargo.toml"),
         "缺 Cargo.toml 时应报项目校验错误，实际: {err}"
     );
     assert!(
@@ -157,7 +156,10 @@ async fn real_dev_install_then_reinstall_then_rollback() {
     let version_dir = data_dir.join("versions").join("vdev-0.1.0"); // current_version_raw()=="0.1.0"
     assert!(current.exists(), "current 软链应存在");
     assert!(
-        std::fs::symlink_metadata(&current).unwrap().file_type().is_symlink(),
+        std::fs::symlink_metadata(&current)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "current 应为软链"
     );
     let link_target = std::fs::read_link(&current).unwrap();

@@ -64,12 +64,7 @@ fn workspace_target_debug() -> PathBuf {
 /// `sessions_dir` lives under `target/tests/` (NOT `/tmp`) so a stray
 /// `cargo clean` removes it along with build artefacts.
 #[cfg(unix)]
-fn write_config_in(
-    dir: &Path,
-    state_path: &Path,
-    fake_claude_path: &str,
-    sessions_dir: &Path,
-) {
+fn write_config_in(dir: &Path, state_path: &Path, fake_claude_path: &str, sessions_dir: &Path) {
     let path = dir.join("config.toml");
     let body = format!(
         r#"[feishu]

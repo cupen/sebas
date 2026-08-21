@@ -58,10 +58,7 @@ pub enum ProviderResolution {
     },
     /// Talk through sebas's gateway: the agent gets the gateway URL and a
     /// gateway-minted token. The gateway is what reaches the upstream.
-    Gateway {
-        url: String,
-        auth_token: String,
-    },
+    Gateway { url: String, auth_token: String },
     /// Provider resolution failed (spec 2026-08-17 §2.2): configuration
     /// error — missing URL, unset `api_key_env`, unknown named provider,
     /// gateway mode without `[gateway]` config, etc. The driver emits a
@@ -182,10 +179,7 @@ mod tests {
             "OPENAI_BASE_URL".to_string(),
             "https://api.openai.com/v1".to_string()
         )));
-        assert!(env.contains(&(
-            "OPENAI_API_KEY".to_string(),
-            "sk-openai-test".to_string()
-        )));
+        assert!(env.contains(&("OPENAI_API_KEY".to_string(), "sk-openai-test".to_string())));
         assert!(!env.iter().any(|(k, _)| k.starts_with("ANTHROPIC")));
     }
 
@@ -200,10 +194,7 @@ mod tests {
             "ANTHROPIC_BASE_URL".to_string(),
             "https://gateway.example/v1".to_string()
         )));
-        assert!(env.contains(&(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            "gw-tok".to_string()
-        )));
+        assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "gw-tok".to_string())));
         // Gateway never leaks the OpenAI vars — the agent only sees the
         // Anthropic-shaped surface the gateway presents.
         assert!(!env.iter().any(|(k, _)| k.starts_with("OPENAI")));
@@ -236,7 +227,10 @@ mod tests {
             },
         ];
         for v in variants {
-            assert!(d.resolve_args(&v).is_empty(), "{v:?} unexpectedly emitted args");
+            assert!(
+                d.resolve_args(&v).is_empty(),
+                "{v:?} unexpectedly emitted args"
+            );
         }
     }
 
@@ -263,10 +257,9 @@ mod tests {
         assert!(!env.iter().any(|(k, _)| k.starts_with("ANTHROPIC_")));
         assert!(!env.iter().any(|(k, _)| k.starts_with("OPENAI_")));
         // And args are still empty (nothing else to send to the agent).
-        assert!(d
-            .resolve_args(&ProviderResolution::Error {
-                reason: "x".into()
-            })
-            .is_empty());
+        assert!(
+            d.resolve_args(&ProviderResolution::Error { reason: "x".into() })
+                .is_empty()
+        );
     }
 }

@@ -110,7 +110,7 @@ pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &
             content: format!("❌ {message}"),
         }),
         AcpEvent::PermissionRequest { .. } => {} // 独立 SendCard，不累积
-        AcpEvent::UsageUpdate { .. } => {} // 不影响卡片 body
+        AcpEvent::UsageUpdate { .. } => {}       // 不影响卡片 body
     }
     enforce_total_budget(body, cfg);
 }

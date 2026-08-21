@@ -13,6 +13,6 @@ pub mod routes;
 pub mod server;
 pub mod sse;
 
-pub use server::{build_router, run, run_with_admin_adapter};
 #[doc(hidden)]
-pub use server::{init_templates_for_tests, WebUiState};
+pub use server::{WebUiState, init_templates_for_tests};
+pub use server::{build_router, run, run_with_admin_adapter};
