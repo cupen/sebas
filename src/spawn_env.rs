@@ -270,14 +270,16 @@ pub fn compute_provider_resolution(
         ProviderMode::Off => (ProviderResolution::Off, None),
         ProviderMode::Gateway => match gateway_cfg {
             Some(cfg) => gateway_resolution(cfg),
+            // 没有可用的 gateway（既没 --gateway 内嵌、config.toml 也没有对应
+            // 段）→ 回退 Off + warn，而不是拒绝启动。mode=gateway 但 gateway
+            // 没起来时，让 claude 走自己 env 配置（Off 的语义）比整 bot 卡死
+            // 在「refusing to launch」强。真把 gateway 配坏了（listen 空）仍
+            // 由 gateway_resolution 返回 Error（§2.2 语义保留）。
             None => {
-                let reason =
-                    "ProviderMode::Gateway but no gateway config provided (config.toml missing?)"
-                        .to_string();
                 tracing::warn!(
-                    "ProviderMode::Gateway but no gateway config provided; aborting spawn"
+                    "ProviderMode::Gateway but no gateway config provided; falling back to Off"
                 );
-                (ProviderResolution::Error { reason }, None)
+                (ProviderResolution::Off, None)
             }
         },
         ProviderMode::Direct { provider } => {
@@ -1031,23 +1033,17 @@ api_key_env = "ANTHROPIC_API_KEY"
     }
 
     #[test]
-    fn gateway_mode_without_cfg_returns_error() {
+    fn gateway_mode_without_cfg_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
         let state = gateway_state();
         let (resolution, _) = compute_provider_resolution(&state, None);
-        match &resolution {
-            ProviderResolution::Error { reason } => {
-                assert!(
-                    reason.contains("Gateway"),
-                    "reason must mention Gateway mode; got: {reason}"
-                );
-                assert!(
-                    reason.to_lowercase().contains("no gateway config"),
-                    "reason must explain missing config; got: {reason}"
-                );
-            }
-            other => panic!("Gateway mode without cfg must yield Error, got {other:?}"),
-        }
+        // mode=gateway 但没有任何可用 gateway → 兜底 Off，不拒绝启动（与
+        // Phantom Direct provider 同理：runtime 状态与可解析配置脱节时，
+        // 让 claude 走自己的配置，而不是整 bot 卡在 refusing to launch）。
+        assert!(
+            matches!(resolution, ProviderResolution::Off),
+            "Gateway mode without cfg must fall back to Off, got {resolution:?}"
+        );
     }
 
     #[test]
