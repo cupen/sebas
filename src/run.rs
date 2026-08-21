@@ -74,6 +74,20 @@ pub async fn run(
         );
     }
 
+    if !crate::ipc::is_under_watchdog()
+        && std::env::var_os("SEBAS_CONTROL_SECRET")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+    {
+        // 裸 core 启动：/upgrade / /rollback / /gateway 等需要 watchdog RPC 的命令
+        // 在此模式下不可用。启动时给可执行提示，避免用户调用 /upgrade 后才发现。
+        warn!(
+            "当前为裸 core 启动模式（SEBAS_IPC 未设置 + SEBAS_CONTROL_SECRET 未配置）：\
+             /upgrade、/rollback、/restart、/gateway 等命令需要 watchdog 转发，\
+             在此模式下调用会失败。如需启用，请通过 `sebas` watchdog 启动 core（spec §5.3）"
+        );
+    }
+
     let map = restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
 
     // TOML is bootstrap; settings.json (if present) wins wholesale.
