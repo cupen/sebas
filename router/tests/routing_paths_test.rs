@@ -263,6 +263,48 @@ async fn slash_status_forwards_continue_session() {
     }
 }
 
+#[tokio::test]
+async fn slash_sessions_lists_empty() {
+    let map = SessionMap::new();
+    let (router, mut out_rx) = RouterHandle::new(map);
+    router
+        .dispatch(FeishuIn::Text {
+            key: key(),
+            text: "/sessions".into(),
+            reply_to: None,
+        })
+        .await;
+
+    match next_out(&mut out_rx).await {
+        Out::PlainText { content, .. } => {
+            assert!(content.contains("没有活跃会话"), "content: {content}");
+        }
+        other => panic!("expected PlainText, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn slash_sessions_lists_active() {
+    let map = SessionMap::new();
+    map.insert(key(), Mapping::active("s1")).await.unwrap();
+    let (router, mut out_rx) = RouterHandle::new(map);
+    router
+        .dispatch(FeishuIn::Text {
+            key: key(),
+            text: "/sessions".into(),
+            reply_to: None,
+        })
+        .await;
+
+    match next_out(&mut out_rx).await {
+        Out::PlainText { content, .. } => {
+            assert!(content.contains("s1"), "s1 missing: {content}");
+            assert!(content.contains("active"), "label missing: {content}");
+        }
+        other => panic!("expected PlainText, got {other:?}"),
+    }
+}
+
 // ---------- Media 组合 ----------
 
 #[tokio::test]
