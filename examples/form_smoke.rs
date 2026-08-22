@@ -191,7 +191,7 @@ impl Handler {
                             thread_id: None,
                         };
                         self.client
-                            .send_card(&self.http, &self.tokens, &key, card, None)
+                            .send_card(&self.http, &self.tokens, &key, card, None, None)
                             .await?;
                     }
                     Target::Open(open_id) => {

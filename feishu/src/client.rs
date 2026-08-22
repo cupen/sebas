@@ -249,6 +249,8 @@ impl FeishuClient {
     /// Builds the JSON body for a card POST request.
     /// When `root_id` is `Some` and non-empty, `root_id` is included in the
     /// body so Feishu renders the card as a reply to the parent message.
+    /// When `thread_id` is `Some`, it's added as a URL query parameter so the
+    /// card is sent to the specific thread (topic) instead of the main chat.
     pub async fn send_card(
         &self,
         http: &reqwest::Client,
@@ -256,14 +258,19 @@ impl FeishuClient {
         key: &SessionKey,
         card_json: serde_json::Value,
         root_id: Option<&str>,
+        thread_id: Option<&str>,
     ) -> anyhow::Result<String> {
-        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
+        let mut url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id".to_string();
+        if let Some(tid) = thread_id {
+            url.push_str("&thread_id=");
+            url.push_str(tid);
+        }
         let mut req = SendCardRequest::new(&key.chat_id, ReceiveIdType::ChatId, &card_json);
         if let Some(rid) = root_id {
             req = req.with_reply(rid);
         }
         let body = serde_json::to_value(&req)?;
-        self.post_card_with_retry(http, tokens, url, body).await
+        self.post_card_with_retry(http, tokens, &url, body).await
     }
 
     /// Send a plain-text message to the chat. Same endpoint + auth+retry

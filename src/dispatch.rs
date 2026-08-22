@@ -75,7 +75,7 @@ pub(crate) async fn send_card_topic_aware(
     root_id: Option<String>,
 ) -> anyhow::Result<TopicSendOutcome> {
     match feishu
-        .send_card(http, tokens, key, card, root_id.as_deref())
+        .send_card(http, tokens, key, card, root_id.as_deref(), key.thread_id.as_deref())
         .await
     {
         Ok(id) => Ok(TopicSendOutcome::Sent(id)),
