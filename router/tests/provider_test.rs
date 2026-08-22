@@ -139,11 +139,9 @@ async fn provider_command_opens_main_card_with_seed() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/provider".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     let out = rx.recv().await.unwrap();
@@ -183,9 +181,8 @@ async fn provider_create_submit_delete_round_trip() {
 
     // 点「＋ 新增」→ 表单卡原地出现。
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
-            action: card_action(json!({"form": "provider-custom", "op": "create"}), "om_1"),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
+            action: card_action(json!({"form": "provider-custom", "op": "create" chat_type: "p2p".into(), }), "om_1"),
         })
         .await;
     let out = rx.recv().await.unwrap();
@@ -200,9 +197,8 @@ async fn provider_create_submit_delete_round_trip() {
     fv.insert("name".into(), json!("openai"));
     fv.insert("base_url".into(), json!("https://api.openai.com"));
     router
-        .dispatch(FeishuIn::FormCb {
-            key: key(),
-            value: json!({"form": "provider-custom", "op": "submit"}),
+        .dispatch(FeishuIn::FormCb { key: key(),
+            value: json!({"form": "provider-custom", "op": "submit" chat_type: "p2p".into(), }),
             form_value: fv,
             message_id: Some("om_1".into()),
         })
@@ -215,10 +211,9 @@ async fn provider_create_submit_delete_round_trip() {
 
     // 删除种子里的 deepseek（写墓碑）。
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: card_action(
-                json!({"form": "provider-custom", "op": "delete", "id": "deepseek"}),
+                json!({"form": "provider-custom", "op": "delete", "id": "deepseek" chat_type: "p2p".into(), }),
                 "om_2",
             ),
         })
@@ -249,14 +244,13 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: CardAction {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
                 value: json!({
-                    "action": { "value": {"session_id": "s1", "request_id": "r1", "decision": "allow_once"} },
+                    "action": { "value": {"session_id": "s1", "request_id": "r1", "decision": "allow_once" chat_type: "p2p".into(), } },
                     "context": { "open_message_id": "om_perm" }
                 }),
             },
@@ -280,10 +274,9 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: card_action(
-                json!({"form": "provider-custom", "op": "cancel"}),
+                json!({"form": "provider-custom", "op": "cancel" chat_type: "p2p".into(), }),
                 "om_cancel",
             ),
         })
@@ -338,11 +331,9 @@ async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
     // 主卡：deepseek 的折叠面板里 API Key 行应是「已配置」，且永远不
     // 出现明文密钥（无论新旧设计）。
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/provider".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::SendCard { card, .. } = out else {
@@ -390,10 +381,9 @@ async fn edit_form_does_not_prefill_secret() {
     // 直接触发既有表单的编辑路径（不走新主卡的按钮，因为我们只想验证
     // 旧契约：编辑表单不预填密钥）。
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: card_action(
-                json!({"form": "provider-custom", "op": "edit", "id": "deepseek"}),
+                json!({"form": "provider-custom", "op": "edit", "id": "deepseek" chat_type: "p2p".into(), }),
                 "om_e",
             ),
         })
@@ -443,9 +433,8 @@ async fn empty_secret_submit_preserves_existing_key() {
     fv.insert("name".into(), json!("deepseek"));
     fv.insert("base_url".into(), json!("https://new.example"));
     router
-        .dispatch(FeishuIn::FormCb {
-            key: key(),
-            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}),
+        .dispatch(FeishuIn::FormCb { key: key(),
+            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek" chat_type: "p2p".into(), }),
             form_value: fv,
             message_id: Some("om_s".into()),
         })

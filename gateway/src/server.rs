@@ -22,6 +22,7 @@ use crate::auth::require_key;
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
 use crate::proxy;
+use crate::rate_limit::rate_limit;
 use crate::routing::RouteTable;
 use crate::usage::UsageSink;
 
@@ -38,6 +39,8 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub table: Arc<RouteTable>,
     pub sink: UsageSink,
+    /// token-bucket 限流状态（`RateLimiter`：`Arc<Mutex>` → `Clone + Send + Sync`）。
+    pub rate_limiter: crate::rate_limit::RateLimiter,
 }
 
 /// Resolve api keys + build the upstream client + route table. Called once
@@ -67,6 +70,8 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
             cfg.usage_file
         ))
     })?;
+    // token-bucket 限流状态（`cfg.rate_limit` 缺省不限流）。
+    let rate_limiter = crate::rate_limit::RateLimiter::from_config(&cfg.rate_limit);
     Ok(AppState {
         cfg: Arc::new(cfg),
         auth_tokens: Arc::new(auth_tokens),
@@ -74,6 +79,7 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
         client,
         table: Arc::new(table),
         sink,
+        rate_limiter,
     })
 }
 
@@ -85,6 +91,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .fallback(proxy::handle)
+        // 内层：token-bucket 限流。挂在鉴权之内，只对放行的合法请求计数
+        // （按鉴权后的 client/token 维度，见 rate_limit.rs）。
+        .layer(from_fn_with_state(state.clone(), rate_limit))
+        // 鉴权层：在内层之上，先鉴权再限流。
         .layer(from_fn_with_state(state.clone(), require_key))
         // 最外层：nginx 风格 access log，覆盖 /healthz 与全部透传请求。
         .layer(axum::middleware::from_fn(crate::access_log::access_log))

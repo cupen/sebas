@@ -19,11 +19,9 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "msg1".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let first = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
@@ -33,11 +31,9 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
 
     // Spawn still in flight (nobody called activate): the second text queues.
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "msg2".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let second = tokio::time::timeout(Duration::from_millis(150), out_rx.recv()).await;
     assert!(
@@ -49,11 +45,9 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
     assert_eq!(pending, vec!["msg2".to_string()]);
     // Now active: a third text continues the session.
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "msg3".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     // Per-turn flow: a fresh card is posted first, then the prompt is
     // forwarded to the session.
@@ -131,11 +125,9 @@ async fn rapid_double_new_emits_single_spawn() {
 
     for _ in 0..2 {
         router
-            .dispatch(FeishuIn::Text {
-                key: key(),
+            .dispatch(FeishuIn::Text { key: key(),
                 text: "/new".into(),
-                reply_to: None,
-            })
+                reply_to: None, chat_type: "private".into(), mentions: vec![], })
             .await;
     }
 

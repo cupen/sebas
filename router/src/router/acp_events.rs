@@ -92,6 +92,9 @@ impl RouterHandle {
                     self.map.remove_by_session(sid).await;
                 }
                 self.drop_card(sid).await;
+                // 终态会话同时清 root msg_id（与 web_close_session 对称），防止
+                // session_id→msg_id 条目长期积累内存泄漏 / 复用 id 继承 stale msg_id。
+                self.msgid.drop(sid).await;
             }
             _ => {
                 // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
@@ -100,12 +103,11 @@ impl RouterHandle {
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
                 // SEED→WORKING 仍发 reaction（🚧 表示进行中）；WORKING→DONE
-                // 不发。Emit before draining: 排队下轮的 SendCard 会把 MsgIdMap
-                // 指向 NEW card，迟发的 React 会把 DONE/FAILED 落到错卡上。
+                // 也发 ✅。emit_reaction 在 drain_queue_if_terminal 之前执行，
+                // 且 reaction 目标始终是用户输入消息（input_msg_id）而非卡片，
+                // 不会被 drain 的 SendCard 翻转 MsgIdMap 影响。
                 if let Some(emoji) = react {
-                    if !is_terminal_reaction(emoji) {
-                        self.emit_reaction(session_id.as_str(), emoji).await;
-                    }
+                    self.emit_reaction(session_id.as_str(), emoji).await;
                 }
                 if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
                     self.drain_queue_if_terminal(&key, session_id.as_str())
@@ -114,15 +116,4 @@ impl RouterHandle {
             }
         }
     }
-}
-
-/// 终态 reaction 不触发 Out::React —— 终态视觉由 card body 表达（Finished
-/// 把父面板标题 🤔 折腾中 → ✅ 已完成；terminal Error 在 body 推 ❌ 行）。
-/// reaction 维持在"已收到 / 折腾中"语义，由 SEED→WORKING 这条唯一 reaction
-/// 转移覆盖用户感知。
-fn is_terminal_reaction(emoji: &str) -> bool {
-    matches!(
-        emoji,
-        crate::card_state::phase::DONE | crate::card_state::phase::FAILED
-    )
 }

@@ -37,11 +37,9 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
 
     // Text 1 -> SpawnAcp.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "msg1".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
         .await
@@ -76,11 +74,9 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
 
     // Text 2 arrives while session/new is sleeping -> queued, no second spawn.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "msg2".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     let (session_id, pending, rx) = spawn.await.unwrap().expect("spawn ok");
@@ -144,11 +140,9 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
     // will send one chunk ("boom") then exit(2) — crashing during the first
     // turn, which is exactly D6's target scenario.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "crash".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
         .await

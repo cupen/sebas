@@ -41,11 +41,9 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         thread_id: None,
     };
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "hello".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
@@ -154,11 +152,9 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         thread_id: None,
     };
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "hello".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
         .await

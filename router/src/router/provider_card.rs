@@ -1122,12 +1122,6 @@ mod tests {
     }
 
     /// spec 2026-08-17 §2.6：所有走 FileStore / state_store 的测试需要
-    /// 串行化 env 访问（全局 mutex）。handle_with 内部已经获取并返回
-    /// guard，调用方需把 `_g` 绑到 test 局部以保证整个 test 期间锁不被
-    /// 释放 —— 锁释放后其他测试可能写入 SEBAS_STATE_FILE 覆盖本测试
-    /// 路径，导致 state_store 读到对方数据。
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// 构造一个带 FileStore 的 RouterHandle（与 provider_test.rs 一致）。
     /// 返回 `(handle, _guard)` —— 调用方必须把 `_guard` 绑到 test 局部
     /// 以保持锁和 SEBAS_STATE_FILE 不被中途重置。
@@ -1135,8 +1129,8 @@ mod tests {
         dir: &std::path::Path,
         seed: Vec<Item>,
     ) -> (RouterHandle, std::sync::MutexGuard<'static, ()>) {
-        let _g = TEST_LOCK.lock().unwrap();
-        // SAFETY: TEST_LOCK held.
+        let _g = crate::test_util::lock_state_file();
+        // SAFETY: lock held.
         unsafe {
             std::env::set_var("SEBAS_STATE_FILE", dir.join("state.json").to_str().unwrap());
         }

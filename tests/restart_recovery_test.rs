@@ -42,11 +42,9 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
 
     // First text after restart → SpawnResume (NOT a SendAcp black hole).
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "继续上次".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let Out::SpawnResume {
         key: k,
@@ -112,11 +110,9 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
     let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "hi".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let Out::SpawnResume {
         key: k,

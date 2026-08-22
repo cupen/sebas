@@ -231,6 +231,7 @@ mod tests {
             default_provider: default.map(String::from),
             auth_token: Vec::new(),
             providers,
+            rate_limit: crate::config::RateLimitConfig::default(),
             routes: routes
                 .iter()
                 .map(|(m, ps)| RouteGroup {

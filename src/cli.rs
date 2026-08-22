@@ -32,6 +32,12 @@ pub enum Cmd {
     Update(UpdateArgs),
     /// Send a command to the watchdog control plane.
     Control(ControlArgs),
+    /// Shorthand for `sebas control status` (control-plane status snapshot).
+    Status(ControlStatusArgs),
+    /// Shorthand for `sebas control services` (managed-service status snapshot).
+    Services(ControlStatusArgs),
+    /// Alias for `sebas control` (watchdog control plane).
+    Ctl(ControlArgs),
 }
 
 /// Run mode — the long-lived sebas service.
@@ -203,6 +209,26 @@ pub struct ControlArgs {
 
     #[command(subcommand)]
     pub cmd: ControlCmd,
+}
+
+/// 顶层 `sebas status` / `sebas services` 的轻量参数（无子命令）。
+/// 复用 ControlArgs 的 socket/secret/format 解析，只是没有 `cmd`。
+#[derive(Parser)]
+pub struct ControlStatusArgs {
+    /// Path to the watchdog control socket.
+    /// Precedence: --socket > $SEBAS_CONTROL_SOCKET > XDG_RUNTIME_DIR/sebas/control.sock.
+    #[arg(long)]
+    pub socket: Option<String>,
+
+    /// Control RPC secret for authentication.
+    /// Precedence: --secret > $SEBAS_CONTROL_SECRET > error.
+    #[arg(long)]
+    pub secret: Option<String>,
+
+    /// Output format. `human` is one-line/key-value text; `json` is the raw
+    /// `RpcControlResponse` envelope, stable across releases.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub format: OutputFormat,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

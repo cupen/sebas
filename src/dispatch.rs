@@ -75,7 +75,7 @@ pub(crate) async fn send_card_topic_aware(
     root_id: Option<String>,
 ) -> anyhow::Result<TopicSendOutcome> {
     match feishu
-        .send_card(http, tokens, key, card, root_id.as_deref())
+        .send_card(http, tokens, key, card, root_id.as_deref(), key.thread_id.as_deref())
         .await
     {
         Ok(id) => Ok(TopicSendOutcome::Sent(id)),
@@ -608,7 +608,14 @@ async fn submit_watchdog_control(
         ),
     };
 
-    let envelope = feishu_control_envelope(key, secret, request);
+    // 长操作（update/rollback/restart）提交后需要轮询 progress 事件；其余为同步查询，无需轮询。
+    let is_long_op = matches!(
+        &request,
+        crate::watchdog::control_rpc::RpcControlRequest::Update { .. }
+            | crate::watchdog::control_rpc::RpcControlRequest::Rollback { .. }
+            | crate::watchdog::control_rpc::RpcControlRequest::RestartCore
+    );
+    let envelope = feishu_control_envelope(key, secret.clone(), request);
 
     match crate::watchdog::control_rpc::request(
         &crate::watchdog::control_rpc::default_socket_path(),
@@ -619,7 +626,16 @@ async fn submit_watchdog_control(
         Ok(crate::watchdog::control_rpc::RpcControlResponse::Accepted {
             operation_id,
             status,
-        }) => format!("已提交{label}请求给 watchdog: {operation_id} ({status})"),
+        }) => {
+            let base = format!("已提交{label}请求给 watchdog: {operation_id} ({status})");
+            if is_long_op {
+                // MVP：提交成功后轮询该 operation 的 Started/Progress/Done/Error 事件，
+                // 把阶段性进度累积成多行文本返回。best-effort：轮询失败不影响控制本身。
+                poll_operation_progress(key, &secret, &operation_id, base).await
+            } else {
+                base
+            }
+        }
         Ok(crate::watchdog::control_rpc::RpcControlResponse::Rejected { code, message }) => {
             format!("{label}请求被拒绝: {code}: {message}")
         }
@@ -661,6 +677,78 @@ async fn submit_watchdog_control(
     }
 }
 
+/// 轮询 watchdog 事件流，跟踪指定 `operation_id` 的执行进度，把阶段性事件
+/// 累积成多行文本。best-effort：任何轮询失败/超时都回退到已有的基础文本，
+/// 不把进度渲染失败当作控制失败返回。
+///
+/// 事件 kind 来自 `ControlEventKind` 的 Debug 字符串（Started/Progress/Done/
+/// Error/Canceled/TimedOut）。门限（终态）：Done/Error/Canceled/TimedOut。
+/// 上限：最多 `POLL_ROUNDS` 轮、每轮间隔 `POLL_INTERVAL`，未到终态返回已见进度并提示
+/// 可用 `/events` 查后续。
+async fn poll_operation_progress(
+    key: &SessionKey,
+    secret: &str,
+    operation_id: &str,
+    base: String,
+) -> String {
+    const POLL_ROUNDS: usize = 15;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let mut seen = Vec::<String>::new();
+    let mut since: u64 = 0;
+    let mut terminal = false;
+
+    for _ in 0..POLL_ROUNDS {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        let envelope = feishu_control_envelope(
+            key,
+            secret.to_string(),
+            crate::watchdog::control_rpc::RpcControlRequest::EventsSince { seq: since },
+        );
+        let Ok(crate::watchdog::control_rpc::RpcControlResponse::Events { events })
+            = crate::watchdog::control_rpc::request(
+                &crate::watchdog::control_rpc::default_socket_path(),
+                &envelope,
+            )
+            .await
+        else {
+            // 一次查询失败就放弃轮询，避免卡死当前处理路径。
+            break;
+        };
+        for event in events {
+            if event.operation_id != operation_id {
+                continue;
+            }
+            since = since.max(event.seq);
+            seen.push(format!(
+                "- [{}] {}",
+                event.kind, event.public_message
+            ));
+            // 终态事件：Done/Error/Canceled/TimedOut（Started/Progress 为非终态）。
+            if matches!(event.kind.as_str(), "Done" | "Error" | "Canceled" | "TimedOut") {
+                terminal = true;
+            }
+        }
+        if terminal {
+            break;
+        }
+    }
+
+    let mut lines = vec![base];
+    if seen.is_empty() {
+        lines.push(format!(
+            "(未在 {POLL_ROUNDS} 轮内观察到该操作的进度事件，可能仍在前台执行，可稍后 `/events` 查)"
+        ));
+    } else {
+        lines.push("执行进度:".to_string());
+        lines.extend(seen);
+        if !terminal {
+            lines.push("(仍在执行，可稍后 `/events` 查后续进度)".to_string());
+        }
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +775,8 @@ mod tests {
                 key: key.clone(),
                 text: "hello".into(),
                 reply_to: Some("om_root".into()),
+                chat_type: "private".into(),
+                mentions: vec![],
             })
             .await;
 
@@ -726,6 +816,8 @@ mod tests {
                 key: key.clone(),
                 text: "hello".into(),
                 reply_to: Some("om_user_msg".into()),
+                chat_type: "private".into(),
+                mentions: vec![],
             })
             .await;
 

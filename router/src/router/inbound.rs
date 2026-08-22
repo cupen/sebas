@@ -30,6 +30,8 @@ impl RouterHandle {
                 key,
                 text,
                 reply_to,
+                chat_type: _,
+                mentions: _,
             } => {
                 // Acknowledge receipt immediately with an emoji reaction on
                 // the user's message, before any processing. "Get" = 👌 =
@@ -49,16 +51,18 @@ impl RouterHandle {
                 files,
                 caption,
                 reply_to,
+                chat_type: _,
             } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
                 self.on_text(key, prompt, reply_to).await;
             }
-            FeishuIn::ButtonCb { key, action } => self.on_button(key, action).await,
+            FeishuIn::ButtonCb { key, action, chat_type: _ } => self.on_button(key, action).await,
             FeishuIn::FormCb {
                 key,
                 value,
                 form_value,
                 message_id,
+                chat_type: _,
             } => self.on_form_cb(key, value, form_value, message_id).await,
         }
     }
@@ -144,6 +148,9 @@ impl RouterHandle {
                     root_id: None,
                 })
                 .await;
+            }
+            Command::Sessions => {
+                self.list_sessions(key).await;
             }
             Command::Settings(setting_key, val) => {
                 self.handle_settings(key, setting_key, val, &settings::settings_path())
@@ -261,6 +268,46 @@ impl RouterHandle {
 
     async fn request_watchdog_restart(&self, key: SessionKey) {
         self.emit(Out::WatchdogRestart { key }).await;
+    }
+
+    async fn list_sessions(&self, key: SessionKey) {
+        use crate::state::MappingState;
+
+        let all = self.map.snapshot_all().await;
+        let sessions: Vec<_> = all
+            .into_iter()
+            .filter(|(k, _)| k.chat_id == key.chat_id)
+            .collect();
+
+        if sessions.is_empty() {
+            self.emit(Out::PlainText {
+                key,
+                content: "当前聊天没有活跃会话。发送 /new 开始新会话。".into(),
+            })
+            .await;
+            return;
+        }
+
+        let mut lines = vec!["当前会话:".to_string()];
+        for (i, (sk, m)) in sessions.iter().enumerate() {
+            let (sid, label) = match &m.state {
+                MappingState::Active { session_id } => (session_id.as_str(), "active"),
+                MappingState::Spawning { .. } => ("(spawning)", "spawning"),
+                MappingState::Dormant { session_id } => (session_id.as_str(), "dormant"),
+            };
+            let thread = sk
+                .thread_id
+                .as_deref()
+                .map(|t| format!(" thread={t}"))
+                .unwrap_or_default();
+            let ts = m.last_active_unix;
+            lines.push(format!("  {}. {sid} [{label}]{thread} 上次活跃={ts}", i + 1));
+        }
+        self.emit(Out::PlainText {
+            key,
+            content: lines.join("\n"),
+        })
+        .await;
     }
 
     async fn request_watchdog_services(&self, key: SessionKey) {
@@ -595,6 +642,10 @@ impl RouterHandle {
             Command::Cost => AcpCommand::ContinueSession {
                 session_id: session_id.into(),
                 prompt: "/cost".into(),
+            },
+            Command::Status => AcpCommand::ContinueSession {
+                session_id: session_id.into(),
+                prompt: "/status".into(),
             },
             Command::Cancel => AcpCommand::Cancel {
                 session_id: session_id.into(),

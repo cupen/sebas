@@ -2,8 +2,8 @@ mod cli;
 
 use clap::Parser;
 use cli::{
-    Cli, Cmd, ControlArgs, ControlCmd, GatewayArgs, OutputFormat, RecordArgs, ReplayArgs,
-    ServiceArgs, WebUiArgs,
+    Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, GatewayArgs, OutputFormat, RecordArgs,
+    ReplayArgs, ServiceArgs, WebUiArgs,
 };
 use std::path::PathBuf;
 
@@ -61,6 +61,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Control(args) => run_control(args).await,
+        Cmd::Status(args) => run_control_status(args, ControlCmd::Status).await,
+        Cmd::Services(args) => run_control_status(args, ControlCmd::Services).await,
+        Cmd::Ctl(args) => run_control(args).await,
         Cmd::Watchdog(args) => {
             let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -206,6 +209,21 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+/// 顶层 `sebas status` / `sebas services`：构造一个固定的 ControlArgs
+/// 复用到 `run_control`，避免复制稳定信封构造逻辑。
+async fn run_control_status(
+    args: ControlStatusArgs,
+    cmd: ControlCmd,
+) -> anyhow::Result<()> {
+    let control = ControlArgs {
+        socket: args.socket,
+        secret: args.secret,
+        format: args.format,
+        cmd,
+    };
+    run_control(control).await
 }
 
 fn render_response(
@@ -604,6 +622,55 @@ mod tests {
             panic!("expected Control subcommand");
         };
         assert!(matches!(args.cmd, ControlCmd::Services));
+    }
+
+    #[test]
+    fn top_level_status_parses() {
+        let cli = Cli::try_parse_from(["sebas", "status"]).expect("`sebas status` must parse");
+        let Cmd::Status(args) = cli.cmd else {
+            panic!("expected Status subcommand");
+        };
+        assert_eq!(args.format, OutputFormat::Human);
+    }
+
+    #[test]
+    fn top_level_status_accepts_format_flag() {
+        let cli =
+            Cli::try_parse_from(["sebas", "status", "--format", "json"]).expect("must parse");
+        let Cmd::Status(args) = cli.cmd else {
+            panic!("expected Status subcommand");
+        };
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn top_level_status_accepts_socket_and_secret_flags() {
+        let cli = Cli::try_parse_from([
+            "sebas", "status", "--socket", "/tmp/x.sock", "--secret", "s",
+        ])
+        .expect("must parse");
+        let Cmd::Status(args) = cli.cmd else {
+            panic!("expected Status subcommand");
+        };
+        assert_eq!(args.socket.as_deref(), Some("/tmp/x.sock"));
+        assert_eq!(args.secret.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn top_level_services_parses() {
+        let cli = Cli::try_parse_from(["sebas", "services"]).expect("`sebas services` must parse");
+        let Cmd::Services(_) = cli.cmd else {
+            panic!("expected Services subcommand");
+        };
+    }
+
+    #[test]
+    fn top_level_ctl_aliases_control() {
+        let cli = Cli::try_parse_from(["sebas", "ctl", "status"]).expect("`sebas ctl status` must parse");
+        let Cmd::Ctl(args) = cli.cmd else {
+            panic!("expected Ctl subcommand");
+        };
+        assert!(matches!(args.cmd, ControlCmd::Status));
     }
 
     #[test]

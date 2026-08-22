@@ -29,11 +29,9 @@ async fn next_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
 
 async fn dispatch_text(router: &RouterHandle, text: &str) {
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: text.into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 }
 

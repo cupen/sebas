@@ -49,10 +49,35 @@ pub fn replay_frame(handler: &RouterEventHandler, raw: &[u8]) -> bool {
             return false;
         }
     };
+
+    // 事件去重：飞书可能重投相同 event_id 的事件。
+    if let Some(ref eid) = env.header.event_id {
+        let mut seen = handler.seen_events.lock().unwrap();
+        if !seen.insert(eid.clone()) {
+            debug!(event_id = %eid, "replay: duplicate event, skipping");
+            return false;
+        }
+        // 容量上限 4096，超限时整体清空。
+        if seen.len() > 4096 {
+            seen.clear();
+        }
+    }
+
     let Some(in_ev) = env.into_event(&handler.owner_id) else {
         debug!("replay: envelope produced no FeishuIn (filtered or unrecognized)");
         return false;
     };
+
+    // chat_type 过滤 + 群聊 @bot 检测
+    if !handler.is_chat_type_allowed(in_ev.chat_type()) {
+        debug!("replay: chat_type not allowed, skipping");
+        return false;
+    }
+    if handler.should_filter_by_mention(&in_ev) {
+        debug!("replay: group message without @bot, skipping");
+        return false;
+    }
+
     let router = handler.router.clone();
     // Dispatch is async; the caller (WS handler or replay::run) is sync.
     // Spawn and let the runtime drive it. The mpsc channel inside the
@@ -99,11 +124,11 @@ pub async fn run(args: ReplayArgs) -> anyhow::Result<u64> {
     // push — `mpsc::Sender::send` returns an error if all receivers are
     // dropped, which would silently swallow every frame.
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let handler = RouterEventHandler {
+    let handler = RouterEventHandler::new(
         router,
-        owner_id: String::new(),
-        dump_dir: None,
-    };
+        String::new(),
+        None,
+    );
 
     let mut count: u64 = 0;
     for p in &paths {
