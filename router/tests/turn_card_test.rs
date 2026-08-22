@@ -39,11 +39,9 @@ async fn continue_session_emits_per_turn_send_card_with_root_id() {
     // continue_session flips DONE->WORKING, emitting [UpdateCard, React],
     // then emits [SendCard (per-turn), SendAcp].
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "follow-up".into(),
-            reply_to: Some("om_user_2".into()),
-        })
+            reply_to: Some("om_user_2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
 
     // Drain the flip messages first. `dispatch` acks the user message with an
@@ -101,11 +99,9 @@ async fn terminal_error_clears_queued_turns() {
 
     // Queue a turn while in-flight.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "second".into(),
-            reply_to: Some("om2".into()),
-        })
+            reply_to: Some("om2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // ⏳ react
     assert_eq!(router.map.queue_len(&key).await, 1);
@@ -163,11 +159,9 @@ async fn continue_while_in_flight_enqueues_no_card_no_sendacp_only_queue_react()
     let _ = out_rx.recv().await; // drain React(OnIt) from status transition
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "second".into(),
-            reply_to: Some("om_user_2".into()),
-        })
+            reply_to: Some("om_user_2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
 
@@ -213,20 +207,16 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
     let _ = out_rx.recv().await; // React WORKING
     // Queue 2 turns while in-flight.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "second".into(),
-            reply_to: Some("om2".into()),
-        })
+            reply_to: Some("om2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳ react
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "third".into(),
-            reply_to: Some("om3".into()),
-        })
+            reply_to: Some("om3".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳ react
@@ -305,11 +295,9 @@ async fn terminal_error_abandons_queued_turns() {
     let _ = out_rx.recv().await;
     // Queue a turn.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "second".into(),
-            reply_to: Some("om2".into()),
-        })
+            reply_to: Some("om2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // ⏳ react
     assert_eq!(router.map.queue_len(&key).await, 1);
@@ -364,22 +352,18 @@ async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
 
     // Queue a normal FIFO turn first.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "fifo".into(),
-            reply_to: Some("omF".into()),
-        })
+            reply_to: Some("omF".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳
 
     // Now a /btw turn — must jump to front.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "/btw btw".into(),
-            reply_to: Some("omB".into()),
-        })
+            reply_to: Some("omB".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // ⏳
@@ -434,11 +418,9 @@ async fn missing_reply_to_is_fire_and_forget_root_id_none() {
 
     // User sends a message with NO reply_to (e.g. fresh message, no quote).
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "hello".into(),
-            reply_to: None, // <-- missing reply_to
-        })
+            reply_to: None, // <-- missing reply_to chat_type: "private".into(), mentions: vec![], })
         .await;
 
     // Drain DONE->WORKING flip (UpdateCard + React).
@@ -476,11 +458,9 @@ async fn three_turns_three_distinct_root_ids() {
         )
         .await;
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "turn 1".into(),
-            reply_to: Some("om1".into()),
-        })
+            reply_to: Some("om1".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
@@ -509,11 +489,9 @@ async fn three_turns_three_distinct_root_ids() {
     let _ = out_rx.recv().await; // UpdateCard
     let _ = out_rx.recv().await; // React
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "turn 2".into(),
-            reply_to: Some("om2".into()),
-        })
+            reply_to: Some("om2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
@@ -543,11 +521,9 @@ async fn three_turns_three_distinct_root_ids() {
     let _ = out_rx.recv().await; // UpdateCard
     let _ = out_rx.recv().await; // React
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "turn 3".into(),
-            reply_to: Some("om3".into()),
-        })
+            reply_to: Some("om3".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     let _ = out_rx.recv().await; // AckMsg(EYES) — immediate receipt ack
     let _ = out_rx.recv().await; // UpdateCard (DONE->WORKING flip)
@@ -601,11 +577,9 @@ async fn streaming_update_after_second_turn_targets_current_card() {
 
     // User sends turn 2.
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "follow-up".into(),
-            reply_to: Some("om_user_2".into()),
-        })
+            reply_to: Some("om_user_2".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     // Drain 5 messages from turn 2: AckMsg(EYES) + UpdateCard (DONE→WORKING
     // flip) + React + SendCard + SendAcp

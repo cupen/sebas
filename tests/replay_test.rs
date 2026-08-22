@@ -14,11 +14,7 @@ use tokio::sync::mpsc::Receiver;
 /// captured `Out` receiver so the test can assert what was dispatched.
 fn make_handler(owner_id: &str) -> (RouterEventHandler, Receiver<Out>) {
     let (router, rx) = RouterHandle::new(SessionMap::new());
-    let handler = RouterEventHandler {
-        router,
-        owner_id: owner_id.to_string(),
-        dump_dir: None,
-    };
+    let handler = RouterEventHandler::new(router, owner_id.to_string(), None);
     (handler, rx)
 }
 

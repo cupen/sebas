@@ -7,6 +7,10 @@ pub enum FeishuIn {
         key: SessionKey,
         text: String,
         reply_to: Option<String>,
+        /// 飞书 chat_type: "private" | "group" | "p2p"
+        chat_type: String,
+        /// 群聊 @ 提及列表。仅 group chat_type 时非空；私聊为空。
+        mentions: Vec<Mention>,
     },
     Media {
         key: SessionKey,
@@ -15,10 +19,14 @@ pub enum FeishuIn {
         /// 归一化后的回复目标（话题内 = 话题根消息 message_id，主线 = 触发消息
         /// message_id）。与 `Text` 的 `reply_to` 语义一致。
         reply_to: Option<String>,
+        /// 飞书 chat_type: "private" | "group" | "p2p"
+        chat_type: String,
     },
     ButtonCb {
         key: SessionKey,
         action: CardAction,
+        /// 飞书 chat_type: "private" | "group" | "p2p"
+        chat_type: String,
     },
     /// Form-container submission: the user filled a `form` container and
     /// clicked its submit button. `value` is the submit button's custom
@@ -31,6 +39,8 @@ pub enum FeishuIn {
         value: serde_json::Value,
         form_value: BTreeMap<String, serde_json::Value>,
         message_id: Option<String>,
+        /// 飞书 chat_type: "private" | "group" | "p2p"
+        chat_type: String,
     },
 }
 
@@ -89,16 +99,45 @@ pub struct CardAction {
     pub value: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FeishuEnvelope {
     pub schema: String,
     pub header: FeishuHeader,
     pub event: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FeishuHeader {
     pub event_type: String,
+    /// Feishu 事件唯一 ID，用于去重（飞书可能重投相同 event_id）。
+    /// 不是所有事件类型都携带 event_id，故为 Option。
+    pub event_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for FeishuEnvelope {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // 先解析为宽松的 Value 以提取 event_id（header 可能在 event 内或外）。
+        #[derive(Deserialize)]
+        struct Raw {
+            schema: String,
+            header: RawHeader,
+            event: serde_json::Value,
+        }
+        #[derive(Deserialize)]
+        struct RawHeader {
+            event_type: String,
+            event_id: Option<String>,
+        }
+        let raw = Raw::deserialize(de)?;
+        Ok(FeishuEnvelope {
+            schema: raw.schema,
+            header: FeishuHeader {
+                event_type: raw.header.event_type,
+                event_id: raw.header.event_id,
+            },
+            event: raw.event,
+        })
+    }
 }
 
 impl FeishuEnvelope {
@@ -133,6 +172,12 @@ impl FeishuEnvelope {
                 .or_else(|| self.event.pointer("/context/open_thread_id"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
+            let chat_type = self
+                .event
+                .pointer("/chat_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("p2p")
+                .to_owned();
             // Primary: the V2 button behaviors[].value round-trip location.
             // Fallback: the legacy flat layout (tolerance against payload drift).
             let pick = |primary: &str, legacy: &str| {
@@ -176,6 +221,7 @@ impl FeishuEnvelope {
                     value,
                     form_value,
                     message_id,
+                    chat_type,
                 });
             }
             return Some(FeishuIn::ButtonCb {
@@ -186,6 +232,7 @@ impl FeishuEnvelope {
                     decision,
                     value: self.event,
                 },
+                chat_type,
             });
         }
 
@@ -194,6 +241,12 @@ impl FeishuEnvelope {
         let message_id = message.pointer("/message_id")?.as_str()?.to_owned();
         let message_type = message.pointer("/message_type")?.as_str()?;
         let content_str = message.pointer("/content")?.as_str()?;
+        // 解析 chat_type（"private" / "group" / "p2p"），缺省 "private"。
+        let chat_type = message
+            .pointer("/chat_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("private")
+            .to_owned();
         let thread_id = message
             .pointer("/thread_id")
             .and_then(serde_json::Value::as_str)
@@ -220,6 +273,8 @@ impl FeishuEnvelope {
                     key,
                     text: body.text.unwrap_or_default(),
                     reply_to: Some(reply_target),
+                    chat_type,
+                    mentions: body.mentions,
                 })
             }
             ("im.message.receive_v1", "image" | "file" | "audio") => Some(FeishuIn::Media {
@@ -227,8 +282,29 @@ impl FeishuEnvelope {
                 files: vec![message_id],
                 caption: None,
                 reply_to: Some(reply_target),
+                chat_type,
             }),
             _ => None,
+        }
+    }
+}
+
+impl FeishuIn {
+    /// 获取消息的 chat_type。
+    pub fn chat_type(&self) -> &str {
+        match self {
+            FeishuIn::Text { chat_type, .. }
+            | FeishuIn::Media { chat_type, .. }
+            | FeishuIn::ButtonCb { chat_type, .. }
+            | FeishuIn::FormCb { chat_type, .. } => chat_type,
+        }
+    }
+
+    /// 获取消息的 mentions（仅 Text 携带）。
+    pub fn mentions(&self) -> &[Mention] {
+        match self {
+            FeishuIn::Text { mentions, .. } => mentions,
+            _ => &[],
         }
     }
 }
@@ -236,4 +312,16 @@ impl FeishuEnvelope {
 #[derive(Debug, Deserialize)]
 pub struct MessageBody {
     pub text: Option<String>,
+    /// 飞书群聊 @ 提及列表。`key` 为 `@_user_1` 等占位符，`name` 为被提及
+    /// 者名称。机器人可通过 `name` 是否包含 bot 名称判断是否被 @。
+    #[serde(default)]
+    pub mentions: Vec<Mention>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Mention {
+    pub key: String,
+    pub name: String,
+    /// 提及者 ID 信息（可选的）。
+    pub id: Option<serde_json::Value>,
 }

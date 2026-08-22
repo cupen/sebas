@@ -23,6 +23,7 @@ fn parses_text_message_event() {
             text,
             key,
             reply_to,
+            ..
         } => {
             assert_eq!(text, "hi");
             // 主线消息：reply target = 触发消息 message_id（Q7 现状不变）。
@@ -209,7 +210,7 @@ fn parses_card_action_trigger_to_buttoncb() {
     });
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
     let evt = env.into_event("").expect("should parse");
-    let FeishuIn::ButtonCb { key, action } = evt else {
+    let FeishuIn::ButtonCb { key, action, .. } = evt else {
         panic!("expected ButtonCb");
     };
     assert_eq!(
@@ -315,7 +316,7 @@ fn parses_card_action_trigger_with_context_open_chat_id() {
     });
     let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
     let evt = env.into_event("").expect("should parse v2 layout");
-    let FeishuIn::ButtonCb { key, action } = evt else {
+    let FeishuIn::ButtonCb { key, action, .. } = evt else {
         panic!("expected ButtonCb");
     };
     assert_eq!(key.chat_id, "oc_real");
@@ -355,6 +356,7 @@ fn parses_form_container_submission_to_formcb() {
         value,
         form_value,
         message_id,
+        chat_type: _,
     } = evt
     else {
         panic!("expected FormCb");

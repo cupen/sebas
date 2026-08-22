@@ -97,6 +97,7 @@ impl Handler {
                 value,
                 form_value,
                 message_id,
+                ..
             } => {
                 info!(?key, ?form_value, ?message_id, "form submission received");
                 let form_name = value.get("form").and_then(Value::as_str).unwrap_or("");
@@ -107,7 +108,7 @@ impl Handler {
                 let out = form.handle(key, &value, &form_value, message_id).await;
                 self.dispatch(out).await?;
             }
-            FeishuIn::ButtonCb { key, action } => {
+            FeishuIn::ButtonCb { key, action, .. } => {
                 // 列表卡上的 新增/编辑/删除 是普通按钮回调（无 form_value），
                 // 负载在 action.value 里，message_id 在 context 里。
                 let payload = action.value.pointer("/action/value").cloned();

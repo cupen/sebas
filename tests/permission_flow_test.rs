@@ -49,11 +49,9 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         thread_id: None,
     };
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "hello".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
@@ -147,6 +145,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
                 request_id: Some(request_id.clone()),
                 value: json!({}),
             },
+            chat_type: "p2p".into(),
         })
         .await;
 

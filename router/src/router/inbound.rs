@@ -30,6 +30,8 @@ impl RouterHandle {
                 key,
                 text,
                 reply_to,
+                chat_type: _,
+                mentions: _,
             } => {
                 // Acknowledge receipt immediately with an emoji reaction on
                 // the user's message, before any processing. "Get" = 👌 =
@@ -49,16 +51,18 @@ impl RouterHandle {
                 files,
                 caption,
                 reply_to,
+                chat_type: _,
             } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
                 self.on_text(key, prompt, reply_to).await;
             }
-            FeishuIn::ButtonCb { key, action } => self.on_button(key, action).await,
+            FeishuIn::ButtonCb { key, action, chat_type: _ } => self.on_button(key, action).await,
             FeishuIn::FormCb {
                 key,
                 value,
                 form_value,
                 message_id,
+                chat_type: _,
             } => self.on_form_cb(key, value, form_value, message_id).await,
         }
     }

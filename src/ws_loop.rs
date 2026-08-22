@@ -7,11 +7,14 @@ use crate::config::Config;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::AcpCommand;
 use feishu::events::SessionKey;
+use feishu::events::FeishuIn;
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use router::router::RouterHandle;
 use std::sync::Arc;
 use std::time::Duration;
+use std::collections::HashSet;
+use std::sync::Mutex;
 use tracing::{error, info, warn};
 
 /// Long-connection WebSocket loop driven by `open-lark`. The crate handles the
@@ -42,11 +45,11 @@ pub(crate) async fn run_ws_loop(
     loop {
         // Rebuild the dispatcher for each connection attempt so retries start
         // with a fresh handler and cheap clones of the router and owner ID.
-        let handler = RouterEventHandler {
-            router: router.clone(),
-            owner_id: owner_id.to_string(),
-            dump_dir: dump_dir.clone(),
-        };
+        let handler = RouterEventHandler::new(
+            router.clone(),
+            owner_id.to_string(),
+            dump_dir.clone(),
+        );
         // Two raw registrations sharing the same handler. `register_raw` in
         // v0.19.0 is purely a key-on-HashMap insert keyed by the supplied
         // string, so `card.action.trigger` is accepted — there is no enum
@@ -117,6 +120,58 @@ pub struct RouterEventHandler {
     /// WS frame is written to `<dir>/<unix_ms>-<uuid>.json` before parsing, so
     /// you can replay captured traffic locally without a live Feishu bot.
     pub dump_dir: Option<std::path::PathBuf>,
+    /// 已处理过的 event_id 集合（去重）。飞书可能重投相同 event_id 的事件。
+    /// 容量上限 4096，超限时整体清空（概率极低，但防内存泄漏）。
+    pub seen_events: Arc<Mutex<HashSet<String>>>,
+    /// 允许的 chat_type 列表（"private", "group" 等）。空列表 = 全部允许。
+    pub allowed_chat_types: Vec<String>,
+    /// 机器人名称（用于群聊 @ 检测）。仅在 group chat_type 时检查。
+    /// 空字符串 = 不检查 @。
+    pub bot_name: String,
+}
+
+impl RouterEventHandler {
+    pub fn new(
+        router: RouterHandle,
+        owner_id: String,
+        dump_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            router,
+            owner_id,
+            dump_dir,
+            seen_events: Arc::new(Mutex::new(HashSet::new())),
+            allowed_chat_types: Vec::new(),
+            bot_name: String::new(),
+        }
+    }
+
+    /// 是否允许该 chat_type 的消息。
+    /// 空列表 = 全部允许。
+    pub fn is_chat_type_allowed(&self, chat_type: &str) -> bool {
+        self.allowed_chat_types.is_empty()
+            || self.allowed_chat_types.iter().any(|t| t == chat_type)
+    }
+
+    /// 检查消息是否需要 @bot 过滤。
+    /// 群聊（group/p2p）中非 @bot 消息应过滤。
+    pub fn should_filter_by_mention(&self, evt: &FeishuIn) -> bool {
+        // 当前只处理私聊/群聊文本消息的 @ 过滤
+        let chat_type = evt.chat_type();
+        if chat_type != "group" && chat_type != "p2p" {
+            return false; // 私聊不过滤
+        }
+        // 无 bot_name 配置时不过滤
+        if self.bot_name.is_empty() {
+            return false;
+        }
+        // 检查 mentions 列表中是否包含 bot 名称
+        let mentioned = evt.mentions().iter().any(|m| {
+            m.name.to_lowercase().contains(&self.bot_name.to_lowercase())
+                || m.key.to_lowercase().contains(&self.bot_name.to_lowercase())
+        });
+        !mentioned
+    }
 }
 
 impl EventHandler for RouterEventHandler {

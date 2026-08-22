@@ -50,22 +50,18 @@ async fn spawn_new_clears_reply_target() {
 
     // 入站话题消息写入 reply target；已映射会话走 Continue，不触发 spawn_new。
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "hello".into(),
-            reply_to: Some("om_root".into()),
-        })
+            reply_to: Some("om_root".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));
 
     // 摘掉映射后下一条消息走 SpawnNew → spawn_new 必须清 reply target。
     map.remove_by_key(&key).await;
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
+        .dispatch(FeishuIn::Text { key: key.clone(),
             text: "fresh".into(),
-            reply_to: Some("om_root".into()),
-        })
+            reply_to: Some("om_root".into()), chat_type: "private".into(), mentions: vec![], })
         .await;
     assert_eq!(
         router.reply_target(&key).await,
@@ -83,14 +79,12 @@ async fn button_cb_dead_session_gets_dead_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: CardAction {
                 session_id: "ghost".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
-                value: serde_json::Value::Null,
-            },
+                value: serde_json::Value::Null, chat_type: "p2p".into(), },
         })
         .await;
     match next_out(&mut out_rx).await {
@@ -108,14 +102,12 @@ async fn button_cb_missing_request_id_gets_help() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: CardAction {
                 session_id: "s1".into(),
                 request_id: None,
                 decision: Some("allow_once".into()),
-                value: serde_json::Value::Null,
-            },
+                value: serde_json::Value::Null, chat_type: "p2p".into(), },
         })
         .await;
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
@@ -138,14 +130,12 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
         )
         .await;
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
+        .dispatch(FeishuIn::ButtonCb { key: key(),
             action: CardAction {
                 session_id: "s1".into(),
                 request_id: Some("r9".into()),
                 decision: Some("yolo".into()),
-                value: serde_json::Value::Null,
-            },
+                value: serde_json::Value::Null, chat_type: "p2p".into(), },
         })
         .await;
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
@@ -181,11 +171,9 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
 
     for (text, expect) in [("/compact", "/compact"), ("/cost", "/cost")] {
         router
-            .dispatch(FeishuIn::Text {
-                key: key(),
+            .dispatch(FeishuIn::Text { key: key(),
                 text: text.into(),
-                reply_to: None,
-            })
+                reply_to: None, chat_type: "private".into(), mentions: vec![], })
             .await;
 
         if text == "/compact" {
@@ -209,11 +197,9 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
     }
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/cancel".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     match next_out(&mut out_rx).await {
         Out::SendAcp {
@@ -229,11 +215,9 @@ async fn slash_compact_without_session_gets_help() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/compact".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
 }
@@ -244,11 +228,9 @@ async fn slash_status_forwards_continue_session() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/status".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     match next_out(&mut out_rx).await {
@@ -268,11 +250,9 @@ async fn slash_sessions_lists_empty() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/sessions".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     match next_out(&mut out_rx).await {
@@ -289,11 +269,9 @@ async fn slash_sessions_lists_active() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/sessions".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
 
     match next_out(&mut out_rx).await {
@@ -312,12 +290,10 @@ async fn media_message_composes_prompt_and_spawns() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Media {
-            key: key(),
+        .dispatch(FeishuIn::Media { key: key(),
             files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()],
             caption: Some("看这两张".into()),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), })
         .await;
     match next_out(&mut out_rx).await {
         Out::SpawnAcp { prompt, .. } => {
@@ -464,11 +440,9 @@ async fn insert_mapping_marks_alive_and_routes() {
     router.insert_mapping(key(), "s7".into()).await;
     assert!(router.session_alive(&key()).await);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "yo".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     // Per-turn flow: a fresh card is posted first, then the prompt is
     // forwarded to the session.
@@ -510,11 +484,9 @@ async fn help_command_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
+        .dispatch(FeishuIn::Text { key: key(),
             text: "/help".into(),
-            reply_to: None,
-        })
+            reply_to: None, chat_type: "private".into(), mentions: vec![], })
         .await;
     let out = next_out(&mut out_rx).await;
     match out {

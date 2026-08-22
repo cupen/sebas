@@ -775,6 +775,8 @@ mod tests {
                 key: key.clone(),
                 text: "hello".into(),
                 reply_to: Some("om_root".into()),
+                chat_type: "private".into(),
+                mentions: vec![],
             })
             .await;
 
@@ -814,6 +816,8 @@ mod tests {
                 key: key.clone(),
                 text: "hello".into(),
                 reply_to: Some("om_user_msg".into()),
+                chat_type: "private".into(),
+                mentions: vec![],
             })
             .await;
 
