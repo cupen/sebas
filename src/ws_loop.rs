@@ -10,6 +10,7 @@ use feishu::events::SessionKey;
 use feishu::events::FeishuIn;
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
+use open_lark::CoreError;
 use router::router::RouterHandle;
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,6 +87,13 @@ pub(crate) async fn run_ws_loop(
             Err(WsClientError::ConnectionClosed { reason }) => {
                 warn!(?reason, "feishu WS closed; reconnecting");
                 backoff = Duration::from_secs(1);
+            }
+            Err(WsClientError::RequestError(core_err)) if matches!(core_err, CoreError::Authentication { .. }) => {
+                error!(
+                    error = %core_err,
+                    "feishu WS auth failed; aborting (fatal)"
+                );
+                return;
             }
             Err(e) => {
                 warn!(error = %e, "feishu WS failed; backing off");
