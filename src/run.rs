@@ -293,7 +293,7 @@ pub async fn run(
         _ = sigterm => {
             info!("shutting down (SIGTERM)");
         }
-        _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router, ws_dump_dir) => {
+        _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router, ws_dump_dir, cfg.feishu.allowed_chat_types.clone(), cfg.feishu.bot_name.clone()) => {
             warn!("WS loop exited; awaiting ctrl_c");
             tokio::signal::ctrl_c().await.ok();
         }

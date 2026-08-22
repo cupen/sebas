@@ -44,6 +44,10 @@ pub struct FeishuConfig {
     /// Empty (default) = nothing sent.
     #[serde(default)]
     pub hello_msg: String,
+    /// 机器人名称（用于群聊 @ 检测）。群聊中只有 @ 了机器人的消息才会被处理。
+    /// 空字符串 = 不检查 @（处理所有消息）。
+    #[serde(default)]
+    pub bot_name: String,
 }
 
 impl Default for FeishuConfig {
@@ -54,6 +58,7 @@ impl Default for FeishuConfig {
             owner_id: String::new(),
             allowed_chat_types: default_chat_types(),
             hello_msg: String::new(),
+            bot_name: String::new(),
         }
     }
 }

@@ -39,6 +39,8 @@ pub(crate) async fn run_ws_loop(
     owner_id: &str,
     router: RouterHandle,
     dump_dir: Option<std::path::PathBuf>,
+    allowed_chat_types: Vec<String>,
+    bot_name: String,
 ) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
@@ -46,11 +48,14 @@ pub(crate) async fn run_ws_loop(
     loop {
         // Rebuild the dispatcher for each connection attempt so retries start
         // with a fresh handler and cheap clones of the router and owner ID.
-        let handler = RouterEventHandler::new(
+        let mut handler = RouterEventHandler::new(
             router.clone(),
             owner_id.to_string(),
             dump_dir.clone(),
         );
+        // Wire chat_type/bot_name filter from config (pub fields)
+        handler.allowed_chat_types = allowed_chat_types.clone();
+        handler.bot_name = bot_name.clone();
         // Two raw registrations sharing the same handler. `register_raw` in
         // v0.19.0 is purely a key-on-HashMap insert keyed by the supplied
         // string, so `card.action.trigger` is accepted — there is no enum
