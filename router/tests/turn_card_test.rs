@@ -420,7 +420,10 @@ async fn missing_reply_to_is_fire_and_forget_root_id_none() {
     router
         .dispatch(FeishuIn::Text { key: key.clone(),
             text: "hello".into(),
-            reply_to: None, // <-- missing reply_to chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     // Drain DONE->WORKING flip (UpdateCard + React).

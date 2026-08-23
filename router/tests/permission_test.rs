@@ -171,7 +171,10 @@ async fn button_callback_emits_permission_reply() {
         value: serde_json::json!({ "decision": "allow_once" }),
     };
 
-    router.dispatch(FeishuIn::ButtonCb key, action chat_type: "p2p".into(), }).await;
+    router.dispatch(FeishuIn::ButtonCb { key: key,
+        action,
+        chat_type: "p2p".into(),
+    }).await;
 
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
     let out = loop {
@@ -217,7 +220,10 @@ async fn button_callback_on_dead_session_emits_help_card() {
         value: serde_json::json!({ "decision": "allow_once" }),
     };
 
-    router.dispatch(FeishuIn::ButtonCb key, action chat_type: "p2p".into(), }).await;
+    router.dispatch(FeishuIn::ButtonCb { key: key,
+        action,
+        chat_type: "p2p".into(),
+    }).await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
@@ -261,7 +267,10 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
         decision: None, // malformed payload -> fail closed
         value: serde_json::json!({}),
     };
-    router.dispatch(FeishuIn::ButtonCb key, action chat_type: "p2p".into(), }).await;
+    router.dispatch(FeishuIn::ButtonCb { key: key,
+        action,
+        chat_type: "p2p".into(),
+    }).await;
     // Drain the in-place flip (UpdateCardByMsgId) before SendAcp.
     let out = loop {
         let got = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())

@@ -84,7 +84,9 @@ async fn button_cb_dead_session_gets_dead_card() {
                 session_id: "ghost".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
-                value: serde_json::Value::Null, chat_type: "p2p".into(), },
+                value: serde_json::Value::Null,
+            },
+            chat_type: "p2p".into(),
         })
         .await;
     match next_out(&mut out_rx).await {
@@ -107,7 +109,9 @@ async fn button_cb_missing_request_id_gets_help() {
                 session_id: "s1".into(),
                 request_id: None,
                 decision: Some("allow_once".into()),
-                value: serde_json::Value::Null, chat_type: "p2p".into(), },
+                value: serde_json::Value::Null,
+            },
+            chat_type: "p2p".into(),
         })
         .await;
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
@@ -135,7 +139,9 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
                 session_id: "s1".into(),
                 request_id: Some("r9".into()),
                 decision: Some("yolo".into()),
-                value: serde_json::Value::Null, chat_type: "p2p".into(), },
+                value: serde_json::Value::Null,
+            },
+            chat_type: "p2p".into(),
         })
         .await;
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.

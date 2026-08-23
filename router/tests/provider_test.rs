@@ -182,7 +182,8 @@ async fn provider_create_submit_delete_round_trip() {
     // 点「＋ 新增」→ 表单卡原地出现。
     router
         .dispatch(FeishuIn::ButtonCb { key: key(),
-            action: card_action(json!({"form": "provider-custom", "op": "create" chat_type: "p2p".into(), }), "om_1"),
+            action: card_action(json!({"form": "provider-custom", "op": "create"}), "om_1"),
+            chat_type: "p2p".into(),
         })
         .await;
     let out = rx.recv().await.unwrap();
@@ -198,9 +199,10 @@ async fn provider_create_submit_delete_round_trip() {
     fv.insert("base_url".into(), json!("https://api.openai.com"));
     router
         .dispatch(FeishuIn::FormCb { key: key(),
-            value: json!({"form": "provider-custom", "op": "submit" chat_type: "p2p".into(), }),
+            value: json!({"form": "provider-custom", "op": "submit"}),
             form_value: fv,
             message_id: Some("om_1".into()),
+            chat_type: "p2p".into(),
         })
         .await;
     let out = rx.recv().await.unwrap();
@@ -213,9 +215,10 @@ async fn provider_create_submit_delete_round_trip() {
     router
         .dispatch(FeishuIn::ButtonCb { key: key(),
             action: card_action(
-                json!({"form": "provider-custom", "op": "delete", "id": "deepseek" chat_type: "p2p".into(), }),
+                json!({"form": "provider-custom", "op": "delete", "id": "deepseek"}),
                 "om_2",
             ),
+            chat_type: "p2p".into(),
         })
         .await;
     let out = rx.recv().await.unwrap();
@@ -250,10 +253,12 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
                 value: json!({
-                    "action": { "value": {"session_id": "s1", "request_id": "r1", "decision": "allow_once" chat_type: "p2p".into(), } },
-                    "context": { "open_message_id": "om_perm" }
+                    "action": { "value": {"session_id": "s1", "request_id": "r1", "decision": "allow_once"} },
+                    "context": { "open_message_id": "om_perm" },
+                    "chat_type": "p2p",
                 }),
             },
+            chat_type: "p2p".into(),
         })
         .await;
 
@@ -276,9 +281,10 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
     router
         .dispatch(FeishuIn::ButtonCb { key: key(),
             action: card_action(
-                json!({"form": "provider-custom", "op": "cancel" chat_type: "p2p".into(), }),
+                json!({"form": "provider-custom", "op": "cancel"}),
                 "om_cancel",
             ),
+            chat_type: "p2p".into(),
         })
         .await;
 
@@ -383,9 +389,10 @@ async fn edit_form_does_not_prefill_secret() {
     router
         .dispatch(FeishuIn::ButtonCb { key: key(),
             action: card_action(
-                json!({"form": "provider-custom", "op": "edit", "id": "deepseek" chat_type: "p2p".into(), }),
+                json!({"form": "provider-custom", "op": "edit", "id": "deepseek"}),
                 "om_e",
             ),
+            chat_type: "p2p".into(),
         })
         .await;
     let out = rx.recv().await.unwrap();
@@ -434,9 +441,10 @@ async fn empty_secret_submit_preserves_existing_key() {
     fv.insert("base_url".into(), json!("https://new.example"));
     router
         .dispatch(FeishuIn::FormCb { key: key(),
-            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek" chat_type: "p2p".into(), }),
+            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}),
             form_value: fv,
             message_id: Some("om_s".into()),
+            chat_type: "p2p".into(),
         })
         .await;
     let _ = rx.recv().await.unwrap();

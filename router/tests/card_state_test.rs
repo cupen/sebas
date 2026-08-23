@@ -494,8 +494,9 @@ async fn permission_card_click_emits_resolved_card_flip() {
                 decision: Some("allow_once".into()),
                 session_id: "sess-1".into(),
                 request_id: Some("req-1".into()),
-                value: serde_json::json!({ chat_type: "p2p".into(), }),
+                value: serde_json::json!({ "chat_type": "p2p" }),
             },
+            chat_type: "p2p".into(),
         })
         .await;
     // First Out: UpdateCardByMsgId that flips the original card in place.
@@ -560,8 +561,9 @@ async fn stale_permission_click_emits_expired_card() {
                 decision: Some("allow_once".into()),
                 session_id: "sess-1".into(),
                 request_id: Some("req-stale".into()),
-                value: serde_json::json!({ chat_type: "p2p".into(), }),
+                value: serde_json::json!({ "chat_type": "p2p" }),
             },
+            chat_type: "p2p".into(),
         })
         .await;
     // Stale click should NOT emit UpdateCardByMsgId (nothing to update
@@ -880,8 +882,9 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_session".into()),
-                value: json!({ chat_type: "p2p".into(), }),
+                value: json!({ "chat_type": "p2p" }),
             },
+            chat_type: "p2p".into(),
         })
         .await;
     // Expect: card flip + PermissionReply(AllowSession), and the grant
@@ -992,8 +995,9 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_session".into()),
-                value: json!({ chat_type: "p2p".into(), }),
+                value: json!({ "chat_type": "p2p" }),
             },
+            chat_type: "p2p".into(),
         })
         .await;
     // Drain card flip + reply.
