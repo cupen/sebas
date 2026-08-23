@@ -1,4 +1,4 @@
-use feishu::cards::{derive_topic, render_permission_card, render_root_card};
+use feishu::cards::{derive_topic, render_help_card, render_permission_card, render_root_card};
 
 #[test]
 fn derive_topic_uses_first_nonempty_line() {
@@ -138,6 +138,82 @@ fn root_card_after_text_delta_snapshot() {
 fn permission_card_snapshot() {
     let card = render_permission_card("s1", "r1", "Bash", &serde_json::json!({"cmd": "rm -rf"}));
     insta::assert_yaml_snapshot!(card);
+}
+
+/// /help 卡片必须用 `column_set` 把命令按钮横排（每行 2-3 个），而不是
+/// 之前的「每个命令一整行」。同时超长命令（如 /gateway on|off|...）单独
+/// 占满整行；每列内 = button + 灰色 desc Div 垂直堆叠。
+#[test]
+fn help_card_uses_column_set_rows() {
+    use feishu::cards::CardElement;
+
+    let groups = ["session", "system", "service", "other"];
+    for group in groups {
+        let card = render_help_card(group, "blue");
+        // 至少应有一个 column_set 行。
+        let colset_rows: Vec<&CardElement> = card
+            .body
+            .elements
+            .iter()
+            .filter(|e| matches!(e, CardElement::ColumnSet { .. }))
+            .collect();
+        assert!(
+            !colset_rows.is_empty(),
+            "group={group}: help card must contain ≥1 column_set row"
+        );
+        for row in &colset_rows {
+            let CardElement::ColumnSet { columns, .. } = row else {
+                continue;
+            };
+            assert!(
+                (1..=3).contains(&columns.len()),
+                "group={group}: column_set row must have 1-3 columns, got {}",
+                columns.len()
+            );
+            for col in columns {
+                // 每列 = button + 灰色 desc Div 垂直堆叠。
+                assert_eq!(
+                    col.elements.len(),
+                    2,
+                    "group={group}: each column must hold exactly 2 stacked items (button + desc)"
+                );
+                assert!(
+                    matches!(col.elements[0], CardElement::Button { .. }),
+                    "group={group}: column[0] must be a Button"
+                );
+                assert!(
+                    matches!(col.elements[1], CardElement::Div { .. }),
+                    "group={group}: column[1] must be a Div (description)"
+                );
+            }
+        }
+    }
+}
+
+/// service 组的 /gateway on|off|restart|status 是已知「超长」命令，必须
+/// 单独占满整行（columns.len() == 1，column 内含该命令的 button）。
+#[test]
+fn help_card_wide_command_takes_full_row() {
+    use feishu::cards::CardElement;
+
+    let card = render_help_card("service", "blue");
+    let mut found_wide = false;
+    for el in &card.body.elements {
+        if let CardElement::ColumnSet { columns, .. } = el {
+            if columns.len() == 1 {
+                if let CardElement::Button { text, .. } = &columns[0].elements[0] {
+                    if text.content.contains("/gateway") {
+                        found_wide = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found_wide,
+        "/gateway command should be rendered as a single-column row (full-width)"
+    );
 }
 
 #[test]

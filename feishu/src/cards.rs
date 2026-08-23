@@ -169,6 +169,29 @@ pub enum CardElement {
         /// `CardElement::Button`'s `behaviors[].value`).
         on_change: Value,
     },
+    /// Card JSON 2.0 `column_set`：横向排版容器，把若干 column 平铺。
+    /// 每个 column 内可放 button / markdown / div 等子元素，配合 `width`
+    /// 控制列宽比例。`flex_mode=false`（默认）时列均分；`true` 时按
+    /// column.width=weighted|auto 分配比例。
+    ColumnSet {
+        flex_mode: bool,
+        horizontal_spacing: Option<String>,
+        columns: Vec<CardColumn>,
+    },
+}
+
+/// `CardElement::ColumnSet` 的列定义。每个 column 是独立的子排版单元，
+/// `elements` 内通常是单个 button（与 column_set 组合实现多列横排）。
+#[derive(Debug, Clone, Serialize)]
+pub struct CardColumn {
+    pub tag: &'static str, // 始终 "column"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<String>, // "weighted" | "auto"；flex_mode=true 时生效
+    pub elements: Vec<CardElement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical_spacing: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizontal_align: Option<String>, // "left" | "center" | "right"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,6 +360,20 @@ impl Serialize for CardElement {
                 if let Some(iv) = initial_value {
                     s.serialize_field("initial_value", &iv)?;
                 }
+                s.end()
+            }
+            CardElement::ColumnSet {
+                flex_mode,
+                horizontal_spacing,
+                columns,
+            } => {
+                let mut s = ser.serialize_struct("CardElement", 3)?;
+                s.serialize_field("tag", "column_set")?;
+                s.serialize_field("flex_mode", flex_mode)?;
+                if let Some(spacing) = horizontal_spacing {
+                    s.serialize_field("horizontal_spacing", spacing)?;
+                }
+                s.serialize_field("columns", columns)?;
                 s.end()
             }
         }
@@ -943,19 +980,65 @@ pub fn render_help_card(group: &str, theme: &str) -> Card {
     }
     card.push_actions(tab_buttons);
 
-    // Divider + command buttons for the selected group
+    // Divider + command buttons for the selected group.
+    // 横排：每行 2-3 个 column，每个 column 内 = button(cmd) + 灰色 Div(desc)
+    // 垂直堆叠。超长 cmd（如 "/gateway on|off|restart|status"）单独占满整行。
     card.push_divider();
+    let mut pending_columns: Vec<CardColumn> = Vec::new();
+    let mut current_width = 0_u8; // 当前行累计「视觉权重」；满 6 触发 flush
+    let wide_weight: u8 = 6;
+    let normal_weight: u8 = 2;
+    let max_row_weight: u8 = 6;
     for (cmd, desc) in commands {
-        card.body.elements.push(CardElement::Button {
+        // 视觉权重估算：cmd 含空格/竖线或长度 >14 → 超长，独立成行；
+        // 否则按正常权重 2 计算（行满 3 个时 flush）。
+        let cmd_len = cmd.chars().count();
+        let is_wide = cmd.contains(' ') || cmd.contains('|') || cmd_len > 14;
+        let weight = if is_wide { wide_weight } else { normal_weight };
+        // 触发 flush：当前行已有内容 + 加这一格会超 6。
+        if !pending_columns.is_empty() && current_width + weight > max_row_weight {
+            card.body.elements.push(CardElement::ColumnSet {
+                flex_mode: false,
+                horizontal_spacing: Some("8px".into()),
+                columns: std::mem::take(&mut pending_columns),
+            });
+            current_width = 0;
+        }
+        // 单列：button 在上、灰色 desc Div 在下；按钮文本只保留 cmd（desc
+        // 单独渲染避免长文本溢出列宽）。
+        let button = CardElement::Button {
             text: CardText {
                 tag: "plain_text".into(),
-                content: format!("{cmd}  —  {desc}"),
+                content: (*cmd).into(),
             },
             r#type: "default".into(),
             behaviors: vec![CardBehavior {
                 r#type: "callback".into(),
                 value: serde_json::json!({"help_cmd": cmd}),
             }],
+        };
+        let desc_div = CardElement::Div {
+            text: DivText {
+                tag: "plain_text".into(),
+                content: (*desc).into(),
+                text_size: Some("notation".into()),
+                text_color: Some("grey".into()),
+            },
+        };
+        pending_columns.push(CardColumn {
+            tag: "column",
+            width: None,
+            elements: vec![button, desc_div],
+            vertical_spacing: Some("4px".into()),
+            horizontal_align: Some("center".into()),
+        });
+        current_width += weight;
+    }
+    if !pending_columns.is_empty() {
+        card.body.elements.push(CardElement::ColumnSet {
+            flex_mode: false,
+            horizontal_spacing: Some("8px".into()),
+            columns: pending_columns,
         });
     }
 
