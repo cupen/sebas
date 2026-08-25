@@ -84,9 +84,13 @@ async fn close_session_clears_reply_target() {
     let (router, _rx) = RouterHandle::new(map.clone());
     // 模拟入站消息写入 reply target（话题内 = 话题根消息 message_id）。
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "hello".into(),
-            reply_to: Some("om_root".into()), chat_type: "private".into(), mentions: vec![], })
+            reply_to: Some("om_root".into()),
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
     assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));
 

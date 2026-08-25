@@ -63,8 +63,12 @@ impl Default for FeishuConfig {
     }
 }
 
+/// 飞书真实 wire 值只有 "p2p"（私聊）和 "group"（群聊）；"private" 是
+/// 字段缺失时的本地缺省幻影值（events.rs），过滤侧另做 private↔p2p
+/// 别名归一化兜底。sebas-5y5：旧默认 ["private","group"] 按字面匹配
+/// 会把所有真实私聊消息静默丢弃。
 fn default_chat_types() -> Vec<String> {
-    vec!["private".into(), "group".into()]
+    vec!["p2p".into(), "group".into()]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,7 +188,7 @@ fn default_log_level() -> String {
     "info".into()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct WatchdogConfig {
     #[serde(default)]
     pub upgrade: WatchdogUpgradeConfig,
@@ -192,16 +196,8 @@ pub struct WatchdogConfig {
     pub storage: WatchdogStorageConfig,
     #[serde(default)]
     pub webui: WatchdogWebUiConfig,
-}
-
-impl Default for WatchdogConfig {
-    fn default() -> Self {
-        Self {
-            upgrade: WatchdogUpgradeConfig::default(),
-            storage: WatchdogStorageConfig::default(),
-            webui: WatchdogWebUiConfig::default(),
-        }
-    }
+    #[serde(default)]
+    pub gateway: WatchdogGatewayConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -235,25 +231,25 @@ fn default_webui_port() -> u16 {
     9797
 }
 
+/// watchdog 模式下 gateway 子进程的开关（默认关：未 opt-in 不 spawn）。
+/// 生产 gateway 默认形态仍是裸 core 的 in-process `run --gateway`；
+/// 显式开启后由 watchdog 作为受管子进程监督（sebas-08c）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WatchdogGatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatchdogUpgradeConfig {
     /// GitHub 仓库（owner/repo）
     #[serde(default = "default_github_repo")]
     pub github_repo: String,
-    /// 启动时自动检查更新
-    #[serde(default = "default_true")]
-    pub check_on_start: bool,
-    /// 最大重试次数
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
-    /// 重试间隔（秒）。仅用于失败重试的等待，**不是**子进程超时。
-    #[serde(default = "default_retry_delay")]
-    pub retry_delay_secs: u64,
     /// release 更新（下载 + 校验 + 安装）的 updater 子进程超时（秒）。
     #[serde(default = "default_updater_timeout")]
     pub updater_timeout_secs: u64,
     /// dev 更新（cargo build --release）的 updater 子进程超时（秒）。
-    /// 编译整个 workspace 可能耗时数分钟，故默认远大于 release 路径。
+    /// 编译整个 workspace 可耗时数分钟，故默认远大于 release 路径。
     #[serde(default = "default_dev_build_timeout")]
     pub dev_build_timeout_secs: u64,
 }
@@ -262,9 +258,6 @@ impl Default for WatchdogUpgradeConfig {
     fn default() -> Self {
         Self {
             github_repo: default_github_repo(),
-            check_on_start: default_true(),
-            max_retries: default_max_retries(),
-            retry_delay_secs: default_retry_delay(),
             updater_timeout_secs: default_updater_timeout(),
             dev_build_timeout_secs: default_dev_build_timeout(),
         }
@@ -283,17 +276,41 @@ impl WatchdogUpgradeConfig {
     }
 }
 
+/// 已废弃且无消费者的 `[watchdog.upgrade]` 键。解析时扫描原始 TOML，
+/// 命中则 warn 一行提示（不报错，旧配置照常启动）。
+const DEPRECATED_WATCHDOG_UPGRADE_KEYS: &[&str] =
+    &["check_on_start", "max_retries", "retry_delay_secs"];
+
+/// 扫描原始 TOML，返回 `[watchdog.upgrade]` 段中出现的废弃键。
+fn deprecated_watchdog_upgrade_hits(raw: &str) -> Vec<&'static str> {
+    let Ok(value) = raw.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Some(watchdog) = value.get("watchdog").and_then(|v| v.as_table()) else {
+        return Vec::new();
+    };
+    let Some(upgrade) = watchdog.get("upgrade").and_then(|v| v.as_table()) else {
+        return Vec::new();
+    };
+    DEPRECATED_WATCHDOG_UPGRADE_KEYS
+        .iter()
+        .copied()
+        .filter(|k| upgrade.contains_key(*k))
+        .collect()
+}
+
+fn warn_deprecated_watchdog_keys(raw: &str) {
+    let hit = deprecated_watchdog_upgrade_hits(raw);
+    if !hit.is_empty() {
+        tracing::warn!(
+            "配置 [watchdog.upgrade] 含已废弃字段（{}）：这些字段不再有效，请从配置中移除",
+            hit.join(", ")
+        );
+    }
+}
+
 fn default_github_repo() -> String {
     "cupen/sebas".into()
-}
-fn default_true() -> bool {
-    true
-}
-fn default_max_retries() -> u32 {
-    3
-}
-fn default_retry_delay() -> u64 {
-    5
 }
 fn default_updater_timeout() -> u64 {
     600
@@ -330,6 +347,7 @@ impl Config {
     /// `~` paths. Priority per spec §6.3: CLI flags > env vars > TOML >
     /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
+        warn_deprecated_watchdog_keys(s);
         let mut cfg: Config =
             toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
         cfg.apply_env_overrides();
@@ -474,4 +492,47 @@ pub fn expand_tilde(p: &str) -> String {
         return home.join(rest).to_string_lossy().into();
     }
     p.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deprecated_watchdog_upgrade_fields_parse_but_are_flagged() {
+        let raw = r#"
+[feishu]
+app_id = "a"
+app_secret = "b"
+
+[watchdog.upgrade]
+check_on_start = true
+max_retries = 5
+retry_delay_secs = 2
+updater_timeout_secs = 123
+"#;
+        // 旧配置不报错：parse 成功，有效字段照常读取。
+        let cfg = Config::parse(raw).expect("含废弃字段的配置必须能解析");
+        assert_eq!(cfg.watchdog.upgrade.updater_timeout_secs, 123);
+        // 废弃键被全部识别（parse 内部会对它们 warn 一行）。
+        let mut hits = deprecated_watchdog_upgrade_hits(raw);
+        hits.sort_unstable();
+        assert_eq!(
+            hits,
+            vec!["check_on_start", "max_retries", "retry_delay_secs"]
+        );
+    }
+
+    #[test]
+    fn clean_config_has_no_deprecated_hits() {
+        let raw = r#"
+[feishu]
+app_id = "a"
+app_secret = "b"
+
+[watchdog.upgrade]
+updater_timeout_secs = 42
+"#;
+        assert!(deprecated_watchdog_upgrade_hits(raw).is_empty());
+    }
 }

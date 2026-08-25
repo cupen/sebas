@@ -15,9 +15,13 @@ async fn new_text_creates_session_and_emits_initial_card() {
 
     tokio::spawn(async move {
         let _ = router
-            .dispatch(FeishuIn::Text { key: key.clone(),
+            .dispatch(FeishuIn::Text {
+                key: key.clone(),
                 text: "hello".into(),
-                reply_to: None, chat_type: "private".into(), mentions: vec![], })
+                reply_to: None,
+                chat_type: "private".into(),
+                mentions: vec![],
+            })
             .await;
     });
 
@@ -43,9 +47,13 @@ async fn existing_session_dispatches_continue() {
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     tokio::spawn(async move {
         let _ = router
-            .dispatch(FeishuIn::Text { key: k.clone(),
+            .dispatch(FeishuIn::Text {
+                key: k.clone(),
                 text: "more".into(),
-                reply_to: None, chat_type: "private".into(), mentions: vec![], })
+                reply_to: None,
+                chat_type: "private".into(),
+                mentions: vec![],
+            })
             .await;
     });
 
@@ -83,9 +91,13 @@ async fn dormant_mapping_emits_spawn_resume() {
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     tokio::spawn(async move {
         let _ = router
-            .dispatch(FeishuIn::Text { key: k.clone(),
+            .dispatch(FeishuIn::Text {
+                key: k.clone(),
                 text: "继续".into(),
-                reply_to: None, chat_type: "private".into(), mentions: vec![], })
+                reply_to: None,
+                chat_type: "private".into(),
+                mentions: vec![],
+            })
             .await;
     });
 

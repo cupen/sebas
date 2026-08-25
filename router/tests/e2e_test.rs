@@ -19,9 +19,13 @@ async fn full_round_trip_text_to_events() {
     // the dispatcher (after create_session mints the real session_id), not the
     // router, so it does not appear on this channel.
     handle
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "hello".into(),
-            reply_to: None, chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     let first = tokio::time::timeout(WAIT, out_rx.recv())

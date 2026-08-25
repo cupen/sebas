@@ -44,9 +44,13 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         thread_id: None,
     };
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "first".into(),
-            reply_to: None, chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
     let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
         .await
@@ -100,9 +104,13 @@ async fn second_text_flips_fsm_and_forwards_continue() {
     //    values the router produces for the FSM-flip + continue-forward
     //    path. We only consume up to SendAcp ContinueSession.
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "second".into(),
-            reply_to: None, chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     let mut saw_react_working = false;

@@ -179,42 +179,7 @@ async fn update_dev(data_dir: &Path, project_dir: Option<&PathBuf>, dry_run: boo
     Ok(())
 }
 
-// ─── Version / Readiness Policy (spec §14) ────────────────
-
-/// Signal emitted after a completed update.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateSignal {
-    /// Core restart is sufficient.
-    RestartCore,
-    /// The update affects watchdog/control-plane semantics; the watchdog
-    /// process itself should be restarted (e.g. via systemd).
-    WatchdogServiceRestartRequired,
-}
-
-/// Human-readable message for an [`UpdateSignal`].
-pub fn update_signal_message(signal: UpdateSignal) -> &'static str {
-    match signal {
-        UpdateSignal::RestartCore => "update completed; restarting core",
-        UpdateSignal::WatchdogServiceRestartRequired => {
-            "update completed; watchdog service restart required"
-        }
-    }
-}
-
-/// Whether an update touches watchdog/control-plane code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ControlPlaneImpact {
-    CoreOnly,
-    AffectsControlPlane,
-}
-
-/// Compute the appropriate [`UpdateSignal`] based on the update's impact.
-pub fn classify_update_impact(impact: ControlPlaneImpact) -> UpdateSignal {
-    match impact {
-        ControlPlaneImpact::CoreOnly => UpdateSignal::RestartCore,
-        ControlPlaneImpact::AffectsControlPlane => UpdateSignal::WatchdogServiceRestartRequired,
-    }
-}
+// ─── Readiness Policy ─────────────────────────────────────
 
 /// Outcome when a core child exits without reporting readiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,21 +202,6 @@ pub fn classify_readiness_failure(
         ReadinessFailureAction::NewBinaryNotReady
     } else {
         ReadinessFailureAction::CrashRetry
-    }
-}
-
-/// Recommended recovery action when an update cannot be completed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryAction {
-    Rollback,
-    ManualIntervention,
-}
-
-pub fn recommended_recovery(has_rollback_backup: bool) -> RecoveryAction {
-    if has_rollback_backup {
-        RecoveryAction::Rollback
-    } else {
-        RecoveryAction::ManualIntervention
     }
 }
 
@@ -282,18 +232,6 @@ mod tests {
             cfg.updater_timeout(true) >= Duration::from_secs(600),
             "dev 编译超时过短，会误杀正常编译"
         );
-    }
-
-    #[test]
-    fn retry_delay_is_not_used_as_timeout() {
-        // retry_delay_secs 语义是重试间隔。即便它被设成极小值，
-        // updater 超时也不能跟着变小。
-        let cfg = WatchdogUpgradeConfig {
-            retry_delay_secs: 1,
-            ..WatchdogUpgradeConfig::default()
-        };
-        assert!(cfg.updater_timeout(true) > Duration::from_secs(1));
-        assert!(cfg.updater_timeout(false) > Duration::from_secs(1));
     }
 
     #[test]
@@ -337,30 +275,6 @@ dev_build_timeout_secs = 4567
     }
 
     #[test]
-    fn core_only_update_does_not_require_watchdog_restart() {
-        assert_eq!(
-            classify_update_impact(ControlPlaneImpact::CoreOnly),
-            UpdateSignal::RestartCore
-        );
-    }
-
-    #[test]
-    fn control_plane_update_requires_watchdog_restart() {
-        assert_eq!(
-            classify_update_impact(ControlPlaneImpact::AffectsControlPlane),
-            UpdateSignal::WatchdogServiceRestartRequired
-        );
-    }
-
-    #[test]
-    fn update_signal_messages_are_distinct() {
-        let core_msg = update_signal_message(UpdateSignal::RestartCore);
-        let cp_msg = update_signal_message(UpdateSignal::WatchdogServiceRestartRequired);
-        assert_ne!(core_msg, cp_msg);
-        assert!(cp_msg.contains("watchdog service restart required"));
-    }
-
-    #[test]
     fn normal_child_exit_is_crash_retry() {
         assert_eq!(
             classify_readiness_failure(false, true, true),
@@ -385,19 +299,6 @@ dev_build_timeout_secs = 4567
         assert_eq!(
             classify_readiness_failure(true, true, true),
             ReadinessFailureAction::CrashRetry
-        );
-    }
-
-    #[test]
-    fn recovery_with_backup_recommends_rollback() {
-        assert_eq!(recommended_recovery(true), RecoveryAction::Rollback);
-    }
-
-    #[test]
-    fn recovery_without_backup_recommends_manual_intervention() {
-        assert_eq!(
-            recommended_recovery(false),
-            RecoveryAction::ManualIntervention
         );
     }
 }

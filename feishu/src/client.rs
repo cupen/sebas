@@ -264,7 +264,8 @@ impl FeishuClient {
         root_id: Option<&str>,
         thread_id: Option<&str>,
     ) -> anyhow::Result<String> {
-        let mut url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id".to_string();
+        let mut url =
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id".to_string();
         if let Some(tid) = thread_id {
             url.push_str("&thread_id=");
             url.push_str(tid);

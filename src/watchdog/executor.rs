@@ -15,32 +15,22 @@ use crate::error::{Result, SebasError};
 use crate::watchdog::auth::{AssertionPrincipal, actor_to_principal};
 use crate::watchdog::confirmation::{ConfirmationError, ConfirmationService};
 use crate::watchdog::control::{
-    Actor, ControlRequest, ControlResponse, ControlService, UpdateKind, UpdateTarget,
+    Actor, ControlRequest, ControlResponse, ControlService, DesiredState, UpdateKind, UpdateTarget,
 };
 use crate::watchdog::control_rpc::{RpcControlResponse, RpcServiceStatus};
+use crate::watchdog::services::ServiceManager;
+use crate::watchdog::supervisor::ServiceName;
+use crate::watchdog::supervisor::ServiceState;
 use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tracing::{info, warn};
-
-/// What the supervisor should do once an operation settles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PostAction {
-    /// Nothing to do (dry-run, status, or a failed operation).
-    None,
-    /// The core child must be restarted. `is_upgrade` tells the watchdog whether
-    /// this restart launches a freshly-installed binary (so a subsequent crash
-    /// *before Ready* can be classified as NewBinaryNotReady and trigger an
-    /// automated rollback) vs. a plain restart of the current binary.
-    RestartCore { is_upgrade: bool },
-}
 
 /// Outcome of running an operation to completion.
 #[derive(Debug, Clone)]
 pub struct ExecutionOutcome {
     pub operation_id: String,
-    pub post_action: PostAction,
 }
 
 /// How an accepted request is carried out.
@@ -50,8 +40,18 @@ enum Execution {
         plan: UpdatePlan,
         label: &'static str,
     },
-    /// Settle immediately and restart the core child. No installer work.
-    RestartOnly,
+    /// Restart the core child via the ServiceManager. `is_upgrade` marks a
+    /// freshly-installed binary (so a subsequent crash *before Ready* is
+    /// classified as NewBinaryNotReady and triggers auto-rollback).
+    RestartCore { is_upgrade: bool },
+    /// Set a managed service's desired state.
+    ServiceSet {
+        name: ServiceName,
+        desired: DesiredState,
+        persist: bool,
+    },
+    /// Restart a managed service.
+    ServiceRestart { name: ServiceName },
     /// Settle immediately with nothing to do (Status, service queries).
     Nothing,
 }
@@ -59,14 +59,15 @@ enum Execution {
 /// Owns everything needed to turn a `ControlRequest` into real work.
 ///
 /// Cloneable so adapters (RPC handlers, IPC loop) can each hold one; all clones
-/// share the same `ControlService` and restart channel.
+/// share the same `ControlService` and `ServiceManager`.
 #[derive(Clone)]
 pub struct ControlExecutor {
     control: Arc<Mutex<ControlService>>,
     runner: Arc<dyn UpdaterRunner>,
     config: WatchdogConfig,
     config_path: String,
-    restart_tx: mpsc::UnboundedSender<PostAction>,
+    /// Managed-service table (core/webui/gateway supervision handles).
+    services: ServiceManager,
     /// Single-use, short-lived confirmation grants for dangerous actions
     /// (spec §7). Shared across executor clones.
     confirmation: Arc<ConfirmationService>,
@@ -101,14 +102,14 @@ impl ControlExecutor {
         runner: Arc<dyn UpdaterRunner>,
         config: WatchdogConfig,
         config_path: String,
-        restart_tx: mpsc::UnboundedSender<PostAction>,
+        services: ServiceManager,
     ) -> Self {
         Self {
             control,
             runner,
             config,
             config_path,
-            restart_tx,
+            services,
             confirmation: Arc::new(ConfirmationService::new()),
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -128,9 +129,7 @@ impl ControlExecutor {
         request: ControlRequest,
     ) -> Result<ExecutionOutcome> {
         let operation_id = self.accept(actor, request.clone()).await?;
-        let outcome = self.run_accepted(operation_id, request).await;
-        self.dispatch_post_action(&outcome);
-        Ok(outcome)
+        Ok(self.run_accepted(operation_id, request).await)
     }
 
     /// Accept a request, then run it on a background task.
@@ -147,8 +146,7 @@ impl ControlExecutor {
         let operation_id = operation_id.clone();
         let this = self.clone();
         tokio::spawn(async move {
-            let outcome = this.run_accepted(operation_id, request).await;
-            this.dispatch_post_action(&outcome);
+            let _ = this.run_accepted(operation_id, request).await;
         });
 
         response
@@ -335,9 +333,7 @@ impl ControlExecutor {
         operation_id: String,
         request: ControlRequest,
     ) -> ExecutionOutcome {
-        let execution = self.plan_for(&request);
-
-        match execution {
+        match self.plan_for(&request) {
             Execution::Nothing => {
                 // Non-executing request (Status, service queries): nothing to run,
                 // but it still occupies a record and must be settled.
@@ -345,19 +341,55 @@ impl ControlExecutor {
                     .lock()
                     .await
                     .mark_done(&operation_id, "no execution required");
-                ExecutionOutcome {
-                    operation_id,
-                    post_action: PostAction::None,
-                }
             }
-            Execution::RestartOnly => {
+            Execution::RestartCore { is_upgrade } => {
                 self.control
                     .lock()
                     .await
                     .mark_done(&operation_id, "restarting core");
-                ExecutionOutcome {
-                    operation_id,
-                    post_action: PostAction::RestartCore { is_upgrade: false },
+                let _ = self.services.restart(ServiceName::Core, is_upgrade).await;
+            }
+            Execution::ServiceSet {
+                name,
+                desired,
+                persist,
+            } => {
+                self.control.lock().await.mark_running(
+                    &operation_id,
+                    format!("setting {} to {desired:?}", name.as_str()),
+                );
+                match self.services.set_desired(name, desired, persist).await {
+                    Ok(()) => self.control.lock().await.mark_done(
+                        &operation_id,
+                        format!("{} set to {desired:?}", name.as_str()),
+                    ),
+                    Err(e) => {
+                        warn!(operation_id = %operation_id, "service set failed: {e}");
+                        self.control
+                            .lock()
+                            .await
+                            .mark_error(&operation_id, format!("service set failed: {e}"));
+                    }
+                }
+            }
+            Execution::ServiceRestart { name } => {
+                self.control
+                    .lock()
+                    .await
+                    .mark_running(&operation_id, format!("restarting {}", name.as_str()));
+                match self.services.restart(name, false).await {
+                    Ok(()) => self
+                        .control
+                        .lock()
+                        .await
+                        .mark_done(&operation_id, format!("{} restarted", name.as_str())),
+                    Err(e) => {
+                        warn!(operation_id = %operation_id, "service restart failed: {e}");
+                        self.control
+                            .lock()
+                            .await
+                            .mark_error(&operation_id, format!("service restart failed: {e}"));
+                    }
                 }
             }
             Execution::Updater { plan, label } => {
@@ -383,35 +415,36 @@ impl ControlExecutor {
                             .lock()
                             .await
                             .mark_error(&operation_id, format!("{label} failed: {error}"));
-                        ExecutionOutcome {
-                            operation_id,
-                            post_action: PostAction::None,
-                        }
                     }
                     Ok(()) => {
-                        let post_action = if plan.dry_run {
-                            PostAction::None
+                        if plan.dry_run {
+                            self.control
+                                .lock()
+                                .await
+                                .mark_done(&operation_id, format!("{label} dry-run completed"));
                         } else {
-                            PostAction::RestartCore { is_upgrade: true }
-                        };
-                        let message = if plan.dry_run {
-                            format!("{label} dry-run completed")
-                        } else {
-                            format!("{label} completed; restarting core")
-                        };
-                        self.control.lock().await.mark_done(&operation_id, message);
-                        ExecutionOutcome {
-                            operation_id,
-                            post_action,
+                            // 升级/回滚落地：重启 core 并标记 is_upgrade，
+                            // 交给 readiness 门 + 自动回滚钩子兜底。
+                            self.services.restart_core_after_upgrade().await;
+                            self.control.lock().await.mark_done(
+                                &operation_id,
+                                format!("{label} completed; restarting core"),
+                            );
                         }
                     }
                 }
             }
         }
+        ExecutionOutcome { operation_id }
     }
 
     /// Map a control request onto an execution path.
     fn plan_for(&self, request: &ControlRequest) -> Execution {
+        use crate::watchdog::control::ManagedService;
+        let service_name = |s: &ManagedService| match s {
+            ManagedService::WebUi => ServiceName::WebUi,
+            ManagedService::Gateway | ManagedService::Feishu => ServiceName::Gateway,
+        };
         match request {
             ControlRequest::Update {
                 kind,
@@ -444,32 +477,40 @@ impl ControlExecutor {
                 },
                 label: "rollback",
             },
-            ControlRequest::RestartCore => {
-                // Restart needs no installer work — settle immediately and
-                // signal the supervisor to restart the core child.
-                Execution::RestartOnly
-            }
-            _ => Execution::Nothing,
+            ControlRequest::RestartCore => Execution::RestartCore { is_upgrade: false },
+            ControlRequest::StopCore => Execution::ServiceSet {
+                name: ServiceName::Core,
+                desired: DesiredState::Disabled,
+                persist: false,
+            },
+            ControlRequest::StartCore => Execution::ServiceSet {
+                name: ServiceName::Core,
+                desired: DesiredState::Enabled,
+                persist: false,
+            },
+            ControlRequest::ServiceSet {
+                service,
+                desired,
+                persist,
+            } => Execution::ServiceSet {
+                name: service_name(service),
+                desired: *desired,
+                persist: *persist,
+            },
+            ControlRequest::ServiceRestart { service } => Execution::ServiceRestart {
+                name: service_name(service),
+            },
+            ControlRequest::Status | ControlRequest::ServiceStatus => Execution::Nothing,
         }
     }
 
-    fn dispatch_post_action(&self, outcome: &ExecutionOutcome) {
-        if outcome.post_action == PostAction::None {
-            return;
-        }
-        // A closed channel means the supervisor loop is gone (shutting down);
-        // there is nothing useful to do beyond noting it.
-        if self.restart_tx.send(outcome.post_action).is_err() {
-            warn!("core restart requested but supervisor channel is closed");
-        }
-    }
-
-    /// Return the current status of all managed services.
+    /// Return the current status of all managed services — real supervision
+    /// snapshots plus the updater operation state. There is no "feishu" row:
+    /// feishu is a core-internal adapter, not a managed service.
     pub async fn service_status(&self) -> RpcControlResponse {
         use crate::watchdog::control::OperationStatus;
         let control = self.control.lock().await;
 
-        // Check if there's a running exclusive operation (update/rollback/restart).
         let updater_status = match &control.running_exclusive() {
             Some(op_id) => {
                 if let Some(record) = control.operation(op_id) {
@@ -484,52 +525,38 @@ impl ControlExecutor {
             None => "idle",
         };
 
-        // Check if the core has been accepted recently (simple heuristic:
-        // if there are operations, the core is reachable).
-        let core_status = if control.operation_count() > 0 {
-            "running"
-        } else {
-            "unknown"
-        };
-
-        let services = vec![
-            RpcServiceStatus {
-                name: "watchdog".into(),
-                status: "running".into(),
-                desired: "enabled".into(),
-                uptime_secs: None,
-            },
-            RpcServiceStatus {
-                name: "core".into(),
-                status: core_status.into(),
-                desired: "enabled".into(),
-                uptime_secs: None,
-            },
-            RpcServiceStatus {
-                name: "updater".into(),
-                status: updater_status.into(),
-                desired: "enabled".into(),
-                uptime_secs: None,
-            },
-            RpcServiceStatus {
-                name: "webui".into(),
-                status: "running".into(),
-                desired: "enabled".into(),
-                uptime_secs: None,
-            },
-            RpcServiceStatus {
-                name: "gateway".into(),
-                status: "running".into(),
-                desired: "enabled".into(),
-                uptime_secs: None,
-            },
-            RpcServiceStatus {
-                name: "feishu".into(),
-                status: "running".into(),
-                desired: "enabled".into(),
-                uptime_secs: None,
-            },
-        ];
+        let mut services = vec![RpcServiceStatus {
+            name: "watchdog".into(),
+            status: "running".into(),
+            desired: "enabled".into(),
+            uptime_secs: None,
+        }];
+        for snap in self.services.all_snapshots().await {
+            let status = match snap.state {
+                ServiceState::Starting => "starting",
+                ServiceState::Running => "running",
+                ServiceState::Restarting => "restarting",
+                ServiceState::Stopped => "stopped",
+                ServiceState::Disabled => "disabled",
+            };
+            let desired = match snap.desired {
+                DesiredState::Enabled => "enabled",
+                DesiredState::Disabled => "disabled",
+            };
+            let uptime_secs = snap.started_at.map(|t| t.elapsed().as_secs());
+            services.push(RpcServiceStatus {
+                name: snap.name.as_str().into(),
+                status: status.into(),
+                desired: desired.into(),
+                uptime_secs,
+            });
+        }
+        services.push(RpcServiceStatus {
+            name: "updater".into(),
+            status: updater_status.into(),
+            desired: "enabled".into(),
+            uptime_secs: None,
+        });
 
         RpcControlResponse::Services { services }
     }
@@ -608,6 +635,7 @@ fn confirmation_message(request: &ControlRequest) -> String {
 mod tests {
     use super::*;
     use crate::watchdog::control::{ErrorCode, OperationStatus};
+    use crate::watchdog::services::service_from_str;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Records how many times it ran and what it was asked to do.
@@ -636,21 +664,19 @@ mod tests {
 
     fn executor_with(
         runner: Arc<dyn UpdaterRunner>,
-    ) -> (
-        ControlExecutor,
-        Arc<Mutex<ControlService>>,
-        mpsc::UnboundedReceiver<PostAction>,
-    ) {
+    ) -> (ControlExecutor, Arc<Mutex<ControlService>>) {
         let control = Arc::new(Mutex::new(ControlService::new()));
-        let (tx, rx) = mpsc::unbounded_channel();
+        // 空 ServiceManager（未注册任何服务）：重启命令走 UnknownService
+        // 分支但不 panic —— 执行路径测试只关心 operation 结算。
+        let services = ServiceManager::new(std::env::temp_dir().join("sebas-executor-test.json"));
         let executor = ControlExecutor::new(
             control.clone(),
             runner,
             WatchdogConfig::default(),
             "./config.toml".into(),
-            tx,
+            services,
         );
-        (executor, control, rx)
+        (executor, control)
     }
 
     fn release_update(dry_run: bool) -> ControlRequest {
@@ -662,9 +688,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_update_runs_runner_and_requests_restart() {
+    async fn successful_update_runs_runner_and_settles() {
         let runner = Arc::new(FakeRunner::default());
-        let (executor, control, mut rx) = executor_with(runner.clone());
+        let (executor, control) = executor_with(runner.clone());
 
         let outcome = executor
             .submit_blocking(Actor::System, release_update(false))
@@ -676,14 +702,6 @@ mod tests {
             1,
             "runner must execute"
         );
-        assert_eq!(
-            outcome.post_action,
-            PostAction::RestartCore { is_upgrade: true }
-        );
-        assert_eq!(
-            rx.try_recv().ok(),
-            Some(PostAction::RestartCore { is_upgrade: true })
-        );
 
         let control = control.lock().await;
         let op = control.operation(&outcome.operation_id).expect("record");
@@ -691,9 +709,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dry_run_does_not_request_restart() {
+    async fn dry_run_settles_without_restart() {
         let runner = Arc::new(FakeRunner::default());
-        let (executor, _control, mut rx) = executor_with(runner.clone());
+        let (executor, control) = executor_with(runner.clone());
 
         let outcome = executor
             .submit_blocking(Actor::System, release_update(true))
@@ -701,28 +719,24 @@ mod tests {
             .expect("dry-run must be accepted");
 
         assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(outcome.post_action, PostAction::None);
-        assert!(rx.try_recv().is_err(), "dry-run must not restart core");
+
+        let control = control.lock().await;
+        let op = control.operation(&outcome.operation_id).expect("record");
+        assert_eq!(op.status, OperationStatus::Succeeded);
     }
 
     #[tokio::test]
-    async fn failed_update_settles_operation_and_skips_restart() {
+    async fn failed_update_settles_operation() {
         let runner = Arc::new(FakeRunner {
             fail: true,
             ..Default::default()
         });
-        let (executor, control, mut rx) = executor_with(runner.clone());
+        let (executor, control) = executor_with(runner.clone());
 
         let outcome = executor
             .submit_blocking(Actor::System, release_update(false))
             .await
             .expect("accept succeeds even though the run fails");
-
-        assert_eq!(outcome.post_action, PostAction::None);
-        assert!(
-            rx.try_recv().is_err(),
-            "failed update must not restart core"
-        );
 
         let control = control.lock().await;
         let op = control.operation(&outcome.operation_id).expect("record");
@@ -734,7 +748,7 @@ mod tests {
     #[tokio::test]
     async fn consecutive_updates_do_not_deadlock_on_the_exclusive_lock() {
         let runner = Arc::new(FakeRunner::default());
-        let (executor, _control, _rx) = executor_with(runner.clone());
+        let (executor, _control) = executor_with(runner.clone());
 
         for attempt in 1..=3 {
             executor
@@ -752,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_update_releases_lock_for_the_next_one() {
-        let (executor, _control, _rx) = executor_with(Arc::new(FakeRunner {
+        let (executor, _control) = executor_with(Arc::new(FakeRunner {
             fail: true,
             ..Default::default()
         }));
@@ -762,7 +776,7 @@ mod tests {
             .submit_blocking(Actor::System, release_update(false))
             .await
             .expect("accepted");
-        assert_eq!(first.post_action, PostAction::None);
+        drop(first);
 
         // ...and must not wedge the second.
         executor
@@ -773,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn panicking_runner_still_releases_the_lock() {
-        let (executor, control, _rx) = executor_with(Arc::new(FakeRunner {
+        let (executor, control) = executor_with(Arc::new(FakeRunner {
             panic: true,
             ..Default::default()
         }));
@@ -803,7 +817,7 @@ mod tests {
     #[tokio::test]
     async fn detached_submit_returns_immediately_then_settles() {
         let runner = Arc::new(FakeRunner::default());
-        let (executor, control, mut rx) = executor_with(runner.clone());
+        let (executor, control) = executor_with(runner.clone());
 
         let response = executor
             .submit_detached(Actor::Cli { uid: 1000 }, release_update(false))
@@ -812,22 +826,25 @@ mod tests {
             panic!("detached submit must be accepted");
         };
 
-        // Background task settles it; wait for the restart signal.
-        let action = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("background execution must finish")
-            .expect("channel open");
-        assert_eq!(action, PostAction::RestartCore { is_upgrade: true });
-
-        let control = control.lock().await;
-        let op = control.operation(&operation_id).expect("record");
-        assert_eq!(op.status, OperationStatus::Succeeded);
+        // Background task settles it; poll the operation record briefly.
+        for _ in 0..100 {
+            {
+                let control = control.lock().await;
+                if let Some(op) = control.operation(&operation_id)
+                    && op.status == OperationStatus::Succeeded
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("background execution must settle the operation");
     }
 
     #[tokio::test]
     async fn detached_submit_releases_lock_so_rpc_callers_are_not_wedged() {
         let runner = Arc::new(FakeRunner::default());
-        let (executor, _control, mut rx) = executor_with(runner.clone());
+        let (executor, _control) = executor_with(runner.clone());
 
         for _ in 0..2 {
             let response = executor
@@ -838,10 +855,7 @@ mod tests {
                 "detached RPC update must not be rejected as Busy"
             );
             // Let the background task settle before the next submit.
-            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-                .await
-                .expect("execution finishes")
-                .expect("channel open");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
         assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
@@ -850,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn dev_update_reaches_the_runner_as_a_dev_plan() {
         let runner = Arc::new(FakeRunner::default());
-        let (executor, _control, _rx) = executor_with(runner.clone());
+        let (executor, _control) = executor_with(runner.clone());
 
         executor
             .submit_blocking(
@@ -883,7 +897,7 @@ mod tests {
         }
 
         let runner = Arc::new(RollbackSpy::default());
-        let (executor, _control, _rx) = executor_with(runner.clone());
+        let (executor, _control) = executor_with(runner.clone());
 
         executor
             .submit_blocking(Actor::System, ControlRequest::Rollback { dry_run: false })
@@ -912,7 +926,7 @@ mod tests {
         let runner = Arc::new(Blocking {
             gate: tokio::sync::Notify::new(),
         });
-        let (executor, _control, _rx) = executor_with(runner.clone());
+        let (executor, _control) = executor_with(runner.clone());
 
         // Start one and leave it parked inside the runner.
         let first = executor
@@ -938,5 +952,49 @@ mod tests {
         );
 
         runner.gate.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn service_status_reports_watchdog_updater_and_no_feishu_row() {
+        let (executor, _control) = executor_with(Arc::new(FakeRunner::default()));
+
+        let RpcControlResponse::Services { services } = executor.service_status().await else {
+            panic!("service_status must return Services");
+        };
+        let names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"watchdog"));
+        assert!(names.contains(&"updater"));
+        assert!(
+            !names.contains(&"feishu"),
+            "feishu is a core-internal adapter, not a managed service"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_status_for_filters_to_requested_service() {
+        let (executor, _control) = executor_with(Arc::new(FakeRunner::default()));
+
+        let RpcControlResponse::Services { services } =
+            executor.service_status_for("updater").await
+        else {
+            panic!("service_status_for must return Services");
+        };
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "updater");
+
+        let RpcControlResponse::Services { services } =
+            executor.service_status_for("no-such-service").await
+        else {
+            panic!("service_status_for must return Services");
+        };
+        assert!(services.is_empty(), "unknown service yields empty list");
+    }
+
+    // service_from_str 与 executor 的 ServiceSet 名称面共享（防漂移）。
+    #[test]
+    fn service_from_str_knows_all_rpc_service_names() {
+        for name in ["core", "webui", "gateway"] {
+            assert!(service_from_str(name).is_some());
+        }
     }
 }

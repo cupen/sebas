@@ -58,9 +58,13 @@ async fn permission_card_in_topic_leaves_root_id_none() {
 
     // 入站话题消息写入 reply target（话题根消息 message_id，events 层归一化）。
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "hello".into(),
-            reply_to: Some("om_topic_root".into()), chat_type: "private".into(), mentions: vec![], })
+            reply_to: Some("om_topic_root".into()),
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     let event = AcpEvent::PermissionRequest {
@@ -109,9 +113,13 @@ async fn permission_card_mainline_keeps_root_id_none() {
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "hello".into(),
-            reply_to: Some("om_msg".into()), chat_type: "private".into(), mentions: vec![], })
+            reply_to: Some("om_msg".into()),
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     let event = AcpEvent::PermissionRequest {
@@ -171,10 +179,13 @@ async fn button_callback_emits_permission_reply() {
         value: serde_json::json!({ "decision": "allow_once" }),
     };
 
-    router.dispatch(FeishuIn::ButtonCb { key: key,
-        action,
-        chat_type: "p2p".into(),
-    }).await;
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key,
+            action,
+            chat_type: "p2p".into(),
+        })
+        .await;
 
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
     let out = loop {
@@ -220,10 +231,13 @@ async fn button_callback_on_dead_session_emits_help_card() {
         value: serde_json::json!({ "decision": "allow_once" }),
     };
 
-    router.dispatch(FeishuIn::ButtonCb { key: key,
-        action,
-        chat_type: "p2p".into(),
-    }).await;
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key,
+            action,
+            chat_type: "p2p".into(),
+        })
+        .await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
@@ -267,10 +281,13 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
         decision: None, // malformed payload -> fail closed
         value: serde_json::json!({}),
     };
-    router.dispatch(FeishuIn::ButtonCb { key: key,
-        action,
-        chat_type: "p2p".into(),
-    }).await;
+    router
+        .dispatch(FeishuIn::ButtonCb {
+            key: key,
+            action,
+            chat_type: "p2p".into(),
+        })
+        .await;
     // Drain the in-place flip (UpdateCardByMsgId) before SendAcp.
     let out = loop {
         let got = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())

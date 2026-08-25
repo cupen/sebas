@@ -56,7 +56,11 @@ impl RouterHandle {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
                 self.on_text(key, prompt, reply_to).await;
             }
-            FeishuIn::ButtonCb { key, action, chat_type: _ } => self.on_button(key, action).await,
+            FeishuIn::ButtonCb {
+                key,
+                action,
+                chat_type: _,
+            } => self.on_button(key, action).await,
             FeishuIn::FormCb {
                 key,
                 value,
@@ -301,7 +305,10 @@ impl RouterHandle {
                 .map(|t| format!(" thread={t}"))
                 .unwrap_or_default();
             let ts = m.last_active_unix;
-            lines.push(format!("  {}. {sid} [{label}]{thread} 上次活跃={ts}", i + 1));
+            lines.push(format!(
+                "  {}. {sid} [{label}]{thread} 上次活跃={ts}",
+                i + 1
+            ));
         }
         self.emit(Out::PlainText {
             key,

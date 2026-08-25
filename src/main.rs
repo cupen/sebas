@@ -213,10 +213,7 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
 
 /// 顶层 `sebas status` / `sebas services`：构造一个固定的 ControlArgs
 /// 复用到 `run_control`，避免复制稳定信封构造逻辑。
-async fn run_control_status(
-    args: ControlStatusArgs,
-    cmd: ControlCmd,
-) -> anyhow::Result<()> {
+async fn run_control_status(args: ControlStatusArgs, cmd: ControlCmd) -> anyhow::Result<()> {
     let control = ControlArgs {
         socket: args.socket,
         secret: args.secret,
@@ -635,8 +632,7 @@ mod tests {
 
     #[test]
     fn top_level_status_accepts_format_flag() {
-        let cli =
-            Cli::try_parse_from(["sebas", "status", "--format", "json"]).expect("must parse");
+        let cli = Cli::try_parse_from(["sebas", "status", "--format", "json"]).expect("must parse");
         let Cmd::Status(args) = cli.cmd else {
             panic!("expected Status subcommand");
         };
@@ -646,7 +642,12 @@ mod tests {
     #[test]
     fn top_level_status_accepts_socket_and_secret_flags() {
         let cli = Cli::try_parse_from([
-            "sebas", "status", "--socket", "/tmp/x.sock", "--secret", "s",
+            "sebas",
+            "status",
+            "--socket",
+            "/tmp/x.sock",
+            "--secret",
+            "s",
         ])
         .expect("must parse");
         let Cmd::Status(args) = cli.cmd else {
@@ -666,7 +667,8 @@ mod tests {
 
     #[test]
     fn top_level_ctl_aliases_control() {
-        let cli = Cli::try_parse_from(["sebas", "ctl", "status"]).expect("`sebas ctl status` must parse");
+        let cli =
+            Cli::try_parse_from(["sebas", "ctl", "status"]).expect("`sebas ctl status` must parse");
         let Cmd::Ctl(args) = cli.cmd else {
             panic!("expected Ctl subcommand");
         };

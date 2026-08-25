@@ -75,7 +75,14 @@ pub(crate) async fn send_card_topic_aware(
     root_id: Option<String>,
 ) -> anyhow::Result<TopicSendOutcome> {
     match feishu
-        .send_card(http, tokens, key, card, root_id.as_deref(), key.thread_id.as_deref())
+        .send_card(
+            http,
+            tokens,
+            key,
+            card,
+            root_id.as_deref(),
+            key.thread_id.as_deref(),
+        )
         .await
     {
         Ok(id) => Ok(TopicSendOutcome::Sent(id)),
@@ -601,11 +608,13 @@ async fn submit_watchdog_control(
 ) -> String {
     let secret = match std::env::var("SEBAS_CONTROL_SECRET") {
         Ok(secret) if !secret.is_empty() => secret,
-        _ => return format!(
-            "{label}请求失败: 当前是裸 core 模式，SEBAS_CONTROL_SECRET 未配置。\
+        _ => {
+            return format!(
+                "{label}请求失败: 当前是裸 core 模式，SEBAS_CONTROL_SECRET 未配置。\
              /upgrade 等 watchdog 命令需要通过 `sebas` watchdog 启动 core（spec §5.3），\
              或在手动启动 core 前 export SEBAS_CONTROL_SECRET=<与 watchdog --secret 一致的值>"
-        ),
+            );
+        }
     };
 
     // 长操作（update/rollback/restart）提交后需要轮询 progress 事件；其余为同步查询，无需轮询。
@@ -705,8 +714,8 @@ async fn poll_operation_progress(
             secret.to_string(),
             crate::watchdog::control_rpc::RpcControlRequest::EventsSince { seq: since },
         );
-        let Ok(crate::watchdog::control_rpc::RpcControlResponse::Events { events })
-            = crate::watchdog::control_rpc::request(
+        let Ok(crate::watchdog::control_rpc::RpcControlResponse::Events { events }) =
+            crate::watchdog::control_rpc::request(
                 &crate::watchdog::control_rpc::default_socket_path(),
                 &envelope,
             )
@@ -720,12 +729,12 @@ async fn poll_operation_progress(
                 continue;
             }
             since = since.max(event.seq);
-            seen.push(format!(
-                "- [{}] {}",
-                event.kind, event.public_message
-            ));
+            seen.push(format!("- [{}] {}", event.kind, event.public_message));
             // 终态事件：Done/Error/Canceled/TimedOut（Started/Progress 为非终态）。
-            if matches!(event.kind.as_str(), "Done" | "Error" | "Canceled" | "TimedOut") {
+            if matches!(
+                event.kind.as_str(),
+                "Done" | "Error" | "Canceled" | "TimedOut"
+            ) {
                 terminal = true;
             }
         }
@@ -924,7 +933,7 @@ mod tests {
     // → plan.dev/dry_run 与请求一致」。env-var-missing 错误信息单独测。
 
     use crate::watchdog::control::ControlService;
-    use crate::watchdog::control_rpc::{serve as rpc_serve, RpcControlResponse};
+    use crate::watchdog::control_rpc::{RpcControlResponse, serve as rpc_serve};
     use crate::watchdog::executor::ControlExecutor;
     use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
     use std::sync::Arc as StdArc;
@@ -957,13 +966,14 @@ mod tests {
 
     fn e2e_executor(runner: StdArc<dyn UpdaterRunner>) -> ControlExecutor {
         let control = StdArc::new(tokio::sync::Mutex::new(ControlService::new()));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         ControlExecutor::new(
             control,
             runner,
             crate::config::WatchdogConfig::default(),
             "./config.toml".into(),
-            tx,
+            crate::watchdog::services::ServiceManager::new(
+                std::env::temp_dir().join(format!("sebas-exec-noop-{}.json", std::process::id())),
+            ),
         )
     }
 
@@ -972,8 +982,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir()
-            .join(format!("sebas-e2e-{label}-{nanos}-{}.sock", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "sebas-e2e-{label}-{nanos}-{}.sock",
+            std::process::id()
+        ))
     }
 
     /// /upgrade 在裸 core 模式下不应再报「请 export SEBAS_CONTROL_SECRET」，
@@ -1052,8 +1064,11 @@ mod tests {
             .expect("server reachable + valid secret");
 
         match &resp {
-            RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. } => {}
-            other => panic!("Update dev/dry_run must reach Accepted or PendingConfirmation, got {other:?}"),
+            RpcControlResponse::Accepted { .. }
+            | RpcControlResponse::PendingConfirmation { .. } => {}
+            other => panic!(
+                "Update dev/dry_run must reach Accepted or PendingConfirmation, got {other:?}"
+            ),
         }
 
         // dry_run=true 时 executor 在 Accepted/Confirmation 路径上不会实际调用
@@ -1069,7 +1084,6 @@ mod tests {
         server.abort();
         let _ = std::fs::remove_file(&path);
     }
-
 
     /// `/gateway on|off` 归一化为 ServiceSet(gateway, persist=false)；
     /// `/gateway status` 归一化为 ServiceStatusFor(gateway)；

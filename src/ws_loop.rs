@@ -6,16 +6,16 @@
 use crate::config::Config;
 use acp_claude::manager::SessionManager;
 use acp_claude::session::AcpCommand;
-use feishu::events::SessionKey;
 use feishu::events::FeishuIn;
+use feishu::events::SessionKey;
 use open_lark::Config as LarkConfig;
-use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use open_lark::CoreError;
+use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use router::router::RouterHandle;
-use std::sync::Arc;
-use std::time::Duration;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// Long-connection WebSocket loop driven by `open-lark`. The crate handles the
@@ -48,11 +48,8 @@ pub(crate) async fn run_ws_loop(
     loop {
         // Rebuild the dispatcher for each connection attempt so retries start
         // with a fresh handler and cheap clones of the router and owner ID.
-        let mut handler = RouterEventHandler::new(
-            router.clone(),
-            owner_id.to_string(),
-            dump_dir.clone(),
-        );
+        let mut handler =
+            RouterEventHandler::new(router.clone(), owner_id.to_string(), dump_dir.clone());
         // Wire chat_type/bot_name filter from config (pub fields)
         handler.allowed_chat_types = allowed_chat_types.clone();
         handler.bot_name = bot_name.clone();
@@ -93,7 +90,9 @@ pub(crate) async fn run_ws_loop(
                 warn!(?reason, "feishu WS closed; reconnecting");
                 backoff = Duration::from_secs(1);
             }
-            Err(WsClientError::RequestError(core_err)) if matches!(core_err, CoreError::Authentication { .. }) => {
+            Err(WsClientError::RequestError(core_err))
+                if matches!(core_err, CoreError::Authentication { .. }) =>
+            {
                 error!(
                     error = %core_err,
                     "feishu WS auth failed; aborting (fatal)"
@@ -143,6 +142,12 @@ pub struct RouterEventHandler {
     pub bot_name: String,
 }
 
+/// chat_type 归一化："private"（本地缺省/存量配置的幻影值）映射到飞书
+/// 真实私聊 wire 值 "p2p"，其余原样返回。
+fn norm_chat_type(t: &str) -> &str {
+    if t == "private" { "p2p" } else { t }
+}
+
 impl RouterEventHandler {
     pub fn new(
         router: RouterHandle,
@@ -161,9 +166,14 @@ impl RouterEventHandler {
 
     /// 是否允许该 chat_type 的消息。
     /// 空列表 = 全部允许。
+    /// "private" ↔ "p2p" 视为同值（sebas-5y5）：飞书私聊真实 wire 值是
+    /// "p2p"，"private" 只出现在本地缺省/存量配置里，两侧归一化后比较。
     pub fn is_chat_type_allowed(&self, chat_type: &str) -> bool {
         self.allowed_chat_types.is_empty()
-            || self.allowed_chat_types.iter().any(|t| t == chat_type)
+            || self
+                .allowed_chat_types
+                .iter()
+                .any(|t| norm_chat_type(t) == norm_chat_type(chat_type))
     }
 
     /// 检查消息是否需要 @bot 过滤。
@@ -180,7 +190,9 @@ impl RouterEventHandler {
         }
         // 检查 mentions 列表中是否包含 bot 名称
         let mentioned = evt.mentions().iter().any(|m| {
-            m.name.to_lowercase().contains(&self.bot_name.to_lowercase())
+            m.name
+                .to_lowercase()
+                .contains(&self.bot_name.to_lowercase())
                 || m.key.to_lowercase().contains(&self.bot_name.to_lowercase())
         });
         !mentioned

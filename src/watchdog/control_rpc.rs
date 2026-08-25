@@ -1,9 +1,11 @@
 use crate::error::{Result, SebasError};
 use crate::watchdog::auth::{AssertionPrincipal, actor_to_principal};
 use crate::watchdog::control::{
-    Actor, ControlEvent, ControlRequest, ControlResponse, ControlService, UpdateKind,
+    Actor, ControlEvent, ControlRequest, ControlResponse, ControlService, DesiredState, UpdateKind,
 };
 use crate::watchdog::executor::ControlExecutor;
+use crate::watchdog::services::service_from_str;
+use crate::watchdog::supervisor::ServiceName;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -316,25 +318,79 @@ async fn handle_envelope(
         RpcControlRequest::ServiceStatusFor { service } => {
             executor.service_status_for(&service).await
         }
-        // Phase 3 (Task 3.1) only routes the command; the ServiceManager that
-        // actually applies desired-state / restart lands in Phase 4. Until
-        // then, be explicit rather than silently no-op.
+        // 受管服务期望态：core 拒绝（改用 RestartCore 走升级/回滚语义），
+        // webui/gateway 走 executor 的 ServiceSet（含 persist 落盘）。
         RpcControlRequest::ServiceSet {
             service,
             desired,
-            persist: _,
-        } => RpcControlResponse::Rejected {
-            code: "service_unavailable".into(),
-            message: format!(
-                "service management not yet wired (Phase 4); received set {service}={desired}"
-            ),
+            persist,
+        } => match service_set_request(&service, &desired, persist) {
+            Ok(request) => {
+                let actor = crate::watchdog::control::Actor::from(envelope.actor);
+                executor.submit_or_confirm(actor, request).await
+            }
+            Err((code, message)) => RpcControlResponse::Rejected { code, message },
         },
-        RpcControlRequest::ServiceRestart { service } => RpcControlResponse::Rejected {
-            code: "service_unavailable".into(),
-            message: format!(
-                "service management not yet wired (Phase 4); received restart {service}"
-            ),
+        RpcControlRequest::ServiceRestart { service } => match service_from_str(&service) {
+            Some(ServiceName::Core) => RpcControlResponse::Rejected {
+                code: "invalid_request".into(),
+                message: "core 使用 restart_core（升级/回滚语义），不接受 service restart".into(),
+            },
+            Some(name) => {
+                let actor = crate::watchdog::control::Actor::from(envelope.actor);
+                executor
+                    .submit_or_confirm(
+                        actor,
+                        ControlRequest::ServiceRestart {
+                            service: managed_service(name),
+                        },
+                    )
+                    .await
+            }
+            None => RpcControlResponse::Rejected {
+                code: "invalid_request".into(),
+                message: format!("未知服务: {service}"),
+            },
         },
+    }
+}
+
+/// 把 RPC 的 ServiceSet 翻译成 ControlRequest；错误返回 (code, message)。
+fn service_set_request(
+    service: &str,
+    desired: &str,
+    persist: bool,
+) -> std::result::Result<ControlRequest, (String, String)> {
+    let name = service_from_str(service)
+        .ok_or_else(|| ("invalid_request".into(), format!("未知服务: {service}")))?;
+    if name == ServiceName::Core {
+        return Err((
+            "invalid_request".into(),
+            "core 的启停由 watchdog 托管，请使用 restart_core".into(),
+        ));
+    }
+    let desired = match desired {
+        "on" | "enabled" => DesiredState::Enabled,
+        "off" | "disabled" => DesiredState::Disabled,
+        other => {
+            return Err((
+                "invalid_request".into(),
+                format!("非法期望态 {other:?}（应为 on/off）"),
+            ));
+        }
+    };
+    Ok(ControlRequest::ServiceSet {
+        service: managed_service(name),
+        desired,
+        persist,
+    })
+}
+
+/// ServiceName → ControlRequest 的 ManagedService（name 已验证非 core）。
+fn managed_service(name: ServiceName) -> crate::watchdog::control::ManagedService {
+    match name {
+        ServiceName::WebUi => crate::watchdog::control::ManagedService::WebUi,
+        _ => crate::watchdog::control::ManagedService::Gateway,
     }
 }
 
@@ -446,13 +502,14 @@ mod tests {
 
     fn test_executor() -> ControlExecutor {
         let control = Arc::new(Mutex::new(ControlService::new()));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         ControlExecutor::new(
             control,
             Arc::new(NoopRunner),
             WatchdogConfig::default(),
             "./config.toml".into(),
-            tx,
+            crate::watchdog::services::ServiceManager::new(
+                std::env::temp_dir().join(format!("sebas-exec-noop-{}.json", std::process::id())),
+            ),
         )
     }
 
@@ -629,17 +686,17 @@ mod tests {
         )
         .await;
 
+        // 空 ServiceManager：gateway 未注册，过滤结果为空（而非报错）。
         match response {
             RpcControlResponse::Services { services } => {
-                assert_eq!(services.len(), 1);
-                assert_eq!(services[0].name, "gateway");
+                assert!(services.is_empty());
             }
             other => panic!("expected Services, got {other:?}"),
         }
     }
 
-    /// ServiceSet is routed but rejected until Phase 4 (ServiceManager) lands;
-    /// be explicit rather than silently no-op (plan Task 3.1).
+    /// ServiceSet: core 被拒（spec「service set rejected」——core 托管，
+    /// 用 restart_core）；合法服务走确认/执行路径（Feishu → PendingConfirmation）。
     #[tokio::test]
     async fn service_set_rejected_until_phase_4() {
         let response = handle_envelope(
@@ -662,23 +719,46 @@ mod tests {
         )
         .await;
 
+        // 旧断言已失效：gateway set 现在真实执行（Feishu actor 会先得到
+        // PendingConfirmation），不再是 service_unavailable。
         assert!(matches!(
             response,
-            RpcControlResponse::Rejected { ref code, .. } if code == "service_unavailable"
+            RpcControlResponse::PendingConfirmation { .. }
         ));
     }
 
     #[tokio::test]
-    async fn service_restart_rejected_until_phase_4() {
+    async fn service_set_core_is_rejected() {
         let response = handle_envelope(
             ControlEnvelope {
                 version: 1,
-                request_id: "feishu_gateway_restart".into(),
+                request_id: "core_set".into(),
                 secret: TEST_SECRET.into(),
-                actor: RpcActor::Feishu {
-                    open_id: String::new(),
-                    chat_id: Some("oc_abc".into()),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::ServiceSet {
+                    service: "core".into(),
+                    desired: "off".into(),
+                    persist: true,
                 },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+        assert!(matches!(
+            response,
+            RpcControlResponse::Rejected { ref code, .. } if code == "invalid_request"
+        ));
+    }
+
+    #[tokio::test]
+    async fn service_restart_gateway_executes() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "cli_gateway_restart".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
                 request: RpcControlRequest::ServiceRestart {
                     service: "gateway".into(),
                 },
@@ -688,9 +768,29 @@ mod tests {
         )
         .await;
 
+        // gateway restart 现在真实执行（Cli actor 直接 Accepted）。
+        assert!(matches!(response, RpcControlResponse::Accepted { .. }));
+    }
+
+    #[tokio::test]
+    async fn service_restart_core_is_rejected() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "core_restart".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::ServiceRestart {
+                    service: "core".into(),
+                },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
         assert!(matches!(
             response,
-            RpcControlResponse::Rejected { ref code, .. } if code == "service_unavailable"
+            RpcControlResponse::Rejected { ref code, .. } if code == "invalid_request"
         ));
     }
 
@@ -707,7 +807,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("sebas-rpc-{label}-{nanos}-{}.sock", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "sebas-rpc-{label}-{nanos}-{}.sock",
+            std::process::id()
+        ))
     }
 
     /// Spawn 真 serve()，等 listener 就绪后返回（client 即可发起 connect）。
@@ -780,7 +883,11 @@ mod tests {
         .expect("server reachable + valid secret");
 
         assert!(
-            matches!(resp, RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. }),
+            matches!(
+                resp,
+                RpcControlResponse::Accepted { .. }
+                    | RpcControlResponse::PendingConfirmation { .. }
+            ),
             "Update dev/dry_run must round-trip to Accepted or PendingConfirmation, got {resp:?}"
         );
 
@@ -807,7 +914,11 @@ mod tests {
         .await
         .expect("Rollback envelope must round-trip");
         assert!(
-            matches!(resp_rb, RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. }),
+            matches!(
+                resp_rb,
+                RpcControlResponse::Accepted { .. }
+                    | RpcControlResponse::PendingConfirmation { .. }
+            ),
             "Rollback should reach Accepted/PendingConfirmation, got {resp_rb:?}"
         );
 
@@ -825,7 +936,11 @@ mod tests {
         .await
         .expect("RestartCore envelope must round-trip");
         assert!(
-            matches!(resp_rc, RpcControlResponse::Accepted { .. } | RpcControlResponse::PendingConfirmation { .. }),
+            matches!(
+                resp_rc,
+                RpcControlResponse::Accepted { .. }
+                    | RpcControlResponse::PendingConfirmation { .. }
+            ),
             "RestartCore should reach Accepted/PendingConfirmation, got {resp_rc:?}"
         );
 
