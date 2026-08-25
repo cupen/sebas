@@ -284,9 +284,7 @@ mod tests {
     // ---- helpers（test-only env var 切换，串行用） ----
 
     /// 锁住 STATE_FILE_LOCK, 设置 env, 返回 guard（guard 存活期间锁保持）。
-    fn set_state_file_for_test(
-        path: &std::path::Path,
-    ) -> std::sync::MutexGuard<'static, ()> {
+    fn set_state_file_for_test(path: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
         let g = crate::test_util::lock_state_file();
         // SAFETY: lock held.
         unsafe {

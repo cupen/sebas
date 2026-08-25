@@ -714,9 +714,7 @@ impl GatewayConfig {
                 "gateway.rate_limit.capacity 必须 ≥ 1".into(),
             ));
         }
-        if self.rate_limit.enabled()
-            && self.rate_limit.refill_per_sec <= 0.0
-        {
+        if self.rate_limit.enabled() && self.rate_limit.refill_per_sec <= 0.0 {
             return Err(GatewayError::Config(
                 "gateway.rate_limit.refill_per_sec 必须 > 0".into(),
             ));
@@ -1277,7 +1275,10 @@ api_key = "test-key"
         assert!(cfg.rate_limit.enabled());
         let (cap, refill) = cfg.rate_limit.bucket_params().expect("bucket params");
         assert_eq!(cap, 60);
-        assert!((refill - 1.0).abs() < 1e-9, "rpm/60 = 1 token/s, got {refill}");
+        assert!(
+            (refill - 1.0).abs() < 1e-9,
+            "rpm/60 = 1 token/s, got {refill}"
+        );
     }
 
     #[test]

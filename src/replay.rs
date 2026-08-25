@@ -124,11 +124,7 @@ pub async fn run(args: ReplayArgs) -> anyhow::Result<u64> {
     // push — `mpsc::Sender::send` returns an error if all receivers are
     // dropped, which would silently swallow every frame.
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let handler = RouterEventHandler::new(
-        router,
-        String::new(),
-        None,
-    );
+    let handler = RouterEventHandler::new(router, String::new(), None);
 
     let mut count: u64 = 0;
     for p in &paths {

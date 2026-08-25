@@ -108,10 +108,7 @@ impl RateLimiter {
         if !self.enabled {
             return true;
         }
-        let mut buckets = self
-            .inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut buckets = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         if let Some(b) = buckets.get_mut(key) {
             b.try_acquire(now)
@@ -119,7 +116,10 @@ impl RateLimiter {
             // 首次见到该 key：按缺省桶参数克隆新桶。
             let proto = buckets.get("*").expect("default bucket seeded").clone();
             buckets.insert(key.to_string(), proto);
-            buckets.get_mut(key).expect("just inserted").try_acquire(now)
+            buckets
+                .get_mut(key)
+                .expect("just inserted")
+                .try_acquire(now)
         }
     }
 }
@@ -205,7 +205,10 @@ mod tests {
         assert!(!rl.try_acquire("sk-a"), "桶空");
         // 等补满后立即再取（> 1/60s 已补满 1 令牌）。
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        assert!(rl.try_acquire("sk-a"), "refill over time must restore a token");
+        assert!(
+            rl.try_acquire("sk-a"),
+            "refill over time must restore a token"
+        );
     }
 
     #[test]

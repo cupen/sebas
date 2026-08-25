@@ -42,9 +42,13 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
 
     // Text "stream" -> SpawnAcp.
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "stream".into(),
-            reply_to: None, chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
         .await

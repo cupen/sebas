@@ -414,9 +414,13 @@ async fn continue_after_done_flips_reaction_back_to_working() {
 
     // 用户追问：continue 回切 WORKING —— 先刷卡，再换 reaction，最后 SendAcp
     router
-        .dispatch(FeishuIn::Text { key: k,
+        .dispatch(FeishuIn::Text {
+            key: k,
             text: "第二题".into(),
-            reply_to: None, chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     let o1 = recv(&mut out_rx).await;
@@ -489,7 +493,8 @@ async fn permission_card_click_emits_resolved_card_flip() {
         .await;
     // User clicks Allow once on the card.
     router
-        .dispatch(FeishuIn::ButtonCb { key: key.clone(),
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
             action: CardAction {
                 decision: Some("allow_once".into()),
                 session_id: "sess-1".into(),
@@ -556,7 +561,8 @@ async fn stale_permission_click_emits_expired_card() {
         .insert(key.clone(), router::state::Mapping::active("sess-stale"))
         .await;
     router
-        .dispatch(FeishuIn::ButtonCb { key: key.clone(),
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
             action: CardAction {
                 decision: Some("allow_once".into()),
                 session_id: "sess-1".into(),
@@ -799,9 +805,13 @@ async fn new_command_clears_session_allowlist() {
     // /new starts a FRESH session in the same chat: "Allow session" grants
     // are scoped to the session that approved them and must not carry over.
     router
-        .dispatch(FeishuIn::Text { key: key.clone(),
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
             text: "/new".into(),
-            reply_to: None, chat_type: "private".into(), mentions: vec![], })
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
         .await;
 
     assert!(
@@ -877,7 +887,8 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
 
     // User clicks 相同调用不再询问.
     router
-        .dispatch(FeishuIn::ButtonCb { key: key.clone(),
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
             action: CardAction {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
@@ -990,7 +1001,8 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
         )
         .await;
     router
-        .dispatch(FeishuIn::ButtonCb { key: key.clone(),
+        .dispatch(FeishuIn::ButtonCb {
+            key: key.clone(),
             action: CardAction {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),

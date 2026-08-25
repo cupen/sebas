@@ -327,6 +327,12 @@ fn init_tracing(cfg: &Config) {
         subscriber.with_writer(file).init();
         return;
     }
+    // watchdog 下 stdout 是 IPC 管道（Ready-only 协议）：日志必须写 stderr
+    // （父进程 inherit），否则读端在 ready 后排空时会与日志争用同一管道。
+    if crate::ipc::is_under_watchdog() {
+        subscriber.with_writer(std::io::stderr).init();
+        return;
+    }
     subscriber.init();
 }
 
@@ -353,56 +359,15 @@ fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> webui::models::Gat
     }
 }
 
-/// 在 watchdog 下运行时初始化 IPC 连接
+/// 在 watchdog 下运行时向父进程发送 ready 握手（Ready-only 协议）。
+/// 控制命令一律走 control RPC（Unix socket），pipe 不再承载命令。
 async fn init_watchdog_ipc() {
-    use crate::ipc::{ChildIpc, install_watchdog_sender};
-    use tokio::sync::mpsc;
     use tracing::info;
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    if let Err(e) = install_watchdog_sender(tx) {
-        tracing::warn!("watchdog IPC sender 初始化失败: {e}");
-    }
-
-    let mut ipc = ChildIpc::new();
+    let mut ipc = crate::ipc::ChildIpc::new();
     if let Err(e) = ipc.ready().await {
         tracing::warn!("watchdog IPC ready 发送失败: {e}");
         return;
     }
     info!("watchdog IPC 连接就绪");
-
-    // 后台任务：串行发送子进程命令并监听父进程消息。stdout/stdin 只有
-    // 这个任务持有，避免多个请求同时读写同一条 JSON Lines pipe。
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                Some(cmd) = rx.recv() => {
-                    if let Err(e) = ipc.send(&cmd).await {
-                        tracing::warn!("watchdog IPC 命令发送失败: {e}");
-                        break;
-                    }
-                }
-                result = ipc.recv() => {
-                    match result {
-                        Ok(msg) => {
-                            info!("watchdog 消息: {} ({})", msg.status, msg.msg);
-                            match msg.status.as_str() {
-                                "done" => {
-                                    info!("watchdog 通知完毕，等待父进程重启当前进程");
-                                }
-                                "error" => {
-                                    tracing::error!("watchdog 错误: {}", msg.msg);
-                                }
-                                _ => {}
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("watchdog IPC 连接断开: {e}");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
 }
