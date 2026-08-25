@@ -892,12 +892,18 @@ mod tests {
         m
     }
 
-    /// 把 SEBAS_STATE_FILE 指向 tempdir/state.json，返回 guard。
+    /// 把 SEBAS_STATE_FILE 与 SEBAS_GATEWAY_PROVIDER_OVERLAY 都指向
+    /// tempdir（state.json + providers.json），返回 state 路径。
+    /// provider 数据已拆回 providers.json，两个 env 都必须隔离。
     fn isolate(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let path = dir.path().join("state.json");
         // SAFETY: ENV_LOCK held by caller.
         unsafe {
             std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
+            std::env::set_var(
+                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                dir.path().join("providers.json").to_str().unwrap(),
+            );
         }
         path
     }
@@ -906,6 +912,7 @@ mod tests {
         // SAFETY: ENV_LOCK held by caller.
         unsafe {
             std::env::remove_var("SEBAS_STATE_FILE");
+            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
         }
     }
 

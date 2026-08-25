@@ -191,6 +191,7 @@ fn upstream_error_response(proto: WireProtocol, message: &str) -> Response {
 ///
 /// 上游响应（含 4xx/5xx + 上游 retry-after）原样透传，status/body/headers 不改。
 pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
+    crate::metrics::Metrics::global().active_requests_enter();
     // 请求起始时刻，用于 latency/ttft。settling 用 `elapsed()`，无需 pin。
     let start = Instant::now();
     // 1. 协议嗅探 + 路径解析。非 /v1 → 404（默认 OpenAI 协议面，与 auth.rs 一致）。
@@ -263,7 +264,9 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     }
 
     // 5. 路由解析。错误按 brief 映射；成功拿到 provider + upstream_model。
-    let decision = match state.table.resolve(model.as_deref(), proto) {
+    // 内核快照一次取用：路由/配置/key 在同一快照上解析（热替换中途不撕裂）。
+    let core = state.core();
+    let decision = match core.table.resolve(model.as_deref(), proto) {
         Ok(d) => d,
         Err(e) => return route_error_response(proto, &e),
     };
@@ -274,7 +277,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     // 7.5 debug test provider：路由命中内置 `test` provider 时，由 gateway
     //     自身应答（固定文字 + 回显输入），不拨号上游。流式/非流式、
     //     Anthropic/OpenAI 两个协议面都支持（路由层已对 test 豁免协议检查）。
-    if state.cfg.debug && decision.provider == "test" {
+    if core.cfg.debug && decision.provider == "test" {
         let echoed = test_provider::echo_text(buffered_bytes.as_ref());
         let stream = test_provider::wants_stream(buffered_bytes.as_ref());
         settle_inner(
@@ -293,7 +296,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     }
 
     // 8. 取上游 provider 配置 + 上游 key。任一缺失（配置不一致）→ 502 防御性错误。
-    let provider_cfg: &ProviderConfig = match state.cfg.providers.get(&decision.provider) {
+    let provider_cfg: &ProviderConfig = match core.cfg.providers.get(&decision.provider) {
         Some(p) => p,
         None => {
             return upstream_error_response(
@@ -302,7 +305,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
             );
         }
     };
-    let upstream_key = match state.api_keys.get(&decision.provider) {
+    let upstream_key = match core.api_keys.get(&decision.provider) {
         Some(k) => k,
         None => {
             return upstream_error_response(
@@ -544,6 +547,16 @@ fn settle_inner(
     info: UsageInfo,
     error: Option<&str>,
 ) {
+    // metrics 观测（Task 5.1）：settle 是全部完成路径的唯一汇点。
+    crate::metrics::Metrics::global().observe_request(
+        provider,
+        model.unwrap_or_default(),
+        status,
+        start.elapsed(),
+        info.input_tokens.unwrap_or(0),
+        info.output_tokens.unwrap_or(0),
+    );
+    crate::metrics::Metrics::global().active_requests_leave();
     let rec = UsageRecord {
         ts: chrono::Utc::now().to_rfc3339(),
         // 无 per-key 身份，key 恒为空（绝不写 token 本体，安全约束）。

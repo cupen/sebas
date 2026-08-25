@@ -17,6 +17,9 @@ const CFG: &str = r#"
 [gateway]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
+# 隔离 overlay：不合并开发机 ~/.sebas/providers.json（其 openai 条目会
+# 与本 config 的 openai preset 冲突导致 parse 失败）。
+provider_overlay = "__SEBAS_TEST_NO_OVERLAY__.json"
 
 auth_token = "sk-gw-test"
 

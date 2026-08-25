@@ -1053,11 +1053,10 @@ listen = "127.0.0.1:0"
     /// 完整且合法的 overlay 文件 → `build_form` 不触发 self-heal，备份
     /// 目录为空（守住 §2.3 「只在错误路径备份」的承诺）。
     ///
-    /// spec 2026-08-17 §2.6：合法 overlay 在首次 `state_store::load` 时被
-    /// 一次性迁移到 `state.json` 然后删除（**这是预期行为**，不是 bug
-    /// —— providers.json 之后由 unified `state.json` 取代）。所以本测试
-    /// 改为断言「providers.json 已迁移并被删除 + state.json 含迁移数据」，
-    /// 而不是「providers.json 保留」。
+    /// change gateway-admin-api-and-model-aliases：providers.json 拆回
+    /// 独立文件成为单一真源（卡片 + gateway admin API 双写者共用），
+    /// **不再**迁移到 state.json 后删除。本测试断言新语义：providers.json
+    /// 保留在原位、内容不变。
     #[tokio::test]
     async fn build_form_valid_overlay_does_not_backup() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1078,17 +1077,10 @@ listen = "127.0.0.1:0"
             broken_backups(dir.path()).is_empty(),
             "正常加载不应产生备份"
         );
-        // spec §2.6 路径 B：合法 overlay 已迁移到 state.json，providers.json
-        // 一次性删除。后续所有 CRUD 都走 state.json。
-        let state_path = dir.path().join("state.json");
+        // providers.json 是单一真源：保留在原位（不迁移删除）。
         assert!(
-            state_path.exists(),
-            "合法 overlay 应被迁移到 state.json：{}",
-            state_path.display()
-        );
-        assert!(
-            !overlay.exists(),
-            "providers.json 迁移后应被删除：{}",
+            overlay.exists(),
+            "providers.json 应保留（单一真源）：{}",
             overlay.display()
         );
         clear_overlay_env();

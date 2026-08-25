@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod admin_auth;
+pub mod gateway_client;
 pub mod models;
 pub mod routes;
 pub mod server;

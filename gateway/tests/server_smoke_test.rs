@@ -26,6 +26,9 @@ const CFG: &str = r#"
 [gateway]
 listen = "127.0.0.1:0"
 auth_token = "sk-gw-test"
+# 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
+# 校验冲突导致 parse 失败）。
+provider_overlay = "__sebas_server_smoke_no_overlay__.json"
 [provider.anthropic]
 base_url_anthropic = "https://api.anthropic.com"
 api_key = "test-key"

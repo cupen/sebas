@@ -1,55 +1,55 @@
-//! Unified state store: `~/.sebas/state.json` as single source of truth.
+//! Split state store: runtime 状态与 provider 数据分文件持久化。
 //!
-//! spec 2026-08-17 §2.6 — merges the legacy overlay file (`providers.json`,
-//! 只放 provider CRUD delta) and runtime state file (`state.json`, mode +
-//! default_selection) into one v2 schema, persisted atomically
-//! (tmp + rename) on every mutation.
+//! - `~/.sebas/state.json`（`SEBAS_STATE_FILE` 可覆盖）：runtime 决策
+//!   （`version` + `mode` + `default_selection`），spawn 翻译的输入。
+//! - `~/.sebas/providers.json`（`SEBAS_GATEWAY_PROVIDER_OVERLAY` 可覆盖）：
+//!   provider 数据单一真源（`providers` CRUD delta + `deleted` 墓碑 +
+//!   gateway 侧的 `model_aliases` 等段——本模块不解释未知段，写时保留）。
 //!
-//! ## Wire schema (v2)
+//! ## 演进史
+//!
+//! - 最初：providers.json 只放 provider CRUD delta。
+//! - spec 2026-08-17 §2.6：合并进 state.json v2 单文件，providers.json 被
+//!   迁移删除 —— 但 gateway 一直读 providers.json，卡片编辑到不了 gateway
+//!   （断链）。
+//! - 本 change（gateway-admin-api-and-model-aliases）：拆回。providers.json
+//!   成为飞书 `/provider` 卡片（本 crate）与 gateway admin API 双写者共用
+//!   的单一真源；state.json 只留 runtime 段。
+//!
+//! ## state.json wire（runtime）
 //!
 //! ```json
 //! {
 //!   "version": 2,
-//!   "providers": { "deepseek": { "preset": "deepseek", ... } },
-//!   "deleted":  ["openai"],
-//!   "mode":     { "kind": "direct", "provider": "deepseek" },
+//!   "mode": { "kind": "direct", "provider": "deepseek" },
 //!   "default_selection": { "provider": "deepseek", "model": "deepseek-chat" }
 //! }
 //! ```
 //!
-//! - `providers`: 仅 UI 创建 / 修改过的条目（与 config.toml seed 合并后得到
-//!   完整视图；见 `crud::FileStore`）。Gateway 侧读同一字段做同样合并。
-//! - `deleted`: 从 seed 删除的名字（墓碑，防止重启后从只读源复活）。
-//! - `mode` / `default_selection`：runtime 决策（spawn 翻译的输入）。
+//! ## providers.json wire
 //!
-//! ## Version-aware migration
+//! ```json
+//! {
+//!   "providers": { "deepseek": { "preset": "deepseek", ... } },
+//!   "deleted":  ["openai"],
+//!   "model_aliases": { ... }   // gateway 拥有，本模块透传保留
+//! }
+//! ```
 //!
-//! `load()` 内部按 state.json 与 providers.json 的存在情况走三条迁移路径：
+//! ## 版本感知迁移（load 时一次性）
 //!
-//! | state.json | providers.json | 路径 |
+//! | state.json | providers.json | 行为 |
 //! |---|---|---|
-//! | 不存在 | 不存在 | 返回 `Default::default()` (空 v2) |
-//! | 不存在 | 存在 | 读 providers.json 作 legacy overlay，组装 v2 PersistedState（mode=Off/default=None），写 state.json（tmp+rename），删 providers.json |
-//! | 存在 v2 | 不存在 / 存在 | 直接 parse 为 v2；repair：若 mode 指向 deleted 或 missing provider，重置为 Off + 清 default；upgrade：`default_provider_for_direct` → `default_selection`（spec §2.8） |
-//! | 存在 v1/v0（无 `version` 字段或 version=1）| 存在 | 读 state.json 作 legacy runtime state（mode+default），读 providers.json 作 legacy overlay，合并写 v2，删 providers.json |
-//! | 存在 v1/v0 | 不存在 | 读 state.json 作 legacy runtime state，providers 字段为空，mode/default 保留，写 v2 |
+//! | 不存在 | 不存在 | 全部 default |
+//! | 不存在 | 存在 | providers 来自 overlay；materialize runtime v2 state.json；**保留** providers.json |
+//! | v1/v0（无 version 或 version=1）| 任意 | runtime 来自 state.json（mode+default）；providers 来自 overlay；写 runtime v2；保留 overlay |
+//! | v2（含 providers/deleted 段，2026-08-17 时代的单文件 schema）| 任意 | **反向搬出**：stranded providers/deleted 合并进 providers.json（state 侧优先，与旧合并语义一致）→ 重写 state.json 只留 runtime 段。幂等可重入：崩溃在「overlay 已写、state 未清」之间时下次 load 重做合并，不丢数据 |
+//! | v2（纯 runtime 段，新 schema）| 任意 | 直接用 |
 //!
-//! ## spec §2.8 default_model 归属迁移
-//!
-//! v2 schema 里只一个 runtime-default 字段：`default_selection: Option<DefaultSelection>`。
-//! 它把旧的 `default_provider_for_direct: Option<String>` 和 overlay item 上的
-//! `default_model` 合并到一个 `(provider, model)` 元组（spec §2.8「default_model
-//! 分裂」收尾）。Overlay item 仍保留 `default_model` 字段作 UI 源（`/provider`
-//! 详情面板里的「默认 model」文本框），`default_selection.model` 是 spawn 翻
-//! 译的权威值，由「设为默认（DIRECT）」动作同步过去。
-//!
-//! 迁移路径：旧 v2 state.json 用 `#[serde(alias = "default_provider_for_direct")]`
-//! 直接 parse 到 `default_selection` 字段（model=None），下次 save 时落地为
-//! 新字段。**不引入 STATE_VERSION_V3** —— 这是 v2 schema 内的字段重命名，
-//! 不是 schema 版本升级。
-//!
-//! 一句话：迁移是**一次性**的（发生在首次 load 检测到旧文件时），完成后
-//! providers.json 不再被读取。所有写入都走 state.json。
+//! 错误语义：单文件解析失败只丢那半边（state 坏 → runtime default；overlay
+//! 坏 → providers default），另一侧照常 —— runtime 状态不应让 sebas 启动
+//! 失败，provider 数据破损的自愈备份由 `sebas::provider::build_form` 的
+//! broken-overlay self-heal 负责。
 
 use crate::provider_state::ProviderMode;
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ pub const STATE_VERSION_V1: u32 = 1;
 /// Runtime 「DIRECT 默认」选择（spec 2026-08-17 §2.8）。
 ///
 /// 把旧 `default_provider_for_direct: Option<String>` 和 overlay item 上的
-/// `default_model: Option<String>` 合并到一个 `(provider, model)` 元组：
+/// `default_model` 合并到一个 `(provider, model)` 元组：
 /// - `provider`：DIRECT 模式下默认启用的 provider 名（必须存在于 `providers`
 ///   或 `gateway_cfg`，否则 spawn-time 兜底回退 Off + warn）；
 /// - `model`：spawn 时追加的 `--model <id>`（仅在 Direct 模式下生效；Gateway
@@ -87,14 +87,10 @@ pub const STATE_VERSION_V1: u32 = 1;
 /// `model` 缺省 / 显式 None 时不写 `--model`（agent 用自己默认）。
 ///
 /// **serde 自定义反序列化**：为了把旧 `default_provider_for_direct: "<name>"`
-/// 形态的 v2 state.json 平滑迁到新形状，`DefaultSelection::deserialize` 同时
+/// 形态的 state.json 平滑迁到新形状，`DefaultSelection::deserialize` 同时
 /// 接受：
 /// - 对象 `{"provider": "...", "model": "..."}`（新）
 /// - 字符串 `"<provider>"`（旧 default_provider_for_direct 别名走这条）
-///
-/// 这避免了引入 STATE_VERSION_V3：旧 v2 文件原地升级，下次 save 落地为对象
-/// 形状。`#[serde(alias)]` 单独不够 —— 它只重命名字段，不会把字符串「升级」
-/// 成对象。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DefaultSelection {
     pub provider: String,
@@ -168,15 +164,10 @@ impl<'de> Deserialize<'de> for DefaultSelection {
     }
 }
 
-/// 统一持久化状态。覆盖以下三个职责：
-/// - provider CRUD delta（与 seed 合并出视图）；
-/// - runtime 模式 + DIRECT 默认 (provider, model)；
-/// - 单文件原子持久化（tmp + rename）。
+/// 内存聚合视图：runtime（state.json）+ provider 数据（providers.json）。
 ///
-/// spec §2.8：`default_provider_for_direct: Option<String>` 替换为
-/// `default_selection: Option<DefaultSelection>`。serde 别名让旧 v2 state.json
-/// （含 `default_provider_for_direct` 字段）继续能解析（model=None 落地），
-/// 第一次 save 后就只写新字段。
+/// 仅作为 load() 的返回值与 update() 闭包的操作对象；`save()` 会把它**拆开**
+/// 写回两个文件（providers/deleted → providers.json；其余 → state.json）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedState {
     #[serde(default = "default_state_version")]
@@ -217,9 +208,9 @@ pub fn state_path() -> PathBuf {
     PathBuf::from(expand_tilde(&raw))
 }
 
-/// 旧 overlay 文件路径：`~/.sebas/providers.json`，可用
+/// provider overlay 文件路径：`~/.sebas/providers.json`，可用
 /// `SEBAS_GATEWAY_PROVIDER_OVERLAY` 覆盖（与 `src::provider::overlay_path`
-/// 同惯例）。**仅迁移路径使用** — 正常读写都走 `state.json`。
+/// 同惯例）。provider 数据的单一真源（卡片 + gateway admin API 双写者共用）。
 pub fn providers_path() -> PathBuf {
     let raw = std::env::var("SEBAS_GATEWAY_PROVIDER_OVERLAY")
         .unwrap_or_else(|_| "~/.sebas/providers.json".into());
@@ -236,149 +227,22 @@ fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
-/// 版本感知迁移：见模块文档的版本矩阵。
+/// 版本感知加载 + 反向迁移：见模块文档的版本矩阵。
 ///
-/// 错误一律 `warn!` 后回退到 `Default::default()` —— runtime 状态不应让
-/// sebas 启动失败。Provider overlay 解析失败也走默认（避免「一次配置错
-/// 让 /provider 死掉」）。
+/// 错误一侧只丢一侧（state 坏 → runtime default；overlay 坏 → providers
+/// default），另一侧照常。
 pub fn load() -> PersistedState {
-    let state_file = state_path();
-    let overlay_file = providers_path();
-
-    // ---- 路径 A：state.json 存在 → 走版本检测 ----
-    if state_file.exists() {
-        match std::fs::read_to_string(&state_file) {
-            Ok(raw) => {
-                // 第一遍：只看顶层 `version` 字段（数字 / 缺失）。
-                let detected = parse_version(&raw);
-                match detected {
-                    Some(STATE_VERSION_V2) => {
-                        // v2 直接 parse。
-                        match serde_json::from_str::<PersistedState>(&raw) {
-                            Ok(mut s) => {
-                                s = repair_mode(s);
-                                // 若 overlay 文件仍存在（半迁移状态：state.json 已
-                                // 写 v2 但 providers.json 未删），best-effort 把它
-                                // 合并进来再删。
-                                if overlay_file.exists()
-                                    && let Ok(extra) = load_legacy_overlay(&overlay_file)
-                                {
-                                    merge_overlay_into(&mut s, extra);
-                                    if save(&s).is_ok() {
-                                        let _ = std::fs::remove_file(&overlay_file);
-                                    }
-                                }
-                                return s;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    path = %state_file.display(),
-                                    error = %e,
-                                    "state.json v2 解析失败，回退默认"
-                                );
-                                return PersistedState::default();
-                            }
-                        }
-                    }
-                    Some(STATE_VERSION_V1) | None => {
-                        // legacy v0/v1：state.json 只含 mode + default。
-                        // 与 providers.json（若存在）合并 → 写 v2 → 删 providers.json。
-                        let (providers, deleted) = if overlay_file.exists() {
-                            load_legacy_overlay(&overlay_file)
-                                .map(|s| (s.providers, s.deleted))
-                                .unwrap_or_default()
-                        } else {
-                            (BTreeMap::new(), Vec::new())
-                        };
-                        let mode_and_default = parse_legacy_state(&raw).unwrap_or_default();
-                        let s = PersistedState {
-                            version: STATE_VERSION_V2,
-                            providers,
-                            deleted,
-                            mode: mode_and_default.mode,
-                            default_selection: mode_and_default
-                                .default_provider_for_direct
-                                .map(DefaultSelection::new),
-                        };
-                        if save(&s).is_ok() && overlay_file.exists() {
-                            // 迁移一次性：state.json 已写 v2 后立刻删 overlay。
-                            let _ = std::fs::remove_file(&overlay_file);
-                        }
-                        return repair_mode(s);
-                    }
-                    Some(other) => {
-                        tracing::warn!(
-                            path = %state_file.display(),
-                            version = other,
-                            "未知的 state.json version，回退默认"
-                        );
-                        return PersistedState::default();
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %state_file.display(),
-                    error = %e,
-                    "读取 state.json 失败，回退默认"
-                );
-                return PersistedState::default();
-            }
-        }
-    }
-
-    // ---- 路径 B：state.json 不存在，providers.json 存在 → 迁移 ----
-    if overlay_file.exists() {
-        match load_legacy_overlay(&overlay_file) {
-            Ok(s) => {
-                if save(&s).is_ok() {
-                    let _ = std::fs::remove_file(&overlay_file);
-                }
-                return s;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %overlay_file.display(),
-                    error = %e,
-                    "providers.json 解析失败，回退默认"
-                );
-                return PersistedState::default();
-            }
-        }
-    }
-
-    // ---- 路径 C：都没有 → 全新装机 ----
-    PersistedState::default()
+    load_at(&state_path(), &providers_path())
 }
 
-/// 原子写：tmp + rename。父目录缺失则创建。失败保留 `Err`。
-///
-/// 所有 mutation（CRUD / state / 合并）都走这里——一次 mutation = 一次写。
+/// 原子写：把聚合 state 拆开写两个文件（各自 tmp + rename）。
+/// providers.json 侧走 Map 级 RMW：只覆写 `providers`/`deleted` 两个 key，
+/// 文件内其它段（如 gateway 的 `model_aliases`）原样保留。
 pub fn save(s: &PersistedState) -> anyhow::Result<()> {
-    let path = state_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            anyhow::anyhow!("创建 state.json 父目录 {} 失败: {e}", parent.display())
-        })?;
-    }
-    let body = serde_json::to_string_pretty(s)
-        .map_err(|e| anyhow::anyhow!("序列化 PersistedState 失败: {e}"))?;
-
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body)
-        .map_err(|e| anyhow::anyhow!("写入临时文件 {} 失败: {e}", tmp.display()))?;
-    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&tmp) {
-        let _ = file.sync_all();
-    }
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| anyhow::anyhow!("rename {} -> {} 失败: {e}", tmp.display(), path.display()))?;
-    Ok(())
+    save_at(&state_path(), &providers_path(), s)
 }
 
 /// 读 → 改 → 写一气呵成。`f` 闭包基于当前 state 做条件决策；返回改后的 state。
-///
-/// 闭包操作**整个 PersistedState**（含 providers + deleted），所以可以一次
-/// 调用里同时改 provider 数据 + mode + default。
 pub fn update<F>(f: F) -> anyhow::Result<PersistedState>
 where
     F: FnOnce(&mut PersistedState),
@@ -390,7 +254,7 @@ where
 }
 
 /// "delete default provider" 原子操作：删除 provider + 同步清掉
-/// `default_selection`（若指向被删的）+ 写盘。一次写 = 一致性。
+/// `default_selection`（若指向被删的）+ 写盘。
 ///
 /// mode 的清理留给 load() 的 `repair_mode`：如果 mode 还指向刚被删的
 /// provider，下次 load 会重置为 Off（repair 时机 = 读时，比写时更安全——
@@ -409,12 +273,204 @@ pub fn delete_provider_and_clear_default(id: &str) -> anyhow::Result<PersistedSt
     })
 }
 
-// ---- 内部 helper ----
+// ---- 内部实现（路径参数化，测试不走 env var 可并行） ----
 
-/// 从 JSON 字符串里抽顶层 `version` 字段（数字）。无字段 / 非数字 → `None`。
-fn parse_version(raw: &str) -> Option<u32> {
-    let v: Value = serde_json::from_str(raw).ok()?;
-    v.get("version").and_then(Value::as_u64).map(|n| n as u32)
+/// state.json 侧的加载结果。
+struct RuntimeSide {
+    state_exists: bool,
+    mode: ProviderMode,
+    default_selection: Option<DefaultSelection>,
+    /// 2026-08-17 单文件 schema 时代滞留在 state.json 里的 provider 数据
+    /// （反向迁移源）。空 = 无需搬出。
+    stranded_providers: BTreeMap<String, Item>,
+    stranded_deleted: Vec<String>,
+    /// 是否需要重写 state.json（legacy 物化 v2 / stranded 搬出后清理）。
+    needs_rewrite: bool,
+}
+
+fn load_at(state_p: &Path, overlay_p: &Path) -> PersistedState {
+    let runtime = load_runtime_side(state_p);
+    let (mut providers, mut deleted, _overlay_raw_ok) = load_overlay_sections(overlay_p);
+
+    // 反向迁移：stranded providers/deleted 合并进 providers.json（state 侧
+    // 优先 —— 旧单文件时代的 load 已把 overlay 合并进 state，state 是超集），
+    // 然后 state.json 只留 runtime 段。崩溃重入安全：overlay 已写但 state
+    // 未清时，下次 load 重做同一合并（幂等，值相同）。
+    if !runtime.stranded_providers.is_empty() || !runtime.stranded_deleted.is_empty() {
+        for (k, v) in runtime.stranded_providers {
+            providers.insert(k, v);
+        }
+        for d in runtime.stranded_deleted {
+            if !deleted.contains(&d) {
+                deleted.push(d);
+            }
+        }
+        if save_overlay(overlay_p, &providers, &deleted).is_ok() {
+            let clean = RuntimeWire {
+                version: STATE_VERSION_V2,
+                mode: runtime.mode.clone(),
+                default_selection: runtime.default_selection.clone(),
+            };
+            let _ = write_runtime(state_p, &clean);
+        }
+        return repair_mode(PersistedState {
+            version: STATE_VERSION_V2,
+            providers,
+            deleted,
+            mode: runtime.mode,
+            default_selection: runtime.default_selection,
+        });
+    }
+
+    // legacy v1/v0 state.json（或 state.json 不存在但 overlay 在）：materialize
+    // runtime v2 state.json（保持旧「首次 load 落盘 v2」行为）；providers.json
+    // 保留不动。
+    let overlay_present = providers_raw_present(overlay_p);
+    if runtime.needs_rewrite || (overlay_present && !runtime.state_exists) {
+        let wire = RuntimeWire {
+            version: STATE_VERSION_V2,
+            mode: runtime.mode.clone(),
+            default_selection: runtime.default_selection.clone(),
+        };
+        let _ = write_runtime(state_p, &wire);
+    }
+    repair_mode(PersistedState {
+        version: STATE_VERSION_V2,
+        providers,
+        deleted,
+        mode: runtime.mode,
+        default_selection: runtime.default_selection,
+    })
+}
+
+/// 读 state.json → runtime 段。解析失败 / 不存在 → runtime default
+/// （不物化）。v1/v0 → needs_rewrite（首次 load materialize v2）。
+/// v2 带 providers/deleted → stranded（反向迁移源）+ needs_rewrite。
+fn load_runtime_side(state_p: &Path) -> RuntimeSide {
+    let raw = match std::fs::read_to_string(state_p) {
+        Ok(r) => r,
+        Err(_) => {
+            // state.json 不存在：runtime default。是否物化 v2 state.json
+            // 由 load_at 决定（overlay 也在时才物化，保持旧 Path B 行为）。
+            return RuntimeSide {
+                state_exists: false,
+                mode: ProviderMode::default(),
+                default_selection: None,
+                stranded_providers: BTreeMap::new(),
+                stranded_deleted: Vec::new(),
+                needs_rewrite: false,
+            };
+        }
+    };
+    match parse_version(&raw) {
+        Some(STATE_VERSION_V2) => {
+            // v2：可能是新 schema（纯 runtime）或旧单文件 schema（带
+            // providers/deleted）。PersistedState 的 serde 容忍两者。
+            match serde_json::from_str::<PersistedState>(&raw) {
+                Ok(s) => {
+                    let stranded = !s.providers.is_empty() || !s.deleted.is_empty();
+                    RuntimeSide {
+                        state_exists: true,
+                        mode: s.mode,
+                        default_selection: s.default_selection,
+                        stranded_providers: s.providers,
+                        stranded_deleted: s.deleted,
+                        needs_rewrite: stranded,
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %state_p.display(),
+                        error = %e,
+                        "state.json v2 解析失败，runtime 回退默认"
+                    );
+                    RuntimeSide {
+                        state_exists: true,
+                        mode: ProviderMode::default(),
+                        default_selection: None,
+                        stranded_providers: BTreeMap::new(),
+                        stranded_deleted: Vec::new(),
+                        needs_rewrite: false,
+                    }
+                }
+            }
+        }
+        Some(STATE_VERSION_V1) | None => {
+            // legacy v0/v1：state.json 只含 mode + default。
+            let legacy = parse_legacy_state(&raw).unwrap_or_default();
+            RuntimeSide {
+                state_exists: true,
+                mode: legacy.mode,
+                default_selection: legacy.default_provider_for_direct.map(DefaultSelection::new),
+                stranded_providers: BTreeMap::new(),
+                stranded_deleted: Vec::new(),
+                needs_rewrite: true,
+            }
+        }
+        Some(other) => {
+            tracing::warn!(
+                path = %state_p.display(),
+                version = other,
+                "未知的 state.json version，runtime 回退默认"
+            );
+            RuntimeSide {
+                state_exists: true,
+                mode: ProviderMode::default(),
+                default_selection: None,
+                stranded_providers: BTreeMap::new(),
+                stranded_deleted: Vec::new(),
+                needs_rewrite: false,
+            }
+        }
+    }
+}
+
+/// overlay 文件是否物理存在（内容有效性无关）——决定 state.json 缺失时
+/// 是否 materialize v2 runtime（保持旧 Path B「overlay-only 机器首次 load
+/// 落盘 state.json」行为）。
+fn providers_raw_present(overlay_p: &Path) -> bool {
+    overlay_p.exists()
+}
+
+/// 读 providers.json → (providers, deleted, raw_ok)。解析失败 / 不存在 →
+/// (空, 空, false)。破损文件的备份自愈由上层（provider.rs build_form）负责。
+fn load_overlay_sections(overlay_p: &Path) -> (BTreeMap<String, Item>, Vec<String>, bool) {
+    let raw = match std::fs::read_to_string(overlay_p) {
+        Ok(r) => r,
+        Err(_) => return (BTreeMap::new(), Vec::new(), false),
+    };
+    match serde_json::from_str::<OverlayWire>(&raw) {
+        Ok(ov) => (ov.providers, ov.deleted, true),
+        Err(e) => {
+            tracing::warn!(
+                path = %overlay_p.display(),
+                error = %e,
+                "providers.json 解析失败，providers 回退默认"
+            );
+            (BTreeMap::new(), Vec::new(), false)
+        }
+    }
+}
+
+/// state.json 的 runtime wire（新 schema：无 providers/deleted 字段）。
+#[derive(Serialize, Deserialize)]
+struct RuntimeWire {
+    #[serde(default = "default_state_version")]
+    version: u32,
+    #[serde(default)]
+    mode: ProviderMode,
+    #[serde(default, alias = "default_provider_for_direct")]
+    default_selection: Option<DefaultSelection>,
+}
+
+/// providers.json 的 wire（本模块只解释 providers/deleted；未知段在
+/// save_overlay 的 RMW 里保留）。
+#[derive(Default, Deserialize)]
+struct OverlayWire {
+    #[serde(default)]
+    providers: BTreeMap<String, Item>,
+    #[serde(default)]
+    deleted: Vec<String>,
 }
 
 /// 旧版 state.json 的 wire 形状：只 mode + default_provider_for_direct。
@@ -430,40 +486,65 @@ fn parse_legacy_state(raw: &str) -> Option<LegacyState> {
     serde_json::from_str(raw).ok()
 }
 
-/// 旧版 overlay 文件的 wire 形状：只 providers + deleted。
-#[derive(Default, Deserialize)]
-struct LegacyOverlay {
-    #[serde(default)]
-    providers: BTreeMap<String, Item>,
-    #[serde(default)]
-    deleted: Vec<String>,
+/// 从 JSON 字符串里抽顶层 `version` 字段（数字）。无字段 / 非数字 → `None`。
+fn parse_version(raw: &str) -> Option<u32> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    v.get("version").and_then(Value::as_u64).map(|n| n as u32)
 }
 
-fn load_legacy_overlay(path: &Path) -> anyhow::Result<PersistedState> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", path.display()))?;
-    let ov: LegacyOverlay = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("解析 {} 失败: {e}", path.display()))?;
-    Ok(PersistedState {
-        version: STATE_VERSION_V2,
-        providers: ov.providers,
-        deleted: ov.deleted,
-        mode: ProviderMode::default(),
-        default_selection: None,
-    })
+/// 写 state.json（tmp + rename）。父目录缺失则创建。
+fn write_runtime(path: &Path, wire: &RuntimeWire) -> anyhow::Result<()> {
+    write_json_atomic(path, &serde_json::to_value(wire)?)
 }
 
-/// 把额外 overlay 项合并进 v2 state（半迁移场景：v2 state.json 已写但
-/// providers.json 还在）。冲突时 v2 优先（用户已迁移完成，保留用户后续改的）。
-fn merge_overlay_into(s: &mut PersistedState, extra: PersistedState) {
-    for (k, v) in extra.providers {
-        s.providers.entry(k).or_insert(v);
+/// 写 providers.json：Map 级 RMW —— 读现有文件为 raw Map（保留
+/// `model_aliases` 等未知段），只覆写 `providers`/`deleted` 两个 key。
+/// 现有文件缺失 / 解析失败 → 从空 Map 开始（破损文件的备份自愈在上层）。
+fn save_overlay(path: &Path, providers: &BTreeMap<String, Item>, deleted: &[String]) -> anyhow::Result<()> {
+    let mut root: Map<String, Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    root.insert(
+        "providers".to_string(),
+        serde_json::to_value(providers)?,
+    );
+    root.insert("deleted".to_string(), serde_json::to_value(deleted)?);
+    write_json_atomic(path, &Value::Object(root))
+}
+
+/// tmp + rename 原子写 + fsync。父目录缺失则创建。
+fn write_json_atomic(path: &Path, value: &Value) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("创建 {} 父目录失败: {e}", path.display()))?;
     }
-    for d in extra.deleted {
-        if !s.deleted.contains(&d) {
-            s.deleted.push(d);
-        }
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| anyhow::anyhow!("序列化 {} 失败: {e}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)
+        .map_err(|e| anyhow::anyhow!("写入临时文件 {} 失败: {e}", tmp.display()))?;
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&tmp) {
+        let _ = file.sync_all();
     }
+    std::fs::rename(&tmp, path)
+        .map_err(|e| anyhow::anyhow!("rename {} -> {} 失败: {e}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+fn save_at(state_p: &Path, overlay_p: &Path, s: &PersistedState) -> anyhow::Result<()> {
+    // providers.json 先写（真源），state.json 后写 —— 崩溃在两写之间时，
+    // providers 数据已落盘，runtime 段最多回退 default（可自愈）。
+    save_overlay(overlay_p, &s.providers, &s.deleted)?;
+    write_runtime(
+        state_p,
+        &RuntimeWire {
+            version: STATE_VERSION_V2,
+            mode: s.mode.clone(),
+            default_selection: s.default_selection.clone(),
+        },
+    )
 }
 
 /// repair-on-load：若 mode 指向 `deleted` 墓碑里的 provider，重置为 Off。
@@ -510,22 +591,30 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
-    /// 路径 C：两个文件都不存在 → 返回 default。
+    fn item_with(fields: &[(&str, &str)]) -> Item {
+        let mut m = Map::new();
+        for (k, v) in fields {
+            m.insert((*k).into(), Value::String((*v).into()));
+        }
+        m
+    }
+
+    /// 路径 C：两个文件都不存在 → 返回 default，且不落任何文件。
     #[test]
     fn load_returns_default_when_neither_file_exists() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
+        let s = load_at(&state_p, &prov_p);
+        assert_eq!(s, PersistedState::default());
         assert!(!state_p.exists());
         assert!(!prov_p.exists());
-        // 直接调用测试 helper（不走 env var）。
-        let s = load_from_paths(&state_p, &prov_p);
-        assert_eq!(s, PersistedState::default());
     }
 
-    /// 路径 B：只有 providers.json（legacy v0 overlay） → 迁移到 v2 state.json。
+    /// 老机器（只有 providers.json）：providers 保留、文件**不删**；
+    /// materialize runtime v2 state.json。
     #[test]
-    fn migration_from_legacy_overlay_only() {
+    fn overlay_only_machine_keeps_overlay_and_materializes_state() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
@@ -537,33 +626,30 @@ mod tests {
             }"#,
         );
 
-        let s = load_from_paths(&state_p, &prov_p);
-        // providers + deleted 保留。
+        let s = load_at(&state_p, &prov_p);
         assert!(s.providers.contains_key("deepseek"));
         assert!(s.deleted.contains(&"openai".to_string()));
-        // mode + default 是 default。
         assert_eq!(s.mode, ProviderMode::Off);
-        assert_eq!(s.default_selection, None);
-        // version = v2。
         assert_eq!(s.version, STATE_VERSION_V2);
+        // providers.json 保留（不再是 legacy 一次性迁移源）。
+        assert!(prov_p.exists(), "providers.json 必须保留（provider 真源）");
+        // state.json materialize 为 v2 runtime。
+        assert!(state_p.exists());
+        let raw = std::fs::read_to_string(&state_p).unwrap();
+        assert!(!raw.contains("\"providers\""), "state.json 不应含 providers 段");
 
-        // load 完应当触发一次 save（state.json 已创建）并删 providers.json。
-        assert!(state_p.exists(), "load 应触发 state.json 写入");
-        assert!(!prov_p.exists(), "load 后 providers.json 应被删除");
-
-        // 二次 load：直接命中 v2 path。
-        let s2 = load_from_paths(&state_p, &prov_p);
+        // 二次 load 稳定。
+        let s2 = load_at(&state_p, &prov_p);
         assert_eq!(s2, s);
     }
 
-    /// 路径 D：state.json 是 v0/v1（无 version 字段）+ providers.json 存在
-    /// → 合并写 v2，删 providers.json。
+    /// v1 state.json + providers.json：runtime 来自 state，providers 来自
+    /// overlay，两文件各归各位（overlay 不删）。
     #[test]
     fn migration_from_v1_state_with_overlay() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        // v1 state.json：缺 version 字段。
         write_file(
             &state_p,
             r#"{
@@ -579,8 +665,7 @@ mod tests {
             }"#,
         );
 
-        let s = load_from_paths(&state_p, &prov_p);
-        assert_eq!(s.version, STATE_VERSION_V2);
+        let s = load_at(&state_p, &prov_p);
         assert_eq!(
             s.mode,
             ProviderMode::Direct {
@@ -589,25 +674,18 @@ mod tests {
         );
         assert_eq!(
             s.default_selection.as_ref().map(|d| d.provider.as_str()),
-            Some("deepseek"),
-            "legacy default_provider_for_direct 应被解析为 default_selection.provider"
-        );
-        assert_eq!(
-            s.default_selection.as_ref().and_then(|d| d.model.clone()),
-            None,
-            "legacy default_provider_for_direct 不带 model 信息 → default_selection.model = None"
+            Some("deepseek")
         );
         assert!(s.providers.contains_key("deepseek"));
-        // 迁移完写 v2 + 删 overlay。
-        assert!(state_p.exists());
-        assert!(!prov_p.exists());
-        // 文件内容应是 v2 wire。
+        assert!(prov_p.exists(), "overlay 不删");
+        // state.json 升级为 v2 runtime-only。
         let raw = std::fs::read_to_string(&state_p).unwrap();
-        let parsed: PersistedState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed, s);
+        assert!(raw.contains("\"version\": 2"));
+        assert!(!raw.contains("\"providers\""));
+        assert!(!raw.contains("default_provider_for_direct"));
     }
 
-    /// v1 state.json 但没有 providers.json：mode + default 保留，providers 字段空。
+    /// v1 state.json 无 overlay：runtime 保留，providers 空。
     #[test]
     fn migration_from_v1_state_without_overlay() {
         let dir = tempfile::tempdir().unwrap();
@@ -615,17 +693,96 @@ mod tests {
         let prov_p = dir.path().join("providers.json");
         write_file(
             &state_p,
-            r#"{
-                "mode": { "kind": "gateway" },
-                "default_provider_for_direct": null
-            }"#,
+            r#"{ "mode": { "kind": "gateway" }, "default_provider_for_direct": null }"#,
         );
 
-        let s = load_from_paths(&state_p, &prov_p);
+        let s = load_at(&state_p, &prov_p);
         assert_eq!(s.version, STATE_VERSION_V2);
         assert_eq!(s.mode, ProviderMode::Gateway);
         assert!(s.providers.is_empty());
         assert!(s.deleted.is_empty());
+    }
+
+    /// **反向迁移（核心场景）**：已迁移机器 state.json 里滞留 providers 段
+    /// → 搬出到 providers.json，数据完整，state.json 不再含 providers 段。
+    #[test]
+    fn stranded_providers_migrate_out_of_state_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_p = dir.path().join("state.json");
+        let prov_p = dir.path().join("providers.json");
+        // 2026-08-17 单文件 schema：providers/deleted 在 state.json 里。
+        write_file(
+            &state_p,
+            r#"{
+                "version": 2,
+                "providers": { "deepseek": { "name": "deepseek", "preset": "deepseek" } },
+                "deleted": ["openai"],
+                "mode": { "kind": "direct", "provider": "deepseek" },
+                "default_selection": { "provider": "deepseek", "model": "deepseek-chat" }
+            }"#,
+        );
+
+        let s = load_at(&state_p, &prov_p);
+        // 数据完整。
+        assert!(s.providers.contains_key("deepseek"));
+        assert!(s.deleted.contains(&"openai".to_string()));
+        assert_eq!(
+            s.default_selection,
+            Some(DefaultSelection::with_model("deepseek", "deepseek-chat"))
+        );
+        // providers.json 已创建并承载 provider 数据。
+        assert!(prov_p.exists());
+        let prov_raw = std::fs::read_to_string(&prov_p).unwrap();
+        let prov: Value = serde_json::from_str(&prov_raw).unwrap();
+        assert!(prov["providers"]["deepseek"].is_object());
+        assert_eq!(prov["deleted"][0], "openai");
+        // state.json 只剩 runtime 段。
+        let state_raw = std::fs::read_to_string(&state_p).unwrap();
+        assert!(!state_raw.contains("\"providers\""), "state.json 应已清空 providers 段");
+        assert!(!state_raw.contains("\"deleted\""));
+
+        // 二次 load 幂等。
+        let s2 = load_at(&state_p, &prov_p);
+        assert_eq!(s2, s);
+    }
+
+    /// **崩溃重入**：反向搬出「overlay 已写、state 未清」中途崩溃 →
+    /// 重入合并不丢数据（state 侧优先，值相同幂等）。
+    #[test]
+    fn stranded_migration_crash_reentry_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_p = dir.path().join("state.json");
+        let prov_p = dir.path().join("providers.json");
+        // 模拟半途状态：providers.json 只搬出了部分（other），state.json
+        // 仍滞留全部（deepseek + other）。
+        write_file(
+            &prov_p,
+            r#"{ "providers": { "other": { "name": "other" } }, "deleted": [] }"#,
+        );
+        write_file(
+            &state_p,
+            r#"{
+                "version": 2,
+                "providers": {
+                    "deepseek": { "name": "deepseek" },
+                    "other": { "name": "other" }
+                },
+                "deleted": ["openai"],
+                "mode": { "kind": "off" }
+            }"#,
+        );
+
+        let s = load_at(&state_p, &prov_p);
+        // 合并结果：两个 provider 都在，墓碑保留。
+        assert!(s.providers.contains_key("deepseek"));
+        assert!(s.providers.contains_key("other"));
+        assert!(s.deleted.contains(&"openai".to_string()));
+        // state.json 清干净。
+        let state_raw = std::fs::read_to_string(&state_p).unwrap();
+        assert!(!state_raw.contains("\"providers\""));
+        // 三次 load 稳定。
+        let s2 = load_at(&state_p, &prov_p);
+        assert_eq!(s2, s);
     }
 
     /// repair-on-load：mode 指向 deleted provider → 自动重置为 Off + 清 default。
@@ -634,27 +791,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        // 写一个 v2 state 但 mode 指向已 tombstoned 的 provider。
+        write_file(
+            &prov_p,
+            r#"{ "providers": { "deepseek": { "name": "deepseek" } }, "deleted": ["openai"] }"#,
+        );
         write_file(
             &state_p,
-            r#"{
-                "version": 2,
-                "providers": { "deepseek": { "name": "deepseek" } },
-                "deleted": ["openai"],
-                "mode": { "kind": "direct", "provider": "openai" },
-                "default_provider_for_direct": "openai"
-            }"#,
+            r#"{ "version": 2, "mode": { "kind": "direct", "provider": "openai" }, "default_selection": "openai" }"#,
         );
-
-        let s = load_from_paths(&state_p, &prov_p);
-        // repair 应已生效。
+        let s = load_at(&state_p, &prov_p);
         assert_eq!(s.mode, ProviderMode::Off);
         assert_eq!(s.default_selection, None);
     }
 
-    /// repair-on-load 不动「mode 指向不在 providers 里」的情况 —— 那是
-    /// 合法状态（用户切到 Direct 模式但还没建 provider），留给 spawn-time
-    /// `compute_provider_resolution` 兜底（找不到就回退 Off + warn）。
+    /// repair-on-load 不动「mode 指向不在 providers 里」的情况。
     #[test]
     fn repair_mode_keeps_pointer_to_missing_provider_when_no_tombstone() {
         let dir = tempfile::tempdir().unwrap();
@@ -662,32 +812,21 @@ mod tests {
         let prov_p = dir.path().join("providers.json");
         write_file(
             &state_p,
-            r#"{
-                "version": 2,
-                "providers": {},
-                "deleted": [],
-                "mode": { "kind": "direct", "provider": "ghost" },
-                "default_provider_for_direct": "ghost"
-            }"#,
+            r#"{ "version": 2, "mode": { "kind": "direct", "provider": "ghost" } }"#,
         );
-
-        let s = load_from_paths(&state_p, &prov_p);
-        // repair 不应触发 —— 用户可能正在筹备新 provider。
+        let s = load_at(&state_p, &prov_p);
         assert_eq!(
             s.mode,
             ProviderMode::Direct {
                 provider: "ghost".into()
             }
         );
-        assert_eq!(
-            s.default_selection.as_ref().map(|d| d.provider.as_str()),
-            Some("ghost")
-        );
     }
 
-    /// v2 → v2 round-trip：所有字段保留。
+    /// save 拆双文件 round-trip：providers/deleted → providers.json；
+    /// runtime → state.json；聚合 load 全部还原。
     #[test]
-    fn v2_round_trip_preserves_all_fields() {
+    fn save_splits_and_round_trips_both_files() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
@@ -703,137 +842,123 @@ mod tests {
             },
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
         };
-        save_to_path(&state_p, &original).unwrap();
-        let s = load_from_paths(&state_p, &prov_p);
-        assert_eq!(s, original);
+        save_at(&state_p, &prov_p, &original).unwrap();
+
+        // providers.json 承载 provider 数据。
+        let prov_raw = std::fs::read_to_string(&prov_p).unwrap();
+        assert!(prov_raw.contains("deepseek"));
+        // state.json 只承载 runtime。
+        let state_raw = std::fs::read_to_string(&state_p).unwrap();
+        assert!(!state_raw.contains("\"providers\""));
+
+        let loaded = load_at(&state_p, &prov_p);
+        assert_eq!(loaded, original);
     }
 
-    /// spec §2.8：旧 v2 state.json 含 `default_provider_for_direct` 字段（无
-    /// `default_selection`）→ load 应通过 `#[serde(alias)]` 直接解析到
-    /// `default_selection` 字段（model=None），下次 save 落地为新 wire 形状。
-    /// 不需要 STATE_VERSION_V3 触发迁移路径。
+    /// **未知段保留（model_aliases 协作）**：save 只覆写 providers/deleted
+    /// 两个 key，providers.json 里 gateway 写入的 model_aliases 原样保留。
+    #[test]
+    fn save_overlay_preserves_unknown_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_p = dir.path().join("state.json");
+        let prov_p = dir.path().join("providers.json");
+        write_file(
+            &prov_p,
+            r#"{
+                "providers": { "alpha": { "name": "alpha" } },
+                "deleted": [],
+                "model_aliases": {
+                    "my-claude": { "provider": "alpha", "upstream_model": "claude-sonnet-4" }
+                }
+            }"#,
+        );
+        let mut s = load_at(&state_p, &prov_p);
+        // 卡片路径改一个 provider（模拟 FileStore persist）。
+        s.providers.insert("beta".into(), item_with(&[("name", "beta")]));
+        save_at(&state_p, &prov_p, &s).unwrap();
+
+        let raw = std::fs::read_to_string(&prov_p).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert!(v["model_aliases"]["my-claude"].is_object(), "未知段必须保留: {raw}");
+        assert!(v["providers"]["beta"].is_object());
+        // 二次 load 仍还原 provider + 墓碑语义。
+        let s2 = load_at(&state_p, &prov_p);
+        assert!(s2.providers.contains_key("beta"));
+    }
+
+    /// spec §2.8：旧 v2 state.json 含 `default_provider_for_direct` 字段 →
+    /// alias 解析到 default_selection，save 后落地新字段名。
     #[test]
     fn v2_with_legacy_default_provider_for_direct_upgrades_to_default_selection() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        // 手写一个「旧形状」的 v2 state.json：含 default_provider_for_direct 但
-        // 没有 default_selection。
         write_file(
             &state_p,
             r#"{
                 "version": 2,
-                "providers": { "deepseek": { "name": "deepseek" } },
-                "deleted": [],
                 "mode": { "kind": "direct", "provider": "deepseek" },
                 "default_provider_for_direct": "deepseek"
             }"#,
         );
 
-        let s = load_from_paths(&state_p, &prov_p);
-        // alias 解析成功：default_selection.provider = "deepseek"，model = None
-        // （旧字段不带 model 信息）。
-        assert_eq!(
-            s.default_selection,
-            Some(DefaultSelection::new("deepseek")),
-            "旧 default_provider_for_direct 应被 alias 解析为 default_selection"
-        );
+        let s = load_at(&state_p, &prov_p);
+        assert_eq!(s.default_selection, Some(DefaultSelection::new("deepseek")));
 
-        // 落地：save() 写出来的 wire 不再有旧字段。
-        save_to_path(&state_p, &s).unwrap();
+        save_at(&state_p, &prov_p, &s).unwrap();
         let raw = std::fs::read_to_string(&state_p).unwrap();
-        assert!(
-            !raw.contains("default_provider_for_direct"),
-            "save 后旧字段不应再出现在 wire 上：{raw}"
-        );
-        assert!(
-            raw.contains("default_selection"),
-            "save 后新字段应出现在 wire 上：{raw}"
-        );
-
-        // 二次 load 命中纯新形状路径。
-        let s2 = load_from_paths(&state_p, &prov_p);
-        assert_eq!(s2, s);
+        assert!(!raw.contains("default_provider_for_direct"));
+        assert!(raw.contains("default_selection"));
     }
 
-    /// spec §2.8：v2 state.json 里 `default_provider_for_direct` 和
-    /// `default_selection` **同时**出现时，serde 把 alias 字段和命名字段视为
-    /// 同一字段 —— 顺序无关紧要，**值必须一致**才是合法状态；冲突时整个
-    /// state.json 被视为 corrupt，回退 default（兜底语义保持
-    /// `repair_mode` 不动 state 的承诺）。
-    ///
-    /// 这条测试锁定「同字段两次出现 = 矛盾」的处理：**不会**让旧 alias 字段
-    /// 静默覆盖新字段（避免迁移时数据丢失），也**不会**让 spawn 时拿到半旧
-    /// 半新的诡异 state。生产环境不太可能触发（用户不会手写这种文件），但
-    /// 显式回归锁定兜底行为。
+    /// spec §2.8：同字段 alias 与命名字段同时出现且矛盾 → state.json 视为
+    /// corrupt，runtime 回退 default；providers 侧（overlay）不受影响。
     #[test]
-    fn v2_conflicting_default_provider_and_selection_falls_back_to_default() {
+    fn v2_conflicting_default_provider_and_selection_falls_back_runtime_only() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
         write_file(
+            &prov_p,
+            r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#,
+        );
+        write_file(
             &state_p,
             r#"{
                 "version": 2,
-                "providers": {},
-                "deleted": [],
-                "mode": { "kind": "off" },
                 "default_provider_for_direct": "old-provider",
                 "default_selection": { "provider": "new-provider", "model": "new-model" }
             }"#,
         );
-        let s = load_from_paths(&state_p, &prov_p);
-        // 矛盾值：serde 解析失败 → load 回退 default（mode=Off, default_selection=None）。
-        // 显式重置 mode 后，下次 save 才会写出干净 state.json。
+        let s = load_at(&state_p, &prov_p);
+        // runtime corrupt → default；providers 侧照常。
         assert_eq!(s.mode, ProviderMode::Off);
         assert_eq!(s.default_selection, None);
+        assert!(s.providers.contains_key("alpha"), "overlay 数据不受 state 损坏影响");
     }
 
-    /// spec §2.8：DefaultSelection 字段顺序不影响解析（serde 字段是 named map，
-    /// 不是 tuple —— 锁定「struct 不是 tuple」这一选型决定）。
+    /// DefaultSelection wire 形状回归（spec §2.8）。
     #[test]
-    fn default_selection_round_trips_with_field_order_swapped() {
+    fn default_selection_wire_shape() {
         let original = DefaultSelection::with_model("anthropic", "claude-3-5-sonnet");
-        let json = serde_json::to_string(&original).unwrap();
-        let parsed: DefaultSelection = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, original);
-
-        // 字段顺序倒过来也应能解析。
         let swapped = r#"{"model":"claude-3-5-sonnet","provider":"anthropic"}"#;
         let parsed: DefaultSelection = serde_json::from_str(swapped).unwrap();
-        assert_eq!(
-            parsed,
-            DefaultSelection::with_model("anthropic", "claude-3-5-sonnet")
-        );
-    }
+        assert_eq!(parsed, original);
 
-    /// spec §2.8：model 为 None 时 wire 上 `model` 字段不出现（`skip_serializing_if`
-    /// 行为），保持 state.json 紧凑。
-    #[test]
-    fn default_selection_with_no_model_omits_field_in_wire() {
         let s = DefaultSelection::new("deepseek");
         let json = serde_json::to_string(&s).unwrap();
-        assert!(
-            !json.contains("\"model\""),
-            "model=None 时 wire 不应有 model 字段：{json}"
-        );
-        assert!(
-            json.contains("\"provider\":\"deepseek\""),
-            "provider 字段必须出现：{json}"
-        );
-        // 反向解析：缺 model 字段 → None。
+        assert!(!json.contains("\"model\""));
         let parsed: DefaultSelection = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, s);
     }
 
-    /// 「delete default provider」原子性：delete 后文件里 default_selection
-    /// 立刻为 None，不会出现「provider 已删但 default 残留」的不一致。
+    /// 「delete default provider」原子性。
     #[test]
     fn delete_provider_atomically_clears_default() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        let mut s = PersistedState {
+        let s = PersistedState {
             version: STATE_VERSION_V2,
             providers: BTreeMap::from([(
                 "deepseek".to_string(),
@@ -845,142 +970,73 @@ mod tests {
             },
             default_selection: Some(DefaultSelection::new("deepseek")),
         };
-        // delete_provider_and_clear_default 走 update 路径：写 state.json 一次。
-        update_at(&state_p, &prov_p, |st| {
-            st.providers.remove("deepseek");
-            st.deleted.push("deepseek".into());
-            if st.default_selection.as_ref().map(|d| d.provider.as_str()) == Some("deepseek") {
-                st.default_selection = None;
-            }
-            // mode 留给 load 时 repair（测试不强制此刻清）
-        });
-        s = load_from_paths(&state_p, &prov_p);
-        // 一次写后已一致：providers 无 deepseek、deleted 有 deepseek、default 为 None。
-        assert!(!s.providers.contains_key("deepseek"));
-        assert!(s.deleted.contains(&"deepseek".to_string()));
-        assert_eq!(s.default_selection, None);
-        // mode 在 repair 之后才被清（Direct{deepseek} → Off）。
-        assert_eq!(s.mode, ProviderMode::Off);
+        save_at(&state_p, &prov_p, &s).unwrap();
+        let mut loaded = load_at(&state_p, &prov_p);
+        loaded.providers.remove("deepseek");
+        loaded.deleted.push("deepseek".into());
+        loaded.default_selection = None;
+        save_at(&state_p, &prov_p, &loaded).unwrap();
+
+        let s2 = load_at(&state_p, &prov_p);
+        assert!(!s2.providers.contains_key("deepseek"));
+        assert!(s2.deleted.contains(&"deepseek".to_string()));
+        assert_eq!(s2.default_selection, None);
+        assert_eq!(s2.mode, ProviderMode::Off, "repair 应清掉指向墓碑的 Direct mode");
     }
 
     /// save 父目录不存在 → 自动创建。
     #[test]
     fn save_creates_missing_parent_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("a").join("b").join("state.json");
-        save_to_path(&nested, &PersistedState::default()).unwrap();
-        assert!(nested.exists());
+        let nested_state = dir.path().join("a").join("b").join("state.json");
+        let nested_prov = dir.path().join("a").join("b").join("providers.json");
+        save_at(&nested_state, &nested_prov, &PersistedState::default()).unwrap();
+        assert!(nested_state.exists());
+        assert!(nested_prov.exists());
     }
 
-    /// 未知 version（如 99）：当前实现 warn + 回退 default。
-    /// （未来新增 schema 版本时再细化处理。）
+    /// 未知 version（如 99）：runtime 回退 default（providers 侧不受影响）。
     #[test]
-    fn unknown_version_falls_back_to_default() {
+    fn unknown_version_falls_back_runtime_only() {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
+        write_file(&prov_p, r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#);
+        write_file(&state_p, r#"{ "version": 99 }"#);
+        let s = load_at(&state_p, &prov_p);
+        assert_eq!(s.mode, ProviderMode::Off);
+        assert!(s.providers.contains_key("alpha"));
+    }
+
+    /// corrupt state.json：runtime 回退 default；providers 侧照常加载。
+    #[test]
+    fn corrupt_state_json_falls_back_runtime_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_p = dir.path().join("state.json");
+        let prov_p = dir.path().join("providers.json");
+        write_file(&prov_p, r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#);
+        write_file(&state_p, "{not valid json");
+        let s = load_at(&state_p, &prov_p);
+        assert_eq!(s.mode, ProviderMode::Off);
+        assert!(s.providers.contains_key("alpha"));
+    }
+
+    /// corrupt providers.json：providers 回退 default（文件保留原位，由
+    /// 上层 self-heal 备份）；runtime 侧照常。
+    #[test]
+    fn corrupt_overlay_falls_back_providers_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_p = dir.path().join("state.json");
+        let prov_p = dir.path().join("providers.json");
+        write_file(&prov_p, "{not valid json");
         write_file(
             &state_p,
-            r#"{ "version": 99, "providers": {}, "deleted": [] }"#,
+            r#"{ "version": 2, "mode": { "kind": "gateway" } }"#,
         );
-        let s = load_from_paths(&state_p, &prov_p);
-        assert_eq!(s, PersistedState::default());
-    }
-
-    /// corrupt state.json：解析失败 → warn + default。runtime 状态不应拖死 sebas。
-    #[test]
-    fn corrupt_state_json_falls_back_to_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_p = dir.path().join("state.json");
-        let prov_p = dir.path().join("providers.json");
-        write_file(&state_p, "{not valid json");
-        let s = load_from_paths(&state_p, &prov_p);
-        assert_eq!(s, PersistedState::default());
-    }
-
-    // ---- helpers（不走 env var，测试可并行） ----
-
-    fn item_with(fields: &[(&str, &str)]) -> Item {
-        let mut m = Map::new();
-        for (k, v) in fields {
-            m.insert((*k).into(), Value::String((*v).into()));
-        }
-        m
-    }
-
-    fn load_from_paths(state_p: &Path, prov_p: &Path) -> PersistedState {
-        // 与 `load()` 同逻辑，但路径硬编码。
-        if state_p.exists() {
-            if let Ok(raw) = std::fs::read_to_string(state_p) {
-                match parse_version(&raw) {
-                    Some(STATE_VERSION_V2) => {
-                        if let Ok(mut s) = serde_json::from_str::<PersistedState>(&raw) {
-                            s = repair_mode(s);
-                            if prov_p.exists()
-                                && let Ok(extra) = load_legacy_overlay(prov_p)
-                            {
-                                merge_overlay_into(&mut s, extra);
-                                if save_to_path(state_p, &s).is_ok() {
-                                    let _ = std::fs::remove_file(prov_p);
-                                }
-                            }
-                            return s;
-                        }
-                        return PersistedState::default();
-                    }
-                    Some(STATE_VERSION_V1) | None => {
-                        let (providers, deleted) = if prov_p.exists() {
-                            load_legacy_overlay(prov_p)
-                                .map(|s| (s.providers, s.deleted))
-                                .unwrap_or_default()
-                        } else {
-                            (BTreeMap::new(), Vec::new())
-                        };
-                        let legacy = parse_legacy_state(&raw).unwrap_or_default();
-                        let mut s = PersistedState {
-                            version: STATE_VERSION_V2,
-                            providers,
-                            deleted,
-                            mode: legacy.mode,
-                            default_selection: legacy
-                                .default_provider_for_direct
-                                .map(DefaultSelection::new),
-                        };
-                        if save_to_path(state_p, &s).is_ok() && prov_p.exists() {
-                            let _ = std::fs::remove_file(prov_p);
-                        }
-                        return repair_mode(s);
-                    }
-                    Some(_) => return PersistedState::default(),
-                }
-            }
-        }
-        if prov_p.exists()
-            && let Ok(mut s) = load_legacy_overlay(prov_p)
-        {
-            if save_to_path(state_p, &s).is_ok() {
-                let _ = std::fs::remove_file(prov_p);
-            }
-            return s;
-        }
-        PersistedState::default()
-    }
-
-    fn save_to_path(path: &Path, s: &PersistedState) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let body =
-            serde_json::to_string_pretty(s).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    }
-
-    fn update_at<F: FnOnce(&mut PersistedState)>(state_p: &Path, prov_p: &Path, f: F) {
-        let mut s = load_from_paths(state_p, prov_p);
-        f(&mut s);
-        save_to_path(state_p, &s).unwrap();
+        let s = load_at(&state_p, &prov_p);
+        assert_eq!(s.mode, ProviderMode::Gateway);
+        assert!(s.providers.is_empty());
+        // 破损文件保留在原位（备份是上层 provider.rs 的职责）。
+        assert!(prov_p.exists());
     }
 }

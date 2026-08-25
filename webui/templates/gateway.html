@@ -18,24 +18,141 @@
     </div>
     <div class="gateway-card">
       <div class="label">Providers</div>
-      <div class="value">{{ gateway.provider_count }}</div>
+      <div class="value">{{ providers | length if live else gateway.provider_count }}</div>
     </div>
     <div class="gateway-card">
-      <div class="label">Auth</div>
-      <div class="value {% if gateway.has_auth %}ok{% else %}warn{% endif %}">
-        {{ "Enabled" if gateway.has_auth else "Disabled" }}
-      </div>
+      <div class="label">Uptime</div>
+      <div class="value">{{ stats.uptime_secs if stats.uptime_secs is defined else "—" }}s</div>
     </div>
     <div class="gateway-card">
-      <div class="label">Debug</div>
-      <div class="value {% if gateway.debug %}warn{% else %}ok{% endif %}">
-        {{ "On" if gateway.debug else "Off" }}
+      <div class="label">Reload</div>
+      <div class="value {% if stats.last_reload_error %}warn{% else %}ok{% endif %}">
+        {% if stats.last_reload_error %}Error{% else %}OK{% endif %}
       </div>
     </div>
   </div>
 
-  {% if gateway.providers %}
+  {% if not live %}
+  <div class="gateway-degraded">
+    <p>⚠️ Gateway admin API 不可达（{{ degraded_reason }}）。显示启动时快照：</p>
+  </div>
+  {% endif %}
+
+  {% if live %}
   <h2>Providers</h2>
+  {% if providers %}
+  <table class="session-table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Anthropic Base URL</th>
+        <th>OpenAI Base URL</th>
+        <th>API Key</th>
+        <th>Models</th>
+        {% if has_secret %}<th>Actions</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in providers %}
+      <tr>
+        <td><strong>{{ p.name }}</strong></td>
+        <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
+        <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
+        <td>{{ "configured" if p.api_key_configured else "—" }}</td>
+        <td>{{ p.models | length if p.models is defined else 0 }}</td>
+        {% if has_secret %}
+        <td>
+          <button onclick="gatewayAction('POST', '/gateway/api/providers/{{ p.name }}/probe')">Probe</button>
+          <button onclick="gatewayDelete('providers', '{{ p.name }}')">Delete</button>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No providers configured.</p>
+  {% endif %}
+
+  {% if has_secret %}
+  <h3>New provider</h3>
+  <form onsubmit="return gatewayCreateProvider(event)">
+    <input id="np-name" placeholder="name" required>
+    <input id="np-preset" placeholder="preset (e.g. deepseek)">
+    <input id="np-base-url-anthropic" placeholder="base_url_anthropic (custom)">
+    <input id="np-base-url-openai" placeholder="base_url_openai (custom)">
+    <input id="np-api-key" placeholder="api_key" type="password">
+    <button type="submit">Create</button>
+  </form>
+  {% endif %}
+
+  <h2>Model Aliases</h2>
+  {% if model_aliases %}
+  <table class="session-table">
+    <thead>
+      <tr>
+        <th>Alias</th>
+        <th>Provider</th>
+        <th>Upstream Model</th>
+        {% if has_secret %}<th>Actions</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for alias, entry in model_aliases | items %}
+      <tr>
+        <td><strong>{{ alias }}</strong></td>
+        <td>{{ entry.provider }}</td>
+        <td><code>{{ entry.upstream_model if entry.upstream_model else "—" }}</code></td>
+        {% if has_secret %}
+        <td><button onclick="gatewayDelete('model-aliases', '{{ alias }}')">Delete</button></td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No model aliases configured.</p>
+  {% endif %}
+
+  {% if has_secret %}
+  <h3>New alias</h3>
+  <form onsubmit="return gatewayCreateAlias(event)">
+    <input id="na-alias" placeholder="alias" required>
+    <input id="na-provider" placeholder="provider" required>
+    <input id="na-upstream" placeholder="upstream_model (optional)">
+    <button type="submit">Create</button>
+  </form>
+  {% endif %}
+
+  {% if stats.per_provider %}
+  <h2>Per-Provider Stats</h2>
+  <table class="session-table">
+    <thead>
+      <tr><th>Provider</th><th>Requests</th><th>Errors</th><th>Input Tokens</th><th>Output Tokens</th></tr>
+    </thead>
+    <tbody>
+      {% for p in stats.per_provider %}
+      <tr>
+        <td><strong>{{ p.name }}</strong></td>
+        <td>{{ p.requests if p.requests is defined else 0 }}</td>
+        <td>{{ p.errors if p.errors is defined else 0 }}</td>
+        <td>{{ p.input_tokens if p.input_tokens is defined else 0 }}</td>
+        <td>{{ p.output_tokens if p.output_tokens is defined else 0 }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if stats.last_reload_error %}
+  <div class="gateway-degraded">
+    <p>⚠️ Last reload error: {{ stats.last_reload_error }}</p>
+  </div>
+  {% endif %}
+  {% else %}
+  {# 降级路径：启动快照 provider 表（与旧版一致） #}
+  {% if gateway.providers %}
+  <h2>Providers (startup snapshot)</h2>
   <table class="session-table">
     <thead>
       <tr>
@@ -54,8 +171,40 @@
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
-  <p class="empty-state">No providers configured.</p>
+  {% endif %}
   {% endif %}
 </div>
+
+<script>
+async function gatewayAction(method, path, body) {
+  const resp = await fetch(path, {
+    method,
+    headers: body ? {'content-type': 'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({}));
+  alert(resp.ok ? JSON.stringify(data) : (data.error || resp.status));
+  if (resp.ok) location.reload();
+  return resp.ok;
+}
+function gatewayCreateProvider(ev) {
+  ev.preventDefault();
+  const body = {name: np_name.value};
+  if (np_preset.value) body.preset = np_preset.value;
+  if (np_base_url_anthropic.value) body.base_url_anthropic = np_base_url_anthropic.value;
+  if (np_base_url_openai.value) body.base_url_openai = np_base_url_openai.value;
+  if (np_api_key.value) body.api_key = np_api_key.value;
+  return gatewayAction('POST', '/gateway/api/providers', body);
+}
+function gatewayCreateAlias(ev) {
+  ev.preventDefault();
+  const body = {alias: na_alias.value, provider: na_provider.value};
+  if (na_upstream.value) body.upstream_model = na_upstream.value;
+  return gatewayAction('POST', '/gateway/api/model-aliases', body);
+}
+function gatewayDelete(kind, name) {
+  if (!confirm('Delete ' + name + '?')) return;
+  return gatewayAction('DELETE', '/gateway/api/' + kind + '/' + name);
+}
+</script>
 {% endblock %}
