@@ -126,6 +126,7 @@ impl RateLimiter {
 
 /// 渲染 429。协议面由 `resolve_target` 嗅探。message 通用，不含 key/限额。
 fn too_many(headers: &axum::http::HeaderMap, path: &str) -> Response {
+    crate::metrics::Metrics::global().observe_rate_limited();
     let proto = resolve_target(headers, path)
         .map(|t| t.protocol)
         .unwrap_or(WireProtocol::OpenAi);

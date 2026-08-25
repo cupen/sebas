@@ -466,6 +466,9 @@ mod tests {
 [gateway]
 listen = "{listen}"
 auth_token = {auth_token:?}
+# 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
+# 校验冲突导致 parse 失败）。
+provider_overlay = "__sebas_spawn_env_no_overlay__.json"
 [provider.anthropic]
 "#
         );

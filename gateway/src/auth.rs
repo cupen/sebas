@@ -40,6 +40,7 @@ pub(crate) fn extract_key(headers: &HeaderMap) -> Option<String> {
 /// 渲染 401：协议面由 `resolve_target` 嗅探；非 `/v1` 路径 → 默认 OpenAi。
 /// message 恒为通用串，绝不回显呈现的 key。
 fn unauthorized(headers: &HeaderMap, path: &str) -> Response {
+    crate::metrics::Metrics::global().observe_auth_rejected();
     let proto = resolve_target(headers, path)
         .map(|t| t.protocol)
         .unwrap_or(WireProtocol::OpenAi);
@@ -64,12 +65,14 @@ pub async fn require_key(State(state): State<AppState>, req: Request, next: Next
         return next.run(req).await;
     }
     // debug 模式（--debug，内置 test provider）或未配置 auth_token：跳过下游
-    // 鉴权（裸奔）。build_state 启动时对后者已 warn。
-    if state.cfg.debug || state.auth_tokens.is_empty() {
+    // 鉴权（裸奔）。build_state 启动时对后者已 warn。auth_tokens 在可热替换
+    // 内核里，取一次快照。
+    let core = state.core();
+    if core.cfg.debug || core.auth_tokens.is_empty() {
         return next.run(req).await;
     }
     match extract_key(req.headers()) {
-        Some(key) if state.auth_tokens.contains(&key) => next.run(req).await,
+        Some(key) if core.auth_tokens.contains(&key) => next.run(req).await,
         _ => unauthorized(req.headers(), req.uri().path()),
     }
 }

@@ -65,7 +65,9 @@ mod tests {
         GatewayConfig::parse(raw)
     }
 
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // 跨模块共享锁（crate::test_util::CONFIG_ENV_LOCK 的别名）——config.rs 与本
+    // 模块的测试都动 SEBAS_GATEWAY_LISTEN，必须互斥。
+    static LOCK: &std::sync::Mutex<()> = &crate::test_util::CONFIG_ENV_LOCK;
 
     #[test]
     fn enable_debug_test_provider_injects_test_provider_and_route() {

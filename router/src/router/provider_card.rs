@@ -1130,9 +1130,13 @@ mod tests {
         seed: Vec<Item>,
     ) -> (RouterHandle, std::sync::MutexGuard<'static, ()>) {
         let _g = crate::test_util::lock_state_file();
-        // SAFETY: lock held.
+        // SAFETY: lock held. provider 数据在 providers.json，两个 env 都隔离。
         unsafe {
             std::env::set_var("SEBAS_STATE_FILE", dir.join("state.json").to_str().unwrap());
+            std::env::set_var(
+                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                dir.join("providers.json").to_str().unwrap(),
+            );
         }
         let store = FileStore::load(dir.join("providers.json"), "name", seed).unwrap();
         let forms = ProviderForms {

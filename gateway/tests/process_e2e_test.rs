@@ -58,6 +58,9 @@ fn write_config(
 [gateway]
 listen = "127.0.0.1:{port}"
 usage_file = "{usage}"
+# 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
+# 校验冲突会让 gateway 启动即失败）。
+provider_overlay = "{}/no-overlay.json"
 default_provider = "anthropic"
 
 auth_token = "sk-gw-process"
@@ -73,7 +76,8 @@ api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY"
 [provider.openai]
 base_url_openai = "{oai_url}"
 api_key_env = "SEBAS_GATEWAY_TEST_UPSTREAM_KEY_OAI"
-"#
+"#,
+        dir.to_string_lossy().replace('\\', "/")
     );
     std::fs::write(&path, body).expect("write gateway config");
     path
@@ -95,13 +99,17 @@ fn write_top_level_provider_config(
 [gateway]
 listen = "127.0.0.1:{port}"
 usage_file = "{usage}"
+# 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
+# 校验冲突会让 gateway 启动即失败）。
+provider_overlay = "{}/no-overlay.json"
 
 auth_token = "sk-gw-top"
 
 [provider.anthropic]
 base_url_anthropic = "{anth_url}"
 api_key_env = "ANTHROPIC_API_KEY"
-"#
+"#,
+        dir.to_string_lossy().replace('\\', "/")
     );
     std::fs::write(&path, body).expect("write top-level-provider gateway config");
     path

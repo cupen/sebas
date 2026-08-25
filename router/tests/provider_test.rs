@@ -21,10 +21,15 @@ use std::sync::{Arc, Mutex};
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn isolate(dir: &tempfile::TempDir) {
-    let path = dir.path().join("state.json");
+    // provider 数据已拆回 providers.json（state_store 双文件），两个 env
+    // 都要隔离，避免读到开发机真实文件。
     // SAFETY: ENV_LOCK held by caller.
     unsafe {
-        std::env::set_var("SEBAS_STATE_FILE", path.to_str().unwrap());
+        std::env::set_var("SEBAS_STATE_FILE", dir.path().join("state.json").to_str().unwrap());
+        std::env::set_var(
+            "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+            dir.path().join("providers.json").to_str().unwrap(),
+        );
     }
 }
 
@@ -32,6 +37,7 @@ fn deisolate() {
     // SAFETY: ENV_LOCK held by caller.
     unsafe {
         std::env::remove_var("SEBAS_STATE_FILE");
+        std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
     }
 }
 

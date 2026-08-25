@@ -55,6 +55,25 @@ async fn start_gateway_impl(config_toml: &str, debug: bool) -> TestGateway {
     // unicode 转义导致解析失败。统一换成 `/`（TOML 与 OS 都接受）。
     let usage = usage_path.to_string_lossy().replace('\\', "/");
     let raw = config_toml.replace("__USAGE__", &usage);
+    // 隔离 provider overlay：向 [gateway] 段注入不存在的 overlay 路径，
+    // parse 时 merge 即 no-op，不合并开发机 ~/.sebas/providers.json（其中
+    // 的 openai 条目会与 preset 校验冲突导致 parse 失败）。TOML 追加在
+    // 文件尾部、且 key 在 [gateway] 段内已存在时 serde 取后者…… 实际
+    // toml 重复 key 报错，故插到首个段落之前，作为 [gateway] 的首字段。
+    // config 已含该字段时（无）不会出现。需要真 overlay 的测试（admin_
+    // test）自行起 gateway，不经本函数。
+    let raw = if raw.contains("provider_overlay") {
+        raw
+    } else {
+        raw.replacen(
+            "[gateway]\n",
+            &format!(
+                "[gateway]\nprovider_overlay = {:?}\n",
+                dir.path().join("no-overlay.json").to_string_lossy().replace('\\', "/")
+            ),
+            1,
+        )
+    };
     let mut cfg = GatewayConfig::parse(&raw).expect("parse test config");
     if debug {
         debug::enable_debug_test_provider(&mut cfg);

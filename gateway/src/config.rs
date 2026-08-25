@@ -69,6 +69,16 @@ pub struct GatewayConfig {
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub routes: Vec<RouteGroup>,
+    /// 模型别名 → upstream model（`None` = 别名透传）。由 provider overlay
+    /// 的 `model_aliases` 段编译而来；`RouteTable` 用它在非 namespace 路径
+    /// 做 rename。对外结构体序列化用 `serde(skip)`——这是派生数据。
+    #[serde(skip)]
+    pub model_aliases: HashMap<String, Option<String>>,
+    /// 本配置来自的 config.toml 路径（reload 用）。`#[serde(skip)]`：
+    /// wire 上不存在；由调用方（gateway_cmd / admin reload）注入。
+    /// 缺省读 `SEBAS_GATEWAY_CONFIG`，再退 `~/.sebas/config.toml`。
+    #[serde(skip)]
+    pub config_source: String,
 }
 
 /// `[gateway.rate_limit]`：token-bucket 限流。缺省不限流。
@@ -130,6 +140,15 @@ fn default_usage_file() -> String {
 }
 fn default_provider_overlay() -> String {
     "~/.sebas/providers.json".into()
+}
+
+/// reload 用的 config.toml 来源：`SEBAS_GATEWAY_CONFIG` env，退
+/// `~/.sebas/config.toml`。调用方（gateway_cmd）可在 parse 后覆盖。
+fn default_config_source() -> String {
+    std::env::var("SEBAS_GATEWAY_CONFIG")
+        .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "~/.sebas/config.toml".into())
 }
 
 /// 上游 provider。`api_key_env` 优先（密钥只从 env 读，不落盘/不落日志）；
@@ -213,6 +232,8 @@ struct RawGatewayConfig {
     read_timeout_secs: u64,
     #[serde(default = "default_usage_file")]
     usage_file: String,
+    #[serde(default = "default_provider_overlay")]
+    provider_overlay: String,
     #[serde(default)]
     default_provider: Option<String>,
     #[serde(default, deserialize_with = "de_auth_token")]
@@ -453,6 +474,44 @@ fn resolve_providers(
     Ok(out)
 }
 
+/// 校验候选 provider 条目：overlay JSON Map 在内存里完整跑 resolve 管线
+/// （preset 解析、URL 校验），不碰文件。admin 写路径（providers CRUD、
+/// reload）用它做「写前 400」判定；返回解析后的 ProviderConfig 供进一步检查。
+/// 错误信息恒含 provider 名（admin 400 body 直接可读）。
+pub fn validate_provider_entry(
+    name: &str,
+    item: &serde_json::Map<String, serde_json::Value>,
+) -> Result<ProviderConfig> {
+    let raw = RawProviderConfig {
+        preset: item
+            .get("preset")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        base_url_anthropic: item
+            .get("base_url_anthropic")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        base_url_openai: item
+            .get("base_url_openai")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        api_key_env: item
+            .get("api_key_env")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        api_key: item
+            .get("api_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        model_map: HashMap::new(),
+        models: parse_models_list(item),
+    };
+    let mut resolved = resolve_providers(HashMap::from([(name.to_string(), raw)]))?;
+    resolved
+        .remove(name)
+        .ok_or_else(|| GatewayError::Config(format!("provider.{name}: 解析结果丢失")))
+}
+
 /// 空字符串归 None（非空为 Some）。
 fn option_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
@@ -549,12 +608,14 @@ impl GatewayConfig {
                     read_timeout_secs: g.read_timeout_secs,
                     usage_file: g.usage_file,
                     debug: false,
-                    provider_overlay: default_provider_overlay(),
+                    provider_overlay: g.provider_overlay,
                     default_provider: g.default_provider,
                     auth_token: g.auth_token,
                     rate_limit: g.rate_limit,
                     providers,
                     routes,
+                    model_aliases: HashMap::new(),
+                    config_source: default_config_source(),
                 }
             }
             // 只有顶层 `[provider.*]`：无 [gateway] 段，其余字段全部走默认。
@@ -571,6 +632,8 @@ impl GatewayConfig {
                 rate_limit: RateLimitConfig::default(),
                 providers,
                 routes: Vec::new(),
+                model_aliases: HashMap::new(),
+                config_source: default_config_source(),
             },
         };
         cfg.apply_env_overrides();
@@ -623,38 +686,37 @@ impl GatewayConfig {
             // preset + 填密钥」的最小写法（地址由 preset 补全）。
             // 注：旧 overlay 里若残留 `protocol` 字段会被静默忽略——schema
             // 已切到 per-protocol base_url。
-            let raw = RawProviderConfig {
-                preset: item
-                    .get("preset")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                base_url_anthropic: item
-                    .get("base_url_anthropic")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                base_url_openai: item
-                    .get("base_url_openai")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                api_key_env: item
-                    .get("api_key_env")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                api_key: item
-                    .get("api_key")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                model_map: HashMap::new(),
-                models: parse_models_list(&item),
-            };
-            let mut resolved =
-                resolve_providers(HashMap::from([(name.clone(), raw)])).map_err(|e| {
-                    GatewayError::Config(format!("provider overlay 里 '{name}' 无效: {e}"))
-                })?;
-            let provider = resolved
-                .remove(&name)
-                .expect("resolve_providers keeps the input name");
+            let provider = validate_provider_entry(&name, &item).map_err(|e| {
+                GatewayError::Config(format!("provider overlay 里 '{name}' 无效: {e}"))
+            })?;
             self.providers.insert(name, provider);
+        }
+        // 模型别名编译（D2）：每别名一条精确 RouteGroup 前置（胜过同名
+        // config route）；rename 记入 cfg.model_aliases（RouteTable 在非
+        // namespace 路径改写——namespace rest 不吃别名改写）。
+        // 引用不存在 provider 的别名 drop + warn（外部写入的自愈，不 fail fast）。
+        let mut alias_routes: Vec<RouteGroup> = Vec::new();
+        for (alias, entry) in file.model_aliases {
+            if !self.providers.contains_key(&entry.provider) {
+                tracing::warn!(
+                    alias = %alias,
+                    provider = %entry.provider,
+                    "model alias 引用不存在的 provider，已丢弃"
+                );
+                continue;
+            }
+            self.model_aliases
+                .insert(alias.clone(), entry.upstream_model.clone());
+            alias_routes.push(RouteGroup {
+                model: alias,
+                providers: vec![entry.provider],
+            });
+        }
+        if !alias_routes.is_empty() {
+            // 字典序稳定排列后整体前置到 config routes 之前。
+            alias_routes.sort_by(|a, b| a.model.cmp(&b.model));
+            alias_routes.append(&mut self.routes);
+            self.routes = alias_routes;
         }
         Ok(())
     }
@@ -775,6 +837,19 @@ struct ProviderOverlay {
     providers: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     deleted: Vec<String>,
+    /// 模型别名：`alias -> { provider, upstream_model? }`。由 admin API /
+    /// 手工编辑写入；引用不存在 provider 的别名在合并期 drop + warn。
+    #[serde(default)]
+    model_aliases: HashMap<String, ModelAliasEntry>,
+}
+
+/// providers.json `model_aliases` 段的单个别名 wire。
+#[derive(Debug, Clone, Deserialize)]
+struct ModelAliasEntry {
+    provider: String,
+    /// 缺省 = 别名即 upstream model（透传）。
+    #[serde(default)]
+    upstream_model: Option<String>,
 }
 
 /// tilde 展开（与 root `src/config.rs` 同款 let-chain 形式）。
@@ -792,11 +867,11 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::proto::WireProtocol;
-
     // 所有 config 测试都经此锁串行：env 覆盖测试会 set/remove
     // `SEBAS_GATEWAY_LISTEN`，单进程内并行跑会与其他调用 parse 的测试竞争。
-    static LOCK: Mutex<()> = Mutex::new(());
+    // 跨模块共享锁（crate::test_util::CONFIG_ENV_LOCK 的别名）——debug.rs 与本
+    // 模块的测试都动 SEBAS_GATEWAY_LISTEN，必须互斥。
+    static LOCK: &Mutex<()> = &crate::test_util::CONFIG_ENV_LOCK;
 
     /// 隔离 provider overlay 后解析：把 SEBAS_GATEWAY_PROVIDER_OVERLAY 指向
     /// 不存在的路径，避免测试读到开发机 ~/.sebas/providers.json 影响断言。
@@ -1480,5 +1555,191 @@ api_key = "test-key"
         );
         assert!(anth.base_url_openai.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY_V2"));
+    }
+
+    /// overlay 带 model_aliases：编译为前置精确 RouteGroup + model_map 插入。
+    /// 用 RouteTable::from_config + resolve 验证完整路由语义。
+    #[test]
+    fn overlay_model_aliases_compile_into_routes_and_model_map() {
+        use crate::routing::RouteTable;
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("providers.json");
+        std::fs::write(
+            &overlay,
+            r#"{
+                "providers": {
+                    "beta": { "preset": "deepseek", "api_key": "sk-b" }
+                },
+                "model_aliases": {
+                    "my-claude": { "provider": "beta", "upstream_model": "deepseek-chat" },
+                    "bare": { "provider": "beta" }
+                }
+            }"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", overlay.to_str().unwrap());
+        }
+        let raw = r#"
+[provider.anthropic]
+[provider.openai]
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("parse with alias overlay");
+
+        // 带 upstream_model：resolve 后改写为 upstream；缺省：别名透传。
+        let table = RouteTable::from_config(&cfg);
+        let d = table
+            .resolve(Some("my-claude"), crate::proto::WireProtocol::Anthropic)
+            .expect("alias resolves");
+        assert_eq!(d.provider, "beta");
+        assert_eq!(d.upstream_model.as_deref(), Some("deepseek-chat"));
+
+        let d = table
+            .resolve(Some("bare"), crate::proto::WireProtocol::Anthropic)
+            .expect("bare alias resolves");
+        assert_eq!(d.provider, "beta");
+        assert_eq!(d.upstream_model.as_deref(), Some("bare"), "缺省 upstream 透传别名");
+
+        // 别名 RouteGroup 存在且排在 config routes 之前。
+        assert!(
+            cfg.routes
+                .iter()
+                .position(|r| r.model == "my-claude")
+                .is_some_and(|i| cfg.routes.iter().take(i).all(|r| r.model != "m*")),
+            "alias groups precede config routes"
+        );
+    }
+
+    /// 别名胜过同名 config route（alias 组前置 = 顺序扫描先命中）。
+    #[test]
+    fn overlay_alias_beats_same_named_config_route() {
+        use crate::routing::RouteTable;
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("providers.json");
+        std::fs::write(
+            &overlay,
+            r#"{
+                "providers": { "beta": { "preset": "deepseek", "api_key": "sk-b" } },
+                "model_aliases": { "m1": { "provider": "beta" } }
+            }"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", overlay.to_str().unwrap());
+        }
+        let raw = r#"
+[provider.anthropic]
+[provider.openai]
+[gateway.routes]
+m1 = ["anthropic"]
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("parse");
+        let table = RouteTable::from_config(&cfg);
+        let d = table
+            .resolve(Some("m1"), crate::proto::WireProtocol::Anthropic)
+            .expect("m1 resolves");
+        assert_eq!(d.provider, "beta", "alias must beat same-named config route");
+    }
+
+    /// 命名空间仍优先于别名：`beta/m1` 走 beta 的 rest 而非 alias 改写。
+    #[test]
+    fn overlay_namespace_still_beats_alias() {
+        use crate::routing::RouteTable;
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("providers.json");
+        std::fs::write(
+            &overlay,
+            r#"{
+                "providers": { "beta": { "preset": "deepseek", "api_key": "sk-b" } },
+                "model_aliases": { "m1": { "provider": "beta", "upstream_model": "renamed" } }
+            }"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", overlay.to_str().unwrap());
+        }
+        let raw = r#"
+[provider.anthropic]
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("parse");
+        let table = RouteTable::from_config(&cfg);
+        let d = table
+            .resolve(Some("beta/m1"), crate::proto::WireProtocol::Anthropic)
+            .expect("namespace resolves");
+        assert_eq!(d.provider, "beta");
+        assert_eq!(
+            d.upstream_model.as_deref(),
+            Some("m1"),
+            "namespace rest 不吃 alias 的 model_map 改写"
+        );
+    }
+
+    /// 引用不存在 provider 的别名 drop + warn，不启动失败。
+    #[test]
+    fn overlay_alias_to_missing_provider_dropped() {
+        use crate::routing::RouteTable;
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_GATEWAY_LISTEN");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("providers.json");
+        std::fs::write(
+            &overlay,
+            r#"{
+                "providers": {},
+                "model_aliases": { "ghost": { "provider": "nonexistent" } }
+            }"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", overlay.to_str().unwrap());
+        }
+        let raw = r#"
+[provider.anthropic]
+"#;
+        let cfg = GatewayConfig::parse(raw).expect("坏别名不导致启动失败");
+        assert!(
+            cfg.routes.iter().all(|r| r.model != "ghost"),
+            "坏别名不得编译进 routes"
+        );
+        let table = RouteTable::from_config(&cfg);
+        // ghost 落到 anthropic（唯一 provider 隐式默认）而非 502。
+        let d = table
+            .resolve(Some("ghost"), crate::proto::WireProtocol::Anthropic)
+            .expect("fallback default");
+        assert_eq!(d.provider, "anthropic");
+    }
+
+    /// 校验辅助：无效候选（无 preset 无 URL）Err 且错误信息含 provider 名；
+    /// 有效 preset 候选解析出 URL。
+    #[test]
+    fn validate_provider_entry_rejects_invalid_and_names_provider() {
+        let mut bad = serde_json::Map::new();
+        bad.insert("name".into(), serde_json::json!("mystery"));
+        let err = validate_provider_entry("mystery", &bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mystery"), "错误信息须含 provider 名: {msg}");
+        assert!(
+            msg.contains("base_url"),
+            "错误信息须说明缺 URL: {msg}"
+        );
+
+        let mut good = serde_json::Map::new();
+        good.insert("preset".into(), serde_json::json!("deepseek"));
+        let cfg = validate_provider_entry("deepseek", &good).expect("preset 候选有效");
+        assert!(cfg.base_url_openai.is_some(), "preset 补全 URL");
     }
 }

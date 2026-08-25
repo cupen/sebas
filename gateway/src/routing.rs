@@ -47,6 +47,10 @@ pub struct RouteTable {
     providers: HashMap<String, ProviderConfig>,
     routes: Vec<RouteGroup>,
     default_provider: Option<String>,
+    /// 别名 → upstream model（spec gateway-model-aliases）：编译进 routes 的
+    /// 别名在此记录 rename。只在非 namespace 路径查（namespace rest 不吃
+    /// 别名改写）；命中 key 但值为 `None` = 透传别名本身。
+    alias_map: HashMap<String, Option<String>>,
     /// debug 模式：内置 `test` provider 由 gateway 自身应答，绕过
     /// 协议一致性检查（双协议面都可命中）。
     debug: bool,
@@ -67,6 +71,7 @@ impl RouteTable {
             providers: cfg.providers.clone(),
             routes: cfg.routes.clone(),
             default_provider,
+            alias_map: cfg.model_aliases.clone(),
             debug: cfg.debug,
         }
     }
@@ -83,7 +88,7 @@ impl RouteTable {
     ) -> Result<RouteDecision, RouteError> {
         // 解析 (provider 名, 待 rename 的 model)。model_for_map 为 None 仅当
         // 请求未携带 model（GET 类）；命名空间命中时取 `rest`，其余取原 model。
-        let (provider_name, model_for_map): (String, Option<&str>) = match model {
+        let (provider_name, model_for_map): (String, Option<String>) = match model {
             None => {
                 let p = self.default_provider.clone().ok_or(RouteError::NoRoute)?;
                 (p, None)
@@ -93,24 +98,35 @@ impl RouteTable {
                 if let Some((ns, rest)) = split_namespace(m)
                     && self.providers.contains_key(ns)
                 {
-                    (ns.to_string(), Some(rest))
+                    (ns.to_string(), Some(rest.to_string()))
                 } else {
                     let p: String = match self.match_route(m) {
                         Some(p) => p.to_string(),
                         None => self.default_provider.clone().ok_or(RouteError::NoRoute)?,
                     };
-                    (p, Some(m))
+                    // 别名改写：命中 alias_map 且带 upstream_model 时改写为
+                    // upstream；否则原样透传（含 namespace rest——不吃别名改写）。
+                    let renamed = self
+                        .alias_map
+                        .get(m)
+                        .and_then(|up| up.clone())
+                        .unwrap_or_else(|| m.to_string());
+                    (p, Some(renamed))
                 }
             }
         };
 
         // 协议一致性：纯透传，不做协议转换。
-        // provider 存在性由 from_config 镜像 + config.rs validate 保证；
-        // 现在每个 provider 按请求协议选 URL：缺该协议位 → ProtocolMismatch。
-        let provider_cfg = self
-            .providers
-            .get(&provider_name)
-            .expect("provider existence guaranteed by from_config mirror + config::validate");
+        // provider 存在性：from_config 镜像 + config.rs validate 保证；热重载
+        // 时代该不变量仍成立，但取防御分支（NoRoute）替代 expect——
+        // panic 面在内核可换的场景不再可接受（design D8）。
+        let Some(provider_cfg) = self.providers.get(&provider_name) else {
+            tracing::error!(
+                provider = %provider_name,
+                "resolve 命中不存在的 provider（内核不一致），回退 NoRoute"
+            );
+            return Err(RouteError::NoRoute);
+        };
         if provider_cfg.url_for(proto).is_none() && !(self.debug && provider_name == "test") {
             return Err(RouteError::ProtocolMismatch {
                 provider: provider_name,
@@ -121,9 +137,9 @@ impl RouteTable {
         let upstream_model = model_for_map.map(|m| {
             provider_cfg
                 .model_map
-                .get(m)
+                .get(m.as_str())
                 .cloned()
-                .unwrap_or_else(|| m.to_string())
+                .unwrap_or(m)
         });
 
         Ok(RouteDecision {
@@ -232,6 +248,8 @@ mod tests {
             auth_token: Vec::new(),
             providers,
             rate_limit: crate::config::RateLimitConfig::default(),
+            model_aliases: HashMap::new(),
+            config_source: "/__test_no_config__.toml".into(),
             routes: routes
                 .iter()
                 .map(|(m, ps)| RouteGroup {

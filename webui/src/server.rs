@@ -54,7 +54,7 @@ pub fn build_router_with_admin_adapter(
         templates: templates.clone(),
     };
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/", get(routes::dashboard))
         .route("/sessions", get(routes::session_list))
         .route("/sessions/partial", get(routes::session_list_partial))
@@ -78,7 +78,38 @@ pub fn build_router_with_admin_adapter(
             "/static",
             ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
         )
+        .with_state(state.clone());
+
+    // gateway BFF mutation 面（Task 6.3）：独立子 router，守卫只套这一组
+    // （POST-only + loopback origin check）。
+    let gateway_mutations = Router::new()
+        .route(
+            "/gateway/api/providers",
+            post(routes::gateway_api_provider_create),
+        )
+        .route(
+            "/gateway/api/providers/{name}",
+            axum::routing::put(routes::gateway_api_provider_update)
+                .delete(routes::gateway_api_provider_delete),
+        )
+        .route(
+            "/gateway/api/providers/{name}/probe",
+            post(routes::gateway_api_provider_probe),
+        )
+        .route(
+            "/gateway/api/model-aliases",
+            post(routes::gateway_api_alias_create),
+        )
+        .route(
+            "/gateway/api/model-aliases/{alias}",
+            axum::routing::put(routes::gateway_api_alias_update)
+                .delete(routes::gateway_api_alias_delete),
+        )
+        .route("/gateway/api/reload", post(routes::gateway_api_reload))
+        .layer(axum::middleware::from_fn(routes::gateway_mutation_guard))
         .with_state(state);
+
+    let mut app = app.merge(gateway_mutations);
 
     if let Some(adapter) = admin_adapter {
         app = app.merge(admin::build_admin_router(AdminState::new(
