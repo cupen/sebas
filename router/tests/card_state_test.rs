@@ -185,8 +185,8 @@ async fn fsm_eyes_to_construction_to_done() {
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
-    // Finished -> 终态：apply_event_to_out 只出 UpdateCard（card body 推 ✅
-    // 已完成父面板），不再 Out::React 换 DONE。
+    // Finished -> 终态：apply_event_to_out 出 UpdateCard（card body 推 ✅
+    // 已完成父面板），随后 Out::React 换 DONE（997bfe2 恢复终态 reaction）。
     let (router3, mut out3) = RouterHandle::new(SessionMap::new());
     router3.seed_card("s3".into(), "p".into()).await;
     router3
@@ -202,11 +202,13 @@ async fn fsm_eyes_to_construction_to_done() {
         .unwrap()
         .unwrap();
     assert!(matches!(o3, Out::UpdateCard { .. }), "先出卡: {o3:?}");
+    let o3b = tokio::time::timeout(Duration::from_millis(200), out3.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(150), out3.recv())
-            .await
-            .is_err(),
-        "Finished 不应再出 React DONE: 已由 card body 表达"
+        matches!(o3b, Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE),
+        "Finished 应换 React DONE: {o3b:?}"
     );
 }
 
@@ -347,8 +349,8 @@ async fn phase_transitions_emit_reactions_card_first() {
     assert!(matches!(o3, Out::UpdateCard { .. }), "出卡: {o3:?}");
     assert_no_more(&mut out_rx).await;
 
-    // Finished → 终态：内部 FSM 转 DONE，body 推"✅ 已完成"父面板；reaction
-    // 维持"已收到 / 折腾中"，不再 Out::React 换 DONE。
+    // Finished → 终态：内部 FSM 转 DONE，body 推"✅ 已完成"父面板；随后
+    // Out::React 换 DONE（997bfe2 恢复终态 reaction）。
     router
         .apply_event_to_out(
             "r1".into(),
@@ -359,6 +361,11 @@ async fn phase_transitions_emit_reactions_card_first() {
         .await;
     let o4 = recv(&mut out_rx).await;
     assert!(matches!(o4, Out::UpdateCard { .. }), "先出卡: {o4:?}");
+    let o5 = recv(&mut out_rx).await;
+    assert!(
+        matches!(o5, Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE),
+        "再换 reaction DONE: {o5:?}"
+    );
     assert_no_more(&mut out_rx).await;
 }
 

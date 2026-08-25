@@ -251,7 +251,8 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
             },
         )
         .await;
-    let _ = out_rx.recv().await; // UpdateCard（终态；reaction 不再发）
+    let _ = out_rx.recv().await; // UpdateCard（终态）
+    let _ = out_rx.recv().await; // React DONE（997bfe2 恢复终态 reaction）
 
     // Now turn 2 should drain: SendCard(root_id=om2) + SendAcp("second")
     let first = out_rx.recv().await.unwrap();
@@ -278,7 +279,8 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
             },
         )
         .await;
-    let _ = out_rx.recv().await; // UpdateCard（终态；reaction 不再发）
+    let _ = out_rx.recv().await; // UpdateCard（终态）
+    let _ = out_rx.recv().await; // React DONE（997bfe2 恢复终态 reaction）
     let third_a = out_rx.recv().await.unwrap();
     let third_b = out_rx.recv().await.unwrap();
     match (&third_a, &third_b) {
