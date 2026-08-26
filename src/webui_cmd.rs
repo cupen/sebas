@@ -30,6 +30,7 @@ use crate::watchdog::control_rpc::{
     self, ControlEnvelope, RpcActor, RpcControlRequest, RpcControlResponse,
 };
 use crate::watchdog::services::WebUiEndpoint;
+use crate::watchdog::EXIT_BIND_FAILED;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -98,9 +99,20 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     // Bind to the configured port. Fails if the port is already in use
     // (by another WebUI process or the legacy `sebas run --webui` path).
-    let listener = tokio::net::TcpListener::bind(endpoint.bind_addr())
-        .await
-        .map_err(|e| SebasError::Gateway(format!("bind webui {}: {e}", endpoint.bind_addr())))?;
+    // On failure, exit with a specific code so the watchdog supervisor can
+    // distinguish bind failures from other crashes and mark the service as
+    // Degraded instead of endlessly retrying.
+    let listener = match tokio::net::TcpListener::bind(endpoint.bind_addr()).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(
+                "bind webui {} failed: {e}; exiting with code {} (Degraded)",
+                endpoint.bind_addr(),
+                EXIT_BIND_FAILED,
+            );
+            std::process::exit(EXIT_BIND_FAILED);
+        }
+    };
 
     let admin_adapter = control_admin_adapter();
 

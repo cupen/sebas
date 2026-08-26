@@ -28,6 +28,10 @@ use tracing::{info, warn};
 /// 版本号
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// WebUI 子进程 bind 失败时的保留退出码。supervisor 据此区分 bind 失败
+/// 与普通 crash，将服务标记为 Degraded 而非自动重试。
+pub const EXIT_BIND_FAILED: i32 = 75;
+
 fn create_control_secret() -> String {
     let pid = std::process::id();
     let ts = std::time::SystemTime::now()
@@ -262,9 +266,8 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
     core_spec.on_unready_after_upgrade = Some(rollback_hook(config.clone()));
     services.register(core_spec, true);
 
-    // webui：config 开关（默认关）。
-    let webui_enabled = services::should_start_watchdog_webui(&config.webui);
-    if webui_enabled {
+    // webui：config 开关（默认启用）。
+    if config.webui.enabled {
         services.register(
             ServiceSpec::new(
                 ServiceName::WebUi,

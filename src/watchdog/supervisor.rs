@@ -7,6 +7,7 @@
 //! 可独立同步单测。
 
 use crate::error::Result;
+use crate::watchdog::EXIT_BIND_FAILED;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -57,6 +58,9 @@ pub enum ServiceState {
     Stopped,
     /// 配置层从未启用：没有 child，也没有运行时覆盖。
     Disabled,
+    /// 服务因 bind 失败等外部原因进入降级态，不自动重试；
+    /// 等待 Restart 命令复位后重新 spawn。
+    Degraded,
 }
 
 /// 复用 control 面的期望态命名，避免两套词汇。
@@ -318,6 +322,28 @@ async fn supervise(
             }
         }
 
+        // 降级态：bind 失败等外部原因，不自动重试，等 Restart/Stop 命令。
+        if snapshot.lock().await.state == ServiceState::Degraded {
+            match cmd_rx.recv().await {
+                Some(ServiceCommand::Restart { .. }) | Some(ServiceCommand::Start) => {
+                    policy.reset();
+                    set_state(&snapshot, ServiceState::Restarting).await;
+                    continue;
+                }
+                Some(ServiceCommand::Stop) => {
+                    desired = DesiredState::Disabled;
+                    set_state(&snapshot, ServiceState::Stopped).await;
+                    continue;
+                }
+                Some(ServiceCommand::Shutdown) | None => {
+                    let mut snap = snapshot.lock().await;
+                    snap.state = ServiceState::Stopped;
+                    snap.pid = None;
+                    return;
+                }
+            }
+        }
+
         // spawn 一次 incarnation。失败重试，监督 task 绝不退出。
         let instance = match spec.spawner.spawn().await {
             Ok(instance) => instance,
@@ -431,6 +457,17 @@ async fn supervise(
                 }
                 just_performed_update = false;
 
+                // 退出码 75 = bind 失败（如端口占用）→ 标记 Degraded，
+                // 不自动重试，等 Restart 命令。
+                if code == Some(EXIT_BIND_FAILED) {
+                    warn!(
+                        service = name.as_str(),
+                        "bind 失败（端口占用？），标记为 Degraded，等待 Restart 命令"
+                    );
+                    set_state(&snapshot, ServiceState::Degraded).await;
+                    continue;
+                }
+
                 set_state(&snapshot, ServiceState::Restarting).await;
                 match policy.register_crash() {
                     CrashDecision::Restart { delay } => {
@@ -489,11 +526,12 @@ mod tests {
     use crate::error::SebasError;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// 可控的 FakeChild：exit 信号经 watch 触发。
+    /// 可控的 FakeChild：exit 信号经 watch 触发，退出码可配置。
     struct FakeChild {
         pid: u32,
         exited: tokio::sync::watch::Receiver<bool>,
         exit_triggered: tokio::sync::watch::Sender<bool>,
+        exit_code: i32,
     }
 
     struct FakeSpawner {
@@ -502,6 +540,8 @@ mod tests {
         auto_exit_ms: u64,
         /// spawn 是否直接失败。
         fail: bool,
+        /// child 退出码（默认 1）。
+        exit_code: i32,
     }
 
     impl FakeSpawner {
@@ -510,6 +550,16 @@ mod tests {
                 spawns: AtomicUsize::new(0),
                 auto_exit_ms: exit_ms,
                 fail: false,
+                exit_code: 1,
+            })
+        }
+
+        fn bind_failed() -> Arc<Self> {
+            Arc::new(Self {
+                spawns: AtomicUsize::new(0),
+                auto_exit_ms: 10,
+                fail: false,
+                exit_code: EXIT_BIND_FAILED,
             })
         }
     }
@@ -524,6 +574,7 @@ mod tests {
             let (tx, rx) = tokio::sync::watch::channel(false);
             let auto_ms = self.auto_exit_ms;
             let exit_tx = tx.clone();
+            let exit_code = self.exit_code;
             tokio::spawn(async move {
                 if auto_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(auto_ms)).await;
@@ -535,6 +586,7 @@ mod tests {
                     pid: 4242,
                     exited: rx.clone(),
                     exit_triggered: tx,
+                    exit_code,
                 }),
                 readiness: None,
             })
@@ -554,7 +606,7 @@ mod tests {
                     return None;
                 }
             }
-            Some(1)
+            Some(self.exit_code)
         }
 
         async fn stop(&mut self) {
@@ -647,6 +699,7 @@ mod tests {
             spawns: AtomicUsize::new(0),
             auto_exit_ms: 0,
             fail: true,
+            exit_code: 1,
         });
         let (handle, task) = start_supervision(fast_spec(spawner.clone(), DesiredState::Enabled));
         tokio::time::sleep(Duration::from_millis(60)).await;
@@ -684,6 +737,56 @@ mod tests {
         );
         // 不计 crash：普通重启延迟（5-10ms）下 spawns 应持续增长。
         assert!(spawner.spawns.load(Ordering::SeqCst) >= 2);
+        assert!(handle.send(ServiceCommand::Shutdown).await);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
+    async fn bind_failed_exit_code_marks_degraded() {
+        let spawner = FakeSpawner::bind_failed();
+        let (handle, task) = start_supervision(fast_spec(spawner.clone(), DesiredState::Enabled));
+        // bind_failed 的 auto_exit_ms=10，等足够时间让 child 退出。
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let snap = handle.snapshot().await;
+        assert_eq!(
+            snap.state,
+            ServiceState::Degraded,
+            "退出码 75 应标记为 Degraded"
+        );
+        // 不应自动重试（spawns 保持 1）。
+        assert_eq!(
+            spawner.spawns.load(Ordering::SeqCst),
+            1,
+            "Degraded 后不自动重试"
+        );
+        assert!(handle.send(ServiceCommand::Shutdown).await);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
+    async fn restart_clears_degraded() {
+        let spawner = FakeSpawner::bind_failed();
+        let (handle, task) = start_supervision(fast_spec(spawner.clone(), DesiredState::Enabled));
+        // 等第一次 bind 失败 → Degraded。
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            spawner.spawns.load(Ordering::SeqCst),
+            1,
+            "Degraded 后 spawn 应停止"
+        );
+        // Restart 命令复位 degraded。
+        assert!(handle.send(ServiceCommand::Restart { is_upgrade: false }).await);
+        // 等待重新 spawn（bind_failed 的 auto_exit_ms=10，会再次用退出码 75 退出，
+        // 但重要的是 spawner 被调用了）。
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let snap = handle.snapshot().await;
+        // Restart 后再次 bind 失败 → 回到 Degraded。
+        // 关键：spawns 增加了（重新 spawn 了）。
+        assert!(
+            spawner.spawns.load(Ordering::SeqCst) >= 2,
+            "Restart 复位后应重新 spawn"
+        );
+        assert_eq!(snap.state, ServiceState::Degraded);
         assert!(handle.send(ServiceCommand::Shutdown).await);
         let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
     }

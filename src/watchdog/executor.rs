@@ -538,6 +538,7 @@ impl ControlExecutor {
                 ServiceState::Restarting => "restarting",
                 ServiceState::Stopped => "stopped",
                 ServiceState::Disabled => "disabled",
+                ServiceState::Degraded => "degraded",
             };
             let desired = match snap.desired {
                 DesiredState::Enabled => "enabled",

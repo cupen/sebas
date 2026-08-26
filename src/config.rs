@@ -202,8 +202,8 @@ pub struct WatchdogConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WatchdogWebUiConfig {
-    /// Let watchdog own the WebUI lifecycle.
-    #[serde(default)]
+    /// Let watchdog own the WebUI lifecycle (default: true).
+    #[serde(default = "default_webui_enabled")]
     pub enabled: bool,
     /// Bind address. Phase 2.3 tightens non-loopback security.
     #[serde(default = "default_webui_host")]
@@ -216,11 +216,15 @@ pub struct WatchdogWebUiConfig {
 impl Default for WatchdogWebUiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             host: default_webui_host(),
             port: default_webui_port(),
         }
     }
+}
+
+fn default_webui_enabled() -> bool {
+    true
 }
 
 fn default_webui_host() -> String {
@@ -534,5 +538,48 @@ app_secret = "b"
 updater_timeout_secs = 42
 "#;
         assert!(deprecated_watchdog_upgrade_hits(raw).is_empty());
+    }
+
+    #[test]
+    fn watchdog_webui_default_enabled() {
+        // 无 watchdog.webui 段 → 默认启用
+        let raw = r#"
+[feishu]
+app_id = "a"
+app_secret = "b"
+"#;
+        let cfg = Config::parse(raw).expect("config parses");
+        assert!(cfg.watchdog.webui.enabled, "默认 webui 应启用");
+        assert_eq!(cfg.watchdog.webui.host, "127.0.0.1");
+        assert_eq!(cfg.watchdog.webui.port, 9797);
+    }
+
+    #[test]
+    fn watchdog_webui_explicit_disabled() {
+        let raw = r#"
+[feishu]
+app_id = "a"
+app_secret = "b"
+
+[watchdog.webui]
+enabled = false
+"#;
+        let cfg = Config::parse(raw).expect("config parses");
+        assert!(!cfg.watchdog.webui.enabled, "显式 false 应关闭");
+    }
+
+    #[test]
+    fn watchdog_webui_custom_port() {
+        let raw = r#"
+[feishu]
+app_id = "a"
+app_secret = "b"
+
+[watchdog.webui]
+port = 9798
+"#;
+        let cfg = Config::parse(raw).expect("config parses");
+        assert!(cfg.watchdog.webui.enabled, "未显式 disabled 应启用");
+        assert_eq!(cfg.watchdog.webui.port, 9798);
     }
 }

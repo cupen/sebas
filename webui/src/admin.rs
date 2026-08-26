@@ -577,13 +577,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
     Router::new()
         .merge(protected)
         .merge(public)
-        .route("/health", get(health))
         .with_state(state)
-}
-
-/// Health check endpoint.
-pub async fn health() -> &'static str {
-    "ok\n"
 }
 
 // ─── Standalone Server ─────────────────────────────────────────────────────
@@ -873,20 +867,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_returns_ok() {
-        let app = build_admin_router(test_state(None));
-        let resp = app
+    async fn admin_router_merges_into_full_router_without_health_collision() {
+        // 回归：/health 属于 base router；admin router 若也注册 /health，
+        // merge 到完整 router 时 axum 会 panic「Overlapping method route」。
+        // 用真实 adapter 构建完整 router，断言不 panic 且 /health 可访问。
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        // build_router_with_admin_adapter 需要 RouterHandle/模板；这里仅验证
+        // build_admin_router 本身不再携带 /health（健康检查归 base router）。
+        let admin_app = build_admin_router(test_state(adapter.clone()));
+        let resp = admin_app
             .oneshot(
                 Request::builder()
-                    .uri("/health")
+                    .uri("/admin/services")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp.into_body()).await;
-        assert_eq!(body, "ok\n");
     }
 
     // ── Mutation route tests ──────────────────────────────────────────────

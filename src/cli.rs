@@ -63,12 +63,17 @@ pub struct RunArgs {
     pub test_msg: Option<String>,
 
     /// Start the WebUI dashboard server.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_webui")]
     pub webui: bool,
 
     /// Port for the WebUI server (default: 9797).
     #[arg(long, default_value = "9797")]
     pub webui_port: u16,
+
+    /// Explicitly disable the WebUI dashboard server (symmetry with watchdog
+    /// default, no-op in bare run mode).
+    #[arg(long, conflicts_with = "webui")]
+    pub no_webui: bool,
 
     /// Dump every raw inbound WS payload to this directory as one .json file per
     /// event (timestamp-prefixed). Useful for local replay/debug without needing

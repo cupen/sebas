@@ -42,10 +42,6 @@ impl WebUiEndpoint {
     }
 }
 
-pub fn should_start_watchdog_webui(config: &WatchdogWebUiConfig) -> bool {
-    config.enabled
-}
-
 // ─── ServiceManager ────────────────────────────────────────
 
 /// persist 文件里单服务的期望态字符串。
@@ -258,7 +254,7 @@ impl ServiceManager {
                 .all_snapshots()
                 .await
                 .into_iter()
-                .all(|s| matches!(s.state, ServiceState::Stopped | ServiceState::Disabled));
+                .all(|s| matches!(s.state, ServiceState::Stopped | ServiceState::Disabled | ServiceState::Degraded));
             if settled || std::time::Instant::now() >= deadline {
                 break;
             }
@@ -492,7 +488,7 @@ host = "127.0.0.1"
 port = 9798
 "#;
         let cfg = crate::config::Config::parse(raw).expect("config parses");
-        assert!(should_start_watchdog_webui(&cfg.watchdog.webui));
+        assert!(cfg.watchdog.webui.enabled);
         assert_eq!(
             WebUiEndpoint::from_config(&cfg.watchdog.webui),
             Some(WebUiEndpoint {

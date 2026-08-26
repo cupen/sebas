@@ -597,6 +597,25 @@ mod tests {
         assert_eq!(args.config, "./config.toml");
     }
 
+    #[test]
+    fn run_no_webui_flag_parses() {
+        let cli = Cli::try_parse_from(["sebas", "run", "--no-webui", "-c", "x.toml"])
+            .expect("`sebas run --no-webui` must parse");
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("expected Run subcommand");
+        };
+        assert!(args.no_webui, "--no-webui 应被解析");
+        assert!(!args.webui, "默认 webui 应为 false");
+    }
+
+    #[test]
+    fn run_webui_and_no_webui_conflict() {
+        assert!(
+            Cli::try_parse_from(["sebas", "run", "--webui", "--no-webui", "-c", "x.toml"]).is_err(),
+            "--webui 与 --no-webui 互斥"
+        );
+    }
+
     // -----------------------------------------------------------------
     // sebas-npc: public CLI client (Phase 6 Task 6.1)
     // -----------------------------------------------------------------
