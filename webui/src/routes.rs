@@ -511,6 +511,196 @@ pub async fn api_switch_session(
     )
 }
 
+// ---- Agent 项目工作台 handlers (webui/projects) ----
+
+/// Agent 项目页：侧栏会话列表 + 主区 (focused session chat 或 empty state)。
+pub async fn agent_page(State(state): State<WebUiState>) -> impl IntoResponse {
+    let sessions = state.router.session_snapshot().await;
+    let card_states = state.router.card_state_snapshot().await;
+    let active_key = state.router.active_session_snapshot().await;
+    let (rows, _, _, _) = build_session_rows(&sessions, &card_states, active_key.as_ref());
+    let active = active_key.as_ref().map(|k| session_agent_summary(k, &sessions, &card_states));
+
+    let data = serde_json::json!({
+        "sessions": rows,
+        "active_session": active,
+        "active_key": active_key.as_ref().map(encode_session_key),
+    });
+    render_template(&state, "agent.html", "agent", &data).await
+}
+
+/// Agent 会话详情：focused session = 这条，侧栏高亮。
+pub async fn agent_detail(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return Html("Invalid session key".to_string()),
+    };
+    let sessions = state.router.session_snapshot().await;
+    let exists = sessions
+        .iter()
+        .any(|(k, _)| k.chat_id == session_key.chat_id && k.thread_id == session_key.thread_id);
+    if !exists {
+        return Html("Agent session not found".to_string());
+    }
+    // 聚焦到该 session。
+    state.router.web_set_active(session_key.clone()).await;
+
+    let card_states = state.router.card_state_snapshot().await;
+    let active_key = Some(&session_key);
+    let (rows, _, _, _) = build_session_rows(&sessions, &card_states, active_key.as_deref());
+    let active = active_key.map(|k| session_agent_summary(k, &sessions, &card_states));
+    let data = serde_json::json!({
+        "sessions": rows,
+        "active_session": active,
+        "active_key": encode_session_key(&session_key),
+    });
+    render_template(&state, "agent.html", "agent", &data).await
+}
+
+/// Agent timeline 片段：HTMX `hx-get` 每 3s 轮询的增量更新。
+pub async fn agent_timeline(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return Html("".to_string()),
+    };
+    let sessions = state.router.session_snapshot().await;
+    let card_states = state.router.card_state_snapshot().await;
+    let active = Some(&session_key).map(|k| session_agent_summary(k, &sessions, &card_states));
+    let data = serde_json::json!({ "active_session": active });
+    render_template(&state, "agent_timeline.html", "agent", &data).await
+}
+
+/// 创建项目 session：接受 git 仓库路径，展开 `~`，校验存在且为目录，
+/// 以自动生成的 prompt 在该目录下 spawn 一个 agent 会话。
+pub async fn api_create_project(
+    State(state): State<WebUiState>,
+    Form(req): Form<CreateProjectRequest>,
+) -> impl IntoResponse {
+    let raw = req.path.trim().to_string();
+    let expanded = expand_home_tilde(&raw);
+    let project_dir = std::path::Path::new(&expanded);
+    if !project_dir.exists() || !project_dir.is_dir() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("路径不存在或不是目录: {expanded}") })),
+        );
+    }
+    let prompt = format!("Work in {expanded} — understand the project structure and help the user with their tasks.");
+    let key = state
+        .router
+        .web_spawn(prompt, Some(expanded))
+        .await;
+    let encoded = encode_session_key(&key);
+    state.router.web_set_active(key.clone()).await;
+    let _ = state.event_tx.send(WebUiEvent::SessionCreated {
+        session_id: encoded.clone(),
+    });
+    (
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({ "key": encoded })),
+    )
+}
+
+/// 给 agent 会话发消息。
+pub async fn api_agent_message(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+    Form(req): Form<SendMessageRequest>,
+) -> impl IntoResponse {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return Html("".to_string()),
+    };
+    state
+        .router
+        .web_send_message(session_key.clone(), req.message)
+        .await;
+    // 返回 timeline 片段以便 HTMX 立即刷新。
+    let sessions = state.router.session_snapshot().await;
+    let card_states = state.router.card_state_snapshot().await;
+    let active = Some(&session_key).map(|k| session_agent_summary(k, &sessions, &card_states));
+    let data = serde_json::json!({ "active_session": active });
+    render_template(&state, "agent_timeline.html", "agent", &data).await
+}
+
+#[derive(Deserialize)]
+pub struct CreateProjectRequest {
+    pub path: String,
+}
+
+/// Agent 页 focused session 的完整渲染数据（含 prompt/body/phase_display）。
+fn session_agent_summary(
+    key: &SessionKey,
+    sessions: &[(SessionKey, Mapping)],
+    card_states: &std::collections::HashMap<String, CardState>,
+) -> serde_json::Value {
+    let mapping = sessions
+        .iter()
+        .find(|(k, _)| k.chat_id == key.chat_id && k.thread_id == key.thread_id)
+        .map(|(_, m)| m);
+    let (status, session_id, project_dir) = match mapping {
+        Some(Mapping { state, project_dir, .. }) => match state {
+            MappingState::Active { session_id } => ("active", Some(session_id.clone()), project_dir.clone()),
+            MappingState::Dormant { session_id } => ("dormant", Some(session_id.clone()), project_dir.clone()),
+            MappingState::Spawning { .. } => ("spawning", None, project_dir.clone()),
+        },
+        None => ("dormant", None, None),
+    };
+    let (phase, prompt, phase_display, body_view) = match &session_id {
+        Some(sid) => card_states
+            .get(sid)
+            .map(|st| {
+                let phase = st.status_emoji.clone();
+                let body: Vec<CardElementView> = st.body.iter().map(card_element_to_view).collect();
+                let phase_display = emoji_to_display(&phase).to_string();
+                (phase, st.user_prompt.clone(), phase_display, body)
+            })
+            .unwrap_or_default(),
+        None => Default::default(),
+    };
+    serde_json::json!({
+        "chat_id": key.chat_id,
+        "thread_id": key.thread_id,
+        "session_id": session_id,
+        "status": status,
+        "phase": phase,
+        "phase_display": phase_display,
+        "prompt": prompt,
+        "body": body_view,
+        "project_dir": project_dir,
+        "last_active": mapping.map(|m| format_relative_time(m.last_active_unix)).unwrap_or_default(),
+        "encoded_key": encode_session_key(key),
+    })
+}
+
+/// 展开首字符 `~`（本地实现；webui crate 不依赖 sebas 的 expand_tilde）。
+fn expand_home_tilde(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return std::path::Path::new(&home).join(rest).to_string_lossy().into();
+    }
+    p.to_string()
+}
+
+/// 把 Feishu reaction `status_emoji`（OnIt/DONE/CrossMark/Get）映射为
+/// agent 模板期望的 phase_display 字符串（Working/Done/Failed/Waiting）。
+fn emoji_to_display(emoji: &str) -> &'static str {
+    match emoji {
+        "OnIt" => "Working",
+        "DONE" => "Done",
+        "CrossMark" => "Failed",
+        "Get" | "SEED" => "Waiting",
+        _ => "Waiting",
+    }
+}
+
 // ---- Helper functions ----
 
 /// Build `SessionRow`s from session snapshots, returning counts. Marks each
@@ -548,6 +738,24 @@ fn build_session_rows(
             let is_active = active_key
                 .map(|a| a.chat_id == key.chat_id && a.thread_id == key.thread_id)
                 .unwrap_or(false);
+            // Agent page 标签：project_dir 优先（📁）；否则用首条用户消息
+            // 预览（💬），取前 80 字符。
+            let prompt_preview = mapping.session_id().and_then(|sid| {
+                card_states
+                    .get(sid)
+                    .map(|st| {
+                        let p = st.user_prompt.trim();
+                        if p.is_empty() {
+                            None
+                        } else if p.chars().count() > 80 {
+                            let short: String = p.chars().take(80).collect();
+                            Some(format!("{short}…"))
+                        } else {
+                            Some(p.to_string())
+                        }
+                    })
+                    .flatten()
+            });
             SessionRow {
                 encoded_key: encode_session_key(key),
                 chat_id: key.chat_id.clone(),
@@ -557,6 +765,8 @@ fn build_session_rows(
                 phase,
                 last_active: format_relative_time(mapping.last_active_unix),
                 is_active,
+                project_dir: mapping.project_dir.clone(),
+                prompt_preview,
             }
         })
         .collect();

@@ -74,6 +74,15 @@ pub fn build_router_with_admin_adapter(
             "/api/sessions/{key}/switch",
             post(routes::api_switch_session),
         )
+        // Agent 项目工作台（webui/projects）：项目导向的 agent 会话。
+        .route("/agent", get(routes::agent_page))
+        .route("/agent/{key}", get(routes::agent_detail))
+        .route("/agent/{key}/timeline", get(routes::agent_timeline))
+        .route("/api/agent/projects", post(routes::api_create_project))
+        .route(
+            "/api/agent/{key}/message",
+            post(routes::api_agent_message),
+        )
         .nest_service(
             "/static",
             ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
@@ -212,5 +221,12 @@ fn init_templates_inner() -> Environment<'static> {
         include_str!("../templates/admin_login.html"),
     )
     .expect("admin_login.html template");
+    env.add_template("agent.html", include_str!("../templates/agent.html"))
+        .expect("agent.html template");
+    env.add_template(
+        "agent_timeline.html",
+        include_str!("../templates/agent_timeline.html"),
+    )
+    .expect("agent_timeline.html template");
     env
 }

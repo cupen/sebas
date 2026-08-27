@@ -382,3 +382,147 @@ async fn detail_page_visiting_marks_session_active() {
         "visiting the detail page must web_set_active"
     );
 }
+
+// ---- Agent project workspace routes (webui/projects) ----
+
+#[tokio::test]
+async fn agent_page_renders_sidebar_and_sessions() {
+    let (_router, app) = fixture().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/agent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    // Sidebar lists all sessions.
+    assert!(body.contains("oc_a"));
+    assert!(body.contains("+ New Project"), "New Project button missing");
+    assert!(
+        body.contains("Open a project to start working"),
+        "empty-state prompt missing"
+    );
+}
+
+#[tokio::test]
+async fn agent_detail_focuses_session_and_renders_timeline() {
+    let (router, app) = fixture().await;
+    let encoded = encode(&key("a"));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/agent/{encoded}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("type a message") || body.contains("Composer"));
+    assert_eq!(
+        router.active_session_snapshot().await,
+        Some(key("a")),
+        "visiting agent detail must focus the session"
+    );
+}
+
+#[tokio::test]
+async fn agent_timeline_fragment_returns_partial() {
+    let (_router, app) = fixture().await;
+    let encoded = encode(&key("a"));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/agent/{encoded}/timeline"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(!body.contains("<html"), "timeline should be a partial");
+}
+
+#[tokio::test]
+async fn agent_create_project_from_valid_path() {
+    // 保留 outbound rx（web_spawn 会 emit Out::WebSpawn；rx 被 drop 则
+    // channel 关闭导致 panic，而真实运行有消费者）。
+    let map = SessionMap::new();
+    let (router, _rx) = RouterHandle::new(map);
+    let templates = Arc::new(init_templates_for_tests());
+    let app = build_router(
+        router.clone(),
+        Arc::new(SessionManager::new(Duration::from_secs(5))),
+        GatewayInfo::default(),
+        templates,
+    );
+    let existed = std::path::Path::new(".");
+    let path = existed.canonicalize().unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent/projects")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("path={}", urlencoding::encode(path.to_str().unwrap()))))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("\"key\""), "response must carry key: {body}");
+}
+
+#[tokio::test]
+async fn agent_create_project_rejects_missing_path() {
+    let (_router, app) = fixture().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent/projects")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("path=/nonexistent/definitely-not-here-xyz"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn agent_send_message_returns_timeline() {
+    // 保活 outbound rx：active session 的消息会 emit Out::SendAcp。
+    let map = SessionMap::new();
+    map.insert(key("a"), Mapping::active("s1"))
+        .await
+        .unwrap();
+    let (router, _rx) = RouterHandle::new(map);
+    let templates = Arc::new(init_templates_for_tests());
+    let app = build_router(
+        router.clone(),
+        Arc::new(SessionManager::new(Duration::from_secs(5))),
+        GatewayInfo::default(),
+        templates,
+    );
+    let encoded = encode(&key("a"));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agent/{encoded}/message"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("message=hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

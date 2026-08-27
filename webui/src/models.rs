@@ -20,6 +20,13 @@ pub struct SessionRow {
     /// True if this session is the WebUI's currently focused one. The
     /// template renders an "active" indicator and gates the Switch button.
     pub is_active: bool,
+    /// Working directory for the project (set when spawned via WebUI as a
+    /// project). `None` for Feishu-originated sessions or sessions without
+    /// a project dir. The agent page renders a 📁 icon when present.
+    pub project_dir: Option<String>,
+    /// A short preview of the session's first user message, used by the
+    /// agent sidebar as a display label when no project_dir is set.
+    pub prompt_preview: Option<String>,
 }
 
 /// Dashboard overview data.
