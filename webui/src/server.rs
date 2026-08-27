@@ -151,7 +151,12 @@ pub async fn run_with_admin_adapter(
     let app = build_router_with_admin_adapter(router, mgr, gateway, templates, admin_adapter);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
-    if let Err(e) = serve(listener, app).await {
+    if let Err(e) = serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    {
         tracing::error!(error = %e, "webui server error");
     }
 }

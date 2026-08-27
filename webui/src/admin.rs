@@ -20,12 +20,13 @@ use crate::admin_auth::SessionStore;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json, Redirect};
 use axum::routing::{get, post};
 use serde::Serialize;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -462,10 +463,13 @@ pub struct LoginForm {
 
 pub async fn admin_login_action(
     State(state): State<AdminState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::Form(form): axum::Form<LoginForm>,
 ) -> axum::response::Response<Body> {
-    // Global rate limit check (no per-IP tracking to keep it simple)
-    if !state.session_store.check_rate_limit("global").await {
+    // Per-IP rate limit：同一来源 IP 的登录尝试独立计数，避免单 IP 暴力
+    // 破解影响其他用户（admin_auth 已支持 per-IP，这里真正接线）。
+    let client_ip = addr.ip().to_string();
+    if !state.session_store.check_rate_limit(&client_ip).await {
         let data = serde_json::json!({
             "page": "admin_login",
             "has_password": state.has_password(),
@@ -493,8 +497,8 @@ pub async fn admin_login_action(
             .into_response();
     }
 
-    // Success: create session, reset rate limit
-    state.session_store.reset_rate_limit("global").await;
+    // Success: create session, reset per-IP rate limit
+    state.session_store.reset_rate_limit(&client_ip).await;
     let (session_id, _csrf) = state.session_store.create().await;
 
     // Set session cookie (no expiry — session store handles TTL)
@@ -592,7 +596,12 @@ pub async fn run_standalone(
     let app = build_admin_router(state);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "admin dashboard started (standalone)");
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    {
         tracing::error!(error = %e, "admin server error");
     }
 }
@@ -783,6 +792,11 @@ mod tests {
             "admin_services:{{services|length}}|{{page}}|{{adapter_ok}}",
         )
         .ok();
+        env.add_template(
+            "admin_login.html",
+            "admin_login:{{page}}|{{error}}|{{has_password}}",
+        )
+        .ok();
         AdminState::new(adapter, Arc::new(env))
     }
 
@@ -888,6 +902,56 @@ mod tests {
     }
 
     // ── Mutation route tests ──────────────────────────────────────────────
+
+    /// POST 一次登录尝试。返回 HTTP 状态码 + 是否被限速（错误文案）。
+    async fn login_attempt(
+        app: &axum::Router,
+        ip: std::net::IpAddr,
+    ) -> (StatusCode, bool) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .extension(ConnectInfo(SocketAddr::new(ip, 12345)))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("password=wrong"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_string(resp.into_body()).await;
+        let rate_limited = body.contains("Too many login attempts");
+        (status, rate_limited)
+    }
+
+    #[tokio::test]
+    async fn login_rate_limit_is_per_ip() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_admin_router(test_state(adapter));
+        let ip_a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let ip_b: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+
+        // 同一 IP 连续失败多次 → 触发限速。
+        let mut blocked_a = false;
+        for _ in 0..20 {
+            let (_s, limited) = login_attempt(&app, ip_a).await;
+            if limited {
+                blocked_a = true;
+                break;
+            }
+        }
+        assert!(blocked_a, "IP A 连续失败后应被限速");
+
+        // 不同 IP 不受影响。
+        let (_s, limited_b) = login_attempt(&app, ip_b).await;
+        assert!(
+            !limited_b,
+            "IP B 不应被 IP A 的失败影响（per-IP 限速）"
+        );
+    }
 
     #[tokio::test]
     async fn mutation_route_accepts_post() {
