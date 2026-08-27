@@ -115,11 +115,11 @@ pub fn hint_from_provider(api_key: Option<&str>, api_key_env: Option<&str>) -> K
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // 串行化所有改动进程 env 的测试 —— `std::env::set_var` 是进程级全局，
-    // 并行跑会撞到。`gateway::config::tests::LOCK` 的同款惯例。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // 共享 crate 级 env 测试锁（config.rs / debug.rs 同款）——`set_var`/
+    // `remove_var` 是进程级全局，任何改动 env 的测试都必须持同一把锁，
+    // 否则跨模块并行跑会竞态（历史 flake）。
+    use crate::test_util::lock_config_env;
 
     /// 重置全局 warn-once 状态：每个 `Plain` 测试都应看到自己的第一次
     /// 调用 emit warn；之后清掉让下一个测试独立。当前实现是「once per
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn env_var_set_returns_value() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_config_env();
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::set_var("SEBAS_KEY_RESOLVER_TEST_A", "sk-from-env");
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn env_var_unset_errors() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_config_env();
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::remove_var("SEBAS_KEY_RESOLVER_TEST_B");
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn env_var_empty_string_errors() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_config_env();
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::set_var("SEBAS_KEY_RESOLVER_TEST_C", "");
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn plain_returns_value() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_config_env();
         reset_plain_warn();
         let hint = KeyHint::Plain("sk-plain-test".into());
         let r = EnvKeyResolver.resolve(&hint);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn none_errors_with_no_key_configured_message() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_config_env();
         let hint = KeyHint::None;
         let r = EnvKeyResolver.resolve(&hint);
         let err = r.expect_err("None must error");
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn plain_warn_fires_only_once_across_calls() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_config_env();
         reset_plain_warn();
         // 第一次调用应触发 warn-once 路径；通过 `PLAIN_WARN_EMITTED` 的
         // 状态间接验证（直接断言 tracing 输出需要 subscriber，太重）。
