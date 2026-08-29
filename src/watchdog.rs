@@ -280,7 +280,7 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
             }),
             DesiredState::Enabled,
         ),
-        services::should_start_watchdog_webui(&config.webui),
+        config.webui.enabled,
     );
 
     // gateway：config 开关（默认关）；`--debug` 强制启用 debug 形态
