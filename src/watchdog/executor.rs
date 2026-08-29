@@ -69,7 +69,7 @@ pub struct ControlExecutor {
     /// Managed-service table (core/webui/gateway supervision handles).
     services: ServiceManager,
     /// Single-use, short-lived confirmation grants for dangerous actions
-    /// (spec §7). Shared across executor clones.
+    /// (openspec/specs/watchdog/spec.md). Shared across executor clones.
     confirmation: Arc<ConfirmationService>,
     /// Pending dangerous actions awaiting confirmation, keyed by the opaque
     /// grant token. The `(Actor, ControlRequest)` is the canonical action
@@ -84,7 +84,7 @@ struct PendingControl {
     request: ControlRequest,
 }
 
-/// TTL for dangerous-action confirmation grants (spec §7: short-lived).
+/// TTL for dangerous-action confirmation grants (openspec/specs/watchdog/spec.md: short-lived).
 const CONFIRMATION_TTL_SECS: u64 = 300;
 
 /// A dangerous action awaiting user confirmation.
@@ -152,7 +152,7 @@ impl ControlExecutor {
         response
     }
 
-    /// Route a dangerous control request (spec §7 dangerous ops list):
+    /// Route a dangerous control request (openspec/specs/watchdog/spec.md dangerous ops list):
     ///
     /// - **Feishu** actors must confirm via a card. The watchdog creates a
     ///   single-use, short-lived grant and holds the pending request keyed by
@@ -193,7 +193,7 @@ impl ControlExecutor {
     /// Create a confirmation grant for a dangerous action and hold the pending
     /// request keyed by the returned opaque token. The principal is derived by
     /// the watchdog (not trusted from the envelope), and the channel is the
-    /// originating chat — both bound into the grant (spec §7/§6.3).
+    /// originating chat — both bound into the grant (openspec/specs/watchdog/spec.md.3).
     async fn create_confirmation(
         &self,
         actor: &Actor,
@@ -231,7 +231,7 @@ impl ControlExecutor {
     ///
     /// The client sends only the opaque token; the canonical params come from
     /// the stored pending request, so params cannot be tampered with over the
-    /// wire (spec §6.3). The grant is single-use and atomic: concurrent
+    /// wire (openspec/specs/watchdog/spec.md). The grant is single-use and atomic: concurrent
     /// double-clicks yield exactly one execution.
     pub async fn confirm(
         &self,
@@ -271,7 +271,7 @@ impl ControlExecutor {
 
     /// Cancel a pending dangerous action. Redeems (consumes) the grant so it
     /// cannot be confirmed afterwards, and records a Canceled event for the
-    /// audit trail (spec §9). Like confirm, validates the caller's principal
+    /// audit trail (openspec/specs/watchdog/spec.md). Like confirm, validates the caller's principal
     /// and channel against the grant.
     pub async fn cancel(
         &self,
@@ -565,7 +565,7 @@ impl ControlExecutor {
 
     /// Return the current status of a single managed service, or an empty
     /// service list when the service is unknown (used by `/gateway status`
-    /// and `/webui status`, spec §12).
+    /// and `/webui status`, openspec/specs/watchdog/spec.md).
     pub async fn service_status_for(&self, service: &str) -> RpcControlResponse {
         match self.service_status().await {
             RpcControlResponse::Services { services } => RpcControlResponse::Services {
@@ -577,7 +577,7 @@ impl ControlExecutor {
 }
 
 /// Human-readable action id + canonical normalized params for a dangerous
-/// control request (spec §7 dangerous ops list). The same context is used at
+/// control request (openspec/specs/watchdog/spec.md dangerous ops list). The same context is used at
 /// grant creation and at redemption, so the wire only ever carries the opaque
 /// token — there is nothing for a client to tamper with.
 fn confirmation_context(request: &ControlRequest) -> (String, HashMap<String, String>) {

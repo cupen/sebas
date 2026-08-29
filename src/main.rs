@@ -135,7 +135,7 @@ async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
         .unwrap_or_else(default_socket_path);
 
     // Resolve secret: --secret > $SEBAS_CONTROL_SECRET.
-    // Watchdog intentionally does not persist this (see spec §5.3), so a CLI
+    // Watchdog intentionally does not persist this (see openspec/specs/watchdog/spec.md), so a CLI
     // client without the env var must be told to export it explicitly.
     let secret = match args
         .secret

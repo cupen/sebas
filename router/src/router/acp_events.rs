@@ -16,11 +16,12 @@ impl RouterHandle {
 
     /// apply_event_to_out：同步薄封装（apply_event + flush_card 即时出卡）。
     ///
-    /// **Spec §6 偏差**：spec §6 说「dispatch_acp_event 改为调 apply_event 不发
-    /// Out」，但 spec §9 要求 router_test/e2e_test/terminal_error_test 零改动通过
-    /// —— 这些测试调 dispatch_acp_event 并断言立即收到 UpdateCard。故本计划保留
+    /// **与原设计的偏差**（原卡片流设计文档的验收要求见
+    /// docs/design-history.md ADR-2）：原设计说「dispatch_acp_event 改为调 apply_event 不发
+    /// Out」，但同一设计的验收标准要求 router_test/e2e_test/terminal_error_test 零改动通过
+    /// —— 这些测试调 dispatch_acp_event 并断言立即收到 UpdateCard。故保留
     /// dispatch_acp_event → apply_event_to_out（同步 flush），仅把 **pump** 从
-    /// dispatch_acp_event 改为 apply_event + debounce + flush_card（Task 6）。
+    /// dispatch_acp_event 改为 apply_event + debounce + flush_card。
     pub async fn apply_event_to_out(&self, session_id: String, event: &AcpEvent) {
         match event {
             AcpEvent::PermissionRequest {
@@ -77,7 +78,7 @@ impl RouterHandle {
                 .await;
             }
             AcpEvent::Error { terminal: true, .. } => {
-                // terminal Error 并入累积模型（spec §8）：apply_event（置 ❌ + append
+                // terminal Error 并入累积模型（openspec/specs/feishu-cards/spec.md）：apply_event（置 ❌ + append
                 // 错误正文，保留死前 transcript）→ flush_card → remove_by_session
                 // → drop_card。**不** emit_reaction —— 终态视觉由 card body 表达
                 // （card_events::apply_event_to_card 把 ❌ 错误行 push 到 body），

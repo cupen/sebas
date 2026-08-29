@@ -25,7 +25,7 @@ pub fn phase_visual(phase: &str) -> &str {
     }
 }
 
-/// 卡片流配置（spec §7）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
+/// 卡片流配置（见 openspec/specs/feishu-cards/spec.md）。原 `[card]` TOML 段，解析后由 router/feishu 共用。
 /// 落在 feishu crate（依赖链最底端），router 与 cards 均可引用。
 ///
 /// `deny_unknown_fields`: 用户手写 `settings.json` 时写错字段名
@@ -553,7 +553,7 @@ fn short_model_name(model: &str) -> String {
     model.to_string()
 }
 
-/// 从累积状态构建完整卡（spec §4.3）：
+/// 从累积状态构建完整卡（见 openspec/specs/feishu-cards/spec.md）：
 /// header(`{主题}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
 /// + body 各元素 + footer 灰注。
 /// 标题由 `derive_topic(user_prompt)` 派生（首条非空 prompt 行），不再携带

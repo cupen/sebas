@@ -12,15 +12,15 @@
 //! `ConnectConfig` plumbing) merges the driver's output into the env / argv
 //! passed to the subprocess.
 //!
-//! The driver is currently a plain struct + inherent impl (spec 2026-08-17
-//! §2.7): YAGNI says don't abstract until a second agent actually exists.
+//! The driver is currently a plain struct + inherent impl:
+//! YAGNI says don't abstract until a second agent actually exists.
 //! When (if) Codex / Gemini CLI / etc. lands, promote to a trait at that
 //! seam — by then the type family will be informed by two real call sites.
 //!
 //! **注意**：Gateway 模式 agent 看到的永远是 Anthropic 协议面 ——
 //! gateway 自身支持双协议（见 `gateway::proto::OPENAI_PATHS`），但仅
 //! 服务于「外部 OpenAI 客户端直连 gateway」场景；sebas 自身用 Gateway
-//! 模式时不可路由到 OpenAI-only provider。详见 spec 2026-08-17 §2.1。
+//! 模式时不可路由到 OpenAI-only provider。见 openspec/specs/provider-management/spec.md。
 //!
 //! Note: this file lives alongside `driver.rs`, which is the SDK engine
 //! adapter (`CcDriver`) — the two share a name root but address different
@@ -29,7 +29,7 @@
 
 /// Which upstream API protocol a `Direct` provider speaks.
 ///
-/// Renamed from `Protocol` (spec 2026-08-17 §2.5) to disambiguate from
+/// Renamed from `Protocol` to disambiguate from
 /// `gateway::proto::WireProtocol` (which carries the same meaning but at
 /// the gateway→upstream seam, not the agent→upstream seam).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub enum ProviderResolution {
     /// Talk through sebas's gateway: the agent gets the gateway URL and a
     /// gateway-minted token. The gateway is what reaches the upstream.
     Gateway { url: String, auth_token: String },
-    /// Provider resolution failed (spec 2026-08-17 §2.2): configuration
+    /// Provider resolution failed: configuration
     /// error — missing URL, unset `api_key_env`, unknown named provider,
     /// gateway mode without `[gateway]` config, etc. The driver emits a
     /// single in-band signal env var `SEBAS_PROVIDER_ERROR=<reason>` so
@@ -114,7 +114,8 @@ impl ClaudeCodeDriver {
                 ("ANTHROPIC_BASE_URL".to_string(), url.clone()),
                 ("ANTHROPIC_AUTH_TOKEN".to_string(), auth_token.clone()),
             ],
-            // Spec 2026-08-17 §2.2: the in-band signal that the spawn
+            // The in-band error signal (openspec/specs/provider-management/spec.md)
+            // that the spawn
             // wrapper intercepts. We don't pass any provider-shaped env
             // vars alongside — the agent must not see partial state.
             ProviderResolution::Error { reason } => {
@@ -234,7 +235,8 @@ mod tests {
         }
     }
 
-    /// Spec 2026-08-17 §2.2: the `Error` variant is the in-band signal
+    /// The `Error` variant (openspec/specs/provider-management/spec.md) is
+    /// the in-band signal
     /// that the spawn wrapper intercepts. The driver must emit ONLY
     /// `SEBAS_PROVIDER_ERROR=<reason>` — no `ANTHROPIC_*` / `OPENAI_*`
     /// partial state, no spurious extra vars. The reason is what the

@@ -249,7 +249,7 @@ pub(crate) async fn dispatch_out(
             //    to Active (draining queued prompts). On failure (missing
             //    binary, handshake timeout, or prompt send failure): drop the
             //    placeholder and show an ❌ card instead of a silent log line
-            //    (spec §4.1 "ACP spawn failure"). create_session and
+            //    (openspec/specs/acp-driver/spec.md "ACP spawn failure"). create_session and
             //    CreateSession-prompt failures share the same Err branch —
             //    both mean the session is unusable.
             let (session_id, pending, rx) = match acp_spawn_and_activate(
@@ -365,7 +365,7 @@ pub(crate) async fn dispatch_out(
             input_msg_id,
         } => {
             let claude = &cfg.acp.claude;
-            // Lazy respawn of a restored mapping (spec §3.3e): claude-native
+            // Lazy respawn of a restored mapping (openspec/specs/session-lifecycle/spec.md): claude-native
             // `resume` of the persisted id; the manager transparently falls
             // back to a fresh session when the conversation is gone
             // (sebas-dk8.4). `resumed` says which happened — on fallback the
@@ -535,7 +535,7 @@ pub(crate) async fn dispatch_out(
     Ok(())
 }
 
-/// Build the Feishu proxy control envelope (spec §6.2 Phase 3). The core
+/// Build the Feishu proxy control envelope (openspec/specs/watchdog/spec.md Phase 3). The core
 /// proxies on behalf of the Feishu chat, authenticated by the startup secret
 /// (the MAC basis). Pre-Phase-5 there is no per-inbound sender open_id on
 /// every message, so `chat_id` is authoritative and `open_id` is left empty.
@@ -572,9 +572,9 @@ fn next_request_id() -> String {
 }
 
 /// Normalize a `/gateway <action>` action into the watchdog control request
-/// (spec §12 control commands, plan Task 3.1). `on`/`off` map to `ServiceSet`
+/// (openspec/specs/watchdog/spec.md control commands). `on`/`off` map to `ServiceSet`
 /// with `persist=false` (persistence requires the Phase 4 atomic config write,
-/// per spec §15); `restart` maps to `ServiceRestart`; `status` maps to
+/// per openspec/specs/watchdog/spec.md); `restart` maps to `ServiceRestart`; `status` maps to
 /// `ServiceStatusFor(gateway)`. The match is exhaustive so a new action
 /// cannot silently fall through to a setter.
 fn gateway_control_request(
@@ -611,7 +611,7 @@ async fn submit_watchdog_control(
         _ => {
             return format!(
                 "{label}请求失败: 当前是裸 core 模式，SEBAS_CONTROL_SECRET 未配置。\
-             /upgrade 等 watchdog 命令需要通过 `sebas` watchdog 启动 core（spec §5.3），\
+             /upgrade 等 watchdog 命令需要通过 `sebas` watchdog 启动 core（openspec/specs/watchdog/spec.md），\
              或在手动启动 core 前 export SEBAS_CONTROL_SECRET=<与 watchdog --secret 一致的值>"
             );
         }
@@ -1088,7 +1088,8 @@ mod tests {
     /// `/gateway on|off` 归一化为 ServiceSet(gateway, persist=false)；
     /// `/gateway status` 归一化为 ServiceStatusFor(gateway)；
     /// `/gateway restart` 归一化为 ServiceRestart(gateway)。这是 WebUI/Feishu
-    /// 共享的归一化契约（spec §12 / plan cross-phase adapter parity）。
+    /// 共享的归一化契约（openspec/specs/watchdog/spec.md；跨 adapter 一致性
+    /// 背景见 docs/design-history.md ADR-6）。
     #[test]
     fn gateway_actions_normalize_to_control_requests() {
         use crate::watchdog::control_rpc::RpcControlRequest;

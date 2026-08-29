@@ -110,7 +110,7 @@ pub fn spec_preset() -> FormSpec {
                 secret: false,
                 disabled: false,
             },
-            // 协议选择（spec 2026-08-17 §2.4）：把 Direct 模式的协议优先级
+            // 协议选择（openspec/specs/provider-management/spec.md）：把 Direct 模式的协议优先级
             // 从「隐式 anthropic > openai」挪到 UI。"auto" = 旧行为（默认，
             // 向后兼容）；显式 anthropic/openai 强制走对应协议端点，对应 URL
             // 缺失时由 spawn_env 回退 Off + warn。
@@ -251,7 +251,7 @@ pub fn spec_custom() -> FormSpec {
                 secret: false,
                 disabled: false,
             },
-            // 协议选择（spec 2026-08-17 §2.4）：custom provider 也走同一套
+            // 协议选择（openspec/specs/provider-management/spec.md）：custom provider 也走同一套
             // 三档（auto / anthropic / openai）；preset 表单已加，custom 保持
             // 字段对齐。
             FormField::Select {
@@ -327,10 +327,10 @@ pub fn overlay_path() -> std::path::PathBuf {
 pub use router::crud::ProviderForms;
 
 /// 构造两套 provider CRUD 表单：种子来自 config.toml 的顶层 `[provider.*]`，
-/// 变更持久化到 `state.json`（详见 spec 2026-08-17 §2.6 与
+/// 变更持久化到 `state.json`（详见 openspec/specs/provider-management/spec.md 与
 /// `router::state_store`）。
 ///
-/// **Self-heal（spec 2026-08-17 §2.3）**：legacy overlay 文件（`providers.json`，
+/// **Self-heal（openspec/specs/provider-management/spec.md）**：legacy overlay 文件（`providers.json`，
 /// `state.json` 不存在时一次性迁移源）破损时不再让 `/provider` 死掉 —
 /// 先把损坏的文件备份到 `<path>.broken-<ts>-<pid>.json`，再让
 /// `FileStore::load`（委托给 `state_store::load`）从 `state.json` / 迁移
@@ -340,7 +340,7 @@ pub use router::crud::ProviderForms;
 ///
 /// **顺序**：先做 broken-overlay 备份再做 state_store 加载 —— 否则
 /// state_store::load 看到 broken overlay 只 warn + 返回 default，
-/// 损坏文件就留在原位无人清理（spec §2.3 不允许）。
+/// 损坏文件就留在原位无人清理（openspec/specs/provider-management/spec.md 不允许）。
 pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
     let seed = match GatewayConfig::parse(raw_config) {
         Ok(g) => g
@@ -361,7 +361,7 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
         tracing::warn!(
             path = %path.display(),
             error = %parse_err,
-            "legacy overlay 解析失败，按 spec 2026-08-17 §2.3 备份后从空 seed 恢复"
+            "legacy overlay 解析失败，按 openspec/specs/provider-management/spec.md 备份后从空 seed 恢复"
         );
         if let Err(backup_err) = backup_broken_overlay(&path) {
             tracing::warn!(
@@ -542,7 +542,7 @@ listen = "127.0.0.1:0"
     }
 
     /// 把 overlay env 指向指定路径，同时把 state.json 重定向到同目录的
-    /// `state.json`（spec 2026-08-17 §2.6：FileStore 现在走 unified
+    /// `state.json`（openspec/specs/provider-management/spec.md：FileStore 现在走 unified
     /// `state.json`，env 不隔离会读到真实 `~/.sebas/state.json` 的污染数据）。
     /// lock 由调用方持。
     fn point_overlay_env(path: &Path) {
@@ -767,7 +767,7 @@ listen = "127.0.0.1:0"
         let spec = spec_preset();
         let names: Vec<&str> = spec.fields.iter().map(|f| f.name()).collect();
         // 顺序：name / preset / api_key / models（HEAD 引入的 catalog）/
-        // default_model（63f）/ protocol（spec 2026-08-17 §2.4，详情面板
+        // default_model（63f）/ protocol（openspec/specs/provider-management/spec.md，详情面板
         // 的协议 radio 也用这个 name）。
         assert_eq!(
             names,
@@ -809,7 +809,7 @@ listen = "127.0.0.1:0"
         );
     }
 
-    /// spec 2026-08-17 §2.4：preset 表单的 protocol 字段是 Select，含
+    /// openspec/specs/provider-management/spec.md：preset 表单的 protocol 字段是 Select，含
     /// auto/anthropic/openai 三档，default = "auto"。
     #[test]
     fn preset_spec_has_protocol_select_with_three_options() {
@@ -838,7 +838,7 @@ listen = "127.0.0.1:0"
         }
     }
 
-    /// spec 2026-08-17 §2.4：custom 表单也带 protocol Select，与 preset
+    /// openspec/specs/provider-management/spec.md：custom 表单也带 protocol Select，与 preset
     /// 字段对齐。
     #[test]
     fn custom_spec_has_protocol_select_with_three_options() {
@@ -936,7 +936,7 @@ listen = "127.0.0.1:0"
         );
     }
 
-    // ---- spec 2026-08-17 §2.3 self-heal tests ----
+    // ---- openspec/specs/provider-management/spec.md self-heal tests ----
 
     /// broken JSON 在 overlay 路径 → `build_form` 返回 `Some(forms)`，
     /// 损坏文件被备份到 `<path>.broken-<ts>-<pid>.json`，原文件不再存在。
@@ -1051,7 +1051,8 @@ listen = "127.0.0.1:0"
     }
 
     /// 完整且合法的 overlay 文件 → `build_form` 不触发 self-heal，备份
-    /// 目录为空（守住 §2.3 「只在错误路径备份」的承诺）。
+    /// 目录为空（守住「只在错误路径备份」的承诺，见
+    /// openspec/specs/provider-management/spec.md）。
     ///
     /// change gateway-admin-api-and-model-aliases：providers.json 拆回
     /// 独立文件成为单一真源（卡片 + gateway admin API 双写者共用），

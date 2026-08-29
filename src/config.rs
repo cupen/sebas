@@ -31,7 +31,7 @@ pub struct AcpConfig {
 pub struct FeishuConfig {
     // serde-default（空串）让 TOML 缺字段时解析不报错，把「必填」判定留给
     // validate() —— 这样 env 覆盖（SEBAS_FEISHU_APP_ID/SECRET）才有机会
-    // 在 validate 前补齐字段（spec §6.3 env > TOML）。
+    // 在 validate 前补齐字段（openspec/specs/cli-service/spec.md env > TOML）。
     #[serde(default)]
     pub app_id: String,
     #[serde(default)]
@@ -369,7 +369,7 @@ fn default_keep_versions() -> u32 {
 
 impl Config {
     /// Parse TOML, apply env overrides, validate required fields, expand
-    /// `~` paths. Priority per spec §6.3: CLI flags > env vars > TOML >
+    /// `~` paths. Priority per openspec/specs/cli-service/spec.md: CLI flags > env vars > TOML >
     /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
         warn_deprecated_watchdog_keys(s);
@@ -380,7 +380,7 @@ impl Config {
         Ok(cfg.with_expanded_paths())
     }
 
-    /// env vars override TOML for the sensitive/ops fields (spec §6.3).
+    /// env vars override TOML for the sensitive/ops fields (openspec/specs/cli-service/spec.md).
     /// Empty values are ignored so `SEBAS_X=` never blanks a configured
     /// credential. Runs BEFORE `validate` so env can satisfy required
     /// fields on a host without a config file.
@@ -411,15 +411,15 @@ impl Config {
                 "feishu.app_id 与 feishu.app_secret 必须同时配置；同时留空 = 不启用飞书".into(),
             ));
         }
-        // owner_id 决策（sebas-nya）：维持**可选**，偏离 spec §6.1 的必填。
-        // 依据：spec §6 同时写明「只有 3 个必填字段」只是设计原则，而实际
+        // owner_id 决策（sebas-nya）：维持**可选**，偏离 openspec/specs/cli-service/spec.md 的必填。
+        // 依据：openspec/specs/cli-service/spec.md 同时写明「只有 3 个必填字段」只是设计原则，而实际
         // 部署（config/config.toml）以 owner_id = "" 运行单用户机器人；
         // 空值语义 = 跳过 owner 过滤。风险（任何飞书用户都可驱动 bot）在
         // run::run 启动时以 warn 提示，并在 config.toml.example 文档化。
         Ok(())
     }
 
-    /// Environmental startup checks (spec §6.4) that need a real
+    /// Environmental startup checks (openspec/specs/cli-service/spec.md) that need a real
     /// filesystem and PATH — kept OUT of `parse` so unit tests can
     /// validate pure config on hosts without a claude binary. `run::run`
     /// calls this before touching the network or spawning anything.
@@ -458,7 +458,7 @@ impl Config {
     }
 }
 
-/// spec §6.4.3: the directory must exist (create it if missing) and accept
+/// openspec/specs/cli-service/spec.md: the directory must exist (create it if missing) and accept
 /// a probe file. The probe is created and removed immediately — it proves
 /// writability for the state file / downloads / log file we create later.
 fn check_dir_writable(dir: &std::path::Path, what: &str) -> Result<()> {
@@ -475,7 +475,7 @@ fn check_dir_writable(dir: &std::path::Path, what: &str) -> Result<()> {
     probe_result.map_err(|e| SebasError::Config(format!("{what} {} 不可写: {e}", dir.display())))
 }
 
-/// spec §6.4.4: the ACP child binary must be reachable — an absolute (or
+/// openspec/specs/cli-service/spec.md: the ACP child binary must be reachable — an absolute (or
 /// relative-with-separator) path is checked directly, a bare name is
 /// resolved against PATH. Either way the file must exist and be executable.
 fn check_binary_reachable(path: &str) -> Result<()> {

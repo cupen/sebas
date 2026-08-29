@@ -190,7 +190,7 @@ impl RouterHandle {
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p, reply_to).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
-                        // Restored mapping claimed for lazy respawn (spec §3.3e).
+                        // Restored mapping claimed for lazy respawn (openspec/specs/session-lifecycle/spec.md).
                         self.emit(Out::SpawnResume {
                             key,
                             session_id: old_sid,

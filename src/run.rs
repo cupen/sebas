@@ -49,7 +49,7 @@ pub async fn run(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     init_tracing(&cfg);
 
-    // spec §6.4 startup checks: directories writable + ACP binary reachable.
+    // openspec/specs/cli-service/spec.md startup checks: directories writable + ACP binary reachable.
     // Friendly Config error, no panic; runs before any network/spawn work.
     cfg.validate_runtime()?;
 
@@ -72,7 +72,7 @@ pub async fn run(
         // 启动时必须醒目提示。
         warn!(
             "feishu.owner_id 为空：任何飞书用户的消息都会被处理并驱动本机 claude；\
-             单用户机器人建议配置 owner_id（spec §6.1）"
+             单用户机器人建议配置 owner_id（openspec/specs/cli-service/spec.md）"
         );
     }
     if !feishu_enabled {
@@ -92,7 +92,7 @@ pub async fn run(
         warn!(
             "当前为裸 core 启动模式（SEBAS_IPC 未设置 + SEBAS_CONTROL_SECRET 未配置）：\
              /upgrade、/rollback、/restart、/gateway 等命令需要 watchdog 转发，\
-             在此模式下调用会失败。如需启用，请通过 `sebas` watchdog 启动 core（spec §5.3）"
+             在此模式下调用会失败。如需启用，请通过 `sebas` watchdog 启动 core（openspec/specs/watchdog/spec.md）"
         );
     }
 
@@ -142,7 +142,7 @@ pub async fn run(
                 cfg.feishu.app_id.clone(),
                 cfg.feishu.app_secret.clone(),
             );
-            // Startup auth check stays fatal (spec §4.1) — 仅在 feishu 启用时。
+            // Startup auth check stays fatal (openspec/specs/acp-driver/spec.md) — 仅在 feishu 启用时。
             tm.token()
                 .await
                 .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?;
@@ -327,11 +327,11 @@ pub async fn run(
         }
     }
 
-    // Snapshot state BEFORE killing children (spec §4.2 order: dump, then
+    // Snapshot state BEFORE killing children (openspec/specs/acp-driver/spec.md order: dump, then
     // shutdown_children). Dumping after kill_all would race the pumps'
     // teardown (terminal events strip mappings) and would lose the whole
     // snapshot if a child hangs the kill — the restored mappings are what
-    // lazy respawn (spec §3.3e) works from.
+    // lazy respawn (openspec/specs/session-lifecycle/spec.md) works from.
     let json = router
         .dump_json()
         .await

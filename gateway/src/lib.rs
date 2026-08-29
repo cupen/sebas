@@ -5,7 +5,7 @@
 //!
 //! 协议嗅探、路由、透传引擎、鉴权/用量统计见后续任务。
 //!
-//! 设计文档：docs/superpowers/specs/2026-08-06-gateway-design.md
+//! 设计文档：openspec/specs/gateway-core/spec.md
 //!
 //! edition 2024：let-chains 可用（`if let A = b && cond`）。
 

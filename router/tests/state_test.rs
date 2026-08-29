@@ -28,7 +28,8 @@ async fn dump_and_restore_round_trip() {
     let json = m.dump_json().await.unwrap();
     let m2 = SessionMap::restore_json(&json).unwrap();
     let got = m2.get(&k).await.unwrap();
-    // Restored entries come back DORMANT (spec §3.3e): the child died with
+    // Restored entries come back DORMANT (openspec/specs/session-lifecycle/spec.md):
+    // the child died with
     // the previous daemon, so the mapping must not route as live...
     assert_eq!(got.session_id(), None);
     assert!(matches!(
@@ -48,7 +49,8 @@ async fn dormant_first_text_claims_resume_then_queues() {
         chat_id: "oc_x".into(),
         thread_id: None,
     };
-    // First text: claims the dormant mapping for lazy respawn (spec §3.3e)
+    // First text: claims the dormant mapping for lazy respawn
+    // (openspec/specs/session-lifecycle/spec.md)
     // and swaps in a Spawning placeholder atomically.
     let r = m.route_text(k.clone(), "hello".into()).await.unwrap();
     assert!(matches!(r, router::state::TextRoute::Resume(ref old) if old == "s-old"));

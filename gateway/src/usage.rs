@@ -1,4 +1,4 @@
-//! usage record → jsonl sink（Task 8，spec §4.5）。
+//! usage record → jsonl sink（Task 8，见 openspec/specs/gateway-metrics/spec.md）。
 //!
 //! `UsageSink::spawn_writer` 起 mpsc(256) + tokio task 追加写 jsonl（先建父目录）。
 //! `record` 用 `try_send`，满则 warn 丢弃。`UsageRecord` 含本次请求的元数据与

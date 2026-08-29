@@ -25,7 +25,7 @@ pub enum GatewayError {
 
 pub type Result<T> = std::result::Result<T, GatewayError>;
 
-/// 按协议面把网关自身错误渲染成对应风格错误响应体（spec §4.3）：
+/// 按协议面把网关自身错误渲染成对应风格错误响应体（见 openspec/specs/gateway-core/spec.md）：
 /// - Anthropic: `{"type":"error","error":{"type":..,"message":..}}`
 /// - OpenAI:    `{"error":{"message":..,"type":..,"code":null}}`
 ///

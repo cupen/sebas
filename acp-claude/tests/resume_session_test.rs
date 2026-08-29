@@ -1,4 +1,4 @@
-//! spec §3.3e lazy-resume coverage (post-ACP rewrite):
+//! lazy-resume coverage (post-ACP rewrite; openspec/specs/acp-driver/spec.md):
 //! - resuming a live conversation id keeps the id and answers prompts
 //! - resume rejection (conversation files gone) transparently falls back to
 //!   a fresh session with a NEW id, `resumed == false` (sebas-dk8.4), and

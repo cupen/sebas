@@ -12,7 +12,7 @@
 3. **Provider 列表** — 每个 provider 一行：默认折叠的 `CollapsiblePanel`，header 只显示 `name ✓DIRECT默认 · 默认 model` 一行摘要；展开/收起由飞书客户端本地完成（无服务端回调）。面板内是 markdown 字段行（预设 / Base URL / API Key 已配置/未配置 / 默认 model）+ 四按钮：🔍 探测 model 列表 / 编辑 / 删除 / 设为默认（DIRECT）。
 4. **新建子区**（常驻底部）— 「＋ 新增（预设）」 / 「＋ 新增（自定义）」两个按钮，复用既有 `CrudForm::handle()` 走 `provider-preset` / `provider-custom` 旧 form 名。
 
-三模式在 spawn 时做的事（src/spawn_env.rs，spec 2026-08-17 §2.8）：
+三模式在 spawn 时做的事（src/spawn_env.rs）：
 
 - `Off` + `default_selection` 未设 → driver 不发任何 env/args；claude 用它自己找到的配置（旧行为）。
 - `Off` + `default_selection` 已设 → 隐式 Direct：用 `default_selection.provider` 解析（覆盖 overlay），加 `--model`（若 `default_selection.model` 或 overlay `default_model` 任一有值）。

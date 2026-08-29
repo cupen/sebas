@@ -1,4 +1,4 @@
-//! 卡片流累积状态（spec §4.1）。纯状态，并行于 `MsgIdMap`：
+//! 卡片流累积状态（openspec/specs/feishu-cards/spec.md）。纯状态，并行于 `MsgIdMap`：
 //! `session_id -> CardState`。渲染与 FSM 在 router.rs / cards.rs。
 
 use feishu::cards::CardElement;
@@ -56,7 +56,7 @@ impl CardState {
         }
     }
 
-    /// 早到事件兜底：prompt=""，emoji SEED，空 body（spec §4.2 lazy seed）。
+    /// 早到事件兜底：prompt=""，emoji SEED，空 body（openspec/specs/feishu-cards/spec.md lazy seed）。
     pub fn lazy() -> Self {
         Self {
             user_prompt: String::new(),

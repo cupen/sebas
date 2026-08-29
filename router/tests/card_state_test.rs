@@ -141,8 +141,9 @@ async fn apply_event_accumulates_without_emitting_out() {
 #[tokio::test]
 async fn fsm_eyes_to_construction_to_done() {
     let map = SessionMap::new();
-    // 持有接收端到作用域结束：emit 在通道关闭时会 debug_assert（spec §4.1
-    // "Channel send fail"），裸 `_` 丢弃接收端会立刻触发 panic。
+    // 持有接收端到作用域结束：emit 在通道关闭时会 debug_assert
+    // （openspec/specs/acp-driver/spec.md "Channel send fail"），
+    // 裸 `_` 丢弃接收端会立刻触发 panic。
     let (router, _rx) = RouterHandle::new(map);
     router.seed_card("s2".into(), "p".into()).await;
     // seed = 👀

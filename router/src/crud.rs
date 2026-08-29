@@ -152,7 +152,7 @@ impl CrudStore for InMemoryStore {
 /// 文件存储：把 CRUD 变更以 delta 形式持久化，与只读种子
 /// （如 config.toml 里的条目）合并后得到最终视图。
 ///
-/// spec 2026-08-17 §2.6 + §2.8：自 v2 schema 起，所有 provider CRUD 变更与
+/// openspec/specs/provider-management/spec.md.8：自 v2 schema 起，所有 provider CRUD 变更与
 /// runtime state（mode / default_selection）统一写入
 /// `~/.sebas/state.json`（详见 `crate::state_store`）。本类型保留
 /// `load(path, id_field, seed)` 旧 API（`path` 仅作为历史 hint 保留）
@@ -171,7 +171,7 @@ impl CrudStore for InMemoryStore {
 /// - `deleted`：从种子删除的名字（墓碑，防止重启后从只读源复活）。
 ///
 /// 旧 overlay 文件（`~/.sebas/providers.json`）由 `state_store` 一次性
-/// 迁移到 `state.json` 后删除（spec §2.6 路径 B）；本类型不再写它。
+/// 迁移到 `state.json` 后删除（见 docs/design-history.md ADR-4）；本类型不再写它。
 #[derive(Clone)]
 pub struct FileStore {
     /// **保留用于向后兼容（签名不变），写入时忽略** —— 持久化统一走
@@ -212,7 +212,7 @@ impl FileStore {
         let id_field = id_field.into();
         // 从统一 store 读当前 overrides / deleted。state_store 内部
         // 处理 v0/v1 state.json + legacy providers.json 的合并迁移
-        // （spec 2026-08-17 §2.6 路径 B）。
+        // （背景见 docs/design-history.md ADR-4）。
         let persisted = crate::state_store::load();
         let mut state = FileState {
             items: seed,
@@ -232,7 +232,7 @@ impl FileStore {
         })
     }
 
-    /// 写入到统一 `state.json`（spec 2026-08-17 §2.6）：tmp + rename
+    /// 写入到统一 `state.json`（openspec/specs/provider-management/spec.md）：tmp + rename
     /// 原子写，由 `state_store::update` 完成。**不再触碰 `self.path`**。
     async fn persist(&self, state: &FileState) -> Result<(), String> {
         let overrides = state.overrides.clone();
@@ -876,7 +876,7 @@ mod tests {
     use super::*;
     use crate::test_util::lock_state_file;
 
-    // spec 2026-08-17 §2.6：FileStore 持久化到 unified state.json（路径由
+    // openspec/specs/provider-management/spec.md：FileStore 持久化到 unified state.json（路径由
     // SEBAS_STATE_FILE 决定）。所有写盘的测试都要先把 SEBAS_STATE_FILE 指
     // 向 tempdir，避免污染开发机 ~/.sebas/state.json，并避免互相覆盖。
     // 全局 mutex 串行化 env 访问。

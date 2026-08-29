@@ -12,7 +12,7 @@
 //! 暴露一个统一的 [`resolve_spawn_overrides`]，返回 `(extra_env, extra_args)`，
 //! 追加到 `claude_args` 上送进 `SessionManager::create_session`。
 //!
-//! 失败语义（spec 2026-08-17 §2.2）：spawn-time 解析失败（gateway URL 没配、
+//! 失败语义（openspec/specs/provider-management/spec.md）：spawn-time 解析失败（gateway URL 没配、
 //! named provider 在 overlay 里找不到、api_key_env 没值）一律返回
 //! `ProviderResolution::Error { reason }`。driver 把这个变体翻译成单条
 //! `SEBAS_PROVIDER_ERROR=<reason>` env var，spawn wrapper（`session_boot`）
@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 
 /// 从 `~/.sebas/providers.json`（legacy overlay）或 `~/.sebas/state.json`
-/// （spec 2026-08-17 §2.6 合并后的统一持久化文件）读单个 provider 的原始
+/// （openspec/specs/provider-management/spec.md 合并后的统一持久化文件）读单个 provider 的原始
 /// Item（含 `default_model`）。文件不存在 / JSON 坏 / 名字不在 overrides
 /// 里 / 已 tombstone → `None`（不报错，让上层决定 graceful fallback 到 `Off`）。
 ///
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 /// 故意不向 gateway 同步 —— sebas-63f.4 设计决定），所以必须从 overlay 读，
 /// 不能从 `gateway_cfg.providers` 拿。
 fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
-    // 优先：legacy overlay（spec §2.6 前的旧路径）。
+    // 优先：legacy overlay（state.json 统一前的旧路径）。
     let overlay_path = crate::provider::overlay_path();
     if overlay_path.exists() {
         let raw = std::fs::read_to_string(&overlay_path).ok()?;
@@ -58,8 +58,8 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
             return Some(item);
         }
     }
-    // 回退：unified state.json（spec §2.6 后的新路径；旧用户首次 load 时
-    // overlay 已被迁移 + 删除）。
+    // 回退：unified state.json（统一后的新路径；旧用户首次 load 时
+    // overlay 已被迁移 + 删除）。行为契约见 openspec/specs/provider-management/spec.md。
     let state = router::state_store::load();
     if state.deleted.iter().any(|d| d == name) {
         return None;
@@ -69,7 +69,7 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
 
 /// 把 overlay Item 映射到 `ProviderResolution::Direct`。
 ///
-/// 协议选择（spec 2026-08-17 §2.4 — UI 在 `/provider` 详情面板里暴露的
+/// 协议选择（openspec/specs/provider-management/spec.md — UI 在 `/provider` 详情面板里暴露的
 /// 「协议」radio 写到这里）：
 /// - `"anthropic"` → 强制走 `base_url_anthropic`；缺失 → `Off` + warn。
 /// - `"openai"`    → 强制走 `base_url_openai`；缺失 → `Off` + warn。
@@ -77,7 +77,7 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
 ///   `base_url_openai`。两者都缺 → `Off` + warn。
 ///
 /// 旧 overlay 没 `protocol` 字段的 provider 走「auto」分支，行为不变
-/// （向后兼容 spec §2.4）。
+/// （向后兼容 openspec/specs/provider-management/spec.md）。
 ///
 /// 密钥优先级：`api_key` 明文（仅测试用，warn 一条） > `api_key_env` 读 env
 /// （env 缺失/空 → 回退 `Off` + warn）。和 `GatewayConfig::resolve_api_keys`
@@ -102,7 +102,7 @@ fn direct_resolution_from_overlay(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     // 协议选择：UI 在详情面板的 radio。缺省 = "auto" = 旧约定（Anthropic 优先），
-    // 不破坏现有用户的默认行为（spec 2026-08-17 §2.4）。
+    // 不破坏现有用户的默认行为（openspec/specs/provider-management/spec.md）。
     let protocol = item
         .get("protocol")
         .and_then(Value::as_str)
@@ -230,11 +230,11 @@ fn gateway_resolution(cfg: &GatewayConfig) -> (ProviderResolution, Option<String
 /// `default_model`（spawn 时追加 `--model <id>`，仅 Direct / Off-with-default
 /// 模式下生效；Gateway 一律 `None`）。
 ///
-/// spec 2026-08-17 §2.8 三处决策点：
+/// openspec/specs/provider-management/spec.md 三处决策点：
 ///
 /// 1. **Off + default_selection 已设** → 视为隐式 Direct，按
 ///    `default_selection.provider` 解析（同 Direct{...} 路径）。这是
-///    spec §2.8 的新行为：用户没显式切 Direct 但已经「设为默认（DIRECT）」时
+///    openspec/specs/provider-management/spec.md 的新行为：用户没显式切 Direct 但已经「设为默认（DIRECT）」时
 ///    也应该让默认 provider 生效。
 /// 2. **Off + default_selection 未设** → `ProviderResolution::Off`（保持
 ///    旧行为，claude 用自己的默认）。
@@ -247,7 +247,7 @@ fn gateway_resolution(cfg: &GatewayConfig) -> (ProviderResolution, Option<String
 ///      保证已编辑 default_model 但忘了「设为默认」的用户也不会丢偏好）；
 ///    - `None`（两者都缺）。
 ///
-/// 失败语义（spec 2026-08-17 §2.2）：一律 `Error { reason }` + warn。绝不
+/// 失败语义（openspec/specs/provider-management/spec.md）：一律 `Error { reason }` + warn。绝不
 /// panic / 绝不静默回退 `Off` —— 旧 silent Off 让用户看到「claude 启动了
 /// 但啥都没发生」时无法定位是 sebas 配置问题还是 claude 自己 env 的问题。
 /// 新行为：spawn wrapper 检测 `SEBAS_PROVIDER_ERROR` 后 print + exit(1)。
@@ -274,7 +274,7 @@ pub fn compute_provider_resolution(
             // 段）→ 回退 Off + warn，而不是拒绝启动。mode=gateway 但 gateway
             // 没起来时，让 claude 走自己 env 配置（Off 的语义）比整 bot 卡死
             // 在「refusing to launch」强。真把 gateway 配坏了（listen 空）仍
-            // 由 gateway_resolution 返回 Error（§2.2 语义保留）。
+            // 由 gateway_resolution 返回 Error（显式失败语义保留）。
             None => {
                 tracing::warn!(
                     "ProviderMode::Gateway but no gateway config provided; falling back to Off"
@@ -298,13 +298,13 @@ pub fn compute_provider_resolution(
                 build_direct_from_gateway_config(provider, p)
             } else {
                 // 两者都缺 → 这位 provider 名既不指向 overlay 项、也不指向
-                // gateway seed。按持久化层的约定（state_store.rs §虚引用、「必须
+                // gateway seed。按持久化层的约定（state_store.rs 的契约：「必须
                 // 存在于 providers 或 gateway_cfg，否则 spawn-time 兜底回退
                 // Off + warn」），回退 Off + warn，而不是拒绝启动：这条路径可能
                 // 来自泄漏进 state.json 的幽灵 provider（如测试字面量
                 // "env-override"），不该让用户连 claude 都拉不起来。真正把
                 // provider 名拼错 / 配置残缺的 case，下面 direct_resolution_*
-                // 各自的 URL / 密钥校验仍会喷 Error（§2.2 语义保留）。
+                // 各自的 URL / 密钥校验仍会喷 Error（显式失败语义保留）。
                 tracing::warn!(
                     provider = %provider,
                     "Direct provider not found in overlay or gateway config; falling back to Off"
@@ -389,7 +389,7 @@ fn build_direct_from_gateway_config(
 
 /// 给 agent 进程的额外 env vars + 额外 CLI args。
 ///
-/// 设计（spec 2026-08-17 §2.2）：
+/// 设计（openspec/specs/provider-management/spec.md）：
 /// - `extra_env` 来自 driver 的 `resolve_env`（已按 `ProviderMode` 翻译）。
 ///   `Error` 变体下 driver 已经把 `SEBAS_PROVIDER_ERROR=<reason>` 放进来
 ///   ——  这是 in-band signal，spawn wrapper（`session_boot`）看到它就 abort。
@@ -613,7 +613,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
             std::env::set_var("DEEPSEEK_API_KEY", "sk-ds");
         }
         // state.default_selection 没带 model → 回退到 overlay 的 default_model。
-        // spec §2.8 把这一行为锁死：用户在「设为默认（DIRECT）」前编辑
+        // openspec/specs/provider-management/spec.md 把这一行为锁死：用户在「设为默认（DIRECT）」前编辑
         // default_model 也不会丢偏好。
         let state = direct_state("deepseek");
         let (env, args) = resolve_spawn_overrides(&driver(), &state, None);
@@ -630,7 +630,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         }
     }
 
-    /// spec §2.8：当 `state.default_selection.model` 显式设置时，spawn 必须
+    /// openspec/specs/provider-management/spec.md：当 `state.default_selection.model` 显式设置时，spawn 必须
     /// 用它（而不是 overlay 的 `default_model`）生成 `--model <id>`。这是
     /// 「设为默认（DIRECT）」动作的副效：`default_selection.model` 是用户
     /// 当前的偏好，应该凌驾 overlay（catalog）上的任何值。
@@ -670,9 +670,9 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         }
     }
 
-    /// spec §2.8：Off 模式 + default_selection 已设 → 视为隐式 Direct，
+    /// openspec/specs/provider-management/spec.md：Off 模式 + default_selection 已设 → 视为隐式 Direct，
     /// 用 default_selection.provider 解析，spawn 出对应 provider 的 env。
-    /// 这是 spec §2.8 新行为：用户没显式切 Direct 但已「设为默认」时也
+    /// 这是 openspec/specs/provider-management/spec.md 新行为：用户没显式切 Direct 但已「设为默认」时也
     /// 应该让默认 provider 生效。
     #[test]
     fn off_with_default_selection_implicit_direct_emits_provider_env() {
@@ -717,7 +717,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         }
     }
 
-    /// spec §2.8：Off + default_selection 已设 + model 也设了 → 隐式 Direct
+    /// openspec/specs/provider-management/spec.md：Off + default_selection 已设 + model 也设了 → 隐式 Direct
     /// + `--model` 出现在 args。
     #[test]
     fn off_with_default_selection_emits_model_arg_via_implicit_direct() {
@@ -754,7 +754,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         }
     }
 
-    /// spec §2.8：default_selection.provider 与 mode.provider 不一致时，
+    /// openspec/specs/provider-management/spec.md：default_selection.provider 与 mode.provider 不一致时，
     /// spawn 用 mode.provider（mode 永远胜出），但 model 仍读
     /// default_selection.model（如果存在且 provider 名匹配）。
     /// 现实场景：用户切到 Direct{anthropic} 但 default_selection 还指向
@@ -1069,7 +1069,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-    /// Spec 2026-08-17 §2.2：Error 变体经过 driver 翻译后，
+    /// openspec/specs/provider-management/spec.md：Error 变体经过 driver 翻译后，
     /// `resolve_spawn_overrides` 必须把 `SEBAS_PROVIDER_ERROR=<reason>`
     /// 放进 `extra_env`，spawn wrapper 据此 abort + exit(1)。
     #[test]
@@ -1279,8 +1279,8 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("expected Gateway, got {other:?}"),
         }
 
-        // --- Scenario D: Direct + 不存在的 provider → 兜底 Off（spec 2026-08-17
-        //     §2.6 持久化层约定「找不到就回退 Off + warn」）。此前这里返回
+        // --- Scenario D: Direct + 不存在的 provider → 兜底 Off（持久化层约定
+        //     「找不到就回退 Off + warn」，契约见 openspec/specs/provider-management/spec.md）。此前这里返回
         //     `ProviderResolution::Error` → spawn wrapper `exit(1)`，用户因一个
         //     幽灵 provider 名（如泄漏的测试字面量 env-override）连 claude 都
         //     拉不起来；改成回退 Off 后启动不被阻断。---
@@ -1320,8 +1320,8 @@ api_key_env = "ANTHROPIC_API_KEY"
     }
 
     /// Direct provider 的 overlay item 同时填了 anthropic + openai base_url
-    /// 且**未显式指定 `protocol` 字段**时，走「auto」默认（spec 2026-08-17
-    /// §2.4）：优先 Anthropic 协议面。该测试锁定 auto 默认值，避免日后
+    /// 且**未显式指定 `protocol` 字段**时，走「auto」默认（协议面选择契约见
+    /// openspec/specs/provider-management/spec.md）：优先 Anthropic 协议面。该测试锁定 auto 默认值，避免日后
     /// 被偷改。显式 `protocol=openai` 走 OpenAI 由另一个测试覆盖。
     #[tokio::test]
     async fn direct_prefers_anthropic_when_both_base_urls_set() {
@@ -1366,7 +1366,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-    /// spec 2026-08-17 §2.4：overlay 里 `protocol=openai` 显式声明 +
+    /// openspec/specs/provider-management/spec.md：overlay 里 `protocol=openai` 显式声明 +
     /// 两个 URL 都配了 → 强制走 OpenAI（不再走 auto 的 anthropic 优先）。
     #[tokio::test]
     async fn direct_explicit_protocol_openai_with_both_urls_uses_openai() {
@@ -1412,7 +1412,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-    /// spec 2026-08-17 §2.4 + §2.2：overlay 里 `protocol=anthropic` 但只配了
+    /// openspec/specs/provider-management/spec.md.2：overlay 里 `protocol=anthropic` 但只配了
     /// openai URL → 显式选择必须能命中；命中失败时不再静默回退 Off，
     /// 而是返回 Error（spawn wrapper abort + 用户看到错误）。
     #[tokio::test]
@@ -1464,7 +1464,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-    /// spec 2026-08-17 §2.4 + §2.2：overlay 里 `protocol=openai` 但只配了
+    /// openspec/specs/provider-management/spec.md.2：overlay 里 `protocol=openai` 但只配了
     /// anthropic URL → 同样返回 Error（对称分支）。
     #[tokio::test]
     async fn direct_explicit_protocol_openai_with_only_anthropic_url_returns_error() {
@@ -1513,7 +1513,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-    /// spec 2026-08-17 §2.4：overlay 里 `protocol=anthropic` 显式 +
+    /// openspec/specs/provider-management/spec.md：overlay 里 `protocol=anthropic` 显式 +
     /// 两个 URL 都配了 → 强制走 Anthropic（覆盖 auto 优先级）。
     #[tokio::test]
     async fn direct_explicit_protocol_anthropic_with_both_urls_uses_anthropic() {

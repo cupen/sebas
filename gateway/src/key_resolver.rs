@@ -1,4 +1,4 @@
-//! 上游 provider api key 解析扩展点（spec 2026-08-17 §2.15）。
+//! 上游 provider api key 解析扩展点。
 //!
 //! 之前 `GatewayConfig::resolve_api_keys` 直接内联三种来源（env 变量 / 明文 /
 //! 无），没给 vault / 1Password / SSH agent / KMS 等后端留 seam。本模块

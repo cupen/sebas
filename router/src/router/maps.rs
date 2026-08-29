@@ -21,7 +21,7 @@ impl MsgIdMap {
     /// Called by the dispatcher after each `send_card` returns. Streaming
     /// `UpdateCard`s resolve through `get(session_id)`, so each new turn's
     /// card "takes over" as the PATCH target — earlier turns stay frozen
-    /// at their final state. See `docs/superpowers/plans/2026-08-04-per-turn-reply-quote.md`.
+    /// at their final state. See openspec/specs/feishu-reactions/spec.md.
     pub async fn record(&self, session_id: String, msg_id: String) {
         self.inner.write().await.insert(session_id, msg_id);
     }

@@ -9,7 +9,7 @@
 //! ## 演进史
 //!
 //! - 最初：providers.json 只放 provider CRUD delta。
-//! - spec 2026-08-17 §2.6：合并进 state.json v2 单文件，providers.json 被
+//! - openspec/specs/provider-management/spec.md：合并进 state.json v2 单文件，providers.json 被
 //!   迁移删除 —— 但 gateway 一直读 providers.json，卡片编辑到不了 gateway
 //!   （断链）。
 //! - 本 change（gateway-admin-api-and-model-aliases）：拆回。providers.json
@@ -65,7 +65,7 @@ pub const STATE_VERSION_V2: u32 = 2;
 /// 旧版 schema：没有 `version` 字段或 version=1 — 只含 mode + default_provider_for_direct。
 pub const STATE_VERSION_V1: u32 = 1;
 
-/// Runtime 「DIRECT 默认」选择（spec 2026-08-17 §2.8）。
+/// Runtime 「DIRECT 默认」选择（openspec/specs/provider-management/spec.md）。
 ///
 /// 把旧 `default_provider_for_direct: Option<String>` 和 overlay item 上的
 /// `default_model` 合并到一个 `(provider, model)` 元组：
@@ -178,7 +178,7 @@ pub struct PersistedState {
     pub deleted: Vec<String>,
     #[serde(default)]
     pub mode: ProviderMode,
-    /// spec §2.8：DIRECT 模式默认 (provider, model)。serde 别名接受旧字段
+    /// openspec/specs/provider-management/spec.md：DIRECT 模式默认 (provider, model)。serde 别名接受旧字段
     /// `default_provider_for_direct` —— 旧 state.json 解析到这里时
     /// `model=None`，upgrade step 在 `repair_mode` 后落地为新 wire 形状。
     #[serde(default, alias = "default_provider_for_direct")]
@@ -886,7 +886,7 @@ mod tests {
         assert!(s2.providers.contains_key("beta"));
     }
 
-    /// spec §2.8：旧 v2 state.json 含 `default_provider_for_direct` 字段 →
+    /// openspec/specs/provider-management/spec.md：旧 v2 state.json 含 `default_provider_for_direct` 字段 →
     /// alias 解析到 default_selection，save 后落地新字段名。
     #[test]
     fn v2_with_legacy_default_provider_for_direct_upgrades_to_default_selection() {
@@ -911,7 +911,7 @@ mod tests {
         assert!(raw.contains("default_selection"));
     }
 
-    /// spec §2.8：同字段 alias 与命名字段同时出现且矛盾 → state.json 视为
+    /// openspec/specs/provider-management/spec.md：同字段 alias 与命名字段同时出现且矛盾 → state.json 视为
     /// corrupt，runtime 回退 default；providers 侧（overlay）不受影响。
     #[test]
     fn v2_conflicting_default_provider_and_selection_falls_back_runtime_only() {
@@ -937,7 +937,7 @@ mod tests {
         assert!(s.providers.contains_key("alpha"), "overlay 数据不受 state 损坏影响");
     }
 
-    /// DefaultSelection wire 形状回归（spec §2.8）。
+    /// DefaultSelection wire 形状回归（openspec/specs/provider-management/spec.md）。
     #[test]
     fn default_selection_wire_shape() {
         let original = DefaultSelection::with_model("anthropic", "claude-3-5-sonnet");

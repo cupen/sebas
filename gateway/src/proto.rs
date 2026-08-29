@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// 上游 provider 的 API 协议面。纯透传模式下决定请求/响应的格式归约
 /// （Anthropic 客户端走 Anthropic provider，OpenAI 同理），不做协议转换。
 ///
-/// Renamed from `Protocol` (spec 2026-08-17 §2.5) to disambiguate from
+/// Renamed from `Protocol` to disambiguate from
 /// `acp_claude::AgentProtocol` (which carries the same meaning but at the
 /// agent→upstream seam, not the gateway→upstream seam).
 ///
@@ -33,16 +33,16 @@ pub struct Target {
     pub path: String,
 }
 
-/// Anthropic 专属路径表（spec §4.1）。段边界感知匹配：
+/// Anthropic 专属路径表（见 openspec/specs/gateway-core/spec.md）。段边界感知匹配：
 /// `/v1/messages` 命中 `/v1/messages` 与 `/v1/messages/x`，不命中 `/v1/messagesXYZ`。
 const ANTHROPIC_PATHS: &[&str] = &["/v1/messages"];
 
-/// OpenAI 专属路径表（spec §4.1）。碰撞路径（`/v1/models`、`/v1/files`、
+/// OpenAI 专属路径表（见 openspec/specs/gateway-core/spec.md）。碰撞路径（`/v1/models`、`/v1/files`、
 /// `/v1/skills`）刻意不入表，由 `anthropic-version` header 仲裁。
 ///
 /// ⚠️ **仅外部 OpenAI 客户端使用** —— sebas 自身走 Gateway 模式时，
 /// agent 只发 Anthropic 协议，本表对 sebas→gateway→upstream 路径不可见。
-/// 详见 spec 2026-08-17 §2.1。
+/// 见 openspec/specs/provider-management/spec.md。
 const OPENAI_PATHS: &[&str] = &[
     "/v1/chat/completions",
     "/v1/responses",
@@ -99,7 +99,7 @@ fn is_under_v1(path: &str) -> bool {
     path == "/v1" || path.starts_with("/v1/")
 }
 
-/// 协议嗅探（spec §4.1）。优先级（高 → 低）：
+/// 协议嗅探（见 openspec/specs/gateway-core/spec.md）。优先级（高 → 低）：
 /// 1. 显式前缀 `/anthropic/`、`/openai/`（强制协议）
 /// 2. Anthropic 专属路径表（`/v1/messages`）
 /// 3. OpenAI 专属路径表

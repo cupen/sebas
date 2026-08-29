@@ -122,7 +122,8 @@ async fn dump_filters_spawning_and_keeps_legacy_shape() {
     assert!(json.contains("\"session_id\":\"s9\""));
     assert!(!json.contains("Spawning") && !json.contains("spawning"));
 
-    // Round-trip through restore: entries come back Dormant (spec §3.3e) —
+    // Round-trip through restore: entries come back Dormant
+    // (openspec/specs/session-lifecycle/spec.md) —
     // dead child, eligible for lazy respawn, not live routing.
     let restored = SessionMap::restore_json(&json).unwrap();
     let m = restored.get(&active_key).await.expect("restored");

@@ -1,4 +1,4 @@
-//! spec §3.3e restart-recovery integration: a state file written by a
+//! restart-recovery integration (openspec/specs/acp-driver/spec.md): a state file written by a
 //! previous daemon run must restore as Dormant mappings; the first inbound
 //! text lazily respawns via claude-native `resume` (transparently falling
 //! back to a fresh session when the conversation is gone — sebas-dk8.4),

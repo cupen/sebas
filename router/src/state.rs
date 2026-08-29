@@ -19,7 +19,7 @@ pub struct QueuedTurn {
 /// `Spawning` is never persisted (the child is gone after a restart anyway).
 /// `Dormant` is the inverse: a mapping restored from the state file after a
 /// daemon restart — the session_id is known but no child process is alive.
-/// The first inbound text lazily respawns it (spec §3.3e); `Dormant` never
+/// The first inbound text lazily respawns it (openspec/specs/session-lifecycle/spec.md); `Dormant` never
 /// appears at runtime except via `restore_json`.
 #[derive(Debug, Clone)]
 pub enum MappingState {
@@ -100,7 +100,7 @@ pub enum TextRoute {
     /// A restored (Dormant) mapping was claimed: the placeholder is in
     /// place and the caller should lazily respawn the given (old) session_id,
     /// falling back to a fresh session when the agent cannot load it
-    /// (spec §3.3e).
+    /// (openspec/specs/session-lifecycle/spec.md).
     Resume(String),
     /// A spawn is already in flight; the prompt was queued (or dropped with a
     /// warning when the queue is full).
@@ -165,7 +165,7 @@ impl SessionMap {
                         // Claim the restored mapping for lazy respawn: swap in a
                         // Spawning placeholder so a concurrent second text queues
                         // instead of double-spawning, and hand the old id to the
-                        // caller (spec §3.3e).
+                        // caller (openspec/specs/session-lifecycle/spec.md).
                         let old = session_id.clone();
                         m.state = MappingState::Spawning {
                             pending: Vec::new(),
@@ -378,7 +378,7 @@ impl SessionMap {
 
     /// Restore from the on-disk shape. Every entry comes back `Dormant`:
     /// its child process died with the previous daemon, so the mapping is
-    /// only good for a lazy respawn (spec §3.3e) — routing treats it as
+    /// only good for a lazy respawn (openspec/specs/session-lifecycle/spec.md) — routing treats it as
     /// dead until the first inbound text respawns it.
     pub fn restore_json_with_capacity(s: &str, capacity: usize) -> serde_json::Result<Self> {
         let dto: HashMap<SessionKey, MappingDto> = serde_json::from_str(s)?;

@@ -57,13 +57,13 @@ pub const FORM_PROBE: &str = "provider-probe";
 pub const FORM_PROBE_APPLY: &str = "provider-probe-apply";
 /// 探测结果卡底部「← 返回 Provider 管理」按钮：把当前结果卡就地翻回主卡。
 pub const FORM_BACK: &str = "provider-back";
-/// spec 2026-08-17 §2.4：详情面板里「协议」radio 的 callback —— 选完直接
+/// openspec/specs/provider-management/spec.md：详情面板里「协议」radio 的 callback —— 选完直接
 /// 把 `protocol` 字段写回 store（不经表单容器，详情面板内的快捷切换）。
 pub const FORM_PROTOCOL: &str = "provider-set-protocol";
 
 /// select_static 触发回调时 `form_value` 里键名（也是 widget `name`）。
 pub const SELECT_NAME_DEFAULT_DIRECT: &str = "provider_default_direct";
-/// spec 2026-08-17 §2.4：详情面板里「协议」radio 的 select_static `name`
+/// openspec/specs/provider-management/spec.md：详情面板里「协议」radio 的 select_static `name`
 /// （与表单 spec 里的 `protocol` 字段名不同——表单字段名走 CRUD 存储，
 /// 这里走详情面板的就地 on_change 回调；两者最终写到同一份 item）。
 pub const SELECT_NAME_PROTOCOL: &str = "provider_protocol";
@@ -207,7 +207,7 @@ async fn handle_mode(
 
 /// 「Default provider for DIRECT」下拉变化：取 `form_value[name]` 写 state。
 ///
-/// spec §2.8：下拉变更也走 [`build_default_selection`] —— 同步把 overlay
+/// openspec/specs/provider-management/spec.md：下拉变更也走 [`build_default_selection`] —— 同步把 overlay
 /// 里同名 provider 的 `default_model` 复制到 `default_selection.model`，让
 /// spawn-time 自动加 `--model`。
 async fn handle_default_direct(
@@ -235,7 +235,7 @@ async fn handle_default_direct(
 
 /// 折叠面板里「设为默认（DIRECT）」按钮。
 ///
-/// spec §2.8：动作按钮 = 唯一把 overlay `default_model` 复制到
+/// openspec/specs/provider-management/spec.md：动作按钮 = 唯一把 overlay `default_model` 复制到
 /// `default_selection.model` 的入口（[`build_default_selection`]）。
 async fn handle_set_default_direct(
     handle: &RouterHandle,
@@ -283,7 +283,7 @@ async fn handle_delete(
     refresh_card(handle, key, None).await
 }
 
-/// spec §2.8：把「provider 名 + overlay 里同名 item 的 default_model」合并
+/// openspec/specs/provider-management/spec.md：把「provider 名 + overlay 里同名 item 的 default_model」合并
 /// 成 `DefaultSelection`。overlay 找不到 / 没 default_model → model = None。
 ///
 /// 这是「设为默认（DIRECT）」动作 + 下拉变更的**唯一**入口，避免两处独立
@@ -457,7 +457,7 @@ async fn handle_back(handle: &RouterHandle, key: &SessionKey, message_id: Option
     refresh_card(handle, key, message_id).await
 }
 
-/// 详情面板里的「协议」radio（spec 2026-08-17 §2.4）：用户切换协议时
+/// 详情面板里的「协议」radio（openspec/specs/provider-management/spec.md）：用户切换协议时
 /// 直接把 `protocol` 字段写回 store（不经表单容器）。不存在的 provider
 /// 走 refresh 兜底；非法值（不是 auto/anthropic/openai）也走兜底。
 async fn handle_protocol(
@@ -614,7 +614,7 @@ fn button_from(b: CardButton) -> CardElement {
     }
 }
 
-/// spec 2026-08-17 §2.4：详情面板里的「协议」select_static —— 标签 +
+/// openspec/specs/provider-management/spec.md：详情面板里的「协议」select_static —— 标签 +
 /// 三档（auto / anthropic / openai）。当前值取自 item.protocol（缺省
 /// "auto"）。on_change 直接写 store（不经表单容器）。
 fn render_protocol_select(name: &str, item: Option<&Item>) -> CardElement {
@@ -641,7 +641,7 @@ fn render_protocol_select(name: &str, item: Option<&Item>) -> CardElement {
 
 /// 「Default provider for DIRECT」下拉。
 ///
-/// spec §2.8：每个选项的 label 包含 provider 名 + 该 provider 的 default_model
+/// openspec/specs/provider-management/spec.md：每个选项的 label 包含 provider 名 + 该 provider 的 default_model
 /// （若设置）。`current` 是 `Option<&DefaultSelection>`：`Some(d)` 时高亮
 /// `d.provider`，placeholder 文案追加「· 默认 model: <d.model>」让用户看到
 /// 当前选择会带哪个 `--model`。
@@ -756,12 +756,12 @@ fn render_provider_row(
     );
     elements.push(CardElement::Markdown { content: body });
 
-    // 协议 radio（spec 2026-08-17 §2.4）：详情面板就地切换 Direct 模式的
+    // 协议 radio（openspec/specs/provider-management/spec.md）：详情面板就地切换 Direct 模式的
     // 协议面（auto / anthropic / openai）。选完直接写 overlay（不走表单
     // 容器）；缺省 "auto" = 旧约定（Anthropic 优先）。
     elements.push(render_protocol_select(name, item));
 
-    // 探测 model 按钮（bead sebas-63f.7 + spec 2026-08-17 §2.11）：
+    // 探测 model 按钮（bead sebas-63f.7 + openspec/specs/provider-management/spec.md）：
     // 仅当 provider 暴露 openai 端点（base_url_openai 非空）时才显示——
     // Anthropic 协议无 `/v1/models` 端点是已知坏掉的，按 spec 隐藏按钮
     // 避免给用户一个必失败的入口。两个端点都设了 → 仍显示（probe 优先
@@ -1121,7 +1121,7 @@ mod tests {
         m
     }
 
-    /// spec 2026-08-17 §2.6：所有走 FileStore / state_store 的测试需要
+    /// openspec/specs/provider-management/spec.md：所有走 FileStore / state_store 的测试需要
     /// 构造一个带 FileStore 的 RouterHandle（与 provider_test.rs 一致）。
     /// 返回 `(handle, _guard)` —— 调用方必须把 `_guard` 绑到 test 局部
     /// 以保持锁和 SEBAS_STATE_FILE 不被中途重置。
@@ -1251,7 +1251,7 @@ mod tests {
         let button_count = serialised.matches("\"tag\":\"button\"").count();
         assert_eq!(button_count, 9, "3 模式 + 2 新建 + 面板 4 = 9");
         // 两个 select_static：DIRECT 默认 provider（顶部）+ 详情面板的
-        // 「协议」radio（spec 2026-08-17 §2.4）。
+        // 「协议」radio（openspec/specs/provider-management/spec.md）。
         let sel_count = serialised.matches("\"tag\":\"select_static\"").count();
         assert_eq!(
             sel_count, 2,
@@ -1597,7 +1597,7 @@ mod tests {
         );
     }
 
-    /// spec §2.8：「DIRECT 模式默认 provider」下拉显示 default_selection
+    /// openspec/specs/provider-management/spec.md：「DIRECT 模式默认 provider」下拉显示 default_selection
     /// 的当前状态：provider 名出现在 placeholder 之外的位置（select_static
     /// 的 initial 字段），有 model 时 placeholder 追加「· 当前默认 model:
     /// <model>」。验证 dropdown 反映新字段。
@@ -1629,7 +1629,7 @@ mod tests {
         provider_state::update(|s| s.default_selection = None).unwrap();
     }
 
-    /// spec §2.8：default_selection 只设 provider 没设 model → placeholder
+    /// openspec/specs/provider-management/spec.md：default_selection 只设 provider 没设 model → placeholder
     /// 用普通版本（不含「· 默认 model」），让用户看不到「虚假的 model」。
     #[tokio::test]
     async fn default_direct_dropdown_placeholder_omits_model_when_none() {
@@ -1887,7 +1887,7 @@ mod tests {
         // 也断言不 panic（已经通过 "_ =" 隐式保证）。
     }
 
-    /// spec 2026-08-17 §2.4：详情面板里的「协议」radio。选项 = auto /
+    /// openspec/specs/provider-management/spec.md：详情面板里的「协议」radio。选项 = auto /
     /// anthropic / openai；initial 跟随 item.protocol（缺省 auto）。
     #[tokio::test]
     async fn provider_row_renders_protocol_radio_with_three_options() {
@@ -1930,7 +1930,7 @@ mod tests {
         );
     }
 
-    /// spec 2026-08-17 §2.4：item 已有 `protocol=openai` → initial 也跟
+    /// openspec/specs/provider-management/spec.md：item 已有 `protocol=openai` → initial 也跟
     /// 显式值（刷新后下拉不会重置回 auto）。
     #[tokio::test]
     async fn protocol_radio_reflects_existing_value() {
@@ -1952,7 +1952,7 @@ mod tests {
         );
     }
 
-    /// spec 2026-08-17 §2.4：dispatch FORM_PROTOCOL 把选中的 protocol
+    /// openspec/specs/provider-management/spec.md：dispatch FORM_PROTOCOL 把选中的 protocol
     /// 写回 store，其它字段不动。
     #[tokio::test]
     async fn dispatch_route_for_protocol_writes_to_store() {
@@ -1980,7 +1980,7 @@ mod tests {
         );
     }
 
-    /// spec 2026-08-17 §2.4：dispatch FORM_PROTOCOL 收到非法值（不在
+    /// openspec/specs/provider-management/spec.md：dispatch FORM_PROTOCOL 收到非法值（不在
     /// auto/anthropic/openai 三档内）→ 忽略（store 不变）。
     #[tokio::test]
     async fn dispatch_route_for_protocol_rejects_invalid_value() {
@@ -2029,7 +2029,7 @@ mod tests {
         );
     }
 
-    /// spec 2026-08-17 §2.11：仅 OpenAI 端点的 provider 仍渲染探测按钮。
+    /// openspec/specs/provider-management/spec.md：仅 OpenAI 端点的 provider 仍渲染探测按钮。
     /// 双协议 provider 的探测优先打 OpenAI URL，所以有 openai URL 即显示。
     #[tokio::test]
     async fn details_panel_shows_probe_button_when_only_openai_url_set() {
@@ -2056,7 +2056,7 @@ mod tests {
         );
     }
 
-    /// spec 2026-08-17 §2.11：仅 Anthropic 端点的 provider **不**渲染
+    /// openspec/specs/provider-management/spec.md：仅 Anthropic 端点的 provider **不**渲染
     /// 探测按钮——Anthropic 协议无 `/v1/models` 端点是已知坏掉的，按
     /// spec 隐藏入口避免用户点必失败的按钮。
     #[tokio::test]

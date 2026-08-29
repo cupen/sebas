@@ -1,4 +1,4 @@
-//! gateway 配置模型与解析（spec §3）。
+//! gateway 配置模型与解析（见 openspec/specs/gateway-core/spec.md）。
 //!
 //! provider 统一放在顶层 `[provider.<name>]`（run 与 gateway 共用），不再支持
 //! 复数 `[providers.*]` 或 `[gateway.providers.*]` 旧写法。
@@ -21,7 +21,7 @@ use crate::proto::WireProtocol;
 
 /// 顶层包装：容忍同一 config.toml 中的 `[feishu]` / `[acp.*]` 等无关段，
 /// 只取 `[gateway]`。有意不复用 root `Config::parse`——gateway 的运行边界
-/// 与配置 schema 独立于 sebas 主进程（spec §3）。
+/// 与配置 schema 独立于 sebas 主进程（见 openspec/specs/gateway-core/spec.md）。
 ///
 /// provider 采用「raw → resolved」两段解析：TOML 先落到 `RawGatewayConfig`
 /// （provider 字段全 Option），再经 `resolve_providers` 应用 preset 得到对外
@@ -169,14 +169,14 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     /// 上游 model id 改名映射：`{旧名: 新名}`。gateway 收到旧名时改写成
     /// 新名再走路由；用于同一 provider 多名（同模型被官方重命名或别名）。
-    /// spec 2026-08-17 §2.12：与 `models` 功能部分重合但独立——
+    /// 与 `models` 功能部分重合但独立——
     /// `models` 决定 OPUS/SONNET/HAIKU 赋值，`model_map` 决定请求时
     /// model 字段的最终名字。
     #[serde(default)]
     pub model_map: HashMap<String, String>,
     /// 按从强到弱排列的模型名列表（手写）。`[n]` 后缀（如 `[1m]`）既是
     /// 模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
-    /// spec 2026-08-17 §2.12：`models` 顺序 = 强→弱，用于 Claude Code
+    /// `models` 顺序 = 强→弱，用于 Claude Code
     /// 4 个 MODEL 环境变量（OPUS/SONNET/HAIKU）的赋值；与 `model_map`
     /// 不重复，前者定 model 列表的强弱档位，后者定上游 id 重命名。
     #[serde(default)]
@@ -288,7 +288,7 @@ struct RawProviderConfig {
     models: Vec<String>,
 }
 
-/// provider 惯例默认（spec §6 Provider 格局调研 + 2026-08-04/07 端点探测）。
+/// provider 惯例默认（见 openspec/specs/provider-management/spec.md 的 Provider 格局调研）。
 /// 双协议 provider（anthropic + openai 端点都有）必须显式 `protocol`，不猜。
 /// 默认 env 名均可被 `api_key_env` 覆盖。pub 暴露供 bot 侧 `/provider` 表单
 /// 预填默认值（见 `src/provider.rs` 的 preset 规范化）。
@@ -643,7 +643,7 @@ impl GatewayConfig {
         Ok(cfg)
     }
 
-    /// env 覆盖（spec §6.3，优先级高于 TOML）。空值忽略，避免
+    /// env 覆盖（优先级高于 TOML）。空值忽略，避免
     /// `SEBAS_GATEWAY_LISTEN=` 抹掉已配置的 listen。在 validate 之前运行。
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("SEBAS_GATEWAY_LISTEN")
@@ -795,7 +795,7 @@ impl GatewayConfig {
     /// - 否则回退明文 `api_key`（仅测试用，emit warn）；
     /// - 两者都缺 → Config 错误。
     ///
-    /// spec 2026-08-17 §2.15：解析走 `KeyResolver` trait，默认 impl 是
+    /// 解析走 `KeyResolver` trait，默认 impl 是
     /// `EnvKeyResolver`（env → plain → none）。未来接 vault / 1Password /
     /// KMS 时可在 `build_state` 之前注入 `Arc<dyn KeyResolver>` 替代默认；
     /// 当前调用方（`server::build_state` / `debug::tests`）签名不变，

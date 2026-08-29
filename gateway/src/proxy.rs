@@ -1,4 +1,4 @@
-//! 透传引擎（Task 7，spec §4.3）。
+//! 透传引擎（Task 7，见 openspec/specs/gateway-core/spec.md）。
 //!
 //! 纯透传网关核心：同协议转发，不改写协议体。`handle` 是 axum fallback
 //! handler，承接 `require_key` 中间件放行后的所有非 `/healthz` 请求。
@@ -31,7 +31,7 @@ use crate::sse::{SseUsageParser, UsageInfo, parse_json_usage};
 use crate::test_provider;
 use crate::usage::{UsageRecord, UsageSink};
 
-/// hop-by-hop + 下游 auth header：请求侧剥离集合（spec §4.3）。
+/// hop-by-hop + 下游 auth header：请求侧剥离集合（见 openspec/specs/gateway-core/spec.md）。
 /// `host` 由 reqwest 按目标 URL 重算；`content-length` 按新 body 重算；
 /// `authorization`/`x-api-key` 是下游 key，必须剥离后注入上游 key。
 const REQUEST_STRIP_HEADERS: &[&str] = &[

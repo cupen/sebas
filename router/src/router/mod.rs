@@ -42,7 +42,7 @@ pub enum Out {
         /// instead of the card. `None` for `/new`, WebUI, or replay spawns.
         input_msg_id: Option<String>,
     },
-    /// Lazily respawn a restored session (spec §3.3e): try `session/load`
+    /// Lazily respawn a restored session (openspec/specs/session-lifecycle/spec.md): try `session/load`
     /// with `session_id`; the dispatcher falls back to a fresh session when
     /// the agent cannot load it.
     SpawnResume {
@@ -125,16 +125,16 @@ pub enum Out {
     WatchdogServices {
         key: SessionKey,
     },
-    /// `/system` — watchdog 系统状态（spec §12 control commands, Phase 3）。
+    /// `/system` — watchdog 系统状态（openspec/specs/router-commands/spec.md control commands, Phase 3）。
     WatchdogSystem {
         key: SessionKey,
     },
-    /// `/gateway on|off|restart|status` — 管理 gateway 服务（spec §12）。
+    /// `/gateway on|off|restart|status` — 管理 gateway 服务（openspec/specs/router-commands/spec.md）。
     WatchdogGateway {
         key: SessionKey,
         action: GatewayAction,
     },
-    /// `/webui status` — 查看 webui 服务状态（spec §12）。
+    /// `/webui status` — 查看 webui 服务状态（openspec/specs/router-commands/spec.md）。
     WatchdogWebui {
         key: SessionKey,
     },
@@ -323,7 +323,7 @@ impl RouterHandle {
         self.msgid.snapshot_all().await
     }
 
-    /// Send an `Out` to the outbound pump. Per spec §4.1 ("Channel send
+    /// Send an `Out` to the outbound pump. Per openspec/specs/acp-driver/spec.md ("Channel send
     /// fail"): a closed channel is a bug in dev (panic via debug_assert)
     /// and an error-log-and-continue in prod — never a silent drop.
     pub async fn emit(&self, out: Out) {
@@ -414,13 +414,13 @@ impl RouterHandle {
     }
 
     /// seed_card：SpawnAcp 臂发完 root 卡后调用（dispatch_out）。
-    /// 幂等：已存在则保留（防 SpawnAcp 重入冲掉已累积状态）。spec §4.2。
+    /// 幂等：已存在则保留（防 SpawnAcp 重入冲掉已累积状态）。openspec/specs/feishu-cards/spec.md。
     pub async fn seed_card(&self, session_id: String, user_prompt: String) {
         self.card_states.seed(session_id, user_prompt).await;
     }
 
     /// apply_event：纯状态变更（FSM emoji + apply_event_to_card append/截断/总量）。
-    /// 不发 Out。session 无 CardState 时 lazy seed（prompt="" 兜底）。spec §4.2。
+    /// 不发 Out。session 无 CardState 时 lazy seed（prompt="" 兜底）。openspec/specs/feishu-cards/spec.md。
     ///
     /// 返回 `Some(新 emoji)` 表示 FSM 发生转移 —— 由调用方决定是否发
     /// `Out::React`（本方法保持纯状态契约），见 `emit_reaction`。
@@ -444,7 +444,7 @@ impl RouterHandle {
                     }
                     return None;
                 }
-                // FSM（spec §5）
+                // FSM（openspec/specs/feishu-cards/spec.md）
                 let next = next_emoji(&st.status_emoji, event);
                 if let Some(e) = next {
                     st.status_emoji = e.into();
@@ -472,7 +472,7 @@ impl RouterHandle {
     }
 
     /// flush_card：快照 → render_accumulated_card → Out::UpdateCard。
-    /// 无 CardState 则 no-op。spec §4.2。节流契约保证 flush 只在 debounce 到点或
+    /// 无 CardState 则 no-op。openspec/specs/feishu-cards/spec.md。节流契约保证 flush 只在 debounce 到点或
     /// Finished/terminal 即时被调，故不维护 dirty flag。
     pub async fn flush_card(&self, session_id: &str) {
         let Some(st) = self.card_states.snapshot(session_id).await else {
@@ -575,7 +575,7 @@ impl RouterHandle {
         true
     }
 
-    /// drop_card：session 死亡/通道关时清 CardState（防无界增长）。spec §4.2。
+    /// drop_card：session 死亡/通道关时清 CardState（防无界增长）。openspec/specs/feishu-cards/spec.md。
     pub async fn drop_card(&self, session_id: &str) {
         self.card_states.drop(session_id).await;
     }
@@ -860,7 +860,7 @@ fn extract_session_id(event: &AcpEvent) -> &str {
     }
 }
 
-/// status emoji FSM（spec §5）。返回 Some(新emoji_type) 表示转移；None 表示
+/// status emoji FSM（openspec/specs/feishu-cards/spec.md）。返回 Some(新emoji_type) 表示转移；None 表示
 /// 不变。seed=SEED（"Typing"）；首个流式事件 -> WORKING（"OnIt"）；
 /// Finished -> DONE（"DONE"）；terminal Error -> FAILED（"CrossMark"）；
 /// 已 WORKING/DONE/FAILED 不回退 SEED。

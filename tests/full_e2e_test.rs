@@ -103,7 +103,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
     //    in production. With the production spawn_acp_pump the 150ms
     //    debounce may coalesce the 🚧 flush into the terminal ✅ (the
     //    Finished event takes the immediate path before the first tick);
-    //    the spec §6 design intentionally drops the transient 🚧 in that
+    //    the design intentionally drops the transient 🚧 in that
     //    race. We assert what the pump actually emits in this scenario:
     //    at least one UpdateCard and the terminal React ✅.
     //    (Lower-level tests without the debouncer cover the full

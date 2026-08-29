@@ -15,12 +15,13 @@ pub enum Cmd {
     Service(ServiceArgs),
     /// Replay captured inbound events from a directory of `.json` files.
     Replay(ReplayArgs),
-    /// Record an ACP agent's stdio traffic as a fixture file (spec §4.4).
+    /// Record an ACP agent's stdio traffic as a fixture file
+    /// （见 openspec/specs/replay-debug/spec.md）.
     /// Type/paste JSON-RPC lines on stdin; responses print to stdout; both
     /// directions are appended to --output as {"dir","msg"} journal lines.
     Record(RecordArgs),
     /// Run the LLM provider gateway (Anthropic/OpenAI dual-protocol
-    /// transparent proxy). See docs/superpowers/specs/2026-08-07-gateway-design.md.
+    /// transparent proxy). See openspec/specs/gateway-core/spec.md.
     Gateway(GatewayArgs),
     /// Start the standalone WebUI dashboard server.
     /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.

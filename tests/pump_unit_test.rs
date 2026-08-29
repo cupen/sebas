@@ -1,4 +1,4 @@
-//! pump 节流契约单测（spec §6）。合成 mpsc Receiver 喂事件，断言：
+//! pump 节流契约单测（见 openspec/specs/feishu-cards/spec.md）。合成 mpsc Receiver 喂事件，断言：
 //! 5 个 TextDelta 合并成 1 个 UpdateCard（≤1/150ms）；Finished 立即再发 ✅；
 //! terminal Error 立即发 ❌ + 清 mapping；通道关闭 drop_card + 退出。
 //! 不依赖 fake-claude 二进制。

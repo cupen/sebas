@@ -2,7 +2,8 @@
 //! (stream-json + control protocol) and surfaces the unchanged
 //! `AcpEvent`/`AcpCommand` vocabulary the router consumes.
 //!
-//! Post-ACP design (docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md):
+//! Post-ACP design (see openspec/specs/acp-driver/spec.md; rationale in
+//! docs/design-history.md ADR-1):
 //! - One `ClaudeClient` per sebas session; the sebas routing id IS the claude
 //!   conversation id. Fresh spawns mint a uuid and pass `--session-id`;
 //!   resume passes ONLY `--resume <id>` — the real CLI rejects
@@ -70,12 +71,12 @@ pub struct CcDriver {
     /// (any `Ok` message on the stream, or a permission request hand-off).
     /// When the child produces nothing for `HANG_TIMEOUT`, the driver
     /// escalates: interrupt() ×3 → disconnect (≈SIGTERM) → 5s → drop
-    /// (≈SIGKILL). Tied to spec §4.1 "5min 无任何 notification".
+    /// (≈SIGKILL). Tied to openspec/specs/acp-driver/spec.md "5min 无任何 notification".
     last_activity: tokio::time::Instant,
     /// Escalation stage: 0..=3 interrupts already sent for the current hang.
     hang_stage: u8,
     /// True while a PreToolUse permission prompt is parked awaiting the
-    /// user's click (spec §4.1: permission wait is "永不超时"). Hang
+    /// user's click (openspec/specs/acp-driver/spec.md: permission wait is "永不超时"). Hang
     /// detection is suspended while this is set, otherwise a slow user
     /// click would look exactly like a hung child.
     waiting_permission: Arc<std::sync::atomic::AtomicBool>,
@@ -339,14 +340,14 @@ impl CcDriver {
                         return;
                     }
 
-                    // Hang detection (sebas-9pz ①, spec §4.1): the child is
+                    // Hang detection (sebas-9pz ①, openspec/specs/acp-driver/spec.md): the child is
                     // alive but silent for HANG_TIMEOUT. The SDK exposes no
                     // process handle, so SIGTERM/SIGKILL are approximated with
                     // the SDK's own escalation: interrupt() (cancel, ×3), then
                     // disconnect() (closes stdin ≈ SIGTERM), then a 5s grace
                     // before the driver returns — dropping `self.client`
                     // SIGKILLs the child (SubprocessTransport::drop).
-                    // HANG_TIMEOUT defaults to spec §4.1's 5min; tests override
+                    // HANG_TIMEOUT defaults to openspec/specs/acp-driver/spec.md's 5min; tests override
                     // via SEBAS_HANG_TIMEOUT_SECS so a hang regression test
                     // doesn't have to sleep 5 minutes.
                     let hang_timeout = std::env::var("SEBAS_HANG_TIMEOUT_SECS")
@@ -357,7 +358,7 @@ impl CcDriver {
                     const ESCALATE_GRACE: Duration = Duration::from_secs(2);
                     const SIGKILL_GRACE: Duration = Duration::from_secs(5);
                     const MAX_INTERRUPTS: u8 = 3;
-                    // Permission wait suspends hang detection (spec §4.1:
+                    // Permission wait suspends hang detection (openspec/specs/acp-driver/spec.md:
                     // "永不超时"). A slow user click must not look like a
                     // hung child.
                     let awaiting_user = self
@@ -566,7 +567,7 @@ fn permission_hook(
             let request_id = tool_use_id.unwrap_or_else(|| format!("req-{}", uuid::Uuid::new_v4()));
             let (tx, rx) = oneshot::channel();
             pending.lock().await.insert(request_id.clone(), tx);
-            // Suspend hang detection while the user decides (spec §4.1:
+            // Suspend hang detection while the user decides (openspec/specs/acp-driver/spec.md:
             // permission wait never times out). Cleared on decision (or when
             // the oneshot drops — the Err arm below).
             waiting.store(true, Ordering::SeqCst);

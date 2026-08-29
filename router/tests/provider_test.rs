@@ -1,7 +1,7 @@
 //! `/provider` 命令 + provider CRUD 表单的路由集成测试：经 RouterHandle
 //! 驱动 列表 → 新增 → 提交 → 删除，验证按钮/表单回调被正确路由且
-//! 存储（FileStore 委托给 unified state.json，spec 2026-08-17 §2.6）
-//! 随变更持久化。
+//! 存储（FileStore 委托给 unified state.json，见 openspec/specs/provider-management/spec.md
+//! 与 docs/design-history.md ADR-4）随变更持久化。
 
 use feishu::events::{CardAction, FeishuIn, SessionKey};
 use feishu::forms::{FormField, FormSpec};
@@ -14,8 +14,9 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-// spec 2026-08-17 §2.6：FileStore 持久化到 unified state.json（路径由
-// SEBAS_STATE_FILE 决定）。所有走 FileStore / state_store 的测试都要
+// provider 状态统一（docs/design-history.md ADR-4，行为契约见
+// openspec/specs/provider-management/spec.md）：FileStore 持久化到 unified
+// state.json（路径由 SEBAS_STATE_FILE 决定）。所有走 FileStore / state_store 的测试都要
 // 把 SEBAS_STATE_FILE 指到 tempdir，避免污染开发机 ~/.sebas/state.json，
 // 且避免同进程内测试互相覆盖。全局 mutex 串行化 env 访问。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -238,8 +239,8 @@ async fn provider_create_submit_delete_round_trip() {
     assert!(matches!(out, Out::UpdateCardByMsgId { .. }), "{out:?}");
 
     // 重启视角：重新加载 unified state.json + 种子 → 只剩 openai。
-    // spec 2026-08-17 §2.6：FileStore::load 不再读 providers.json，
-    // 直接走 state_store::load（SEBAS_STATE_FILE 已指到 dir/state.json）。
+    // 状态统一后（docs/design-history.md ADR-4）：FileStore::load 不再读
+    // providers.json，直接走 state_store::load（SEBAS_STATE_FILE 已指到 dir/state.json）。
     let reloaded = FileStore::load(
         dir.path().join("providers.json"),
         "name",

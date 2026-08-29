@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-/// 触发 abort 的 env var 名（spec 2026-08-17 §2.2）。
+/// 触发 abort 的 env var 名（openspec/specs/provider-management/spec.md）。
 ///
 /// 当 [`crate::spawn_env::compute_provider_resolution`] 检测到配置错误
 /// （缺失 provider / `api_key_env` 未设 / gateway.listen 空等），driver
@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 /// 看到 claude 启动了但啥都没发生（然后猜是 sebas / claude / 网络哪个环节）。
 pub(crate) const SEBAS_PROVIDER_ERROR_ENV: &str = "SEBAS_PROVIDER_ERROR";
 
-/// Pull the spec 2026-08-17 §2.2 abort reason out of an `extra_env` list,
+/// Pull the openspec/specs/provider-management/spec.md abort reason out of an `extra_env` list,
 /// if present. Pure function, easy to unit-test. Returns `None` when the
 /// signal is absent (the common case).
 pub(crate) fn extract_provider_error(extra_env: &[(String, String)]) -> Option<&str> {
@@ -41,7 +41,7 @@ pub(crate) fn extract_provider_error(extra_env: &[(String, String)]) -> Option<&
         .map(|(_, v)| v.as_str())
 }
 
-/// Check `extra_env` for the spec 2026-08-17 §2.2 abort signal. If the
+/// Check `extra_env` for the openspec/specs/provider-management/spec.md abort signal. If the
 /// signal is present, print the reason to stderr and `std::process::exit(1)`.
 ///
 /// `pub(crate)` so the spawn wrapper can call it directly; integration
@@ -143,7 +143,7 @@ pub async fn acp_spawn_and_activate(
     Ok((session_id, pending, rx))
 }
 
-/// Resume variant of [`acp_spawn_and_activate`] (spec §3.3e): ask claude to
+/// Resume variant of [`acp_spawn_and_activate`] (openspec/specs/session-lifecycle/spec.md): ask claude to
 /// `resume` the persisted conversation id (the manager transparently falls
 /// back to a fresh session when the id is rejected — sebas-dk8.4), then push
 /// the triggering prompt as a continuation and flip the router's placeholder
@@ -195,7 +195,7 @@ pub async fn acp_resume_and_activate(
     Ok((session_id, pending, rx, outcome.resumed))
 }
 
-/// Restore the session map from the state file (spec §3.3e):
+/// Restore the session map from the state file (openspec/specs/session-lifecycle/spec.md):
 /// - missing or empty file → empty table (first boot; an empty file is a
 ///   harmless leftover, not corruption);
 /// - valid JSON → entries come back `Dormant`, eligible for lazy respawn;
@@ -253,7 +253,7 @@ pub(crate) async fn wire_session_card_and_pump(
     // tracking. `None` = standalone card (WebUI / no input message).
     input_msg_id: Option<String>,
 ) -> anyhow::Result<()> {
-    // seed_card（spec §4.2）: 记录 user_prompt 供后续 flush 重渲染
+    // seed_card（openspec/specs/feishu-cards/spec.md）: 记录 user_prompt 供后续 flush 重渲染
     // 引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
     // 会用 prompt="" 冲掉引用块。
     router.seed_card(session_id.clone(), prompt.clone()).await;
@@ -346,7 +346,7 @@ pub async fn flush_pending_prompts(
 }
 
 /// Drain ACP events for one session, accumulating them into CardState and
-/// flushing a single UpdateCard at most once per 150 ms (spec §6 节流契约)。
+/// flushing a single UpdateCard at most once per 150 ms (openspec/specs/feishu-cards/spec.md 节流契约)。
 ///
 /// - 流式事件（TextDelta/ThinkingDelta/ToolStart/ToolProgress/ToolEnd/非
 ///   terminal Error）: `apply_event`（状态）+ 标脏；interval tick 到点若脏
@@ -360,7 +360,8 @@ pub async fn flush_pending_prompts(
 /// `rx` 在 `acp_spawn_and_activate` 里于任何慢 I/O 之前克隆，故即便 agent
 /// 首次 prompt 即崩（D6）、wrapper 急切移除表项，终端事件仍能经此克隆抵达。
 ///
-/// 机制选择（spec §6 把 async 机制委托给计划钉死）：用
+/// 机制选择（150ms debounce 节流契约见 openspec/specs/feishu-cards/spec.md，
+/// 选型背景见 docs/design-history.md ADR-2）：用
 /// `tokio::time::interval(150ms) + dirty bool`，而非 spec 建议的
 /// `Option<Sleep> + select + pending()` —— 后者在 select 跨臂借用 `&mut`
 /// 会冲突，interval + Copy bool 规避之，契约等价。
@@ -484,8 +485,9 @@ mod tests {
 
     /// Pure-logic test: `extract_provider_error` must find the
     /// `SEBAS_PROVIDER_ERROR` key and return its value verbatim. No
-    /// subprocess, no panic — just the env list parsing. Spec 2026-08-17
-    /// §2.2 step 6: "just unit-test the env-detection logic if spawning
+    /// subprocess, no panic — just the env list parsing. The provider
+    /// review's decision (docs/design-history.md ADR-5): "just unit-test
+    /// the env-detection logic if spawning
     /// is too integration-heavy" — we go with the lighter approach.
     #[test]
     fn extract_provider_error_returns_reason_when_signal_present() {

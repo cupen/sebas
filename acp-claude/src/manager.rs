@@ -1,7 +1,8 @@
 //! `SessionManager` — public API for spawning per-session claude agents.
 //!
 //! Engine: `cc-agent-sdk` over claude's stream-json + control protocol
-//! (post-ACP; see docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md).
+//! (post-ACP; see openspec/specs/acp-driver/spec.md; rationale in
+//! docs/design-history.md ADR-1).
 //! The public surface (`SessionManager`, `SessionStart`, `SpawnOutcome`,
 //! `AcpCommand`/`AcpEvent` in session.rs) is unchanged from the ACP era —
 //! router/run.rs and the test-suite are the proof of that.
@@ -18,7 +19,7 @@ pub enum SessionStart {
     /// Fresh conversation (a uuid is minted and passed as `--session-id`).
     New,
     /// `resume` the given (previously persisted) conversation id —
-    /// claude-native resume; the routing id stays the same (spec §3.3e).
+    /// claude-native resume; the routing id stays the same (见 openspec/specs/acp-driver/spec.md).
     Load(String),
 }
 
@@ -75,7 +76,7 @@ impl SessionManager {
             .session_id)
     }
 
-    /// Lazily respawn a previously persisted session (spec §3.3e): spawn
+    /// Lazily respawn a previously persisted session (见 openspec/specs/acp-driver/spec.md): spawn
     /// claude with `resume = old_session_id`. The routing id IS the resumed
     /// conversation id. Graceful fallback (sebas-dk8.4): if claude rejects
     /// the resume (conversation files gone — "No conversation found"), a
@@ -166,7 +167,7 @@ impl SessionManager {
             let expected_exit = expected_exit.clone();
             async move {
                 driver.run(cmd_rx, cancel_rx).await;
-                // Terminal-event guarantee (design §4.2): a session that dies
+                // Terminal-event guarantee (openspec/specs/acp-driver/spec.md): a session that dies
                 // without an explicit kill surfaces exactly one
                 // Error{terminal:true}; then the table entry is dropped so
                 // send() fails fast and all senders close the stream.

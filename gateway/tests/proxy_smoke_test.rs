@@ -1,4 +1,4 @@
-//! 透传引擎 smoke test（Task 7，spec §4.3）。
+//! 透传引擎 smoke test（Task 7，见 openspec/specs/gateway-core/spec.md）。
 //!
 //! 2 例（brief 契约）：
 //! 1. 内联 mini 上游（axum 单路由回固定 JSON + 记录入站 header）验证

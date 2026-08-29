@@ -1,4 +1,4 @@
-//! Debug 模式注入路径（spec 2026-08-17 §2.14）。
+//! Debug 模式注入路径。
 //!
 //! `enable_debug_test_provider` 仅在 `sebas gateway --debug` 与
 //! `sebas run --debug` 路径调用，不属于生产配置语义。把它从 `config.rs`
@@ -19,7 +19,7 @@ use crate::config::{GatewayConfig, ProviderConfig, RouteGroup};
 /// 拆出来作为模块顶层函数而不是 `GatewayConfig` 的方法：
 /// - 强调这是「注入行为」而非 config 解析语义的一部分；
 /// - 给后续可能的扩展（如 debug-time mock upstream fixture）留独立 seam；
-/// - spec 2026-08-17 §2.14 要求 prod config.rs 不混 debug 注入代码。
+/// - 要求 prod config.rs 不混 debug 注入代码。
 pub fn enable_debug_test_provider(cfg: &mut GatewayConfig) {
     cfg.debug = true;
     tracing::debug!("debug mode: injecting built-in test provider");

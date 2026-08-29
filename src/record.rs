@@ -1,4 +1,4 @@
-//! `sebas record --output fixture.jsonl` — ACP stdio 抓包（spec §4.4）。
+//! `sebas record --output fixture.jsonl` — ACP stdio 抓包（openspec/specs/replay-debug/spec.md）。
 //!
 //! 用当前配置（`acp.claude.path`/`args`）spawn agent，把用户终端的 stdin
 //! 逐行转发给子进程 stdin、把子进程 stdout 逐行回显到终端；两个方向的

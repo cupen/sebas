@@ -1,6 +1,7 @@
 //! Public session/command/event types for the claude-backed engine.
 //!
-//! Post-ACP (docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md):
+//! Post-ACP (see openspec/specs/acp-driver/spec.md; rationale in
+//! docs/design-history.md ADR-1):
 //! `AcpEvent`/`AcpCommand`/`Decision` are the stable internal vocabulary the
 //! router consumes — the name is historical, no ACP wire protocol is involved
 //! anymore. The engine adapter lives in `crate::driver`.

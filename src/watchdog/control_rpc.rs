@@ -31,7 +31,7 @@ pub enum RpcActor {
     Cli {
         uid: u32,
     },
-    /// Feishu proxy actor (spec §6.2, Phase 3 core-hosted). The core submits
+    /// Feishu proxy actor (openspec/specs/watchdog/spec.md, Phase 3 core-hosted). The core submits
     /// this with the startup secret as the signed-assertion MAC basis; the
     /// watchdog maps it to `crate::watchdog::control::Actor::Feishu`.
     /// `open_id` is the Feishu sender; `chat_id` the originating chat.
@@ -78,7 +78,7 @@ pub enum RpcControlRequest {
         service: String,
     },
     /// Confirm a pending dangerous action via its opaque confirmation token
-    /// (Phase 3 Task 3.2, spec §7). The client sends only the token; the
+    /// (Phase 3 Task 3.2, openspec/specs/watchdog/spec.md). The client sends only the token; the
     /// canonical action/params live in the watchdog's pending registry.
     Confirm {
         token: String,
@@ -107,7 +107,7 @@ pub enum RpcControlResponse {
     Services {
         services: Vec<RpcServiceStatus>,
     },
-    /// A dangerous action needs confirmation before it can run (spec §7).
+    /// A dangerous action needs confirmation before it can run (openspec/specs/watchdog/spec.md).
     /// `token` is opaque, single-use and short-lived; the client renders a
     /// confirmation card carrying only this token — never the action truth,
     /// which stays in the watchdog's pending registry. `action`/`message`/
@@ -404,7 +404,7 @@ fn managed_service(name: ServiceName) -> crate::watchdog::control::ManagedServic
     }
 }
 
-/// Derive the Feishu principal + channel for confirm/cancel (spec §6.2/§6.3).
+/// Derive the Feishu principal + channel for confirm/cancel (openspec/specs/watchdog/spec.md.3).
 /// Only Feishu actors carry an assertion-based principal, and the watchdog —
 /// not the core — derives the identity from the actor, so a forged open_id in
 /// the envelope cannot impersonate an owner. Cli/System actors have no
@@ -629,7 +629,7 @@ mod tests {
         );
     }
 
-    /// Feishu proxy actor (spec §6.2 Phase 3) maps to the watchdog Actor
+    /// Feishu proxy actor (openspec/specs/watchdog/spec.md Phase 3) maps to the watchdog Actor
     /// preserving open_id/chat_id, so downstream authorization can act on the
     /// real chat while the sender open_id is still absent pre-Phase-5.
     #[test]

@@ -1,4 +1,4 @@
-//! 下游 token 鉴权中间件（spec §4.5）。
+//! 下游 token 鉴权中间件（见 openspec/specs/gateway-auth-rate-limit/spec.md）。
 //!
 //! `require_key` 以 `from_fn_with_state` 挂在 fallback 层上方，覆盖所有路由
 //! （含 `/healthz`，由中间件内豁免）。`Authorization: Bearer <key>` 优先、

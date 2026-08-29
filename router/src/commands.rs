@@ -24,7 +24,7 @@ pub const HELP_TEXT: &str = "可用命令:\n\
 /help — 显示本帮助\n\
 （注：watchdog 控制命令需 watchdog 在线且核心已配置控制凭据）";
 
-/// `/gateway` 的动作域（spec §12 control commands）。
+/// `/gateway` 的动作域（openspec/specs/router-commands/spec.md control commands）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayAction {
     On,
@@ -61,11 +61,11 @@ pub enum Command {
     Rollback,
     Restart,
     Services,
-    /// `/system` — watchdog 系统状态（spec §12 control commands）。
+    /// `/system` — watchdog 系统状态（openspec/specs/router-commands/spec.md control commands）。
     System,
-    /// `/gateway on|off|restart|status` — 管理 gateway 服务（spec §12）。
+    /// `/gateway on|off|restart|status` — 管理 gateway 服务（openspec/specs/router-commands/spec.md）。
     Gateway(GatewayAction),
-    /// `/webui status` — 查看 webui 服务状态（spec §12）。
+    /// `/webui status` — 查看 webui 服务状态（openspec/specs/router-commands/spec.md）。
     Webui,
     PassThrough(String),
 }

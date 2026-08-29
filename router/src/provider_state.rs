@@ -1,6 +1,7 @@
 //! `/provider` 运行态持久化：mode + default_selection。
 //!
-//! spec 2026-08-17 §2.6 起，这部分数据合并进 `state.json` v2（见
+//! 自 state.json v2 统一起（openspec/specs/provider-management/spec.md，背景见
+//! docs/design-history.md ADR-4），这部分数据合并进 `state.json`（见
 //! `state_store::PersistedState`）。本模块保留 `ProviderRuntimeState` 类型
 //! 与 `load()` / `update()` 自由函数 API（向后兼容），但底层都委托给
 //! `state_store` —— 不再单独读写 `state.json`。
@@ -41,7 +42,7 @@ impl Default for ProviderMode {
 /// 设计要点：
 /// - 字段都 `#[serde(default)]`：旧文件缺字段时仍能加载（向前兼容）。
 /// - 整结构 `Default`：第一次跑没有 state.json 时 `load()` 直接返回这个。
-/// - `default_selection` 镜像 `PersistedState::default_selection`（spec §2.8
+/// - `default_selection` 镜像 `PersistedState::default_selection`（openspec/specs/provider-management/spec.md
 ///   合并 provider + model 到一个字段；不再有独立的 `default_provider_for_direct`）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderRuntimeState {

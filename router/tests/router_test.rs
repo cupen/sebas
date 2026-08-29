@@ -80,7 +80,8 @@ async fn existing_session_dispatches_continue() {
 #[tokio::test]
 async fn dormant_mapping_emits_spawn_resume() {
     // Restored state file → Dormant mapping; the first text must emit
-    // SpawnResume (lazy respawn, spec §3.3e), not SendAcp into the void.
+    // SpawnResume (lazy respawn, openspec/specs/session-lifecycle/spec.md),
+    // not SendAcp into the void.
     let json = r#"{"oc_x":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
     let k = SessionKey {

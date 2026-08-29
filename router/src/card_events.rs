@@ -1,4 +1,4 @@
-//! AcpEvent → 卡片元素的累积翻译（spec §4.2/§7）。
+//! AcpEvent → 卡片元素的累积翻译（openspec/specs/feishu-cards/spec.md）。
 //!
 //! 属于业务编排层：feishu crate 只持有纯卡片协议类型（`CardElement` 等），
 //! 事件到卡片的翻译放在 router，避免 feishu 反向依赖 acp-claude。
@@ -9,7 +9,7 @@ use feishu::cards::{
     StandardIcon, ThinkingDisplay,
 };
 
-/// 把一个事件累积进 body（spec §4.2/§7）。复活 ThinkingDelta/ToolEnd/ToolProgress。
+/// 把一个事件累积进 body（openspec/specs/feishu-cards/spec.md）。复活 ThinkingDelta/ToolEnd/ToolProgress。
 /// fold_long_output=true 时：ToolStart 折叠成一个 collapsible_panel（默认收起），
 /// ToolProgress/ToolEnd 都收进对应工具面板，卡片里每个工具只占一行；
 /// tool result 默认屏蔽（max_tool_output_chars=0），>0 时结果也收进面板。
@@ -401,7 +401,7 @@ const TOOL_RESULT_HARD_LIMIT_CHARS: usize = 10240;
 /// 也用于 `card_needs_rotation` 的换卡阈值判断（80% ≈ 64 元素）。
 pub(crate) const MAX_ELEMENTS: usize = 80;
 
-/// 总量兜底常量（spec §7）：body 累积字符上限。
+/// 总量兜底常量（openspec/specs/feishu-cards/spec.md）：body 累积字符上限。
 /// 也用于 `card_needs_rotation` 的换卡阈值判断（80% ≈ 19200 字符）。
 pub(crate) const TOTAL_BUDGET: usize = 24000;
 
@@ -417,7 +417,7 @@ fn cap_chars(s: &str, limit: usize) -> String {
     }
 }
 
-/// 总量兜底（spec §7）：body 累积字符 > 24000 或递归元素总数 > 80
+/// 总量兜底（openspec/specs/feishu-cards/spec.md）：body 累积字符 > 24000 或递归元素总数 > 80
 /// 时丢最旧元素；最旧是 Hr 则连后一个一起丢。CollapsiblePanel 优先从内部丢，
 /// 避免整个面板被一次性丢弃。
 fn enforce_total_budget(body: &mut Vec<CardElement>, _cfg: &CardConfig) {

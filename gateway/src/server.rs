@@ -105,8 +105,9 @@ pub fn build_state(cfg: GatewayConfig) -> Result<AppState> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(cfg.connect_timeout_secs))
         // per-read timeout: resets on activity, so long SSE streams that keep
-        // emitting are not cut. This is the "read timeout" the spec calls out
-        // (§4.3, 放宽到分钟级) — distinct from a hard total `.timeout()`.
+        // emitting are not cut. This is the "read timeout" the passthrough
+        // contract calls out (openspec/specs/gateway-core/spec.md, 放宽到分钟级)
+        // — distinct from a hard total `.timeout()`.
         .read_timeout(Duration::from_secs(cfg.read_timeout_secs))
         .build()
         .map_err(|e| GatewayError::Upstream(format!("构建 reqwest client 失败: {e}")))?;

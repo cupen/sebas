@@ -5,7 +5,7 @@
 //! crate owns the HTTP surface; this module is the root-binary adapter that
 //! turns a `SebasError`-typed CLI call into `gateway::server::run`.
 //!
-//! See docs/superpowers/specs/2026-08-06-gateway-design.md.
+//! See openspec/specs/gateway-core/spec.md.
 
 use gateway::config::GatewayConfig;
 use gateway::debug;
@@ -28,7 +28,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
     let mut cfg = GatewayConfig::parse(&raw).map_err(|e| SebasError::Gateway(e.to_string()))?;
     if args.debug {
         // parse 完成后注入内置 test provider（不改变配置解析语义）。
-        // 实现在 `gateway::debug`（spec 2026-08-17 §2.14）。
+        // 实现在 `gateway::debug`。
         debug::enable_debug_test_provider(&mut cfg);
     }
     server::run(cfg)

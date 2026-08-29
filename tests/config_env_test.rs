@@ -1,4 +1,4 @@
-//! env 覆盖链（spec §6.3）：env > TOML > 默认。
+//! env 覆盖链：env > TOML > 默认。
 //! 独立成文件 = 独立进程：set_var/remove_var 不会与其他 config 测试的
 //! 并行断言竞争（cargo 在单进程内以线程并行跑同一文件的测试）。
 

@@ -3,7 +3,8 @@
 //! into `Command::{System, Gateway, Webui}` and the router emits the matching
 //! watchdog Out event — the core then proxies it over the private control RPC.
 //! Control commands do not require an active session mapping (unlike core
-//! commands), matching spec §12.
+//! commands), matching the openspec/specs/router-commands/spec.md
+//! control-commands contract.
 
 use feishu::events::{FeishuIn, SessionKey};
 use router::commands::GatewayAction;

@@ -1,4 +1,4 @@
-//! 路由表与 model 提取（Task 4，spec §4.2）。
+//! 路由表与 model 提取（Task 4，见 openspec/specs/gateway-core/spec.md）。
 //!
 //! - `RouteTable::from_config` / `RouteTable::resolve`：按优先级链解析 model
 //!   → provider + 经 `model_map` 重命名后的 upstream_model。
@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::config::{GatewayConfig, ProviderConfig, RouteGroup};
 use crate::proto::WireProtocol;
 
-/// 路由解析错误（spec §4.2）。proxy 按变体映射 HTTP 状态：
+/// 路由解析错误（见 openspec/specs/gateway-core/spec.md）。proxy 按变体映射 HTTP 状态：
 /// `NoRoute` → 502、`ProtocolMismatch` → 400。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RouteError {

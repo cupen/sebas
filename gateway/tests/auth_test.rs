@@ -1,4 +1,4 @@
-//! 鉴权中间件测试（Task 5，spec §4.5）。
+//! 鉴权中间件测试（Task 5，见 openspec/specs/gateway-auth-rate-limit/spec.md）。
 //!
 //! 5 例：healthz 豁免／无 key 401 Anthropic 格式（带 anthropic-version）／
 //! 无 key 401 OpenAI 格式／错 key 401／Bearer 与 x-api-key 都通过

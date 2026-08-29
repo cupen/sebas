@@ -1,4 +1,4 @@
-//! SSE 增量 usage 解析器（Task 8，spec §4.4）。
+//! SSE 增量 usage 解析器（Task 8，见 openspec/specs/gateway-metrics/spec.md）。
 //!
 //! 纯透传网关在 SSE 字节流上做"旁路 tee"：每 chunk 喂 parser 提取 usage 计数，
 //! 字节本身原样透传。容错铁律：`[DONE]`、未知事件、截断帧、坏 JSON 一律跳过
@@ -92,7 +92,7 @@ impl SseUsageParser {
     }
 }
 
-/// 非流式响应的 usage 解析（spec §4.4）。body 是完整 JSON。坏 JSON → 全 None。
+/// 非流式响应的 usage 解析（见 openspec/specs/gateway-metrics/spec.md）。body 是完整 JSON。坏 JSON → 全 None。
 /// Anthropic 取 top-level `usage.{input,output,cache_read,cache_creation}`；
 /// OpenAI 按 key 存在性探测 chat（prompt/completion）vs responses（input/output）。
 pub fn parse_json_usage(proto: WireProtocol, body: &[u8]) -> UsageInfo {
