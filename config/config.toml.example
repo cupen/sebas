@@ -23,7 +23,7 @@ path = "claude"
 args = []
 
 
-# 卡片流配置（全部可选，默认值见 docs/superpowers/specs/2026-07-26-sebas-design.md §6.2）
+# 卡片流配置（全部可选，行为契约见 openspec/specs/feishu-cards/spec.md）
 # [card]
 # max_user_text_chars = 4000    # 单元素文本软上限，超过则截断 + 灰注
 # max_tool_output_chars = 0     # 0 = 不输出 tool call 结果内容（默认）；>0 时超过则折叠进工具面板
@@ -31,8 +31,8 @@ args = []
 # thinking = "show"             # 模型思考内容的卡片展示：show（折叠面板，默认）/ hide（不渲染）
 
 
-# LLM provider 网关（Anthropic/OpenAI 双协议面纯透传）。完整说明见
-# docs/superpowers/specs/2026-08-06-gateway-design.md。
+# LLM provider 网关（Anthropic/OpenAI 双协议面纯透传）。行为契约见
+# openspec/specs/gateway-core/spec.md。
 #
 # 运行方式：
 #   sebas gateway -c <path>    独立进程，listen 用下面配置（--config 等价）

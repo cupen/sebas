@@ -213,7 +213,7 @@ CLI 参数 > 环境变量 > TOML 文件 > 默认值
 
 ### 完整配置说明
 
-详见 `config/config.toml.example` 及 `docs/superpowers/specs/2026-07-26-sebas-design.md`。
+详见 `config/config.toml.example`（含逐项注释）与 `openspec/specs/`（各 capability 的行为契约，如 `cli-service`、`feishu-cards`）。
 
 ---
 
@@ -273,7 +273,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claud
 OPENAI_BASE_URL=http://127.0.0.1:8787 OPENAI_API_KEY=sk-gw-local-dev ...
 ```
 
-详见 `docs/superpowers/specs/2026-08-06-gateway-design.md`。
+详见 `openspec/specs/gateway-core/`（路由与协议面契约）及 `openspec/specs/gateway-auth-rate-limit/`（鉴权与限流）。
 
 ---
 

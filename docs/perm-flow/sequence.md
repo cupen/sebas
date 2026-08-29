@@ -6,7 +6,8 @@ The full permission round-trip from claude's tool_use to Feishu's card flip.
 > `cc-agent-sdk` (stream-json + control protocol over stdio). The bridge
 > process, the PreToolUse hook script and the unix-socket broker are gone —
 > the permission gate is a process-internal hook callback correlated by
-> control `request_id`. Design: `docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md` §4.2.
+> control `request_id`. Behavior contract: `openspec/specs/permission-flow/spec.md`;
+> design rationale: `docs/design-history.md` ADR-1.
 
 **Participants**
 - **Claude** — `claude` CLI child (stream-json + control protocol on stdio)
