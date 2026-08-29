@@ -76,14 +76,36 @@ async fn sessions_list_renders_all_sessions_and_buttons() {
     assert!(body.contains("oc_a"), "active session missing from list");
     assert!(body.contains("oc_b"), "dormant session missing from list");
     assert!(body.contains("oc_c"), "spawning session missing from list");
-    // Per-row action buttons must render (Close is the new feature).
+    // Status is asserted through the `data-status` attribute rather than a
+    // class name: it is the contract the stylesheet keys off, and it pins the
+    // whole derivation path from MappingState to rendered markup. oc_a is
+    // Active with no card phase, which must read Queued, not Working.
     assert!(
-        body.contains("btn-close"),
+        body.contains(r#"data-status="queued""#),
+        "active-without-phase row should derive Queued"
+    );
+    assert!(
+        body.contains(r#"data-status="dormant""#),
+        "dormant row missing derived status"
+    );
+    assert!(
+        body.contains(r#"data-status="starting""#),
+        "spawning row should derive Starting"
+    );
+    // The raw Feishu reaction names must never reach the response.
+    for leak in ["OnIt", "CrossMark", ">Get<"] {
+        assert!(
+            !body.contains(leak),
+            "raw card phase {leak:?} leaked into the session list"
+        );
+    }
+    // Per-row Close affordance: the button owns an inline confirm row.
+    assert!(
+        body.contains(r#"aria-controls="confirm-"#),
         "Close buttons missing from sessions table"
     );
-    // Status counts are part of the new banner.
-    assert!(body.contains("count-active"), "active count pill missing");
-    assert!(body.contains("count-dormant"), "dormant count pill missing");
+    // Counts live in the status ribbon.
+    assert!(body.contains("ribbon-count"), "status ribbon counts missing");
 }
 
 #[tokio::test]
@@ -110,6 +132,40 @@ async fn sessions_partial_returns_table_without_layout_chrome() {
         "partial should render the session table"
     );
     assert!(body.contains("oc_a"));
+}
+
+/// Session keys are percent-encoded, so every row id contains a literal `%`
+/// (at minimum the `%00` separating chat_id from thread_id). `%` is not a legal
+/// CSS identifier character, so `#row-oc_a%00` is a selector *parse error* —
+/// htmx resolves `hx-target` through querySelector, so an id-based target on
+/// these rows throws and the request is never sent. The bug is invisible to a
+/// status-code test: only the rendered markup shows it. Keep it out.
+#[tokio::test]
+async fn no_hx_attribute_targets_a_percent_encoded_id() {
+    let (_router, app) = fixture().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/sessions/partial")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp.into_body()).await;
+
+    for line in body.lines() {
+        let line = line.trim();
+        if !line.starts_with("hx-target=") {
+            continue;
+        }
+        let value = line.trim_start_matches("hx-target=").trim_matches('"');
+        assert!(
+            !(value.starts_with('#') && value.contains('%')),
+            "hx-target {value:?} is an unparseable CSS selector — htmx will \
+             throw resolving it. Target a quoted attribute selector instead."
+        );
+    }
 }
 
 #[tokio::test]
@@ -165,7 +221,7 @@ async fn switch_session_marks_active_and_returns_redirect() {
         .unwrap();
     let body2 = body_string(resp2.into_body()).await;
     assert!(
-        body2.contains("row-active"),
+        body2.contains(r#"data-focused="true""#),
         "active session row should be marked after switch"
     );
     assert!(

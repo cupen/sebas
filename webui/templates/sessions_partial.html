@@ -2,44 +2,60 @@
 <table class="session-table">
   <thead>
     <tr>
-      <th></th>
-      <th>Chat ID</th>
-      <th>Thread</th>
-      <th>Session ID</th>
+      {# The status gutter is a 3px colour bar, not a data column. #}
+      <th><span class="sr-only">Status colour</span></th>
       <th>Status</th>
-      <th>Phase</th>
-      <th>Last Active</th>
-      <th>Actions</th>
+      <th>Session</th>
+      <th>Agent id</th>
+      <th>Age</th>
+      <th><span class="sr-only">Actions</span></th>
     </tr>
   </thead>
   <tbody>
     {% for s in recent_sessions %}
+    {#
+      `encoded_key` is percent-encoded, so it always contains at least the
+      `%00` that separates chat_id from thread_id. That makes it a legal HTML
+      id but an *illegal* CSS identifier: `#row-oc_a%00` is a selector parse
+      error, so anything resolving it through querySelector throws. Reach these
+      rows via getElementById or a quoted attribute selector — never `#id`.
+    #}
     <tr id="row-{{ s.encoded_key }}"
-        class="{{ "row-active" if s.is_active else "" }} row-{{ s.status }}"
-        data-status="{{ s.status }}"
-        data-active="{{ "true" if s.is_active else "false" }}">
-      <td class="cell-active-mark">
-        {% if s.is_active %}<span title="Focused session">●</span>{% endif %}
+        class="session-row"
+        data-status="{{ s.status_slug }}"
+        data-focused="{{ "true" if s.is_active else "false" }}">
+      <td class="cell-status-gutter"></td>
+      <td>
+        {# Glyph + word: two channels, so the board survives greyscale. #}
+        <span class="status">
+          <span class="status-glyph" aria-hidden="true">{{ s.status_glyph }}</span>
+          <span>{{ s.status_label }}</span>
+        </span>
       </td>
-      <td>{{ s.chat_id }}</td>
-      <td>{{ s.thread_id if s.thread_id else "—" }}</td>
+      <td class="session-ident">
+        {{ s.chat_id }}
+        {% if s.thread_id %}
+        <span class="session-ident-sub">· {{ s.thread_id }}</span>
+        {% endif %}
+        {% if s.is_active %}
+        <span class="sr-only">(focused session)</span>
+        {% endif %}
+      </td>
       <td>
         {% if s.session_id %}
-        <code class="session-id-code">{{ s.session_id }}</code>
+        <code class="session-id-code" title="{{ s.session_id }}">{{ s.session_id_short }}</code>
         {% else %}
         <span class="muted">—</span>
         {% endif %}
       </td>
-      <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
-      <td>{{ s.phase }}</td>
-      <td>{{ s.last_active }}</td>
+      <td class="cell-age">{{ s.last_active }}</td>
       <td class="cell-actions">
         <a href="/sessions/{{ s.encoded_key }}"
-           class="btn btn-sm btn-secondary"
-           hx-boost="true">View</a>
+           class="btn btn-sm"
+           hx-boost="true">Open</a>
 
-        {# Switch — disabled when this row is already active. #}
-        <button class="btn btn-sm btn-secondary btn-switch"
+        {# Focus — disabled when this row is already the focused session. #}
+        <button class="btn btn-sm"
                 {% if s.is_active %}disabled{% endif %}
                 hx-post="/api/sessions/{{ s.encoded_key }}/switch"
                 hx-target="body"
@@ -50,37 +66,39 @@
                     if (d.redirect) window.location.href = d.redirect;
                   }
                 ">
-          {% if s.is_active %}Focused{% else %}Switch{% endif %}
+          {% if s.is_active %}Focused{% else %}Focus{% endif %}
         </button>
 
-        {# Close — first click reveals inline confirm row; second click (now red) actually closes. #}
-        <button class="btn btn-sm btn-danger btn-close"
-                onclick="revealClose('{{ s.encoded_key }}', '{{ s.chat_id }}')">
+        {# Close — first click reveals the inline confirm row below; the
+           confirm row's button is the one that actually closes. #}
+        <button class="btn btn-sm"
+                aria-expanded="false"
+                aria-controls="confirm-{{ s.encoded_key }}"
+                onclick="revealClose('{{ s.encoded_key }}', this)">
           Close
         </button>
       </td>
     </tr>
     {# Inline confirm row, hidden until the Close button is clicked. #}
-    <tr id="confirm-{{ s.encoded_key }}" class="confirm-row" style="display: none;">
-      <td colspan="8">
+    <tr id="confirm-{{ s.encoded_key }}" class="confirm-row" hidden>
+      <td colspan="6">
         <div class="confirm-prompt">
           <span class="confirm-prompt-text">
             Close session <code>{{ s.chat_id }}</code>?
             The child Claude Code process will be terminated and the session removed.
           </span>
           <div class="confirm-actions">
-            <button class="btn btn-sm btn-secondary"
+            <button class="btn btn-sm"
                     onclick="hideClose('{{ s.encoded_key }}')">Cancel</button>
             <button class="btn btn-sm btn-danger"
                     hx-post="/api/sessions/{{ s.encoded_key }}/close"
-                    hx-target="#row-{{ s.encoded_key }}"
-                    hx-swap="outerHTML"
+                    hx-swap="none"
                     hx-on::after-request="
                       hideClose('{{ s.encoded_key }}');
                       // Refresh the list so the row is gone for good.
-                      htmx.ajax('GET', '/sessions/partial', {target:'#sessions-list', swap:'innerHTML'});
+                      htmx.ajax('GET', '/sessions/partial', {target:'#session-board', swap:'innerHTML'});
                     ">
-              Yes, close
+              Close session
             </button>
           </div>
         </div>
@@ -90,17 +108,26 @@
   </tbody>
 </table>
 {% else %}
-<p class="empty-state">No sessions. Start one above or from Feishu with <code>/new</code>.</p>
+<p class="empty-state">No sessions. Start one above, or from Feishu with <code>/new</code>.</p>
 {% endif %}
 
-{# Tiny inline script — small enough to live in the partial so SSE re-renders don't depend on base.html wiring. #}
+{# Small enough to live in the partial, so a re-render never depends on
+   base.html having already wired something up. #}
 <script>
-  function revealClose(key, chatId) {
+  function revealClose(key, btn) {
     var row = document.getElementById('confirm-' + key);
-    if (row) row.style.display = '';
+    if (row) row.hidden = false;
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+    var cancel = row && row.querySelector('.btn');
+    if (cancel) cancel.focus();
   }
   function hideClose(key) {
     var row = document.getElementById('confirm-' + key);
-    if (row) row.style.display = 'none';
+    if (row) row.hidden = true;
+    var trigger = document.querySelector('[aria-controls="confirm-' + key + '"]');
+    if (trigger) {
+      trigger.setAttribute('aria-expanded', 'false');
+      trigger.focus();
+    }
   }
 </script>

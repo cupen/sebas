@@ -3,32 +3,33 @@
 {% block content %}
 <div class="page-header">
   <h1>Gateway</h1>
+  <p class="page-subtitle">The local LLM gateway this daemon routes agents through.</p>
 </div>
 <div class="page-body">
   <div class="gateway-status">
     <div class="gateway-card">
-      <div class="label">Status</div>
-      <div class="value {% if gateway.listen %}ok{% else %}off{% endif %}">
-        {% if gateway.listen %}Running{% else %}Off{% endif %}
+      <div class="detail-label">Status</div>
+      <div class="gateway-value" data-state="{{ "ok" if gateway.listen else "warn" }}">
+        {{ "Running" if gateway.listen else "Not running" }}
       </div>
     </div>
     <div class="gateway-card">
-      <div class="label">Listen</div>
-      <div class="value"><code>{{ gateway.listen if gateway.listen else "—" }}</code></div>
+      <div class="detail-label">Listen</div>
+      <div class="gateway-value"><code>{{ gateway.listen if gateway.listen else "—" }}</code></div>
     </div>
     <div class="gateway-card">
-      <div class="label">Providers</div>
-      <div class="value">{{ gateway.provider_count }}</div>
+      <div class="detail-label">Providers</div>
+      <div class="gateway-value">{{ gateway.provider_count }}</div>
     </div>
     <div class="gateway-card">
-      <div class="label">Auth</div>
-      <div class="value {% if gateway.has_auth %}ok{% else %}warn{% endif %}">
+      <div class="detail-label">Auth</div>
+      <div class="gateway-value" data-state="{{ "ok" if gateway.has_auth else "warn" }}">
         {{ "Enabled" if gateway.has_auth else "Disabled" }}
       </div>
     </div>
     <div class="gateway-card">
-      <div class="label">Debug</div>
-      <div class="value {% if gateway.debug %}warn{% else %}ok{% endif %}">
+      <div class="detail-label">Debug</div>
+      <div class="gateway-value" data-state="{{ "warn" if gateway.debug else "ok" }}">
         {{ "On" if gateway.debug else "Off" }}
       </div>
     </div>
@@ -40,22 +41,22 @@
     <thead>
       <tr>
         <th>Name</th>
-        <th>Anthropic Base URL</th>
-        <th>OpenAI Base URL</th>
+        <th>Anthropic base URL</th>
+        <th>OpenAI base URL</th>
       </tr>
     </thead>
     <tbody>
       {% for p in gateway.providers %}
       <tr>
-        <td><strong>{{ p.name }}</strong></td>
-        <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
-        <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
+        <td>{{ p.name }}</td>
+        <td><code class="session-id-code">{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
+        <td><code class="session-id-code">{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   {% else %}
-  <p class="empty-state">No providers configured.</p>
+  <p class="empty-state">No providers configured. Add one under <code>[gateway.providers]</code> in your config.</p>
   {% endif %}
 </div>
 {% endblock %}

@@ -7,7 +7,7 @@
   <a class="sidebar-active-link" href="/sessions/{{ active_session_key }}" hx-boost="true">
     <code>{{ active_session_key }}</code>
   </a>
-  <button class="btn btn-sm btn-danger btn-close-sidebar"
+  <button class="btn btn-sm btn-danger"
           hx-post="/api/sessions/{{ active_session_key }}/close"
           hx-swap="none"
           hx-on::after-request="

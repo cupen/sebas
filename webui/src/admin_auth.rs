@@ -165,7 +165,7 @@ pub fn generate_token(byte_len: usize) -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let seed = (nanos as u128).to_le_bytes();
+    let seed = nanos.to_le_bytes();
     let mut state = 0u64;
     for b in seed.chunks(2) {
         state = state

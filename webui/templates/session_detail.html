@@ -1,47 +1,70 @@
 {% extends "base.html" %}
-{% block title %}Session Detail - sebas{% endblock %}
+{% block title %}Session - sebas{% endblock %}
 {% block content %}
 <div class="page-header">
+  <h1>Session</h1>
+  <p class="page-subtitle">
+    <span class="status" data-status="{{ status_slug }}">
+      <span class="status-glyph" aria-hidden="true">{{ status_glyph }}</span>
+      <span>{{ status_label }}</span>
+    </span>
+  </p>
   <div class="page-header-actions">
-    <h1>Session Detail</h1>
-    <button class="btn btn-danger"
-            onclick="document.getElementById('confirm-close').style.display='block'; this.style.display='none'">
+    <button class="btn btn-danger" id="close-btn"
+            aria-expanded="false"
+            aria-controls="confirm-close"
+            onclick="
+              var c = document.getElementById('confirm-close');
+              c.hidden = false;
+              this.hidden = true;
+              this.setAttribute('aria-expanded', 'true');
+              c.querySelector('.btn').focus();
+            ">
       Close session
     </button>
   </div>
 </div>
 
-<div id="confirm-close" class="confirm-banner" style="display: none;">
+<div id="confirm-close" class="confirm-banner" hidden>
   <div class="confirm-prompt">
     <span class="confirm-prompt-text">
       Close <code>{{ chat_id }}</code>? The child Claude Code process will be terminated.
     </span>
     <div class="confirm-actions">
-      <button class="btn btn-secondary"
-              onclick="document.getElementById('confirm-close').style.display='none'; document.querySelector('.btn-danger[onclick]').style.display='inline-flex'">
+      <button class="btn"
+              onclick="
+                document.getElementById('confirm-close').hidden = true;
+                var b = document.getElementById('close-btn');
+                b.hidden = false;
+                b.setAttribute('aria-expanded', 'false');
+                b.focus();
+              ">
         Cancel
       </button>
       <button class="btn btn-danger"
               hx-post="/api/sessions/{{ encoded_key }}/close"
               hx-swap="none"
               hx-on::after-request="window.location.href = '/sessions'">
-        Yes, close
+        Close session
       </button>
     </div>
   </div>
 </div>
 
+{# One Status field, not Status plus Phase. The old Phase column printed the
+   Feishu reaction name (`OnIt`, `CrossMark`) straight to the screen; both
+   rows now collapse into the derived status word above. #}
 <div class="detail-header">
   <div class="detail-field">
-    <span class="detail-label">Chat ID</span>
-    <span class="detail-value">{{ chat_id }}</span>
+    <span class="detail-label">Chat</span>
+    <span class="detail-value mono">{{ chat_id }}</span>
   </div>
   <div class="detail-field">
-    <span class="detail-label">Thread ID</span>
-    <span class="detail-value">{{ thread_id if thread_id else "—" }}</span>
+    <span class="detail-label">Thread</span>
+    <span class="detail-value mono">{{ thread_id if thread_id else "—" }}</span>
   </div>
   <div class="detail-field">
-    <span class="detail-label">Session ID</span>
+    <span class="detail-label">Agent id</span>
     <span class="detail-value">
       {% if session_id %}
       <code>{{ session_id }}</code>
@@ -51,20 +74,12 @@
     </span>
   </div>
   <div class="detail-field">
-    <span class="detail-label">Status</span>
-    <span class="badge badge-{{ status }}">{{ status }}</span>
+    <span class="detail-label">Last active</span>
+    <span class="detail-value">{{ last_active }}</span>
   </div>
   <div class="detail-field">
-    <span class="detail-label">Phase</span>
-    <span>{{ phase if phase else "—" }}</span>
-  </div>
-  <div class="detail-field">
-    <span class="detail-label">Last Active</span>
-    <span>{{ last_active }}</span>
-  </div>
-  <div class="detail-field">
-    <span class="detail-label">Message ID</span>
-    <span>
+    <span class="detail-label">Feishu message</span>
+    <span class="detail-value">
       {% if msg_id %}
       <code>{{ msg_id }}</code>
       {% else %}
@@ -74,9 +89,13 @@
   </div>
 </div>
 
-<h2>Card Body</h2>
+<h2>Latest turn</h2>
 <div id="card-body">
 {% if body %}
+{# Card content is rendered as escaped text, not markdown. It is
+   agent-controlled, and marked passes raw HTML through — turning this into a
+   markdown surface is a security decision, not a styling one, so it stays out
+   of a redesign. #}
 <div class="card-body">
   {% for el in body %}
     {% if el.element_type == "markdown" %}
@@ -93,11 +112,10 @@
   {% endfor %}
 </div>
 {% else %}
-<p class="empty-state">No card content yet. Start a conversation below.</p>
+<p class="empty-state">Nothing yet. Send a message below to start the turn.</p>
 {% endif %}
 </div>
 
-<!-- Message input -->
 <div class="message-form">
   <form hx-post="/api/sessions/{{ encoded_key }}/message"
         hx-trigger="submit"
@@ -106,9 +124,14 @@
           document.getElementById('msg-input').value = '';
           htmx.ajax('GET', '/sessions/{{ encoded_key }}', {target:'#card-body', swap:'outerHTML'});
         ">
-    <textarea id="msg-input" name="message" class="msg-input" rows="2" placeholder="Type a message for Claude Code..."></textarea>
+    <div class="form-group">
+      <label for="msg-input">Message</label>
+      <textarea id="msg-input" name="message" class="msg-input" rows="2"
+                placeholder="Send to this session…"></textarea>
+    </div>
     <div class="form-actions">
       <button type="submit" class="btn btn-primary">Send</button>
+      <span class="muted">Cmd/Ctrl + Enter</span>
     </div>
   </form>
 </div>

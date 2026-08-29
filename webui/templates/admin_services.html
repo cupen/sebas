@@ -1,69 +1,43 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Services - sebas</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-brand">
-        <span class="brand-icon">&#9889;</span>
-        <span class="brand-text">sebas admin</span>
-      </div>
-      <nav class="sidebar-nav">
-        <div class="nav-section">
-          <div class="nav-section-title">Admin</div>
-          <a href="/admin/status" class="nav-item {{ "active" if page == "admin_status" else "" }}">Status</a>
-          <a href="/admin/events" class="nav-item {{ "active" if page == "admin_events" else "" }}">Events</a>
-          <a href="/admin/update" class="nav-item {{ "active" if page == "admin_update" else "" }}">Update</a>
-          <a href="/admin/services" class="nav-item {{ "active" if page == "admin_services" else "" }}">Services</a>
-        </div>
-        <div class="nav-section" style="margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(205,214,244,0.15);">
-          <form method="POST" action="/admin/logout" style="display:inline">
-            <button type="submit" class="nav-item" style="background:none;border:none;color:var(--sidebar-text);cursor:pointer;width:100%;text-align:left;padding:8px 16px;font-size:0.85rem;">Logout</button>
-          </form>
-        </div>
-      </nav>
-    </aside>
-
-    <main class="main-content">
-      <div class="page-header">
-        <h1>Managed Services</h1>
-      </div>
-      <div class="page-body">
-        {% if not adapter_ok %}
-        <div class="alert alert-warning">Control plane not connected.</div>
-        {% endif %}
-
-        {% if services %}
-        <table class="session-table">
-          <thead>
-            <tr>
-              <th>Service</th>
-              <th>Status</th>
-              <th>Desired</th>
-              <th>Uptime</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for svc in services %}
-            <tr>
-              <td><strong>{{ svc.name }}</strong></td>
-              <td><span class="badge badge-{{ svc.status }}">{{ svc.status }}</span></td>
-              <td>{{ svc.desired }}</td>
-              <td>{% if svc.uptime_secs %}{{ svc.uptime_secs }}s{% else %}N/A{% endif %}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="empty-state">No managed services information available.</p>
-        {% endif %}
-      </div>
-    </main>
+{% extends "base.html" %}
+{% block title %}Services - sebas admin{% endblock %}
+{% block brand_suffix %} admin{% endblock %}
+{% block nav_admin %}{% include "admin_nav.html" %}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Managed services</h1>
+  <p class="page-subtitle">What the watchdog supervises.</p>
+</div>
+<div class="page-body">
+  {% if not adapter_ok %}
+  <div class="alert alert-warning">
+    Control plane not connected, so service state is unknown. Run
+    <code>sebas watchdog</code> with <code>SEBAS_CONTROL_SECRET</code> set.
   </div>
-</body>
-</html>
+  {% endif %}
+
+  {% if services %}
+  <table class="session-table">
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Status</th>
+        <th>Desired</th>
+        <th>Uptime</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for svc in services %}
+      <tr>
+        <td>{{ svc.name }}</td>
+        <td><span class="badge {{ "badge-running" if svc.status == "running" else "" }}">{{ svc.status }}</span></td>
+        <td>{{ svc.desired }}</td>
+        <td class="cell-age">{% if svc.uptime_secs %}{{ svc.uptime_secs }}s{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No service information available.</p>
+  {% endif %}
+</div>
+{% endblock %}

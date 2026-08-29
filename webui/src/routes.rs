@@ -1,6 +1,6 @@
 //! Route handlers for the WebUI dashboard.
 
-use crate::models::{CardConfigInfo, CardElementView, DashboardData, SessionRow};
+use crate::models::{CardConfigInfo, CardElementView, DashboardData, SessionRow, SessionStatus};
 use crate::server::WebUiState;
 use crate::sse::WebUiEvent;
 use axum::Form;
@@ -28,9 +28,11 @@ pub async fn dashboard(State(state): State<WebUiState>) -> impl IntoResponse {
         dormant_count: dormant,
         spawning_count: spawning,
         total_sessions: active + dormant + spawning,
-        uptime_seconds: state.started_at.elapsed().as_secs() as i64,
+        uptime: format_uptime(state.started_at.elapsed()),
         recent_sessions: rows,
-        active_session: active_key.as_ref().map(|k| session_summary(k, &sessions)),
+        active_session: active_key
+            .as_ref()
+            .map(|k| session_summary(k, &sessions, &card_states)),
         active_session_key: active_encoded,
     };
 
@@ -126,12 +128,16 @@ pub async fn session_detail(
         None
     };
 
+    let derived = SessionStatus::derive(status, &phase);
+
     let data = serde_json::json!({
         "chat_id": raw_key.chat_id,
         "thread_id": raw_key.thread_id,
         "session_id": session_id,
         "status": status,
-        "phase": phase,
+        "status_label": derived.label(),
+        "status_slug": derived.slug(),
+        "status_glyph": derived.glyph(),
         "user_prompt": user_prompt,
         "body": body_view,
         "msg_id": msg_id,
@@ -358,13 +364,20 @@ fn build_session_rows(
             let is_active = active_key
                 .map(|a| a.chat_id == key.chat_id && a.thread_id == key.thread_id)
                 .unwrap_or(false);
+            let derived = SessionStatus::derive(status, &phase);
+            let session_id = mapping.session_id().map(|s| s.to_string());
             SessionRow {
                 encoded_key: encode_session_key(key),
                 chat_id: key.chat_id.clone(),
                 thread_id: key.thread_id.clone(),
-                session_id: mapping.session_id().map(|s| s.to_string()),
+                session_id_short: session_id
+                    .as_deref()
+                    .map(|s| crate::models::middle_truncate(s, 18)),
+                session_id,
                 status,
-                phase,
+                status_label: derived.label(),
+                status_slug: derived.slug(),
+                status_glyph: derived.glyph(),
                 last_active: format_relative_time(mapping.last_active_unix),
                 is_active,
             }
@@ -381,8 +394,12 @@ fn build_session_rows(
     (rows, active, dormant, spawning)
 }
 
-/// Compact summary used by the dashboard's "active session" panel.
-fn session_summary(key: &SessionKey, sessions: &[(SessionKey, Mapping)]) -> serde_json::Value {
+/// Compact summary used by the dashboard's focused-session banner.
+fn session_summary(
+    key: &SessionKey,
+    sessions: &[(SessionKey, Mapping)],
+    card_states: &std::collections::HashMap<String, CardState>,
+) -> serde_json::Value {
     let mapping = sessions
         .iter()
         .find(|(k, _)| k.chat_id == key.chat_id && k.thread_id == key.thread_id)
@@ -395,11 +412,20 @@ fn session_summary(key: &SessionKey, sessions: &[(SessionKey, Mapping)]) -> serd
         },
         None => ("dormant", None),
     };
+    let phase = session_id
+        .as_ref()
+        .and_then(|sid| card_states.get(sid))
+        .map(|st| st.status_emoji.clone())
+        .unwrap_or_default();
+    let derived = SessionStatus::derive(status, &phase);
     serde_json::json!({
         "chat_id": key.chat_id,
         "thread_id": key.thread_id,
         "session_id": session_id,
         "status": status,
+        "status_label": derived.label(),
+        "status_slug": derived.slug(),
+        "status_glyph": derived.glyph(),
         "encoded_key": encode_session_key(key),
     })
 }

@@ -156,6 +156,8 @@ fn init_templates_inner() -> Environment<'static> {
         include_str!("../templates/sidebar_active.html"),
     )
     .expect("sidebar_active.html template");
+    env.add_template("admin_nav.html", include_str!("../templates/admin_nav.html"))
+        .expect("admin_nav.html template");
     env.add_template(
         "admin_status.html",
         include_str!("../templates/admin_status.html"),
