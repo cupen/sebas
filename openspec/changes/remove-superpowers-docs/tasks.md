@@ -39,4 +39,4 @@
 
 ## 8. 收尾
 
-- [ ] 8.1 按 Conventional Commits 分批提交(同步/清理各批/工具/删除),每批可独立构建;删除 commit 置于最后。验证:`git log` 顺序符合 design D5
+- [x] 8.1 按 Conventional Commits 分批提交(同步/清理各批/工具/删除),每批可独立构建;删除 commit 置于最后。验证:`git log` 顺序符合 design D5
