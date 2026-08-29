@@ -4,10 +4,13 @@
 //! - `update-models` — fetch `https://models.dev/api.json`, parse it
 //!   into the `gateway::models::ModelDef` shape, and regenerate the
 //!   `MODELS` const body in `gateway/src/models.rs`.
+//! - `check-docs` — fail if the tree still cites the removed
+//!   superpowers planning corpus (ghost references).
 //!
 //! This is a one-shot CLI. No async runtime is owned by callers —
 //! `update-models` uses reqwest's blocking client under the hood.
 
+mod check_docs;
 mod parser;
 mod render;
 
@@ -29,6 +32,7 @@ fn main() -> ExitCode {
             }
         }
         "update-models" => run_update_models(&args[2..]),
+        "check-docs" => check_docs::run(&args[2..]),
         other => {
             eprintln!("xtask: unknown subcommand `{}`", other);
             print_help();
@@ -46,6 +50,8 @@ fn print_help() {
     println!("SUBCOMMANDS:");
     println!("    update-models    Fetch https://models.dev/api.json and regenerate");
     println!("                    gateway/src/models.rs::MODELS in place.");
+    println!("    check-docs       Fail if the tree cites the removed superpowers");
+    println!("                    corpus (paths, dated `spec YYYY-MM-DD`, bare `spec §N`).");
     println!("    help             Print this message.");
 }
 
