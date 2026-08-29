@@ -50,6 +50,7 @@ pub enum UpdateTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedService {
+    Core,
     WebUi,
     Gateway,
     Feishu,

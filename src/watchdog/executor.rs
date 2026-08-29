@@ -442,6 +442,7 @@ impl ControlExecutor {
     fn plan_for(&self, request: &ControlRequest) -> Execution {
         use crate::watchdog::control::ManagedService;
         let service_name = |s: &ManagedService| match s {
+            ManagedService::Core => ServiceName::Core,
             ManagedService::WebUi => ServiceName::WebUi,
             ManagedService::Gateway | ManagedService::Feishu => ServiceName::Gateway,
         };

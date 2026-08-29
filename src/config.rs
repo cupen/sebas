@@ -50,6 +50,14 @@ pub struct FeishuConfig {
     pub bot_name: String,
 }
 
+impl FeishuConfig {
+    /// feishu 是否启用：app_id 与 app_secret 同时非空。
+    /// 两者同时为空 = 不接入飞书（feishu 可选，sebas-2ty）。
+    pub fn enabled(&self) -> bool {
+        !self.app_id.is_empty() && !self.app_secret.is_empty()
+    }
+}
+
 impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
@@ -191,6 +199,8 @@ fn default_log_level() -> String {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WatchdogConfig {
     #[serde(default)]
+    pub core: WatchdogCoreConfig,
+    #[serde(default)]
     pub upgrade: WatchdogUpgradeConfig,
     #[serde(default)]
     pub storage: WatchdogStorageConfig,
@@ -200,9 +210,20 @@ pub struct WatchdogConfig {
     pub gateway: WatchdogGatewayConfig,
 }
 
+/// watchdog 模式下 core 子进程（飞书 bot + ACP）的开关。
+/// 默认关：feishu 是可选项，`sebas watchdog` 默认只启动 WebUI；
+/// 需要飞书 bot 时在 WebUI 服务页启用（选择持久化到 services.json），
+/// 或在此显式 `enabled = true`。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WatchdogCoreConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WatchdogWebUiConfig {
-    /// Let watchdog own the WebUI lifecycle (default: true).
+    /// Let watchdog own the WebUI lifecycle. 默认开：watchdog 唯一默认启动
+    /// 的服务，其余（core/gateway）由 WebUI 服务页按需启停。
     #[serde(default = "default_webui_enabled")]
     pub enabled: bool,
     /// Bind address. Phase 2.3 tightens non-loopback security.
@@ -216,7 +237,7 @@ pub struct WatchdogWebUiConfig {
 impl Default for WatchdogWebUiConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: default_webui_enabled(),
             host: default_webui_host(),
             port: default_webui_port(),
         }
@@ -382,11 +403,13 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.feishu.app_id.is_empty() {
-            return Err(SebasError::Config("feishu.app_id is required".into()));
-        }
-        if self.feishu.app_secret.is_empty() {
-            return Err(SebasError::Config("feishu.app_secret is required".into()));
+        // feishu 是可选项（sebas-2ty）：app_id/app_secret 同时为空 = 不接入
+        // 飞书（`sebas run` 以无飞书模式运行；watchdog 下 core 服务默认不
+        // 启动）。只配其一属于半配置，明确报错而不是静默半启用。
+        if self.feishu.app_id.is_empty() != self.feishu.app_secret.is_empty() {
+            return Err(SebasError::Config(
+                "feishu.app_id 与 feishu.app_secret 必须同时配置；同时留空 = 不启用飞书".into(),
+            ));
         }
         // owner_id 决策（sebas-nya）：维持**可选**，偏离 spec §6.1 的必填。
         // 依据：spec §6 同时写明「只有 3 个必填字段」只是设计原则，而实际
@@ -501,6 +524,61 @@ pub fn expand_tilde(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webui_enabled_by_default_and_core_disabled() {
+        // watchdog 默认服务面 = 仅 WebUI（sebas-2ty）：webui 默认开，
+        // core（飞书 bot）与 gateway 默认关，由 WebUI 服务页按需启停。
+        let cfg = Config::parse("").expect("空配置应可解析（feishu 可选）");
+        assert!(cfg.watchdog.webui.enabled, "webui 应默认启用");
+        assert!(!cfg.watchdog.core.enabled, "core 应默认停用");
+        assert!(!cfg.watchdog.gateway.enabled, "gateway 应默认停用");
+        assert!(!cfg.feishu.enabled(), "无凭证时 feishu 应视为未启用");
+    }
+
+    #[test]
+    fn feishu_optional_but_not_half_configured() {
+        // 同时留空 = 不启用飞书，合法。
+        let both_empty = Config::parse("").expect("同时留空应可解析");
+        assert!(!both_empty.feishu.enabled());
+
+        // 只配其一 = 半配置，明确报错。
+        let only_id = Config::parse(
+            r#"
+[feishu]
+app_id = "cli_a1b2"
+"#,
+        );
+        assert!(only_id.is_err(), "只配 app_id 必须报错");
+        let only_secret = Config::parse(
+            r#"
+[feishu]
+app_secret = "s"
+"#,
+        );
+        assert!(only_secret.is_err(), "只配 app_secret 必须报错");
+
+        // 同时配置 = 启用。
+        let both = Config::parse(
+            r#"
+[feishu]
+app_id = "cli_a1b2"
+app_secret = "s"
+"#,
+        )
+        .expect("完整 feishu 配置应可解析");
+        assert!(both.feishu.enabled());
+    }
+
+    #[test]
+    fn watchdog_webui_explicit_disabled_wins() {
+        let raw = r#"
+[watchdog.webui]
+enabled = false
+"#;
+        let cfg = Config::parse(raw).expect("显式关闭应可解析");
+        assert!(!cfg.watchdog.webui.enabled, "显式 false 应优先于默认值");
+    }
 
     #[test]
     fn deprecated_watchdog_upgrade_fields_parse_but_are_flagged() {

@@ -255,6 +255,9 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
     );
 
     // core：readiness 门 + 新二进制未就绪自动回滚。
+    // 默认停用（feishu 可选，sebas-2ty）：`sebas watchdog` 默认只启动 WebUI，
+    // core（飞书 bot）由 WebUI 服务页启用，或配置 [watchdog.core] enabled = true。
+    // persist 文件（services.json）里的选择优先于这里的 config 初值。
     let mut core_spec = ServiceSpec::new(
         ServiceName::Core,
         Arc::new(CoreSpawner {
@@ -264,40 +267,36 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
         DesiredState::Enabled,
     );
     core_spec.on_unready_after_upgrade = Some(rollback_hook(config.clone()));
-    services.register(core_spec, true);
+    services.register(core_spec, config.core.enabled);
 
-    // webui：config 开关（默认启用）。
-    if config.webui.enabled {
-        services.register(
-            ServiceSpec::new(
-                ServiceName::WebUi,
-                Arc::new(WebUiSpawner {
-                    config_path: config_path.clone(),
-                    control_secret: secret.clone(),
-                }),
-                DesiredState::Enabled,
-            ),
-            true,
-        );
-    }
+    // webui：config 开关（默认开）。始终注册进 ServiceManager：即使初值停用，
+    // 服务页也能看到并重新启用。
+    services.register(
+        ServiceSpec::new(
+            ServiceName::WebUi,
+            Arc::new(WebUiSpawner {
+                config_path: config_path.clone(),
+                control_secret: secret.clone(),
+            }),
+            DesiredState::Enabled,
+        ),
+        services::should_start_watchdog_webui(&config.webui),
+    );
 
-    // gateway：config 开关（默认关）；`--debug` 强制开启 debug 形态
-    // （内置 test provider，不转发上游）。
-    let gateway_enabled = config.gateway.enabled || debug;
-    if gateway_enabled {
-        services.register(
-            ServiceSpec::new(
-                ServiceName::Gateway,
-                Arc::new(GatewaySpawner {
-                    config_path: config_path.clone(),
-                    control_secret: secret.clone(),
-                    debug,
-                }),
-                DesiredState::Enabled,
-            ),
-            true,
-        );
-    }
+    // gateway：config 开关（默认关）；`--debug` 强制启用 debug 形态
+    // （内置 test provider，不转发上游）。同样始终注册以便后续启停。
+    services.register(
+        ServiceSpec::new(
+            ServiceName::Gateway,
+            Arc::new(GatewaySpawner {
+                config_path: config_path.clone(),
+                control_secret: secret.clone(),
+                debug,
+            }),
+            DesiredState::Enabled,
+        ),
+        config.gateway.enabled || debug,
+    );
 
     // 监督 task 各自永续运行；watchdog 主 task 停泊在关闭信号上。
     // kill_on_drop 只在进程内 Drop 时生效——收到信号时默认动作是立即
@@ -347,6 +346,7 @@ mod tests {
 
     fn test_config(tmp_data_dir: &std::path::Path) -> WatchdogConfig {
         WatchdogConfig {
+            core: Default::default(),
             upgrade: WatchdogUpgradeConfig::default(),
             storage: WatchdogStorageConfig {
                 data_dir: tmp_data_dir.display().to_string(),

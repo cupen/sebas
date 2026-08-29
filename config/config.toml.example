@@ -1,4 +1,6 @@
-# 飞书机器人接入。app_id / app_secret 必填，或由 env 覆盖。
+# 飞书机器人接入（可选）。app_id / app_secret 同时留空 = 不接入飞书
+# （sebas watchdog 默认只启动 WebUI，需要 bot 时再配置并在 WebUI 服务页
+# 启用 core）；只配其一会在启动时报错。也可由 env 覆盖。
 [feishu]
 app_id = ""
 app_secret = ""
@@ -82,21 +84,26 @@ args = []
 # # models = ["deepseek-chat", "deepseek-reasoner"]
 #
 #
-# # 路由表：model（可含 glob）→ provider 数组，数组顺序 = 优先级（先 = 主）。
-# # glob 键需加引号；故障转移（主失败自动切换）暂未实现。
+# 路由表：model（可含 glob）→ provider 数组，数组顺序 = 优先级（先 = 主）。
+# glob 键需加引号；故障转移（主失败自动切换）暂未实现。
 # [gateway.routes]
 # "claude-*" = ["anthropic"]
 # "deepseek-*" = ["deepseek", "ark"]
 
 
-# watchdog 模式：sebas 以监督进程启动，管理 core / webui / gateway 子进程。
-# [watchdog.webui] 默认启用 WebUI dashboard（127.0.0.1:9797）。
-# 端口冲突时 WebUI 自动降级为 degraded，不影响 core 服务。
-# 如不需要，设 enabled = false 关闭；或改 port 换端口。
-# [watchdog.webui]
+# ── watchdog 服务面（sebas-2ty）────────────────────────────────────────
+# `sebas watchdog` 默认只启动 WebUI；core（飞书 bot）与 gateway 默认停用，
+# 在 WebUI 服务页（/admin/services）启停，选择持久化到 ~/.sebas/services.json
+# （重启后保持，且优先于下面的 config 初值）。
+# WebUI 端口冲突时自动降级为 degraded，不影响 core 服务。
+#
+# [watchdog.webui]     # WebUI 控制台（默认启用）
 # enabled = true
 # host = "127.0.0.1"
 # port = 9797
 #
-# [watchdog.gateway]
+# [watchdog.core]      # core 子进程 = 飞书 bot + ACP（默认停用）
+# enabled = false
+#
+# [watchdog.gateway]   # gateway 子进程（默认停用；`sebas watchdog --debug` 强制启用）
 # enabled = false

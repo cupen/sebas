@@ -65,8 +65,8 @@ pub enum RpcControlRequest {
         service: String,
     },
     /// `/gateway on|off`: set a managed service's desired state.
-    /// `service` ∈ {gateway, webui}, `desired` ∈ {on, off}. Serve side
-    /// returns `service_unavailable` until Phase 4 (ServiceManager) lands.
+    /// `service` ∈ {core, gateway, webui}, `desired` ∈ {on, off}. core 的
+    /// 启停只接受 CLI/WebUI actor（飞书 actor 拒绝，见 handle 侧）。
     ServiceSet {
         service: String,
         desired: String,
@@ -318,19 +318,32 @@ async fn handle_envelope(
         RpcControlRequest::ServiceStatusFor { service } => {
             executor.service_status_for(&service).await
         }
-        // 受管服务期望态：core 拒绝（改用 RestartCore 走升级/回滚语义），
-        // webui/gateway 走 executor 的 ServiceSet（含 persist 落盘）。
+        // 受管服务期望态：core 也允许启停（sebas-2ty：feishu 可选，core 由
+        // WebUI 服务页控制），但飞书 actor 例外——core 停止后确认卡片无法
+        // 送达（dead-man's switch），core 的启停只走 CLI/WebUI 控制面。
+        // webui/gateway 照旧走 executor 的 ServiceSet（含 persist 落盘）。
         RpcControlRequest::ServiceSet {
             service,
             desired,
             persist,
-        } => match service_set_request(&service, &desired, persist) {
-            Ok(request) => {
-                let actor = crate::watchdog::control::Actor::from(envelope.actor);
-                executor.submit_or_confirm(actor, request).await
+        } => {
+            if service_from_str(&service) == Some(ServiceName::Core)
+                && matches!(envelope.actor, RpcActor::Feishu { .. })
+            {
+                return RpcControlResponse::Rejected {
+                    code: "invalid_request".into(),
+                    message: "core 的启停请通过 WebUI 服务页或 CLI 控制面（飞书渠道不支持）"
+                        .into(),
+                };
             }
-            Err((code, message)) => RpcControlResponse::Rejected { code, message },
-        },
+            match service_set_request(&service, &desired, persist) {
+                Ok(request) => {
+                    let actor = crate::watchdog::control::Actor::from(envelope.actor);
+                    executor.submit_or_confirm(actor, request).await
+                }
+                Err((code, message)) => RpcControlResponse::Rejected { code, message },
+            }
+        }
         RpcControlRequest::ServiceRestart { service } => match service_from_str(&service) {
             Some(ServiceName::Core) => RpcControlResponse::Rejected {
                 code: "invalid_request".into(),
@@ -356,6 +369,8 @@ async fn handle_envelope(
 }
 
 /// 把 RPC 的 ServiceSet 翻译成 ControlRequest；错误返回 (code, message)。
+/// core 合法（sebas-2ty：由 WebUI/CLI 启停）；飞书 actor 的 core 操作已在
+/// 上层拒绝。
 fn service_set_request(
     service: &str,
     desired: &str,
@@ -363,12 +378,6 @@ fn service_set_request(
 ) -> std::result::Result<ControlRequest, (String, String)> {
     let name = service_from_str(service)
         .ok_or_else(|| ("invalid_request".into(), format!("未知服务: {service}")))?;
-    if name == ServiceName::Core {
-        return Err((
-            "invalid_request".into(),
-            "core 的启停由 watchdog 托管，请使用 restart_core".into(),
-        ));
-    }
     let desired = match desired {
         "on" | "enabled" => DesiredState::Enabled,
         "off" | "disabled" => DesiredState::Disabled,
@@ -386,11 +395,12 @@ fn service_set_request(
     })
 }
 
-/// ServiceName → ControlRequest 的 ManagedService（name 已验证非 core）。
+/// ServiceName → ControlRequest 的 ManagedService。
 fn managed_service(name: ServiceName) -> crate::watchdog::control::ManagedService {
     match name {
+        ServiceName::Core => crate::watchdog::control::ManagedService::Core,
         ServiceName::WebUi => crate::watchdog::control::ManagedService::WebUi,
-        _ => crate::watchdog::control::ManagedService::Gateway,
+        ServiceName::Gateway => crate::watchdog::control::ManagedService::Gateway,
     }
 }
 
@@ -727,14 +737,43 @@ mod tests {
         ));
     }
 
+    /// ServiceSet core：CLI/WebUI actor 直接执行（Accepted，落 operation）；
+    /// 飞书 actor 被拒（core 停止后确认卡片无法送达，dead-man's switch）。
     #[tokio::test]
-    async fn service_set_core_is_rejected() {
+    async fn service_set_core_executes_for_cli() {
         let response = handle_envelope(
             ControlEnvelope {
                 version: 1,
                 request_id: "core_set".into(),
                 secret: TEST_SECRET.into(),
                 actor: RpcActor::Cli { uid: 1000 },
+                request: RpcControlRequest::ServiceSet {
+                    service: "core".into(),
+                    desired: "off".into(),
+                    persist: true,
+                },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+        assert!(
+            matches!(response, RpcControlResponse::Accepted { .. }),
+            "CLI actor 的 core ServiceSet 应被接受，got {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_set_core_is_rejected_for_feishu() {
+        let response = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "core_set_feishu".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_abc".into()),
+                },
                 request: RpcControlRequest::ServiceSet {
                     service: "core".into(),
                     desired: "off".into(),

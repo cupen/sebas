@@ -240,6 +240,23 @@ impl AdminAdapter for ControlRpcAdminAdapter {
         }
     }
 
+    async fn service_set(
+        &self,
+        service: &str,
+        desired: &str,
+    ) -> std::result::Result<AdminMutationResult, String> {
+        self.submit(
+            RpcControlRequest::ServiceSet {
+                service: service.into(),
+                desired: desired.into(),
+                // WebUI 服务页的启停选择持久化：watchdog 重启后保持用户意图。
+                persist: true,
+            },
+            format!("service {service} set to {desired}"),
+        )
+        .await
+    }
+
     async fn update(
         &self,
         dev: bool,

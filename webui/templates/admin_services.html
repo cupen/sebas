@@ -23,6 +23,7 @@
         <th>Status</th>
         <th>Desired</th>
         <th>Uptime</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -32,6 +33,29 @@
         <td><span class="badge {{ "badge-running" if svc.status == "running" else "" }}">{{ svc.status }}</span></td>
         <td>{{ svc.desired }}</td>
         <td class="cell-age">{% if svc.uptime_secs %}{{ svc.uptime_secs }}s{% else %}—{% endif %}</td>
+        <td>
+          {% if adapter_ok and svc.managed %}
+          {% if svc.desired == "enabled" %}
+          <button class="btn btn-danger btn-sm"
+                  hx-post="/admin/services/{{ svc.name }}/disable"
+                  hx-swap="none"
+                  hx-headers='{"origin": "http://127.0.0.1"}'
+                  hx-on::after-request="if(event.detail.successful){location.reload()}else{showToast('Stop failed','error')}">
+            Stop
+          </button>
+          {% else %}
+          <button class="btn btn-primary btn-sm"
+                  hx-post="/admin/services/{{ svc.name }}/enable"
+                  hx-swap="none"
+                  hx-headers='{"origin": "http://127.0.0.1"}'
+                  hx-on::after-request="if(event.detail.successful){location.reload()}else{showToast('Start failed','error')}">
+            Start
+          </button>
+          {% endif %}
+          {% else %}
+          —
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

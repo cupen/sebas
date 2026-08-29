@@ -20,7 +20,7 @@ use crate::admin_auth::SessionStore;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json, Redirect};
@@ -53,6 +53,11 @@ pub trait AdminAdapter: Send + Sync {
 
     /// Restart the core service.
     async fn restart_core(&self) -> Result<AdminMutationResult, String>;
+
+    /// Set a managed service's desired state (`desired` ∈ {"on", "off"}).
+    /// 选择会被 watchdog 持久化（services.json），重启后保持。
+    async fn service_set(&self, service: &str, desired: &str)
+        -> Result<AdminMutationResult, String>;
 
     /// Get the list of managed services and their status.
     async fn services(&self) -> Result<Vec<AdminService>, String>;
@@ -225,10 +230,24 @@ pub async fn admin_services(State(state): State<AdminState>) -> impl IntoRespons
         None => (vec![], false),
     };
 
+    // watchdog/updater 是伪行（非受管服务），不渲染启停按钮。
+    let rows: Vec<serde_json::Value> = services
+        .iter()
+        .map(|svc| {
+            serde_json::json!({
+                "name": svc.name,
+                "status": svc.status,
+                "desired": svc.desired,
+                "uptime_secs": svc.uptime_secs,
+                "managed": matches!(svc.name.as_str(), "core" | "webui" | "gateway"),
+            })
+        })
+        .collect();
+
     let data = serde_json::json!({
         "page": "admin_services",
         "adapter_ok": adapter_ok,
-        "services": services,
+        "services": rows,
     });
     render_template(&state, "admin_services.html", &data).await
 }
@@ -283,6 +302,37 @@ pub async fn admin_rollback_action(State(state): State<AdminState>) -> impl Into
 pub async fn admin_restart_action(State(state): State<AdminState>) -> impl IntoResponse {
     match &state.adapter {
         Some(adapter) => match adapter.restart_core().await {
+            Ok(result) => mutation_json(&result),
+            Err(e) => mutation_error(e),
+        },
+        None => no_adapter_error(),
+    }
+}
+
+/// POST /admin/services/{service}/enable — set desired state to "on"
+/// （选择持久化到 services.json，watchdog 重启后保持）。
+pub async fn admin_service_enable(
+    State(state): State<AdminState>,
+    Path(service): Path<String>,
+) -> impl IntoResponse {
+    service_set_action(state, &service, "on").await
+}
+
+/// POST /admin/services/{service}/disable — set desired state to "off".
+pub async fn admin_service_disable(
+    State(state): State<AdminState>,
+    Path(service): Path<String>,
+) -> impl IntoResponse {
+    service_set_action(state, &service, "off").await
+}
+
+async fn service_set_action(
+    state: AdminState,
+    service: &str,
+    desired: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match &state.adapter {
+        Some(adapter) => match adapter.service_set(service, desired).await {
             Ok(result) => mutation_json(&result),
             Err(e) => mutation_error(e),
         },
@@ -554,6 +604,11 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/admin/update/dev", post(admin_dev_update_action))
         .route("/admin/rollback", post(admin_rollback_action))
         .route("/admin/restart", post(admin_restart_action))
+        .route("/admin/services/{service}/enable", post(admin_service_enable))
+        .route(
+            "/admin/services/{service}/disable",
+            post(admin_service_disable),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_mutation_guard,
@@ -758,6 +813,21 @@ mod tests {
             })
         }
 
+        async fn service_set(
+            &self,
+            service: &str,
+            desired: &str,
+        ) -> Result<AdminMutationResult, String> {
+            if self.fail {
+                return Err("fake failure".into());
+            }
+            Ok(AdminMutationResult {
+                operation_id: format!("op_service_{service}"),
+                status: "accepted".into(),
+                message: format!("{service} set to {desired}"),
+            })
+        }
+
         async fn services(&self) -> Result<Vec<AdminService>, String> {
             if self.fail {
                 return Err("fake failure".into());
@@ -880,24 +950,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_router_merges_into_full_router_without_health_collision() {
-        // 回归：/health 属于 base router；admin router 若也注册 /health，
-        // merge 到完整 router 时 axum 会 panic「Overlapping method route」。
-        // 用真实 adapter 构建完整 router，断言不 panic 且 /health 可访问。
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        // build_router_with_admin_adapter 需要 RouterHandle/模板；这里仅验证
-        // build_admin_router 本身不再携带 /health（健康检查归 base router）。
-        let admin_app = build_admin_router(test_state(adapter.clone()));
+    async fn admin_router_does_not_register_health() {
+        // 回归：/health 属于 base router（webui/src/server.rs）；admin router
+        // 若也注册 /health，merge 进完整 router 时 axum 会 panic
+        // 「Overlapping method route. Handler for `GET /health` already exists」
+        // （watchdog 模式下 webui 子进程启动即崩，sebas-2ty 修复）。
+        // 断言 build_admin_router 本身不再携带 /health：请求应 404。
+        let admin_app = build_admin_router(test_state(None));
         let resp = admin_app
             .oneshot(
                 Request::builder()
-                    .uri("/admin/services")
+                    .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     // ── Mutation route tests ──────────────────────────────────────────────
@@ -1110,6 +1179,53 @@ mod tests {
         let result = adapter.restart_core().await.expect("restart must succeed");
         assert_eq!(result.operation_id, "op_restart");
         assert_eq!(result.message, "restart requested");
+    }
+
+    #[tokio::test]
+    async fn adapter_service_set_produces_normalized_request() {
+        let adapter = FakeAdapter { fail: false };
+        let result = adapter
+            .service_set("core", "on")
+            .await
+            .expect("service_set must succeed");
+        assert_eq!(result.operation_id, "op_service_core");
+        assert_eq!(result.message, "core set to on");
+    }
+
+    #[tokio::test]
+    async fn service_enable_route_accepts_post() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_admin_router(test_state(adapter));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/services/core/enable")
+                    .header("origin", "http://127.0.0.1:9797")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn service_disable_route_accepts_post() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_admin_router(test_state(adapter));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/services/gateway/disable")
+                    .header("origin", "http://127.0.0.1:9797")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ── No-adapter tests ───────────────────────────────────────────────────

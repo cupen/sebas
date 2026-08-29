@@ -64,13 +64,21 @@ pub async fn run(
         info!(%addr, "gateway started (run --gateway); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
     }
 
-    if cfg.feishu.owner_id.is_empty() {
+    // feishu 是可选项（sebas-2ty）：app_id/app_secret 同时为空 = 不接入飞书。
+    let feishu_enabled = cfg.feishu.enabled();
+    if feishu_enabled && cfg.feishu.owner_id.is_empty() {
         // owner_id 决策（sebas-nya，文档化于 config.rs validate）：可选。
         // 空值 = 不过滤发送者 —— 对能执行任意命令的单用户 bot 是真实风险，
         // 启动时必须醒目提示。
         warn!(
             "feishu.owner_id 为空：任何飞书用户的消息都会被处理并驱动本机 claude；\
              单用户机器人建议配置 owner_id（spec §6.1）"
+        );
+    }
+    if !feishu_enabled {
+        info!(
+            "feishu 未启用（app_id/app_secret 为空）：跳过飞书接入，\
+             以本地服务形态运行；如需接入请在配置中填写凭证"
         );
     }
 
@@ -117,111 +125,116 @@ pub async fn run(
     // router's phase machine can swap 👀→🚧→✅ rather than pile them up.
     let reactions = Arc::new(ReactionTracker::default());
 
-    let feishu = FeishuClient::new(FeishuConfig {
-        app_id: cfg.feishu.app_id.clone(),
-        app_secret: cfg.feishu.app_secret.clone(),
-        owner_id: cfg.feishu.owner_id.clone(),
-    });
-
+    // feishu 启用：建 client、取 token、发 hello/test、spawn 出站 pump。
+    // feishu 未启用（sebas-2ty）：全部跳过，出站接收端直接丢弃（与
+    // standalone WebUI 同语义：Out 事件静默丢弃），进程等关闭信号。
     let http = reqwest::Client::new();
-    // Test affordance: `SEBAS_TEST_FAKE_TOKEN=1` skips the live Feishu auth
-    // HTTP call and substitutes a stub token. Used by integration tests that
-    // cannot reach the live Feishu API. Off by default; production callers
-    // see no behaviour change.
-    let tokens = if std::env::var("SEBAS_TEST_FAKE_TOKEN").as_deref() == Ok("1") {
-        info!("SEBAS_TEST_FAKE_TOKEN=1; using stub tenant_access_token");
-        feishu::client::TokenManager::with_stub_token("t-stub-test")
-    } else {
-        let tm = feishu::client::TokenManager::new(
-            cfg.feishu.app_id.clone(),
-            cfg.feishu.app_secret.clone(),
-        );
-        // Startup auth check stays fatal (spec §4.1).
-        tm.token()
-            .await
-            .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?;
-        tm
-    };
+    if feishu_enabled {
+        // Test affordance: `SEBAS_TEST_FAKE_TOKEN=1` skips the live Feishu auth
+        // HTTP call and substitutes a stub token. Used by integration tests that
+        // cannot reach the live Feishu API. Off by default; production callers
+        // see no behaviour change.
+        let tokens = if std::env::var("SEBAS_TEST_FAKE_TOKEN").as_deref() == Ok("1") {
+            info!("SEBAS_TEST_FAKE_TOKEN=1; using stub tenant_access_token");
+            feishu::client::TokenManager::with_stub_token("t-stub-test")
+        } else {
+            let tm = feishu::client::TokenManager::new(
+                cfg.feishu.app_id.clone(),
+                cfg.feishu.app_secret.clone(),
+            );
+            // Startup auth check stays fatal (spec §4.1) — 仅在 feishu 启用时。
+            tm.token()
+                .await
+                .map_err(|e| crate::error::SebasError::Feishu(e.to_string()))?;
+            tm
+        };
 
-    // hello_msg: send to the owner (private DM via open_id) if both are set.
-    // If owner_id is empty, do nothing.
-    if !cfg.feishu.hello_msg.is_empty() && !cfg.feishu.owner_id.is_empty() {
-        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
-        let req = SendTextRequest::new(
-            &cfg.feishu.owner_id,
-            ReceiveIdType::OpenId,
-            &cfg.feishu.hello_msg,
-        );
-        let body = serde_json::to_value(&req).unwrap_or_default();
-        let bearer = tokens.token().await.unwrap_or_default();
-        match http.post(url).bearer_auth(&bearer).json(&body).send().await {
-            Ok(resp) => {
+        // hello_msg: send to the owner (private DM via open_id) if both are set.
+        // If owner_id is empty, do nothing.
+        if !cfg.feishu.hello_msg.is_empty() && !cfg.feishu.owner_id.is_empty() {
+            let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
+            let req = SendTextRequest::new(
+                &cfg.feishu.owner_id,
+                ReceiveIdType::OpenId,
+                &cfg.feishu.hello_msg,
+            );
+            let body = serde_json::to_value(&req).unwrap_or_default();
+            let bearer = tokens.token().await.unwrap_or_default();
+            match http.post(url).bearer_auth(&bearer).json(&body).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    info!(%status, body = %body, "hello_msg send result");
+                }
+                Err(e) => warn!(?e, "hello_msg send failed"),
+            }
+        }
+
+        // Optional startup test message: send "sebas 已启动" to the given receive_id
+        // (interpreted as chat_id; for private DMs to a user, pass their open_id and
+        // set receive_id_type=open_id below). Default to chat_id for groups.
+        if let Some(receive_id) = test_msg {
+            let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
+            let req = SendTextRequest::new(receive_id, ReceiveIdType::ChatId, "✅ sebas 已启动");
+            let body = serde_json::to_value(&req).unwrap_or_default();
+            async {
+                let bearer = tokens.token().await.unwrap_or_default();
+                let resp = http
+                    .post(url)
+                    .bearer_auth(&bearer)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| crate::error::SebasError::Feishu(format!("send: {e}")))?;
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                info!(%status, body = %body, "hello_msg send result");
+                info!(%status, body = %body, "test message send result");
+                if !status.is_success() {
+                    Err(crate::error::SebasError::Feishu(format!(
+                        "test message failed: {body}"
+                    )))
+                } else {
+                    Ok(())
+                }
             }
-            Err(e) => warn!(?e, "hello_msg send failed"),
+            .await?;
         }
-    }
 
-    // Optional startup test message: send "sebas 已启动" to the given receive_id
-    // (interpreted as chat_id; for private DMs to a user, pass their open_id and
-    // set receive_id_type=open_id below). Default to chat_id for groups.
-    if let Some(receive_id) = test_msg {
-        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
-        let req = SendTextRequest::new(receive_id, ReceiveIdType::ChatId, "✅ sebas 已启动");
-        let body = serde_json::to_value(&req).unwrap_or_default();
-        async {
-            let bearer = tokens.token().await.unwrap_or_default();
-            let resp = http
-                .post(url)
-                .bearer_auth(&bearer)
-                .json(&body)
-                .send()
+        // Spawn outbound pump
+        let cfg_for_outbound = cfg.clone();
+        let tokens_for_outbound = tokens;
+        let http_for_outbound = http;
+        let feishu = FeishuClient::new(FeishuConfig {
+            app_id: cfg.feishu.app_id.clone(),
+            app_secret: cfg.feishu.app_secret.clone(),
+            owner_id: cfg.feishu.owner_id.clone(),
+        });
+        let router_for_outbound = router.clone();
+        let mgr_for_outbound = mgr.clone();
+        let reactions_for_outbound = reactions;
+        let gateway_cfg_for_outbound = gateway_cfg.clone();
+        tokio::spawn(async move {
+            while let Some(out) = out_rx.recv().await {
+                if let Err(e) = dispatch_out(
+                    &feishu,
+                    &http_for_outbound,
+                    &tokens_for_outbound,
+                    &cfg_for_outbound,
+                    &router_for_outbound,
+                    &mgr_for_outbound,
+                    &reactions_for_outbound,
+                    gateway_cfg_for_outbound.as_ref(),
+                    out,
+                )
                 .await
-                .map_err(|e| crate::error::SebasError::Feishu(format!("send: {e}")))?;
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            info!(%status, body = %body, "test message send result");
-            if !status.is_success() {
-                Err(crate::error::SebasError::Feishu(format!(
-                    "test message failed: {body}"
-                )))
-            } else {
-                Ok(())
+                {
+                    error!(?e, "outbound dispatch failed");
+                }
             }
-        }
-        .await?;
+        });
+    } else {
+        drop(out_rx);
     }
-
-    // Spawn outbound pump
-    let cfg_for_outbound = cfg.clone();
-    let tokens_for_outbound = tokens.clone();
-    let http_for_outbound = http.clone();
-    let feishu_for_outbound = feishu.clone();
-    let router_for_outbound = router.clone();
-    let mgr_for_outbound = mgr.clone();
-    let reactions_for_outbound = reactions.clone();
-    let gateway_cfg_for_outbound = gateway_cfg.clone();
-    tokio::spawn(async move {
-        while let Some(out) = out_rx.recv().await {
-            if let Err(e) = dispatch_out(
-                &feishu_for_outbound,
-                &http_for_outbound,
-                &tokens_for_outbound,
-                &cfg_for_outbound,
-                &router_for_outbound,
-                &mgr_for_outbound,
-                &reactions_for_outbound,
-                gateway_cfg_for_outbound.as_ref(),
-                out,
-            )
-            .await
-            {
-                error!(?e, "outbound dispatch failed");
-            }
-        }
-    });
 
     // Start WebUI dashboard server if requested
     if webui {
@@ -241,19 +254,20 @@ pub async fn run(
     // shutdown signal can drop the WebSocket future and close the connection
     // promptly. If the reconnect loop ever exits, keep waiting for ctrl_c so
     // the normal session cleanup and state snapshot still run.
+    // feishu 未启用时以 pending future 占位：进程只等关闭信号（sebas-2ty）。
     let ws_router = router.clone();
     let ws_owner = cfg.feishu.owner_id.clone();
     let ws_app_id = cfg.feishu.app_id.clone();
     let ws_app_secret = cfg.feishu.app_secret.clone();
     let ws_dump_dir = match dump_inbound.as_ref() {
-        Some(p) => match std::fs::create_dir_all(p) {
+        Some(p) if feishu_enabled => match std::fs::create_dir_all(p) {
             Ok(()) => Some(std::path::PathBuf::from(p)),
             Err(e) => {
                 warn!(?e, path = %p, "failed to create inbound dump dir; disabling dump");
                 None
             }
         },
-        None => None,
+        _ => None,
     };
     if let Some(d) = &ws_dump_dir {
         info!(dir = %d.display(), "inbound WS payloads will be dumped here");
@@ -286,6 +300,20 @@ pub async fn run(
             std::future::pending::<()>().await;
         }
     };
+    let mut ws_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        if feishu_enabled {
+            Box::pin(run_ws_loop(
+                &ws_app_id,
+                &ws_app_secret,
+                &ws_owner,
+                ws_router,
+                ws_dump_dir,
+                cfg.feishu.allowed_chat_types.clone(),
+                cfg.feishu.bot_name.clone(),
+            ))
+        } else {
+            Box::pin(std::future::pending())
+        };
     tokio::select! {
         _ = sigint => {
             info!("shutting down (SIGINT)");
@@ -293,7 +321,7 @@ pub async fn run(
         _ = sigterm => {
             info!("shutting down (SIGTERM)");
         }
-        _ = run_ws_loop(&ws_app_id, &ws_app_secret, &ws_owner, ws_router, ws_dump_dir, cfg.feishu.allowed_chat_types.clone(), cfg.feishu.bot_name.clone()) => {
+        _ = &mut ws_fut => {
             warn!("WS loop exited; awaiting ctrl_c");
             tokio::signal::ctrl_c().await.ok();
         }
