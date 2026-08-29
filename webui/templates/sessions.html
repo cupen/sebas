@@ -1,69 +1,88 @@
 {% extends "base.html" %}
 {% block title %}Sessions - sebas{% endblock %}
+
+{% block ribbon %}
+<div class="ribbon" role="status" aria-label="Session totals">
+  <span class="ribbon-item" data-status="working">
+    <span class="ribbon-count">{{ active_count }}</span>
+    <span class="ribbon-label">active</span>
+  </span>
+  <span class="ribbon-item" data-status="dormant">
+    <span class="ribbon-count">{{ dormant_count }}</span>
+    <span class="ribbon-label">dormant</span>
+  </span>
+  <span class="ribbon-item" data-status="starting">
+    <span class="ribbon-count">{{ spawning_count }}</span>
+    <span class="ribbon-label">starting</span>
+  </span>
+  <span class="ribbon-item">
+    <span class="ribbon-count">{{ total_sessions }}</span>
+    <span class="ribbon-label">total</span>
+  </span>
+</div>
+{% endblock %}
+
 {% block content %}
 <div class="page-header">
   <h1>Sessions</h1>
-  <p class="page-subtitle">Browse, switch, and close Claude Code sessions.</p>
+  <p class="page-subtitle">Open, focus, and close Claude Code sessions.</p>
 </div>
 
-<!-- Active session banner -->
 {% if active_session_key %}
 <div class="active-banner" id="active-banner">
-  <div class="active-banner-icon">⚡</div>
   <div class="active-banner-body">
     <div class="active-banner-label">Focused session</div>
     <div class="active-banner-meta">
       <code>{{ active_session_key }}</code>
     </div>
   </div>
-  <a class="btn btn-secondary btn-sm" href="/sessions/{{ active_session_key }}" hx-boost="true">Open</a>
+  <a class="btn btn-sm" href="/sessions/{{ active_session_key }}" hx-boost="true">Open</a>
 </div>
 {% endif %}
 
-<!-- New Session -->
 <div class="action-bar">
   <button class="btn btn-primary" id="new-session-btn"
-          onclick="document.getElementById('new-session-form').style.display='block'; this.style.display='none'">
-    + New Session
+          aria-expanded="false"
+          aria-controls="new-session-form"
+          onclick="
+            document.getElementById('new-session-form').hidden = false;
+            this.hidden = true;
+            this.setAttribute('aria-expanded', 'true');
+            document.querySelector('#new-session-form .msg-input').focus();
+          ">
+    New session
   </button>
-  <div class="session-counts">
-    <span class="count-pill count-active" title="Active">{{ active_count }} active</span>
-    <span class="count-pill count-dormant" title="Dormant">{{ dormant_count }} dormant</span>
-    <span class="count-pill count-spawning" title="Spawning">{{ spawning_count }} spawning</span>
-    <span class="count-pill count-total">{{ total_sessions }} total</span>
-  </div>
 </div>
 
-<div id="new-session-form" class="message-form" style="display: none;">
+<div id="new-session-form" class="message-form" hidden>
   <form hx-post="/api/sessions"
         hx-target="#new-session-result"
         hx-swap="innerHTML"
         hx-on::after-request="if(event.detail.successful) { const d = JSON.parse(event.detail.xhr.response); window.location.href = '/sessions/' + d.key; }">
-    <textarea name="prompt" class="msg-input" rows="3" placeholder="Enter prompt for Claude Code..."></textarea>
+    <div class="form-group">
+      <label for="new-session-prompt">First message</label>
+      <textarea id="new-session-prompt" name="prompt" class="msg-input" rows="3"
+                placeholder="What should the agent do?"></textarea>
+    </div>
     <div class="form-actions">
       <button type="submit" class="btn btn-primary">Start</button>
-      <button type="button" class="btn btn-secondary"
-              onclick="document.getElementById('new-session-form').style.display='none'; document.getElementById('new-session-btn').style.display='inline-block'">Cancel</button>
+      <button type="button" class="btn"
+              onclick="
+                document.getElementById('new-session-form').hidden = true;
+                var b = document.getElementById('new-session-btn');
+                b.hidden = false;
+                b.setAttribute('aria-expanded', 'false');
+                b.focus();
+              ">Cancel</button>
     </div>
   </form>
   <div id="new-session-result"></div>
 </div>
 
-<!-- Filter tabs (purely visual — full list rendered below). -->
-<div class="filter-tabs">
-  <span class="filter-tab filter-tab-active">All</span>
-  <span class="filter-tab">Active</span>
-  <span class="filter-tab">Dormant</span>
-  <span class="filter-tab">Spawning</span>
-</div>
-
-<!-- htmx-driven live list. Outer swap re-renders the table body when
-     the SSE event stream signals a session change. -->
-<div id="sessions-list"
-     hx-get="/sessions/partial"
-     hx-trigger="sse:update"
-     hx-swap="innerHTML">
+{# The four filter tabs that used to sit here were decorative — they had no
+   handler and never filtered anything. Removed rather than restyled; see the
+   "No non-functional controls" requirement. #}
+<div id="session-board">
   {% include "sessions_partial.html" %}
 </div>
-
 {% endblock %}

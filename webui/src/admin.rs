@@ -148,11 +148,13 @@ pub async fn admin_status(State(state): State<AdminState>) -> impl IntoResponse 
     let (status, adapter_ok) = match &state.adapter {
         Some(adapter) => match adapter.status().await {
             Ok(s) => (s, true),
-            Err(e) => {
-                let mut s = AdminStatus::default();
-                s.version = format!("error: {e}");
-                (s, false)
-            }
+            Err(e) => (
+                AdminStatus {
+                    version: format!("error: {e}"),
+                    ..Default::default()
+                },
+                false,
+            ),
         },
         None => (AdminStatus::default(), false),
     };
@@ -347,11 +349,8 @@ pub async fn admin_auth_guard(
         .and_then(|cookies| {
             cookies.split(';').find_map(|c| {
                 let c = c.trim();
-                if let Some(val) = c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME)) {
-                    Some(val.to_string())
-                } else {
-                    None
-                }
+                c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME))
+                    .map(|val| val.to_string())
             })
         });
 

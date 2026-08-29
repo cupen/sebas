@@ -1,53 +1,61 @@
 {% extends "base.html" %}
-{% block title %}Dashboard - sebas{% endblock %}
+{% block title %}Board - sebas{% endblock %}
+
+{% block ribbon %}
+{# One line of counts instead of five stat cards. The counts are the same
+   numbers; what changes is that they stop competing with the board for
+   attention. #}
+<div class="ribbon" role="status" aria-label="Session totals">
+  <span class="ribbon-item" data-status="working">
+    <span class="ribbon-count">{{ active_count }}</span>
+    <span class="ribbon-label">active</span>
+  </span>
+  <span class="ribbon-item" data-status="dormant">
+    <span class="ribbon-count">{{ dormant_count }}</span>
+    <span class="ribbon-label">dormant</span>
+  </span>
+  <span class="ribbon-item" data-status="starting">
+    <span class="ribbon-count">{{ spawning_count }}</span>
+    <span class="ribbon-label">starting</span>
+  </span>
+  <span class="ribbon-item">
+    <span class="ribbon-count">{{ total_sessions }}</span>
+    <span class="ribbon-label">total</span>
+  </span>
+  <span class="ribbon-spacer"></span>
+  <span class="ribbon-uptime">up {{ uptime }}</span>
+</div>
+{% endblock %}
+
 {% block content %}
 <div class="page-header">
-  <h1>Dashboard</h1>
-  <p class="page-subtitle">Overview of every Claude Code session managed by this daemon.</p>
+  <h1>Board</h1>
+  <p class="page-subtitle">Every Claude Code session this daemon manages.</p>
 </div>
 
-<div class="stats-row">
-  <div class="stat-card stat-active">
-    <div class="stat-value">{{ active_count }}</div>
-    <div class="stat-label">Active</div>
-  </div>
-  <div class="stat-card stat-dormant">
-    <div class="stat-value">{{ dormant_count }}</div>
-    <div class="stat-label">Dormant</div>
-  </div>
-  <div class="stat-card stat-spawning">
-    <div class="stat-value">{{ spawning_count }}</div>
-    <div class="stat-label">Spawning</div>
-  </div>
-  <div class="stat-card stat-total">
-    <div class="stat-value">{{ total_sessions }}</div>
-    <div class="stat-label">Total</div>
-  </div>
-  <div class="stat-card stat-uptime">
-    <div class="stat-value">{{ uptime_seconds }}</div>
-    <div class="stat-label">Uptime (s)</div>
-  </div>
-</div>
-
-{# Active session summary card. #}
 {% if active_session %}
-<div class="active-banner" id="active-banner">
-  <div class="active-banner-icon">⚡</div>
+<div class="active-banner" id="active-banner" data-status="{{ active_session.status_slug }}">
   <div class="active-banner-body">
     <div class="active-banner-label">Focused session</div>
     <div class="active-banner-meta">
-      <span class="badge badge-{{ active_session.status }}">{{ active_session.status }}</span>
+      <span class="status">
+        <span class="status-glyph" aria-hidden="true">{{ active_session.status_glyph }}</span>
+        <span>{{ active_session.status_label }}</span>
+      </span>
       <code>{{ active_session.chat_id }}{% if active_session.thread_id %} · {{ active_session.thread_id }}{% endif %}</code>
       {% if active_session.session_id %}<span class="muted">· {{ active_session.session_id }}</span>{% endif %}
     </div>
+    <p class="active-banner-note">
+      Focus is a display pointer for this console. It does not change where
+      Feishu messages are routed.
+    </p>
   </div>
-  <a class="btn btn-secondary btn-sm" href="/sessions/{{ active_session_key }}" hx-boost="true">Open</a>
-  <button class="btn btn-danger btn-sm"
+  <a class="btn btn-sm" href="/sessions/{{ active_session_key }}" hx-boost="true">Open</a>
+  <button class="btn btn-sm btn-danger"
           hx-post="/api/sessions/{{ active_session_key }}/close"
           hx-swap="none"
           hx-on::after-request="
             if(event.detail.successful) {
-              const d = JSON.parse(event.detail.xhr.response);
               window.location.href = '/sessions';
             }
           ">
@@ -56,15 +64,10 @@
 </div>
 {% endif %}
 
-<h2>Recent Sessions</h2>
-<div id="sessions-list"
-     hx-get="/sessions/partial"
-     hx-trigger="sse:update"
-     hx-swap="innerHTML">
+<h2>Recent sessions</h2>
+{# base.html holds one EventSource for the document and refetches this
+   partial into #session-board, debounced. #}
+<div id="session-board">
   {% include "sessions_partial.html" %}
 </div>
-
-{% if not recent_sessions %}
-<p class="empty-state">No sessions yet. Start one in Feishu with <code>/new</code> or from the Sessions page.</p>
-{% endif %}
 {% endblock %}

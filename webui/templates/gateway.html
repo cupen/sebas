@@ -3,30 +3,37 @@
 {% block content %}
 <div class="page-header">
   <h1>Gateway</h1>
+  <p class="page-subtitle">The local LLM gateway this daemon routes agents through.</p>
 </div>
 <div class="page-body">
   <div class="gateway-status">
     <div class="gateway-card">
-      <div class="label">Status</div>
-      <div class="value {% if gateway.listen %}ok{% else %}off{% endif %}">
-        {% if gateway.listen %}Running{% else %}Off{% endif %}
+      <div class="detail-label">Status</div>
+      <div class="gateway-value" data-state="{{ "ok" if gateway.listen else "warn" }}">
+        {{ "Running" if gateway.listen else "Not running" }}
       </div>
     </div>
     <div class="gateway-card">
-      <div class="label">Listen</div>
-      <div class="value"><code>{{ gateway.listen if gateway.listen else "—" }}</code></div>
+      <div class="detail-label">Listen</div>
+      <div class="gateway-value"><code>{{ gateway.listen if gateway.listen else "—" }}</code></div>
     </div>
     <div class="gateway-card">
-      <div class="label">Providers</div>
-      <div class="value">{{ providers | length if live else gateway.provider_count }}</div>
+      <div class="detail-label">Providers</div>
+      <div class="gateway-value">{{ providers | length if live else gateway.provider_count }}</div>
     </div>
     <div class="gateway-card">
-      <div class="label">Uptime</div>
-      <div class="value">{{ stats.uptime_secs if stats.uptime_secs is defined else "—" }}s</div>
+      <div class="detail-label">Auth</div>
+      <div class="gateway-value" data-state="{{ "ok" if gateway.has_auth else "warn" }}">
+        {{ "Enabled" if gateway.has_auth else "Disabled" }}
+      </div>
     </div>
     <div class="gateway-card">
-      <div class="label">Reload</div>
-      <div class="value {% if stats.last_reload_error %}warn{% else %}ok{% endif %}">
+      <div class="detail-label">Uptime</div>
+      <div class="gateway-value">{{ stats.uptime_secs if stats.uptime_secs is defined else "—" }}s</div>
+    </div>
+    <div class="gateway-card">
+      <div class="detail-label">Reload</div>
+      <div class="gateway-value {% if stats.last_reload_error %}data-state="warn"{% endif %}">
         {% if stats.last_reload_error %}Error{% else %}OK{% endif %}
       </div>
     </div>
@@ -157,20 +164,22 @@
     <thead>
       <tr>
         <th>Name</th>
-        <th>Anthropic Base URL</th>
-        <th>OpenAI Base URL</th>
+        <th>Anthropic base URL</th>
+        <th>OpenAI base URL</th>
       </tr>
     </thead>
     <tbody>
       {% for p in gateway.providers %}
       <tr>
-        <td><strong>{{ p.name }}</strong></td>
-        <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
-        <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
+        <td>{{ p.name }}</td>
+        <td><code class="session-id-code">{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
+        <td><code class="session-id-code">{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% else %}
+  <p class="empty-state">No providers configured. Add one under <code>[gateway.providers]</code> in your config.</p>
   {% endif %}
   {% endif %}
 </div>
@@ -183,7 +192,7 @@ async function gatewayAction(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await resp.json().catch(() => ({}));
-  alert(resp.ok ? JSON.stringify(data) : (data.error || resp.status));
+  showToast(resp.ok ? 'Gateway 操作成功' : (data.error || ('失败 ' + resp.status)), resp.ok ? 'success' : 'error');
   if (resp.ok) location.reload();
   return resp.ok;
 }

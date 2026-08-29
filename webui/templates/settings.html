@@ -3,43 +3,44 @@
 {% block content %}
 <div class="page-header">
   <h1>Settings</h1>
+  <p class="page-subtitle">Read-only view of the running configuration.</p>
 </div>
 <div class="page-body">
-  <h2>Card Config</h2>
+  <h2>Feishu card</h2>
   <table class="settings-table">
     <tbody>
-      <tr><td>Theme Color</td><td><code>{{ card_config.theme_color }}</code></td></tr>
-      <tr><td>Fold Long Output</td><td>{{ card_config.fold_long_output }}</td></tr>
-      <tr><td>Thinking Display</td><td>{{ card_config.thinking_display }}</td></tr>
-      <tr><td>Max User Text Chars</td><td>{{ card_config.max_user_text_chars }}</td></tr>
-      <tr><td>Max Tool Output Chars</td><td>{{ card_config.max_tool_output_chars }}</td></tr>
+      <tr><td>Theme colour</td><td><code>{{ card_config.theme_color }}</code></td></tr>
+      <tr><td>Fold long output</td><td>{{ card_config.fold_long_output }}</td></tr>
+      <tr><td>Thinking display</td><td>{{ card_config.thinking_display }}</td></tr>
+      <tr><td>Max user text chars</td><td>{{ card_config.max_user_text_chars }}</td></tr>
+      <tr><td>Max tool output chars</td><td>{{ card_config.max_tool_output_chars }}</td></tr>
     </tbody>
   </table>
 
   <h2>Gateway</h2>
   <table class="settings-table">
     <tbody>
-      <tr><td>Listen</td><td><code>{{ gateway.listen if gateway.listen else "N/A" }}</code></td></tr>
+      <tr><td>Listen</td><td><code>{{ gateway.listen if gateway.listen else "—" }}</code></td></tr>
       <tr><td>Providers</td><td>{{ gateway.provider_count }}</td></tr>
-      <tr><td>Debug Mode</td><td>{{ gateway.debug }}</td></tr>
-      <tr><td>Auth Enabled</td><td>{{ gateway.has_auth }}</td></tr>
+      <tr><td>Debug mode</td><td>{{ gateway.debug }}</td></tr>
+      <tr><td>Auth enabled</td><td>{{ gateway.has_auth }}</td></tr>
     </tbody>
   </table>
 
   {% if gateway.providers %}
-  <h3>Provider Details</h3>
+  <h3>Provider details</h3>
   <table class="session-table">
     <thead>
       <tr>
         <th>Name</th>
-        <th>Anthropic Base URL</th>
-        <th>OpenAI Base URL</th>
+        <th>Anthropic base URL</th>
+        <th>OpenAI base URL</th>
       </tr>
     </thead>
     <tbody>
       {% for p in gateway.providers %}
       <tr>
-        <td><strong>{{ p.name }}</strong></td>
+        <td>{{ p.name }}</td>
         <td><code>{{ p.base_url_anthropic if p.base_url_anthropic else "—" }}</code></td>
         <td><code>{{ p.base_url_openai if p.base_url_openai else "—" }}</code></td>
       </tr>

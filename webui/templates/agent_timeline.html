@@ -1,0 +1,53 @@
+<div class="timeline-scroll">
+  {% if active_session.prompt %}
+  <div class="timeline-message user-message">
+    <div class="message-avatar">You</div>
+    <div class="message-bubble">{{ active_session.prompt }}</div>
+  </div>
+  {% endif %}
+
+  {% if active_session.body %}
+  {% for el in active_session.body %}
+    {% if el.element_type == "markdown" %}
+    <div class="timeline-message agent-message">
+      <div class="message-avatar">C</div>
+      <div class="message-bubble md-content">{{ el.content }}</div>
+    </div>
+    {% elif el.element_type == "collapsible" %}
+    <div class="timeline-collapsible">
+      {{ el.content|safe }}
+    </div>
+    {% elif el.element_type == "hr" %}
+    <hr class="timeline-separator">
+    {% elif el.element_type == "div" %}
+    <div class="timeline-message system-message">
+      <div class="message-bubble muted">{{ el.content }}</div>
+    </div>
+    {% endif %}
+  {% endfor %}
+  {% else %}
+    {% if not active_session.prompt %}
+    <div class="timeline-empty">
+      <div class="timeline-empty-icon">💬</div>
+      <p>No messages yet. Send a message to start the conversation.</p>
+    </div>
+    {% endif %}
+  {% endif %}
+
+  <div class="timeline-status-bar">
+    {% if active_session.phase_display == "Working" %}
+    <span class="status-indicator working">
+      <span class="thinking-dots">
+        <span></span><span></span><span></span>
+      </span>
+      Working...
+    </span>
+    {% elif active_session.phase_display == "Done" %}
+    <span class="status-indicator done">✓ Done</span>
+    {% elif active_session.phase_display == "Failed" %}
+    <span class="status-indicator failed">✗ Failed</span>
+    {% elif active_session.phase_display == "Waiting" %}
+    <span class="status-indicator waiting">🌀 Waiting for agent...</span>
+    {% endif %}
+  </div>
+</div>

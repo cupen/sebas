@@ -1,124 +1,104 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Update - sebas</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/htmx.min.js"></script>
-</head>
-<body>
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-brand">
-        <span class="brand-icon">&#9889;</span>
-        <span class="brand-text">sebas admin</span>
-      </div>
-      <nav class="sidebar-nav">
-        <div class="nav-section">
-          <div class="nav-section-title">Admin</div>
-          <a href="/admin/status" class="nav-item {{ "active" if page == "admin_status" else "" }}">Status</a>
-          <a href="/admin/events" class="nav-item {{ "active" if page == "admin_events" else "" }}">Events</a>
-          <a href="/admin/update" class="nav-item {{ "active" if page == "admin_update" else "" }}">Update</a>
-          <a href="/admin/services" class="nav-item {{ "active" if page == "admin_services" else "" }}">Services</a>
-        </div>
-        <div class="nav-section" style="margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(205,214,244,0.15);">
-          <form method="POST" action="/admin/logout" style="display:inline">
-            <button type="submit" class="nav-item" style="background:none;border:none;color:var(--sidebar-text);cursor:pointer;width:100%;text-align:left;padding:8px 16px;font-size:0.85rem;">Logout</button>
-          </form>
-        </div>
-      </nav>
-    </aside>
-
-    <main class="main-content">
-      <div class="page-header">
-        <h1>Update Control</h1>
-      </div>
-      <div class="page-body">
-        {% if not adapter_ok %}
-        <div class="alert alert-warning">Control plane not connected. Run <code>sebas watchdog</code> to enable update controls.</div>
-        {% endif %}
-
-        <div class="action-grid">
-          <div class="form-card">
-            <h2>Release Update</h2>
-            <p>Download and install the latest release from GitHub.</p>
-            <button class="btn btn-primary"
-                    hx-post="/admin/update"
-                    hx-swap="none"
-                    hx-headers='{"origin": "http://127.0.0.1"}'
-                    hx-on::after-request="if(event.detail.successful){showToast('Update accepted','success')}else{showToast('Update failed','error')}">
-              Update
-            </button>
-          </div>
-
-          <div class="form-card">
-            <h2>Dry-Run</h2>
-            <p>Check for updates without installing.</p>
-            <button class="btn btn-secondary"
-                    hx-post="/admin/update/dry-run"
-                    hx-swap="none"
-                    hx-headers='{"origin": "http://127.0.0.1"}'
-                    hx-on::after-request="if(event.detail.successful){showToast('Dry-run accepted','success')}else{showToast('Dry-run failed','error')}">
-              Dry-Run
-            </button>
-          </div>
-
-          <div class="form-card">
-            <h2>Dev Update</h2>
-            <p>Build from local source (requires <code>cargo build --release</code>).</p>
-            <button class="btn btn-warning"
-                    hx-post="/admin/update/dev"
-                    hx-swap="none"
-                    hx-headers='{"origin": "http://127.0.0.1"}'
-                    hx-on::after-request="if(event.detail.successful){showToast('Dev update accepted','success')}else{showToast('Dev update failed','error')}">
-              Dev Update
-            </button>
-          </div>
-
-          <div class="form-card">
-            <h2>Rollback</h2>
-            <p>Revert to the previously installed version.</p>
-            <button class="btn btn-danger"
-                    hx-post="/admin/rollback"
-                    hx-swap="none"
-                    hx-headers='{"origin": "http://127.0.0.1"}'
-                    hx-on::after-request="if(event.detail.successful){showToast('Rollback accepted','success')}else{showToast('Rollback failed','error')}">
-              Rollback
-            </button>
-          </div>
-
-          <div class="form-card">
-            <h2>Restart Core</h2>
-            <p>Restart the core sebas process without recompiling.</p>
-            <button class="btn btn-danger"
-                    hx-post="/admin/restart"
-                    hx-swap="none"
-                    hx-headers='{"origin": "http://127.0.0.1"}'
-                    hx-on::after-request="if(event.detail.successful){showToast('Restart accepted','success')}else{showToast('Restart failed','error')}">
-              Restart Core
-            </button>
-          </div>
-        </div>
-
-        <div id="toast-container" class="toast-container"></div>
-        <script>
-          function showToast(message, type) {
-            type = type || 'info';
-            var container = document.getElementById('toast-container');
-            var toast = document.createElement('div');
-            toast.className = 'toast toast-' + type;
-            toast.textContent = message;
-            container.appendChild(toast);
-            setTimeout(function() {
-              toast.style.opacity = '0';
-              toast.style.transition = 'opacity 0.3s';
-              setTimeout(function() { toast.remove(); }, 300);
-            }, 3000);
-          }
-        </script>
-      </div>
-    </main>
+{% extends "base.html" %}
+{% block title %}Update - sebas admin{% endblock %}
+{% block brand_suffix %} admin{% endblock %}
+{% block nav_admin %}{% include "admin_nav.html" %}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Update control</h1>
+  <p class="page-subtitle">Install, roll back, or restart from the watchdog.</p>
+</div>
+<div class="page-body">
+  {% if not adapter_ok %}
+  {# Every mutation below needs the watchdog control plane. Saying so once,
+     here, is why the buttons can be honestly disabled rather than failing on
+     click. #}
+  <div class="alert alert-warning">
+    Control plane not connected, so these actions are unavailable. Run
+    <code>sebas watchdog</code> with <code>SEBAS_CONTROL_SECRET</code> set in
+    its environment.
   </div>
-</body>
-</html>
+  {% endif %}
+
+  <div class="action-grid">
+    <div class="form-card">
+      <h2>Release update</h2>
+      <p>Download and install the latest release from GitHub.</p>
+      <button class="btn btn-primary"
+              {% if not adapter_ok %}disabled{% endif %}
+              hx-post="/admin/update"
+              hx-swap="none"
+              hx-headers='{"origin": "http://127.0.0.1"}'
+              hx-on::after-request="if(event.detail.successful){showToast('Update accepted','success')}else{showToast('Update failed','error')}">
+        Update
+      </button>
+      {% if not adapter_ok %}
+      <span class="unavailable-note">Needs <code>SEBAS_CONTROL_SECRET</code>.</span>
+      {% endif %}
+    </div>
+
+    <div class="form-card">
+      <h2>Dry run</h2>
+      <p>Check for updates without installing anything.</p>
+      <button class="btn"
+              {% if not adapter_ok %}disabled{% endif %}
+              hx-post="/admin/update/dry-run"
+              hx-swap="none"
+              hx-headers='{"origin": "http://127.0.0.1"}'
+              hx-on::after-request="if(event.detail.successful){showToast('Dry run accepted','success')}else{showToast('Dry run failed','error')}">
+        Dry run
+      </button>
+      {% if not adapter_ok %}
+      <span class="unavailable-note">Needs <code>SEBAS_CONTROL_SECRET</code>.</span>
+      {% endif %}
+    </div>
+
+    <div class="form-card">
+      <h2>Dev update</h2>
+      <p>Build from local source (requires <code>cargo build --release</code>).</p>
+      <button class="btn btn-warning"
+              {% if not adapter_ok %}disabled{% endif %}
+              hx-post="/admin/update/dev"
+              hx-swap="none"
+              hx-headers='{"origin": "http://127.0.0.1"}'
+              hx-on::after-request="if(event.detail.successful){showToast('Dev update accepted','success')}else{showToast('Dev update failed','error')}">
+        Dev update
+      </button>
+      {% if not adapter_ok %}
+      <span class="unavailable-note">Needs <code>SEBAS_CONTROL_SECRET</code>.</span>
+      {% endif %}
+    </div>
+
+    <div class="form-card">
+      <h2>Rollback</h2>
+      <p>Revert to the previously installed version.</p>
+      <button class="btn btn-danger"
+              {% if not adapter_ok %}disabled{% endif %}
+              hx-post="/admin/rollback"
+              hx-swap="none"
+              hx-headers='{"origin": "http://127.0.0.1"}'
+              hx-on::after-request="if(event.detail.successful){showToast('Rollback accepted','success')}else{showToast('Rollback failed','error')}">
+        Rollback
+      </button>
+      {% if not adapter_ok %}
+      <span class="unavailable-note">Needs <code>SEBAS_CONTROL_SECRET</code>.</span>
+      {% endif %}
+    </div>
+
+    <div class="form-card">
+      <h2>Restart core</h2>
+      <p>Restart the core sebas process without recompiling.</p>
+      <button class="btn btn-danger"
+              {% if not adapter_ok %}disabled{% endif %}
+              hx-post="/admin/restart"
+              hx-swap="none"
+              hx-headers='{"origin": "http://127.0.0.1"}'
+              hx-on::after-request="if(event.detail.successful){showToast('Restart accepted','success')}else{showToast('Restart failed','error')}">
+        Restart core
+      </button>
+      {% if not adapter_ok %}
+      <span class="unavailable-note">Needs <code>SEBAS_CONTROL_SECRET</code>.</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

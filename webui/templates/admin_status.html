@@ -1,100 +1,74 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Status - sebas</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-brand">
-        <span class="brand-icon">&#9889;</span>
-        <span class="brand-text">sebas admin</span>
-      </div>
-      <nav class="sidebar-nav">
-        <div class="nav-section">
-          <div class="nav-section-title">Admin</div>
-          <a href="/admin/status" class="nav-item {{ "active" if page == "admin_status" else "" }}">Status</a>
-          <a href="/admin/events" class="nav-item {{ "active" if page == "admin_events" else "" }}">Events</a>
-          <a href="/admin/update" class="nav-item {{ "active" if page == "admin_update" else "" }}">Update</a>
-          <a href="/admin/services" class="nav-item {{ "active" if page == "admin_services" else "" }}">Services</a>
-        </div>
-        <div class="nav-section" style="margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(205,214,244,0.15);">
-          <form method="POST" action="/admin/logout" style="display:inline">
-            <button type="submit" class="nav-item" style="background:none;border:none;color:var(--sidebar-text);cursor:pointer;width:100%;text-align:left;padding:8px 16px;font-size:0.85rem;">Logout</button>
-          </form>
-        </div>
-      </nav>
-    </aside>
+{% extends "base.html" %}
+{% block title %}Status - sebas admin{% endblock %}
+{% block brand_suffix %} admin{% endblock %}
+{% block nav_admin %}{% include "admin_nav.html" %}{% endblock %}
 
-    <main class="main-content">
-      <div class="page-header">
-        <h1>Control Plane Status</h1>
-      </div>
-      <div class="page-body">
-        {% if not adapter_ok %}
-        <div class="alert alert-warning">Control plane not connected. Run <code>sebas watchdog</code> to enable the control plane.</div>
-        {% endif %}
+{% block ribbon %}
+<div class="ribbon" role="status" aria-label="Control plane summary">
+  <span class="ribbon-item">
+    <span class="ribbon-count">{{ status.version }}</span>
+    <span class="ribbon-label">version</span>
+  </span>
+  <span class="ribbon-item">
+    <span class="ribbon-count">{{ status.operations | length }}</span>
+    <span class="ribbon-label">operations</span>
+  </span>
+  <span class="ribbon-spacer"></span>
+  <span class="ribbon-uptime">up {{ uptime_display }}</span>
+</div>
+{% endblock %}
 
-        <div class="stats-row">
-          <div class="stat-card">
-            <div class="stat-value">{{ status.version }}</div>
-            <div class="stat-label">Version</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-value">{{ uptime_display }}</div>
-            <div class="stat-label">Uptime</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-value">{{ status.operations.len() }}</div>
-            <div class="stat-label">Operations</div>
-          </div>
-        </div>
-
-        {% if status.active_operation %}
-        <h2>Active Operation</h2>
-        <div class="active-banner">
-          <div class="active-banner-icon">&#9888;</div>
-          <div class="active-banner-body">
-            <div class="active-banner-label">{{ status.active_operation.request_type }}</div>
-            <div class="active-banner-meta">
-              <span class="badge badge-running">{{ status.active_operation.status }}</span>
-              <code>{{ status.active_operation.operation_id }}</code>
-            </div>
-            <p>{{ status.active_operation.message }}</p>
-          </div>
-        </div>
-        {% endif %}
-
-        <h2>Recent Operations</h2>
-        {% if status.operations %}
-        <table class="session-table">
-          <thead>
-            <tr>
-              <th>Operation ID</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for op in status.operations %}
-            <tr>
-              <td><code>{{ op.operation_id }}</code></td>
-              <td>{{ op.request_type }}</td>
-              <td><span class="badge badge-{{ op.status }}">{{ op.status }}</span></td>
-              <td>{{ op.message }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="empty-state">No operations recorded.</p>
-        {% endif %}
-      </div>
-    </main>
+{% block content %}
+<div class="page-header">
+  <h1>Control plane status</h1>
+  <p class="page-subtitle">Watchdog version, uptime, and recent operations.</p>
+</div>
+<div class="page-body">
+  {% if not adapter_ok %}
+  <div class="alert alert-warning">
+    Control plane not connected. Run <code>sebas watchdog</code> with
+    <code>SEBAS_CONTROL_SECRET</code> set to enable it.
   </div>
-</body>
-</html>
+  {% endif %}
+
+  {% if status.active_operation %}
+  <h2>Active operation</h2>
+  <div class="active-banner">
+    <div class="active-banner-body">
+      <div class="active-banner-label">{{ status.active_operation.request_type }}</div>
+      <div class="active-banner-meta">
+        <span class="badge badge-running">{{ status.active_operation.status }}</span>
+        <code class="session-id-code">{{ status.active_operation.operation_id }}</code>
+      </div>
+      <p class="active-banner-note">{{ status.active_operation.message }}</p>
+    </div>
+  </div>
+  {% endif %}
+
+  <h2>Recent operations</h2>
+  {% if status.operations %}
+  <table class="session-table">
+    <thead>
+      <tr>
+        <th>Operation</th>
+        <th>Type</th>
+        <th>Status</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for op in status.operations %}
+      <tr>
+        <td><code class="session-id-code">{{ op.operation_id }}</code></td>
+        <td>{{ op.request_type }}</td>
+        <td><span class="badge {{ "badge-running" if op.status == "running" else "" }}">{{ op.status }}</span></td>
+        <td>{{ op.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No operations recorded yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

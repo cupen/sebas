@@ -1,40 +1,42 @@
 <!DOCTYPE html>
 <html lang="en">
+{# Deliberately NOT extending base.html: this page is shown to an
+   unauthenticated visitor, and base.html's shell renders the admin nav and the
+   focused-session card. A login screen must not display the surface it is
+   guarding. It shares the token stylesheet, so the chrome still matches. #}
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Login - sebas</title>
+  <title>Sign in - sebas admin</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="login-layout">
-    <div class="login-card">
-      <div class="login-header">
-        <span class="brand-icon">&#9889;</span>
-        <span class="brand-text">sebas admin</span>
-      </div>
-      <p class="login-subtitle">Watchdog Control Plane</p>
+    <main class="login-card">
+      <div class="login-header">sebas admin</div>
+      <p class="login-subtitle">Watchdog control plane</p>
 
       {% if not has_password %}
       <div class="alert alert-warning">
-        No password configured. Set <code>SEBAS_WEBUI_PASSWORD</code> to enable authentication.
+        No password configured, so the control plane is unprotected. Set
+        <code>SEBAS_WEBUI_PASSWORD</code> to require a sign-in.
       </div>
       <div class="login-actions">
-        <a href="/admin/status" class="btn btn-primary">Continue to Dashboard</a>
+        <a href="/admin/status" class="btn btn-primary">Continue</a>
       </div>
       {% else %}
       <form method="POST" action="/admin/login" class="login-form">
         {% if error %}
-        <div class="alert alert-error">{{ error }}</div>
+        <div class="alert alert-error" role="alert">{{ error }}</div>
         {% endif %}
         <div class="form-group">
           <label for="password">Password</label>
           <input type="password" id="password" name="password" class="form-input" required autofocus>
         </div>
-        <button type="submit" class="btn btn-primary btn-block">Login</button>
+        <button type="submit" class="btn btn-primary btn-block">Sign in</button>
       </form>
       {% endif %}
-    </div>
+    </main>
   </div>
 </body>
 </html>

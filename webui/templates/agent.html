@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Agent Chat - sebas{% endblock %}
+{% block content %}
+<div class="codex-layout">
+  <!-- Left: Project / Session list -->
+  <aside class="codex-sidebar">
+    <div class="codex-sidebar-header">
+      <button class="btn btn-primary btn-sm" id="codex-new-btn"
+              onclick="document.getElementById('codex-new-form').style.display='block'; this.style.display='none'">
+        + New Project
+      </button>
+    </div>
+
+    <div id="codex-new-form" class="codex-new-form" style="display:none">
+      <form hx-post="/api/agent/projects"
+            hx-target="#codex-new-result"
+            hx-swap="innerHTML"
+            hx-on::after-request="if(event.detail.successful) { const d = JSON.parse(event.detail.xhr.response); window.location.href = '/agent/' + d.key; }">
+        <input type="text" name="path" class="codex-path-input" placeholder="~/projects/my-app">
+        <div class="codex-new-actions">
+          <button type="submit" class="btn btn-primary btn-sm">Start</button>
+          <button type="button" class="btn btn-sm btn-secondary"
+                  onclick="document.getElementById('codex-new-form').style.display='none'; document.getElementById('codex-new-btn').style.display='inline-flex'">Cancel</button>
+        </div>
+      </form>
+      <div id="codex-new-result"></div>
+    </div>
+
+    <div class="codex-session-list">
+      {% for s in sessions %}
+      <a href="/agent/{{ s.encoded_key }}" class="codex-session-item {{ "active" if s.encoded_key == active_key else "" }}">
+        <div class="codex-session-name">
+          {% if s.project_dir %}
+          <span class="codex-dir-icon">📁</span>
+          {% else %}
+          <span class="codex-dir-icon">💬</span>
+          {% endif %}
+          {{ s.prompt_preview if s.prompt_preview else s.project_dir }}
+        </div>
+        <div class="codex-session-meta">
+          <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
+          <span class="codex-session-time">{{ s.last_active }}</span>
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <!-- Main: Chat area -->
+  <main class="codex-main">
+    {% if active_session %}
+    <!-- Top bar -->
+    <div class="codex-topbar">
+      <div class="codex-topbar-left">
+        {% if active_session.project_dir %}
+        <span class="codex-project-path">{{ active_session.project_dir }}</span>
+        {% else %}
+        <span class="codex-project-path">{{ active_session.chat_id }}</span>
+        {% endif %}
+      </div>
+      <div class="codex-topbar-right">
+        <span class="codex-topbar-status">
+          {% if active_session.status == "active" %}
+            {% if active_session.phase_display == "Working" %}
+            <span class="status-dot working"></span> Working
+            {% elif active_session.phase_display == "Done" %}
+            <span class="status-dot done"></span> Done
+            {% elif active_session.phase_display == "Waiting" %}
+            <span class="status-dot waiting"></span> Waiting
+            {% elif active_session.phase_display == "Failed" %}
+            <span class="status-dot failed"></span> Failed
+            {% else %}
+            <span class="status-dot active"></span> Active
+            {% endif %}
+          {% elif active_session.status == "spawning" %}
+            <span class="status-dot spawning"></span> Spawning
+          {% else %}
+            <span class="status-dot dormant"></span> {{ active_session.phase_display }}
+          {% endif %}
+        </span>
+      </div>
+    </div>
+
+    <!-- Chat timeline -->
+    <div class="codex-timeline" id="codex-timeline"
+         hx-get="/agent/{{ active_key }}/timeline"
+         hx-trigger="every 3s"
+         hx-swap="innerHTML">
+      {% include "agent_timeline.html" %}
+    </div>
+
+    <!-- Composer -->
+    <div class="codex-composer">
+      <form hx-post="/api/agent/{{ active_key }}/message"
+            hx-target="#codex-timeline"
+            hx-swap="innerHTML"
+            hx-on::after-request="document.getElementById('codex-msg-input').value = ''">
+        <textarea id="codex-msg-input" name="message" class="codex-input" rows="2" placeholder="Type a message for Claude Code..."></textarea>
+        <div class="codex-composer-actions">
+          <button type="submit" class="btn btn-primary btn-sm">Send</button>
+        </div>
+      </form>
+    </div>
+    {% else %}
+    <!-- Empty state -->
+    <div class="codex-empty">
+      <div class="codex-empty-icon">📁</div>
+      <p>Open a project to start working with Claude Code</p>
+      <span class="codex-empty-hint">Click "+ New Project" in the sidebar to get started</span>
+    </div>
+    {% endif %}
+  </main>
+</div>
+{% endblock %}
