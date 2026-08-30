@@ -6,7 +6,11 @@ import { defineConfig } from 'vitest/config'
 // and developed against identical paths.
 export default defineConfig({
   server: {
-    port: 5173,
+    // Dedicated port: other projects on this machine run their own Vite on
+    // the default 5173 — a fixed, non-default port avoids cross-project
+    // collisions and keeps the URL stable across restarts.
+    port: 5273,
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:9797',

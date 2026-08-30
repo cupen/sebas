@@ -354,7 +354,7 @@ cargo run -- release 二进制或 ./target/release/sebas run --config <你的配
 
 # 终端 2：Vite dev server（前端源码热更新）
 cd sebas-webui/frontend && ../../.tooling/pnpm dev
-# 输出 Local: http://localhost:5173/（被占用时自动 +1，如 5174）
+# 输出 Local: http://localhost:5273/（专用端口，strictPort——被占用时直接报错而不是顺延）
 ```
 
 浏览器打开 Vite 输出的地址即可。`sebas-webui/frontend/vite.config.ts` 已配置代理：
