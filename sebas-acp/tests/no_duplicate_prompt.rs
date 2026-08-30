@@ -8,8 +8,8 @@
 //! prompt and `mgr.send(CreateSession)` pushed it again, producing
 //! four text chunks for a single user message.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 

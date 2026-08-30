@@ -17,7 +17,7 @@
 //! - `setting_sources = Some(vec![])` hermetically isolates the child from
 //!   the host user's settings/hooks (spike §8b).
 
-use crate::session::{AcpCommand, AcpEvent, Decision, ResponderSlot, TurnUsage};
+use crate::claude::session::{AcpCommand, AcpEvent, Decision, ResponderSlot, TurnUsage};
 use claude_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, HookCallback, HookEvent, HookInput,
     HookJsonOutput, HookMatcher, HookSpecificOutput, Message, PreToolUseHookSpecificOutput,

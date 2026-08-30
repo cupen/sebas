@@ -1,4 +1,4 @@
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 
 #[test]
 fn parses_full_session_stream() {

@@ -19,7 +19,7 @@ use crate::dispatch::dispatch_out;
 use crate::error::Result;
 use crate::reactions::ReactionTracker;
 use crate::ws_loop::{run_ws_loop, spawn_test_session};
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use sebas_feishu::client::{FeishuClient, FeishuConfig};
 use sebas_feishu::messages::{ReceiveIdType, SendTextRequest};
 use sebas_gateway::config::GatewayConfig;

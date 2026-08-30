@@ -2,7 +2,7 @@
 //! never answers `initialize` — and tear down the half-spawned child instead
 //! of leaking it.
 
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

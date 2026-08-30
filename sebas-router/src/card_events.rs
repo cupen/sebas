@@ -3,7 +3,7 @@
 //! 属于业务编排层：feishu crate 只持有纯卡片协议类型（`CardElement` 等），
 //! 事件到卡片的翻译放在 router，避免 feishu 反向依赖 acp-claude。
 
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 use sebas_feishu::cards::{
     CardConfig, CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, DivText,
     StandardIcon, ThinkingDisplay,

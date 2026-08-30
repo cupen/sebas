@@ -4,7 +4,7 @@ use crate::admin::{self, AdminAdapter, AdminState};
 use crate::models::GatewayInfo;
 use crate::routes;
 use crate::sse::WebUiEvent;
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use axum::Router;
 use axum::routing::{get, post};
 use axum::serve;

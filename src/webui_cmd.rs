@@ -84,7 +84,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     // Create a throwaway session manager. No actual ACP sessions run in this
     // process, so the manager is a stub that accepts calls but has no children.
-    let mgr = Arc::new(sebas_acp_claude::manager::SessionManager::new(
+    let mgr = Arc::new(sebas_acp::claude::manager::SessionManager::new(
         std::time::Duration::from_secs(cfg.acp.claude.startup_timeout_secs),
     ));
 

@@ -1,12 +1,12 @@
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 
 #[tokio::test]
 async fn fake_claude_emits_finished() {
     let mgr = SessionManager::new(Duration::from_secs(30));
-    // `cargo test` runs from the package dir (acp-claude/), so resolve the
+    // `cargo test` runs from the package dir (sebas-acp/), so resolve the
     // workspace-root target/ via CARGO_MANIFEST_DIR's parent.
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

@@ -6,7 +6,7 @@
 //! steps in the `redesign-webui-console` change; asserting them is strictly
 //! better than re-checking them by hand each time a template moves.
 
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use axum::body::Body;
 use axum::http::Request;
 use sebas_feishu::events::SessionKey;

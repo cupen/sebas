@@ -3,8 +3,8 @@
 //! user message; the routing id the manager returns must be the id the fake
 //! CLI works on (every frame it emits carries the same session_id).
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 

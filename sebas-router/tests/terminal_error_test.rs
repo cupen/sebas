@@ -1,7 +1,7 @@
 //! Terminal AcpEvent::Error: the router must remove the session mapping and
 //! emit an ❌ UpdateCard. Non-terminal errors keep the existing behaviour.
 
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 use sebas_feishu::cards::CardConfig;
 use sebas_feishu::events::SessionKey;
 use sebas_router::router::{Out, RouterHandle};

@@ -4,7 +4,7 @@
 //!
 //! - `sebas_router::provider_state::ProviderRuntimeState`（bead sebas-63f.3）：runtime 决策
 //!   ——「当前走 Off / Direct / Gateway」。
-//! - `sebas_acp_claude::ClaudeCodeDriver`（bead sebas-63f.2）：把 `ProviderResolution`
+//! - `sebas_acp::claude::ClaudeCodeDriver`（bead sebas-63f.2）：把 `ProviderResolution`
 //!   翻成 agent 进程看得懂的 env vars + CLI args。
 //!
 //! 这里只负责「中间环节」：从 state 拿到语义意图 → 解析上游 URL + 密钥 → 喂
@@ -21,7 +21,7 @@
 //! —— 用户看到"启动了但啥都没发生"时无法定位是 sebas 的问题还是 claude
 //! 自己环境的问题。新行为把错误直接喂给用户。
 
-use sebas_acp_claude::{ClaudeCodeDriver, ProviderResolution};
+use sebas_acp::claude::{ClaudeCodeDriver, ProviderResolution};
 use sebas_gateway::config::GatewayConfig;
 use sebas_router::provider_state::{ProviderMode, ProviderRuntimeState};
 use serde_json::{Map, Value};
@@ -111,7 +111,7 @@ fn direct_resolution_from_overlay(
 
     let (proto, base_url) = match protocol {
         "anthropic" => match base_url_anthropic {
-            Some(u) => (sebas_acp_claude::AgentProtocol::Anthropic, u),
+            Some(u) => (sebas_acp::claude::AgentProtocol::Anthropic, u),
             None => {
                 let reason = format!(
                     "direct provider '{name}' has explicit protocol=anthropic but no base_url_anthropic"
@@ -124,7 +124,7 @@ fn direct_resolution_from_overlay(
             }
         },
         "openai" => match base_url_openai {
-            Some(u) => (sebas_acp_claude::AgentProtocol::OpenAi, u),
+            Some(u) => (sebas_acp::claude::AgentProtocol::OpenAi, u),
             None => {
                 let reason = format!(
                     "direct provider '{name}' has explicit protocol=openai but no base_url_openai"
@@ -139,9 +139,9 @@ fn direct_resolution_from_overlay(
         // "auto" 或未知值：旧约定（anthropic > openai）。
         _ => {
             if let Some(u) = base_url_anthropic {
-                (sebas_acp_claude::AgentProtocol::Anthropic, u)
+                (sebas_acp::claude::AgentProtocol::Anthropic, u)
             } else if let Some(u) = base_url_openai {
-                (sebas_acp_claude::AgentProtocol::OpenAi, u)
+                (sebas_acp::claude::AgentProtocol::OpenAi, u)
             } else {
                 let reason = format!(
                     "direct provider '{name}' has no base_url_anthropic or base_url_openai"
@@ -333,9 +333,9 @@ fn build_direct_from_gateway_config(
     p: &sebas_gateway::config::ProviderConfig,
 ) -> (ProviderResolution, Option<String>) {
     let (proto, base_url) = if let Some(u) = p.base_url_anthropic.as_deref() {
-        (sebas_acp_claude::AgentProtocol::Anthropic, u.to_string())
+        (sebas_acp::claude::AgentProtocol::Anthropic, u.to_string())
     } else if let Some(u) = p.base_url_openai.as_deref() {
-        (sebas_acp_claude::AgentProtocol::OpenAi, u.to_string())
+        (sebas_acp::claude::AgentProtocol::OpenAi, u.to_string())
     } else {
         let reason = format!(
             "direct provider '{name}' in gateway config has no base_url_anthropic or base_url_openai"
@@ -422,7 +422,7 @@ pub fn resolve_spawn_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sebas_acp_claude::{AgentProtocol, ClaudeCodeDriver};
+    use sebas_acp::claude::{AgentProtocol, ClaudeCodeDriver};
     use sebas_gateway::config::GatewayConfig;
     use sebas_router::provider_state::{ProviderMode, ProviderRuntimeState};
     use sebas_router::state_store::DefaultSelection;

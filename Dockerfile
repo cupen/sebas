@@ -20,7 +20,7 @@ COPY src ./src
 COPY tests ./tests
 COPY sebas-router ./sebas-router
 COPY sebas-feishu ./sebas-feishu
-COPY sebas-acp-claude ./sebas-acp-claude
+COPY sebas-acp ./sebas-acp
 COPY sebas-gateway ./sebas-gateway
 
 RUN cargo build --release --locked --bin sebas

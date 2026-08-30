@@ -8,7 +8,7 @@ use crate::session_boot::{
     acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts,
     spawn_acp_pump_with_idle, wire_session_card_and_pump,
 };
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use sebas_feishu::client::{FeishuApiError, FeishuClient};
 use sebas_feishu::events::SessionKey;
 use sebas_gateway::config::GatewayConfig;

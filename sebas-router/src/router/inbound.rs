@@ -6,7 +6,7 @@
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
 use crate::commands::{Command, GatewayAction, parse_command};
 use crate::settings;
-use sebas_acp_claude::session::{AcpCommand, Decision};
+use sebas_acp::claude::session::{AcpCommand, Decision};
 use sebas_feishu::cards::{
     CardConfig, CardElement, DivText, ThinkingDisplay, render_accumulated_card,
     render_dead_session_card, render_expired_permission_card, render_help_card,

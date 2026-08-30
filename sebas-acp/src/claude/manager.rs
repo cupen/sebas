@@ -7,8 +7,8 @@
 //! `AcpCommand`/`AcpEvent` in session.rs) is unchanged from the ACP era —
 //! router/run.rs and the test-suite are the proof of that.
 
-use crate::driver::{CcDriver, ConnectConfig};
-use crate::session::{AcpCommand, AcpEvent, AcpSessionHandle, SessionMeta};
+use crate::claude::driver::{CcDriver, ConnectConfig};
+use crate::claude::session::{AcpCommand, AcpEvent, AcpSessionHandle, SessionMeta};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -123,7 +123,7 @@ impl SessionManager {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AcpCommand>(64);
         let (evt_tx, evt_rx) = mpsc::channel::<AcpEvent>(256);
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-        let pending_responders: Arc<Mutex<HashMap<String, crate::session::ResponderSlot>>> =
+        let pending_responders: Arc<Mutex<HashMap<String, crate::claude::session::ResponderSlot>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let expected_exit = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -144,7 +144,7 @@ impl SessionManager {
         let (driver, session_id, resumed) =
             match CcDriver::connect(make_config(session_id.clone(), resume)).await {
                 Ok(d) => (d, session_id, resume),
-                Err(crate::driver::ConnectError::ResumeRejected) => {
+                Err(crate::claude::driver::ConnectError::ResumeRejected) => {
                     // Graceful fallback (sebas-dk8.4): the old conversation is
                     // gone (claude's session files were cleaned). Start fresh
                     // with a NEW id instead of failing the spawn; `resumed:
@@ -158,7 +158,7 @@ impl SessionManager {
                     let d = CcDriver::connect(make_config(fresh.clone(), false)).await?;
                     (d, fresh, false)
                 }
-                Err(crate::driver::ConnectError::Other(e)) => return Err(e),
+                Err(crate::claude::driver::ConnectError::Other(e)) => return Err(e),
             };
 
         tokio::spawn({

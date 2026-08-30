@@ -6,8 +6,8 @@
 //! liveness probe (`set_permission_mode`) still answers (process alive), so
 //! only the hang detector can fire.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 

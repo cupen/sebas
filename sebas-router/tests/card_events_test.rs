@@ -1,4 +1,4 @@
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 use sebas_feishu::cards::{CardConfig, CardElement, ThinkingDisplay};
 use sebas_router::card_events::apply_event_to_card;
 

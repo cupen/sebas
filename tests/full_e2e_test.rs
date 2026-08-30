@@ -7,7 +7,7 @@
 //! are observed on the outbound channel — they ARE the prod intent,
 //! they just don't traverse HTTP here.
 
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use sebas_feishu::cards::CardConfig;
 use sebas_feishu::events::{FeishuIn, SessionKey};
 use sebas_router::router::{Out, RouterHandle};

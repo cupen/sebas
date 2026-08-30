@@ -4,8 +4,8 @@
 //! PermissionReply resolves the parked oneshot → hook returns allow →
 //! tool_result flows → turn completes. Journal asserts the protocol facts.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use std::path::PathBuf;
 use std::time::Duration;
 

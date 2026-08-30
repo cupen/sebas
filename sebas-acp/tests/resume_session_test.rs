@@ -4,8 +4,8 @@
 //!   a fresh session with a NEW id, `resumed == false` (sebas-dk8.4), and
 //!   the fallback is FAST (stderr watch, not the startup-timeout path)
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 

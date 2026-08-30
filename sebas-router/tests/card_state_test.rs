@@ -1,6 +1,6 @@
 //! CardStateMap 存储语义单测（FSM/累积在 card_state_test 的后续测试 + Task 5 覆盖）。
 
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 use sebas_feishu::cards::CardConfig;
 use sebas_feishu::cards::CardElement;
 use sebas_router::card_state::{CardState, CardStateMap};
@@ -533,7 +533,7 @@ async fn permission_card_click_emits_resolved_card_flip() {
     match o2 {
         Out::SendAcp {
             cmd:
-                sebas_acp_claude::session::AcpCommand::PermissionReply {
+                sebas_acp::claude::session::AcpCommand::PermissionReply {
                     request_id,
                     decision,
                     ..
@@ -541,7 +541,7 @@ async fn permission_card_click_emits_resolved_card_flip() {
             ..
         } => {
             assert_eq!(request_id, "req-1");
-            assert!(matches!(decision, sebas_acp_claude::session::Decision::AllowOnce));
+            assert!(matches!(decision, sebas_acp::claude::session::Decision::AllowOnce));
         }
         other => panic!("expected SendAcp, got {other:?}"),
     }
@@ -610,7 +610,7 @@ fn render_resolved_card_includes_label() {
 
 // ---- sebas session-level allowlist (Allow session semantics) ----
 
-use sebas_acp_claude::session::{AcpCommand, Decision};
+use sebas_acp::claude::session::{AcpCommand, Decision};
 use sebas_router::router::tool_signature;
 use serde_json::json;
 
@@ -833,7 +833,7 @@ async fn new_command_clears_session_allowlist() {
 
 #[tokio::test]
 async fn allow_session_click_grants_and_auto_approves_identical_call() {
-    use sebas_acp_claude::session::AcpEvent;
+    use sebas_acp::claude::session::AcpEvent;
     use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
     use sebas_router::router::{Out, RouterHandle};
     use sebas_router::state::{Mapping, SessionMap};
@@ -967,7 +967,7 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
 
 #[tokio::test]
 async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
-    use sebas_acp_claude::session::AcpEvent;
+    use sebas_acp::claude::session::AcpEvent;
     use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
     use sebas_router::router::{Out, RouterHandle};
     use sebas_router::state::{Mapping, SessionMap};

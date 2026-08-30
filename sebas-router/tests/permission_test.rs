@@ -1,4 +1,4 @@
-use sebas_acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::Mapping;

@@ -10,8 +10,8 @@
 //! The actual second-turn event stream is exercised by `full_e2e_test`;
 //! the fake CLI serves multi-turn prompts in streaming mode by default.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::AcpCommand;
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::AcpCommand;
 use sebas_feishu::cards::CardConfig;
 use sebas_feishu::events::{FeishuIn, SessionKey};
 use sebas_router::router::{Out, RouterHandle};
