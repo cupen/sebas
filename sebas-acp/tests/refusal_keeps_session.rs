@@ -3,8 +3,8 @@
 //! still be answered. Before the fix, any `Result{is_error:true}` became a
 //! terminal error and killed the session.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 

@@ -4,7 +4,7 @@
 //! docs/design-history.md ADR-1):
 //! `AcpEvent`/`AcpCommand`/`Decision` are the stable internal vocabulary the
 //! router consumes — the name is historical, no ACP wire protocol is involved
-//! anymore. The engine adapter lives in `crate::driver`.
+//! anymore. The engine adapter lives in `crate::claude::driver`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

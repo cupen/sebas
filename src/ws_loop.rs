@@ -4,8 +4,8 @@
 //! （WS 路径与离线 replay 共享同一套解析+分发），经 `crate::run` re-export。
 
 use crate::config::Config;
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::AcpCommand;
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::AcpCommand;
 use sebas_feishu::events::FeishuIn;
 use sebas_feishu::events::SessionKey;
 use open_lark::Config as LarkConfig;

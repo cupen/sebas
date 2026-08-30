@@ -3,7 +3,7 @@
 //! `POST /api/sessions/{key}/switch`. Uses axum's `oneshot` to drive the
 //! router in-process — no live listener required.
 
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sebas_feishu::events::SessionKey;

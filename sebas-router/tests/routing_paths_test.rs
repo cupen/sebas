@@ -2,7 +2,7 @@
 //! 缺 rid/未知 decision，slash 转发臂，Media 组合 prompt，dispatch_acp_event
 //! 全事件类型，MsgIdMap 存取，terminal error 清理。
 
-use sebas_acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
 use sebas_router::router::{Out, RouterHandle, compose_media_prompt};
 use sebas_router::state::{Mapping, SessionMap};

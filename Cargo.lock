@@ -2055,7 +2055,7 @@ dependencies = [
  "openlark",
  "reqwest 0.12.28",
  "rustls",
- "sebas-acp-claude",
+ "sebas-acp",
  "sebas-feishu",
  "sebas-gateway",
  "sebas-router",
@@ -2072,7 +2072,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sebas-acp-claude"
+name = "sebas-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2131,7 +2131,7 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "reqwest 0.12.28",
- "sebas-acp-claude",
+ "sebas-acp",
  "sebas-feishu",
  "serde",
  "serde_json",
@@ -2152,7 +2152,7 @@ dependencies = [
  "http-body-util",
  "minijinja",
  "reqwest 0.12.28",
- "sebas-acp-claude",
+ "sebas-acp",
  "sebas-feishu",
  "sebas-router",
  "serde",

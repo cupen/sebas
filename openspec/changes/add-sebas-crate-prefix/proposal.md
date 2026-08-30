@@ -9,7 +9,7 @@ workspace 成员 crate 命名过于通用（`router`、`gateway`、`feishu`、`w
 - 重命名 5 个成员 crate 的包名与目录名（目录与包名保持一致）：
   - `router` → `sebas-router`
   - `feishu` → `sebas-feishu`
-  - `acp-claude` → `sebas-acp-claude`
+  - `acp-claude` → `sebas-acp-claude`（**修订 2026-08-30**：按用户决定进一步更名 `sebas-acp`，原内容收进 `claude` 子模块，见 design.md D7）
   - `gateway` → `sebas-gateway`
   - `webui` → `sebas-webui`
 - 同步更新：

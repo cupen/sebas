@@ -10,9 +10,9 @@
 
 **背景**:原链路 `sebas →(ACP/JSON-RPC)→ claude-acp-bridge →(stream-json)→ claude`,bridge 是没有语义增益的纯转码层:每会话 3 进程 + 每工具调用 1 个 hook 进程 + 1 条 unix socket;`acp-claude` + bridge ≈ 全库 1/3 代码做 1:1 转码;JSON-RPC dispatch loop 不可阻塞,带来 gate 锁 / `OwnedMutexGuard` / pump 必须 `cx.spawn` 的并发复杂度;权限链 4 进程经 broker 单 FIFO 位置配对,并行工具调用会错配;`session/load` 是死代码(bridge 声明 `load_session:false`);claude v2.1.220 envelope 变更曾穿透 bridge 导致事件静默丢失。
 
-**决策**:弃用 ACP 线协议与 bridge 进程;复用 crates.io 的 `cc-agent-sdk`(pin 精确版本,适配层 `sebas-acp-claude/src/driver.rs` 为 SDK 类型的唯一接触点);内部事件词汇表 `AcpEvent`/`AcpCommand`/`Decision` 原样保留为 router 的稳定端口;权限传输走 SDK PreToolUse hook 进程内回调(spike 实证 `can_use_tool` option 在 0.1.6 是死字段);会话恢复用 claude 原生 `resume`;不做双引擎灰度,直接替换,git revert 即回退。
+**决策**:弃用 ACP 线协议与 bridge 进程;复用 crates.io 的 `cc-agent-sdk`(pin 精确版本,适配层 `sebas-acp/src/claude/driver.rs` 为 SDK 类型的唯一接触点);内部事件词汇表 `AcpEvent`/`AcpCommand`/`Decision` 原样保留为 router 的稳定端口;权限传输走 SDK PreToolUse hook 进程内回调(spike 实证 `can_use_tool` option 在 0.1.6 是死字段);会话恢复用 claude 原生 `resume`;不做双引擎灰度,直接替换,git revert 即回退。
 
-**后果**:每会话 3→2 进程;权限关联进程显式化;重启后真恢复对话历史;`acp-claude` crate 名称保留但只含直连 driver。（2026-08-30 更新:crate 已更名 `sebas-acp-claude`,见 openspec change `add-sebas-crate-prefix`。）
+**后果**:每会话 3→2 进程;权限关联进程显式化;重启后真恢复对话历史;`acp-claude` crate 名称保留但只含直连 driver。（2026-08-30 更新:crate 已更名 `sebas-acp`,claude 实现收进 `sebas_acp::claude` 子模块,见 openspec change `add-sebas-crate-prefix`。）
 
 **原文**:`docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md` §1.1/§2(git 历史)
 

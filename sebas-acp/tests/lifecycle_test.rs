@@ -1,4 +1,4 @@
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use std::path::PathBuf;
 use std::time::Duration;
 

@@ -3,7 +3,7 @@
 //! - mutation 路由：GET → 405；非 loopback origin → 403；无 secret → 503；
 //!   有 secret 时转发 admin API（create → 列表出现 → delete → 消失）。
 
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;

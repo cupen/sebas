@@ -3,7 +3,7 @@
 //! 隐含于 pump 的 lazy seed，但此处显式走 dispatch_out 不便，故直接驱动 pump）
 //! 断言 150ms 内合并成 1 个含 5 段的 UpdateCard，随后 Finished 立即产 ✅ 卡。
 
-use sebas_acp_claude::manager::SessionManager;
+use sebas_acp::claude::manager::SessionManager;
 use sebas_feishu::events::{FeishuIn, SessionKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;

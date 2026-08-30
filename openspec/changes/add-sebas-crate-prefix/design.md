@@ -44,6 +44,9 @@ xtask 的 models 同步功能按 `<repo>/gateway/src/models.rs` 相对路径定�
 **D6 不设 spec delta（skip_specs: true）。**
 二进制名、CLI、配置格式、API 均不变，无 spec 级行为变化，不为满足校验而编造能力需求。
 
+**D7 修订（2026-08-30，用户决定）：`sebas-acp-claude` 进一步更名 `sebas-acp`，原内容收进 `claude` 子模块。**
+现 crate 内全部内容（agent_driver/driver/manager/session）均为 Claude 专属（CcDriver、ClaudeCodeDriver、cc-agent-sdk 唯一接触点），不存在可独立成层的通用 ACP 抽象，故整体收进 `sebas_acp::claude::`：crate 根只暴露 `pub mod claude;`，原根重导出移入 `claude/mod.rs`，外部路径 `sebas_acp_claude::X` → `sebas_acp::claude::X`。备选方案（在 crate 根保留"通用 ACP"层、仅 driver 收进 claude）被否：需凭空发明通用 trait 边界，超出本次命名整理的意图；未来接入其他 agent 引擎时再行抽取。
+
 ## Risks / Trade-offs
 
 - [约 286 处导入改动引入编译错误] → `cargo check` + `cargo test --workspace` 全量门禁；CI 命令不变，天然验证

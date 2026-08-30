@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 use sebas_feishu::events::{FeishuIn, SessionKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::{Mapping, SessionMap};

@@ -2,8 +2,8 @@
 //! Pre-fix code broke the read loop after sending CancelNotification,
 //! dropping the connection and SIGKILL-ing the child.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 

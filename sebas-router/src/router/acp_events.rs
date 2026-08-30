@@ -3,7 +3,7 @@
 //! `RouterHandle` 的 impl 延续块（子模块可访问私有字段），从 router.rs 拆出。
 
 use super::{Out, RouterHandle, extract_session_id};
-use sebas_acp_claude::session::{AcpCommand, AcpEvent, Decision};
+use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_feishu::cards::render_permission_card;
 
 impl RouterHandle {

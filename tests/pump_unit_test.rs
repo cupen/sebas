@@ -3,7 +3,7 @@
 //! terminal Error 立即发 ❌ + 清 mapping；通道关闭 drop_card + 退出。
 //! 不依赖 fake-claude 二进制。
 
-use sebas_acp_claude::session::AcpEvent;
+use sebas_acp::claude::session::AcpEvent;
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::{Mapping, SessionMap};
 use sebas::run::spawn_acp_pump;

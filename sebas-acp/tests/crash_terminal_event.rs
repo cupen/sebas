@@ -7,8 +7,8 @@
 //! the manager's entry releases only the manager's Arc clone, so any
 //! buffered terminal event survives for the consumer to observe.
 
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

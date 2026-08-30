@@ -7,9 +7,9 @@ use crate::config::Config;
 use crate::dispatch::{TopicSendOutcome, send_card_topic_aware, topic_reply_target};
 use crate::reactions::ReactionTracker;
 use crate::spawn_env::resolve_spawn_overrides;
-use sebas_acp_claude::ClaudeCodeDriver;
-use sebas_acp_claude::manager::SessionManager;
-use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_acp::claude::ClaudeCodeDriver;
+use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_feishu::cards::render_accumulated_card;
 use sebas_feishu::client::FeishuClient;
 use sebas_feishu::events::SessionKey;
@@ -109,7 +109,7 @@ pub async fn acp_spawn_and_activate(
 ) -> anyhow::Result<(
     String,
     Vec<String>,
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>>,
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
 )> {
     let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
     let session_id = mgr
@@ -167,7 +167,7 @@ pub async fn acp_resume_and_activate(
 ) -> anyhow::Result<(
     String,
     Vec<String>,
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>>,
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
     bool,
 )> {
     let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
@@ -246,7 +246,7 @@ pub(crate) async fn wire_session_card_and_pump(
     prompt: String,
     pending: Vec<String>,
     rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>,
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
     >,
     // Feishu message_id this session's root card should reply to (the user's
     // input message), so the card appears threaded under it for easy
@@ -369,7 +369,7 @@ pub async fn flush_pending_prompts(
 /// `pub` for integration tests (tests/full_e2e_test.rs)；经 `crate::run` re-export。
 pub fn spawn_acp_pump(
     rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>,
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
     >,
     router: RouterHandle,
     session_id: String,
@@ -389,7 +389,7 @@ pub fn spawn_acp_pump(
 /// `mgr` 用于杀进程；`None` 时只撤卡不杀（供测试与旧调用点）。
 pub fn spawn_acp_pump_with_idle(
     rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>,
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
     >,
     router: RouterHandle,
     session_id: String,

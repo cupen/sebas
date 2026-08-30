@@ -36,3 +36,9 @@
   - `e2e_gateway.sh` 失败：脚本用旧 provider 字段 `base_url=`，main 上即坏 → bead `sebas-3n4`（schema 兼容的 `e2e_gateway_admin.sh` 全流程 PASS，验证运行时行为无损）；
   - 其余 5 个（router provider_state×4、gateway server_smoke×1、config_test validate_runtime×1）：本沙箱 `~/.sebas`、`~/.config` 只读（EROFS）所致，可写 HOME 下全部 PASS，main 上同样失败。
 - **3.2 / 5.2 的「push 后 CI 绿」**：未获 push 授权，本地合并完成；push 后验证 → bead `sebas-ci9`。Dockerfile 未做本地镜像构建（docker daemon 不可用），已核对 COPY 路径与 `--locked` 构建一致性。
+
+## 6. 修订：sebas-acp-claude → sebas-acp + claude 子模块（2026-08-30，D7）
+
+- [x] 6.1 `git mv sebas-acp-claude sebas-acp`；模块收进 `src/claude/`（mod.rs 持声明与根重导出，lib.rs 只留 `pub mod claude;`），内部 `crate::X` → `crate::claude::X`；验证 `cargo check --workspace` 通过
+- [x] 6.2 清单同步：根 Cargo.toml members/deps、sebas-router/sebas-webui 依赖、Dockerfile COPY；外部导入 `sebas_acp_claude::` → `sebas_acp::claude::`（59 处，含 crate 自身 tests、gateway proto.rs 文档注释）
+- [x] 6.3 文档与工件：README（图/表/目录树）、design-history 修订注；本变更 proposal/design/tasks 增补修订记录；验证全仓 grep 无 `sebas-acp-claude`/`sebas_acp_claude` 残留（Cargo.lock 除外）

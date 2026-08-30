@@ -1,5 +1,5 @@
 [package]
-name = "sebas-acp-claude"
+name = "sebas-acp"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,7 +22,7 @@ tempfile = "3"
 
 # Test fake speaking the claude stream-json + control-protocol dialect.
 # Shares the workspace-root source with sebas's `fake-claude` bin — the two
-# binaries are byte-identical apart from the name, so acp-claude keeps its
+# binaries are byte-identical apart from the name, so sebas-acp keeps its
 # own test binary name without a second copy of the code.
 [[bin]]
 name = "fake-claude-cli"

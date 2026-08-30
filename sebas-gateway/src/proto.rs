@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// （Anthropic 客户端走 Anthropic provider，OpenAI 同理），不做协议转换。
 ///
 /// Renamed from `Protocol` to disambiguate from
-/// `sebas_acp_claude::AgentProtocol` (which carries the same meaning but at the
+/// `sebas_acp::claude::AgentProtocol` (which carries the same meaning but at the
 /// agent→upstream seam, not the gateway→upstream seam).
 ///
 /// serde `rename_all = "lowercase"`：`Anthropic` <-> `"anthropic"`，
