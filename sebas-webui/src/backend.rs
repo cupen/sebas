@@ -18,7 +18,7 @@
 //! [`message`]: SessionBackend::message
 
 use crate::events::WebUiEvent;
-use crate::models::SessionRow;
+use crate::models::{CardConfigInfo, SessionRow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -118,6 +118,12 @@ pub trait SessionBackend: Send + Sync + 'static {
     /// Turn content for a session after `position`.
     async fn turns(&self, key: &str, position: u64) -> Result<TurnContent, Rejection>;
 
+    /// The core's card-rendering config, for the settings page. Required by
+    /// the webui-api spec ("GET /api/settings carries card config + gateway
+    /// info") — read-only display data; the channel does not stream config
+    /// changes, so a socket backend serves its last-known snapshot.
+    async fn card_config(&self) -> CardConfigInfo;
+
     /// The honest-degradation report (drives `core_connected` in the API).
     fn reachability(&self) -> Reachability;
 }
@@ -130,6 +136,7 @@ pub struct FakeBackend {
     state: RwLock<FakeState>,
     events: broadcast::Sender<WebUiEvent>,
     reachable: AtomicBool,
+    card_config: RwLock<CardConfigInfo>,
 }
 
 #[derive(Default)]
@@ -149,6 +156,7 @@ impl FakeBackend {
             state: RwLock::new(FakeState::default()),
             events,
             reachable: AtomicBool::new(reachable),
+            card_config: RwLock::new(CardConfigInfo::default()),
         }
     }
 
@@ -162,6 +170,11 @@ impl FakeBackend {
 
     pub async fn set_rows(&self, rows: Vec<SessionRow>) {
         self.state.write().await.rows = rows;
+    }
+
+    /// Set the card config the settings endpoint serves.
+    pub async fn set_card_config(&self, cfg: CardConfigInfo) {
+        *self.card_config.write().await = cfg;
     }
 
     /// Append turn content for `key`; [`SessionBackend::turns`] slices it.
@@ -216,7 +229,9 @@ impl SessionBackend for FakeBackend {
         }
         let mut state = self.state.write().await;
         state.spawn_seq += 1;
-        let key = format!("web-{}", state.spawn_seq);
+        // The contract returns the encoded wire key (what a client can put
+        // straight into a URL), matching the real backends.
+        let key = urlencoding::encode(&format!("web-{}\0", state.spawn_seq)).into_owned();
         state.rows.push(SessionRow {
             encoded_key: key.clone(),
             chat_id: key.clone(),
@@ -234,6 +249,10 @@ impl SessionBackend for FakeBackend {
             prompt_preview: Some(prompt.clone()),
         });
         state.spawner_calls.push((prompt, project_dir));
+        // Live event, as the core would publish on session creation.
+        let _ = self.events.send(WebUiEvent::SessionCreated {
+            session_id: key.clone(),
+        });
         Ok(key)
     }
 
@@ -265,13 +284,27 @@ impl SessionBackend for FakeBackend {
         if state.rows.len() == before {
             Ok(CloseOutcome::NotFound)
         } else {
+            // Live event, as the core would publish on teardown.
+            let _ = self.events.send(WebUiEvent::SessionRemoved {
+                session_id: key.to_string(),
+            });
             Ok(CloseOutcome::Closed)
         }
     }
 
     async fn turns(&self, key: &str, position: u64) -> Result<TurnContent, Rejection> {
         let state = self.state.read().await;
+        // A known session without registered turns serves an empty
+        // transcript (a spawning session has no card state yet) — only an
+        // unknown key is a typed rejection.
         let Some(items) = state.turns.get(key) else {
+            if state.rows.iter().any(|r| r.encoded_key == key) {
+                return Ok(TurnContent {
+                    key: key.to_string(),
+                    position: 0,
+                    items: Vec::new(),
+                });
+            }
             return Err(Rejection::UnknownSession { key: key.to_string() });
         };
         let slice: Vec<TurnItem> = items
@@ -284,6 +317,10 @@ impl SessionBackend for FakeBackend {
             position: items.len() as u64,
             items: slice,
         })
+    }
+
+    async fn card_config(&self) -> CardConfigInfo {
+        self.card_config.read().await.clone()
     }
 
     fn reachability(&self) -> Reachability {
@@ -301,7 +338,7 @@ impl SessionBackend for FakeBackend {
 mod tests {
     use super::{CloseOutcome, FakeBackend, Reachability, Rejection, SessionBackend, TurnItem};
     use crate::events::WebUiEvent;
-    use crate::models::SessionRow;
+    use crate::models::{CardConfigInfo, SessionRow};
     use std::sync::Arc;
 
     fn row(key: &str) -> SessionRow {
@@ -344,12 +381,12 @@ mod tests {
         let got = events.try_recv().unwrap();
         assert!(matches!(got, WebUiEvent::SessionCreated { ref session_id } if session_id == "web-2"));
 
-        // spawn: returns a fresh encoded key and grows the snapshot.
+        // spawn: returns a fresh encoded wire key and grows the snapshot.
         let spawned = backend
             .spawn("fix the bug".into(), Some("/tmp/proj".into()))
             .await
             .unwrap();
-        assert_eq!(spawned, "web-1");
+        assert_eq!(spawned, "web-1%00", "spawn returns the encoded wire key");
         assert_eq!(backend.snapshot().await.len(), 3);
         assert_eq!(
             backend.spawn_calls().await,
@@ -357,10 +394,10 @@ mod tests {
         );
 
         // message: known key records; unknown key rejects.
-        backend.message("web-1", "do it".into()).await.unwrap();
+        backend.message(&spawned, "do it".into()).await.unwrap();
         assert_eq!(
             backend.messages().await,
-            vec![("web-1".to_string(), "do it".to_string())]
+            vec![(spawned.clone(), "do it".to_string())]
         );
         assert_eq!(
             backend.message("nope", "hi".into()).await,
@@ -368,9 +405,9 @@ mod tests {
         );
 
         // close: known → Closed (row gone); unknown → NotFound.
-        assert_eq!(backend.close("web-1").await.unwrap(), CloseOutcome::Closed);
+        assert_eq!(backend.close(&spawned).await.unwrap(), CloseOutcome::Closed);
         assert_eq!(backend.snapshot().await.len(), 2);
-        assert_eq!(backend.close("web-1").await.unwrap(), CloseOutcome::NotFound);
+        assert_eq!(backend.close(&spawned).await.unwrap(), CloseOutcome::NotFound);
 
         // turns: monotonic position — a second call at the returned position
         // yields only newer content.
@@ -395,6 +432,17 @@ mod tests {
             backend.turns("ghost", 0).await,
             Err(Rejection::UnknownSession { key: "ghost".into() })
         );
+
+        // card_config: the settings payload's card-config source.
+        let cfg = backend.card_config().await;
+        assert!(!cfg.theme_color.is_empty(), "default theme color present");
+        backend
+            .set_card_config(CardConfigInfo {
+                theme_color: "#ff0000".into(),
+                ..CardConfigInfo::default()
+            })
+            .await;
+        assert_eq!(backend.card_config().await.theme_color, "#ff0000");
 
         // reachability: connected by default.
         assert_eq!(backend.reachability(), Reachability::Connected);

@@ -261,14 +261,16 @@ pub async fn run(
 
     // Start WebUI dashboard server if requested
     if webui {
-        let router_for_webui = router.clone();
-        let mgr_for_webui = mgr.clone();
+        // The core IS this process: serve the dashboard over the in-process
+        // session backend (no SessionManager — spawn/close dispatch through
+        // the router's outbound pump).
+        let backend = crate::webui_backend::InProcessSessionBackend::new(router.clone());
         let gateway_info = build_gateway_info(gateway_cfg.as_ref());
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
         tokio::spawn(async move {
-            sebas_webui::run(router_for_webui, mgr_for_webui, gateway_info, listener).await;
+            sebas_webui::run(backend, gateway_info, listener).await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }

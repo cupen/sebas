@@ -26,84 +26,91 @@
 ## 3. Cut the WebUI over to the seam
 
 - [x] 3.1 Change `sebas_webui::run*` and `WebUiState` to hold `Arc<dyn SessionBackend>`
-      instead of `RouterHandle`; verify `cargo build -p webui` passes
-- [x] 3.2 Port `routes.rs` session reads to the backend snapshot; verify every
+      instead of `RouterHandle`; verify `cargo build -p sebas-webui` passes
+- [x] 3.2 Port `routes.rs`/`api.rs` session reads to the backend snapshot; verify every
       session route renders against the fake backend
-- [x] 3.3 Port `routes.rs` session mutations (create, message, close) to backend
+- [x] 3.3 Port `routes.rs`/`api.rs` session mutations (create, message, close) to backend
       calls, mapping typed rejections onto the existing status codes; verify
       unknown-key cases still return 404
-- [x] 3.4 Point `sse.rs` at the backend subscription instead of the WebUI-local
-      broadcast; verify a fake-backend event appears on `/events`
-- [x] 3.5 Rewrite `sebas-webui/tests/session_endpoints_test.rs` against the fake
-      backend; verify the suite passes with no `RouterHandle` construction in it
+- [x] 3.4 Point the `/ws` event broadcast at the backend subscription instead of the
+      WebUI-local publishes in `api.rs` (remove those publish sites); verify a
+      fake-backend event arrives on `/ws`
+- [x] 3.5 Rewrite `sebas-webui/tests/session_endpoints_test.rs`,
+      `api_endpoints_test.rs`, `gateway_bff_test.rs`, and `ws_test.rs` against
+      the fake backend; verify the suites pass with no `RouterHandle`
+      construction in them
 - [x] 3.6 Wire `run.rs` to pass the in-process backend; verify `run --webui`
       behaves as before by driving a session and watching the board update
+- [x] 3.7 Expose backend reachability in the JSON API — `GET /api/summary`
+      carries `core_connected` plus a cause when degraded; verify the fake
+      backend's unreachable mode shows up in the payload
 
 ## 4. Channel protocol
 
-- [x] 4.1 Define the request and response types with a `cmd` tag, mirroring
+- [ ] 4.1 Define the request and response types with a `cmd` tag, mirroring
       `RpcControlRequest`'s serde shape, plus a typed rejection enum; verify each
       variant round-trips through serde
-- [x] 4.2 Define the stream frame for pushed session events; verify a snapshot
+- [ ] 4.2 Define the stream frame for pushed session events; verify a snapshot
       frame followed by event frames parses back into the same sequence
 
 ## 5. Channel server in the core
 
-- [x] 5.1 Bind the Unix listener at the configured path with mode 0600, reclaiming
+- [ ] 5.1 Bind the Unix listener at the configured path with mode 0600, reclaiming
       a stale socket file; verify a test binds twice in a row and the second
       succeeds
-- [x] 5.2 Enforce peer uid equality via `SO_PEERCRED` and reject mismatches before
+- [ ] 5.2 Enforce peer uid equality via `SO_PEERCRED` and reject mismatches before
       reading any request; verify with a test asserting rejection happens before
       request parsing
-- [x] 5.3 Enforce the `SEBAS_CORE_SECRET` handshake line; verify absent, empty,
+- [ ] 5.3 Enforce the `SEBAS_CORE_SECRET` handshake line; verify absent, empty,
       and wrong secrets are each rejected and the connection closes
-- [x] 5.4 Implement snapshot and subscribe, emitting the snapshot before any
+- [ ] 5.4 Implement snapshot and subscribe, emitting the snapshot before any
       event; verify a test that mutates during subscribe setup sees no gap and no
       duplicate
-- [x] 5.5 Implement spawn, canonicalizing and stat'ing `project_dir` before any
+- [ ] 5.5 Implement spawn, canonicalizing and stat'ing `project_dir` before any
       spawn; verify a non-directory path is rejected with no child spawned and no
       existence disclosure in the message
-- [x] 5.6 Implement message and close, returning typed rejections for unknown
+- [ ] 5.6 Implement message and close, returning typed rejections for unknown
       keys; verify nothing is mutated on rejection
-- [x] 5.7 Implement turn retrieval with a monotonic position; verify a second call
+- [ ] 5.7 Implement turn retrieval with a monotonic position; verify a second call
       at the returned position yields only newer content
-- [x] 5.8 Drop a lagging subscriber rather than delivering a gap; verify a test
+- [ ] 5.8 Drop a lagging subscriber rather than delivering a gap; verify a test
       with a deliberately stalled reader gets disconnected and re-snapshots
-- [x] 5.9 Start the server from `run.rs` and remove the socket file on graceful
+- [ ] 5.9 Start the server from `run.rs` and remove the socket file on graceful
       shutdown; verify the socket appears while running and is gone after exit
 
 ## 6. Socket client backend
 
-- [x] 6.1 Implement `SessionBackend` over the socket in the sebas binary crate;
+- [ ] 6.1 Implement `SessionBackend` over the socket in the sebas binary crate;
       verify against a test server that each method reaches the right handler
-- [x] 6.2 Add reconnect with backoff and a fresh snapshot on reconnect; verify a
+- [ ] 6.2 Add reconnect with backoff and a fresh snapshot on reconnect; verify a
       test that kills and restarts the server converges without client restart
-- [x] 6.3 Report unreachable with its cause — socket absent, refused, secret
+- [ ] 6.3 Report unreachable with its cause — socket absent, refused, secret
       rejected, dropped; verify each cause surfaces distinctly
 
 ## 7. Standalone WebUI cutover
 
-- [x] 7.1 Delete the `restore_session_map` call, the throwaway `SessionManager`,
+- [ ] 7.1 Delete the `restore_session_map` call, the throwaway `SessionManager`,
       and the `RouterHandle` construction from `webui_cmd.rs`; verify no reference
       to the session state file remains in that file
-- [x] 7.2 Pass the socket backend to `sebas_webui::run_with_admin_adapter`; verify
+- [ ] 7.2 Pass the socket backend to `sebas_webui::run_with_admin_adapter`; verify
       `sebas webui` starts with the core running and lists live sessions
-- [x] 7.3 Render the not-connected state on the board and disable the composer
-      with its reason; verify by starting the WebUI with no core and confirming the
-      cause is stated and no control reports success
+- [ ] 7.3 Render the not-connected state in the SPA views from the summary's
+      `core_connected`/cause, disable the composer with its reason, and show a
+      degraded banner; verify by starting the WebUI with no core and confirming
+      the cause is stated and no control reports success
 
 ## 8. Verification
 
-- [x] 8.1 With the core running, create a session from the standalone WebUI;
+- [ ] 8.1 With the core running, create a session from the standalone WebUI;
       verify a real ACP child appears and the session shows in both the WebUI and
       the core's own view
-- [x] 8.2 Send a message from the standalone WebUI; verify it reaches the real
+- [ ] 8.2 Send a message from the standalone WebUI; verify it reaches the real
       session rather than only local state
-- [x] 8.3 Restart the core under the watchdog while a page is open; verify the
+- [ ] 8.3 Restart the core under the watchdog while a page is open; verify the
       WebUI survives, reconnects, and converges with no manual reload
-- [x] 8.4 Compare the same pages under `sebas webui` and `run --webui`; verify
+- [ ] 8.4 Compare the same pages under `sebas webui` and `run --webui`; verify
       session data and control availability are equivalent
-- [x] 8.5 Connect to the socket as a different uid and with a wrong secret; verify
+- [ ] 8.5 Connect to the socket as a different uid and with a wrong secret; verify
       both are refused and nothing is mutated
-- [x] 8.6 Run the full workspace suite; verify `cargo test` passes and no test
+- [ ] 8.6 Run the full workspace suite; verify `cargo test` passes and no test
       constructs a `RouterHandle` inside the WebUI crate
