@@ -7,11 +7,11 @@
 //! are observed on the outbound channel — they ARE the prod intent,
 //! they just don't traverse HTTP here.
 
-use acp_claude::manager::SessionManager;
-use feishu::cards::CardConfig;
-use feishu::events::{FeishuIn, SessionKey};
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_feishu::cards::CardConfig;
+use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,7 +119,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         };
         match got {
             Out::UpdateCard { .. } => saw_update = true,
-            Out::React { emoji, .. } if emoji == router::card_state::phase::DONE => {
+            Out::React { emoji, .. } if emoji == sebas_router::card_state::phase::DONE => {
                 saw_react_done = true;
                 break;
             }
@@ -210,10 +210,10 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
             Err(_) => continue,
         };
         if let Out::React { emoji, .. } = &got {
-            if emoji == router::card_state::phase::WORKING {
+            if emoji == sebas_router::card_state::phase::WORKING {
                 saw_react_working = true;
             }
-            if emoji == router::card_state::phase::DONE {
+            if emoji == sebas_router::card_state::phase::DONE {
                 saw_react_done = true;
                 if saw_react_working {
                     working_before_done = true;

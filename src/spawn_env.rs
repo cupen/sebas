@@ -2,9 +2,9 @@
 //!
 //! Sits between two already-built pieces:
 //!
-//! - `router::provider_state::ProviderRuntimeState`（bead sebas-63f.3）：runtime 决策
+//! - `sebas_router::provider_state::ProviderRuntimeState`（bead sebas-63f.3）：runtime 决策
 //!   ——「当前走 Off / Direct / Gateway」。
-//! - `acp_claude::ClaudeCodeDriver`（bead sebas-63f.2）：把 `ProviderResolution`
+//! - `sebas_acp_claude::ClaudeCodeDriver`（bead sebas-63f.2）：把 `ProviderResolution`
 //!   翻成 agent 进程看得懂的 env vars + CLI args。
 //!
 //! 这里只负责「中间环节」：从 state 拿到语义意图 → 解析上游 URL + 密钥 → 喂
@@ -21,9 +21,9 @@
 //! —— 用户看到"启动了但啥都没发生"时无法定位是 sebas 的问题还是 claude
 //! 自己环境的问题。新行为把错误直接喂给用户。
 
-use acp_claude::{ClaudeCodeDriver, ProviderResolution};
-use gateway::config::GatewayConfig;
-use router::provider_state::{ProviderMode, ProviderRuntimeState};
+use sebas_acp_claude::{ClaudeCodeDriver, ProviderResolution};
+use sebas_gateway::config::GatewayConfig;
+use sebas_router::provider_state::{ProviderMode, ProviderRuntimeState};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -60,7 +60,7 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
     }
     // 回退：unified state.json（统一后的新路径；旧用户首次 load 时
     // overlay 已被迁移 + 删除）。行为契约见 openspec/specs/provider-management/spec.md。
-    let state = router::state_store::load();
+    let state = sebas_router::state_store::load();
     if state.deleted.iter().any(|d| d == name) {
         return None;
     }
@@ -111,7 +111,7 @@ fn direct_resolution_from_overlay(
 
     let (proto, base_url) = match protocol {
         "anthropic" => match base_url_anthropic {
-            Some(u) => (acp_claude::AgentProtocol::Anthropic, u),
+            Some(u) => (sebas_acp_claude::AgentProtocol::Anthropic, u),
             None => {
                 let reason = format!(
                     "direct provider '{name}' has explicit protocol=anthropic but no base_url_anthropic"
@@ -124,7 +124,7 @@ fn direct_resolution_from_overlay(
             }
         },
         "openai" => match base_url_openai {
-            Some(u) => (acp_claude::AgentProtocol::OpenAi, u),
+            Some(u) => (sebas_acp_claude::AgentProtocol::OpenAi, u),
             None => {
                 let reason = format!(
                     "direct provider '{name}' has explicit protocol=openai but no base_url_openai"
@@ -139,9 +139,9 @@ fn direct_resolution_from_overlay(
         // "auto" 或未知值：旧约定（anthropic > openai）。
         _ => {
             if let Some(u) = base_url_anthropic {
-                (acp_claude::AgentProtocol::Anthropic, u)
+                (sebas_acp_claude::AgentProtocol::Anthropic, u)
             } else if let Some(u) = base_url_openai {
-                (acp_claude::AgentProtocol::OpenAi, u)
+                (sebas_acp_claude::AgentProtocol::OpenAi, u)
             } else {
                 let reason = format!(
                     "direct provider '{name}' has no base_url_anthropic or base_url_openai"
@@ -325,17 +325,17 @@ pub fn compute_provider_resolution(
     }
 }
 
-/// 从 `gateway::config::ProviderConfig` 构造 `ProviderResolution::Direct`。
+/// 从 `sebas_gateway::config::ProviderConfig` 构造 `ProviderResolution::Direct`。
 /// 与 `direct_resolution_from_overlay` 语义一致，只是输入形状不同 —— 复用
 /// 同一套协议选择 + 密钥优先级，避免两套逻辑漂移。
 fn build_direct_from_gateway_config(
     name: &str,
-    p: &gateway::config::ProviderConfig,
+    p: &sebas_gateway::config::ProviderConfig,
 ) -> (ProviderResolution, Option<String>) {
     let (proto, base_url) = if let Some(u) = p.base_url_anthropic.as_deref() {
-        (acp_claude::AgentProtocol::Anthropic, u.to_string())
+        (sebas_acp_claude::AgentProtocol::Anthropic, u.to_string())
     } else if let Some(u) = p.base_url_openai.as_deref() {
-        (acp_claude::AgentProtocol::OpenAi, u.to_string())
+        (sebas_acp_claude::AgentProtocol::OpenAi, u.to_string())
     } else {
         let reason = format!(
             "direct provider '{name}' in gateway config has no base_url_anthropic or base_url_openai"
@@ -422,10 +422,10 @@ pub fn resolve_spawn_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp_claude::{AgentProtocol, ClaudeCodeDriver};
-    use gateway::config::GatewayConfig;
-    use router::provider_state::{ProviderMode, ProviderRuntimeState};
-    use router::state_store::DefaultSelection;
+    use sebas_acp_claude::{AgentProtocol, ClaudeCodeDriver};
+    use sebas_gateway::config::GatewayConfig;
+    use sebas_router::provider_state::{ProviderMode, ProviderRuntimeState};
+    use sebas_router::state_store::DefaultSelection;
     use std::sync::Mutex;
 
     // 串行化所有 env 访问：`SEBAS_GATEWAY_PROVIDER_OVERLAY` 是全局变量，
@@ -1222,7 +1222,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"version":2,"providers":{"test_prov":{"preset":"deepseek","base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"off"},"default_selection":null}"#,
         )
         .unwrap();
-        let st = router::provider_state::load();
+        let st = sebas_router::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         assert!(matches!(
             compute_provider_resolution(&st, None).0,
@@ -1237,7 +1237,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"version":2,"providers":{"test_prov":{"preset":"deepseek","base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"direct","provider":"test_prov"},"default_selection":{"provider":"test_prov"}}"#,
         )
         .unwrap();
-        let st = router::provider_state::load();
+        let st = sebas_router::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
             ProviderResolution::Direct {
@@ -1269,7 +1269,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"mode":{"kind":"gateway"},"default_selection":null}"#,
         )
         .unwrap();
-        let st = router::provider_state::load();
+        let st = sebas_router::provider_state::load();
         let cfg = test_gateway("127.0.0.1:8888", vec!["sk-gw-test".to_string()]);
         match compute_provider_resolution(&st, Some(&cfg)).0 {
             ProviderResolution::Gateway { url, auth_token } => {
@@ -1289,7 +1289,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"mode":{"kind":"direct","provider":"nonexistent"},"default_selection":null}"#,
         )
         .unwrap();
-        let st = router::provider_state::load();
+        let st = sebas_router::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
             ProviderResolution::Off => {}

@@ -25,7 +25,7 @@
 
 ## 3. Cut the WebUI over to the seam
 
-- [ ] 3.1 Change `webui::run*` and `WebUiState` to hold `Arc<dyn SessionBackend>`
+- [ ] 3.1 Change `sebas_webui::run*` and `WebUiState` to hold `Arc<dyn SessionBackend>`
       instead of `RouterHandle`; verify `cargo build -p webui` passes
 - [ ] 3.2 Port `routes.rs` session reads to the backend snapshot; verify every
       session route renders against the fake backend
@@ -34,7 +34,7 @@
       unknown-key cases still return 404
 - [ ] 3.4 Point `sse.rs` at the backend subscription instead of the WebUI-local
       broadcast; verify a fake-backend event appears on `/events`
-- [ ] 3.5 Rewrite `webui/tests/session_endpoints_test.rs` against the fake
+- [ ] 3.5 Rewrite `sebas-webui/tests/session_endpoints_test.rs` against the fake
       backend; verify the suite passes with no `RouterHandle` construction in it
 - [ ] 3.6 Wire `run.rs` to pass the in-process backend; verify `run --webui`
       behaves as before by driving a session and watching the board update
@@ -86,7 +86,7 @@
 - [ ] 7.1 Delete the `restore_session_map` call, the throwaway `SessionManager`,
       and the `RouterHandle` construction from `webui_cmd.rs`; verify no reference
       to the session state file remains in that file
-- [ ] 7.2 Pass the socket backend to `webui::run_with_admin_adapter`; verify
+- [ ] 7.2 Pass the socket backend to `sebas_webui::run_with_admin_adapter`; verify
       `sebas webui` starts with the core running and lists live sessions
 - [ ] 7.3 Render the not-connected state on the board and disable the composer
       with its reason; verify by starting the WebUI with no core and confirming the

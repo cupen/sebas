@@ -10,7 +10,7 @@ pub struct Config {
     #[serde(default)]
     pub router: RouterConfig,
     #[serde(default)]
-    pub card: feishu::cards::CardConfig,
+    pub card: sebas_feishu::cards::CardConfig,
     #[serde(default)]
     pub media: MediaConfig,
     #[serde(default)]

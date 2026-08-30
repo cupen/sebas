@@ -16,13 +16,13 @@
 //! 前置条件：应用的卡片回传交互（card.action.trigger）已通过长连接订阅
 //! （跑 sebas 的应用通常已具备）；飞书客户端 V6.6+（form 容器要求）。
 
-use feishu::client::{FeishuClient, TokenManager};
-use feishu::events::{FeishuEnvelope, FeishuIn, SessionKey};
-use feishu::messages::{ReceiveIdType, SendCardRequest};
+use sebas_feishu::client::{FeishuClient, TokenManager};
+use sebas_feishu::events::{FeishuEnvelope, FeishuIn, SessionKey};
+use sebas_feishu::messages::{ReceiveIdType, SendCardRequest};
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
-use router::Out;
-use router::crud::{CrudForm, FileStore, ProviderForms};
+use sebas_router::Out;
+use sebas_router::crud::{CrudForm, FileStore, ProviderForms};
 use sebas::config::Config;
 use sebas::provider::build_form;
 use serde_json::Value;
@@ -278,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let http = reqwest::Client::new();
-    let client = FeishuClient::new(feishu::client::FeishuConfig {
+    let client = FeishuClient::new(sebas_feishu::client::FeishuConfig {
         app_id: cfg.feishu.app_id.clone(),
         app_secret: cfg.feishu.app_secret.clone(),
         owner_id: cfg.feishu.owner_id.clone(),

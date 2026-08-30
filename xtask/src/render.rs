@@ -1,5 +1,5 @@
 //! Render a flat `Vec<RawEntry>` -> the body of the `MODELS` const
-//! in `gateway/src/models.rs`, and patch the existing file's
+//! in `sebas-gateway/src/models.rs`, and patch the existing file's
 //! timestamp comment + const body in place.
 
 use std::fs;
@@ -38,7 +38,7 @@ fn fmt_u64(n: u64) -> String {
 ///   would mask models.dev gaps).
 /// - Entries with `max_output_tokens = None` fall back to
 ///   `context_window / 4` (consistent with `resolve_caps` in
-///   `gateway/src/models.rs`).
+///   `sebas-gateway/src/models.rs`).
 /// - Provider section separators are emitted once per provider, in
 ///   the order providers first appear.
 pub fn render_models_body(entries: &[RawEntry]) -> String {
@@ -86,13 +86,13 @@ const CONST_CLOSE_PREFIX: &str = "];";
 /// Prefix of the timestamp comment we update on every run.
 const TIMESTAMP_PREFIX: &str = "// last synced:";
 
-/// Result of patching `gateway/src/models.rs`.
+/// Result of patching `sebas-gateway/src/models.rs`.
 pub struct PatchReport {
     pub entries_written: usize,
     pub timestamp_line: String,
 }
 
-/// Patch `gateway/src/models.rs` in place: update the
+/// Patch `sebas-gateway/src/models.rs` in place: update the
 /// `// last synced:` line and replace the body of the `MODELS` const
 /// with `new_body`. Atomic on disk (write to `.tmp`, fsync, rename).
 ///
@@ -293,7 +293,7 @@ mod tests {
     /// End-to-end: parse a small embedded models.dev fixture into
     /// `RawEntry` rows via the real parser, render those rows into
     /// the MODELS body string, and assert the resulting Rust source
-    /// matches what `gateway/src/models.rs` expects. This is the
+    /// matches what `sebas-gateway/src/models.rs` expects. This is the
     /// "parser end-to-end with embedded JSON fixture" test the spec
     /// asks for.
     ///

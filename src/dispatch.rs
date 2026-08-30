@@ -8,12 +8,12 @@ use crate::session_boot::{
     acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts,
     spawn_acp_pump_with_idle, wire_session_card_and_pump,
 };
-use acp_claude::manager::SessionManager;
-use feishu::client::{FeishuApiError, FeishuClient};
-use feishu::events::SessionKey;
-use gateway::config::GatewayConfig;
-use router::commands::GatewayAction;
-use router::router::{Out, RouterHandle};
+use sebas_acp_claude::manager::SessionManager;
+use sebas_feishu::client::{FeishuApiError, FeishuClient};
+use sebas_feishu::events::SessionKey;
+use sebas_gateway::config::GatewayConfig;
+use sebas_router::commands::GatewayAction;
+use sebas_router::router::{Out, RouterHandle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,7 +68,7 @@ fn classify_topic_invalid(e: &anyhow::Error) -> Option<i32> {
 pub(crate) async fn send_card_topic_aware(
     feishu: &FeishuClient,
     http: &reqwest::Client,
-    tokens: &feishu::client::TokenManager,
+    tokens: &sebas_feishu::client::TokenManager,
     router: &RouterHandle,
     key: &SessionKey,
     card: serde_json::Value,
@@ -111,7 +111,7 @@ pub(crate) async fn send_card_topic_aware(
 pub(crate) async fn dispatch_out(
     feishu: &FeishuClient,
     http: &reqwest::Client,
-    tokens: &feishu::client::TokenManager,
+    tokens: &sebas_feishu::client::TokenManager,
     cfg: &Config,
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
@@ -267,7 +267,7 @@ pub(crate) async fn dispatch_out(
                 Ok(v) => v,
                 Err(e) => {
                     router.fail_spawn(&key).await;
-                    let card = feishu::cards::render_error_card(&format!(
+                    let card = sebas_feishu::cards::render_error_card(&format!(
                         "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
                     let reply = topic_reply_target(router, &key, None).await;
@@ -387,7 +387,7 @@ pub(crate) async fn dispatch_out(
                 Ok(v) => v,
                 Err(e) => {
                     router.fail_spawn(&key).await;
-                    let card = feishu::cards::render_error_card(&format!(
+                    let card = sebas_feishu::cards::render_error_card(&format!(
                         "agent 恢复失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
                     let reply = topic_reply_target(router, &key, None).await;
@@ -410,7 +410,7 @@ pub(crate) async fn dispatch_out(
             };
             if !resumed {
                 info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
-                let card = feishu::cards::render_session_lost_card();
+                let card = sebas_feishu::cards::render_session_lost_card();
                 let reply = topic_reply_target(router, &key, None).await;
                 if let Err(e2) = send_card_topic_aware(
                     feishu,
@@ -761,8 +761,8 @@ async fn poll_operation_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use feishu::events::FeishuIn;
-    use router::state::{Mapping, SessionMap};
+    use sebas_feishu::events::FeishuIn;
+    use sebas_router::state::{Mapping, SessionMap};
 
     /// 话题会话：root_id 为空时用 router 存的最近回复目标兜底；显式带
     /// root_id 优先。这是权限卡等出站卡 root_id 的唯一收口（F3）。

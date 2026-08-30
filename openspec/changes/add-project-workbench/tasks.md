@@ -1,6 +1,6 @@
 ## 1. Project registry
 
-- [ ] 1.1 Add a projects module in `webui/src/` that reads and writes
+- [ ] 1.1 Add a projects module in `sebas-webui/src/` that reads and writes
       `~/.sebas/projects.json` (path as identity, atomic tmp+rename), honouring
       a path override env var for tests; verify unit tests cover absent file,
       unparseable file, duplicate add, and remove

@@ -13,9 +13,9 @@
 
 use std::path::PathBuf;
 
-use feishu::events::FeishuEnvelope;
-use router::router::RouterHandle;
-use router::state::SessionMap;
+use sebas_feishu::events::FeishuEnvelope;
+use sebas_router::router::RouterHandle;
+use sebas_router::state::SessionMap;
 use tracing::{debug, info, warn};
 
 use crate::run::RouterEventHandler;

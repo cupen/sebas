@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut gateway_cfg = if run.gateway {
                 Some(
-                    gateway::config::GatewayConfig::parse(&raw)
+                    sebas_gateway::config::GatewayConfig::parse(&raw)
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
                 )
             } else {
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
             if run.debug
                 && let Some(c) = gateway_cfg.as_mut()
             {
-                gateway::debug::enable_debug_test_provider(c);
+                sebas_gateway::debug::enable_debug_test_provider(c);
             }
             sebas::run::run(
                 cfg,

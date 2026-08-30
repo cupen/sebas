@@ -21,7 +21,7 @@
 //! ```
 //!
 //! We deliberately ignore `cost`, `modalities`, `attachment`, etc. —
-//! `gateway::models::ModelDef` only needs `name`, `context_window`,
+//! `sebas_gateway::models::ModelDef` only needs `name`, `context_window`,
 //! `max_output_tokens`. Optional fields fall through to `None` so
 //! downstream rendering picks a sensible default rather than dropping
 //! the entry.

@@ -7,15 +7,15 @@ use crate::config::Config;
 use crate::dispatch::{TopicSendOutcome, send_card_topic_aware, topic_reply_target};
 use crate::reactions::ReactionTracker;
 use crate::spawn_env::resolve_spawn_overrides;
-use acp_claude::ClaudeCodeDriver;
-use acp_claude::manager::SessionManager;
-use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::cards::render_accumulated_card;
-use feishu::client::FeishuClient;
-use feishu::events::SessionKey;
-use gateway::config::GatewayConfig;
-use router::router::RouterHandle;
-use router::state::SessionMap;
+use sebas_acp_claude::ClaudeCodeDriver;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_feishu::cards::render_accumulated_card;
+use sebas_feishu::client::FeishuClient;
+use sebas_feishu::events::SessionKey;
+use sebas_gateway::config::GatewayConfig;
+use sebas_router::router::RouterHandle;
+use sebas_router::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -76,7 +76,7 @@ fn spawn_overrides(
     claude_args: Vec<String>,
     gateway_cfg: Option<&GatewayConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
-    let state = router::provider_state::load();
+    let state = sebas_router::provider_state::load();
     let driver = ClaudeCodeDriver;
     let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, gateway_cfg);
     abort_if_provider_error(&extra_env);
@@ -109,7 +109,7 @@ pub async fn acp_spawn_and_activate(
 ) -> anyhow::Result<(
     String,
     Vec<String>,
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>>,
 )> {
     let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
     let session_id = mgr
@@ -167,7 +167,7 @@ pub async fn acp_resume_and_activate(
 ) -> anyhow::Result<(
     String,
     Vec<String>,
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>>,
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>>,
     bool,
 )> {
     let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
@@ -236,7 +236,7 @@ pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
 pub(crate) async fn wire_session_card_and_pump(
     feishu: &FeishuClient,
     http: &reqwest::Client,
-    tokens: &feishu::client::TokenManager,
+    tokens: &sebas_feishu::client::TokenManager,
     cfg: &Config,
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
@@ -246,7 +246,7 @@ pub(crate) async fn wire_session_card_and_pump(
     prompt: String,
     pending: Vec<String>,
     rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>,
     >,
     // Feishu message_id this session's root card should reply to (the user's
     // input message), so the card appears threaded under it for easy
@@ -290,12 +290,12 @@ pub(crate) async fn wire_session_card_and_pump(
         // "Typing" 暗示正在输入，"Get" 才契合"已收到"语义。Best-effort:
         // a reaction failure must not abort session creation.
         match feishu
-            .react(http, tokens, &msg_id, router::card_state::phase::SEED)
+            .react(http, tokens, &msg_id, sebas_router::card_state::phase::SEED)
             .await
         {
             Ok(rid) => {
                 reactions
-                    .record(&session_id, router::card_state::phase::SEED.into(), rid)
+                    .record(&session_id, sebas_router::card_state::phase::SEED.into(), rid)
                     .await
             }
             Err(e) => warn!(%session_id, "initial react failed: {e}"),
@@ -369,7 +369,7 @@ pub async fn flush_pending_prompts(
 /// `pub` for integration tests (tests/full_e2e_test.rs)；经 `crate::run` re-export。
 pub fn spawn_acp_pump(
     rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>,
     >,
     router: RouterHandle,
     session_id: String,
@@ -389,7 +389,7 @@ pub fn spawn_acp_pump(
 /// `mgr` 用于杀进程；`None` 时只撤卡不杀（供测试与旧调用点）。
 pub fn spawn_acp_pump_with_idle(
     rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<acp_claude::session::AcpEvent>>,
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp_claude::session::AcpEvent>>,
     >,
     router: RouterHandle,
     session_id: String,

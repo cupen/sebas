@@ -9,12 +9,12 @@
 //! observed on the outbound channel and cross-checked with what the
 //! SessionManager actually receives.
 
-use acp_claude::manager::SessionManager;
-use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::cards::CardConfig;
-use feishu::events::{CardAction, FeishuIn, SessionKey};
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_feishu::cards::CardConfig;
+use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -177,7 +177,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     };
     assert_eq!(reply.0, session_id);
     assert_eq!(reply.1, request_id);
-    assert!(matches!(reply.2, acp_claude::session::Decision::AllowOnce));
+    assert!(matches!(reply.2, sebas_acp_claude::session::Decision::AllowOnce));
 
     // Probe the manager path: a second permission round-trip will hit
     // mgr.send (also via our router). We don't have the bridge connected

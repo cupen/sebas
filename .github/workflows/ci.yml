@@ -32,6 +32,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # fake-claude 与 sebas 都是集成测试的被测进程，必须先于测试构建
-      # （gateway 的 process_e2e_test 会 spawn target/debug/sebas）。
+      # （sebas-gateway 的 process_e2e_test 会 spawn target/debug/sebas）。
       - run: cargo build --bin sebas --bin fake-claude
       - run: cargo test --workspace

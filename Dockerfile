@@ -18,10 +18,10 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY tests ./tests
-COPY router ./router
-COPY feishu ./feishu
-COPY acp-claude ./acp-claude
-COPY gateway ./gateway
+COPY sebas-router ./sebas-router
+COPY sebas-feishu ./sebas-feishu
+COPY sebas-acp-claude ./sebas-acp-claude
+COPY sebas-gateway ./sebas-gateway
 
 RUN cargo build --release --locked --bin sebas
 

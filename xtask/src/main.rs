@@ -2,8 +2,8 @@
 //!
 //! Subcommands:
 //! - `update-models` — fetch `https://models.dev/api.json`, parse it
-//!   into the `gateway::models::ModelDef` shape, and regenerate the
-//!   `MODELS` const body in `gateway/src/models.rs`.
+//!   into the `sebas_gateway::models::ModelDef` shape, and regenerate the
+//!   `MODELS` const body in `sebas-gateway/src/models.rs`.
 //! - `check-docs` — fail if the tree still cites the removed
 //!   superpowers planning corpus (ghost references).
 //!
@@ -49,7 +49,7 @@ fn print_help() {
     println!();
     println!("SUBCOMMANDS:");
     println!("    update-models    Fetch https://models.dev/api.json and regenerate");
-    println!("                    gateway/src/models.rs::MODELS in place.");
+    println!("                    sebas-gateway/src/models.rs::MODELS in place.");
     println!("    check-docs       Fail if the tree cites the removed superpowers");
     println!("                    corpus (paths, dated `spec YYYY-MM-DD`, bare `spec §N`).");
     println!("    help             Print this message.");
@@ -60,7 +60,7 @@ fn run_update_models(extra_args: &[String]) -> ExitCode {
     if extra_args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "xtask update-models — fetch {} and regenerate \
-             gateway/src/models.rs::MODELS",
+             sebas-gateway/src/models.rs::MODELS",
             MODELS_DEV_URL
         );
         return ExitCode::SUCCESS;
@@ -111,21 +111,21 @@ fn run_update_models(extra_args: &[String]) -> ExitCode {
 
     let utc_now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     println!(
-        "Updated {} entries, wrote gateway/src/models.rs (timestamp: {}); file marker: {}",
+        "Updated {} entries, wrote sebas-gateway/src/models.rs (timestamp: {}); file marker: {}",
         report.entries_written, utc_now, report.timestamp_line
     );
     ExitCode::SUCCESS
 }
 
-/// Locate `gateway/src/models.rs` relative to the xtask crate's
+/// Locate `sebas-gateway/src/models.rs` relative to the xtask crate's
 /// `CARGO_MANIFEST_DIR`. xtask lives at `<repo>/xtask/`, the target
-/// lives at `<repo>/gateway/src/models.rs`.
+/// lives at `<repo>/sebas-gateway/src/models.rs`.
 fn locate_models_rs() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
         .parent()
-        .map(|p| p.join("gateway/src/models.rs"))
-        .unwrap_or_else(|| PathBuf::from("gateway/src/models.rs"))
+        .map(|p| p.join("sebas-gateway/src/models.rs"))
+        .unwrap_or_else(|| PathBuf::from("sebas-gateway/src/models.rs"))
 }
 
 fn fetch_blocking(url: &str) -> Result<Vec<u8>, String> {

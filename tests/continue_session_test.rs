@@ -10,12 +10,12 @@
 //! The actual second-turn event stream is exercised by `full_e2e_test`;
 //! the fake CLI serves multi-turn prompts in streaming mode by default.
 
-use acp_claude::manager::SessionManager;
-use acp_claude::session::AcpCommand;
-use feishu::cards::CardConfig;
-use feishu::events::{FeishuIn, SessionKey};
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_acp_claude::session::AcpCommand;
+use sebas_feishu::cards::CardConfig;
+use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,7 +93,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Err(_) => continue,
         };
         if let Out::React { emoji, .. } = got
-            && emoji == router::card_state::phase::DONE
+            && emoji == sebas_router::card_state::phase::DONE
         {
             first_done = true;
         }
@@ -123,7 +123,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Err(_) => continue,
         };
         match got {
-            Out::React { emoji, .. } if emoji == router::card_state::phase::WORKING => {
+            Out::React { emoji, .. } if emoji == sebas_router::card_state::phase::WORKING => {
                 saw_react_working = true
             }
             Out::SendAcp {

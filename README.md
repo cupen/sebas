@@ -58,13 +58,13 @@ sebas 的架构设计不止于单机单 agent。长期探索的方向是：
 │                  │ AcpEvent (流式事件)                           │
 │                  ▼                                              │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │ acp-claude (SessionManager + CcDriver)                   │    │
+│  │ sebas-acp-claude (SessionManager + CcDriver)                   │    │
 │  │   每个 session = 一个 Claude Code 子进程                  │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                  │                                              │
 │                  ▼                                              │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │ gateway (LLM 双协议网关)                                  │    │
+│  │ sebas-gateway (LLM 双协议网关)                                  │    │
 │  │   Anthropic / OpenAI 协议  ──► 多 provider 路由          │    │
 │  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
@@ -74,10 +74,10 @@ sebas 的架构设计不止于单机单 agent。长期探索的方向是：
 
 | 层次 | 组件 | 职责 |
 |------|------|------|
-| **接入层** | `ws_loop` + `feishu` crate | 飞书 WebSocket 长连接（断线重连）、事件解析、API 调用 |
-| **路由层** | `router` crate | 会话映射、slash 命令解析、权限处理、状态机管理 |
-| **Agent 层** | `acp-claude` crate | Claude Code 子进程生命周期、流式事件泵送、中断恢复 |
-| **网关层** | `gateway` crate | Anthropic/OpenAI 双协议透传、多 provider 路由、用量记录 |
+| **接入层** | `ws_loop` + `sebas-feishu` crate | 飞书 WebSocket 长连接（断线重连）、事件解析、API 调用 |
+| **路由层** | `sebas-router` crate | 会话映射、slash 命令解析、权限处理、状态机管理 |
+| **Agent 层** | `sebas-acp-claude` crate | Claude Code 子进程生命周期、流式事件泵送、中断恢复 |
+| **网关层** | `sebas-gateway` crate | Anthropic/OpenAI 双协议透传、多 provider 路由、用量记录 |
 
 ---
 
@@ -282,10 +282,10 @@ OPENAI_BASE_URL=http://127.0.0.1:8787 OPENAI_API_KEY=sk-gw-local-dev ...
 ```
 sebas/
 ├── src/                  # 主二进制：配置、CLI、编排、事件循环
-├── feishu/               # 飞书 API 客户端（消息、卡片、媒体、事件、表单）
-├── router/               # 路由引擎（状态机、命令解析、会话映射、权限处理）
-├── acp-claude/           # Claude Code 子进程生命周期（cc-agent-sdk）
-├── gateway/              # LLM Provider 网关（Anthropic/OpenAI 双协议）
+├── sebas-feishu/        # 飞书 API 客户端（消息、卡片、媒体、事件、表单）
+├── sebas-router/        # 路由引擎（状态机、命令解析、会话映射、权限处理）
+├── sebas-acp-claude/    # Claude Code 子进程生命周期（cc-agent-sdk）
+├── sebas-gateway/       # LLM Provider 网关（Anthropic/OpenAI 双协议）
 ├── config/               # 配置文件示例
 ├── tests/                # 集成测试（含 fake-claude 测试桩）
 ├── scripts/              # 辅助脚本
@@ -301,7 +301,7 @@ MVP / 持续开发中。核心链路已贯通：飞书 WebSocket 长连接 → �
 - 会话状态持久化到 `state_file`，重连后懒恢复；但关闭时正在处理的轮次会丢失
 - `/compact`、`/cost` 作为字面提示传给 Claude；`/model`、`/cd`、`/status`、`/help` 已解析但未完整接入
 - 未配置 CI 流水线
-- 覆盖率目标（router ≥90%、cards ≥90%、整体 ≥80%）为设定目标，尚未验证
+- 覆盖率目标（sebas-router ≥90%、cards ≥90%、整体 ≥80%）为设定目标，尚未验证
 
 ---
 

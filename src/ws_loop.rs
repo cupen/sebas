@@ -4,14 +4,14 @@
 //! （WS 路径与离线 replay 共享同一套解析+分发），经 `crate::run` re-export。
 
 use crate::config::Config;
-use acp_claude::manager::SessionManager;
-use acp_claude::session::AcpCommand;
-use feishu::events::FeishuIn;
-use feishu::events::SessionKey;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_acp_claude::session::AcpCommand;
+use sebas_feishu::events::FeishuIn;
+use sebas_feishu::events::SessionKey;
 use open_lark::Config as LarkConfig;
 use open_lark::CoreError;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
-use router::router::RouterHandle;
+use sebas_router::router::RouterHandle;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;

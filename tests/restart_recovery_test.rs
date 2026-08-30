@@ -4,10 +4,10 @@
 //! back to a fresh session when the conversation is gone — sebas-dk8.4),
 //! and a corrupt state file is quarantined instead of aborting startup.
 
-use acp_claude::manager::SessionManager;
-use feishu::events::{FeishuIn, SessionKey};
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,7 +89,7 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
     let guard = tokio::time::timeout(Duration::from_secs(5), async {
         let mut rx = rx.lock().await;
         while let Some(evt) = rx.recv().await {
-            if matches!(evt, acp_claude::session::AcpEvent::Finished { .. }) {
+            if matches!(evt, sebas_acp_claude::session::AcpEvent::Finished { .. }) {
                 got_finished = true;
                 break;
             }
@@ -166,7 +166,7 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
     let guard = tokio::time::timeout(Duration::from_secs(5), async {
         let mut rx = rx.lock().await;
         while let Some(evt) = rx.recv().await {
-            if matches!(evt, acp_claude::session::AcpEvent::Finished { .. }) {
+            if matches!(evt, sebas_acp_claude::session::AcpEvent::Finished { .. }) {
                 got_finished = true;
                 break;
             }

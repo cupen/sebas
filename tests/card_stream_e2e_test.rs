@@ -3,10 +3,10 @@
 //! 隐含于 pump 的 lazy seed，但此处显式走 dispatch_out 不便，故直接驱动 pump）
 //! 断言 150ms 内合并成 1 个含 5 段的 UpdateCard，随后 Finished 立即产 ✅ 卡。
 
-use acp_claude::manager::SessionManager;
-use feishu::events::{FeishuIn, SessionKey};
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,7 +105,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
                 merged = s; // keep last for the panic message
             }
             Out::React { emoji, .. } => {
-                if emoji == router::card_state::phase::WORKING {
+                if emoji == sebas_router::card_state::phase::WORKING {
                     saw_working = true;
                 }
             }
@@ -130,7 +130,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         };
         match o {
             Out::UpdateCard { .. } | Out::SendCard { .. } => {} // 卡不携带状态 emoji，忽略
-            Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE => {
+            Out::React { ref emoji, .. } if emoji == sebas_router::card_state::phase::DONE => {
                 got_done_react = true;
             }
             Out::React { .. } => {} // tick 补发的 OnIt，忽略

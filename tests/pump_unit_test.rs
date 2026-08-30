@@ -3,9 +3,9 @@
 //! terminal Error 立即发 ❌ + 清 mapping；通道关闭 drop_card + 退出。
 //! 不依赖 fake-claude 二进制。
 
-use acp_claude::session::AcpEvent;
-use router::router::{Out, RouterHandle};
-use router::state::{Mapping, SessionMap};
+use sebas_acp_claude::session::AcpEvent;
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::{Mapping, SessionMap};
 use sebas::run::spawn_acp_pump;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +56,7 @@ async fn five_deltas_merge_into_one_updatecard() {
         .expect("React 🚧 follows the merged card")
         .expect("channel open");
     assert!(
-        matches!(second, Out::React { ref emoji, .. } if emoji == router::card_state::phase::WORKING),
+        matches!(second, Out::React { ref emoji, .. } if emoji == sebas_router::card_state::phase::WORKING),
         "合并卡后紧跟 React WORKING: {second:?}"
     );
     let third = tokio::time::timeout(Duration::from_millis(120), out_rx.recv()).await;
@@ -92,7 +92,7 @@ async fn finished_flushes_immediately_after_stream() {
             .expect("channel open");
         // 状态由 Feishu reaction 表达，不再进卡：DONE 反应即 Finished 落地。
         match o {
-            Out::React { ref emoji, .. } if emoji == router::card_state::phase::DONE => {
+            Out::React { ref emoji, .. } if emoji == sebas_router::card_state::phase::DONE => {
                 got_done = true;
                 break;
             }
@@ -106,7 +106,7 @@ async fn finished_flushes_immediately_after_stream() {
 #[tokio::test]
 async fn terminal_error_flushes_removes_and_exits() {
     let map = SessionMap::new();
-    let key = feishu::events::SessionKey {
+    let key = sebas_feishu::events::SessionKey {
         chat_id: "oc_t".into(),
         thread_id: None,
     };

@@ -5,7 +5,7 @@
 //! （只读，不改写，支持 preset 惯例默认）；bot 里新增/修改/删除的变更以
 //! delta 形式持久化到 `~/.sebas/providers.json`（overlay）。gateway 启动时
 //! 把同一份 overlay 合并进自身配置
-//! （见 `gateway::config::GatewayConfig::merge_provider_overlay`），实现
+//! （见 `sebas_gateway::config::GatewayConfig::merge_provider_overlay`），实现
 //! 「在飞书里改 provider，gateway 重启后生效」。
 //!
 //! 密钥策略：表单直接收 `api_key`（飞书里无法设置环境变量）。密钥存进
@@ -19,12 +19,12 @@
 //! 官方 `/models` 接口（详情面板的「🔍 探测 model 列表」按钮），静态
 //! preset 表里的型号很快就会过时；探测不可用时手填兜底。
 
-use feishu::cards::{
+use sebas_feishu::cards::{
     CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, StandardIcon,
 };
-use feishu::forms::{FormField, FormSpec, SelectOption};
-use gateway::config::GatewayConfig;
-use router::crud::{CrudForm, FileStore, Item};
+use sebas_feishu::forms::{FormField, FormSpec, SelectOption};
+use sebas_gateway::config::GatewayConfig;
+use sebas_router::crud::{CrudForm, FileStore, Item};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub fn spec_preset() -> FormSpec {
                 name: "preset".into(),
                 label: "预设".into(),
                 required: true,
-                options: gateway::config::presets()
+                options: sebas_gateway::config::presets()
                     .iter()
                     .map(|p| SelectOption {
                         value: p.name.to_string(),
@@ -146,7 +146,7 @@ pub fn spec_preset() -> FormSpec {
 /// 找不到对应 preset（例如用户选了不存在的 custom preset）时返回空 vec，
 /// 调用方应「不叠加面板」而不是报错。
 pub fn render_preset_details(preset_name: &str) -> Vec<CardElement> {
-    let Some(p) = gateway::config::presets()
+    let Some(p) = sebas_gateway::config::presets()
         .iter()
         .find(|p| p.name == preset_name)
     else {
@@ -291,7 +291,7 @@ pub fn spec() -> FormSpec {
 /// 这个值传给 agent。这里不写入 `default_model`，让表单编辑时初始为空；
 /// overlay 里已有 `default_model` 的项会在 `item_to_initial` 里被预填。
 // TODO: gateway config sync is out of scope for this bead.
-pub fn item_from_provider(name: &str, p: &gateway::config::ProviderConfig) -> Item {
+pub fn item_from_provider(name: &str, p: &sebas_gateway::config::ProviderConfig) -> Item {
     let mut m = Map::new();
     m.insert("name".into(), Value::String(name.into()));
     if let Some(u) = &p.base_url_anthropic {
@@ -324,11 +324,11 @@ pub fn overlay_path() -> std::path::PathBuf {
 
 /// `/provider` 命令的两张表单（共享同一个 overlay 存储）。
 /// 定义在 router 里；sebas root crate 只是装配。
-pub use router::crud::ProviderForms;
+pub use sebas_router::crud::ProviderForms;
 
 /// 构造两套 provider CRUD 表单：种子来自 config.toml 的顶层 `[provider.*]`，
 /// 变更持久化到 `state.json`（详见 openspec/specs/provider-management/spec.md 与
-/// `router::state_store`）。
+/// `sebas_router::state_store`）。
 ///
 /// **Self-heal（openspec/specs/provider-management/spec.md）**：legacy overlay 文件（`providers.json`，
 /// `state.json` 不存在时一次性迁移源）破损时不再让 `/provider` 死掉 —
@@ -473,7 +473,7 @@ fn apply_preset_defaults(item: &mut Item) {
     let Some(preset_name) = item.get("preset").and_then(Value::as_str) else {
         return;
     };
-    let Some(p) = gateway::config::presets()
+    let Some(p) = sebas_gateway::config::presets()
         .iter()
         .find(|p| p.name == preset_name)
     else {
@@ -514,7 +514,7 @@ fn apply_preset_defaults(item: &mut Item) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use router::CrudStore;
+    use sebas_router::CrudStore;
     use std::sync::Mutex;
 
     // 串行化 `SEBAS_GATEWAY_PROVIDER_OVERLAY` env 访问，与

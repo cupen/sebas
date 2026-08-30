@@ -19,12 +19,12 @@ use crate::dispatch::dispatch_out;
 use crate::error::Result;
 use crate::reactions::ReactionTracker;
 use crate::ws_loop::{run_ws_loop, spawn_test_session};
-use acp_claude::manager::SessionManager;
-use feishu::client::{FeishuClient, FeishuConfig};
-use feishu::messages::{ReceiveIdType, SendTextRequest};
-use gateway::config::GatewayConfig;
-use router::router::RouterHandle;
-use router::settings;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_feishu::client::{FeishuClient, FeishuConfig};
+use sebas_feishu::messages::{ReceiveIdType, SendTextRequest};
+use sebas_gateway::config::GatewayConfig;
+use sebas_router::router::RouterHandle;
+use sebas_router::settings;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -59,7 +59,7 @@ pub async fn run(
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定随机端口失败: {e}")))?;
-        let (addr, _handle) = gateway::server::serve_with_listener(gw_cfg.clone(), listener)
+        let (addr, _handle) = sebas_gateway::server::serve_with_listener(gw_cfg.clone(), listener)
             .map_err(|e| crate::error::SebasError::Gateway(e.to_string()))?;
         info!(%addr, "gateway started (run --gateway); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
     }
@@ -136,9 +136,9 @@ pub async fn run(
         // see no behaviour change.
         let tokens = if std::env::var("SEBAS_TEST_FAKE_TOKEN").as_deref() == Ok("1") {
             info!("SEBAS_TEST_FAKE_TOKEN=1; using stub tenant_access_token");
-            feishu::client::TokenManager::with_stub_token("t-stub-test")
+            sebas_feishu::client::TokenManager::with_stub_token("t-stub-test")
         } else {
-            let tm = feishu::client::TokenManager::new(
+            let tm = sebas_feishu::client::TokenManager::new(
                 cfg.feishu.app_id.clone(),
                 cfg.feishu.app_secret.clone(),
             );
@@ -245,7 +245,7 @@ pub async fn run(
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
         tokio::spawn(async move {
-            webui::run(router_for_webui, mgr_for_webui, gateway_info, listener).await;
+            sebas_webui::run(router_for_webui, mgr_for_webui, gateway_info, listener).await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }
@@ -365,20 +365,20 @@ fn init_tracing(cfg: &Config) {
 }
 
 /// Build a GatewayInfo from the optional gateway config for the WebUI.
-fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> webui::models::GatewayInfo {
+fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> sebas_webui::models::GatewayInfo {
     let Some(gw) = gateway_cfg else {
-        return webui::models::GatewayInfo::default();
+        return sebas_webui::models::GatewayInfo::default();
     };
     let providers = gw
         .providers
         .iter()
-        .map(|(name, p)| webui::models::ProviderInfo {
+        .map(|(name, p)| sebas_webui::models::ProviderInfo {
             name: name.clone(),
             base_url_anthropic: p.base_url_anthropic.clone(),
             base_url_openai: p.base_url_openai.clone(),
         })
         .collect();
-    webui::models::GatewayInfo {
+    sebas_webui::models::GatewayInfo {
         listen: Some(gw.listen.clone()),
         provider_count: gw.providers.len(),
         debug: gw.debug,
