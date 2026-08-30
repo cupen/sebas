@@ -33,7 +33,7 @@ WebUI 目前是"看起来像仪表盘"，但实测有三类硬伤：**样式缺�
 
 - `webui/static/style.css`（重写）、`webui/static/` 新增 vendored JS 与自托管字体。
 - `webui/templates/*.html` 全部触及；`admin_*.html` 结构性重构为 `extends base.html`。
-- `webui/src/models.rs` + `routes.rs`：`SessionRow` 新增由 `(MappingState, phase)` 投影出的展示用状态标签。
-- `webui/src/server.rs`：模板注册表随模板增删调整。
-- `webui/tests/session_endpoints_test.rs`：断言 HTML 片段的用例需同步。
+- `sebas-webui/src/models.rs` + `routes.rs`：`SessionRow` 新增由 `(MappingState, phase)` 投影出的展示用状态标签。
+- `sebas-webui/src/server.rs`：模板注册表随模板增删调整。
+- `sebas-webui/tests/session_endpoints_test.rs`：断言 HTML 片段的用例需同步。
 - 无新增 Rust 依赖。

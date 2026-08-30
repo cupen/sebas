@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
-use webui::admin::{
+use sebas_webui::admin::{
     AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService, AdminStatus,
 };
 
@@ -84,14 +84,14 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     // Create a throwaway session manager. No actual ACP sessions run in this
     // process, so the manager is a stub that accepts calls but has no children.
-    let mgr = Arc::new(acp_claude::manager::SessionManager::new(
+    let mgr = Arc::new(sebas_acp_claude::manager::SessionManager::new(
         std::time::Duration::from_secs(cfg.acp.claude.startup_timeout_secs),
     ));
 
     // Create the router. The outbound rx is dropped intentionally: the
     // standalone WebUI has no outbound dispatch pump, so `Out` instructions
     // (session creation, message sending, card updates) are silently dropped.
-    let (router, _out_rx) = router::router::RouterHandle::new_with_config(
+    let (router, _out_rx) = sebas_router::router::RouterHandle::new_with_config(
         map,
         merged_card_cfg,
         cfg.router.channel_buffer,
@@ -119,10 +119,10 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     info!("webui dashboard listening on {}", endpoint.bind_addr());
 
     // Run the WebUI server. This blocks until the server stops.
-    webui::run_with_admin_adapter(
+    sebas_webui::run_with_admin_adapter(
         router,
         mgr,
-        webui::models::GatewayInfo::default(),
+        sebas_webui::models::GatewayInfo::default(),
         listener,
         admin_adapter,
     )
@@ -313,8 +313,8 @@ fn current_uid() -> u32 {
 }
 
 /// Load card config from settings.json, falling back to the TOML `[card]` section.
-fn load_card_config(cfg: &Config) -> feishu::cards::CardConfig {
-    match router::settings::load_settings(&router::settings::settings_path()) {
+fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
+    match sebas_router::settings::load_settings(&sebas_router::settings::settings_path()) {
         Ok(Some(s)) => s,
         Ok(None) => cfg.card.clone(),
         Err(e) => {

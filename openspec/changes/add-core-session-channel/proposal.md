@@ -35,8 +35,8 @@
 ## Impact
 
 - 新增 `src/core_channel/`（服务端）与 `webui_cmd.rs` 侧客户端实现。
-- `router/src/router/mod.rs` + `state.rs`：新增会话事件广播。
-- `webui/src/`：`SessionBackend` trait；`server.rs`、`routes.rs`、`sse.rs` 由持 `RouterHandle` 改为持 backend。
+- `sebas-router/src/router/mod.rs` + `state.rs`：新增会话事件广播。
+- `sebas-webui/src/`：`SessionBackend` trait；`server.rs`、`routes.rs`、`sse.rs` 由持 `RouterHandle` 改为持 backend。
 - `src/run.rs`：启动通道服务端；`run --webui` 传入进程内 backend。
-- `webui/tests/session_endpoints_test.rs`：改用 fake backend。
+- `sebas-webui/tests/session_endpoints_test.rs`：改用 fake backend。
 - 无新增外部依赖（tokio UnixListener + serde_json 已在用）。

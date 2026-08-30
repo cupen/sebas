@@ -4,13 +4,13 @@ See `proposal.md` — Why. Constraints and existing groundwork:
 
 - **Half the plumbing exists.** `RouterHandle::web_spawn(prompt, project_dir)`,
   `Out::WebSpawn { key, prompt, project_dir }`, `Mapping.project_dir`, and
-  `SessionMap::set_project_dir` are all in place. `webui/src/routes.rs:201`
+  `SessionMap::set_project_dir` are all in place. `sebas-webui/src/routes.rs:201`
   passes `None` and no route ever collects a directory.
 - **The core is the only session authority.** `add-core-session-channel` makes the
   WebUI a client of it: `trait SessionBackend` replaces the WebUI's direct
   `RouterHandle`, and both the detached and in-process paths drive real sessions.
   This change assumes that seam and does not re-litigate it.
-- **`~/.sebas/state.json` is the core's file.** `router/src/state_store.rs`
+- **`~/.sebas/state.json` is the core's file.** `sebas-router/src/state_store.rs`
   rewrites it whole, atomically (tmp + rename), on every mutation. A detached
   WebUI writing the same file would clobber the core.
 - **Session origin is derivable, per-turn origin is not.** `SessionKey::web_key()`

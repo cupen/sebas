@@ -3,13 +3,13 @@
 //! Reads the `[gateway]` config (TOML + env override + validate), builds the
 //! server state, and runs the axum server with graceful shutdown. The gateway
 //! crate owns the HTTP surface; this module is the root-binary adapter that
-//! turns a `SebasError`-typed CLI call into `gateway::server::run`.
+//! turns a `SebasError`-typed CLI call into `sebas_gateway::server::run`.
 //!
 //! See openspec/specs/gateway-core/spec.md.
 
-use gateway::config::GatewayConfig;
-use gateway::debug;
-use gateway::server;
+use sebas_gateway::config::GatewayConfig;
+use sebas_gateway::debug;
+use sebas_gateway::server;
 
 use crate::error::{Result, SebasError};
 
@@ -28,7 +28,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
     let mut cfg = GatewayConfig::parse(&raw).map_err(|e| SebasError::Gateway(e.to_string()))?;
     if args.debug {
         // parse 完成后注入内置 test provider（不改变配置解析语义）。
-        // 实现在 `gateway::debug`。
+        // 实现在 `sebas_gateway::debug`。
         debug::enable_debug_test_provider(&mut cfg);
     }
     server::run(cfg)

@@ -26,15 +26,15 @@ GATEWAY_MIN=70
 
 overall=$(jq -r '.data[0].totals.lines.percent' "$json")
 router=$(jq -r '
-  [.data[].files[] | select(.filename | test("/router/src/")) | .summary.lines]
+  [.data[].files[] | select(.filename | test("/sebas-router/src/")) | .summary.lines]
   | (map(.covered) | add) as $c | (map(.count) | add) as $t
   | if $t == 0 then 100 else ($c * 100 / $t) end' "$json")
 cards=$(jq -r '
-  [.data[].files[] | select(.filename | endswith("feishu/src/cards.rs")) | .summary.lines]
+  [.data[].files[] | select(.filename | endswith("sebas-feishu/src/cards.rs")) | .summary.lines]
   | (map(.covered) | add) as $c | (map(.count) | add) as $t
   | if $t == 0 then 100 else ($c * 100 / $t) end' "$json")
 gateway=$(jq -r '
-  [.data[].files[] | select(.filename | test("/gateway/src/")) | .summary.lines]
+  [.data[].files[] | select(.filename | test("/sebas-gateway/src/")) | .summary.lines]
   | (map(.covered) | add) as $c | (map(.count) | add) as $t
   | if $t == 0 then 100 else ($c * 100 / $t) end' "$json")
 
@@ -49,9 +49,9 @@ check() { # check <name> <actual> <min>
 }
 
 check "overall" "$overall" "$OVERALL_MIN"
-check "router/" "$router" "$ROUTER_MIN"
+check "sebas-router/" "$router" "$ROUTER_MIN"
 check "cards.rs" "$cards" "$CARDS_MIN"
-check "gateway/" "$gateway" "$GATEWAY_MIN"
+check "sebas-gateway/" "$gateway" "$GATEWAY_MIN"
 
 if [ "$fail" -ne 0 ]; then
   echo "coverage gate failed (spec §4.3; overall 棘轮下限见脚本头注释)" >&2

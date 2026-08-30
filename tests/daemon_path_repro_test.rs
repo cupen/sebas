@@ -4,10 +4,10 @@
 //! the daemon-side spawn flow. (Post-ACP: the "agent" is now the claude
 //! CLI itself — fake-claude speaks its stream-json + control protocol.)
 
-use acp_claude::manager::SessionManager;
-use feishu::events::SessionKey;
-use router::router::RouterHandle;
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_feishu::events::SessionKey;
+use sebas_router::router::RouterHandle;
+use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

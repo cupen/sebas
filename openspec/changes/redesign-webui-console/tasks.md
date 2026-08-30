@@ -127,7 +127,7 @@ from this change. What remains is the styling the list needs either way.
       Markdown bodies still render raw — see 5.1.
 - [x] 8.5 Render the board in grayscale; verify each status stays identifiable
       from its label and glyph alone
-- [x] 8.6 Update `webui/tests/session_endpoints_test.rs` for the rewritten
+- [x] 8.6 Update `sebas-webui/tests/session_endpoints_test.rs` for the rewritten
       markup, asserting on data attributes rather than class names; verify
       `cargo test -p webui` passes
 - [x] 8.7 Run `cargo build` and `cargo clippy -p webui`; verify both are clean

@@ -2,11 +2,11 @@
 //! rapid texts produce exactly ONE session/new and TWO session/prompt calls
 //! (the second being the drained pending queue, joined).
 
-use acp_claude::manager::SessionManager;
-use acp_claude::session::{AcpCommand, AcpEvent};
-use feishu::events::{FeishuIn, SessionKey};
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_acp_claude::manager::SessionManager;
+use sebas_acp_claude::session::{AcpCommand, AcpEvent};
+use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,7 +101,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
         let mut rx = rx.lock().await;
         while finished < 2 {
             match rx.recv().await {
-                Some(acp_claude::session::AcpEvent::Finished { .. }) => finished += 1,
+                Some(sebas_acp_claude::session::AcpEvent::Finished { .. }) => finished += 1,
                 Some(_) => {}
                 None => break,
             }

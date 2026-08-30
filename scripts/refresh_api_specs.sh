@@ -3,7 +3,7 @@
 #
 # 用法：./scripts/refresh_api_specs.sh [--cached]
 #
-# 默认：从 GitHub 实时拉取官方源文件最新版，写入 gateway/tests/specs/：
+# 默认：从 GitHub 实时拉取官方源文件最新版，写入 sebas-gateway/tests/specs/：
 #   - openai-openapi.yaml   ← openai/openai-openapi          openapi.yaml
 #   - anthropic-api.md      ← anthropics/anthropic-sdk-typescript  api.md
 #
@@ -13,7 +13,7 @@
 # Accept: application/vnd.github.raw 返回文件原始内容（不经 base64/JSON 包裹）。
 set -euo pipefail
 
-SPECS_DIR="$(cd "$(dirname "$0")/.." && pwd)/gateway/tests/specs"
+SPECS_DIR="$(cd "$(dirname "$0")/.." && pwd)/sebas-gateway/tests/specs"
 mkdir -p "$SPECS_DIR"
 
 GH_RAW="Accept: application/vnd.github.raw"

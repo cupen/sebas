@@ -99,7 +99,7 @@ event fires between a separate snapshot call and a separate subscribe call.
 
 ### D6: The seam — `trait SessionBackend`, shaped like `AdminAdapter`
 
-`webui/src/admin.rs:41` already establishes the pattern: a trait in the WebUI
+`sebas-webui/src/admin.rs:41` already establishes the pattern: a trait in the WebUI
 crate, implemented in the binary crate, `Option`al in state, absent means degraded.
 Reuse it exactly — a second pattern for the same problem would be the worse
 outcome.
@@ -108,7 +108,7 @@ Unlike `AdminAdapter` the backend is **not** optional: there is always a backend
 and it is the backend that reports whether the core is reachable. "No backend"
 would reintroduce a silent-no-op path.
 
-`webui::run*` takes `Arc<dyn SessionBackend>` where it took `RouterHandle`.
+`sebas_webui::run*` takes `Arc<dyn SessionBackend>` where it took `RouterHandle`.
 `routes.rs`, `sse.rs`, and `server.rs` follow. `run.rs` passes the in-process
 implementation; `webui_cmd.rs` passes the socket client and stops building a
 router at all.

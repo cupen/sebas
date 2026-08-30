@@ -10,9 +10,9 @@
 
 **背景**:原链路 `sebas →(ACP/JSON-RPC)→ claude-acp-bridge →(stream-json)→ claude`,bridge 是没有语义增益的纯转码层:每会话 3 进程 + 每工具调用 1 个 hook 进程 + 1 条 unix socket;`acp-claude` + bridge ≈ 全库 1/3 代码做 1:1 转码;JSON-RPC dispatch loop 不可阻塞,带来 gate 锁 / `OwnedMutexGuard` / pump 必须 `cx.spawn` 的并发复杂度;权限链 4 进程经 broker 单 FIFO 位置配对,并行工具调用会错配;`session/load` 是死代码(bridge 声明 `load_session:false`);claude v2.1.220 envelope 变更曾穿透 bridge 导致事件静默丢失。
 
-**决策**:弃用 ACP 线协议与 bridge 进程;复用 crates.io 的 `cc-agent-sdk`(pin 精确版本,适配层 `acp-claude/src/driver.rs` 为 SDK 类型的唯一接触点);内部事件词汇表 `AcpEvent`/`AcpCommand`/`Decision` 原样保留为 router 的稳定端口;权限传输走 SDK PreToolUse hook 进程内回调(spike 实证 `can_use_tool` option 在 0.1.6 是死字段);会话恢复用 claude 原生 `resume`;不做双引擎灰度,直接替换,git revert 即回退。
+**决策**:弃用 ACP 线协议与 bridge 进程;复用 crates.io 的 `cc-agent-sdk`(pin 精确版本,适配层 `sebas-acp-claude/src/driver.rs` 为 SDK 类型的唯一接触点);内部事件词汇表 `AcpEvent`/`AcpCommand`/`Decision` 原样保留为 router 的稳定端口;权限传输走 SDK PreToolUse hook 进程内回调(spike 实证 `can_use_tool` option 在 0.1.6 是死字段);会话恢复用 claude 原生 `resume`;不做双引擎灰度,直接替换,git revert 即回退。
 
-**后果**:每会话 3→2 进程;权限关联进程内显式化;重启后真恢复对话历史;`acp-claude` crate 名称保留但只含直连 driver。
+**后果**:每会话 3→2 进程;权限关联进程显式化;重启后真恢复对话历史;`acp-claude` crate 名称保留但只含直连 driver。（2026-08-30 更新:crate 已更名 `sebas-acp-claude`,见 openspec change `add-sebas-crate-prefix`。）
 
 **原文**:`docs/superpowers/specs/2026-08-06-claude-direct-sdk-refactor-design.md` §1.1/§2(git 历史)
 
@@ -36,7 +36,7 @@
 
 **决策**:bare `/v1/*` 挂载 + 协议嗅探(Anthropic 客户端必带 `anthropic-version` header,以此仲裁碰撞路径),辅以显式前缀 `/anthropic/v1/*`、`/openai/v1/*`;**纯透传**——不做协议转换,provider 协议面与请求协议不一致时返回明确错误;model 提取靠 body 缓冲重放 + 路径参数回退;`[[gateway.keys]]` 简化移除,下游只做 Bearer/x-api-key 匹配。
 
-**后果**:单端口同时服务 `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` 两类客户端;agent 模式下 gateway 对 Claude Code 永远暴露 Anthropic 协议面(OpenAI 路径表仅服务外部直连客户端,见 `gateway/src/proto.rs` 警告)。注:per-key 限流后来在演进中回归为 token-bucket 形态,现行契约见 `openspec/specs/gateway-auth-rate-limit/`。
+**后果**:单端口同时服务 `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` 两类客户端;agent 模式下 gateway 对 Claude Code 永远暴露 Anthropic 协议面(OpenAI 路径表仅服务外部直连客户端,见 `sebas-gateway/src/proto.rs` 警告)。注:per-key 限流后来在演进中回归为 token-bucket 形态,现行契约见 `openspec/specs/gateway-auth-rate-limit/`。
 
 **原文**:`docs/superpowers/specs/2026-08-06-gateway-design.md` §4.1/§4.2(git 历史)
 
@@ -46,7 +46,7 @@
 
 **背景**:provider 数据分居两个文件——`~/.sebas/providers.json`(CRUD)与 `~/.sebas/state.json`(mode + default_provider_for_direct),各自独立 tmp+rename 原子写。「删除当前 default provider」需要两次写入,中间被杀则 mode 指向不存在的 provider,曾以 silent fallback 掩盖。
 
-**决策**:合成统一 `state.json`;新增 `router/src/state_store.rs` 负责 v0/v1/v2 迁移 + 原子保存 + repair-on-load;`providers.json` 仅在首次迁移路径 B 中创建后立即删除,后续 CRUD 全部写入统一文件;`OverlayFile` 结构删除。同时 `default_provider_for_direct` 改为 `default_selection { provider, model }`(反序列化兼容 legacy 字符串与新对象两种 schema,无 V3 升级)。
+**决策**:合成统一 `state.json`;新增 `sebas-router/src/state_store.rs` 负责 v0/v1/v2 迁移 + 原子保存 + repair-on-load;`providers.json` 仅在首次迁移路径 B 中创建后立即删除,后续 CRUD 全部写入统一文件;`OverlayFile` 结构删除。同时 `default_provider_for_direct` 改为 `default_selection { provider, model }`(反序列化兼容 legacy 字符串与新对象两种 schema,无 V3 升级)。
 
 **后果**:单文件单次原子写,半程崩溃不再产生悬挂引用;行为变更:Off + default_selection 已设 → 隐式 Direct;配置错误经 `SEBAS_PROVIDER_ERROR` 环境变量在 spawn wrapper 显式拦截,不再 silent fallback。后续 WebUI 等外部进程**不得**写 state.json(core 每 mutation 整文件原子重写)。
 
@@ -87,4 +87,4 @@ sebas-63f epic 收尾评审列出 15 项设计问题,处置结果:
 | P2 service_status 硬编码 "running" | 已被 Phase 4 ServiceManager 重构吸收——硬编码状态不复存在,状态源自监督句柄快照 |
 | P2 run_watchdog 创建两次 ControlService | 已解——现单次创建(`watchdog.rs::run_watchdog`)经 Arc 共享 |
 | P3 spawn_webui_process 过渡注释 | 已解/失效——该函数已随 ServiceManager 重构消失,模块文档保留 Phase 过渡说明(`webui_cmd.rs` 顶部) |
-| P3 webui 降级行为(无 SEBAS_CONTROL_SECRET)不记录 | 已显式化——mutation 面无 secret 返回 503 + 明确错误文案(`webui/src/routes.rs`) |
+| P3 webui 降级行为(无 SEBAS_CONTROL_SECRET)不记录 | 已显式化——mutation 面无 secret 返回 503 + 明确错误文案(`sebas-webui/src/routes.rs`) |

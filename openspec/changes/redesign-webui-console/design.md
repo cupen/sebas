@@ -13,7 +13,7 @@ See `proposal.md` — Why. Constraints that shape the approach:
 - **Status is a two-field derivation.** `SessionRow.status` is
   `active`/`spawning`/`dormant` from `MappingState`; `SessionRow.phase` is
   `CardState.status_emoji`, whose values are literally Feishu reaction
-  `emoji_type` tokens (`router/src/card_state.rs`: `Get`, `OnIt`, `DONE`,
+  `emoji_type` tokens (`sebas-router/src/card_state.rs`: `Get`, `OnIt`, `DONE`,
   `CrossMark`). The console currently prints these raw.
 - **Loopback-only, single operator.** Bound to `127.0.0.1:9797`. No
   multi-tenant, no theming, no i18n machinery. But per README the operator
@@ -270,7 +270,7 @@ this change's scope, so it goes.
 - **Template edits need a `cargo build`.** A designer iterating on CSS alone is
   fine; anyone touching structure must rebuild. → Keep as much as possible in
   `static/style.css`, and note the rebuild step in the tasks.
-- **Existing tests assert HTML fragments.** `webui/tests/session_endpoints_test.rs`
+- **Existing tests assert HTML fragments.** `sebas-webui/tests/session_endpoints_test.rs`
   may match on markup this change rewrites. → Audit and update assertions in the
   same commits; prefer asserting on data attributes over on classes so the next
   restyle doesn't break them.

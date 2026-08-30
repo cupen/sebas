@@ -1,6 +1,6 @@
 ## Why
 
-WebUI 的组织单位是飞书会话（`chat_id, thread_id`），但实际工作单位是项目。要同时推进多个项目的 agent 对话时，一张扁平会话表无法表达归属。地基其实已经铺了一半却没接上：`Mapping.project_dir` 字段存在（`router/src/state.rs:37`），`RouterHandle::web_spawn(prompt, project_dir)` 存在，但 `webui/src/routes.rs:201` 恒传 `None`；`agent.html` 那套 project-chat 界面既无路由也未注册模板。
+WebUI 的组织单位是飞书会话（`chat_id, thread_id`），但实际工作单位是项目。要同时推进多个项目的 agent 对话时，一张扁平会话表无法表达归属。地基其实已经铺了一半却没接上：`Mapping.project_dir` 字段存在（`sebas-router/src/state.rs:37`），`RouterHandle::web_spawn(prompt, project_dir)` 存在，但 `sebas-webui/src/routes.rs:201` 恒传 `None`；`agent.html` 那套 project-chat 界面既无路由也未注册模板。
 
 ## What Changes
 
@@ -30,7 +30,7 @@ WebUI 的组织单位是飞书会话（`chat_id, thread_id`），但实际工作
 
 ## Impact
 
-- `webui/src/`：新增 projects 模块（注册表读写）+ 路由；会话创建改为经 backend 传入 `project_dir`；`server.rs` 增模板注册。
+- `sebas-webui/src/`：新增 projects 模块（注册表读写）+ 路由；会话创建改为经 backend 传入 `project_dir`；`server.rs` 增模板注册。
 - `webui/templates/`：新增 workbench 模板；`agent.html` / `agent_timeline.html` 复活重写。
 - `webui/static/style.css`：workbench 分区样式。
 - 新文件 `~/.sebas/projects.json`（webui 独占）。

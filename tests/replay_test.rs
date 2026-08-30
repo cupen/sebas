@@ -4,8 +4,8 @@
 //! FS read path is skipped — the test boundary is the parse + dispatch step
 //! that both the live WS handler and the offline replay command share.
 
-use router::router::{Out, RouterHandle};
-use router::state::SessionMap;
+use sebas_router::router::{Out, RouterHandle};
+use sebas_router::state::SessionMap;
 use sebas::replay::replay_frame;
 use sebas::run::RouterEventHandler;
 use tokio::sync::mpsc::Receiver;
