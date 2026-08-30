@@ -13,6 +13,8 @@ config.toml
 .worktree/
 logs/
 .codebase-memory/
+# sebas 本地运行时状态（cookies/downloads/usage jsonl 等）
+/state/
 *.xml
 sebas
 
