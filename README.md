@@ -337,3 +337,39 @@ MVP / 持续开发中。核心链路已贯通：飞书 WebSocket 长连接 → �
 4. 发 `/new`；确认新会话创建
 5. 发 `/sessions`；确认两个会话可见
 6. 重启 sebas，在同一会话发消息；确认会话恢复
+---
+
+## 前端联调（Vite 热更新 + Rust 后端）
+
+开发 WebUI 前端时不必每次 `cargo build`——Vite dev server 提供秒级热更新，
+后端表面（JSON API / WebSocket / 健康检查 / Gateway BFF）由代理转发到本机
+Rust 进程，浏览器全程同源，与生产嵌入形态路径一致。
+
+### 启动
+
+```bash
+# 终端 1：Rust 后端（任何形态都可以——裸跑、watchdog 均可）
+cargo run -- release 二进制或 ./target/release/sebas run --config <你的配置> --webui
+# WebUI API 默认监听 127.0.0.1:9797
+
+# 终端 2：Vite dev server（前端源码热更新）
+cd sebas-webui/frontend && ../../.tooling/pnpm dev
+# 输出 Local: http://localhost:5173/（被占用时自动 +1，如 5174）
+```
+
+浏览器打开 Vite 输出的地址即可。`sebas-webui/frontend/vite.config.ts` 已配置代理：
+`/api`、`/gateway`、`/ws`（WebSocket）、`/health` → `127.0.0.1:9797`。
+前端代码全部使用相对路径请求，因此无需任何环境变量或代码改动。
+
+### 注意事项
+
+- **端口冲突**：5173 是 Vite 默认端口，被其他项目占用时会自动顺延到
+  5174/5175…，以启动日志打印的为准；后端端口固定 9797 不受影响。
+- **改前端即时生效**（HMR）；改 Rust 代码需要重新编译重启后端进程，前端无需动。
+- **WebSocket 实时事件**走代理 `ws: true` 透传，`session.created/updated/removed`
+  事件链路与生产形态一致；断线由前端自动重连。
+- **Gateway BFF**（`/gateway/api/*`，POST/PUT/DELETE）：后端守卫只放行 loopback
+  origin，Vite dev origin 同属 127.0.0.1，联调时行为与生产一致（无
+  `SEBAS_CONTROL_SECRET` 时返回 503）。
+- **测试**：`../../.tooling/pnpm test`（vitest，不依赖后端）；联调中的端到端
+  验证用浏览器或 curl 直接打 Vite 地址即可。
