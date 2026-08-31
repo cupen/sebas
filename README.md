@@ -127,6 +127,29 @@ cargo build --release
 ./target/release/sebas run --config ./config.toml
 ```
 
+### 以 systemd 服务运行（watchdog）
+
+`service --install` 写一个 systemd 系统 unit，其 `ExecStart` 运行
+**watchdog**（`<data_dir>/bin/sebas watchdog --config …`），而非裸 core：
+systemd 只监督 watchdog 一个进程，core/gateway/webui、控制面（`sebas ctl`）、
+自升级都由 watchdog 驱动。该 unit 以 `--user` 指定的非 root 账户运行，
+二进制平台到 `<data_dir>/bin/sebas`（`data_dir` 取配置
+`[watchdog.storage].data_dir`，未设则按该账户 home 推导）；`sebas update`
+原地替换它，因此升级后重启机器即运行最新版本。
+
+```bash
+# 需要一个已存在的非 root 账户（如 sebas）与一个绝对路径的 config.toml
+sudo sebas service --install --user sebas --config /etc/sebas/config.toml --auto-start
+
+# 查看状态 / 日志 / 控制面
+systemctl status sebas
+journalctl -u sebas
+sebas ctl status --secret <secret>
+```
+
+从旧版（unit 直接跑 `sebas run`）迁移：`sudo sebas service --install --force
+--user <user> --config <abs-config> --auto-start` 即可重写为 watchdog 语义并重启生效。
+
 ### Docker 运行
 
 #### 使用环境变量启动（推荐）

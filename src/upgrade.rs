@@ -67,16 +67,29 @@ pub fn repo_full_name() -> &'static str {
     "cupen/sebas"
 }
 
-/// 获取数据目录（`data_dir` 或 XDG 默认）
+/// 获取数据目录（`data_dir` 或 XDG 默认）。
+///
+/// 运行时的 watchdog `/`installer 用 `dirs::data_dir()`（即当前用户 home）。
+/// `service --install` 需要按目标 `--user` 解析，走 [`data_dir_for_user`]。
 pub fn data_dir(cfg: &WatchdogConfig) -> PathBuf {
-    let d = if cfg.storage.data_dir.is_empty() {
-        dirs::data_dir()
+    data_dir_for_user(cfg.storage.data_dir.as_str(), dirs::data_dir())
+}
+
+/// 按显式 `data_dir` 配置 + 一个「默认 home」解析数据目录。
+///
+/// `default_home` 在 `service --install` 时传 `--user` 的 home（而非 installer
+/// root 的），确保服务自升级写入的目录归服务用户所有。
+pub fn data_dir_for_user(
+    data_dir_cfg: &str,
+    default_home: Option<PathBuf>,
+) -> PathBuf {
+    if data_dir_cfg.is_empty() {
+        default_home
             .unwrap_or_else(|| PathBuf::from("~/.local/share"))
             .join("sebas")
     } else {
-        expand_tilde(&cfg.storage.data_dir)
-    };
-    d
+        expand_tilde(data_dir_cfg)
+    }
 }
 
 /// 尝试获取升级锁（文件锁 + 进程锁）
@@ -538,13 +551,40 @@ fn make_relative(base: &Path, target: &Path) -> PathBuf {
     result
 }
 
-fn expand_tilde(p: &str) -> PathBuf {
+pub fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
     {
         return home.join(rest);
     }
     PathBuf::from(p)
+}
+
+/// 把当前二进制 seed 到固定路径 `<data_dir>/bin/sebas`。
+///
+/// `service --install` 用它将安装时的 `current_exe()` 落盘为稳定路径；此后
+/// `install_version` 的原地替换（见 `update`）即可让该路径始终指向最新版本，
+/// systemd 重启/机器重启都一致。bin 目录可选传入覆盖名（默认 `sebas`）。
+pub fn seed_stable_binary(binary: &Path, data_dir: &Path) -> Result<PathBuf> {
+    let bin_dir = data_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| SebasError::Upgrade(format!("创建固定目录失败: {e}")))?;
+
+    let dest = bin_dir.join("sebas");
+    let tmp = bin_dir.join(format!(".sebas-{}.tmp", std::process::id()));
+    // 先复制到临时文件再 rename，避免覆盖运行中的二进制时半写。
+    std::fs::copy(binary, &tmp)
+        .map_err(|e| SebasError::Upgrade(format!("复制固定二进制失败: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| SebasError::Upgrade(format!("设置固定二进制权限失败: {e}")))?;
+    }
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| SebasError::Upgrade(format!("落盘固定二进制失败: {e}")))?;
+
+    Ok(dest)
 }
 
 #[cfg(test)]
@@ -689,6 +729,47 @@ mod tests {
         let expanded = expand_tilde("~/test");
         assert!(!expanded.starts_with("~"), "~ 应该被展开");
         assert!(expanded.ends_with("test"), "尾部路径应保留");
+    }
+
+    #[test]
+    fn test_seed_stable_binary() {
+        let tmp = std::env::temp_dir().join("sebas-test-seed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let src = tmp.join("src-sebas");
+        fs::write(&src, b"binary bytes").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let data_dir = tmp.join("data");
+        let dest = seed_stable_binary(&src, &data_dir).unwrap();
+        assert_eq!(dest, data_dir.join("bin").join("sebas"));
+        assert!(dest.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"binary bytes");
+
+        // 幂等：再次 seed 覆盖成功
+        seed_stable_binary(&src, &data_dir).unwrap();
+        assert!(dest.exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_data_dir_for_user() {
+        let dir = data_dir_for_user("", Some(PathBuf::from("/home/svc")));
+        assert_eq!(dir, PathBuf::from("/home/svc/sebas"));
+
+        // 空默认 home 时退回占位
+        let dir2 = data_dir_for_user("", None);
+        assert!(dir2.ends_with("sebas"));
+
+        // 显式 data_dir 优先
+        let dir3 = data_dir_for_user("/var/lib/sebas", Some(PathBuf::from("/home/svc")));
+        assert_eq!(dir3, PathBuf::from("/var/lib/sebas"));
     }
 
     #[test]

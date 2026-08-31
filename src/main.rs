@@ -376,6 +376,7 @@ impl From<ServiceArgs> for sebas::service::Args {
             auto_start: a.auto_start,
             force: a.force,
             config: a.config,
+            log_level: a.log_level.unwrap_or_default(),
         }
     }
 }
@@ -628,6 +629,27 @@ mod tests {
             panic!("expected Control subcommand");
         };
         assert!(matches!(args.cmd, ControlCmd::RestartCore));
+    }
+
+    #[test]
+    fn service_install_accepts_log_level() {
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "service",
+            "--install",
+            "--user",
+            "cupen",
+            "--config",
+            "/etc/sebas.toml",
+            "--log-level",
+            "debug",
+        ])
+        .expect("`sebas service --install --log-level debug` must parse");
+        let Cmd::Service(args) = cli.cmd else {
+            panic!("expected Service subcommand");
+        };
+        let svc: sebas::service::Args = args.into();
+        assert_eq!(svc.log_level, "debug");
     }
 
     #[test]

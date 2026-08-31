@@ -11,10 +11,17 @@
 //! `/etc/systemd/system` + system-scope `systemctl`), but the daemon process
 //! never runs as root.
 //!
+//! The unit runs the **watchdog** entrypoint (`<stable-binary> watchdog
+//! --config <config>`), not the bare core: systemd supervises exactly one
+//! process and the watchdog supervises core/gateway/webui, owns the control
+//! socket + `services.json` desired-state, and performs self-upgrade. The
+//! stable binary lives at `<data_dir>/bin/sebas` (seeded at install, replaced
+//! in place by `sebas update`), so a machine reboot runs the latest version.
+//!
 //! Exit codes (from the brief):
 //!   2 = `--install`/`--uninstall` action missing or both given
 //!   3 = unit file already exists at `unit_path()` (and `!force`)
-//!   4 = EUID/`--user` conflict (not root, or `--user` empty/`root`)
+//!   4 = EUID/`--user` conflict (not root, or `--user` empty/root/nonexistent)
 //!   5 = `--config` path missing or not absolute
 //!   6 = unsupported platform (macOS)
 
@@ -43,21 +50,51 @@ pub struct Args {
     pub force: bool,
     /// Path to the sebas config.toml to bake into ExecStart. Must be absolute.
     pub config: String,
+    /// Bake a specific `RUST_LOG` value into the unit instead of inheriting it.
+    /// Empty means "inherit from the installing env, fall back to info".
+    pub log_level: String,
 }
 
 /// Inputs to the pure renderer. Held by reference so tests can pass
 /// `Path::new("…")` literals without allocation.
 pub struct UnitInputs<'a> {
+    /// Stable binary path (seeded at install). Rendered into `ExecStart`.
     pub binary_abs: &'a Path,
     pub config_abs: &'a Path,
     /// The OS user the service runs as. Rendered into both `User=` and
-    /// `Group=`; the validators refuse `root`.
+    /// `Group=`; the validators refuse `root`/empty/nonexistent.
     pub user: &'a str,
     pub log_level: &'a str,
 }
 
 const UNIT_NAME: &str = "sebas.service";
 const DESCRIPTION: &str = "sebas — bridge Feishu ↔ Claude Code via ACP";
+
+/// systemd escapes a single command word (`ExecStart` argument) so that
+/// spaces/special chars stay one token. Mirrors systemd's quoting rule: wrap
+/// the shell-escaped value in double quotes; `systemd` unquotes it.
+fn systemd_escape(arg: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    out.push('"');
+    for c in arg.chars() {
+        // systemd's double-quoted tokens treat `"` and `\` specially.
+        if c == '"' {
+            // split the quote (shell-style continuation isn't needed here);
+            // systemd does not support `\"` inside double quotes, so we drop
+            // the risk by replacing with a single quote word-boundary via
+            // reverting to shell escaping — a config path with `"` is not
+            // expressible; reject it earlier. For now, escape defensively.
+            write!(out, "\\\"").ok();
+        } else if c == '\\' {
+            write!(out, "\\\\").ok();
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('"');
+    out
+}
 
 /// Render the full systemd unit file text. Pure: no FS, no system calls.
 /// The unit tests in this module are the contract.
@@ -78,14 +115,24 @@ pub fn render_unit(inputs: UnitInputs<'_>) -> String {
     s.push_str(&format!("User={}\n", inputs.user));
     s.push_str(&format!("Group={}\n", inputs.user));
     s.push_str(&format!("Environment=RUST_LOG={}\n", inputs.log_level));
+    // The watchdog entrypoint: systemd supervises one process; watchdog
+    // supervises core/gateway/webui + self-upgrade + control plane.
     s.push_str(&format!(
-        "ExecStart={} {} --config {}\n",
-        inputs.binary_abs.display(),
-        crate::CORE_SUBCOMMAND,
-        inputs.config_abs.display(),
+        "ExecStart={} watchdog --config {}\n",
+        systemd_escape(&inputs.binary_abs.display().to_string()),
+        systemd_escape(&inputs.config_abs.display().to_string()),
     ));
     s.push_str("Restart=on-failure\n");
     s.push_str("RestartSec=5\n");
+
+    // Hardening. `ProtectSystem=full` (not `strict`): the watchdog must be
+    // able to replace its own binary at `data_dir/bin` on self-upgrade, but
+    // `/usr,/boot,/etc` stay read-only. `full` leaves `/home` and the data
+    // dir writable while keeping system dirs read-only.
+    s.push_str("NoNewPrivileges=true\n");
+    s.push_str("ProtectSystem=full\n");
+    s.push_str("ProtectHome=read-only\n");
+    s.push_str("PrivateTmp=true\n");
     s.push('\n');
 
     // [Install]
@@ -160,7 +207,9 @@ fn validate_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validate the install-time `--user`: never run the sebas daemon as root.
+/// Validate the install-time `--user`: never run the sebas daemon as root,
+/// and the account must actually exist (the daemon drops to it at start via
+/// `User=`/`Group=`, so a typo'd account would fail every boot).
 fn validate_user(user: &str) -> anyhow::Result<()> {
     if user.is_empty() || user == "root" {
         return Err(exit_err(
@@ -168,7 +217,68 @@ fn validate_user(user: &str) -> anyhow::Result<()> {
             "--user must name a non-root account to run the service as",
         ));
     }
+    if !user_exists(user) {
+        return Err(exit_err(
+            4,
+            format!(
+                "--user {user} does not exist on this system; create it first"
+            ),
+        ));
+    }
     Ok(())
+}
+
+/// Does a POSIX account with this name exist? Uses `libc::getpwnam` (no child
+/// process), matching the existing `libc::geteuid` dependency.
+fn user_exists(user: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let name = match CString::new(user) {
+            Ok(n) => n,
+            Err(_) => return false, // embedded NUL: never a valid account
+        };
+        // SAFETY: `getpwnam` returns a pointer to static storage or NULL; we
+        // only test for NULL and never deref the result beyond reading pw_dir.
+        unsafe { !libc::getpwnam(name.as_ptr()).is_null() }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = user;
+        false
+    }
+}
+
+/// Home directory of a POSIX account (from `getpwnam().pw_dir`), used to
+/// locate the default data dir when the config has no explicit `data_dir`.
+/// Returns `None` if the account doesn't exist or has no home.
+fn user_home(user: &str) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let name = CString::new(user).ok()?;
+        // SAFETY: `getpwnam` returns a pointer to static storage we must not
+        // free; we copy the pw_dir out immediately before any other call.
+        let pw = unsafe { libc::getpwnam(name.as_ptr()) };
+        if pw.is_null() {
+            return None;
+        }
+        let pw = unsafe { &*pw };
+        if pw.pw_dir.is_null() {
+            return None;
+        }
+        let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) }.to_string_lossy();
+        if dir.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(dir.to_string()))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = user;
+        None
+    }
 }
 
 /// Validate an install-time `--config` path (absolute + exists). Exit 5.
@@ -211,6 +321,45 @@ pub async fn run_install(args: Args) -> anyhow::Result<()> {
     let config_path = validate_config(&args.config)?;
     let binary_abs = binary_abs()?;
 
+    // Resolve the data dir from the config's [watchdog.storage].data_dir; when
+    // unset, use the service user's home (NOT the installer's root home) so the
+    // daemon can self-upgrade a data-dir-owned binary without root.
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("read config {}", config_path.display()))?;
+    let cfg = crate::config::Config::parse(&raw).map_err(|e| anyhow!("parse config: {e}"))?;
+    let data_dir = crate::upgrade::data_dir_for_user(
+        cfg.watchdog.storage.data_dir.as_str(),
+        user_home(&args.user),
+    );
+
+    // Seed the stable binary at <data_dir>/bin/sebas. `sebas update` replaces
+    // this in place, so a machine reboot runs the newest installed version.
+    let stable_bin = crate::upgrade::seed_stable_binary(&binary_abs, &data_dir)?;
+    info!(
+        stable = %stable_bin.display(),
+        "seeded stable binary"
+    );
+
+    // Best-effort PATH convenience symlink. Not an error if it can't be
+    // created (e.g. /usr/local/bin not writable / missing / on a restricted FS).
+    #[cfg(unix)]
+    {
+        let link = PathBuf::from("/usr/local/bin/sebas");
+        if let Some(parent) = link.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&stable_bin, &link) {
+            if link.exists() {
+                let _ = std::fs::remove_file(&link);
+                if std::os::unix::fs::symlink(&stable_bin, &link).is_err() {
+                    warn!(path = %link.display(), "could not (re)create CLI symlink");
+                }
+            } else {
+                warn!(path = %link.display(), "could not create CLI symlink: {e}");
+            }
+        }
+    }
+
     let path = unit_path();
     if path.exists() && !args.force {
         return Err(exit_err(
@@ -227,9 +376,15 @@ pub async fn run_install(args: Args) -> anyhow::Result<()> {
             .with_context(|| format!("create_dir_all({})", parent.display()))?;
     }
 
-    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+    // --log-level overrides the inherited RUST_LOG; empty falls back to the
+    // installing env, then `info`.
+    let log_level = if !args.log_level.is_empty() {
+        args.log_level.clone()
+    } else {
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
+    };
     let body = render_unit(UnitInputs {
-        binary_abs: &binary_abs,
+        binary_abs: &stable_bin,
         config_abs: &config_path,
         user: &args.user,
         log_level: &log_level,
@@ -243,7 +398,15 @@ pub async fn run_install(args: Args) -> anyhow::Result<()> {
         run_systemctl(&["enable", "--now", UNIT_NAME])?;
     }
 
+    // Idempotent re-install: if the unit is already active after reloading,
+    // restart it so the new binary/config take effect deterministically.
+    if is_unit_active() {
+        run_systemctl(&["restart", UNIT_NAME])?;
+        info!("restarted {UNIT_NAME}");
+    }
+
     println!("Installed {} to {}", UNIT_NAME, path.display());
+    println!("  binary: {}", stable_bin.display());
     if !args.auto_start {
         println!("Start it with:");
         println!("  systemctl enable --now {UNIT_NAME}");
@@ -251,6 +414,19 @@ pub async fn run_install(args: Args) -> anyhow::Result<()> {
     println!("Inspect logs with: journalctl -u {UNIT_NAME}");
 
     Ok(())
+}
+
+/// Is the unit currently active (`systemctl is-active` == "active")? Returns
+/// false on any error (missing systemctl, inactive unit, transient failure) — a
+/// conservative default so install never restarts a not-running service.
+fn is_unit_active() -> bool {
+    let Ok(out) = Command::new("systemctl")
+        .args(["is-active", UNIT_NAME])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).trim() == "active"
 }
 
 /// Run the `--uninstall` flow. If the unit file is absent, report and exit
@@ -318,7 +494,7 @@ mod tests {
         let s = render_unit(std_inputs("cupen"));
         assert!(s.contains("[Unit]"));
         assert!(s.contains("Description="));
-        assert!(s.contains("ExecStart=/usr/local/bin/sebas run --config /home/u/cfg.toml"));
+        assert!(s.contains("ExecStart=\"/usr/local/bin/sebas\" watchdog --config \"/home/u/cfg.toml\""));
         assert!(s.contains("Environment=RUST_LOG=info"));
         assert!(s.contains("Restart=on-failure"));
         assert!(s.contains("RestartSec=5"));
@@ -334,37 +510,73 @@ mod tests {
     }
 
     #[test]
+    fn unit_runs_watchdog_not_core() {
+        let s = render_unit(std_inputs("cupen"));
+        assert!(s.contains("watchdog --config"), "ExecStart must run watchdog");
+        assert!(!s.contains(" run --config"), "must not run the bare core");
+    }
+
+    #[test]
+    fn unit_hardening_present_but_no_strict() {
+        let s = render_unit(std_inputs("cupen"));
+        assert!(s.contains("NoNewPrivileges=true"));
+        assert!(s.contains("ProtectSystem=full"));
+        assert!(s.contains("ProtectHome=read-only"));
+        assert!(s.contains("PrivateTmp=true"));
+        assert!(!s.contains("ProtectSystem=strict"), "self-upgrade needs /data writable");
+    }
+
+    #[test]
+    fn unit_escapes_whitespace_paths() {
+        let inputs = UnitInputs {
+            binary_abs: Path::new("/opt/my sebas/bin/sebas"),
+            config_abs: Path::new("/etc/sebas cfg/sebas.toml"),
+            user: "cupen",
+            log_level: "info",
+        };
+        let s = render_unit(inputs);
+        // Both args wrapped in a single quoted token.
+        assert!(s.contains("ExecStart=\"/opt/my sebas/bin/sebas\" watchdog --config \"/etc/sebas cfg/sebas.toml\""));
+    }
+
+    #[test]
     fn unit_idempotent() {
         let a = render_unit(std_inputs("cupen"));
         let b = render_unit(std_inputs("cupen"));
         assert_eq!(a, b, "render must be deterministic");
     }
 
-    #[test]
-    fn validate_rejects_root_user() {
-        let args = Args {
+    fn args_with(user: &str) -> Args {
+        Args {
             install: true,
             uninstall: false,
-            user: "root".into(),
+            user: user.into(),
             auto_start: false,
             force: false,
             config: "/etc/sebas.toml".into(),
-        };
+            log_level: String::new(),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_root_user() {
+        let args = args_with("root");
         let err = validate_user(&args.user).unwrap_err();
         assert_eq!(exit_code_of(&err), Some(4));
     }
 
     #[test]
     fn validate_rejects_empty_user() {
-        let args = Args {
-            install: true,
-            uninstall: false,
-            user: String::new(),
-            auto_start: false,
-            force: false,
-            config: "/etc/sebas.toml".into(),
-        };
+        let args = args_with("");
         let err = validate_user(&args.user).unwrap_err();
+        assert_eq!(exit_code_of(&err), Some(4));
+    }
+
+    #[test]
+    fn validate_rejects_nonexistent_user() {
+        // A username that almost certainly doesn't exist on this box.
+        let nonce = format!("sebas_nosuch_{}", std::process::id());
+        let err = validate_user(&nonce).unwrap_err();
         assert_eq!(exit_code_of(&err), Some(4));
     }
 }

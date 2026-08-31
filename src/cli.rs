@@ -109,6 +109,11 @@ pub struct ServiceArgs {
     /// Path to the sebas config.toml to bake into ExecStart. Must be absolute.
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
+
+    /// Bake a specific RUST_LOG value into the unit. When omitted, the installing
+    /// environment's RUST_LOG is inherited (falling back to info). Install-only.
+    #[arg(long)]
+    pub log_level: Option<String>,
 }
 
 #[derive(Parser)]
