@@ -3,10 +3,11 @@
 > 日期：2026-08-29
 > 状态：调研 + 设计蓝图（纯文档，未实现；对应 openspec change `add-agent-core-architecture`，`skip_specs`——行为规格将由后续实现 change 从本文派生）
 > 作者：DeepSeek Harness（与 cupen 协作）
+> 修订 2026-09-01：crate 定名 **sebas-agent**（沿 sebas-* crate 惯例，"agent-core" 保留为能力域名）；D3 修订为 **gateway 可选**——agent 可直连 provider（见 §6 / §7.2 / §10）。
 
 ## 0. 摘要
 
-sebas 目前只是 agent 的"桥"：`acp-claude` 拉起外部 Claude Code 子进程，agent loop、工具契约、上下文管理都在别人进程里。本文回答两个问题：**专业 coding agent 由什么构成**（Part I，拆解 Claude Code / Codex / DeepSeek-Harness）——答案是七条共性不变量 + 九条可验收 checklist（§5.3）；以及 **sebas 自己的 agent 内核长什么样**（Part II）——新 crate `agent-core`：in-process 事件驱动循环（§7）+ 六件套工具（§8）+ gateway Anthropic 协议通道（D3）+ webui 优先的会话面（§9），与 `acp-claude` 并存不替换（§10），按四阶段演进（§11）。Phase 1 的验收基准就是 §5.3 的 checklist。
+sebas 目前只是 agent 的"桥"：`acp-claude` 拉起外部 Claude Code 子进程，agent loop、工具契约、上下文管理都在别人进程里。本文回答两个问题：**专业 coding agent 由什么构成**（Part I，拆解 Claude Code / Codex / DeepSeek-Harness）——答案是七条共性不变量 + 九条可验收 checklist（§5.3）；以及 **sebas 自己的 agent 内核长什么样**（Part II）——新 crate `sebas-agent`（能力域名 agent-core）：in-process 事件驱动循环（§7）+ 六件套工具（§8）+ Anthropic 协议 LLM 通道（D3，直连 provider 或经可选 gateway）+ webui 优先的会话面（§9），与 `acp-claude` 并存不替换（§10），按四阶段演进（§11）。Phase 1 的验收基准就是 §5.3 的 checklist。
 
 ---
 
@@ -133,7 +134,7 @@ DeepSeek-Harness 的独有价值是**策略沙箱 + 显式升级**这对组合�
 |---|---|---|---|
 | D1 | in-process 事件驱动循环，不做第二个子进程桥 | §7 | 1 |
 | D2 | 统一 Tool trait + JSON Schema 参数；首批六件套 | §8 | 1 |
-| D3 | LLM 通道 = `gateway`，Anthropic Messages 协议优先 | §7.2 / §10 | 1 |
+| D3 | Anthropic Messages 协议优先；端点可配置——**直连 provider（默认）或经可选 gateway**（2026-09-01 修订：gateway 非必经层） | §7.2 / §10 | 1 |
 | D4 | webui 优先，经 SessionBackend 形状的会话 API + SSE | §9 | 1 |
 | D5 | 调研方法：机制拆解表 + adopt/adapt/skip 判定 | Part I 全部 | —（已完成） |
 | D6 | 单文档 ADR 风格（本文） | —（已体现） | — |
@@ -167,7 +168,7 @@ DeepSeek-Harness 的独有价值是**策略沙箱 + 显式升级**这对组合�
 
 1. webui 提交 prompt → 会话离开 Idle。
 2. 构造 messages：**system = agent-core 基础提示词 + 项目 AGENTS.md / CLAUDE.md**（C6，机制同 CC-7/CX-5）+ 历史消息 + 本轮用户输入。
-3. HTTP POST `gateway` 的 `/v1/messages`（Anthropic 协议，`stream=true`）。依据：`gateway/src/proto.rs` 的 `WireProtocol::Anthropic` 协议面及其注释——"sebas 自身走 Gateway 模式时，agent 只发 Anthropic 协议"；鉴权经 gateway `auth_token`（`gateway/src/auth.rs`）。**这就是 D3**：agent-core 只认识 Anthropic 协议与 gateway 地址，不认识任何具体 provider（D3 拒绝直连 SDK：路由/用量已由 `gateway/src/routing.rs`、`gateway/src/usage.rs` 承担）。
+3. HTTP POST `{llm_endpoint}/v1/messages`（Anthropic 协议，`stream=true`）。**端点可配置（D3 修订，2026-09-01）**：默认直连 provider——base_url 与 api key 直接来自 provider 数据（Anthropic API 或任意 Anthropic 兼容上游），不需要跑 gateway；也可指向本地 gateway（`WireProtocol::Anthropic` 面 + `auth_token`，见 `gateway/src/proto.rs`）以换取多 provider 模型名路由与用量计量。两种端点对循环是同一个 wire protocol，区别只是端点与凭证配置。仍拒绝内嵌任何 provider SDK（路由/用量逻辑属于 gateway 或宿主，不属于内核）。
 4. 消费 SSE 增量（`gateway/src/sse.rs` 已有 SSE 处理先例）：`content_block_delta` 按 block 类型分流——text → `TextDelta`、thinking → `ThinkingDelta`——边收边发事件（C2）。
 5. `stop_reason = tool_use` → 进入 ExecutingTools：按序执行每个 `tool_use` 块，逐个发 `ToolStart{tool_name, args}` → （可选 `ToolProgress`）→ `ToolEnd{result}`。
 6. 全部工具结果以 `tool_result` 块回填为下一条 user 消息 → 回到 AwaitingModel。
@@ -269,10 +270,10 @@ trait AgentSessionBackend {
 
 ## 10. 模块边界与 crate 布局（D7 展开）
 
-新 crate **`agent-core`**（workspace member），四模块：
+新 crate **`sebas-agent`**（workspace member；"agent-core" 保留为能力域名），四模块：
 
 ```
-agent-core/
+sebas-agent/
 ├── loop/      # §7 状态机：AwaitingModel ⇄ ExecutingTools、取消、预算
 ├── llm/       # LlmClient trait + GatewayClient（HTTP 打本地 gateway，Anthropic 协议）
 │              #                  + FakeLlmClient（集成测试用——tests/ 已有 fake-claude 桩先例）
@@ -283,7 +284,7 @@ agent-core/
 依赖纪律（D7 的技术含义）：
 
 - `agent-core` 依赖：tokio、reqwest、serde/serde_json、async-trait。**不依赖** `feishu` / `router` / `acp-claude` / `webui`。
-- 对 `gateway` 是 **HTTP 依赖不是 crate 依赖**：`GatewayClient` 只需要 base_url + auth_token + Anthropic 协议（D3）。gateway 独立进程运行（`sebas gateway`，已有 `src/gateway_cmd.rs`），或随主服务 `--gateway` 启动。
+- LLM 端点是**可配置的 HTTP 端点，不是 crate 依赖**（D3 修订）：默认**直连 provider**——直接使用 provider 数据（base_url / 协议 / api key）；**gateway 是可选路径**（`sebas gateway`，`src/gateway_cmd.rs`）——需要多 provider 模型名路由、用量计量时才启用。两者均为 Anthropic 协议 HTTP 端点。crate 名定 **`sebas-agent`**（沿 sebas-* 惯例；本文原暂定名 `agent-core` 保留为能力域名）。
 - **不动**：`acp-claude`（原样并存）、`feishu`、router 命令面、gateway 本体。
 - 后端选择发生在会话创建处：webui 创建会话时指定执行后端（acp-claude 子进程 vs agent-core）；Phase 1 用配置项表达即可，复用 `Mapping` 会话映射不动。
 
