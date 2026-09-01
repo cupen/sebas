@@ -12,8 +12,10 @@ pub mod gateway_client;
 pub mod models;
 pub mod routes;
 pub mod server;
+pub mod session_backend;
 pub mod sse;
 
 #[doc(hidden)]
 pub use server::{WebUiState, init_templates_for_tests};
+pub use session_backend::{Reachability, SessionBackend, SessionRejection};
 pub use server::{build_router, run, run_with_admin_adapter};

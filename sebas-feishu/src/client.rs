@@ -5,7 +5,7 @@ use crate::messages::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
@@ -22,6 +22,12 @@ pub struct FeishuToken {
 #[derive(Clone)]
 pub struct FeishuClient {
     pub config: FeishuConfig,
+    /// headless 模式（sebas-2ty 无飞书部署，openspec/changes/
+    /// add-core-session-channel）：不接入飞书，但会话生命周期（spawn/
+    /// pump/FSM）必须与有飞书模式完全一致。所有出站 API 调用变为
+    /// 成功的 no-op（send_card 返回占位 message_id，react 返回占位
+    /// reaction_id），调用方照常记录，后续 update/react 同样 no-op。
+    headless: bool,
 }
 
 /// 飞书 API 业务错误（HTTP 成功但 `code != 0`）。类型化以便调用方区分
@@ -50,7 +56,23 @@ impl std::error::Error for FeishuApiError {}
 
 impl FeishuClient {
     pub fn new(config: FeishuConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            headless: false,
+        }
+    }
+
+    /// headless 客户端：飞书未启用时的出站替身。所有发送类调用成功且
+    /// 无网络请求（详见 struct 字段注释）。
+    pub fn new_headless() -> Self {
+        Self {
+            config: FeishuConfig::default(),
+            headless: true,
+        }
+    }
+
+    pub fn is_headless(&self) -> bool {
+        self.headless
     }
 }
 
@@ -264,6 +286,10 @@ impl FeishuClient {
         root_id: Option<&str>,
         thread_id: Option<&str>,
     ) -> anyhow::Result<String> {
+        if self.headless {
+            // 占位 message_id：可被 update_card/react 的 no-op 安全引用。
+            return Ok("headless-noop-msg".into());
+        }
         let mut url =
             "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id".to_string();
         if let Some(tid) = thread_id {
@@ -291,6 +317,9 @@ impl FeishuClient {
         key: &SessionKey,
         text: &str,
     ) -> anyhow::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
         let req = SendTextRequest::new(&key.chat_id, ReceiveIdType::ChatId, text);
         let body = serde_json::to_value(&req)?;
@@ -305,6 +334,9 @@ impl FeishuClient {
         message_id: &str,
         card_json: serde_json::Value,
     ) -> anyhow::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}");
         let req = UpdateCardRequest {
             content: card_json.to_string(),
@@ -323,6 +355,9 @@ impl FeishuClient {
         message_id: &str,
         emoji_type: &str,
     ) -> anyhow::Result<String> {
+        if self.headless {
+            return Ok("headless-noop-reaction".into());
+        }
         let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions");
         let req = ReactRequest::new(emoji_type);
         let body = serde_json::to_value(&req)?;
@@ -340,6 +375,9 @@ impl FeishuClient {
         message_id: &str,
         reaction_id: &str,
     ) -> anyhow::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         let url = format!(
             "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions/{reaction_id}"
         );

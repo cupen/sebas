@@ -1,20 +1,19 @@
-//! HTTP integration tests for the session-manager endpoints added to the
-//! WebUI dashboard: `/sessions/partial`, `POST /api/sessions/{key}/close`,
-//! `POST /api/sessions/{key}/switch`. Uses axum's `oneshot` to drive the
-//! router in-process — no live listener required.
+//! HTTP integration tests for the session endpoints, driven entirely through
+//! the `SessionBackend` seam (task 3.5): no `RouterHandle`, no `SessionManager`,
+//! no child process — the fake backend supplies the session set. Uses axum's
+//! `oneshot` (no live listener required).
 
-use sebas_acp::claude::manager::SessionManager;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use sebas_feishu::events::SessionKey;
 use http_body_util::BodyExt;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::{Mapping, SessionMap};
-use std::sync::Arc;
-use std::time::Duration;
-use tower::ServiceExt;
-use sebas_webui::models::GatewayInfo;
+use sebas_feishu::events::SessionKey;
+use sebas_router::SessionInfo;
+use sebas_webui::session_backend::{
+    FakeBackend, Reachability, SessionBackend,
+};
 use sebas_webui::{build_router, init_templates_for_tests};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 fn key(id: &str) -> SessionKey {
     SessionKey {
@@ -32,25 +31,39 @@ fn encode(key: &SessionKey) -> String {
     urlencoding::encode(&raw).into_owned()
 }
 
-/// Build a RouterHandle preloaded with three sessions: one Active (s1),
-/// one Dormant (s2), one Spawning placeholder (s3). Returns the handle
-/// and the axum app wired against a stub `SessionManager`.
-async fn fixture() -> (RouterHandle, axum::Router) {
-    let map = SessionMap::new();
-    let k1 = key("a");
-    let k2 = key("b");
-    let k3 = key("c");
-    map.insert(k1.clone(), Mapping::active("s1")).await.unwrap();
-    map.insert(k2.clone(), Mapping::dormant("s2", 1))
-        .await
-        .unwrap();
-    map.insert(k3.clone(), Mapping::spawning()).await.unwrap();
+fn info(id: &str, status: &str, session_id: Option<&str>) -> SessionInfo {
+    SessionInfo {
+        chat_id: format!("oc_{id}"),
+        thread_id: None,
+        session_id: session_id.map(str::to_string),
+        status: status.to_string(),
+        phase: None,
+        user_prompt: None,
+        last_active_unix: 0,
+        project_dir: None,
+    }
+}
 
-    let (router, _rx) = RouterHandle::new(map);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(5)));
+/// Build a fake backend preloaded with three sessions: one Active (s1),
+/// one Dormant (s2), one Spawning placeholder (s3) — plus the app wired
+/// against it.
+async fn fixture() -> (Arc<FakeBackend>, axum::Router) {
+    let backend = Arc::new(FakeBackend::new());
+    backend
+        .set_sessions(vec![
+            info("a", "active", Some("s1")),
+            info("b", "dormant", Some("s2")),
+            info("c", "spawning", None),
+        ])
+        .await;
     let templates = Arc::new(init_templates_for_tests());
-    let app = build_router(router.clone(), mgr, GatewayInfo::default(), templates);
-    (router, app)
+    let app = build_router(
+        backend.clone(),
+        sebas_webui::models::GatewayInfo::default(),
+        Default::default(),
+        templates,
+    );
+    (backend, app)
 }
 
 async fn body_string(body: Body) -> String {
@@ -60,7 +73,7 @@ async fn body_string(body: Body) -> String {
 
 #[tokio::test]
 async fn sessions_list_renders_all_sessions_and_buttons() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -77,8 +90,7 @@ async fn sessions_list_renders_all_sessions_and_buttons() {
     assert!(body.contains("oc_b"), "dormant session missing from list");
     assert!(body.contains("oc_c"), "spawning session missing from list");
     // Status is asserted through the `data-status` attribute rather than a
-    // class name: it is the contract the stylesheet keys off, and it pins the
-    // whole derivation path from MappingState to rendered markup. oc_a is
+    // class name: it is the contract the stylesheet keys off. oc_a is
     // Active with no card phase, which must read Queued, not Working.
     assert!(
         body.contains(r#"data-status="queued""#),
@@ -110,7 +122,7 @@ async fn sessions_list_renders_all_sessions_and_buttons() {
 
 #[tokio::test]
 async fn sessions_partial_returns_table_without_layout_chrome() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -142,7 +154,7 @@ async fn sessions_partial_returns_table_without_layout_chrome() {
 /// status-code test: only the rendered markup shows it. Keep it out.
 #[tokio::test]
 async fn no_hx_attribute_targets_a_percent_encoded_id() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -170,7 +182,7 @@ async fn no_hx_attribute_targets_a_percent_encoded_id() {
 
 #[tokio::test]
 async fn switch_session_marks_active_and_returns_redirect() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let k2 = key("b");
     let encoded = encode(&k2);
 
@@ -195,19 +207,19 @@ async fn switch_session_marks_active_and_returns_redirect() {
         "switch response missing redirect URL: {body}"
     );
 
-    // The router now reports k2 as the focused session.
+    // The backend now reports k2 as the focused session.
     assert_eq!(
-        router.active_session_snapshot().await,
+        backend.focused().await,
         Some(k2.clone()),
-        "switch must update the router's active_session slot"
+        "switch must update the backend's focused slot"
     );
 
     // And the next render of /sessions shows the active-row styling + sidebar card.
     let templates = Arc::new(init_templates_for_tests());
     let app2 = build_router(
-        router.clone(),
-        Arc::new(SessionManager::new(Duration::from_secs(5))),
-        GatewayInfo::default(),
+        backend.clone(),
+        sebas_webui::models::GatewayInfo::default(),
+        Default::default(),
         templates,
     );
     let resp2 = app2
@@ -232,7 +244,7 @@ async fn switch_session_marks_active_and_returns_redirect() {
 
 #[tokio::test]
 async fn switch_unknown_session_returns_404() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let encoded = encode(&SessionKey {
         chat_id: "oc_ghost".into(),
         thread_id: None,
@@ -256,12 +268,12 @@ async fn switch_unknown_session_returns_404() {
 
 #[tokio::test]
 async fn close_active_session_drops_mapping_and_returns_200() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let k1 = key("a");
     let encoded = encode(&k1);
-    let pre_map = router.session_snapshot().await;
+    let pre = backend.snapshot().await;
     assert!(
-        pre_map.iter().any(|(k, _)| k == &k1),
+        pre.iter().any(|s| s.chat_id == k1.chat_id),
         "fixture sanity: k1 should be present before close"
     );
 
@@ -282,16 +294,16 @@ async fn close_active_session_drops_mapping_and_returns_200() {
         "unexpected close response: {body}"
     );
 
-    let post_map = router.session_snapshot().await;
+    let post = backend.snapshot().await;
     assert!(
-        !post_map.iter().any(|(k, _)| k == &k1),
-        "close must remove the mapping from the session map"
+        !post.iter().any(|s| s.chat_id == k1.chat_id),
+        "close must remove the session from the backend"
     );
 }
 
 #[tokio::test]
 async fn close_dormant_session_returns_200_without_child_kill() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let k2 = key("b");
     let encoded = encode(&k2);
 
@@ -308,18 +320,14 @@ async fn close_dormant_session_returns_200_without_child_kill() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     assert!(
-        router
-            .session_snapshot()
-            .await
-            .iter()
-            .all(|(k, _)| k != &k2),
-        "dormant mapping must drop too"
+        backend.snapshot().await.iter().all(|s| s.chat_id != k2.chat_id),
+        "dormant session must drop too"
     );
 }
 
 #[tokio::test]
 async fn close_spawning_placeholder_returns_200_and_drops_it() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let k3 = key("c");
     let encoded = encode(&k3);
 
@@ -335,18 +343,14 @@ async fn close_spawning_placeholder_returns_200_and_drops_it() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        router
-            .session_snapshot()
-            .await
-            .iter()
-            .all(|(k, _)| k != &k3),
+        backend.snapshot().await.iter().all(|s| s.chat_id != k3.chat_id),
         "spawning placeholder must drop on close"
     );
 }
 
 #[tokio::test]
 async fn close_unknown_session_returns_404() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let encoded = encode(&SessionKey {
         chat_id: "oc_ghost".into(),
         thread_id: None,
@@ -366,7 +370,7 @@ async fn close_unknown_session_returns_404() {
 
 #[tokio::test]
 async fn close_malformed_key_returns_400() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -390,12 +394,12 @@ async fn close_malformed_key_returns_400() {
 
 #[tokio::test]
 async fn close_focused_session_clears_active_pointer() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let k1 = key("a");
     let encoded = encode(&k1);
 
-    router.web_set_active(k1.clone()).await;
-    assert_eq!(router.active_session_snapshot().await, Some(k1.clone()));
+    backend.set_focus(Some(k1.clone())).await;
+    assert_eq!(backend.focused().await, Some(k1.clone()));
 
     let resp = app
         .oneshot(
@@ -409,18 +413,18 @@ async fn close_focused_session_clears_active_pointer() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        router.active_session_snapshot().await,
+        backend.focused().await,
         None,
-        "closing the focused session must clear active_session"
+        "closing the focused session must clear the focus"
     );
 }
 
 #[tokio::test]
 async fn detail_page_visiting_marks_session_active() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let k2 = key("b");
     let encoded = encode(&k2);
-    assert_eq!(router.active_session_snapshot().await, None);
+    assert_eq!(backend.focused().await, None);
 
     let resp = app
         .oneshot(
@@ -433,9 +437,40 @@ async fn detail_page_visiting_marks_session_active() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        router.active_session_snapshot().await,
+        backend.focused().await,
         Some(k2),
-        "visiting the detail page must web_set_active"
+        "visiting the detail page must focus the session"
+    );
+}
+
+/// The detail page renders the transcript from the backend's turn content.
+#[tokio::test]
+async fn detail_page_renders_transcript_entries() {
+    let (backend, app) = fixture().await;
+    backend.push_turn("s1", "prompt", "user prompt here").await;
+    backend.push_turn("s1", "content", "agent answer").await;
+    backend
+        .push_turn_typed("s1", "content", "thinking", "hidden thought")
+        .await;
+
+    let encoded = encode(&key("a"));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sessions/{encoded}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("user prompt here"), "prompt entry missing");
+    assert!(body.contains("agent answer"), "content entry missing");
+    assert!(body.contains("hidden thought"), "thinking entry missing");
+    assert!(
+        body.contains("el-thinking"),
+        "thinking entries should render in their own class"
     );
 }
 
@@ -443,7 +478,7 @@ async fn detail_page_visiting_marks_session_active() {
 
 #[tokio::test]
 async fn agent_page_renders_sidebar_and_sessions() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -466,7 +501,7 @@ async fn agent_page_renders_sidebar_and_sessions() {
 
 #[tokio::test]
 async fn agent_detail_focuses_session_and_renders_timeline() {
-    let (router, app) = fixture().await;
+    let (backend, app) = fixture().await;
     let encoded = encode(&key("a"));
     let resp = app
         .oneshot(
@@ -481,7 +516,7 @@ async fn agent_detail_focuses_session_and_renders_timeline() {
     let body = body_string(resp.into_body()).await;
     assert!(body.contains("type a message") || body.contains("Composer"));
     assert_eq!(
-        router.active_session_snapshot().await,
+        backend.focused().await,
         Some(key("a")),
         "visiting agent detail must focus the session"
     );
@@ -489,7 +524,7 @@ async fn agent_detail_focuses_session_and_renders_timeline() {
 
 #[tokio::test]
 async fn agent_timeline_fragment_returns_partial() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let encoded = encode(&key("a"));
     let resp = app
         .oneshot(
@@ -507,15 +542,12 @@ async fn agent_timeline_fragment_returns_partial() {
 
 #[tokio::test]
 async fn agent_create_project_from_valid_path() {
-    // 保留 outbound rx（web_spawn 会 emit Out::WebSpawn；rx 被 drop 则
-    // channel 关闭导致 panic，而真实运行有消费者）。
-    let map = SessionMap::new();
-    let (router, _rx) = RouterHandle::new(map);
+    let backend = Arc::new(FakeBackend::new());
     let templates = Arc::new(init_templates_for_tests());
     let app = build_router(
-        router.clone(),
-        Arc::new(SessionManager::new(Duration::from_secs(5))),
-        GatewayInfo::default(),
+        backend.clone(),
+        sebas_webui::models::GatewayInfo::default(),
+        Default::default(),
         templates,
     );
     let existed = std::path::Path::new(".");
@@ -534,11 +566,13 @@ async fn agent_create_project_from_valid_path() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body = body_string(resp.into_body()).await;
     assert!(body.contains("\"key\""), "response must carry key: {body}");
+    // The spawn reached the backend (spawning placeholder visible).
+    assert_eq!(backend.snapshot().await.len(), 1);
 }
 
 #[tokio::test]
 async fn agent_create_project_rejects_missing_path() {
-    let (_router, app) = fixture().await;
+    let (_backend, app) = fixture().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -555,19 +589,20 @@ async fn agent_create_project_rejects_missing_path() {
 
 #[tokio::test]
 async fn agent_send_message_returns_timeline() {
-    // 保活 outbound rx：active session 的消息会 emit Out::SendAcp。
-    let map = SessionMap::new();
-    map.insert(key("a"), Mapping::active("s1"))
-        .await
-        .unwrap();
-    let (router, _rx) = RouterHandle::new(map);
-    let templates = Arc::new(init_templates_for_tests());
-    let app = build_router(
-        router.clone(),
-        Arc::new(SessionManager::new(Duration::from_secs(5))),
-        GatewayInfo::default(),
-        templates,
-    );
+    let (backend, app) = {
+        let backend = Arc::new(FakeBackend::new());
+        backend
+            .set_sessions(vec![info("a", "active", Some("s1"))])
+            .await;
+        let templates = Arc::new(init_templates_for_tests());
+        let app = build_router(
+            backend.clone(),
+            sebas_webui::models::GatewayInfo::default(),
+            Default::default(),
+            templates,
+        );
+        (backend, app)
+    };
     let encoded = encode(&key("a"));
     let resp = app
         .oneshot(
@@ -581,4 +616,156 @@ async fn agent_send_message_returns_timeline() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(!body.contains("<html"), "timeline fragment, not a page");
+    let _ = backend;
+}
+
+// ---- Honest degradation (7.3): unreachable core rendering ----
+
+#[tokio::test]
+async fn unreachable_core_renders_cause_on_board_and_503s_mutations() {
+    let (backend, app) = {
+        let backend = Arc::new(FakeBackend::new());
+        backend
+            .set_sessions(vec![info("a", "active", Some("s1"))])
+            .await;
+        backend.set_reachable(false, "socket absent");
+        let templates = Arc::new(init_templates_for_tests());
+        let app = build_router(
+            backend.clone(),
+            sebas_webui::models::GatewayInfo::default(),
+            Default::default(),
+            templates,
+        );
+        (backend, app)
+    };
+
+    // The board renders the cause verbatim.
+    let resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .uri("/sessions/partial")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(
+        body.contains("socket absent"),
+        "unreachable cause must be stated on the board: {body}"
+    );
+
+    // Mutations fail honestly with 503 — never a success.
+    let resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("prompt=hi"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "create must 503 while unreachable"
+    );
+
+    let resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/message", encode(&key("a"))))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("message=hi"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/close", encode(&key("a"))))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // Nothing was mutated.
+    assert_eq!(backend.snapshot().await.len(), 1);
+    assert_eq!(backend.reachability().await, Reachability::Unreachable { cause: "socket absent".into() });
+}
+
+// ---- SSE (3.4): backend events surface on /events ----
+
+#[tokio::test]
+async fn backend_events_appear_on_the_events_stream() {
+    let (backend, app) = {
+        let backend = Arc::new(FakeBackend::new());
+        let templates = Arc::new(init_templates_for_tests());
+        let app = build_router(
+            backend.clone(),
+            sebas_webui::models::GatewayInfo::default(),
+            Default::default(),
+            templates,
+        );
+        (backend, app)
+    };
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()["content-type"],
+        "text/event-stream",
+        "SSE content type"
+    );
+
+    // Emit from the backend AFTER the SSE subscription is established.
+    let key = backend.spawn("sse test".into(), None).await.unwrap();
+
+    // Read a bounded chunk of the never-ending stream.
+    use http_body_util::BodyExt as _;
+    let mut stream_body = resp.into_body();
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline
+        && !seen.contains(&key.chat_id)
+    {
+        let chunk = tokio::time::timeout(std::time::Duration::from_millis(500), stream_body.frame())
+            .await;
+        match chunk {
+            Ok(Some(Ok(frame))) => {
+                let data = frame.into_data().unwrap_or_default();
+                seen.push_str(&String::from_utf8_lossy(&data));
+                seen.push('\n');
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        seen.contains("event: update"),
+        "SSE stream must emit update events, got: {seen}"
+    );
+    assert!(
+        seen.contains(&key.chat_id),
+        "the fake backend's Created event must surface on /events, got: {seen}"
+    );
 }

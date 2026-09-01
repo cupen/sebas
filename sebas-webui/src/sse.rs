@@ -1,38 +1,37 @@
 //! SSE event stream for real-time WebUI updates.
+//!
+//! Subscribes to the backend's session event stream (task 3.4) instead of a
+//! WebUI-local broadcast: events originate at the session authority (the
+//! router inside the core), so the console reacts to every session change
+//! whether it was driven from this WebUI, the Feishu bot, or another client.
+//!
+//! Wire contract: any session event is surfaced as an `update` SSE event.
+//! The frontend debounces `update` into a `/sessions/partial` refetch, so
+//! the payload is informational, not authoritative.
 
 use crate::server::WebUiState;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
-use serde::Serialize;
 use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 
-/// Events that the WebUI can push to connected clients.
-#[derive(Debug, Clone, Serialize)]
-pub enum WebUiEvent {
-    /// A new session was created.
-    SessionCreated { session_id: String },
-    /// A session's state was updated.
-    SessionUpdated { session_id: String, status: String },
-    /// A session was removed.
-    SessionRemoved { session_id: String },
-    /// Configuration was updated.
-    ConfigUpdated,
-}
-
-/// SSE handler: subscribes to the broadcast channel and streams events.
+/// SSE handler: subscribes to the backend's session event stream and
+/// forwards every event (including `Resync` after a reconnect) as an
+/// `update` event. Lagged receivers are dropped from the stream silently —
+/// the browser's own EventSource reconnect plus the debounced partial
+/// refetch converges the view.
 pub async fn event_stream(State(state): State<WebUiState>) -> impl IntoResponse {
-    let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+    let rx = state.backend.subscribe();
+    let stream = BroadcastStream::new(rx).map(|result| match result {
         Ok(event) => {
-            let data = serde_json::to_string(&event).unwrap_or_default();
-            Some(Ok::<_, Infallible>(
-                Event::default().event("update").data(data),
-            ))
+            let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
+            Ok::<_, Infallible>(Event::default().event("update").data(data))
         }
-        Err(_) => None,
+        // Lagged / closed: emit nothing; the client keeps its connection and
+        // the next event (or a page navigation) re-renders from the snapshot.
+        Err(_) => Ok(Event::default().event("update").data("{\"resync\":true}")),
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

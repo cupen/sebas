@@ -218,6 +218,11 @@ pub struct WatchdogConfig {
 pub struct WatchdogCoreConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// core session channel 的 Unix socket 路径（openspec/changes/
+    /// add-core-session-channel）。空/缺省 → `$XDG_RUNTIME_DIR/sebas/core.sock`
+    /// （或 per-uid 临时目录回退）。
+    #[serde(default)]
+    pub channel_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

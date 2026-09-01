@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Agent Chat - sebas{% endblock %}
 {% block content %}
+{# Honest degradation (add-core-session-channel). #}
+{% if core_unreachable_cause %}
+<div class="alert alert-warning" data-test="core-unreachable">
+  ⚠ 核心不可达：{{ core_unreachable_cause }}。会话列表可能过期，消息发送与项目创建均不可用。
+</div>
+{% endif %}
 <div class="codex-layout">
   <!-- Left: Project / Session list -->
   <aside class="codex-sidebar">
@@ -95,9 +101,13 @@
             hx-target="#codex-timeline"
             hx-swap="innerHTML"
             hx-on::after-request="document.getElementById('codex-msg-input').value = ''">
-        <textarea id="codex-msg-input" name="message" class="codex-input" rows="2" placeholder="Type a message for Claude Code..."></textarea>
+        <textarea id="codex-msg-input" name="message" class="codex-input" rows="2"
+                  placeholder="Type a message for Claude Code..."
+                  {{ "disabled" if core_unreachable_cause else "" }}
+                  title="{{ core_unreachable_cause if core_unreachable_cause else "" }}"></textarea>
         <div class="codex-composer-actions">
-          <button type="submit" class="btn btn-primary btn-sm">Send</button>
+          <button type="submit" class="btn btn-primary btn-sm"
+                  {{ "disabled" if core_unreachable_cause else "" }}>Send</button>
         </div>
       </form>
     </div>

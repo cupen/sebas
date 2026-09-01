@@ -100,6 +100,8 @@
   {% for el in body %}
     {% if el.element_type == "markdown" %}
     <div class="el-markdown">{{ el.content }}</div>
+    {% elif el.element_type == "thinking" %}
+    <div class="el-thinking muted"><em>{{ el.content }}</em></div>
     {% elif el.element_type == "div" %}
     <div class="el-div">{{ el.content }}</div>
     {% elif el.element_type == "collapsible" %}
@@ -116,6 +118,11 @@
 {% endif %}
 </div>
 
+{% if core_unreachable_cause %}
+<div class="alert alert-warning" data-test="core-unreachable">
+  ⚠ 核心不可达：{{ core_unreachable_cause }}。消息发送不可用。
+</div>
+{% endif %}
 <div class="message-form">
   <form hx-post="/api/sessions/{{ encoded_key }}/message"
         hx-trigger="submit"
@@ -127,10 +134,13 @@
     <div class="form-group">
       <label for="msg-input">Message</label>
       <textarea id="msg-input" name="message" class="msg-input" rows="2"
-                placeholder="Send to this session…"></textarea>
+                placeholder="Send to this session…"
+                {{ "disabled" if core_unreachable_cause else "" }}
+                title="{{ core_unreachable_cause if core_unreachable_cause else "" }}"></textarea>
     </div>
     <div class="form-actions">
-      <button type="submit" class="btn btn-primary">Send</button>
+      <button type="submit" class="btn btn-primary"
+              {{ "disabled" if core_unreachable_cause else "" }}>Send</button>
       <span class="muted">Cmd/Ctrl + Enter</span>
     </div>
   </form>

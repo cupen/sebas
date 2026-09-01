@@ -8,6 +8,7 @@
 pub const CORE_SUBCOMMAND: &str = "run";
 
 pub mod config;
+pub mod core_channel;
 mod dispatch;
 pub mod error;
 pub mod gateway_cmd;

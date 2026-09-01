@@ -191,6 +191,7 @@ impl RouterHandle {
                     Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p, reply_to).await,
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
                         // Restored mapping claimed for lazy respawn (openspec/specs/session-lifecycle/spec.md).
+                        self.publish_updated(&key).await;
                         self.emit(Out::SpawnResume {
                             key,
                             session_id: old_sid,
@@ -217,6 +218,7 @@ impl RouterHandle {
                         self.spawn_new(key, text, reply_to).await
                     }
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
+                        self.publish_updated(&key).await;
                         self.emit(Out::SpawnResume {
                             key,
                             session_id: old_sid,
@@ -578,11 +580,13 @@ impl RouterHandle {
         // `input_msg_id` rides along so the dispatcher can point the session's
         // state reactions at the user's input message.
         self.emit(Out::SpawnAcp {
-            key,
+            key: key.clone(),
             prompt,
             input_msg_id,
         })
         .await;
+        // Spawning placeholder 已入表（route_text/begin_spawn），对外发 Created。
+        self.publish_created(&key).await;
     }
 
     async fn continue_session(

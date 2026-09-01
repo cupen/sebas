@@ -65,6 +65,7 @@ fn init_watchdog_tracing() {
 struct CoreSpawner {
     config_path: String,
     control_secret: String,
+    core_secret: String,
 }
 
 #[async_trait::async_trait]
@@ -87,6 +88,7 @@ impl ServiceSpawner for CoreSpawner {
             .stderr(std::process::Stdio::inherit())
             .env("SEBAS_IPC", "1")
             .env("SEBAS_CONTROL_SECRET", &self.control_secret)
+            .env("SEBAS_CORE_SECRET", &self.core_secret)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| SebasError::Upgrade(format!("启动子进程失败: {e}")))?;
@@ -133,12 +135,20 @@ impl ServiceSpawner for CoreSpawner {
 struct WebUiSpawner {
     config_path: String,
     control_secret: String,
+    core_secret: String,
 }
 
 #[async_trait::async_trait]
 impl ServiceSpawner for WebUiSpawner {
     async fn spawn(&self) -> Result<SpawnedInstance> {
-        spawn_aux_process(&self.config_path, &self.control_secret, &["webui"], "webui").await
+        spawn_aux_process(
+            &self.config_path,
+            &self.control_secret,
+            Some(&self.core_secret),
+            &["webui"],
+            "webui",
+        )
+        .await
     }
 }
 
@@ -156,13 +166,22 @@ impl ServiceSpawner for GatewaySpawner {
         if self.debug {
             args.push("--debug");
         }
-        spawn_aux_process(&self.config_path, &self.control_secret, &args, "gateway").await
+        spawn_aux_process(
+            &self.config_path,
+            &self.control_secret,
+            None,
+            &args,
+            "gateway",
+        )
+        .await
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_aux_process(
     config_path: &str,
     control_secret: &str,
+    core_secret: Option<&str>,
     args: &[&str],
     label: &str,
 ) -> Result<SpawnedInstance> {
@@ -174,8 +193,13 @@ async fn spawn_aux_process(
     }
     cmd.arg("--config")
         .arg(config_path)
-        .env("SEBAS_CONTROL_SECRET", control_secret)
-        .stdout(std::process::Stdio::inherit())
+        .env("SEBAS_CONTROL_SECRET", control_secret);
+    // The standalone WebUI is a core session channel client: it needs the
+    // same secret the core gets. Gateway never touches sessions.
+    if let Some(core_secret) = core_secret {
+        cmd.env("SEBAS_CORE_SECRET", core_secret);
+    }
+    cmd.stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
 
@@ -258,11 +282,15 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
     // 默认停用（feishu 可选，sebas-2ty）：`sebas watchdog` 默认只启动 WebUI，
     // core（飞书 bot）由 WebUI 服务页启用，或配置 [watchdog.core] enabled = true。
     // persist 文件（services.json）里的选择优先于这里的 config 初值。
+    // core session channel 的共享密钥：core 与 webui 子进程各注入一份
+    // （SEBAS_CORE_SECRET），socket 之外还叠加同 uid 校验（spec 的双因子）。
+    let core_secret = create_control_secret();
     let mut core_spec = ServiceSpec::new(
         ServiceName::Core,
         Arc::new(CoreSpawner {
             config_path: config_path.clone(),
             control_secret: secret.clone(),
+            core_secret: core_secret.clone(),
         }),
         DesiredState::Enabled,
     );
@@ -277,6 +305,7 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
             Arc::new(WebUiSpawner {
                 config_path: config_path.clone(),
                 control_secret: secret.clone(),
+                core_secret: core_secret.clone(),
             }),
             DesiredState::Enabled,
         ),

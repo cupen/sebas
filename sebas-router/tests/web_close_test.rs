@@ -30,7 +30,7 @@ async fn close_active_session_drops_mapping_and_clears_active() {
         .unwrap();
 
     let (router, _rx) = RouterHandle::new(map.clone());
-    router.web_set_active(key.clone()).await;
+    router.web_set_active(Some(key.clone())).await;
     assert_eq!(
         router.active_session_snapshot().await,
         Some(key.clone()),
@@ -109,11 +109,11 @@ async fn set_active_is_idempotent_and_overwrites() {
     let k1 = web_key("1");
     let k2 = web_key("2");
 
-    router.web_set_active(k1.clone()).await;
-    router.web_set_active(k1.clone()).await;
+    router.web_set_active(Some(k1.clone())).await;
+    router.web_set_active(Some(k1.clone())).await;
     assert_eq!(router.active_session_snapshot().await, Some(k1));
 
-    router.web_set_active(k2.clone()).await;
+    router.web_set_active(Some(k2.clone())).await;
     assert_eq!(
         router.active_session_snapshot().await,
         Some(k2),
@@ -134,7 +134,7 @@ async fn close_unfocused_session_leaves_active_untouched() {
         .unwrap();
 
     let (router, _rx) = RouterHandle::new(map.clone());
-    router.web_set_active(a.clone()).await;
+    router.web_set_active(Some(a.clone())).await;
 
     let out = router.web_close_session(b.clone()).await;
     assert_eq!(out, CloseOutcome::Closed);

@@ -116,7 +116,7 @@ pub async fn run(
     let provider_forms = crate::provider::build_form(&raw_config);
     let (router, mut out_rx) = RouterHandle::new_with_provider_form(
         map,
-        merged_card_cfg,
+        merged_card_cfg.clone(),
         cfg.router.channel_buffer,
         provider_forms,
         Some(mgr.clone()),
@@ -233,21 +233,77 @@ pub async fn run(
             }
         });
     } else {
-        drop(out_rx);
+        // feishu 未启用（sebas-2ty / core session channel）：会话生命周期
+        // （spawn / ACP pump / FSM 推进）必须照常运转 —— standalone WebUI
+        // 与 core channel 都靠 Out::SpawnAcp 落地真实子进程。出站泵照常
+        // 启动，但换成 headless 飞书替身：所有卡片/表情 API 变成成功的
+        // no-op（sebas-feishu::FeishuClient::new_headless），无网络请求，
+        // 无凭据需求。接收端必须存活——直接 drop 会关闭通道，任何 emit
+        // 都会 send 失败（debug 构建 panic，core 进程崩溃）。
+        let feishu_headless = FeishuClient::new_headless();
+        let tokens_headless = sebas_feishu::client::TokenManager::with_stub_token("headless");
+        let cfg_for_outbound = cfg.clone();
+        let router_for_outbound = router.clone();
+        let mgr_for_outbound = mgr.clone();
+        let gateway_cfg_for_outbound = gateway_cfg.clone();
+        tokio::spawn(async move {
+            while let Some(out) = out_rx.recv().await {
+                if let Err(e) = dispatch_out(
+                    &feishu_headless,
+                    &http,
+                    &tokens_headless,
+                    &cfg_for_outbound,
+                    &router_for_outbound,
+                    &mgr_for_outbound,
+                    &ReactionTracker::default(),
+                    gateway_cfg_for_outbound.as_ref(),
+                    out,
+                )
+                .await
+                {
+                    error!(?e, "outbound dispatch failed (headless)");
+                }
+            }
+        });
     }
 
     // Start WebUI dashboard server if requested
     if webui {
-        let router_for_webui = router.clone();
-        let mgr_for_webui = mgr.clone();
+        let backend: std::sync::Arc<dyn sebas_webui::SessionBackend> = std::sync::Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(router.clone()),
+        );
         let gateway_info = build_gateway_info(gateway_cfg.as_ref());
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
         tokio::spawn(async move {
-            sebas_webui::run(router_for_webui, mgr_for_webui, gateway_info, listener).await;
+            sebas_webui::run(backend, gateway_info, merged_card_cfg.clone(), listener).await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
+    }
+
+    // Core session channel server (openspec/changes/add-core-session-channel
+    // task 5.9): the core is the single session authority; the socket is how
+    // every other process observes and drives sessions. Runs for the whole
+    // core lifetime; the socket file is removed on graceful shutdown below.
+    let (channel_close_tx, channel_close_rx) = tokio::sync::watch::channel(false);
+    {
+        let router_for_channel = router.clone();
+        let path = crate::core_channel::socket_path(&cfg);
+        let secret = std::env::var("SEBAS_CORE_SECRET").ok().unwrap_or_default();
+        let shutdown_rx = channel_close_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::core_channel::server::serve(
+                router_for_channel,
+                path.clone(),
+                secret,
+                shutdown_rx,
+            )
+            .await
+            {
+                error!(path = %path.display(), ?e, "core session channel server failed");
+            }
+        });
     }
 
     // Run the long-connection event loop inline in a `tokio::select!` so the
@@ -326,6 +382,12 @@ pub async fn run(
             tokio::signal::ctrl_c().await.ok();
         }
     }
+
+    // Stop the core session channel first: clients see the socket disappear
+    // and fall back to honest "unreachable" rendering (task 5.9 — the server
+    // removes the socket file on graceful shutdown).
+    let _ = channel_close_tx.send(true);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Snapshot state BEFORE killing children (openspec/specs/acp-driver/spec.md order: dump, then
     // shutdown_children). Dumping after kill_all would race the pumps'

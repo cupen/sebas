@@ -1,20 +1,20 @@
-//! ACP 会话生命周期：spawn/resume/restore、卡片种子、事件泵、排队 prompt 冲刷。
+//! ACP 会话生命周期：spawn/resume/restore、事件泵、排队 prompt 冲刷。
 //!
 //! 从 `run.rs` 拆出（原文件 922 行混了编排/分发/会话/WS 四个职责）。
 //! 对外的稳定入口经 `crate::run` 的 re-export 暴露，integration tests 路径不变。
+//!
+//! **与飞书解耦（本模块的边界契约）**：本文件的每个函数只依赖 ACP
+//! manager + router——不 import 任何 `sebas_feishu` 类型，不持 HTTP 客户端。
+//! 飞书侧的呈现（种子卡发送 / root message_id 记录 / 初始 reaction）是
+//! dispatch 层的编排职责（见 `crate::dispatch::seed_and_send_root_card`）：
+//! ACP 生命周期 → router 状态，飞书卡片 → Out 指令副作用，两条线在此分离。
 
-use crate::config::Config;
-use crate::dispatch::{TopicSendOutcome, send_card_topic_aware, topic_reply_target};
-use crate::reactions::ReactionTracker;
 use crate::spawn_env::resolve_spawn_overrides;
 use sebas_acp::claude::ClaudeCodeDriver;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
-use sebas_feishu::cards::render_accumulated_card;
-use sebas_feishu::client::FeishuClient;
-use sebas_feishu::events::SessionKey;
 use sebas_gateway::config::GatewayConfig;
-use sebas_router::router::RouterHandle;
+use sebas_router::router::{RouterHandle, SessionKey};
 use sebas_router::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,96 +229,37 @@ pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
     }
 }
 
-/// Shared post-spawn wiring for the SpawnAcp and SpawnResume dispatch arms:
-/// seed the card state, send the root card, record its message_id, start the
-/// event pump, and flush prompts queued during the spawn.
+/// Spawn/resume 之后的 ACP 侧启动序列（与飞书无关）：
+/// seed 卡片状态、启动事件泵、冲刷 spawn 窗口内排队的 prompt。
+///
+/// 这是 [`crate::dispatch`] 中 `SpawnAcp` / `SpawnResume`（飞书路径，先由
+/// `seed_and_send_root_card` 发卡）与 `WebSpawn`（无飞书路径）共用的
+/// **引擎侧半场**。刻意不接收 `FeishuClient` / `TokenManager` /
+/// `ReactionTracker` / `Config`：`idle_timeout` 由调用方从
+/// `[acp.claude] idle_kill_secs` 解析后传入，保持本函数的输入只描述
+/// ACP 会话本身。
+///
+/// 顺序契约（与拆分前逐条一致，无行为变化）：
+/// 1. `seed_card`：记录 user_prompt 供后续 flush 重渲染引用块。幂等。
+///    必须在 pump 启动前，否则首个事件 lazy seed 会用 prompt="" 冲掉引用块。
+/// 2. 启动事件泵（`rx` 已在 `acp_spawn_and_activate` 里于任何慢 I/O 前
+///    克隆，D6 保证首次即崩的终端事件不丢）。
+/// 3. `flush_pending_prompts`：排队 prompt 合并为一次 ContinueSession
+///    （逐条发送会违反 ACP 的 one-prompt-in-flight 规则）。
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn wire_session_card_and_pump(
-    feishu: &FeishuClient,
-    http: &reqwest::Client,
-    tokens: &sebas_feishu::client::TokenManager,
-    cfg: &Config,
+pub(crate) async fn boot_session_pump_and_flush(
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
-    reactions: &ReactionTracker,
-    key: SessionKey,
     session_id: String,
     prompt: String,
     pending: Vec<String>,
-    rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
-    >,
-    // Feishu message_id this session's root card should reply to (the user's
-    // input message), so the card appears threaded under it for easy
-    // tracking. `None` = standalone card (WebUI / no input message).
-    input_msg_id: Option<String>,
+    rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AcpEvent>>>,
+    // sebas-9pz ②: idle_kill_secs 死配置接线 —— 由调用方解析；None =
+    // 永不过期（生产默认 48h 只在显式配置非零值时启用）。
+    idle_timeout: Option<Duration>,
 ) -> anyhow::Result<()> {
-    // seed_card（openspec/specs/feishu-cards/spec.md）: 记录 user_prompt 供后续 flush 重渲染
-    // 引用块。幂等。必须在 pump 启动前，否则首个事件 lazy seed
-    // 会用 prompt="" 冲掉引用块。
-    router.seed_card(session_id.clone(), prompt.clone()).await;
-    // Send the seed card (empty body) and record its message_id keyed by the
-    // real session_id (so streaming UpdateCards resolve correctly).
-    // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
-    //（避免初始卡蓝、后续卡变色的跳变）。
-    let card = render_accumulated_card(&prompt, &session_id, &[], &cfg.card.theme_color, None);
-    // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
-    // 原话题；主线回退到用户输入消息（main 的 input_msg_id 行为，卡片
-    // 以 reply 形式挂在输入消息下，方便沿 thread 跟踪）。话题失效时
-    // send_card_topic_aware 会发文本提示并熔断（web_close_session 终止
-    // 刚 spawn 的会话，返回 TopicInvalid，不冒泡错误）—— 首次出站就失效
-    // 更要终止。
-    let reply = topic_reply_target(router, &key, None)
-        .await
-        .or(input_msg_id);
-    let outcome = send_card_topic_aware(
-        feishu,
-        http,
-        tokens,
-        router,
-        &key,
-        serde_json::to_value(&card)?,
-        reply,
-    )
-    .await?;
-    if let TopicSendOutcome::Sent(msg_id) = outcome {
-        router
-            .record_root_msg_id(session_id.clone(), msg_id.clone())
-            .await;
-        // Stamp the initial reaction on the root card. emoji_type 是 Feishu
-        // API 合法值（"Get" = 👌 已收到），不再是 "Typing" / unicode 👀 ——
-        // "Typing" 暗示正在输入，"Get" 才契合"已收到"语义。Best-effort:
-        // a reaction failure must not abort session creation.
-        match feishu
-            .react(http, tokens, &msg_id, sebas_router::card_state::phase::SEED)
-            .await
-        {
-            Ok(rid) => {
-                reactions
-                    .record(&session_id, sebas_router::card_state::phase::SEED.into(), rid)
-                    .await
-            }
-            Err(e) => warn!(%session_id, "initial react failed: {e}"),
-        }
-    }
-    // Pump ACP events from this session back into the router.
-    // `rx` was cloned before any slow I/O (the send_card HTTP round trip
-    // above) so a crash-on-first-prompt terminal event survives the
-    // wrapper's eager table removal (D6).
-    //
-    // sebas-9pz ②: idle_kill_secs 死配置接线 —— 配置 > 0 时,会话连续无事件
-    // 超过该时长会被 kill(子进程) + drop_card。默认 172800(48h)照常生效。
-    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
-        .then(|| Duration::from_secs(cfg.acp.claude.idle_kill_secs));
-    spawn_acp_pump_with_idle(
-        rx,
-        router.clone(),
-        session_id.clone(),
-        idle_timeout,
-        Some(mgr.clone()),
-    );
-    // Flush queued prompts as ONE follow-up (sending them one by one would
-    // violate ACP's one-prompt-in-flight rule).
+    router.seed_card(session_id.clone(), prompt).await;
+    spawn_acp_pump_with_idle(rx, router.clone(), session_id.clone(), idle_timeout, Some(mgr.clone()));
     if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
         warn!(?e, "failed to flush pending prompts");
     }

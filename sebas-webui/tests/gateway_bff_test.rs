@@ -3,21 +3,17 @@
 //! - mutation 路由：GET → 405；非 loopback origin → 403；无 secret → 503；
 //!   有 secret 时转发 admin API（create → 列表出现 → delete → 消失）。
 
-use sebas_acp::claude::manager::SessionManager;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_webui::session_backend::FakeBackend;
 use std::sync::Arc;
-use std::time::Duration;
 use tower::ServiceExt;
 use sebas_webui::models::GatewayInfo;
 use sebas_webui::{build_router, init_templates_for_tests};
 
 async fn app_with(gateway_listen: Option<String>) -> axum::Router {
-    let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(5)));
+    let backend = Arc::new(FakeBackend::new());
     let templates = Arc::new(init_templates_for_tests());
     let gw = GatewayInfo {
         listen: gateway_listen,
@@ -30,7 +26,7 @@ async fn app_with(gateway_listen: Option<String>) -> axum::Router {
             base_url_openai: None,
         }],
     };
-    build_router(router, mgr, gw, templates)
+    build_router(backend, gw, Default::default(), templates)
 }
 
 async fn body_string(body: Body) -> String {

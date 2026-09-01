@@ -1,27 +1,27 @@
 //! Route handlers for the WebUI dashboard.
+//!
+//! Every session read and mutation flows through the `SessionBackend` seam
+//! (openspec/changes/add-core-session-channel): the routes render whatever
+//! the backend reports, and typed rejections map onto the pre-existing HTTP
+//! status codes. When the backend is unreachable the pages render the cause
+//! and the mutations return 503 — no control ever reports success falsely.
 
-use crate::models::{CardConfigInfo, CardElementView, DashboardData, SessionRow, SessionStatus};
+use crate::models::{CardConfigInfo, DashboardData, SessionRow, SessionStatus};
 use crate::server::WebUiState;
-use crate::sse::WebUiEvent;
+use crate::session_backend::{Reachability, SessionRejection};
 use axum::Form;
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Json};
-use sebas_feishu::cards::CardElement;
 use sebas_feishu::events::SessionKey;
-use sebas_router::card_state::CardState;
-use sebas_router::router::CloseOutcome;
-use sebas_router::state::{Mapping, MappingState};
+use sebas_router::{SessionInfo, TurnEntry};
 use serde::Deserialize;
 
 /// Dashboard overview: session counts, recent sessions, uptime, active session.
 pub async fn dashboard(State(state): State<WebUiState>) -> impl IntoResponse {
-    let sessions = state.router.session_snapshot().await;
-    let card_states = state.router.card_state_snapshot().await;
-    let active_key = state.router.active_session_snapshot().await;
-    let active_encoded = active_key.as_ref().map(encode_session_key);
+    let sessions = state.backend.snapshot().await;
+    let active_key = state.backend.focused().await;
 
-    let (rows, active, dormant, spawning) =
-        build_session_rows(&sessions, &card_states, active_key.as_ref());
+    let (rows, active, dormant, spawning) = build_session_rows(&sessions, active_key.as_ref());
 
     let data = DashboardData {
         active_count: active,
@@ -32,8 +32,9 @@ pub async fn dashboard(State(state): State<WebUiState>) -> impl IntoResponse {
         recent_sessions: rows,
         active_session: active_key
             .as_ref()
-            .map(|k| session_summary(k, &sessions, &card_states)),
-        active_session_key: active_encoded,
+            .and_then(|k| find_info(&sessions, k))
+            .map(|info| session_summary(info)),
+        active_session_key: active_key.as_ref().map(encode_session_key),
     };
 
     render_template(&state, "index.html", "dashboard", &data).await
@@ -41,11 +42,10 @@ pub async fn dashboard(State(state): State<WebUiState>) -> impl IntoResponse {
 
 /// Full session list (full page with action bar).
 pub async fn session_list(State(state): State<WebUiState>) -> impl IntoResponse {
-    let sessions = state.router.session_snapshot().await;
-    let card_states = state.router.card_state_snapshot().await;
-    let active_key = state.router.active_session_snapshot().await;
-    let (rows, active, dormant, spawning) =
-        build_session_rows(&sessions, &card_states, active_key.as_ref());
+    let sessions = state.backend.snapshot().await;
+    let active_key = state.backend.focused().await;
+    let (rows, active, dormant, spawning) = build_session_rows(&sessions, active_key.as_ref());
+    let unreachable = unreachable_cause(&state).await;
 
     let data = serde_json::json!({
         "recent_sessions": rows,
@@ -54,6 +54,7 @@ pub async fn session_list(State(state): State<WebUiState>) -> impl IntoResponse 
         "spawning_count": spawning,
         "total_sessions": active + dormant + spawning,
         "active_session_key": active_key.as_ref().map(encode_session_key),
+        "core_unreachable_cause": unreachable,
     });
     render_template(&state, "sessions.html", "sessions", &data).await
 }
@@ -61,11 +62,10 @@ pub async fn session_list(State(state): State<WebUiState>) -> impl IntoResponse 
 /// htmx partial: just the table body + counts. Used by SSE-driven refresh
 /// so the list updates live without a full page reload.
 pub async fn session_list_partial(State(state): State<WebUiState>) -> impl IntoResponse {
-    let sessions = state.router.session_snapshot().await;
-    let card_states = state.router.card_state_snapshot().await;
-    let active_key = state.router.active_session_snapshot().await;
-    let (rows, active, dormant, spawning) =
-        build_session_rows(&sessions, &card_states, active_key.as_ref());
+    let sessions = state.backend.snapshot().await;
+    let active_key = state.backend.focused().await;
+    let (rows, active, dormant, spawning) = build_session_rows(&sessions, active_key.as_ref());
+    let unreachable = unreachable_cause(&state).await;
 
     let data = serde_json::json!({
         "recent_sessions": rows,
@@ -74,75 +74,55 @@ pub async fn session_list_partial(State(state): State<WebUiState>) -> impl IntoR
         "spawning_count": spawning,
         "total_sessions": active + dormant + spawning,
         "active_session_key": active_key.as_ref().map(encode_session_key),
+        "core_unreachable_cause": unreachable,
     });
     render_template(&state, "sessions_partial.html", "sessions", &data).await
 }
 
-/// Session detail: card content, message_id, events. Visiting this page
+/// Session detail: transcript content and session facts. Visiting this page
 /// also marks the session as the focused WebUI session.
 pub async fn session_detail(
     State(state): State<WebUiState>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
-    let session_key = decode_session_key(&key);
-
-    let sessions = state.router.session_snapshot().await;
-    let (mapping, raw_key) = match session_key {
-        Some(ref sk) => match sessions
-            .into_iter()
-            .find(|(k, _)| k.chat_id == sk.chat_id && k.thread_id == sk.thread_id)
-        {
-            Some((k, m)) => (m, k),
-            None => return Html("Session not found".to_string()),
-        },
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
         None => return Html("Invalid session key".to_string()),
     };
 
+    let sessions = state.backend.snapshot().await;
+    let Some(info) = find_info(&sessions, &session_key) else {
+        return Html("Session not found".to_string());
+    };
+
     // Visiting the detail page focuses this session in the dashboard.
-    state.router.web_set_active(raw_key.clone()).await;
+    state.backend.set_focus(Some(session_key.clone())).await;
 
-    let card_states = state.router.card_state_snapshot().await;
-    let encoded_key = encode_session_key(&raw_key);
+    // Transcript: full fetch (from position 0). The page is a full render —
+    // incremental fetch matters for the timeline, not here.
+    let body_view: Vec<crate::models::CardElementView> =
+        match state.backend.turns(session_key.clone(), 0).await {
+            Ok(entries) => entries.iter().map(turn_entry_to_view).collect(),
+            Err(_) => Vec::new(),
+        };
 
-    let (status, session_id) = match &mapping.state {
-        MappingState::Active { session_id } => ("active", Some(session_id.clone())),
-        MappingState::Dormant { session_id } => ("dormant", Some(session_id.clone())),
-        MappingState::Spawning { .. } => ("spawning", None),
-    };
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
 
-    let (phase, user_prompt, body_view) = match &session_id {
-        Some(sid) => card_states
-            .get(sid)
-            .map(|st| {
-                let phase = st.status_emoji.clone();
-                let body: Vec<CardElementView> = st.body.iter().map(card_element_to_view).collect();
-                (phase, st.user_prompt.clone(), body)
-            })
-            .unwrap_or_default(),
-        None => Default::default(),
-    };
-
-    let msg_id = if let Some(sid) = session_id.as_ref() {
-        state.router.msgid_snapshot().await.get(sid).cloned()
-    } else {
-        None
-    };
-
-    let derived = SessionStatus::derive(status, &phase);
-
+    let unreachable = unreachable_cause(&state).await;
     let data = serde_json::json!({
-        "chat_id": raw_key.chat_id,
-        "thread_id": raw_key.thread_id,
-        "session_id": session_id,
-        "status": status,
+        "chat_id": info.chat_id,
+        "thread_id": info.thread_id,
+        "session_id": info.session_id,
+        "status": info.status,
         "status_label": derived.label(),
         "status_slug": derived.slug(),
         "status_glyph": derived.glyph(),
-        "user_prompt": user_prompt,
+        "user_prompt": info.user_prompt,
         "body": body_view,
-        "msg_id": msg_id,
-        "last_active": format_relative_time(mapping.last_active_unix),
-        "encoded_key": encoded_key,
+        "last_active": format_relative_time(info.last_active_unix),
+        "encoded_key": key,
+        "project_dir": info.project_dir,
+        "core_unreachable_cause": unreachable,
     });
 
     render_template(&state, "session_detail.html", "sessions", &data).await
@@ -150,9 +130,9 @@ pub async fn session_detail(
 
 /// Settings page: card config and basic gateway info.
 pub async fn settings(State(state): State<WebUiState>) -> impl IntoResponse {
-    let card_cfg = state.router.card_config().await;
+    let card_cfg = &state.card_config;
     let card_config_info = CardConfigInfo {
-        theme_color: card_cfg.theme_color,
+        theme_color: card_cfg.theme_color.clone(),
         fold_long_output: card_cfg.fold_long_output,
         thinking_display: format!("{:?}", card_cfg.thinking),
         max_user_text_chars: card_cfg.max_user_text_chars,
@@ -315,18 +295,13 @@ pub async fn gateway_api_reload(State(state): State<WebUiState>) -> axum::respon
     }
 }
 
-/// gateway mutation 守卫（Task 6.3，语义与 admin_mutation_guard 一致但
-/// 不依赖 AdminState）：POST-only（405）+ loopback origin 检查（403）。
 pub async fn gateway_mutation_guard(
-    req: axum::extract::Request,
+    req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::http::Method;
     // 只放行变更语义（POST/PUT/DELETE）；GET/HEAD 等读方法 405。
-    if !matches!(
-        req.method(),
-        &Method::POST | &Method::PUT | &Method::DELETE
-    ) {
+    if !matches!(req.method(), &Method::POST | &Method::PUT | &Method::DELETE) {
         return (axum::http::StatusCode::METHOD_NOT_ALLOWED, "mutation only").into_response();
     }
     let origin_ok = req
@@ -365,6 +340,31 @@ fn err_503_no_secret() -> axum::response::Response {
         .into_response()
 }
 
+/// Map a typed backend rejection onto the pre-existing HTTP status codes:
+/// unknown key → 404, unusable project dir → 400, capacity/unavailable → 503.
+fn rejection_response(rej: SessionRejection) -> axum::response::Response {
+    let status = match &rej {
+        SessionRejection::UnknownSession { .. } => axum::http::StatusCode::NOT_FOUND,
+        SessionRejection::UnusableProjectDir => axum::http::StatusCode::BAD_REQUEST,
+        SessionRejection::Capacity { .. } | SessionRejection::Unavailable { .. } => {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        }
+    };
+    (
+        status,
+        Json(serde_json::json!({ "error": rej.to_string() })),
+    )
+        .into_response()
+}
+
+/// The reachability cause when the backend cannot reach the core, else `None`.
+async fn unreachable_cause(state: &WebUiState) -> Option<String> {
+    match state.backend.reachability().await {
+        Reachability::Reachable => None,
+        Reachability::Unreachable { cause } => Some(cause),
+    }
+}
+
 /// About page: version info and system status.
 pub async fn about(State(state): State<WebUiState>) -> impl IntoResponse {
     let uptime = state.started_at.elapsed();
@@ -393,18 +393,20 @@ pub struct CreateSessionRequest {
 pub async fn api_create_session(
     State(state): State<WebUiState>,
     Form(req): Form<CreateSessionRequest>,
-) -> impl IntoResponse {
-    let key = state.router.web_spawn(req.prompt, None).await;
-    let encoded = encode_session_key(&key);
-    state.router.web_set_active(key.clone()).await;
-    let _ = state.event_tx.send(WebUiEvent::SessionCreated {
-        session_id: encoded.clone(),
-    });
-    // Session is still spawning; client redirects to detail page.
-    (
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "key": encoded })),
-    )
+) -> axum::response::Response {
+    match state.backend.spawn(req.prompt, None).await {
+        Ok(key) => {
+            let encoded = encode_session_key(&key);
+            state.backend.set_focus(Some(key)).await;
+            // Session is still spawning; client redirects to detail page.
+            (
+                axum::http::StatusCode::CREATED,
+                Json(serde_json::json!({ "key": encoded })),
+            )
+                .into_response()
+        }
+        Err(rej) => rejection_response(rej),
+    }
 }
 
 #[derive(Deserialize)]
@@ -416,24 +418,25 @@ pub async fn api_send_message(
     State(state): State<WebUiState>,
     Path(key): Path<String>,
     Form(req): Form<SendMessageRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
         None => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": "Invalid session key" })),
-            );
+            )
+                .into_response();
         }
     };
-    state
-        .router
-        .web_send_message(session_key, req.message)
-        .await;
-    (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({"status": "ok"})),
-    )
+    match state.backend.message(session_key, req.message).await {
+        Ok(()) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "ok"})),
+        )
+            .into_response(),
+        Err(rej) => rejection_response(rej),
+    }
 }
 
 /// Close (kill) a session. Returns 200 + the new active session key (or
@@ -441,28 +444,21 @@ pub async fn api_send_message(
 pub async fn api_close_session(
     State(state): State<WebUiState>,
     Path(key): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
         None => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "Invalid session key"})),
-            );
+            )
+                .into_response();
         }
     };
 
-    let outcome = state.router.web_close_session(session_key.clone()).await;
-    match outcome {
-        CloseOutcome::NotFound => (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        ),
-        CloseOutcome::Closed => {
-            let active = state.router.active_session_snapshot().await;
-            let _ = state.event_tx.send(WebUiEvent::SessionRemoved {
-                session_id: key.clone(),
-            });
+    match state.backend.close(session_key).await {
+        Ok(()) => {
+            let active = state.backend.focused().await;
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
@@ -470,7 +466,9 @@ pub async fn api_close_session(
                     "active_session_key": active.as_ref().map(encode_session_key),
                 })),
             )
+                .into_response()
         }
+        Err(rej) => rejection_response(rej),
     }
 }
 
@@ -491,22 +489,15 @@ pub async fn api_switch_session(
         }
     };
 
-    let sessions = state.router.session_snapshot().await;
-    if !sessions
-        .iter()
-        .any(|(k, _)| k.chat_id == session_key.chat_id && k.thread_id == session_key.thread_id)
-    {
+    let sessions = state.backend.snapshot().await;
+    if find_info(&sessions, &session_key).is_none() {
         return (
             axum::http::StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
         );
     }
 
-    state.router.web_set_active(session_key.clone()).await;
-    let _ = state.event_tx.send(WebUiEvent::SessionUpdated {
-        session_id: key.clone(),
-        status: "active".into(),
-    });
+    state.backend.set_focus(Some(session_key.clone())).await;
     (
         axum::http::StatusCode::OK,
         Json(serde_json::json!({
@@ -521,16 +512,20 @@ pub async fn api_switch_session(
 
 /// Agent 项目页：侧栏会话列表 + 主区 (focused session chat 或 empty state)。
 pub async fn agent_page(State(state): State<WebUiState>) -> impl IntoResponse {
-    let sessions = state.router.session_snapshot().await;
-    let card_states = state.router.card_state_snapshot().await;
-    let active_key = state.router.active_session_snapshot().await;
-    let (rows, _, _, _) = build_session_rows(&sessions, &card_states, active_key.as_ref());
-    let active = active_key.as_ref().map(|k| session_agent_summary(k, &sessions, &card_states));
+    let sessions = state.backend.snapshot().await;
+    let active_key = state.backend.focused().await;
+    let (rows, _, _, _) = build_session_rows(&sessions, active_key.as_ref());
+    let active = active_key
+        .as_ref()
+        .and_then(|k| find_info(&sessions, k))
+        .map(|info| session_agent_summary(info));
+    let unreachable = unreachable_cause(&state).await;
 
     let data = serde_json::json!({
         "sessions": rows,
         "active_session": active,
         "active_key": active_key.as_ref().map(encode_session_key),
+        "core_unreachable_cause": unreachable,
     });
     render_template(&state, "agent.html", "agent", &data).await
 }
@@ -544,24 +539,21 @@ pub async fn agent_detail(
         Some(k) => k,
         None => return Html("Invalid session key".to_string()),
     };
-    let sessions = state.router.session_snapshot().await;
-    let exists = sessions
-        .iter()
-        .any(|(k, _)| k.chat_id == session_key.chat_id && k.thread_id == session_key.thread_id);
-    if !exists {
+    let sessions = state.backend.snapshot().await;
+    let Some(info) = find_info(&sessions, &session_key) else {
         return Html("Agent session not found".to_string());
-    }
+    };
     // 聚焦到该 session。
-    state.router.web_set_active(session_key.clone()).await;
+    state.backend.set_focus(Some(session_key.clone())).await;
 
-    let card_states = state.router.card_state_snapshot().await;
-    let active_key = Some(&session_key);
-    let (rows, _, _, _) = build_session_rows(&sessions, &card_states, active_key.as_deref());
-    let active = active_key.map(|k| session_agent_summary(k, &sessions, &card_states));
+    let (rows, _, _, _) = build_session_rows(&sessions, Some(&session_key));
+    let active = Some(session_agent_summary(info));
+    let unreachable = unreachable_cause(&state).await;
     let data = serde_json::json!({
         "sessions": rows,
         "active_session": active,
         "active_key": encode_session_key(&session_key),
+        "core_unreachable_cause": unreachable,
     });
     render_template(&state, "agent.html", "agent", &data).await
 }
@@ -575,10 +567,15 @@ pub async fn agent_timeline(
         Some(k) => k,
         None => return Html("".to_string()),
     };
-    let sessions = state.router.session_snapshot().await;
-    let card_states = state.router.card_state_snapshot().await;
-    let active = Some(&session_key).map(|k| session_agent_summary(k, &sessions, &card_states));
-    let data = serde_json::json!({ "active_session": active });
+    let sessions = state.backend.snapshot().await;
+    let Some(info) = find_info(&sessions, &session_key) else {
+        return Html("".to_string());
+    };
+    let mut summary = session_agent_summary(info);
+    if let Ok(entries) = state.backend.turns(session_key, 0).await {
+        summary["body"] = serde_json::json!(entries.iter().map(turn_entry_to_view).collect::<Vec<_>>());
+    }
+    let data = serde_json::json!({ "active_session": summary });
     render_template(&state, "agent_timeline.html", "agent", &data).await
 }
 
@@ -587,7 +584,7 @@ pub async fn agent_timeline(
 pub async fn api_create_project(
     State(state): State<WebUiState>,
     Form(req): Form<CreateProjectRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let raw = req.path.trim().to_string();
     let expanded = expand_home_tilde(&raw);
     let project_dir = std::path::Path::new(&expanded);
@@ -595,22 +592,22 @@ pub async fn api_create_project(
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("路径不存在或不是目录: {expanded}") })),
-        );
+        )
+            .into_response();
     }
     let prompt = format!("Work in {expanded} — understand the project structure and help the user with their tasks.");
-    let key = state
-        .router
-        .web_spawn(prompt, Some(expanded))
-        .await;
-    let encoded = encode_session_key(&key);
-    state.router.web_set_active(key.clone()).await;
-    let _ = state.event_tx.send(WebUiEvent::SessionCreated {
-        session_id: encoded.clone(),
-    });
-    (
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "key": encoded })),
-    )
+    match state.backend.spawn(prompt, Some(expanded)).await {
+        Ok(key) => {
+            let encoded = encode_session_key(&key);
+            state.backend.set_focus(Some(key)).await;
+            (
+                axum::http::StatusCode::CREATED,
+                Json(serde_json::json!({ "key": encoded })),
+            )
+                .into_response()
+        }
+        Err(rej) => rejection_response(rej),
+    }
 }
 
 /// 给 agent 会话发消息。
@@ -618,20 +615,33 @@ pub async fn api_agent_message(
     State(state): State<WebUiState>,
     Path(key): Path<String>,
     Form(req): Form<SendMessageRequest>,
-) -> impl IntoResponse {
+) -> Html<String> {
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
         None => return Html("".to_string()),
     };
-    state
-        .router
-        .web_send_message(session_key.clone(), req.message)
-        .await;
+    if let Err(rej) = state
+        .backend
+        .message(session_key.clone(), req.message)
+        .await
+    {
+        // 返回错误片段（HTMX swap 目标是 timeline 容器）——保持诚实：失败
+        // 不渲染成功的时间线。
+        return Html(format!(
+            "<div class=\"alert alert-error\">{}</div>",
+            rej
+        ));
+    }
     // 返回 timeline 片段以便 HTMX 立即刷新。
-    let sessions = state.router.session_snapshot().await;
-    let card_states = state.router.card_state_snapshot().await;
-    let active = Some(&session_key).map(|k| session_agent_summary(k, &sessions, &card_states));
-    let data = serde_json::json!({ "active_session": active });
+    let sessions = state.backend.snapshot().await;
+    let Some(info) = find_info(&sessions, &session_key) else {
+        return Html("".to_string());
+    };
+    let mut summary = session_agent_summary(info);
+    if let Ok(entries) = state.backend.turns(session_key, 0).await {
+        summary["body"] = serde_json::json!(entries.iter().map(turn_entry_to_view).collect::<Vec<_>>());
+    }
+    let data = serde_json::json!({ "active_session": summary });
     render_template(&state, "agent_timeline.html", "agent", &data).await
 }
 
@@ -641,47 +651,24 @@ pub struct CreateProjectRequest {
 }
 
 /// Agent 页 focused session 的完整渲染数据（含 prompt/body/phase_display）。
-fn session_agent_summary(
-    key: &SessionKey,
-    sessions: &[(SessionKey, Mapping)],
-    card_states: &std::collections::HashMap<String, CardState>,
-) -> serde_json::Value {
-    let mapping = sessions
-        .iter()
-        .find(|(k, _)| k.chat_id == key.chat_id && k.thread_id == key.thread_id)
-        .map(|(_, m)| m);
-    let (status, session_id, project_dir) = match mapping {
-        Some(Mapping { state, project_dir, .. }) => match state {
-            MappingState::Active { session_id } => ("active", Some(session_id.clone()), project_dir.clone()),
-            MappingState::Dormant { session_id } => ("dormant", Some(session_id.clone()), project_dir.clone()),
-            MappingState::Spawning { .. } => ("spawning", None, project_dir.clone()),
-        },
-        None => ("dormant", None, None),
-    };
-    let (phase, prompt, phase_display, body_view) = match &session_id {
-        Some(sid) => card_states
-            .get(sid)
-            .map(|st| {
-                let phase = st.status_emoji.clone();
-                let body: Vec<CardElementView> = st.body.iter().map(card_element_to_view).collect();
-                let phase_display = emoji_to_display(&phase).to_string();
-                (phase, st.user_prompt.clone(), phase_display, body)
-            })
-            .unwrap_or_default(),
-        None => Default::default(),
-    };
+/// Body 由调用方按需填充（turns 拉取）。
+fn session_agent_summary(info: &SessionInfo) -> serde_json::Value {
+    let phase_display = emoji_to_display(info.phase.as_deref().unwrap_or("")).to_string();
     serde_json::json!({
-        "chat_id": key.chat_id,
-        "thread_id": key.thread_id,
-        "session_id": session_id,
-        "status": status,
-        "phase": phase,
+        "chat_id": info.chat_id,
+        "thread_id": info.thread_id,
+        "session_id": info.session_id,
+        "status": info.status,
+        "phase": info.phase,
         "phase_display": phase_display,
-        "prompt": prompt,
-        "body": body_view,
-        "project_dir": project_dir,
-        "last_active": mapping.map(|m| format_relative_time(m.last_active_unix)).unwrap_or_default(),
-        "encoded_key": encode_session_key(key),
+        "prompt": info.user_prompt,
+        "body": [],
+        "project_dir": info.project_dir,
+        "last_active": format_relative_time(info.last_active_unix),
+        "encoded_key": encode_session_key(&SessionKey {
+            chat_id: info.chat_id.clone(),
+            thread_id: info.thread_id.clone(),
+        }),
     })
 }
 
@@ -709,11 +696,17 @@ fn emoji_to_display(emoji: &str) -> &'static str {
 
 // ---- Helper functions ----
 
-/// Build `SessionRow`s from session snapshots, returning counts. Marks each
+/// Find a session's `SessionInfo` in a snapshot by key identity.
+fn find_info<'a>(sessions: &'a [SessionInfo], key: &SessionKey) -> Option<&'a SessionInfo> {
+    sessions
+        .iter()
+        .find(|s| s.chat_id == key.chat_id && s.thread_id == key.thread_id)
+}
+
+/// Build `SessionRow`s from a backend snapshot, returning counts. Marks each
 /// row with `is_active` so the template can render the active indicator.
 fn build_session_rows(
-    sessions: &[(SessionKey, Mapping)],
-    card_states: &std::collections::HashMap<String, CardState>,
+    sessions: &[SessionInfo],
     active_key: Option<&SessionKey>,
 ) -> (Vec<SessionRow>, usize, usize, usize) {
     let mut active = 0usize;
@@ -722,63 +715,58 @@ fn build_session_rows(
 
     let mut rows: Vec<SessionRow> = sessions
         .iter()
-        .map(|(key, mapping)| {
-            let (status, phase) = match &mapping.state {
-                MappingState::Active { session_id } => {
+        .map(|info| {
+            let status: &'static str = match info.status.as_str() {
+                "active" => {
                     active += 1;
-                    let phase = card_states
-                        .get(session_id)
-                        .map(|st| st.status_emoji.clone())
-                        .unwrap_or_default();
-                    ("active", phase)
+                    "active"
                 }
-                MappingState::Dormant { .. } => {
+                "dormant" => {
                     dormant += 1;
-                    ("dormant", String::new())
+                    "dormant"
                 }
-                MappingState::Spawning { .. } => {
+                _ => {
                     spawning += 1;
-                    ("spawning", String::new())
+                    "spawning"
                 }
             };
+            let phase = info.phase.clone().unwrap_or_default();
             let is_active = active_key
-                .map(|a| a.chat_id == key.chat_id && a.thread_id == key.thread_id)
+                .map(|a| a.chat_id == info.chat_id && a.thread_id == info.thread_id)
                 .unwrap_or(false);
             // Agent page 标签：project_dir 优先（📁）；否则用首条用户消息
             // 预览（💬），取前 80 字符。
-            let prompt_preview = mapping.session_id().and_then(|sid| {
-                card_states
-                    .get(sid)
-                    .map(|st| {
-                        let p = st.user_prompt.trim();
-                        if p.is_empty() {
-                            None
-                        } else if p.chars().count() > 80 {
-                            let short: String = p.chars().take(80).collect();
-                            Some(format!("{short}…"))
-                        } else {
-                            Some(p.to_string())
-                        }
-                    })
-                    .flatten()
+            let prompt_preview = info.user_prompt.as_ref().and_then(|p| {
+                let p = p.trim();
+                if p.is_empty() {
+                    None
+                } else if p.chars().count() > 80 {
+                    let short: String = p.chars().take(80).collect();
+                    Some(format!("{short}…"))
+                } else {
+                    Some(p.to_string())
+                }
             });
             let derived = SessionStatus::derive(status, &phase);
-            let session_id = mapping.session_id().map(|s| s.to_string());
             SessionRow {
-                encoded_key: encode_session_key(key),
-                chat_id: key.chat_id.clone(),
-                thread_id: key.thread_id.clone(),
-                session_id_short: session_id
+                encoded_key: encode_session_key(&SessionKey {
+                    chat_id: info.chat_id.clone(),
+                    thread_id: info.thread_id.clone(),
+                }),
+                chat_id: info.chat_id.clone(),
+                thread_id: info.thread_id.clone(),
+                session_id_short: info
+                    .session_id
                     .as_deref()
                     .map(|s| crate::models::middle_truncate(s, 18)),
-                session_id,
+                session_id: info.session_id.clone(),
                 status,
                 status_label: derived.label(),
                 status_slug: derived.slug(),
                 status_glyph: derived.glyph(),
-                last_active: format_relative_time(mapping.last_active_unix),
+                last_active: format_relative_time(info.last_active_unix),
                 is_active,
-                project_dir: mapping.project_dir.clone(),
+                project_dir: info.project_dir.clone(),
                 prompt_preview,
             }
         })
@@ -795,38 +783,20 @@ fn build_session_rows(
 }
 
 /// Compact summary used by the dashboard's focused-session banner.
-fn session_summary(
-    key: &SessionKey,
-    sessions: &[(SessionKey, Mapping)],
-    card_states: &std::collections::HashMap<String, CardState>,
-) -> serde_json::Value {
-    let mapping = sessions
-        .iter()
-        .find(|(k, _)| k.chat_id == key.chat_id && k.thread_id == key.thread_id)
-        .map(|(_, m)| m);
-    let (status, session_id) = match mapping {
-        Some(Mapping { state, .. }) => match state {
-            MappingState::Active { session_id } => ("active", Some(session_id.clone())),
-            MappingState::Dormant { session_id } => ("dormant", Some(session_id.clone())),
-            MappingState::Spawning { .. } => ("spawning", None),
-        },
-        None => ("dormant", None),
-    };
-    let phase = session_id
-        .as_ref()
-        .and_then(|sid| card_states.get(sid))
-        .map(|st| st.status_emoji.clone())
-        .unwrap_or_default();
-    let derived = SessionStatus::derive(status, &phase);
+fn session_summary(info: &SessionInfo) -> serde_json::Value {
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
     serde_json::json!({
-        "chat_id": key.chat_id,
-        "thread_id": key.thread_id,
-        "session_id": session_id,
-        "status": status,
+        "chat_id": info.chat_id,
+        "thread_id": info.thread_id,
+        "session_id": info.session_id,
+        "status": info.status,
         "status_label": derived.label(),
         "status_slug": derived.slug(),
         "status_glyph": derived.glyph(),
-        "encoded_key": encode_session_key(key),
+        "encoded_key": encode_session_key(&SessionKey {
+            chat_id: info.chat_id.clone(),
+            thread_id: info.thread_id.clone(),
+        }),
     })
 }
 
@@ -853,7 +823,7 @@ async fn render_template<T: serde::Serialize>(
     }
     // Inject the active session key so the sidebar's `sidebar_active.html`
     // partial can render its focused-session card on every page.
-    let active_key = state.router.active_session_snapshot().await;
+    let active_key = state.backend.focused().await;
     map.insert(
         "active_session_key".into(),
         match active_key {
@@ -891,45 +861,17 @@ fn decode_session_key(encoded: &str) -> Option<SessionKey> {
     })
 }
 
-/// Convert a CardElement to a view model for template rendering.
-fn card_element_to_view(el: &CardElement) -> CardElementView {
-    match el {
-        CardElement::Markdown { content } => CardElementView {
-            element_type: "markdown",
-            content: content.clone(),
+/// Map a transcript entry onto the card-element view model. The transcript
+/// already carries rendered view shapes (`element_type` + `content`), so
+/// this is a direct mapping.
+fn turn_entry_to_view(entry: &TurnEntry) -> crate::models::CardElementView {
+    crate::models::CardElementView {
+        element_type: match entry.element_type.as_str() {
+            "markdown" => "markdown",
+            "thinking" => "thinking",
+            _ => "other",
         },
-        CardElement::Div { text } => CardElementView {
-            element_type: "div",
-            content: text.content.clone(),
-        },
-        CardElement::CollapsiblePanel(panel) => {
-            let header = panel.header.title.content.as_str();
-            let body: Vec<String> = panel
-                .elements
-                .iter()
-                .map(|e| match e {
-                    CardElement::Markdown { content } => content.clone(),
-                    CardElement::Div { text } => text.content.clone(),
-                    _ => String::new(),
-                })
-                .collect();
-            let content = format!(
-                "<details><summary>{header}</summary>{}</details>",
-                body.join("\n")
-            );
-            CardElementView {
-                element_type: "collapsible",
-                content,
-            }
-        }
-        CardElement::Hr => CardElementView {
-            element_type: "hr",
-            content: String::new(),
-        },
-        _ => CardElementView {
-            element_type: "other",
-            content: String::new(),
-        },
+        content: entry.content.clone(),
     }
 }
 

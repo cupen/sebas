@@ -3,54 +3,55 @@
 use crate::admin::{self, AdminAdapter, AdminState};
 use crate::models::GatewayInfo;
 use crate::routes;
-use crate::sse::WebUiEvent;
-use sebas_acp::claude::manager::SessionManager;
+use crate::session_backend::SessionBackend;
 use axum::Router;
 use axum::routing::{get, post};
 use axum::serve;
 use minijinja::Environment;
-use sebas_router::router::RouterHandle;
+use sebas_feishu::cards::CardConfig;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
-/// Shared state for the WebUI server.
+/// Shared state for the WebUI server. All session data flows through the
+/// backend seam — the webui crate never touches `RouterHandle` (the
+/// in-process case wraps it inside `InProcessBackend`; the standalone case
+/// speaks the core session channel over a Unix socket).
 #[derive(Clone)]
 pub struct WebUiState {
-    pub router: RouterHandle,
-    pub mgr: Arc<SessionManager>,
+    pub backend: Arc<dyn SessionBackend>,
     pub gateway: GatewayInfo,
     pub started_at: Instant,
-    pub event_tx: Arc<broadcast::Sender<WebUiEvent>>,
+    /// Static snapshot of the card config for the settings page. The session
+    /// channel does not transport settings; the caller loads it (from the
+    /// local settings.json) at startup.
+    pub card_config: CardConfig,
     pub templates: Arc<Environment<'static>>,
 }
 
 /// Build the axum Router with all WebUI routes.
 pub fn build_router(
-    router: RouterHandle,
-    mgr: Arc<SessionManager>,
+    backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     templates: Arc<Environment<'static>>,
 ) -> Router {
-    build_router_with_admin_adapter(router, mgr, gateway, templates, None)
+    build_router_with_admin_adapter(backend, gateway, card_config, templates, None)
 }
 
 /// Build the axum Router with optional watchdog admin adapter.
 pub fn build_router_with_admin_adapter(
-    router: RouterHandle,
-    mgr: Arc<SessionManager>,
+    backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     templates: Arc<Environment<'static>>,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) -> Router {
-    let (tx, _) = broadcast::channel::<WebUiEvent>(256);
     let state = WebUiState {
-        router,
-        mgr,
+        backend,
         gateway,
         started_at: Instant::now(),
-        event_tx: Arc::new(tx),
+        card_config,
         templates: templates.clone(),
     };
 
@@ -131,24 +132,25 @@ pub fn build_router_with_admin_adapter(
 
 /// Run the WebUI server on the given listener.
 pub async fn run(
-    router: RouterHandle,
-    mgr: Arc<SessionManager>,
+    backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     listener: tokio::net::TcpListener,
 ) {
-    run_with_admin_adapter(router, mgr, gateway, listener, None).await;
+    run_with_admin_adapter(backend, gateway, card_config, listener, None).await;
 }
 
 /// Run the WebUI server with an optional watchdog admin adapter.
 pub async fn run_with_admin_adapter(
-    router: RouterHandle,
-    mgr: Arc<SessionManager>,
+    backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) {
     let templates = Arc::new(init_templates());
-    let app = build_router_with_admin_adapter(router, mgr, gateway, templates, admin_adapter);
+    let app =
+        build_router_with_admin_adapter(backend, gateway, card_config, templates, admin_adapter);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
     if let Err(e) = serve(

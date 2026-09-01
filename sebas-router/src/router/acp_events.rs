@@ -91,6 +91,8 @@ impl RouterHandle {
                     self.allowlist.clear(&key).await;
                     self.reply_targets.clear(&key).await;
                     self.map.remove_by_session(sid).await;
+                    self.transcript_drop(sid).await;
+                    self.publish_removed(&key).await;
                 }
                 self.drop_card(sid).await;
                 // 终态会话同时清 root msg_id（与 web_close_session 对称），防止

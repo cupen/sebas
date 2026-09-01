@@ -81,6 +81,19 @@ impl CardStateMap {
             .or_insert_with(|| CardState::new(&user_prompt));
     }
 
+    /// 幂等 seed 的报告变体：真正新建返回 `true`，entry 已存在（重入保留）
+    /// 返回 `false`。供 seed_card 决定是否记 transcript prompt / 发事件。
+    pub async fn seed_and_report(&self, session_id: &str, user_prompt: &str) -> bool {
+        let mut g = self.inner.write().await;
+        match g.entry(session_id.to_string()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(CardState::new(user_prompt));
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(_) => false,
+        }
+    }
+
     /// 无 entry 时 `lazy()` 兜底插入，再对 `&mut CardState` 跑 `f`，返回其结果。
     pub async fn apply<F, R>(&self, session_id: &str, f: F) -> R
     where

@@ -18,3 +18,4 @@ logs/
 *.xml
 sebas
 
+.e2e/

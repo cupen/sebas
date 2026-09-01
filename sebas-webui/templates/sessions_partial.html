@@ -1,3 +1,11 @@
+{# Honest degradation (add-core-session-channel): when the core session
+   channel is unreachable, say so on the board instead of showing a stale
+   list that silently accepts controls. #}
+{% if core_unreachable_cause %}
+<div class="alert alert-warning" data-test="core-unreachable">
+  ⚠ 核心不可达：{{ core_unreachable_cause }}。以下列表可能过期，创建/发送/关闭均不可用。
+</div>
+{% endif %}
 {% if recent_sessions %}
 <table class="session-table">
   <thead>

@@ -6,15 +6,12 @@
 //! steps in the `redesign-webui-console` change; asserting them is strictly
 //! better than re-checking them by hand each time a template moves.
 
-use sebas_acp::claude::manager::SessionManager;
 use axum::body::Body;
 use axum::http::Request;
-use sebas_feishu::events::SessionKey;
 use http_body_util::BodyExt;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::{Mapping, SessionMap};
+use sebas_webui::session_backend::FakeBackend;
+use sebas_router::SessionInfo;
 use std::sync::Arc;
-use std::time::Duration;
 use tower::ServiceExt;
 use sebas_webui::models::GatewayInfo;
 use sebas_webui::{build_router, init_templates_for_tests};
@@ -22,30 +19,33 @@ use sebas_webui::{build_router, init_templates_for_tests};
 /// Every GET page in the dashboard, as a (path, label) pair.
 const PAGES: &[&str] = &["/", "/sessions", "/settings", "/gateway", "/about"];
 
-fn key(id: &str) -> SessionKey {
-    SessionKey {
+async fn app() -> axum::Router {
+    let backend = Arc::new(FakeBackend::new());
+    let mk = |id: &str, status: &str, sid: Option<&str>| SessionInfo {
         chat_id: format!("oc_{id}"),
         thread_id: None,
-    }
-}
-
-async fn app() -> axum::Router {
-    let map = SessionMap::new();
-    map.insert(key("a"), Mapping::active("sess-abcdef0123456789-tail"))
-        .await
-        .unwrap();
-    map.insert(key("b"), Mapping::dormant("sess-b", 3))
-        .await
-        .unwrap();
-    map.insert(key("c"), Mapping::spawning()).await.unwrap();
-
-    let (router, _rx) = RouterHandle::new(map);
-    router
-        .seed_card("sess-abcdef0123456789-tail".into(), "a prompt".into())
+        session_id: sid.map(str::to_string),
+        status: status.to_string(),
+        phase: None,
+        user_prompt: None,
+        last_active_unix: 0,
+        project_dir: None,
+    };
+    backend
+        .set_sessions(vec![
+            mk("a", "active", Some("sess-abcdef0123456789-tail")),
+            mk("b", "dormant", Some("sess-b")),
+            mk("c", "spawning", None),
+        ])
         .await;
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(5)));
+    backend.push_turn("sess-abcdef0123456789-tail", "prompt", "a prompt").await;
     let templates = Arc::new(init_templates_for_tests());
-    build_router(router, mgr, GatewayInfo::default(), templates)
+    build_router(
+        backend,
+        GatewayInfo::default(),
+        Default::default(),
+        templates,
+    )
 }
 
 async fn render(app: &axum::Router, path: &str) -> String {
