@@ -1,0 +1,28 @@
+[package]
+name = "sebas-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "sebas 的原生 in-process coding agent 内核（Phase 1a）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.40", features = ["process", "io-util", "io-std", "sync", "macros", "rt-multi-thread", "time", "fs"] }
+tracing = "0.1"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+eventsource-stream = "0.2"
+bytes = "1"
+futures-util = "0.3"
+regex = "1"
+globset = "0.4"
+walkdir = "2"
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
