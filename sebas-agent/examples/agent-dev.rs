@@ -23,8 +23,11 @@
 use sebas_agent::llm::anthropic::AnthropicMessagesClient;
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::tools::ToolRegistry;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -33,9 +36,10 @@ fn env_or(name: &str, default: &str) -> String {
 }
 
 fn print_help() {
-    eprintln!("usage: cargo run -p sebas-agent --example agent-dev -- [--workdir DIR] [--model MODEL] [--shell] [PROMPT...]");
+    eprintln!("usage: cargo run -p sebas-agent --example agent-dev -- [--workdir DIR] [--model MODEL] [--record FILE] [--shell] [PROMPT...]");
     eprintln!();
-    eprintln!("  --shell   interactive shell for testing agent interaction");
+    eprintln!("  --shell       interactive shell for testing agent interaction");
+    eprintln!("  --record FILE write all events as JSONL for later replay/debugging");
     eprintln!();
     eprintln!("env (direct provider, default):");
     eprintln!("  SEBAS_AGENT_PROVIDER_BASE_URL  (default: https://api.anthropic.com)");
@@ -44,6 +48,43 @@ fn print_help() {
     eprintln!("env (optional gateway):");
     eprintln!("  SEBAS_AGENT_GATEWAY_URL        (e.g. http://127.0.0.1:8787)");
     eprintln!("  SEBAS_AGENT_GATEWAY_AUTH       (default: sk-gw-local-dev)");
+}
+
+/// 将事件记录为 JSONL 的工具。
+struct Recorder {
+    inner: Mutex<BufWriter<File>>,
+}
+
+impl Recorder {
+    fn new(path: &PathBuf) -> Self {
+        let file = File::create(path).unwrap_or_else(|e| {
+            eprintln!("[agent-dev] failed to open record file {path:?}: {e}");
+            std::process::exit(2);
+        });
+        Self {
+            inner: Mutex::new(BufWriter::new(file)),
+        }
+    }
+
+    fn record(&self, ev: &AgentEvent) {
+        if let Ok(line) = serde_json::to_string(ev) {
+            if let Ok(mut w) = self.inner.lock() {
+                let _ = writeln!(w, "{line}");
+            }
+        }
+    }
+
+    fn record_prompt(&self, prompt: &str) {
+        if let Ok(mut w) = self.inner.lock() {
+            let _ = writeln!(w, "# prompt: {prompt}");
+        }
+    }
+
+    fn flush(&self) {
+        if let Ok(mut w) = self.inner.lock() {
+            let _ = w.flush();
+        }
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -56,8 +97,11 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// 打印事件流；返回是否遇到 terminal 错误（会话不可恢复）。
-fn print_event(ev: &AgentEvent) -> bool {
+/// 打印事件流；记录到 recorder（如有）；返回是否遇到 terminal 错误。
+fn print_event(ev: &AgentEvent, recorder: Option<&Recorder>) -> bool {
+    if let Some(r) = recorder {
+        r.record(ev);
+    }
     match ev {
         AgentEvent::TextDelta { delta, .. } | AgentEvent::ThinkingDelta { delta, .. } => {
             eprint!("{delta}");
@@ -110,7 +154,11 @@ async fn stdin_lines() -> tokio::sync::mpsc::Receiver<String> {
 /// 交互 shell（--shell）：stdin 行 + 事件流的 select 循环。
 /// turn 进行中仍可输入：/cancel 即时生效，新 prompt 由会话层串行排队；
 /// /quit（或 EOF）等当前在途 turn 收尾后再退出，保证输出完整。
-async fn run_shell(handle: &SessionHandle, mut rx: broadcast::Receiver<AgentEvent>) {
+async fn run_shell(
+    handle: &SessionHandle,
+    mut rx: broadcast::Receiver<AgentEvent>,
+    recorder: Option<&Recorder>,
+) {
     eprintln!(
         "[agent-dev] shell ready (session {}) — type a prompt; /cancel cancels the current turn; /quit exits",
         handle.key
@@ -160,7 +208,7 @@ async fn run_shell(handle: &SessionHandle, mut rx: broadcast::Receiver<AgentEven
                             AgentEvent::Finished { .. } | AgentEvent::Error { .. }
                         );
                         // terminal 错误 = 会话不可恢复，shell 退出
-                        if print_event(&ev) {
+                        if print_event(&ev, recorder) {
                             break;
                         }
                         if terminal {
@@ -186,6 +234,7 @@ async fn main() {
     let mut workdir = PathBuf::from(".");
     let mut model: Option<String> = None;
     let mut shell = false;
+    let mut record: Option<PathBuf> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -201,6 +250,12 @@ async fn main() {
                     std::process::exit(2);
                 }));
             }
+            "--record" => {
+                record = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("--record needs a file path");
+                    std::process::exit(2);
+                })));
+            }
             "--shell" => shell = true,
             "--help" | "-h" => {
                 print_help();
@@ -209,6 +264,8 @@ async fn main() {
             _ => prompt_parts.push(a),
         }
     }
+
+    let recorder = record.as_ref().map(Recorder::new);
 
     // LLM 通道（design N9）：直连 provider 默认，gateway 可选。
     let client = if let Ok(url) = std::env::var("SEBAS_AGENT_GATEWAY_URL") {
@@ -241,7 +298,10 @@ async fn main() {
     let rx = handle.subscribe();
 
     if shell {
-        run_shell(&handle, rx).await;
+        run_shell(&handle, rx, recorder.as_ref()).await;
+        if let Some(r) = recorder.as_ref() {
+            r.flush();
+        }
         return;
     }
 
@@ -251,16 +311,26 @@ async fn main() {
         std::process::exit(2);
     }
 
+    let recorder_ref = recorder.as_ref();
     let mut rx = rx;
     eprintln!("[agent-dev] session {} — prompt: {prompt}", handle.key);
+    if let Some(r) = recorder_ref {
+        r.record_prompt(&prompt);
+    }
     handle.prompt(prompt).await;
 
     while let Ok(ev) = rx.recv().await {
-        if print_event(&ev) {
+        if print_event(&ev, recorder_ref) {
             break;
         }
         if matches!(ev, AgentEvent::Finished { .. }) {
             break;
+        }
+    }
+    if let Some(r) = recorder_ref {
+        r.flush();
+        if let Some(path) = record.as_ref() {
+            eprintln!("[agent-dev] events recorded to {}", path.display());
         }
     }
 }

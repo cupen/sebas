@@ -1343,6 +1343,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
+]
+
+[[package]]
 name = "notify"
 version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1367,7 +1377,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
  "bitflags",
-]
 ]
 
 [[package]]
@@ -2129,6 +2138,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sebas-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "eventsource-stream",
+ "futures-util",
+ "globset",
+ "libc",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "sebas-feishu"
 version = "0.1.0"
 dependencies = [
@@ -2204,28 +2235,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "urlencoding",
-]
-
-[[package]]
-name = "sebas-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "eventsource-stream",
- "futures-util",
- "globset",
- "libc",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "walkdir",
 ]
 
 [[package]]
