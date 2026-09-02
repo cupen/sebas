@@ -545,10 +545,8 @@ fn short_model_name(model: &str) -> String {
         }
     }
     // Fallback: take the second segment if it looks like "claude-{name}"
-    if let Some(rest) = model.strip_prefix("claude-") {
-        if let Some(name) = rest.split('-').next() {
-            return name.to_string();
-        }
+    if let Some(name) = model.strip_prefix("claude-").and_then(|rest| rest.split('-').next()) {
+        return name.to_string();
     }
     model.to_string()
 }
@@ -556,12 +554,14 @@ fn short_model_name(model: &str) -> String {
 /// 从累积状态构建完整卡（见 openspec/specs/feishu-cards/spec.md）：
 /// header(`{主题}`, theme) + 引用块(`> {user_prompt}`) + 分隔线
 /// + body 各元素 + footer 灰注。
+///
 /// 标题由 `derive_topic(user_prompt)` 派生（首条非空 prompt 行），不再携带
 /// 状态 emoji；状态由 Feishu reaction 表达（见 `sebas_router::card_state::phase`）。
 /// 当 `footer` 为 Some 时展示模型名和 token 用量，否则回退 `msg_id: {session_id}`。
 ///
 /// Footer 三段语义（避免把 in/out 当 round、ctx 当 in+out 求和的常见错）：
-/// - `in`  = 累计输入 token（整个会话的 prompt 累计，作为对话"成本"）
+///
+/// - `in` = 累计输入 token（整个会话的 prompt 累计，作为对话"成本"）
 /// - `out` = 累计输出 token（整个会话的生成累计）
 /// - `ctx` = 当前上下文窗口 token（=累计输入，因为输入就是填入上下文的全部
 ///   内容；不应把 in+out 求和，那只是总流量不是上下文）
@@ -885,9 +885,10 @@ pub fn render_expired_permission_card() -> Card {
 
 /// Command groups for the interactive help card.
 /// Maps group key → (tab label, list of (command, description)).
-fn help_command_groups() -> HashMap<&'static str, (&'static str, Vec<(&'static str, &'static str)>)>
-{
-    let mut m: HashMap<&str, (&str, Vec<(&str, &str)>)> = HashMap::new();
+type HelpGroupTable = HashMap<&'static str, (&'static str, Vec<(&'static str, &'static str)>)>;
+
+fn help_command_groups() -> HelpGroupTable {
+    let mut m: HelpGroupTable = HashMap::new();
     m.insert(
         "session",
         (
@@ -948,9 +949,13 @@ fn help_command_groups() -> HashMap<&'static str, (&'static str, Vec<(&'static s
 /// `theme` — card theme color (e.g. "blue").
 ///
 /// The card includes:
-/// - A row of tab buttons for switching groups (in-place update via `UpdateCardByMsgId`).
-/// - A list of command buttons for the selected group (clicking executes the command).
-/// The `msg_id` of the card is stored by the dispatcher so tab switches can PATCH in place.
+/// - A row of tab buttons for switching groups (in-place update via
+///   `UpdateCardByMsgId`).
+/// - A list of command buttons for the selected group (clicking executes the
+///   command).
+///
+/// The `msg_id` of the card is stored by the dispatcher so tab switches can
+/// PATCH in place.
 pub fn render_help_card(group: &str, theme: &str) -> Card {
     let groups = help_command_groups();
     // Validate group key; fall back to "session".

@@ -20,19 +20,17 @@ use serde::{Deserialize, Serialize};
 ///
 /// 注意：与 gateway 内部 `GatewayConfig.mode`（`off`/`upstream`）语义
 /// 不完全相同 —— 这里是 sebas 这一侧对 spawn 路径的开关。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderMode {
+    /// Default = Off（无网关配置时诚实降级）。
+    #[default]
     Off,
     Direct { provider: String },
     Gateway,
 }
 
-impl Default for ProviderMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
+
 
 /// 运行时持久化状态（mode + default_selection 的子集视图）。
 ///

@@ -13,10 +13,11 @@ use sebas_feishu::cards::{
 /// fold_long_output=true 时：ToolStart 折叠成一个 collapsible_panel（默认收起），
 /// ToolProgress/ToolEnd 都收进对应工具面板，卡片里每个工具只占一行；
 /// tool result 默认屏蔽（max_tool_output_chars=0），>0 时结果也收进面板。
-/// ThinkingDelta 也收进同一个父级折叠面板，与工具调用统一收纳。
-/// fold_long_output=false 时：保持内联展示（结果仍受 10240 硬上限保护）。
-/// + 总量兜底（24000 字符上限 + 80 递归元素上限，Hr 连后一个一起丢）。
-/// PermissionRequest 不累积（走独立 SendCard）。
+///
+/// - ThinkingDelta 也收进同一个父级折叠面板，与工具调用统一收纳。
+/// - `fold_long_output=false` 时保持内联展示（结果仍受 10240 硬上限保护），
+///   另有总量兜底（24000 字符上限 + 80 递归元素上限，Hr 连后一个一起丢）。
+/// - PermissionRequest 不累积（走独立 SendCard）。
 pub fn apply_event_to_card(body: &mut Vec<CardElement>, event: &AcpEvent, cfg: &CardConfig) {
     match event {
         AcpEvent::TextDelta { delta, .. } => {
@@ -276,10 +277,10 @@ const TOOLS_PARENT_DONE_TITLE: &str = "✅ 已完成";
 fn ensure_tools_parent(body: &mut Vec<CardElement>) -> usize {
     // 搜索整个 body（父面板可能不在末尾，TextDelta 等事件会插在它后面）
     for (i, el) in body.iter().enumerate() {
-        if let CardElement::CollapsiblePanel(panel) = el {
-            if is_tools_parent(panel) {
-                return i;
-            }
+        if let CardElement::CollapsiblePanel(panel) = el
+            && is_tools_parent(panel)
+        {
+            return i;
         }
     }
     body.push(CardElement::CollapsiblePanel(CollapsiblePanel {
@@ -297,13 +298,14 @@ fn is_tools_parent(panel: &CollapsiblePanel) -> bool {
 }
 
 /// Finished 时把父面板标题从 "🤔 折腾中" 更新为 "✅ 已完成"。
-fn mark_parent_completed(body: &mut Vec<CardElement>) {
-    if let Some(idx) = find_tools_parent_index(body) {
-        if let CardElement::CollapsiblePanel(panel) = &mut body[idx] {
-            if panel.header.title.content == TOOLS_PARENT_TITLE {
-                panel.header.title.content = TOOLS_PARENT_DONE_TITLE.into();
-            }
-        }
+fn mark_parent_completed(body: &mut [CardElement]) {
+    let Some(idx) = find_tools_parent_index(body) else {
+        return;
+    };
+    if let CardElement::CollapsiblePanel(panel) = &mut body[idx]
+        && panel.header.title.content == TOOLS_PARENT_TITLE
+    {
+        panel.header.title.content = TOOLS_PARENT_DONE_TITLE.into();
     }
 }
 
@@ -514,7 +516,7 @@ pub fn format_elapsed(d: &std::time::Duration) -> String {
 /// 更新父折叠面板标题，添加项数和经过时间。
 /// 标题格式：`"🤔 折腾中 · 3项 · 45s"` → Finished 后 `"✅ 已完成 · 5项 · 2m 30s"`。
 pub fn update_parent_title(
-    body: &mut Vec<CardElement>,
+    body: &mut [CardElement],
     count: usize,
     elapsed: &std::time::Duration,
 ) {

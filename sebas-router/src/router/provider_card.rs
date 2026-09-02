@@ -268,10 +268,10 @@ async fn handle_delete(
         tracing::warn!("provider-delete-confirm 缺少 name 字段");
         return refresh_card(handle, key, None).await;
     };
-    if let Some(forms) = &handle.provider_forms {
-        if let Err(e) = forms.preset.store.delete(name).await {
-            tracing::warn!(name, error = %e, "provider delete failed");
-        }
+    if let Some(forms) = &handle.provider_forms
+        && let Err(e) = forms.preset.store.delete(name).await
+    {
+        tracing::warn!(name, error = %e, "provider delete failed");
     }
     if let Err(e) = provider_state::update(|s| {
         if s.default_selection.as_ref().map(|d| d.provider.as_str()) == Some(name) {
