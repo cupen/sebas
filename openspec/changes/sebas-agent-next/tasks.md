@@ -122,7 +122,7 @@
 
 ## 7. Blueprint update & final gate
 
-- [ ] 7.1 Revise design doc §3 (Codex teardown) — upgrade evidence to source
+- [x] 7.1 Revise design doc §3 (Codex teardown) — upgrade evidence to source
       (`openai/codex`, 2026 snapshot): CX-1 corrected (Linux sandbox default is
       bubblewrap + seccomp, Landlock is the legacy fallback; macOS sandbox-exec;
       Windows RestrictedToken), CX-3 corrected (the single-tool-surface verdict
@@ -131,12 +131,12 @@
       ApprovedForSession, is_likely_sandbox_denied, rollout-trace, codex exec
       headless events); verify every revised row cites a source and no uncited
       load-bearing claim remains
-- [ ] 7.2 Revise design doc §4 (DSH teardown) — upgrade `S9 [观测]` to
+- [x] 7.2 Revise design doc §4 (DSH teardown) — upgrade `S9 [观测]` to
       `S10 [源码]` with deepseek-ai/deepseek-harness (2026-08-13, MIT) and
       official docs citations; correct mechanism rows (exit_plan_mode,
       workflow, lsp, session_search, jump policy); verify every revised row
       cites a source and no uncited load-bearing claim remains
-- [ ] 7.3 Revise design doc §11 (roadmap) — Phase 2 = permission/sandbox +
+- [x] 7.3 Revise design doc §11 (roadmap) — Phase 2 = permission/sandbox +
       network surface (this change); Phase 3 splits into 3a compaction, 3b
       todo + proactive ask, 3c plan mode + apply_patch; Phase 4 subagent/MCP/
       skills registry; persistence (OQ1) promoted to an explicit roadmap item

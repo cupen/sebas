@@ -4,6 +4,7 @@
 > 状态：调研 + 设计蓝图（纯文档，未实现；对应 openspec change `add-agent-core-architecture`，`skip_specs`——行为规格将由后续实现 change 从本文派生）
 > 作者：DeepSeek Harness（与 cupen 协作）
 > 修订 2026-09-01：crate 定名 **sebas-agent**（沿 sebas-* crate 惯例，"agent-core" 保留为能力域名）；D3 修订为 **gateway 可选**——agent 可直连 provider（见 §6 / §7.2 / §10）。
+> 修订 2026-09-02：DSH 与 Codex 均已开源，§3/§4 证据升级为源码对照（S10/S11），§3 两条裁决修正（CX-1/CX-3）、§11 路线图拆分细化、新增 §12 修订台账（openspec change `sebas-agent-next`）。
 
 ## 0. 摘要
 
@@ -49,6 +50,12 @@ Claude Code 证明的是**"专用工具 + 结构化契约"路线**（与 Codex �
 
 ## 3. Codex（OpenAI）拆解
 
+> **2026-09-02 源码对照修订（S11，`openai/codex`，2026-09 快照）**：本节基于第三方文档的裁决按源码修正——
+> **CX-1 修正**：Linux 沙箱默认已是 **bubblewrap + seccomp**（ro-bind 根、可写层、unshare user/pid/net、seccomp 网络过滤 + 代理桥；`codex-rs/linux-sandbox/`、`codex-rs/sandboxing/src/bwrap.rs`），Landlock 降级为 `use_legacy_landlock` legacy 路径；macOS `sandbox-exec` deny-by-default `.sbpl`；Windows RestrictedToken。拒绝检测用启发式 `is_likely_sandbox_denied`（exit 2/126/127 + SIGSYS + 关键字扫描）。
+> **CX-3 修正**：「Codex 是单工具收敛路线」**已被 2026 架构取代**——工具面现为 unified_exec（带进程管理）/ apply_patch / update_plan / view_image / get_context_remaining / request_permissions / request_user_input / tool_search + MCP + 多 agent v2（spawn/send_message/interrupt/wait）+ Code Mode（`codex-rs/core/src/tools/`）。原裁决"skip（路线）"的**结论仍成立**（sebas 走专用工具路线），但前提"收敛"不成立——专用 vs 收敛的对照应改为"面可控性"而非"面大小"。
+> **新增采纳行**：会话批准缓存 `ApprovalStore::with_cached_approval`（ApprovedForSession，按 exec id / apply_patch 文件集——≡ sebas 会话 allowlist）；审批 `AskForApproval{unless-trusted, on-request(默认), never, granular}` + `escalate_on_failure` 一次性未沙箱升级（≡ 一次性升级重试）；`rollout-trace` crate（opt-in 原始 trace.jsonl + 确定性 trace-reduce 语义图——sebas agent-bench 的轨迹/重放即其最小形态）；`codex exec` 无头 ThreadEvent JSONL + resume/fork。
+> **持久化佐证**：thread-store 规范化 TurnItems + SQLite 状态库（`codex-rs/state/`）取代扁平 transcript.jsonl——sebas 的会话持久化（OQ1）照此形态列 Phase 3+/4。
+
 #### 3.1 机制表
 
 | # | 机制 | 它如何工作 | 证据 | 迁移判定 |
@@ -65,6 +72,8 @@ Claude Code 证明的是**"专用工具 + 结构化契约"路线**（与 Codex �
 Codex 的价值在**约束面**而非工具面：沙箱三档 + 审批四档给出了 Phase 2 的现成词汇表（枚举几乎可以照抄），`on-failure`"先跑、被拦再问"与 webui 的异步审批卡片天然契合；单工具路线被 D2 明确否决，但 `update_plan` / `apply_patch` 是 Phase 3 的两个具体借鉴点；同为 Rust 实现则消除了"Rust 做进程沙箱是否可行"的疑虑（CX-6）。
 
 ## 4. DeepSeek-Harness 拆解
+
+> **2026-09-02 源码升级（S10）**：DSH 于 2026-08-13 开源（`deepseek-ai/deepseek-harness`，MIT，~208k stars；npm `@deepseek-ai/dsh`）。S9 [观测] 的机制行升级为源码可证：`docs/tool-catalog.md`（工具清单含 exit_plan_mode / workflow / lsp / session_search / run_code / ralph / schedule_* 等）；`docs/subsystems/sandbox.md`（SandboxMode read-only / workspace-write / danger-full-access；bwrap/Landlock/Seatbelt/ACL 后端 + full/partial 如实上报）；`docs/subsystems/approval.md`（ApprovalPolicy ask/never；fail-closed 五态闭集；**请求带 agent/tool/callId/reason 而刻意不带 args**）；`docs/agent-lifecycle.md`（goal 轮次 + blocked floor 3 轮；send_message 步界注入）；**执行流水线**：`tools/pre-execute` 瀑布（hooks→permission→sandbox）→ 单调 guard → ctx.approval（缺席即拒）→ `tools/execute` → fs 写意图门 → `tools/post-execute`（S7 的五段流水线由此印证）。本节机制表保留作为首次观测记录，行级差异以源码为准。
 
 #### 4.1 机制表
 
@@ -303,6 +312,8 @@ sebas-agent/
 
 原则：**Phase N 的入口依赖 Phase N-1 的稳定运行，不并行抢跑**；每个 Phase 是独立的实现 change，规格从本文对应章节派生。
 
+> **2026-09-02 修订**：Phase 1a 已完成归档（headless 内核，`openspec/changes/sebas-agent`）。Phase 2 细化为**权限/沙箱（Landlock 进程内为主 + 防火墙回退）+ 网络面（web_search/web_fetch）+ 上下文管理第一步（结果改写/Assembly 预算/只读并行）+ agent-bench 评估面**（openspec change `sebas-agent-next`）。Phase 3 拆分：**3a 上下文 compaction/摘要**、**3b 任务清单 + agent 主动提问**、**3c plan mode + apply_patch**，各自独立 change。**持久化（OQ1）升为路线图显式条目**（DSH session-log 与 Codex thread-store/SQLite 双重佐证），列 Phase 3+。webui 接线（1b）沿 SessionBackend 缝推进，依赖 `add-core-session-channel` 的 channel 谱系收敛。
+
 ## 12. 风险与开放问题
 
 风险（→ 缓解）：
@@ -337,5 +348,23 @@ sebas-agent/
 | S7 | [DeepSeek Harness 工具清单：内置工具与执行流水线](https://www.ai-indeed.com/encyclopedia/29669.html) | [文档] | §4 内置工具与流水线 |
 | S8 | [dsh-agent-sdk — Embeddable runtime built on DeepSeek Harness](https://github.com/salathleizhang/dsh-agent-sdk) | [文档] | §4 运行时形态佐证 |
 | S9 | DeepSeek-Harness 运行时上下文（本文作者运行环境：工具清单、文件沙箱策略、审批政策、goal/job/subagent 编排均为一手可观测行为） | [观测] | §4 全部机制行 |
+| S10 | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（2026-08-13 开源，MIT）及其 docs/（tool-catalog、subsystems/sandbox、subsystems/approval、agent-lifecycle、tool-execution-pipeline） | [源码] | §4 修订（2026-09-02） |
+| S11 | [openai/codex](https://github.com/openai/codex)（Rust monorepo，2026-09 快照）：codex-rs/{sandboxing,linux-sandbox,protocol,core/src/tools,thread-store,state,rollout-trace,exec} | [源码] | §3 修订（2026-09-02） |
 
 注：Codex 内部实现（Seatbelt/Landlock 细节等）以官方文档与 S4–S6 所述为准，超出部分在正文标 [推断]。DeepSeek-Harness 无公开完整设计文档，S7/S8 为第三方整理，机制描述以 S9 一手观测为准、S7/S8 佐证。
+
+
+---
+
+## 12. 修订台账（2026-09-02，openspec change `sebas-agent-next`）
+
+| # | 位置 | 原裁决 | 修订后 | 依据 |
+|---|---|---|---|---|
+| R1 | §3 CX-1 | Codex Linux 用 Landlock/Seatbelt | 默认 **bwrap+seccomp**，Landlock legacy 回退；拒绝启发式 `is_likely_sandbox_denied` | S11 源码 |
+| R2 | §3 CX-3 | Codex 单工具收敛路线（skip） | 2026 工具面已大幅扩张（unified_exec/MCP/多 agent/code_mode）；结论改立"面可控性" | S11 源码 |
+| R3 | §3 新增 | — | 采纳：ApprovedForSession 会话批准缓存、一次性未沙箱升级、rollout-trace 轨迹、codex exec 无头事件 | S11 源码 |
+| R4 | §4 | DSH 机制靠 S9 观测 | 证据升级 [源码]（S10）；流水线五段印证 S7 | S10 源码 |
+| R5 | §11 | Phase 2 = 权限/沙箱；Phase 3 单体 | Phase 2 扩为四件套（沙箱/网络/上下文/bench）；Phase 3 拆 3a/3b/3c；持久化升显式条目 | 本 change 实施范围 |
+| R6 | §10 依赖面 | agent 不依赖 landlock/cap-std | sebas-agent 新增 `landlock`（Linux）；**弃 cap-std**（管不住子进程）；网络面新增 url/mime_guess | N2/N3 选型研究 |
+
+注：本台账逐条对应 `openspec/changes/sebas-agent-next` 的 tasks 7.1–7.3；归档时按仓库惯例回写本文头部状态。
