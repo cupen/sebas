@@ -7,8 +7,9 @@
 
 use crate::llm::{LlmClient, LlmRequest, StopReason, StreamEvent};
 use crate::message::{BudgetConfig, ContentBlock, Message, Role, ToolErrorKind, ToolOutput};
+use crate::policy::{ApprovalAnswer, PermissionRequestInfo, PolicyDecision};
 use crate::session::AgentEvent;
-use crate::tools::{ToolCtx, ToolRegistry};
+use crate::tools::{Tool, ToolCtx, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
 /// 正常收尾原因。预算耗尽也走 Finished（spec：不是 error）。
@@ -89,6 +90,33 @@ impl<'a> TurnEmit<'a> {
             session_id: self.session_id.into(),
             tool_name: tool_name.into(),
             result: result.into(),
+        });
+    }
+
+    /// 策略审批请求（request_id == tool_use_id，消费端据此回填决定）。
+    pub(crate) fn permission_request(
+        &self,
+        request_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+        reason: &str,
+    ) {
+        self.send(AgentEvent::PermissionRequest {
+            session_id: self.session_id.into(),
+            request_id: request_id.into(),
+            tool_name: tool_name.into(),
+            args: args.clone(),
+            reason: reason.into(),
+        });
+    }
+
+    /// 策略流结果（allowed_once / allowed_session / escalated / denied / unavailable）。
+    pub(crate) fn tool_policy(&self, request_id: &str, tool_name: &str, outcome: &str) {
+        self.send(AgentEvent::ToolPolicy {
+            session_id: self.session_id.into(),
+            request_id: request_id.into(),
+            tool_name: tool_name.into(),
+            outcome: outcome.into(),
         });
     }
 }
@@ -219,9 +247,14 @@ impl TurnEngine {
                     workdir: tool_ctx_base.workdir.clone(),
                     cancel: cancel.clone(),
                     read_files: tool_ctx_base.read_files.clone(),
+                    policy: tool_ctx_base.policy.clone(),
+                    approver: tool_ctx_base.approver.clone(),
                 };
                 let out: ToolOutput = match registry.get(tool_name) {
-                    Some(tool) => tool.execute(input.clone(), &ctx).await,
+                    Some(tool) => {
+                        gated_execute(tool.as_ref(), tool_use_id, tool_name, input.clone(), &ctx, emit)
+                            .await
+                    }
                     None => ToolOutput::error(
                         ToolErrorKind::InvalidArgs,
                         format!(
@@ -250,6 +283,123 @@ impl TurnEngine {
                 }
             }
         }
+    }
+}
+
+/// 策略门控执行（task 1.3，design N1）：Allow 直跑；Deny 可升级（带理由的
+/// 一次性重试）；Ask 走审批——无回答者/超时/取消 → fail closed。每次策略
+/// 流结果发 `ToolPolicy` 事件，让消费端区分「策略拒绝」与「工具崩溃」。
+async fn gated_execute(
+    tool: &dyn Tool,
+    tool_use_id: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+    ctx: &ToolCtx,
+    emit: &TurnEmit<'_>,
+) -> ToolOutput {
+    let Some(policy) = ctx.policy.clone() else {
+        // 未配置策略引擎：1a 行为（不过门控）。
+        return tool.execute(input, ctx).await;
+    };
+    match policy.evaluate(tool_name, &input, &ctx.workdir) {
+        PolicyDecision::Allow => tool.execute(input, ctx).await,
+        PolicyDecision::Deny { reason } => {
+            // 升级 = 带理由的一次性重试（仅当审批人放行那一次）；否则维持拒绝。
+            if let Some(approver) = &ctx.approver {
+                approver.prepare(tool_use_id);
+                emit.permission_request(
+                    tool_use_id,
+                    tool_name,
+                    &input,
+                    &format!("denied by policy: {reason} — approve to run once?"),
+                );
+                let info = PermissionRequestInfo {
+                    request_id: tool_use_id.to_string(),
+                    tool: tool_name.to_string(),
+                    input: input.clone(),
+                    reason: reason.clone(),
+                };
+                let answer = wait_approval(approver.as_ref(), &info, &policy.config().approval_timeout, &ctx.cancel).await;
+                if matches!(
+                    answer,
+                    Some(ApprovalAnswer::AllowOnce) | Some(ApprovalAnswer::Escalate { .. })
+                ) {
+                    emit.tool_policy(tool_use_id, tool_name, "escalated");
+                    return tool.execute(input, ctx).await;
+                }
+            }
+            emit.tool_policy(tool_use_id, tool_name, "denied");
+            ToolOutput::error(
+                ToolErrorKind::Denied { reason: reason.clone() },
+                format!("refused by policy: {reason}"),
+            )
+        }
+        PolicyDecision::Ask { reason } => {
+            let Some(approver) = &ctx.approver else {
+                // fail closed：无回答者 → 拒绝（结构化数据，循环继续）。
+                emit.tool_policy(tool_use_id, tool_name, "unavailable");
+                return ToolOutput::error(
+                    ToolErrorKind::Denied { reason: reason.clone() },
+                    format!(
+                        "refused by policy: {reason}; no approval answerer reachable (fail closed)"
+                    ),
+                );
+            };
+            approver.prepare(tool_use_id);
+            emit.permission_request(tool_use_id, tool_name, &input, &reason);
+            let info = PermissionRequestInfo {
+                request_id: tool_use_id.to_string(),
+                tool: tool_name.to_string(),
+                input: input.clone(),
+                reason: reason.clone(),
+            };
+            let answer = wait_approval(approver.as_ref(), &info, &policy.config().approval_timeout, &ctx.cancel).await;
+            match answer {
+                Some(ApprovalAnswer::AllowOnce) => {
+                    emit.tool_policy(tool_use_id, tool_name, "allowed_once");
+                    tool.execute(input, ctx).await
+                }
+                Some(ApprovalAnswer::AllowSession) => {
+                    // 本会话精确签名升级进 allowlist：后续同签名静默。
+                    policy.allow_session(tool_name, &input);
+                    emit.tool_policy(tool_use_id, tool_name, "allowed_session");
+                    tool.execute(input, ctx).await
+                }
+                Some(ApprovalAnswer::Escalate { .. }) => {
+                    emit.tool_policy(tool_use_id, tool_name, "escalated");
+                    tool.execute(input, ctx).await
+                }
+                Some(ApprovalAnswer::Deny) => {
+                    emit.tool_policy(tool_use_id, tool_name, "denied");
+                    ToolOutput::error(
+                        ToolErrorKind::Denied { reason: reason.clone() },
+                        format!("refused by policy: operator denied `{tool_name}`"),
+                    )
+                }
+                None => {
+                    emit.tool_policy(tool_use_id, tool_name, "unavailable");
+                    ToolOutput::error(
+                        ToolErrorKind::Denied { reason: reason.clone() },
+                        format!(
+                            "refused by policy: {reason}; approval timed out or no answerer (fail closed)"
+                        ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// 审批等待：与取消令牌竞争；超时（策略配置）或取消 → None（fail closed）。
+async fn wait_approval(
+    approver: &dyn crate::policy::Approver,
+    info: &PermissionRequestInfo,
+    timeout: &std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<ApprovalAnswer> {
+    tokio::select! {
+        _ = cancel.cancelled() => None,
+        a = tokio::time::timeout(*timeout, approver.approve(info)) => a.ok().flatten(),
     }
 }
 
@@ -575,6 +725,197 @@ mod tests {
         );
         // 3（取消轮）+ user("again") + assistant(text) = 5
         assert_eq!(history.len(), 5);
+    }
+
+    // ─── 策略门控（task 1.2/1.3 验证）─────────────────────────────────────
+
+    struct ScriptedApprover(std::sync::Mutex<std::collections::VecDeque<ApprovalAnswer>>);
+
+    fn registry_stub() -> crate::tools::ToolRegistry {
+        crate::tools::ToolRegistry::new(std::time::Duration::from_secs(10))
+    }
+
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    #[async_trait::async_trait]
+    impl crate::policy::Approver for ScriptedApprover {
+        async fn approve(&self, _req: &PermissionRequestInfo) -> Option<ApprovalAnswer> {
+            self.0.lock().unwrap().pop_front()
+        }
+    }
+
+    fn gated_ctx(
+        dir: &std::path::Path,
+        policy: Arc<crate::policy::PolicyEngine>,
+        approver: Option<Arc<dyn crate::policy::Approver>>,
+    ) -> ToolCtx {
+        ToolCtx {
+            workdir: dir.to_path_buf(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            read_files: Default::default(),
+            policy: Some(policy),
+            approver,
+        }
+    }
+
+    fn kinds(evs: &[AgentEvent]) -> Vec<String> {
+        evs.iter()
+            .map(|e| serde_json::to_value(e).unwrap()["type"].as_str().unwrap().into())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn allow_once_runs_once_then_asks_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(256);
+        let policy = Arc::new(crate::policy::PolicyEngine::new(Default::default()));
+        let approver: Arc<dyn crate::policy::Approver> = Arc::new(ScriptedApprover(std::sync::Mutex::new(VecDeque::from(vec![
+            ApprovalAnswer::AllowOnce,
+            ApprovalAnswer::Deny,
+]))));
+        let ctx = gated_ctx(dir.path(), policy, Some(approver));
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "bash", serde_json::json!({"command": "rm -rf build"}))]),
+            FakeLlmClient::call_tools(vec![("t2", "bash", serde_json::json!({"command": "rm -rf build"}))]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        let outcome = TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry_stub(), &ctx, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
+            .await;
+        assert_eq!(outcome, TurnOutcome::Finished { reason: FinishReason::EndTurn });
+        let evs = collect(&mut rx);
+        assert_eq!(
+            kinds(&evs),
+            vec!["tool_start", "permission_request", "tool_policy", "tool_end",
+                 "tool_start", "permission_request", "tool_policy", "tool_end",
+                 "text_delta"]
+        );
+        let outcomes: Vec<&str> = evs.iter().filter_map(|e| match e {
+            AgentEvent::ToolPolicy { outcome, .. } => Some(outcome.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(outcomes, vec!["allowed_once", "denied"]);
+        // 第二次被拒的结果是结构化数据回填（is_error），循环继续到 done
+        assert!(matches!(
+            &history[history.len() - 2].content[0],
+            ContentBlock::ToolResult { is_error: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn allow_session_absorbs_exact_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(256);
+        let policy = Arc::new(crate::policy::PolicyEngine::new(Default::default()));
+        let approver: Arc<dyn crate::policy::Approver> = Arc::new(ScriptedApprover(std::sync::Mutex::new(VecDeque::from(vec![
+            ApprovalAnswer::AllowSession,
+]))));
+        let ctx = gated_ctx(dir.path(), policy, Some(approver));
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "bash", serde_json::json!({"command": "rm -rf build"}))]),
+            FakeLlmClient::call_tools(vec![("t2", "bash", serde_json::json!({"command": "rm -rf build"}))]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry_stub(), &ctx, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
+            .await;
+        let evs = collect(&mut rx);
+        // 首次 ask → allowed_session；第二次同签名静默（无 permission_request / tool_policy）
+        assert_eq!(
+            kinds(&evs),
+            vec!["tool_start", "permission_request", "tool_policy", "tool_end",
+                 "tool_start", "tool_end", "text_delta"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_without_approver_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(256);
+        let policy = Arc::new(crate::policy::PolicyEngine::new(Default::default()));
+        let ctx = gated_ctx(dir.path(), policy, None);
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "bash", serde_json::json!({"command": "rm -rf build"}))]),
+            FakeLlmClient::say("noted"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        let outcome = TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry_stub(), &ctx, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
+            .await;
+        assert_eq!(outcome, TurnOutcome::Finished { reason: FinishReason::EndTurn });
+        let evs = collect(&mut rx);
+        assert_eq!(
+            kinds(&evs),
+            vec!["tool_start", "tool_policy", "tool_end", "text_delta"]
+        );
+        assert!(matches!(&evs[1], AgentEvent::ToolPolicy { outcome, .. } if outcome == "unavailable"));
+        assert!(matches!(
+            &history[2].content[0],
+            ContentBlock::ToolResult { is_error: true, content, .. } if content.contains("fail closed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_deny_escalates_once_with_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(256);
+        let policy = Arc::new(crate::policy::PolicyEngine::new(crate::policy::PolicyConfig {
+            deny: vec![crate::policy::ToolRule::tool("bash")],
+            ..Default::default()
+        }));
+        let approver: Arc<dyn crate::policy::Approver> = Arc::new(ScriptedApprover(std::sync::Mutex::new(VecDeque::from(vec![
+            ApprovalAnswer::AllowOnce,
+]))));
+        let ctx = gated_ctx(dir.path(), policy, Some(approver));
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "bash", serde_json::json!({"command": "echo escalated-run"}))]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry_stub(), &ctx, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
+            .await;
+        let evs = collect(&mut rx);
+        assert_eq!(
+            kinds(&evs),
+            vec!["tool_start", "permission_request", "tool_policy", "tool_end", "text_delta"]
+        );
+        assert!(matches!(&evs[2], AgentEvent::ToolPolicy { outcome, .. } if outcome == "escalated"));
+        // 升级确实执行了（输出可见），且只此一次
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::ToolEnd { result, .. } if result.contains("escalated-run"))));
+    }
+
+    #[tokio::test]
+    async fn no_policy_engine_keeps_1a_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(256);
+        let ctx = gated_ctx(dir.path(), Arc::new(crate::policy::PolicyEngine::new(Default::default())), None);
+        // policy=None 场景由既有测试覆盖（SessionManager 默认）；这里验证 rm 命令
+        // 在 policy=None 时直接执行——用一个显式 None ctx 变体。
+        let ctx_none = ToolCtx {
+            policy: None,
+            approver: None,
+            ..ctx
+        };
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "bash", serde_json::json!({"command": "echo raw-bash"}))]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry_stub(), &ctx_none, &mut history, "go", "sys", "m", tokio_util::sync::CancellationToken::new(), &emit)
+            .await;
+        let evs = collect(&mut rx);
+        assert!(!evs.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. } | AgentEvent::ToolPolicy { .. })));
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::ToolEnd { result, .. } if result.contains("raw-bash"))));
     }
 
     #[tokio::test]

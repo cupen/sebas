@@ -6,6 +6,7 @@ pub mod search;
 
 use crate::llm::ToolSchema;
 use crate::message::ToolOutput;
+use crate::policy::{Approver, PolicyEngine, SandboxMode};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,7 +21,10 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     /// 会话级已读文件集合（write/edit 的 read-before-write 门控）。
     pub read_files: Arc<Mutex<HashSet<PathBuf>>>,
-    // Phase 2: sandbox_tier / permission hook（C3 的挂点，D2 预留的权限检查面）
+    /// 策略引擎（None = 不做策略门控，1a 行为）。
+    pub policy: Option<Arc<PolicyEngine>>,
+    /// 审批回答者（None + Ask 判定 = fail closed 拒绝）。
+    pub approver: Option<Arc<dyn Approver>>,
 }
 
 impl ToolCtx {
@@ -29,6 +33,8 @@ impl ToolCtx {
             workdir,
             cancel,
             read_files: Arc::new(Mutex::new(HashSet::new())),
+            policy: None,
+            approver: None,
         }
     }
 
@@ -62,11 +68,17 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// 按 spec 顺序注册六个工具；`bash_timeout` 为 bash 缺省时限。
+    /// 按 spec 顺序注册六个工具；`bash_timeout` 为 bash 缺省时限，
+    /// bash 沙箱档位默认 Auto（Landlock 可用即用，否则防火墙）。
     pub fn new(bash_timeout: Duration) -> Self {
+        Self::with_sandbox(bash_timeout, SandboxMode::Auto)
+    }
+
+    /// 同 [`Self::new`]，显式指定 bash 沙箱档位（design N2 配置面）。
+    pub fn with_sandbox(bash_timeout: Duration, sandbox: SandboxMode) -> Self {
         Self {
             tools: vec![
-                Arc::new(bash::BashTool::new(bash_timeout)),
+                Arc::new(bash::BashTool::new(bash_timeout, sandbox)),
                 Arc::new(fs_ops::ReadTool),
                 Arc::new(fs_ops::WriteTool),
                 Arc::new(fs_ops::EditTool),

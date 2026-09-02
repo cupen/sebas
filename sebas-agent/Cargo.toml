@@ -24,5 +24,10 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# bash 沙箱主后端（design N2）：进程内 Landlock，内核 ≥6.7 全生效（含 TCP 网络位）；
+# 更老内核/受限容器由 spawn 失败路径回退防火墙档——绝不半隔离。
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

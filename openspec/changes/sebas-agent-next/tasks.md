@@ -1,20 +1,20 @@
 ## 1. Policy engine & sandbox scaffold (design N1/N2, agent-core spec)
 
-- [ ] 1.1 Add the `policy/` module — `PolicyEngine`, `PolicyConfig` (static
+- [x] 1.1 Add the `policy/` module — `PolicyEngine`, `PolicyConfig` (static
       allow/deny rules), `PolicyDecision::Allow/Deny/Ask/Escalate`, and the
       three-layer evaluation (static rules → session allowlist → interactive
       ask, deny > allow > ask, no ask after deny); verify a unit test covers
       layer priority and fail-closed with no answerer
-- [ ] 1.2 Add the session allowlist (`(tool, args)` exact signature,
+- [x] 1.2 Add the session allowlist (`(tool, args)` exact signature,
       consulted before any ask; allow-once vs allow-session semantics) and
       wire it into the engine; verify a test asserts an allowlisted exact
       signature runs silently and a different args variant still prompts
-- [ ] 1.3 Add `PermissionRequest` emission + ID correlation (request_id ==
+- [x] 1.3 Add `PermissionRequest` emission + ID correlation (request_id ==
       tool_use_id) and the `permission_decision` outcome path; hook the
       decision into the tool executor via a one-shot answer channel in
       `ToolCtx`; verify a test walks a gated call → request → allow-once →
       run-once → no allowlist, and a no-answerer case resolves as denied
-- [ ] 1.4 Add the Landlock sandbox backend (default) — the `landlock` crate
+- [x] 1.4 Add the Landlock sandbox backend (default) — the `landlock` crate
       enforced inside the bash child via `pre_exec`: handle fs from_all
       (BestEffort) plus net BindTcp/ConnectTcp (HardRequirement), read-only `/`,
       writable workdir + /tmp (directory rights) and /dev/null + /dev/urandom
@@ -25,7 +25,7 @@
       write inside workspace succeeds, write to $HOME is denied, TCP connect is
       denied while an unrestricted control run gets connection-refused, and a
       simulated unsupported kernel takes the fallback path
-- [ ] 1.5 Add the firewall fallback backend — env scrubbing of known secret
+- [x] 1.5 Add the firewall fallback backend — env scrubbing of known secret
       patterns (*_KEY/*_TOKEN/*_SECRET/*_PASSWORD, SEBAS_*), command -v/readlink
       literal probes refusing exact dangerous binaries, and the honest
       `[bash conf: firewall]` note in tool output, plus the

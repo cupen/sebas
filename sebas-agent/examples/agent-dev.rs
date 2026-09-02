@@ -118,6 +118,22 @@ fn print_event(ev: &AgentEvent, recorder: Option<&Recorder>) -> bool {
             eprintln!("\n[tool end] {tool_name}: {}", truncate(result, 400));
             false
         }
+        AgentEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            args,
+            reason,
+            ..
+        } => {
+            eprintln!("\n[permission] {tool_name} {args} — {reason} (request {request_id})");
+            false
+        }
+        AgentEvent::ToolPolicy {
+            tool_name, outcome, ..
+        } => {
+            eprintln!("\n[policy] {tool_name}: {outcome}");
+            false
+        }
         AgentEvent::Finished { .. } => {
             eprintln!("\n[finished]");
             false
