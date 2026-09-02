@@ -130,6 +130,9 @@ pub struct SessionRow {
     pub status_glyph: &'static str,
     /// Human-readable relative time.
     pub last_active: String,
+    /// Unix timestamp backing `last_active`. Exposed so clients can sort
+    /// without re-parsing the rendered string.
+    pub last_active_unix: i64,
     /// True if this session is the WebUI's currently focused one. The
     /// template renders an "active" indicator and gates the Switch button.
     pub is_active: bool,
@@ -188,26 +191,15 @@ pub struct CardConfigInfo {
     pub max_tool_output_chars: usize,
 }
 
-impl Default for CardConfigInfo {
-    /// Mirrors the core's own `CardConfig::default()` — the settings page
-    /// renders this before (or without) a live core.
-    fn default() -> Self {
-        let cfg = sebas_feishu::cards::CardConfig::default();
-        Self {
-            theme_color: cfg.theme_color,
-            fold_long_output: cfg.fold_long_output,
-            thinking_display: format!("{:?}", cfg.thinking),
-            max_user_text_chars: cfg.max_user_text_chars,
-            max_tool_output_chars: cfg.max_tool_output_chars,
-        }
-    }
-}
-
 /// Card element for rendering in session detail.
 #[derive(Debug, Clone, Serialize)]
 pub struct CardElementView {
     pub element_type: &'static str,
     pub content: String,
+    /// Unix seconds when the entry was appended; lets the client render a
+    /// flush-left timestamp next to each block (spec 4.1) and anchor the
+    /// seen-boundary seam to a stable identity (spec 4.4).
+    pub created_at_unix: u64,
 }
 
 #[cfg(test)]

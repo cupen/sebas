@@ -1,164 +1,197 @@
-//! Router session event source (openspec/changes/add-core-session-channel
-//! tasks 1.2 / 1.3): every mapping mutation publishes a `SessionEvent`, and
-//! a fresh subscriber can fold the event stream onto the snapshot accessor
-//! and land exactly on the router's own state.
+//! Session event stream + external snapshot (openspec/changes/add-core-session-channel
+//! tasks 1.2/1.3): subscribe → create → status change → remove yields the exact
+//! event sequence, and applying events to a snapshot reproduces the router's own
+//! state.
 
-use sebas_router::router::{RouterHandle, SessionEvent, SessionSnapshot, SessionState};
-use sebas_router::state::SessionMap;
 use sebas_feishu::events::SessionKey;
+use sebas_router::router::SessionEvent;
+use sebas_router::state::{Mapping, SessionMap};
+use sebas_router::RouterHandle;
+use std::collections::HashMap;
 
-/// Stable string form of a SessionKey for map/set style comparisons.
-fn key_string(key: &SessionKey) -> String {
-    serde_json::to_value(key).unwrap().as_str().unwrap().to_string()
-}
-
-fn fold(events: &[SessionEvent]) -> Vec<SessionSnapshot> {
-    let mut state: Vec<SessionSnapshot> = Vec::new();
-    for event in events {
-        match event {
-            SessionEvent::Created { session } | SessionEvent::Updated { session } => {
-                if let Some(existing) = state
-                    .iter_mut()
-                    .find(|s| s.key == session.key)
-                {
-                    *existing = session.clone();
-                } else {
-                    state.push(session.clone());
-                }
-            }
-            SessionEvent::Removed { key } => {
-                state.retain(|s| s.key != *key);
-            }
-        }
+fn key(id: &str) -> SessionKey {
+    SessionKey {
+        chat_id: format!("oc_{id}"),
+        thread_id: None,
     }
-    state.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
-    state
 }
 
-async fn drain(rx: &mut tokio::sync::broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
-    let mut out = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        out.push(event);
-    }
-    out
-}
-
-/// Task 1.2: create → status change → remove publishes exactly
-/// Created(spawning) → Updated(active) → Removed.
+/// Task 1.2: create → status change → remove publishes the exact sequence.
 #[tokio::test]
-async fn create_then_activate_then_close_publishes_exact_sequence() {
-    let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let mut events = router.session_events();
+async fn events_follow_create_status_change_remove() {
+    let map = SessionMap::new();
+    let (router, _rx) = RouterHandle::new(map);
+    let mut events = router.subscribe_session_events();
 
-    let key = router.web_spawn("build the thing".into(), None).await;
-    router.activate(&key, "ses_abc".to_string()).await;
+    // create: web_spawn inserts a Spawning placeholder.
+    let key = router.web_spawn("hello world".into(), Some("/tmp/p".into())).await;
+    // status change: Spawning → Active.
+    router.activate(&key, "s1".into()).await;
+    // remove.
     let outcome = router.web_close_session(key.clone()).await;
     assert_eq!(outcome, sebas_router::router::CloseOutcome::Closed);
 
-    let got = drain(&mut events).await;
-    assert_eq!(got.len(), 3, "expected exactly three events, got {got:?}");
+    let mut seq = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        seq.push(ev);
+    }
 
-    match &got[0] {
+    assert_eq!(seq.len(), 3, "expected exactly [Created, Updated, Removed], got {seq:?}");
+    match &seq[0] {
         SessionEvent::Created { session } => {
-            assert_eq!(session.key, key);
-            assert_eq!(session.state, SessionState::Spawning);
+            assert_eq!(session.chat_id, key.chat_id);
+            assert_eq!(session.status, "spawning");
+            assert_eq!(session.project_dir.as_deref(), Some("/tmp/p"));
             assert_eq!(session.session_id, None);
         }
         other => panic!("first event should be Created, got {other:?}"),
     }
-    match &got[1] {
+    match &seq[1] {
         SessionEvent::Updated { session } => {
-            assert_eq!(session.key, key);
-            assert_eq!(session.state, SessionState::Active);
-            assert_eq!(session.session_id.as_deref(), Some("ses_abc"));
+            assert_eq!(session.status, "active");
+            assert_eq!(session.session_id.as_deref(), Some("s1"));
         }
         other => panic!("second event should be Updated, got {other:?}"),
     }
-    match &got[2] {
-        SessionEvent::Removed { key: removed } => assert_eq!(removed, &key),
+    match &seq[2] {
+        SessionEvent::Removed { chat_id, thread_id } => {
+            assert_eq!(chat_id, &key.chat_id);
+            assert_eq!(thread_id, &None);
+        }
         other => panic!("third event should be Removed, got {other:?}"),
     }
 }
 
-/// Task 1.3: folding the events onto an empty view reproduces
-/// `session_snapshots()` exactly (identity, state, phase, recency, dir).
+/// Task 1.2: emoji phase transition publishes Updated with the new phase.
 #[tokio::test]
-async fn folded_events_reproduce_the_router_snapshot() {
-    let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let mut events = router.session_events();
+async fn phase_transition_publishes_updated_with_phase() {
+    let map = SessionMap::new();
+    let (router, _rx) = RouterHandle::new(map);
+    let mut events = router.subscribe_session_events();
 
-    let web = router
-        .web_spawn("project session".into(), Some("/tmp/proj".into()))
-        .await;
-    let feishu_key = SessionKey {
-        chat_id: "oc_fold".into(),
-        thread_id: None,
-    };
-    // Feishu-originated path: text arrives before any mapping exists.
+    let k = key("b");
     router
-        .dispatch(sebas_feishu::events::FeishuIn::Text {
-            key: feishu_key.clone(),
-            text: "hello".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+        .map
+        .insert(k.clone(), Mapping::active("s-b"))
+        .await
+        .unwrap();
+    router.seed_card("s-b".into(), "fix the bug".into()).await;
+
+    // TextDelta does not transition the FSM (SEED → WORKING only on... actually
+    // TextDelta moves SEED → WORKING per next_emoji). Drive one TextDelta and
+    // assert an Updated event carrying the WORKING phase arrives.
+    use sebas_acp::claude::session::AcpEvent;
+    router
+        .apply_event("s-b", &AcpEvent::TextDelta {
+            session_id: "s-b".into(),
+            delta: "working on it".into(),
         })
         .await;
 
-    let got = drain(&mut events).await;
-    let folded = fold(&got);
-    let actual = router.session_snapshots().await;
-
-    assert_eq!(folded.len(), actual.len(), "folded {folded:?} vs {actual:?}");
-    let mut folded_by_key: Vec<(String, SessionSnapshot)> = folded
-        .into_iter()
-        .map(|s| (key_string(&s.key), s))
-        .collect();
-    folded_by_key.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut actual_by_key: Vec<(String, SessionSnapshot)> = actual
-        .into_iter()
-        .map(|s| (key_string(&s.key), s))
-        .collect();
-    actual_by_key.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for ((fk, fs), (ak, as_)) in folded_by_key.iter().zip(actual_by_key.iter()) {
-        assert_eq!(fk, ak, "same key set");
-        assert_eq!(fs, as_, "snapshot for {fk} must match the router's view");
+    let mut saw_working = false;
+    while let Ok(ev) = events.try_recv() {
+        if let SessionEvent::Updated { session } = ev
+            && session.session_id.as_deref() == Some("s-b")
+            && session.phase.as_deref() == Some(sebas_router::card_state::phase::WORKING)
+        {
+            saw_working = true;
+        }
     }
-
-    // The web session's Created snapshot already carries its project dir.
-    let web_created = got.iter().find_map(|e| match e {
-        SessionEvent::Created { session } if session.key == web => Some(session.clone()),
-        _ => None,
-    });
-    assert_eq!(
-        web_created.map(|s| s.project_dir),
-        Some(Some("/tmp/proj".into())),
-        "Created must carry project_dir"
-    );
+    assert!(saw_working, "expected an Updated event with the WORKING phase");
 }
 
-/// The removed key must not linger: close drops the row from snapshots, and
-/// the event stream is the only notification a subscriber needs.
+/// Task 1.3: applying published events to a snapshot reproduces the router's
+/// own state.
 #[tokio::test]
-async fn removal_converges_snapshot_and_stream() {
-    let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let mut events = router.session_events();
+async fn applying_events_to_snapshot_reproduces_router_state() {
+    let map = SessionMap::new();
+    let (router, _rx) = RouterHandle::new(map);
+    let mut events = router.subscribe_session_events();
 
-    let keep = router.web_spawn("stays".into(), None).await;
-    let gone = router.web_spawn("dies".into(), None).await;
-    router.web_close_session(gone.clone()).await;
+    // Client-side cache: (chat_id, thread_id) → SessionInfo.
+    let mut cache: HashMap<(String, Option<String>), sebas_router::SessionInfo> = HashMap::new();
 
-    let got = drain(&mut events).await;
-    let folded = fold(&got);
-    assert_eq!(folded.len(), 1, "only the surviving row remains: {folded:?}");
-    assert_eq!(folded[0].key, keep);
-    assert_eq!(
-        router.session_snapshots().await.len(),
-        1,
-        "router state agrees"
-    );
-    assert!(!got.iter().any(
-        |e| matches!(e, SessionEvent::Removed { key } if *key == keep)
-    ));
+    let ka = key("a");
+    router
+        .map
+        .insert(ka.clone(), Mapping::dormant("s-a", 42))
+        .await
+        .unwrap();
+    let kb_key = router.web_spawn("spawn me".into(), None).await;
+    router.activate(&kb_key, "s-b".into()).await;
+    let _ = router.web_close_session(ka).await;
+
+    // Fold: snapshot BEFORE the mutations? No — take the snapshot now and fold
+    // only the buffered events on top of an empty cache; the result must equal
+    // the router's own snapshot.
+    let snapshot = router.session_info_snapshot().await;
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            SessionEvent::Created { session } | SessionEvent::Updated { session } => {
+                cache.insert(
+                    (session.chat_id.clone(), session.thread_id.clone()),
+                    session,
+                );
+            }
+            SessionEvent::Removed {
+                chat_id,
+                thread_id,
+            } => {
+                cache.remove(&(chat_id, thread_id));
+            }
+            SessionEvent::Resync => {}
+        }
+    }
+
+    assert_eq!(cache.len(), snapshot.len(), "cache {cache:?} vs snapshot {snapshot:?}");
+    for info in &snapshot {
+        let cached = cache
+            .get(&(info.chat_id.clone(), info.thread_id.clone()))
+            .expect("snapshot session present in cache");
+        assert_eq!(cached, info);
+    }
+    // Exactly the surviving web session remains, active (web_spawn minted its
+    // own `web-{nanos}` key — kb was never given a mapping).
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].chat_id, kb_key.chat_id);
+    assert_eq!(snapshot[0].status, "active");
+    assert_eq!(snapshot[0].session_id.as_deref(), Some("s-b"));
+}
+
+/// Task 1.3 companion: transcript positions are monotonic and `session_turns`
+/// returns only entries at or after the requested position.
+#[tokio::test]
+async fn turns_are_incremental_by_position() {
+    use sebas_acp::claude::session::AcpEvent;
+    let map = SessionMap::new();
+    let (router, _rx) = RouterHandle::new(map);
+    let k = key("t");
+    router
+        .map
+        .insert(k.clone(), Mapping::active("s-t"))
+        .await
+        .unwrap();
+    router.seed_card("s-t".into(), "do things".into()).await;
+
+    let delta = |d: &str| AcpEvent::TextDelta {
+        session_id: "s-t".into(),
+        delta: d.into(),
+    };
+    router.apply_event("s-t", &delta("one")).await;
+    router.apply_event("s-t", &delta("two")).await;
+    router.apply_event("s-t", &delta("three")).await;
+
+    let all = router.session_turns(&k, 0).await.unwrap();
+    // prompt + three deltas
+    assert_eq!(all.len(), 4);
+    assert_eq!(all[0].kind, "prompt");
+    assert_eq!(all[3].content, "three");
+
+    let after = router.session_turns(&k, 3).await.unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].position, 3);
+    assert_eq!(after[0].content, "three");
+
+    // Unknown key → None; known key with no content → empty.
+    assert!(router.session_turns(&key("zzz"), 0).await.is_none());
 }

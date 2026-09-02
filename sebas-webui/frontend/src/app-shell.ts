@@ -16,8 +16,11 @@ import { icon } from './components/icons.js'
 // tree-shakes the rest of the library).
 import '@awesome.me/webawesome/dist/components/button/button.js'
 
-const ROUTES: RouteDef[] = [
+// Exported for tests: the nav/route resolution audit iterates these.
+export const ROUTES: RouteDef[] = [
   { id: 'dashboard', pattern: '/' },
+  // `/sessions` stays routed (rail link + old deep links) but is demoted
+  // from the primary nav — sessions are reached through the workbench rail.
   { id: 'sessions', pattern: '/sessions' },
   { id: 'session-detail', pattern: '/sessions/:key' },
   { id: 'settings', pattern: '/settings' },
@@ -27,9 +30,8 @@ const ROUTES: RouteDef[] = [
   { id: 'admin', pattern: '/admin/:view' },
 ]
 
-const NAV_ITEMS = [
+export const NAV_ITEMS = [
   { label: 'Dashboard', href: '/', icon: 'dashboard' },
-  { label: 'Sessions', href: '/sessions', icon: 'sessions' },
   { label: 'Settings', href: '/settings', icon: 'settings' },
   { label: 'Gateway', href: '/gateway', icon: 'gateway' },
   { label: 'About', href: '/about', icon: 'about' },

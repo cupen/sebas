@@ -237,6 +237,10 @@ impl FakeBackend {
             kind: kind.to_string(),
             element_type: element_type.to_string(),
             content: content.to_string(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         });
     }
 
