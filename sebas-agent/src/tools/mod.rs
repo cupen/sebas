@@ -206,4 +206,68 @@ mod tests {
         }
         assert!(registry.get("nonexistent").is_none());
     }
+
+    // ─── 能力门（task 4.2/4.3，design N6 验证）────────────────────────────
+
+    struct FakeLspBackend;
+
+    #[async_trait::async_trait]
+    impl image::LspBackend for FakeLspBackend {
+        async fn query(&self, op: &str, path: &str, line: u32, _col: u32) -> ToolOutput {
+            ToolOutput::ok(format!("{op} at {path}:{line}"))
+        }
+    }
+
+    /// 能力门 1（task 4.2）：`read_image` 仅在配置的 LLM **声明**图像支持时
+    /// 出现在 schema 列表——声明与否由宿主沿 `with_image_support` 缝传入，
+    /// 两种状态各测一次（对应"fake client 宣称/不宣称能力"）。
+    #[test]
+    fn image_gate_only_declares_read_image_when_capability_announced() {
+        // 未声明（text-only 模型）：工具不可见，schema 列表不反映
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10)).with_image_support(false);
+        assert!(!r.names().contains(&"read_image"));
+        assert!(r.schemas().iter().all(|s| s.name != "read_image"));
+        assert!(r.get("read_image").is_none());
+        // 已声明：read_image 进入 schema 列表
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10)).with_image_support(true);
+        assert!(r.names().contains(&"read_image"));
+        assert!(r.schemas().iter().any(|s| s.name == "read_image"));
+        assert!(r.get("read_image").is_some());
+    }
+
+    /// 能力门 2（task 4.2/4.3）：`lsp` 总是注册，但 `file_system` 能力字段
+    /// 仅在后端可达时出现在 schema；不可达时调用返回 unavailable 事实（非 error）。
+    #[tokio::test]
+    async fn lsp_gate_reports_file_system_only_when_backend_reachable() {
+        // 后端不可达：lsp 可声明，schema 无 file_system 字段；调用 → ok 的 unavailable
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10)).with_lsp(None);
+        assert!(r.names().contains(&"lsp"));
+        let lsp = r.get("lsp").unwrap();
+        assert!(lsp.parameters()["properties"].get("file_system").is_none());
+        let ctx = ToolCtx::new(std::env::temp_dir(), tokio_util::sync::CancellationToken::new());
+        let out = lsp
+            .execute(
+                serde_json::json!({"operation": "definitions", "path": "a.rs", "line": 1, "column": 1}),
+                &ctx,
+            )
+            .await;
+        assert!(out.ok, "unavailable is a fact, not an error: {}", out.output);
+        assert!(out.output.contains("unavailable"));
+        // 后端可达：file_system 能力字段出现在 schema 列表
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10))
+            .with_lsp(Some(Arc::new(FakeLspBackend)));
+        let lsp = r.get("lsp").unwrap();
+        assert_eq!(
+            lsp.parameters()["properties"]["file_system"],
+            serde_json::json!(true)
+        );
+        let out = lsp
+            .execute(
+                serde_json::json!({"operation": "hover", "path": "a.rs", "line": 3, "column": 4}),
+                &ctx,
+            )
+            .await;
+        assert!(out.ok, "{}", out.output);
+        assert!(out.output.contains("hover at a.rs:3"));
+    }
 }

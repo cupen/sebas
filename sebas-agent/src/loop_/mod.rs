@@ -5,9 +5,10 @@
 //! 与真实 Anthropic 流上的 `stop_reason == tool_use` 等价，同时让有状态
 //! fake（恒返回 EndTurn）也能驱动多步测试。
 
-use crate::llm::{LlmClient, LlmRequest, StopReason, StreamEvent};
+use crate::llm::{consult, LlmClient, LlmRequest, StopReason, StreamEvent};
 use crate::message::{
-    rewrite_for_history, BudgetConfig, ContentBlock, Message, Role, ToolErrorKind, ToolOutput,
+    rewrite_for_history, BudgetConfig, ContentBlock, ImageSource, Message, Role, ToolErrorKind,
+    ToolOutput,
 };
 use crate::policy::{ApprovalAnswer, PermissionRequestInfo, PolicyDecision};
 use crate::session::AgentEvent;
@@ -232,6 +233,9 @@ impl TurnEngine {
                 };
             }
             // Assembly 预算（task 3.2，C8 token 维度）：超限 = 干净收尾（非错误）。
+            // 语义出处（task 4.3，design N6）：「上下文窗口逼近 90% → finish」——
+            // est_token_budget 是该语义的绝对值形态（llm::consult::CONTEXT_FINISH_RATIO，
+            // 由 llm::consult::budget_for_context_window 按窗口推导）。
             if history.len() > self.budget.max_messages {
                 return TurnOutcome::Finished {
                     reason: FinishReason::Budget { which: "messages" },
@@ -245,11 +249,18 @@ impl TurnEngine {
             counters.model_calls += 1;
 
             // AwaitingModel：delta 到达即回调；select 保证取消/超时即时生效。
+            // 请求组装边界（task 4.3，design N6 LlmConsult 常量）：工具声明数
+            // 超过 Anthropic 上限时确定性截断（保留响应序前缀）——被截工具对
+            // 模型不可见，误调用走既有 unknown-tool 结构化错误路径，turn 不崩。
+            let mut tools = registry.schemas();
+            if tools.len() > consult::MAX_TOOL_DECLARATIONS {
+                tools.truncate(consult::MAX_TOOL_DECLARATIONS);
+            }
             let req = LlmRequest {
                 model: model.to_string(),
                 system: system.to_string(),
                 messages: history.clone(),
-                tools: registry.schemas(),
+                tools,
                 max_tokens: 8192,
             };
             let sink = |ev: StreamEvent| match ev {
@@ -385,7 +396,8 @@ impl TurnEngine {
 }
 
 /// 粗粒度 token 估算（task 3.2）：chars/4 + 每块常数开销（不追求精确，
-/// 只求比真值略高以保守收尾）。
+/// 只求比真值略高以保守收尾）。多模态（task 4.1）：Image 块按 base64
+/// 载荷字符计入——多模态内容同样占据上下文，预算不撒谎。
 fn estimate_tokens(system: &str, history: &[Message]) -> usize {
     let mut tokens = system.chars().count() / 4;
     for m in history {
@@ -395,7 +407,10 @@ fn estimate_tokens(system: &str, history: &[Message]) -> usize {
                 ContentBlock::Text { text } => text.chars().count(),
                 ContentBlock::ToolUse { input, .. } => input.to_string().chars().count(),
                 ContentBlock::ToolResult { content, .. } => content.chars().count(),
-                ContentBlock::Thinking { .. } | ContentBlock::Image { .. } => 0,
+                ContentBlock::Image {
+                    source: ImageSource::Base64 { data, .. },
+                } => data.chars().count(),
+                ContentBlock::Thinking { .. } => 0,
             };
             tokens += chars / 4;
         }
@@ -1316,5 +1331,103 @@ mod tests {
             ContentBlock::ToolResult { content, is_error: true, .. }
                 if content.contains("unknown tool")
         ));
+    }
+
+    // ─── LlmConsult 常量（task 4.3，design N6 验证）────────────────────────
+
+    /// 记录每次请求 tools 数的 client（截断发生在请求组装边界，client 侧可见）。
+    struct RecordingToolsClient {
+        tool_counts: Arc<std::sync::Mutex<Vec<usize>>>,
+        turns: std::sync::Mutex<std::collections::VecDeque<crate::llm::LlmTurn>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for RecordingToolsClient {
+        async fn stream_turn(
+            &self,
+            req: &LlmRequest,
+            _sink: &(dyn Fn(StreamEvent) + Send + Sync),
+        ) -> Result<crate::llm::LlmTurn, crate::llm::LlmError> {
+            self.tool_counts.lock().unwrap().push(req.tools.len());
+            self.turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| crate::llm::LlmError::terminal("script exhausted"))
+        }
+    }
+
+    struct DummyTool;
+
+    #[async_trait::async_trait]
+    impl Tool for DummyTool {
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+        fn description(&self) -> String {
+            "dummy tool for tool-cap testing".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolCtx) -> ToolOutput {
+            ToolOutput::ok("ok")
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_declaration_cap_truncates_request_at_128() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _tx, _rx) = setup(dir.path());
+        // 130 个声明 > 上限 128：截断为确定性前缀，turn 照常收尾（非错误）
+        let registry = ToolRegistry::from_tools(
+            (0..130)
+                .map(|_| Arc::new(DummyTool) as Arc<dyn Tool>)
+                .collect(),
+        );
+        let counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm = RecordingToolsClient {
+            tool_counts: counts.clone(),
+            turns: std::sync::Mutex::new(
+                vec![FakeLlmClient::say("done")]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &_tx);
+        let outcome = TurnEngine::new(BudgetConfig::default())
+            .run_turn(
+                &llm, &registry, &ctx, &mut history, "go", "sys", "m",
+                CancellationToken::new(), &emit,
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            TurnOutcome::Finished { reason: FinishReason::EndTurn }
+        );
+        assert_eq!(*counts.lock().unwrap(), vec![consult::MAX_TOOL_DECLARATIONS]);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_image_payloads() {
+        // 多模态诚实预算：Image 块的 base64 载荷计入估算（4 chars ≈ 1 token）
+        let history = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "x".repeat(400),
+                },
+            }],
+        }];
+        let t = estimate_tokens("", &history);
+        assert!(t >= 100, "image payload must count toward the budget: {t}");
+        // 对照：thinking 块不计（回传前会被 strip）
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking { thinking: "x".repeat(400) }],
+        }];
+        assert_eq!(estimate_tokens("", &history), 8);
     }
 }

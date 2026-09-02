@@ -699,7 +699,8 @@ mod tests {
         handle.prompt("go").await;
 
         // 收到审批请求 → 经 SessionHandle 回填 AllowOnce
-        let mut request_id = String::new();
+        //（循环内唯一 break 路径已赋值，无需初值——clippy::unused_assignment）
+        let request_id: String;
         loop {
             match rx.recv().await {
                 Ok(AgentEvent::PermissionRequest { request_id: id, .. }) => {

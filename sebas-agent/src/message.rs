@@ -284,4 +284,43 @@ mod tests {
         assert_eq!(stripped.len(), 1);
         assert!(matches!(&stripped[0], ContentBlock::Text { .. }));
     }
+
+    #[test]
+    fn strip_thinking_keeps_image_blocks_for_multimodal() {
+        // task 4.1（design N6）：strip_thinking 只剔 thinking，多模态块
+        // 原样保留进请求组装（否则图像在多轮回传中丢失）。
+        let blocks = vec![
+            ContentBlock::Thinking {
+                thinking: "hmm".into(),
+            },
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                },
+            },
+        ];
+        let stripped = strip_thinking(&blocks);
+        assert_eq!(stripped.len(), 1);
+        assert!(
+            matches!(&stripped[0], ContentBlock::Image { .. }),
+            "image blocks must survive strip_thinking"
+        );
+    }
+
+    #[test]
+    fn image_block_round_trips_on_anthropic_wire() {
+        let block = ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/jpeg".into(),
+                data: "aGVsbG8gd29ybGQ=".into(),
+            },
+        };
+        let j = serde_json::to_value(&block).unwrap();
+        assert_eq!(j["type"], "image");
+        assert_eq!(j["source"]["type"], "base64");
+        assert_eq!(j["source"]["media_type"], "image/jpeg");
+        let back: ContentBlock = serde_json::from_value(j).unwrap();
+        assert_eq!(back, block);
+    }
 }

@@ -497,5 +497,39 @@ mod tests {
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
     }
 
+    #[test]
+    fn request_body_carries_image_blocks_for_multimodal() {
+        // task 4.1（design N6）：ContentBlock::Image 按 Anthropic wire 形状
+        // 直接进请求体（serde 直通，无需客户端特判）。
+        let client = AnthropicMessagesClient::direct_provider("http://x", "k");
+        let req = LlmRequest {
+            model: "m".into(),
+            system: "sys".into(),
+            messages: vec![Message {
+                role: crate::message::Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "describe this".into(),
+                    },
+                    ContentBlock::Image {
+                        source: crate::message::ImageSource::Base64 {
+                            media_type: "image/png".into(),
+                            data: "aGVsbG8=".into(),
+                        },
+                    },
+                ],
+            }],
+            tools: vec![],
+            max_tokens: 64,
+        };
+        let body = client.request_body(&req);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aGVsbG8=");
+    }
+
     use crate::llm::ToolSchema;
 }

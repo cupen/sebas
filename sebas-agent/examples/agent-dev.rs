@@ -67,10 +67,10 @@ impl Recorder {
     }
 
     fn record(&self, ev: &AgentEvent) {
-        if let Ok(line) = serde_json::to_string(ev) {
-            if let Ok(mut w) = self.inner.lock() {
-                let _ = writeln!(w, "{line}");
-            }
+        if let Ok(line) = serde_json::to_string(ev)
+            && let Ok(mut w) = self.inner.lock()
+        {
+            let _ = writeln!(w, "{line}");
         }
     }
 
