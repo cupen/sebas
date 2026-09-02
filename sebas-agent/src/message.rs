@@ -35,6 +35,21 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// 多模态内容块（design N6）：与 Anthropic wire 对齐
+    /// `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`。
+    Image {
+        source: ImageSource,
+    },
+}
+
+/// 图片数据源（base64）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        media_type: String,
+        data: String,
+    },
 }
 
 /// 一条消息。

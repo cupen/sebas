@@ -8,6 +8,14 @@ pub mod fake;
 
 use crate::message::{ContentBlock, Message};
 
+/// 协议咨询常量（task 4.3，design N6）：注册面与预算收尾的硬边界。
+pub mod consult {
+    /// Anthropic `tools` 数组的声明上限。
+    pub const MAX_TOOL_DECLARATIONS: usize = 128;
+    /// 上下文逼近此比例即干净收尾（budget-exhausted），不做侥幸调用。
+    pub const CONTEXT_FINISH_RATIO: f64 = 0.9;
+}
+
 /// 流式增量事件：从 SSE 流解析出来就立刻回调（checklist C2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {

@@ -2,6 +2,7 @@
 
 pub mod bash;
 pub mod fs_ops;
+pub mod image;
 pub mod search;
 pub mod web;
 
@@ -116,6 +117,22 @@ impl ToolRegistry {
     /// 测试/宿主自定义工具集（task 3.3 并发测试用）。
     pub fn from_tools(tools: Vec<Arc<dyn Tool>>) -> Self {
         Self { tools }
+    }
+
+    /// 能力门（task 4.2，design N6）：`image` 为真才注册 read_image——
+    /// 由宿主依据所配置模型的图像支持决定；诚实声明，不虚设。
+    pub fn with_image_support(mut self, image: bool) -> Self {
+        if image {
+            self.tools.push(Arc::new(image::ReadImageTool));
+        }
+        self
+    }
+
+    /// 能力门（task 4.2）：lsp 工具总是可声明，但后端可达才带 file_system
+    /// 能力字段；不可达时调用返回 unavailable 事实（非错误）。
+    pub fn with_lsp(mut self, backend: Option<Arc<dyn image::LspBackend>>) -> Self {
+        self.tools.push(Arc::new(image::LspTool::new(backend)));
+        self
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {

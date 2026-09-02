@@ -134,6 +134,14 @@ fn print_event(ev: &AgentEvent, recorder: Option<&Recorder>) -> bool {
             eprintln!("\n[policy] {tool_name}: {outcome}");
             false
         }
+        AgentEvent::ToolFinish { tool_name, ok, .. } => {
+            eprintln!("\n[tool finish] {tool_name} ok={ok}");
+            false
+        }
+        AgentEvent::SessionSummary { model_calls, tool_calls, turn_ms, .. } => {
+            eprintln!("\n[summary] model={model_calls} tools={tool_calls} {turn_ms}ms");
+            false
+        }
         AgentEvent::Finished { .. } => {
             eprintln!("\n[finished]");
             false

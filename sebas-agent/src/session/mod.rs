@@ -65,6 +65,23 @@ pub enum AgentEvent {
         tool_name: String,
         outcome: String,
     },
+    /// 工具结构化收尾事件（Phase 2，design N6）：`ToolEnd` 的结构化孪生，
+    /// 供 SSE/日志消费结构化字段而无需解析 result 文本。
+    ToolFinish {
+        session_id: String,
+        tool_name: String,
+        ok: bool,
+        truncated: bool,
+        exit_code: Option<i32>,
+    },
+    /// turn 汇总（Phase 2，design N6）：引擎在 turn 收尾时发射（Finished /
+    /// Cancelled / Failed 均发），供宿主记录与展示。
+    SessionSummary {
+        session_id: String,
+        model_calls: u32,
+        tool_calls: u32,
+        turn_ms: u64,
+    },
     Finished {
         session_id: String,
     },
@@ -643,7 +660,8 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["tool_start", "tool_end", "text_delta", "finished"]
+            vec!["tool_start", "tool_end", "tool_finish", "text_delta", "session_summary",
+                 "finished"]
         );
         assert!(evs
             .iter()

@@ -112,6 +112,27 @@ impl<'a> TurnEmit<'a> {
         });
     }
 
+    /// 工具结构化收尾（ToolEnd 的孪生事件，design N6）。
+    pub(crate) fn tool_finish(&self, tool_name: &str, out: &ToolOutput) {
+        self.send(AgentEvent::ToolFinish {
+            session_id: self.session_id.into(),
+            tool_name: tool_name.into(),
+            ok: out.ok,
+            truncated: out.truncated,
+            exit_code: out.exit_code,
+        });
+    }
+
+    /// turn 汇总（引擎收尾发射，design N6）。
+    pub(crate) fn session_summary(&self, model_calls: u32, tool_calls: u32, turn_ms: u64) {
+        self.send(AgentEvent::SessionSummary {
+            session_id: self.session_id.into(),
+            model_calls,
+            tool_calls,
+            turn_ms,
+        });
+    }
+
     /// 策略流结果（allowed_once / allowed_session / escalated / denied / unavailable）。
     pub(crate) fn tool_policy(&self, request_id: &str, tool_name: &str, outcome: &str) {
         self.send(AgentEvent::ToolPolicy {
@@ -121,6 +142,13 @@ impl<'a> TurnEmit<'a> {
             outcome: outcome.into(),
         });
     }
+}
+
+/// turn 内计数器（design N6 SessionSummary 的数据源）。
+#[derive(Default)]
+struct TurnCounters {
+    model_calls: u32,
+    tool_calls: u32,
 }
 
 /// turn 引擎：持有预算与并发配置；会话历史由调用方持有并传入（每会话一份）。
@@ -137,8 +165,7 @@ impl TurnEngine {
         }
     }
 
-    /// 执行一轮 turn：把 `user_text` 追加进 `history`，循环「模型 ⇄ 工具」
-    /// 直到无工具调用 / 预算耗尽 / 失败 / 取消。
+    /// 执行一轮 turn（公开入口）：计时并在收尾发射 `SessionSummary`。
     #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &self,
@@ -152,16 +179,43 @@ impl TurnEngine {
         cancel: CancellationToken,
         emit: &TurnEmit<'_>,
     ) -> TurnOutcome {
+        let started = std::time::Instant::now();
+        let mut counters = TurnCounters::default();
+        let outcome = self
+            .run_turn_inner(llm, registry, tool_ctx_base, history, user_text, system, model, cancel, emit, &mut counters)
+            .await;
+        emit.session_summary(
+            counters.model_calls,
+            counters.tool_calls,
+            started.elapsed().as_millis() as u64,
+        );
+        outcome
+    }
+
+    /// 执行一轮 turn：把 `user_text` 追加进 `history`，循环「模型 ⇄ 工具」
+    /// 直到无工具调用 / 预算耗尽 / 失败 / 取消。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_inner(
+        &self,
+        llm: &dyn LlmClient,
+        registry: &ToolRegistry,
+        tool_ctx_base: &ToolCtx,
+        history: &mut Vec<Message>,
+        user_text: &str,
+        system: &str,
+        model: &str,
+        cancel: CancellationToken,
+        emit: &TurnEmit<'_>,
+        counters: &mut TurnCounters,
+    ) -> TurnOutcome {
         history.push(Message::user_text(user_text));
         let deadline = tokio::time::Instant::now() + self.budget.turn_timeout;
-        let mut model_calls: u32 = 0;
-        let mut tool_calls: u32 = 0;
 
         loop {
             if cancel.is_cancelled() {
                 return TurnOutcome::Cancelled;
             }
-            if model_calls >= self.budget.max_model_calls {
+            if counters.model_calls >= self.budget.max_model_calls {
                 return TurnOutcome::Finished {
                     reason: FinishReason::Budget {
                         which: "model_calls",
@@ -188,7 +242,7 @@ impl TurnEngine {
                     reason: FinishReason::Budget { which: "tokens" },
                 };
             }
-            model_calls += 1;
+            counters.model_calls += 1;
 
             // AwaitingModel：delta 到达即回调；select 保证取消/超时即时生效。
             let req = LlmRequest {
@@ -265,7 +319,7 @@ impl TurnEngine {
                         j += 1;
                     }
                     // 预算裁剪：段内调用逐个计数，超额部分不执行（预算收尾）。
-                    let remaining = (self.budget.max_tool_calls.saturating_sub(tool_calls)) as usize;
+                    let remaining = (self.budget.max_tool_calls.saturating_sub(counters.tool_calls)) as usize;
                     let run_end = i + remaining.min(j - i);
                     if run_end < j {
                         budget_exhausted = Some("tool_calls");
@@ -285,13 +339,13 @@ impl TurnEngine {
                         for (k, out) in done.into_iter().enumerate() {
                             emit_tool_end(emit, calls[batch + k].1, &out);
                             outputs[batch + k] = Some(out);
-                            tool_calls += 1;
+                            counters.tool_calls += 1;
                         }
                         batch = batch_end;
                     }
                     i = j;
                 } else {
-                    if tool_calls >= self.budget.max_tool_calls {
+                    if counters.tool_calls >= self.budget.max_tool_calls {
                         budget_exhausted = Some("tool_calls");
                         break;
                     }
@@ -301,7 +355,7 @@ impl TurnEngine {
                     let out = execute_one(registry, id, name, input, &ctx, emit).await;
                     emit_tool_end(emit, name, &out);
                     outputs[i] = Some(out);
-                    tool_calls += 1;
+                    counters.tool_calls += 1;
                     i += 1;
                 }
             }
@@ -341,7 +395,7 @@ fn estimate_tokens(system: &str, history: &[Message]) -> usize {
                 ContentBlock::Text { text } => text.chars().count(),
                 ContentBlock::ToolUse { input, .. } => input.to_string().chars().count(),
                 ContentBlock::ToolResult { content, .. } => content.chars().count(),
-                ContentBlock::Thinking { .. } => 0,
+                ContentBlock::Thinking { .. } | ContentBlock::Image { .. } => 0,
             };
             tokens += chars / 4;
         }
@@ -388,12 +442,14 @@ async fn execute_one(
 }
 
 /// ToolEnd 文本：错误是数据（C4），失败原因必须让模型看见。
+/// 同时发射结构化孪生事件 ToolFinish（design N6）。
 fn emit_tool_end(emit: &TurnEmit<'_>, tool_name: &str, out: &ToolOutput) {
     let end_text = match &out.error {
         Some(kind) => format!("{}: {}", kind, out.output),
         None => out.output.clone(),
     };
     emit.tool_end(tool_name, &end_text);
+    emit.tool_finish(tool_name, out);
 }
 
 /// 策略门控执行（task 1.3，design N1）：Allow 直跑；Deny 可升级（带理由的
@@ -899,9 +955,9 @@ mod tests {
         let evs = collect(&mut rx);
         assert_eq!(
             kinds(&evs),
-            vec!["tool_start", "permission_request", "tool_policy", "tool_end",
-                 "tool_start", "permission_request", "tool_policy", "tool_end",
-                 "text_delta"]
+            vec!["tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
+                 "tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
+                 "text_delta", "session_summary"]
         );
         let outcomes: Vec<&str> = evs.iter().filter_map(|e| match e {
             AgentEvent::ToolPolicy { outcome, .. } => Some(outcome.as_str()),
@@ -938,8 +994,8 @@ mod tests {
         // 首次 ask → allowed_session；第二次同签名静默（无 permission_request / tool_policy）
         assert_eq!(
             kinds(&evs),
-            vec!["tool_start", "permission_request", "tool_policy", "tool_end",
-                 "tool_start", "tool_end", "text_delta"]
+            vec!["tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
+                 "tool_start", "tool_end", "tool_finish", "text_delta", "session_summary"]
         );
     }
 
@@ -962,7 +1018,8 @@ mod tests {
         let evs = collect(&mut rx);
         assert_eq!(
             kinds(&evs),
-            vec!["tool_start", "tool_policy", "tool_end", "text_delta"]
+            vec!["tool_start", "tool_policy", "tool_end", "tool_finish", "text_delta",
+                 "session_summary"]
         );
         assert!(matches!(&evs[1], AgentEvent::ToolPolicy { outcome, .. } if outcome == "unavailable"));
         assert!(matches!(
@@ -995,7 +1052,8 @@ mod tests {
         let evs = collect(&mut rx);
         assert_eq!(
             kinds(&evs),
-            vec!["tool_start", "permission_request", "tool_policy", "tool_end", "text_delta"]
+            vec!["tool_start", "permission_request", "tool_policy", "tool_end", "tool_finish",
+                 "text_delta", "session_summary"]
         );
         assert!(matches!(&evs[2], AgentEvent::ToolPolicy { outcome, .. } if outcome == "escalated"));
         // 升级确实执行了（输出可见），且只此一次
