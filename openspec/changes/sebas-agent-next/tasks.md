@@ -85,6 +85,12 @@
 
 ## 5. Webui wiring (design N5, webui spec)
 
+> **BLOCKED（2026-09-02）**：main 的 `sebas-webui` crate 自 585e17d 合并起处于双谱系
+> 接缝不一致状态（lib.rs 声明的 assets/events 模块文件曾丢失、admin.rs 与 server.rs
+> 跨代、SessionRow/CardElementView 字段两代并存），workspace 构建失败。需要先裁决以
+> 哪个谱系为准（feat/webui 的完整 SPA vs main 的 seam 混合态）再实施本组。已完成：
+> 补回 events.rs/assets.rs + 移除 router 悬空 re-export（b8c0ba4）。
+
 - [ ] 5.1 Add the `NativeAgentBackend` adapter in the sebas binary crate over
       `SessionManager` — create/prompt/cancel/close/events mapped onto the
       `SessionBackend` trait; verify it satisfies the trait and drives a fake
