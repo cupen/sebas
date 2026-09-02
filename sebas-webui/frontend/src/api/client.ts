@@ -155,6 +155,26 @@ export interface AdminService {
   uptime_secs: number | null
 }
 
+/**
+ * Execution-backend hint sent with `POST /api/sessions`. `"acp"` (the
+ * default) spawns the Claude Code bridge; `"native"` spawns the built-in
+ * kernel. Single-backend seams ignore the field.
+ */
+export type BackendHint = 'acp' | 'native'
+
+/**
+ * The operator's answer to a gated tool call, mirroring the backend's
+ * internally-tagged `PermissionDecision` (session_backend.rs): on the wire
+ * each variant is `{"decision": "allow_once" | "allow_session" | "deny"}`
+ * or `{"decision": "escalate", "reason": "…"}`, and the answer endpoint
+ * nests it as `{decision: <PermissionDecision>}`.
+ */
+export type PermissionDecision =
+  | { decision: 'allow_once' }
+  | { decision: 'allow_session' }
+  | { decision: 'deny' }
+  | { decision: 'escalate'; reason: string }
+
 /** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
 export class ApiError extends Error {
   readonly status: number
@@ -215,8 +235,22 @@ export const api = {
   about: () => get<About>('/api/about'),
 
   // Session mutations
-  createSession: (prompt: string, projectDir?: string | null) =>
-    post<{ key: string }>('/api/sessions', { prompt, project_dir: projectDir ?? null }),
+  createSession: (prompt: string, projectDir?: string | null, backend?: string | null) =>
+    post<{ key: string }>('/api/sessions', {
+      prompt,
+      project_dir: projectDir ?? null,
+      backend: backend ?? null,
+    }),
+  /**
+   * Answer a gated tool call (review card). Resolves `{status: "delivered"}`
+   * when the pending request got the decision; rejects with `ApiError`
+   * status 404 when no pending request carries that id (already answered,
+   * timed out, or unknown).
+   */
+  answerPermission: (requestId: string, decision: PermissionDecision) =>
+    post<{ status: string }>(`/api/permissions/${encodeURIComponent(requestId)}/answer`, {
+      decision,
+    }),
   sendMessage: (encodedKey: string, message: string) =>
     post<{ status: string }>(`/api/sessions/${encodedKey}/message`, { message }),
   closeSession: (encodedKey: string) =>

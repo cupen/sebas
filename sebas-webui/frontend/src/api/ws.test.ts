@@ -86,6 +86,31 @@ describe('WsClient', () => {
     expect(received).toEqual([{ type: 'session.removed', session_id: 'oc_2' }])
   })
 
+  it('dispatches permission.requested frames with the full payload', () => {
+    // Review-card feed (tasks 5.3): the frame mirrors the backend's
+    // WebUiEvent::PermissionRequested — request_id == kernel tool_use_id,
+    // session_id is the URL-safe encoded session key, args is verbatim.
+    const client = makeClient()
+    client.hostConnected()
+    const received: WsEvent[] = []
+    client.subscribe((e) => received.push(e))
+    const socket = FakeSocket.instances[0]!
+    socket.open()
+    const frame = {
+      type: 'permission.requested',
+      request_id: 'toolu_01ABC',
+      session_id: 'oc_enc%00key',
+      tool_name: 'bash',
+      args: { command: 'rm -rf build' },
+      reason: 'may modify state',
+    }
+    socket.emit(frame)
+    expect(received).toEqual([frame])
+    // The event table keeps tolerating unknown types alongside it.
+    socket.emit({ type: 'session.exploded' })
+    expect(received).toHaveLength(1)
+  })
+
   it('reconnects with exponential backoff and fires onReconnect on success', async () => {
     const reconnected = vi.fn()
     const client = makeClient(reconnected)

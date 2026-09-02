@@ -5,7 +5,7 @@
 
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { api, ApiError, type SessionList } from '../api/client.js'
+import { api, ApiError, type BackendHint, type SessionList } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
@@ -14,12 +14,15 @@ import '../components/status-badge.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/input/input.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
+import '@awesome.me/webawesome/dist/components/select/select.js'
+import '@awesome.me/webawesome/dist/components/option/option.js'
 
 @customElement('sebas-sessions')
 export class SebasSessions extends LitElement {
   @state() private data: SessionList | null = null
   @state() private error = ''
   @state() private prompt = ''
+  @state() private backend: BackendHint = 'acp'
   @state() private creating = false
   @state() private closeTarget: string | null = null
   private unsubscribe?: () => void
@@ -55,6 +58,10 @@ export class SebasSessions extends LitElement {
       .composer wa-input {
         flex: 1;
         min-width: 220px;
+      }
+      .composer .backend-select {
+        flex: 0 0 auto;
+        min-width: 215px;
       }
       .grid {
         display: grid;
@@ -195,7 +202,7 @@ export class SebasSessions extends LitElement {
     if (!this.prompt.trim() || this.creating) return
     this.creating = true
     try {
-      const { key } = await api.createSession(this.prompt.trim())
+      const { key } = await api.createSession(this.prompt.trim(), null, this.backend)
       this.prompt = ''
       navigate(`/sessions/${key}`)
     } catch (err) {
@@ -276,6 +283,18 @@ export class SebasSessions extends LitElement {
             value=${this.prompt}
             @input=${(e: Event) => (this.prompt = (e.target as HTMLInputElement).value)}
           ></wa-input>
+          <wa-select
+            class="backend-select"
+            aria-label="Execution backend"
+            value=${this.backend}
+            @change=${(e: Event) => {
+              const value = (e.target as HTMLInputElement).value
+              if (value === 'acp' || value === 'native') this.backend = value
+            }}
+          >
+            <wa-option value="acp">acp · Claude Code bridge</wa-option>
+            <wa-option value="native">native · built-in kernel</wa-option>
+          </wa-select>
           <wa-button variant="brand" appearance="accent" ?loading=${this.creating} type="submit"
             >New session</wa-button
           >

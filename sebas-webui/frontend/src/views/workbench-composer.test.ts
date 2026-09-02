@@ -203,7 +203,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('hello agent', null)
+    expect(api.createSession).toHaveBeenCalledWith('hello agent', null, 'acp')
     expect(created).toHaveBeenCalledTimes(1)
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_inbox')
   })
@@ -228,7 +228,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('work on this', '/home/me/code/sebas')
+    expect(api.createSession).toHaveBeenCalledWith('work on this', '/home/me/code/sebas', 'acp')
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_proj')
     // Binding caption shows the trailing path segment.
     expect(el.shadowRoot?.textContent ?? '').toContain('sebas')
@@ -241,6 +241,35 @@ describe('sebas-workbench-composer', () => {
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     expect(api.createSession).not.toHaveBeenCalled()
+  })
+
+  it('forwards the backend selected in the drop-down (default acp)', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_native' })
+    const el = await mount({ projectDir: null })
+
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'run natively'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    // Flip the execution-backend drop-down to native (5.2).
+    const select = el.shadowRoot?.querySelector('wa-select') as unknown as
+      | (HTMLElement & { value: string; disabled: boolean })
+      | null
+    expect(select).toBeTruthy()
+    expect(select!.value).toBe('acp')
+    select!.value = 'native'
+    select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    ;(sendBtn as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.createSession).toHaveBeenCalledTimes(1)
+    expect(api.createSession).toHaveBeenCalledWith('run natively', null, 'native')
   })
 
   it('error path surfaces inline and preserves text', async () => {

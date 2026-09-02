@@ -5,7 +5,8 @@
  * Contract (from the `webui-api` capability):
  * - every connected client receives every event;
  * - events are JSON objects tagged with a dotted `type`
- *   (session.created / session.updated / session.removed / config.updated);
+ *   (session.created / session.updated / session.removed / config.updated /
+ *   permission.requested);
  * - unknown event types must be tolerated (forward compatibility);
  * - reconnect with exponential backoff after a drop, and refetch the
  *   visible view's data afterwards (the `onReconnect` hook).
@@ -18,6 +19,20 @@ export interface WsEvents {
   'session.updated': { type: 'session.updated'; session_id: string; status: string }
   'session.removed': { type: 'session.removed'; session_id: string }
   'config.updated': { type: 'config.updated' }
+  /**
+   * A gated tool call awaits an operator decision (the review card).
+   * `session_id` is the URL-safe encoded session key; `request_id` equals
+   * the kernel's tool_use_id and is what `api.answerPermission` takes
+   * back. `args` is the call's arguments verbatim (arbitrary JSON).
+   */
+  'permission.requested': {
+    type: 'permission.requested'
+    request_id: string
+    session_id: string
+    tool_name: string
+    args: unknown
+    reason: string
+  }
 }
 
 export type WsEvent = WsEvents[keyof WsEvents]
@@ -28,6 +43,7 @@ const EVENTS = {
   'session.updated': true,
   'session.removed': true,
   'config.updated': true,
+  'permission.requested': true,
 }
 
 export type WsEventHandler = (event: WsEvent) => void

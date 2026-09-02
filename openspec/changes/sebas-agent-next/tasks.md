@@ -70,16 +70,16 @@
 
 ## 4. Event vocabulary & tools upgrade (design N6, agent-core spec)
 
-- [ ] 4.1 Add `ToolFinish`, `SessionSummary`, and enable `PermissionRequest` on
+- [x] 4.1 Add `ToolFinish`, `SessionSummary`, and enable `PermissionRequest` on
       `AgentEvent`; add the `ContentBlock::Image` variant and multi-modal
       request support; verify serde round-trips and the existing 1a
       event-sequence tests still pass unchanged
-- [ ] 4.2 Add `read_image` behind a capability gate — declared only when the
+- [x] 4.2 Add `read_image` behind a capability gate — declared only when the
       configured LLM announces image support; and a `lsp` tool that reports
       `file_system` only when a server is reachable and returns unavailable
       (not error) otherwise; verify both gates with a fake client that does and
       does not announce the capability
-- [ ] 4.3 Register the new tools conditionally in `ToolRegistry` and expose the
+- [x] 4.3 Register the new tools conditionally in `ToolRegistry` and expose the
       `LlmConsult` constants (tools ≤128, context ~90% finish); verify the
       schema list reflects the capability gates
 
@@ -95,11 +95,11 @@
       `SessionManager` — create/prompt/cancel/close/events mapped onto the
       `SessionBackend` trait; verify it satisfies the trait and drives a fake
       client through `run --webui`
-- [ ] 5.2 Add the session-row backend selector (acp / native drop-down) and
+- [x] 5.2 Add the session-row backend selector (acp / native drop-down) and
       route `spawn`/`message`/`close`/`turns` to the chosen backend; verify the
       acp path behaves exactly as before and the native path renders a live
       session
-- [ ] 5.3 Add the review card — webui renders `PermissionRequest` (allow once /
+- [x] 5.3 Add the review card — webui renders `PermissionRequest` (allow once /
       allow session / deny + reason) and returns `permission_decision` to the
       session; verify a gated call via the native backend is answered through
       the card end-to-end

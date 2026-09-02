@@ -13,6 +13,7 @@ import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '../components/status-badge.js'
+import '../components/review-card.js'
 import './transcript-view.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -384,6 +385,10 @@ export class SebasSessionDetail extends LitElement {
               <span class="who">Original prompt</span>“${d.user_prompt}”
             </blockquote>`
           : nothing}
+
+        <!-- Gated tool calls for this session: a card appears the moment
+             the kernel asks for permission and disappears once answered. -->
+        <sebas-review-cards .sessionKey=${d.encoded_key}></sebas-review-cards>
 
         <section
           class="panel transcript body"

@@ -12,11 +12,13 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api } from '../api/client.js'
+import { api, type BackendHint } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
+import '@awesome.me/webawesome/dist/components/select/select.js'
+import '@awesome.me/webawesome/dist/components/option/option.js'
 
 @customElement('sebas-workbench-composer')
 export class SebasWorkbenchComposer extends LitElement {
@@ -34,6 +36,8 @@ export class SebasWorkbenchComposer extends LitElement {
 
   @state() private text = ''
   @state() private sending = false
+  /** Execution-backend hint forwarded with the spawn request. */
+  @state() private backend: BackendHint = 'acp'
   @state() private error: string | null = null
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
@@ -84,6 +88,10 @@ export class SebasWorkbenchComposer extends LitElement {
         display: flex;
         gap: var(--sebas-space-3);
         align-items: flex-end;
+      }
+      .composer .backend-select {
+        flex: 0 0 auto;
+        width: 175px;
       }
       .composer wa-textarea {
         flex: 1;
@@ -151,7 +159,7 @@ export class SebasWorkbenchComposer extends LitElement {
     this.sending = true
     this.error = null
     try {
-      const { key } = await api.createSession(prompt, this.projectDir)
+      const { key } = await api.createSession(prompt, this.projectDir, this.backend)
       this.text = ''
       this.dispatchEvent(
         new CustomEvent<{ key: string }>('composer-created', {
@@ -201,6 +209,19 @@ export class SebasWorkbenchComposer extends LitElement {
           `
         : nothing}
       <div class="composer">
+        <wa-select
+          class="backend-select"
+          aria-label="Execution backend"
+          value=${this.backend}
+          ?disabled=${disabled}
+          @change=${(e: Event) => {
+            const value = (e.target as HTMLInputElement).value
+            if (value === 'acp' || value === 'native') this.backend = value
+          }}
+        >
+          <wa-option value="acp">acp · Claude Code bridge</wa-option>
+          <wa-option value="native">native · built-in kernel</wa-option>
+        </wa-select>
         <wa-textarea
           placeholder="Message the agent…"
           aria-label="Message"
