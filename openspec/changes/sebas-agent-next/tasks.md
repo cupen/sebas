@@ -103,20 +103,20 @@
 
 ## 6. agent-bench (agent-bench spec)
 
-- [ ] 6.1 Add `sebas agent-bench` — `--smoke`, `--tasks a,b,c`, `--model m`,
+- [x] 6.1 Add `sebas agent-bench` — `--smoke`, `--tasks a,b,c`, `--model m`,
       `--record trace.jsonl`, `--debug`, `--replay`; run a task in a temp
       workspace, record the full event stream to JSONL with a `# task:` header,
       and print a per-task summary; verify the CLI runs the smoke subset against
       a fake client and the trace file exists
-- [ ] 6.2 Add per-task assertions on final workspace state and trace content
+- [x] 6.2 Add per-task assertions on final workspace state and trace content
       (fail-fast on missing files, no prose inspection); add the
       ERROR-RECOVERY task (fixture command fails early, score depends on
       recovery); verify a passing and a failing task each report correctly
-- [ ] 6.3 Add the tree dashboard — fixed task order, buckets (web-tooling /
+- [x] 6.3 Add the tree dashboard — fixed task order, buckets (web-tooling /
       apply_patch / subagent, the latter two placeholder-marked skipped in this
       change), per-bucket roll-up, deterministic ordering; verify the printed
       tree matches the expected layout for a smoke run
-- [ ] 6.4 Add honest environment reporting — client type, model, tool list,
+- [x] 6.4 Add honest environment reporting — client type, model, tool list,
       budgets, runtime, sample count in the trace header and summary; verify a
       run prints these and the trace header carries them
 

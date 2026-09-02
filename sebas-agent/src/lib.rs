@@ -11,6 +11,7 @@
 //! 事件词汇沿 `AcpEvent` 形状（`type` tag + snake_case）；Phase 2 启用
 //! `PermissionRequest`（策略审批面）并新增 `ToolPolicy`（策略结果事件）。
 
+pub mod bench;
 pub mod llm;
 pub mod loop_;
 pub mod message;

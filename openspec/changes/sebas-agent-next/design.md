@@ -136,7 +136,7 @@ run --webui（进程内）
 - `AgentEvent` 新增：`PermissionRequest{session_id, request_id, tool_name, args, reason}`、`ToolFinish{session_id, tool_name, ok, truncated, exit_code}`、`SessionSummary{session_id, turn_ms, model_calls, tool_calls, output_chars}`。`PermissionRequest` 的 `request_id` 与工具 `tool_use_id` 一致（`permission-flow` 的关联契约）。
 - `LlmClient` / 消息模型升级：`ContentBlock::Image{media_type, data}`（多模态；`strip_thinking` 兼容处理）；`LlmConsult` 常量（tools 数量上限 128、上下文窗口逼近 90% → finish）。
 - 后端选择与伪工具：`bash conf` 以独立伪工具（`session_tools`）事件通报，避免污染 bash 结果。
-- 新工具 schema 注册：web_search / web_fetch / read_image / lsp 在 `ToolRegistry` 条件注册（read_image 与 lsp 只在能力门开放时出现在 `schemas()`）。
+- 新工具 schema 注册：web_search / web_fetch **总是注册**（spec「关闭时调用返回结构化 network disabled 结果」要求拒绝发生在策略层而非工具不存在）；read_image 与 lsp 按能力门条件注册（只开放时出现在 `schemas()`）。
 
 ### N7 — agent-bench：CLI + 轨迹 + dashboard（评估面）
 
