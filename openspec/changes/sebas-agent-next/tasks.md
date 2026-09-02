@@ -85,13 +85,13 @@
 
 ## 5. Webui wiring (design N5, webui spec)
 
-> **BLOCKED（2026-09-02）**：main 的 `sebas-webui` crate 自 585e17d 合并起处于双谱系
-> 接缝不一致状态（lib.rs 声明的 assets/events 模块文件曾丢失、admin.rs 与 server.rs
-> 跨代、SessionRow/CardElementView 字段两代并存），workspace 构建失败。需要先裁决以
-> 哪个谱系为准（feat/webui 的完整 SPA vs main 的 seam 混合态）再实施本组。已完成：
-> 补回 events.rs/assets.rs + 移除 router 悬空 re-export（b8c0ba4）。
+> **谱系裁决（2026-09-02，用户确认）**：以 feat/webui 谱系为准——router 回
+> SessionInfo/TurnEntry/Resync 词表 + transcript 机制，webui 取 SPA+rust-embed 全套，
+> binary 改接 session_backend 缝（backend.rs/webui_backend.rs 退役）。5.2/5.3 的
+> API 与 /ws 层已就绪（spawn backend 提示、/api/permissions answer、
+> permission.requested WS 帧）；SPA 组件（会话行下拉、审查卡）留待前端轮次。
 
-- [ ] 5.1 Add the `NativeAgentBackend` adapter in the sebas binary crate over
+- [x] 5.1 Add the `NativeAgentBackend` adapter in the sebas binary crate over
       `SessionManager` — create/prompt/cancel/close/events mapped onto the
       `SessionBackend` trait; verify it satisfies the trait and drives a fake
       client through `run --webui`
@@ -103,7 +103,7 @@
       allow session / deny + reason) and returns `permission_decision` to the
       session; verify a gated call via the native backend is answered through
       the card end-to-end
-- [ ] 5.4 Verify `cargo build -p sebas-webui` and `cargo test -p sebas-webui`
+- [x] 5.4 Verify `cargo build -p sebas-webui` and `cargo test -p sebas-webui`
       pass with no regression in the acp-mode tests, and `run --webui` still
       drives an acp session as before
 
@@ -148,7 +148,7 @@
       skills registry; persistence (OQ1) promoted to an explicit roadmap item
       (Codex thread-store/SQLite and DSH session-log both argue it); add §12
       revision ledger; verify the roadmap and the delivered change scope agree
-- [ ] 7.4 Full gate — `cargo build` workspace-wide, `cargo test -p sebas-agent`
+- [x] 7.4 Full gate — `cargo build` workspace-wide, `cargo test -p sebas-agent`
       and `-p sebas-webui`, `cargo clippy -p sebas-agent -p sebas-webui -- -D
       warnings`; verify all pass, existing crates untouched (`git status` shows
       only this change's files), and `openspec validate sebas-agent-next`

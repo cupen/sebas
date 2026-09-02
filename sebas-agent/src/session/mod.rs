@@ -156,6 +156,11 @@ impl SessionManager {
         self
     }
 
+    /// 是否挂了审批回答者（宿主据此决定是否复用默认 hub）。
+    pub fn has_approver(&self) -> bool {
+        self.approver.is_some()
+    }
+
     /// 创建绑定 `workdir` 的会话（多会话并发，彼此隔离）。
     pub fn create_session(&self, workdir: PathBuf) -> SessionHandle {
         let key = uuid::Uuid::new_v4().to_string();

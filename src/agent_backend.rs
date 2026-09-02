@@ -1,0 +1,681 @@
+//! The native-agent session backend (openspec/changes/sebas-agent-next
+//! tasks 5.1–5.3, design N5): [`sebas_agent::session::SessionManager`] behind
+//! the WebUI's [`SessionBackend`] seam, plus the composite backend that lets
+//! one dashboard host both execution backends (the Claude Code bridge and
+//! the built-in kernel) selectable per spawn.
+//!
+//! Mapping conventions:
+//! - native sessions live under `SessionKey`s whose `chat_id` is
+//!   `agent-{8-hex}` (thread `None`) — the composite routes on that prefix;
+//! - each `AgentEvent` from the kernel pump updates the session transcript
+//!   (prompt / streamed text / tool traces, one `TurnEntry` per flush) and
+//!   republishes a session `Updated` event;
+//! - gated calls surface as [`PermissionNotice`]s on the review-card feed;
+//!   operator decisions round-trip through the kernel's [`ApproverHub`].
+
+use sebas_agent::llm::{AnthropicMessagesClient, LlmClient};
+use sebas_agent::policy::{Approver, ApprovalAnswer, ApproverHub, PolicyConfig, PolicyEngine};
+use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
+use sebas_agent::policy::SandboxMode;
+use sebas_agent::tools::ToolRegistry;
+use sebas_feishu::events::SessionKey;
+use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_webui::session_backend::{
+    PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
+};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{broadcast, RwLock};
+
+/// One live native session: kernel handle + its rendered transcript.
+struct NativeSession {
+    handle: SessionHandle,
+    workdir: Option<String>,
+    prompt: String,
+    /// Rendered transcript entries (turn-content retrieval source).
+    transcript: Vec<TurnEntry>,
+    /// The in-flight streamed text, flushed into the transcript on tool
+    /// boundaries and turn end.
+    text_buf: String,
+}
+
+impl NativeSession {
+    fn flush_text(&mut self) {
+        if self.text_buf.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.text_buf);
+        self.transcript.push(TurnEntry {
+            position: self.transcript.len() as u64,
+            kind: "content".into(),
+            element_type: "markdown".into(),
+            content: text,
+            created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
+        });
+    }
+
+    fn push_markdown(&mut self, content: String) {
+        self.flush_text();
+        self.transcript.push(TurnEntry {
+            position: self.transcript.len() as u64,
+            kind: "content".into(),
+            element_type: "markdown".into(),
+            content,
+            created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
+        });
+    }
+
+    fn info(&self, key: &SessionKey) -> SessionInfo {
+        SessionInfo {
+            chat_id: key.chat_id.clone(),
+            thread_id: key.thread_id.clone(),
+            session_id: Some(self.handle.key.clone()),
+            status: "active".into(),
+            phase: None,
+            user_prompt: Some(self.prompt.clone()),
+            last_active_unix: chrono::Utc::now().timestamp(),
+            project_dir: self.workdir.clone(),
+        }
+    }
+}
+
+/// The in-process backend over the native agent kernel.
+pub struct NativeAgentBackend {
+    manager: SessionManager,
+    hub: Arc<ApproverHub>,
+    /// Encoded key → session. Encoded keys are the URL-safe form the WebUI
+    /// routes already use.
+    sessions: Arc<RwLock<HashMap<String, NativeSession>>>,
+    /// Lifecycle + review-card events for the WebUI relay.
+    events: broadcast::Sender<SessionEvent>,
+    /// Gated-call feed (review cards).
+    notices: broadcast::Sender<PermissionNotice>,
+    /// Why the native backend is unavailable (missing LLM credentials), if so.
+    unavailable_cause: Option<String>,
+}
+
+impl NativeAgentBackend {
+    /// Build the backend. Reads the agent LLM channel from the environment
+    /// (design N9): `SEBAS_AGENT_PROVIDER_BASE_URL` + `SEBAS_AGENT_PROVIDER_API_KEY`
+    /// (direct; default endpoint `https://api.anthropic.com`), or
+    /// `SEBAS_AGENT_GATEWAY_URL` (+ optional `SEBAS_AGENT_GATEWAY_AUTH`) to
+    /// route through the gateway. Without credentials the backend reports
+    /// honestly degraded: every spawn rejects with the cause.
+    pub fn from_env(bash_timeout: Duration) -> Arc<Self> {
+        let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) =
+            if let Ok(url) = std::env::var("SEBAS_AGENT_GATEWAY_URL") {
+                let auth = std::env::var("SEBAS_AGENT_GATEWAY_AUTH")
+                    .unwrap_or_else(|_| "sk-gw-local-dev".into());
+                (
+                    Some(Arc::new(AnthropicMessagesClient::gateway(url, auth))),
+                    None,
+                )
+            } else {
+                let base =
+                    std::env::var("SEBAS_AGENT_PROVIDER_BASE_URL")
+                        .unwrap_or_else(|_| "https://api.anthropic.com".into());
+                match std::env::var("SEBAS_AGENT_PROVIDER_API_KEY") {
+                    Ok(key) if !key.is_empty() => (
+                        Some(Arc::new(AnthropicMessagesClient::direct_provider(base, key))),
+                        None,
+                    ),
+                    _ => (
+                        None,
+                        Some(
+                            "native backend needs SEBAS_AGENT_PROVIDER_API_KEY \
+                             (or SEBAS_AGENT_GATEWAY_URL)"
+                                .into(),
+                        ),
+                    ),
+                }
+            };
+
+        let model = std::env::var("SEBAS_AGENT_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".into());
+        let manager = SessionManager::new(
+            client.expect("caller gates on the cause; no-client construction is rejected at spawn"),
+            // 沙箱档位（design N2 配置面）：默认 Auto（Landlock 可用即用，
+            // 否则防火墙回退）；`SEBAS_AGENT_BASH_SANDBOX=firewall` 强制回退档。
+            ToolRegistry::with_sandbox(bash_timeout, agent_sandbox_mode()),
+            SessionConfig {
+                model,
+                ..Default::default()
+            },
+        )
+        .with_policy(Arc::new(PolicyEngine::new(PolicyConfig::default())))
+        .with_approver(ApproverHub::new());
+
+        Self::new(manager, cause)
+    }
+
+    /// Inject an already-configured manager (tests, or hosts that read the
+    /// provider registry themselves).
+    pub fn with_manager(manager: SessionManager) -> Arc<Self> {
+        Self::new(manager, None)
+    }
+
+    fn new(manager: SessionManager, unavailable_cause: Option<String>) -> Arc<Self> {
+        // The kernel needs an approver to surface gated calls; the hub owns
+        // the pending map the review-card answer route feeds.
+        let hub = ApproverHub::new();
+        let manager = match manager.has_approver() {
+            true => manager,
+            false => manager.with_approver(hub.clone()),
+        };
+        let (events, _) = broadcast::channel(256);
+        let (notices, _) = broadcast::channel(64);
+        Arc::new(Self {
+            manager,
+            hub,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            events,
+            notices,
+            unavailable_cause,
+        })
+    }
+
+    fn encode_key(key: &SessionKey) -> String {
+        serde_json::to_string(key).expect("SessionKey serialization")
+    }
+
+    async fn session_info(&self, encoded: &str) -> Option<SessionInfo> {
+        let g = self.sessions.read().await;
+        g.get(encoded).map(|s| s.info(&Self::decode_agent_key(encoded)))
+    }
+
+    fn decode_agent_key(encoded: &str) -> SessionKey {
+        serde_json::from_str(encoded).unwrap_or(SessionKey {
+            chat_id: encoded.to_string(),
+            thread_id: None,
+        })
+    }
+
+    /// Drive one native session: kernel events → transcript + lifecycle
+    /// events + review-card notices. Runs until the session task dies.
+    async fn pump(
+        mut rx: broadcast::Receiver<AgentEvent>,
+        key: SessionKey,
+        encoded: String,
+        sessions: Arc<RwLock<HashMap<String, NativeSession>>>,
+        events: broadcast::Sender<SessionEvent>,
+        notices: broadcast::Sender<PermissionNotice>,
+    ) {
+        use AgentEvent as AE;
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            };
+            let mut removed = false;
+            // 锁内只做变更与 frame 计算；发送在锁外（发事件会同步唤醒订阅者）。
+            let frame: Option<SessionEvent> = {
+                let mut g = sessions.write().await;
+                let Some(session) = g.get_mut(&encoded) else { break };
+                match ev {
+                    AE::TextDelta { delta, .. } => {
+                        session.text_buf.push_str(&delta);
+                        None
+                    }
+                    AE::ThinkingDelta { .. } | AE::ToolProgress { .. } | AE::ToolFinish { .. } => None,
+                    AE::ToolStart { tool_name, args, .. } => {
+                        let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
+                        session
+                            .push_markdown(format!("📖 **{tool_name}**\n```json\n{args_str}\n```"));
+                        Some(SessionEvent::Updated { session: session.info(&key) })
+                    }
+                    AE::ToolEnd { tool_name, result, .. } => {
+                        session.push_markdown(format!("✓ **{tool_name}**\n{result}"));
+                        Some(SessionEvent::Updated { session: session.info(&key) })
+                    }
+                    AE::PermissionRequest { request_id, tool_name, args, reason, .. } => {
+                        session.push_markdown(format!(
+                            "⏳ **{tool_name}** awaits approval — {reason}"
+                        ));
+                        let _ = notices.send(PermissionNotice {
+                            request_id,
+                            session_id: encoded.clone(),
+                            tool_name,
+                            args,
+                            reason,
+                        });
+                        Some(SessionEvent::Updated { session: session.info(&key) })
+                    }
+                    AE::ToolPolicy { tool_name, outcome, .. } => {
+                        session.push_markdown(format!("🛡 **{tool_name}** policy: {outcome}"));
+                        Some(SessionEvent::Updated { session: session.info(&key) })
+                    }
+                    AE::SessionSummary { turn_ms, model_calls, tool_calls, .. } => {
+                        session.push_markdown(format!(
+                            "🗒 turn summary — {model_calls} model calls, {tool_calls} tools, {turn_ms}ms"
+                        ));
+                        Some(SessionEvent::Updated { session: session.info(&key) })
+                    }
+                    AE::Error { message, terminal, .. } => {
+                        session.push_markdown(format!("⚠ {message}"));
+                        removed = terminal;
+                        None
+                    }
+                    AE::Finished { .. } => {
+                        session.flush_text();
+                        Some(SessionEvent::Updated { session: session.info(&key) })
+                    }
+                }
+            };
+            match frame {
+                Some(SessionEvent::Updated { .. }) | None => {
+                    if let Some(frame) = frame {
+                        let _ = events.send(frame);
+                    }
+                }
+                _ => {}
+            }
+            if removed {
+                sessions.write().await.remove(&encoded);
+                let _ = events.send(SessionEvent::Removed {
+                    chat_id: key.chat_id.clone(),
+                    thread_id: key.thread_id.clone(),
+                });
+                break;
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionBackend for NativeAgentBackend {
+    async fn snapshot(&self) -> Vec<SessionInfo> {
+        let g = self.sessions.read().await;
+        let mut out: Vec<SessionInfo> =
+            g.iter().map(|(encoded, s)| s.info(&Self::decode_agent_key(encoded))).collect();
+        out.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
+        out
+    }
+
+    async fn focused(&self) -> Option<SessionKey> {
+        // The native backend does not track focus; the acp side owns it.
+        None
+    }
+
+    async fn set_focus(&self, _key: Option<SessionKey>) {}
+
+    fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    async fn spawn(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+    ) -> Result<SessionKey, SessionRejection> {
+        if let Some(cause) = &self.unavailable_cause {
+            return Err(SessionRejection::Unavailable { cause: cause.clone() });
+        }
+        let workdir: PathBuf = match project_dir.as_ref() {
+            Some(dir) => {
+                let p = PathBuf::from(dir);
+                if !p.is_dir() {
+                    return Err(SessionRejection::UnusableProjectDir);
+                }
+                p
+            }
+            None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        };
+        let handle = self.manager.create_session(workdir);
+        let key = SessionKey {
+            chat_id: format!("agent-{}", &handle.key[..8.min(handle.key.len())]),
+            thread_id: None,
+        };
+        let encoded = Self::encode_key(&key);
+        {
+            let mut g = self.sessions.write().await;
+            g.insert(
+                encoded.clone(),
+                NativeSession {
+                    handle,
+                    workdir: project_dir.clone(),
+                    prompt: prompt.clone(),
+                    transcript: Vec::new(),
+                    text_buf: String::new(),
+                },
+            );
+        }
+        let info = self.session_info(&encoded).await;
+        if let Some(info) = info {
+            let _ = self.events.send(SessionEvent::Created { session: info });
+        }
+
+        // Kernel pump：先订阅（broadcast 只转发订阅后的事件）再首 prompt。
+        let rx = {
+            let g = self.sessions.read().await;
+            g.get(&encoded).expect("just inserted").handle.subscribe()
+        };
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let notices = self.notices.clone();
+        let pump_key = key.clone();
+        let pump_encoded = encoded.clone();
+        tokio::spawn(async move {
+            Self::pump(rx, pump_key, pump_encoded, sessions, events, notices).await;
+        });
+
+        // First prompt drives the first turn.
+        {
+            let g = self.sessions.read().await;
+            let h = &g.get(&encoded).expect("just inserted").handle;
+            h.prompt(prompt).await;
+        }
+        Ok(key)
+    }
+
+    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let g = self.sessions.read().await;
+        let Some(session) = g.get(&encoded) else {
+            return Err(SessionRejection::UnknownSession { key: encoded });
+        };
+        session.handle.prompt(message).await;
+        Ok(())
+    }
+
+    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let mut g = self.sessions.write().await;
+        let Some(session) = g.remove(&encoded) else {
+            return Err(SessionRejection::UnknownSession { key: encoded });
+        };
+        session.handle.cancel().await;
+        Ok(())
+    }
+
+    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let g = self.sessions.read().await;
+        let Some(session) = g.get(&encoded) else {
+            return Err(SessionRejection::UnknownSession { key: encoded });
+        };
+        Ok(session
+            .transcript
+            .iter()
+            .filter(|e| e.position >= from)
+            .cloned()
+            .collect())
+    }
+
+    async fn reachability(&self) -> Reachability {
+        match &self.unavailable_cause {
+            Some(cause) => Reachability::Unreachable { cause: cause.clone() },
+            None => Reachability::Reachable,
+        }
+    }
+
+    fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
+        Some(self.notices.subscribe())
+    }
+
+    async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+        let answer = match decision {
+            PermissionDecision::AllowOnce => ApprovalAnswer::AllowOnce,
+            PermissionDecision::AllowSession => ApprovalAnswer::AllowSession,
+            PermissionDecision::Deny => ApprovalAnswer::Deny,
+            PermissionDecision::Escalate { reason } => ApprovalAnswer::Escalate { reason },
+        };
+        self.hub.answer(request_id, answer)
+    }
+}
+
+/// The composite seam: one dashboard, two execution backends. Spawn routes on
+/// the optional backend hint (`"native"` → the built-in kernel; anything else
+/// → the Claude Code bridge); every other call routes on the key prefix
+/// (`agent-*` chat ids belong to native sessions).
+pub struct DualSessionBackend {
+    pub acp: Arc<dyn SessionBackend>,
+    pub native: Arc<NativeAgentBackend>,
+    events: broadcast::Sender<SessionEvent>,
+}
+
+impl DualSessionBackend {
+    pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
+        let (events, _) = broadcast::channel(256);
+        // Merge both children's lifecycle streams into one relay.
+        {
+            let tx = events.clone();
+            let mut rx = acp.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => {
+                            let _ = tx.send(ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        {
+            let tx = events.clone();
+            let mut rx = native.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => {
+                            let _ = tx.send(ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        Arc::new(Self { acp, native, events })
+    }
+
+    fn is_native(key: &SessionKey) -> bool {
+        key.chat_id.starts_with("agent-")
+    }
+
+    fn route(&self, key: &SessionKey) -> &dyn SessionBackend {
+        if Self::is_native(key) {
+            self.native.as_ref()
+        } else {
+            self.acp.as_ref()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionBackend for DualSessionBackend {
+    async fn snapshot(&self) -> Vec<SessionInfo> {
+        let mut all = self.acp.snapshot().await;
+        all.extend(self.native.snapshot().await);
+        all.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
+        all
+    }
+
+    async fn focused(&self) -> Option<SessionKey> {
+        self.acp.focused().await
+    }
+
+    async fn set_focus(&self, key: Option<SessionKey>) {
+        match key {
+            Some(k) if Self::is_native(&k) => self.native.set_focus(Some(k)).await,
+            other => self.acp.set_focus(other).await,
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    async fn spawn(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+    ) -> Result<SessionKey, SessionRejection> {
+        self.acp.spawn(prompt, project_dir).await
+    }
+
+    async fn spawn_with(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+        backend: Option<&str>,
+    ) -> Result<SessionKey, SessionRejection> {
+        match backend {
+            Some("native") => self.native.spawn(prompt, project_dir).await,
+            _ => self.acp.spawn(prompt, project_dir).await,
+        }
+    }
+
+    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
+        self.route(&key).message(key, message).await
+    }
+
+    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+        self.route(&key).close(key).await
+    }
+
+    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+        self.route(&key).turns(key, from).await
+    }
+
+    async fn reachability(&self) -> Reachability {
+        self.acp.reachability().await
+    }
+
+    fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
+        self.native.permission_requests()
+    }
+
+    async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+        if self.native.answer_permission(request_id, decision.clone()).await {
+            return true;
+        }
+        self.acp.answer_permission(request_id, decision).await
+    }
+}
+
+/// bash 沙箱档位解析（design N2 配置面）。
+fn agent_sandbox_mode() -> SandboxMode {
+    match std::env::var("SEBAS_AGENT_BASH_SANDBOX").as_deref() {
+        Ok("firewall") => SandboxMode::Firewall,
+        _ => SandboxMode::Auto,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sebas_agent::llm::fake::FakeLlmClient;
+    use sebas_agent::policy::NetworkMode;
+
+    fn manager() -> SessionManager {
+        // 脚本化：先破坏面 bash（→ Ask），再收尾文本。
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![(
+                "t1",
+                "bash",
+                serde_json::json!({"command": "rm -rf build"}),
+            )]),
+            FakeLlmClient::say("gated call was approved"),
+        ]);
+        SessionManager::new(
+            Arc::new(llm),
+            ToolRegistry::with_sandbox(
+                Duration::from_secs(10),
+                sebas_agent::policy::SandboxMode::Firewall,
+            ),
+            SessionConfig::default(),
+        )
+        .with_policy(Arc::new(PolicyEngine::new(PolicyConfig {
+            network: NetworkMode::Off,
+            ..Default::default()
+        })))
+    }
+
+    #[tokio::test]
+    async fn native_spawn_prompts_and_permission_round_trips() {
+        let backend = NativeAgentBackend::with_manager(manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        // 审查卡流：拿到 request_id 后回填 allow-once。
+        let mut notices = backend.permission_requests().expect("native has notices");
+        let notice = tokio::time::timeout(Duration::from_secs(10), notices.recv())
+            .await
+            .expect("notice timeout")
+            .expect("notice");
+        assert_eq!(notice.tool_name, "bash");
+        assert_eq!(
+            notice.session_id,
+            NativeAgentBackend::encode_key(&key),
+            "session id is the encoded key"
+        );
+        assert!(
+            backend
+                .answer_permission(&notice.request_id, PermissionDecision::AllowOnce)
+                .await,
+            "answer must reach the pending request"
+        );
+
+        // turn 收尾后的 transcript：策略事件 + 完成文本可见。
+        let deadline = Duration::from_secs(10);
+        let _ = tokio::time::timeout(deadline, async {
+            loop {
+                let turns = backend.turns(key.clone(), 0).await.unwrap();
+                let joined: String = turns.iter().map(|t| t.content.clone()).collect();
+                if joined.contains("gated call was approved") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+
+        // turns：transcript 里能看到审批与工具痕迹。
+        let turns = backend.turns(key.clone(), 0).await.unwrap();
+        let joined: String = turns.iter().map(|t| t.content.clone()).collect();
+        assert!(joined.contains("bash"), "tool trace in transcript: {joined}");
+        assert!(joined.contains("policy"), "policy event in transcript: {joined}");
+        assert!(
+            joined.contains("gated call was approved"),
+            "completion text in transcript: {joined}"
+        );
+
+        // close 后 sessions 清空。
+        assert!(backend.close(key).await.is_ok());
+        assert!(backend.snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dual_routes_on_backend_hint_and_prefix() {
+        let acp: Arc<dyn SessionBackend> =
+            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
+                make_router().await,
+            ));
+        let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
+        // backend hint = native → key 前缀 agent-。
+        let key = dual
+            .spawn_with("go".into(), None, Some("native"))
+            .await
+            .expect("spawn native");
+        assert!(DualSessionBackend::is_native(&key), "{:?}", key.chat_id);
+        // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
+        let acp_key = dual.spawn_with("hi".into(), None, None).await.expect("spawn acp");
+        assert!(!DualSessionBackend::is_native(&acp_key));
+    }
+
+    /// 出站接收端必须保活：router 发送在通道关闭时会 panic。
+    async fn make_router() -> sebas_router::RouterHandle {
+        let (router, mut out_rx) = sebas_router::RouterHandle::new(sebas_router::SessionMap::new());
+        tokio::spawn(async move {
+            while out_rx.recv().await.is_some() {}
+        });
+        router
+    }
+}

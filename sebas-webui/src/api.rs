@@ -217,6 +217,11 @@ pub struct CreateSessionRequest {
     /// path with `UnusableProjectDir` — the client surfaces that verbatim.
     #[serde(default)]
     pub project_dir: Option<String>,
+    /// Optional execution-backend hint (composite seams route on it, e.g.
+    /// `"acp"` for the Claude Code bridge vs `"native"` for the built-in
+    /// agent). Single-backend seams ignore it.
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -231,7 +236,11 @@ pub async fn create_session(
     State(state): State<WebUiState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Response {
-    let key = match state.backend.spawn(req.prompt, req.project_dir).await {
+    let key = match state
+        .backend
+        .spawn_with(req.prompt, req.project_dir, req.backend.as_deref())
+        .await
+    {
         Ok(k) => k,
         Err(rej) => return rejection_response(rej),
     };
@@ -432,6 +441,9 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
 async fn ws_connection(state: WebUiState, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.backend.subscribe();
+    // Review-card feed (gated tool calls). Backends without permission
+    // interaction yield `None`; the select leg below then never fires.
+    let mut permissions = state.backend.permission_requests();
     let mut ping = tokio::time::interval(WS_PING_INTERVAL);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.reset();
@@ -459,6 +471,26 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            notice = async {
+                match permissions.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Ok(notice) = notice {
+                    let frame = WebUiEvent::PermissionRequested {
+                        request_id: notice.request_id,
+                        session_id: notice.session_id,
+                        tool_name: notice.tool_name,
+                        args: notice.args,
+                        reason: notice.reason,
+                    };
+                    let text = serde_json::to_string(&frame).unwrap_or_default();
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
             frame = receiver.next() => {
                 match frame {
                     Some(Ok(msg)) => {
@@ -472,5 +504,30 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                 }
             }
         }
+    }
+}
+
+/// POST /api/permissions/{request_id}/answer — deliver the operator's
+/// decision for a gated tool call (the review card). `404` when no pending
+/// request carries that id (already answered, timed out, or unknown — the
+/// client may retry briefly).
+#[derive(Deserialize)]
+pub struct AnswerPermissionRequest {
+    pub decision: crate::session_backend::PermissionDecision,
+}
+
+pub async fn answer_permission(
+    State(state): State<WebUiState>,
+    Path(request_id): Path<String>,
+    Json(req): Json<AnswerPermissionRequest>,
+) -> Response {
+    let delivered = state
+        .backend
+        .answer_permission(&request_id, req.decision)
+        .await;
+    if delivered {
+        Json(json!({ "status": "delivered" })).into_response()
+    } else {
+        api_error(StatusCode::NOT_FOUND, "no pending permission request with that id")
     }
 }

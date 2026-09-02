@@ -4,6 +4,8 @@
 //! 流式端点——直连 provider（默认）或经可选 gateway；测试实现 [`fake::FakeLlmClient`]。
 
 pub mod anthropic;
+
+pub use anthropic::AnthropicMessagesClient;
 pub mod fake;
 
 use crate::message::{ContentBlock, Message};

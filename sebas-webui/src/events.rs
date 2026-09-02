@@ -24,6 +24,17 @@ pub enum WebUiEvent {
     /// reserved so clients must tolerate it (and unknown types) arriving.
     #[serde(rename = "config.updated")]
     ConfigUpdated,
+    /// A gated tool call awaits an operator decision (the review card).
+    /// `args` carries the call's arguments verbatim; the client answers via
+    /// `POST /api/permissions/{request_id}/answer`.
+    #[serde(rename = "permission.requested")]
+    PermissionRequested {
+        request_id: String,
+        session_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -56,6 +67,23 @@ mod tests {
                 json!({"type": "session.removed", "session_id": "oc_b"}),
             ),
             (WebUiEvent::ConfigUpdated, json!({"type": "config.updated"})),
+            (
+                WebUiEvent::PermissionRequested {
+                    request_id: "req1".into(),
+                    session_id: "oc_a".into(),
+                    tool_name: "bash".into(),
+                    args: json!({"command": "rm -rf build"}),
+                    reason: "may modify state".into(),
+                },
+                json!({
+                    "type": "permission.requested",
+                    "request_id": "req1",
+                    "session_id": "oc_a",
+                    "tool_name": "bash",
+                    "args": {"command": "rm -rf build"},
+                    "reason": "may modify state"
+                }),
+            ),
         ];
         for (event, want) in cases {
             let got = serde_json::to_value(&event).unwrap();

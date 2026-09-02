@@ -21,7 +21,7 @@ async fn main() {
     let mut debug = false;
     let mut replay = false;
     let mut record: Option<std::path::PathBuf> = None;
-    let mut model = "bench-fake-1".to_string();
+    let mut _model = "bench-fake-1".to_string();
     let mut tasks_filter: Vec<String> = Vec::new();
 
     while let Some(a) = args.next() {
@@ -43,7 +43,7 @@ async fn main() {
                 tasks_filter = v.split(',').map(str::to_string).collect();
             }
             "--model" => {
-                model = args.next().unwrap_or_else(|| {
+                _model = args.next().unwrap_or_else(|| {
                     eprintln!("--model needs a value");
                     std::process::exit(2);
                 });

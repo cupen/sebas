@@ -13,6 +13,7 @@
 use async_trait::async_trait;
 use sebas_feishu::events::SessionKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
@@ -56,6 +57,31 @@ impl std::fmt::Display for SessionRejection {
     }
 }
 
+/// One gated tool call awaiting an operator decision (webui review card).
+/// `session_id` is the encoded session key; `request_id` equals the kernel's
+/// `tool_use_id` and is what [`SessionBackend::answer_permission`] takes back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionNotice {
+    pub request_id: String,
+    /// Encoded session key (URL-safe, as used in routes).
+    pub session_id: String,
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    pub reason: String,
+}
+
+/// The operator's answer to a [`PermissionNotice`]. `escalate` = one-shot
+/// elevated retry carrying the operator's stated reason (the session policy
+/// itself never widens).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum PermissionDecision {
+    AllowOnce,
+    AllowSession,
+    Deny,
+    Escalate { reason: String },
+}
+
 /// The seam every session-data source must satisfy.
 #[async_trait]
 pub trait SessionBackend: Send + Sync {
@@ -94,6 +120,32 @@ pub trait SessionBackend: Send + Sync {
 
     /// Whether the session authority is reachable right now, and if not, why.
     async fn reachability(&self) -> Reachability;
+
+    /// Live stream of gated tool calls awaiting a decision (the review-card
+    /// feed). `None` = this backend has no permission interaction (its
+    /// sessions never gate, or gating is surfaced elsewhere).
+    fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
+        None
+    }
+
+    /// Deliver an operator decision for `request_id`. Returns `false` when
+    /// no pending request carries that id (already answered, timed out, or
+    /// unknown — callers may retry briefly).
+    async fn answer_permission(&self, _request_id: &str, _decision: PermissionDecision) -> bool {
+        false
+    }
+
+    /// Create a session, optionally pinning the execution backend. The
+    /// default ignores the hint (single-backend seams); composite seams
+    /// route on it.
+    async fn spawn_with(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+        _backend: Option<&str>,
+    ) -> Result<SessionKey, SessionRejection> {
+        self.spawn(prompt, project_dir).await
+    }
 }
 
 // ─── In-process implementation (task 2.2) ──────────────────────────────────

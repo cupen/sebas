@@ -65,6 +65,10 @@ pub fn build_router_with_admin_adapter(
         .route("/api/sessions/{key}/close", post(api::close_session))
         .route("/api/sessions/{key}/switch", post(api::switch_session))
         .route("/api/summary", get(api::summary))
+        .route(
+            "/api/permissions/{request_id}/answer",
+            post(api::answer_permission),
+        )
         .route("/api/settings", get(api::settings))
         .route("/api/gateway", get(api::gateway))
         .route("/api/about", get(api::about))
