@@ -133,7 +133,12 @@ impl RouterHandle {
                     // trailing text 作为初始 prompt：`derive_topic(prompt)`
                     // 派生卡片标题，引用块渲染 prompt；空 trailing 走旧行为
                     // （无 prompt、卡标题回退 "Claude Code" 占位）。
-                    Ok(_) => self.spawn_new(key, prompt, reply_to).await,
+                    Ok(_) => {
+                        // The placeholder replaced whatever was mapped:
+                        // publish before `key` moves into spawn_new.
+                        self.publish_created(&key).await;
+                        self.spawn_new(key, prompt, reply_to).await;
+                    }
                     Err(e) => {
                         tracing::warn!(?e, "begin_spawn failed");
                         self.emit(Out::HelpText { key }).await;
@@ -185,10 +190,14 @@ impl RouterHandle {
             Command::PassThrough(p) => {
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
+                        // emit_turn_card publishes the new-turn phase reset.
                         self.continue_session(sid, p, reply_to, key.clone(), false)
-                            .await
+                            .await;
                     }
-                    Ok(crate::state::TextRoute::SpawnNew) => self.spawn_new(key, p, reply_to).await,
+                    Ok(crate::state::TextRoute::SpawnNew) => {
+                        self.publish_created(&key).await;
+                        self.spawn_new(key, p, reply_to).await;
+                    }
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
                         // Restored mapping claimed for lazy respawn (openspec/specs/session-lifecycle/spec.md).
                         self.publish_updated(&key).await;
@@ -211,11 +220,13 @@ impl RouterHandle {
                 // /btw: same routing as PassThrough, but priority=true so it jumps the queue.
                 match self.map.route_text(key.clone(), text.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
+                        // emit_turn_card publishes the new-turn phase reset.
                         self.continue_session(sid, text, reply_to, key.clone(), true)
-                            .await
+                            .await;
                     }
                     Ok(crate::state::TextRoute::SpawnNew) => {
-                        self.spawn_new(key, text, reply_to).await
+                        self.publish_created(&key).await;
+                        self.spawn_new(key, text, reply_to).await;
                     }
                     Ok(crate::state::TextRoute::Resume(old_sid)) => {
                         self.publish_updated(&key).await;

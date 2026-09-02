@@ -1,0 +1,63 @@
+/* Global app chrome built on the design tokens. Component-specific styling
+ * lives inside Lit components (see src/styles/shared.ts for the shared kit);
+ * this file covers the document background, focus, selection, and scrollbars. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--sebas-bg);
+  color: var(--sebas-text);
+  font-family: var(--sebas-font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Soft ambient wash behind the app shell — pure decoration, CSS only. */
+body {
+  background-image:
+    radial-gradient(1100px 480px at 82% -12%, rgba(91, 100, 242, 0.09), transparent 62%),
+    radial-gradient(900px 420px at -8% 108%, rgba(56, 209, 221, 0.05), transparent 60%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: var(--sebas-selection-bg);
+}
+
+/* One visible focus indicator everywhere, keyboard or pointer. */
+:focus-visible {
+  outline: var(--sebas-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--sebas-radius-sm);
+}
+
+/* Quiet, dev-tool scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sebas-border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--sebas-border-strong);
+  border-radius: var(--sebas-radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+sebas-app {
+  display: block;
+  min-height: 100vh;
+}

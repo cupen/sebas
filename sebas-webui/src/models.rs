@@ -188,6 +188,21 @@ pub struct CardConfigInfo {
     pub max_tool_output_chars: usize,
 }
 
+impl Default for CardConfigInfo {
+    /// Mirrors the core's own `CardConfig::default()` — the settings page
+    /// renders this before (or without) a live core.
+    fn default() -> Self {
+        let cfg = sebas_feishu::cards::CardConfig::default();
+        Self {
+            theme_color: cfg.theme_color,
+            fold_long_output: cfg.fold_long_output,
+            thinking_display: format!("{:?}", cfg.thinking),
+            max_user_text_chars: cfg.max_user_text_chars,
+            max_tool_output_chars: cfg.max_tool_output_chars,
+        }
+    }
+}
+
 /// Card element for rendering in session detail.
 #[derive(Debug, Clone, Serialize)]
 pub struct CardElementView {

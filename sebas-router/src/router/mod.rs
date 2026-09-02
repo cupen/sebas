@@ -4,6 +4,7 @@
 //! - 入站飞书事件（文本/按钮 → Out）: [`inbound`]
 //! - ACP 事件 → Out: [`acp_events`]
 //! - 登记表类型（MsgIdMap/PermCardMap/SessionAllowlist）: [`maps`]
+//! - 会话生命周期事件（SessionEvent 广播 + 快照）: [`events`]
 
 mod acp_events;
 mod events;
@@ -11,7 +12,7 @@ mod inbound;
 mod maps;
 pub mod provider_card;
 
-pub use events::{SessionEvent, SessionInfo, TurnEntry};
+pub use events::{SessionEvent, SessionSnapshot, SessionState};
 pub use maps::{
     MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
 };
@@ -26,11 +27,7 @@ use crate::state::{Mapping, SessionMap};
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_feishu::cards::{CardConfig, CardElement, DivText, render_accumulated_card};
-// SessionKey 的中立 re-export：session 生命周期编排层（如根 crate 的
-// session_boot）只依赖 router，不直接 import sebas_feishu——保持「ACP
-// 生命周期 / 飞书呈现」两条线的 crate 级边界。类型本体仍在 sebas-feishu
-// （chat_id/thread_id 是 feishu 域概念，反向迁移留待共享类型 crate）。
-pub use sebas_feishu::events::SessionKey;
+use sebas_feishu::events::SessionKey;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -168,12 +165,6 @@ pub enum CloseOutcome {
     NotFound,
 }
 
-/// Capacity of the session-event broadcast. Bounded per the channel spec:
-/// a lagging subscriber is dropped (Lagged) rather than delivered a gap
-/// silently — the socket server closes such connections and the client
-/// re-snapshots.
-const SESSION_EVENT_CAPACITY: usize = 256;
-
 pub struct RouterHandle {
     /// Public so integration tests in `tests/` can seed mappings without
     /// going through `/new`. Production callers should use `insert_mapping`
@@ -226,14 +217,11 @@ pub struct RouterHandle {
     /// group tab, the router looks up this msg_id and sends `UpdateCardByMsgId`
     /// to flip the card in place rather than creating a new message.
     help_card_msgid: MsgIdMap,
-    /// Session event broadcast (bounded). Published on every mapping mutation
-    /// and card phase transition so out-of-process observers (core session
-    /// channel subscribers) track the live session set.
-    session_events: broadcast::Sender<SessionEvent>,
-    /// Per-session rendered transcript (keyed by session_id): the append-only
-    /// content log behind the channel's turn-content retrieval. Survives card
-    /// rotation/drain within a session's lifetime; dropped with the mapping.
-    turn_log: Arc<RwLock<HashMap<String, Vec<TurnEntry>>>>,
+    /// Session lifecycle broadcast (`SessionEvent`): every mapping mutation
+    /// publishes here so detached frontends converge on the router's view.
+    /// Bounded; lagging subscribers read `RecvError::Lagged` and must
+    /// re-snapshot (events are a notification, never a gap-free log).
+    events: broadcast::Sender<SessionEvent>,
 }
 
 impl Clone for RouterHandle {
@@ -252,8 +240,7 @@ impl Clone for RouterHandle {
             active_session: self.active_session.clone(),
             reply_targets: self.reply_targets.clone(),
             help_card_msgid: self.help_card_msgid.clone(),
-            session_events: self.session_events.clone(),
-            turn_log: self.turn_log.clone(),
+            events: self.events.clone(),
         }
     }
 }
@@ -296,7 +283,7 @@ impl RouterHandle {
         mgr: Option<Arc<SessionManager>>,
     ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(channel_buffer);
-        let (session_events, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
+        let (events, _) = broadcast::channel(256);
         (
             Self {
                 map,
@@ -312,8 +299,7 @@ impl RouterHandle {
                 active_session: Arc::new(RwLock::new(None)),
                 reply_targets: ReplyTargetMap::default(),
                 help_card_msgid: MsgIdMap::default(),
-                session_events,
-                turn_log: Arc::new(RwLock::new(HashMap::new())),
+                events,
             },
             rx,
         )
@@ -336,6 +322,78 @@ impl RouterHandle {
     /// Snapshot all session mappings (for WebUI dashboard).
     pub async fn session_snapshot(&self) -> Vec<(SessionKey, Mapping)> {
         self.map.snapshot_all().await
+    }
+
+    /// Snapshot every known session in the row-ready shape ([`SessionSnapshot`]):
+    /// identity, lifecycle state, card phase, recency, project dir. Sorted
+    /// most-recent-activity first. This is the baseline a subscriber folds
+    /// [`SessionEvent`]s onto.
+    pub async fn session_snapshots(&self) -> Vec<SessionSnapshot> {
+        let sessions = self.map.snapshot_all().await;
+        let mut out: Vec<SessionSnapshot> = Vec::with_capacity(sessions.len());
+        for (key, mapping) in sessions {
+            let session_id = mapping.session_id().map(str::to_string);
+            let phase = match &session_id {
+                Some(sid) => self.card_states.status_emoji(sid).await.unwrap_or_default(),
+                None => String::new(),
+            };
+            out.push(SessionSnapshot {
+                key,
+                session_id,
+                state: (&mapping.state).into(),
+                phase,
+                last_active_unix: mapping.last_active_unix,
+                project_dir: mapping.project_dir.clone(),
+            });
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
+        out
+    }
+
+    /// Subscribe to session lifecycle events. Receivers that fall behind get
+    /// `RecvError::Lagged` and must re-snapshot via [`Self::session_snapshots`].
+    pub fn session_events(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    /// One session's snapshot, or `None` when no mapping exists for `key`.
+    async fn snapshot_of(&self, key: &SessionKey) -> Option<SessionSnapshot> {
+        let mapping = self.map.get(key).await?;
+        let session_id = mapping.session_id().map(str::to_string);
+        let phase = match &session_id {
+            Some(sid) => self.card_states.status_emoji(sid).await.unwrap_or_default(),
+            None => String::new(),
+        };
+        Some(SessionSnapshot {
+            key: key.clone(),
+            session_id,
+            state: (&mapping.state).into(),
+            phase,
+            last_active_unix: mapping.last_active_unix,
+            project_dir: mapping.project_dir.clone(),
+        })
+    }
+
+    fn publish(&self, event: SessionEvent) {
+        // No subscribers is the normal quiet case; lagging ones get the
+        // Lagged error on their next recv and re-snapshot. Never propagate.
+        let _ = self.events.send(event);
+    }
+
+    async fn publish_created(&self, key: &SessionKey) {
+        if let Some(session) = self.snapshot_of(key).await {
+            self.publish(SessionEvent::Created { session });
+        }
+    }
+
+    async fn publish_updated(&self, key: &SessionKey) {
+        if let Some(session) = self.snapshot_of(key).await {
+            self.publish(SessionEvent::Updated { session });
+        }
+    }
+
+    fn publish_removed(&self, key: &SessionKey) {
+        self.publish(SessionEvent::Removed { key: key.clone() });
     }
 
     /// Snapshot all card states (for WebUI session detail).
@@ -440,21 +498,8 @@ impl RouterHandle {
 
     /// seed_card：SpawnAcp 臂发完 root 卡后调用（dispatch_out）。
     /// 幂等：已存在则保留（防 SpawnAcp 重入冲掉已累积状态）。openspec/specs/feishu-cards/spec.md。
-    /// 同时把本轮用户 prompt 记入 transcript（turn-content 检索的 prompt 条目）。
     pub async fn seed_card(&self, session_id: String, user_prompt: String) {
-        let seeded = self
-            .card_states
-            .seed_and_report(session_id.as_str(), &user_prompt)
-            .await;
-        if seeded {
-            // 幂等语义：只有真正新建（而非重入保留）才记录 prompt，防止
-            // 重入把同一条 prompt 重复追加进 transcript。
-            self.transcript_push(&session_id, TurnEntry::prompt(0, user_prompt.clone()))
-                .await;
-            if let Some(key) = self.map.lookup_key_by_session(&session_id).await {
-                self.publish_updated(&key).await;
-            }
-        }
+        self.card_states.seed(session_id, user_prompt).await;
     }
 
     /// apply_event：纯状态变更（FSM emoji + apply_event_to_card append/截断/总量）。
@@ -464,41 +509,8 @@ impl RouterHandle {
     /// `Out::React`（本方法保持纯状态契约），见 `emit_reaction`。
     pub async fn apply_event(&self, session_id: &str, event: &AcpEvent) -> Option<&'static str> {
         let cfg = self.card_cfg.read().await;
-        // transcript 条目在 apply 闭包外追加（锁序：card_states → turn_log，
-        // 与其他路径不交叉）。TextDelta/Thinking/Tool 事件是内容流，逐条入账。
-        match event {
-            AcpEvent::TextDelta { delta, .. } => {
-                self.transcript_push(session_id, TurnEntry::markdown(0, delta.clone()))
-                    .await;
-            }
-            AcpEvent::ThinkingDelta { delta, .. } => {
-                if cfg.thinking != sebas_feishu::cards::ThinkingDisplay::Hide {
-                    self.transcript_push(session_id, TurnEntry::thinking(0, delta.clone()))
-                        .await;
-                }
-            }
-            AcpEvent::ToolStart { tool_name, args, .. } => {
-                let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
-                self.transcript_push(
-                    session_id,
-                    TurnEntry::markdown(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```")),
-                )
-                .await;
-            }
-            AcpEvent::ToolEnd {
-                tool_name, result, ..
-            } => {
-                self.transcript_push(
-                    session_id,
-                    TurnEntry::markdown(0, format!("✓ **{tool_name}**\n{result}")),
-                )
-                .await;
-            }
-            _ => {}
-        }
-        // FSM 转移从闭包里带出来：供返回值（reaction 契约）与 Updated 事件共用。
-        let next_cell = std::sync::Mutex::new(None);
-        self.card_states
+        let transition = self
+            .card_states
             .apply(session_id, |st| {
                 // Handle usage updates separately — they don't affect the FSM
                 // or the card body, but update accumulated token counts.
@@ -520,7 +532,6 @@ impl RouterHandle {
                 let next = next_emoji(&st.status_emoji, event);
                 if let Some(e) = next {
                     st.status_emoji = e.into();
-                    *next_cell.lock().unwrap() = Some(e);
                 }
                 // On Finished, reset round counters for the next turn.
                 if matches!(event, AcpEvent::Finished { .. }) {
@@ -531,14 +542,15 @@ impl RouterHandle {
                 next
             })
             .await;
-        let next = *next_cell.lock().unwrap();
-        // 卡片 emoji 相位转移 = 外部可见的 phase 变化，对外发 Updated。
-        if next.is_some() {
+        // An FSM transition is a phase change: push an Updated so detached
+        // frontends see working/done/failed flip live. Streaming chunks
+        // deliberately publish nothing — only transitions do.
+        if transition.is_some() {
             if let Some(key) = self.map.lookup_key_by_session(session_id).await {
                 self.publish_updated(&key).await;
             }
         }
-        next
+        transition
     }
 
     /// 发射 root 卡 reaction（apply_event 报告 FSM 转移 / continue 回切时由
@@ -666,6 +678,7 @@ impl RouterHandle {
     /// that continuations, permission-card routing (reverse lookup) and
     /// liveness checks can find the session.
     pub async fn insert_mapping(&self, key: SessionKey, session_id: String) {
+        let existed = self.map.get(&key).await.is_some();
         if let Err(e) = self
             .map
             .insert(key.clone(), crate::state::Mapping::active(session_id))
@@ -674,7 +687,11 @@ impl RouterHandle {
             tracing::warn!(?e, "failed to insert session mapping");
             return;
         }
-        self.publish_created(&key).await;
+        if existed {
+            self.publish_updated(&key).await;
+        } else {
+            self.publish_created(&key).await;
+        }
     }
 
     /// 最近一次入站消息的回复目标（话题内 = 话题根消息 message_id）。
@@ -698,15 +715,30 @@ impl RouterHandle {
     /// Flip Spawning -> Active for `key` and drain queued prompts.
     /// Called by the dispatcher once `create_session` has minted the id.
     pub async fn activate(&self, key: &SessionKey, session_id: String) -> Vec<String> {
+        let existed = self.map.get(key).await.is_some();
         let pending = self.map.activate(key, session_id).await;
-        self.publish_updated(key).await;
+        if existed {
+            self.publish_updated(key).await;
+        } else {
+            self.publish_created(key).await;
+        }
         pending
     }
 
     /// Spawn failed/timeout: remove the Spawning placeholder for `key`.
     pub async fn fail_spawn(&self, key: &SessionKey) {
+        // Only publish when a placeholder was actually removed — fail_spawn
+        // is a no-op for Active/Dormant mappings.
+        let was_spawning = self
+            .map
+            .get(key)
+            .await
+            .map(|m| matches!(m.state, crate::state::MappingState::Spawning { .. }))
+            .unwrap_or(false);
         self.map.fail_spawn(key).await;
-        self.publish_removed(key).await;
+        if was_spawning {
+            self.publish_removed(key);
+        }
     }
 
     /// Start a new session from the WebUI (no Feishu card operations).
@@ -716,17 +748,24 @@ impl RouterHandle {
     pub async fn web_spawn(&self, prompt: String, project_dir: Option<String>) -> SessionKey {
         let key = SessionKey::web_key();
         match self.map.begin_spawn(key.clone()).await {
-            Ok(_) => {
+            Ok(outcome) => {
                 // Record project_dir on the mapping before emitting, so the
                 // WebUI can display it even before the session is active.
                 self.map.set_project_dir(&key, project_dir.clone()).await;
+                // Publish after set_project_dir so the Created snapshot
+                // already carries it. AlreadySpawning changed nothing.
+                if !matches!(
+                    outcome,
+                    crate::state::BeginSpawn::AlreadySpawning
+                ) {
+                    self.publish_created(&key).await;
+                }
                 self.emit(Out::WebSpawn {
                     key: key.clone(),
                     prompt,
                     project_dir,
                 })
                 .await;
-                self.publish_created(&key).await;
                 key
             }
             Err(e) => {
@@ -742,11 +781,8 @@ impl RouterHandle {
     pub async fn web_send_message(&self, key: SessionKey, message: String) {
         match self.map.route_text(key.clone(), message.clone()).await {
             Ok(crate::state::TextRoute::Continue(sid)) => {
-                // 记录本轮用户 prompt 到 transcript（与 feishu 路径的
-                // seed_card 对齐）：否则 WebUI composer 发出的消息不出现在
-                // 会话记录里，turn-content 检索漏掉这一轮的提问。
-                self.transcript_push(&sid, TurnEntry::prompt(0, message.clone()))
-                    .await;
+                // The route touched last_active on the mapping — push an
+                // Updated so subscribers refresh recency (and phase).
                 self.publish_updated(&key).await;
                 self.emit(Out::SendAcp {
                     session_id: sid.clone(),
@@ -758,15 +794,18 @@ impl RouterHandle {
                 .await;
             }
             Ok(crate::state::TextRoute::SpawnNew) => {
+                // route_text inserted a Spawning placeholder for `key`.
+                self.publish_created(&key).await;
                 self.emit(Out::WebSpawn {
-                    key: key.clone(),
+                    key,
                     prompt: message,
                     project_dir: None,
                 })
                 .await;
-                self.publish_created(&key).await;
             }
             Ok(crate::state::TextRoute::Resume(old_sid)) => {
+                // The Dormant mapping was claimed and swapped to Spawning.
+                self.publish_updated(&key).await;
                 self.emit(Out::SpawnResume {
                     key,
                     session_id: old_sid,
@@ -788,139 +827,14 @@ impl RouterHandle {
     /// Mark `key` as the currently focused WebUI session. The dashboard
     /// highlights the active row and the sidebar shows it under "Active".
     /// Idempotent; safe to call on every page load.
-    /// Mark the focused session (idempotent). `None` clears the focus —
-    /// used by the WebUI when the focused session disappears.
-    pub async fn web_set_active(&self, key: Option<SessionKey>) {
+    pub async fn web_set_active(&self, key: SessionKey) {
         let mut g = self.active_session.write().await;
-        *g = key;
+        *g = Some(key);
     }
 
     /// Snapshot of the currently focused session, if any.
     pub async fn active_session_snapshot(&self) -> Option<SessionKey> {
         self.active_session.read().await.clone()
-    }
-
-    // ─── Session event stream + external snapshot (core-session-channel) ────
-
-    /// Subscribe to the session event stream. Published on every mapping
-    /// mutation (created / status or phase changed / removed) plus emoji
-    /// phase transitions. Bounded: a lagging receiver sees `Lagged`.
-    pub fn subscribe_session_events(&self) -> broadcast::Receiver<SessionEvent> {
-        self.session_events.subscribe()
-    }
-
-    /// Publish a session event. Send errors mean no live subscribers —
-    /// the event stream is purely observability, so that is not a fault.
-    fn publish_session_event(&self, ev: SessionEvent) {
-        // 满箱由接收端以 Lagged 收敛（连接重置 + 重新快照），发送端不阻塞。
-        let _ = self.session_events.send(ev);
-    }
-
-    /// Publish `Created`/`Updated` carrying the current state of `key`.
-    async fn publish_created(&self, key: &SessionKey) {
-        if let Some(session) = self.session_info_for(key).await {
-            self.publish_session_event(SessionEvent::Created { session });
-        }
-    }
-
-    async fn publish_updated(&self, key: &SessionKey) {
-        if let Some(session) = self.session_info_for(key).await {
-            self.publish_session_event(SessionEvent::Updated { session });
-        }
-    }
-
-    /// Publish `Removed` for `key` (no session payload — the mapping is gone).
-    async fn publish_removed(&self, key: &SessionKey) {
-        self.publish_session_event(SessionEvent::Removed {
-            chat_id: key.chat_id.clone(),
-            thread_id: key.thread_id.clone(),
-        });
-    }
-
-    /// Build the external `SessionInfo` for `key`: mapping state joined with
-    /// card-derived phase/prompt. Returns `None` when no mapping exists.
-    async fn session_info_for(&self, key: &SessionKey) -> Option<SessionInfo> {
-        let m = self.map.get(key).await?;
-        let (status, session_id) = match &m.state {
-            crate::state::MappingState::Active { session_id } => {
-                ("active", Some(session_id.clone()))
-            }
-            crate::state::MappingState::Dormant { session_id } => {
-                ("dormant", Some(session_id.clone()))
-            }
-            crate::state::MappingState::Spawning { .. } => ("spawning", None),
-        };
-        let (phase, user_prompt) = match session_id.as_ref() {
-            Some(sid) => match self.card_states.snapshot(sid).await {
-                Some(st) => (Some(st.status_emoji), Some(st.user_prompt)),
-                None => (None, None),
-            },
-            None => (None, None),
-        };
-        Some(SessionInfo {
-            chat_id: key.chat_id.clone(),
-            thread_id: key.thread_id.clone(),
-            session_id,
-            status: status.into(),
-            phase,
-            user_prompt,
-            last_active_unix: m.last_active_unix,
-            project_dir: m.project_dir.clone(),
-        })
-    }
-
-    /// External snapshot of every known session — the shape the WebUI's
-    /// session rows need (mapping + card phase/prompt, `SessionInfo`).
-    pub async fn session_info_snapshot(&self) -> Vec<SessionInfo> {
-        let keys: Vec<SessionKey> = self.map.snapshot_all().await.into_iter().map(|(k, _)| k).collect();
-        let mut out = Vec::with_capacity(keys.len());
-        for k in &keys {
-            if let Some(info) = self.session_info_for(k).await {
-                out.push(info);
-            }
-        }
-        out
-    }
-
-    /// Whether any mapping (Active, Dormant, or Spawning) exists for `key`.
-    /// Unlike `session_alive` (live child only), this accepts Spawning
-    /// placeholders — the channel's message/close rejection rule is
-    /// "unknown key", not "no live child".
-    pub async fn session_exists(&self, key: &SessionKey) -> bool {
-        self.map.get(key).await.is_some()
-    }
-
-    // ─── Transcript (turn-content retrieval) ────────────────────────────────
-
-    /// Append one entry to a session's transcript. Position is assigned
-    /// monotonically from the log length.
-    async fn transcript_push(&self, session_id: &str, mut entry: TurnEntry) {
-        let mut g = self.turn_log.write().await;
-        let log = g.entry(session_id.to_string()).or_default();
-        entry.position = log.len() as u64;
-        log.push(entry);
-    }
-
-    /// Drop a session's transcript. Called when the mapping is removed so a
-    /// recycled session_id cannot inherit stale content.
-    async fn transcript_drop(&self, session_id: &str) {
-        self.turn_log.write().await.remove(session_id);
-    }
-
-    /// The session's transcript after `from` (monotonic positions).
-    /// `None` when no mapping exists for `key`; a session without a
-    /// transcript (Spawning, or no content yet) yields an empty vec.
-    pub async fn session_turns(&self, key: &SessionKey, from: u64) -> Option<Vec<TurnEntry>> {
-        let m = self.map.get(key).await?;
-        let Some(sid) = m.session_id() else {
-            return Some(Vec::new());
-        };
-        let g = self.turn_log.read().await;
-        Some(
-            g.get(sid)
-                .map(|log| log.iter().filter(|e| e.position >= from).cloned().collect())
-                .unwrap_or_default(),
-        )
     }
 
     /// Tear down the session mapped to `key` from the WebUI.
@@ -949,7 +863,6 @@ impl RouterHandle {
             }
             self.card_states.drop(sid).await;
             self.msgid.drop(sid).await;
-            self.transcript_drop(sid).await;
         }
 
         // Remove the mapping. Active/Dormant keys are indexed by session_id;
@@ -959,10 +872,10 @@ impl RouterHandle {
         } else {
             self.map.remove_by_key(&key).await;
         }
+        self.publish_removed(&key);
 
         self.allowlist.clear(&key).await;
         self.reply_targets.clear(&key).await;
-        self.publish_removed(&key).await;
 
         // Clear the active pointer if this was the focused session.
         let mut active = self.active_session.write().await;
@@ -990,7 +903,7 @@ impl RouterHandle {
         let theme_color = self.card_cfg.read().await.theme_color.clone();
         let card = render_accumulated_card(&prompt, session_id, &[], &theme_color, None);
         self.emit(Out::SendCard {
-            key,
+            key: key.clone(),
             card: serde_json::to_value(&card).unwrap(),
             // Record the new card under the session so streaming UpdateCards
             // resolve to THIS turn's card (previous turn stays frozen).
@@ -1008,6 +921,10 @@ impl RouterHandle {
             },
         })
         .await;
+        // A new turn reset the card state (phase back to seed): publish so
+        // detached frontends flip the row off done/working immediately.
+        // Covers both the continue_session and drain_queue_if_terminal paths.
+        self.publish_updated(&key).await;
     }
 
     /// Drain ONE queued turn if the session is in a terminal state (DONE/FAILED)

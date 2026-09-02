@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-router", "sebas-feishu", "sebas-acp", "sebas-gateway", "sebas-webui", "xtask"]
+members = ["sebas-router", "sebas-feishu", "sebas-acp", "sebas-gateway", "sebas-webui", "xtask", "sebas-agent"]
 
 # Debug profile: 产物最小化
 [profile.dev]

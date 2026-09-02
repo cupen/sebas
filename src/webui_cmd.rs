@@ -5,15 +5,24 @@
 //! across core restarts (`sebas watchdog` restarts the core child; the WebUI
 //! process is unaffected).
 //!
-//! # Session data via the core session channel
+//! # Limitations
 //!
-//! The standalone WebUI is a pure **client** of the core session channel (a
-//! Unix-socket NDJSON protocol served by the core child): session reads and
-//! mutations go through the socket backend (`core_channel::client`), so every
-//! page shows the core's live state and every control reaches the real
-//! session authority. When the core is not running, the backend reports
-//! unreachable with its cause and the console renders that honestly —
-//! no control reports success.
+//! The standalone WebUI creates its own [`RouterHandle`] and [`SessionManager`]
+//! from the state file on disk. It does **not** share live session state with
+//! the core child:
+//!
+//! - Session data is as fresh as the last state file dump (written by the core
+//!   child on shutdown and after significant state changes).
+//! - API endpoints that create sessions (`POST /api/sessions`) or send messages
+//!   (`POST /api/sessions/{key}/message`) will create router entries but will
+//!   **not** create actual ACP sessions, since the WebUI process has no running
+//!   ACP manager.
+//! - Session close (`POST /api/sessions/{key}/close`) will remove the mapping
+//!   from the local router but will not affect any running child processes.
+//!
+//! Phase 2.3+ should introduce an IPC bridge between the WebUI process and the
+//! core child, or fold the WebUI back into the core child with watchdog-controlled
+//! lifecycle commands.
 
 use crate::config::Config;
 use crate::error::{Result, SebasError};
@@ -67,15 +76,19 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     );
 
     // Load card config: settings.json wins if present, else TOML `[card]`.
-    // (The session channel does not transport settings; the settings page
-    // renders this local snapshot.)
     let merged_card_cfg = load_card_config(&cfg);
 
-    // The session backend: a client of the core session channel. The core
-    // child owns the sessions; this process only renders and forwards.
-    let backend = crate::core_channel::client::CoreChannelBackend::new(
-        crate::core_channel::socket_path(&cfg),
-        std::env::var("SEBAS_CORE_SECRET").ok().unwrap_or_default(),
+    // Restore session map from the state file (same path as the core child).
+    let map =
+        crate::run::restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
+
+    // Create the router. The outbound rx is dropped intentionally: the
+    // standalone WebUI has no outbound dispatch pump, so `Out` instructions
+    // (session creation, message sending, card updates) are silently dropped.
+    let (router, _out_rx) = sebas_router::router::RouterHandle::new_with_config(
+        map,
+        merged_card_cfg,
+        cfg.router.channel_buffer,
     );
 
     // Bind to the configured port. Fails if the port is already in use
@@ -100,11 +113,16 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     info!("webui dashboard listening on {}", endpoint.bind_addr());
 
     // Run the WebUI server. This blocks until the server stops.
-    let backend_dyn: Arc<dyn sebas_webui::SessionBackend> = backend;
+    //
+    // Interim wiring: the standalone WebUI still runs an in-process backend
+    // over its throwaway router (same degradation as before — Out
+    // instructions have no pump here, so web-created sessions stay in
+    // Spawning). The socket client backend replaces this in tasks 7.1/7.2 of
+    // add-core-session-channel, after which this process holds no router.
+    let backend = crate::webui_backend::InProcessSessionBackend::new(router);
     sebas_webui::run_with_admin_adapter(
-        backend_dyn,
+        backend,
         sebas_webui::models::GatewayInfo::default(),
-        merged_card_cfg,
         listener,
         admin_adapter,
     )

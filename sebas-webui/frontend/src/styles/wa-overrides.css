@@ -1,0 +1,56 @@
+/* Maps Web Awesome's theme hooks onto the sebas design language. Loaded
+ * after the WA stylesheets (imported from main.ts). `:root.wa-dark` wins the
+ * cascade over the theme's `.wa-dark` block regardless of order, and the
+ * `wa-dark` class on <html> is the app's default (see main.ts: it is toggled
+ * off only when the system explicitly prefers light). */
+
+:root {
+  --wa-font-family-body: var(--sebas-font-sans);
+  --wa-font-family-heading: var(--sebas-font-sans);
+  --wa-font-family-code: var(--sebas-font-mono);
+}
+
+:root.wa-dark {
+  /* Brand = sebas indigo. WA maps fills/borders/on-colours off this scale. */
+  --wa-color-brand-10: #171b3a;
+  --wa-color-brand-20: #20244f;
+  --wa-color-brand-30: #2c3068;
+  --wa-color-brand-40: #818cf8;
+  --wa-color-brand-50: #5b64f2;
+  --wa-color-brand-60: #7d87ff;
+  --wa-color-brand-70: #aab2ff;
+  --wa-color-brand-80: #c5caff;
+  --wa-color-brand-90: #e0e2ff;
+  --wa-color-brand-95: #f0f1ff;
+  --wa-color-brand: #5b64f2;
+  --wa-color-brand-on: #ffffff;
+
+  --wa-color-focus: #8b93ff;
+
+  /* Surfaces follow the sebas palette so dialogs/inputs sit in-scene. */
+  --wa-color-surface-default: #131824;
+  --wa-color-surface-raised: #161c2a;
+  --wa-color-surface-border: var(--sebas-border);
+  --wa-color-text-normal: var(--sebas-text);
+  --wa-color-text-quiet: var(--sebas-text-dim);
+  --wa-color-overlay-modal: rgba(4, 6, 12, 0.72);
+}
+
+/* Light mode: main.ts removes the wa-dark class when the system explicitly
+ * prefers light, so this selector tracks that state. */
+:root:not(.wa-dark) {
+  --wa-color-brand-10: #1e2464;
+  --wa-color-brand-20: #262c7e;
+  --wa-color-brand-30: #3a41b5;
+  --wa-color-brand-40: #4750d8;
+  --wa-color-brand-50: #4750d8;
+  --wa-color-brand-60: #363ec2;
+  --wa-color-brand-70: #5a63e6;
+  --wa-color-brand-80: #aeb4f0;
+  --wa-color-brand-90: #dcdff9;
+  --wa-color-brand-95: #eef0fd;
+  --wa-color-brand: #4750d8;
+  --wa-color-brand-on: #ffffff;
+
+  --wa-color-focus: #4750d8;
+}

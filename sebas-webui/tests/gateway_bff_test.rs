@@ -6,15 +6,14 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use sebas_webui::session_backend::FakeBackend;
+use sebas_webui::backend::FakeBackend;
 use std::sync::Arc;
 use tower::ServiceExt;
 use sebas_webui::models::GatewayInfo;
-use sebas_webui::{build_router, init_templates_for_tests};
+use sebas_webui::build_router;
 
 async fn app_with(gateway_listen: Option<String>) -> axum::Router {
-    let backend = Arc::new(FakeBackend::new());
-    let templates = Arc::new(init_templates_for_tests());
+    let backend = Arc::new(FakeBackend::connected());
     let gw = GatewayInfo {
         listen: gateway_listen,
         provider_count: 1,
@@ -26,7 +25,7 @@ async fn app_with(gateway_listen: Option<String>) -> axum::Router {
             base_url_openai: None,
         }],
     };
-    build_router(backend, gw, Default::default(), templates)
+    build_router(backend, gw)
 }
 
 async fn body_string(body: Body) -> String {
@@ -34,75 +33,54 @@ async fn body_string(body: Body) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
-async fn gateway_page_degrades_when_gateway_down() {
+async fn api_gateway_reports_snapshot_when_gateway_down() {
+    // SSR 网关页已由 SPA 取代；等价语义改为 API 面：/api/gateway 返回启动
+    // 快照（providers 含 snapshot-provider），SPA 侧自行渲染降级提示。
     let app = app_with(Some("127.0.0.1:59999".into())).await; // 无 gateway 监听
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/gateway")
+                .uri("/api/gateway")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "降级页须 200");
-    let html = body_string(resp.into_body()).await;
-    assert!(html.contains("snapshot-provider"), "保底显示启动快照: 截断");
-    assert!(html.contains("不可达") || html.contains("startup snapshot"), "降级提示");
+    assert_eq!(resp.status(), 200, "快照 API 须 200");
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("snapshot-provider"), "保底显示启动快照: {body}");
 }
 
 #[tokio::test]
-async fn gateway_page_live_when_gateway_up() {
-    // 起 mock gateway admin 面。
-    let admin = axum::Router::new()
-        .route(
-            "/admin/providers",
-            axum::routing::get(|| async {
-                axum::Json(serde_json::json!({"providers": [{"name": "live-alpha", "api_key_configured": true}]}))
-            }),
-        )
-        .route(
-            "/admin/model-aliases",
-            axum::routing::get(|| async {
-                axum::Json(serde_json::json!({"model_aliases": {"fast": {"provider": "live-alpha"}}}))
-            }),
-        )
-        .route(
-            "/admin/stats",
-            axum::routing::get(|| async {
-                axum::Json(serde_json::json!({"uptime_secs": 42, "per_provider": []}))
-            }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, admin).await.unwrap();
-    });
-
-    let app = app_with(Some(format!("{addr}"))).await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/gateway")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let html = body_string(resp.into_body()).await;
-    assert!(html.contains("live-alpha"), "页面须显示实时 provider");
-    assert!(html.contains("fast"), "页面须显示别名");
-    assert!(!html.contains("不可达"), "不应有降级提示");
+async fn gateway_bff_read_routes_are_mutation_only() {
+    // BFF mutation 面（POST/PUT/DELETE）不接受 GET——SPA 用 /api/gateway
+    // 快照 + gateway 自身 admin API（经 BFF 转发）组合出只读视图。
+    let app = app_with(Some("127.0.0.1:59999".into())).await;
+    for uri in [
+        "/gateway/api/providers",
+        "/gateway/api/model-aliases",
+        "/gateway/api/reload",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "GET {uri}");
+    }
 }
-
-/// SEBAS_CONTROL_SECRET 是进程级 env，涉及读写的测试必须串行。
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[tokio::test]
 async fn mutation_routes_guarded() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().await;
     let app = app_with(Some("127.0.0.1:59999".into())).await;
     // GET → 405（POST-only）。
     let resp = app
@@ -150,7 +128,7 @@ async fn mutation_routes_guarded() {
 
 #[tokio::test]
 async fn mutation_round_trip_via_admin_api() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().await;
     // mock gateway admin：create → list 出现 → delete → 消失。
     use std::sync::atomic::{AtomicUsize, Ordering};
     let created = Arc::new(AtomicUsize::new(0));
