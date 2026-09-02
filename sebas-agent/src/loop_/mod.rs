@@ -6,7 +6,9 @@
 //! fake（恒返回 EndTurn）也能驱动多步测试。
 
 use crate::llm::{LlmClient, LlmRequest, StopReason, StreamEvent};
-use crate::message::{BudgetConfig, ContentBlock, Message, Role, ToolErrorKind, ToolOutput};
+use crate::message::{
+    rewrite_for_history, BudgetConfig, ContentBlock, Message, Role, ToolErrorKind, ToolOutput,
+};
 use crate::policy::{ApprovalAnswer, PermissionRequestInfo, PolicyDecision};
 use crate::session::AgentEvent;
 use crate::tools::{Tool, ToolCtx, ToolRegistry};
@@ -17,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 pub enum FinishReason {
     EndTurn,
     MaxTokens,
-    /// `which`: "model_calls" | "tool_calls" | "turn_deadline"
+    /// `which`: "model_calls" | "tool_calls" | "turn_deadline" | "messages" | "tokens"
     Budget {
         which: &'static str,
     },
@@ -121,14 +123,18 @@ impl<'a> TurnEmit<'a> {
     }
 }
 
-/// turn 引擎：只持有预算配置；会话历史由调用方持有并传入（每会话一份）。
+/// turn 引擎：持有预算与并发配置；会话历史由调用方持有并传入（每会话一份）。
 pub struct TurnEngine {
     pub budget: BudgetConfig,
+    pub max_concurrent_readonly: usize,
 }
 
 impl TurnEngine {
     pub fn new(budget: BudgetConfig) -> Self {
-        Self { budget }
+        Self {
+            budget,
+            max_concurrent_readonly: 8,
+        }
     }
 
     /// 执行一轮 turn：把 `user_text` 追加进 `history`，循环「模型 ⇄ 工具」
@@ -169,6 +175,17 @@ impl TurnEngine {
                     reason: FinishReason::Budget {
                         which: "turn_deadline",
                     },
+                };
+            }
+            // Assembly 预算（task 3.2，C8 token 维度）：超限 = 干净收尾（非错误）。
+            if history.len() > self.budget.max_messages {
+                return TurnOutcome::Finished {
+                    reason: FinishReason::Budget { which: "messages" },
+                };
+            }
+            if estimate_tokens(system, history) > self.budget.est_token_budget {
+                return TurnOutcome::Finished {
+                    reason: FinishReason::Budget { which: "tokens" },
                 };
             }
             model_calls += 1;
@@ -219,71 +236,164 @@ impl TurnEngine {
                 };
             }
 
-            // ExecutingTools：按序执行全部 tool_use（Phase 1 串行）。
-            for block in &turn.content {
-                let (tool_use_id, tool_name, input) = match block {
-                    ContentBlock::ToolUse { id, name, input } => (id, name, input),
-                    _ => continue,
-                };
+            // ExecutingTools：按响应序执行 tool_use——连续只读段并行
+            //（task 3.3，cap 限流），写/未知工具与相邻段保持先后。
+            let calls: Vec<(&str, &str, &serde_json::Value)> = turn
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => Some((id.as_str(), name.as_str(), input)),
+                    _ => None,
+                })
+                .collect();
+            let mut outputs: Vec<Option<ToolOutput>> = vec![None; calls.len()];
+            let mut i = 0usize;
+            let mut budget_exhausted: Option<&'static str> = None;
+            while i < calls.len() {
                 if cancel.is_cancelled() {
                     return TurnOutcome::Cancelled;
                 }
-                // 墙钟预算在工具间同样生效（deadline 过 → 不再执行下一个工具）。
+                // 墙钟预算在工具间同样生效。
                 if tokio::time::Instant::now() >= deadline {
-                    return TurnOutcome::Finished {
-                        reason: FinishReason::Budget { which: "turn_deadline" },
-                    };
+                    budget_exhausted = Some("turn_deadline");
+                    break;
                 }
-                if tool_calls >= self.budget.max_tool_calls {
-                    return TurnOutcome::Finished {
-                        reason: FinishReason::Budget { which: "tool_calls" },
-                    };
-                }
-                tool_calls += 1;
-                emit.tool_start(tool_name, input.clone());
-
-                // 每 turn 换发取消令牌，read_files 集合随会话共享。
-                let ctx = ToolCtx {
-                    workdir: tool_ctx_base.workdir.clone(),
-                    cancel: cancel.clone(),
-                    read_files: tool_ctx_base.read_files.clone(),
-                    policy: tool_ctx_base.policy.clone(),
-                    approver: tool_ctx_base.approver.clone(),
-                };
-                let out: ToolOutput = match registry.get(tool_name) {
-                    Some(tool) => {
-                        gated_execute(tool.as_ref(), tool_use_id, tool_name, input.clone(), &ctx, emit)
-                            .await
+                let readonly = is_readonly_tool(calls[i].1);
+                if readonly {
+                    let mut j = i;
+                    while j < calls.len() && is_readonly_tool(calls[j].1) {
+                        j += 1;
                     }
-                    None => ToolOutput::error(
-                        ToolErrorKind::InvalidArgs,
-                        format!(
-                            "unknown tool `{tool_name}`; available: {}",
-                            registry.names().join(", ")
-                        ),
-                    ),
-                };
-                // 错误是数据（C4）：ToolEnd 的文本必须让模型看见失败原因。
-                let end_text = match &out.error {
-                    Some(kind) => format!("{}: {}", kind, out.output),
-                    None => out.output.clone(),
-                };
-                emit.tool_end(tool_name, &end_text);
-                // 工具结果回填为 user/tool_result（错误是数据，C4）。
-                history.push(Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: out.output.clone(),
-                        is_error: !out.ok,
-                    }],
-                });
-                if cancel.is_cancelled() {
-                    return TurnOutcome::Cancelled;
+                    // 预算裁剪：段内调用逐个计数，超额部分不执行（预算收尾）。
+                    let remaining = (self.budget.max_tool_calls.saturating_sub(tool_calls)) as usize;
+                    let run_end = i + remaining.min(j - i);
+                    if run_end < j {
+                        budget_exhausted = Some("tool_calls");
+                    }
+                    // 段内按 cap 分批：每批 emit starts（响应序）→ 并行执行 → ends（响应序）。
+                    let mut batch = i;
+                    while batch < run_end {
+                        let batch_end = (batch + self.max_concurrent_readonly).min(run_end);
+                        for (_id, name, input) in &calls[batch..batch_end] {
+                            emit.tool_start(name, (*input).clone());
+                        }
+                        let ctx = make_ctx(tool_ctx_base, &cancel);
+                        let futs = calls[batch..batch_end].iter().map(|(id, name, input)| {
+                            execute_one(registry, id, name, input, &ctx, emit)
+                        });
+                        let done = futures_util::future::join_all(futs).await;
+                        for (k, out) in done.into_iter().enumerate() {
+                            emit_tool_end(emit, calls[batch + k].1, &out);
+                            outputs[batch + k] = Some(out);
+                            tool_calls += 1;
+                        }
+                        batch = batch_end;
+                    }
+                    i = j;
+                } else {
+                    if tool_calls >= self.budget.max_tool_calls {
+                        budget_exhausted = Some("tool_calls");
+                        break;
+                    }
+                    let (id, name, input) = calls[i];
+                    emit.tool_start(name, input.clone());
+                    let ctx = make_ctx(tool_ctx_base, &cancel);
+                    let out = execute_one(registry, id, name, input, &ctx, emit).await;
+                    emit_tool_end(emit, name, &out);
+                    outputs[i] = Some(out);
+                    tool_calls += 1;
+                    i += 1;
                 }
+            }
+            // tool_result 按响应序回填（入库副本经 3.1 改写）。
+            for (k, (id, _, _)) in calls.iter().enumerate() {
+                if let Some(out) = &outputs[k] {
+                    history.push(Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: (*id).to_string(),
+                            content: rewrite_for_history(&out.output),
+                            is_error: !out.ok,
+                        }],
+                    });
+                }
+            }
+            if cancel.is_cancelled() {
+                return TurnOutcome::Cancelled;
+            }
+            if let Some(which) = budget_exhausted {
+                return TurnOutcome::Finished {
+                    reason: FinishReason::Budget { which },
+                };
             }
         }
     }
+}
+
+/// 粗粒度 token 估算（task 3.2）：chars/4 + 每块常数开销（不追求精确，
+/// 只求比真值略高以保守收尾）。
+fn estimate_tokens(system: &str, history: &[Message]) -> usize {
+    let mut tokens = system.chars().count() / 4;
+    for m in history {
+        for b in &m.content {
+            tokens += 8;
+            let chars = match b {
+                ContentBlock::Text { text } => text.chars().count(),
+                ContentBlock::ToolUse { input, .. } => input.to_string().chars().count(),
+                ContentBlock::ToolResult { content, .. } => content.chars().count(),
+                ContentBlock::Thinking { .. } => 0,
+            };
+            tokens += chars / 4;
+        }
+    }
+    tokens
+}
+
+/// 只读工具（task 3.3 并行白名单）——名称即契约；未知工具按写处理（保守串行）。
+fn is_readonly_tool(name: &str) -> bool {
+    matches!(name, "read" | "glob" | "grep" | "web_search" | "web_fetch" | "read_image" | "lsp")
+}
+
+fn make_ctx(base: &ToolCtx, cancel: &CancellationToken) -> ToolCtx {
+    ToolCtx {
+        workdir: base.workdir.clone(),
+        cancel: cancel.clone(),
+        read_files: base.read_files.clone(),
+        policy: base.policy.clone(),
+        approver: base.approver.clone(),
+    }
+}
+
+/// 单次执行：gated（策略门控）+ 未知工具兜底。
+async fn execute_one(
+    registry: &ToolRegistry,
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    ctx: &ToolCtx,
+    emit: &TurnEmit<'_>,
+) -> ToolOutput {
+    match registry.get(tool_name) {
+        Some(tool) => {
+            gated_execute(tool.as_ref(), tool_use_id, tool_name, input.clone(), ctx, emit).await
+        }
+        None => ToolOutput::error(
+            ToolErrorKind::InvalidArgs,
+            format!(
+                "unknown tool `{tool_name}`; available: {}",
+                registry.names().join(", ")
+            ),
+        ),
+    }
+}
+
+/// ToolEnd 文本：错误是数据（C4），失败原因必须让模型看见。
+fn emit_tool_end(emit: &TurnEmit<'_>, tool_name: &str, out: &ToolOutput) {
+    let end_text = match &out.error {
+        Some(kind) => format!("{}: {}", kind, out.output),
+        None => out.output.clone(),
+    };
+    emit.tool_end(tool_name, &end_text);
 }
 
 /// 策略门控执行（task 1.3，design N1）：Allow 直跑；Deny 可升级（带理由的
@@ -916,6 +1026,205 @@ mod tests {
         let evs = collect(&mut rx);
         assert!(!evs.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. } | AgentEvent::ToolPolicy { .. })));
         assert!(evs.iter().any(|e| matches!(e, AgentEvent::ToolEnd { result, .. } if result.contains("raw-bash"))));
+    }
+
+    // ─── 上下文管理（task 3.1–3.3 验证）──────────────────────────────────
+
+    struct SlowRead {
+        concurrent: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for SlowRead {
+        fn name(&self) -> &'static str {
+            "read"
+        }
+        fn description(&self) -> String {
+            "slow read stub for concurrency testing".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolCtx) -> ToolOutput {
+            use std::sync::atomic::Ordering;
+            let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            self.concurrent.fetch_sub(1, Ordering::SeqCst);
+            ToolOutput::ok("slow-ok")
+        }
+    }
+
+    #[tokio::test]
+    async fn large_tool_result_is_rewritten_in_history_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, tx, mut rx) = setup(dir.path());
+        let registry = ToolRegistry::new(std::time::Duration::from_secs(10));
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![(
+                "t1",
+                "bash",
+                serde_json::json!({"command": "yes word | head -c 20000"}),
+            )]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
+            .await;
+        // 入库副本：改写标记 + 长度有界
+        let stored = match &history[2].content[0] {
+            ContentBlock::ToolResult { content, .. } => content,
+            other => panic!("expected tool_result, got {other:?}"),
+        };
+        assert!(stored.contains("[truncated:"), "{}", &stored[..200]);
+        assert!(stored.chars().count() < 8_300, "stored must be bounded");
+        // 事件面：ToolEnd 保留改写前（cap 后）版本，无入库标记
+        let evs = collect(&mut rx);
+        let end_full = evs.iter().find_map(|e| match e {
+            AgentEvent::ToolEnd { result, .. } => Some(result.clone()),
+            _ => None,
+        }).unwrap();
+        assert!(end_full.chars().count() > 15_000, "ToolEnd keeps pre-rewrite text");
+        assert!(!end_full.contains("[truncated:"));
+    }
+
+    #[test]
+    fn schemas_carry_rewrite_note() {
+        let registry = ToolRegistry::new(std::time::Duration::from_secs(10));
+        for s in registry.schemas() {
+            assert!(s.description.contains("[truncated"), "{} description must mention rewriting", s.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn message_budget_ends_turn_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, tx, _rx) = setup(dir.path());
+        let registry = ToolRegistry::new(std::time::Duration::from_secs(10));
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![("t1", "bash", serde_json::json!({"command": "echo one"}))]),
+            FakeLlmClient::call_tools(vec![("t2", "bash", serde_json::json!({"command": "echo two"}))]),
+            FakeLlmClient::say("never reached"),
+        ]);
+        let budget = BudgetConfig { max_messages: 3, ..Default::default() };
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        let outcome = TurnEngine::new(budget)
+            .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
+            .await;
+        assert_eq!(
+            outcome,
+            TurnOutcome::Finished { reason: FinishReason::Budget { which: "messages" } }
+        );
+    }
+
+    #[tokio::test]
+    async fn token_budget_ends_turn_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, tx, _rx) = setup(dir.path());
+        let registry = ToolRegistry::new(std::time::Duration::from_secs(10));
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![(
+                "t1",
+                "bash",
+                serde_json::json!({"command": "yes word | head -c 2000"}),
+            )]),
+            FakeLlmClient::say("never reached"),
+        ]);
+        let budget = BudgetConfig { est_token_budget: 100, ..Default::default() };
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        let outcome = TurnEngine::new(budget)
+            .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
+            .await;
+        assert_eq!(
+            outcome,
+            TurnOutcome::Finished { reason: FinishReason::Budget { which: "tokens" } }
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_readonly_calls_run_concurrently_in_response_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, tx, mut rx) = setup(dir.path());
+        let concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = ToolRegistry::from_tools(vec![Arc::new(SlowRead {
+            concurrent: concurrent.clone(),
+            peak: peak.clone(),
+        })]);
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![
+                ("t1", "read", serde_json::json!({})),
+                ("t2", "read", serde_json::json!({})),
+                ("t3", "read", serde_json::json!({})),
+            ]),
+            FakeLlmClient::say("done"),
+        ]);
+        let started = std::time::Instant::now();
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
+            .await;
+        let elapsed = started.elapsed();
+        assert!(peak.load(std::sync::atomic::Ordering::SeqCst) >= 2, "reads must overlap");
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "3x120ms serial would be 360ms; concurrent must be faster: {elapsed:?}"
+        );
+        // 事件序：starts 全部先于 ends（段内响应序）
+        let evs = collect(&mut rx);
+        let kinds: Vec<&str> = evs.iter().filter_map(|e| match e {
+            AgentEvent::ToolStart { .. } => Some("start"),
+            AgentEvent::ToolEnd { .. } => Some("end"),
+            _ => None,
+        }).collect();
+        assert_eq!(kinds, vec!["start", "start", "start", "end", "end", "end"]);
+        // tool_result 按响应序回填
+        let ids: Vec<&String> = history.iter().filter_map(|m| match &m.content[0] {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+            _ => None,
+        }).collect();
+        assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[tokio::test]
+    async fn write_serializes_against_neighboring_readonly_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, tx, mut rx) = setup(dir.path());
+        let registry = ToolRegistry::from_tools(vec![
+            Arc::new(SlowRead {
+                concurrent: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            Arc::new(crate::tools::fs_ops::WriteTool),
+        ]);
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![
+                ("t1", "read", serde_json::json!({})),
+                ("t2", "write", serde_json::json!({"path": "w.txt", "content": "x"})),
+                ("t3", "read", serde_json::json!({})),
+            ]),
+            FakeLlmClient::say("done"),
+        ]);
+        let mut history = Vec::new();
+        let emit = TurnEmit::new("s1", &tx);
+        TurnEngine::new(BudgetConfig::default())
+            .run_turn(&llm, &registry, &ctx, &mut history, "go", "sys", "m", CancellationToken::new(), &emit)
+            .await;
+        // 事件序 = 响应序：start,end（读1）→ start,end（写）→ start,end（读2）
+        let evs = collect(&mut rx);
+        let kinds: Vec<&str> = evs.iter().filter_map(|e| match e {
+            AgentEvent::ToolStart { tool_name, .. } => Some(match tool_name.as_str() { "read" => "r", _ => "w" }),
+            AgentEvent::ToolEnd { tool_name, .. } => Some(match tool_name.as_str() { "read" => "R", _ => "W" }),
+            _ => None,
+        }).collect();
+        assert_eq!(kinds, vec!["r", "R", "w", "W", "r", "R"]);
+        assert!(dir.path().join("w.txt").exists(), "write must have run");
     }
 
     #[tokio::test]

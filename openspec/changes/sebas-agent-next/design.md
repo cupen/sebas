@@ -107,7 +107,7 @@ macOS（后续）：/usr/bin/sandbox-exec + deny-default .sbpl（Codex 同款）
 1. **工具结果改写**（`message.rs` 常量）：工具返回的 `output` 入库前统一改写为 `首段 ~8k 字符 + "\n[truncated: 余下 N 字符省略，可用 read/offset 查看]"`——**结构化、确定性**，并写进工具 description（模型知道截断，需要更多就调用 read 分页）。这替换 1a "cap 后全量入库"的做法（入口防上了，上下文总量仍被大文件 read 撑爆）。`truncated` 语义保留在 `ToolOutput`；重写只影响**入库副本**，`ToolOutput` 本身不被改。
    - 注意：`ToolEnd` 事件的 `result` 文本仍发**改写前**上限内版本（事件面体验完整）；只有回填给模型的 tool_result 走改写。
 2. **Assembly 预算**（`session/mod.rs`）：构造 `LlmRequest` 前——`history` 条数 > `max_messages`（默认 80）→ `Finished{reason:Budget{which:"messages"}}`（新 budget 维）；token 估算（`min` 式：chars × 0.25 + blocks 常数）> `est_token_budget`（默认上下文 40%）→ 同样干净收尾。请求体 `max_tokens` 继续 8192。
-3. **只读并行**（`loop_/mod.rs`）：单响应内——只读组（read / glob / grep / web_search / web_fetch）并行（`futures::future::join_all`，`max_concurrent_readonly` 默认 8），写组（write / edit / bash）串行且等只读组完成后才动。事件序：`ToolStart` 按响应顺序发射；`ToolEnd` 按响应顺序回填 tool_result（完成顺序不决定回填序）。budget 的 `max_tool_calls` 计数含并行组内每个调用。
+3. **只读并行**（`loop_/mod.rs`）：单响应内**连续只读段**（read / glob / grep / web_search / web_fetch）并行（按 `max_concurrent_readonly` 默认 8 分批 `join_all`），写工具串行且仅与相邻段保持先后（修订：原"全部只读先于全部写"会破坏 `[write → read]` 同响应依赖语义——实现期裁定为连续段并行，见 spec 同步修订）。事件序：`ToolStart` 按响应顺序发射；`ToolEnd` 按响应顺序发射；tool_result 按响应顺序回填。budget 的 `max_tool_calls` 计数含并行段内每个调用。
 
 ### N5 — webui 接线：进程内后端 + 审查卡 + 会话行选择（D4 展开）
 

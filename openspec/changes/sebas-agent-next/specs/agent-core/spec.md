@@ -105,17 +105,18 @@ The system SHALL bound what enters the model context per turn: tool results SHAL
 
 ### Requirement: Concurrent tool execution
 
-The system SHALL execute tool calls from one model response concurrently when a read-only group contains more than one call, bounded by a concurrency cap, with the transcript event order deterministic (start events in response order). Write tools and keyword-unknown tools SHALL NOT run concurrently with anything (they serialize). Tool-result messages SHALL be appended in response order regardless of completion order.
+The system SHALL execute tool calls from one model response concurrently when consecutive read-only calls appear in response order, bounded by a concurrency cap, with the transcript event order deterministic (start events in response order). Write tools and unknown tools SHALL NOT run concurrently with anything (they serialize against their neighbors). Tool-result messages SHALL be appended in response order regardless of completion order.
 
 #### Scenario: Read-only reads run in parallel, events in order
 
 - **WHEN** a single response contains multiple read-only tool calls
 - **THEN** they execute concurrently under the cap and their start/end events appear in the transcript in response order
 
-#### Scenario: Mixed group serializes writes behind reads
+#### Scenario: Writes serialize against neighboring read-only calls
 
 - **WHEN** a response mixes read-only and write tools
-- **THEN** the write executes only after every read-only call finishes, with deterministic ordering
+- **THEN** each write executes only after every read-only call that precedes it in response order has finished, and before any read-only call that follows it starts
+- **AND** start events and tool results still appear in response order
 
 ### Requirement: Multimodal and language tool capability declaration
 

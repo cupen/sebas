@@ -51,17 +51,17 @@
 
 ## 3. Context management & concurrency (design N4, agent-core spec)
 
-- [ ] 3.1 Implement tool-result rewriting — the stored transcript holds a
+- [x] 3.1 Implement tool-result rewriting — the stored transcript holds a
       first-~8k placeholder with a `[truncated]` marker, deterministic,
       described in tool descriptions; the `ToolEnd` event keeps the pre-rewrite
       capped version and the model-visible tool_result always carries a marker
       with no silent drops; verify tests for >cap output, marker presence, and
       description mention
-- [ ] 3.2 Add the Assembly budget — `max_messages` (default 80) and an
+- [x] 3.2 Add the Assembly budget — `max_messages` (default 80) and an
       estimated-token gate ahead of each model call; exceeding either finishes
       the turn cleanly as budget-exhausted (never an error), session reusable;
       verify one test per limit
-- [ ] 3.3 Add concurrent read-only tool execution — read/glob/grep/web_*
+- [x] 3.3 Add concurrent read-only tool execution — read/glob/grep/web_*
       parallel under `max_concurrent_readonly` (default 8), writes serialize
       after the read-only group, ToolStart in response order and tool_result
       appended in response order regardless of completion order; verify a

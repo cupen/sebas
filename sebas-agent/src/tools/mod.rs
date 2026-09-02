@@ -107,10 +107,15 @@ impl ToolRegistry {
             .iter()
             .map(|t| ToolSchema {
                 name: t.name().to_string(),
-                description: t.description(),
+                description: format!("{}{}", t.description(), RESULT_REWRITE_NOTE),
                 parameters: t.parameters(),
             })
             .collect()
+    }
+
+    /// 测试/宿主自定义工具集（task 3.3 并发测试用）。
+    pub fn from_tools(tools: Vec<Arc<dyn Tool>>) -> Self {
+        Self { tools }
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -121,6 +126,9 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name()).collect()
     }
 }
+
+/// 工具契约中的结果改写说明（spec 3.1：模型须知道截断并知道如何取细节）。
+pub const RESULT_REWRITE_NOTE: &str = "\n\nResults may be truncated to the first ~8k characters with an explicit     `[truncated: …]` marker; request more detail with narrower queries or paged reads.";
 
 /// 把路径解析到会话工作目录下（绝对路径按原样使用）。
 pub(crate) fn resolve_under(workdir: &Path, p: &str) -> PathBuf {
