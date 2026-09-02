@@ -36,14 +36,14 @@
 
 ## 2. Web tool surface (design N3, agent-core spec)
 
-- [ ] 2.1 Add `web_fetch` — URL scheme allowlist (http/https only), bounded
+- [x] 2.1 Add `web_fetch` — URL scheme allowlist (http/https only), bounded
       redirect hops (≤3), output cap (~100KB) with truncation marking, ~30s
       timeout, best-effort robots.txt; verify tests cover scheme rejection,
       cap truncation, and timeout
-- [ ] 2.2 Add `web_search` — query → capped result entries (≤8) with
+- [x] 2.2 Add `web_search` — query → capped result entries (≤8) with
       truncation marking and no redirect chasing; verify cap and no-network
       tests
-- [ ] 2.3 Register both under the network policy gate — default `off` (tool
+- [x] 2.3 Register both under the network policy gate — default `off` (tool
       returns a structured "network disabled" result, no network request),
       `ask` (goes through the review card), `allow` (silent); verify a test
       asserts the disabled case makes no network call and the ask case emits a

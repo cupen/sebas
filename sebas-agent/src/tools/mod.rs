@@ -3,10 +3,11 @@
 pub mod bash;
 pub mod fs_ops;
 pub mod search;
+pub mod web;
 
 use crate::llm::ToolSchema;
 use crate::message::ToolOutput;
-use crate::policy::{Approver, PolicyEngine, SandboxMode};
+use crate::policy::{Approver, NetworkMode, PolicyEngine, SandboxMode};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -76,16 +77,29 @@ impl ToolRegistry {
 
     /// 同 [`Self::new`]，显式指定 bash 沙箱档位（design N2 配置面）。
     pub fn with_sandbox(bash_timeout: Duration, sandbox: SandboxMode) -> Self {
-        Self {
-            tools: vec![
-                Arc::new(bash::BashTool::new(bash_timeout, sandbox)),
-                Arc::new(fs_ops::ReadTool),
-                Arc::new(fs_ops::WriteTool),
-                Arc::new(fs_ops::EditTool),
-                Arc::new(search::GlobTool),
-                Arc::new(search::GrepTool),
-            ],
+        Self::with_sandbox_and_network(bash_timeout, sandbox, NetworkMode::Off)
+    }
+
+    /// 条件注册（design N3）：network != off 时 web 工具进入 schema 面；
+    /// off 时依赖 policy evaluate 的兜底拒绝（双保险）。
+    pub fn with_sandbox_and_network(
+        bash_timeout: Duration,
+        sandbox: SandboxMode,
+        network: NetworkMode,
+    ) -> Self {
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(bash::BashTool::new(bash_timeout, sandbox)),
+            Arc::new(fs_ops::ReadTool),
+            Arc::new(fs_ops::WriteTool),
+            Arc::new(fs_ops::EditTool),
+            Arc::new(search::GlobTool),
+            Arc::new(search::GrepTool),
+        ];
+        if network != NetworkMode::Off {
+            tools.push(Arc::new(web::WebFetchTool));
+            tools.push(Arc::new(web::WebSearchTool));
         }
+        Self { tools }
     }
 
     pub fn schemas(&self) -> Vec<ToolSchema> {
@@ -129,6 +143,31 @@ mod tests {
 
     /// task 3.1 验证：注册表恰好包含六件套，且每个 schema 都是合法的
     /// JSON Schema object（properties/required 形状，映射 input_schema）。
+    #[test]
+    fn web_tools_registered_only_when_network_enabled() {
+        use crate::policy::NetworkMode;
+        let off = ToolRegistry::with_sandbox_and_network(
+            std::time::Duration::from_secs(10),
+            SandboxMode::Auto,
+            NetworkMode::Off,
+        );
+        assert_eq!(off.names(), vec!["bash", "read", "write", "edit", "glob", "grep"]);
+
+        let ask = ToolRegistry::with_sandbox_and_network(
+            std::time::Duration::from_secs(10),
+            SandboxMode::Auto,
+            NetworkMode::Ask,
+        );
+        assert_eq!(
+            ask.names(),
+            vec!["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"]
+        );
+        for name in ["web_fetch", "web_search"] {
+            let schema = ask.get(name).unwrap();
+            assert!(schema.description().contains("network"), "{name} description should state network policy");
+        }
+    }
+
     #[test]
     fn registry_lists_all_six_tools_with_valid_json_schemas() {
         let registry = ToolRegistry::new(std::time::Duration::from_secs(60));
