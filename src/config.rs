@@ -20,11 +20,33 @@ pub struct Config {
 }
 
 /// Wrapper for all ACP agent configs. TOML section `[acp.<agent>]` nests here.
-/// Currently only `claude` is supported; future agents add new fields.
+/// Multi-agent: `default` names the kind used when a session does not request
+/// one; `agents` maps an open kind slug to its driver-backed config. The
+/// legacy single-`claude` block is migrated into `agents.claude` on load.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AcpConfig {
     #[serde(default)]
-    pub claude: AcpClaudeConfig,
+    pub default: Option<String>,
+    #[serde(default)]
+    pub agents: std::collections::HashMap<String, AgentConfig>,
+    /// Legacy `[acp.claude]` block; migrated to `agents.claude` in `parse`.
+    #[serde(default)]
+    pub claude: Option<AcpClaudeConfig>,
+}
+
+/// One configured agent, tagged by driver. `Claude` drives the dedicated
+/// Claude Code path; `Acp` drives any native-ACP agent via a launch command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "driver", rename_all = "snake_case")]
+pub enum AgentConfig {
+    Claude(AcpClaudeConfig),
+    Acp {
+        command: Vec<String>,
+        #[serde(default = "default_startup_timeout")]
+        startup_timeout_secs: u64,
+        #[serde(default = "default_idle_kill")]
+        idle_kill_secs: u64,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +141,99 @@ fn default_startup_timeout() -> u64 {
 }
 fn default_idle_kill() -> u64 {
     172800
+}
+
+impl AcpConfig {
+    /// The kind used when a session does not request one. Falls back to
+    /// `"claude"` (the historical single-agent default).
+    pub fn default_kind(&self) -> &str {
+        self.default.as_deref().unwrap_or("claude")
+    }
+
+    /// The executable (argv[0]) of the default agent, for reachability checks.
+    /// Falls back to `"claude"` when no agent is configured (matches the
+    /// historical behavior of always probing the claude binary).
+    fn default_kind_binary(&self) -> String {
+        self.command_for(self.default_kind())
+            .and_then(|mut v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.remove(0))
+                }
+            })
+            .unwrap_or_else(|| "claude".to_string())
+    }
+
+    /// The full argv (executable + args) for an agent kind, if configured.
+    pub fn command_for(&self, kind: &str) -> Option<Vec<String>> {
+        self.agents.get(kind).map(|a| match a {
+            AgentConfig::Claude(c) => {
+                let mut v = vec![c.path.clone()];
+                v.extend(c.args.clone());
+                v
+            }
+            AgentConfig::Acp { command, .. } => command.clone(),
+        })
+    }
+
+    /// The configured work directory for an agent kind (Claude only for now).
+    pub fn work_dir_for(&self, kind: &str) -> Option<String> {
+        match self.agents.get(kind) {
+            Some(AgentConfig::Claude(c)) => c.work_dir.clone(),
+            _ => None,
+        }
+    }
+
+    /// The startup timeout for an agent kind.
+    pub fn startup_timeout_for(&self, kind: &str) -> std::time::Duration {
+        let secs = self
+            .agents
+            .get(kind)
+            .map(|a| match a {
+                AgentConfig::Claude(c) => c.startup_timeout_secs,
+                AgentConfig::Acp {
+                    startup_timeout_secs,
+                    ..
+                } => *startup_timeout_secs,
+            })
+            .unwrap_or_else(default_startup_timeout);
+        std::time::Duration::from_secs(secs.max(1))
+    }
+
+    /// The idle-kill timeout for an agent kind (0 = never expire).
+    pub fn idle_kill_for(&self, kind: &str) -> u64 {
+        self.agents
+            .get(kind)
+            .map(|a| match a {
+                AgentConfig::Claude(c) => c.idle_kill_secs,
+                AgentConfig::Acp { idle_kill_secs, .. } => *idle_kill_secs,
+            })
+            .unwrap_or_else(default_idle_kill)
+    }
+
+    /// Migrate the legacy `[acp.claude]` block into `agents.claude` and pick a
+    /// default (design D2). Idempotent; called once in `parse`.
+    fn migrate_legacy_claude(&mut self) {
+        if let Some(claude) = self.claude.take() {
+            if !self.agents.contains_key("claude") {
+                self.agents
+                    .insert("claude".to_string(), AgentConfig::Claude(claude));
+            }
+            if self.default.is_none() {
+                self.default = Some("claude".to_string());
+            }
+            tracing::warn!("`acp.claude` is deprecated; migrated to `[acp.agents.claude]`");
+        }
+        // A single configured agent with no explicit default becomes the
+        // default (back-compat with a bare `acp` hint).
+        if self.default.is_none() && self.agents.len() == 1 {
+            let only = self.agents.keys().next().cloned().unwrap_or_default();
+            if !only.is_empty() {
+                self.default = Some(only);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -380,6 +495,7 @@ impl Config {
         warn_deprecated_watchdog_keys(s);
         let mut cfg: Config =
             toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
+        cfg.acp.migrate_legacy_claude();
         cfg.apply_env_overrides();
         cfg.validate()?;
         Ok(cfg.with_expanded_paths())
@@ -445,17 +561,21 @@ impl Config {
         {
             check_dir_writable(parent, "log.file 父目录")?;
         }
-        check_binary_reachable(&self.acp.claude.path)?;
+        check_binary_reachable(&self.acp.default_kind_binary())?;
         Ok(())
     }
 
     fn with_expanded_paths(mut self) -> Self {
         self.router.state_file = expand_tilde(&self.router.state_file);
-        self.acp.claude.sessions_dir = expand_tilde(&self.acp.claude.sessions_dir);
-        self.media.download_dir = expand_tilde(&self.media.download_dir);
-        if let Some(ref wd) = self.acp.claude.work_dir {
-            self.acp.claude.work_dir = Some(expand_tilde(wd));
+        for (_, agent) in self.acp.agents.iter_mut() {
+            if let AgentConfig::Claude(c) = agent {
+                c.sessions_dir = expand_tilde(&c.sessions_dir);
+                if let Some(ref wd) = c.work_dir {
+                    c.work_dir = Some(expand_tilde(wd));
+                }
+            }
         }
+        self.media.download_dir = expand_tilde(&self.media.download_dir);
         if let Some(ref f) = self.log.file {
             self.log.file = Some(expand_tilde(f));
         }

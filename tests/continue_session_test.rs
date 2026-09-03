@@ -37,7 +37,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
 
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = SessionKey {
         chat_id: "oc_continue".into(),
@@ -67,8 +67,8 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         &router,
         &key,
         &prompt,
-        fake.to_str().unwrap(),
-        vec!["--slow-ms".into(), "200".into()],
+        "claude",
+        vec![fake.to_str().unwrap().to_string(), "--slow-ms".into(), "200".into()],
         Some(work_dir.path().to_string_lossy().into_owned()),
         None,
     )

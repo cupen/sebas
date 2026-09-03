@@ -10,12 +10,14 @@ tokio = { version = "1.40", features = ["process", "io-util", "sync", "macros", 
 tracing = "0.1"
 thiserror = "1"
 anyhow = "1"
+async-trait = "0.1"
 # Post-ACP engine: claude stream-json + control protocol client.
 # Unknown message types from the CLI are handled at the Err() level
 # in the driver's receive loop; no need for a vendored Unknown variant.
 cc-agent-sdk = "0.1.7"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
+agent-client-protocol = "2.0.0"
 
 [dev-dependencies]
 tempfile = "3"

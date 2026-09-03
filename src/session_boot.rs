@@ -65,24 +65,30 @@ pub(crate) fn abort_if_provider_error(extra_env: &[(String, String)]) {
     }
 }
 
-/// Compute (extra_env, claude_args+extra_args) from provider state + gateway
-/// config. Centralizes the spawn-time translation so spawn / resume /
-/// spawn_test_session all see the same view. Pure: same input → same output.
+/// Compute (extra_env, full command) from provider state + gateway config.
+/// Centralizes the spawn-time translation. The provider override only applies
+/// to the dedicated Claude driver (it injects `ANTHROPIC_BASE_URL` /
+/// `OPENAI_API_KEY`); native-ACP agents manage their own provider and get an
+/// untouched command. Pure: same input → same output.
 ///
 /// Before returning, runs [`abort_if_provider_error`] — if `extra_env`
 /// carries the in-band error signal, the process exits here and never
 /// returns. The spawn call site therefore doesn't need to re-check.
 fn spawn_overrides(
-    claude_args: Vec<String>,
+    kind: &str,
+    command: Vec<String>,
     gateway_cfg: Option<&GatewayConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
+    if kind != "claude" {
+        return (Vec::new(), command);
+    }
     let state = sebas_router::provider_state::load();
     let driver = ClaudeCodeDriver;
     let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, gateway_cfg);
     abort_if_provider_error(&extra_env);
-    let mut full_args = claude_args;
-    full_args.extend(extra_args);
-    (extra_env, full_args)
+    let mut full = command;
+    full.extend(extra_args);
+    (extra_env, full)
 }
 
 /// Create the ACP session, send the initial prompt, and flip the router's
@@ -102,8 +108,8 @@ pub async fn acp_spawn_and_activate(
     router: &RouterHandle,
     key: &SessionKey,
     prompt: &str,
-    claude_path: &str,
-    claude_args: Vec<String>,
+    kind: &str,
+    command: Vec<String>,
     work_dir: Option<String>,
     gateway_cfg: Option<&GatewayConfig>,
 ) -> anyhow::Result<(
@@ -111,11 +117,11 @@ pub async fn acp_spawn_and_activate(
     Vec<String>,
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
 )> {
-    let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
+    let (extra_env, full_command) = spawn_overrides(kind, command, gateway_cfg);
     let session_id = mgr
         .create_session(
-            claude_path,
-            full_args,
+            kind,
+            full_command,
             work_dir,
             extra_env,
             prompt.to_string(),
@@ -160,8 +166,8 @@ pub async fn acp_resume_and_activate(
     key: &SessionKey,
     old_session_id: &str,
     prompt: &str,
-    claude_path: &str,
-    claude_args: Vec<String>,
+    kind: &str,
+    command: Vec<String>,
     work_dir: Option<String>,
     gateway_cfg: Option<&GatewayConfig>,
 ) -> anyhow::Result<(
@@ -170,9 +176,9 @@ pub async fn acp_resume_and_activate(
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
     bool,
 )> {
-    let (extra_env, full_args) = spawn_overrides(claude_args, gateway_cfg);
+    let (extra_env, full_command) = spawn_overrides(kind, command, gateway_cfg);
     let outcome = mgr
-        .resume_session(claude_path, full_args, work_dir, extra_env, old_session_id)
+        .resume_session(kind, full_command, work_dir, extra_env, old_session_id)
         .await?;
     let session_id = outcome.session_id.clone();
     let rx = mgr

@@ -29,7 +29,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
 
     let map = SessionMap::new();
     let (router, _out_rx) = RouterHandle::new(map);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = SessionKey {
         chat_id: "oc_x".into(),
@@ -42,8 +42,8 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
         &router,
         &key,
         "hello",
-        fake.to_str().unwrap(),
-        vec![],
+        "claude",
+        vec![fake.to_str().unwrap().to_string(), ],
         Some(work_dir.path().to_string_lossy().into_owned()),
         None,
     )

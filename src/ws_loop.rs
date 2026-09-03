@@ -230,12 +230,13 @@ impl EventHandler for RouterEventHandler {
 /// pid by the time SIGTERM arrives. Production callers never set
 /// `SEBAS_TEST_SPAWN_SESSION`, so this path is dormant.
 pub(crate) async fn spawn_test_session(cfg: &Config, router: &RouterHandle, mgr: &SessionManager) {
-    let claude = &cfg.acp.claude;
+    let kind = cfg.acp.default_kind().to_string();
+    let command = cfg.acp.command_for(&kind).unwrap_or_default();
     let session_id = match mgr
         .create_session(
-            &claude.path,
-            claude.args.clone(),
-            claude.work_dir.clone(),
+            &kind,
+            command,
+            cfg.acp.work_dir_for(&kind),
             Vec::new(), // no provider-mode env in test harness
             "[test-mode] sigterm-cleanup probe".into(),
         )

@@ -42,7 +42,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
 
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = SessionKey {
         chat_id: "oc_perm".into(),
@@ -73,8 +73,8 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         &router,
         &key,
         &prompt,
-        fake.to_str().unwrap(),
-        vec![],
+        "claude",
+        vec![fake.to_str().unwrap().to_string(), ],
         Some(work_dir.path().to_string_lossy().into_owned()),
         None,
     )

@@ -34,7 +34,7 @@ fn card_str(out: &Out) -> String {
 async fn fake_claude_stream_merges_five_chunks_then_done() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
     let key = SessionKey {
         chat_id: "oc_stream".into(),
         thread_id: None,
@@ -64,8 +64,8 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         &router,
         &k,
         &prompt,
-        fake().to_str().unwrap(),
-        vec![],
+        "claude",
+        vec![fake().to_str().unwrap().to_string(), ],
         None,
         None,
     )

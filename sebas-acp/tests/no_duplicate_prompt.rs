@@ -15,13 +15,13 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn one_prompt_yields_exactly_three_events() {
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
         .join("target/debug/fake-claude-cli");
     let id = mgr
-        .create_session(fake.to_str().unwrap(), vec![], None, vec![], "".into())
+        .create_claude_session(fake.to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn fake-claude");
 

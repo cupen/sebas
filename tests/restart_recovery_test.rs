@@ -38,7 +38,7 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
     let json = r#"{"oc_restart":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
 
     // First text after restart → SpawnResume (NOT a SendAcp black hole).
     router
@@ -69,8 +69,8 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
         &k,
         &old,
         &prompt,
-        fake().to_str().unwrap(),
-        vec![],
+        "claude",
+        vec![fake().to_str().unwrap().to_string(), ],
         None,
         None,
     )
@@ -111,7 +111,7 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
     let json = r#"{"oc_restart":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
 
     router
         .dispatch(FeishuIn::Text {
@@ -143,8 +143,8 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
             &k,
             &old,
             &prompt,
-            fake().to_str().unwrap(),
-            vec!["--resume-fails".into()],
+            "claude",
+            vec![fake().to_str().unwrap().to_string(), "--resume-fails".into()],
             None,
             None,
         ),

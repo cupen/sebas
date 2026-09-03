@@ -11,7 +11,7 @@ owner_id = "ou_x"
     let cfg = Config::parse(toml).expect("parse");
     assert_eq!(cfg.feishu.app_id, "cli_x");
     // defaults filled
-    assert_eq!(cfg.acp.claude.idle_kill_secs, 172800);
+    assert_eq!(cfg.acp.idle_kill_for("claude"), 172800);
     assert_eq!(cfg.router.max_concurrent_sessions, 32);
     assert_eq!(cfg.log.level, "info");
     assert!(cfg.log.file.is_none());
@@ -55,7 +55,7 @@ idle_kill_secs = 60
 level = "debug"
 "#;
     let cfg = Config::parse(toml).unwrap();
-    assert_eq!(cfg.acp.claude.idle_kill_secs, 60);
+    assert_eq!(cfg.acp.idle_kill_for("claude"), 60);
     assert_eq!(cfg.log.level, "debug");
 }
 

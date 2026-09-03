@@ -15,10 +15,10 @@ fn fake() -> PathBuf {
 
 #[tokio::test]
 async fn hanging_agent_times_out_and_is_reaped() {
-    let mgr = SessionManager::new(Duration::from_millis(400));
+    let mgr = SessionManager::claude_only(Duration::from_millis(400));
     let t0 = Instant::now();
     let res = mgr
-        .create_session(
+        .create_claude_session(
             fake().to_str().unwrap(),
             vec!["--hang-on-init".into()],
             None,

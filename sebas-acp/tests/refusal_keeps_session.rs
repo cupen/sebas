@@ -34,9 +34,9 @@ async fn drain_until<F: Fn(&AcpEvent) -> bool>(
 
 #[tokio::test]
 async fn refusal_is_non_terminal_and_session_survives() {
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let id = mgr
-        .create_session(fake().to_str().unwrap(), vec![], None, vec![], "".into())
+        .create_claude_session(fake().to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn");
 

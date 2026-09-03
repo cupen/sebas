@@ -14,19 +14,42 @@ pub use crate::session_boot::{
 };
 pub use crate::ws_loop::RouterEventHandler;
 
-use crate::config::Config;
+use crate::config::{AgentConfig, Config};
 use crate::dispatch::{dispatch_out, dispatch_out_without_feishu};
 use crate::error::Result;
 use crate::reactions::ReactionTracker;
 use crate::ws_loop::{run_ws_loop, spawn_test_session};
-use sebas_acp::claude::manager::SessionManager;
+use sebas_acp::claude::manager::{AgentEntry, SessionManager};
+use sebas_acp::{AcpDriver, AgentDriver, ClaudeDriver};
 use sebas_feishu::client::{FeishuClient, FeishuConfig};
 use sebas_feishu::messages::{ReceiveIdType, SendTextRequest};
 use sebas_gateway::config::GatewayConfig;
 use sebas_router::router::RouterHandle;
 use sebas_router::settings;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+
+/// Assemble the kind → driver registry the `SessionManager` routes sessions
+/// through. Driver selection is closed (Claude → dedicated, Acp → generic);
+/// adding a new native-ACP agent only changes config, not this function.
+fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
+    cfg.acp
+        .agents
+        .iter()
+        .map(|(slug, agent_cfg)| {
+            let driver: Arc<dyn AgentDriver> = match agent_cfg {
+                AgentConfig::Claude(_) => Arc::new(ClaudeDriver),
+                AgentConfig::Acp { .. } => Arc::new(AcpDriver),
+            };
+            let entry = AgentEntry {
+                driver,
+                startup_timeout: cfg.acp.startup_timeout_for(slug),
+            };
+            (slug.clone(), entry)
+        })
+        .collect()
+}
 
 pub async fn run(
     cfg: Config,
@@ -110,9 +133,10 @@ pub async fn run(
             return Err(crate::error::SebasError::Config(e));
         }
     };
-    let mgr = Arc::new(SessionManager::new(std::time::Duration::from_secs(
-        cfg.acp.claude.startup_timeout_secs,
-    )));
+    let mgr = Arc::new(SessionManager::new(
+        cfg.acp.default_kind().to_string(),
+        build_agent_registry(&cfg),
+    ));
     let provider_forms = crate::provider::build_form(&raw_config);
     let webui_card_cfg = merged_card_cfg.clone();
     let (router, mut out_rx) = RouterHandle::new_with_provider_form(
@@ -268,7 +292,7 @@ pub async fn run(
         // 双执行后端：Claude Code 桥（acp）+ 原生内核（native），会话行创建
         // 时按 backend 提示选择（openspec/changes/sebas-agent-next 5.1/5.2）。
         let native = crate::agent_backend::NativeAgentBackend::from_env(
-            std::time::Duration::from_secs(cfg.acp.claude.startup_timeout_secs.max(1)),
+            cfg.acp.startup_timeout_for(cfg.acp.default_kind()),
         );
         let backend: std::sync::Arc<dyn sebas_webui::SessionBackend> =
             crate::agent_backend::DualSessionBackend::new(

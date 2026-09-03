@@ -32,7 +32,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
     // Build the same shape `run()` constructs (run.rs:43–49).
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     // 1) Inject a Feishu text. Router dispatch goes on_text → spawn_new →
     //    emit Out::SpawnAcp on the outbound channel.
@@ -70,8 +70,8 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         &router,
         &key,
         &prompt,
-        fake.to_str().unwrap(),
-        vec![],
+        "claude",
+        vec![fake.to_str().unwrap().to_string(), ],
         Some(work_dir_a.path().to_string_lossy().into_owned()),
         None,
     )
@@ -149,7 +149,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
 
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(15)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = SessionKey {
         chat_id: "oc_slow".into(),
@@ -179,11 +179,11 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         &router,
         &key,
         &prompt,
-        fake.to_str().unwrap(),
+        "claude",
         // 800ms of mid-turn silence: pump startup (two process spawns) +
         // the 150ms debounce tick must both land before the result frame,
         // or the transient 🚧 flush is preempted by Finished.
-        vec!["--slow-ms".into(), "800".into()],
+        vec![fake.to_str().unwrap().to_string(), "--slow-ms".into(), "800".into()],
         Some(work_dir_b.path().to_string_lossy().into_owned()),
         None,
     )

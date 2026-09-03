@@ -50,15 +50,16 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let mut cmd = tokio::process::Command::new(&cfg.acp.claude.path);
-    cmd.args(&cfg.acp.claude.args)
+    let command = cfg.acp.command_for(cfg.acp.default_kind()).unwrap_or_default();
+    let mut cmd = tokio::process::Command::new(command.first().cloned().unwrap_or_else(|| "claude".to_string()));
+    cmd.args(command.iter().skip(1))
         .args(agent_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cfg.acp.claude.path))?;
+        .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", command.first().cloned().unwrap_or_else(|| "claude".to_string())))?;
     let mut child_stdin = child
         .stdin
         .take()

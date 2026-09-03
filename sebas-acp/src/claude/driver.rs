@@ -823,6 +823,96 @@ pub(crate) fn map_message(
     }
 }
 
+/// The [`crate::AgentDriver`] implementation for the dedicated Claude Code
+/// path. Wraps the low-level [`CcDriver`] engine so `SessionManager` can drive
+/// it through the driver-agnostic seam without knowing claude specifics
+/// (including the resume-rejection → fresh fallback, which is claude-only).
+pub struct ClaudeDriver;
+
+#[async_trait::async_trait]
+impl crate::agent_driver::AgentDriver for ClaudeDriver {
+    async fn spawn(
+        &self,
+        cfg: crate::agent_driver::DriverConfig,
+    ) -> Result<crate::agent_driver::DriverHandle, crate::agent_driver::DriverError> {
+        use crate::agent_driver::{DriverConfig, DriverHandle};
+
+        let DriverConfig {
+            kind_slug,
+            command,
+            work_dir,
+            extra_env,
+            session_id,
+            resume,
+            startup_timeout,
+            evt_tx,
+            cmd_rx,
+            cancel_rx,
+            pending_perms,
+            terminal_sent,
+        } = cfg;
+
+        // command[0] is the claude binary; the rest are argv (map-shaped).
+        let mut argv = command.into_iter();
+        let claude_path = argv.next().unwrap_or_else(|| "claude".to_string());
+        let claude_args: Vec<String> = argv.collect();
+
+        let make_connect = |sid: String, resume: bool| ConnectConfig {
+            claude_path: claude_path.clone(),
+            claude_args: claude_args.clone(),
+            work_dir: work_dir.clone(),
+            extra_env: extra_env.clone(),
+            session_id: sid,
+            resume,
+            startup_timeout,
+            evt_tx: evt_tx.clone(),
+            pending_perms: pending_perms.clone(),
+            terminal_sent: terminal_sent.clone(),
+        };
+
+        let (driver, session_id, resumed) =
+            match CcDriver::connect(make_connect(session_id.clone(), resume)).await {
+                Ok(d) => (d, session_id, resume),
+                Err(ConnectError::ResumeRejected) => {
+                    // Graceful fallback (sebas-dk8.4): the old conversation is
+                    // gone (claude's session files were cleaned). Start fresh
+                    // with a NEW id instead of failing the spawn.
+                    let fresh = uuid::Uuid::new_v4().to_string();
+                    tracing::warn!(
+                        old = %session_id,
+                        fresh = %fresh,
+                        kind = %kind_slug,
+                        "agent rejected resume; falling back to a fresh session"
+                    );
+                    let d = CcDriver::connect(make_connect(fresh.clone(), false))
+                        .await
+                        .map_err(|e| conn_err(e))?;
+                    (d, fresh, false)
+                }
+                Err(e) => return Err(conn_err(e)),
+            };
+
+        let run: futures::future::BoxFuture<'static, ()> =
+            Box::pin(async move { driver.run(cmd_rx, cancel_rx).await });
+
+        Ok(DriverHandle {
+            session_id,
+            resumed,
+            run,
+        })
+    }
+}
+
+/// Map a low-level `ConnectError` into the driver-agnostic `DriverError`.
+fn conn_err(e: ConnectError) -> crate::agent_driver::DriverError {
+    match e {
+        ConnectError::ResumeRejected => {
+            crate::agent_driver::DriverError::ResumeRejected("resume rejected".into())
+        }
+        ConnectError::Other(e) => crate::agent_driver::DriverError::Other(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
