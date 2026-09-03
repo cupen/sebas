@@ -11,50 +11,77 @@ the watchdog control plane.
 
 ### Requirement: HTTP route surface
 
-The WebUI SHALL serve: `GET /` (dashboard overview), `GET /sessions` (full
-list), `GET /sessions/partial` (table fragment), `GET /sessions/{key}`
-(detail), `GET /settings`, `GET /gateway` (live gateway view), `GET /about`,
-`GET /events` (SSE), `GET /health` (literal `ok`), `GET /static/*` (static
-assets), and the session APIs `POST /api/sessions` (create), `POST
-/api/sessions/{key}/message`, `POST /api/sessions/{key}/close`, `POST
-/api/sessions/{key}/switch`. The `/admin/*` cluster (status, events,
-update, update/dry-run, update/dev, rollback, restart, services, login,
-logout) is mounted only when a control-plane adapter is configured. The
-gateway editing cluster — `GET /gateway` plus its fragment routes and
-POST-only JSON mutation routes under `/gateway/api/*` (provider and model
-alias CRUD, provider probe, reload) — is functional only when a control
-secret is configured; without it `GET /gateway` renders a degraded
-read-only view and the mutation routes return 503. Gateway data on these
-pages is fetched live from the gateway admin API at request time (proxied
-server-side by the WebUI backend with the control secret), not from a
-startup snapshot. Templates are compiled into the binary; static assets
-(styles, vendored htmx) are served from disk; syntax highlighting and
-markdown rendering load from external CDNs.
+The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and
+`GET /assets/*` for its built styles, scripts, and fonts. Any other
+browser-facing GET (for example `/sessions/{key}`) resolves through the SPA
+fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about`
+canonicalise to `/` — those surfaces live in the Settings modal now. The JSON
+API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create), `GET
+/api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST
+/api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `GET
+/api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`,
+`GET /api/gateway`, `GET /api/about`, the project APIs `GET /api/projects` and
+`POST /api/projects` (register), `POST /api/projects/reorder`, `POST
+/api/projects/{path}/remove`, `GET /api/projects/{path}/branch`, and `GET /ws`
+(WebSocket session stream). Project and session mutations are POST-only and
+carry the same posture as the existing session APIs. The gateway mutation
+cluster — POST/PUT/DELETE under `/gateway/api/*` (provider and model-alias
+CRUD, provider probe, reload) — is functional only when a control secret is
+configured; without it the mutations return 503. Gateway data is fetched live
+from the gateway admin API at request time (proxied server-side by the WebUI
+backend with the control secret), not from a startup snapshot. The JSON admin
+API `/api/admin/*` (status, events, services, login, logout, update,
+update/dry-run, update/dev, rollback, restart) is always mounted: without a
+control-plane adapter its reads report `adapter_ok: false` and its mutations
+return 503 (honest degradation). `GET /health` returns the literal `ok`. All
+browser assets the UI needs to render — styles, fonts, Web Awesome, markdown
+rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI
+SHALL NOT depend on an external CDN at render time. Navigation SHALL only link
+to routes this surface serves.
 
 #### Scenario: dashboard route
 
 - **WHEN** a browser requests `/`
-- **THEN** the overview renders active/dormant/spawning counts, uptime, and
-  recent sessions
+- **THEN** the SPA workbench renders, listing registered projects in the
+  project rail, the origin-named grouping for sessions with no project, and
+  the selected project's sessions
+
+#### Scenario: session deep link still resolves
+
+- **WHEN** a bookmarked `/sessions/{key}` is requested
+- **THEN** the SPA fallback serves the shell and the client router renders
+  the session's detail rather than 404, so links made before this change keep
+  working
 
 #### Scenario: admin cluster requires adapter
 
-- **WHEN** the WebUI starts without a control secret
-- **THEN** `/admin/*` routes either 404 or render with "control plane not
-  connected", and mutations return 503
+- **WHEN** the WebUI starts without a control-plane adapter
+- **THEN** `/api/admin/*` reads report `adapter_ok: false` and mutations
+  return 503
 
 #### Scenario: gateway page reflects live state
 
 - **WHEN** a provider is renamed through the gateway admin API and the
-  browser then requests `GET /gateway`
-- **THEN** the rendered page lists the new provider name without a WebUI
-  restart
+  browser then requests `GET /api/gateway`
+- **THEN** the response lists the new provider name without a WebUI restart
 
 #### Scenario: gateway mutations unavailable without secret
 
 - **WHEN** the WebUI runs without a control secret and a mutation is posted
   to `/gateway/api/providers`
 - **THEN** the response is 503
+
+#### Scenario: no external asset fetch
+
+- **WHEN** any page is rendered
+- **THEN** every stylesheet, script, and font it requests resolves under
+  `/assets/*` and no request targets an external host
+
+#### Scenario: navigation targets exist
+
+- **WHEN** every navigation link in the rendered shell is requested
+- **THEN** each resolves to a route served by this surface, including SPA
+  client routes resolved through the fallback
 
 ### Requirement: Local-only binding
 
@@ -119,12 +146,14 @@ path for mutations.
 
 ### Requirement: Session dashboard and focus semantics
 
-The dashboard SHALL render one row per known session (encoded key, chat and
-thread ids, session id, status, phase, relative last-active), active-first.
-Visiting a session's detail page or posting `/switch` SHALL set the
-webui-side focused session — a display pointer only that never changes
+The cross-project session list SHALL render one row per known session (encoded
+key, chat and thread ids, session id, status, phase, relative last-active),
+active-first, and SHALL be reachable from the workbench rather than from
+primary navigation. Visiting a session's detail page or posting `/switch` SHALL
+set the webui-side focused session — a display pointer only that never changes
 message routing — and `switch` returns the redirect target or 404 for an
-unknown key.
+unknown key. Switching the displayed project SHALL NOT alter the focused
+session pointer.
 
 #### Scenario: focus is cosmetic
 
@@ -137,6 +166,11 @@ unknown key.
 
 - **WHEN** `/api/sessions/{key}/switch` posts a key not in the map
 - **THEN** the response is 404
+
+#### Scenario: project switch leaves focus alone
+
+- **WHEN** the operator switches the displayed project
+- **THEN** the focused session pointer is unchanged
 
 ### Requirement: Web session close
 
@@ -158,22 +192,56 @@ dashboard close buttons act immediately.
 - **WHEN** the close endpoint is called with an unknown key
 - **THEN** the response is 404 and nothing is mutated
 
-### Requirement: Standalone detached semantics
+### Requirement: Standalone core-client semantics
 
-The watchdog-spawned (standalone) WebUI SHALL operate on its own `RouterHandle`
-restored from the state file with a throwaway session manager and the
-outbound instruction channel deliberately dropped: session create, message
-send, and close mutate only the local in-process state and never spawn a
-real ACP session, send to Feishu, or affect the running core. The legacy
-`run --webui` path instead shares the live router and manager with the WS
-bridge.
+The watchdog-spawned (standalone) WebUI SHALL obtain session data and perform
+session mutations exclusively through the core session channel, and SHALL NOT
+construct its own `RouterHandle`, restore session state from the state file, or
+hold a throwaway session manager. Session create, message send, and close SHALL
+be requests to the core that spawn real ACP sessions and take effect in the
+running core. The in-process `run --webui` path SHALL use an equivalent
+in-process backend so that both paths present the same behavior to the browser.
 
-#### Scenario: standalone message send is local
+#### Scenario: standalone message send reaches the core
 
-- **WHEN** the user sends a message through a standalone WebUI's session
-  page
-- **THEN** no ACP child is spawned and no Feishu message is sent; only the
-  local mapping state changes
+- **WHEN** the user sends a message through a standalone WebUI's session page
+- **THEN** the request is delivered to the core, which applies it to the real
+  session, and the change is observable in the core rather than only in the
+  WebUI process
+
+#### Scenario: standalone board is live
+
+- **WHEN** the core creates or updates a session while a standalone WebUI page is
+  open
+- **THEN** the WebUI reflects the change without a manual reload, and never
+  renders a session set reconstructed from the state file
+
+#### Scenario: both paths behave alike
+
+- **WHEN** the same page is rendered under `sebas webui` and under
+  `run --webui`
+- **THEN** session data and the availability of session controls are equivalent,
+  differing only in which backend implementation serves them
+
+### Requirement: Session backend seam
+
+The WebUI crate SHALL access sessions through a backend abstraction rather than a
+concrete `RouterHandle`, in the same shape as the existing admin adapter, so the
+crate carries no knowledge of whether the core is in-process or across a socket.
+The crate SHALL NOT depend on the sebas binary crate to obtain a backend; the
+binary crate SHALL supply the implementation at startup.
+
+#### Scenario: WebUI is testable without a core
+
+- **WHEN** the WebUI's route tests run
+- **THEN** they drive routes through a fake backend, with no ACP child, no socket,
+  and no state file
+
+#### Scenario: no backend leaks into templates
+
+- **WHEN** a page is rendered
+- **THEN** which backend is in use is not visible in the markup except where the
+  channel's degradation contract requires stating that the core is not connected
 
 ### Requirement: Admin actions via control plane
 

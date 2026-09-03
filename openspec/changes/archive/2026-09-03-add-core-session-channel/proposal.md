@@ -6,6 +6,10 @@
 
 唯一能驱动的 `run --webui` 共享 router 路径，在 spec 中被标记为 legacy，且 ownership guard 禁止它与 watchdog 路径共存。把功能寄托在它上面不构成可交付方案。
 
+## Current status（对齐 main 的现实）
+
+协议（4.x）、服务端实现（5.1-5.8）、socket 客户端（6.x）、standalone 切换（7.x）**均已落地**在 `src/core_channel/`（server/client/protocol/tests）与 `webui_cmd.rs`（`CoreChannelBackend`）。**5.9 已接线并经沙箱实测**（2026-09-03，/tmp 隔离目录、非生产端口）：`run.rs` 在检测到 `SEBAS_CORE_SECRET`（watchdog 注入 core 子进程的标记）时启动 `core_channel::server::serve`，socket 出现/监听/优雅退出清理均验证；standalone webui 连接、spawn 往返、事件收敛、类型化拒绝、错误 secret 拒绝、core 重启后免刷新重连全部实测通过。唯一无法在沙箱验证的是「真实 ACP 子进程完成回合」——provider 凭据只存在于操作者环境，沙箱按规不得复制；该路径由 in-process（`run --webui`）验证覆盖。详见 tasks.md 5.9/8.1–8.4 的落地注记。
+
 ## What Changes
 
 - **core 侧新增会话通道**：Unix socket（`~/.sebas/core.sock`，0600），换行分隔 JSON，复用 control RPC 的密钥 + peer uid 双重校验姿态。方法：会话快照、事件订阅、spawn（prompt + project_dir）、发消息、关闭、取回某会话的 turn 内容。

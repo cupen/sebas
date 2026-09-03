@@ -128,9 +128,10 @@ deferred-change excuse.
 
 ### D8: Relationship to the other two changes
 
-- `redesign-webui-console` is unaffected and still archives first. Its "Live
-  session board" requirement is only *satisfiable in production* once this lands;
-  this change supplies the events its SSE client consumes.
+- `redesign-webui-console` was deleted (its design was superseded by the SPA
+  migration; no archive). Its token system and accessibility floor were absorbed
+  into the SPA's design system; its SSE "live session board" was replaced by the
+  `/ws` WebSocket in the SPA — this change's events back that realtime surface.
 - `add-project-workbench` archives last and drops `can_drive`, taking drivability
   as given and using this channel's turn-content method for its stream.
 

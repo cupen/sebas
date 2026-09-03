@@ -16,9 +16,11 @@ See `proposal.md` — Why. Constraints and existing groundwork:
 - **Session origin is derivable, per-turn origin is not.** `SessionKey::web_key()`
   distinguishes workbench-created sessions. Nothing records which surface an
   individual turn came from.
-- **Depends on `redesign-webui-console`** for the token system, vendored assets,
-  SSE consumption, the status vocabulary, and the accessibility floor, and on
-  `add-core-session-channel` for live session data and drivability.
+- **The SPA design system is the style base.** The token system, status
+  vocabulary, and accessibility floor live in the SPA (`tokens.css` /
+  `styles/shared.ts` / the view components) — the retired console change that
+  seeded them was deleted after the SPA migration absorbed its outputs.
+  `add-core-session-channel` supplies live session data and drivability.
 
 ## Goals / Non-Goals
 
@@ -133,18 +135,18 @@ It is also cheap and semantically correct: the boundary is per-browser state in
 `localStorage`, never server-side, because "while **you** were away" is a
 property of a viewer, not of a session.
 
-Only one signature. The pulse lane from `redesign-webui-console` does not
+Only one signature. The pulse lane from the retired console design does not
 survive into the workbench — see D7.
 
 ### D5: `--signal` is reassigned to "your move"
 
-The console change fixed the rule that status colors describe the machine and
-the single accent describes the operator; there it marked the focused session.
-In the workbench the thing that is about the operator is **the turn waiting on
-them**: a pending permission request, and the composer when it holds focus. So
-`--signal` marks those and nothing else. The seam does *not* get orange — it is
-a time boundary, not a demand — and takes its own desaturated `--seam` token so
-the two never compete.
+The retired console design fixed the rule that status colors describe the
+machine and the single accent describes the operator; there it marked the
+focused session. In the workbench the thing that is about the operator is **the
+turn waiting on them**: a pending permission request, and the composer when it
+holds focus. So `--signal` marks those and nothing else. The seam does *not*
+get orange — it is a time boundary, not a demand — and takes its own
+desaturated `--seam` token so the two never compete.
 
 Rejected: a per-project accent hue. With several projects on screen the
 temptation is to color-code them, but it multiplies into badge soup, collides
@@ -167,23 +169,22 @@ index, and the "3 new" count is counted in elements-since-seen presented as
 turns. Recording a real turn log is router state, which this change excludes —
 noted as a known imprecision rather than hidden.
 
-### D7: What the console change should drop
+### D7: What the retired console design dropped
 
-The board-centric group of `redesign-webui-console` — the lane board and the
+The board-centric group of the retired console design — the lane board and the
 pulse lane — is superseded: the flat board is demoted out of primary navigation,
 so a signature element built for it no longer has a surface worth carrying it.
-That change should keep its tokens, vendored assets, SSE wiring, status
-vocabulary, admin shell dedup, and accessibility floor, all of which this change
-builds on, and drop the board group. Stated plainly: the pulse lane was my
-proposal one round earlier and the new product direction retires it.
+The SPA absorbed the pieces that matter — the token system, status vocabulary,
+and accessibility floor — and replaced the SSE live board with the `/ws`
+WebSocket. Stated plainly: the pulse lane was my proposal one round earlier and
+the new product direction retires it.
 
 ## Risks / Trade-offs
 
-- **Three unarchived changes, two of them touching the `webui` route-surface
-  requirement.** Two unarchived deltas on one requirement conflict at archive
-  time. → Archive order is `redesign-webui-console` → `add-core-session-channel`
-  → this change. This delta is written against the post-console text; if the
-  console change is abandoned, re-derive it from the current main spec.
+- **Two unarchived changes touching the `webui` route-surface requirement.**
+  Two unarchived deltas on one requirement conflict at archive time. → Archive
+  order is `add-core-session-channel` → this change. The retired console change
+  was deleted (design superseded by the SPA migration) and no longer participates.
 - **This change now depends on a backend change landing first.** The workbench is
   unbuildable-as-specified until `add-core-session-channel` supplies the seam. →
   Accepted deliberately: the alternative was a workbench that is inert in the
