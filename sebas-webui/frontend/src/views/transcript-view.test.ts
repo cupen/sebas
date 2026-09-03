@@ -5,7 +5,7 @@
  * than through the parent view.
  *
  * Eight scenarios:
- *   - flush-left timestamps with correct datetime attrs
+ *   - timestamps rendered inside each bubble's meta row with correct datetime attrs
  *   - thinking blocks collapsed by default
  *   - no seam when everything is seen
  *   - seam pill with "~N new since you last viewed" wording
@@ -98,9 +98,11 @@ function makeEntries(): CardElementView[] {
 // ---- tests ------------------------------------------------------------
 
 describe('sebas-transcript-view', () => {
-  it('renders timestamps flush-left with the right datetime attribute', async () => {
+  it('renders each timestamp inside its bubble meta row', async () => {
     const el = await mount({ entries: makeEntries() })
-    const times = el.shadowRoot?.querySelectorAll<HTMLTimeElement>('.ts')
+    const times = el.shadowRoot?.querySelectorAll<HTMLTimeElement>(
+      '.turn-block .bubble .meta time.time',
+    )
     expect(times?.length).toBe(3)
     expect(times?.[0]?.getAttribute('datetime')).toBe(
       new Date(FIXED_DATES.T1 * 1000).toISOString(),
@@ -120,7 +122,7 @@ describe('sebas-transcript-view', () => {
     ]
     const el = await mount({ entries })
     // Markdown is rendered inline (not wrapped in <details>).
-    const sections = el.shadowRoot?.querySelectorAll<HTMLElement>('section.entry')
+    const sections = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block')
     expect(sections?.length).toBe(2)
     const markdownSection = sections?.[0]
     const thinkingSection = sections?.[1]
@@ -207,9 +209,28 @@ describe('sebas-transcript-view', () => {
       { element_type: 'markdown', content: 'kept', created_at_unix: FIXED_DATES.T2 },
     ]
     const el = await mount({ entries })
-    const sections = el.shadowRoot?.querySelectorAll<HTMLElement>('section.entry')
+    const sections = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block')
     expect(sections?.length).toBe(1)
     // The remaining entry carries the non-empty content.
     expect(sections?.[0]?.textContent ?? '').toContain('kept')
+  })
+
+  it('fill mode lifts the 58vh cap and flexes the scroll region', async () => {
+    const el = await mount({ entries: makeEntries() })
+    // 非 fill：宿主无 fill 属性，.scroll 规则里带 58vh 封顶。
+    expect(el.hasAttribute('fill')).toBe(false)
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    expect(styleText).toContain('58vh')
+    // fill 模式：宿主反射 fill 属性，滚动区封顶取消（规则切换而非新节点）。
+    const scroll = el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
+    el.fill = true
+    await el.updateComplete
+    expect(el.hasAttribute('fill')).toBe(true)
+    expect(styleText).toContain(':host([fill])')
+    expect(styleText).toMatch(/:host\(\[fill\]\)\s*\{[^}]*flex:\s*1/)
+    expect(styleText).toMatch(/:host\(\[fill\]\)[\s\S]*max-height:\s*none/)
+    expect(el.shadowRoot!.querySelector<HTMLElement>('.scroll') === scroll).toBe(true)
   })
 })

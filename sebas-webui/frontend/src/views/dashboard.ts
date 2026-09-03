@@ -1,17 +1,25 @@
 /**
- * Dashboard: counts, uptime, focused session, recent sessions. Live updates
- * arrive over the shared WebSocket; a reconnect triggers a refetch.
+ * Workbench main area (IA v2)：项目树已上移到 app-shell 侧栏
+ * （sebas-project-rail），本视图只保留工作台主体——
+ * 选中项目的头部（名称 + mono 分支 pill + `N sessions · ● active` meta）、
+ * turn-stream 舞台与 composer。无聚焦会话时渲染预览原型的空态；有聚焦
+ * 会话时给 spotlight 深链卡片并**就地内联**渲染 `<sebas-transcript-view>`
+ * （聚焦会话的 detail 由 /api/sessions/:key 取得，随 summary 的
+ * active_session_key 刷新——与 session-detail 同一套取数/装配方式）。
+ * 统计卡条（Active/Dormant/Spawning/Uptime）与 "Recent sessions" 表已随
+ * IA v2 移除。Live updates arrive over the shared WebSocket; a reconnect
+ * triggers a refetch.
  */
 
-import { LitElement, css, html, nothing } from 'lit'
-import { customElement, state } from 'lit/decorators.js'
-import { api, type SessionRow, type Summary } from '../api/client.js'
+import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
+import { customElement, property, state } from 'lit/decorators.js'
+import { api, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
 import { navigate } from '../router.js'
 import { viewStyles } from '../styles/shared.js'
 import '../components/status-badge.js'
-import './project-rail.js'
+import './transcript-view.js'
 import './workbench-composer.js'
 
 @customElement('sebas-dashboard')
@@ -20,11 +28,29 @@ export class SebasDashboard extends LitElement {
   @state() private allRows: SessionRow[] = []
   @state() private error = ''
   /**
-   * Selected project path. `null` = "All sessions" view (the legacy
-   * dashboard default). The selection only affects the workbench right
-   * pane — never the focused-session pointer or any session state.
+   * Focused session's full detail (transcript entries + encoded key) for
+   * the inline turn stream. Loaded from /api/sessions/:key whenever the
+   * summary's `active_session_key` changes; `null` while loading or when
+   * nothing is focused.
    */
-  @state() private selectedPath: string | null = null
+  @state() private focusedDetail: SessionDetail | null = null
+  /** Set when the focused detail fetch failed (session vanished mid-flight). */
+  @state() private focusedUnavailable = false
+  /**
+   * Selected project path — owned by the app-shell（侧栏项目树驱动），
+   * 这里只消费。`null` = 未选择项目。The selection only affects the
+   * workbench main area — never the focused-session pointer or any
+   * session state.
+   */
+  @property({ attribute: false })
+  selectedPath: string | null = null
+  /**
+   * Branch of the selected project, fetched lazily for the project header
+   * pill. Cleared on every selection change so a slow response can never
+   * paint the previous project's branch; left null (pill hidden) when
+   * lookup fails.
+   */
+  @state() private selectedBranch: string | null = null
   /**
    * Provider label rendered next to the composer (e.g. "anthropic / claude").
    * `null` while loading; `"no provider configured"` if no providers
@@ -32,10 +58,6 @@ export class SebasDashboard extends LitElement {
    */
   @state() private providerLabel: string | null = null
   private unsubscribe?: () => void
-  private onRailSelect = (e: Event) => {
-    const ce = e as CustomEvent<{ path: string | null }>
-    this.selectedPath = ce.detail.path
-  }
   private onComposerCreated = (e: Event) => {
     const detail = (e as CustomEvent<{ key: string }>).detail
     navigate(`/sessions/${detail.key}`)
@@ -44,208 +66,162 @@ export class SebasDashboard extends LitElement {
   static styles = [
     viewStyles,
     css`
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: var(--sebas-space-3);
-        margin-bottom: var(--sebas-space-5);
-      }
-      .stat {
-        background: var(--sebas-surface);
-        border: 1px solid var(--sebas-border);
-        border-radius: var(--sebas-radius-lg);
-        box-shadow: var(--sebas-shadow-1);
-        padding: var(--sebas-space-4);
+      /* 满幅工作台面板（预览原型 workbench 同款）：宿主随 outlet
+         拉伸，project-header 钉顶、turn-stream 吃满余高、composer 钉底。 */
+      :host {
         display: flex;
+        flex: 1;
         flex-direction: column;
-        gap: var(--sebas-space-1);
-        transition:
-          border-color var(--sebas-dur) var(--sebas-ease),
-          transform var(--sebas-dur) var(--sebas-ease);
+        min-height: 0;
+        min-width: 0;
       }
-      .stat:hover {
-        border-color: var(--sebas-border-strong);
-        transform: translateY(-1px);
-      }
-      .stat .cap {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        color: var(--sebas-text-dim);
-        font-size: 0.75rem;
-        text-transform: uppercase;
-        letter-spacing: 0.07em;
-        font-weight: 550;
-      }
-      .stat .cap .pin {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--sebas-text-faint);
-      }
-      .stat[data-pin='active'] .pin {
-        background: var(--sebas-status-working);
-      }
-      .stat[data-pin='dormant'] .pin {
-        background: var(--sebas-status-dormant);
-      }
-      .stat[data-pin='spawning'] .pin {
-        background: var(--sebas-status-starting);
-      }
-      .stat[data-pin='uptime'] .pin {
-        background: var(--sebas-accent);
-      }
-      .stat .num {
-        font-size: 1.65rem;
-        font-weight: 700;
-        line-height: 1.1;
-        color: var(--sebas-text-bright);
-        font-variant-numeric: tabular-nums;
-        letter-spacing: -0.01em;
-      }
-      .stat .num.small {
-        font-size: 1.15rem;
-        padding-top: 6px;
-      }
-      /* Focused-session spotlight. */
-      .spotlight {
+      /* 项目头部（对齐预览原型 workbench 的 project-header）：钉在面板
+         顶部的通栏条——border-bottom 分隔、无边框圆角/阴影/外边距，
+         右侧聚焦会话深链与 "N sessions · ● active" meta 一起右对齐。 */
+      .project-header {
         display: flex;
         align-items: center;
         gap: var(--sebas-space-3);
         flex-wrap: wrap;
-        background:
-          linear-gradient(var(--sebas-surface), var(--sebas-surface)) padding-box,
-          linear-gradient(100deg, var(--sebas-accent-border), transparent 55%) border-box;
-        border: 1px solid transparent;
-        border-radius: var(--sebas-radius-lg);
-        box-shadow: var(--sebas-shadow-1);
-        padding: var(--sebas-space-3) var(--sebas-space-4);
-        margin-bottom: var(--sebas-space-5);
-        color: var(--sebas-text);
-        text-decoration: none;
-        transition: border-color var(--sebas-dur) var(--sebas-ease);
-      }
-      .spotlight:hover {
-        text-decoration: none;
-        border-color: var(--sebas-accent-border);
-      }
-      .spotlight:focus-visible {
-        outline: var(--sebas-focus-ring);
-        outline-offset: 2px;
-      }
-      .spotlight .label {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        color: var(--sebas-accent);
-        font-size: 0.72rem;
-        font-weight: 650;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-      }
-      .spotlight .key {
-        font-family: var(--sebas-font-mono);
-        font-size: 0.85rem;
-        color: var(--sebas-text-bright);
-      }
-      .spotlight .arrow {
-        margin-left: auto;
-        color: var(--sebas-text-faint);
-      }
-      td.time {
-        color: var(--sebas-text-dim);
-        font-size: 0.85rem;
-      }
-      .workbench {
-        display: grid;
-        grid-template-columns: 240px minmax(0, 1fr);
-        gap: var(--sebas-space-4);
-        align-items: start;
-      }
-      @media (max-width: 900px) {
-        .workbench {
-          grid-template-columns: 1fr;
-        }
-      }
-      .rail {
-        display: flex;
-        flex-direction: column;
-        gap: var(--sebas-space-3);
         background: var(--sebas-surface);
-        border: 1px solid var(--sebas-border);
-        border-radius: var(--sebas-radius-lg);
-        padding: var(--sebas-space-3);
-        box-shadow: var(--sebas-shadow-1);
-        min-height: 200px;
+        border: none;
+        border-bottom: 1px solid var(--sebas-border);
+        border-radius: 0;
+        box-shadow: none;
+        padding: var(--sebas-space-3) var(--sebas-space-5);
+        margin-bottom: 0;
+        flex-shrink: 0;
       }
-      .all-row {
-        display: grid;
-        grid-template-columns: 18px 1fr auto;
-        gap: 8px;
-        align-items: center;
-        padding: 7px 9px;
-        border-radius: var(--sebas-radius-md);
-        font-size: 0.85rem;
-        color: var(--sebas-text-dim);
-        cursor: pointer;
-        transition:
-          background var(--sebas-dur) var(--sebas-ease),
-          color var(--sebas-dur) var(--sebas-ease);
-      }
-      .all-row:hover {
-        background: var(--sebas-surface-2);
+      .project-header .path {
+        font-weight: 600;
+        font-size: 0.95rem;
         color: var(--sebas-text-bright);
-      }
-      .all-row.selected {
-        background: var(--sebas-accent-soft);
-        color: var(--sebas-accent);
-      }
-      .all-row .all-count {
-        background: var(--sebas-surface-2);
-        border-radius: 999px;
-        padding: 1px 7px;
-        font-size: 0.7rem;
-        font-weight: 500;
-      }
-      .all-row.selected .all-count {
-        background: var(--sebas-accent-strong);
-        color: var(--sebas-accent-ink);
-      }
-      .all-row .all-glyph {
-        display: inline-flex;
-        color: var(--sebas-text-faint);
-      }
-      .all-row.selected .all-glyph {
-        color: var(--sebas-accent);
-      }
-      .all-row .all-label {
-        font-weight: 500;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* Demoted /sessions entry point: the primary nav no longer carries it,
-       * the rail keeps it reachable for old deep links. */
-      .rail-foot {
+      .project-header .path.muted {
+        color: var(--sebas-text-faint);
+        font-weight: 500;
+      }
+      .branch-pill {
+        font-family: var(--sebas-font-mono);
+        font-size: 0.75rem;
+        color: var(--sebas-accent);
+        background: var(--sebas-accent-soft);
+        border-radius: var(--sebas-radius-full);
+        padding: 1px 10px;
+        white-space: nowrap;
+      }
+      .project-meta {
+        margin-left: auto;
         display: flex;
         align-items: center;
-        gap: 6px;
-        margin-top: auto;
-        padding: 7px 9px;
-        border-radius: var(--sebas-radius-md);
+        gap: var(--sebas-space-3);
         font-size: 0.8rem;
-        color: var(--sebas-text-faint);
-        transition:
-          background var(--sebas-dur) var(--sebas-ease),
-          color var(--sebas-dur) var(--sebas-ease);
+        color: var(--sebas-text-dim);
+        font-variant-numeric: tabular-nums;
       }
-      .rail-foot:hover {
+      .project-meta .meta-item {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .project-meta .meta-sep {
+        color: var(--sebas-text-faint);
+      }
+      .project-meta .active-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+        background: var(--sebas-status-dormant);
+      }
+      .project-meta .meta-item.is-active .active-dot {
+        background: var(--sebas-status-working);
+      }
+      /* 聚焦会话深链（原 spotlight 卡片折叠进 header 的右段）：mono
+         chat id + 状态徽章 + 前箭头，低调、悬停转 accent。 */
+      .focused-link {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--sebas-space-2);
+        margin-left: var(--sebas-space-2);
+        padding-left: var(--sebas-space-3);
+        border-left: 1px solid var(--sebas-border);
+        font-size: 0.78rem;
+        color: var(--sebas-text-faint);
+        text-decoration: none;
+        transition: color var(--sebas-dur) var(--sebas-ease);
+      }
+      .focused-link:hover {
+        color: var(--sebas-accent);
+      }
+      .focused-link:focus-visible {
+        outline: var(--sebas-focus-ring);
+        outline-offset: 2px;
+      }
+      .focused-link .fkey {
+        font-family: var(--sebas-font-mono);
+        font-size: 0.8rem;
+        color: var(--sebas-text-dim);
+        transition: color var(--sebas-dur) var(--sebas-ease);
+      }
+      .focused-link:hover .fkey {
+        color: var(--sebas-accent);
+      }
+      .focused-link .arrow {
+        font-size: 0.85rem;
+      }
+      /* turn-stream 舞台：聚焦会话的 transcript 面板，随面板 flex 吃满
+         余高（滚动由 transcript-view 内部 .scroll 负责，fill 模式去掉
+         58vh 封顶）。 */
+      .turn-stream-area {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      /* turn-stream 舞台：无聚焦会话时的预览原型空态（48px glyph 圆）。 */
+      .empty-stream {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--sebas-space-3);
+        padding: var(--sebas-space-10) var(--sebas-space-6);
+        color: var(--sebas-text-dim);
+        text-align: center;
+        flex: 1;
+      }
+      .empty-stream .glyph {
+        display: grid;
+        place-items: center;
+        width: 48px;
+        height: 48px;
+        border-radius: var(--sebas-radius-full);
         background: var(--sebas-surface-2);
+        border: 1px solid var(--sebas-border);
+        color: var(--sebas-text-faint);
+      }
+      .empty-stream .title {
+        font-weight: 600;
+        font-size: 1rem;
         color: var(--sebas-text-bright);
       }
-      .right-pane {
+      .empty-stream .hint {
+        font-size: 0.85rem;
+        max-width: 36ch;
         margin: 0;
+      }
+      /* Composer 底座：钉在面板底部的通栏（预览原型 composer-area
+         同款），内壳 18px 圆角 shell 由 workbench-composer 自绘。 */
+      .composer-area {
+        border-top: 1px solid var(--sebas-border);
+        background: var(--sebas-bg);
+        flex-shrink: 0;
+        padding: 0 var(--sebas-space-5) var(--sebas-space-4);
       }
       .skel-line.w60 {
         width: 60%;
@@ -269,12 +245,18 @@ export class SebasDashboard extends LitElement {
     super.disconnectedCallback()
   }
 
+  protected willUpdate(changed: PropertyValues): void {
+    // 侧栏选中项目切换 → 重取分支（面板 pill 用）。
+    if (changed.has('selectedPath')) this.loadSelectedBranch()
+  }
+
   private refetch = (): void => {
     api
       .summary()
       .then((d) => {
         this.data = d
         this.error = ''
+        this.loadFocused(d.active_session_key)
       })
       .catch((e) => {
         this.error = String(e)
@@ -303,21 +285,10 @@ export class SebasDashboard extends LitElement {
 
   private renderLoading() {
     return html`
-      <div class="stats">
-        ${[0, 1, 2, 3].map(
-          () => html`
-            <div class="stat">
-              <div class="skel skel-line" style="width:52px"></div>
-              <div class="skel skel-line" style="width:38px;height:22px"></div>
-            </div>
-          `,
-        )}
-      </div>
       <div class="panel">
         ${[0, 1, 2, 3].map(
           () => html`
             <div class="skel-row">
-              <div class="skel skel-line w25"></div>
               <div class="skel skel-line w25"></div>
               <div class="skel skel-line w60"></div>
             </div>
@@ -336,149 +307,165 @@ export class SebasDashboard extends LitElement {
       `
     if (!this.data) return this.renderLoading()
     const d = this.data
+    const rows = this.rowsForSelected()
+    const hasActive = rows.some((r) => r.status_slug === 'working')
+    const projectName = this.selectedPath
+      ? (this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath)
+      : null
     return html`
-      <header class="page-head">
-        <div>
-          <h1 class="page-title">Workbench</h1>
-          <p class="page-sub">
-            ${this.selectedPath
-              ? 'Sessions in the selected project.'
-              : 'Live overview across every project.'}
-          </p>
-        </div>
+      <header class="project-header">
+        ${projectName
+          ? html`
+              <span class="path" title=${this.selectedPath ?? ''}>${projectName}</span>
+              ${this.selectedBranch
+                ? html`<span class="branch-pill">${this.selectedBranch}</span>`
+                : nothing}
+            `
+          : html`<span class="path muted">No project selected</span>`}
+        <span class="project-meta">
+          ${projectName
+            ? html`
+                <span class="meta-item">${rows.length} sessions</span>
+                <span class="meta-sep" aria-hidden="true">·</span>
+                <span class="meta-item ${hasActive ? 'is-active' : ''}">
+                  <span class="active-dot"></span>${hasActive ? 'active' : 'idle'}
+                </span>
+              `
+            : nothing}
+          ${d.active_session
+            ? html`
+                <a
+                  class="focused-link"
+                  href=${`/sessions/${d.active_session.encoded_key}`}
+                  title="Open focused session"
+                >
+                  <span class="fkey">${d.active_session.chat_id}</span>
+                  <sebas-status-badge
+                    slug=${d.active_session.status_slug}
+                    label=${d.active_session.status_label}
+                    glyph=${d.active_session.status_glyph}
+                  ></sebas-status-badge>
+                  <span class="arrow">${icon('forward', 13)}</span>
+                </a>
+              `
+            : nothing}
+        </span>
       </header>
 
-      <div class="stats">
-        <div class="stat" data-pin="active">
-          <span class="cap"><span class="pin"></span>Active</span>
-          <span class="num">${d.active_count}</span>
-        </div>
-        <div class="stat" data-pin="dormant">
-          <span class="cap"><span class="pin"></span>Dormant</span>
-          <span class="num">${d.dormant_count}</span>
-        </div>
-        <div class="stat" data-pin="spawning">
-          <span class="cap"><span class="pin"></span>Spawning</span>
-          <span class="num">${d.spawning_count}</span>
-        </div>
-        <div class="stat" data-pin="uptime">
-          <span class="cap"><span class="pin"></span>Uptime</span>
-          <span class="num small">${d.uptime}</span>
-        </div>
-      </div>
-
       ${d.active_session
-        ? html`
-            <a class="spotlight" href=${`/sessions/${d.active_session.encoded_key}`}>
-              <span class="label">${icon('zap', 12)} Focused now</span>
-              <span class="key">${d.active_session.chat_id}</span>
-              <sebas-status-badge
-                slug=${d.active_session.status_slug}
-                label=${d.active_session.status_label}
-                glyph=${d.active_session.status_glyph}
-              ></sebas-status-badge>
-              <span class="arrow">${icon('forward', 14)}</span>
-            </a>
-          `
-        : nothing}
+        ? this.renderTurnStream()
+        : html`
+            <div class="empty-stream">
+              <span class="glyph">${icon('message', 20)}</span>
+              <span class="title">No session focused</span>
+              <p class="hint">
+                Pick a session from the sidebar tree — or start a new one with the composer below.
+              </p>
+            </div>
+          `}
 
-      <div class="workbench">
-        <aside class="rail">
-          <div
-            class="all-row ${this.selectedPath === null ? 'selected' : ''}"
-            @click=${() => (this.selectedPath = null)}
-            role="button"
-            tabindex="0"
-          >
-            <span class="all-glyph" aria-hidden="true">${icon('inbox', 14)}</span>
-            <span class="all-label">All sessions</span>
-            <span class="all-count">${d.total_sessions}</span>
-          </div>
-          <sebas-project-rail
-            .sessions=${this.allRows}
-            .activePath=${this.selectedPath}
-            @rail-select=${this.onRailSelect}
-          ></sebas-project-rail>
-          <a class="rail-foot" href="/sessions">所有会话 / all sessions</a>
-        </aside>
-
-        <section class="panel right-pane">
-          <sebas-workbench-composer
-            .projectDir=${this.selectedPath}
-            .providerLabel=${this.providerLabel}
-            @composer-created=${this.onComposerCreated}
-          ></sebas-workbench-composer>
-          <div class="panel-head">
-            <h2 class="panel-title">
-              ${this.selectedPath
-                ? `Sessions · ${this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath}`
-                : 'Recent sessions'}
-            </h2>
-            <span class="panel-caption tnum">
-              ${this.rowsForSelected().length} shown
-            </span>
-          </div>
-          ${this.renderSessionTable(this.rowsForSelected(), this.selectedPath === null)}
-        </section>
+      <div class="composer-area">
+        <sebas-workbench-composer
+          .projectDir=${this.selectedPath}
+          .providerLabel=${this.providerLabel}
+          @composer-created=${this.onComposerCreated}
+        ></sebas-workbench-composer>
       </div>
     `
   }
 
   private rowsForSelected(): SessionRow[] {
-    if (this.selectedPath === null) return this.allRows
+    if (this.selectedPath === null) return []
     return this.allRows.filter((r) => r.project_dir === this.selectedPath)
   }
 
-  private renderSessionTable(rows: SessionRow[], _showAll: boolean) {
-    if (rows.length === 0)
-      return html`
-        <div class="empty">
-          <span class="glyph">${icon('inbox', 20)}</span>
-          <span class="title">No sessions</span>
-          <p class="hint">
-            ${this.selectedPath
-              ? 'This project has no sessions yet. Create one from the composer.'
-              : 'Spin up an agent from the Sessions page and it will show up here.'}
-          </p>
-          ${this.selectedPath === null
-            ? html`<a class="cta" href="/sessions">Go to Sessions</a>`
-            : nothing}
-        </div>
-      `
+  /**
+   * Inline turn stream data: fetch the focused session's detail (same
+   * endpoint session-detail uses). `null` key clears the stage; stale
+   * responses (focus moved on while in flight) are dropped so the stream
+   * never shows a session that is no longer focused.
+   */
+  private loadFocused(key: string | null): void {
+    if (!key) {
+      this.focusedDetail = null
+      this.focusedUnavailable = false
+      return
+    }
+    api
+      .session(key)
+      .then((d) => {
+        if (this.data?.active_session_key === d.encoded_key) {
+          this.focusedDetail = d
+          this.focusedUnavailable = false
+        }
+      })
+      .catch(() => {
+        if (this.data?.active_session_key === key) {
+          this.focusedDetail = null
+          this.focusedUnavailable = true
+        }
+      })
+  }
+
+  /**
+   * Inline turn-stream 舞台：聚焦会话就地的 transcript（复用
+   * `<sebas-transcript-view fill>`，内部滚动/未读 seam 均归它管）。detail 尚在
+   * 途时给骨架，取数失败（会话恰好被关闭）给一条温和空态而不是报错。
+   * 容器是满幅面板区（flex 吃满余高），不再有 panel 卡片外观。
+   */
+  private renderTurnStream() {
     return html`
-      <table>
-        <thead>
-          <tr>
-            <th>Chat</th>
-            <th>Session</th>
-            <th>Status</th>
-            <th>Last active</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map(
-            (row) => html`
-              <tr data-status=${row.status_slug}>
-                <td>
-                  <a class="mono" href=${`/sessions/${row.encoded_key}`}>${row.chat_id}</a>
-                </td>
-                <td class="mono dim" title=${row.session_id ?? ''}>
-                  ${row.session_id_short ?? '—'}
-                </td>
-                <td>
-                  <sebas-status-badge
-                    slug=${row.status_slug}
-                    label=${row.status_label}
-                    glyph=${row.status_glyph}
-                  ></sebas-status-badge>
-                </td>
-                <td class="time tnum">${row.last_active}</td>
-              </tr>
-            `,
-          )}
-        </tbody>
-      </table>
+      <div class="turn-stream-area" aria-label="Focused session transcript">
+        ${this.focusedDetail
+          ? this.focusedDetail.body.length === 0
+            ? html`
+                <div class="empty">
+                  <span class="glyph">${icon('message', 20)}</span>
+                  <span class="title">Nothing yet</span>
+                  <p class="hint">The agent has not produced output for this session.</p>
+                </div>
+              `
+            : html`<sebas-transcript-view
+                fill
+                .entries=${this.focusedDetail.body}
+                sessionKey=${this.focusedDetail.encoded_key}
+              ></sebas-transcript-view>`
+          : this.focusedUnavailable
+            ? html`
+                <div class="empty">
+                  <span class="glyph">${icon('message', 20)}</span>
+                  <span class="title">Session unavailable</span>
+                  <p class="hint">The focused session could not be loaded.</p>
+                </div>
+              `
+            : html`
+                ${[0, 1, 2].map(
+                  () => html`
+                    <div class="skel-row">
+                      <div class="skel skel-line" style="width:24%"></div>
+                      <div class="skel skel-line" style="width:52%"></div>
+                    </div>
+                  `,
+                )}
+              `}
+      </div>
     `
+  }
+
+  /** 懒加载选中项目的分支（project-header 的 mono pill 用），选中即取，失败不渲染。 */
+  private loadSelectedBranch(): void {
+    const path = this.selectedPath
+    this.selectedBranch = null
+    if (path === null) return
+    api.projects
+      .branch(path)
+      .then((info) => {
+        // 选中项中途切换时丢弃过期响应，避免显示上一个项目的分支
+        if (this.selectedPath === info.path) this.selectedBranch = info.branch
+      })
+      .catch(() => {
+        /* 分支信息不可得时保持无 pill */
+      })
   }
 }
 

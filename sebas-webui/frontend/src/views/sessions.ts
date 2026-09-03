@@ -26,6 +26,8 @@ export class SebasSessions extends LitElement {
   @state() private kinds: AgentKindInfo[] = []
   @state() private creating = false
   @state() private closeTarget: string | null = null
+  /** Execution-backend hint forwarded with the spawn request. */
+  @state() private backend: BackendHint = 'acp'
   private unsubscribe?: () => void
 
   static styles = [
@@ -43,6 +45,11 @@ export class SebasSessions extends LitElement {
         flex-direction: column;
         gap: var(--sebas-space-2);
       }
+      .composer .backend-select {
+        font-size: 0.8rem;
+        --wa-select-min-height: 32px;
+        max-width: 220px;
+      }
       .composer .composer-label {
         color: var(--sebas-text-dim);
         font-size: 0.8rem;
@@ -59,10 +66,6 @@ export class SebasSessions extends LitElement {
       .composer wa-input {
         flex: 1;
         min-width: 220px;
-      }
-      .composer .backend-select {
-        flex: 0 0 auto;
-        min-width: 215px;
       }
       .grid {
         display: grid;
