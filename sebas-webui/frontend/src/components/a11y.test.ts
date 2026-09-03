@@ -19,13 +19,21 @@ describe('accessibility baseline', () => {
     el.remove()
   })
 
-  it('reduced motion + dark scheme ship in tokens.css, focus ring in app.css', async () => {
+  it('reduced motion + theme class hooks ship in tokens.css, focus ring in app.css', async () => {
     const fs = await import('node:fs')
     const path = await import('node:path')
     const here = path.dirname(new URL(import.meta.url).pathname)
     const tokens = fs.readFileSync(path.join(here, '../../src/styles/tokens.css'), 'utf8')
     expect(tokens).toContain('prefers-reduced-motion')
-    expect(tokens).toContain('prefers-color-scheme: dark')
+    // Light re-map is keyed on the single wa-dark switch (see src/theme.ts),
+    // so an explicit Settings → Appearance override can beat the OS preference.
+    expect(tokens).toContain(':root:not(.wa-dark)')
+    // 5.5: --signal token exists and is referenced outside the token definition.
+    expect(tokens).toContain('--sebas-signal')
+    const reviewCard = fs.readFileSync(path.join(here, '../components/review-card.ts'), 'utf8')
+    expect(reviewCard).toContain('--sebas-signal')
+    const composer = fs.readFileSync(path.join(here, '../views/workbench-composer.ts'), 'utf8')
+    expect(composer).toContain('--sebas-signal')
     const app = fs.readFileSync(path.join(here, '../../src/styles/app.css'), 'utf8')
     expect(app).toContain(':focus-visible')
   })

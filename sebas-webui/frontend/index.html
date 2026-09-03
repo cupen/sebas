@@ -6,6 +6,23 @@
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#0a0c11" />
     <title>sebas console</title>
+    <script>
+      // Theme pre-paint (inline: module scripts run too late and a light-OS
+      // user would flash dark). Mirrors src/theme.ts — `wa-dark` on <html> is
+      // the single switch; Settings → Appearance persists 'sebas:theme'.
+      ;(() => {
+        let mode = 'system'
+        try {
+          mode = localStorage.getItem('sebas:theme') || 'system'
+        } catch {}
+        const light =
+          mode === 'light' ||
+          (mode === 'system' &&
+            typeof matchMedia === 'function' &&
+            matchMedia('(prefers-color-scheme: light)').matches)
+        document.documentElement.classList.toggle('wa-dark', !light)
+      })()
+    </script>
     <link rel="stylesheet" href="/src/styles/tokens.css" />
     <link rel="stylesheet" href="/src/styles/app.css" />
   </head>
