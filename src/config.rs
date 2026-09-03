@@ -567,7 +567,7 @@ impl Config {
 
     fn with_expanded_paths(mut self) -> Self {
         self.router.state_file = expand_tilde(&self.router.state_file);
-        for (_, agent) in self.acp.agents.iter_mut() {
+        for agent in self.acp.agents.values_mut() {
             if let AgentConfig::Claude(c) = agent {
                 c.sessions_dir = expand_tilde(&c.sessions_dir);
                 if let Some(ref wd) = c.work_dir {

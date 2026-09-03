@@ -408,8 +408,13 @@ pub(crate) async fn dispatch_out(
             key,
             prompt,
             project_dir,
+            kind: requested_kind,
         } => {
-            let kind = cfg.acp.default_kind().to_string();
+            // `kind` from the webui backend hint (acp:<slug>) wins; a bare
+            // hint or no hint falls back to the configured default kind.
+            let kind = requested_kind
+                .clone()
+                .unwrap_or_else(|| cfg.acp.default_kind().to_string());
             let command = cfg.acp.command_for(&kind).unwrap_or_default();
             // Web-originated spawn: create the ACP session and wire the pump,
             // but skip the Feishu send_card / react operations. Card content
@@ -1237,7 +1242,8 @@ pub(crate) async fn dispatch_out_without_feishu(
             key,
             prompt,
             project_dir,
-        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir).await,
+            kind,
+        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir, kind).await,
         Out::SpawnResume {
             key,
             session_id: old_sid,
@@ -1255,6 +1261,7 @@ pub(crate) async fn dispatch_out_without_feishu(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_web_spawn(
     cfg: &Config,
     router: &RouterHandle,
@@ -1263,8 +1270,9 @@ async fn handle_web_spawn(
     key: SessionKey,
     prompt: String,
     project_dir: Option<String>,
+    requested_kind: Option<String>,
 ) -> anyhow::Result<()> {
-    let kind = cfg.acp.default_kind().to_string();
+    let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
     let command = cfg.acp.command_for(&kind).unwrap_or_default();
     let (session_id, pending, rx) = match acp_spawn_and_activate(
         mgr,

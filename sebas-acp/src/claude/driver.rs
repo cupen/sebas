@@ -886,7 +886,7 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
                     );
                     let d = CcDriver::connect(make_connect(fresh.clone(), false))
                         .await
-                        .map_err(|e| conn_err(e))?;
+                        .map_err(conn_err)?;
                     (d, fresh, false)
                 }
                 Err(e) => return Err(conn_err(e)),

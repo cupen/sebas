@@ -175,17 +175,17 @@ impl AgentDriver for AcpDriver {
                 })
                 .await;
 
-            if let Err(e) = result {
-                if !terminal_sent.load(std::sync::atomic::Ordering::SeqCst) {
-                    terminal_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let _ = evt_tx
-                        .send(AcpEvent::Error {
-                            session_id: routing_id.clone(),
-                            message: format!("acp driver error: {e:#}"),
-                            terminal: true,
-                        })
-                        .await;
-                }
+            if let Err(e) = result
+                && !terminal_sent.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                terminal_sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = evt_tx
+                    .send(AcpEvent::Error {
+                        session_id: routing_id.clone(),
+                        message: format!("acp driver error: {e:#}"),
+                        terminal: true,
+                    })
+                    .await;
             }
         };
 

@@ -30,6 +30,11 @@ impl RouterHandle {
                 tool_name,
                 args,
             } => {
+                // 独立权限广播（design D6）：与飞书卡片路径并行，任何订阅者
+                // （如 webui InProcessBackend）都能拿到这条 PermissionRequest。
+                // 即使飞书侧因无 SessionKey 而丢弃卡片，广播也照发不误。
+                let _ = self.perm_events.send(event.clone());
+
                 // Resolve the SessionKey that owns this session so Feishu has a
                 // real `receive_id`. Without this the card would carry an empty
                 // chat_id and Feishu rejects it.

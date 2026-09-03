@@ -103,6 +103,7 @@ fn spawn_overrides(
 /// `gateway_cfg` is the parsed `[gateway]` config from config.toml (or
 /// `None` when the daemon runs without one). Used to resolve
 /// `ProviderMode::Gateway` → URL + auth token; ignored for Off / Direct.
+#[allow(clippy::too_many_arguments)]
 pub async fn acp_spawn_and_activate(
     mgr: &Arc<SessionManager>,
     router: &RouterHandle,

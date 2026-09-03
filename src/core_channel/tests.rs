@@ -182,7 +182,7 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     );
 
     // Mutate AFTER the snapshot: every change must arrive as event frames.
-    let key = core.handle.web_spawn("racing prompt".into(), None).await;
+    let key = core.handle.web_spawn("racing prompt".into(), None, None).await;
     core.handle.activate(&key, "s-live".into()).await;
 
     let mut saw_created = false;

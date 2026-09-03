@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError } from './client.js'
+import { api, ApiError, parseBackendHint } from './client.js'
 
 const fetchMock = vi.fn()
 
@@ -80,5 +80,17 @@ describe('api wire shapes', () => {
       project_dir: null,
       backend: null,
     })
+  })
+
+  it('parseBackendHint treats a bare acp as the default agent', () => {
+    expect(parseBackendHint('acp')).toEqual({ driver: 'acp' })
+  })
+
+  it('parseBackendHint splits acp:<kind> into driver + slug', () => {
+    expect(parseBackendHint('acp:gemini')).toEqual({ driver: 'acp', slug: 'gemini' })
+  })
+
+  it('parseBackendHint recognises native', () => {
+    expect(parseBackendHint('native')).toEqual({ driver: 'native' })
   })
 })

@@ -12,7 +12,7 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type BackendHint } from '../api/client.js'
+import { api, type AgentKindInfo, type BackendHint } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
@@ -38,6 +38,8 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private sending = false
   /** Execution-backend hint forwarded with the spawn request. */
   @state() private backend: BackendHint = 'acp'
+  /** Reachable third-party agent kinds for the create-session dropdown. */
+  @state() private kinds: AgentKindInfo[] = []
   @state() private error: string | null = null
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
@@ -130,6 +132,17 @@ export class SebasWorkbenchComposer extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     void this.loadReachability()
+    void this.loadKinds()
+  }
+
+  private async loadKinds(): Promise<void> {
+    try {
+      const data = await api.agentKinds()
+      this.kinds = data.kinds.filter((k) => k.reachable)
+    } catch {
+      // agent-kinds is advisory; a failure leaves the dropdown at default/native.
+      this.kinds = []
+    }
   }
 
   private async loadReachability(): Promise<void> {
@@ -216,10 +229,15 @@ export class SebasWorkbenchComposer extends LitElement {
           ?disabled=${disabled}
           @change=${(e: Event) => {
             const value = (e.target as HTMLInputElement).value
-            if (value === 'acp' || value === 'native') this.backend = value
+            if (value === 'acp' || value === 'native' || value.startsWith('acp:')) {
+              this.backend = value as BackendHint
+            }
           }}
         >
-          <wa-option value="acp">acp · Claude Code bridge</wa-option>
+          <wa-option value="acp">acp · default kind</wa-option>
+          ${this.kinds.map(
+            (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
+          )}
           <wa-option value="native">native · built-in kernel</wa-option>
         </wa-select>
         <wa-textarea

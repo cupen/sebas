@@ -302,11 +302,21 @@ pub async fn run(
                 native,
             );
         let gateway_info = build_gateway_info(gateway_cfg.as_ref());
+        // 创建会话下拉的可达 agent 列表：从 `cfg.acp.agents` 提取 (slug, argv)。
+        let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = cfg
+            .acp
+            .agents
+            .keys()
+            .map(|slug| sebas_webui::agent_kinds::AgentKindSource {
+                slug: slug.clone(),
+                command: cfg.acp.command_for(slug).unwrap_or_default(),
+            })
+            .collect();
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
         tokio::spawn(async move {
-            sebas_webui::run(backend, gateway_info, webui_card_cfg, listener).await;
+            sebas_webui::run(backend, gateway_info, webui_card_cfg, agent_kinds, listener).await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }

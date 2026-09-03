@@ -104,10 +104,10 @@ fn tool_result(upd: &ToolCallUpdate) -> String {
     if let Some(content) = &upd.fields.content {
         let mut parts = Vec::new();
         for c in content {
-            if let agent_client_protocol::schema::v1::ToolCallContent::Content(inner) = c {
-                if let ContentBlock::Text(t) = &inner.content {
-                    parts.push(t.text.clone());
-                }
+            if let agent_client_protocol::schema::v1::ToolCallContent::Content(inner) = c
+                && let ContentBlock::Text(t) = &inner.content
+            {
+                parts.push(t.text.clone());
             }
         }
         if !parts.is_empty() {

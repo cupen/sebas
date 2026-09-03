@@ -15,7 +15,8 @@ use sebas_feishu::events::SessionKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
 
 /// Whether the backend can currently reach the session authority (the core),
 /// and if not, why — rendered verbatim so degradation is honest.
@@ -150,15 +151,98 @@ pub trait SessionBackend: Send + Sync {
 
 // ─── In-process implementation (task 2.2) ──────────────────────────────────
 
+/// Parse a webui backend hint into the requested ACP agent kind slug.
+/// `"acp:<slug>"` → `Some(slug)`; a bare `"acp"` (or anything else, including
+/// `"native"` which the composite seam handles before it reaches here) →
+/// `None`, meaning the configured default kind.
+fn parse_acp_kind(backend: &str) -> Option<String> {
+    backend
+        .strip_prefix("acp:")
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
 /// In-process backend over the router. Used by `sebas run --webui`, where the
 /// webui lives in the same process as the session authority.
 pub struct InProcessBackend {
     router: sebas_router::RouterHandle,
+    /// Review-card notices relayed from the router's ACP permission broadcast.
+    notices: broadcast::Sender<PermissionNotice>,
+    /// `request_id` → routing `session_id`, recorded when a PermissionRequest
+    /// is relayed, so `answer_permission` can route the reply back to the
+    /// owning session without the caller knowing the session id.
+    request_sessions: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl InProcessBackend {
     pub fn new(router: sebas_router::RouterHandle) -> Self {
-        Self { router }
+        let (notices, _) = broadcast::channel(64);
+        let request_sessions = Arc::new(RwLock::new(HashMap::new()));
+
+        // Relay the router's independent ACP permission broadcast (design D6)
+        // into the `PermissionNotice` review-card feed. `session_id` is the
+        // URL-safe encoded SessionKey — the same shape the WebUI routes and the
+        // review-card filter key off.
+        {
+            let router = router.clone();
+            let notices = notices.clone();
+            let request_sessions = request_sessions.clone();
+            // 同步订阅（在 spawn 之前）确保广播在第一条 PermissionRequest
+            // 到达时已有接收端，避免 tokio broadcast "无接收者" 丢事件。
+            let mut rx = router.subscribe_acp_permission_requests();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(sebas_acp::AcpEvent::PermissionRequest {
+                            session_id,
+                            request_id,
+                            tool_name,
+                            args,
+                        }) => {
+                            let key = router.map.lookup_key_by_session(&session_id).await;
+                            let encoded = key
+                                .map(|k| crate::routes::encode_session_key(&k))
+                                .unwrap_or_else(|| session_id.clone());
+                            request_sessions
+                                .write()
+                                .await
+                                .insert(request_id.clone(), session_id);
+                            let _ = notices.send(PermissionNotice {
+                                request_id,
+                                session_id: encoded,
+                                tool_name,
+                                args,
+                                reason: String::new(),
+                            });
+                        }
+                        // 广播只承载 PermissionRequest；其余变体到不了这里。
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
+        Self {
+            router,
+            notices,
+            request_sessions,
+        }
+    }
+}
+
+/// `PermissionDecision` → ACP `Decision`（design D6/R5）。ACP 侧没有 escalate
+/// 等价，`Escalate` 降级为 `AllowOnce`（reason 丢弃，记为已知取舍）。
+fn map_permission_decision(d: PermissionDecision) -> sebas_acp::Decision {
+    match d {
+        PermissionDecision::AllowOnce => sebas_acp::Decision::AllowOnce,
+        PermissionDecision::AllowSession => sebas_acp::Decision::AllowSession,
+        PermissionDecision::Deny => sebas_acp::Decision::Deny,
+        PermissionDecision::Escalate { reason } => {
+            tracing::warn!(%reason, "ACP 无 escalate 等价；降级为 AllowOnce");
+            sebas_acp::Decision::AllowOnce
+        }
     }
 }
 
@@ -187,7 +271,20 @@ impl SessionBackend for InProcessBackend {
     ) -> Result<SessionKey, SessionRejection> {
         // web_spawn never fails structurally: the placeholder is inserted and
         // the spawn failure surfaces as a Removed event later.
-        Ok(self.router.web_spawn(prompt, project_dir).await)
+        Ok(self.router.web_spawn(prompt, project_dir, None).await)
+    }
+
+    /// Parse a backend hint (`"native"` handled by the composite seam;
+    /// `"acp"` / `"acp:<slug>"` arrive here) into the requested agent kind,
+    /// then spawn through the router with that kind pinned.
+    async fn spawn_with(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+        backend: Option<&str>,
+    ) -> Result<SessionKey, SessionRejection> {
+        let kind = backend.and_then(parse_acp_kind);
+        Ok(self.router.web_spawn(prompt, project_dir, kind).await)
     }
 
     async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
@@ -221,6 +318,34 @@ impl SessionBackend for InProcessBackend {
     async fn reachability(&self) -> Reachability {
         // Same process as the authority: always reachable.
         Reachability::Reachable
+    }
+
+    fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
+        Some(self.notices.subscribe())
+    }
+
+    async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+        let session_id = self
+            .request_sessions
+            .read()
+            .await
+            .get(request_id)
+            .cloned();
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        let decision = map_permission_decision(decision);
+        self.router
+            .emit(sebas_router::Out::SendAcp {
+                session_id: session_id.clone(),
+                cmd: sebas_acp::AcpCommand::PermissionReply {
+                    session_id,
+                    request_id: request_id.to_string(),
+                    decision,
+                },
+            })
+            .await;
+        true
     }
 }
 
