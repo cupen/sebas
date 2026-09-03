@@ -23,6 +23,66 @@ This project uses **bd** (beads) for issue tracking. Run `bd prime` for full wor
   2. Exception: if the branch has few commits and adds no new feature, just
      rebase onto `main` and fast-forward it into `main` (no merge commit).
 
+## Frontend/Backend Integration Testing (联调)
+
+Backend changes count as done only after they are verified against the real
+frontend. Division of labor:
+
+- **Frontend**: the operator runs `pnpm run dev` in `sebas-webui/frontend`
+  (Vite on `127.0.0.1:5273`, strictPort). HMR auto-applies frontend edits —
+  never start/stop/reconfigure that dev server yourself.
+- **Backend**: build and run it yourself (`cargo build`), in a **sandbox**.
+
+### Sandbox rules (never touch the operator's real instance)
+
+The operator's real sebas (AppImage, port **9797**, real `~/.sebas` /
+`~/.config/sebas` / provider credentials) is off-limits: do not restart it,
+do not bind its ports, do not read or copy its credentials, and never point
+sandbox processes at its files.
+
+1. Every sandbox path goes under a throwaway dir (e.g. `/tmp/sebas-itest/`)
+   and must override **all** of the defaults that otherwise fall back to the
+   real `~/.sebas`:
+
+   - config `-c` path (there is no sandbox-safe default), with
+     `[router] state_file`, `[media] download_dir`,
+     `[acp.claude] sessions_dir` / `work_dir`,
+     `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
+     (pick a port ≠ 9797, e.g. 9877) all set inside it;
+   - env: `SEBAS_CORE_SECRET=<fake>` (mimics the watchdog's injection; its
+     presence is what arms the core session channel and the webui client),
+     `SEBAS_STATE_FILE`, `SEBAS_GATEWAY_PROVIDER_OVERLAY` — the latter two
+     default to the real `~/.sebas` files, so they are mandatory.
+
+2. Run the two halves exactly as the watchdog would:
+
+   ```bash
+   SEBAS_CORE_SECRET=fake SEBAS_STATE_FILE=… SEBAS_GATEWAY_PROVIDER_OVERLAY=… \
+     target/debug/sebas run -c /tmp/sebas-itest/config.toml          # core
+   SEBAS_CORE_SECRET=fake \
+     target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
+   ```
+
+3. Verify over HTTP on the sandbox port (`/health`, `/api/summary`,
+   `/api/sessions`, POST `/api/sessions` + `/{key}/message`), and/or open
+   `http://127.0.0.1:<sandbox-port>/` in the browser — `cargo build` bakes
+   the current `frontend/dist` into the binary, so the sandbox serves the
+   real UI.
+
+4. Clean up: SIGTERM the core (graceful exit removes the channel socket and
+   dumps state — itself worth asserting), stop the webui, delete the sandbox
+   dir, and confirm the ports are free.
+
+### What a sandbox can and cannot verify
+
+Verifiable: route surface, channel/socket lifecycle (appears while running,
+removed on graceful exit), webui↔core connect/reconnect (`reachability` in
+`/api/summary` flips `ok`/`cause`), spawn/message round-trips, typed
+rejections, wrong-secret refusal. **Not** verifiable without the operator's
+provider credentials: a real ACP child completing a turn — sessions spawn,
+then the child dies honestly; do not interpret that as a channel failure.
+Report such limits explicitly instead of marking the task done.
+
 ## Quick Reference
 
 ```bash

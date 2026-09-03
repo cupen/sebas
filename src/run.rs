@@ -321,6 +321,35 @@ pub async fn run(
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }
 
+    // Core session channel (5.9): the watchdog injects `SEBAS_CORE_SECRET`
+    // into the core child (and the standalone WebUI), so its presence marks
+    // "this process is the core under the watchdog" — the bare `sebas run`
+    // keeps no socket, matching the client-side gate in webui_cmd.rs. `serve`
+    // owns the socket lifecycle (bind, reclaim stale, remove on shutdown).
+    let channel_shutdown = if !std::env::var("SEBAS_CORE_SECRET").unwrap_or_default().is_empty() {
+        let core_secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
+        let channel_path = crate::core_channel::socket_path(&cfg);
+        info!(path = %channel_path.display(), "core session channel listening");
+        let channel_router = router.clone();
+        let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            match crate::core_channel::server::serve(
+                channel_router,
+                channel_path,
+                core_secret,
+                close_rx,
+            )
+            .await
+            {
+                Ok(()) => info!("core session channel closed"),
+                Err(e) => warn!(?e, "core session channel server exited"),
+            }
+        });
+        Some(close_tx)
+    } else {
+        None
+    };
+
     // Run the long-connection event loop inline in a `tokio::select!` so the
     // shutdown signal can drop the WebSocket future and close the connection
     // promptly. If the reconnect loop ever exits, keep waiting for ctrl_c so
@@ -396,6 +425,14 @@ pub async fn run(
             warn!("WS loop exited; awaiting ctrl_c");
             tokio::signal::ctrl_c().await.ok();
         }
+    }
+
+    // Ask the core session channel to close (the serve task then removes the
+    // socket file itself); give it a moment so the file is gone before the
+    // watchdog's restart probes the path.
+    if let Some(tx) = channel_shutdown {
+        let _ = tx.send(true);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     // Snapshot state BEFORE killing children (openspec/specs/acp-driver/spec.md order: dump, then
