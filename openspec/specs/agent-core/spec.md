@@ -1,10 +1,10 @@
-# agent-core delta — sebas-agent (Phase 2: 权限沙箱 / 网络工具 / 上下文管理 / 首个交互面)
+# agent-core Specification
 
 ## Purpose
 
 Extends the sebas-agent kernel (Phase 1a: per-session turn loops, six-tool set, budget, cancellation) into a usable coding agent: a policy engine that gates destructive and networked operations with explicit human approval and fail-closed defaults (checklist C3), a network tool surface for external research, context management (tool-result rewriting, assembly budgets, concurrent tool execution), optional multimodal and language-server capabilities with honest capability declaration, and the event vocabulary to drive the webui as its first approval answerer.
 
-## MODIFIED Requirements
+## Requirements
 
 ### Requirement: Policy-gated tool execution
 
