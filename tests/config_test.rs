@@ -11,7 +11,7 @@ owner_id = "ou_x"
     let cfg = Config::parse(toml).expect("parse");
     assert_eq!(cfg.feishu.app_id, "cli_x");
     // defaults filled
-    assert_eq!(cfg.acp.claude.idle_kill_secs, 172800);
+    assert_eq!(cfg.acp.idle_kill_for("claude"), 172800);
     assert_eq!(cfg.router.max_concurrent_sessions, 32);
     assert_eq!(cfg.log.level, "info");
     assert!(cfg.log.file.is_none());
@@ -55,8 +55,63 @@ idle_kill_secs = 60
 level = "debug"
 "#;
     let cfg = Config::parse(toml).unwrap();
-    assert_eq!(cfg.acp.claude.idle_kill_secs, 60);
+    assert_eq!(cfg.acp.idle_kill_for("claude"), 60);
     assert_eq!(cfg.log.level, "debug");
+}
+
+#[test]
+fn legacy_claude_block_migrates_to_agents() {
+    let toml = r#"
+[feishu]
+app_id = "cli_x"
+app_secret = "sec"
+owner_id = "ou_x"
+
+[acp.claude]
+path = "/bin/cat"
+idle_kill_secs = 60
+"#;
+    let cfg = Config::parse(toml).unwrap();
+    assert_eq!(cfg.acp.default.as_deref(), Some("claude"));
+    assert!(cfg.acp.agents.contains_key("claude"));
+    assert_eq!(cfg.acp.idle_kill_for("claude"), 60);
+    assert_eq!(
+        cfg.acp.command_for("claude"),
+        Some(vec!["/bin/cat".to_string()])
+    );
+}
+
+#[test]
+fn single_acp_agent_gets_implicit_default() {
+    let toml = r#"
+[feishu]
+app_id = "cli_x"
+app_secret = "sec"
+
+[acp.agents.gemini]
+driver = "acp"
+command = ["gemini", "--acp"]
+"#;
+    let cfg = Config::parse(toml).unwrap();
+    assert_eq!(cfg.acp.default.as_deref(), Some("gemini"));
+    assert_eq!(
+        cfg.acp.command_for("gemini"),
+        Some(vec!["gemini".to_string(), "--acp".to_string()])
+    );
+}
+
+#[test]
+fn unknown_driver_tag_errors() {
+    let toml = r#"
+[feishu]
+app_id = "cli_x"
+app_secret = "sec"
+
+[acp.agents.foo]
+driver = "foobar"
+command = ["foo"]
+"#;
+    assert!(Config::parse(toml).is_err());
 }
 
 #[test]

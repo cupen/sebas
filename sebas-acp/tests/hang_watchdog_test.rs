@@ -28,9 +28,9 @@ async fn silent_child_is_detected_as_hung_and_torn_down() {
     // SAFETY: no other thread reads this var concurrently in this test.
     unsafe { std::env::set_var("SEBAS_HANG_TIMEOUT_SECS", "1") };
 
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let id = mgr
-        .create_session(
+        .create_claude_session(
             fake().to_str().unwrap(),
             // `--ignore-interrupt` makes the fake ack cancels but keep going,
             // so the FULL escalation chain (interrupt×3 → disconnect → 5s →

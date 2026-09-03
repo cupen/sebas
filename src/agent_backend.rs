@@ -433,11 +433,16 @@ pub struct DualSessionBackend {
     pub acp: Arc<dyn SessionBackend>,
     pub native: Arc<NativeAgentBackend>,
     events: broadcast::Sender<SessionEvent>,
+    /// Merged review-card notices from both children (acp + native), so a
+    /// Claude/ACP permission request reaches the webui review card through the
+    /// same channel as a native gated call.
+    notices: broadcast::Sender<PermissionNotice>,
 }
 
 impl DualSessionBackend {
     pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
+        let (notices, _) = broadcast::channel(64);
         // Merge both children's lifecycle streams into one relay.
         {
             let tx = events.clone();
@@ -469,7 +474,42 @@ impl DualSessionBackend {
                 }
             });
         }
-        Arc::new(Self { acp, native, events })
+        // Merge both children's permission-notice streams into one relay, so
+        // review cards from either backend surface on the same feed.
+        if let Some(mut rx) = acp.permission_requests() {
+            let tx = notices.clone();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(notice) => {
+                            let _ = tx.send(notice);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        if let Some(mut rx) = native.permission_requests() {
+            let tx = notices.clone();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(notice) => {
+                            let _ = tx.send(notice);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        Arc::new(Self {
+            acp,
+            native,
+            events,
+            notices,
+        })
     }
 
     fn is_native(key: &SessionKey) -> bool {
@@ -525,7 +565,9 @@ impl SessionBackend for DualSessionBackend {
     ) -> Result<SessionKey, SessionRejection> {
         match backend {
             Some("native") => self.native.spawn(prompt, project_dir).await,
-            _ => self.acp.spawn(prompt, project_dir).await,
+            // `acp` / `acp:<slug>` (and any other non-native hint) route to
+            // the ACP backend, which parses the slug and pins the kind.
+            _ => self.acp.spawn_with(prompt, project_dir, backend).await,
         }
     }
 
@@ -546,7 +588,7 @@ impl SessionBackend for DualSessionBackend {
     }
 
     fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
-        self.native.permission_requests()
+        Some(self.notices.subscribe())
     }
 
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
@@ -568,8 +610,11 @@ fn agent_sandbox_mode() -> SandboxMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
     use sebas_agent::llm::fake::FakeLlmClient;
     use sebas_agent::policy::NetworkMode;
+    use sebas_router::router::Out;
+    use sebas_router::state::{Mapping, SessionMap};
 
     fn manager() -> SessionManager {
         // 脚本化：先破坏面 bash（→ Ask），再收尾文本。
@@ -677,5 +722,76 @@ mod tests {
             while out_rx.recv().await.is_some() {}
         });
         router
+    }
+
+    /// acp 会话权限经 dual 后端往返：acp 后端转出 PermissionNotice，dual 的
+    /// `answer_permission` 先试 native（无匹配 → false）再回退到 acp（活路径），
+    /// 最终经 `Out::SendAcp` 回路由出 `PermissionReply`。
+    #[tokio::test]
+    async fn acp_permission_round_trips_through_dual_backend() {
+        let map = SessionMap::new();
+        let key = SessionKey {
+            chat_id: "oc_dual".into(),
+            thread_id: None,
+        };
+        map.insert(key.clone(), Mapping::active("s1"))
+            .await
+            .unwrap();
+        let (router, mut out_rx) = sebas_router::RouterHandle::new(map);
+
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(router.clone()),
+        );
+        let dual = DualSessionBackend::new(acp.clone(), NativeAgentBackend::with_manager(manager()));
+
+        // 订阅 acp 后端审查卡流，再触发权限请求。
+        let mut notices = acp.permission_requests().expect("acp has notices");
+        router
+            .dispatch_acp_event(AcpEvent::PermissionRequest {
+                session_id: "s1".into(),
+                request_id: "claude:toolu_dual".into(),
+                tool_name: "Bash".into(),
+                args: serde_json::json!({"cmd": "ls"}),
+            })
+            .await;
+
+        let notice = tokio::time::timeout(Duration::from_secs(5), notices.recv())
+            .await
+            .expect("notice timeout")
+            .expect("notice");
+        assert_eq!(notice.request_id, "claude:toolu_dual");
+
+        // dual.answer_permission：native 无匹配 → acp 回退命中（返回 true）。
+        assert!(
+            dual.answer_permission(&notice.request_id, PermissionDecision::AllowOnce)
+                .await,
+            "acp fallback must answer the pending request"
+        );
+
+        // 回路由：排掉权限卡（SendCard）后取到 PermissionReply。
+        let reply = loop {
+            let got = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
+                .await
+                .expect("permission reply not received in time")
+                .expect("channel closed");
+            if matches!(got, Out::SendAcp { .. }) {
+                break got;
+            }
+        };
+        match reply {
+            Out::SendAcp {
+                cmd:
+                    AcpCommand::PermissionReply {
+                        request_id,
+                        decision,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(request_id, "claude:toolu_dual");
+                assert!(matches!(decision, Decision::AllowOnce));
+            }
+            other => panic!("expected SendAcp PermissionReply, got {other:?}"),
+        }
     }
 }

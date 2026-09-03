@@ -145,12 +145,15 @@ pub enum Out {
     /// sessions). The dispatcher creates the ACP session and wires the pump,
     /// but skips the Feishu send_card / react operations. Card content is
     /// still accumulated in CardStateMap and readable via the WebUI.
-    /// `project_dir` specifies the working directory for the Claude Code
-    /// process (if None, falls back to the config default).
+    /// `project_dir` specifies the working directory for the agent process
+    /// (if None, falls back to the config default). `kind` is the requested
+    /// agent kind from the webui backend hint (`acp:<slug>`); None = the
+    /// configured default kind.
     WebSpawn {
         key: SessionKey,
         prompt: String,
         project_dir: Option<String>,
+        kind: Option<String>,
     },
 }
 
@@ -222,6 +225,11 @@ pub struct RouterHandle {
     /// Bounded; lagging subscribers read `RecvError::Lagged` and must
     /// re-snapshot (events are a notification, never a gap-free log).
     events: broadcast::Sender<SessionEvent>,
+    /// ACP 权限事件广播（design D6, OQ1）：`AcpEvent::PermissionRequest` 的
+    /// 独立并行通道，与 session 事件广播分开，避免权限噪声冲刷 session 订阅者。
+    /// `InProcessBackend` 订阅它把 Claude/ACP 会话的权限请求转成 webui 审查卡。
+    /// 只广播 `PermissionRequest`；其余变体不上这条通道。
+    perm_events: broadcast::Sender<AcpEvent>,
     /// Per-session rendered transcript (`session_id` → ordered entries),
     /// the source for the WebUI/channel turn-content retrieval. Dropped
     /// with the mapping so a recycled session_id cannot inherit stale
@@ -246,6 +254,7 @@ impl Clone for RouterHandle {
             reply_targets: self.reply_targets.clone(),
             help_card_msgid: self.help_card_msgid.clone(),
             events: self.events.clone(),
+            perm_events: self.perm_events.clone(),
             turn_log: self.turn_log.clone(),
         }
     }
@@ -290,6 +299,7 @@ impl RouterHandle {
     ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(channel_buffer);
         let (events, _) = broadcast::channel(256);
+        let (perm_events, _) = broadcast::channel(256);
         (
             Self {
                 map,
@@ -307,6 +317,7 @@ impl RouterHandle {
                 reply_targets: ReplyTargetMap::default(),
                 help_card_msgid: MsgIdMap::default(),
                 events,
+                perm_events,
             },
             rx,
         )
@@ -421,6 +432,15 @@ impl RouterHandle {
     /// `RecvError::Lagged` and must re-snapshot via [`Self::session_info_snapshot`].
     pub fn subscribe_session_events(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    /// Subscribe to the ACP permission broadcast (design D6): every
+    /// `AcpEvent::PermissionRequest` the router applies is forwarded here as
+    /// an independent side-channel, parallel to the Feishu card path. Lagging
+    /// subscribers see `RecvError::Lagged` (advisory — a missed card can be
+    /// recovered from the session transcript, never a correctness loss).
+    pub fn subscribe_acp_permission_requests(&self) -> broadcast::Receiver<AcpEvent> {
+        self.perm_events.subscribe()
     }
 
     fn publish(&self, event: SessionEvent) {
@@ -841,8 +861,14 @@ impl RouterHandle {
     /// Start a new session from the WebUI (no Feishu card operations).
     /// Uses `Out::WebSpawn` which the dispatcher handles without sending
     /// cards to Feishu. Returns the SessionKey for the new session.
-    /// `project_dir` specifies the working directory for Claude Code.
-    pub async fn web_spawn(&self, prompt: String, project_dir: Option<String>) -> SessionKey {
+    /// `project_dir` specifies the working directory for the agent; `kind`
+    /// is the requested agent kind (None = configured default).
+    pub async fn web_spawn(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+        kind: Option<String>,
+    ) -> SessionKey {
         let key = SessionKey::web_key();
         match self.map.begin_spawn(key.clone()).await {
             Ok(outcome) => {
@@ -861,6 +887,7 @@ impl RouterHandle {
                     key: key.clone(),
                     prompt,
                     project_dir,
+                    kind,
                 })
                 .await;
                 key
@@ -902,6 +929,7 @@ impl RouterHandle {
                     key,
                     prompt: message,
                     project_dir: None,
+                    kind: None,
                 })
                 .await;
             }

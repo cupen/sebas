@@ -129,6 +129,15 @@ export interface About {
   provider_count: number
 }
 
+/** One configured third-party agent kind, as reported by /api/agent-kinds. */
+export interface AgentKindInfo {
+  name: string
+  slug: string
+  reachable: boolean
+  cause?: string
+  version?: string
+}
+
 export interface AdminStatus {
   adapter_ok: boolean
   status: {
@@ -156,11 +165,33 @@ export interface AdminService {
 }
 
 /**
- * Execution-backend hint sent with `POST /api/sessions`. `"acp"` (the
- * default) spawns the Claude Code bridge; `"native"` spawns the built-in
- * kernel. Single-backend seams ignore the field.
+ * Execution-backend hint sent with `POST /api/sessions`. `"native"` spawns the
+ * built-in kernel; `"acp"` (the default) spawns the configured default
+ * third-party agent; `"acp:<slug>"` selects a specific configured agent kind.
+ * Single-backend seams ignore the field.
  */
-export type BackendHint = 'acp' | 'native'
+export type BackendHint = 'acp' | `acp:${string}` | 'native'
+
+/** Parsed form of a [`BackendHint`]: the driver plus the optional kind slug. */
+export interface ParsedBackendHint {
+  driver: 'acp' | 'native'
+  /** Agent kind slug for `acp:<slug>`; absent for the default `acp`. */
+  slug?: string
+}
+
+/**
+ * Normalize a backend-hint string into its driver + optional slug. The bare
+ * `acp` hint (and any unrecognized value) resolves to the configured default
+ * third-party agent, mirroring the backend's "empty kind = default" rule.
+ */
+export function parseBackendHint(hint: string): ParsedBackendHint {
+  if (hint === 'native') return { driver: 'native' }
+  if (hint.startsWith('acp:')) {
+    const slug = hint.slice('acp:'.length)
+    return slug ? { driver: 'acp', slug } : { driver: 'acp' }
+  }
+  return { driver: 'acp' }
+}
 
 /**
  * The operator's answer to a gated tool call, mirroring the backend's
@@ -233,6 +264,7 @@ export const api = {
   settings: () => get<{ card_config: CardConfig; gateway: GatewayInfo }>('/api/settings'),
   gateway: () => get<{ gateway: GatewayInfo }>('/api/gateway'),
   about: () => get<About>('/api/about'),
+  agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
 
   // Session mutations
   createSession: (prompt: string, projectDir?: string | null, backend?: string | null) =>

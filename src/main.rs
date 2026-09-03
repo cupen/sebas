@@ -2,8 +2,8 @@ mod cli;
 
 use clap::Parser;
 use cli::{
-    Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, GatewayArgs, OutputFormat, RecordArgs,
-    ReplayArgs, ServiceArgs, WebUiArgs,
+    AgentKindsCmd, Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, GatewayArgs, OutputFormat,
+    RecordArgs, ReplayArgs, ServiceArgs, WebUiArgs,
 };
 use std::path::PathBuf;
 
@@ -53,6 +53,20 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::AgentKinds(args) => match args.cmd {
+            AgentKindsCmd::List(list) => {
+                if let Err(e) = sebas::agent_kinds::run(sebas::agent_kinds::ListArgs {
+                    config: list.config,
+                    json: list.json,
+                })
+                .await
+                {
+                    eprintln!("error: {e:?}");
+                    std::process::exit(1);
+                }
+                Ok(())
+            }
+        },
         Cmd::WebUi(args) => {
             if let Err(e) = sebas::webui_cmd::run(args.into()).await {
                 eprintln!("error: {e:?}");
@@ -514,6 +528,29 @@ mod tests {
             panic!("expected Gateway subcommand");
         };
         assert!(args.debug, "--debug flag must be captured");
+    }
+
+    #[test]
+    fn agent_kinds_list_subcommand_parses() {
+        let cli = Cli::try_parse_from(["sebas", "agent-kinds", "list", "-c", "x.toml"])
+            .expect("`sebas agent-kinds list -c <path>` must parse");
+        let Cmd::AgentKinds(args) = cli.cmd else {
+            panic!("expected AgentKinds subcommand");
+        };
+        let AgentKindsCmd::List(list) = args.cmd;
+        assert_eq!(list.config, "x.toml");
+        assert!(!list.json, "--json 默认应为 false");
+    }
+
+    #[test]
+    fn agent_kinds_list_accepts_json_flag() {
+        let cli = Cli::try_parse_from(["sebas", "agent-kinds", "list", "--json"])
+            .expect("`sebas agent-kinds list --json` must parse");
+        let Cmd::AgentKinds(args) = cli.cmd else {
+            panic!("expected AgentKinds subcommand");
+        };
+        let AgentKindsCmd::List(list) = args.cmd;
+        assert!(list.json, "--json 应被解析");
     }
 
     #[test]

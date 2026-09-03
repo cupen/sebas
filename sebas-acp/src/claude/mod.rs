@@ -8,5 +8,6 @@ pub mod manager;
 pub mod session;
 
 pub use agent_driver::{AgentProtocol, ClaudeCodeDriver, ProviderResolution};
-pub use manager::{SessionManager, SessionStart, SpawnOutcome};
+pub use driver::ClaudeDriver;
+pub use manager::{AgentEntry, SessionManager, SessionStart, SpawnOutcome};
 pub use session::{AcpCommand, AcpEvent, AcpSessionHandle, Decision, SessionMeta};

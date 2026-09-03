@@ -106,10 +106,11 @@ pub(crate) async fn send_card_topic_aware(
     }
 }
 
-/// `[acp.claude] idle_kill_secs` → 事件泵 idle 超时（sebas-9pz ②）。
+/// `[acp.agents.<kind>] idle_kill_secs` → 事件泵 idle 超时（sebas-9pz ②）。
 /// 配置 > 0 时启用（生产默认 172800/48h 照常生效）；0 = 不过期。
-fn idle_timeout_from(cfg: &Config) -> Option<Duration> {
-    (cfg.acp.claude.idle_kill_secs > 0).then(|| Duration::from_secs(cfg.acp.claude.idle_kill_secs))
+fn idle_timeout_from(cfg: &Config, kind: &str) -> Option<Duration> {
+    let secs = cfg.acp.idle_kill_for(kind);
+    (secs > 0).then(|| Duration::from_secs(secs))
 }
 
 /// Spawn/resume 之后的**飞书侧**启动序列：seed 卡片状态、渲染并发送
@@ -324,8 +325,9 @@ pub(crate) async fn dispatch_out(
             prompt,
             input_msg_id,
         } => {
-            let claude = &cfg.acp.claude;
-            // 1) Spawn the claude subprocess, mint a session_id, send the
+            let kind = cfg.acp.default_kind().to_string();
+            let command = cfg.acp.command_for(&kind).unwrap_or_default();
+            // 1) Spawn the agent subprocess, mint a session_id, send the
             //    initial prompt, and flip the router's Spawning placeholder
             //    to Active (draining queued prompts). On failure (missing
             //    binary, handshake timeout, or prompt send failure): drop the
@@ -338,9 +340,9 @@ pub(crate) async fn dispatch_out(
                 router,
                 &key,
                 &prompt,
-                &claude.path,
-                claude.args.clone(),
-                claude.work_dir.clone(),
+                &kind,
+                command,
+                cfg.acp.work_dir_for(&kind),
                 gateway_cfg,
             )
             .await
@@ -398,7 +400,7 @@ pub(crate) async fn dispatch_out(
                 prompt,
                 pending,
                 rx,
-                idle_timeout_from(cfg),
+                idle_timeout_from(cfg, &kind),
             )
             .await?;
         }
@@ -406,8 +408,14 @@ pub(crate) async fn dispatch_out(
             key,
             prompt,
             project_dir,
+            kind: requested_kind,
         } => {
-            let claude = &cfg.acp.claude;
+            // `kind` from the webui backend hint (acp:<slug>) wins; a bare
+            // hint or no hint falls back to the configured default kind.
+            let kind = requested_kind
+                .clone()
+                .unwrap_or_else(|| cfg.acp.default_kind().to_string());
+            let command = cfg.acp.command_for(&kind).unwrap_or_default();
             // Web-originated spawn: create the ACP session and wire the pump,
             // but skip the Feishu send_card / react operations. Card content
             // is still accumulated in CardStateMap and readable via the WebUI.
@@ -417,9 +425,9 @@ pub(crate) async fn dispatch_out(
                 router,
                 &key,
                 &prompt,
-                &claude.path,
-                claude.args.clone(),
-                project_dir.or_else(|| claude.work_dir.clone()),
+                &kind,
+                command,
+                project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
                 gateway_cfg,
             )
             .await
@@ -441,7 +449,7 @@ pub(crate) async fn dispatch_out(
                 prompt,
                 pending,
                 rx,
-                idle_timeout_from(cfg),
+                idle_timeout_from(cfg, &kind),
             )
             .await?;
         }
@@ -451,9 +459,10 @@ pub(crate) async fn dispatch_out(
             prompt,
             input_msg_id,
         } => {
-            let claude = &cfg.acp.claude;
-            // Lazy respawn of a restored mapping (openspec/specs/session-lifecycle/spec.md): claude-native
-            // `resume` of the persisted id; the manager transparently falls
+            let kind = cfg.acp.default_kind().to_string();
+            let command = cfg.acp.command_for(&kind).unwrap_or_default();
+            // Lazy respawn of a restored mapping (openspec/specs/session-lifecycle/spec.md): resume
+            // of the persisted id; the manager transparently falls
             // back to a fresh session when the conversation is gone
             // (sebas-dk8.4). `resumed` says which happened — on fallback the
             // old context did NOT carry over, so tell the user instead of
@@ -464,9 +473,9 @@ pub(crate) async fn dispatch_out(
                 &key,
                 &old_sid,
                 &prompt,
-                &claude.path,
-                claude.args.clone(),
-                claude.work_dir.clone(),
+                &kind,
+                command,
+                cfg.acp.work_dir_for(&kind),
                 gateway_cfg,
             )
             .await
@@ -541,7 +550,7 @@ pub(crate) async fn dispatch_out(
                 prompt,
                 pending,
                 rx,
-                idle_timeout_from(cfg),
+                idle_timeout_from(cfg, &kind),
             )
             .await?;
         }
@@ -1233,7 +1242,8 @@ pub(crate) async fn dispatch_out_without_feishu(
             key,
             prompt,
             project_dir,
-        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir).await,
+            kind,
+        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir, kind).await,
         Out::SpawnResume {
             key,
             session_id: old_sid,
@@ -1251,6 +1261,7 @@ pub(crate) async fn dispatch_out_without_feishu(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_web_spawn(
     cfg: &Config,
     router: &RouterHandle,
@@ -1259,16 +1270,18 @@ async fn handle_web_spawn(
     key: SessionKey,
     prompt: String,
     project_dir: Option<String>,
+    requested_kind: Option<String>,
 ) -> anyhow::Result<()> {
-    let claude = &cfg.acp.claude;
+    let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
+    let command = cfg.acp.command_for(&kind).unwrap_or_default();
     let (session_id, pending, rx) = match acp_spawn_and_activate(
         mgr,
         router,
         &key,
         &prompt,
-        &claude.path,
-        claude.args.clone(),
-        project_dir.or_else(|| claude.work_dir.clone()),
+        &kind,
+        command,
+        project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
         gateway_cfg,
     )
     .await
@@ -1283,8 +1296,7 @@ async fn handle_web_spawn(
     // Seed card state and wire the pump (no Feishu card operations).
     router.seed_card(session_id.clone(), prompt.clone()).await;
     // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
-    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
-        .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
+    let idle_timeout = idle_timeout_from(cfg, &kind);
     spawn_acp_pump_with_idle(
         rx,
         router.clone(),
@@ -1308,16 +1320,17 @@ async fn handle_spawn_resume_without_feishu(
     old_sid: String,
     prompt: String,
 ) -> anyhow::Result<()> {
-    let claude = &cfg.acp.claude;
+    let kind = cfg.acp.default_kind().to_string();
+    let command = cfg.acp.command_for(&kind).unwrap_or_default();
     let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
         mgr,
         router,
         &key,
         &old_sid,
         &prompt,
-        &claude.path,
-        claude.args.clone(),
-        claude.work_dir.clone(),
+        &kind,
+        command,
+        cfg.acp.work_dir_for(&kind),
         gateway_cfg,
     )
     .await
@@ -1333,8 +1346,7 @@ async fn handle_spawn_resume_without_feishu(
         info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
     }
     router.seed_card(session_id.clone(), prompt.clone()).await;
-    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
-        .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
+    let idle_timeout = idle_timeout_from(cfg, &kind);
     spawn_acp_pump_with_idle(
         rx,
         router.clone(),

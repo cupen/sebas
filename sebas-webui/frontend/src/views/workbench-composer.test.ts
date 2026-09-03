@@ -91,6 +91,7 @@ vi.mock('../api/client.js', () => ({
     summary: vi.fn(),
     settings: vi.fn(),
     createSession: vi.fn(),
+    agentKinds: vi.fn(),
   },
 }))
 
@@ -154,6 +155,13 @@ beforeEach(() => {
       has_auth: false,
       providers: [],
     },
+  })
+  ;(api.agentKinds as ReturnType<typeof vi.fn>).mockResolvedValue({
+    kinds: [
+      { name: 'claude', slug: 'claude', reachable: true, version: 'v1' },
+      { name: 'gemini', slug: 'gemini', reachable: true, version: 'v2' },
+      { name: 'codex', slug: 'codex', reachable: false, cause: 'command not found' },
+    ],
   })
 })
 
@@ -270,6 +278,42 @@ describe('sebas-workbench-composer', () => {
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
     expect(api.createSession).toHaveBeenCalledWith('run natively', null, 'native')
+  })
+
+  it('lists only reachable agent kinds and forwards the selected acp:<slug> hint', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_gemini' })
+    const el = await mount({ projectDir: null })
+
+    // Dropdown: reachable kinds + native; unreachable kinds are omitted.
+    const options = Array.from(
+      el.shadowRoot?.querySelectorAll('wa-option') ?? [],
+    ) as HTMLElement[]
+    const values = options.map((o) => o.getAttribute('value'))
+    expect(values).toContain('acp:claude')
+    expect(values).toContain('acp:gemini')
+    expect(values).not.toContain('acp:codex')
+    expect(values).toContain('native')
+
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'use gemini'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    const select = el.shadowRoot?.querySelector('wa-select') as unknown as
+      | (HTMLElement & { value: string })
+      | null
+    select!.value = 'acp:gemini'
+    select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    ;(sendBtn as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.createSession).toHaveBeenCalledTimes(1)
+    expect(api.createSession).toHaveBeenCalledWith('use gemini', null, 'acp:gemini')
   })
 
   it('error path surfaces inline and preserves text', async () => {

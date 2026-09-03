@@ -35,10 +35,10 @@ async fn drain_until_finished(mgr: &SessionManager, id: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn resume_keeps_old_id_and_answers() {
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     // The fake accepts --resume <id> and echoes it as its session_id.
     let outcome = mgr
-        .resume_session(fake().to_str().unwrap(), vec![], None, vec![], "sess-old-1")
+        .resume_claude_session(fake().to_str().unwrap(), vec![], None, vec![], "sess-old-1")
         .await
         .expect("resume_session");
     assert!(outcome.resumed, "native resume path must report resumed");
@@ -65,10 +65,10 @@ async fn resume_rejected_falls_back_to_fresh_session() {
     // Generous startup timeout: the fallback must fire via the driver's
     // stderr watch ("No conversation found"), NOT by timing out — the 10s
     // outer guard fails the test if we ever regress to the hang path.
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let outcome = tokio::time::timeout(
         Duration::from_secs(10),
-        mgr.resume_session(
+        mgr.resume_claude_session(
             fake().to_str().unwrap(),
             vec!["--resume-fails".into()],
             None,

@@ -99,12 +99,24 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     info!("webui dashboard listening on {}", endpoint.bind_addr());
 
+    // 创建会话下拉的可达 agent 列表（独立 WebUI 进程同样读 config 提供）。
+    let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = cfg
+        .acp
+        .agents
+        .keys()
+        .map(|slug| sebas_webui::agent_kinds::AgentKindSource {
+            slug: slug.clone(),
+            command: cfg.acp.command_for(slug).unwrap_or_default(),
+        })
+        .collect();
+
     // Run the WebUI server. This blocks until the server stops.
     let backend_dyn: Arc<dyn sebas_webui::SessionBackend> = backend;
     sebas_webui::run_with_admin_adapter(
         backend_dyn,
         sebas_webui::models::GatewayInfo::default(),
         merged_card_cfg,
+        agent_kinds,
         listener,
         admin_adapter,
     )

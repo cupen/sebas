@@ -5,7 +5,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn fake_claude_emits_finished() {
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     // `cargo test` runs from the package dir (sebas-acp/), so resolve the
     // workspace-root target/ via CARGO_MANIFEST_DIR's parent.
     let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -13,7 +13,7 @@ async fn fake_claude_emits_finished() {
         .expect("workspace root")
         .join("target/debug/fake-claude-cli");
     let id = mgr
-        .create_session(fake.to_str().unwrap(), vec![], None, vec![], "".into())
+        .create_claude_session(fake.to_str().unwrap(), vec![], None, vec![], "".into())
         .await
         .expect("spawn fake-claude");
     // Send create_session command

@@ -1,6 +1,7 @@
 //! axum server setup for the WebUI: JSON API + WebSocket + embedded SPA.
 
 use crate::admin::{self, AdminAdapter, AdminState};
+use crate::agent_kinds::{AgentKindProvider, AgentKindSource, ConfigAgentKindProvider};
 use crate::api;
 use crate::assets;
 use crate::models::GatewayInfo;
@@ -26,6 +27,9 @@ pub struct WebUiState {
     /// channel does not transport settings; the caller loads it (from the
     /// local settings.json) at startup.
     pub card_config: CardConfig,
+    /// Supplies the reachable agent kinds for the create-session dropdown.
+    /// Empty for deployments that never pass a config-driven provider.
+    pub agent_kinds: Arc<dyn AgentKindProvider>,
 }
 
 /// Build the axum Router with all WebUI routes.
@@ -34,7 +38,24 @@ pub fn build_router(
     gateway: GatewayInfo,
     card_config: CardConfig,
 ) -> Router {
-    build_router_with_admin_adapter(backend, gateway, card_config, None)
+    build_router_full(
+        backend,
+        gateway,
+        card_config,
+        None,
+        Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+    )
+}
+
+/// Build the axum Router with an explicit agent-kind provider (tests inject a
+/// canned provider; production can inject a config-driven one).
+pub fn build_router_with_agent_kind_provider(
+    backend: Arc<dyn SessionBackend>,
+    gateway: GatewayInfo,
+    card_config: CardConfig,
+    agent_kinds: Arc<dyn AgentKindProvider>,
+) -> Router {
+    build_router_full(backend, gateway, card_config, None, agent_kinds)
 }
 
 /// Build the axum Router with optional watchdog admin adapter.
@@ -44,11 +65,28 @@ pub fn build_router_with_admin_adapter(
     card_config: CardConfig,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) -> Router {
+    build_router_full(
+        backend,
+        gateway,
+        card_config,
+        admin_adapter,
+        Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+    )
+}
+
+fn build_router_full(
+    backend: Arc<dyn SessionBackend>,
+    gateway: GatewayInfo,
+    card_config: CardConfig,
+    admin_adapter: Option<Arc<dyn AdminAdapter>>,
+    agent_kinds: Arc<dyn AgentKindProvider>,
+) -> Router {
     let state = WebUiState {
         backend,
         gateway,
         started_at: Instant::now(),
         card_config,
+        agent_kinds,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -72,6 +110,7 @@ pub fn build_router_with_admin_adapter(
         .route("/api/settings", get(api::settings))
         .route("/api/gateway", get(api::gateway))
         .route("/api/about", get(api::about))
+        .route("/api/agent-kinds", get(api::agent_kinds))
         .route("/api/projects", get(api::projects_list).post(api::projects_add))
         .route("/api/projects/reorder", post(api::projects_reorder))
         .route("/api/projects/{path}/remove", post(api::projects_remove))
@@ -116,14 +155,17 @@ pub fn build_router_with_admin_adapter(
         .fallback(assets::spa_fallback)
 }
 
-/// Run the WebUI server on the given listener.
+/// Run the WebUI server on the given listener. `agent_kinds` supplies the
+/// create-session dropdown's reachable agent list (empty for deployments
+/// without config-driven agents).
 pub async fn run(
     backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
     card_config: CardConfig,
+    agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
 ) {
-    run_with_admin_adapter(backend, gateway, card_config, listener, None).await;
+    run_full(backend, gateway, card_config, agent_kinds, listener, None).await;
 }
 
 /// Run the WebUI server with an optional watchdog admin adapter.
@@ -131,10 +173,23 @@ pub async fn run_with_admin_adapter(
     backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
     card_config: CardConfig,
+    agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) {
-    let app = build_router_with_admin_adapter(backend, gateway, card_config, admin_adapter);
+    run_full(backend, gateway, card_config, agent_kinds, listener, admin_adapter).await;
+}
+
+async fn run_full(
+    backend: Arc<dyn SessionBackend>,
+    gateway: GatewayInfo,
+    card_config: CardConfig,
+    agent_kinds: Vec<AgentKindSource>,
+    listener: tokio::net::TcpListener,
+    admin_adapter: Option<Arc<dyn AdminAdapter>>,
+) {
+    let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
+    let app = build_router_full(backend, gateway, card_config, admin_adapter, provider);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
     if let Err(e) = serve(

@@ -24,7 +24,7 @@ async fn events_follow_create_status_change_remove() {
     let mut events = router.subscribe_session_events();
 
     // create: web_spawn inserts a Spawning placeholder.
-    let key = router.web_spawn("hello world".into(), Some("/tmp/p".into())).await;
+    let key = router.web_spawn("hello world".into(), Some("/tmp/p".into()), None).await;
     // status change: Spawning → Active.
     router.activate(&key, "s1".into()).await;
     // remove.
@@ -117,7 +117,7 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
         .insert(ka.clone(), Mapping::dormant("s-a", 42))
         .await
         .unwrap();
-    let kb_key = router.web_spawn("spawn me".into(), None).await;
+    let kb_key = router.web_spawn("spawn me".into(), None, None).await;
     router.activate(&kb_key, "s-b".into()).await;
     let _ = router.web_close_session(ka).await;
 

@@ -206,6 +206,14 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
+/// GET /api/agent-kinds — the reachable third-party agent kinds for the
+/// create-session dropdown, plus their failure causes when unreachable. The
+/// client lists only `reachable` kinds alongside the built-in `native` entry.
+pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
+    let kinds = state.agent_kinds.agent_kinds().await;
+    Json(json!({ "kinds": kinds })).into_response()
+}
+
 // ---- Mutation endpoints ----
 
 #[derive(Deserialize)]

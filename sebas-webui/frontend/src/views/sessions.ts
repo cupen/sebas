@@ -5,7 +5,7 @@
 
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { api, ApiError, type BackendHint, type SessionList } from '../api/client.js'
+import { api, ApiError, type AgentKindInfo, type BackendHint, type SessionList } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
@@ -23,6 +23,7 @@ export class SebasSessions extends LitElement {
   @state() private error = ''
   @state() private prompt = ''
   @state() private backend: BackendHint = 'acp'
+  @state() private kinds: AgentKindInfo[] = []
   @state() private creating = false
   @state() private closeTarget: string | null = null
   private unsubscribe?: () => void
@@ -175,8 +176,20 @@ export class SebasSessions extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     this.refetch()
+    this.loadKinds()
     this.unsubscribe = sharedWs.subscribe(() => this.refetch())
     window.addEventListener('sebas:refetch', this.refetch)
+  }
+
+  private loadKinds(): void {
+    api
+      .agentKinds()
+      .then((d) => {
+        this.kinds = d.kinds.filter((k) => k.reachable)
+      })
+      .catch(() => {
+        this.kinds = []
+      })
   }
 
   disconnectedCallback(): void {
@@ -289,10 +302,15 @@ export class SebasSessions extends LitElement {
             value=${this.backend}
             @change=${(e: Event) => {
               const value = (e.target as HTMLInputElement).value
-              if (value === 'acp' || value === 'native') this.backend = value
+              if (value === 'acp' || value === 'native' || value.startsWith('acp:')) {
+                this.backend = value as BackendHint
+              }
             }}
           >
-            <wa-option value="acp">acp · Claude Code bridge</wa-option>
+            <wa-option value="acp">acp · default kind</wa-option>
+            ${this.kinds.map(
+              (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
+            )}
             <wa-option value="native">native · built-in kernel</wa-option>
           </wa-select>
           <wa-button variant="brand" appearance="accent" ?loading=${this.creating} type="submit"

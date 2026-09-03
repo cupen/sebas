@@ -39,6 +39,9 @@ pub enum Cmd {
     Services(ControlStatusArgs),
     /// Alias for `sebas control` (watchdog control plane).
     Ctl(ControlArgs),
+    /// Report reachability of the configured third-party agents.
+    #[command(name = "agent-kinds")]
+    AgentKinds(AgentKindsArgs),
 }
 
 /// Run mode — the long-lived sebas service.
@@ -278,4 +281,29 @@ pub enum ControlCmd {
     RestartCore,
     /// Print the watchdog's managed-service status snapshot.
     Services,
+}
+
+/// `sebas agent-kinds` — reachability reporting for configured third-party
+/// agents (openspec/changes/multi-third-party-acp-agents, agent-driver spec).
+#[derive(Parser)]
+pub struct AgentKindsArgs {
+    #[command(subcommand)]
+    pub cmd: AgentKindsCmd,
+}
+
+#[derive(Subcommand)]
+pub enum AgentKindsCmd {
+    /// List each configured agent kind with reachability + version.
+    List(AgentKindsListArgs),
+}
+
+#[derive(Parser)]
+pub struct AgentKindsListArgs {
+    /// Path to the sebas config.toml.
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+
+    /// Output the raw `AgentKindInfo` list as JSON instead of the table.
+    #[arg(long)]
+    pub json: bool,
 }

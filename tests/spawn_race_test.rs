@@ -29,7 +29,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
     ));
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
     let key = SessionKey {
         chat_id: "oc_race".into(),
         thread_id: None,
@@ -63,8 +63,8 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
             &router2,
             &k,
             &prompt,
-            fake().to_str().unwrap(),
-            vec![
+            "claude",
+            vec![fake().to_str().unwrap().to_string(), 
                 "--journal".into(),
                 journal_arg,
                 "--delay-new-ms".into(),
@@ -138,7 +138,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
 async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
-    let mgr = Arc::new(SessionManager::new(Duration::from_secs(30)));
+    let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
     let key = SessionKey {
         chat_id: "oc_crash".into(),
         thread_id: None,
@@ -171,8 +171,8 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
         &router,
         &k,
         &prompt,
-        fake().to_str().unwrap(),
-        vec![],
+        "claude",
+        vec![fake().to_str().unwrap().to_string(), ],
         None,
         None,
     )

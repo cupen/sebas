@@ -348,12 +348,14 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
                     }
                 } else {
                     let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-                    let key = router.web_spawn(prompt, Some(canonical.display().to_string())).await;
+                    let key = router
+                        .web_spawn(prompt, Some(canonical.display().to_string()), None)
+                        .await;
                     CoreChannelResponse::Spawned { key }
                 }
             }
             None => {
-                let key = router.web_spawn(prompt, None).await;
+                let key = router.web_spawn(prompt, None, None).await;
                 CoreChannelResponse::Spawned { key }
             }
         },

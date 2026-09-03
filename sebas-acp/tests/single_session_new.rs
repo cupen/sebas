@@ -42,9 +42,9 @@ async fn exactly_one_initialize_one_user_message_and_routing_id_matches() {
     // 当前盘符的 C:\tmp，导致 cwd 断言必然失败（child cwd mismatch）。
     let work_dir = tempfile::tempdir().expect("work dir");
     let work_dir_str = work_dir.path().to_string_lossy().into_owned();
-    let mgr = SessionManager::new(Duration::from_secs(30));
+    let mgr = SessionManager::claude_only(Duration::from_secs(30));
     let id = mgr
-        .create_session(
+        .create_claude_session(
             fake().to_str().unwrap(),
             vec!["--journal".into(), journal.to_str().unwrap().into()],
             Some(work_dir_str.clone()),
