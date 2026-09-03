@@ -19,3 +19,5 @@ logs/
 sebas
 
 .e2e/
+node_modules/
+sebas-webui/frontend/dist/

@@ -67,10 +67,10 @@ impl Recorder {
     }
 
     fn record(&self, ev: &AgentEvent) {
-        if let Ok(line) = serde_json::to_string(ev) {
-            if let Ok(mut w) = self.inner.lock() {
-                let _ = writeln!(w, "{line}");
-            }
+        if let Ok(line) = serde_json::to_string(ev)
+            && let Ok(mut w) = self.inner.lock()
+        {
+            let _ = writeln!(w, "{line}");
         }
     }
 
@@ -116,6 +116,30 @@ fn print_event(ev: &AgentEvent, recorder: Option<&Recorder>) -> bool {
             tool_name, result, ..
         } => {
             eprintln!("\n[tool end] {tool_name}: {}", truncate(result, 400));
+            false
+        }
+        AgentEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            args,
+            reason,
+            ..
+        } => {
+            eprintln!("\n[permission] {tool_name} {args} — {reason} (request {request_id})");
+            false
+        }
+        AgentEvent::ToolPolicy {
+            tool_name, outcome, ..
+        } => {
+            eprintln!("\n[policy] {tool_name}: {outcome}");
+            false
+        }
+        AgentEvent::ToolFinish { tool_name, ok, .. } => {
+            eprintln!("\n[tool finish] {tool_name} ok={ok}");
+            false
+        }
+        AgentEvent::SessionSummary { model_calls, tool_calls, turn_ms, .. } => {
+            eprintln!("\n[summary] model={model_calls} tools={tool_calls} {turn_ms}ms");
             false
         }
         AgentEvent::Finished { .. } => {

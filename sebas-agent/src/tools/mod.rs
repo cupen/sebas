@@ -2,10 +2,13 @@
 
 pub mod bash;
 pub mod fs_ops;
+pub mod image;
 pub mod search;
+pub mod web;
 
 use crate::llm::ToolSchema;
 use crate::message::ToolOutput;
+use crate::policy::{Approver, PolicyEngine, SandboxMode};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,7 +23,10 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     /// 会话级已读文件集合（write/edit 的 read-before-write 门控）。
     pub read_files: Arc<Mutex<HashSet<PathBuf>>>,
-    // Phase 2: sandbox_tier / permission hook（C3 的挂点，D2 预留的权限检查面）
+    /// 策略引擎（None = 不做策略门控，1a 行为）。
+    pub policy: Option<Arc<PolicyEngine>>,
+    /// 审批回答者（None + Ask 判定 = fail closed 拒绝）。
+    pub approver: Option<Arc<dyn Approver>>,
 }
 
 impl ToolCtx {
@@ -29,6 +35,8 @@ impl ToolCtx {
             workdir,
             cancel,
             read_files: Arc::new(Mutex::new(HashSet::new())),
+            policy: None,
+            approver: None,
         }
     }
 
@@ -62,16 +70,26 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// 按 spec 顺序注册六个工具；`bash_timeout` 为 bash 缺省时限。
+    /// 按 spec 顺序注册工具；`bash_timeout` 为 bash 缺省时限，
+    /// bash 沙箱档位默认 Auto（Landlock 可用即用，否则防火墙）。
+    /// web 工具**总是注册**（spec：network=off 时调用返回结构化
+    /// "network disabled" 结果——拒绝发生在策略层，不是"工具不存在"）。
     pub fn new(bash_timeout: Duration) -> Self {
+        Self::with_sandbox(bash_timeout, SandboxMode::Auto)
+    }
+
+    /// 同 [`Self::new`]，显式指定 bash 沙箱档位（design N2 配置面）。
+    pub fn with_sandbox(bash_timeout: Duration, sandbox: SandboxMode) -> Self {
         Self {
             tools: vec![
-                Arc::new(bash::BashTool::new(bash_timeout)),
+                Arc::new(bash::BashTool::new(bash_timeout, sandbox)),
                 Arc::new(fs_ops::ReadTool),
                 Arc::new(fs_ops::WriteTool),
                 Arc::new(fs_ops::EditTool),
                 Arc::new(search::GlobTool),
                 Arc::new(search::GrepTool),
+                Arc::new(web::WebFetchTool),
+                Arc::new(web::WebSearchTool),
             ],
         }
     }
@@ -81,10 +99,31 @@ impl ToolRegistry {
             .iter()
             .map(|t| ToolSchema {
                 name: t.name().to_string(),
-                description: t.description(),
+                description: format!("{}{}", t.description(), RESULT_REWRITE_NOTE),
                 parameters: t.parameters(),
             })
             .collect()
+    }
+
+    /// 测试/宿主自定义工具集（task 3.3 并发测试用）。
+    pub fn from_tools(tools: Vec<Arc<dyn Tool>>) -> Self {
+        Self { tools }
+    }
+
+    /// 能力门（task 4.2，design N6）：`image` 为真才注册 read_image——
+    /// 由宿主依据所配置模型的图像支持决定；诚实声明，不虚设。
+    pub fn with_image_support(mut self, image: bool) -> Self {
+        if image {
+            self.tools.push(Arc::new(image::ReadImageTool));
+        }
+        self
+    }
+
+    /// 能力门（task 4.2）：lsp 工具总是可声明，但后端可达才带 file_system
+    /// 能力字段；不可达时调用返回 unavailable 事实（非错误）。
+    pub fn with_lsp(mut self, backend: Option<Arc<dyn image::LspBackend>>) -> Self {
+        self.tools.push(Arc::new(image::LspTool::new(backend)));
+        self
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -95,6 +134,9 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name()).collect()
     }
 }
+
+/// 工具契约中的结果改写说明（spec 3.1：模型须知道截断并知道如何取细节）。
+pub const RESULT_REWRITE_NOTE: &str = "\n\nResults may be truncated to the first ~8k characters with an explicit     `[truncated: …]` marker; request more detail with narrower queries or paged reads.";
 
 /// 把路径解析到会话工作目录下（绝对路径按原样使用）。
 pub(crate) fn resolve_under(workdir: &Path, p: &str) -> PathBuf {
@@ -118,14 +160,34 @@ mod tests {
     /// task 3.1 验证：注册表恰好包含六件套，且每个 schema 都是合法的
     /// JSON Schema object（properties/required 形状，映射 input_schema）。
     #[test]
-    fn registry_lists_all_six_tools_with_valid_json_schemas() {
+    fn web_tools_always_registered_and_policy_governed() {
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10));
+        assert_eq!(
+            r.names(),
+            vec![
+                "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"
+            ]
+        );
+        for name in ["web_fetch", "web_search"] {
+            let schema = r.get(name).unwrap();
+            assert!(
+                schema.description().contains("network"),
+                "{name} description should state network policy"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_lists_all_tools_with_valid_json_schemas() {
         let registry = ToolRegistry::new(std::time::Duration::from_secs(60));
         assert_eq!(
             registry.names(),
-            vec!["bash", "read", "write", "edit", "glob", "grep"]
+            vec![
+                "bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"
+            ]
         );
         let schemas = registry.schemas();
-        assert_eq!(schemas.len(), 6);
+        assert_eq!(schemas.len(), 8);
         for s in &schemas {
             assert!(!s.name.is_empty());
             assert!(s.description.len() > 20, "description is model-facing contract");
@@ -143,5 +205,69 @@ mod tests {
             assert!(registry.get(name).is_some(), "{name} must be registered");
         }
         assert!(registry.get("nonexistent").is_none());
+    }
+
+    // ─── 能力门（task 4.2/4.3，design N6 验证）────────────────────────────
+
+    struct FakeLspBackend;
+
+    #[async_trait::async_trait]
+    impl image::LspBackend for FakeLspBackend {
+        async fn query(&self, op: &str, path: &str, line: u32, _col: u32) -> ToolOutput {
+            ToolOutput::ok(format!("{op} at {path}:{line}"))
+        }
+    }
+
+    /// 能力门 1（task 4.2）：`read_image` 仅在配置的 LLM **声明**图像支持时
+    /// 出现在 schema 列表——声明与否由宿主沿 `with_image_support` 缝传入，
+    /// 两种状态各测一次（对应"fake client 宣称/不宣称能力"）。
+    #[test]
+    fn image_gate_only_declares_read_image_when_capability_announced() {
+        // 未声明（text-only 模型）：工具不可见，schema 列表不反映
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10)).with_image_support(false);
+        assert!(!r.names().contains(&"read_image"));
+        assert!(r.schemas().iter().all(|s| s.name != "read_image"));
+        assert!(r.get("read_image").is_none());
+        // 已声明：read_image 进入 schema 列表
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10)).with_image_support(true);
+        assert!(r.names().contains(&"read_image"));
+        assert!(r.schemas().iter().any(|s| s.name == "read_image"));
+        assert!(r.get("read_image").is_some());
+    }
+
+    /// 能力门 2（task 4.2/4.3）：`lsp` 总是注册，但 `file_system` 能力字段
+    /// 仅在后端可达时出现在 schema；不可达时调用返回 unavailable 事实（非 error）。
+    #[tokio::test]
+    async fn lsp_gate_reports_file_system_only_when_backend_reachable() {
+        // 后端不可达：lsp 可声明，schema 无 file_system 字段；调用 → ok 的 unavailable
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10)).with_lsp(None);
+        assert!(r.names().contains(&"lsp"));
+        let lsp = r.get("lsp").unwrap();
+        assert!(lsp.parameters()["properties"].get("file_system").is_none());
+        let ctx = ToolCtx::new(std::env::temp_dir(), tokio_util::sync::CancellationToken::new());
+        let out = lsp
+            .execute(
+                serde_json::json!({"operation": "definitions", "path": "a.rs", "line": 1, "column": 1}),
+                &ctx,
+            )
+            .await;
+        assert!(out.ok, "unavailable is a fact, not an error: {}", out.output);
+        assert!(out.output.contains("unavailable"));
+        // 后端可达：file_system 能力字段出现在 schema 列表
+        let r = ToolRegistry::new(std::time::Duration::from_secs(10))
+            .with_lsp(Some(Arc::new(FakeLspBackend)));
+        let lsp = r.get("lsp").unwrap();
+        assert_eq!(
+            lsp.parameters()["properties"]["file_system"],
+            serde_json::json!(true)
+        );
+        let out = lsp
+            .execute(
+                serde_json::json!({"operation": "hover", "path": "a.rs", "line": 3, "column": 4}),
+                &ctx,
+            )
+            .await;
+        assert!(out.ok, "{}", out.output);
+        assert!(out.output.contains("hover at a.rs:3"));
     }
 }

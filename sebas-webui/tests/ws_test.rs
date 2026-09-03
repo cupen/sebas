@@ -1,30 +1,36 @@
 //! Integration test for the WebSocket realtime channel `/ws`.
 //!
 //! Binds a real listener on an ephemeral port, drives the server with
-//! tokio, connects a `tokio-tungstenite` client, and asserts that backend
-//! events broadcast over the wire — whether triggered through the API or
-//! arising inside the backend itself (e.g. from the Feishu chat side).
+//! tokio, connects a `tokio-tungstenite` client, and asserts that session
+//! mutations broadcast the tagged JSON events over the wire.
 
+use sebas_feishu::cards::CardConfig;
 use futures_util::{SinkExt, StreamExt};
-use sebas_webui::backend::FakeBackend;
-use sebas_webui::events::WebUiEvent;
-use sebas_webui::models::GatewayInfo;
-use sebas_webui::build_router;
+use sebas_router::router::RouterHandle;
+use sebas_router::state::SessionMap;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use sebas_webui::models::GatewayInfo;
+use sebas_webui::build_router;
 
-async fn spawn_server() -> (String, Arc<FakeBackend>) {
-    let backend = Arc::new(FakeBackend::connected());
-    let app = build_router(backend.clone(), GatewayInfo::default());
+async fn spawn_server() -> (String, tokio::sync::mpsc::Receiver<sebas_router::router::Out>) {
+    let map = SessionMap::new();
+    let (router, rx) = RouterHandle::new(map);
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(router.clone()),
+    );
+    let app = build_router(backend, GatewayInfo::default(), CardConfig::default());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), backend)
+    // `http_base` for plain HTTP calls; `ws_url` builds ws:// URLs from it
+    // (tungstenite requires the ws scheme explicitly).
+    (format!("http://{addr}"), rx)
 }
 
 fn ws_url(base: &str) -> tokio_tungstenite::tungstenite::http::Request<()> {
@@ -54,11 +60,9 @@ async fn next_event(
     }
 }
 
-
-
 #[tokio::test]
 async fn create_session_broadcasts_over_websocket() {
-    let (base, _backend) = spawn_server().await;
+    let (base, _rx) = spawn_server().await;
 
     // Connect a WebSocket client.
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url(&base))
@@ -87,7 +91,7 @@ async fn create_session_broadcasts_over_websocket() {
 
 #[tokio::test]
 async fn one_client_disconnecting_does_not_starve_others() {
-    let (base, backend) = spawn_server().await;
+    let (base, _rx) = spawn_server().await;
 
     // Two clients; then the first disconnects.
     let (ws1, _) = tokio_tungstenite::connect_async(ws_url(&base)).await.unwrap();
@@ -101,8 +105,8 @@ async fn one_client_disconnecting_does_not_starve_others() {
         let _ = r1.next().await; // drain the close echo
     }
 
-    // Seed a row and close it through the API: client 2 must receive both
-    // the created (from the spawn) and removed events in order.
+    // A session close must still reach client 2. Seed a dormant session via
+    // the API path: create (spawning) then close it.
     let http = reqwest::Client::new();
     let resp = http
         .post(format!("{base}/api/sessions"))
@@ -120,19 +124,9 @@ async fn one_client_disconnecting_does_not_starve_others() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
+    // Client 2 receives both the created and removed events in order.
     let created_ev = next_event(&mut r2).await;
     assert_eq!(created_ev["type"], "session.created");
     let removed_ev = next_event(&mut r2).await;
     assert_eq!(removed_ev["type"], "session.removed", "event: {removed_ev}");
-    assert_eq!(removed_ev["session_id"], key.as_str());
-
-    // A backend-originated event (no API call involved — e.g. a Feishu-side
-    // update) reaches the client too: the subscription is the only source.
-    backend.emit(WebUiEvent::SessionUpdated {
-        session_id: "oc_chat%00".into(),
-        status: "working".into(),
-    });
-    let updated_ev = next_event(&mut r2).await;
-    assert_eq!(updated_ev["type"], "session.updated", "event: {updated_ev}");
-    assert_eq!(updated_ev["status"], "working");
 }

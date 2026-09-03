@@ -5,18 +5,19 @@
 use crate::config::Config;
 use crate::reactions::{ReactPlan, ReactionTracker};
 use crate::session_boot::{
-    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts,
-    spawn_acp_pump_with_idle, wire_session_card_and_pump,
+    acp_resume_and_activate, acp_spawn_and_activate, boot_session_pump_and_flush,
+    flush_pending_prompts, spawn_acp_pump_with_idle,
 };
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::client::{FeishuApiError, FeishuClient};
+use sebas_feishu::cards::render_accumulated_card;
+use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
 use sebas_feishu::events::SessionKey;
 use sebas_gateway::config::GatewayConfig;
 use sebas_router::commands::GatewayAction;
 use sebas_router::router::{Out, RouterHandle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 /// 话题失效提示文案（Q8→F1 熔断）：发一次提示并终止会话，不重试、不重发。
@@ -103,6 +104,86 @@ pub(crate) async fn send_card_topic_aware(
             Err(e)
         }
     }
+}
+
+/// `[acp.claude] idle_kill_secs` → 事件泵 idle 超时（sebas-9pz ②）。
+/// 配置 > 0 时启用（生产默认 172800/48h 照常生效）；0 = 不过期。
+fn idle_timeout_from(cfg: &Config) -> Option<Duration> {
+    (cfg.acp.claude.idle_kill_secs > 0).then(|| Duration::from_secs(cfg.acp.claude.idle_kill_secs))
+}
+
+/// Spawn/resume 之后的**飞书侧**启动序列：seed 卡片状态、渲染并发送
+/// root 卡（话题感知）、记录 root message_id、盖初始 reaction。
+///
+/// 与 `crate::session_boot::boot_session_pump_and_flush`（引擎侧半场）
+/// 成对：本函数只做飞书呈现，不启动泵、不冲刷 pending——ACP 生命周期
+/// 与飞书卡片的编排在此显式分离，`WebSpawn`（无飞书宿主）只调用引擎侧
+/// 即可完整工作。
+///
+/// 顺序契约（与拆分前的 `wire_session_card_and_pump` 逐条一致）：
+/// 1. `seed_card` 在 pump 启动前（调用方保证 `boot_session_pump_and_flush`
+///    在本函数之后执行）。
+/// 2. `send_card_topic_aware` 话题失效时已内部熔断（web_close_session），
+///    返回 `TopicInvalid` → 调用方按「未发出」处理：跳过 record/reaction，
+///    但**继续**启动泵（会话即将被终止，泵只负责清尾）。
+/// 3. 初始 reaction 是 best-effort：失败仅告警，不中止会话创建。
+#[allow(clippy::too_many_arguments)]
+async fn seed_and_send_root_card(
+    feishu: &FeishuClient,
+    http: &reqwest::Client,
+    tokens: &TokenManager,
+    router: &RouterHandle,
+    reactions: &ReactionTracker,
+    cfg: &Config,
+    key: &SessionKey,
+    session_id: &str,
+    prompt: &str,
+    // 飞书消息 message_id：root 卡 reply 挂到该输入消息下（主线）。
+    // `None` = 独立卡（WebUI / 无输入消息）。
+    input_msg_id: Option<String>,
+) -> anyhow::Result<()> {
+    // seed_card（openspec/specs/feishu-cards/spec.md）: 记录 user_prompt 供
+    // 后续 flush 重渲染引用块。幂等。
+    router.seed_card(session_id.to_string(), prompt.to_string()).await;
+    // Send the seed card (empty body) and record its message_id keyed by the
+    // real session_id (so streaming UpdateCards resolve correctly).
+    // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
+    //（避免初始卡蓝、后续卡变色的跳变）。
+    let card = render_accumulated_card(prompt, session_id, &[], &cfg.card.theme_color, None);
+    // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
+    // 原话题；主线回退到用户输入消息。话题失效时 send_card_topic_aware
+    // 发文本提示并熔断 —— 首次出站就失效更要终止。
+    let reply = topic_reply_target(router, key, None).await.or(input_msg_id);
+    let outcome = send_card_topic_aware(
+        feishu,
+        http,
+        tokens,
+        router,
+        key,
+        serde_json::to_value(&card)?,
+        reply,
+    )
+    .await?;
+    if let TopicSendOutcome::Sent(msg_id) = outcome {
+        router
+            .record_root_msg_id(session_id.to_string(), msg_id.clone())
+            .await;
+        // Stamp the initial reaction on the root card. emoji_type 是 Feishu
+        // API 合法值（"Get" = 👌 已收到）。Best-effort: a reaction failure
+        // must not abort session creation.
+        match feishu
+            .react(http, tokens, &msg_id, sebas_router::card_state::phase::SEED)
+            .await
+        {
+            Ok(rid) => {
+                reactions
+                    .record(session_id, sebas_router::card_state::phase::SEED.into(), rid)
+                    .await
+            }
+            Err(e) => warn!(%session_id, "initial react failed: {e}"),
+        }
+    }
+    Ok(())
 }
 
 // 参数即 outbound 共享上下文（client/http/tokens/cfg/router/mgr/reactions），
@@ -212,10 +293,10 @@ pub(crate) async fn dispatch_out(
                 // Before planning the phase reaction, check if there's a
                 // pending ack reaction (EYES) on this message. If so, remove
                 // it first so the phase emoji cleanly replaces the ack.
-                if let Some((_, ack_rid)) = reactions.take_ack(&message_id).await {
-                    if let Err(e) = feishu.unreact(http, tokens, &message_id, &ack_rid).await {
-                        warn!(%session_id, "removing ack reaction before phase swap failed: {e}");
-                    }
+                if let Some((_, ack_rid)) = reactions.take_ack(&message_id).await
+                    && let Err(e) = feishu.unreact(http, tokens, &message_id, &ack_rid).await
+                {
+                    warn!(%session_id, "removing ack reaction before phase swap failed: {e}");
                 }
                 match reactions.plan(&session_id, &emoji).await {
                     ReactPlan::Skip => {}
@@ -295,20 +376,29 @@ pub(crate) async fn dispatch_out(
                     .record_input_msg_id(session_id.clone(), input_id.clone())
                     .await;
             }
-            wire_session_card_and_pump(
+            // 飞书侧：seed + root 卡 + 初始 reaction。
+            seed_and_send_root_card(
                 feishu,
                 http,
                 tokens,
+                router,
+                reactions,
                 cfg,
+                &key,
+                &session_id,
+                &prompt,
+                input_msg_id,
+            )
+            .await?;
+            // 引擎侧：事件泵 + pending 冲刷。
+            boot_session_pump_and_flush(
                 router,
                 mgr,
-                reactions,
-                key,
                 session_id,
                 prompt,
                 pending,
                 rx,
-                input_msg_id,
+                idle_timeout_from(cfg),
             )
             .await?;
         }
@@ -317,7 +407,43 @@ pub(crate) async fn dispatch_out(
             prompt,
             project_dir,
         } => {
-            handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir).await?;
+            let claude = &cfg.acp.claude;
+            // Web-originated spawn: create the ACP session and wire the pump,
+            // but skip the Feishu send_card / react operations. Card content
+            // is still accumulated in CardStateMap and readable via the WebUI.
+            // `project_dir` takes precedence over the config default.
+            let (session_id, pending, rx) = match acp_spawn_and_activate(
+                mgr,
+                router,
+                &key,
+                &prompt,
+                &claude.path,
+                claude.args.clone(),
+                project_dir.or_else(|| claude.work_dir.clone()),
+                gateway_cfg,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    router.fail_spawn(&key).await;
+                    warn!(?e, "web_spawn: acp_spawn_and_activate failed");
+                    return Ok(());
+                }
+            };
+            // Seed card state and wire the pump (no Feishu card operations):
+            // WebSpawn 只走引擎侧半场 `boot_session_pump_and_flush`，不碰
+            // `seed_and_send_root_card` —— ACP 生命周期对飞书零依赖的结构性证明。
+            boot_session_pump_and_flush(
+                router,
+                mgr,
+                session_id,
+                prompt,
+                pending,
+                rx,
+                idle_timeout_from(cfg),
+            )
+            .await?;
         }
         Out::SpawnResume {
             key,
@@ -393,20 +519,29 @@ pub(crate) async fn dispatch_out(
                     .record_input_msg_id(session_id.clone(), input_id.clone())
                     .await;
             }
-            wire_session_card_and_pump(
+            // 飞书侧：seed + root 卡 + 初始 reaction。
+            seed_and_send_root_card(
                 feishu,
                 http,
                 tokens,
+                router,
+                reactions,
                 cfg,
+                &key,
+                &session_id,
+                &prompt,
+                input_msg_id,
+            )
+            .await?;
+            // 引擎侧：事件泵 + pending 冲刷。
+            boot_session_pump_and_flush(
                 router,
                 mgr,
-                reactions,
-                key,
                 session_id,
                 prompt,
                 pending,
                 rx,
-                input_msg_id,
+                idle_timeout_from(cfg),
             )
             .await?;
         }
@@ -494,149 +629,6 @@ pub(crate) async fn dispatch_out(
         }
     }
     Ok(())
-}
-
-/// Shared `Out::WebSpawn` handling — no Feishu side effects (web-originated
-/// sessions never send cards). Used by both the feishu and the feishu-less
-/// outbound pumps.
-///
-/// Creates the ACP session and wires the pump; card content is still
-/// accumulated in CardStateMap and readable via the WebUI. `project_dir`
-/// takes precedence over the config default.
-async fn handle_web_spawn(
-    cfg: &Config,
-    router: &RouterHandle,
-    mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
-    key: SessionKey,
-    prompt: String,
-    project_dir: Option<String>,
-) -> anyhow::Result<()> {
-    let claude = &cfg.acp.claude;
-    let (session_id, pending, rx) = match acp_spawn_and_activate(
-        mgr,
-        router,
-        &key,
-        &prompt,
-        &claude.path,
-        claude.args.clone(),
-        project_dir.or_else(|| claude.work_dir.clone()),
-        gateway_cfg,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            router.fail_spawn(&key).await;
-            warn!(?e, "web_spawn: acp_spawn_and_activate failed");
-            return Ok(());
-        }
-    };
-    // Seed card state and wire the pump (no Feishu card operations).
-    router.seed_card(session_id.clone(), prompt.clone()).await;
-    // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
-    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
-        .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
-    spawn_acp_pump_with_idle(
-        rx,
-        router.clone(),
-        session_id.clone(),
-        idle_timeout,
-        Some(mgr.clone()),
-    );
-    // Flush prompts queued during spawn.
-    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
-        warn!(?e, "web_spawn: flush_pending_prompts failed");
-    }
-    Ok(())
-}
-
-/// `Out::SpawnResume` for feishu-less runs: identical session mechanics to
-/// the feishu path, minus the failure/session-lost cards and the initial
-/// Feishu card — there is no chat to deliver them to. Card state is still
-/// seeded so the WebUI shows the transcript.
-async fn handle_spawn_resume_without_feishu(
-    cfg: &Config,
-    router: &RouterHandle,
-    mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
-    key: SessionKey,
-    old_sid: String,
-    prompt: String,
-) -> anyhow::Result<()> {
-    let claude = &cfg.acp.claude;
-    let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
-        mgr,
-        router,
-        &key,
-        &old_sid,
-        &prompt,
-        &claude.path,
-        claude.args.clone(),
-        claude.work_dir.clone(),
-        gateway_cfg,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            router.fail_spawn(&key).await;
-            warn!(?e, %old_sid, "resume failed (feishu-less run; no card sent)");
-            return Ok(());
-        }
-    };
-    if !resumed {
-        info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
-    }
-    router.seed_card(session_id.clone(), prompt.clone()).await;
-    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
-        .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
-    spawn_acp_pump_with_idle(
-        rx,
-        router.clone(),
-        session_id.clone(),
-        idle_timeout,
-        Some(mgr.clone()),
-    );
-    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
-        warn!(?e, "resume: flush_pending_prompts failed");
-    }
-    Ok(())
-}
-
-/// Outbound pump for feishu-less runs: the WebUI (and any web client) still
-/// drives real ACP sessions. Session-driving `Out`s run the same mechanics
-/// as the feishu pump minus the Feishu deliveries; everything chat-facing
-/// (cards, reactions, help, watchdog chatter) is a logged no-op — there is
-/// no chat to deliver to.
-pub(crate) async fn dispatch_out_without_feishu(
-    cfg: &Config,
-    router: &RouterHandle,
-    mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
-    out: Out,
-) -> anyhow::Result<()> {
-    match out {
-        Out::WebSpawn {
-            key,
-            prompt,
-            project_dir,
-        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir).await,
-        Out::SpawnResume {
-            key,
-            session_id: old_sid,
-            prompt,
-            ..
-        } => {
-            handle_spawn_resume_without_feishu(cfg, router, mgr, gateway_cfg, key, old_sid, prompt)
-                .await
-        }
-        Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
-        other => {
-            debug!(?other, "feishu-less outbound pump dropped a chat-facing Out");
-            Ok(())
-        }
-    }
 }
 
 /// Build the Feishu proxy control envelope (openspec/specs/watchdog/spec.md Phase 3). The core
@@ -1227,4 +1219,131 @@ mod tests {
             }
         );
     }
+}
+
+pub(crate) async fn dispatch_out_without_feishu(
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    gateway_cfg: Option<&GatewayConfig>,
+    out: Out,
+) -> anyhow::Result<()> {
+    match out {
+        Out::WebSpawn {
+            key,
+            prompt,
+            project_dir,
+        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir).await,
+        Out::SpawnResume {
+            key,
+            session_id: old_sid,
+            prompt,
+            ..
+        } => {
+            handle_spawn_resume_without_feishu(cfg, router, mgr, gateway_cfg, key, old_sid, prompt)
+                .await
+        }
+        Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
+        other => {
+            debug!(?other, "feishu-less outbound pump dropped a chat-facing Out");
+            Ok(())
+        }
+    }
+}
+
+async fn handle_web_spawn(
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    gateway_cfg: Option<&GatewayConfig>,
+    key: SessionKey,
+    prompt: String,
+    project_dir: Option<String>,
+) -> anyhow::Result<()> {
+    let claude = &cfg.acp.claude;
+    let (session_id, pending, rx) = match acp_spawn_and_activate(
+        mgr,
+        router,
+        &key,
+        &prompt,
+        &claude.path,
+        claude.args.clone(),
+        project_dir.or_else(|| claude.work_dir.clone()),
+        gateway_cfg,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            router.fail_spawn(&key).await;
+            warn!(?e, "web_spawn: acp_spawn_and_activate failed");
+            return Ok(());
+        }
+    };
+    // Seed card state and wire the pump (no Feishu card operations).
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
+    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
+        .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
+    spawn_acp_pump_with_idle(
+        rx,
+        router.clone(),
+        session_id.clone(),
+        idle_timeout,
+        Some(mgr.clone()),
+    );
+    // Flush prompts queued during spawn.
+    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+        warn!(?e, "web_spawn: flush_pending_prompts failed");
+    }
+    Ok(())
+}
+
+async fn handle_spawn_resume_without_feishu(
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    gateway_cfg: Option<&GatewayConfig>,
+    key: SessionKey,
+    old_sid: String,
+    prompt: String,
+) -> anyhow::Result<()> {
+    let claude = &cfg.acp.claude;
+    let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
+        mgr,
+        router,
+        &key,
+        &old_sid,
+        &prompt,
+        &claude.path,
+        claude.args.clone(),
+        claude.work_dir.clone(),
+        gateway_cfg,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            router.fail_spawn(&key).await;
+            warn!(?e, %old_sid, "resume failed (feishu-less run; no card sent)");
+            return Ok(());
+        }
+    };
+    if !resumed {
+        info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
+    }
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    let idle_timeout = (cfg.acp.claude.idle_kill_secs > 0)
+        .then(|| std::time::Duration::from_secs(cfg.acp.claude.idle_kill_secs));
+    spawn_acp_pump_with_idle(
+        rx,
+        router.clone(),
+        session_id.clone(),
+        idle_timeout,
+        Some(mgr.clone()),
+    );
+    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+        warn!(?e, "resume: flush_pending_prompts failed");
+    }
+    Ok(())
 }

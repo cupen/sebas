@@ -5,17 +5,41 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { api, type Summary } from '../api/client.js'
+import { api, type SessionRow, type Summary } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
+import { navigate } from '../router.js'
 import { viewStyles } from '../styles/shared.js'
 import '../components/status-badge.js'
+import './project-rail.js'
+import './workbench-composer.js'
 
 @customElement('sebas-dashboard')
 export class SebasDashboard extends LitElement {
   @state() private data: Summary | null = null
+  @state() private allRows: SessionRow[] = []
   @state() private error = ''
+  /**
+   * Selected project path. `null` = "All sessions" view (the legacy
+   * dashboard default). The selection only affects the workbench right
+   * pane — never the focused-session pointer or any session state.
+   */
+  @state() private selectedPath: string | null = null
+  /**
+   * Provider label rendered next to the composer (e.g. "anthropic / claude").
+   * `null` while loading; `"no provider configured"` if no providers
+   * are registered.
+   */
+  @state() private providerLabel: string | null = null
   private unsubscribe?: () => void
+  private onRailSelect = (e: Event) => {
+    const ce = e as CustomEvent<{ path: string | null }>
+    this.selectedPath = ce.detail.path
+  }
+  private onComposerCreated = (e: Event) => {
+    const detail = (e as CustomEvent<{ key: string }>).detail
+    navigate(`/sessions/${detail.key}`)
+  }
 
   static styles = [
     viewStyles,
@@ -131,7 +155,97 @@ export class SebasDashboard extends LitElement {
       td.time {
         color: var(--sebas-text-dim);
         font-size: 0.85rem;
+      }
+      .workbench {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        gap: var(--sebas-space-4);
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .workbench {
+          grid-template-columns: 1fr;
+        }
+      }
+      .rail {
+        display: flex;
+        flex-direction: column;
+        gap: var(--sebas-space-3);
+        background: var(--sebas-surface);
+        border: 1px solid var(--sebas-border);
+        border-radius: var(--sebas-radius-lg);
+        padding: var(--sebas-space-3);
+        box-shadow: var(--sebas-shadow-1);
+        min-height: 200px;
+      }
+      .all-row {
+        display: grid;
+        grid-template-columns: 18px 1fr auto;
+        gap: 8px;
+        align-items: center;
+        padding: 7px 9px;
+        border-radius: var(--sebas-radius-md);
+        font-size: 0.85rem;
+        color: var(--sebas-text-dim);
+        cursor: pointer;
+        transition:
+          background var(--sebas-dur) var(--sebas-ease),
+          color var(--sebas-dur) var(--sebas-ease);
+      }
+      .all-row:hover {
+        background: var(--sebas-surface-2);
+        color: var(--sebas-text-bright);
+      }
+      .all-row.selected {
+        background: var(--sebas-accent-soft);
+        color: var(--sebas-accent);
+      }
+      .all-row .all-count {
+        background: var(--sebas-surface-2);
+        border-radius: 999px;
+        padding: 1px 7px;
+        font-size: 0.7rem;
+        font-weight: 500;
+      }
+      .all-row.selected .all-count {
+        background: var(--sebas-accent-strong);
+        color: var(--sebas-accent-ink);
+      }
+      .all-row .all-glyph {
+        display: inline-flex;
+        color: var(--sebas-text-faint);
+      }
+      .all-row.selected .all-glyph {
+        color: var(--sebas-accent);
+      }
+      .all-row .all-label {
+        font-weight: 500;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /* Demoted /sessions entry point: the primary nav no longer carries it,
+       * the rail keeps it reachable for old deep links. */
+      .rail-foot {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: auto;
+        padding: 7px 9px;
+        border-radius: var(--sebas-radius-md);
+        font-size: 0.8rem;
+        color: var(--sebas-text-faint);
+        transition:
+          background var(--sebas-dur) var(--sebas-ease),
+          color var(--sebas-dur) var(--sebas-ease);
+      }
+      .rail-foot:hover {
+        background: var(--sebas-surface-2);
+        color: var(--sebas-text-bright);
+      }
+      .right-pane {
+        margin: 0;
       }
       .skel-line.w60 {
         width: 60%;
@@ -164,6 +278,26 @@ export class SebasDashboard extends LitElement {
       })
       .catch((e) => {
         this.error = String(e)
+      })
+    api
+      .sessions()
+      .then((list) => {
+        this.allRows = list.recent_sessions
+      })
+      .catch(() => {
+        /* summary already surfaces failures */
+      })
+    // Lazy provider-label fetch: cheap, only fetches once because the
+    // composer reads the cached field — refetches on WS push keep the
+    // label fresh if the operator reconfigures providers mid-session.
+    api
+      .settings()
+      .then((s) => {
+        const first = s.gateway?.providers?.[0]
+        this.providerLabel = first ? first.name : 'no provider configured'
+      })
+      .catch(() => {
+        /* leave existing label in place */
       })
   }
 
@@ -205,8 +339,12 @@ export class SebasDashboard extends LitElement {
     return html`
       <header class="page-head">
         <div>
-          <h1 class="page-title">Dashboard</h1>
-          <p class="page-sub">Live overview of the agent router.</p>
+          <h1 class="page-title">Workbench</h1>
+          <p class="page-sub">
+            ${this.selectedPath
+              ? 'Sessions in the selected project.'
+              : 'Live overview across every project.'}
+          </p>
         </div>
       </header>
 
@@ -244,55 +382,102 @@ export class SebasDashboard extends LitElement {
           `
         : nothing}
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2 class="panel-title">Recent sessions</h2>
-          <span class="panel-caption tnum">${d.total_sessions} total</span>
+      <div class="workbench">
+        <aside class="rail">
+          <div
+            class="all-row ${this.selectedPath === null ? 'selected' : ''}"
+            @click=${() => (this.selectedPath = null)}
+            role="button"
+            tabindex="0"
+          >
+            <span class="all-glyph" aria-hidden="true">${icon('inbox', 14)}</span>
+            <span class="all-label">All sessions</span>
+            <span class="all-count">${d.total_sessions}</span>
+          </div>
+          <sebas-project-rail
+            .sessions=${this.allRows}
+            .activePath=${this.selectedPath}
+            @rail-select=${this.onRailSelect}
+          ></sebas-project-rail>
+          <a class="rail-foot" href="/sessions">所有会话 / all sessions</a>
+        </aside>
+
+        <section class="panel right-pane">
+          <sebas-workbench-composer
+            .projectDir=${this.selectedPath}
+            .providerLabel=${this.providerLabel}
+            @composer-created=${this.onComposerCreated}
+          ></sebas-workbench-composer>
+          <div class="panel-head">
+            <h2 class="panel-title">
+              ${this.selectedPath
+                ? `Sessions · ${this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath}`
+                : 'Recent sessions'}
+            </h2>
+            <span class="panel-caption tnum">
+              ${this.rowsForSelected().length} shown
+            </span>
+          </div>
+          ${this.renderSessionTable(this.rowsForSelected(), this.selectedPath === null)}
+        </section>
+      </div>
+    `
+  }
+
+  private rowsForSelected(): SessionRow[] {
+    if (this.selectedPath === null) return this.allRows
+    return this.allRows.filter((r) => r.project_dir === this.selectedPath)
+  }
+
+  private renderSessionTable(rows: SessionRow[], _showAll: boolean) {
+    if (rows.length === 0)
+      return html`
+        <div class="empty">
+          <span class="glyph">${icon('inbox', 20)}</span>
+          <span class="title">No sessions</span>
+          <p class="hint">
+            ${this.selectedPath
+              ? 'This project has no sessions yet. Create one from the composer.'
+              : 'Spin up an agent from the Sessions page and it will show up here.'}
+          </p>
+          ${this.selectedPath === null
+            ? html`<a class="cta" href="/sessions">Go to Sessions</a>`
+            : nothing}
         </div>
-        ${d.recent_sessions.length === 0
-          ? html`
-              <div class="empty">
-                <span class="glyph">${icon('inbox', 20)}</span>
-                <span class="title">No sessions yet</span>
-                <p class="hint">Spin up an agent from the Sessions page and it will show up here.</p>
-                <a class="cta" href="/sessions">Go to Sessions</a>
-              </div>
-            `
-          : html`
-              <table>
-                <thead>
-                  <tr>
-                    <th>Chat</th>
-                    <th>Session</th>
-                    <th>Status</th>
-                    <th>Last active</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${d.recent_sessions.map(
-                    (row) => html`
-                      <tr data-status=${row.status_slug}>
-                        <td>
-                          <a class="mono" href=${`/sessions/${row.encoded_key}`}>${row.chat_id}</a>
-                        </td>
-                        <td class="mono dim" title=${row.session_id ?? ''}>
-                          ${row.session_id_short ?? '—'}
-                        </td>
-                        <td>
-                          <sebas-status-badge
-                            slug=${row.status_slug}
-                            label=${row.status_label}
-                            glyph=${row.status_glyph}
-                          ></sebas-status-badge>
-                        </td>
-                        <td class="time tnum">${row.last_active}</td>
-                      </tr>
-                    `,
-                  )}
-                </tbody>
-              </table>
-            `}
-      </section>
+      `
+    return html`
+      <table>
+        <thead>
+          <tr>
+            <th>Chat</th>
+            <th>Session</th>
+            <th>Status</th>
+            <th>Last active</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(
+            (row) => html`
+              <tr data-status=${row.status_slug}>
+                <td>
+                  <a class="mono" href=${`/sessions/${row.encoded_key}`}>${row.chat_id}</a>
+                </td>
+                <td class="mono dim" title=${row.session_id ?? ''}>
+                  ${row.session_id_short ?? '—'}
+                </td>
+                <td>
+                  <sebas-status-badge
+                    slug=${row.status_slug}
+                    label=${row.status_label}
+                    glyph=${row.status_glyph}
+                  ></sebas-status-badge>
+                </td>
+                <td class="time tnum">${row.last_active}</td>
+              </tr>
+            `,
+          )}
+        </tbody>
+      </table>
     `
   }
 }

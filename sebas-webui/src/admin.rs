@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Json, Redirect};
+use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -115,7 +115,6 @@ pub struct AdminService {
 #[derive(Clone)]
 pub struct AdminState {
     pub adapter: Option<Arc<dyn AdminAdapter>>,
-    pub templates: Arc<minijinja::Environment<'static>>,
     pub started_at: Arc<Instant>,
     pub password: Option<Arc<str>>,
     pub session_store: SessionStore,
@@ -123,17 +122,13 @@ pub struct AdminState {
 
 impl AdminState {
     /// Create a new admin state with an optional adapter.
-    pub fn new(
-        adapter: Option<Arc<dyn AdminAdapter>>,
-        templates: Arc<minijinja::Environment<'static>>,
-    ) -> Self {
+    pub fn new(adapter: Option<Arc<dyn AdminAdapter>>) -> Self {
         let password = std::env::var("SEBAS_WEBUI_PASSWORD")
             .ok()
             .filter(|p| !p.is_empty())
             .map(|p| Arc::from(p.as_str()));
         Self {
             adapter,
-            templates,
             started_at: Arc::new(Instant::now()),
             password,
             session_store: SessionStore::new(),
@@ -148,109 +143,9 @@ impl AdminState {
 
 // ─── Route Handlers ────────────────────────────────────────────────────────
 
-/// GET /admin/status — control plane status page.
-pub async fn admin_status(State(state): State<AdminState>) -> impl IntoResponse {
-    let (status, adapter_ok) = match &state.adapter {
-        Some(adapter) => match adapter.status().await {
-            Ok(s) => (s, true),
-            Err(e) => (
-                AdminStatus {
-                    version: format!("error: {e}"),
-                    ..Default::default()
-                },
-                false,
-            ),
-        },
-        None => (AdminStatus::default(), false),
-    };
 
-    let uptime = state.started_at.as_ref().elapsed();
-    let data = serde_json::json!({
-        "page": "admin_status",
-        "adapter_ok": adapter_ok,
-        "status": status,
-        "uptime_secs": uptime.as_secs(),
-        "uptime_display": format_uptime(uptime),
-    });
-    render_template(&state, "admin_status.html", &data).await
-}
 
-/// GET /admin/events — event timeline page.
-pub async fn admin_events(State(state): State<AdminState>) -> impl IntoResponse {
-    let (events, adapter_ok) = match &state.adapter {
-        Some(adapter) => match adapter.events_since(0).await {
-            Ok(events) => (events, true),
-            Err(e) => {
-                let ev = AdminEvent {
-                    seq: 0,
-                    operation_id: "error".into(),
-                    kind: "error".into(),
-                    message: e,
-                };
-                (vec![ev], false)
-            }
-        },
-        None => (vec![], false),
-    };
 
-    let data = serde_json::json!({
-        "page": "admin_events",
-        "adapter_ok": adapter_ok,
-        "events": events,
-    });
-    render_template(&state, "admin_events.html", &data).await
-}
-
-/// GET /admin/update — update control page.
-pub async fn admin_update_page(State(state): State<AdminState>) -> impl IntoResponse {
-    let last_result: Option<AdminMutationResult> = None;
-    let data = serde_json::json!({
-        "page": "admin_update",
-        "adapter_ok": state.adapter.is_some(),
-        "last_result": last_result,
-    });
-    render_template(&state, "admin_update.html", &data).await
-}
-
-/// GET /admin/services — managed services page.
-pub async fn admin_services(State(state): State<AdminState>) -> impl IntoResponse {
-    let (services, adapter_ok) = match &state.adapter {
-        Some(adapter) => match adapter.services().await {
-            Ok(svcs) => (svcs, true),
-            Err(e) => {
-                let svc = AdminService {
-                    name: "error".into(),
-                    status: e,
-                    desired: "".into(),
-                    uptime_secs: None,
-                };
-                (vec![svc], false)
-            }
-        },
-        None => (vec![], false),
-    };
-
-    // watchdog/updater 是伪行（非受管服务），不渲染启停按钮。
-    let rows: Vec<serde_json::Value> = services
-        .iter()
-        .map(|svc| {
-            serde_json::json!({
-                "name": svc.name,
-                "status": svc.status,
-                "desired": svc.desired,
-                "uptime_secs": svc.uptime_secs,
-                "managed": matches!(svc.name.as_str(), "core" | "webui" | "gateway"),
-            })
-        })
-        .collect();
-
-    let data = serde_json::json!({
-        "page": "admin_services",
-        "adapter_ok": adapter_ok,
-        "services": rows,
-    });
-    render_template(&state, "admin_services.html", &data).await
-}
 
 // ─── Mutation Endpoints (POST-only) ────────────────────────────────────────
 
@@ -370,58 +265,7 @@ fn no_adapter_error() -> (StatusCode, Json<serde_json::Value>) {
 /// Cookie name for the admin session.
 const SESSION_COOKIE_NAME: &str = "sebas_admin_session";
 
-/// Middleware that checks authentication for all admin routes (except login).
-///
-/// If `SEBAS_WEBUI_PASSWORD` is set, all `/admin/*` routes (except `/admin/login`
-/// and `/admin/logout`) require a valid session cookie.  If the password is not
-/// set, this middleware is a no-op.
-pub async fn admin_auth_guard(
-    State(state): State<AdminState>,
-    req: Request<Body>,
-    next: Next,
-) -> Result<impl IntoResponse, StatusCode> {
-    if !state.has_password() {
-        // No password configured — allow all requests (read-only mode).
-        return Ok(next.run(req).await);
-    }
 
-    let path = req.uri().path().to_string();
-    // Allow login/logout without auth
-    if path == "/admin/login" || path == "/admin/logout" {
-        return Ok(next.run(req).await);
-    }
-
-    // Check session cookie
-    let session_id = req
-        .headers()
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|c| {
-                let c = c.trim();
-                c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME))
-                    .map(|val| val.to_string())
-            })
-        });
-
-    match session_id {
-        Some(id) => match state.session_store.validate(&id).await {
-            Ok(csrf_token) => {
-                // Store CSRF token in request extensions for mutation middleware
-                let mut req = req;
-                req.extensions_mut().insert(CsrfExtension(csrf_token));
-                Ok(next.run(req).await)
-            }
-            Err(_) => redirect_to_login(),
-        },
-        None => redirect_to_login(),
-    }
-}
-
-/// Redirect to login page.
-fn redirect_to_login() -> Result<axum::response::Response<Body>, StatusCode> {
-    Ok(Redirect::to("/admin/login").into_response())
-}
 
 /// Extension to pass CSRF token through request layers.
 #[derive(Clone)]
@@ -494,15 +338,6 @@ fn is_loopback_origin(origin: &str) -> bool {
 
 // ─── Login / Logout ─────────────────────────────────────────────────────────
 
-/// GET /admin/login — show login form.
-pub async fn admin_login_page(State(state): State<AdminState>) -> impl IntoResponse {
-    let data = serde_json::json!({
-        "page": "admin_login",
-        "has_password": state.has_password(),
-        "error": "",
-    });
-    render_template(&state, "admin_login.html", &data).await
-}
 
 /// POST /admin/login — authenticate and create session.
 #[derive(serde::Deserialize)]
@@ -510,103 +345,223 @@ pub struct LoginForm {
     password: String,
 }
 
-pub async fn admin_login_action(
-    State(state): State<AdminState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    axum::Form(form): axum::Form<LoginForm>,
-) -> axum::response::Response<Body> {
-    // Per-IP rate limit：同一来源 IP 的登录尝试独立计数，避免单 IP 暴力
-    // 破解影响其他用户（admin_auth 已支持 per-IP，这里真正接线）。
-    let client_ip = addr.ip().to_string();
-    if !state.session_store.check_rate_limit(&client_ip).await {
-        let data = serde_json::json!({
-            "page": "admin_login",
-            "has_password": state.has_password(),
-            "error": "Too many login attempts. Try again later.",
-        });
-        return render_template(&state, "admin_login.html", &data)
-            .await
-            .into_response();
-    }
 
-    // Verify password
-    let password_ok = match &state.password {
-        Some(expected) => form.password == expected.as_ref(),
-        None => false,
-    };
 
-    if !password_ok {
-        let data = serde_json::json!({
-            "page": "admin_login",
-            "has_password": state.has_password(),
-            "error": "Invalid password.",
-        });
-        return render_template(&state, "admin_login.html", &data)
-            .await
-            .into_response();
-    }
+// ─── JSON API for the SPA (see the `webui-api` capability) ──────────────────
 
-    // Success: create session, reset per-IP rate limit
-    state.session_store.reset_rate_limit(&client_ip).await;
-    let (session_id, _csrf) = state.session_store.create().await;
-
-    // Set session cookie (no expiry — session store handles TTL)
-    let cookie = format!(
-        "{}={}; Path=/admin; HttpOnly; SameSite=Lax",
-        SESSION_COOKIE_NAME, session_id
-    );
-
-    let mut resp = Redirect::to("/admin/status").into_response();
-    resp.headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
-    resp
-}
-
-/// POST /admin/logout — end session.
-pub async fn admin_logout_action(
-    State(state): State<AdminState>,
-    headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    // Extract session ID from cookie
-    if let Some(session_id) = headers
+/// Extract the admin session cookie value from request headers.
+fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
             cookies.split(';').find_map(|c| {
                 let c = c.trim();
                 c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME))
-                    .map(|s| s.to_string())
+                    .map(|val| val.to_string())
             })
         })
-    {
-        state.session_store.remove(&session_id).await;
+}
+
+fn api_401() -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": "authentication required" })),
+    )
+        .into_response()
+}
+
+/// GET /api/admin/status — control plane status as JSON.
+pub async fn api_admin_status(State(state): State<AdminState>) -> impl IntoResponse {
+    let (status, adapter_ok) = match &state.adapter {
+        Some(adapter) => match adapter.status().await {
+            Ok(s) => (s, true),
+            Err(e) => (
+                AdminStatus {
+                    version: format!("error: {e}"),
+                    ..Default::default()
+                },
+                false,
+            ),
+        },
+        None => (AdminStatus::default(), false),
+    };
+
+    let uptime = state.started_at.as_ref().elapsed();
+    Json(serde_json::json!({
+        "adapter_ok": adapter_ok,
+        "status": status,
+        "uptime_secs": uptime.as_secs(),
+        "uptime_display": format_uptime(uptime),
+    }))
+}
+
+/// GET /api/admin/events — control-plane event timeline as JSON.
+pub async fn api_admin_events(State(state): State<AdminState>) -> impl IntoResponse {
+    let (events, adapter_ok) = match &state.adapter {
+        Some(adapter) => match adapter.events_since(0).await {
+            Ok(events) => (events, true),
+            Err(e) => {
+                let ev = AdminEvent {
+                    seq: 0,
+                    operation_id: "error".into(),
+                    kind: "error".into(),
+                    message: e,
+                };
+                (vec![ev], false)
+            }
+        },
+        None => (vec![], false),
+    };
+
+    Json(serde_json::json!({
+        "adapter_ok": adapter_ok,
+        "events": events,
+    }))
+}
+
+/// GET /api/admin/services — managed services as JSON.
+pub async fn api_admin_services(State(state): State<AdminState>) -> impl IntoResponse {
+    let (services, adapter_ok) = match &state.adapter {
+        Some(adapter) => match adapter.services().await {
+            Ok(svcs) => (svcs, true),
+            Err(e) => {
+                let svc = AdminService {
+                    name: "error".into(),
+                    status: e,
+                    desired: "".into(),
+                    uptime_secs: None,
+                };
+                (vec![svc], false)
+            }
+        },
+        None => (vec![], false),
+    };
+
+    Json(serde_json::json!({
+        "adapter_ok": adapter_ok,
+        "services": services,
+    }))
+}
+
+/// Auth guard for `/api/admin/*`: like [`admin_auth_guard`], but rejects
+/// with a JSON `401` instead of redirecting, so any client can branch on
+/// the status code.
+pub async fn api_admin_auth_guard(
+    State(state): State<AdminState>,
+    req: Request<Body>,
+    next: Next,
+) -> axum::response::Response {
+    if !state.has_password() {
+        // No password configured — allow all requests (read-only mode).
+        return next.run(req).await;
     }
 
-    // Clear cookie
+    let path = req.uri().path();
+    if path == "/api/admin/login" || path == "/api/admin/logout" {
+        return next.run(req).await;
+    }
+
+    match extract_session_cookie(req.headers()) {
+        Some(id) => match state.session_store.validate(&id).await {
+            Ok(csrf_token) => {
+                let mut req = req;
+                req.extensions_mut().insert(CsrfExtension(csrf_token));
+                next.run(req).await
+            }
+            Err(_) => api_401(),
+        },
+        None => api_401(),
+    }
+}
+
+/// POST /api/admin/login — authenticate with JSON `{ "password": ... }`.
+/// On success sets the admin session cookie (Path=/ so it covers
+/// `/api/admin/*`), HttpOnly, SameSite=Lax; the 24 h inactivity TTL lives
+/// in the session store.
+pub async fn api_login_action(
+    State(state): State<AdminState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(form): Json<LoginForm>,
+) -> axum::response::Response {
+    // Per-IP rate limit：同一来源 IP 的登录尝试独立计数，避免单 IP 暴力
+    // 破解影响其他用户（admin_auth 已支持 per-IP，这里真正接线）。
+    let client_ip = addr.ip().to_string();
+    if !state.session_store.check_rate_limit(&client_ip).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "Too many login attempts. Try again later." })),
+        )
+            .into_response();
+    }
+
+    let password_ok = match &state.password {
+        Some(expected) => form.password == expected.as_ref(),
+        None => false,
+    };
+    if !password_ok {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Invalid password." })),
+        )
+            .into_response();
+    }
+
+    state.session_store.reset_rate_limit(&client_ip).await;
+    let (session_id, _csrf) = state.session_store.create().await;
     let cookie = format!(
-        "{}=; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=0",
-        SESSION_COOKIE_NAME
+        "{}={}; Path=/; HttpOnly; SameSite=Lax",
+        SESSION_COOKIE_NAME, session_id
     );
-    let mut resp = Redirect::to("/admin/login").into_response();
+    let mut resp = (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok" })),
+    )
+        .into_response();
     resp.headers_mut()
         .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
     resp
 }
 
-// ─── Router Builder ─────────────────────────────────────────────────────────
+/// POST /api/admin/logout — end the session and clear the cookie.
+pub async fn api_logout_action(
+    State(state): State<AdminState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(session_id) = extract_session_cookie(&headers) {
+        state.session_store.remove(&session_id).await;
+    }
+    let cookie = format!(
+        "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        SESSION_COOKIE_NAME
+    );
+    let mut resp = (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok" })),
+    )
+        .into_response();
+    resp.headers_mut()
+        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
+    resp
+}
 
-/// Build an admin-only router for standalone mode.
-pub fn build_admin_router(state: AdminState) -> Router {
-    // Mutation routes with security middleware
+/// Build the JSON admin API router (mounted always, unlike the HTML admin
+/// cluster): reads report `adapter_ok: false` without an adapter and
+/// mutations return 503, so the SPA can present an honest degradation
+/// instead of a dead link.
+pub fn build_api_admin_router(state: AdminState) -> Router {
     let mutation_routes = Router::new()
-        .route("/admin/update", post(admin_update_action))
-        .route("/admin/update/dry-run", post(admin_dry_run_action))
-        .route("/admin/update/dev", post(admin_dev_update_action))
-        .route("/admin/rollback", post(admin_rollback_action))
-        .route("/admin/restart", post(admin_restart_action))
-        .route("/admin/services/{service}/enable", post(admin_service_enable))
+        .route("/api/admin/update", post(admin_update_action))
+        .route("/api/admin/update/dry-run", post(admin_dry_run_action))
+        .route("/api/admin/update/dev", post(admin_dev_update_action))
+        .route("/api/admin/rollback", post(admin_rollback_action))
+        .route("/api/admin/restart", post(admin_restart_action))
         .route(
-            "/admin/services/{service}/disable",
+            "/api/admin/services/{service}/enable",
+            post(admin_service_enable),
+        )
+        .route(
+            "/api/admin/services/{service}/disable",
             post(admin_service_disable),
         )
         .layer(middleware::from_fn_with_state(
@@ -614,23 +569,19 @@ pub fn build_admin_router(state: AdminState) -> Router {
             admin_mutation_guard,
         ));
 
-    // Protected admin routes (require auth if password is set)
     let protected = Router::new()
-        .route("/admin/status", get(admin_status))
-        .route("/admin/events", get(admin_events))
-        .route("/admin/update", get(admin_update_page))
-        .route("/admin/services", get(admin_services))
+        .route("/api/admin/status", get(api_admin_status))
+        .route("/api/admin/events", get(api_admin_events))
+        .route("/api/admin/services", get(api_admin_services))
         .merge(mutation_routes)
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            admin_auth_guard,
+            api_admin_auth_guard,
         ));
 
-    // Public admin routes (no auth required)
     let public = Router::new()
-        .route("/admin/login", get(admin_login_page))
-        .route("/admin/login", post(admin_login_action))
-        .route("/admin/logout", post(admin_logout_action));
+        .route("/api/admin/login", post(api_login_action))
+        .route("/api/admin/logout", post(api_logout_action));
 
     Router::new()
         .merge(protected)
@@ -638,16 +589,20 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .with_state(state)
 }
 
+// ─── Router Builder ─────────────────────────────────────────────────────────
+
+
+/// Health check endpoint.
+pub async fn health() -> &'static str {
+    "ok\n"
+}
+
 // ─── Standalone Server ─────────────────────────────────────────────────────
 
 /// Run the standalone admin server.
-pub async fn run_standalone(
-    listener: tokio::net::TcpListener,
-    adapter: Option<Arc<dyn AdminAdapter>>,
-) {
-    let templates = Arc::new(init_standalone_templates());
-    let state = AdminState::new(adapter, templates);
-    let app = build_admin_router(state);
+pub async fn run_standalone(listener: tokio::net::TcpListener, adapter: Option<Arc<dyn AdminAdapter>>) {
+    let state = AdminState::new(adapter);
+    let app = build_api_admin_router(state);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "admin dashboard started (standalone)");
     if let Err(e) = axum::serve(
@@ -662,52 +617,7 @@ pub async fn run_standalone(
 
 // ─── Template Helpers ──────────────────────────────────────────────────────
 
-/// Render a MiniJinja template with context.
-async fn render_template(
-    state: &AdminState,
-    template_name: &str,
-    context: &serde_json::Value,
-) -> Html<String> {
-    let tmpl = state
-        .templates
-        .get_template(template_name)
-        .unwrap_or_else(|_| panic!("template {template_name} should exist"));
-    let rendered = tmpl
-        .render(minijinja::Value::from_serialize(context))
-        .unwrap_or_else(|e| format!("Template error: {e}"));
-    Html(rendered)
-}
 
-/// Initialize templates for standalone mode.
-fn init_standalone_templates() -> minijinja::Environment<'static> {
-    let mut env = minijinja::Environment::new();
-    env.add_template(
-        "admin_status.html",
-        include_str!("../templates/admin_status.html"),
-    )
-    .expect("admin_status.html template");
-    env.add_template(
-        "admin_events.html",
-        include_str!("../templates/admin_events.html"),
-    )
-    .expect("admin_events.html template");
-    env.add_template(
-        "admin_update.html",
-        include_str!("../templates/admin_update.html"),
-    )
-    .expect("admin_update.html template");
-    env.add_template(
-        "admin_services.html",
-        include_str!("../templates/admin_services.html"),
-    )
-    .expect("admin_services.html template");
-    env.add_template(
-        "admin_login.html",
-        include_str!("../templates/admin_login.html"),
-    )
-    .expect("admin_login.html template");
-    env
-}
 
 /// Format a Duration as a human-readable string.
 fn format_uptime(d: std::time::Duration) -> String {
@@ -842,278 +752,18 @@ mod tests {
     }
 
     fn test_state(adapter: Option<Arc<dyn AdminAdapter>>) -> AdminState {
-        let mut env = minijinja::Environment::new();
-        // Register minimal templates for tests
-        env.add_template(
-            "admin_status.html",
-            "admin_status:{{status.version}}|{{page}}|{{adapter_ok}}",
-        )
-        .ok();
-        env.add_template(
-            "admin_events.html",
-            "admin_events:{{events|length}}|{{page}}|{{adapter_ok}}",
-        )
-        .ok();
-        env.add_template("admin_update.html", "admin_update:{{page}}|{{adapter_ok}}")
-            .ok();
-        env.add_template(
-            "admin_services.html",
-            "admin_services:{{services|length}}|{{page}}|{{adapter_ok}}",
-        )
-        .ok();
-        env.add_template(
-            "admin_login.html",
-            "admin_login:{{page}}|{{error}}|{{has_password}}",
-        )
-        .ok();
-        AdminState::new(adapter, Arc::new(env))
+        AdminState::new(adapter)
     }
 
-    async fn body_string(body: Body) -> String {
-        let bytes = body.collect().await.unwrap().to_bytes();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    }
 
-    // ── Route smoke tests ─────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn admin_status_page_returns_200() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp.into_body()).await;
-        assert!(body.contains("admin_status:"));
-        assert!(body.contains("0.1.0-test"));
-    }
 
-    #[tokio::test]
-    async fn admin_events_page_returns_200() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/events")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp.into_body()).await;
-        assert!(body.contains("admin_events:"));
-    }
 
-    #[tokio::test]
-    async fn admin_update_page_returns_200() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/update")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp.into_body()).await;
-        assert!(body.contains("admin_update:"));
-    }
 
-    #[tokio::test]
-    async fn admin_services_page_returns_200() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/services")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp.into_body()).await;
-        assert!(body.contains("admin_services:"));
-    }
 
-    #[tokio::test]
-    async fn admin_router_does_not_register_health() {
-        // 回归：/health 属于 base router（webui/src/server.rs）；admin router
-        // 若也注册 /health，merge 进完整 router 时 axum 会 panic
-        // 「Overlapping method route. Handler for `GET /health` already exists」
-        // （watchdog 模式下 webui 子进程启动即崩，sebas-2ty 修复）。
-        // 断言 build_admin_router 本身不再携带 /health：请求应 404。
-        let admin_app = build_admin_router(test_state(None));
-        let resp = admin_app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
 
-    // ── Mutation route tests ──────────────────────────────────────────────
 
-    /// POST 一次登录尝试。返回 HTTP 状态码 + 是否被限速（错误文案）。
-    async fn login_attempt(
-        app: &axum::Router,
-        ip: std::net::IpAddr,
-    ) -> (StatusCode, bool) {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/login")
-                    .extension(ConnectInfo(SocketAddr::new(ip, 12345)))
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("password=wrong"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let body = body_string(resp.into_body()).await;
-        let rate_limited = body.contains("Too many login attempts");
-        (status, rate_limited)
-    }
 
-    #[tokio::test]
-    async fn login_rate_limit_is_per_ip() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let ip_a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
-        let ip_b: std::net::IpAddr = "10.0.0.2".parse().unwrap();
-
-        // 同一 IP 连续失败多次 → 触发限速。
-        let mut blocked_a = false;
-        for _ in 0..20 {
-            let (_s, limited) = login_attempt(&app, ip_a).await;
-            if limited {
-                blocked_a = true;
-                break;
-            }
-        }
-        assert!(blocked_a, "IP A 连续失败后应被限速");
-
-        // 不同 IP 不受影响。
-        let (_s, limited_b) = login_attempt(&app, ip_b).await;
-        assert!(
-            !limited_b,
-            "IP B 不应被 IP A 的失败影响（per-IP 限速）"
-        );
-    }
-
-    #[tokio::test]
-    async fn mutation_route_accepts_post() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/update")
-                    .header("origin", "http://127.0.0.1:9797")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp.into_body()).await;
-        assert!(body.contains("accepted"));
-        assert!(body.contains("op_update"));
-    }
-
-    #[tokio::test]
-    async fn mutation_route_rejects_get() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/admin/update")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        // GET /admin/update goes to the GET handler, not the mutation
-        // The mutation (POST-only) at /admin/update is reached via POST
-        // GET should return the update page, not 405
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn mutation_route_without_valid_origin_gets_403() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/update")
-                    .header("origin", "http://evil.com")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn mutation_without_origin_is_allowed() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/update")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn mutation_with_localhost_origin_is_allowed() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/update")
-                    .header("origin", "http://localhost:9797")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
 
     // ── Adapter contract tests ────────────────────────────────────────────
 
@@ -1195,12 +845,12 @@ mod tests {
     #[tokio::test]
     async fn service_enable_route_accepts_post() {
         let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
+        let app = build_api_admin_router(test_state(adapter));
         let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/admin/services/core/enable")
+                    .uri("/api/admin/services/core/enable")
                     .header("origin", "http://127.0.0.1:9797")
                     .body(Body::empty())
                     .unwrap(),
@@ -1213,12 +863,12 @@ mod tests {
     #[tokio::test]
     async fn service_disable_route_accepts_post() {
         let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
-        let app = build_admin_router(test_state(adapter));
+        let app = build_api_admin_router(test_state(adapter));
         let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/admin/services/gateway/disable")
+                    .uri("/api/admin/services/gateway/disable")
                     .header("origin", "http://127.0.0.1:9797")
                     .body(Body::empty())
                     .unwrap(),
@@ -1230,60 +880,8 @@ mod tests {
 
     // ── No-adapter tests ───────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn no_adapter_still_renders_pages() {
-        let app = build_admin_router(test_state(None));
-        for path in &[
-            "/admin/status",
-            "/admin/events",
-            "/admin/update",
-            "/admin/services",
-        ] {
-            let resp = app
-                .clone()
-                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "path {path} must return 200");
-        }
-    }
 
-    #[tokio::test]
-    async fn no_adapter_mutation_returns_503() {
-        let app = build_admin_router(test_state(None));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/update")
-                    .header("origin", "http://127.0.0.1:9797")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = body_string(resp.into_body()).await;
-        assert!(body.contains("control plane not connected"));
-    }
 
-    // ── Security middleware tests ──────────────────────────────────────────
-
-    #[tokio::test]
-    async fn post_without_mutation_path_is_not_affected() {
-        // Non-mutation routes should still work with GET
-        let app = build_admin_router(test_state(None));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
 
     #[test]
     fn is_loopback_origin_accepts_localhost() {
@@ -1294,5 +892,271 @@ mod tests {
         assert!(!is_loopback_origin("http://evil.com"));
         assert!(!is_loopback_origin("https://localhost:9797"));
         assert!(!is_loopback_origin(""));
+    }
+
+    // ── JSON API tests (`/api/admin/*`) ───────────────────────────────────
+
+    use serde_json::Value;
+
+    async fn api_json(app: Router, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .extension(ConnectInfo(SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)));
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = match body {
+            Some(b) => builder.body(Body::from(b.to_string())).unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("non-JSON from {uri} [{status}]: {e}"));
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn api_admin_status_reports_adapter_presence() {
+        // With adapter: adapter_ok true, data present.
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let (status, v) = api_json(app, "GET", "/api/admin/status", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["adapter_ok"], true);
+        assert_eq!(v["status"]["version"], "0.1.0-test");
+
+        // Without adapter: honest degradation, adapter_ok false.
+        let app = build_api_admin_router(test_state(None));
+        let (status, v) = api_json(app, "GET", "/api/admin/status", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["adapter_ok"], false);
+    }
+
+    #[tokio::test]
+    async fn api_admin_events_and_services_report_adapter_presence() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let (status, v) = api_json(app, "GET", "/api/admin/events", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["adapter_ok"], true);
+        assert_eq!(v["events"].as_array().unwrap().len(), 2);
+
+        let app = build_api_admin_router(test_state(None));
+        let (status, v) = api_json(app, "GET", "/api/admin/events", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["adapter_ok"], false);
+        assert_eq!(v["events"].as_array().unwrap().len(), 0);
+
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let (status, v) = api_json(app, "GET", "/api/admin/services", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["services"][0]["name"], "webui");
+    }
+
+    #[tokio::test]
+    async fn api_admin_mutation_proxies_and_reports_missing_adapter() {
+        // With adapter: mutation accepted (POST with loopback origin).
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let (status, v) = api_json(
+            app,
+            "POST",
+            "/api/admin/restart",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {v}");
+        assert_eq!(v["operation_id"], "op_restart");
+
+        // Without adapter: 503 with the error envelope.
+        let app = build_api_admin_router(test_state(None));
+        let (status, v) = api_json(app, "POST", "/api/admin/update", Some("{}")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(v["error"].as_str().unwrap().contains("control plane not connected"));
+    }
+
+    #[tokio::test]
+    async fn api_admin_mutations_reject_get_with_405() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        // /api/admin/update is registered POST-only; GET is 405.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/admin/update")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn api_admin_foreign_origin_rejected() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/restart")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// State with a password configured, bypassing env-var races.
+    fn password_state() -> AdminState {
+        let mut st = test_state(None);
+        st.password = Some(Arc::from("sekrit"));
+        st
+    }
+
+    #[tokio::test]
+    async fn api_admin_login_logout_round_trip() {
+        let state = password_state();
+        let app = build_api_admin_router(state.clone());
+
+        // Unauthenticated read → 401 with JSON error.
+        let (status, v) = api_json(app.clone(), "GET", "/api/admin/status", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(v["error"].as_str().is_some());
+
+        // Wrong password → 403.
+        let (status, _) = api_json(
+            app.clone(),
+            "POST",
+            "/api/admin/login",
+            Some(r#"{"password": "wrong"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Correct password → 200 + cookie (HttpOnly, Path=/).
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/login")
+            .extension(ConnectInfo(SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password": "sekrit"}"#.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert!(cookie.starts_with("sebas_admin_session="), "cookie: {cookie}");
+        assert!(cookie.contains("HttpOnly"), "cookie: {cookie}");
+        assert!(cookie.contains("Path=/"), "cookie must cover /api/admin: {cookie}");
+        let session_value = cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Authenticated read succeeds.
+        let (status, _) = api_json_with_cookie(app.clone(), "GET", "/api/admin/status", &session_value).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Logout clears the session.
+        let (status, _) = api_json_with_cookie(app.clone(), "POST", "/api/admin/logout", &session_value).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // After logout the same cookie is invalid again.
+        let (status, v) = api_json_with_cookie(app, "GET", "/api/admin/status", &session_value).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(v["error"].as_str().is_some());
+    }
+
+    async fn api_json_with_cookie(
+        app: Router,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+    ) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .extension(ConnectInfo(SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)))
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("non-JSON from {uri} [{status}]: {e}"));
+        (status, v)
+    }
+
+    /// POST 一次 JSON 登录尝试，模拟指定来源 IP。返回状态码 + 是否被限速。
+    async fn api_login_attempt(
+        app: &axum::Router,
+        ip: std::net::IpAddr,
+    ) -> (StatusCode, bool) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/login")
+            .extension(ConnectInfo(SocketAddr::new(ip, 12345)))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password": "nope"}"#.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let limited = status == StatusCode::TOO_MANY_REQUESTS;
+        (status, limited)
+    }
+
+    #[tokio::test]
+    async fn api_admin_login_rate_limit_still_enforced() {
+        let state = password_state();
+        let app = build_api_admin_router(state);
+        let ip: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        for _ in 0..5 {
+            let (status, _limited) = api_login_attempt(&app, ip).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        // The 6th attempt inside the window is rejected by the limiter.
+        let (status, limited) = api_login_attempt(&app, ip).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(limited);
+    }
+
+    #[tokio::test]
+    async fn api_admin_login_rate_limit_is_per_ip() {
+        let state = password_state();
+        let app = build_api_admin_router(state);
+        let ip_a: std::net::IpAddr = "10.0.1.1".parse().unwrap();
+        let ip_b: std::net::IpAddr = "10.0.1.2".parse().unwrap();
+
+        // IP A 连续失败 → 触发限速。
+        let mut blocked_a = false;
+        for _ in 0..8 {
+            let (_status, limited) = api_login_attempt(&app, ip_a).await;
+            if limited {
+                blocked_a = true;
+                break;
+            }
+        }
+        assert!(blocked_a, "IP A 连续失败后应被限速");
+
+        // 不同 IP 不受影响：第一次尝试是普通 403，而非 429。
+        let (status, limited_b) = api_login_attempt(&app, ip_b).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!limited_b, "IP B 不应被 IP A 的失败影响（per-IP 限速）");
     }
 }

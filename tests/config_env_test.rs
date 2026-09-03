@@ -39,7 +39,13 @@ level = "debug"
     assert_eq!(cfg2.feishu.app_id, "cli_env");
     assert_eq!(cfg2.feishu.app_secret, "sec_env");
 
-    // 变量移除后，缺失必填字段重新报错（确认测试间无残留污染）。
-    let r3 = Config::parse("[feishu]\n");
-    assert!(r3.is_err());
+    // 变量移除后，`[feishu]` 空表 = 双双留空 = 不接入飞书（sebas-2ty 起
+    // feishu 可选），解析应成功且 app_id 为空（确认测试间无残留污染）。
+    let r3 = Config::parse("[feishu]\n").expect("feishu 可选：双空合法");
+    assert_eq!(r3.feishu.app_id, "");
+    assert_eq!(r3.feishu.app_secret, "");
+
+    // 半配置（只填其一）仍报错。
+    let r4 = Config::parse("[feishu]\napp_id = \"only_id\"\n");
+    assert!(r4.is_err());
 }

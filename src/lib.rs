@@ -8,6 +8,7 @@
 pub const CORE_SUBCOMMAND: &str = "run";
 
 pub mod config;
+pub mod agent_backend;
 pub mod core_channel;
 mod dispatch;
 pub mod error;
@@ -26,6 +27,5 @@ pub mod spawn_env;
 pub mod update;
 pub mod upgrade;
 pub mod watchdog;
-pub mod webui_backend;
 pub mod webui_cmd;
 mod ws_loop;

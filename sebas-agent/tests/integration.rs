@@ -391,7 +391,14 @@ async fn event_vocabulary_over_full_turn() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["tool_start", "tool_end", "text_delta", "finished"]
+        vec![
+            "tool_start",
+            "tool_end",
+            "tool_finish",
+            "text_delta",
+            "session_summary",
+            "finished",
+        ]
     );
     // serde 形状与 AcpEvent 兼容（type tag + snake_case + 同名字段）
     let v = serde_json::to_value(&evs[0]).unwrap();

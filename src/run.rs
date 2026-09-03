@@ -114,6 +114,7 @@ pub async fn run(
         cfg.acp.claude.startup_timeout_secs,
     )));
     let provider_forms = crate::provider::build_form(&raw_config);
+    let webui_card_cfg = merged_card_cfg.clone();
     let (router, mut out_rx) = RouterHandle::new_with_provider_form(
         map,
         merged_card_cfg,
@@ -264,13 +265,24 @@ pub async fn run(
         // The core IS this process: serve the dashboard over the in-process
         // session backend (no SessionManager — spawn/close dispatch through
         // the router's outbound pump).
-        let backend = crate::webui_backend::InProcessSessionBackend::new(router.clone());
+        // 双执行后端：Claude Code 桥（acp）+ 原生内核（native），会话行创建
+        // 时按 backend 提示选择（openspec/changes/sebas-agent-next 5.1/5.2）。
+        let native = crate::agent_backend::NativeAgentBackend::from_env(
+            std::time::Duration::from_secs(cfg.acp.claude.startup_timeout_secs.max(1)),
+        );
+        let backend: std::sync::Arc<dyn sebas_webui::SessionBackend> =
+            crate::agent_backend::DualSessionBackend::new(
+                std::sync::Arc::new(sebas_webui::session_backend::InProcessBackend::new(
+                    router.clone(),
+                )),
+                native,
+            );
         let gateway_info = build_gateway_info(gateway_cfg.as_ref());
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
         tokio::spawn(async move {
-            sebas_webui::run(backend, gateway_info, listener).await;
+            sebas_webui::run(backend, gateway_info, webui_card_cfg, listener).await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }

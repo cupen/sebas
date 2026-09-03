@@ -35,6 +35,21 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// 多模态内容块（design N6）：与 Anthropic wire 对齐
+    /// `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`。
+    Image {
+        source: ImageSource,
+    },
+}
+
+/// 图片数据源（base64）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        media_type: String,
+        data: String,
+    },
 }
 
 /// 一条消息。
@@ -126,12 +141,17 @@ impl ToolOutput {
     }
 }
 
-/// 每 turn 的三重预算（C8）：模型调用次数、工具执行次数、墙钟时限。
+/// 每 turn 的预算（C8）：模型调用次数、工具执行次数、墙钟时限，
+/// 以及 Assembly 维度（Phase 2，design N4）：消息条数与 token 估算。
 #[derive(Debug, Clone)]
 pub struct BudgetConfig {
     pub max_model_calls: u32,
     pub max_tool_calls: u32,
     pub turn_timeout: Duration,
+    /// 单次模型调用允许携带的最大消息条数（超过 → budget 收尾，不是错误）。
+    pub max_messages: usize,
+    /// 单次模型调用允许携带的估算 token 上限（chars/4 + 块常数）。
+    pub est_token_budget: usize,
 }
 
 impl Default for BudgetConfig {
@@ -140,8 +160,26 @@ impl Default for BudgetConfig {
             max_model_calls: 20,
             max_tool_calls: 50,
             turn_timeout: Duration::from_secs(10 * 60),
+            max_messages: 80,
+            est_token_budget: 100_000,
         }
     }
+}
+
+/// 工具结果入库改写上限（design N4）：首段保留 + 截断标记。
+pub const RESULT_REWRITE_CAP: usize = 8_000;
+
+/// 入库改写（task 3.1）：确定性——首段 `RESULT_REWRITE_CAP` 字符 + 显式标记。
+/// `ToolEnd` 事件仍带改写前（cap 后）版本；只有回填模型的 tool_result 走改写。
+pub fn rewrite_for_history(output: &str) -> String {
+    let total = output.chars().count();
+    if total <= RESULT_REWRITE_CAP {
+        return output.to_string();
+    }
+    let head: String = output.chars().take(RESULT_REWRITE_CAP).collect();
+    format!(
+        "{head}\n[truncated: {rest} more characters omitted — use read with offset/limit or a narrower query for detail]"
+    , rest = total - RESULT_REWRITE_CAP)
 }
 
 /// 构造请求消息时剔除 thinking 块（多轮回传需要 signature，1a 不启用扩展思考）。
@@ -245,5 +283,44 @@ mod tests {
         let stripped = strip_thinking(&blocks);
         assert_eq!(stripped.len(), 1);
         assert!(matches!(&stripped[0], ContentBlock::Text { .. }));
+    }
+
+    #[test]
+    fn strip_thinking_keeps_image_blocks_for_multimodal() {
+        // task 4.1（design N6）：strip_thinking 只剔 thinking，多模态块
+        // 原样保留进请求组装（否则图像在多轮回传中丢失）。
+        let blocks = vec![
+            ContentBlock::Thinking {
+                thinking: "hmm".into(),
+            },
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                },
+            },
+        ];
+        let stripped = strip_thinking(&blocks);
+        assert_eq!(stripped.len(), 1);
+        assert!(
+            matches!(&stripped[0], ContentBlock::Image { .. }),
+            "image blocks must survive strip_thinking"
+        );
+    }
+
+    #[test]
+    fn image_block_round_trips_on_anthropic_wire() {
+        let block = ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/jpeg".into(),
+                data: "aGVsbG8gd29ybGQ=".into(),
+            },
+        };
+        let j = serde_json::to_value(&block).unwrap();
+        assert_eq!(j["type"], "image");
+        assert_eq!(j["source"]["type"], "base64");
+        assert_eq!(j["source"]["media_type"], "image/jpeg");
+        let back: ContentBlock = serde_json::from_value(j).unwrap();
+        assert_eq!(back, block);
     }
 }

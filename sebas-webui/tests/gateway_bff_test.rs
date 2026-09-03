@@ -3,17 +3,21 @@
 //! - mutation 路由：GET → 405；非 loopback origin → 403；无 secret → 503；
 //!   有 secret 时转发 admin API（create → 列表出现 → delete → 消失）。
 
+use sebas_feishu::cards::CardConfig;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use sebas_webui::backend::FakeBackend;
+use sebas_router::router::RouterHandle;
+use sebas_router::state::SessionMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 use sebas_webui::models::GatewayInfo;
 use sebas_webui::build_router;
 
 async fn app_with(gateway_listen: Option<String>) -> axum::Router {
-    let backend = Arc::new(FakeBackend::connected());
+    let (router, _rx) = RouterHandle::new(SessionMap::new());
+    let backend: Arc<dyn sebas_webui::SessionBackend> =
+        Arc::new(sebas_webui::session_backend::InProcessBackend::new(router));
     let gw = GatewayInfo {
         listen: gateway_listen,
         provider_count: 1,
@@ -25,7 +29,7 @@ async fn app_with(gateway_listen: Option<String>) -> axum::Router {
             base_url_openai: None,
         }],
     };
-    build_router(backend, gw)
+    build_router(backend, gw, CardConfig::default())
 }
 
 async fn body_string(body: Body) -> String {

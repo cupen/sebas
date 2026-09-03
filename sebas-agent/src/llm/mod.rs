@@ -4,9 +4,36 @@
 //! 流式端点——直连 provider（默认）或经可选 gateway；测试实现 [`fake::FakeLlmClient`]。
 
 pub mod anthropic;
+
+pub use anthropic::AnthropicMessagesClient;
 pub mod fake;
 
 use crate::message::{ContentBlock, Message};
+
+/// 协议咨询常量（task 4.3，design N6 的「LlmConsult 常量组」）：注册面与
+/// 预算收尾的硬边界。常量必须被请求组装与预算逻辑真正消费，不做摆设。
+pub mod consult {
+    use crate::message::BudgetConfig;
+
+    /// Anthropic Messages `tools` 数组的声明上限（API 硬约束）。请求组装边界
+    /// （`loop_::TurnEngine`）据此对 schema 列表做确定性截断。
+    pub const MAX_TOOL_DECLARATIONS: usize = 128;
+
+    /// 上下文窗口逼近此比例即干净收尾（budget-exhausted 语义，不是错误）。
+    /// 现有 Assembly 预算（`BudgetConfig::est_token_budget` 到限即 finish）是
+    /// 该语义的绝对值形态；[`budget_for_context_window`] 按本比率从窗口推导。
+    pub const CONTEXT_FINISH_RATIO: f64 = 0.9;
+
+    /// 按模型上下文窗口推导 Assembly 预算（design N6）：`est_token_budget =
+    /// 窗口 × [`CONTEXT_FINISH_RATIO`]`（向下取整，略保守），其余维度取默认。
+    /// 默认 [`BudgetConfig`] 不受影响（绝对值 100k，语义出处见此）。
+    pub fn budget_for_context_window(window_tokens: usize) -> BudgetConfig {
+        BudgetConfig {
+            est_token_budget: (window_tokens as f64 * CONTEXT_FINISH_RATIO) as usize,
+            ..BudgetConfig::default()
+        }
+    }
+}
 
 /// 流式增量事件：从 SSE 流解析出来就立刻回调（checklist C2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,4 +117,26 @@ pub trait LlmClient: Send + Sync {
         req: &LlmRequest,
         sink: &(dyn Fn(StreamEvent) + Send + Sync),
     ) -> Result<LlmTurn, LlmError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::BudgetConfig;
+
+    /// task 4.3 验证：CONTEXT_FINISH_RATIO 真正参与预算推导——
+    /// 窗口 × 0.9 即 finish 预算，其余预算维度保持默认。
+    #[test]
+    fn budget_for_context_window_derives_ratio_budget() {
+        let b = consult::budget_for_context_window(200_000);
+        assert_eq!(b.est_token_budget, 180_000);
+        let d = BudgetConfig::default();
+        assert_eq!(b.max_messages, d.max_messages);
+        assert_eq!(b.max_model_calls, d.max_model_calls);
+        assert_eq!(b.max_tool_calls, d.max_tool_calls);
+        assert_eq!(b.turn_timeout, d.turn_timeout);
+        // 常量本身即语义来源：90% 比率，工具声明上限 128
+        assert_eq!(consult::CONTEXT_FINISH_RATIO, 0.9);
+        assert_eq!(consult::MAX_TOOL_DECLARATIONS, 128);
+    }
 }

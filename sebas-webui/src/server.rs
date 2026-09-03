@@ -3,47 +3,52 @@
 use crate::admin::{self, AdminAdapter, AdminState};
 use crate::api;
 use crate::assets;
-use crate::backend::SessionBackend;
 use crate::models::GatewayInfo;
 use crate::routes;
+use crate::session_backend::SessionBackend;
 use axum::Router;
 use axum::routing::{get, post};
 use axum::serve;
+use sebas_feishu::cards::CardConfig;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
 
-/// Shared state for the WebUI server.
+/// Shared state for the WebUI server. All session data flows through the
+/// backend seam — the webui crate never touches `RouterHandle` (the
+/// in-process case wraps it inside `InProcessBackend`; the standalone case
+/// speaks the core session channel over a Unix socket).
 #[derive(Clone)]
 pub struct WebUiState {
-    /// The session source — in-process over the router (`run --webui`) or a
-    /// socket client (standalone `sebas webui`). The crate never knows which.
     pub backend: Arc<dyn SessionBackend>,
     pub gateway: GatewayInfo,
     pub started_at: Instant,
-    /// The WebUI-side focused session (encoded key) — a display pointer only,
-    /// set by detail reads and switch, never affecting message routing.
-    /// Session rows leave the backend with `is_active: false`; the API layer
-    /// applies this pointer.
-    pub focus: Arc<RwLock<Option<String>>>,
+    /// Static snapshot of the card config for the settings page. The session
+    /// channel does not transport settings; the caller loads it (from the
+    /// local settings.json) at startup.
+    pub card_config: CardConfig,
 }
 
 /// Build the axum Router with all WebUI routes.
-pub fn build_router(backend: Arc<dyn SessionBackend>, gateway: GatewayInfo) -> Router {
-    build_router_with_admin_adapter(backend, gateway, None)
+pub fn build_router(
+    backend: Arc<dyn SessionBackend>,
+    gateway: GatewayInfo,
+    card_config: CardConfig,
+) -> Router {
+    build_router_with_admin_adapter(backend, gateway, card_config, None)
 }
 
 /// Build the axum Router with optional watchdog admin adapter.
 pub fn build_router_with_admin_adapter(
     backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) -> Router {
     let state = WebUiState {
         backend,
         gateway,
         started_at: Instant::now(),
-        focus: Arc::new(RwLock::new(None)),
+        card_config,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -60,9 +65,17 @@ pub fn build_router_with_admin_adapter(
         .route("/api/sessions/{key}/close", post(api::close_session))
         .route("/api/sessions/{key}/switch", post(api::switch_session))
         .route("/api/summary", get(api::summary))
+        .route(
+            "/api/permissions/{request_id}/answer",
+            post(api::answer_permission),
+        )
         .route("/api/settings", get(api::settings))
         .route("/api/gateway", get(api::gateway))
         .route("/api/about", get(api::about))
+        .route("/api/projects", get(api::projects_list).post(api::projects_add))
+        .route("/api/projects/reorder", post(api::projects_reorder))
+        .route("/api/projects/{path}/remove", post(api::projects_remove))
+        .route("/api/projects/{path}/branch", get(api::projects_branch))
         .route("/ws", get(api::ws_handler))
         .with_state(state.clone());
 
@@ -107,19 +120,21 @@ pub fn build_router_with_admin_adapter(
 pub async fn run(
     backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     listener: tokio::net::TcpListener,
 ) {
-    run_with_admin_adapter(backend, gateway, listener, None).await;
+    run_with_admin_adapter(backend, gateway, card_config, listener, None).await;
 }
 
 /// Run the WebUI server with an optional watchdog admin adapter.
 pub async fn run_with_admin_adapter(
     backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,
+    card_config: CardConfig,
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) {
-    let app = build_router_with_admin_adapter(backend, gateway, admin_adapter);
+    let app = build_router_with_admin_adapter(backend, gateway, card_config, admin_adapter);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
     if let Err(e) = serve(

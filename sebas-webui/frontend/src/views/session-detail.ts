@@ -7,14 +7,14 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { api, ApiError, type SessionDetail as Detail } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
-import { renderMarkdown } from '../components/markdown.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '../components/status-badge.js'
+import '../components/review-card.js'
+import './transcript-view.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
@@ -223,6 +223,13 @@ export class SebasSessionDetail extends LitElement {
       .composer wa-textarea {
         flex: 1;
       }
+      /* 8.2: the native textarea lives in wa-textarea's shadow root, so the
+         shared focus-visible rule can't reach it — ring the host instead. */
+      .composer wa-textarea:focus-within {
+        outline: var(--sebas-focus-ring);
+        outline-offset: 2px;
+        border-radius: var(--sebas-radius-sm);
+      }
       .composer .send-col {
         display: flex;
         flex-direction: column;
@@ -273,17 +280,9 @@ export class SebasSessionDetail extends LitElement {
 
   protected updated(changed: Map<string, unknown>): void {
     super.updated(changed)
-    // Live streaming: keep the transcript pinned to the newest output, but
-    // only while the reader is already near the bottom (never fight a
-    // deliberate scroll-up).
-    if (changed.has('data')) this.stickToBottom()
-  }
-
-  private stickToBottom(): void {
-    const el = this.renderRoot.querySelector<HTMLElement>('.transcript')
-    if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160
-    if (nearBottom) el.scrollTop = el.scrollHeight
+    // Live streaming scroll is owned by `<sebas-transcript-view>` now —
+    // its seen-boundary seam knows whether the reader is currently
+    // looking at the bottom and only sticks when they are.
   }
 
   private refetch = (): void => {
@@ -387,10 +386,13 @@ export class SebasSessionDetail extends LitElement {
             </blockquote>`
           : nothing}
 
+        <!-- Gated tool calls for this session: a card appears the moment
+             the kernel asks for permission and disappears once answered. -->
+        <sebas-review-cards .sessionKey=${d.encoded_key}></sebas-review-cards>
+
         <section
           class="panel transcript body"
           aria-label="Session transcript"
-          role="log"
         >
           ${d.body.length === 0
             ? html`
@@ -400,14 +402,10 @@ export class SebasSessionDetail extends LitElement {
                   <p class="hint">The agent has not produced output — say hello below.</p>
                 </div>
               `
-            : d.body.map(
-                (el) =>
-                  el.element_type === 'markdown'
-                    ? html`<div class="entry">${unsafeHTML(renderMarkdown(el.content))}</div>`
-                    : el.element_type === 'collapsible' || el.element_type === 'div'
-                      ? html`<div class="entry">${unsafeHTML(renderMarkdown(el.content))}</div>`
-                      : nothing,
-              )}
+            : html`<sebas-transcript-view
+                .entries=${d.body}
+                sessionKey=${d.encoded_key}
+              ></sebas-transcript-view>`}
         </section>
 
         <div class="composer">

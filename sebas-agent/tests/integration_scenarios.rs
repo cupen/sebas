@@ -297,6 +297,10 @@ async fn two_sessions_isolated_events_and_workdirs() {
             | AgentEvent::ToolStart { session_id, .. }
             | AgentEvent::ToolProgress { session_id, .. }
             | AgentEvent::ToolEnd { session_id, .. }
+            | AgentEvent::PermissionRequest { session_id, .. }
+            | AgentEvent::ToolPolicy { session_id, .. }
+            | AgentEvent::ToolFinish { session_id, .. }
+            | AgentEvent::SessionSummary { session_id, .. }
             | AgentEvent::Finished { session_id }
             | AgentEvent::Error { session_id, .. } => session_id == key,
         }));

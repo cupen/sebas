@@ -1,122 +1,170 @@
-//! Session lifecycle events and snapshots broadcast by the router.
+//! Session event stream + snapshot shapes for out-of-process observers
+//! (openspec/changes/add-core-session-channel — tasks 1.1/1.3).
 //!
-//! The router is the single authority on session existence and state. Every
-//! mapping mutation it performs publishes a [`SessionEvent`] on a bounded
-//! broadcast channel ([`RouterHandle::session_events`]), so detached
-//! frontends — the WebUI today, any channel client tomorrow — can converge
-//! on the router's own view without polling. [`SessionSnapshot`] carries the
-//! fields a session row needs (identity, state, phase, recency, project
-//! directory); derived presentation (encoded keys, status words, relative
-//! times) stays with the consumer.
+//! `SessionInfo` is the externally visible view of one session: the mapping
+//! state joined with the card-derived fields the WebUI renders. `SessionEvent`
+//! is published on a bounded broadcast in `RouterHandle` for every mapping
+//! mutation (create / status-or-phase change / removal). `TurnEntry` is one
+//! block of a session's rendered transcript, addressed by a monotonic
+//! position so channel clients can fetch only what they have not seen.
+//!
+//! These types are serde-native by design: they cross the core session
+//! channel as newline-delimited JSON. (`CardElement` deliberately is not
+//! `Serialize` — the transcript carries rendered view shapes instead.)
 
-use crate::state::MappingState;
-use sebas_feishu::events::SessionKey;
 use serde::{Deserialize, Serialize};
 
-/// Coarse lifecycle state of a session, mirroring `MappingState` without its
-/// internal queues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionState {
-    /// Placeholder inserted while a child process is being spawned.
-    Spawning,
-    /// A live child process exists (`session_id` is routable).
-    Active,
-    /// Restored from the state file; the id is known but no child is alive.
-    Dormant,
+/// One session as the outside world sees it: mapping state joined with the
+/// card-derived fields the WebUI renders.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionInfo {
+    pub chat_id: String,
+    pub thread_id: Option<String>,
+    /// Live routing id — `None` for Spawning placeholders.
+    pub session_id: Option<String>,
+    /// `"spawning"` | `"active"` | `"dormant"`.
+    pub status: String,
+    /// Card phase emoji (`SEED`/`OnIt`/`DONE`/`CrossMark`) when a card exists.
+    pub phase: Option<String>,
+    /// Current turn's user prompt, when a card exists.
+    pub user_prompt: Option<String>,
+    pub last_active_unix: i64,
+    /// Working directory for project sessions (WebUI-spawned).
+    pub project_dir: Option<String>,
 }
 
-impl From<&MappingState> for SessionState {
-    fn from(state: &MappingState) -> Self {
-        match state {
-            MappingState::Spawning { .. } => Self::Spawning,
-            MappingState::Active { .. } => Self::Active,
-            MappingState::Dormant { .. } => Self::Dormant,
+/// Session change event published on the router's broadcast channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEvent {
+    /// A mapping was inserted (Spawning placeholder or restored Dormant).
+    Created { session: SessionInfo },
+    /// Status or phase changed (Spawning→Active, Dormant→Spawning resume,
+    /// project_dir set, card emoji transition).
+    Updated { session: SessionInfo },
+    /// The mapping was removed (web close, terminal error, failed spawn).
+    Removed {
+        chat_id: String,
+        thread_id: Option<String>,
+    },
+    /// Emitted by channel clients (never by the router itself) after a
+    /// reconnect: subscribers should re-snapshot because the client resumed
+    /// from a fresh snapshot and the view must converge. See the channel
+    /// spec's "reconnect resumes from a snapshot" scenario.
+    Resync,
+}
+
+/// One rendered block of a session's transcript, addressed by a monotonic
+/// position. `kind` distinguishes the user's prompt from agent/tool output;
+/// `element_type` tells the client how to render `content`
+/// (`"markdown"` | `"thinking"`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TurnEntry {
+    /// 0-based monotonic position within the session's transcript.
+    pub position: u64,
+    /// `"prompt"` (user turn input) or `"content"` (agent/tool output).
+    pub kind: String,
+    /// `"markdown"` | `"thinking"`.
+    pub element_type: String,
+    pub content: String,
+    /// Unix seconds when this entry was appended. Lets the client render a
+    /// flush-left timestamp next to each block (spec 4.1) and lets the
+    /// client anchor the seen-boundary seam to a stable element identity
+    /// that survives in-place card refresh (spec 4.4 — older refreshes
+    /// don't bump `position`, so a seam anchored by `position` alone would
+    /// drift onto a different element; the timestamp is the canonical
+    /// identity that doesn't change once written).
+    pub created_at_unix: u64,
+}
+
+impl TurnEntry {
+    pub fn prompt(position: u64, content: impl Into<String>) -> Self {
+        Self::new(position, "prompt", "markdown", content)
+    }
+
+    pub fn markdown(position: u64, content: impl Into<String>) -> Self {
+        Self::new(position, "content", "markdown", content)
+    }
+
+    pub fn thinking(position: u64, content: impl Into<String>) -> Self {
+        Self::new(position, "content", "thinking", content)
+    }
+
+    fn new(position: u64, kind: &str, element_type: &str, content: impl Into<String>) -> Self {
+        Self {
+            position,
+            kind: kind.into(),
+            element_type: element_type.into(),
+            content: content.into(),
+            // The router stamps the wall-clock at push time so every
+            // entry carries the moment it was appended, not the moment
+            // the helper was called.
+            created_at_unix: now_unix_secs(),
         }
     }
 }
 
-/// Everything a session row needs to know about one session. `phase` is the
-/// card-state emoji (`""` before the first ACP event) that drives the
-/// derived status (working/done/failed) on top of `state`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSnapshot {
-    pub key: SessionKey,
-    pub session_id: Option<String>,
-    pub state: SessionState,
-    pub phase: String,
-    pub last_active_unix: i64,
-    pub project_dir: Option<String>,
-}
-
-/// A session lifecycle event, published on every mapping mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionEvent {
-    /// A mapping came into existence (fresh key, or a key replaced by `/new`).
-    Created { session: SessionSnapshot },
-    /// An existing mapping changed state, phase, recency, or project dir.
-    Updated { session: SessionSnapshot },
-    /// The mapping (and its queued turns) is gone.
-    Removed { key: SessionKey },
+/// Wall-clock seconds since the UNIX epoch. Wrapped so tests can override
+/// it; production just reads the OS clock once per call.
+#[inline]
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionEvent, SessionSnapshot, SessionState};
+    use super::*;
 
-    fn snapshot() -> SessionSnapshot {
-        SessionSnapshot {
-            key: sebas_feishu::events::SessionKey {
-                chat_id: "oc_chat".into(),
-                thread_id: Some("om_thread".into()),
-            },
-            session_id: Some("ses_1".into()),
-            state: SessionState::Active,
-            phase: "OnIt".into(),
-            last_active_unix: 1_700_000_000,
-            project_dir: Some("/tmp/proj".into()),
-        }
-    }
-
-    /// Each variant must survive a serde round-trip unchanged — channel
-    /// clients re-hydrate these frames verbatim.
     #[test]
-    fn every_variant_round_trips_through_serde() {
+    fn session_event_round_trips_through_serde() {
+        // 1.1 验收：每个变体经 serde 往返后与原值一致。
+        let info = SessionInfo {
+            chat_id: "oc_1".into(),
+            thread_id: Some("om_t".into()),
+            session_id: Some("s1".into()),
+            status: "active".into(),
+            phase: Some("DONE".into()),
+            user_prompt: Some("hello".into()),
+            last_active_unix: 1234,
+            project_dir: Some("/tmp/p".into()),
+        };
         let cases = vec![
             SessionEvent::Created {
-                session: snapshot(),
+                session: info.clone(),
             },
-            SessionEvent::Updated {
-                session: snapshot(),
-            },
+            SessionEvent::Updated { session: info },
             SessionEvent::Removed {
-                key: sebas_feishu::events::SessionKey {
-                    chat_id: "oc_x".into(),
-                    thread_id: None,
-                },
+                chat_id: "oc_2".into(),
+                thread_id: None,
             },
+            SessionEvent::Resync,
         ];
-        for event in cases {
-            let json = serde_json::to_string(&event).unwrap();
-            let back: SessionEvent = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, event, "round-trip changed {json}");
+        for ev in cases {
+            let json = serde_json::to_string(&ev).expect("serialize");
+            let back: SessionEvent = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, ev, "round-trip mismatch for {json}");
         }
     }
 
-    /// The wire shape is tagged and snake_case — pinned so a protocol change
-    /// is a conscious one.
     #[test]
-    fn wire_shape_is_tagged_snake_case() {
-        let event = SessionEvent::Removed {
-            key: sebas_feishu::events::SessionKey {
-                chat_id: "oc_x".into(),
-                thread_id: Some("t".into()),
-            },
+    fn session_event_uses_type_tag() {
+        // wire 形态带 "type" tag，与 control RPC 的 cmd tag 姿态一致。
+        let ev = SessionEvent::Removed {
+            chat_id: "oc_x".into(),
+            thread_id: None,
         };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "removed");
-        // SessionKey serializes as its "chat\0thread" string form.
-        assert_eq!(value["key"], "oc_x\0t");
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["type"], "removed");
+    }
+
+    #[test]
+    fn turn_entry_round_trips_through_serde() {
+        let e = TurnEntry::prompt(3, "fix the bug");
+        let back: TurnEntry =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
     }
 }

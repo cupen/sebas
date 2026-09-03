@@ -43,6 +43,13 @@ export const viewStyles = css`
     box-shadow: var(--sebas-shadow-1);
     overflow: hidden;
   }
+  /* 8.1: at narrow widths a wide child (the sessions table) must stay
+     reachable — clip only vertically, let the user swipe horizontally. */
+  @media (max-width: 640px) {
+    .panel {
+      overflow-x: auto;
+    }
+  }
   .panel-pad {
     padding: var(--sebas-space-4);
   }
@@ -147,6 +154,14 @@ export const viewStyles = css`
     outline-offset: 2px;
     border-radius: var(--sebas-radius-sm);
   }
+  button:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  [tabindex]:focus-visible {
+    outline: var(--sebas-focus-ring);
+    outline-offset: 2px;
+  }
 
   /* ---- Empty states -------------------------------------------------- */
   .empty {
@@ -241,7 +256,8 @@ export const viewStyles = css`
     background: var(--sebas-status-failed-bg);
     border-color: var(--sebas-status-failed-border);
   }
-  .callout-warn {
+  .callout-warn,
+  .callout-warning {
     color: var(--sebas-status-working);
     background: var(--sebas-status-working-bg);
     border-color: var(--sebas-status-working-border);

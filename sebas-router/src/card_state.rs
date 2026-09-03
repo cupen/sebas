@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 /// Phase token: string IS the Feishu `emoji_type` (e.g. `"Typing"`, `"OnIt"`,
 /// `"DONE"`, `"CrossMark"`) — required because Feishu's reaction API rejects
-//// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. These values
+/// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. These values
 /// surface as reactions on the root card to reflect session state; the card
 /// header title is the topic from the first prompt line
 /// (`sebas_feishu::cards::derive_topic`).

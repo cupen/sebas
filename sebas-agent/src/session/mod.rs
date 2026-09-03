@@ -8,6 +8,7 @@
 use crate::llm::LlmClient;
 use crate::loop_::{TurnEngine, TurnEmit, TurnOutcome};
 use crate::message::{BudgetConfig, Message};
+use crate::policy::{ApprovalAnswer, Approver, PolicyEngine};
 use crate::tools::{ToolCtx, ToolRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -17,9 +18,9 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-/// 会话事件词汇：与 `acp-claude::AcpEvent` 一一对应（零新增变体）。
-/// 刻意不含 `PermissionRequest`——1a 结构性保证不发出权限事件（spec）；
-/// 1b 由宿主 adapter 1:1 映射。serde 形状兼容（`type` tag + snake_case）。
+/// 会话事件词汇：与 `acp-claude::AcpEvent` 一一对应（serde 形状兼容：
+/// `type` tag + snake_case）。Phase 2 在此基础上**启用** `PermissionRequest`
+/// （策略审批面，1a 刻意不发）并新增 `ToolPolicy`（策略结果事件）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -46,6 +47,41 @@ pub enum AgentEvent {
         tool_name: String,
         result: String,
     },
+    /// 策略审批请求（request_id == tool_use_id，permission-flow 关联契约）。
+    /// 消费端（webui 审查卡 / 飞书卡）呈现后经 `SessionHandle::answer_permission`
+    /// 回填决定；无回答者/超时 = fail closed 拒绝。
+    PermissionRequest {
+        session_id: String,
+        request_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+        reason: String,
+    },
+    /// 策略流结果事件：outcome ∈ allowed_once | allowed_session | escalated |
+    /// denied | unavailable。让消费端区分「策略拒绝」与「工具崩溃」。
+    ToolPolicy {
+        session_id: String,
+        request_id: String,
+        tool_name: String,
+        outcome: String,
+    },
+    /// 工具结构化收尾事件（Phase 2，design N6）：`ToolEnd` 的结构化孪生，
+    /// 供 SSE/日志消费结构化字段而无需解析 result 文本。
+    ToolFinish {
+        session_id: String,
+        tool_name: String,
+        ok: bool,
+        truncated: bool,
+        exit_code: Option<i32>,
+    },
+    /// turn 汇总（Phase 2，design N6）：引擎在 turn 收尾时发射（Finished /
+    /// Cancelled / Failed 均发），供宿主记录与展示。
+    SessionSummary {
+        session_id: String,
+        model_calls: u32,
+        tool_calls: u32,
+        turn_ms: u64,
+    },
     Finished {
         session_id: String,
     },
@@ -62,6 +98,11 @@ pub enum AgentEvent {
 enum SessionCmd {
     Prompt(String),
     Cancel,
+    /// 审批决定回填（webui 审查卡 / agent-dev 脚本通道）。
+    PermissionAnswer {
+        request_id: String,
+        answer: ApprovalAnswer,
+    },
 }
 
 /// 会话级配置。`model` 缺省值为占位（OQ3 延后：模型默认值由部署方定）。
@@ -83,10 +124,13 @@ impl Default for SessionConfig {
 }
 
 /// 会话管理器：每会话一个 tokio task（design N4）。
+/// 策略引擎与审批回答者是会话级共享件（None = 不做策略门控，1a 行为）。
 pub struct SessionManager {
     llm: Arc<dyn LlmClient>,
     registry: Arc<ToolRegistry>,
     config: SessionConfig,
+    policy: Option<Arc<PolicyEngine>>,
+    approver: Option<Arc<dyn Approver>>,
 }
 
 impl SessionManager {
@@ -95,7 +139,26 @@ impl SessionManager {
             llm,
             registry: Arc::new(registry),
             config,
+            policy: None,
+            approver: None,
         }
+    }
+
+    /// 挂策略引擎（task 1.1–1.3：所有工具调用先过策略）。
+    pub fn with_policy(mut self, policy: Arc<PolicyEngine>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// 挂审批回答者（webui 审查卡 / agent-dev 脚本应答 / 测试桩）。
+    pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
+        self.approver = Some(approver);
+        self
+    }
+
+    /// 是否挂了审批回答者（宿主据此决定是否复用默认 hub）。
+    pub fn has_approver(&self) -> bool {
+        self.approver.is_some()
     }
 
     /// 创建绑定 `workdir` 的会话（多会话并发，彼此隔离）。
@@ -107,6 +170,8 @@ impl SessionManager {
             llm: self.llm.clone(),
             registry: self.registry.clone(),
             config: self.config.clone(),
+            policy: self.policy.clone(),
+            approver: self.approver.clone(),
             workdir,
             key: key.clone(),
             cmd_rx,
@@ -143,6 +208,18 @@ impl SessionHandle {
         let _ = self.cmd_tx.send(SessionCmd::Cancel).await;
     }
 
+    /// 回填一个权限决定（design N5：`permission_decision` 回 SessionHandle）。
+    /// request_id 来自 `PermissionRequest` 事件；无待决请求时静默丢弃。
+    pub async fn answer_permission(&self, request_id: impl Into<String>, answer: ApprovalAnswer) {
+        let _ = self
+            .cmd_tx
+            .send(SessionCmd::PermissionAnswer {
+                request_id: request_id.into(),
+                answer,
+            })
+            .await;
+    }
+
     /// 订阅事件流（每订阅者独立游标）。
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.evt_tx.subscribe()
@@ -153,6 +230,8 @@ struct SessionTask {
     llm: Arc<dyn LlmClient>,
     registry: Arc<ToolRegistry>,
     config: SessionConfig,
+    policy: Option<Arc<PolicyEngine>>,
+    approver: Option<Arc<dyn Approver>>,
     workdir: PathBuf,
     key: String,
     cmd_rx: mpsc::Receiver<SessionCmd>,
@@ -170,6 +249,13 @@ impl SessionTask {
             let mut text = match cmd {
                 SessionCmd::Prompt(t) => t,
                 SessionCmd::Cancel => continue,
+                SessionCmd::PermissionAnswer { request_id, answer } => {
+                    // 空闲期到达的审批决定：请求已随 turn 结束超时/失效，静默丢弃。
+                    if let Some(a) = &self.approver {
+                        let _ = a.answer(&request_id, answer);
+                    }
+                    continue;
+                }
             };
             loop {
                 let cancel = CancellationToken::new();
@@ -177,6 +263,8 @@ impl SessionTask {
                     workdir: self.workdir.clone(),
                     cancel: cancel.clone(),
                     read_files: read_files.clone(),
+                    policy: self.policy.clone(),
+                    approver: self.approver.clone(),
                 };
                 let system = build_system(&self.workdir);
                 let emit = TurnEmit::new(&self.key, &self.evt_tx);
@@ -201,6 +289,12 @@ impl SessionTask {
                             cmd = self.cmd_rx.recv() => match cmd {
                                 Some(SessionCmd::Cancel) => cancel.cancel(),
                                 Some(SessionCmd::Prompt(t)) => pending.push_back(t),
+                                Some(SessionCmd::PermissionAnswer { request_id, answer }) => {
+                                    // 审批决定回填 → 转交审批人（oneshot 唤醒门控等待）。
+                                    if let Some(a) = &self.approver {
+                                        let _ = a.answer(&request_id, answer);
+                                    }
+                                }
                                 None => cancel.cancel(), // 管理器已丢句柄：收尾当前 turn
                             },
                             out = &mut fut => break out,
@@ -571,11 +665,63 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["tool_start", "tool_end", "text_delta", "finished"]
+            vec!["tool_start", "tool_end", "tool_finish", "text_delta", "session_summary",
+                 "finished"]
         );
         assert!(evs
             .iter()
             .all(|e| serde_json::to_value(e).unwrap()["session_id"] == handle.key));
+    }
+
+    #[tokio::test]
+    async fn permission_answer_round_trip_through_session_handle() {
+        use crate::policy::{ApproverHub, PolicyEngine};
+        use crate::policy::ApprovalAnswer as AA;
+
+        let dir = tempfile::tempdir().unwrap();
+        let llm = FakeLlmClient::scripted(vec![
+            FakeLlmClient::call_tools(vec![(
+                "t1",
+                "bash",
+                serde_json::json!({"command": "rm -rf build"}),
+            )]),
+            FakeLlmClient::say("done"),
+        ]);
+        let manager = SessionManager::new(
+            Arc::new(llm),
+            ToolRegistry::new(Duration::from_secs(10)),
+            SessionConfig::default(),
+        )
+        .with_policy(Arc::new(PolicyEngine::new(Default::default())))
+        .with_approver(ApproverHub::new());
+        let handle = manager.create_session(dir.path().to_path_buf());
+        let mut rx = handle.subscribe();
+        handle.prompt("go").await;
+
+        // 收到审批请求 → 经 SessionHandle 回填 AllowOnce
+        //（循环内唯一 break 路径已赋值，无需初值——clippy::unused_assignment）
+        let request_id: String;
+        loop {
+            match rx.recv().await {
+                Ok(AgentEvent::PermissionRequest { request_id: id, .. }) => {
+                    request_id = id;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("event channel closed: {e}"),
+            }
+        }
+        handle.answer_permission(&request_id, AA::AllowOnce).await;
+
+        let evs = tokio::time::timeout(Duration::from_secs(30), wait_terminal(&mut rx))
+            .await
+            .unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(e, AgentEvent::ToolPolicy { outcome, .. } if outcome == "allowed_once")),
+            "allow-once decision must round-trip: {evs:?}"
+        );
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::Finished { .. })));
     }
 
     #[tokio::test]

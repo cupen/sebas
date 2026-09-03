@@ -1,27 +1,108 @@
-//! Route handlers: key/element/time helpers shared by the JSON API and the
-//! backend implementations, plus the gateway BFF proxies.
+//! Route handlers: pure helpers for the JSON API + the gateway BFF proxies.
 
-use crate::models::CardElementView;
+use crate::models::{SessionRow, SessionStatus};
 use crate::server::WebUiState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use sebas_feishu::cards::CardElement;
 use sebas_feishu::events::SessionKey;
+use sebas_router::SessionInfo;
 
 // ---- Helper functions ----
 
-/// Encode a SessionKey for use in URLs.
-pub fn encode_session_key(key: &SessionKey) -> String {
-    let raw = format!(
-        "{}\0{}",
-        key.chat_id,
-        key.thread_id.as_deref().unwrap_or("")
-    );
+/// Build `SessionRow`s from backend session info, returning counts. Marks
+/// each row with `is_active` so the client can render the active indicator.
+pub(crate) fn build_session_rows(
+    infos: &[SessionInfo],
+    focused: Option<&SessionKey>,
+) -> (Vec<SessionRow>, usize, usize, usize) {
+    let mut active = 0usize;
+    let mut dormant = 0usize;
+    let mut spawning = 0usize;
+
+    let mut rows: Vec<SessionRow> = infos
+        .iter()
+        .map(|info| {
+            let status: &'static str = match info.status.as_str() {
+                "active" => {
+                    active += 1;
+                    "active"
+                }
+                "dormant" => {
+                    dormant += 1;
+                    "dormant"
+                }
+                _ => {
+                    spawning += 1;
+                    "spawning"
+                }
+            };
+            let is_active = focused
+                .map(|a| a.chat_id == info.chat_id && a.thread_id == info.thread_id)
+                .unwrap_or(false);
+            let derived =
+                SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""));
+            SessionRow {
+                project_dir: info.project_dir.clone(),
+                prompt_preview: info.user_prompt.clone(),
+                encoded_key: encode_key(&info.chat_id, info.thread_id.as_deref()),
+                chat_id: info.chat_id.clone(),
+                thread_id: info.thread_id.clone(),
+                session_id_short: info
+                    .session_id
+                    .as_deref()
+                    .map(|s| crate::models::middle_truncate(s, 18)),
+                session_id: info.session_id.clone(),
+                status,
+                status_label: derived.label(),
+                status_slug: derived.slug(),
+                status_glyph: derived.glyph(),
+                last_active: format_relative_time(info.last_active_unix),
+                last_active_unix: info.last_active_unix,
+                is_active,
+            }
+        })
+        .collect();
+
+    // Sort: focused first, then by most-recent activity. Activity compares
+    // the underlying unix timestamps — the rendered relative-time string is
+    // for humans, and text-comparing "20694d ago" > "0s ago" inverted the
+    // intended order.
+    rows.sort_by(|a, b| {
+        b.is_active
+            .cmp(&a.is_active)
+            .then_with(|| b.last_active_unix.cmp(&a.last_active_unix))
+    });
+    (rows, active, dormant, spawning)
+}
+
+/// Compact summary used by the dashboard's focused-session banner.
+pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
+    serde_json::json!({
+        "chat_id": info.chat_id,
+        "thread_id": info.thread_id,
+        "session_id": info.session_id,
+        "status": info.status,
+        "status_label": derived.label(),
+        "status_slug": derived.slug(),
+        "status_glyph": derived.glyph(),
+        "encoded_key": encode_key(&info.chat_id, info.thread_id.as_deref()),
+    })
+}
+
+/// Encode a (chat_id, thread_id) pair for use in URLs.
+pub(crate) fn encode_key(chat_id: &str, thread_id: Option<&str>) -> String {
+    let raw = format!("{chat_id}\0{}", thread_id.unwrap_or(""));
     urlencoding::encode(&raw).into_owned()
 }
 
+/// Encode a SessionKey for use in URLs.
+pub(crate) fn encode_session_key(key: &SessionKey) -> String {
+    encode_key(&key.chat_id, key.thread_id.as_deref())
+}
+
 /// Decode a URL-encoded SessionKey.
-pub fn decode_session_key(encoded: &str) -> Option<SessionKey> {
+pub(crate) fn decode_session_key(encoded: &str) -> Option<SessionKey> {
     let decoded = urlencoding::decode(encoded).ok()?;
     let (chat_id, thread_id) = decoded.split_once('\0')?;
     Some(SessionKey {
@@ -34,50 +115,8 @@ pub fn decode_session_key(encoded: &str) -> Option<SessionKey> {
     })
 }
 
-/// Convert a CardElement to a view model for template rendering.
-pub fn card_element_to_view(el: &CardElement) -> CardElementView {
-    match el {
-        CardElement::Markdown { content } => CardElementView {
-            element_type: "markdown",
-            content: content.clone(),
-        },
-        CardElement::Div { text } => CardElementView {
-            element_type: "div",
-            content: text.content.clone(),
-        },
-        CardElement::CollapsiblePanel(panel) => {
-            let header = panel.header.title.content.as_str();
-            let body: Vec<String> = panel
-                .elements
-                .iter()
-                .map(|e| match e {
-                    CardElement::Markdown { content } => content.clone(),
-                    CardElement::Div { text } => text.content.clone(),
-                    _ => String::new(),
-                })
-                .collect();
-            let content = format!(
-                "<details><summary>{header}</summary>{}</details>",
-                body.join("\n")
-            );
-            CardElementView {
-                element_type: "collapsible",
-                content,
-            }
-        }
-        CardElement::Hr => CardElementView {
-            element_type: "hr",
-            content: String::new(),
-        },
-        _ => CardElementView {
-            element_type: "other",
-            content: String::new(),
-        },
-    }
-}
-
 /// Format a unix timestamp as a relative time string.
-pub fn format_relative_time(unix_ts: i64) -> String {
+pub(crate) fn format_relative_time(unix_ts: i64) -> String {
     let diff = chrono::Utc::now().timestamp() - unix_ts;
     if diff < 60 {
         format!("{diff}s ago")
