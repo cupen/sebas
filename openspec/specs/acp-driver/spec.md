@@ -146,3 +146,71 @@ The system SHALL route `AcpCommand::PermissionReply` to the parked oneshot for t
 - **WHEN** a `PermissionReply` arrives for a `request_id` with no parked responder
 - **THEN** the reply is logged with the set of currently-known request ids
 - **AND** the call returns `Ok(())`
+
+### Requirement: ACP session resume through session/load
+
+The generic ACP driver SHALL implement resume for native ACP agents: when a session starts with a load request, the driver SHALL issue the ACP `session/load` request for the persisted session id and continue that conversation. When the agent declines or cannot load the session (unknown id, or the agent does not advertise load capability), the driver SHALL fall back to a fresh session with a new id and report `resumed = false`. A fallback SHALL NOT surface a raw protocol error to the caller.
+
+#### Scenario: ACP resume continues the loaded conversation
+
+- **WHEN** a native ACP agent is spawned in load mode with a persisted session id and the agent supports `session/load`
+- **THEN** the driver issues a load for that id, the agent streams the resumed conversation in later prompts, and the spawn reports `resumed = true` with the same routing id
+
+#### Scenario: ACP resume falls back to fresh when the session is gone
+
+- **WHEN** the ACP agent responds to `session/load` with an error (conversation not found)
+- **THEN** the driver starts a fresh session with a newly minted id
+- **AND** the spawn reports `resumed = false` so the caller can tell the user the old conversation is gone
+
+#### Scenario: Resume is rejected, not faked, for agents without load support
+
+- **WHEN** the driver is asked to load a session but the ACP agent does not support load
+- **THEN** resume is handled honestly: the fresh-session fallback applies (never a fabricated successful resume)
+- **AND** the caller is informed via `resumed = false`
+
+### Requirement: ACP resume loads by the real ACP session id
+
+The generic ACP driver SHALL accept, in a load request, an explicit ACP session id that differs from the routing session id: when the caller provides the agent's real session id, the driver SHALL issue `session/load` with that id. The driver SHALL report the agent's real ACP session id (from `session/new` or the loaded conversation) back to the caller so the mapping can be persisted. When the load is rejected (unknown id or no load capability), the existing fresh-session fallback with `resumed = false` SHALL apply.
+
+#### Scenario: Load uses the provided ACP session id
+
+- **WHEN** a resume caller supplies an ACP session id distinct from the routing id
+- **THEN** the driver issues `session/load` with the provided ACP id
+- **AND** on success the routing id is unchanged and `resumed` is `true`
+
+#### Scenario: Fresh spawn reports the agent session id
+
+- **WHEN** a fresh ACP session is created
+- **THEN** the spawn outcome carries the agent's real ACP session id (from `session/new`)
+- **AND** the routing id maps to it for future resumes
+
+#### Scenario: Rejected real-id load falls back to fresh
+
+- **WHEN** the agent rejects `session/load` for the provided ACP session id
+- **THEN** a fresh session starts with a new routing id
+- **AND** `resumed` is `false`
+
+### Requirement: ACP config options surface on session establishment
+
+The generic ACP driver SHALL parse the `configOptions` from a `session/new` or `session/load` response and expose the model option (id "model", its select values, and the current value) to the caller as part of the spawn outcome. The driver SHALL NOT hardcode or filter model lists; the agent's response is the source of truth.
+
+#### Scenario: Spawn outcome carries the model option
+
+- **WHEN** an ACP session is established and the agent returns a `model` config option
+- **THEN** the spawn outcome carries the model select values and current value
+- **AND** a session without a model option reports no model surface
+
+### Requirement: ACP model switch command
+
+The driver SHALL accept a session command to set the model and translate it to the standard ACP `session/set_config_option` (`configId = "model"`). A rejected value SHALL surface an explicit error; an agent without the method or option SHALL report the same explicit error.
+
+#### Scenario: SetModel issues set_config_option
+
+- **WHEN** a `SetModel { model_id }` command targets an ACP session
+- **THEN** the driver sends `session/set_config_option` with the model value
+- **AND** reports success or an explicit model-rejected error
+
+#### Scenario: Unsupported agent reports explicit error
+
+- **WHEN** the agent lacks `set_config_option`/the model option
+- **THEN** the driver returns an explicit "model not supported" error instead of failing silently
