@@ -88,3 +88,30 @@ sebas-63f epic 收尾评审列出 15 项设计问题,处置结果:
 | P2 run_watchdog 创建两次 ControlService | 已解——现单次创建(`watchdog.rs::run_watchdog`)经 Arc 共享 |
 | P3 spawn_webui_process 过渡注释 | 已解/失效——该函数已随 ServiceManager 重构消失,模块文档保留 Phase 过渡说明(`webui_cmd.rs` 顶部) |
 | P3 webui 降级行为(无 SEBAS_CONTROL_SECRET)不记录 | 已显式化——mutation 面无 secret 返回 503 + 明确错误文案(`sebas-webui/src/routes.rs`) |
+
+---
+
+## decouple-feishu-channel · 飞书解耦为可选通道适配器(2026-09-04)
+
+`openspec/changes/decouple-feishu-channel`(实施于 feat/decouple-feishu-channel 分支)。
+动机:飞书类型(`SessionKey`/`FeishuIn`/`Card`)此前被当作核心领域模型,渗入 core_channel 协议、
+router maps/inbound/crud、webui routes/backend——新 IM/agent 接入必撞上飞书形状。
+
+核心决策(详见 change 的 design.md,此处为摘要):
+
+| # | 决策 |
+|---|---|
+| D1 | 中立抽象落在新 crate `sebas-channels`(ChannelKey/ChannelEvent/ChannelCard/ChannelAdapter/AdapterRegistry),core bin、router、webui、feishu 四方共享 |
+| D2 | `ChannelKey` = 通道名 + 不透明引用;`web-*`/`oc_*` 前缀特判废除;core_channel 协议 wire 形状随之中立化(BREAKING,同仓同发) |
+| D3 | 入站四变体 `ChannelEvent`(text/media/button/form)取代 `FeishuIn`;chat_type/mention 门禁留在飞书边界 |
+| D4 | 出站 `ChannelCard` 中立呈现模型取代 router 直接发飞书卡;渲染(ChannelCard→card schema 2.0 JSON)收进 feishu adapter |
+| D5 | `ChannelAdapter` trait + 注册表装配;adapter 经 inbound 通道把事件交给 core,单向依赖 |
+| D6 | 协议类型先上移、行为后切;replay 记录格式随 ChannelEvent 调整,旧 fixture 失效(开发阶段接受) |
+| D7 | webui 作为 `web` 通道:`SessionBackend` seam 即 web 通道契约,`WebAdapter` 常驻注册(无传输循环、渲染返回 None,诚实语义) |
+| D8 | `sebas-router` 零 `sebas-feishu` 依赖(编译期闸门,`grep` 可验) |
+| D9 | `[feishu] enabled` 语义不变(开关对象=适配器注册);`[card]` 渲染 knob 归 adapter 解释 |
+| D10 | 卡片引用簿记(MsgIdMap/ReplyTargetMap)保留在 router:按 ChannelKey 存不透明字符串引用,即中立 CardRef 概念;飞书语义(PATCH/线程)在边界解释。备选(下沉 dispatcher)记录在案 |
+
+Session map 磁盘格式随 ChannelKey 升级:结构化键(`{"channel","reference"}` JSON 串为 map 键),
+兼容读取旧格式(裸 `oc_x` / `chat\0thread` 复合键 → feishu 通道)。
+术语定义:`openspec/glossary.md`。

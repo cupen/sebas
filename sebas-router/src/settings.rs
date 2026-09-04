@@ -12,7 +12,7 @@
 //! a TOML-tuned `theme_color` / `max_user_text_chars` / `thinking` with the
 //! default on every restart where the user hasn't yet run `/settings`.
 
-use sebas_feishu::cards::CardConfig;
+use crate::cards::CardConfig;
 use std::path::{Path, PathBuf};
 
 /// `~/.sebas/settings.json`, expanded at call time so the env is honoured.

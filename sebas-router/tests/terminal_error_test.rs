@@ -2,8 +2,8 @@
 //! emit an ❌ UpdateCard. Non-terminal errors keep the existing behaviour.
 
 use sebas_acp::claude::session::AcpEvent;
-use sebas_feishu::cards::CardConfig;
-use sebas_feishu::events::SessionKey;
+use sebas_router::cards::CardConfig;
+use sebas_channels::ChannelKey;
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::{Mapping, SessionMap};
 use std::time::Duration;
@@ -21,10 +21,7 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Vec<Out> {
 #[tokio::test]
 async fn terminal_error_removes_mapping_and_marks_card() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -59,10 +56,7 @@ async fn terminal_error_removes_mapping_and_marks_card() {
 #[tokio::test]
 async fn non_terminal_error_keeps_mapping() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -90,10 +84,7 @@ async fn non_terminal_error_keeps_mapping() {
 #[tokio::test]
 async fn terminal_error_preserves_pre_death_transcript() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();

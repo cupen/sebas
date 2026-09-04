@@ -15,6 +15,7 @@ pub mod projects;
 pub mod routes;
 pub mod server;
 pub mod session_backend;
+pub mod web_adapter;
 
 #[doc(hidden)]
 pub use server::WebUiState;

@@ -22,7 +22,7 @@ use sebas_feishu::messages::{ReceiveIdType, SendCardRequest};
 use open_lark::Config as LarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
 use sebas_router::Out;
-use sebas_router::crud::{CrudForm, FileStore, ProviderForms};
+use sebas_router::crud::ProviderForms;
 use sebas::config::Config;
 use sebas::provider::build_form;
 use serde_json::Value;
@@ -39,18 +39,12 @@ enum Target {
 }
 
 impl Target {
-    /// SessionKey 只用于 CRUD 内部的状态流转；open_id 模式下真实会话
+    /// ChannelKey 用于 CRUD 内部的状态流转；open_id 模式下真实会话
     /// 由回调的 context.open_chat_id 决定，这里先占位空串。
-    fn placeholder_key(&self) -> SessionKey {
+    fn placeholder_key(&self) -> sebas_channels::ChannelKey {
         match self {
-            Target::Chat(chat_id) => SessionKey {
-                chat_id: chat_id.clone(),
-                thread_id: None,
-            },
-            Target::Open(_) => SessionKey {
-                chat_id: String::new(),
-                thread_id: None,
-            },
+            Target::Chat(chat_id) => sebas_channels::ChannelKey::feishu(chat_id, None),
+            Target::Open(_) => sebas_channels::ChannelKey::feishu("", None),
         }
     }
 }
@@ -105,7 +99,7 @@ impl Handler {
                     warn!(form_name, "unwired form callback ignored");
                     return Ok(());
                 };
-                let out = form.handle(key, &value, &form_value, message_id).await;
+                let out = form.handle(sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref()), &value, &form_value, message_id).await;
                 self.dispatch(out).await?;
             }
             FeishuIn::ButtonCb { key, action, .. } => {
@@ -147,7 +141,7 @@ impl Handler {
                     info!(?key, ?payload, ?message_id, "button callback received");
                     let out = form
                         .handle(
-                            key,
+                            sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref()),
                             &payload.unwrap_or(Value::Null),
                             &BTreeMap::new(),
                             message_id,
@@ -170,7 +164,7 @@ impl Handler {
         *target = Some(Target::Chat(key.chat_id.clone()));
         drop(target);
         info!(?key, text = %text, "target resolved from inbound message; sending CRUD card");
-        let out = self.forms.open(key).await;
+        let out = self.forms.open(sebas_channels::ChannelKey::feishu(&key.chat_id, key.thread_id.as_deref())).await;
         self.dispatch(out).await?;
         Ok(())
     }
@@ -190,13 +184,19 @@ impl Handler {
                             chat_id,
                             thread_id: None,
                         };
+                        let card_json = serde_json::to_value(
+                            sebas_feishu::adapter::render_standalone_card(&card),
+                        )?;
                         self.client
-                            .send_card(&self.http, &self.tokens, &key, card, None, None)
+                            .send_card(&self.http, &self.tokens, &key, card_json, None, None)
                             .await?;
                     }
                     Target::Open(open_id) => {
                         let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id";
-                        let req = SendCardRequest::new(open_id, ReceiveIdType::OpenId, &card);
+                        let card_json = serde_json::to_value(
+                            sebas_feishu::adapter::render_standalone_card(&card),
+                        )?;
+                        let req = SendCardRequest::new(open_id, ReceiveIdType::OpenId, &card_json);
                         let body = serde_json::to_value(&req)?;
                         self.client
                             .post_card_with_retry(&self.http, &self.tokens, url, body)
@@ -205,8 +205,11 @@ impl Handler {
                 }
             }
             Out::UpdateCardByMsgId { msg_id, card, .. } => {
+                let card_json = serde_json::to_value(
+                    sebas_feishu::adapter::render_standalone_card(&card),
+                )?;
                 self.client
-                    .update_card(&self.http, &self.tokens, &msg_id, card)
+                    .update_card(&self.http, &self.tokens, &msg_id, card_json)
                     .await?;
                 info!(%msg_id, "card updated in place");
             }

@@ -121,7 +121,7 @@ pub struct ServiceArgs {
 
 #[derive(Parser)]
 pub struct ReplayArgs {
-    /// Directory containing `.json` files to replay (one envelope per file).
+    /// Directory containing `.json` files to replay (one neutral channel event per file).
     /// Files are processed in lexical filename order so timestamp-prefixed
     /// dumps preserve capture order.
     #[arg(long)]

@@ -1,5 +1,5 @@
 use sebas_acp::claude::session::AcpEvent;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use std::time::Duration;
@@ -10,22 +10,13 @@ const WAIT: Duration = Duration::from_millis(500);
 async fn full_round_trip_text_to_events() {
     let map = SessionMap::new();
     let (handle, mut out_rx) = RouterHandle::new(map.clone());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x".into(), None);
 
     // 1) Text in → expect SpawnAcp only. The root SendCard is now emitted by
     // the dispatcher (after create_session mints the real session_id), not the
     // router, so it does not appear on this channel.
     handle
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "hello".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(ChannelEvent::Text { key: key.clone(), text: "hello".into(), reply_target: None })
         .await;
 
     let first = tokio::time::timeout(WAIT, out_rx.recv())

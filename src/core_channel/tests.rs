@@ -9,6 +9,7 @@ use crate::core_channel::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
 };
 use crate::core_channel::server;
+use sebas_channels::ChannelKey;
 use sebas_router::state::SessionMap;
 use sebas_router::{RouterHandle, SessionEvent};
 use sebas_webui::session_backend::{Reachability, SessionBackend, SessionRejection};
@@ -194,10 +195,10 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
         match frame {
             SessionStreamFrame::Event {
                 event: SessionEvent::Created { session },
-            } if session.chat_id == key.chat_id => saw_created = true,
+            } if session.channel_key() == key => saw_created = true,
             SessionStreamFrame::Event {
                 event: SessionEvent::Updated { session },
-            } if session.chat_id == key.chat_id && session.status == "active" => {
+            } if session.channel_key() == key && session.status == "active" => {
                 saw_updated = true;
                 break;
             }
@@ -210,7 +211,7 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     // The event state matches the authoritative snapshot: an idempotent
     // re-apply changes nothing (no visible duplicate).
     let snap = core.handle.session_info_snapshot().await;
-    assert!(snap.iter().any(|s| s.chat_id == key.chat_id && s.status == "active"));
+    assert!(snap.iter().any(|s| s.channel_key() == key && s.status == "active"));
 }
 
 // ── 6.1: backend round-trips ────────────────────────────────────────────────
@@ -237,7 +238,12 @@ async fn backend_methods_reach_the_right_handlers() {
     assert_eq!(snap[0].project_dir.as_deref(), Some("/tmp"));
 
     // activate on the core side → snapshot reflects active + session id.
-    core.handle.activate(&key, "s-live".into()).await;
+    // (The spawned key is channel-neutral on the wire; the webui-trait client
+    // sees it only in feishu shape, so drive the real ChannelKey from the
+    // router's mapping directly.)
+    let (channel_key, _) = core.handle.map.snapshot_all().await.into_iter().next()
+        .expect("spawned session mapped");
+    core.handle.activate(&channel_key, "s-live".into()).await;
     let snap = backend.snapshot().await;
     assert_eq!(snap[0].status, "active");
     assert_eq!(snap[0].session_id.as_deref(), Some("s-live"));
@@ -247,11 +253,12 @@ async fn backend_methods_reach_the_right_handlers() {
         .message(key.clone(), "hello".into())
         .await
         .expect("message");
+    // message via the core handle (channel-neutral key) → routes into the map.
+    core.handle.web_send_message(channel_key.clone(), "hello".into()).await;
     // message to an unknown key → typed rejection, nothing mutated.
-    let bogus = sebas_feishu::events::SessionKey {
-        chat_id: "web-nope".into(),
-        thread_id: None,
-    };
+    // (The unknown key is channel-neutral on the wire, so it round-trips
+    // byte-for-byte through the channel's structured `{channel,reference}`.)
+    let bogus = ChannelKey::new("web", "web-nope");
     assert_eq!(
         backend.message(bogus.clone(), "hi".into()).await,
         Err(SessionRejection::UnknownSession {
@@ -274,8 +281,8 @@ async fn backend_methods_reach_the_right_handlers() {
         )
         .await;
     let all = backend.turns(key.clone(), 0).await.unwrap();
-    assert_eq!(all.len(), 3); // prompt + prompt + delta
-    let tail = backend.turns(key.clone(), 2).await.unwrap();
+    assert_eq!(all.len(), 4); // prompt + prompt (web_send_message) + prompt + delta
+    let tail = backend.turns(key.clone(), 3).await.unwrap();
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].content, "chunk one");
     // unknown key → rejection.
@@ -402,10 +409,7 @@ async fn lagging_subscriber_is_disconnected_and_can_resnapshot() {
     for i in 0..3000u64 {
         core.handle
             .insert_mapping(
-                sebas_feishu::events::SessionKey {
-                    chat_id: format!("oc_lag-{i}"),
-                    thread_id: None,
-                },
+                ChannelKey::feishu(&format!("oc_lag-{i}"), None),
                 format!("s-lag-{i}"),
             )
             .await;

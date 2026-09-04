@@ -1,7 +1,9 @@
-//! 卡片流累积状态（openspec/specs/feishu-cards/spec.md）。纯状态，并行于 `MsgIdMap`：
-//! `session_id -> CardState`。渲染与 FSM 在 router.rs / cards.rs。
+//! 卡片流累积状态（openspec/specs/feishu-cards/spec.md）。纯状态，并行于
+//! `MsgIdMap`：`session_id -> CardState`。渲染与 FSM 在 router.rs，累积用的
+//! 是**中立**元素词汇（sebas-channels），feishu 适配器把累积结果渲染成
+//! 飞书卡片 JSON（decouple-feishu-channel task 3：router 只产中立呈现）。
 
-use sebas_feishu::cards::CardElement;
+use sebas_channels::card::{AppUsage, ChannelElement};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,7 +14,7 @@ use tokio::sync::RwLock;
 /// arbitrary Unicode emoji like 👀/🚧/✅/❌ with error 231001. These values
 /// surface as reactions on the root card to reflect session state; the card
 /// header title is the topic from the first prompt line
-/// (`sebas_feishu::cards::derive_topic`).
+/// (topic derivation is a feishu adapter responsibility).
 pub mod phase {
     // SEED reaction 表达"已收到"语义（Feishu `emoji_type` "Get" = 👌），不再是
     // "Typing" —— 后者暗示"正在打字"。bot 首条回复卡 reaction 用 SEED，
@@ -27,10 +29,9 @@ pub mod phase {
     pub const FAILED: &str = "CrossMark"; // terminal Error event (state only, no reaction emit)
 }
 
-/// Accumulated token usage for a session. Reset at the start of each turn
-/// (round) so the footer can show per-round and cumulative totals.
-/// Re-exported from sebas_feishu::cards for convenience.
-pub use sebas_feishu::cards::CardFooter;
+/// 中立累计 token / usage 视图（feishu `CardFooter` 的 neutral 等价；footer
+/// 渲染在适配器侧）。Reset 在每轮开始（round），footer 只读 total 累计。
+pub type CardUsage = AppUsage;
 
 #[derive(Debug, Clone)]
 pub struct CardState {
@@ -39,9 +40,9 @@ pub struct CardState {
     /// Session start timestamp — used to compute elapsed time for the
     /// parent panel title ("🤔 折腾中 · 3项 · 45s").
     pub started_at: Instant,
-    pub body: Vec<CardElement>,
-    /// Model name and token usage tracking.
-    pub usage: CardFooter,
+    pub body: Vec<ChannelElement>,
+    /// Model name and token usage tracking (neutral).
+    pub usage: CardUsage,
 }
 
 impl CardState {
@@ -52,7 +53,7 @@ impl CardState {
             status_emoji: phase::SEED.into(),
             started_at: Instant::now(),
             body: Vec::new(),
-            usage: CardFooter::default(),
+            usage: CardUsage::default(),
         }
     }
 
@@ -63,7 +64,7 @@ impl CardState {
             status_emoji: phase::SEED.into(),
             started_at: Instant::now(),
             body: Vec::new(),
-            usage: CardFooter::default(),
+            usage: CardUsage::default(),
         }
     }
 }
@@ -132,7 +133,7 @@ impl CardStateMap {
     }
 
     /// 替换 session 的 body，重置 started_at。用于卡片换卡（rotate_card）后清空 body。
-    pub async fn reset_body(&self, session_id: &str, elements: Vec<CardElement>) {
+    pub async fn reset_body(&self, session_id: &str, elements: Vec<ChannelElement>) {
         let mut g = self.inner.write().await;
         if let Some(st) = g.get_mut(session_id) {
             st.body = elements;

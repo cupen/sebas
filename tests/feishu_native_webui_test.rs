@@ -6,7 +6,7 @@
 //! mapping → webui `InProcessBackend` snapshot 看到该 oc_* 会话 →
 //! transcript（工具轨迹 + 收尾文本）可读 → 权限请求可经 webui 审查卡回填。
 
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::state::SessionMap;
 use sebas_router::RouterHandle;
 use sebas_webui::session_backend::{InProcessBackend, PermissionDecision, SessionBackend};
@@ -42,10 +42,7 @@ fn native_manager() -> Arc<sebas_agent::session::SessionManager> {
 #[tokio::test]
 async fn feishu_native_session_appears_in_webui_snapshot() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_native_webui".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_native_webui", None);
     let (router, mut out_rx) = RouterHandle::new(map);
     // 丢弃 Out（原生路径不发 SpawnAcp/卡片）。
     tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
@@ -67,12 +64,10 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
 
     // feishu 文本 → dispatch → 走桥创建原生会话。
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "build it".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 
@@ -92,7 +87,7 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     let row = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let snap = backend.snapshot().await;
-            if let Some(info) = snap.into_iter().find(|i| i.chat_id == key.chat_id) {
+            if let Some(info) = snap.into_iter().find(|i| i.channel == key.channel_str() && i.key == key.reference) {
                 return info;
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
@@ -100,7 +95,8 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     })
     .await
     .expect("native feishu session should appear in webui snapshot");
-    assert_eq!(row.chat_id, "oc_native_webui");
+    assert_eq!(row.channel, "feishu");
+    assert_eq!(row.key, "oc_native_webui");
     assert_eq!(row.status, "active");
 
     // transcript 可读：工具轨迹 + 收尾文本最终出现在 turn 流。轮询至 deadline，
@@ -108,7 +104,10 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut last: Vec<sebas_router::TurnEntry> = Vec::new();
     loop {
-        last = backend.turns(key.clone(), 0).await.unwrap_or_default();
+        // webui InProcessBackend 的 trait 键是中立 ChannelKey；feishu 通道的
+        // key 用引用（chat_id，无 thread）。
+        let trait_key = sebas_channels::ChannelKey::feishu("oc_native_webui", None);
+        last = backend.turns(trait_key, 0).await.unwrap_or_default();
         let joined: String = last.iter().map(|e| e.content.clone()).collect();
         if joined.contains("bash") && joined.contains("native done") {
             break;

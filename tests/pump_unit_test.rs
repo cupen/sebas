@@ -106,10 +106,7 @@ async fn finished_flushes_immediately_after_stream() {
 #[tokio::test]
 async fn terminal_error_flushes_removes_and_exits() {
     let map = SessionMap::new();
-    let key = sebas_feishu::events::SessionKey {
-        chat_id: "oc_t".into(),
-        thread_id: None,
-    };
+    let key = sebas_channels::ChannelKey::feishu("oc_t", None);
     map.insert(key.clone(), Mapping::active("s3"))
         .await
         .unwrap();

@@ -11,8 +11,8 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
-use sebas_feishu::cards::CardConfig;
-use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+use sebas_router::cards::CardConfig;
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use serde_json::json;
@@ -44,17 +44,12 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
-    let key = SessionKey {
-        chat_id: "oc_perm".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_perm", None);
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "hello".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 
@@ -112,13 +107,14 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         }
     };
     // Sanity: the card JSON should reference our tool/session.
+    let card_json = card.to_json();
     assert!(
-        card.to_string().contains("Bash"),
-        "permission card missing tool name: {card}"
+        card_json.contains("Bash"),
+        "permission card missing tool name: {card_json}"
     );
     assert!(
-        card.to_string().contains(&session_id),
-        "permission card missing session_id: {card}"
+        card_json.contains(&session_id),
+        "permission card missing session_id: {card_json}"
     );
 
     // Simulate the dispatch_out step that production performs after
@@ -141,15 +137,14 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     //    probe SessionManager to confirm the bridge side actually received
     //    the decision (router's job ends at out_rx).
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key.clone(),
-            action: CardAction {
+            action: ChannelAction {
                 decision: Some("allow_once".into()),
                 session_id: session_id.clone(),
                 request_id: Some(request_id.clone()),
                 value: json!({}),
             },
-            chat_type: "p2p".into(),
         })
         .await;
 

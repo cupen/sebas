@@ -1,16 +1,11 @@
-use sebas_feishu::cards::ThinkingDisplay;
-use sebas_feishu::events::SessionKey;
+use sebas_router::cards::ThinkingDisplay;
+use sebas_channels::ChannelKey;
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::settings::load_settings;
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_test".into(),
-        thread_id: None,
-    }
-}
+fn key() -> ChannelKey { ChannelKey::feishu("oc_test", None) }
 
 async fn next_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
     rx.recv().await.expect("expected Out")

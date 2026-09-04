@@ -11,15 +11,24 @@
 //! These types are serde-native by design: they cross the core session
 //! channel as newline-delimited JSON. (`CardElement` deliberately is not
 //! `Serialize` — the transcript carries rendered view shapes instead.)
+//!
+//! The session is addressed by its flattened [`ChannelKey`]: `channel` is the
+//! originating channel name (`"feishu"`, `"web"`, ...) and `key` is the
+//! channel-neutral reference, opaque to the core (feishu's reference encodes
+//! `chat_id\0thread_id`; only the feishu adapter interprets it).
 
 use serde::{Deserialize, Serialize};
+
+use sebas_channels::ChannelKey;
 
 /// One session as the outside world sees it: mapping state joined with the
 /// card-derived fields the WebUI renders.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionInfo {
-    pub chat_id: String,
-    pub thread_id: Option<String>,
+    /// Originating channel name (`"feishu"`, `"web"`, ...).
+    pub channel: String,
+    /// Channel-neutral opaque reference within that channel.
+    pub key: String,
     /// Live routing id — `None` for Spawning placeholders.
     pub session_id: Option<String>,
     /// `"spawning"` | `"active"` | `"dormant"`.
@@ -33,6 +42,13 @@ pub struct SessionInfo {
     pub project_dir: Option<String>,
 }
 
+impl SessionInfo {
+    /// The flattened [`ChannelKey`] this session belongs to.
+    pub fn channel_key(&self) -> ChannelKey {
+        ChannelKey::new(self.channel.clone(), self.key.clone())
+    }
+}
+
 /// Session change event published on the router's broadcast channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -43,9 +59,10 @@ pub enum SessionEvent {
     /// project_dir set, card emoji transition).
     Updated { session: SessionInfo },
     /// The mapping was removed (web close, terminal error, failed spawn).
+    /// `channel`/`key` flatten the removed [`ChannelKey`].
     Removed {
-        chat_id: String,
-        thread_id: Option<String>,
+        channel: String,
+        key: String,
     },
     /// Emitted by channel clients (never by the router itself) after a
     /// reconnect: subscribers should re-snapshot because the client resumed
@@ -122,8 +139,8 @@ mod tests {
     fn session_event_round_trips_through_serde() {
         // 1.1 验收：每个变体经 serde 往返后与原值一致。
         let info = SessionInfo {
-            chat_id: "oc_1".into(),
-            thread_id: Some("om_t".into()),
+            channel: "feishu".into(),
+            key: "oc_1\0om_t".into(),
             session_id: Some("s1".into()),
             status: "active".into(),
             phase: Some("DONE".into()),
@@ -137,8 +154,8 @@ mod tests {
             },
             SessionEvent::Updated { session: info },
             SessionEvent::Removed {
-                chat_id: "oc_2".into(),
-                thread_id: None,
+                channel: "feishu".into(),
+                key: "oc_2".into(),
             },
             SessionEvent::Resync,
         ];
@@ -153,11 +170,31 @@ mod tests {
     fn session_event_uses_type_tag() {
         // wire 形态带 "type" tag，与 control RPC 的 cmd tag 姿态一致。
         let ev = SessionEvent::Removed {
-            chat_id: "oc_x".into(),
-            thread_id: None,
+            channel: "feishu".into(),
+            key: "oc_x".into(),
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["type"], "removed");
+        assert_eq!(json["channel"], "feishu");
+        assert_eq!(json["key"], "oc_x");
+    }
+
+    #[test]
+    fn channel_key_round_trips_through_flattened_info() {
+        let k = ChannelKey::feishu("oc_x", Some("t1"));
+        let info = SessionInfo {
+            channel: k.channel_str().to_string(),
+            key: k.reference.clone(),
+            session_id: Some("s1".into()),
+            status: "active".into(),
+            phase: None,
+            user_prompt: None,
+            last_active_unix: 0,
+            project_dir: None,
+        };
+        assert_eq!(info.channel, "feishu");
+        assert_eq!(info.key, "oc_x\0t1");
+        assert_eq!(info.channel_key(), k);
     }
 
     #[test]

@@ -34,11 +34,10 @@ use super::{Out, RouterHandle};
 use crate::crud::{CrudStore, Item};
 use crate::provider_state::{self, ProviderMode, ProviderRuntimeState};
 use crate::state_store::DefaultSelection;
-use sebas_feishu::cards::{
-    Card, CardBehavior, CardButton, CardElement, CardText, CollapsiblePanel,
-    CollapsiblePanelHeader, StandardIcon,
+use sebas_channels::card::{
+    Behavior, ButtonSpec, ChannelCard, ChannelElement, CollapsiblePanel, RichText,
 };
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -82,7 +81,7 @@ const OP_CREATE: &str = "create";
 // ===========================================================================
 
 /// `/provider` 命令主入口：渲染「Provider 管理」主卡并发新卡。
-pub async fn render_main_card(handle: &RouterHandle, key: &SessionKey) -> Out {
+pub async fn render_main_card(handle: &RouterHandle, key: &ChannelKey) -> Out {
     let state = provider_state::load();
     let items = match &handle.provider_forms {
         Some(forms) => forms.preset.store.list().await,
@@ -91,11 +90,10 @@ pub async fn render_main_card(handle: &RouterHandle, key: &SessionKey) -> Out {
     let provider_names = sorted_names(&items);
 
     let card = build_card(&state, &provider_names, &items);
-    let card_value = serde_json::to_value(&card).expect("provider card serializes");
     let root_id = handle.reply_target(key).await;
     Out::SendCard {
         key: key.clone(),
-        card: card_value,
+        card,
         msg_id: None,
         perm_request_id: None,
         perm_meta: None,
@@ -115,7 +113,7 @@ pub async fn render_main_card(handle: &RouterHandle, key: &SessionKey) -> Out {
 /// 兜底）。
 pub async fn dispatch(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     form_value: &BTreeMap<String, Value>,
     message_id: Option<String>,
@@ -151,7 +149,7 @@ pub async fn dispatch(
 /// Mode 按钮：把 `{form, mode}` 翻译成 `ProviderMode` 写盘。
 async fn handle_mode(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     _message_id: Option<String>,
 ) -> Out {
@@ -212,7 +210,7 @@ async fn handle_mode(
 /// spawn-time 自动加 `--model`。
 async fn handle_default_direct(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     form_value: &BTreeMap<String, Value>,
     _message_id: Option<String>,
 ) -> Out {
@@ -239,7 +237,7 @@ async fn handle_default_direct(
 /// `default_selection.model` 的入口（[`build_default_selection`]）。
 async fn handle_set_default_direct(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     _message_id: Option<String>,
 ) -> Out {
@@ -260,7 +258,7 @@ async fn handle_set_default_direct(
 /// 走同一份存储），然后清掉 default_provider_for_direct 残留。
 async fn handle_delete(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     _message_id: Option<String>,
 ) -> Out {
@@ -312,7 +310,7 @@ async fn build_default_selection(handle: &RouterHandle, name: &str) -> DefaultSe
 /// 旧 UI 一致。
 async fn handle_create(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     legacy_form: &str,
     message_id: Option<String>,
 ) -> Out {
@@ -342,7 +340,7 @@ async fn handle_create(
 /// 的卡，用户从卡里的按钮挑一个 model 回写。
 async fn handle_probe(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     _message_id: Option<String>,
 ) -> Out {
@@ -364,7 +362,7 @@ async fn handle_probe(
             let card = build_probe_error_card(name, &reason);
             return Out::SendCard {
                 key: key.clone(),
-                card: serde_json::to_value(&card).expect("probe error card serializes"),
+                card,
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
@@ -410,7 +408,7 @@ async fn handle_probe(
     };
     Out::SendCard {
         key: key.clone(),
-        card: serde_json::to_value(&card).expect("probe result card serializes"),
+        card,
         msg_id: None,
         perm_request_id: None,
         perm_meta: None,
@@ -422,7 +420,7 @@ async fn handle_probe(
 /// 回主卡（详情面板会显示新的 `default_model`）。
 async fn handle_probe_apply(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     message_id: Option<String>,
 ) -> Out {
@@ -453,7 +451,7 @@ async fn handle_probe_apply(
 }
 
 /// 探测结果卡底部「← 返回 Provider 管理」按钮：原地把当前卡翻回主卡。
-async fn handle_back(handle: &RouterHandle, key: &SessionKey, message_id: Option<String>) -> Out {
+async fn handle_back(handle: &RouterHandle, key: &ChannelKey, message_id: Option<String>) -> Out {
     refresh_card(handle, key, message_id).await
 }
 
@@ -462,7 +460,7 @@ async fn handle_back(handle: &RouterHandle, key: &SessionKey, message_id: Option
 /// 走 refresh 兜底；非法值（不是 auto/anthropic/openai）也走兜底。
 async fn handle_protocol(
     handle: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     value: &Value,
     form_value: &BTreeMap<String, Value>,
     message_id: Option<String>,
@@ -501,8 +499,8 @@ async fn handle_protocol(
 // 卡片构建（每个 section 一个 helper）
 // ===========================================================================
 
-fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[Item]) -> Card {
-    let mut card = Card::new(CARD_TITLE, "blue");
+fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[Item]) -> ChannelCard {
+    let mut card = ChannelCard::new(CARD_TITLE, "blue");
     card.push_note("切换运行模式、设置默认 provider、增删 provider 条目。");
     card.push_divider();
 
@@ -510,13 +508,13 @@ fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[
     card.push_text("**模式**");
     card.push_text(format!("当前：**{}**", mode_display_label(&state.mode)));
     for el in render_mode_buttons(&state.mode) {
-        card.body.elements.push(el);
+        card.elements.push(el);
     }
     card.push_divider();
 
     // ---- 2. Default provider for DIRECT ----
     card.push_text("**DIRECT 模式默认 provider**");
-    card.body.elements.push(render_default_direct_select(
+    card.elements.push(render_default_direct_select(
         provider_names,
         state.default_selection.as_ref(),
     ));
@@ -531,7 +529,7 @@ fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[
         let item = items
             .iter()
             .find(|i| i.get("name").and_then(Value::as_str) == Some(name.as_str()));
-        card.body.elements.push(render_provider_row(
+        card.elements.push(render_provider_row(
             name,
             item,
             state
@@ -544,7 +542,7 @@ fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[
 
     // ---- 4. 新建子区（常驻）----
     for el in render_create_sub_section() {
-        card.body.elements.push(el);
+        card.elements.push(el);
     }
     card
 }
@@ -567,57 +565,41 @@ fn mode_display_label(mode: &ProviderMode) -> String {
 /// 三个模式按钮。当前模式高亮（primary），其余 default。
 /// 按顺序：Off / Direct / Gateway。`behaviors[].value` 携带
 /// `{form, mode}`，触发 `card.action.trigger` 路由到 `dispatch()`。
-fn render_mode_buttons(current: &ProviderMode) -> Vec<CardElement> {
+fn render_mode_buttons(current: &ProviderMode) -> Vec<ChannelElement> {
     let off_selected = matches!(current, ProviderMode::Off);
     let direct_selected = matches!(current, ProviderMode::Direct { .. });
     let gateway_selected = matches!(current, ProviderMode::Gateway);
     vec![
-        button_from(mode_button_payload("off", off_selected)),
-        button_from(mode_button_payload("direct", direct_selected)),
-        button_from(mode_button_payload("gateway", gateway_selected)),
+        button_from("Off", if off_selected { "primary" } else { "default" }, &mode_button_payload("off")),
+        button_from("Direct", if direct_selected { "primary" } else { "default" }, &mode_button_payload("direct")),
+        button_from("Gateway", if gateway_selected { "primary" } else { "default" }, &mode_button_payload("gateway")),
     ]
 }
 
-/// 单个模式按钮的 `CardButton`（含 `behaviors`）。
-fn mode_button_payload(mode: &str, selected: bool) -> CardButton {
+/// 单个模式按钮的 callback 负载。
+fn mode_button_payload(mode: &str) -> Value {
     let mut payload = Map::new();
     payload.insert("form".into(), Value::String(FORM_MODE.into()));
     payload.insert("mode".into(), Value::String(mode.into()));
-    CardButton {
-        text: CardText {
-            tag: "plain_text".into(),
-            content: mode_label(mode).into(),
-        },
-        r#type: if selected { "primary" } else { "default" }.into(),
-        value: Value::Object(payload),
-    }
+    Value::Object(payload)
 }
 
-fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "off" => "Off",
-        "direct" => "Direct",
-        "gateway" => "Gateway",
-        _ => "Unknown",
-    }
-}
-
-/// 把 `CardButton` 包装成 `CardElement::Button`（带 callback behaviors）。
-fn button_from(b: CardButton) -> CardElement {
-    CardElement::Button {
-        text: b.text,
-        r#type: b.r#type,
-        behaviors: vec![CardBehavior {
+/// 包装一个带 callback behaviors 的中立 v2 Button。
+fn button_from(label: &str, style: &str, value: &Value) -> ChannelElement {
+    ChannelElement::Button {
+        text: RichText::plain(label),
+        style: style.into(),
+        behaviors: vec![Behavior {
             r#type: "callback".into(),
-            value: b.value,
+            value: value.clone(),
         }],
     }
 }
 
-/// openspec/specs/provider-management/spec.md：详情面板里的「协议」select_static —— 标签 +
-/// 三档（auto / anthropic / openai）。当前值取自 item.protocol（缺省
-/// "auto"）。on_change 直接写 store（不经表单容器）。
-fn render_protocol_select(name: &str, item: Option<&Item>) -> CardElement {
+/// 详情面板里的「协议」select_static —— 标签 + 三档（auto / anthropic /
+/// openai）。当前值取自 item.protocol（缺省 "auto"）。on_change 直接写
+/// store（不经表单容器）。
+fn render_protocol_select(name: &str, item: Option<&Item>) -> ChannelElement {
     let current = item
         .and_then(|i| i.get("protocol").and_then(Value::as_str))
         .filter(|s| matches!(*s, "auto" | "anthropic" | "openai"))
@@ -627,12 +609,9 @@ fn render_protocol_select(name: &str, item: Option<&Item>) -> CardElement {
         ("anthropic".to_string(), "Anthropic".to_string()),
         ("openai".to_string(), "OpenAI".to_string()),
     ];
-    CardElement::SelectStatic {
+    ChannelElement::SelectStatic {
         name: SELECT_NAME_PROTOCOL.into(),
-        placeholder: CardText {
-            tag: "plain_text".into(),
-            content: "协议".into(),
-        },
+        placeholder: RichText::plain("协议"),
         options,
         initial: Some(current.to_string()),
         on_change: json!({ "form": FORM_PROTOCOL, "name": name }),
@@ -648,7 +627,7 @@ fn render_protocol_select(name: &str, item: Option<&Item>) -> CardElement {
 fn render_default_direct_select(
     provider_names: &[String],
     current: Option<&DefaultSelection>,
-) -> CardElement {
+) -> ChannelElement {
     // 当前选中的 provider 名（用于 `initial` 高亮 + 给每个 option 标注 default_model）。
     let current_provider = current.map(|d| d.provider.clone());
     // 当前 default_selection.model（None / 空都视作「未设」）。
@@ -667,12 +646,9 @@ fn render_default_direct_select(
         Some(m) => format!("选择默认 provider（当前默认 model: {m}）"),
         None => "选择默认 provider".into(),
     };
-    CardElement::SelectStatic {
+    ChannelElement::SelectStatic {
         name: SELECT_NAME_DEFAULT_DIRECT.into(),
-        placeholder: CardText {
-            tag: "plain_text".into(),
-            content: placeholder_text,
-        },
+        placeholder: RichText::plain(placeholder_text),
         options,
         // `current` 为 None 时 initial 也是 None（展示 placeholder）；
         // 当前有 selection 时 initial = provider 名（select_static 只能按
@@ -683,33 +659,14 @@ fn render_default_direct_select(
 }
 
 /// 新建子区：两个「＋ 新增」按钮。
-fn render_create_sub_section() -> Vec<CardElement> {
+fn render_create_sub_section() -> Vec<ChannelElement> {
     vec![
-        CardElement::Markdown {
+        ChannelElement::Markdown {
             content: "**新建 provider**".into(),
         },
-        button_from(create_button(
-            "＋ 新增（预设）",
-            FORM_CREATE_PRESET,
-            "primary",
-        )),
-        button_from(create_button(
-            "＋ 新增（自定义）",
-            FORM_CREATE_CUSTOM,
-            "default",
-        )),
+        button_from("＋ 新增（预设）", "primary", &json!({ "form": FORM_CREATE_PRESET })),
+        button_from("＋ 新增（自定义）", "default", &json!({ "form": FORM_CREATE_CUSTOM })),
     ]
-}
-
-fn create_button(label: &str, form_name: &str, kind: &str) -> CardButton {
-    CardButton {
-        text: CardText {
-            tag: "plain_text".into(),
-            content: label.into(),
-        },
-        r#type: kind.into(),
-        value: json!({ "form": form_name }),
-    }
 }
 
 /// 单行 provider 条目：`CollapsiblePanel`（**默认折叠**），header 一行摘要
@@ -721,8 +678,8 @@ fn render_provider_row(
     name: &str,
     item: Option<&Item>,
     default_direct: Option<&str>,
-) -> CardElement {
-    let mut elements: Vec<CardElement> = Vec::new();
+) -> ChannelElement {
+    let mut elements: Vec<ChannelElement> = Vec::new();
 
     // markdown 字段行：预设 / Base URL(Anthropic) / Base URL(OpenAI) /
     // API Key 已配置/未配置 / 默认 model。**严禁回显 api_key 明文**。
@@ -754,7 +711,7 @@ fn render_provider_row(
          **API Key**：{api_key_status}\n\
          **默认 model**：{default_model}"
     );
-    elements.push(CardElement::Markdown { content: body });
+    elements.push(ChannelElement::Markdown { content: body });
 
     // 协议 radio（openspec/specs/provider-management/spec.md）：详情面板就地切换 Direct 模式的
     // 协议面（auto / anthropic / openai）。选完直接写 overlay（不走表单
@@ -771,11 +728,7 @@ fn render_provider_row(
         .is_some_and(|s| !s.is_empty());
     if has_openai_url {
         let probe_value = json!({ "form": FORM_PROBE, "name": name });
-        elements.push(button_with_value(
-            "🔍 探测 model 列表",
-            "default",
-            probe_value,
-        ));
+        elements.push(button_from("🔍 探测 model 列表", "default", &probe_value));
     }
 
     // 三个动作按钮：编辑 / 删除 / 设为默认（DIRECT）。
@@ -790,13 +743,9 @@ fn render_provider_row(
     let delete_value = json!({ "form": FORM_DELETE_CONFIRM, "name": name });
     let set_default_value = json!({ "form": FORM_SET_DEFAULT_DIRECT, "name": name });
 
-    elements.push(button_with_value("编辑", "default", edit_value));
-    elements.push(button_with_value("删除", "danger", delete_value));
-    elements.push(button_with_value(
-        "设为默认（DIRECT）",
-        "primary",
-        set_default_value,
-    ));
+    elements.push(button_from("编辑", "default", &edit_value));
+    elements.push(button_from("删除", "danger", &delete_value));
+    elements.push(button_from("设为默认（DIRECT）", "primary", &set_default_value));
 
     // header 一行摘要：`name · <默认 model>`，是 DIRECT 默认时加标记。
     // 保持单行——列表的可扫读性全靠这一行。
@@ -808,37 +757,12 @@ fn render_provider_row(
         title.push_str(&format!(" · {default_model}"));
     }
 
-    CardElement::CollapsiblePanel(CollapsiblePanel {
+    ChannelElement::CollapsiblePanel(CollapsiblePanel {
         expanded: false,
-        header: CollapsiblePanelHeader {
-            title: CardText {
-                tag: "plain_text".into(),
-                content: title,
-            },
-            icon: StandardIcon {
-                tag: "standard_icon".into(),
-                token: "down-small-ccm_outlined".into(),
-                size: "16px 16px".into(),
-            },
-            icon_position: "right".into(),
-            icon_expanded_angle: -180,
-        },
+        header_title: RichText::plain(title),
+        icon_token: "down-small-ccm_outlined".into(),
         elements,
     })
-}
-
-fn button_with_value(label: &str, kind: &str, value: Value) -> CardElement {
-    CardElement::Button {
-        text: CardText {
-            tag: "plain_text".into(),
-            content: label.into(),
-        },
-        r#type: kind.into(),
-        behaviors: vec![CardBehavior {
-            r#type: "callback".into(),
-            value,
-        }],
-    }
 }
 
 // ===========================================================================
@@ -974,8 +898,8 @@ fn build_probe_result_card(
     base_kind: &str,
     probe_url: &str,
     models: &[String],
-) -> Card {
-    let mut card = Card::new(&format!("探测结果：{provider_name}"), "blue");
+) -> ChannelCard {
+    let mut card = ChannelCard::new(&format!("探测结果：{provider_name}"), "blue");
     card.push_note(format!("base_url 类型：{base_kind} · {probe_url}"));
     card.push_divider();
 
@@ -991,45 +915,38 @@ fn build_probe_result_card(
     card.push_actions(
         models
             .iter()
-            .map(|m| CardButton {
-                text: CardText {
-                    tag: "plain_text".into(),
-                    content: format!("使用 {m}"),
-                },
-                r#type: "default".into(),
-                value: json!({
-                    "form": FORM_PROBE_APPLY,
-                    "name": provider_name,
-                    "model": m,
-                }),
+            .map(|m| {
+                ButtonSpec::new(
+                    format!("使用 {m}"),
+                    "default",
+                    json!({
+                        "form": FORM_PROBE_APPLY,
+                        "name": provider_name,
+                        "model": m,
+                    }),
+                )
             })
             .collect(),
     );
     card.push_divider();
-    card.push_actions(vec![CardButton {
-        text: CardText {
-            tag: "plain_text".into(),
-            content: "← 返回 Provider 管理".into(),
-        },
-        r#type: "default".into(),
-        value: json!({ "form": FORM_BACK }),
-    }]);
+    card.push_actions(vec![ButtonSpec::new(
+        "← 返回 Provider 管理",
+        "default",
+        json!({ "form": FORM_BACK }),
+    )]);
     card
 }
 
 /// 探测失败 / 无 base_url 时的结果卡：单行说明 + 返回按钮。
-fn build_probe_error_card(provider_name: &str, reason: &str) -> Card {
-    let mut card = Card::new(&format!("探测结果：{provider_name}"), "red");
+fn build_probe_error_card(provider_name: &str, reason: &str) -> ChannelCard {
+    let mut card = ChannelCard::new(&format!("探测结果：{provider_name}"), "red");
     card.push_text(format!("探测失败：{reason}，请手填默认 model。"));
     card.push_divider();
-    card.push_actions(vec![CardButton {
-        text: CardText {
-            tag: "plain_text".into(),
-            content: "← 返回 Provider 管理".into(),
-        },
-        r#type: "default".into(),
-        value: json!({ "form": FORM_BACK }),
-    }]);
+    card.push_actions(vec![ButtonSpec::new(
+        "← 返回 Provider 管理",
+        "default",
+        json!({ "form": FORM_BACK }),
+    )]);
     card
 }
 
@@ -1045,7 +962,7 @@ fn sorted_names(items: &[Item]) -> Vec<String> {
 
 /// 重新渲染主卡并通过 `UpdateCardByMsgId`（有原 message_id）或 `SendCard`
 /// （无原 message_id）发出去。
-async fn refresh_card(handle: &RouterHandle, key: &SessionKey, message_id: Option<String>) -> Out {
+async fn refresh_card(handle: &RouterHandle, key: &ChannelKey, message_id: Option<String>) -> Out {
     let state = provider_state::load();
     let items = match &handle.provider_forms {
         Some(forms) => forms.preset.store.list().await,
@@ -1053,18 +970,17 @@ async fn refresh_card(handle: &RouterHandle, key: &SessionKey, message_id: Optio
     };
     let provider_names = sorted_names(&items);
     let card = build_card(&state, &provider_names, &items);
-    let card_value = serde_json::to_value(&card).expect("provider card serializes");
     match message_id {
         Some(msg_id) => Out::UpdateCardByMsgId {
             key: key.clone(),
             msg_id,
-            card: card_value,
+            card,
         },
         None => {
             let root_id = handle.reply_target(key).await;
             Out::SendCard {
                 key: key.clone(),
-                card: card_value,
+                card,
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
@@ -1083,14 +999,11 @@ mod tests {
     use super::*;
     use crate::crud::{CrudForm, FileStore, ProviderForms};
     use crate::state::SessionMap;
-    use sebas_feishu::forms::FormSpec;
+    use sebas_channels::card::FormSpec;
     use std::sync::Arc;
 
-    fn test_key() -> SessionKey {
-        SessionKey {
-            chat_id: "oc_test".into(),
-            thread_id: None,
-        }
+    fn test_key() -> ChannelKey {
+        ChannelKey::feishu("oc_test", None)
     }
 
     fn item(name: &str, preset: Option<&str>) -> Item {
@@ -1161,7 +1074,9 @@ mod tests {
         (h, _g)
     }
 
-    fn serialised_button_values(card: &Value) -> Vec<String> {
+    /// Serialize a neutral card and walk its wire JSON for button payloads.
+    fn serialised_button_values(card: &ChannelCard) -> Vec<String> {
+        let value = serde_json::to_value(card).expect("card serializes");
         fn walk(v: &Value, out: &mut Vec<String>) {
             if let Value::Object(map) = v {
                 if map.get("tag").and_then(Value::as_str) == Some("button")
@@ -1186,11 +1101,12 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        walk(card, &mut out);
+        walk(&value, &mut out);
         out
     }
 
-    fn button_mode_types(card: &Value) -> std::collections::HashMap<String, String> {
+    fn button_mode_types(card: &ChannelCard) -> std::collections::HashMap<String, String> {
+        let value = serde_json::to_value(card).expect("card serializes");
         let mut out = std::collections::HashMap::new();
         fn walk(v: &Value, out: &mut std::collections::HashMap<String, String>) {
             if let Value::Object(map) = v {
@@ -1224,7 +1140,7 @@ mod tests {
                 }
             }
         }
-        walk(card, &mut out);
+        walk(&value, &mut out);
         out
     }
 
@@ -1239,12 +1155,7 @@ mod tests {
             panic!("expected SendCard");
         };
         let serialised = serde_json::to_string(&card).unwrap();
-        let title = card
-            .get("header")
-            .and_then(|h| h.get("title"))
-            .and_then(|t| t.get("content"))
-            .and_then(Value::as_str);
-        assert_eq!(title, Some("Provider 管理"));
+        assert_eq!(card.title, "Provider 管理");
 
         // 序列化 JSON 里数 button + select_static 个数。
         // 3 模式 + 2 新建 + 详情面板 4（探测/编辑/删除/设为默认）= 9。
@@ -1925,7 +1836,7 @@ mod tests {
         );
         // 缺省值（item 没 protocol）→ initial=auto。
         assert!(
-            serialised.contains("\"initial_value\":[\"auto\"]"),
+            serialised.contains("\"initial\":\"auto\""),
             "缺省 initial 应为 auto：{serialised}"
         );
     }
@@ -1947,7 +1858,7 @@ mod tests {
         };
         let serialised = serde_json::to_string(&card).unwrap();
         assert!(
-            serialised.contains("\"initial_value\":[\"openai\"]"),
+            serialised.contains("\"initial\":\"openai\""),
             "initial 应跟 item.protocol：{serialised}"
         );
     }

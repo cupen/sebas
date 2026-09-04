@@ -1,40 +1,39 @@
 //! `sebas replay --dir <DIR>` — offline replay of captured inbound events.
 //!
 //! Reads every `*.json` file in the directory (sorted by filename), parses
-//! each as a `FeishuEnvelope`, and dispatches into a fresh `RouterHandle`
-//! exactly the same way the live Feishu WebSocket loop would. No Feishu
-//! client, no ACP child, no HTTP server — this is a pure router/manager
-//! exercise used to reproduce router decisions and `apply_event_to_out`
-//! actions offline.
+//! each as a neutral [`ChannelEvent`] (the post-adapter, post-gating shape
+//! the live WS loop dumps), and dispatches into a fresh `RouterHandle`.
+//! No Feishu client, no ACP child, no HTTP server — this is a pure
+//! router/manager exercise used to reproduce router decisions and
+//! `apply_event_to_out` actions offline.
 //!
-//! The parse + dispatch path is shared with `crate::run::RouterEventHandler`
-//! via `replay_frame`, so the WS handler and the replay command exercise
-//! the same routing code 1:1.
+//! Frame format: externally-tagged `ChannelEvent` JSON
+//! (`{"Text": {"key": {"channel": "feishu", "reference": "..."}, ...}}`).
+//! Captured events have already passed the adapter's gates (dedup,
+//! chat-type, mention) at capture time, so replay re-applies none of them.
+//! Pre-neutralization fixture dumps (raw Feishu envelopes) no longer parse
+//! and are skipped with a warning (decouple-feishu-channel design D6).
 
 use std::path::PathBuf;
 
-use sebas_feishu::events::FeishuEnvelope;
+use sebas_channels::ChannelEvent;
 use sebas_router::router::RouterHandle;
 use sebas_router::state::SessionMap;
 use tracing::{debug, info, warn};
-
-use crate::run::RouterEventHandler;
 
 /// Arguments for `sebas replay --dir <DIR>`.
 pub struct ReplayArgs {
     pub dir: PathBuf,
 }
 
-/// Replay ONE frame synchronously against the dispatcher.
+/// Replay ONE neutral frame synchronously against the router.
 ///
-/// Synchronous so it can be called from `EventHandler::handle` (the WS
-/// handler runs in sync context) and from tests; the actual `dispatch`
-/// call is async, so we `tokio::spawn` it and return immediately.
+/// Synchronous so tests (and any sync caller) can drive it; the actual
+/// `dispatch` call is async, so we `tokio::spawn` it and return immediately.
 ///
 /// Returns `true` if the frame was parsed and dispatched to the router,
-/// `false` if it was skipped (UTF-8 / JSON parse failure, or the envelope
-/// mapped to no internal event — e.g. owner filter excluded the sender).
-pub fn replay_frame(handler: &RouterEventHandler, raw: &[u8]) -> bool {
+/// `false` if it was skipped (UTF-8 / JSON parse failure).
+pub fn replay_frame(router: &RouterHandle, raw: &[u8]) -> bool {
     let text = match std::str::from_utf8(raw) {
         Ok(t) => t,
         Err(e) => {
@@ -42,48 +41,19 @@ pub fn replay_frame(handler: &RouterEventHandler, raw: &[u8]) -> bool {
             return false;
         }
     };
-    let env = match serde_json::from_str::<FeishuEnvelope>(text) {
+    let evt = match serde_json::from_str::<ChannelEvent>(text) {
         Ok(e) => e,
         Err(e) => {
-            warn!(?e, "replay: failed to parse FeishuEnvelope, skipping");
+            warn!(?e, "replay: failed to parse ChannelEvent, skipping");
             return false;
         }
     };
-
-    // 事件去重：飞书可能重投相同 event_id 的事件。
-    if let Some(ref eid) = env.header.event_id {
-        let mut seen = handler.seen_events.lock().unwrap();
-        if !seen.insert(eid.clone()) {
-            debug!(event_id = %eid, "replay: duplicate event, skipping");
-            return false;
-        }
-        // 容量上限 4096，超限时整体清空。
-        if seen.len() > 4096 {
-            seen.clear();
-        }
-    }
-
-    let Some(in_ev) = env.into_event(&handler.owner_id) else {
-        debug!("replay: envelope produced no FeishuIn (filtered or unrecognized)");
-        return false;
-    };
-
-    // chat_type 过滤 + 群聊 @bot 检测
-    if !handler.is_chat_type_allowed(in_ev.chat_type()) {
-        debug!("replay: chat_type not allowed, skipping");
-        return false;
-    }
-    if handler.should_filter_by_mention(&in_ev) {
-        debug!("replay: group message without @bot, skipping");
-        return false;
-    }
-
-    let router = handler.router.clone();
-    // Dispatch is async; the caller (WS handler or replay::run) is sync.
-    // Spawn and let the runtime drive it. The mpsc channel inside the
-    // router absorbs the result so the caller does not need to await.
+    let router = router.clone();
+    // Dispatch is async; the caller (tests or replay::run) is sync. Spawn
+    // and let the runtime drive it. The mpsc channel inside the router
+    // absorbs the result so the caller does not need to await.
     tokio::spawn(async move {
-        router.dispatch(in_ev).await;
+        router.dispatch(evt).await;
     });
     debug!("replay: dispatched frame");
     true
@@ -124,7 +94,6 @@ pub async fn run(args: ReplayArgs) -> anyhow::Result<u64> {
     // push — `mpsc::Sender::send` returns an error if all receivers are
     // dropped, which would silently swallow every frame.
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let handler = RouterEventHandler::new(router, String::new(), None);
 
     let mut count: u64 = 0;
     for p in &paths {
@@ -136,7 +105,7 @@ pub async fn run(args: ReplayArgs) -> anyhow::Result<u64> {
                 continue;
             }
         };
-        let dispatched = replay_frame(&handler, &bytes);
+        let dispatched = replay_frame(&router, &bytes);
         if dispatched {
             debug!(path = %p.display(), "replay: dispatched frame");
             count += 1;

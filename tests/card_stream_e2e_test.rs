@@ -4,7 +4,7 @@
 //! 断言 150ms 内合并成 1 个含 5 段的 UpdateCard，随后 Finished 立即产 ✅ 卡。
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
@@ -35,19 +35,14 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
-    let key = SessionKey {
-        chat_id: "oc_stream".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_stream", None);
 
     // Text "stream" -> SpawnAcp.
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "stream".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())

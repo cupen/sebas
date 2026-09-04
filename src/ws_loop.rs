@@ -1,114 +1,22 @@
-//! 飞书 WebSocket 长连接事件循环 + 入站事件处理器。
+//! 飞书入站事件处理器（feishu 适配器边界）。
 //!
-//! 从 `run.rs` 拆出。`RouterEventHandler` 同时被 `crate::replay` 复用
-//! （WS 路径与离线 replay 共享同一套解析+分发），经 `crate::run` re-export。
+//! decouple-feishu-channel task 3/4：生产 WS 循环已下沉到 feishu adapter
+//! （`sebas_feishu::adapter::FeishuAdapter::spawn` → 内部 `run_ws_loop`）。
+//! 这里保留 `RouterEventHandler` + `feishu_in_to_channel_event` +
+//! `ingest_feishu_frame`：envelope 解析、去重、门禁、中立化翻译都在这一层
+//! 完成，dump 的是翻译后的中立 `ChannelEvent`（`sebas replay` 消费同一
+//! 形状，replay 侧零飞书引用）。
 
 use crate::config::Config;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::AcpCommand;
-use sebas_feishu::events::FeishuIn;
-use sebas_feishu::events::SessionKey;
-use open_lark::Config as LarkConfig;
-use open_lark::CoreError;
-use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
+use sebas_feishu::events::{FeishuEnvelope, FeishuIn};
+use open_lark::ws_client::EventHandler;
 use sebas_router::router::RouterHandle;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
-use tracing::{error, info, warn};
-
-/// Long-connection WebSocket loop driven by `open-lark`. The crate handles the
-/// protobuf framing and the `/callback/ws/endpoint` handshake for us, so all
-/// we have to do is register a raw event handler on the dispatcher and
-/// forward each inbound message into the router.
-///
-/// `LarkWsClient::open` returns when the server closes the connection (or on
-/// any other error); we wrap it in an outer reconnect loop with exponential
-/// backoff so a transient flap doesn't take the bot offline.
-///
-/// Note on event coverage: v0.19.0's `register_raw` accepts any non-empty
-/// string key, so we register both inbound event names we care about:
-/// `im.message.receive_v1` (text/media) and `card.action.trigger` (button
-/// callbacks from permission cards). Each registration hands the same
-/// `RouterEventHandler` clone every frame; the handler parses both
-/// envelope shapes via `FeishuEnvelope::into_event`.
-pub(crate) async fn run_ws_loop(
-    app_id: &str,
-    app_secret: &str,
-    owner_id: &str,
-    router: RouterHandle,
-    dump_dir: Option<std::path::PathBuf>,
-    allowed_chat_types: Vec<String>,
-    bot_name: String,
-) {
-    let mut backoff = Duration::from_secs(1);
-    let max_backoff = Duration::from_secs(60);
-
-    loop {
-        // Rebuild the dispatcher for each connection attempt so retries start
-        // with a fresh handler and cheap clones of the router and owner ID.
-        let mut handler =
-            RouterEventHandler::new(router.clone(), owner_id.to_string(), dump_dir.clone());
-        // Wire chat_type/bot_name filter from config (pub fields)
-        handler.allowed_chat_types = allowed_chat_types.clone();
-        handler.bot_name = bot_name.clone();
-        // Two raw registrations sharing the same handler. `register_raw` in
-        // v0.19.0 is purely a key-on-HashMap insert keyed by the supplied
-        // string, so `card.action.trigger` is accepted — there is no enum
-        // of supported events on the openlark side. Any registration error
-        // (empty / duplicate key) is bubbled up and aborts the WS loop.
-        let dispatcher = match EventDispatcherHandler::builder()
-            .register_raw("im.message.receive_v1", handler.clone())
-            .and_then(|b| b.register_raw("card.action.trigger", handler))
-        {
-            Ok(d) => d,
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "failed to register event handlers; aborting WS loop"
-                );
-                return;
-            }
-        };
-
-        let ws_config = LarkConfig::builder()
-            .app_id(app_id.to_string())
-            .app_secret(app_secret.to_string())
-            .build();
-        let ws_config = Arc::new(ws_config);
-
-        info!("connecting to feishu WS via open-lark");
-        let result = LarkWsClient::open(ws_config, dispatcher).await;
-
-        match result {
-            Ok(()) => {
-                info!("feishu WS session ended cleanly; reconnecting");
-                backoff = Duration::from_secs(1);
-            }
-            Err(WsClientError::ConnectionClosed { reason }) => {
-                warn!(?reason, "feishu WS closed; reconnecting");
-                backoff = Duration::from_secs(1);
-            }
-            Err(WsClientError::RequestError(core_err))
-                if matches!(core_err, CoreError::Authentication { .. }) =>
-            {
-                error!(
-                    error = %core_err,
-                    "feishu WS auth failed; aborting (fatal)"
-                );
-                return;
-            }
-            Err(e) => {
-                warn!(error = %e, "feishu WS failed; backing off");
-            }
-        }
-
-        info!(?backoff, "WS reconnect after backoff");
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(max_backoff);
-    }
-}
+use tracing::{debug, info, warn};
 
 /// Raw-bytes event handler bound to inbound event names via `register_raw`.
 /// Bypasses v0.14.0's typed-registration bug (where the dispatcher built the
@@ -120,17 +28,16 @@ pub(crate) async fn run_ws_loop(
 /// `card.action.trigger` for permission-card button callbacks), so the
 /// struct must be cheap to clone — all owned fields are already `Clone`.
 ///
-/// Also reused by `crate::replay` (the `sebas replay --dir` subcommand) so
-/// the WS path and the offline replay path share the same parse + dispatch
-/// logic 1:1. Fields are `pub` so tests and `replay::run` can construct one
+/// Fields are `pub` so tests and the adapter wiring can construct one
 /// directly without a constructor.
 #[derive(Clone)]
 pub struct RouterEventHandler {
     pub router: RouterHandle,
     pub owner_id: String,
-    /// Optional directory for raw payload snapshots. When set, every received
-    /// WS frame is written to `<dir>/<unix_ms>-<uuid>.json` before parsing, so
-    /// you can replay captured traffic locally without a live Feishu bot.
+    /// Optional directory for **translated neutral event** snapshots. When set,
+    /// every gated inbound frame is written as `ChannelEvent` JSON to
+    /// `<dir>/<unix_ns>-<pid>.json`, so `sebas replay` can replay captured
+    /// traffic locally without a live Feishu bot.
     pub dump_dir: Option<std::path::PathBuf>,
     /// 已处理过的 event_id 集合（去重）。飞书可能重投相同 event_id 的事件。
     /// 容量上限 4096，超限时整体清空（概率极低，但防内存泄漏）。
@@ -204,23 +111,100 @@ impl EventHandler for RouterEventHandler {
         &self,
         payload: &[u8],
     ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(dir) = &self.dump_dir {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let pid = std::process::id();
-            let path = dir.join(format!("{ts}-{pid}.json"));
-            if let Err(e) = std::fs::write(&path, payload) {
-                warn!(?e, ?path, "failed to dump inbound payload");
-            }
-        }
-        // Delegate the parse + dispatch to the shared replay helper so the
-        // WS loop and `sebas replay --dir` exercise the exact same routing
-        // logic. `replay_frame` is sync; it spawns the async dispatch.
-        crate::replay::replay_frame(self, payload);
+        // Feishu-boundary ingest: envelope parse → dedup → gates → neutral
+        // translation → dump (neutral) → dispatch. `ingest_feishu_frame` is
+        // sync; it spawns the async dispatch.
+        ingest_feishu_frame(self, payload);
         Ok(())
     }
+}
+
+/// Feishu-boundary ingest for one raw WS frame (also drives the envelope-
+/// driven tests): parse the `FeishuEnvelope`, dedup by `event_id`, apply the
+/// chat-type/mention gates, translate to a neutral [`ChannelEvent`], dump
+/// the **translated** event (so `sebas replay` consumes neutral frames), and
+/// dispatch into the router.
+///
+/// Synchronous so the WS handler and tests can call it; the actual dispatch
+/// is async and spawned. Returns `true` if a frame was translated and
+/// dispatched, `false` if it was skipped (parse failure, owner filter,
+/// gates, or unrecognized envelope).
+pub fn ingest_feishu_frame(handler: &RouterEventHandler, raw: &[u8]) -> bool {
+    let text = match std::str::from_utf8(raw) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(?e, "ingest: non-UTF8 payload, skipping");
+            return false;
+        }
+    };
+    let env = match serde_json::from_str::<FeishuEnvelope>(text) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(?e, "ingest: failed to parse FeishuEnvelope, skipping");
+            return false;
+        }
+    };
+
+    // 事件去重：飞书可能重投相同 event_id 的事件。
+    if let Some(ref eid) = env.header.event_id {
+        let mut seen = handler.seen_events.lock().unwrap();
+        if !seen.insert(eid.clone()) {
+            debug!(event_id = %eid, "ingest: duplicate event, skipping");
+            return false;
+        }
+        // 容量上限 4096，超限时整体清空。
+        if seen.len() > 4096 {
+            seen.clear();
+        }
+    }
+
+    let Some(in_ev) = env.into_event(&handler.owner_id) else {
+        debug!("ingest: envelope produced no FeishuIn (filtered or unrecognized)");
+        return false;
+    };
+
+    // chat_type 过滤 + 群聊 @bot 检测
+    if !handler.is_chat_type_allowed(in_ev.chat_type()) {
+        debug!("ingest: chat_type not allowed, skipping");
+        return false;
+    }
+    if handler.should_filter_by_mention(&in_ev) {
+        debug!("ingest: group message without @bot, skipping");
+        return false;
+    }
+
+    // 中立化：飞书入站事件 → ChannelEvent 再进 router（decouple-feishu-channel）。
+    let channel_evt =
+        sebas_feishu::adapter::feishu_in_to_channel_event(in_ev);
+
+    // Dump the **translated** neutral event so `sebas replay` consumes the
+    // same shape offline (post-gates, post-translation).
+    if let Some(dir) = &handler.dump_dir {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let path = dir.join(format!("{ts}-{pid}.json"));
+        match serde_json::to_vec(&channel_evt) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    warn!(?e, ?path, "failed to dump inbound channel event");
+                }
+            }
+            Err(e) => warn!(?e, "failed to serialize channel event for dump"),
+        }
+    }
+
+    let router = handler.router.clone();
+    // Dispatch is async; the caller (WS handler or tests) is sync. Spawn and
+    // let the runtime drive it. The mpsc channel inside the router absorbs
+    // the result so the caller does not need to await.
+    tokio::spawn(async move {
+        router.dispatch(channel_evt).await;
+    });
+    debug!("ingest: dispatched frame");
+    true
 }
 
 /// Test-only helper used by the SIGTERM-cleanup integration test
@@ -266,10 +250,10 @@ pub(crate) async fn spawn_test_session(cfg: &Config, router: &RouterHandle, mgr:
     }
     // Synthetic SessionKey — the test never sends a real Feishu message,
     // so the key content doesn't matter; it just needs to be unique.
-    let key = SessionKey {
-        chat_id: format!("test-sigterm-{}", std::process::id()),
-        thread_id: None,
-    };
+    let key = sebas_channels::ChannelKey::feishu(
+        &format!("test-sigterm-{}", std::process::id()),
+        None,
+    );
     router.insert_mapping(key, session_id.clone()).await;
     info!(%session_id, "SEBAS_TEST_SPAWN_SESSION: spawned child session");
 }

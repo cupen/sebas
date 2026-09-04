@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-router", "sebas-feishu", "sebas-acp", "sebas-gateway", "sebas-webui", "xtask", "sebas-agent"]
+members = ["sebas-router", "sebas-feishu", "sebas-acp", "sebas-gateway", "sebas-webui", "xtask", "sebas-agent", "sebas-channels"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -30,6 +30,7 @@ sebas-acp = { path = "sebas-acp" }
 sebas-gateway = { path = "sebas-gateway" }
 sebas-webui = { path = "sebas-webui" }
 sebas-agent = { path = "sebas-agent" }
+sebas-channels = { path = "sebas-channels" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

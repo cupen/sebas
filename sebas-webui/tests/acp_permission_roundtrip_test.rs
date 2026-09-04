@@ -6,7 +6,7 @@
 //! `Out::SendAcp` 回路由（`Escalate` 降级 `AllowOnce`）。
 
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::router::Out;
 use sebas_router::state::{Mapping, SessionMap};
 use sebas_webui::session_backend::{
@@ -15,21 +15,14 @@ use sebas_webui::session_backend::{
 use std::sync::Arc;
 use std::time::Duration;
 
-fn key(chat_id: &str) -> SessionKey {
-    SessionKey {
-        chat_id: chat_id.into(),
-        thread_id: None,
-    }
+fn key(chat_id: &str) -> ChannelKey {
+    ChannelKey::feishu(chat_id, None)
 }
 
-/// 与 routes::encode_session_key 同形的 URL-safe 编码（chat_id\0thread_id）。
-fn encoded_key(k: &SessionKey) -> String {
-    urlencoding::encode(&format!(
-        "{}\0{}",
-        k.chat_id,
-        k.thread_id.as_deref().unwrap_or("")
-    ))
-    .into_owned()
+/// 与 routes::encode_session_key 同形的 URL-safe 编码（channel\0reference）。
+fn encoded_key(k: &ChannelKey) -> String {
+    urlencoding::encode(&format!("{}\0{}", k.channel.as_str(), k.reference))
+        .into_owned()
 }
 
 #[tokio::test]

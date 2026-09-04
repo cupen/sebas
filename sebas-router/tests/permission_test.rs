@@ -1,5 +1,5 @@
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
-use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::Mapping;
 use sebas_router::state::SessionMap;
@@ -9,10 +9,7 @@ use std::time::Duration;
 async fn permission_request_emits_card_with_buttons() {
     let map = SessionMap::new();
     // The router resolves session_id -> SessionKey via the map, so seed it.
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x".into(), None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -33,8 +30,8 @@ async fn permission_request_emits_card_with_buttons() {
     match out {
         Out::SendCard { key, card, .. } => {
             assert_eq!(
-                key.chat_id, "oc_x",
-                "expected resolved SessionKey, got {key:?}"
+                key.reference, "oc_x",
+                "expected resolved ChannelKey, got {key:?}"
             );
             let s = serde_json::to_string(&card).unwrap();
             assert!(s.contains("本次允许"), "missing '本次允许' in card: {s}");
@@ -47,10 +44,7 @@ async fn permission_request_emits_card_with_buttons() {
 #[tokio::test]
 async fn permission_card_in_topic_leaves_root_id_none() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_topic".into(),
-        thread_id: Some("omt_t1".into()),
-    };
+    let key = ChannelKey::feishu("oc_topic".into(), Some("omt_t1".into()));
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -58,13 +52,7 @@ async fn permission_card_in_topic_leaves_root_id_none() {
 
     // 入站话题消息写入 reply target（话题根消息 message_id，events 层归一化）。
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "hello".into(),
-            reply_to: Some("om_topic_root".into()),
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(ChannelEvent::Text { key: key.clone(), text: "hello".into(), reply_target: Some("om_topic_root".into()) })
         .await;
 
     let event = AcpEvent::PermissionRequest {
@@ -93,7 +81,7 @@ async fn permission_card_in_topic_leaves_root_id_none() {
             _ => continue,
         }
     };
-    assert_eq!(perm_card.0.thread_id.as_deref(), Some("omt_t1"));
+    assert_eq!(perm_card.0.reference, "oc_topic\0omt_t1");
     assert_eq!(
         perm_card.1, None,
         "话题内权限卡 root_id 恒为 None：话题聚合由 dispatch 层兜底"
@@ -103,23 +91,14 @@ async fn permission_card_in_topic_leaves_root_id_none() {
 #[tokio::test]
 async fn permission_card_mainline_keeps_root_id_none() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x".into(), None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "hello".into(),
-            reply_to: Some("om_msg".into()),
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(ChannelEvent::Text { key: key.clone(), text: "hello".into(), reply_target: Some("om_msg".into()) })
         .await;
 
     let event = AcpEvent::PermissionRequest {
@@ -150,10 +129,7 @@ async fn permission_card_mainline_keeps_root_id_none() {
 #[tokio::test]
 async fn button_callback_emits_permission_reply() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x".into(), None);
     // on_button now requires a live session mapping before forwarding a reply.
     map.insert(key.clone(), Mapping::active("s1"))
         .await
@@ -172,7 +148,7 @@ async fn button_callback_emits_permission_reply() {
             serde_json::json!({"cmd": "ls"}),
         )
         .await;
-    let action = CardAction {
+    let action = ChannelAction {
         session_id: "s1".into(),
         request_id: Some("r1".into()),
         decision: Some("allow_once".into()),
@@ -180,11 +156,10 @@ async fn button_callback_emits_permission_reply() {
     };
 
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key,
             action,
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
 
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
@@ -220,11 +195,8 @@ async fn button_callback_emits_permission_reply() {
 async fn button_callback_on_dead_session_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let key = SessionKey {
-        chat_id: "oc_gone".into(),
-        thread_id: None,
-    };
-    let action = CardAction {
+    let key = ChannelKey::feishu("oc_gone".into(), None);
+    let action = ChannelAction {
         session_id: "s_dead".into(),
         request_id: Some("r1".into()),
         decision: Some("allow_once".into()),
@@ -232,11 +204,10 @@ async fn button_callback_on_dead_session_emits_help_card() {
     };
 
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key,
             action,
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
 
     let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
@@ -245,7 +216,7 @@ async fn button_callback_on_dead_session_emits_help_card() {
         .unwrap();
     match out {
         Out::SendCard { key, card, .. } => {
-            assert_eq!(key.chat_id, "oc_gone");
+            assert_eq!(key.reference, "oc_gone");
             let s = serde_json::to_string(&card).unwrap();
             assert!(s.contains("会话已结束"), "missing dead-session notice: {s}");
         }
@@ -256,10 +227,7 @@ async fn button_callback_on_dead_session_emits_help_card() {
 #[tokio::test]
 async fn button_callback_unknown_decision_defaults_to_deny() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x".into(), None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -275,18 +243,17 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
             serde_json::json!({"cmd": "ls"}),
         )
         .await;
-    let action = CardAction {
+    let action = ChannelAction {
         session_id: "s1".into(),
         request_id: Some("r1".into()),
         decision: None, // malformed payload -> fail closed
         value: serde_json::json!({}),
     };
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key,
             action,
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
     // Drain the in-place flip (UpdateCardByMsgId) before SendAcp.
     let out = loop {

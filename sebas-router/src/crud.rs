@@ -17,18 +17,23 @@
 //! 拿不到 message_id 时才退回新发一张卡片。
 
 use crate::router::Out;
-use sebas_feishu::cards::{Card, CardButton, CardElement, CardText};
-use sebas_feishu::events::SessionKey;
 // `SelectOption` 仅在 #[cfg(test)] 的 provider_spec helper 里用到，lib 构建
 // 会触发 unused_imports warning，故显式 allow。
 #[allow(unused_imports)]
-use sebas_feishu::forms::{FormField, FormSpec, SelectOption, render_form_card, values_to_strings};
+use sebas_channels::card::{ButtonSpec, ChannelCard, ChannelElement, FormField, FormSpec, SelectOption};
+use sebas_channels::ChannelKey;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+
+/// 表单回调提交值的归一化：`form_value`（JSON 值表）→ 字符串表。与
+/// `sebas_channels::card::values_to_strings` 同语义，保持旧 import 路径。
+pub fn values_to_strings(form_value: &BTreeMap<String, Value>) -> BTreeMap<String, String> {
+    sebas_channels::card::values_to_strings(form_value)
+}
 
 /// 一条记录：字段名 -> 值（必须含 `id_field` 指向的 id）。
 pub type Item = Map<String, Value>;
@@ -333,26 +338,25 @@ impl ProviderForms {
     /// 「取消」按钮专用：从任意表单回到 ProviderForms 的双入口列表卡。
     /// 与单表单 `render_list_card` 不同——保留「＋ 新增（预设/自定义）」
     /// 两个按钮以及双 form 调度。
-    pub async fn cancel(&self, key: SessionKey, message_id: Option<String>) -> crate::router::Out {
+    pub async fn cancel(&self, key: ChannelKey, message_id: Option<String>) -> crate::router::Out {
         self.handle_cancel(key, message_id).await
     }
 
     async fn handle_cancel(
         &self,
-        key: SessionKey,
+        key: ChannelKey,
         message_id: Option<String>,
     ) -> crate::router::Out {
         let card = self.build_list_card().await;
-        let card_value = serde_json::to_value(&card).expect("provider list card serializes");
         match message_id {
             Some(msg_id) => crate::router::Out::UpdateCardByMsgId {
                 key,
                 msg_id,
-                card: card_value,
+                card,
             },
             None => crate::router::Out::SendCard {
                 key,
-                card: card_value,
+                card,
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
@@ -361,10 +365,10 @@ impl ProviderForms {
         }
     }
 
-    async fn build_list_card(&self) -> Card {
+    async fn build_list_card(&self) -> ChannelCard {
         let items = self.preset.store.list().await;
         let spec = &self.preset.spec;
-        let mut card = Card::new(&format!("{}列表", spec.title), &spec.template);
+        let mut card = ChannelCard::new(&format!("{}列表", spec.title), &spec.template);
         if items.is_empty() {
             card.push_text("暂无记录");
         } else {
@@ -403,42 +407,30 @@ impl ProviderForms {
                 &self.custom
             };
             card.push_actions(vec![
-                CardButton {
-                    text: CardText {
-                        tag: "plain_text".into(),
-                        content: "编辑".into(),
-                    },
-                    r#type: "default".into(),
-                    value: payload(edit_form.spec.form_name.as_str(), OP_EDIT, Some(&id)),
-                },
-                CardButton {
-                    text: CardText {
-                        tag: "plain_text".into(),
-                        content: "删除".into(),
-                    },
-                    r#type: "danger".into(),
-                    value: payload(edit_form.spec.form_name.as_str(), OP_DELETE, Some(&id)),
-                },
+                ButtonSpec::new(
+                    "编辑",
+                    "default",
+                    payload(edit_form.spec.form_name.as_str(), OP_EDIT, Some(&id)),
+                ),
+                ButtonSpec::new(
+                    "删除",
+                    "danger",
+                    payload(edit_form.spec.form_name.as_str(), OP_DELETE, Some(&id)),
+                ),
             ]);
             card.push_divider();
         }
         card.push_actions(vec![
-            CardButton {
-                text: CardText {
-                    tag: "plain_text".into(),
-                    content: "＋ 新增（预设）".into(),
-                },
-                r#type: "primary".into(),
-                value: payload(self.preset.spec.form_name.as_str(), OP_CREATE, None),
-            },
-            CardButton {
-                text: CardText {
-                    tag: "plain_text".into(),
-                    content: "＋ 新增（自定义）".into(),
-                },
-                r#type: "default".into(),
-                value: payload(self.custom.spec.form_name.as_str(), OP_CREATE, None),
-            },
+            ButtonSpec::new(
+                "＋ 新增（预设）",
+                "primary",
+                payload(self.preset.spec.form_name.as_str(), OP_CREATE, None),
+            ),
+            ButtonSpec::new(
+                "＋ 新增（自定义）",
+                "default",
+                payload(self.custom.spec.form_name.as_str(), OP_CREATE, None),
+            ),
         ]);
         card
     }
@@ -460,16 +452,16 @@ impl ProviderForms {
 
     /// `/provider` 命令入口：拉任意一张表单的存储列表（两张共享同一 store），
     /// 渲染一张带两个「＋ 新增」按钮的列表卡。
-    pub async fn open(&self, key: SessionKey) -> crate::router::Out {
+    pub async fn open(&self, key: ChannelKey) -> crate::router::Out {
         self.render_list_card(key).await
     }
 
-    async fn render_list_card(&self, key: SessionKey) -> crate::router::Out {
+    async fn render_list_card(&self, key: ChannelKey) -> crate::router::Out {
         let card = self.build_list_card().await;
         // 列表卡没有 context open_message_id：新发一张。
         crate::router::Out::SendCard {
             key,
-            card: serde_json::to_value(&card).expect("provider list card serializes"),
+            card,
             msg_id: None,
             perm_request_id: None,
             perm_meta: None,
@@ -513,7 +505,7 @@ impl<S: CrudStore> CrudForm<S> {
     }
 
     /// 打开 CRUD：发送列表卡（含「＋ 新增」和每条记录的 编辑/删除）。
-    pub async fn open(&self, key: SessionKey) -> Out {
+    pub async fn open(&self, key: ChannelKey) -> Out {
         self.reply(key, self.render_list_card().await, None)
     }
 
@@ -526,7 +518,7 @@ impl<S: CrudStore> CrudForm<S> {
     /// 回调负载见模块文档；表单字段值走 `form_value`（组件 `name` -> 值）。
     pub async fn handle(
         &self,
-        key: SessionKey,
+        key: ChannelKey,
         value: &Value,
         form_value: &BTreeMap<String, Value>,
         message_id: Option<String>,
@@ -597,9 +589,8 @@ impl<S: CrudStore> CrudForm<S> {
                 };
                 let mut card = self.render_edit_card(&initial, id);
                 // 结果提示放表单容器上方，重渲后第一眼可见。
-                card.body
-                    .elements
-                    .insert(0, CardElement::Markdown { content: note });
+                card.elements
+                    .insert(0, ChannelElement::Markdown { content: note });
                 self.reply(key, card, message_id)
             }
             OP_DELETE => {
@@ -710,44 +701,40 @@ impl<S: CrudStore> CrudForm<S> {
         out
     }
 
-    fn render_edit_card(&self, initial: &BTreeMap<String, String>, id: Option<&str>) -> Card {
+    fn render_edit_card(&self, initial: &BTreeMap<String, String>, id: Option<&str>) -> ChannelCard {
         let mut submit = Map::new();
         submit.insert(KEY_FORM.into(), Value::String(self.spec.form_name.clone()));
         submit.insert(KEY_OP.into(), Value::String(OP_SUBMIT.into()));
         if let Some(id) = id {
             submit.insert(KEY_ID.into(), Value::String(id.to_string()));
         }
-        let mut card = render_form_card(&self.spec, initial, Value::Object(submit));
+        let mut card = ChannelCard::new(&self.spec.title, &self.spec.template);
+        card.elements.push(ChannelElement::Form {
+            name: self.spec.form_name.clone(),
+            fields: self.spec.fields.clone(),
+            initials: initial.clone(),
+            submit: Value::Object(submit),
+        });
         // 「获取模型列表」（可选）与「取消/返回列表」都必须是表单容器外的
         // 普通回调按钮：容器内的 reset 按钮不允许带 behaviors（飞书 API
         // 11310），无法驱动服务端状态。获取按钮在容器外也能拿到整张卡的
         // form_value（含容器内各字段当前值），所以新建未提交也能取数。
-        let mut actions: Vec<CardButton> = Vec::new();
+        let mut actions: Vec<ButtonSpec> = Vec::new();
         if self.model_fetcher.is_some() {
-            actions.push(CardButton {
-                text: CardText {
-                    tag: "plain_text".into(),
-                    content: "🔍 获取模型列表".into(),
-                },
-                r#type: "default".into(),
-                value: self.payload(OP_FETCH_MODELS, id),
-            });
+            actions.push(ButtonSpec::new(
+                "🔍 获取模型列表",
+                "default",
+                self.payload(OP_FETCH_MODELS, id),
+            ));
         }
-        actions.push(CardButton {
-            text: CardText {
-                tag: "plain_text".into(),
-                content: "取消".into(),
-            },
-            r#type: "default".into(),
-            value: self.payload(OP_CANCEL, None),
-        });
+        actions.push(ButtonSpec::new("取消", "default", self.payload(OP_CANCEL, None)));
         card.push_actions(actions);
         card
     }
 
-    async fn render_list_card(&self) -> Card {
+    async fn render_list_card(&self) -> ChannelCard {
         let items = self.store.list().await;
-        let mut card = Card::new(&format!("{}列表", self.spec.title), &self.spec.template);
+        let mut card = ChannelCard::new(&format!("{}列表", self.spec.title), &self.spec.template);
         if items.is_empty() {
             card.push_text("暂无记录");
         } else {
@@ -773,33 +760,16 @@ impl<S: CrudStore> CrudForm<S> {
                 card.push_text(lines.join("\n"));
             }
             card.push_actions(vec![
-                CardButton {
-                    text: CardText {
-                        tag: "plain_text".into(),
-                        content: "编辑".into(),
-                    },
-                    r#type: "default".into(),
-                    value: self.payload(OP_EDIT, Some(&id)),
-                },
-                CardButton {
-                    text: CardText {
-                        tag: "plain_text".into(),
-                        content: "删除".into(),
-                    },
-                    r#type: "danger".into(),
-                    value: self.payload(OP_DELETE, Some(&id)),
-                },
+                ButtonSpec::new("编辑", "default", self.payload(OP_EDIT, Some(&id))),
+                ButtonSpec::new("删除", "danger", self.payload(OP_DELETE, Some(&id))),
             ]);
             card.push_divider();
         }
-        card.push_actions(vec![CardButton {
-            text: CardText {
-                tag: "plain_text".into(),
-                content: "＋ 新增".into(),
-            },
-            r#type: "primary".into(),
-            value: self.payload(OP_CREATE, None),
-        }]);
+        card.push_actions(vec![ButtonSpec::new(
+            "＋ 新增",
+            "primary",
+            self.payload(OP_CREATE, None),
+        )]);
         card
     }
 
@@ -813,8 +783,7 @@ impl<S: CrudStore> CrudForm<S> {
         Value::Object(m)
     }
 
-    fn reply(&self, key: SessionKey, card: Card, message_id: Option<String>) -> Out {
-        let card = serde_json::to_value(&card).expect("crud card serializes");
+    fn reply(&self, key: ChannelKey, card: ChannelCard, message_id: Option<String>) -> Out {
         match message_id {
             Some(msg_id) => Out::UpdateCardByMsgId { key, msg_id, card },
             None => Out::SendCard {

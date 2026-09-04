@@ -6,7 +6,7 @@
 use sebas_feishu::cards::CardConfig;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use http_body_util::BodyExt;
 use sebas_router::router::RouterHandle;
 use sebas_router::state::{Mapping, SessionMap};
@@ -16,20 +16,12 @@ use tower::ServiceExt;
 use sebas_webui::models::GatewayInfo;
 use sebas_webui::build_router;
 
-fn key(id: &str) -> SessionKey {
-    SessionKey {
-        chat_id: format!("oc_{id}"),
-        thread_id: None,
-    }
+fn key(id: &str) -> ChannelKey {
+    ChannelKey::feishu(&format!("oc_{id}"), None)
 }
 
-fn encode(key: &SessionKey) -> String {
-    let raw = format!(
-        "{}\0{}",
-        key.chat_id,
-        key.thread_id.as_deref().unwrap_or("")
-    );
-    urlencoding::encode(&raw).into_owned()
+fn encode(key: &ChannelKey) -> String {
+    urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference)).into_owned()
 }
 
 /// RouterHandle preloaded with one Active (s1), one Dormant (s2), one
@@ -126,14 +118,14 @@ async fn sessions_list_is_active_first_with_status_projection() {
     let (_, v) = get_json(&app, "/api/sessions").await;
     assert_eq!(v["active_session_key"], encoded_a.as_str(), "focus must be set");
     let rows = v["recent_sessions"].as_array().unwrap();
-    let first = rows[0]["chat_id"].as_str().unwrap();
+    let first = rows[0]["reference"].as_str().unwrap();
     assert_eq!(first, "oc_a", "focused session must sort first: {v}");
     assert_eq!(rows[0]["is_active"], true);
     // The others are not focused; recency puts the dormant fixture (ts=1)
     // after everything created "just now".
     let later: Vec<&str> = rows[1..]
         .iter()
-        .map(|r| r["chat_id"].as_str().unwrap())
+        .map(|r| r["reference"].as_str().unwrap())
         .collect();
     assert!(later.contains(&"oc_b"), "dormant fixture missing: {v}");
     // Backend-owned status projection: slug in the known set, matching
@@ -162,7 +154,7 @@ async fn session_detail_returns_payload_and_sets_focus() {
     let encoded = encode(&key("a"));
     let (status, v) = get_json(&app, &format!("/api/sessions/{encoded}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["chat_id"], "oc_a");
+    assert_eq!(v["reference"], "oc_a");
     assert_eq!(v["session_id"], "s1");
     assert!(v["status_slug"].as_str().is_some());
     assert!(v["body"].is_array(), "card body must be a list: {v}");
@@ -278,7 +270,7 @@ async fn close_session_semantics_over_json() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| r["chat_id"].as_str().unwrap())
+        .map(|r| r["reference"].as_str().unwrap())
         .collect();
     assert!(!keys.contains(&"oc_b"), "closed session still listed");
 }

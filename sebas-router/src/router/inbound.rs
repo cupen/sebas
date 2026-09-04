@@ -1,18 +1,20 @@
-//! 入站飞书事件处理：文本/媒体/按钮回调 → `Out` 指令。
+//! 入站通道事件处理（中立事件模型）：文本/媒体/按钮回调 → `Out` 指令。
 //!
 //! `RouterHandle` 的 impl 延续块（子模块可访问私有字段），从 router.rs 拆出。
 //! `drain_queue_if_terminal` 被 [`acp_events`] 复用，故放在 mod.rs 里。
+//!
+//! 入站统一走 `sebas_channels::ChannelEvent`（Text/Media/ButtonCb/FormCb）：
+//! 通道相关的门禁（chat_type / 群聊 @ bot 检测 / 去重）已下沉到各通道适配器，
+//! 核心只看到中立事件与 `ChannelKey`。
 
 use super::{Out, RouterHandle, compose_media_prompt, text_from_caption};
+use crate::cards::{CardConfig, ThinkingDisplay};
+use crate::cards_ui;
 use crate::commands::{Command, GatewayAction, parse_command};
 use crate::settings;
 use sebas_acp::claude::session::{AcpCommand, Decision};
-use sebas_feishu::cards::{
-    CardConfig, CardElement, DivText, ThinkingDisplay, render_accumulated_card,
-    render_dead_session_card, render_expired_permission_card, render_help_card,
-    render_resolved_permission_card,
-};
-use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+use sebas_channels::card::ChannelCard;
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,51 +25,70 @@ use std::time::Duration;
 /// via `RouterHandle::record_help_card_msgid` for later in-place updates.
 const HELP_CARD_TAG: &str = "__help_card__";
 
+/// 判断两个 `ChannelKey` 是否属于同一个"会话上下文"（`/sessions` 列表按此
+/// 归组）：必须同通道，且引用属于同一个 chat。引用是不透明字符串，对话层
+/// 只做展示性切分——飞书引用是 `chat\0thread` 复合，`\0` 前的 chat 部分归组
+/// （主线恰好没有 `\0`，即整个引用）；其它通道引用相等即同一上下文。
+fn same_chat_context(a: &ChannelKey, b: &ChannelKey) -> bool {
+    if a.channel != b.channel {
+        return false;
+    }
+    chat_part(&a.reference) == chat_part(&b.reference)
+}
+
+/// 引用的 chat 部分（`\0` 前；无 `\0` 时整个引用即 chat）。
+fn chat_part(reference: &str) -> &str {
+    reference.split_once('\0').map(|(c, _)| c).unwrap_or(reference)
+}
+
+/// `/sessions` 列表里一行的话题后缀（` thread=<tid>`；无话题时空串）。
+fn thread_label(reference: &str) -> String {
+    reference
+        .split_once('\0')
+        .map(|(_, t)| format!(" thread={t}"))
+        .unwrap_or_default()
+}
+
 impl RouterHandle {
-    pub async fn dispatch(&self, evt: FeishuIn) {
+    /// Dispatch one inbound channel event (channel-neutral). The channel
+    /// adapter has already translated the wire payload and applied its own
+    /// gating (chat type, mention, dedup); the core just routes.
+    pub async fn dispatch(&self, evt: ChannelEvent) {
         match evt {
-            FeishuIn::Text {
+            ChannelEvent::Text {
                 key,
                 text,
-                reply_to,
-                chat_type: _,
-                mentions: _,
+                reply_target,
             } => {
                 // Acknowledge receipt immediately with an emoji reaction on
                 // the user's message, before any processing. "Get" = 👌 =
                 // "已收到" 语义（Feishu `emoji_type`），不再是 "EYES"/"Typing"
                 // —— 后者暗示"正在输入"。
-                if let Some(ref msg_id) = reply_to {
+                if let Some(ref msg_id) = reply_target {
                     self.emit(Out::AckMsg {
                         message_id: msg_id.clone(),
                         emoji: crate::card_state::phase::SEED.into(),
                     })
                     .await;
                 }
-                self.on_text(key, text, reply_to).await;
+                self.on_text(key, text, reply_target).await;
             }
-            FeishuIn::Media {
+            ChannelEvent::Media {
                 key,
                 files,
                 caption,
-                reply_to,
-                chat_type: _,
+                reply_target,
             } => {
                 let prompt = compose_media_prompt(&text_from_caption(&caption), &files);
-                self.on_text(key, prompt, reply_to).await;
+                self.on_text(key, prompt, reply_target).await;
             }
-            FeishuIn::ButtonCb {
-                key,
-                action,
-                chat_type: _,
-            } => self.on_button(key, action).await,
-            FeishuIn::FormCb {
+            ChannelEvent::ButtonCb { key, action } => self.on_button(key, action).await,
+            ChannelEvent::FormCb {
                 key,
                 value,
                 form_value,
-                message_id,
-                chat_type: _,
-            } => self.on_form_cb(key, value, form_value, message_id).await,
+                card_ref,
+            } => self.on_form_cb(key, value, form_value, card_ref).await,
         }
     }
 
@@ -79,7 +100,7 @@ impl RouterHandle {
     /// 未接线的表单仅记日志，不静默吞掉。
     async fn on_form_cb(
         &self,
-        key: SessionKey,
+        key: ChannelKey,
         value: Value,
         form_value: BTreeMap<String, Value>,
         message_id: Option<String>,
@@ -115,7 +136,7 @@ impl RouterHandle {
         }
     }
 
-    async fn on_text(&self, key: SessionKey, text: String, reply_to: Option<String>) {
+    async fn on_text(&self, key: ChannelKey, text: String, reply_to: Option<String>) {
         // 记录最近入站回复目标：话题内 = 话题根消息 message_id（events 层已
         // 归一化），主线 = 触发消息 message_id。话题出站卡（权限卡/初始卡）
         // 用它作为 root_id，保证回复聚合在原话题。
@@ -147,10 +168,10 @@ impl RouterHandle {
             }
             Command::Help => {
                 let theme = self.card_cfg.read().await.theme_color.clone();
-                let card = render_help_card("session", &theme);
+                let card = cards_ui::help_card("session", &theme);
                 self.emit(Out::SendCard {
                     key,
-                    card: serde_json::to_value(&card).expect("help card serializes"),
+                    card,
                     msg_id: Some(HELP_CARD_TAG.into()),
                     perm_request_id: None,
                     perm_meta: None,
@@ -321,7 +342,7 @@ impl RouterHandle {
     /// 无活跃会话时的统一错误回复（sebas-ixv）：需要会话的命令在 key 无映射
     /// 时给用户明确的 PlainText，而不是落到 dispatch 层为 no-op 的 HelpText。
     /// 文案与 `list_sessions` 空列表口径一致。
-    async fn no_session_reply(&self, key: SessionKey, cmd: &str) {
+    async fn no_session_reply(&self, key: ChannelKey, cmd: &str) {
         self.emit(Out::PlainText {
             key,
             content: format!("当前没有活跃会话，{cmd} 需要活跃会话。发送 /new 开始新会话。"),
@@ -329,25 +350,28 @@ impl RouterHandle {
         .await;
     }
 
-    async fn request_watchdog_upgrade(&self, key: SessionKey, dev: bool, dry_run: bool) {
+    async fn request_watchdog_upgrade(&self, key: ChannelKey, dev: bool, dry_run: bool) {
         self.emit(Out::WatchdogUpgrade { key, dev, dry_run }).await;
     }
 
-    async fn request_watchdog_rollback(&self, key: SessionKey) {
+    async fn request_watchdog_rollback(&self, key: ChannelKey) {
         self.emit(Out::WatchdogRollback { key }).await;
     }
 
-    async fn request_watchdog_restart(&self, key: SessionKey) {
+    async fn request_watchdog_restart(&self, key: ChannelKey) {
         self.emit(Out::WatchdogRestart { key }).await;
     }
 
-    async fn list_sessions(&self, key: SessionKey) {
+    async fn list_sessions(&self, key: ChannelKey) {
         use crate::state::MappingState;
 
         let all = self.map.snapshot_all().await;
+        // 会话按「同一会话上下文」分组列出：同通道 + 同 chat（飞书引用里的
+        // `chat\0thread` 复合以 `\0` 前的 chat 部分归组；主线/话题同属一个
+        // 聊天）。跨通道会话不混列（web 会话不进飞书列表）。
         let sessions: Vec<_> = all
             .into_iter()
-            .filter(|(k, _)| k.chat_id == key.chat_id)
+            .filter(|(k, _)| same_chat_context(k, &key))
             .collect();
 
         if sessions.is_empty() {
@@ -366,11 +390,7 @@ impl RouterHandle {
                 MappingState::Spawning { .. } => ("(spawning)", "spawning"),
                 MappingState::Dormant { session_id } => (session_id.as_str(), "dormant"),
             };
-            let thread = sk
-                .thread_id
-                .as_deref()
-                .map(|t| format!(" thread={t}"))
-                .unwrap_or_default();
+            let thread = thread_label(&sk.reference);
             let ts = m.last_active_unix;
             lines.push(format!(
                 "  {}. {sid} [{label}]{thread} 上次活跃={ts}",
@@ -384,42 +404,42 @@ impl RouterHandle {
         .await;
     }
 
-    async fn request_watchdog_services(&self, key: SessionKey) {
+    async fn request_watchdog_services(&self, key: ChannelKey) {
         self.emit(Out::WatchdogServices { key }).await;
     }
 
-    async fn request_watchdog_system(&self, key: SessionKey) {
+    async fn request_watchdog_system(&self, key: ChannelKey) {
         self.emit(Out::WatchdogSystem { key }).await;
     }
 
-    async fn request_watchdog_gateway(&self, key: SessionKey, action: GatewayAction) {
+    async fn request_watchdog_gateway(&self, key: ChannelKey, action: GatewayAction) {
         self.emit(Out::WatchdogGateway { key, action }).await;
     }
 
-    async fn request_watchdog_webui(&self, key: SessionKey) {
+    async fn request_watchdog_webui(&self, key: ChannelKey) {
         self.emit(Out::WatchdogWebui { key }).await;
     }
 
-    async fn on_button(&self, key: SessionKey, action: CardAction) {
+    async fn on_button(&self, key: ChannelKey, action: ChannelAction) {
         // 帮助卡片交互：分组 tab 切换 / 命令执行。优先于其他所有路由。
         let payload = action.value.pointer("/action/value").cloned();
         if let Some(p) = payload.as_ref() {
             // Tab 切换：原地更新卡片
             if let Some(tab) = p.get("help_tab").and_then(Value::as_str) {
                 let theme = self.card_cfg.read().await.theme_color.clone();
-                let card = render_help_card(tab, &theme);
+                let card = cards_ui::help_card(tab, &theme);
                 // 查找已有帮助卡 msg_id → 原地更新；没有则发新卡
                 if let Some(msg_id) = self.help_card_msg_id(&key).await {
                     self.emit(Out::UpdateCardByMsgId {
                         key,
                         msg_id,
-                        card: serde_json::to_value(&card).expect("help card serializes"),
+                        card,
                     })
                     .await;
                 } else {
                     self.emit(Out::SendCard {
                         key,
-                        card: serde_json::to_value(&card).expect("help card serializes"),
+                        card,
                         msg_id: Some(HELP_CARD_TAG.into()),
                         perm_request_id: None,
                         perm_meta: None,
@@ -534,10 +554,10 @@ impl RouterHandle {
         // permission reply has nowhere to go — tell the user instead of sending
         // a command into the void.
         if !self.session_alive(&key).await {
-            let card = render_dead_session_card();
+            let card = cards_ui::dead_session_card();
             self.emit(Out::SendCard {
                 key,
-                card: serde_json::to_value(&card).expect("dead-session card serializes"),
+                card,
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
@@ -575,11 +595,11 @@ impl RouterHandle {
                     Decision::AllowSession => "✅ 已允许（本会话不再询问）",
                     Decision::Deny => "❌ 已拒绝",
                 };
-                let card = render_resolved_permission_card(label);
+                let card = cards_ui::resolved_permission_card(label);
                 self.emit(Out::UpdateCardByMsgId {
                     key: entry.key,
                     msg_id: entry.msg_id,
-                    card: serde_json::to_value(&card).expect("resolved-permission card serializes"),
+                    card,
                 })
                 .await;
             } else {
@@ -606,10 +626,10 @@ impl RouterHandle {
             // The card couldn't be flipped in place — show expired so the
             // user knows it was already handled. Emitted after the reply so
             // the bridge hook unblocks first.
-            let card = render_expired_permission_card();
+            let card = cards_ui::expired_permission_card();
             self.emit(Out::SendCard {
                 key: key.clone(),
-                card: serde_json::to_value(&card).expect("expired-permission card serializes"),
+                card,
                 msg_id: None,
                 perm_request_id: None,
                 perm_meta: None,
@@ -622,7 +642,7 @@ impl RouterHandle {
 
     /// `/provider`：渲染 Provider 管理主卡（mode + default-direct + 列表 +
     /// 详情/新建面板，bead sebas-63f.5）。未接线时退回帮助。
-    async fn on_provider(&self, key: SessionKey) {
+    async fn on_provider(&self, key: ChannelKey) {
         if self.provider_forms.is_some() {
             let out = super::provider_card::render_main_card(self, &key).await;
             self.emit(out).await;
@@ -631,7 +651,7 @@ impl RouterHandle {
         }
     }
 
-    async fn spawn_new(&self, key: SessionKey, prompt: String, input_msg_id: Option<String>) {
+    async fn spawn_new(&self, key: ChannelKey, prompt: String, input_msg_id: Option<String>) {
         // A fresh session must not inherit "本会话不再询问" grants from the
         // previous session in this chat — the user approved those for the
         // session that asked, not for whatever comes next.
@@ -667,7 +687,7 @@ impl RouterHandle {
         session_id: String,
         prompt: String,
         root_id: Option<String>,
-        key: SessionKey,
+        key: ChannelKey,
         priority: bool,
     ) {
         use crate::card_state::phase::WORKING;
@@ -744,7 +764,7 @@ impl RouterHandle {
     }
 
     /// `/compact` 命令：发送进度卡片，每 1s×5 次 → 3s 间隔更新，完成后自动停止。
-    async fn forward_compact(&self, session_id: &str, key: SessionKey) {
+    async fn forward_compact(&self, session_id: &str, key: ChannelKey) {
         let prompt = "⚙️ 压缩上下文...";
         self.card_states
             .seed(session_id.to_string(), prompt.into())
@@ -752,10 +772,19 @@ impl RouterHandle {
 
         // Send initial card
         let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(prompt, session_id, &[], &theme_color, None);
+        let card = ChannelCard {
+            title: String::new(),
+            theme: theme_color.clone(),
+            elements: Vec::new(),
+            turn: Some(sebas_channels::card::TurnChrome {
+                prompt: prompt.to_string(),
+                session_id: session_id.to_string(),
+                usage: None,
+            }),
+        };
         self.emit(Out::SendCard {
             key: key.clone(),
-            card: serde_json::to_value(&card).unwrap(),
+            card,
             msg_id: Some(session_id.to_string()),
             perm_request_id: None,
             perm_meta: None,
@@ -790,14 +819,7 @@ impl RouterHandle {
                     .apply(&sid, |st| {
                         let elapsed = st.started_at.elapsed();
                         let secs = elapsed.as_secs();
-                        st.body = vec![CardElement::Div {
-                            text: DivText {
-                                tag: "plain_text".into(),
-                                content: format!("⏱ 正在压缩... {secs}s"),
-                                text_size: Some("standard".into()),
-                                text_color: None,
-                            },
-                        }];
+                        st.body = vec![crate::card_events::compact_progress_note(secs)];
                     })
                     .await;
 
@@ -817,7 +839,7 @@ impl RouterHandle {
     }
     pub async fn handle_settings(
         &self,
-        key: SessionKey,
+        key: ChannelKey,
         setting_key: Option<String>,
         val: Option<String>,
         path: &std::path::Path,

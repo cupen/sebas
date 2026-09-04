@@ -1,4 +1,4 @@
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::MsgIdMap;
 use sebas_router::state::Mapping;
 use sebas_router::state::QueuedTurn;
@@ -7,10 +7,7 @@ use sebas_router::state::SessionMap;
 #[tokio::test]
 async fn insert_and_lookup() {
     let m = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     m.insert(k.clone(), Mapping::active("s1")).await.unwrap();
     let got = m.get(&k).await;
     assert_eq!(got.unwrap().session_id(), Some("s1"));
@@ -19,10 +16,7 @@ async fn insert_and_lookup() {
 #[tokio::test]
 async fn dump_and_restore_round_trip() {
     let m = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     m.insert(k.clone(), Mapping::active("s1")).await.unwrap();
 
     let json = m.dump_json().await.unwrap();
@@ -42,13 +36,47 @@ async fn dump_and_restore_round_trip() {
 }
 
 #[tokio::test]
+async fn dump_uses_structured_channel_key_round_trip() {
+    // v2 磁盘格式：key 是 ChannelKey 的紧凑 JSON 对象字符串（自洽、含
+    // channel + reference），不再是 `chat\0thread` 扁平键。
+    let m = SessionMap::new();
+    let feishu = ChannelKey::feishu("oc_x", Some("t1"));
+    let web = ChannelKey::new("web", "web-1");
+    m.insert(feishu.clone(), Mapping::active("s1")).await.unwrap();
+    m.insert(web.clone(), Mapping::active("s2")).await.unwrap();
+
+    let json = m.dump_json().await.unwrap();
+    // key 内容：`{"channel":"feishu","reference":"oc_x\u0000t1"}`（转义后）。
+    assert!(json.contains("{\\\"channel\\\":\\\"feishu\\\""));
+    assert!(json.contains("\\\"channel\\\":\\\"web\\\""));
+    assert!(json.contains("oc_x"), "reference survives in the key: {json}");
+    assert!(json.contains("web-1"), "web reference survives: {json}");
+
+    let m2 = SessionMap::restore_json(&json).unwrap();
+    assert_eq!(m2.get(&feishu).await.unwrap().session_id(), None); // dormant
+    assert_eq!(m2.get(&web).await.unwrap().session_id(), None);
+}
+
+#[tokio::test]
+async fn restore_parses_legacy_thread_composite_key_as_feishu() {
+    // 旧格式 `oc_x\0t1`（chat\0thread 扁平键）→ feishu 通道、reference 保持
+    // 复合串（与 `ChannelKey::feishu("oc_x", Some("t1"))` 完全一致）。
+    let json = r#"{"oc_x\u0000t1":{"session_id":"s-old","last_active_unix":1}}"#;
+    let m = SessionMap::restore_json(json).unwrap();
+    let k = ChannelKey::feishu("oc_x", Some("t1"));
+    let got = m.get(&k).await.expect("legacy composite key maps to feishu");
+    assert_eq!(got.session_id(), None);
+    assert!(matches!(
+        got.state,
+        sebas_router::state::MappingState::Dormant { .. }
+    ));
+}
+
+#[tokio::test]
 async fn dormant_first_text_claims_resume_then_queues() {
     let json = r#"{"oc_x":{"session_id":"s-old","last_active_unix":1}}"#;
     let m = SessionMap::restore_json(json).unwrap();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     // First text: claims the dormant mapping for lazy respawn
     // (openspec/specs/session-lifecycle/spec.md)
     // and swaps in a Spawning placeholder atomically.
@@ -68,10 +96,7 @@ async fn dormant_first_text_claims_resume_then_queues() {
 async fn dormant_new_means_fresh_spawn_not_resume() {
     let json = r#"{"oc_x":{"session_id":"s-old","last_active_unix":1}}"#;
     let m = SessionMap::restore_json(json).unwrap();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     let r = m.begin_spawn(k.clone()).await.unwrap();
     assert!(matches!(r, sebas_router::state::BeginSpawn::ReplacedActive));
     let got = m.get(&k).await.unwrap();
@@ -84,10 +109,7 @@ async fn dormant_new_means_fresh_spawn_not_resume() {
 #[tokio::test]
 async fn route_text_and_activate_touch_last_active() {
     let m = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     // Backdate the entry so the touch is observable.
     m.insert(k.clone(), Mapping::dormant("s1", 1))
         .await
@@ -105,10 +127,7 @@ async fn overflow_rejects() {
     let m = SessionMap::with_capacity(2);
     for i in 0..2 {
         m.insert(
-            SessionKey {
-                chat_id: format!("oc_{i}"),
-                thread_id: None,
-            },
+            ChannelKey::feishu(&format!("oc_{i}"), None),
             Mapping::active(format!("s_{i}")),
         )
         .await
@@ -116,10 +135,7 @@ async fn overflow_rejects() {
     }
     let r = m
         .insert(
-            SessionKey {
-                chat_id: "oc_3".into(),
-                thread_id: None,
-            },
+            ChannelKey::feishu("oc_3", None),
             Mapping::active("s_3"),
         )
         .await;
@@ -137,10 +153,7 @@ async fn msgid_map_record_overwrites_previous_entry() {
 #[tokio::test]
 async fn queue_fifo_by_default_priority_jumps_front() {
     let m = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc", None);
     let _ = m.insert(k.clone(), Mapping::active("s1")).await;
     m.enqueue_turn(
         &k,
@@ -179,10 +192,7 @@ async fn queue_fifo_by_default_priority_jumps_front() {
 #[tokio::test]
 async fn pop_next_turn_cleans_up_empty_entry() {
     let m = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc", None);
     let _ = m.insert(k.clone(), Mapping::active("s1")).await;
     m.enqueue_turn(
         &k,
@@ -202,10 +212,7 @@ async fn pop_next_turn_cleans_up_empty_entry() {
 #[tokio::test]
 async fn remove_by_key_drops_mapping_and_queue() {
     let m = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc_orphan".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_orphan", None);
     m.insert(k.clone(), Mapping::spawning()).await.unwrap();
     m.enqueue_turn(
         &k,

@@ -110,10 +110,10 @@ pub fn middle_truncate(s: &str, max: usize) -> String {
 /// A single session row for the dashboard / session list.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionRow {
-    /// URL-encoded SessionKey (chat_id\0thread_id).
+    /// URL-encoded session key (`channel\0reference`).
     pub encoded_key: String,
-    pub chat_id: String,
-    pub thread_id: Option<String>,
+    pub channel: String,
+    pub reference: String,
     /// The ACP session_id, if active/dormant.
     pub session_id: Option<String>,
     /// `session_id` with its middle elided, for display. The full value goes

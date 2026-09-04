@@ -1,8 +1,8 @@
 //! 通用 CRUD 表单状态机的集成测试：schema + 内存存储，驱动
 //! 列表 / 新增 / 编辑 / 删除 / 取消 全流程。
 
-use sebas_feishu::events::SessionKey;
-use sebas_feishu::forms::{FormField, FormSpec};
+use sebas_channels::ChannelKey;
+use sebas_channels::card::{FormField, FormSpec};
 use sebas_router::CrudStore;
 use sebas_router::Out;
 use sebas_router::crud::{
@@ -37,11 +37,8 @@ fn spec() -> FormSpec {
     )
 }
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_crud".into(),
-        thread_id: None,
-    }
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_crud", None)
 }
 
 fn payload(op: &str, id: Option<&str>) -> Value {
@@ -73,7 +70,7 @@ async fn open_sends_list_card_with_create_button() {
     let crud = CrudForm::new(spec(), "id", InMemoryStore::new("id"));
     match crud.open(key()).await {
         Out::SendCard { card, .. } => {
-            let s = card.to_string();
+            let s = card.to_json();
             assert!(s.contains("暂无记录"), "{s}");
             assert!(s.contains("＋ 新增"), "{s}");
         }
@@ -97,7 +94,7 @@ async fn create_submit_inserts_and_flips_card_in_place() {
     match out {
         Out::UpdateCardByMsgId { msg_id, card, .. } => {
             assert_eq!(msg_id, "om_1");
-            let s = card.to_string();
+            let s = card.to_json();
             assert!(s.contains("共 1 条"), "{s}");
             assert!(s.contains("写周报"), "{s}");
         }
@@ -134,7 +131,7 @@ async fn edit_prefills_then_submit_updates() {
     let Out::UpdateCardByMsgId { card, .. } = out else {
         panic!("expected UpdateCardByMsgId");
     };
-    let s = card.to_string();
+    let s = card.to_json();
     assert!(s.contains("旧标题"), "edit form must prefill: {s}");
     assert!(
         s.contains("\"id\":\"n1\""),
@@ -172,7 +169,7 @@ async fn delete_removes_item_and_returns_list() {
         .await;
     match out {
         Out::UpdateCardByMsgId { card, .. } => {
-            assert!(card.to_string().contains("暂无记录"));
+            assert!(card.to_json().contains("暂无记录"));
         }
         other => panic!("expected UpdateCardByMsgId, got {other:?}"),
     }
@@ -195,7 +192,7 @@ async fn cancel_returns_to_list_without_touching_store() {
         .await;
     match out {
         Out::UpdateCardByMsgId { card, .. } => {
-            assert!(card.to_string().contains("旧标题"));
+            assert!(card.to_json().contains("旧标题"));
         }
         other => panic!("expected UpdateCardByMsgId, got {other:?}"),
     }
@@ -248,7 +245,7 @@ async fn create_button_opens_empty_form() {
         .await;
     match out {
         Out::UpdateCardByMsgId { card, .. } => {
-            let s = card.to_string();
+            let s = card.to_json();
             assert!(s.contains("\"tag\":\"form\""), "{s}");
             // 取消/返回列表按钮在表单容器外（普通回调按钮，带 cancel 负载）。
             assert!(s.contains("\"op\":\"cancel\""), "{s}");

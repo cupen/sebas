@@ -15,7 +15,7 @@ use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
 };
 use crate::error::{Result, SebasError};
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::{RouterHandle, SessionEvent};
 use sebas_webui::session_backend::SessionRejection;
 use std::path::{Path, PathBuf};
@@ -402,7 +402,7 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
     }
 }
 
-fn key_str(key: &SessionKey) -> String {
+fn key_str(key: &ChannelKey) -> String {
     serde_json::to_string(key).unwrap_or_default()
 }
 

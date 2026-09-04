@@ -2,7 +2,7 @@
 //!
 //! 从 router.rs 拆出；经 `super` re-export，外部路径 `sebas_router::MsgIdMap` 等不变。
 
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ impl MsgIdMap {
 /// session allowlist when the user picks "Allow session".
 #[derive(Debug, Clone)]
 pub struct PermCardEntry {
-    pub key: SessionKey,
+    pub key: ChannelKey,
     pub msg_id: String,
     pub tool_name: String,
     pub args: Value,
@@ -66,7 +66,7 @@ impl PermCardMap {
     pub async fn record(
         &self,
         request_id: String,
-        key: SessionKey,
+        key: ChannelKey,
         msg_id: String,
         tool_name: String,
         args: Value,
@@ -95,7 +95,7 @@ impl PermCardMap {
 /// `PermissionRequest`s in the same chat are auto-approved without a card.
 #[derive(Default, Clone)]
 pub struct SessionAllowlist {
-    inner: Arc<RwLock<HashMap<SessionKey, AllowEntry>>>,
+    inner: Arc<RwLock<HashMap<ChannelKey, AllowEntry>>>,
 }
 
 /// Per-chat approval state. `allow_all` is set by "本会话不再询问" and
@@ -115,7 +115,7 @@ impl SessionAllowlist {
     /// Check whether a (tool_name, args) call is allowed for the given chat:
     /// either the chat is in allow-all mode, or the exact signature was
     /// granted individually.
-    pub async fn is_allowed(&self, key: &SessionKey, tool_name: &str, args: &Value) -> bool {
+    pub async fn is_allowed(&self, key: &ChannelKey, tool_name: &str, args: &Value) -> bool {
         let sig = tool_signature(tool_name, args);
         self.inner
             .read()
@@ -127,7 +127,7 @@ impl SessionAllowlist {
 
     /// Record an "Allow session" approval: from now on, auto-approve every
     /// permission request in this chat. Idempotent.
-    pub async fn grant_all(&self, key: &SessionKey) {
+    pub async fn grant_all(&self, key: &ChannelKey) {
         self.inner
             .write()
             .await
@@ -137,7 +137,7 @@ impl SessionAllowlist {
     }
 
     /// Record a single-signature approval. Idempotent.
-    pub async fn grant(&self, key: &SessionKey, tool_name: &str, args: &Value) {
+    pub async fn grant(&self, key: &ChannelKey, tool_name: &str, args: &Value) {
         let sig = tool_signature(tool_name, args);
         self.inner
             .write()
@@ -150,34 +150,34 @@ impl SessionAllowlist {
 
     /// Drop the allowlist for a chat (session ended). Called from
     /// `remove_by_session` and similar lifecycle hooks.
-    pub async fn clear(&self, key: &SessionKey) {
+    pub async fn clear(&self, key: &ChannelKey) {
         self.inner.write().await.remove(key);
     }
 }
 
-/// Per-SessionKey 最近一次入站消息的回复目标。话题内 = 话题根消息的
+/// Per-ChannelKey 最近一次入站消息的回复目标。话题内 = 话题根消息的
 /// `message_id`（`root_id` 归一化后）；主线 = 触发消息 `message_id`。
 ///
 /// 话题出站卡（权限卡、初始 root 卡、失败提示卡）用它作为 `root_id`，保证
 /// 回复聚合在同一个话题里。纯内存、不持久化：重启后由下一条入站消息重建。
 #[derive(Default, Clone)]
 pub struct ReplyTargetMap {
-    inner: Arc<RwLock<HashMap<SessionKey, String>>>,
+    inner: Arc<RwLock<HashMap<ChannelKey, String>>>,
 }
 
 impl ReplyTargetMap {
     /// 记录最近入站消息的回复目标。幂等覆盖。
-    pub async fn set(&self, key: SessionKey, target: String) {
+    pub async fn set(&self, key: ChannelKey, target: String) {
         self.inner.write().await.insert(key, target);
     }
 
     /// 取最近一次入站回复目标（如果有）。
-    pub async fn get(&self, key: &SessionKey) -> Option<String> {
+    pub async fn get(&self, key: &ChannelKey) -> Option<String> {
         self.inner.read().await.get(key).cloned()
     }
 
     /// 删除一个 key 的回复目标（会话结束时调用，防无界增长）。
-    pub async fn clear(&self, key: &SessionKey) {
+    pub async fn clear(&self, key: &ChannelKey) {
         self.inner.write().await.remove(key);
     }
 }

@@ -5,7 +5,7 @@
 //! and a corrupt state file is quarantined instead of aborting startup.
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
@@ -18,11 +18,8 @@ fn fake() -> PathBuf {
         .join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_restart".into(),
-        thread_id: None,
-    }
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_restart", None)
 }
 
 async fn first_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
@@ -42,12 +39,10 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
 
     // First text after restart → SpawnResume (NOT a SendAcp black hole).
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key(),
             text: "继续上次".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let Out::SpawnResume {
@@ -114,12 +109,10 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
 
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key(),
             text: "hi".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let Out::SpawnResume {

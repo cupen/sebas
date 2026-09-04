@@ -4,7 +4,7 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
@@ -30,19 +30,14 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
-    let key = SessionKey {
-        chat_id: "oc_race".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_race", None);
 
     // Text 1 -> SpawnAcp.
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "msg1".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
@@ -78,12 +73,10 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
 
     // Text 2 arrives while session/new is sleeping -> queued, no second spawn.
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "msg2".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 
@@ -139,21 +132,16 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
-    let key = SessionKey {
-        chat_id: "oc_crash".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_crash", None);
 
     // Dispatch a text with "crash" -> SpawnAcp. The agent (fake-claude)
     // will send one chunk ("boom") then exit(2) — crashing during the first
     // turn, which is exactly D6's target scenario.
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "crash".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())

@@ -9,14 +9,14 @@
 //! `chat_id = "agent-{hex}"`（`thread_id = None`）。webui 侧据此
 //! 前缀把原生会话路由到 `NativeAgentBackend` 呈现（transcript + 审查卡）。
 
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use std::sync::Arc;
 
 /// 原生内核执行桥。`sebas-router` 不直接依赖 `sebas-agent`——通过 trait
 /// 反转依赖，core（`src/`）装配时注入具体实现；无桥 = 纯 acp 行为。
 pub trait NativeSessionBridge: Send + Sync {
     /// 判断 `key` 是否属于原生内核会话（`agent-*` 前缀）。
-    fn is_native(&self, key: &SessionKey) -> bool;
+    fn is_native(&self, key: &ChannelKey) -> bool;
 
     /// 向原生会话发送一条消息。`key` 必须是本桥管理的原生会话：
     /// - 已存在 → 送到该会话处理；
@@ -24,7 +24,7 @@ pub trait NativeSessionBridge: Send + Sync {
     ///
     /// 实现方负责 `Mapping` 登记与 `SessionEvent` 广播（与 acp 路径对齐）。
     /// 接收 `Arc<Self>`：具体桥需要把自身克隆进后台 task，`&self` 做不到。
-    fn prompt(self: Arc<Self>, key: SessionKey, text: String);
+    fn prompt(self: Arc<Self>, key: ChannelKey, text: String);
 
     /// 回填一个原生权限请求的决定（fail-closed：无答即拒）。返回是否
     /// 存在该待决请求（false = 无匹配或已过期）。

@@ -1,5 +1,5 @@
 use sebas_acp::claude::session::AcpEvent;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::{Mapping, SessionMap};
 use std::time::Duration;
@@ -8,19 +8,14 @@ use std::time::Duration;
 async fn new_text_creates_session_and_emits_initial_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
 
     tokio::spawn(async move {
         let _ = router
-            .dispatch(FeishuIn::Text {
+            .dispatch(ChannelEvent::Text {
                 key: key.clone(),
                 text: "hello".into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
+                reply_target: None,
             })
             .await;
     });
@@ -36,10 +31,7 @@ async fn new_text_creates_session_and_emits_initial_card() {
 #[tokio::test]
 async fn existing_session_dispatches_continue() {
     let map = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     map.insert(k.clone(), Mapping::active("existing"))
         .await
         .unwrap();
@@ -47,12 +39,10 @@ async fn existing_session_dispatches_continue() {
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     tokio::spawn(async move {
         let _ = router
-            .dispatch(FeishuIn::Text {
+            .dispatch(ChannelEvent::Text {
                 key: k.clone(),
                 text: "more".into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
+                reply_target: None,
             })
             .await;
     });
@@ -84,20 +74,15 @@ async fn dormant_mapping_emits_spawn_resume() {
     // not SendAcp into the void.
     let json = r#"{"oc_x":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
 
     let (router, mut out_rx) = RouterHandle::new(map.clone());
     tokio::spawn(async move {
         let _ = router
-            .dispatch(FeishuIn::Text {
+            .dispatch(ChannelEvent::Text {
                 key: k.clone(),
                 text: "继续".into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
+                reply_target: None,
             })
             .await;
     });
@@ -135,7 +120,7 @@ async fn apply_event_to_out_renders_update_card() {
     match out {
         Out::UpdateCard { session_id, card } => {
             assert_eq!(session_id, "s1");
-            assert!(card.is_object());
+            assert!(!card.elements.is_empty());
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }

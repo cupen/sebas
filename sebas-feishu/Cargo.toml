@@ -12,6 +12,13 @@ tracing = "0.1"
 thiserror = "1"
 anyhow = "1"
 chrono = "0.4"
+# Neutral channel abstraction: the adapter implements ChannelAdapter on top
+# of the feishu WS lifecycle and card rendering (decouple-feishu-channel task 3).
+sebas-channels = { path = "../sebas-channels" }
+# Feishu WebSocket long-connection inbound. v0.19.0+ adds `register_raw`
+# which sidesteps the dispatcher-key bug present in v0.14.0 (handlers
+# never matched because registered keys vs. emit keys were different).
+openlark = { version = "0.20", default-features = false, features = ["communication", "websocket"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

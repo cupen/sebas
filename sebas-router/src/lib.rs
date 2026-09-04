@@ -1,5 +1,7 @@
 pub mod card_events;
 pub mod card_state;
+pub mod cards;
+pub mod cards_ui;
 pub mod commands;
 pub mod crud;
 pub mod error;
@@ -13,6 +15,7 @@ pub mod state_store;
 pub use commands::{Command, GatewayAction, parse_command};
 pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};
 pub use crate::router::{MsgIdMap, Out, RouterHandle, SessionEvent, SessionInfo, TurnEntry};
+pub use cards::{CardConfig, ThinkingDisplay};
 pub use state::{Mapping, SessionMap};
 
 /// 所有 SEBAS_STATE_FILE env 操作串行化（crud + provider_state 共享）。

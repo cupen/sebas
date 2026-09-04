@@ -4,7 +4,7 @@ use crate::models::{SessionRow, SessionStatus};
 use crate::server::WebUiState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use sebas_feishu::events::SessionKey;
+use sebas_channels::key::ChannelKey;
 use sebas_router::SessionInfo;
 
 // ---- Helper functions ----
@@ -13,7 +13,7 @@ use sebas_router::SessionInfo;
 /// each row with `is_active` so the client can render the active indicator.
 pub(crate) fn build_session_rows(
     infos: &[SessionInfo],
-    focused: Option<&SessionKey>,
+    focused: Option<&ChannelKey>,
 ) -> (Vec<SessionRow>, usize, usize, usize) {
     let mut active = 0usize;
     let mut dormant = 0usize;
@@ -37,16 +37,16 @@ pub(crate) fn build_session_rows(
                 }
             };
             let is_active = focused
-                .map(|a| a.chat_id == info.chat_id && a.thread_id == info.thread_id)
+                .map(|a| a.channel.as_str() == info.channel && a.reference == info.key)
                 .unwrap_or(false);
             let derived =
                 SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""));
             SessionRow {
                 project_dir: info.project_dir.clone(),
                 prompt_preview: info.user_prompt.clone(),
-                encoded_key: encode_key(&info.chat_id, info.thread_id.as_deref()),
-                chat_id: info.chat_id.clone(),
-                thread_id: info.thread_id.clone(),
+                encoded_key: encode_channel_key(&info.channel, &info.key),
+                channel: info.channel.clone(),
+                reference: info.key.clone(),
                 session_id_short: info
                     .session_id
                     .as_deref()
@@ -79,40 +79,33 @@ pub(crate) fn build_session_rows(
 pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
     let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
     serde_json::json!({
-        "chat_id": info.chat_id,
-        "thread_id": info.thread_id,
+        "channel": info.channel,
+        "reference": info.key,
         "session_id": info.session_id,
         "status": info.status,
         "status_label": derived.label(),
         "status_slug": derived.slug(),
         "status_glyph": derived.glyph(),
-        "encoded_key": encode_key(&info.chat_id, info.thread_id.as_deref()),
+        "encoded_key": encode_channel_key(&info.channel, &info.key),
     })
 }
 
-/// Encode a (chat_id, thread_id) pair for use in URLs.
-pub(crate) fn encode_key(chat_id: &str, thread_id: Option<&str>) -> String {
-    let raw = format!("{chat_id}\0{}", thread_id.unwrap_or(""));
+/// Encode a (channel, reference) pair for use in URLs.
+pub(crate) fn encode_channel_key(channel: &str, reference: &str) -> String {
+    let raw = format!("{channel}\0{reference}");
     urlencoding::encode(&raw).into_owned()
 }
 
-/// Encode a SessionKey for use in URLs.
-pub(crate) fn encode_session_key(key: &SessionKey) -> String {
-    encode_key(&key.chat_id, key.thread_id.as_deref())
+/// Encode a ChannelKey for use in URLs.
+pub(crate) fn encode_session_key(key: &ChannelKey) -> String {
+    encode_channel_key(&key.channel.as_str(), &key.reference)
 }
 
-/// Decode a URL-encoded SessionKey.
-pub(crate) fn decode_session_key(encoded: &str) -> Option<SessionKey> {
+/// Decode a URL-encoded ChannelKey.
+pub(crate) fn decode_session_key(encoded: &str) -> Option<ChannelKey> {
     let decoded = urlencoding::decode(encoded).ok()?;
-    let (chat_id, thread_id) = decoded.split_once('\0')?;
-    Some(SessionKey {
-        chat_id: chat_id.to_string(),
-        thread_id: if thread_id.is_empty() {
-            None
-        } else {
-            Some(thread_id.to_string())
-        },
-    })
+    let (channel, reference) = decoded.split_once('\0')?;
+    Some(ChannelKey::new(channel, reference))
 }
 
 /// Format a unix timestamp as a relative time string.

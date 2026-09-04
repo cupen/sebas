@@ -1,6 +1,6 @@
 ---
-source: feishu/tests/cards_test.rs
-assertion_line: 19
+source: sebas-feishu/tests/cards_test.rs
+assertion_line: 140
 expression: card
 ---
 schema: "2.0"
@@ -29,9 +29,9 @@ body:
       behaviors:
         - type: callback
           value:
-            decision: allow_once
-            request_id: r1
             session_id: s1
+            request_id: r1
+            decision: allow_once
     - tag: button
       text:
         tag: plain_text
@@ -40,9 +40,9 @@ body:
       behaviors:
         - type: callback
           value:
-            decision: allow_session
-            request_id: r1
             session_id: s1
+            request_id: r1
+            decision: allow_session
     - tag: button
       text:
         tag: plain_text
@@ -51,6 +51,6 @@ body:
       behaviors:
         - type: callback
           value:
-            decision: deny
-            request_id: r1
             session_id: s1
+            request_id: r1
+            decision: deny
