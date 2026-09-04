@@ -31,7 +31,6 @@ use sebas_feishu::client::FeishuClient;
 use sebas_feishu::messages::{ReceiveIdType, SendTextRequest};
 use sebas_gateway::config::GatewayConfig;
 use sebas_router::router::RouterHandle;
-use sebas_router::settings;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -137,6 +136,27 @@ pub async fn run(
 
     let map = restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
 
+    // 5.5: 初始化状态库 DB (add-state-store)。
+    // 如果 DB 初始化失败, 退回到文件存储 (向后兼容)。
+    {
+        let raw = std::env::var("SEBAS_STATE_DB")
+            .unwrap_or_else(|_| "~/.sebas/sebas.db".into());
+        let expanded = sebas_router::state_store::expand_tilde(&raw);
+        let path = std::path::PathBuf::from(&expanded);
+        match crate::sebas_state::writer::StateWriter::start(path.clone()) {
+            Ok(writer) => {
+                let engine = Box::new(crate::sebas_state::engine::DbStateEngine::new(
+                    writer.handle().clone(),
+                ));
+                sebas_router::state_store::init_engine(engine);
+                tracing::info!(path = %path.display(), "state store DB 已初始化");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "state store DB 初始化失败, 使用文件存储");
+            }
+        }
+    }
+
     // TOML is bootstrap; settings.json (if present) wins wholesale.
     // Strict: malformed settings.json refuses to start with a clear error.
     // Missing settings.json → fall back to TOML [card] so first-boot users
@@ -145,19 +165,33 @@ pub async fn run(
     // decouple-feishu-channel task 3/4：`settings.json` 由 router 的中立
     // `CardConfig` 读写（两面 serde 形状逐一相同）；这里把它转成 router
     // 需要的类型（serde 往返，零字段映射代码）。
-    let merged_card_cfg = match settings::load_settings(&settings::settings_path()) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            // TOML `[card]` 是 feishu 渲染配置（adapter 读取）；转为 router
-            // 中立镜像（serde 形状逐一相同，往返即映射）。
-            serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
-                .expect("card config round-trips between mirror shapes")
+    //
+    // 当 state store DB 可用时, 优先从 DB 读 settings; 再回退到文件。
+    let merged_card_cfg = if let Some(engine) = sebas_router::state_store::engine() {
+        match engine.load_settings().await {
+            Ok(Some(value)) => {
+                // DB 中有 settings, 用 Value 反序列化回 router CardConfig
+                match serde_json::from_value::<sebas_router::CardConfig>(value) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "DB settings 反序列化失败, 回退到文件");
+                        fallback_settings(&cfg)
+                    }
+                }
+            }
+            Ok(None) => {
+                // DB 无 settings, 回退到文件
+                fallback_settings(&cfg)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "DB 读取 settings 失败, 回退到文件");
+                fallback_settings(&cfg)
+            }
         }
-        Err(e) => {
-            error!(error = %e, "settings.json 解析失败，拒绝启动");
-            return Err(crate::error::SebasError::Config(e));
-        }
+    } else {
+        fallback_settings(&cfg)
     };
+
     let mgr = Arc::new(SessionManager::new(
         cfg.acp.default_kind().to_string(),
         build_agent_registry(&cfg),
@@ -568,6 +602,22 @@ fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> sebas_webui::model
         debug: gw.debug,
         has_auth: !gw.auth_token.is_empty(),
         providers,
+    }
+}
+
+/// 回退到 settings.json 读取, 再回退到 TOML `[card]`。
+fn fallback_settings(cfg: &Config) -> sebas_router::CardConfig {
+    match sebas_router::settings::load_settings(&sebas_router::settings::settings_path()) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
+                .expect("card config round-trips between mirror shapes")
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "settings.json 解析失败, 使用 TOML 兜底");
+            serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
+                .expect("card config round-trips between mirror shapes")
+        }
     }
 }
 

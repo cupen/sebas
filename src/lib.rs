@@ -24,6 +24,7 @@ pub mod reactions;
 pub mod record;
 pub mod replay;
 pub mod run;
+pub mod sebas_state;
 mod session_boot;
 pub mod spawn_env;
 pub mod update;

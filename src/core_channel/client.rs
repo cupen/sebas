@@ -384,4 +384,32 @@ impl SessionBackend for CoreChannelBackend {
             },
         }
     }
+
+    async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        match self
+            .request(&CoreChannelRequest::StateSnapshot {
+                domain: domain.to_string(),
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::StateSnapshot { payload, .. }) => Some(payload),
+            _ => None,
+        }
+    }
+
+    async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        match self
+            .request(&CoreChannelRequest::StateMutation {
+                domain: domain.to_string(),
+                payload,
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::StateMutationOk) => Ok(()),
+            Ok(CoreChannelResponse::Rejected { rejection }) => {
+                Err(format!("state mutation rejected: {rejection}"))
+            }
+            _ => Err("state store 不可用".into()),
+        }
+    }
 }

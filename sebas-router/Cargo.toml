@@ -13,6 +13,7 @@ dirs = "5"
 anyhow = "1"
 sebas-channels = { path = "../sebas-channels" }
 sebas-acp = { path = "../sebas-acp" }
+async-trait = "0.1"
 # 仅 provider 探测 `/v1/models` 用，少量依赖；rustls-tls 省掉 native-tls 链接。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 

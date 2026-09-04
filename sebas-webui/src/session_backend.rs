@@ -165,6 +165,22 @@ pub trait SessionBackend: Send + Sync {
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
     }
+
+    // ─── State store methods (add-state-store) ───────────────────────────────
+
+    /// Load a snapshot of the core state store's domain.
+    /// Returns `None` when the domain is unknown or the store is unreachable.
+    async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        let _ = domain;
+        None
+    }
+
+    /// Mutate a domain of the core state store.
+    /// Returns `Ok(())` on success, or an error string.
+    async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        let _ = (domain, payload);
+        Err("state store 不可用".into())
+    }
 }
 
 // ─── In-process implementation (task 2.2) ──────────────────────────────────

@@ -6,12 +6,7 @@
 
 ### Requirement: Alias entity and persistence
 
-A model alias SHALL be persisted in the provider overlay file
-(`~/.sebas/providers.json`) as an entry of the `model_aliases` map with
-fields: `alias` (the custom name clients use), `provider` (the bound
-provider name), and optional `upstream_model` (the real model name forwarded
-upstream). Aliases survive restarts and coexist with the file's provider
-entries without affecting other sections.
+A model alias SHALL be persisted in the core state store as a row with fields: `alias` (the custom name clients use), `provider` (the bound provider name), and optional `upstream_model` (the real model name forwarded upstream). Aliases survive restarts, are read and written through the core channel state methods (in-process within core), and coexist with other stored data without affecting it.
 
 #### Scenario: alias persists across restart
 

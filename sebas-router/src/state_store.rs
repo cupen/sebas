@@ -56,6 +56,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// 全局状态存储引擎 (add-state-store)。
+static ENGINE: OnceLock<Box<dyn StateStoreEngine + Send + Sync>> = OnceLock::new();
+
+/// 状态存储引擎 trait: 抽象 SQLite/文件后端。
+#[async_trait::async_trait]
+pub trait StateStoreEngine: Send + Sync {
+    async fn load_persisted_state(&self) -> PersistedState;
+    async fn save_persisted_state(&self, state: PersistedState) -> anyhow::Result<()>;
+    async fn load_settings(&self) -> Result<Option<serde_json::Value>, String>;
+    async fn save_settings(&self, cfg: serde_json::Value) -> Result<(), String>;
+}
+
+/// 初始化全局状态存储引擎。
+pub fn init_engine(engine: Box<dyn StateStoreEngine + Send + Sync>) {
+    ENGINE.set(engine).ok().expect("state store engine 已初始化");
+}
+
+/// 获取引擎引用。
+pub fn engine() -> Option<&'static Box<dyn StateStoreEngine + Send + Sync>> {
+    ENGINE.get()
+}
 
 /// 一条记录：字段名 -> 值。Provider CRUD 用。
 pub type Item = Map<String, Value>;
@@ -218,7 +241,7 @@ pub fn providers_path() -> PathBuf {
 }
 
 /// 复制 `sebas::config::expand_tilde`（router 不能反向依赖 sebas root）。
-fn expand_tilde(p: &str) -> String {
+pub fn expand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
     {
@@ -231,22 +254,49 @@ fn expand_tilde(p: &str) -> String {
 ///
 /// 错误一侧只丢一侧（state 坏 → runtime default；overlay 坏 → providers
 /// default），另一侧照常。
+///
+/// 当 `init_engine` 已调用时, 委托给引擎。
 pub fn load() -> PersistedState {
+    if let Some(engine) = ENGINE.get() {
+        // 在 tokio 运行时上下文中 block_on 是安全的（core 始终在 tokio 中运行）。
+        return tokio::runtime::Handle::current()
+            .block_on(engine.load_persisted_state());
+    }
     load_at(&state_path(), &providers_path())
 }
 
 /// 原子写：把聚合 state 拆开写两个文件（各自 tmp + rename）。
 /// providers.json 侧走 Map 级 RMW：只覆写 `providers`/`deleted` 两个 key，
 /// 文件内其它段（如 gateway 的 `model_aliases`）原样保留。
+///
+/// 当 `init_engine` 已调用时, 委托给引擎。
 pub fn save(s: &PersistedState) -> anyhow::Result<()> {
+    if let Some(engine) = ENGINE.get() {
+        let state = s.clone();
+        return tokio::runtime::Handle::current()
+            .block_on(engine.save_persisted_state(state))
+            .map_err(|e| anyhow::anyhow!("{}", e));
+    }
     save_at(&state_path(), &providers_path(), s)
 }
 
 /// 读 → 改 → 写一气呵成。`f` 闭包基于当前 state 做条件决策；返回改后的 state。
+///
+/// 当 `init_engine` 已调用时, 委托给引擎。
 pub fn update<F>(f: F) -> anyhow::Result<PersistedState>
 where
     F: FnOnce(&mut PersistedState),
 {
+    if let Some(engine) = ENGINE.get() {
+        let mut state = tokio::runtime::Handle::current()
+            .block_on(engine.load_persisted_state());
+        f(&mut state);
+        let snapshot = state.clone();
+        tokio::runtime::Handle::current()
+            .block_on(engine.save_persisted_state(state))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        return Ok(snapshot);
+    }
     let mut s = load();
     f(&mut s);
     save(&s)?;

@@ -242,6 +242,11 @@ async fn handle_connection(
                 // 5.4: stream connection — snapshot first, then events.
                 return serve_subscription(router, writer).await;
             }
+            CoreChannelRequest::StateSubscribe => {
+                // State subscription: single snapshot response, no streaming yet.
+                let resp = dispatch(&router, req).await;
+                return write_response(&mut writer, &resp).await.map(|_| ());
+            }
             other => {
                 let resp = dispatch(&router, other).await;
                 write_response(&mut writer, &resp).await?;
@@ -421,6 +426,61 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
         },
         // Handled by the connection loop before dispatch; unreachable here.
         CoreChannelRequest::Subscribe => CoreChannelResponse::Ok,
+        CoreChannelRequest::StateSnapshot { domain } => {
+            match sebas_router::state_store::engine() {
+                Some(engine) => {
+                    let payload = match domain.as_str() {
+                        "providers" => {
+                            let state = engine.load_persisted_state().await;
+                            serde_json::to_value(&state).unwrap_or_default()
+                        }
+                        "settings" => {
+                            match engine.load_settings().await {
+                                Ok(Some(cfg)) => cfg,
+                                Ok(None) => serde_json::Value::Null,
+                                Err(e) => serde_json::json!({"error": e}),
+                            }
+                        }
+                        "sessions" => {
+                            let sessions = router.session_info_snapshot().await;
+                            serde_json::to_value(&sessions).unwrap_or_default()
+                        }
+                        other => serde_json::json!({"error": format!("unknown domain: {other}")}),
+                    };
+                    CoreChannelResponse::StateSnapshot { domain, payload }
+                }
+                None => CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: "state store 未初始化".into(),
+                    },
+                },
+            }
+        }
+        CoreChannelRequest::StateMutation { domain, payload } => {
+            match sebas_router::state_store::engine() {
+                Some(engine) => {
+                    let result = match domain.as_str() {
+                        "settings" => {
+                            let value = payload.get("value").cloned().unwrap_or(payload);
+                            engine.save_settings(value).await
+                        }
+                        other => Err(format!("unknown domain: {other}")),
+                    };
+                    match result {
+                        Ok(()) => CoreChannelResponse::StateMutationOk,
+                        Err(e) => CoreChannelResponse::Rejected {
+                            rejection: SessionRejection::Unavailable { cause: e },
+                        },
+                    }
+                }
+                None => CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: "state store 未初始化".into(),
+                    },
+                },
+            }
+        }
+        CoreChannelRequest::StateSubscribe => CoreChannelResponse::Ok,
     }
 }
 
