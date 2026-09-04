@@ -14,7 +14,9 @@
 //! - gated calls surface as [`PermissionNotice`]s on the review-card feed;
 //!   operator decisions round-trip through the kernel's [`ApproverHub`].
 
-use sebas_agent::llm::{AnthropicMessagesClient, LlmClient};
+use sebas_agent::llm::{
+    AnthropicMessagesClient, LlmClient, LlmError, LlmRequest, LlmTurn, StreamEvent,
+};
 use sebas_agent::policy::{Approver, ApprovalAnswer, ApproverHub, PolicyConfig, PolicyEngine};
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::policy::SandboxMode;
@@ -104,6 +106,26 @@ pub struct NativeAgentBackend {
     unavailable_cause: Option<String>,
 }
 
+/// 无凭据时的占位 LLM 客户端：任何调用都以 terminal 错误失败。
+/// 生产路径调不到它——`NativeAgentBackend::spawn` 先按
+/// `unavailable_cause` 拒绝；它的存在让"manager 可建但不可用"的
+/// 文档语义成立，替代曾经的构造期 panic（bead sebas-rqv）。
+struct DeadLlmClient;
+
+#[async_trait::async_trait]
+impl LlmClient for DeadLlmClient {
+    async fn stream_turn(
+        &self,
+        _req: &LlmRequest,
+        _sink: &(dyn Fn(StreamEvent) + Send + Sync),
+    ) -> Result<LlmTurn, LlmError> {
+        Err(LlmError::terminal(
+            "native backend has no LLM credentials \
+             (set SEBAS_AGENT_PROVIDER_API_KEY or SEBAS_AGENT_GATEWAY_URL)",
+        ))
+    }
+}
+
 impl NativeAgentBackend {
     /// 从环境装配原生内核 manager（design N9）。优先直连
     /// `SEBAS_AGENT_PROVIDER_BASE_URL` + `SEBAS_AGENT_PROVIDER_API_KEY`
@@ -142,8 +164,12 @@ impl NativeAgentBackend {
             };
 
         let model = std::env::var("SEBAS_AGENT_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".into());
+        // 无凭据时不 panic：以死客户端占位构造。`spawn` 先检查
+        // `unavailable_cause` 并拒绝（诚实降级），占位客户端永远不被调用；
+        // 直接调到它 = 既有门卫失效，terminal 错误立刻暴露。
+        let client = client.unwrap_or_else(|| Arc::new(DeadLlmClient) as Arc<dyn LlmClient>);
         let manager = SessionManager::new(
-            client.expect("caller gates on the cause; no-client construction is rejected at spawn"),
+            client,
             // 沙箱档位（design N2 配置面）：默认 Auto（Landlock 可用即用，
             // 否则防火墙回退）；`SEBAS_AGENT_BASH_SANDBOX=firewall` 强制回退档。
             ToolRegistry::with_sandbox(bash_timeout, agent_sandbox_mode()),
