@@ -735,15 +735,42 @@ impl SessionBackend for DualSessionBackend {
     }
 
     async fn reachability(&self) -> Reachability {
-        // wire-webui-sebas-agent-e2e D6：两执行体任一不可用 → 整体不可用。
-        // 原生侧（缺凭据）的 cause 优先报告，因为它是真正的"unavailable"
-        // 状态而非仅通道不通；acp 不可达次之。
-        if let Some(native_cause) = &self.native.unavailable_cause {
-            return Reachability::Unreachable {
-                cause: format!("native unavailable: {native_cause}"),
-            };
-        }
+        // 整体可达性 = session authority（core）是否可达，跟 acp 侧一致；
+        // 某个执行体自身不可用（如 native 缺凭据）不是"core 不可达"，
+        // 由 execution_bodies 逐体如实上报，不拉低整体门禁误伤 acp。
         self.acp.reachability().await
+    }
+
+    async fn execution_bodies(&self) -> Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>> {
+        let acp = match self.acp.reachability().await {
+            Reachability::Reachable => sebas_webui::session_backend::ExecutionBodyStatus {
+                name: "acp".into(),
+                ok: true,
+                cause: None,
+            },
+            Reachability::Unreachable { cause } => {
+                sebas_webui::session_backend::ExecutionBodyStatus {
+                    name: "acp".into(),
+                    ok: false,
+                    cause: Some(cause),
+                }
+            }
+        };
+        let native = match self.native.reachability().await {
+            Reachability::Reachable => sebas_webui::session_backend::ExecutionBodyStatus {
+                name: "native".into(),
+                ok: true,
+                cause: None,
+            },
+            Reachability::Unreachable { cause } => {
+                sebas_webui::session_backend::ExecutionBodyStatus {
+                    name: "native".into(),
+                    ok: false,
+                    cause: Some(cause),
+                }
+            }
+        };
+        Some(vec![acp, native])
     }
 
     fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {

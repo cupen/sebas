@@ -112,12 +112,13 @@ export interface ReachabilityInfo {
 
 /**
  * wire-webui-sebas-agent-e2e: 双执行体的逐体可用性。`native` 不可用时 composer
- * 渲染该选项为 disabled + cause（不让操作员提交后才看到失败）。`acp` 不可用
- * 时由既有 `reachability` 字段的整体门禁覆盖。
+ * 渲染该选项为 disabled + cause（不让操作员提交后才看到失败）。后端不区分
+ * 执行体时省略该段（`execution_bodies?: …`）。
  */
-export interface ExecutionBodies {
-  acp: ReachabilityInfo
-  native: ReachabilityInfo
+export interface ExecutionBodyStatus {
+  name: string
+  ok: boolean
+  cause?: string | null
 }
 
 export interface Summary {
@@ -130,7 +131,7 @@ export interface Summary {
   active_session: SessionSummary | null
   active_session_key: string | null
   reachability: ReachabilityInfo
-  execution_bodies?: ExecutionBodies
+  execution_bodies?: ExecutionBodyStatus[]
 }
 
 export interface SessionList {

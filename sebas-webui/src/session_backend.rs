@@ -70,6 +70,17 @@ pub struct PermissionNotice {
     pub reason: String,
 }
 
+/// （wire-webui-sebas-agent-e2e）单个执行体（acp / native）的可用性：
+/// composer 据此禁选并标注 cause。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionBodyStatus {
+    /// `"acp"` | `"native"`（未来可扩展）。
+    pub name: String,
+    pub ok: bool,
+    /// 不可用时的原因（如实透传给 UI）。
+    pub cause: Option<String>,
+}
+
 /// The operator's answer to a [`PermissionNotice`]. `escalate` = one-shot
 /// elevated retry carrying the operator's stated reason (the session policy
 /// itself never widens).
@@ -136,6 +147,14 @@ pub trait SessionBackend: Send + Sync {
 
     /// Whether the session authority is reachable right now, and if not, why.
     async fn reachability(&self) -> Reachability;
+
+    /// （wire-webui-sebas-agent-e2e）各执行体的逐体可用性，供 composer 把
+    /// 不可用的执行体禁选 + 标注 cause（spec：不可用执行体不因整体门禁
+    /// 误伤其他执行体）。`None` = 此后端不区分执行体（summary 省略该段，
+    /// 前端降级为只看整体 reachability）。
+    async fn execution_bodies(&self) -> Option<Vec<ExecutionBodyStatus>> {
+        None
+    }
 
     /// Live stream of gated tool calls awaiting a decision (the review-card
     /// feed). `None` = this backend has no permission interaction (its

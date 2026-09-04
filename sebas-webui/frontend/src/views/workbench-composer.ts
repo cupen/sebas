@@ -242,13 +242,14 @@ export class SebasWorkbenchComposer extends LitElement {
       }
       // wire-webui-sebas-agent-e2e：双执行体的逐体可用性。native 不可用时把后
       // 端下拉中的 "native" 选项渲染为 disabled + cause（spec：不可用执行体
-      // 不应让操作员提交后才看到失败）。acp 不可用被上面的 `unreachable`
-      // 整体禁用覆盖。
-      const eb = data.execution_bodies
-      if (eb && eb.native) {
-        this.nativeAvailability = eb.native.ok
+      // 不应让操作员提交后才看到失败）；acp 不受 native 状态影响，整体
+      // 提交门禁只看 reachability（core 可达性）。
+      const bodies = data.execution_bodies
+      const native = bodies?.find((b) => b.name === 'native')
+      if (native) {
+        this.nativeAvailability = native.ok
           ? { ok: true }
-          : { ok: false, cause: eb.native.cause ?? 'native backend unavailable' }
+          : { ok: false, cause: native.cause ?? 'native backend unavailable' }
       } else {
         this.nativeAvailability = null
       }
