@@ -69,4 +69,5 @@
 | webui(进程)vs `web`(通道) | 前者是 dashboard 进程;后者是它在通道抽象里的注册名 |
 | sebas-agent vs ACP 桥 | 两种执行体:自研内核 vs 经 ACP 驱动的外部 agent |
 | 项目 vs 工作台 | 项目是目录(组织单元);工作台是 webui 里呈现它的页面 |
+| 产品定位"工作台" vs 页面级"工作台" | 前者指 sebas 整体(README 定位用法:"自托管的 agent 工作台");后者专指 webui 的 `/agent` 页。上下文无法区分时优先按页面级理解 |
 | 会话 vs turn | 会话是持久载体;turn 是其中一次问答执行 |

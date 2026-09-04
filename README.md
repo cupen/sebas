@@ -1,247 +1,118 @@
 # sebas
 
-**Agent 桥接到飞书，把 AI 助手装进口袋。**
+**把 AI 同事装进口袋。**
 
-sebas 是一个 Rust 守护进程，将 Claude Code（及其他兼容 agent）接入飞书，让你在飞书客户端即可驱动 AI 助手执行开发任务——无需死守终端，随时查看进度、审批权限、切换会话。
+在工位上，在网页工作台里和 agent 并肩干活；离开工位，用飞书 / IM 指挥它继续干活。sebas 是一个自托管的 agent 工作台，驱动 Claude Code 等兼容 agent——网页主控，IM 遥控，多会话并行。
+
+> 状态：开发中，核心链路已贯通（网页 / 飞书双通道 → 多会话执行 → 流式回写）。
 
 ```
-你在飞书发消息 ──► sebas 收到 ──► 拉起 Claude Code 执行 ──► 流式回写到飞书卡片
+离开工位？手机上发条消息 ──► sebas 派活给 agent ──► 进度流式回到你的网页/IM
 ```
-
-## 状态
-开发中……
-
----
-
-## 愿景
-
-### 短期：远程驱动开发任务
-
-日常开发场景——重构、批量编辑、跑测试、查日志——往往需要长时间占用终端。sebas 把这些任务搬到飞书，让你：
-
-- 在工位上用飞书 Bot 发指令，后台执行，**边干活边等结果**
-- 离开座位时用手机查看进度、审批权限申请
-- 多个会话并行，互不干扰
-
-### 长期：跨机器多 Agent 并行协作
-
-sebas 的架构设计不止于单机单 agent。长期探索的方向是：
-
-- **多 agent 并行**：将一个需求拆解为多个子任务，分配给不同 agent 实例同时推进，最后汇总结果
-- **跨机器协作**：不同机器上的 sebas 实例协同工作，各自承担不同角色（如开发机跑 Claude Code、专用 GPU 服务器跑代码审查 agent）
-- **统一调度入口**：飞书作为唯一交互界面，背后是分布式的 agent 集群
-
----
-
-## 架构
-
-进程拓扑、IPC 语义与 crate 职责的完整描述见 [docs/architecture.md](docs/architecture.md)。
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        飞书客户端                                │
-│             私聊 / 群聊 / 话题 ── 交互卡片 + 按钮               │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ 飞书 WebSocket 长连接
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  sebas daemon (Rust)                                            │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ ws_loop    ──►  RouterEventHandler  ──►  RouterHandle   │    │
-│  │   (长连接)        (事件解析)            (路由分发)       │    │
-│  └───────────────┬─────────────────────────────────────────┘    │
-│                  │ Out 指令 (发卡片 / 更新 / 反应)               │
-│                  ▼                                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ dispatch_out    ──►  飞书 API (send_card / update_card)  │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                  │                                              │
-│                  │ AcpEvent (流式事件)                           │
-│                  ▼                                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ sebas-acp::claude (SessionManager + CcDriver)                   │    │
-│  │   每个 session = 一个 Claude Code 子进程                  │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                  │                                              │
-│                  ▼                                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ sebas-gateway (LLM 双协议网关)                                  │    │
-│  │   Anthropic / OpenAI 协议  ──► 多 provider 路由          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 核心设计
-
-| 层次 | 组件 | 职责 |
-|------|------|------|
-| **接入层** | `ws_loop` + `sebas-feishu` crate | 飞书 WebSocket 长连接（断线重连）、事件解析、API 调用 |
-| **路由层** | `sebas-router` crate | 会话映射、slash 命令解析、权限处理、状态机管理 |
-| **Agent 层** | `sebas-acp` crate | Claude Code 子进程生命周期、流式事件泵送、中断恢复 |
-| **网关层** | `sebas-gateway` crate | Anthropic/OpenAI 双协议透传、多 provider 路由、用量记录 |
-
----
 
 ## 功能特性
 
-- **流式卡片更新**——Claude Code 的思考、工具调用、文本输出实时写入飞书卡片，无需等待最终结果
-- **表情反应状态机**——卡片 Emoji 反应实时反映处理阶段：🖊 输入中 → ⚙ 执行中 → ✅ 完成 / ❌ 失败
-- **权限交互卡片**——工具权限请求（Bash/Read/Write）以交互按钮呈现：允许一次 / 允许本次会话 / 拒绝
-- **多会话管理**——`/new` 开新会话、`/sessions` 查看列表、`/switch` 切换、`/resume` 恢复
-- **会话持久化**——优雅关闭时保存状态，重启后懒恢复，支持 Claude 原生 `resume`
-- **媒体转发**——图片、文件、音频自动下载并传入 agent 上下文
-- **LLM Provider 网关**——内置双协议网关，把请求按模型名路由到任意上游 provider
-- **Provider CRUD**——`/provider` 命令在飞书直接管理 LLM provider，无需编辑配置文件
-- **运行时配置**——`/settings` 调整卡片主题色、思考内容展示、文本截断、工具输出折叠等
+**工作台（webui 主控）**
+
+- **项目导向的会话区**——按项目目录分组管理 agent 会话：项目列表、会话侧栏、时间线与输入区
+- **inbox**——你离开期间到达的 turn 流，回来一次看清
+- **权限审批**——工具权限请求（Bash/Read/Write）以按钮呈现：允许一次 / 允许本会话 / 拒绝
+- **诚实降级**——core 断连时界面明确告知原因，不装死
+
+**会话执行**
+
+- **ACP 桥**——驱动 Claude Code 等兼容 agent，每个会话一个子进程
+- **流式卡片更新**——思考、工具调用、文本输出实时上屏，无需等待最终结果
+- **会话持久化**——优雅关闭保存状态，重启后懒恢复
+- **媒体转发**——图片、文件、音频自动下载并进入 agent 上下文
+
+**通道**
+
+- **适配器可插拔**——核心只依赖中立通道抽象（`sebas-channels`），通道按配置注册
+- **双通道对等**——`web` 与 `feishu` 是同一个注册表里的两个适配器，随时只开其一
+
+**LLM Provider 网关**
+
+- **双协议透传**——Anthropic / OpenAI 协议按模型名路由到 DeepSeek、Kimi、GLM、MiniMax 等上游
 
 ---
 
 ## 快速开始
 
-### 前置条件
-
-1. 在 [飞书开放平台](https://open.feishu.cn/) 创建应用，开启权限：
-   - `im:message`（接收和发送消息）
-   - `im:message.group_at_msg`（群聊 @ 机器人）
-   - `im:message.p2p_msg`（私聊消息）
-   - 在事件订阅中启用 **长连接（WebSocket）** 模式（非 webhook）
-2. 安装 Rust 工具链（1.90+）和 `claude` CLI
-
-### 本地运行
+前置：Rust 工具链（1.90+）。要真正派活给 agent，还需安装 `claude` CLI。
 
 ```bash
-# 1. 克隆并配置
+# 1. 克隆并准备配置（无必填项——不填飞书凭证即为纯网页形态）
 git clone git@github.com:cupen/sebas.git
 cd sebas
 cp config/config.toml.example config.toml
 
-# 2. 编辑 config.toml，填入飞书应用凭证
-#    - feishu.app_id
-#    - feishu.app_secret
-#    - feishu.owner_id（你的 open_id，ou_xxx 格式）
-
-# 3. 构建
+# 2. 构建并启动（webui 默认监听 127.0.0.1:9797）
 cargo build --release
-
-# 4. 启动
-./target/release/sebas run --config ./config.toml
+./target/release/sebas run --config ./config.toml --webui
 ```
 
-### 以 systemd 服务运行（watchdog）
+浏览器打开 <http://127.0.0.1:9797>（工作台在 `/agent` 页）：新建项目、开会话、发指令，agent 的输出实时出现在时间线里。
 
-`service --install` 写一个 systemd 系统 unit，其 `ExecStart` 运行
-**watchdog**（`<data_dir>/bin/sebas watchdog --config …`），而非裸 core：
-systemd 只监督 watchdog 一个进程，core/gateway/webui、控制面（`sebas ctl`）、
-自升级都由 watchdog 驱动。该 unit 以 `--user` 指定的非 root 账户运行，
-二进制平台到 `<data_dir>/bin/sebas`（`data_dir` 取配置
-`[watchdog.storage].data_dir`，未设则按该账户 home 推导）；`sebas update`
-原地替换它，因此升级后重启机器即运行最新版本。
+---
+
+## 部署
+
+### systemd 服务（watchdog）
+
+`service --install` 写一个 systemd 系统 unit，由 **watchdog** 监督：默认只启动 WebUI，core（agent 执行）与飞书按需在 WebUI 服务页启用。升级用 `sebas update`。
 
 ```bash
-# 需要一个已存在的非 root 账户（如 sebas）与一个绝对路径的 config.toml
+# 需要一个已存在的非 root 账户与绝对路径的 config.toml
 sudo sebas service --install --user sebas --config /etc/sebas/config.toml --auto-start
 
-# 查看状态 / 日志 / 控制面
-systemctl status sebas
-journalctl -u sebas
-sebas ctl status --secret <secret>
+systemctl status sebas        # 状态
+sebas ctl status              # 控制面快照
 ```
 
-从旧版（unit 直接跑 `sebas run`）迁移：`sudo sebas service --install --force
---user <user> --config <abs-config> --auto-start` 即可重写为 watchdog 语义并重启生效。
-
-### Docker 运行
-
-#### 使用环境变量启动（推荐）
-
-镜像默认会查找 `/app/config.toml`，找不到时回退到环境变量：
+### Docker
 
 ```bash
 docker run -d --name sebas \
   --restart unless-stopped \
-  -e SEBAS_FEISHU_APP_ID=cli_xxxxxxxxxxxx \
-  -e SEBAS_FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx \
-  -e SEBAS_LOG_LEVEL=info \
-  ghcr.io/cupen/sebas:latest
-```
-
-#### 使用配置文件启动
-
-```bash
-docker run -d --name sebas \
-  --restart unless-stopped \
-  -v /path/to/your/config.toml:/app/config.toml:ro \
-  ghcr.io/cupen/sebas:latest
-```
-
-#### 完整示例：带网关的 Docker 部署
-
-```bash
-# 拉取最新镜像
-docker pull ghcr.io/cupen/sebas:latest
-
-# 启动（同时启用内置 LLM 网关）
-docker run -d --name sebas \
-  --restart unless-stopped \
-  -e SEBAS_FEISHU_APP_ID=cli_xxxxxxxxxxxx \
-  -e SEBAS_FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx \
-  -e SEBAS_GATEWAY_LISTEN=0.0.0.0:8787 \
-  -e SEBAS_LOG_LEVEL=info \
-  -p 8787:8787 \
+  -p 9797:9797 \
   ghcr.io/cupen/sebas:latest \
-  sebas run --config /app/config.toml --gateway
+  sebas run --webui
 ```
 
-> 注意：`claude` CLI 需要在容器内可用。生产部署建议将宿主机的 `claude` 二进制挂载到容器内，或在自定义镜像中预装。
-
-#### 查看日志
+或挂载配置文件：
 
 ```bash
-docker logs -f sebas
+docker run -d --name sebas \
+  --restart unless-stopped \
+  -p 9797:9797 \
+  -v /path/to/config.toml:/app/config.toml:ro \
+  ghcr.io/cupen/sebas:latest \
+  sebas run --webui
 ```
 
-#### 本地构建（可选）
-
-如需自行构建镜像：
-
-```bash
-invoke build-image
-```
+> 注意：容器内需有 `claude` CLI 才能驱动 agent——建议将宿主机二进制挂载进容器或在自定义镜像中预装。日志：`docker logs -f sebas`；本地构建镜像：`invoke build-image`。
 
 ---
 
-## 配置
+## 接入飞书（可选）
 
-### 最小配置
+飞书只是 sebas 的一个可选通道，用于离开工位后远程遥控——不接入不影响网页工作台的任何功能。
 
-```toml
-[feishu]
-app_id = "cli_xxx"
-app_secret = "xxx"
-owner_id = "ou_xxx"
-```
+1. 在[飞书开放平台](https://open.feishu.cn/)创建应用，开启权限 `im:message`、`im:message.group_at_msg`、`im:message.p2p_msg`，事件订阅选择**长连接（WebSocket）**模式（非 webhook）。
+2. 配置凭证（或用环境变量 `SEBAS_FEISHU_APP_ID` / `SEBAS_FEISHU_APP_SECRET`）：
 
-### 配置优先级
+   ```toml
+   [feishu]
+   app_id = "cli_xxx"
+   app_secret = "xxx"
+   owner_id = "ou_xxx"   # 你的 open_id
+   ```
 
-CLI 参数 > 环境变量 > TOML 文件 > 默认值
+   显式开关：`enabled = true` 强制接入（凭据不全拒绝启动）、`enabled = false` 强制停用；缺省按凭据是否齐全隐式判定。
+3. 重启后私聊机器人发 `hello`，应看到流式卡片与 Emoji 反应（🖊 输入中 → ⚙ 执行中 → ✅ 完成）。
 
-### 关键环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `SEBAS_FEISHU_APP_ID` | 飞书应用 App ID |
-| `SEBAS_FEISHU_APP_SECRET` | 飞书应用 App Secret |
-| `SEBAS_LOG_LEVEL` | 日志级别（默认 `info`） |
-| `SEBAS_GATEWAY_LISTEN` | 网关监听地址（如 `127.0.0.1:8787`） |
-| `SEBAS_GATEWAY_PROVIDER_OVERLAY` | Provider 覆盖文件路径 |
-
-### 完整配置说明
-
-详见 `config/config.toml.example`（含逐项注释）与 `openspec/specs/`（各 capability 的行为契约，如 `cli-service`、`feishu-cards`）。
-
----
-
-## 命令
+### 飞书内 slash 命令
 
 | 命令 | 说明 |
 |------|------|
@@ -261,8 +132,6 @@ CLI 参数 > 环境变量 > TOML 文件 > 默认值
 
 sebas 内置一个双协议（Anthropic/OpenAI）纯透传 LLM 网关。让 Claude Code 或任意兼容 SDK 经 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 指向本网关，即可将流量路由到 DeepSeek、Kimi、GLM、MiniMax、Ark、DashScope、Gemini 等上游 provider。
 
-### 最小网关配置
-
 ```toml
 [gateway]
 listen = "127.0.0.1:8787"
@@ -277,27 +146,50 @@ api_key_env = "ANTHROPIC_API_KEY"
 "claude-*" = ["anthropic"]
 ```
 
-### 启动方式
-
 ```bash
-# 独立进程
-sebas gateway --config ./config.toml
+# 随主服务启动（或独立进程：sebas gateway --config …）
+sebas run --config ./config.toml --gateway
 
-# 随主服务启动（随机端口）
-sebas run --config ./config.toml --gateway --debug
-```
-
-### 客户端接入
-
-```bash
-# Claude Code 经网关
+# 客户端接入
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claude
-
-# OpenAI SDK 经网关
-OPENAI_BASE_URL=http://127.0.0.1:8787 OPENAI_API_KEY=sk-gw-local-dev ...
 ```
 
-详见 `openspec/specs/gateway-core/`（路由与协议面契约）及 `openspec/specs/gateway-auth-rate-limit/`（鉴权与限流）。
+配置优先级：CLI 参数 > 环境变量 > TOML 文件 > 默认值。完整配置说明见 `config/config.toml.example`（逐项注释）与 `openspec/specs/`。
+
+---
+
+## 愿景
+
+- **短期**：网页工作台是主控台，IM 是遥控器——工位内外无缝切换，多会话并行互不干扰。
+- **长期**：通道中立，任意 IM / 客户端作为适配器即插即用；多 agent 并行协作（一个需求拆解给多个 agent 实例同时推进）、跨机器协同（开发机跑 Claude Code，专用服务器跑审查 agent）。
+
+---
+
+## 架构
+
+进程拓扑、IPC 语义与 crate 职责的完整描述见 [docs/architecture.md](docs/architecture.md)；术语以 [openspec/glossary.md](openspec/glossary.md) 为准。
+
+```
+   网页工作台          飞书客户端         未来 IM / 客户端
+       │                  │                  │
+       ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────┐
+│ 通道适配器（AdapterRegistry，按配置注册）             │
+│   WebAdapter  │  FeishuAdapter  │  …                │
+└──────────────────────┬──────────────────────────────┘
+     中立事件 ChannelEvent  ⇅  中立卡片 ChannelCard
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│ core（sebas run，长驻进程，会话状态的单一权威）       │
+│   router：会话映射 · slash 命令 · 权限状态机 · 编排   │
+│   执行体：ACP 桥（Claude Code 子进程）               │
+│           │ 原生内核 sebas-agent（开发中）           │
+└──────────────────────┬──────────────────────────────┘
+                       ▼
+        sebas-gateway（Anthropic/OpenAI → 多 provider）
+```
+
+核心不特判任何通道：适配器把渠道入站事件翻译为中立 `ChannelEvent`，把中立 `ChannelCard` 渲染为渠道形态。
 
 ---
 
@@ -305,71 +197,15 @@ OPENAI_BASE_URL=http://127.0.0.1:8787 OPENAI_API_KEY=sk-gw-local-dev ...
 
 ```
 sebas/
-├── src/                  # 主二进制：配置、CLI、编排、事件循环
-├── sebas-feishu/        # 飞书 API 客户端（消息、卡片、媒体、事件、表单）
-├── sebas-router/        # 路由引擎（状态机、命令解析、会话映射、权限处理）
-├── sebas-acp/           # ACP 层：claude 子模块（cc-agent-sdk）
-├── sebas-gateway/       # LLM Provider 网关（Anthropic/OpenAI 双协议）
+├── src/                  # 主二进制：CLI、编排、事件循环、watchdog、core session channel
+├── sebas-channels/       # 通道中立抽象：ChannelKey / ChannelEvent / ChannelCard / AdapterRegistry
+├── sebas-feishu/         # 飞书适配器与 API 客户端（消息、卡片、媒体、表单）
+├── sebas-webui/          # WebUI dashboard 与 web 通道适配器
+├── sebas-router/         # 路由引擎（会话映射、命令解析、权限状态机）
+├── sebas-acp/            # ACP 桥：驱动 Claude Code 等外部 agent
+├── sebas-agent/          # 原生 agent 内核（开发中）
+├── sebas-gateway/        # LLM Provider 网关（Anthropic/OpenAI 双协议）
 ├── config/               # 配置文件示例
 ├── tests/                # 集成测试（含 fake-claude 测试桩）
-├── scripts/              # 辅助脚本
-└── docs/                 # 设计文档与实现计划
+└── docs/                 # 设计文档（架构、前端联调等）
 ```
-
----
-
-## 当前状态
-
-MVP / 持续开发中。核心链路已贯通：飞书 WebSocket 长连接 → 事件解析 → 路由分发 → Claude Code 子进程 → 流式回写卡片。已知局限：
-
-- 会话状态持久化到 `state_file`，重连后懒恢复；但关闭时正在处理的轮次会丢失
-- `/compact`、`/cost` 作为字面提示传给 Claude；`/model`、`/cd`、`/status`、`/help` 已解析但未完整接入
-- 未配置 CI 流水线
-- 覆盖率目标（sebas-router ≥90%、cards ≥90%、整体 ≥80%）为设定目标，尚未验证
-
----
-
-## 手动冒烟测试
-
-1. 启动 sebas，确认 `sebas started` 日志
-2. 飞书私聊发 "hello"；确认响应卡片出现 Emoji 反应序列
-3. 发 "list the files here"；确认出现权限卡片——点击 Allow
-4. 发 `/new`；确认新会话创建
-5. 发 `/sessions`；确认两个会话可见
-6. 重启 sebas，在同一会话发消息；确认会话恢复
----
-
-## 前端联调（Vite 热更新 + Rust 后端）
-
-开发 WebUI 前端时不必每次 `cargo build`——Vite dev server 提供秒级热更新，
-后端表面（JSON API / WebSocket / 健康检查 / Gateway BFF）由代理转发到本机
-Rust 进程，浏览器全程同源，与生产嵌入形态路径一致。
-
-### 启动
-
-```bash
-# 终端 1：Rust 后端（任何形态都可以——裸跑、watchdog 均可）
-cargo run -- release 二进制或 ./target/release/sebas run --config <你的配置> --webui
-# WebUI API 默认监听 127.0.0.1:9797
-
-# 终端 2：Vite dev server（前端源码热更新）
-cd sebas-webui/frontend && ../../.tooling/pnpm dev
-# 输出 Local: http://localhost:5273/（专用端口，strictPort——被占用时直接报错而不是顺延）
-```
-
-浏览器打开 Vite 输出的地址即可。`sebas-webui/frontend/vite.config.ts` 已配置代理：
-`/api`、`/gateway`、`/ws`（WebSocket）、`/health` → `127.0.0.1:9797`。
-前端代码全部使用相对路径请求，因此无需任何环境变量或代码改动。
-
-### 注意事项
-
-- **端口冲突**：5173 是 Vite 默认端口，被其他项目占用时会自动顺延到
-  5174/5175…，以启动日志打印的为准；后端端口固定 9797 不受影响。
-- **改前端即时生效**（HMR）；改 Rust 代码需要重新编译重启后端进程，前端无需动。
-- **WebSocket 实时事件**走代理 `ws: true` 透传，`session.created/updated/removed`
-  事件链路与生产形态一致；断线由前端自动重连。
-- **Gateway BFF**（`/gateway/api/*`，POST/PUT/DELETE）：后端守卫只放行 loopback
-  origin，Vite dev origin 同属 127.0.0.1，联调时行为与生产一致（无
-  `SEBAS_CONTROL_SECRET` 时返回 503）。
-- **测试**：`../../.tooling/pnpm test`（vitest，不依赖后端）；联调中的端到端
-  验证用浏览器或 curl 直接打 Vite 地址即可。
