@@ -71,6 +71,7 @@ describe('api wire shapes', () => {
       prompt: 'do things',
       project_dir: '/tmp/proj',
       backend: 'native',
+      model: null,
     })
 
     await api.createSession('inbox task', null)
@@ -79,6 +80,7 @@ describe('api wire shapes', () => {
       prompt: 'inbox task',
       project_dir: null,
       backend: null,
+      model: null,
     })
   })
 

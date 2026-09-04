@@ -11,7 +11,7 @@
 //! vocabulary, so nothing downstream branches on which driver is bound to a
 //! session.
 
-use crate::session::{AcpCommand, AcpEvent, ResponderSlot};
+use crate::session::{AcpCommand, AcpEvent, AcpModelInfo, ResponderSlot};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -30,6 +30,11 @@ pub struct DriverConfig {
     pub extra_env: Vec<(String, String)>,
     /// The sebas routing id (also becomes the agent conversation id).
     pub session_id: String,
+    /// The agent's real session id to pass to `session/load`, when it differs
+    /// from the routing id (native-ACP agents like opencode address a
+    /// conversation by their own id). `None` → the driver falls back to
+    /// `session_id` for loads (agents without a distinct id, legacy records).
+    pub load_session_id: Option<String>,
     /// True → resume/load the previous conversation instead of starting fresh.
     pub resume: bool,
     /// Timeout for the spawn + initialize handshake.
@@ -56,6 +61,33 @@ pub struct DriverHandle {
     /// True only when a resume actually resumed the old conversation; false
     /// means fresh spawn or a resume-rejection fallback.
     pub resumed: bool,
+    /// The agent's real ACP session id when it differs from the routing id
+    /// (native-ACP agents). `Some(sid)` for fresh spawns (the `session/new`
+    /// id) and successful loads (the loaded conversation id); always `None`
+    /// for Claude, where the conversation id equals the routing id. Valid
+    /// only after the handshake completes (see [`DriverHandle::handshake`]).
+    pub acp_session_id: Option<String>,
+    /// （add-acp-model-selection）会话建立时 agent 经 `configOptions` 暴露的
+    /// 模型选择面。由 drive 在 `session/new`/`session/load` 后填充；`None` =
+    /// agent 未暴露模型选项。有效时间同 `acp_session_id`（handshake 完成后）。
+    pub model: Option<AcpModelInfo>,
+    /// Optional async handshake completion: the driver's final routing id +
+    /// `resumed` flag. The generic ACP driver completes its initialize/load
+    /// handshake inside the run loop (the `agent-client-protocol` connect
+    /// closure owns the connection), so the definitive id/`resumed` are only
+    /// known after the run loop starts — this receiver delivers them.
+    ///
+    /// - `Some(rx)`: ACP driver; the manager must await the handshake (under
+    ///   the startup timeout) before inserting the session and building the
+    ///   spawn outcome.
+    /// - `None`: drivers that handshake synchronously inside `spawn` (the
+    ///   Claude driver); `session_id`/`resumed` are already final.
+    ///
+    /// 元组四元组：`(final_routing_id, resumed, acp_session_id, model_info)`。
+    /// `acp_session_id` 与 `model` 由 ACP 驱动在连接闭包内解析后一次性递出。
+    pub handshake: Option<
+        tokio::sync::oneshot::Receiver<(String, bool, Option<String>, Option<AcpModelInfo>)>,
+    >,
     /// The driver's read/command loop, boxed. Awaiting it drives the session
     /// to completion (cancel, terminal error, or child exit). The manager
     /// owns the command sender (`cmd_rx` was passed in via [`DriverConfig`]).

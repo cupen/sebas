@@ -36,6 +36,21 @@ pub struct Mapping {
     /// Working directory for the project (set when spawned via WebUI).
     /// `None` for Feishu-originated sessions or sessions without a project dir.
     pub project_dir: Option<String>,
+    /// The agent's real ACP session id when it differs from the routing id
+    /// (native-ACP agents, e.g. opencode; the `session/new` id on a fresh
+    /// spawn, the loaded conversation id on a successful resume). `None` for
+    /// Claude (routing id == conversation id) and legacy records. Persisted
+    /// with the session record; a resume reads it to load the conversation
+    /// by the id the agent actually knows (acp-session-mapping D3).
+    pub acp_session_id: Option<String>,
+    /// 会话当前的模型 id（add-acp-model-selection）：spawn 时由 driver 上报的
+    /// configOptions 填充；SetModel 成功后更新。`None` = agent 无模型选项。
+    /// 内存层字段；`add-state-store` 落地后收编为其 sessions 表 `current_model`
+    /// 列（review R1）——本 change 先落内存/MappingDto 层。
+    pub current_model: Option<String>,
+    /// 该 ACP 会话可选的模型 id 列表（来自 agent 的 configOptions）。webui
+    /// 创建会话下拉的数据源；`None`/空 = 无模型选择面。
+    pub available_models: Option<Vec<String>>,
 }
 
 impl Mapping {
@@ -46,6 +61,27 @@ impl Mapping {
             },
             last_active_unix: crate::router::now_unix(),
             project_dir: None,
+            acp_session_id: None,
+            current_model: None,
+            available_models: None,
+        }
+    }
+
+    /// [`Mapping::active`] plus the real ACP session id (fresh spawn /
+    /// successful resume mapping write — acp-session-mapping D3).
+    pub fn active_with_acp(
+        session_id: impl Into<String>,
+        acp_session_id: Option<String>,
+    ) -> Self {
+        Self {
+            state: MappingState::Active {
+                session_id: session_id.into(),
+            },
+            last_active_unix: crate::router::now_unix(),
+            project_dir: None,
+            acp_session_id,
+            current_model: None,
+            available_models: None,
         }
     }
 
@@ -56,6 +92,9 @@ impl Mapping {
             },
             last_active_unix: crate::router::now_unix(),
             project_dir: None,
+            acp_session_id: None,
+            current_model: None,
+            available_models: None,
         }
     }
 
@@ -66,6 +105,9 @@ impl Mapping {
             },
             last_active_unix,
             project_dir: None,
+            acp_session_id: None,
+            current_model: None,
+            available_models: None,
         }
     }
 
@@ -216,23 +258,47 @@ impl SessionMap {
 
     /// Flip Spawning -> Active and drain queued prompts (returned in order).
     /// Also touches `last_active_unix`: activation is the moment the session
-    /// starts doing real work.
-    pub async fn activate(&self, key: &ChannelKey, session_id: String) -> Vec<String> {
+    /// starts doing real work. `acp_session_id` is the agent's real ACP
+    /// session id (native-ACP agents) to persist alongside the routing id;
+    /// `None` for Claude and whenever the driver reported none.
+    ///
+    /// `model`（add-acp-model-selection）：spawn outcome 里的模型选择面，写入
+    /// 映射供快照暴露（current_model + available_models）；`None` = agent 无
+    /// 模型选项。
+    pub async fn activate(
+        &self,
+        key: &ChannelKey,
+        session_id: String,
+        acp_session_id: Option<String>,
+        model: Option<sebas_acp::AcpModelInfo>,
+    ) -> Vec<String> {
         let mut g = self.inner.write().await;
         match g.get_mut(key) {
             Some(m) => {
                 m.last_active_unix = crate::router::now_unix();
-                match std::mem::replace(&mut m.state, MappingState::Active { session_id }) {
+                let mut next = MappingState::Active { session_id };
+                // 写入映射：新会话/成功 resume 的 acp_session_id 落盘给后续
+                // resume 使用；把旧字段就地一起换掉（D4：load 失败时旧映射
+                // 保持不动——本次 activate 携带的是新会话的 id）。
+                std::mem::swap(&mut m.state, &mut next);
+                let pending = match next {
                     MappingState::Spawning { pending } => pending,
                     MappingState::Active { .. } | MappingState::Dormant { .. } => Vec::new(),
-                }
+                };
+                m.acp_session_id = acp_session_id;
+                m.current_model = model.as_ref().map(|info| info.current.clone());
+                m.available_models = model.map(|info| info.options);
+                pending
             }
             None => {
                 tracing::warn!(
                     ?key,
                     "activate without placeholder; inserting fresh mapping"
                 );
-                g.insert(key.clone(), Mapping::active(session_id));
+                let mut mapping = Mapping::active_with_acp(session_id, acp_session_id);
+                mapping.current_model = model.as_ref().map(|info| info.current.clone());
+                mapping.available_models = model.map(|info| info.options);
+                g.insert(key.clone(), mapping);
                 Vec::new()
             }
         }
@@ -271,6 +337,58 @@ impl SessionMap {
 
     pub async fn get(&self, key: &ChannelKey) -> Option<Mapping> {
         self.inner.read().await.get(key).cloned()
+    }
+
+    /// The persisted real ACP session id for `key` (native-ACP agents), or
+    /// `None` when the mapping is absent or has no recorded id (Claude,
+    /// legacy records, Spawning placeholders). Used by the resume path to
+    /// load the conversation by the id the agent actually knows instead of
+    /// the routing uuid (acp-session-mapping 场景 2).
+    pub async fn acp_session_id_for(&self, key: &ChannelKey) -> Option<String> {
+        self.inner.read().await.get(key)?.acp_session_id.clone()
+    }
+
+    /// 更新会话的 current model 记录（add-acp-model-selection）：SetModel
+    /// 成功（ModelChanged）后调用，快照 API 立即反映新模型。无映射时 no-op。
+    /// 不更新 available_models（模型列表来自 spawn 时的 configOptions）。
+    pub async fn set_current_model(&self, key: &ChannelKey, model_id: String) {
+        let mut g = self.inner.write().await;
+        if let Some(m) = g.get_mut(key) {
+            m.current_model = Some(model_id);
+        }
+    }
+
+    /// Preserve a (routing id ↔ real ACP session id) mapping as a dormant
+    /// record so a conversation is not lost when a resume falls back fresh
+    /// (acp-session-mapping D4: "原映射保留在存储，旧会话仍可被未来 load
+    /// 寻址，不因一次失败而抹除"). The record is parked under a deterministic
+    /// synthesized `closed-<hash(session_id)>` key so it survives a daemon
+    /// restart in `dump_json` yet stays out of the user's chat keys (a
+    /// `closed-*` chat can never collide with a web/feishu key, and the WebUI
+    /// session list already renders Dormant rows). Idempotent: the same
+    /// session id reuses the same archive key instead of duplicating rows.
+    pub async fn preserve_closed_mapping(&self, session_id: &str, acp_session_id: Option<String>) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        session_id.hash(&mut h);
+        let archive_key = ChannelKey::new("web", &format!("closed-{:016x}", h.finish()));
+        let mut g = self.inner.write().await;
+        // 已存在则只补 last_active——不覆盖已记录的 acp_session_id。
+        match g.get_mut(&archive_key) {
+            Some(m) => {
+                m.last_active_unix = crate::router::now_unix();
+            }
+            None => {
+                let mut m = Mapping::dormant(session_id.to_string(), crate::router::now_unix());
+                m.acp_session_id = acp_session_id;
+                if g.len() < self.capacity {
+                    g.insert(archive_key, m);
+                } else {
+                    tracing::warn!(%session_id, "session map at capacity; cannot archive closed mapping");
+                }
+            }
+        }
     }
 
     pub async fn lookup_key_by_session(&self, session_id: &str) -> Option<ChannelKey> {
@@ -375,6 +493,8 @@ impl SessionMap {
                 let dto = MappingDto {
                     session_id: sid.to_string(),
                     last_active_unix: m.last_active_unix,
+                    acp_session_id: m.acp_session_id.clone(),
+                    current_model: m.current_model.clone(),
                 };
                 out.insert(
                     key_str,
@@ -408,7 +528,13 @@ impl SessionMap {
                 serde_json::from_value(v).map_err(|e| {
                     serde_json::Error::custom(format!("bad entry for {key_str:?}: {e}"))
                 })?;
-            map.insert(key, Mapping::dormant(dto.session_id, dto.last_active_unix));
+            let mut m = Mapping::dormant(dto.session_id, dto.last_active_unix);
+            // Legacy records (no `acp_session_id` field) restore as
+            // `None` — a later resume falls back to fresh (D4).
+            m.acp_session_id = dto.acp_session_id;
+            // 上次模型（内存层字段；state-store 落地后转 sessions 表列）。
+            m.current_model = dto.current_model;
+            map.insert(key, m);
         }
         Ok(Self {
             inner: Arc::new(RwLock::new(map)),
@@ -444,9 +570,19 @@ impl Default for SessionMap {
     }
 }
 
-/// On-disk shape (unchanged).
+/// Legacy on-disk shape, extended with the real ACP session id
+/// (acp-session-mapping D3; the `add-state-store` SQLite sessions table takes
+/// this same column later — review R1).
 #[derive(Serialize, Deserialize)]
 struct MappingDto {
     session_id: String,
     last_active_unix: i64,
+    /// The agent's real ACP session id (native-ACP agents). `#[serde(default)]`
+    /// keeps legacy `state.json` files (no field) readable → `None`.
+    #[serde(default)]
+    acp_session_id: Option<String>,
+    /// 上次生效的模型 id（add-acp-model-selection；`add-state-store` 的
+    /// `current_model` 列收编前先落这里）。`#[serde(default)]` 兼容旧文件。
+    #[serde(default)]
+    current_model: Option<String>,
 }

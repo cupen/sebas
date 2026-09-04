@@ -39,7 +39,12 @@ pub enum CoreChannelRequest {
     Spawn {
         prompt: String,
         project_dir: Option<String>,
+        /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
+        #[serde(default)]
+        model: Option<String>,
     },
+    /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
+    SetSessionModel { key: ChannelKey, model_id: String },
     /// Send a message to an existing session.
     Message { key: ChannelKey, message: String },
     /// Close (kill) a session.
@@ -111,6 +116,11 @@ mod tests {
             CoreChannelRequest::Spawn {
                 prompt: "hello".into(),
                 project_dir: Some("/tmp/p".into()),
+                model: Some("m1".into()),
+            },
+            CoreChannelRequest::SetSessionModel {
+                key: key.clone(),
+                model_id: "m2".into(),
             },
             CoreChannelRequest::Message {
                 key: key.clone(),
@@ -172,6 +182,8 @@ mod tests {
             user_prompt: None,
             last_active_unix: 0,
             project_dir: None,
+            current_model: None,
+            available_models: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

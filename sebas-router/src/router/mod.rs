@@ -22,7 +22,7 @@ use crate::card_events::{
 };
 use crate::card_state::CardState;
 use crate::cards::CardConfig;
-use crate::commands::GatewayAction;
+use crate::commands::{Command, GatewayAction};
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use sebas_acp::claude::manager::SessionManager;
@@ -159,12 +159,14 @@ pub enum Out {
     /// `project_dir` specifies the working directory for the agent process
     /// (if None, falls back to the config default). `kind` is the requested
     /// agent kind from the webui backend hint (`acp:<slug>`); None = the
-    /// configured default kind.
+    /// configured default kind. `model`（add-acp-model-selection）是创建时
+    /// 请求的模型 id（会话建立后、首 prompt 前应用；None = 默认模型）。
     WebSpawn {
         key: ChannelKey,
         prompt: String,
         project_dir: Option<String>,
         kind: Option<String>,
+        model: Option<String>,
     },
 }
 
@@ -435,6 +437,8 @@ impl RouterHandle {
             user_prompt,
             last_active_unix: m.last_active_unix,
             project_dir: m.project_dir.clone(),
+            current_model: m.current_model.clone(),
+            available_models: m.available_models.clone(),
         })
     }
 
@@ -697,6 +701,15 @@ impl RouterHandle {
         let cfg = self.card_cfg.read().await;
         // transcript 条目在 apply 闭包外追加（锁序：card_states → turn_log，
         // 与其他路径不交叉）。TextDelta/Thinking/Tool 事件是内容流，逐条入账。
+        // ModelChanged（add-acp-model-selection）：更新映射 current model 并
+        // 发布 Updated，让快照立即反映中程切换 —— 覆盖流式 pump（apply_event）
+        // 与即时路径（apply_event_to_out）两条到达线。
+        if let AcpEvent::ModelChanged { model_id, .. } = event {
+            if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+                self.map.set_current_model(&key, model_id.clone()).await;
+                self.publish_updated(&key).await;
+            }
+        }
         match event {
             AcpEvent::TextDelta { delta, .. } => {
                 self.transcript_push(session_id, TurnEntry::markdown(0, delta.clone()))
@@ -947,15 +960,35 @@ impl RouterHandle {
 
     /// Flip Spawning -> Active for `key` and drain queued prompts.
     /// Called by the dispatcher once `create_session` has minted the id.
-    pub async fn activate(&self, key: &ChannelKey, session_id: String) -> Vec<String> {
+    /// `acp_session_id` is the agent's real ACP session id (native-ACP
+    /// agents) to persist for later resumes; `None` when the driving session
+    /// has no distinct id (e.g. Claude). `model`（add-acp-model-selection）
+    /// 是 spawn outcome 的模型选择面，写入映射供快照暴露；`None` = agent
+    /// 无模型选项。
+    pub async fn activate(
+        &self,
+        key: &ChannelKey,
+        session_id: String,
+        acp_session_id: Option<String>,
+        model: Option<sebas_acp::AcpModelInfo>,
+    ) -> Vec<String> {
         let existed = self.map.get(key).await.is_some();
-        let pending = self.map.activate(key, session_id).await;
+        let pending = self.map.activate(key, session_id, acp_session_id, model).await;
         if existed {
             self.publish_updated(key).await;
         } else {
             self.publish_created(key).await;
         }
         pending
+    }
+
+    /// 会话模型切换成功（AcpEvent::ModelChanged）后更新映射的 current model，
+    /// 并发布 Updated 让快照/订阅者立即反映新模型。
+    pub async fn apply_model_changed(&self, session_id: &str, model_id: &str) {
+        if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+            self.map.set_current_model(&key, model_id.to_string()).await;
+            self.publish_updated(&key).await;
+        }
     }
 
     /// Spawn failed/timeout: remove the Spawning placeholder for `key`.
@@ -978,12 +1011,14 @@ impl RouterHandle {
     /// Uses `Out::WebSpawn` which the dispatcher handles without sending
     /// cards to Feishu. Returns the SessionKey for the new session.
     /// `project_dir` specifies the working directory for the agent; `kind`
-    /// is the requested agent kind (None = configured default).
+    /// is the requested agent kind (None = configured default). `model`
+    /// （add-acp-model-selection）是创建时请求的模型 id（None = 默认模型）。
     pub async fn web_spawn(
         &self,
         prompt: String,
         project_dir: Option<String>,
         kind: Option<String>,
+        model: Option<String>,
     ) -> ChannelKey {
         let key = ChannelKey::web_new();
         match self.map.begin_spawn(key.clone()).await {
@@ -1001,6 +1036,7 @@ impl RouterHandle {
                     prompt,
                     project_dir,
                     kind,
+                    model,
                 })
                 .await;
                 key
@@ -1014,8 +1050,62 @@ impl RouterHandle {
 
     /// Send a message to an existing session from the WebUI.
     /// Routes the message through the session map (same logic as Feishu
-    /// text messages) and emits the appropriate Out instruction.
+    /// text messages) and emits the appropriate Out instruction. Command
+    /// text is parsed like the Feishu path (B 档冒烟 2026-09-04：webui 直达
+    /// 路径此前把 `/cancel` 当普通 prompt 发给 opencode，中断无效）。
     pub async fn web_send_message(&self, key: ChannelKey, message: String) {
+        match crate::commands::parse_command(&message) {
+            // 命令臂：无活跃会话明确回复（与 feishu 路径一致，sebas-ixv）。
+            Command::Cost | Command::Cancel | Command::Status => {
+                let sid = self.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned));
+                if let Some(sid) = sid {
+                    let cmd = match crate::commands::parse_command(&message) {
+                        Command::Cost => AcpCommand::ContinueSession {
+                            session_id: sid.clone(),
+                            prompt: "/cost".into(),
+                        },
+                        Command::Status => AcpCommand::ContinueSession {
+                            session_id: sid.clone(),
+                            prompt: "/status".into(),
+                        },
+                        Command::Cancel => AcpCommand::Cancel { session_id: sid.clone() },
+                        _ => unreachable!(),
+                    };
+                    self.emit(Out::SendAcp { session_id: sid, cmd }).await;
+                } else {
+                    let cmd = message.split_whitespace().next().unwrap_or("");
+                    self.emit(Out::PlainText {
+                        key,
+                        content: format!("当前没有活跃会话，{cmd} 需要活跃会话。发送 /new 开始新会话。"),
+                    })
+                    .await;
+                }
+                return;
+            }
+            Command::Compact => {
+                let sid = self.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned));
+                if let Some(sid) = sid {
+                    self.emit(Out::SendAcp {
+                        session_id: sid.clone(),
+                        cmd: AcpCommand::ContinueSession {
+                            session_id: sid,
+                            prompt: "/compact".into(),
+                        },
+                    })
+                    .await;
+                } else {
+                    self.emit(Out::PlainText {
+                        key,
+                        content: "当前没有活跃会话，/compact 需要活跃会话。发送 /new 开始新会话。".into(),
+                    })
+                    .await;
+                }
+                return;
+            }
+            // 其余命令/普通文本：webui 侧不处理的命令保持原行为（不静默
+            // 截留），与 feishu 路径的 PassThrough 语义一致。
+            _ => {}
+        }
         match self.map.route_text(key.clone(), message.clone()).await {
             Ok(crate::state::TextRoute::Continue(sid)) => {
                 // 记录本轮用户 prompt 到 transcript（与 feishu 路径的
@@ -1043,6 +1133,8 @@ impl RouterHandle {
                     prompt: message,
                     project_dir: None,
                     kind: None,
+                    // 直达消息路径没有模型参数（用户指定模型走创建表单）。
+                    model: None,
                 })
                 .await;
             }
@@ -1313,7 +1405,8 @@ fn extract_session_id(event: &AcpEvent) -> &str {
         | AcpEvent::PermissionRequest { session_id, .. }
         | AcpEvent::Finished { session_id }
         | AcpEvent::Error { session_id, .. }
-        | AcpEvent::UsageUpdate { session_id, .. } => session_id,
+        | AcpEvent::UsageUpdate { session_id, .. }
+        | AcpEvent::ModelChanged { session_id, .. } => session_id,
     }
 }
 
@@ -1346,5 +1439,6 @@ fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
         }
         AcpEvent::PermissionRequest { .. } => None,
         AcpEvent::UsageUpdate { .. } => None,
+        AcpEvent::ModelChanged { .. } => None,
     }
 }

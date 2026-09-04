@@ -42,6 +42,11 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private backend: BackendHint = 'acp'
   /** Reachable third-party agent kinds for the create-session dropdown. */
   @state() private kinds: AgentKindInfo[] = []
+  /** 创建会话时请求的模型 id（add-acp-model-selection）；仅当数据源（最近
+   *  会话的可用模型列表）非空时显示下拉。 */
+  @state() private model: string | null = null
+  /** 模型下拉的数据源：最近一个暴露 available_models 的会话的模型列表。 */
+  @state() private modelOptions: string[] = []
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
 
@@ -178,6 +183,36 @@ export class SebasWorkbenchComposer extends LitElement {
     super.connectedCallback()
     void this.loadReachability()
     void this.loadKinds()
+    void this.loadModelOptions()
+  }
+
+  /**
+   * 模型下拉数据源（add-acp-model-selection D4）：创建会话表单的模型列表来自
+   * 快照里最近一个暴露 `available_models` 的会话（agent 的 configOptions）。
+   * 无模型选项的 agent（如 Claude）→ 空列表 → 不显示下拉、不报错。
+   */
+  private async loadModelOptions(): Promise<void> {
+    try {
+      const data = await api.sessions()
+      const latest = data.recent_sessions
+        .slice()
+        .sort((a, b) => b.last_active_unix - a.last_active_unix)
+        .find((r) => Array.isArray(r.available_models) && r.available_models.length > 0)
+      if (latest && latest.available_models) {
+        this.modelOptions = latest.available_models
+        // 预选会话当前模型（若列表里含它），否则选第一项。
+        this.model =
+          latest.current_model && this.modelOptions.includes(latest.current_model)
+            ? latest.current_model
+            : (this.modelOptions[0] ?? null)
+      } else {
+        this.modelOptions = []
+        this.model = null
+      }
+    } catch {
+      this.modelOptions = []
+      this.model = null
+    }
   }
 
   private async loadKinds(): Promise<void> {
@@ -217,7 +252,7 @@ export class SebasWorkbenchComposer extends LitElement {
     this.sending = true
     this.error = null
     try {
-      const { key } = await api.createSession(prompt, this.projectDir, this.backend)
+      const { key } = await api.createSession(prompt, this.projectDir, this.backend, this.model)
       this.text = ''
       this.dispatchEvent(
         new CustomEvent<{ key: string }>('composer-created', {
@@ -308,6 +343,21 @@ export class SebasWorkbenchComposer extends LitElement {
               ? html`<span class="label">${placeholder}</span>`
               : html`<span class="label placeholder">· · ·</span>`}
             ${this.renderBinding()}
+            ${this.modelOptions.length > 0
+              ? html`<wa-select
+                  class="backend-select model-select"
+                  aria-label="Model"
+                  value=${this.model ?? ''}
+                  ?disabled=${disabled}
+                  @change=${(e: Event) => {
+                    this.model = (e.target as HTMLSelectElement).value || null
+                  }}
+                >
+                  ${this.modelOptions.map(
+                    (m) => html`<wa-option value=${m}>${m}</wa-option>`,
+                  )}
+                </wa-select>`
+              : nothing}
             <wa-select
               class="backend-select"
               aria-label="Execution backend"

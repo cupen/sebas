@@ -395,7 +395,7 @@ pub(crate) async fn dispatch_out(
             //    (openspec/specs/acp-driver/spec.md "ACP spawn failure"). create_session and
             //    CreateSession-prompt failures share the same Err branch —
             //    both mean the session is unusable.
-            let (session_id, pending, rx) = match acp_spawn_and_activate(
+            let (session_id, pending, rx, _model_info) = match acp_spawn_and_activate(
                 mgr,
                 router,
                 &key,
@@ -404,6 +404,8 @@ pub(crate) async fn dispatch_out(
                 command,
                 cfg.acp.work_dir_for(&kind),
                 gateway_cfg,
+                // 飞书路径无模型参数（feishu 卡片无模型选择 UI）→ 默认模型。
+                None,
             )
             .await
             {
@@ -471,6 +473,7 @@ pub(crate) async fn dispatch_out(
             prompt,
             project_dir,
             kind: requested_kind,
+            model,
         } => {
             // `kind` from the webui backend hint (acp:<slug>) wins; a bare
             // hint or no hint falls back to the configured default kind.
@@ -482,7 +485,7 @@ pub(crate) async fn dispatch_out(
             // but skip the Feishu send_card / react operations. Card content
             // is still accumulated in CardStateMap and readable via the WebUI.
             // `project_dir` takes precedence over the config default.
-            let (session_id, pending, rx) = match acp_spawn_and_activate(
+            let (session_id, pending, rx, _model_info) = match acp_spawn_and_activate(
                 mgr,
                 router,
                 &key,
@@ -491,6 +494,7 @@ pub(crate) async fn dispatch_out(
                 command,
                 project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
                 gateway_cfg,
+                model,
             )
             .await
             {
@@ -539,6 +543,8 @@ pub(crate) async fn dispatch_out(
                 command,
                 cfg.acp.work_dir_for(&kind),
                 gateway_cfg,
+                // 飞书 resume 路径无模型参数：沿用会话当前模型。
+                None,
             )
             .await
             {
@@ -986,6 +992,7 @@ pub(crate) async fn dispatch_out_without_feishu(
             prompt,
             project_dir,
             kind,
+            model,
         } => {
             handle_web_spawn(
                 cfg,
@@ -996,6 +1003,7 @@ pub(crate) async fn dispatch_out_without_feishu(
                 prompt,
                 project_dir,
                 kind,
+                model,
             )
             .await
         }
@@ -1029,10 +1037,11 @@ async fn handle_web_spawn(
     prompt: String,
     project_dir: Option<String>,
     requested_kind: Option<String>,
+    model: Option<String>,
 ) -> anyhow::Result<()> {
     let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
     let command = cfg.acp.command_for(&kind).unwrap_or_default();
-    let (session_id, pending, rx) = match acp_spawn_and_activate(
+    let (session_id, pending, rx, _model_info) = match acp_spawn_and_activate(
         mgr,
         router,
         &key,
@@ -1041,6 +1050,7 @@ async fn handle_web_spawn(
         command,
         project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
         gateway_cfg,
+        model,
     )
     .await
     {
@@ -1090,6 +1100,8 @@ async fn handle_spawn_resume_without_feishu(
         command,
         cfg.acp.work_dir_for(&kind),
         gateway_cfg,
+        // webui resume 路径暂无模型参数（创建/中程切换走 POST model）。
+        None,
     )
     .await
     {

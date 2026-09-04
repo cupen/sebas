@@ -313,14 +313,37 @@ impl SessionBackend for CoreChannelBackend {
         prompt: String,
         project_dir: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        self.spawn_with(prompt, project_dir, None, None).await
+    }
+
+    async fn spawn_with(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+        backend: Option<&str>,
+        model: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        let _ = backend; // the core channel spawn route pins the configured kind
         match self
             .request(&CoreChannelRequest::Spawn {
                 prompt,
                 project_dir,
+                model,
             })
             .await?
         {
             CoreChannelResponse::Spawned { key } => Ok(key),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::SetSessionModel { key, model_id })
+            .await?
+        {
+            CoreChannelResponse::Ok => Ok(()),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),
             other => Err(unavailable(format!("unexpected response: {other:?}"))),
         }

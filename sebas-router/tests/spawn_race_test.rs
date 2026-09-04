@@ -32,7 +32,7 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
         "no second Out may be emitted while spawning"
     );
 
-    let pending = map.activate(&key(), "s1".into()).await;
+    let pending = map.activate(&key(), "s1".into(), None, None).await;
     assert_eq!(pending, vec!["msg2".to_string()]);
     // Now active: a third text continues the session.
     router
@@ -74,7 +74,7 @@ async fn pending_queue_capped_at_16() {
         let r = map.route_text(key(), format!("m{i}")).await.unwrap();
         assert!(matches!(r, TextRoute::Enqueued));
     }
-    let pending = map.activate(&key(), "s1".into()).await;
+    let pending = map.activate(&key(), "s1".into(), None, None).await;
     assert_eq!(pending.len(), 16);
     assert_eq!(pending[0], "m1");
     assert_eq!(pending[15], "m16");

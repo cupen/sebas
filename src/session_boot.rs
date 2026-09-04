@@ -104,6 +104,14 @@ fn spawn_overrides(
 /// `gateway_cfg` is the parsed `[gateway]` config from config.toml (or
 /// `None` when the daemon runs without one). Used to resolve
 /// `ProviderMode::Gateway` → URL + auth token; ignored for Off / Direct.
+///
+/// `model`（add-acp-model-selection D3）：创建时请求的模型 id。`Some` 时在
+/// 会话建立后、首 prompt 前经 `SetModel` 应用（失败报非致命错误、会话仍
+/// 可对话）；`None` = 用 agent 默认模型。
+///
+/// 返回 `(session_id, pending, rx, model_info)`：`model_info` 是 spawn
+/// outcome 携带的模型选择面（agent 的 configOptions），调用方把它写入
+/// session 映射供快照暴露。
 #[allow(clippy::too_many_arguments)]
 pub async fn acp_spawn_and_activate(
     mgr: &Arc<SessionManager>,
@@ -114,10 +122,12 @@ pub async fn acp_spawn_and_activate(
     command: Vec<String>,
     work_dir: Option<String>,
     gateway_cfg: Option<&GatewayConfig>,
+    model: Option<String>,
 ) -> anyhow::Result<(
     String,
     Vec<String>,
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
+    Option<sebas_acp::AcpModelInfo>,
 )> {
     let (extra_env, full_command) = spawn_overrides(kind, command, gateway_cfg);
     let session_id = mgr
@@ -139,6 +149,18 @@ pub async fn acp_spawn_and_activate(
         .event_rx(&session_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("no event_rx for freshly-created session"))?;
+    // create-with-model（D3）：会话建立后、首 prompt 前应用请求的模型。失败
+    // 不 abort 会话——记录 warn，模型保持 agent 默认（webui 报非致命错误）。
+    if let Some(model_id) = model
+        && let Err(e) = mgr.set_model(&session_id, &model_id).await
+    {
+        tracing::warn!(
+            %session_id,
+            model_id,
+            error = %e,
+            "create-with-model failed (non-fatal; session uses its default model)"
+        );
+    }
     mgr.send(
         &session_id,
         AcpCommand::CreateSession {
@@ -147,8 +169,16 @@ pub async fn acp_spawn_and_activate(
         },
     )
     .await?;
-    let pending = router.activate(key, session_id.clone()).await;
-    Ok((session_id, pending, rx))
+    // Persist the driver-reported real ACP session id (native-ACP agents) on
+    // the mapping so a later resume loads the conversation by the id the
+    // agent actually knows (acp-session-mapping 场景 1). `None` (Claude) is
+    // a no-op — the routing id is the conversation id there.
+    let acp_session_id = mgr.get_acp_session_id(&session_id).await;
+    // 模型选择面：spawn outcome 里 driver 上报的 configOptions 解析结果，
+    // 一并写入映射供快照暴露（current_model + available_models）。
+    let model_info = mgr.get_model_info(&session_id).await;
+    let pending = router.activate(key, session_id.clone(), acp_session_id, model_info.clone()).await;
+    Ok((session_id, pending, rx, model_info))
 }
 
 /// Resume variant of [`acp_spawn_and_activate`] (openspec/specs/session-lifecycle/spec.md): ask claude to
@@ -161,6 +191,10 @@ pub async fn acp_spawn_and_activate(
 ///
 /// Provider-mode env/args apply on resume just as on fresh spawn — same
 /// `gateway_cfg` and same runtime state produce the same overrides.
+///
+/// `model`（add-acp-model-selection）：`Some` 时在 resume（或 fallback-fresh）
+/// 建立后、首 prompt 前经 `SetModel` 应用；`None` = 沿用 agent 会话设置的
+/// 模型（resume 加载的会话自带其模型状态）。
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub async fn acp_resume_and_activate(
     mgr: &Arc<SessionManager>,
@@ -172,6 +206,7 @@ pub async fn acp_resume_and_activate(
     command: Vec<String>,
     work_dir: Option<String>,
     gateway_cfg: Option<&GatewayConfig>,
+    model: Option<String>,
 ) -> anyhow::Result<(
     String,
     Vec<String>,
@@ -179,14 +214,50 @@ pub async fn acp_resume_and_activate(
     bool,
 )> {
     let (extra_env, full_command) = spawn_overrides(kind, command, gateway_cfg);
+    // Resume by the agent's real ACP session id when the persisted mapping
+    // for `key` has one (native-ACP agents like opencode address a
+    // conversation by their OWN id, not sebas's routing uuid); `None` keeps
+    // the legacy routing-id-as-load-target behavior for agents/records
+    // without a distinct id. On a load rejection the manager's fresh
+    // fallback proceeds and the returned outcome's `acp_session_id` carries
+    // the NEW session's id under the NEW routing id.
+    let acp_session_id = router.map.acp_session_id_for(key).await;
     let outcome = mgr
-        .resume_session(kind, full_command, work_dir, extra_env, old_session_id)
+        .resume_session(
+            kind,
+            full_command,
+            work_dir,
+            extra_env,
+            old_session_id,
+            acp_session_id.clone(),
+        )
         .await?;
     let session_id = outcome.session_id.clone();
+    // 诚实回退（load 被拒 / 无映射）：把原映射（old routing id ↔ 旧真实 id）
+    // 归档为 dormant 记录，保留在存储里供未来 load 寻址（D4：不因一次失败
+    // 而抹除）。成功 load 时路由 id 不变、映射原位更新，无需归档。
+    let is_fallback = !outcome.resumed;
+    if is_fallback {
+        router
+            .map
+            .preserve_closed_mapping(old_session_id, acp_session_id)
+            .await;
+    }
     let rx = mgr
         .event_rx(&session_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("no event_rx for freshly-resumed session"))?;
+    // create-with-model 语义同样适用于 resume（会话建立后、首 prompt 前）。
+    if let Some(model_id) = model
+        && let Err(e) = mgr.set_model(&session_id, &model_id).await
+    {
+        tracing::warn!(
+            %session_id,
+            model_id,
+            error = %e,
+            "resume-with-model failed (non-fatal; session keeps its current model)"
+        );
+    }
     // The triggering prompt rides as a continuation: for a resumed session
     // it appends to the loaded conversation; for a fallback-fresh session
     // it is simply the first prompt (run_main drives both through
@@ -199,7 +270,14 @@ pub async fn acp_resume_and_activate(
         },
     )
     .await?;
-    let pending = router.activate(key, session_id.clone()).await;
+    // Persist the (possibly NEW) real ACP session id: a successful load
+    // re-records the loaded id under the same routing id; a fallback-fresh
+    // session records the new session's id under the new routing id.
+    let new_acp_session_id = mgr.get_acp_session_id(&session_id).await;
+    let model_info = mgr.get_model_info(&session_id).await;
+    let pending = router
+        .activate(key, session_id.clone(), new_acp_session_id, model_info)
+        .await;
     Ok((session_id, pending, rx, outcome.resumed))
 }
 

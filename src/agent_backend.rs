@@ -80,6 +80,9 @@ impl NativeSession {
             user_prompt: Some(self.prompt.clone()),
             last_active_unix: chrono::Utc::now().timestamp(),
             project_dir: self.workdir.clone(),
+            // 原生内核目前没有会话级模型选择面（Claude 专用驱动）。
+            current_model: None,
+            available_models: None,
         }
     }
 }
@@ -588,12 +591,14 @@ impl SessionBackend for DualSessionBackend {
         prompt: String,
         project_dir: Option<String>,
         backend: Option<&str>,
+        _model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match backend {
             Some("native") => self.native.spawn(prompt, project_dir).await,
             // `acp` / `acp:<slug>` (and any other non-native hint) route to
-            // the ACP backend, which parses the slug and pins the kind.
-            _ => self.acp.spawn_with(prompt, project_dir, backend).await,
+            // the ACP backend, which parses the slug and pins the kind. The
+            // model id (add-acp-model-selection) is threaded into the spawn.
+            _ => self.acp.spawn_with(prompt, project_dir, backend, _model).await,
         }
     }
 
@@ -603,6 +608,12 @@ impl SessionBackend for DualSessionBackend {
 
     async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         self.route(&key).close(key).await
+    }
+
+    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+        // 原生内核没有会话级模型选择（Claude 专用）；ACP 会话（webui/桥）走
+        // InProcessBackend 的 SetModel 命令通道（add-acp-model-selection）。
+        self.acp.set_session_model(key, model_id).await
     }
 
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
@@ -736,12 +747,12 @@ mod tests {
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
         // backend hint = native → key 前缀 agent-。
         let key = dual
-            .spawn_with("go".into(), None, Some("native"))
+            .spawn_with("go".into(), None, Some("native"), None)
             .await
             .expect("spawn native");
         assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);
         // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
-        let acp_key = dual.spawn_with("hi".into(), None, None).await.expect("spawn acp");
+        let acp_key = dual.spawn_with("hi".into(), None, None, None).await.expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
     }
 

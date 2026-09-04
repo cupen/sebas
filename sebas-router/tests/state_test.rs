@@ -86,7 +86,7 @@ async fn dormant_first_text_claims_resume_then_queues() {
     let r2 = m.route_text(k.clone(), "again".into()).await.unwrap();
     assert!(matches!(r2, sebas_router::state::TextRoute::Enqueued));
     // Activate flips to Active and drains the queue.
-    let pending = m.activate(&k, "s-new".into()).await;
+    let pending = m.activate(&k, "s-new".into(), None, None).await;
     assert_eq!(pending, vec!["again".to_string()]);
     let r3 = m.route_text(k.clone(), "third".into()).await.unwrap();
     assert!(matches!(r3, sebas_router::state::TextRoute::Continue(ref sid) if sid == "s-new"));
@@ -117,7 +117,7 @@ async fn route_text_and_activate_touch_last_active() {
     m.route_text(k.clone(), "hi".into()).await.unwrap();
     let t1 = m.get(&k).await.unwrap().last_active_unix;
     assert!(t1 > 1, "route_text must refresh last_active_unix, got {t1}");
-    m.activate(&k, "s2".into()).await;
+    m.activate(&k, "s2".into(), None, None).await;
     let t2 = m.get(&k).await.unwrap().last_active_unix;
     assert!(t2 >= t1);
 }

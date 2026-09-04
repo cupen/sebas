@@ -82,6 +82,17 @@ impl RouterHandle {
                 })
                 .await;
             }
+            AcpEvent::ModelChanged { model_id, .. } => {
+                // 模型切换成功：更新映射 current model + 发布 Updated 让快照
+                // 立即反映（webui 中程模型选择器的数据源）；并把可见行累积进
+                // transcript（apply_event 会在 card body 留 "⚙ model → …"）。
+                self.apply_model_changed(session_id.as_str(), model_id).await;
+                let react = self.apply_event(session_id.as_str(), event).await;
+                self.flush_card(session_id.as_str()).await;
+                if let Some(emoji) = react {
+                    self.emit_reaction(session_id.as_str(), emoji).await;
+                }
+            }
             AcpEvent::Error { terminal: true, .. } => {
                 // terminal Error 并入累积模型（openspec/specs/feishu-cards/spec.md）：apply_event（置 ❌ + append
                 // 错误正文，保留死前 transcript）→ flush_card → remove_by_session

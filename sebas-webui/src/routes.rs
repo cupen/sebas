@@ -44,6 +44,8 @@ pub(crate) fn build_session_rows(
             SessionRow {
                 project_dir: info.project_dir.clone(),
                 prompt_preview: info.user_prompt.clone(),
+                current_model: info.current_model.clone(),
+                available_models: info.available_models.clone(),
                 encoded_key: encode_channel_key(&info.channel, &info.key),
                 channel: info.channel.clone(),
                 reference: info.key.clone(),
@@ -87,6 +89,8 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
         "status_slug": derived.slug(),
         "status_glyph": derived.glyph(),
         "encoded_key": encode_channel_key(&info.channel, &info.key),
+        "current_model": info.current_model,
+        "available_models": info.available_models,
     })
 }
 

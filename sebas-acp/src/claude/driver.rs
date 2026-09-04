@@ -419,6 +419,17 @@ impl CcDriver {
                     // intercepts before the channel); never expected here.
                     tracing::debug!("ignoring unexpected PermissionReply on session channel");
                 }
+                Sel::Cmd(Some(AcpCommand::SetModel { .. })) => {
+                    // 模型选择是 ACP 原生能力（`session/set_config_option`），
+                    // Claude 专用驱动不支持。显式报错而不是静默丢弃，调用方
+                    // 会把它呈现给用户（acp-driver spec "Unsupported agent
+                    // reports explicit error"）。
+                    self.terminal(
+                        "set model 需要支持 configOptions 的 ACP 会话；当前驱动（Claude 专用）不支持",
+                    )
+                    .await;
+                    return;
+                }
                 Sel::Msg(Some(Ok(m))) => {
                     // Any real message from the child counts as activity:
                     // resets the hang timer and clears the escalation stage
@@ -843,6 +854,10 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
             work_dir,
             extra_env,
             session_id,
+            // Reserved for native-ACP agents; Claude's conversation id equals
+            // the routing id, so a load is always addressed by the routing id
+            // (the `session_id` field). Never used directly here.
+            load_session_id: _,
             resume,
             startup_timeout,
             evt_tx,
@@ -898,6 +913,14 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
         Ok(DriverHandle {
             session_id,
             resumed,
+            // Claude's conversation id IS the routing id — no separate ACP
+            // session id to map; resume is addressed by the routing id itself.
+            acp_session_id: None,
+            // Claude 暴露 configOptions/模型选择（add-acp-model-selection
+            // D4：无模型选项的 agent 不显示模型 UI）；handshake=None 时由
+            // manager 直接取该字段。
+            model: None,
+            handshake: None,
             run,
         })
     }
