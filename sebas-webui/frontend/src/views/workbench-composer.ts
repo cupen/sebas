@@ -49,6 +49,13 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private modelOptions: string[] = []
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
+  /**
+   * wire-webui-sebas-agent-e2e: per-execution-body reachability from
+   * `/api/summary.execution_bodies`. `native.ok=false` → 后端下拉中 "native"
+   * 选项渲染为 disabled + cause（spec：不可用的执行体不应让操作员提交到
+   * 才能发现的失败）。
+   */
+  @state() private nativeAvailability: { ok: boolean; cause?: string } | null = null
 
   static styles = [
     viewStyles,
@@ -233,11 +240,24 @@ export class SebasWorkbenchComposer extends LitElement {
       } else {
         this.unreachable = null
       }
+      // wire-webui-sebas-agent-e2e：双执行体的逐体可用性。native 不可用时把后
+      // 端下拉中的 "native" 选项渲染为 disabled + cause（spec：不可用执行体
+      // 不应让操作员提交后才看到失败）。acp 不可用被上面的 `unreachable`
+      // 整体禁用覆盖。
+      const eb = data.execution_bodies
+      if (eb && eb.native) {
+        this.nativeAvailability = eb.native.ok
+          ? { ok: true }
+          : { ok: false, cause: eb.native.cause ?? 'native backend unavailable' }
+      } else {
+        this.nativeAvailability = null
+      }
     } catch {
       /* If summary itself fails, leave reachability null so the operator
        * can still try to submit (the server-side call will give a more
        * accurate error than a stale gate). */
       this.unreachable = null
+      this.nativeAvailability = null
     }
   }
 
@@ -320,7 +340,11 @@ export class SebasWorkbenchComposer extends LitElement {
           ${this.kinds.map(
             (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
           )}
-          <wa-option value="native">native · built-in kernel</wa-option>
+          ${this.nativeAvailability && !this.nativeAvailability.ok
+            ? html`<wa-option value="native" disabled
+                >native · built-in kernel (unavailable: ${this.nativeAvailability.cause ?? 'no provider credentials'})</wa-option
+              >`
+            : html`<wa-option value="native">native · built-in kernel</wa-option>`}
         </wa-select>
         <wa-textarea
           placeholder="Message the agent…"
@@ -369,7 +393,11 @@ export class SebasWorkbenchComposer extends LitElement {
               }}
             >
               <wa-option value="acp">acp</wa-option>
-              <wa-option value="native">native</wa-option>
+              ${this.nativeAvailability && !this.nativeAvailability.ok
+                ? html`<wa-option value="native" disabled
+                    >native (unavailable)</wa-option
+                  >`
+                : html`<wa-option value="native">native</wa-option>`}
             </wa-select>
           </div>
           <div class="right-tools">

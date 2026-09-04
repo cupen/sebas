@@ -74,8 +74,33 @@ pub async fn summary(State(state): State<WebUiState>) -> Response {
         "active_session": active_session,
         "active_session_key": focused.as_ref().map(encode_session_key),
         "reachability": reachability_payload(&reachability),
+        // wire-webui-sebas-agent-e2e：双执行体的逐体可用性。前端 composer 按
+        // 此渲染下拉（缺凭据的 native 显示为不可用 + cause），同时不为旧前端
+        // 制造破坏（summary 老字段都还在）。
+        "execution_bodies": execution_bodies_payload(&reachability),
     });
     Json(data).into_response()
+}
+
+/// 双执行体的逐体可用性：`acp` 与 `native` 各自 `{ok,cause?}`。当下层是
+/// 单后端（InProcess/CoreChannel），acp 的状态等同于 `reachability`，native
+/// 在 core 通道后端下不可知 —— 标记为 unknown（前端降级为只看 acp）。
+fn execution_bodies_payload(r: &Reachability) -> serde_json::Value {
+    match r {
+        Reachability::Reachable => json!({
+            "acp": { "ok": true },
+            "native": { "ok": true },
+        }),
+        Reachability::Unreachable { cause } => {
+            // 总体的 cause 优先反映 native 不可用（DualSessionBackend 取最小
+            // 值时把 native cause 提前），否则当作 acp 不可达。
+            let is_native = cause.starts_with("native unavailable");
+            json!({
+                "acp": { "ok": !is_native, "cause": if is_native { None } else { Some(cause) } },
+                "native": { "ok": false, "cause": if is_native { Some(cause.trim_start_matches("native unavailable: ")) } else { None } },
+            })
+        }
+    }
 }
 
 /// Serialize the reachability report for the composer gate. Only the
