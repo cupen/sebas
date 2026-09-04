@@ -51,6 +51,12 @@ pub enum AgentConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeishuConfig {
+    /// 显式启用开关（feishu 可选，make-feishu-optional-webui-primary）：
+    /// - `Some(true)`：强制接入（凭据不完整会在 validate 报错）。
+    /// - `Some(false)`：强制不接入（即使凭据齐全也不起飞书）。
+    /// - `None`（缺省）：回退历史隐式判定 = `app_id` 与 `app_secret` 双非空。
+    #[serde(default)]
+    pub enabled: Option<bool>,
     // serde-default（空串）让 TOML 缺字段时解析不报错，把「必填」判定留给
     // validate() —— 这样 env 覆盖（SEBAS_FEISHU_APP_ID/SECRET）才有机会
     // 在 validate 前补齐字段（openspec/specs/cli-service/spec.md env > TOML）。
@@ -70,25 +76,41 @@ pub struct FeishuConfig {
     /// 空字符串 = 不检查 @（处理所有消息）。
     #[serde(default)]
     pub bot_name: String,
+    /// 飞书 **新**会话的默认执行体（make-feishu-optional-webui-primary）：
+    /// `true` = 走原生 sebas-agent 内核（`agent-*` 会话，输出在 webui 看，
+    /// 不出飞书卡片）；`false`（默认）= 走 acp 桥（Claude Code，飞书卡片
+    /// 渲染照旧）。既有原生会话不受影响。
+    #[serde(default)]
+    pub native_default: bool,
 }
 
 impl FeishuConfig {
+    /// feishu 是否启用：显式 `enabled` 优先；缺省回退历史隐式判定
+    /// （app_id 与 app_secret 双非空 = 接入，sebas-2ty）。
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+            .unwrap_or(!self.app_id.is_empty() && !self.app_secret.is_empty())
+    }
+
     /// feishu 是否启用：app_id 与 app_secret 同时非空。
     /// 两者同时为空 = 不接入飞书（feishu 可选，sebas-2ty）。
+    /// 保持历史命名，内部委托给显式开关优先的 `is_enabled`。
     pub fn enabled(&self) -> bool {
-        !self.app_id.is_empty() && !self.app_secret.is_empty()
+        self.is_enabled()
     }
 }
 
 impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
+            enabled: None,
             app_id: String::new(),
             app_secret: String::new(),
             owner_id: String::new(),
             allowed_chat_types: default_chat_types(),
             hello_msg: String::new(),
             bot_name: String::new(),
+            native_default: false,
         }
     }
 }
@@ -532,6 +554,17 @@ impl Config {
                 "feishu.app_id 与 feishu.app_secret 必须同时配置；同时留空 = 不启用飞书".into(),
             ));
         }
+        // 显式开关（make-feishu-optional-webui-primary）：enabled = true 但凭据
+        // 不完整 = 半配置意图，拒绝启动；enabled = false 而凭据齐全 = 以显式
+        // 值为准（不接入），交给 run.rs 记日志提示，这里不算错误。
+        if self.feishu.enabled == Some(true)
+            && (self.feishu.app_id.is_empty() || self.feishu.app_secret.is_empty())
+        {
+            return Err(SebasError::Config(
+                "feishu.enabled = true 但 app_id/app_secret 未完整配置；\
+                 请同时填写凭据，或设 enabled = false（显式停用）".into(),
+            ));
+        }
         // owner_id 决策（sebas-nya）：维持**可选**，偏离 openspec/specs/cli-service/spec.md 的必填。
         // 依据：openspec/specs/cli-service/spec.md 同时写明「只有 3 个必填字段」只是设计原则，而实际
         // 部署（config/config.toml）以 owner_id = "" 运行单用户机器人；
@@ -693,6 +726,53 @@ app_secret = "s"
         )
         .expect("完整 feishu 配置应可解析");
         assert!(both.feishu.enabled());
+    }
+
+    #[test]
+    fn feishu_explicit_enabled_switch_four_states() {
+        // 态 1：enabled = false + 凭据齐全 → 显式关闭优先（不接入）。
+        let off_with_creds = Config::parse(
+            r#"
+[feishu]
+enabled = false
+app_id = "cli_a1b2"
+app_secret = "s"
+"#,
+        )
+        .expect("enabled=false + 凭据应可解析");
+        assert!(!off_with_creds.feishu.is_enabled(), "显式 false 应优先于凭据");
+
+        // 态 2：enabled = true + 凭据缺失 → 配置错误拒绝启动。
+        let on_no_creds = Config::parse(
+            r#"
+[feishu]
+enabled = true
+"#,
+        );
+        assert!(on_no_creds.is_err(), "enabled=true 但无凭据必须报错");
+        assert!(
+            on_no_creds
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("enabled = true"),
+            "报错应指明开关与凭据不匹配"
+        );
+
+        // 态 3：缺省 + 凭据空 → 不接入（历史行为）。
+        let default_no_creds = Config::parse("").expect("空配置可解析");
+        assert!(!default_no_creds.feishu.is_enabled(), "缺省+空凭据应不接入");
+
+        // 态 4：缺省 + 凭据齐全 → 接入（历史隐式判定回退）。
+        let default_with_creds = Config::parse(
+            r#"
+[feishu]
+app_id = "cli_a1b2"
+app_secret = "s"
+"#,
+        )
+        .expect("缺省+凭据可解析");
+        assert!(default_with_creds.feishu.is_enabled(), "缺省回退隐式判定应接入");
     }
 
     #[test]

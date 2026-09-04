@@ -87,8 +87,9 @@ pub async fn run(
         info!(%addr, "gateway started (run --gateway); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
     }
 
-    // feishu 是可选项（sebas-2ty）：app_id/app_secret 同时为空 = 不接入飞书。
-    let feishu_enabled = cfg.feishu.enabled();
+    // feishu 是可选项（sebas-2ty / make-feishu-optional-webui-primary）：
+    // 显式 `[feishu] enabled` 优先，缺省回退 app_id/app_secret 双非空判定。
+    let feishu_enabled = cfg.feishu.is_enabled();
     if feishu_enabled && cfg.feishu.owner_id.is_empty() {
         // owner_id 决策（sebas-nya，文档化于 config.rs validate）：可选。
         // 空值 = 不过滤发送者 —— 对能执行任意命令的单用户 bot 是真实风险，
@@ -99,10 +100,19 @@ pub async fn run(
         );
     }
     if !feishu_enabled {
-        info!(
-            "feishu 未启用（app_id/app_secret 为空）：跳过飞书接入，\
-             以本地服务形态运行；如需接入请在配置中填写凭证"
-        );
+        // 显式 enabled = false 但凭据齐全：提示「刻意停用」而非「没配置」，
+        // 让部署者明白为什么没有接入飞书（make-feishu-optional-webui-primary）。
+        if cfg.feishu.enabled == Some(false) && (!cfg.feishu.app_id.is_empty() || !cfg.feishu.app_secret.is_empty()) {
+            info!(
+                "feishu 显式停用（[feishu] enabled = false），凭据已配置但不接入；\
+                 以本地/WebUI 主控形态运行"
+            );
+        } else {
+            info!(
+                "feishu 未启用（app_id/app_secret 为空）：跳过飞书接入，\
+                 以本地服务形态运行；如需接入请在配置中填写凭证"
+            );
+        }
     }
 
     if !crate::ipc::is_under_watchdog()
@@ -139,6 +149,15 @@ pub async fn run(
     ));
     let provider_forms = crate::provider::build_form(&raw_config);
     let webui_card_cfg = merged_card_cfg.clone();
+    // 原生内核 manager（make-feishu-optional-webui-primary）：webui 的
+    // NativeAgentBackend 与飞书原生桥共享同一个执行面（LLM 通道/工具注册表/
+    // 审批 hub）。凭据缺失时 manager 仍可建，spawn 时按 cause 拒绝并诚实降级。
+    let (native_mgr, _native_cause) =
+        crate::agent_backend::NativeAgentBackend::build_native_manager(
+            cfg.acp.startup_timeout_for(cfg.acp.default_kind()),
+        );
+    // 先建 router（native = None），再构造桥（桥需要 router 句柄），最后注入——
+    // 解决桥↔router 循环依赖。
     let (router, mut out_rx) = RouterHandle::new_with_provider_form(
         map,
         merged_card_cfg,
@@ -146,6 +165,12 @@ pub async fn run(
         provider_forms,
         Some(mgr.clone()),
     );
+    let native_bridge = crate::native_router_bridge::RouterNativeBridge::with_default(
+        native_mgr,
+        router.clone(),
+        cfg.feishu.native_default,
+    );
+    router.set_native_bridge(Some(native_bridge)).await;
     // Tracks the current emoji reaction on each session's root card so the
     // router's phase machine can swap 👀→🚧→✅ rather than pile them up.
     let reactions = Arc::new(ReactionTracker::default());

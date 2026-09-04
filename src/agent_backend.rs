@@ -83,8 +83,10 @@ impl NativeSession {
 
 /// The in-process backend over the native agent kernel.
 pub struct NativeAgentBackend {
-    manager: SessionManager,
-    hub: Arc<ApproverHub>,
+    manager: Arc<SessionManager>,
+    /// 内核实际使用的审批回答者（`manager.approver()`；无则补一个 hub）。
+    /// 统一走 trait object，`answer_permission` 直接 `answer()` 到内核。
+    hub: Arc<dyn Approver>,
     /// Encoded key → session. Encoded keys are the URL-safe form the WebUI
     /// routes already use.
     sessions: Arc<RwLock<HashMap<String, NativeSession>>>,
@@ -97,13 +99,14 @@ pub struct NativeAgentBackend {
 }
 
 impl NativeAgentBackend {
-    /// Build the backend. Reads the agent LLM channel from the environment
-    /// (design N9): `SEBAS_AGENT_PROVIDER_BASE_URL` + `SEBAS_AGENT_PROVIDER_API_KEY`
-    /// (direct; default endpoint `https://api.anthropic.com`), or
-    /// `SEBAS_AGENT_GATEWAY_URL` (+ optional `SEBAS_AGENT_GATEWAY_AUTH`) to
-    /// route through the gateway. Without credentials the backend reports
-    /// honestly degraded: every spawn rejects with the cause.
-    pub fn from_env(bash_timeout: Duration) -> Arc<Self> {
+    /// 从环境装配原生内核 manager（design N9）。优先直连
+    /// `SEBAS_AGENT_PROVIDER_BASE_URL` + `SEBAS_AGENT_PROVIDER_API_KEY`
+    /// （默认端点 `https://api.anthropic.com`），或
+    /// `SEBAS_AGENT_GATEWAY_URL`（+ 可选 `SEBAS_AGENT_GATEWAY_AUTH`）走 gateway。
+    ///
+    /// 无凭据时返回 `(manager, Some(cause))`——manager 可建但每个 spawn
+    /// 会拒绝并报 cause。
+    pub fn build_native_manager(bash_timeout: Duration) -> (Arc<SessionManager>, Option<String>) {
         let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) =
             if let Ok(url) = std::env::var("SEBAS_AGENT_GATEWAY_URL") {
                 let auth = std::env::var("SEBAS_AGENT_GATEWAY_AUTH")
@@ -145,23 +148,42 @@ impl NativeAgentBackend {
         )
         .with_policy(Arc::new(PolicyEngine::new(PolicyConfig::default())))
         .with_approver(ApproverHub::new());
+        (Arc::new(manager), cause)
+    }
 
+    /// Build the backend. Reads the agent LLM channel from the environment
+    /// (design N9). Without credentials the backend reports honestly
+    /// degraded: every spawn rejects with the cause.
+    pub fn from_env(bash_timeout: Duration) -> Arc<Self> {
+        let (manager, cause) = Self::build_native_manager(bash_timeout);
         Self::new(manager, cause)
     }
 
     /// Inject an already-configured manager (tests, or hosts that read the
     /// provider registry themselves).
     pub fn with_manager(manager: SessionManager) -> Arc<Self> {
+        Self::new(Arc::new(manager), None)
+    }
+
+    /// Inject an already-configured manager behind an `Arc`（webui 与 feishu
+    /// 桥共享同一个内核 manager）。
+    pub fn with_manager_arc(manager: Arc<SessionManager>) -> Arc<Self> {
         Self::new(manager, None)
     }
 
-    fn new(manager: SessionManager, unavailable_cause: Option<String>) -> Arc<Self> {
-        // The kernel needs an approver to surface gated calls; the hub owns
-        // the pending map the review-card answer route feeds.
-        let hub = ApproverHub::new();
-        let manager = match manager.has_approver() {
-            true => manager,
-            false => manager.with_approver(hub.clone()),
+    /// 暴露内嵌的内核 manager（供 feishu 原生桥共享同一执行面）。
+    pub fn native_manager(&self) -> Arc<SessionManager> {
+        self.manager.clone()
+    }
+
+    fn new(manager: Arc<SessionManager>, unavailable_cause: Option<String>) -> Arc<Self> {
+        // The kernel needs an approver to surface gated calls. 生产路径
+        // （`from_env`/`build_native_manager`）已挂 approver；`with_manager`
+        // 注入的 manager 若缺，用它自己的 hub 补一个（此前缺了这个回填，
+        // 双 hub 错位会让 webui 的 answer 到不了内核——sebas-22f 类问题）。
+        let hub: Arc<dyn Approver> = match manager.approver() {
+            Some(a) => a,
+            None => ApproverHub::new(),
         };
         let (events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
@@ -638,6 +660,9 @@ mod tests {
             network: NetworkMode::Off,
             ..Default::default()
         })))
+        // 生产路径（build_native_manager）已挂 approver；测试 manager 同样
+        // 挂 hub，gated 调用才能呈现审查卡。
+        .with_approver(sebas_agent::policy::ApproverHub::new())
     }
 
     #[tokio::test]

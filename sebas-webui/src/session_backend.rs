@@ -334,6 +334,24 @@ impl SessionBackend for InProcessBackend {
         let Some(session_id) = session_id else {
             return false;
         };
+        // 原生会话（make-feishu-optional-webui-primary）：权限请求来自桥 →
+        // 决定回填到原生内核（ApproverHub）。先试 native，失败再回退 acp。
+        let native = match decision.clone() {
+            PermissionDecision::AllowOnce => {
+                sebas_router::native_bridge::NativeApprovalDecision::AllowOnce
+            }
+            PermissionDecision::AllowSession => {
+                sebas_router::native_bridge::NativeApprovalDecision::AllowSession
+            }
+            PermissionDecision::Deny => sebas_router::native_bridge::NativeApprovalDecision::Deny,
+            PermissionDecision::Escalate { reason } => {
+                sebas_router::native_bridge::NativeApprovalDecision::Escalate { reason }
+            }
+        };
+        if self.router.answer_native_permission(request_id, native).await {
+            return true;
+        }
+        // acp 会话：走既有 Out::SendAcp PermissionReply。
         let decision = map_permission_decision(decision);
         self.router
             .emit(sebas_router::Out::SendAcp {

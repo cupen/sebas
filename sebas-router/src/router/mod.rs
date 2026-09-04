@@ -206,6 +206,12 @@ pub struct RouterHandle {
     /// and by tests that drive `web_send_message` flows. `None` for router
     /// instances that never spawn a child (e.g. pure mapping tests).
     mgr: Option<Arc<SessionManager>>,
+    /// 原生 sebas-agent 执行体桥（可选，make-feishu-optional-webui-primary）。
+    /// `None` = 未接线，所有会话走 acp 桥（现状）；`Some` 时 `agent-*`
+    /// 会话经此桥直达原生内核，acp 会话行为不变。
+    /// 用 `RwLock` 包装以支持构造后注入（桥需要 router 句柄 → 先建 router、
+    /// 再建桥、再 set）。
+    native: Arc<RwLock<crate::native_bridge::NativeBridge>>,
     /// The session currently focused by the WebUI. The dashboard uses this
     /// to highlight the active row and to decide which session's detail
     /// page to deep-link into. `None` until the user clicks Switch on a
@@ -250,6 +256,7 @@ impl Clone for RouterHandle {
             allowlist: self.allowlist.clone(),
             provider_forms: self.provider_forms.clone(),
             mgr: self.mgr.clone(),
+            native: self.native.clone(),
             active_session: self.active_session.clone(),
             reply_targets: self.reply_targets.clone(),
             help_card_msgid: self.help_card_msgid.clone(),
@@ -286,7 +293,7 @@ impl RouterHandle {
         card_cfg: CardConfig,
         mgr: Arc<SessionManager>,
     ) -> (Self, mpsc::Receiver<Out>) {
-        Self::new_with_provider_form(map, card_cfg, 256, None, Some(mgr))
+        Self::new_with_details(map, card_cfg, 256, None, Some(mgr), None)
     }
 
     /// 带 provider CRUD 表单的完整构造（root crate 启动时注入）。
@@ -296,6 +303,17 @@ impl RouterHandle {
         channel_buffer: usize,
         provider_forms: Option<Arc<ProviderForms>>,
         mgr: Option<Arc<SessionManager>>,
+    ) -> (Self, mpsc::Receiver<Out>) {
+        Self::new_with_details(map, card_cfg, channel_buffer, provider_forms, mgr, None)
+    }
+
+    fn new_with_details(
+        map: SessionMap,
+        card_cfg: CardConfig,
+        channel_buffer: usize,
+        provider_forms: Option<Arc<ProviderForms>>,
+        mgr: Option<Arc<SessionManager>>,
+        native: crate::native_bridge::NativeBridge,
     ) -> (Self, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(channel_buffer);
         let (events, _) = broadcast::channel(256);
@@ -312,6 +330,7 @@ impl RouterHandle {
                 allowlist: SessionAllowlist::default(),
                 provider_forms,
                 mgr,
+                native: Arc::new(RwLock::new(native)),
                 active_session: Arc::new(RwLock::new(None)),
                 turn_log: Arc::new(RwLock::new(HashMap::new())),
                 reply_targets: ReplyTargetMap::default(),
@@ -321,6 +340,12 @@ impl RouterHandle {
             },
             rx,
         )
+    }
+
+    /// 构造后注入原生执行体桥（make-feishu-optional-webui-primary）。桥需要
+    /// router 句柄 → 先建 router（native = None）、再建桥、再 set；幂等。
+    pub async fn set_native_bridge(&self, bridge: crate::native_bridge::NativeBridge) {
+        *self.native.write().await = bridge;
     }
 
     /// Replace the live `CardConfig` at runtime (used by the `/settings`
@@ -422,6 +447,12 @@ impl RouterHandle {
         log.push(entry);
     }
 
+    /// Public transcript append for out-of-impl callers (native bridge).
+    /// Positions are assigned monotonically from the log length.
+    pub async fn push_transcript_entry(&self, session_id: &str, entry: TurnEntry) {
+        self.transcript_push(session_id, entry).await;
+    }
+
     /// Drop a session's transcript. Called when the mapping is removed so a
     /// recycled session_id cannot inherit stale content.
     async fn transcript_drop(&self, session_id: &str) {
@@ -441,6 +472,61 @@ impl RouterHandle {
     /// recovered from the session transcript, never a correctness loss).
     pub fn subscribe_acp_permission_requests(&self) -> broadcast::Receiver<AcpEvent> {
         self.perm_events.subscribe()
+    }
+
+    /// Publish a native-kernel permission request onto the same ACP permission
+    /// broadcast (make-feishu-optional-webui-primary, design D3). The webui
+    /// `InProcessBackend` relays `AcpEvent::PermissionRequest` into its
+    /// review-card feed already — reusing the shape means feishu-originated
+    /// native sessions surface permission cards for free, encoded key lookup
+    /// included. `session_id` is the URL-safe encoded `SessionKey`.
+    pub fn publish_native_permission(
+        &self,
+        session_id: String,
+        request_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    ) {
+        let _ = self.perm_events.send(AcpEvent::PermissionRequest {
+            session_id,
+            request_id,
+            tool_name,
+            args,
+        });
+    }
+
+    /// 原生内核会话登记为已存在（幂等）：事件驱动地刷新一次 Updated，
+    /// 让 webui/channel 看到最新状态。
+    pub async fn touch_native_session(&self, key: &SessionKey) {
+        if self.session_info_for(key).await.is_some() {
+            self.publish_updated(key).await;
+        }
+    }
+
+    /// 关闭原生会话（映射移除 + 广播 Removed）。桥在终端错误/会话结束时
+    /// 调用。`remove_by_key` 是幂等的（无映射则 no-op），这里总是广播
+    /// Removed 以收敛订阅者视图。
+    pub async fn fail_native_session(&self, key: &SessionKey) {
+        let existed = self.map.get(key).await.is_some();
+        self.map.remove_by_key(key).await;
+        if existed {
+            self.publish_removed(key);
+        }
+    }
+
+    /// 回填一个原生权限决定。返回 false = 该 request_id 不在桥的待决表
+    /// （可能是 acp 会话的权限，或已过期）。供 webui 审查卡先试 native
+    /// 再回退 acp。
+    pub async fn answer_native_permission(
+        &self,
+        request_id: &str,
+        decision: crate::native_bridge::NativeApprovalDecision,
+    ) -> bool {
+        let bridge = self.native.read().await.clone();
+        match bridge {
+            Some(b) => b.answer_permission(request_id, decision),
+            None => false,
+        }
     }
 
     fn publish(&self, event: SessionEvent) {
@@ -1114,6 +1200,73 @@ pub fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Encode a `SessionKey` for URLs / the channel wire: `chat_id\0thread_id`
+/// percent-encoded (same convention as the WebUI's `routes::encode_key`).
+/// No external dependency — the charset is small (chat/thread ids are
+/// alnum plus a few separators) so a targeted percent-encoder suffices.
+pub fn encode_key(key: &SessionKey) -> String {
+    let raw = format!("{}\0{}", key.chat_id, key.thread_id.clone().unwrap_or_default());
+    percent_encode(&raw)
+}
+
+/// Decode a percent-encoded `SessionKey` (inverse of [`encode_key`]).
+pub fn decode_key(encoded: &str) -> Option<SessionKey> {
+    let decoded = percent_decode(encoded)?;
+    let (chat_id, thread_id) = decoded.split_once('\0')?;
+    Some(SessionKey {
+        chat_id: chat_id.to_string(),
+        thread_id: if thread_id.is_empty() {
+            None
+        } else {
+            Some(thread_id.to_string())
+        },
+    })
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = hex_val(bytes[i + 1])?;
+                let lo = hex_val(bytes[i + 2])?;
+                out.push(hi << 4 | lo);
+                i += 3;
+            }
+            b'%' => return None,
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn extract_session_id(event: &AcpEvent) -> &str {

@@ -1,7 +1,12 @@
-# 飞书机器人接入（可选）。app_id / app_secret 同时留空 = 不接入飞书
-# （sebas watchdog 默认只启动 WebUI，需要 bot 时再配置并在 WebUI 服务页
-# 启用 core）；只配其一会在启动时报错。也可由 env 覆盖。
+# 飞书机器人接入（可选）。默认主控是 WebUI（sebas watchdog 默认只启动
+# WebUI，core 停用）；需要 bot 时再配置并在 WebUI 服务页启用 core。
+#
+# 显式开关（缺省 = 回退历史隐式判定「app_id/app_secret 双非空」）：
+#   enabled = true  → 强制接入（凭据不完整会报错拒绝启动）
+#   enabled = false → 强制停用（即使凭据齐全也不接入飞书）
+# 只配 app_id 或 app_secret 其一会在启动时报错。也可由 env 覆盖。
 [feishu]
+# enabled = true
 app_id = ""
 app_secret = ""
 
@@ -9,6 +14,11 @@ app_secret = ""
 # 留空 = 不过滤发送者（任何能私聊 bot 的用户都可驱动本机 claude），启动时会有 warn。
 # 强烈建议填上；open_id 可在飞书开放平台或 bot 收到的消息事件里查到。
 # owner_id = "ou_xxx"
+#
+# 新会话的默认执行体（可选，make-feishu-optional-webui-primary）：
+#   false（默认）= 走 acp 桥（Claude Code 子进程，飞书卡片渲染照旧）
+#   true         = 走原生 sebas-agent 内核（输出在 WebUI 看，飞书侧不渲染卡片）
+# native_default = true
 #
 # 启动时发给每个恢复会话的消息（空 = 不发）
 # hello_msg = "你好，我又回来了"
