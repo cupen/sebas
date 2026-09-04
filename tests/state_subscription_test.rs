@@ -16,6 +16,7 @@ use sebas::sebas_state::engine::DbStateEngine;
 use sebas::sebas_state::writer::StateWriter;
 use sebas_router::RouterHandle;
 use sebas_router::state::SessionMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -42,8 +43,12 @@ async fn start_core(dir: &std::path::Path) -> TestCore {
     let (close_tx, close_rx) = tokio::sync::watch::channel(false);
     let serve_path = path.clone();
     let serve_router = router.clone();
+    // wire-webui-sebas-agent-e2e：通道 server 委托复合 SessionBackend。
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(serve_router.clone()),
+    );
     tokio::spawn(async move {
-        let _ = server::serve(serve_router, serve_path, SECRET.into(), close_rx).await;
+        let _ = server::serve(backend, serve_router, serve_path, SECRET.into(), close_rx).await;
     });
     for _ in 0..100 {
         if path.exists() {

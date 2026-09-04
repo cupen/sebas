@@ -16,12 +16,14 @@ use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
     StateStreamFrame,
 };
+use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_router::{RouterHandle, SessionEvent};
-use sebas_webui::session_backend::SessionRejection;
+use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -81,11 +83,15 @@ pub fn bind_channel_socket(path: &Path) -> Result<IpcListener> {
     Ok(listener)
 }
 
-/// Serve the core session channel until the process exits. `secret` is the
-/// value of `SEBAS_CORE_SECRET` injected by the watchdog (empty disables the
-/// secret check only for peers that send an empty secret — the uid check
-/// still applies).
+/// Serve the core session channel until the process exits. `backend` is the
+/// core's composite session seam (acp + native kernel; design D1 of
+/// wire-webui-sebas-agent-e2e) — session mutations are applied through it so
+/// detached and in-process share one dispatch. `router` backs the router-
+/// level state-store domains. `secret` is the value of `SEBAS_CORE_SECRET`
+/// injected by the watchdog (empty disables the secret check only for peers
+/// that send an empty secret — the uid check still applies).
 pub async fn serve(
+    backend: Arc<dyn SessionBackend>,
     router: RouterHandle,
     path: PathBuf,
     secret: String,
@@ -108,12 +114,13 @@ pub async fn serve(
                         continue;
                     }
                 };
+                let backend = backend.clone();
                 let router = router.clone();
                 let secret = secret.clone();
                 let mut close_rx = close_rx.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        r = handle_connection(stream, router, secret) => {
+                        r = handle_connection(stream, backend, router, secret) => {
                             if let Err(e) = r {
                                 warn!(?e, "core channel connection failed");
                             }
@@ -200,6 +207,7 @@ async fn read_handshake(
 
 async fn handle_connection(
     stream: IpcStream,
+    backend: Arc<dyn SessionBackend>,
     router: RouterHandle,
     secret: String,
 ) -> Result<()> {
@@ -245,8 +253,9 @@ async fn handle_connection(
         };
         match req {
             CoreChannelRequest::Subscribe => {
-                // 5.4: stream connection — snapshot first, then events.
-                return serve_subscription(router, writer).await;
+                // 5.4: stream connection — snapshot first, then events
+                // (plus approval frames as they arise).
+                return serve_subscription(backend, writer).await;
             }
             CoreChannelRequest::StateSubscribe => {
                 // State subscription: persistent stream — full snapshot first,
@@ -254,7 +263,7 @@ async fn handle_connection(
                 return serve_state_subscription(router, writer).await;
             }
             other => {
-                let resp = dispatch(&router, other).await;
+                let resp = dispatch(&backend, &router, other).await;
                 write_response(&mut writer, &resp).await?;
             }
         }
@@ -285,43 +294,77 @@ async fn write_response(
 /// the writer stalled) or the bounded flush times out on a full socket
 /// buffer (stalled reader) — either way the connection is closed and the
 /// client re-snapshots on reconnect.
+///
+/// wire-webui-sebas-agent-e2e: the stream is fed by the composite backend
+/// (acp + native lifecycle events) and interleaves approval frames
+/// (`ApprovalRequested`) from its review-card feed. Approval frames are not
+/// replayed on reconnect — a gated call whose request cannot reach any
+/// client fails closed at the kernel (spec).
 async fn serve_subscription(
-    router: RouterHandle,
+    backend: Arc<dyn SessionBackend>,
     mut writer: WriteHalf,
 ) -> Result<()> {
     const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    let mut events = router.subscribe_session_events();
-    let snapshot = router.session_info_snapshot().await;
+    let mut events = backend.subscribe();
+    let mut approvals = backend.permission_requests();
+    let snapshot = backend.snapshot().await;
 
     // Frame 1: the snapshot.
     let frame = SessionStreamFrame::Snapshot { sessions: snapshot };
     write_frame(&mut writer, &frame).await?;
 
-    let mut pending: Vec<SessionEvent> = Vec::new();
+    let mut pending: Vec<SessionStreamFrame> = Vec::new();
     loop {
-        match events.recv().await {
-            Ok(event) => pending.push(event),
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                // 5.8: a lagging subscriber is dropped, not gap-filled.
-                warn!("core channel: subscriber lagged; dropping connection");
-                return Ok(());
+        let frame: SessionStreamFrame = tokio::select! {
+            ev = events.recv() => match ev {
+                Ok(event) => SessionStreamFrame::Event { event },
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // 5.8: a lagging subscriber is dropped, not gap-filled.
+                    warn!("core channel: subscriber lagged; dropping connection");
+                    return Ok(());
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Ok(()); // backend gone (core shutting down)
+                }
+            },
+            approval = recv_approval(&mut approvals) => {
+                SessionStreamFrame::ApprovalRequested { notice: approval }
             }
-            Err(broadcast::error::RecvError::Closed) => {
-                return Ok(()); // router gone (core shutting down)
-            }
-        }
+        };
+        pending.push(frame);
         // Bounded flush: a live local reader drains in microseconds. A
         // stalled reader leaves the socket buffer full → timeout → drop.
         let flush = async {
-            for ev in pending.drain(..) {
-                write_frame(&mut writer, &SessionStreamFrame::Event { event: ev }).await?;
+            for frame in pending.drain(..) {
+                write_frame(&mut writer, &frame).await?;
             }
             writer.flush().await.map_err(SebasError::from)
         };
         if tokio::time::timeout(FLUSH_TIMEOUT, flush).await.is_err() {
             warn!("core channel: subscriber stalled on write; dropping connection");
             return Ok(());
+        }
+    }
+}
+
+/// Next approval notice from the composite feed, if this backend has one.
+/// A missing (or closed) feed never resolves — the select arm simply stays
+/// pending and session events keep flowing.
+async fn recv_approval(
+    approvals: &mut Option<broadcast::Receiver<PermissionNotice>>,
+) -> PermissionNotice {
+    let Some(rx) = approvals.as_mut() else {
+        return std::future::pending().await;
+    };
+    loop {
+        match rx.recv().await {
+            Ok(notice) => return notice,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => {
+                // Feed gone (backend dropped); keep the stream alive.
+                return std::future::pending().await;
+            }
         }
     }
 }
@@ -522,119 +565,106 @@ async fn write_state_frame(
     Ok(())
 }
 
-/// Dispatch one non-subscribe request against the router.
-async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannelResponse {
+/// Dispatch one non-subscribe request against the composite session backend
+/// (design D1 of wire-webui-sebas-agent-e2e). `router` serves the router-
+/// level state-store domains and the web-key existence pre-check for Message
+/// (the in-process backend would otherwise spawn a new session for an
+/// unknown key — the feishu inbound semantic — while the channel spec
+/// demands a typed rejection).
+async fn dispatch(
+    backend: &Arc<dyn SessionBackend>,
+    router: &RouterHandle,
+    req: CoreChannelRequest,
+) -> CoreChannelResponse {
     match req {
-        CoreChannelRequest::Snapshot => {
-            CoreChannelResponse::Snapshot {
-                sessions: router.session_info_snapshot().await,
-            }
-        }
+        CoreChannelRequest::Snapshot => CoreChannelResponse::Snapshot {
+            sessions: backend.snapshot().await,
+        },
         CoreChannelRequest::Spawn {
             prompt,
             project_dir,
             model,
-        } => match &project_dir {
-            Some(dir) => {
-                // 5.5: canonicalize + stat BEFORE any spawn; no existence
-                // disclosure in the rejection message.
+            backend: hint,
+        } => {
+            // 5.5: canonicalize + stat BEFORE any spawn; no existence
+            // disclosure in the rejection message.
+            if let Some(dir) = &project_dir {
                 if !usable_project_dir(dir) {
-                    CoreChannelResponse::Rejected {
+                    return CoreChannelResponse::Rejected {
                         rejection: SessionRejection::UnusableProjectDir,
-                    }
-                } else {
-                    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-                    let key = router
-                        .web_spawn(prompt, Some(canonical.display().to_string()), None, model)
-                        .await;
-                    CoreChannelResponse::Spawned { key }
+                    };
                 }
             }
-            None => {
-                let key = router.web_spawn(prompt, None, None, model).await;
-                CoreChannelResponse::Spawned { key }
+            let project_dir = project_dir.map(|dir| {
+                std::fs::canonicalize(&dir)
+                    .unwrap_or_else(|_| PathBuf::from(&dir))
+                    .display()
+                    .to_string()
+            });
+            match backend
+                .spawn_with(prompt, project_dir, hint.as_deref(), model)
+                .await
+            {
+                Ok(key) => CoreChannelResponse::Spawned { key },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
-        },
+        }
         CoreChannelRequest::CreatePlaceholder { project_dir, model } => {
             // 0-turn 占位（P2 修复）：只建行、不 spawn 子进程——空 prompt 绝
-            // 不上送 agent。project_dir 校验与 Spawn 同款；kind 与 Spawn 一致
-            // 钉在 core 配置的默认 agent 上。
-            match &project_dir {
-                Some(dir) => {
-                    if !usable_project_dir(dir) {
-                        CoreChannelResponse::Rejected {
-                            rejection: SessionRejection::UnusableProjectDir,
-                        }
-                    } else {
-                        let canonical =
-                            std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-                        let key = router
-                            .web_create_placeholder(
-                                Some(canonical.display().to_string()),
-                                None,
-                                model,
-                            )
-                            .await;
-                        CoreChannelResponse::Spawned { key }
-                    }
+            // 不上送 agent。project_dir 校验与 Spawn 同款；执行体 hint 不上线，
+            // 占位会话走 ACP 默认（原生内核的占位会话后续按需扩展）。
+            if let Some(dir) = &project_dir {
+                if !usable_project_dir(dir) {
+                    return CoreChannelResponse::Rejected {
+                        rejection: SessionRejection::UnusableProjectDir,
+                    };
                 }
-                None => {
-                    let key = router.web_create_placeholder(None, None, model).await;
-                    CoreChannelResponse::Spawned { key }
-                }
+            }
+            let project_dir = project_dir.map(|dir| {
+                std::fs::canonicalize(&dir)
+                    .unwrap_or_else(|_| PathBuf::from(&dir))
+                    .display()
+                    .to_string()
+            });
+            match backend
+                .create_placeholder(project_dir, None, model)
+                .await
+            {
+                Ok(key) => CoreChannelResponse::Spawned { key },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
         CoreChannelRequest::SetSessionModel { key, model_id } => {
-            // 中程切换模型：解析路由 session_id 后经 Out::SendAcp 送达 SetModel。
-            let Some(sid) = router.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned))
-            else {
-                return CoreChannelResponse::Rejected {
-                    rejection: SessionRejection::UnknownSession {
-                        key: key_str(&key),
-                    },
-                };
-            };
-            router
-                .emit(sebas_router::Out::SendAcp {
-                    session_id: sid.clone(),
-                    cmd: sebas_acp::AcpCommand::SetModel {
-                        session_id: sid,
-                        model_id,
-                    },
-                })
-                .await;
-            CoreChannelResponse::Ok
+            // 按执行体分发（wire-webui-sebas-agent-e2e）：native key → 内核，
+            // 其余 → ACP（InProcessBackend 解析 session_id 后经 Out::SendAcp）。
+            match backend.set_session_model(key, model_id).await {
+                Ok(()) => CoreChannelResponse::Ok,
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
         }
         CoreChannelRequest::Message { key, message } => {
-            // 5.6: unknown key → typed rejection, nothing mutated.
-            if !router.session_exists(&key).await {
+            // 5.6: unknown web/feishu key → typed rejection, nothing mutated.
+            // Native keys are unknown to the router map — the native backend
+            // rejects them itself.
+            if !DualSessionBackend::is_native(&key) && !router.session_exists(&key).await {
                 return CoreChannelResponse::Rejected {
                     rejection: SessionRejection::UnknownSession {
                         key: key_str(&key),
                     },
                 };
             }
-            router.web_send_message(key, message).await;
-            CoreChannelResponse::Ok
-        }
-        CoreChannelRequest::Close { key } => {
-            if !router.session_exists(&key).await {
-                return CoreChannelResponse::Rejected {
-                    rejection: SessionRejection::UnknownSession {
-                        key: key_str(&key),
-                    },
-                };
+            match backend.message(key, message).await {
+                Ok(()) => CoreChannelResponse::Ok,
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
-            router.web_close_session(key).await;
-            CoreChannelResponse::Ok
         }
-        CoreChannelRequest::Turns { key, from } => match router.session_turns(&key, from).await {
-            Some(entries) => CoreChannelResponse::Turns { entries },
-            None => CoreChannelResponse::Rejected {
-                rejection: SessionRejection::UnknownSession {
-                    key: key_str(&key),
-                },
-            },
+        CoreChannelRequest::Close { key } => match backend.close(key).await {
+            Ok(()) => CoreChannelResponse::Ok,
+            Err(rejection) => CoreChannelResponse::Rejected { rejection },
+        },
+        CoreChannelRequest::Turns { key, from } => match backend.turns(key, from).await {
+            Ok(entries) => CoreChannelResponse::Turns { entries },
+            Err(rejection) => CoreChannelResponse::Rejected { rejection },
         },
         CoreChannelRequest::SetFocus { key } => {
             router.web_set_active(key).await;
@@ -643,6 +673,29 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
         CoreChannelRequest::Focused => CoreChannelResponse::Focused {
             key: router.active_session_snapshot().await,
         },
+        CoreChannelRequest::SetFocus { key } => {
+            backend.set_focus(key).await;
+            CoreChannelResponse::Ok
+        }
+        CoreChannelRequest::Focused => CoreChannelResponse::Focused {
+            key: backend.focused().await,
+        },
+        CoreChannelRequest::ApprovalAnswer {
+            request_id,
+            decision,
+        } => {
+            // 审批决定回填（wire-webui-sebas-agent-e2e）：无待决请求 → typed
+            // rejection（fail-closed 语义，拒绝而非伪装成功）。
+            if backend.answer_permission(&request_id, decision).await {
+                CoreChannelResponse::Ok
+            } else {
+                CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: "无待决审批请求（已回答、超时或未知）".into(),
+                    },
+                }
+            }
+        }
         // Handled by the connection loop before dispatch; unreachable here.
         CoreChannelRequest::Subscribe => CoreChannelResponse::Ok,
         CoreChannelRequest::StateSnapshot { domain } => {

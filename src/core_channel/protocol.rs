@@ -27,6 +27,7 @@
 
 use sebas_channels::ChannelKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
 /// One request over the core session channel.
@@ -42,6 +43,10 @@ pub enum CoreChannelRequest {
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
+        /// （wire-webui-sebas-agent-e2e）执行体提示：`"native"` = 原生内核，
+        /// `"acp"`/None = ACP 桥（旧客户端缺省行为不变）。
+        #[serde(default)]
+        backend: Option<String>,
     },
     /// Create a 0-turn placeholder session WITHOUT spawning an agent child
     /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
@@ -74,6 +79,12 @@ pub enum CoreChannelRequest {
     StateMutation { domain: String, payload: serde_json::Value },
     /// Subscribe to state change notifications (add-state-store).
     StateSubscribe,
+    /// （wire-webui-sebas-agent-e2e）回填一个审批决定：request_id 来自订阅流
+    /// 上的 `ApprovalRequested` 帧。无待决请求 → typed rejection。
+    ApprovalAnswer {
+        request_id: String,
+        decision: PermissionDecision,
+    },
 }
 
 /// One response over the core session channel.
@@ -99,12 +110,17 @@ pub enum CoreChannelResponse {
 }
 
 /// One frame of the subscription stream (task 4.2): exactly one snapshot
-/// frame first, then event frames.
+/// frame first, then event frames — interleaved with approval frames when a
+/// native-kernel session gates a tool call (wire-webui-sebas-agent-e2e).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum SessionStreamFrame {
     Snapshot { sessions: Vec<SessionInfo> },
     Event { event: SessionEvent },
+    /// A gated tool call awaits an operator decision; answer via
+    /// [`CoreChannelRequest::ApprovalAnswer`]. Not replayed on reconnect —
+    /// a request with no reachable client fails closed at the kernel.
+    ApprovalRequested { notice: PermissionNotice },
 }
 
 /// One frame of the **state** subscription stream (add-state-store 4.2).
@@ -203,6 +219,7 @@ mod tests {
                 prompt: "hello".into(),
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
+                backend: Some("native".into()),
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
@@ -233,6 +250,10 @@ mod tests {
                 payload: serde_json::json!({"key": "card_config", "value": {}}),
             },
             CoreChannelRequest::StateSubscribe,
+            CoreChannelRequest::ApprovalAnswer {
+                request_id: "toolu_1".into(),
+                decision: PermissionDecision::AllowOnce,
+            },
         ];
         for r in &requests {
             roundtrip(r);
@@ -297,6 +318,15 @@ mod tests {
                     session: info.clone(),
                 },
             },
+            SessionStreamFrame::ApprovalRequested {
+                notice: PermissionNotice {
+                    request_id: "toolu_9".into(),
+                    session_id: "feishu%3Aagent-1".into(),
+                    tool_name: "bash".into(),
+                    args: serde_json::json!({"command": "ls"}),
+                    reason: "policy ask".into(),
+                },
+            },
             SessionStreamFrame::Event {
                 event: SessionEvent::Removed {
                     channel: "feishu".into(),
@@ -319,5 +349,22 @@ mod tests {
             "snapshot"
         );
         assert_eq!(serde_json::to_value(&frames[3]).unwrap()["frame"], "event");
+    }
+
+    /// wire-webui-sebas-agent-e2e 1.1 验收：旧客户端报文（Spawn 无 backend 字段）
+    /// 仍可反序列化 —— additive 兼容。
+    #[test]
+    fn legacy_wire_shapes_still_deserialize() {
+        let legacy_spawn = r#"{"cmd":"spawn","prompt":"hi","project_dir":null,"model":null}"#;
+        let req: CoreChannelRequest = serde_json::from_str(legacy_spawn).unwrap();
+        assert_eq!(
+            req,
+            CoreChannelRequest::Spawn {
+                prompt: "hi".into(),
+                project_dir: None,
+                model: None,
+                backend: None,
+            }
+        );
     }
 }

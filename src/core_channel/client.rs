@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use sebas_channels::ChannelKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
-    Reachability, SessionBackend, SessionRejection,
+    PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
 };
 use sebas_ipc::{ReadHalf, WriteHalf};
 use std::path::{Path, PathBuf};
@@ -39,16 +39,21 @@ pub struct CoreChannelBackend {
     path: PathBuf,
     secret: String,
     events: broadcast::Sender<SessionEvent>,
+    /// wire-webui-sebas-agent-e2e: native approval notices relayed by the
+    /// channel; consumed by the same review-card feed as the in-process backend.
+    notices: broadcast::Sender<PermissionNotice>,
     status: std::sync::Mutex<ConnStatus>,
 }
 
 impl CoreChannelBackend {
     pub fn new(path: PathBuf, secret: String) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
+        let (notices, _) = broadcast::channel(64);
         let backend = Arc::new(Self {
             path,
             secret,
             events,
+            notices,
             status: std::sync::Mutex::new(ConnStatus::Failed {
                 cause: "尚未连接 core".into(),
             }),
@@ -206,6 +211,13 @@ impl CoreChannelBackend {
                     self.set_status(ConnStatus::Connected);
                     let _ = self.events.send(event);
                 }
+                // wire-webui-sebas-agent-e2e: a gated tool call awaiting a
+                // decision. Not buffered — operators who miss the review card
+                // rely on the kernel's fail-closed path, not on replay.
+                SessionStreamFrame::ApprovalRequested { notice } => {
+                    self.set_status(ConnStatus::Connected);
+                    let _ = self.notices.send(notice);
+                }
             }
         }
     }
@@ -323,12 +335,12 @@ impl SessionBackend for CoreChannelBackend {
         backend: Option<&str>,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        let _ = backend; // the core channel spawn route pins the configured kind
         match self
             .request(&CoreChannelRequest::Spawn {
                 prompt,
                 project_dir,
                 model,
+                backend: backend.map(str::to_owned),
             })
             .await?
         {
@@ -434,6 +446,23 @@ impl SessionBackend for CoreChannelBackend {
                 Err(format!("state mutation rejected: {rejection}"))
             }
             _ => Err("state store 不可用".into()),
+        }
+    }
+
+    fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
+        Some(self.notices.subscribe())
+    }
+
+    async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+        match self
+            .request(&CoreChannelRequest::ApprovalAnswer {
+                request_id: request_id.to_string(),
+                decision,
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::Ok) => true,
+            _ => false,
         }
     }
 }

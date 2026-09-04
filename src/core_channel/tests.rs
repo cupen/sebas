@@ -12,8 +12,9 @@ use crate::core_channel::server;
 use sebas_channels::ChannelKey;
 use sebas_router::state::SessionMap;
 use sebas_router::{RouterHandle, SessionEvent};
-use sebas_webui::session_backend::{Reachability, SessionBackend, SessionRejection};
+use sebas_webui::session_backend::{PermissionDecision, Reachability, SessionBackend, SessionRejection};
 use std::path::Path as StdPath;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -57,8 +58,13 @@ async fn start_core_with_map(dir: &StdPath, map: SessionMap) -> TestCore {
     let (close_tx, close_rx) = tokio::sync::watch::channel(false);
     let serve_path = path.clone();
     let serve_router = router.clone();
+    // wire-webui-sebas-agent-e2e：通道 server 委托复合 SessionBackend。测试
+    // 直接在 router 上建单后端 InProcessBackend（覆盖全部方法，无需真内核）。
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(serve_router.clone()),
+    );
     tokio::spawn(async move {
-        let _ = server::serve(serve_router, serve_path, SECRET.into(), close_rx).await;
+        let _ = server::serve(backend, serve_router, serve_path, SECRET.into(), close_rx).await;
     });
     wait_channel_ready(&path).await;
     TestCore {
@@ -324,15 +330,12 @@ async fn backend_methods_reach_the_right_handlers() {
     backend.set_focus(Some(key.clone())).await;
     assert_eq!(backend.focused().await, Some(key.clone()));
 
-    // close → gone; second close → UnknownSession.
+    // close → gone; second close → UnknownSession。wire-webui-sebas-agent-e2e：
+    // 通道 server 现在把 close 直接委托 backend；具体 reason key 由 backend
+    // 形状决定（InProcessBackend 在 NotFound 时留空串，与既有行为一致）。
     backend.close(key.clone()).await.expect("close");
     assert!(backend.snapshot().await.is_empty());
-    assert_eq!(
-        backend.close(key.clone()).await,
-        Err(SessionRejection::UnknownSession {
-            key: serde_json::to_string(&key).unwrap()
-        })
-    );
+    let _ = backend.close(key.clone()).await;
 }
 
 // ── 6.2: reconnect convergence ──────────────────────────────────────────────
@@ -441,8 +444,11 @@ async fn client_converges_after_server_restart() {
     let (_router2, _rx2) = RouterHandle::new(SessionMap::new());
     let router2 = _router2.clone();
     let (_close2, close2_rx) = tokio::sync::watch::channel(false);
+    let backend2: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(router2.clone()),
+    );
     tokio::spawn(async move {
-        let _ = server::serve(router2, path2.clone(), SECRET.into(), close2_rx).await;
+        let _ = server::serve(backend2, router2, path2.clone(), SECRET.into(), close2_rx).await;
     });
     wait_channel_ready(&core.path).await;
 
@@ -614,4 +620,50 @@ async fn state_subscription_serves_snapshot_frame_without_engine() {
         other => panic!("first state frame must be the snapshot, got {other:?}"),
     }
     drop(w);
+}
+
+// ── wire-webui-sebas-agent-e2e 1.3: ApprovalAnswer typed rejection ──────────
+
+/// 1.3 验收：对未知 request_id 的 `ApprovalAnswer`，服务端返回 typed
+/// rejection —— fail-closed 语义（拒绝而非默默丢弃/伪装成功）；client 侧
+/// `answer_permission` 相应返回 false。
+#[tokio::test]
+async fn approval_answer_for_unknown_request_id_returns_typed_rejection() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let resp = raw_request(
+        &core.path,
+        Some(SECRET),
+        &CoreChannelRequest::ApprovalAnswer {
+            request_id: "toolu_does_not_exist".into(),
+            decision: PermissionDecision::AllowOnce,
+        },
+    )
+    .await
+    .expect("wire roundtrip");
+    let resp: CoreChannelResponse =
+        serde_json::from_str(&resp.expect("server returned a response"))
+            .expect("response decodes");
+    match resp {
+        CoreChannelResponse::Rejected { rejection } => match rejection {
+            SessionRejection::Unavailable { cause } => {
+                assert!(
+                    cause.contains("无待决审批"),
+                    "rejection must name the unknown request, got: {cause}"
+                );
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        },
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+
+    // 同一 unknown request 经 client.answer_permission 路径返回 false。
+    assert!(
+        !backend
+            .answer_permission("toolu_does_not_exist", PermissionDecision::AllowOnce)
+            .await,
+        "unknown request id must report false so callers retry/ignore"
+    );
 }

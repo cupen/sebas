@@ -202,10 +202,14 @@ pub async fn run(
     let webui_card_cfg: sebas_feishu::cards::CardConfig =
         serde_json::from_value(serde_json::to_value(&merged_card_cfg).expect("card config serializes"))
             .expect("card config round-trips between mirror shapes");
-    // 原生内核 manager（make-feishu-optional-webui-primary）：webui 的
-    // NativeAgentBackend 与飞书原生桥共享同一个执行面（LLM 通道/工具注册表/
-    // 审批 hub）。凭据缺失时 manager 仍可建，spawn 时按 cause 拒绝并诚实降级。
-    let (native_mgr, _native_cause) =
+    // 原生内核 manager（make-feishu-optional-webui-primary）：webui、核心通道
+    // server 与飞书原生桥共享同一个执行面（LLM 通道/工具注册表/审批 hub）。
+    // 凭据缺失时 manager 仍可建，spawn 时按 cause 拒绝并诚实降级（cause 由下方
+    // 装配 webui_backend 时透传到 NativeAgentBackend）。`available_models` 与
+    // `default_model`（wire-webui-sebas-agent-e2e D5）同样在装配期确定，全
+    // env（`SEBAS_AGENT_MODELS` / `SEBAS_AGENT_MODEL`）与内核 SessionConfig
+    // 共用同一来源。
+    let (native_mgr, native_cause, native_available_models, native_default_model) =
         crate::agent_backend::NativeAgentBackend::build_native_manager(
             cfg.acp.startup_timeout_for(cfg.acp.default_kind()),
         );
@@ -219,7 +223,7 @@ pub async fn run(
         Some(mgr.clone()),
     );
     let native_bridge = crate::native_router_bridge::RouterNativeBridge::with_default(
-        native_mgr,
+        native_mgr.clone(),
         router.clone(),
         cfg.feishu.native_default,
     );
@@ -430,23 +434,28 @@ pub async fn run(
     );
     let _registry = registry;
 
-    // Start WebUI dashboard server if requested
+    // Start WebUI dashboard server if requested. 双执行后端（Claude Code 桥 +
+    // 原生内核；sebas-agent-next 5.1/5.2）。核心常驻一份，webui 与核心通道
+    // server 共享（design D1 of wire-webui-sebas-agent-e2e）：复用上方为飞书
+    // 原生桥构建的同一个 `native_mgr`，detached 形态下经通道 spawn 的 native 会
+    // 话与 in-process 看到的是同一个内核 manager。
+    let webui_backend: std::sync::Arc<dyn sebas_webui::SessionBackend> =
+        crate::agent_backend::DualSessionBackend::new(
+            std::sync::Arc::new(sebas_webui::session_backend::InProcessBackend::new(
+                router.clone(),
+            )),
+            crate::agent_backend::NativeAgentBackend::with_manager_arc(
+                native_mgr.clone(),
+                native_cause.clone(),
+                native_available_models,
+                native_default_model,
+            ),
+        );
     if webui {
         // The core IS this process: serve the dashboard over the in-process
         // session backend (no SessionManager — spawn/close dispatch through
         // the router's outbound pump).
-        // 双执行后端：Claude Code 桥（acp）+ 原生内核（native），会话行创建
-        // 时按 backend 提示选择（openspec/changes/sebas-agent-next 5.1/5.2）。
-        let native = crate::agent_backend::NativeAgentBackend::from_env(
-            cfg.acp.startup_timeout_for(cfg.acp.default_kind()),
-        );
-        let backend: std::sync::Arc<dyn sebas_webui::SessionBackend> =
-            crate::agent_backend::DualSessionBackend::new(
-                std::sync::Arc::new(sebas_webui::session_backend::InProcessBackend::new(
-                    router.clone(),
-                )),
-                native,
-            );
+        let backend = webui_backend.clone();
         let gateway_info = build_gateway_info(gateway_cfg.as_ref());
         // 创建会话下拉的可达 agent 列表：从 `cfg.acp.agents` 提取 (slug, argv)。
         let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = cfg
@@ -472,14 +481,18 @@ pub async fn run(
     // "this process is the core under the watchdog" — the bare `sebas run`
     // keeps no socket, matching the client-side gate in webui_cmd.rs. `serve`
     // owns the socket lifecycle (bind, reclaim stale, remove on shutdown).
+    // Session mutations are delegated to the composite backend (design D1),
+    // so detached WebUI and `run --webui` see identical behavior.
     let channel_shutdown = if !std::env::var("SEBAS_CORE_SECRET").unwrap_or_default().is_empty() {
         let core_secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
         let channel_path = crate::core_channel::socket_path(&cfg);
         info!(path = %channel_path.display(), "core session channel listening");
         let channel_router = router.clone();
+        let channel_backend = webui_backend.clone();
         let (close_tx, close_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             match crate::core_channel::server::serve(
+                channel_backend,
                 channel_router,
                 channel_path,
                 core_secret,
