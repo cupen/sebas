@@ -30,6 +30,10 @@ pub struct WebUiState {
     /// Supplies the reachable agent kinds for the create-session dropdown.
     /// Empty for deployments that never pass a config-driven provider.
     pub agent_kinds: Arc<dyn AgentKindProvider>,
+    /// Archive retention period in days. Defaults to 30. Archived sessions
+    /// older than this are automatically removed on startup and on list
+    /// requests.
+    pub archive_retention_days: u64,
 }
 
 /// Build the axum Router with all WebUI routes.
@@ -44,6 +48,7 @@ pub fn build_router(
         card_config,
         None,
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+        30,
     )
 }
 
@@ -55,7 +60,7 @@ pub fn build_router_with_agent_kind_provider(
     card_config: CardConfig,
     agent_kinds: Arc<dyn AgentKindProvider>,
 ) -> Router {
-    build_router_full(backend, gateway, card_config, None, agent_kinds)
+    build_router_full(backend, gateway, card_config, None, agent_kinds, 30)
 }
 
 /// Build the axum Router with optional watchdog admin adapter.
@@ -71,6 +76,7 @@ pub fn build_router_with_admin_adapter(
         card_config,
         admin_adapter,
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+        30,
     )
 }
 
@@ -80,6 +86,7 @@ fn build_router_full(
     card_config: CardConfig,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     agent_kinds: Arc<dyn AgentKindProvider>,
+    archive_retention_days: u64,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -87,6 +94,7 @@ fn build_router_full(
         started_at: Instant::now(),
         card_config,
         agent_kinds,
+        archive_retention_days,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -111,10 +119,14 @@ fn build_router_full(
         .route("/api/gateway", get(api::gateway))
         .route("/api/about", get(api::about))
         .route("/api/agent-kinds", get(api::agent_kinds))
-        .route(
+.route(
             "/api/projects",
             get(api::projects_list).post(api::projects_add),
         )
+        .route("/api/fs/browse-dirs", get(api::browse_dirs))
+        .route("/api/archive", get(api::archive_list))
+        .route("/api/sessions/{key}/archive", post(api::archive_session))
+        .route("/api/sessions/{key}/restore", post(api::restore_session))
         .route("/api/projects/reorder", post(api::projects_reorder))
         .route("/api/projects/{path}/remove", post(api::projects_remove))
         .route("/api/projects/{path}/branch", get(api::projects_branch))
@@ -170,7 +182,7 @@ pub async fn run(
     agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
 ) {
-    run_full(backend, gateway, card_config, agent_kinds, listener, None).await;
+    run_full(backend, gateway, card_config, agent_kinds, listener, None, 30).await;
 }
 
 /// Run the WebUI server with an optional watchdog admin adapter.
@@ -182,13 +194,14 @@ pub async fn run_with_admin_adapter(
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) {
-    run_full(
+run_full(
         backend,
         gateway,
         card_config,
         agent_kinds,
         listener,
         admin_adapter,
+        30,
     )
     .await;
 }
@@ -200,9 +213,10 @@ async fn run_full(
     agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
+    archive_retention_days: u64,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
-    let app = build_router_full(backend, gateway, card_config, admin_adapter, provider);
+    let app = build_router_full(backend, gateway, card_config, admin_adapter, provider, archive_retention_days);
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
     if let Err(e) = serve(

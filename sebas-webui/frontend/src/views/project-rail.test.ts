@@ -1,45 +1,23 @@
-// @vitest-environment jsdom
 /**
- * Sidebar project tree（IA v2）：项目行（计数/分支/悬停动作）、展开后的
- * 嵌套会话行（短 id + 状态点，点击深链 /sessions/:key）、History 组
- * （收纳 project_dir === null 的会话，组头带 "All sessions →" 链接）、
- * 拖拽排序持久化与添加项目表单的错误态。api client 全量 mock，
- * sharedWs 打桩（不真实连 WS）。
+ * Tests for the sidebar project tree (project-rail.ts).
+ *
+ * Covers: project rows with counts, expand/collapse, session deep-links,
+ * drag-to-reorder, add-project dialog, Inbox group (unbound sessions),
+ * History group (archived sessions), and archive/restore.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionRow } from '../api/client.js'
-
-const apiMocks = vi.hoisted(() => ({
-  sessions: vi.fn(),
-  projectsList: vi.fn(),
-  projectsBranch: vi.fn(),
-  projectsAdd: vi.fn(),
-  projectsReorder: vi.fn(),
-}))
-
-vi.mock('../api/client.js', () => ({
-  api: {
-    sessions: apiMocks.sessions,
-    projects: {
-      list: apiMocks.projectsList,
-      branch: apiMocks.projectsBranch,
-      add: apiMocks.projectsAdd,
-      reorder: apiMocks.projectsReorder,
-    },
-  },
-}))
-
-vi.mock('../api/shared-ws.js', () => ({
-  sharedWs: { subscribe: () => () => {} },
-}))
-
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { api, type Project, type SessionRow } from '../api/client.js'
 import './project-rail.js'
 import type { SebasProjectRail } from './project-rail.js'
 
-const projects = [
-  { path: '/home/me/alpha', name: 'alpha', added_at: 1, branch: 'main' },
-  { path: '/home/me/beta', name: 'beta', added_at: 2, branch: null },
+vi.mock('../api/client.js')
+
+const apiMock = vi.mocked(api)
+
+const projects: Project[] = [
+  { path: '/home/me/alpha', name: 'alpha', added_at: 0 },
+  { path: '/home/me/beta', name: 'beta', added_at: 1 },
 ]
 
 let seq = 0
@@ -59,21 +37,26 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     last_active_unix: 1000 + seq,
     is_active: false,
     project_dir: null,
+    prompt_preview: null,
     ...overrides,
   }
 }
 
 const sessionRows: SessionRow[] = [
-  row({ project_dir: '/home/me/alpha' }),
-  row({ status_slug: 'done', status: 'done', project_dir: '/home/me/alpha' }),
-  row({ status_slug: 'queued', status: 'queued', project_dir: '/home/me/beta' }),
-  row({ project_dir: null }), // inbox → History 组
-  row({ status_slug: 'dormant', project_dir: null }),
+  row({ project_dir: '/home/me/alpha', status: 'working', status_slug: 'working' }),
+  row({ project_dir: '/home/me/alpha', status: 'done', status_slug: 'done' }),
+  row({ project_dir: null, status: 'working', status_slug: 'working' }),
+  row({ project_dir: null, status: 'queued', status_slug: 'queued' }),
 ]
 
 async function mount(): Promise<SebasProjectRail> {
   const el = document.createElement('sebas-project-rail') as SebasProjectRail
   document.body.appendChild(el)
+  // The component calls void this.refresh() in connectedCallback — each
+  // await inside refresh() queues a microtask. Flush them all.
+  await new Promise((r) => setTimeout(r, 0))
+  await el.updateComplete
+  await new Promise((r) => setTimeout(r, 0))
   await el.updateComplete
   await new Promise((r) => setTimeout(r, 0))
   await el.updateComplete
@@ -81,9 +64,12 @@ async function mount(): Promise<SebasProjectRail> {
 }
 
 beforeEach(() => {
-  apiMocks.projectsList.mockResolvedValue({ projects })
-  apiMocks.projectsBranch.mockRejectedValue(new Error('no branch lookup here'))
-  apiMocks.sessions.mockResolvedValue({ recent_sessions: sessionRows })
+  apiMock.projects.list.mockResolvedValue({ projects })
+  apiMock.projects.branch.mockRejectedValue(new Error('no branch lookup here'))
+  // Mock sessions.
+  apiMock.sessions.mockResolvedValue({ recent_sessions: sessionRows as any })
+  // Mock archive list (empty by default).
+  apiMock.archiveList.mockResolvedValue({ archived_sessions: [] })
 })
 
 afterEach(() => {
@@ -98,10 +84,9 @@ describe('sebas-project-rail (sidebar tree)', () => {
     expect(rows).toHaveLength(2)
     expect(el.shadowRoot!.textContent).toContain('alpha')
     expect(el.shadowRoot!.textContent).toContain('beta')
-    // 计数徽标：alpha 2 个会话，beta 1 个。
     const counts = rows.map((r) => r.querySelector('.meta .count')?.textContent ?? '')
-    expect(counts).toEqual(['2', '1'])
-    // 添加项目的 "+" 挂在分区标签上。
+    // alpha has 2 sessions, beta has 0 (no sessions with project_dir=/home/me/beta)
+    expect(counts).toEqual(['2', ''])
     expect(el.shadowRoot!.querySelector('.section-label .add-btn')).toBeTruthy()
     el.remove()
   })
@@ -118,7 +103,6 @@ describe('sebas-project-rail (sidebar tree)', () => {
     expect(selected).toHaveBeenCalledTimes(1)
     expect((selected.mock.calls[0]![0] as CustomEvent).detail.path).toBe('/home/me/alpha')
 
-    // 展开后：两个嵌套会话行，短 session id + 状态点。
     const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
     expect(items).toHaveLength(2)
     expect(el.shadowRoot!.textContent).toContain('aaaa0001')
@@ -135,81 +119,84 @@ describe('sebas-project-rail (sidebar tree)', () => {
     const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
     first.click()
     await el.updateComplete
-    // 深链保持 RAW encoded key（含 %00）。
     expect(window.location.pathname).toBe('/sessions/oc_1%00')
     el.remove()
   })
 
   it('keeps drag-to-reorder persistence via POST /api/projects/reorder', async () => {
-    apiMocks.projectsReorder.mockResolvedValue({
+    apiMock.projects.reorder.mockResolvedValue({
       projects: [projects[1], projects[0]],
     })
     const el = await mount()
     const rows = () => [...el.shadowRoot!.querySelectorAll('.row')]
     expect(rows()[0]!.textContent).toContain('alpha')
 
-    // jsdom 没有 DragEvent：拖拽处理器对缺失 dataTransfer 已做防御，
-    // 用普通 Event 驱动同一状态机即可。
     rows()[0]!.dispatchEvent(new Event('dragstart', { bubbles: true }))
     rows()[1]!.dispatchEvent(new Event('drop', { bubbles: true }))
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
 
-    expect(apiMocks.projectsReorder).toHaveBeenCalledWith(['/home/me/beta', '/home/me/alpha'])
-    // 服务端返回的顺序回写（beta 置顶）。
+    expect(apiMock.projects.reorder).toHaveBeenCalledWith(['/home/me/beta', '/home/me/alpha'])
     expect(rows()[0]!.textContent).toContain('beta')
     el.remove()
   })
 
-  it('surfaces add-project validation and API errors in the form', async () => {
+  it('opens add-project dialog when the + button is clicked', async () => {
+    apiMock.fsBrowse.mockResolvedValue({ path: '/home/me', entries: [{ name: 'alpha', is_dir: true }] })
     const el = await mount()
     ;(el.shadowRoot!.querySelector('.section-label .add-btn') as HTMLElement).click()
     await el.updateComplete
-    const form = el.shadowRoot!.querySelector('.add-form')
-    expect(form).toBeTruthy()
-
-    // 空路径 → 校验错误。
-    ;(form!.querySelector('button.primary') as HTMLElement).click()
-    await el.updateComplete
-    expect(el.shadowRoot!.textContent).toContain('请输入路径')
-
-    // API 失败 → 错误透出。
-    apiMocks.projectsAdd.mockRejectedValue(new Error('directory does not exist'))
-    const input = form!.querySelector('input') as HTMLInputElement
-    input.value = '/no/such/dir'
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    ;(form!.querySelector('button.primary') as HTMLElement).click()
-    await new Promise((r) => setTimeout(r, 0))
-    await el.updateComplete
-    expect(el.shadowRoot!.textContent).toContain('directory does not exist')
+    // Should have a wa-dialog.
+    const dialog = el.shadowRoot!.querySelector('wa-dialog')
+    expect(dialog).toBeTruthy()
+    // wa-dialog uses .open property, not the open attribute
+    expect((dialog as any).open).toBe(true)
     el.remove()
   })
 })
 
-describe('history group', () => {
-  it('lists project-less sessions under a collapsible header with count and /sessions link', async () => {
+describe('inbox group', () => {
+  it('lists project-less sessions under a collapsible Inbox header', async () => {
     const el = await mount()
-    const head = el.shadowRoot!.querySelector('.history-head') as HTMLElement
+    const head = el.shadowRoot!.querySelector('.group-head')
     expect(head).toBeTruthy()
-    expect(head.textContent).toContain('History')
-    expect(head.querySelector('.history-count')?.textContent).toBe('2')
-    // 旧深链入口：All sessions →
-    const all = head.querySelector<HTMLAnchorElement>('a.history-all')
-    expect(all?.getAttribute('href')).toBe('/sessions')
-    // 默认折叠；点击头展开 inbox 会话行。
-    expect(el.shadowRoot!.querySelectorAll('.history-section li.session-item')).toHaveLength(0)
-    head.click()
+    expect(head!.textContent).toContain('Inbox')
+    expect(head!.querySelector('.group-count')?.textContent).toBe('2')
+    // Default collapsed.
+    expect(el.shadowRoot!.querySelectorAll('.group-section li.session-item')).toHaveLength(0)
+    head!.click()
     await el.updateComplete
-    const items = [...el.shadowRoot!.querySelectorAll('.history-section li.session-item')]
+    const items = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item')]
     expect(items).toHaveLength(2)
     expect(items[0]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('working')
     el.remove()
   })
 
   it('stays hidden entirely when every session is bound to a project', async () => {
-    apiMocks.sessions.mockResolvedValue({ recent_sessions: [sessionRows[0]] })
+    apiMock.sessions.mockResolvedValue({ recent_sessions: [sessionRows[0]] as any })
     const el = await mount()
-    expect(el.shadowRoot!.querySelector('.history-head')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.group-head')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('history group (archived sessions)', () => {
+  it('shows archived sessions from the archive API', async () => {
+    apiMock.archiveList.mockResolvedValue({
+      archived_sessions: [
+        { session_key: 'oc_arch%00', project_path: '/home/me/alpha', label: 'Old session', archived_at: 1000, retention_deadline: 2000 },
+      ],
+    })
+    const el = await mount()
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
+    const historyHead = heads.find((h) => h.textContent?.includes('History'))
+    expect(historyHead).toBeTruthy()
+    expect(historyHead!.querySelector('.group-count')?.textContent).toBe('1')
+    historyHead!.click()
+    await el.updateComplete
+    const items = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item')]
+    expect(items).toHaveLength(1)
+    expect(items[0]!.classList.contains('archived')).toBe(true)
     el.remove()
   })
 })

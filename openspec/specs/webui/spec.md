@@ -16,13 +16,19 @@ The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and
 browser-facing GET (for example `/sessions/{key}`) resolves through the SPA
 fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about`
 canonicalise to `/` — those surfaces live in the Settings modal now. The JSON
-API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create), `GET
+API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with
+optional `prompt` field), `GET
 /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST
 /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `GET
 /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`,
 `GET /api/gateway`, `GET /api/about`, the project APIs `GET /api/projects` and
 `POST /api/projects` (register), `POST /api/projects/reorder`, `POST
-/api/projects/{path}/remove`, `GET /api/projects/{path}/branch`, and `GET /ws`
+/api/projects/{path}/remove`, `GET /api/projects/{path}/branch`, `GET
+/api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped
+to a server-configured work root), `POST
+/api/sessions/{key}/archive` (archive a session), `POST
+/api/sessions/{key}/restore` (restore an archived session), `GET /api/archive`
+(list archived sessions with expiry info), and `GET /ws`
 (WebSocket session stream). Project and session mutations are POST-only and
 carry the same posture as the existing session APIs. The gateway mutation
 cluster — POST/PUT/DELETE under `/gateway/api/*` (provider and model-alias
@@ -43,8 +49,8 @@ to routes this surface serves.
 
 - **WHEN** a browser requests `/`
 - **THEN** the SPA workbench renders, listing registered projects in the
-  project rail, the origin-named grouping for sessions with no project, and
-  the selected project's sessions
+  project rail, the Inbox grouping for sessions with no project, the History
+  (archive) group, and the selected project's sessions
 
 #### Scenario: session deep link still resolves
 
@@ -82,6 +88,22 @@ to routes this surface serves.
 - **WHEN** every navigation link in the rendered shell is requested
 - **THEN** each resolves to a route served by this surface, including SPA
   client routes resolved through the fallback
+
+#### Scenario: directory browser rejects parent escape
+
+- **WHEN** `GET /api/fs/browse-dirs?path=/etc&root=/home/user` is called
+- **AND** the path is canonicalised and found to navigate outside the operator's home directory
+- **THEN** the response is 400 with an error message
+
+#### Scenario: archive endpoint exists
+
+- **WHEN** `POST /api/sessions/{key}/archive` is called
+- **THEN** the session is archived, moved from the active session list, and the response confirms the action
+
+#### Scenario: archive list endpoint
+
+- **WHEN** `GET /api/archive` is called
+- **THEN** the response lists all archived sessions with their original project, archive timestamp, and expiry
 
 ### Requirement: Local-only binding
 
@@ -149,7 +171,9 @@ path for mutations.
 The cross-project session list SHALL render one row per known session (encoded
 key, chat and thread ids, session id, status, phase, relative last-active),
 active-first, and SHALL be reachable from the workbench rather than from
-primary navigation. Visiting a session's detail page or posting `/switch` SHALL
+primary navigation. The session list SHALL exclude archived sessions — those
+are served by `GET /api/archive`. Visiting a session's detail page or posting
+`/switch` SHALL
 set the webui-side focused session — a display pointer only that never changes
 message routing — and `switch` returns the redirect target or 404 for an
 unknown key. Switching the displayed project SHALL NOT alter the focused
@@ -171,6 +195,11 @@ session pointer.
 
 - **WHEN** the operator switches the displayed project
 - **THEN** the focused session pointer is unchanged
+
+#### Scenario: archive hides session from list
+
+- **WHEN** a session is archived
+- **THEN** it is no longer returned by `GET /api/sessions` and appears only in the `GET /api/archive` response
 
 ### Requirement: Web session close
 
@@ -339,3 +368,30 @@ service back to `Restarting` and attempt a new spawn.
 - **WHEN** a degraded service receives a `Restart` command
 - **THEN** the supervisor sets the state to `Restarting` and calls
   `spawn()`
+### Requirement: Archive persistence
+
+The archive registry SHALL persist to its own file, separate from the project registry and the router state file. Each entry SHALL record the session key, the original project path, the session label, the archive timestamp, and the retention deadline.
+
+#### Scenario: archive survives restart
+
+- **WHEN** the WebUI process is restarted after sessions were archived
+- **THEN** the same archived sessions are listed
+
+#### Scenario: archive expiry clean on startup
+
+- **WHEN** the WebUI starts and an archived session has passed its retention deadline
+- **THEN** that entry is removed from the archive file and the session is no longer listed
+
+### Requirement: Configurable archive retention
+
+The WebUI config SHALL support an `archive_retention_days` field under the `[webui]` section, with a default of 30 days. The expiry check SHALL run at WebUI startup and on every `GET /api/archive` or `GET /api/sessions` request.
+
+#### Scenario: default retention
+
+- **WHEN** no `archive_retention_days` is set in the config
+- **THEN** the default retention of 30 days applies
+
+#### Scenario: custom retention
+
+- **WHEN** `[webui] archive_retention_days = 60` is set
+- **THEN** archived sessions are retained for 60 days

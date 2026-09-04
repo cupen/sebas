@@ -26,8 +26,6 @@ export class SebasSessions extends LitElement {
   @state() private kinds: AgentKindInfo[] = []
   @state() private creating = false
   @state() private closeTarget: string | null = null
-  /** Execution-backend hint forwarded with the spawn request. */
-  @state() private backend: BackendHint = 'acp'
   private unsubscribe?: () => void
 
   static styles = [

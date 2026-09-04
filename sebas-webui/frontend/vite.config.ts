@@ -13,22 +13,22 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:9797',
+        target: 'http://127.0.0.1:9877',
         changeOrigin: false,
       },
       // Gateway BFF mutation surface (POST/PUT/DELETE only; reads stay on
       // /api/gateway). The backend's loopback-origin guard accepts the vite
       // dev origin — both are 127.0.0.1.
       '/gateway': {
-        target: 'http://127.0.0.1:9797',
+        target: 'http://127.0.0.1:9877',
         changeOrigin: false,
       },
       '/ws': {
-        target: 'ws://127.0.0.1:9797',
+        target: 'ws://127.0.0.1:9877',
         ws: true,
       },
       '/health': {
-        target: 'http://127.0.0.1:9797',
+        target: 'http://127.0.0.1:9877',
       },
     },
   },

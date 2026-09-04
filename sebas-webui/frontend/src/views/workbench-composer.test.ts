@@ -307,7 +307,7 @@ describe('sebas-workbench-composer', () => {
     select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
     await el.updateComplete
 
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete

@@ -53,6 +53,7 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     last_active_unix: 1000,
     is_active: false,
     project_dir: '/home/me/sebas',
+    prompt_preview: null,
     ...overrides,
   }
 }

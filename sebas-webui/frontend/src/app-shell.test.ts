@@ -229,8 +229,8 @@ describe('routes after IA v2', () => {
 })
 
 describe('deep-link reachability', () => {
-  it('the sidebar History group header still links /sessions (old deep links stay resolvable)', () => {
+  it('the project rail still navigates to /sessions/:key via session rows', () => {
     const src = readFileSync(join(here, 'views/project-rail.ts'), 'utf8')
-    expect(src).toContain('href="/sessions"')
+    expect(src).toContain('navigate(`/sessions/')
   })
 })
