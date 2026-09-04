@@ -56,6 +56,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// 全局状态存储引擎 (add-state-store)。
+static ENGINE: OnceLock<Box<dyn StateStoreEngine + Send + Sync>> = OnceLock::new();
+
+/// 状态存储引擎 trait: 抽象 SQLite/文件后端。
+#[async_trait::async_trait]
+pub trait StateStoreEngine: Send + Sync {
+    async fn load_persisted_state(&self) -> PersistedState;
+    async fn save_persisted_state(&self, state: PersistedState) -> anyhow::Result<()>;
+    async fn load_settings(&self) -> Result<Option<serde_json::Value>, String>;
+    async fn save_settings(&self, cfg: serde_json::Value) -> Result<(), String>;
+}
+
+/// 初始化全局状态存储引擎。
+pub fn init_engine(engine: Box<dyn StateStoreEngine + Send + Sync>) {
+    ENGINE.set(engine).ok().expect("state store engine 已初始化");
+}
+
+/// 获取引擎引用。
+pub fn engine() -> Option<&'static Box<dyn StateStoreEngine + Send + Sync>> {
+    ENGINE.get()
+}
 
 /// 一条记录：字段名 -> 值。Provider CRUD 用。
 pub type Item = Map<String, Value>;
