@@ -52,4 +52,38 @@ impl StateStoreEngine for DbStateEngine {
             .exec(move |conn| crate::sebas_state::repo::save_settings(conn, &card_cfg))
             .await
     }
+
+    async fn load_projects(&self) -> Result<Vec<Value>, String> {
+        self.handle
+            .exec(|conn| {
+                crate::sebas_state::repo::load_projects(conn)
+                    .map(|rows| rows.into_iter().map(|r| serde_json::to_value(&r).unwrap_or_default()).collect())
+            })
+            .await
+    }
+
+    async fn save_projects(&self, projects: Vec<Value>) -> Result<(), String> {
+        let rows: Vec<crate::sebas_state::repo::ProjectRow> = projects
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+        self.handle
+            .exec(move |conn| crate::sebas_state::repo::save_projects(conn, &rows))
+            .await
+    }
+
+    async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String> {
+        let p = path.to_string();
+        let n = name.to_string();
+        self.handle
+            .exec(move |conn| crate::sebas_state::repo::add_project(conn, &p, &n, added_at))
+            .await
+    }
+
+    async fn remove_project(&self, path: &str) -> Result<bool, String> {
+        let p = path.to_string();
+        self.handle
+            .exec(move |conn| crate::sebas_state::repo::remove_project(conn, &p))
+            .await
+    }
 }
