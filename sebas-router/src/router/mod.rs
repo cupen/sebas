@@ -125,6 +125,13 @@ pub enum Out {
     WatchdogRestart {
         key: SessionKey,
     },
+    /// `/confirm <token>` — 兑换待确认危险操作的令牌（sebas-29s）。dispatch
+    /// 以同一 Feishu actor（同 chat_id）发送 Confirm RPC，watchdog 校验
+    /// 同 actor 同参数单次兑换后真正执行原操作。
+    WatchdogConfirm {
+        key: SessionKey,
+        token: String,
+    },
     WatchdogServices {
         key: SessionKey,
     },
@@ -378,8 +385,13 @@ impl RouterHandle {
     /// External snapshot of every known session — the shape the WebUI's
     /// session rows need (mapping + card phase/prompt, `SessionInfo`).
     pub async fn session_info_snapshot(&self) -> Vec<SessionInfo> {
-        let keys: Vec<SessionKey> =
-            self.map.snapshot_all().await.into_iter().map(|(k, _)| k).collect();
+        let keys: Vec<SessionKey> = self
+            .map
+            .snapshot_all()
+            .await
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         let mut out = Vec::with_capacity(keys.len());
         for k in &keys {
             if let Some(info) = self.session_info_for(k).await {
@@ -692,7 +704,9 @@ impl RouterHandle {
                         .await;
                 }
             }
-            AcpEvent::ToolStart { tool_name, args, .. } => {
+            AcpEvent::ToolStart {
+                tool_name, args, ..
+            } => {
                 let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
                 self.transcript_push(
                     session_id,
@@ -963,10 +977,7 @@ impl RouterHandle {
                 self.map.set_project_dir(&key, project_dir.clone()).await;
                 // Publish after set_project_dir so the Created snapshot
                 // already carries it. AlreadySpawning changed nothing.
-                if !matches!(
-                    outcome,
-                    crate::state::BeginSpawn::AlreadySpawning
-                ) {
+                if !matches!(outcome, crate::state::BeginSpawn::AlreadySpawning) {
                     self.publish_created(&key).await;
                 }
                 self.emit(Out::WebSpawn {
