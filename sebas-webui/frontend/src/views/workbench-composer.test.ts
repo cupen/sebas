@@ -431,4 +431,69 @@ describe('sebas-workbench-composer', () => {
     // Text preserved for retry — the composer does not clear on failure.
     expect(ta.value).toBe('retry me')
   })
+
+  // ── Enter 发送路径（@keydown on wa-textarea）─────────────────────────────
+
+  it('plain Enter sends; Shift+Enter does not', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_enter' })
+    const el = await mount({ projectDir: null })
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'enter to send'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    // Shift+Enter：不发送。
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, composed: true }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.createSession).not.toHaveBeenCalled()
+
+    // 普通 Enter：发送。
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.createSession).toHaveBeenCalledTimes(1)
+    expect(api.createSession).toHaveBeenCalledWith('enter to send', null, 'acp', null)
+  })
+
+  it('Enter is a no-op while reachability is unreachable', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)
+    const el = await mount({ projectDir: null })
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'should not send'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.createSession).not.toHaveBeenCalled()
+  })
+
+  // ── Reachability 轮询（断连横幅随 core 恢复自动消失）─────────────────────
+
+  it('reachability recovers on poll without remounting', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)
+    const el = await mount({ projectDir: null })
+    expect(el.shadowRoot?.querySelector('.callout-warning')).toBeTruthy()
+    // connectedCallback 安装了轮询定时器。
+    const timer = (el as unknown as { reachabilityTimer: number | undefined }).reachabilityTimer
+    expect(timer).not.toBeUndefined()
+
+    // core 恢复：下一次轮询拉到 ok → 横幅消失、composer 重新可用。
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    await (el as unknown as { loadReachability(): Promise<void> }).loadReachability()
+    await el.updateComplete
+    expect(el.shadowRoot?.querySelector('.callout-warning')).toBeNull()
+    const textarea = el.shadowRoot?.querySelector('wa-textarea')
+    expect(textarea?.hasAttribute('disabled')).toBe(false)
+
+    // 卸载后定时器被清理。
+    el.remove()
+    await el.updateComplete
+    expect(
+      (el as unknown as { reachabilityTimer: number | undefined }).reachabilityTimer,
+    ).toBeUndefined()
+  })
 })

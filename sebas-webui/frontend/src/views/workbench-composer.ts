@@ -21,6 +21,9 @@ import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
+/** Reachability 轮询周期：断连横幅与 composer 禁用态的翻转延迟上限。 */
+const WORKBENCH_REACHABILITY_POLL_MS = 5_000
+
 @customElement('sebas-workbench-composer')
 export class SebasWorkbenchComposer extends LitElement {
   /**
@@ -56,6 +59,8 @@ export class SebasWorkbenchComposer extends LitElement {
    * 才能发现的失败）。
    */
   @state() private nativeAvailability: { ok: boolean; cause?: string } | null = null
+  /** Reachability 轮询定时器（connectedCallback 启动，disconnectedCallback 清理）。 */
+  private reachabilityTimer: number | undefined = undefined
 
   static styles = [
     viewStyles,
@@ -191,6 +196,19 @@ export class SebasWorkbenchComposer extends LitElement {
     void this.loadReachability()
     void this.loadKinds()
     void this.loadModelOptions()
+    // Reachability 只在挂载时求值一次会让断连横幅永不恢复（core 回来后
+    // composer 仍被禁用）——周期性重查，横幅与禁用态随真实状态翻转。
+    this.reachabilityTimer = window.setInterval(() => {
+      void this.loadReachability()
+    }, WORKBENCH_REACHABILITY_POLL_MS)
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback()
+    if (this.reachabilityTimer !== undefined) {
+      window.clearInterval(this.reachabilityTimer)
+      this.reachabilityTimer = undefined
+    }
   }
 
   /**
