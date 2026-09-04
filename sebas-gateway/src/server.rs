@@ -168,6 +168,7 @@ pub async fn run(cfg: GatewayConfig) -> Result<()> {
     let state = build_state(cfg)?;
     crate::admin::warn_no_secret_once();
     crate::hot_reload::spawn_watcher(state.clone(), state.reload_status.clone());
+    crate::core_channel::spawn_subscriber(state.clone());
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     let addr = listener.local_addr()?;
@@ -193,6 +194,7 @@ pub fn serve_with_listener(
 )> {
     let state = build_state(cfg)?;
     crate::hot_reload::spawn_watcher(state.clone(), state.reload_status.clone());
+    crate::core_channel::spawn_subscriber(state.clone());
     let app = build_router(state);
     let addr = listener.local_addr()?;
     let handle = tokio::spawn(async move {

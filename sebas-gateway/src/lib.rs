@@ -13,6 +13,7 @@ pub mod access_log;
 pub mod admin;
 pub mod auth;
 pub mod config;
+pub mod core_channel;
 pub mod debug;
 pub mod error;
 pub mod hot_reload;
