@@ -1,6 +1,6 @@
 //! Core session channel client (openspec/changes/add-core-session-channel,
-//! tasks 6.1–6.3): a `SessionBackend` implementation over the Unix-socket
-//! protocol served by the core.
+//! tasks 6.1–6.3): a `SessionBackend` implementation over the local-IPC
+//! protocol served by the core (Unix socket / Windows named pipe).
 //!
 //! - Every method opens a short-lived connection: handshake line → ack →
 //!   request line → response line.
@@ -19,11 +19,11 @@ use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
     Reachability, SessionBackend, SessionRejection,
 };
+use sebas_ipc::{ReadHalf, WriteHalf};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
 /// Per-request timeout: a hung core must not wedge the WebUI forever.
@@ -220,14 +220,14 @@ async fn connect(
     path: &Path,
 ) -> std::result::Result<
     (
-        tokio::net::unix::OwnedWriteHalf,
-        BufReader<tokio::net::unix::OwnedReadHalf>,
+        WriteHalf,
+        BufReader<ReadHalf>,
     ),
     SessionRejection,
 > {
-    match UnixStream::connect(path).await {
+    match sebas_ipc::connect(path).await {
         Ok(stream) => {
-            let (r, w) = stream.into_split();
+            let (r, w) = sebas_ipc::split(stream);
             Ok((w, BufReader::new(r)))
         }
         Err(e) => {
@@ -244,8 +244,8 @@ async fn connect(
 /// Send the handshake line and wait for the ack. EOF or a bad ack after the
 /// handshake = the secret was rejected (5.3 server side closes).
 async fn handshake(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut WriteHalf,
+    reader: &mut BufReader<ReadHalf>,
     secret: &str,
 ) -> std::result::Result<(), SessionRejection> {
     let hs = serde_json::to_string(&ChannelHandshake {
