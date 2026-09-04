@@ -111,7 +111,10 @@ fn build_router_full(
         .route("/api/gateway", get(api::gateway))
         .route("/api/about", get(api::about))
         .route("/api/agent-kinds", get(api::agent_kinds))
-        .route("/api/projects", get(api::projects_list).post(api::projects_add))
+        .route(
+            "/api/projects",
+            get(api::projects_list).post(api::projects_add),
+        )
         .route("/api/projects/reorder", post(api::projects_reorder))
         .route("/api/projects/{path}/remove", post(api::projects_remove))
         .route("/api/projects/{path}/branch", get(api::projects_branch))
@@ -151,7 +154,9 @@ fn build_router_full(
     // `adapter_ok: false` and mutations answer 503 (honest degradation).
     // It carries its own AdminState, merged as a stateless Router.
     core.merge(gateway_mutations)
-        .merge(admin::build_api_admin_router(AdminState::new(admin_adapter)))
+        .merge(admin::build_api_admin_router(AdminState::new(
+            admin_adapter,
+        )))
         .fallback(assets::spa_fallback)
 }
 
@@ -177,7 +182,15 @@ pub async fn run_with_admin_adapter(
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) {
-    run_full(backend, gateway, card_config, agent_kinds, listener, admin_adapter).await;
+    run_full(
+        backend,
+        gateway,
+        card_config,
+        agent_kinds,
+        listener,
+        admin_adapter,
+    )
+    .await;
 }
 
 async fn run_full(
@@ -199,5 +212,26 @@ async fn run_full(
     .await
     {
         tracing::error!(error = %e, "webui server error");
+    }
+}
+
+#[cfg(test)]
+mod health_dup_tests {
+    // 回归测试（sebas-hsb）：admin router 曾与 core router 重复注册
+    // GET /health，merge 时 axum panic「Overlapping method route」。
+    // build_router_full 无论是否有 admin adapter 都会 merge admin router，
+    // 故此处构建完整 router 即可覆盖该冲突。
+    use super::*;
+    use crate::models::GatewayInfo;
+    use crate::session_backend::FakeBackend;
+    use sebas_feishu::cards::CardConfig;
+
+    #[test]
+    fn full_router_builds_without_route_conflict() {
+        let _app = build_router(
+            std::sync::Arc::new(FakeBackend::new()),
+            GatewayInfo::default(),
+            CardConfig::default(),
+        );
     }
 }

@@ -236,7 +236,9 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
 }
 
 #[tokio::test]
-async fn slash_compact_without_session_gets_help() {
+async fn slash_compact_without_session_gets_plain_error() {
+    // sebas-ixv：无会话时 /compact 不再静默（HelpText 在 dispatch 层是
+    // no-op），改为 PlainText 明确报错。
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
@@ -248,7 +250,63 @@ async fn slash_compact_without_session_gets_help() {
             mentions: vec![],
         })
         .await;
-    assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
+    match next_out(&mut out_rx).await {
+        Out::PlainText { content, .. } => {
+            assert!(content.contains("没有活跃会话"), "content: {content}");
+            assert!(content.contains("/compact"), "content: {content}");
+        }
+        other => panic!("expected PlainText, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn slash_status_cancel_without_session_get_plain_error() {
+    // sebas-ixv：/status /cancel 无会话同样明确报错（与 /compact 同约定）。
+    for text in ["/status", "/cancel"] {
+        let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+        router
+            .dispatch(FeishuIn::Text {
+                key: key(),
+                text: text.into(),
+                reply_to: None,
+                chat_type: "private".into(),
+                mentions: vec![],
+            })
+            .await;
+        match next_out(&mut out_rx).await {
+            Out::PlainText { content, .. } => {
+                assert!(content.contains("没有活跃会话"), "{text}: {content}");
+                assert!(content.contains(text), "{text}: {content}");
+            }
+            other => panic!("expected PlainText for {text}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn switch_resume_cd_get_unsupported_reply() {
+    // sebas-ixv：/switch /resume /cd 已解析但路由未接入，必须明确回复
+    // 「暂未支持」，不得静默丢弃。
+    for text in ["/switch 1", "/resume s1", "/cd /tmp"] {
+        let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+        router
+            .dispatch(FeishuIn::Text {
+                key: key(),
+                text: text.into(),
+                reply_to: None,
+                chat_type: "private".into(),
+                mentions: vec![],
+            })
+            .await;
+        match next_out(&mut out_rx).await {
+            Out::PlainText { content, .. } => {
+                let cmd = text.split_whitespace().next().unwrap();
+                assert!(content.contains("暂未支持"), "{text}: {content}");
+                assert!(content.contains(cmd), "{text}: {content}");
+            }
+            other => panic!("expected PlainText for {text}, got {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
