@@ -103,6 +103,8 @@ enum SessionCmd {
         request_id: String,
         answer: ApprovalAnswer,
     },
+    /// 中程切换会话模型（wire-webui-sebas-agent-e2e）：用于后续 turn。
+    SetModel(String),
 }
 
 /// 会话级配置。`model` 缺省值为占位（OQ3 延后：模型默认值由部署方定）。
@@ -227,6 +229,12 @@ impl SessionHandle {
             .await;
     }
 
+    /// 中程切换会话模型（wire-webui-sebas-agent-e2e）：作用于后续 turn，
+    /// 不改变正在进行的 turn；非法/未支持的 model 由内核层 reject（透传）。
+    pub async fn set_model(&self, model: impl Into<String>) {
+        let _ = self.cmd_tx.send(SessionCmd::SetModel(model.into())).await;
+    }
+
     /// 订阅事件流（每订阅者独立游标）。
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.evt_tx.subscribe()
@@ -261,6 +269,12 @@ impl SessionTask {
                     if let Some(a) = &self.approver {
                         let _ = a.answer(&request_id, answer);
                     }
+                    continue;
+                }
+                SessionCmd::SetModel(model) => {
+                    // 空闲期生效：覆写当前 config.model，下一次 turn 走它。
+                    // 正在跑的 turn 已 pin 自己的 model snapshot，不受影响。
+                    self.config.model = model;
                     continue;
                 }
             };
@@ -302,6 +316,10 @@ impl SessionTask {
                                         let _ = a.answer(&request_id, answer);
                                     }
                                 }
+                                // 正在进行的 turn 已 pin 自己的 model snapshot；
+                                // SetModel 在 turn 内的语义是"下一次生效"，与
+                                // Prompt 排队一致：收下即丢，不打断当前 turn。
+                                Some(SessionCmd::SetModel(_)) => {}
                                 None => cancel.cancel(), // 管理器已丢句柄：收尾当前 turn
                             },
                             out = &mut fut => break out,

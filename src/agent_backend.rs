@@ -42,6 +42,13 @@ struct NativeSession {
     /// The in-flight streamed text, flushed into the transcript on tool
     /// boundaries and turn end.
     text_buf: String,
+    /// （wire-webui-sebas-agent-e2e）会话级模型 override。`None` = 走内核默认；
+    /// 设置后下一次 turn 起用，新值即时生效。
+    current_model_override: Option<String>,
+    /// 装配期的可用模型清单（来自 `SEBAS_AGENT_MODELS`）。`info()` 透出。
+    available_models: Vec<String>,
+    /// 装配期的默认模型 id（`SEBAS_AGENT_MODEL`），与内核 SessionConfig 共用。
+    default_model: String,
 }
 
 impl NativeSession {
@@ -82,9 +89,10 @@ impl NativeSession {
             user_prompt: Some(self.prompt.clone()),
             last_active_unix: chrono::Utc::now().timestamp(),
             project_dir: self.workdir.clone(),
-            // 原生内核目前没有会话级模型选择面（Claude 专用驱动）。
-            current_model: None,
-            available_models: None,
+            // wire-webui-sebas-agent-e2e: 原生内核可用模型来自装配期的环境
+            // 变量清单；当前模型取会话级 override，缺省为内核默认。
+            current_model: self.current_model_override.clone().or(Some(self.default_model.clone())),
+            available_models: Some(self.available_models.clone()),
         }
     }
 }
@@ -104,6 +112,13 @@ pub struct NativeAgentBackend {
     notices: broadcast::Sender<PermissionNotice>,
     /// Why the native backend is unavailable (missing LLM credentials), if so.
     unavailable_cause: Option<String>,
+    /// （wire-webui-sebas-agent-e2e）原生内核可供选择的模型 id 列表。来自
+    /// `SEBAS_AGENT_MODELS`（逗号分隔），缺省仅含 `SEBAS_AGENT_MODEL`。
+    /// WebUI composer 的模型下拉数据源。
+    available_models: Vec<String>,
+    /// （wire-webui-sebas-agent-e2e）默认模型 id（`SEBAS_AGENT_MODEL`），
+    /// 在 native 会话尚未设置任何覆盖前对所有 turn 生效。
+    default_model: String,
 }
 
 /// 无凭据时的占位 LLM 客户端：任何调用都以 terminal 错误失败。
@@ -132,9 +147,17 @@ impl NativeAgentBackend {
     /// （默认端点 `https://api.anthropic.com`），或
     /// `SEBAS_AGENT_GATEWAY_URL`（+ 可选 `SEBAS_AGENT_GATEWAY_AUTH`）走 gateway。
     ///
-    /// 无凭据时返回 `(manager, Some(cause))`——manager 可建但每个 spawn
-    /// 会拒绝并报 cause。
-    pub fn build_native_manager(bash_timeout: Duration) -> (Arc<SessionManager>, Option<String>) {
+    /// 无凭据时返回 `(manager, Some(cause), …)`——manager 可建但每个 spawn
+    /// 会拒绝并报 cause；可用模型与默认模型从 `SEBAS_AGENT_MODELS` /
+    /// `SEBAS_AGENT_MODEL` 推导，与管理器共享同一装配面（wire-webui-sebas-agent-e2e D5）。
+    pub fn build_native_manager(
+        bash_timeout: Duration,
+    ) -> (
+        Arc<SessionManager>,
+        Option<String>,
+        Vec<String>,
+        String,
+    ) {
         let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) =
             if let Ok(url) = std::env::var("SEBAS_AGENT_GATEWAY_URL") {
                 let auth = std::env::var("SEBAS_AGENT_GATEWAY_AUTH")
@@ -168,39 +191,62 @@ impl NativeAgentBackend {
         // `unavailable_cause` 并拒绝（诚实降级），占位客户端永远不被调用；
         // 直接调到它 = 既有门卫失效，terminal 错误立刻暴露。
         let client = client.unwrap_or_else(|| Arc::new(DeadLlmClient) as Arc<dyn LlmClient>);
+        let available_models: Vec<String> = std::env::var("SEBAS_AGENT_MODELS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![model.clone()]);
         let manager = SessionManager::new(
             client,
             // 沙箱档位（design N2 配置面）：默认 Auto（Landlock 可用即用，
             // 否则防火墙回退）；`SEBAS_AGENT_BASH_SANDBOX=firewall` 强制回退档。
             ToolRegistry::with_sandbox(bash_timeout, agent_sandbox_mode()),
             SessionConfig {
-                model,
+                model: model.clone(),
                 ..Default::default()
             },
         )
         .with_policy(Arc::new(PolicyEngine::new(PolicyConfig::default())))
         .with_approver(ApproverHub::new());
-        (Arc::new(manager), cause)
+        (Arc::new(manager), cause, available_models, model)
     }
 
     /// Build the backend. Reads the agent LLM channel from the environment
     /// (design N9). Without credentials the backend reports honestly
     /// degraded: every spawn rejects with the cause.
     pub fn from_env(bash_timeout: Duration) -> Arc<Self> {
-        let (manager, cause) = Self::build_native_manager(bash_timeout);
-        Self::new(manager, cause)
+        let (manager, cause, available_models, default_model) =
+            Self::build_native_manager(bash_timeout);
+        Self::new(manager, cause, available_models, default_model)
     }
 
     /// Inject an already-configured manager (tests, or hosts that read the
     /// provider registry themselves).
     pub fn with_manager(manager: SessionManager) -> Arc<Self> {
-        Self::new(Arc::new(manager), None)
+        Self::new(
+            Arc::new(manager),
+            None,
+            vec!["claude-sonnet-4-5".into()],
+            "claude-sonnet-4-5".into(),
+        )
     }
 
-    /// Inject an already-configured manager behind an `Arc`（webui 与 feishu
-    /// 桥共享同一个内核 manager）。
-    pub fn with_manager_arc(manager: Arc<SessionManager>) -> Arc<Self> {
-        Self::new(manager, None)
+    /// Inject an already-configured manager behind an `Arc`（webui、通道
+    /// server 与 feishu 桥共享同一个内核 manager）。`cause` = 装配时发现的
+    /// 凭据缺失原因（None = 凭据齐全），由宿主从 `build_native_manager` 透传。
+    pub fn with_manager_arc(
+        manager: Arc<SessionManager>,
+        cause: Option<String>,
+        available_models: Vec<String>,
+        default_model: String,
+    ) -> Arc<Self> {
+        Self::new(manager, cause, available_models, default_model)
     }
 
     /// 暴露内嵌的内核 manager（供 feishu 原生桥共享同一执行面）。
@@ -208,7 +254,12 @@ impl NativeAgentBackend {
         self.manager.clone()
     }
 
-    fn new(manager: Arc<SessionManager>, unavailable_cause: Option<String>) -> Arc<Self> {
+    fn new(
+        manager: Arc<SessionManager>,
+        unavailable_cause: Option<String>,
+        available_models: Vec<String>,
+        default_model: String,
+    ) -> Arc<Self> {
         // The kernel needs an approver to surface gated calls. 生产路径
         // （`from_env`/`build_native_manager`）已挂 approver；`with_manager`
         // 注入的 manager 若缺，用它自己的 hub 补一个（此前缺了这个回填，
@@ -226,6 +277,8 @@ impl NativeAgentBackend {
             events,
             notices,
             unavailable_cause,
+            available_models,
+            default_model,
         })
     }
 
@@ -391,6 +444,9 @@ impl SessionBackend for NativeAgentBackend {
                     prompt: prompt.clone(),
                     transcript: Vec::new(),
                     text_buf: String::new(),
+                    current_model_override: None,
+                    available_models: self.available_models.clone(),
+                    default_model: self.default_model.clone(),
                 },
             );
         }
@@ -420,6 +476,21 @@ impl SessionBackend for NativeAgentBackend {
             h.prompt(prompt).await;
         }
         Ok(key)
+    }
+
+    /// （wire-webui-sebas-agent-e2e）native 会话级模型 override。先写本地
+    /// 当前模型字段，再下发内核 `set_model` 命令作用于后续 turn。`model_id`
+    /// 不在 `available_models` 内仍接受（与 ACP 行为一致 —— 模型 ID 合法性
+    /// 由内核 LLM 客户端实时校验）。
+    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+        let encoded = Self::encode_key(&key);
+        let mut g = self.sessions.write().await;
+        let Some(session) = g.get_mut(&encoded) else {
+            return Err(SessionRejection::UnknownSession { key: encoded });
+        };
+        session.current_model_override = Some(model_id.clone());
+        session.handle.set_model(model_id).await;
+        Ok(())
     }
 
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
@@ -567,7 +638,10 @@ impl DualSessionBackend {
 
     /// Native keys are feishu-channel `agent-*` references; everything else
     /// (including feishu chat keys and web keys) routes to the ACP bridge.
-    fn is_native(key: &ChannelKey) -> bool {
+    /// Public: the core channel server uses the same predicate for its
+    /// web-key existence pre-check (native sessions live outside the router
+    /// map and would otherwise be wrongly rejected as unknown).
+    pub fn is_native(key: &ChannelKey) -> bool {
         key.channel_str() == "feishu" && key.reference.starts_with("agent-")
     }
 
@@ -651,9 +725,9 @@ impl SessionBackend for DualSessionBackend {
     }
 
     async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
-        // 原生内核没有会话级模型选择（Claude 专用）；ACP 会话（webui/桥）走
-        // InProcessBackend 的 SetModel 命令通道（add-acp-model-selection）。
-        self.acp.set_session_model(key, model_id).await
+        // wire-webui-sebas-agent-e2e：按 key 分发。原生 key 路由到内核，
+        // ACP key 走既有 InProcessBackend 的 Out::SendAcp SetModel。
+        self.route(&key).set_session_model(key, model_id).await
     }
 
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
@@ -661,6 +735,14 @@ impl SessionBackend for DualSessionBackend {
     }
 
     async fn reachability(&self) -> Reachability {
+        // wire-webui-sebas-agent-e2e D6：两执行体任一不可用 → 整体不可用。
+        // 原生侧（缺凭据）的 cause 优先报告，因为它是真正的"unavailable"
+        // 状态而非仅通道不通；acp 不可达次之。
+        if let Some(native_cause) = &self.native.unavailable_cause {
+            return Reachability::Unreachable {
+                cause: format!("native unavailable: {native_cause}"),
+            };
+        }
         self.acp.reachability().await
     }
 
