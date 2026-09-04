@@ -57,6 +57,12 @@ pub enum CoreChannelRequest {
     Focused,
     /// Start the event stream (see module docs for the frame order).
     Subscribe,
+    /// Snapshot a domain of the core state store (add-state-store).
+    StateSnapshot { domain: String },
+    /// Mutate a domain of the core state store (add-state-store).
+    StateMutation { domain: String, payload: serde_json::Value },
+    /// Subscribe to state change notifications (add-state-store).
+    StateSubscribe,
 }
 
 /// One response over the core session channel.
@@ -75,6 +81,10 @@ pub enum CoreChannelResponse {
     Focused { key: Option<ChannelKey> },
     /// Typed rejection — names the reason; nothing was mutated.
     Rejected { #[serde(flatten)] rejection: sebas_webui::session_backend::SessionRejection },
+    /// State snapshot result (add-state-store).
+    StateSnapshot { domain: String, payload: serde_json::Value },
+    /// State mutation accepted.
+    StateMutationOk,
 }
 
 /// One frame of the subscription stream (task 4.2): exactly one snapshot
@@ -135,6 +145,14 @@ mod tests {
             CoreChannelRequest::SetFocus { key: None },
             CoreChannelRequest::Focused,
             CoreChannelRequest::Subscribe,
+            CoreChannelRequest::StateSnapshot {
+                domain: "providers".into(),
+            },
+            CoreChannelRequest::StateMutation {
+                domain: "settings".into(),
+                payload: serde_json::json!({"key": "card_config", "value": {}}),
+            },
+            CoreChannelRequest::StateSubscribe,
         ];
         for r in &requests {
             roundtrip(r);
@@ -160,6 +178,11 @@ mod tests {
             CoreChannelResponse::Rejected {
                 rejection: SessionRejection::Unavailable { cause: "c".into() },
             },
+            CoreChannelResponse::StateSnapshot {
+                domain: "providers".into(),
+                payload: serde_json::json!({"providers": {}}),
+            },
+            CoreChannelResponse::StateMutationOk,
         ];
         for r in &responses {
             roundtrip(r);
