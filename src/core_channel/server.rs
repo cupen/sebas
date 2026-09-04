@@ -1,5 +1,6 @@
 //! Core session channel server (openspec/changes/add-core-session-channel,
-//! tasks 5.1–5.8): a Unix-socket NDJSON server inside the core process.
+//! tasks 5.1–5.8): a local-IPC NDJSON server inside the core process
+//! (Unix domain socket / Windows named pipe via `sebas_ipc`).
 //!
 //! The core is the single session authority; this server is how every other
 //! process observes and drives sessions. Security model (spec):
@@ -17,11 +18,11 @@ use super::protocol::{
 };
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
+use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_router::{RouterHandle, SessionEvent};
 use sebas_webui::session_backend::SessionRejection;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -48,13 +49,14 @@ pub fn socket_path(cfg: &crate::config::Config) -> PathBuf {
     }
 }
 
-/// Bind the Unix listener at `path` with mode 0600, reclaiming a stale socket
-/// file (task 5.1). A socket file that still accepts connections means a live
-/// server — that's an error, not a stale file.
-pub fn bind_channel_socket(path: &Path) -> Result<UnixListener> {
+/// Bind the IPC listener at `path` with mode 0600 (unix), reclaiming a stale
+/// socket file (task 5.1). A socket that still accepts connections means a
+/// live server — that's an error, not a stale file.
+pub fn bind_channel_socket(path: &Path) -> Result<IpcListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    #[cfg(unix)]
     if path.exists() {
         // Stale-file reclaim: only if nothing answers on it.
         match std::os::unix::net::UnixStream::connect(path) {
@@ -70,7 +72,7 @@ pub fn bind_channel_socket(path: &Path) -> Result<UnixListener> {
             }
         }
     }
-    let listener = UnixListener::bind(path)?;
+    let listener = sebas_ipc::bind(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -98,8 +100,8 @@ pub async fn serve(
     let (close_tx, close_rx) = tokio::sync::watch::channel(false);
     loop {
         tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = match accepted {
+            accepted = sebas_ipc::accept(&listener) => {
+                let stream = match accepted {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(?e, "core channel accept failed");
@@ -147,8 +149,11 @@ async fn wait_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
 /// Peer credential check (task 5.2): the connecting uid must equal our own
 /// effective uid. Runs before the handshake or any request is read.
 #[cfg(unix)]
-fn peer_uid_ok(stream: &UnixStream) -> bool {
-    use std::os::fd::AsRawFd;
+fn peer_uid_ok(stream: &IpcStream) -> bool {
+    use std::os::fd::{AsFd, AsRawFd};
+    let sebas_ipc::IpcStream::UdSocket(uds) = stream else {
+        return true;
+    };
     let mut ucred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -157,7 +162,7 @@ fn peer_uid_ok(stream: &UnixStream) -> bool {
     let mut len: libc::socklen_t = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let ok = unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(),
+            uds.as_fd().as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
             &mut ucred as *mut libc::ucred as *mut libc::c_void,
@@ -168,7 +173,7 @@ fn peer_uid_ok(stream: &UnixStream) -> bool {
 }
 
 #[cfg(not(unix))]
-fn peer_uid_ok(_stream: &UnixStream) -> bool {
+fn peer_uid_ok(_stream: &IpcStream) -> bool {
     true
 }
 
@@ -176,7 +181,7 @@ fn peer_uid_ok(_stream: &UnixStream) -> bool {
 /// unparseable line, empty-vs-required, or wrong secret → None (caller
 /// closes without answering).
 async fn read_handshake(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    reader: &mut BufReader<ReadHalf>,
     secret: &str,
 ) -> Option<()> {
     let mut line = String::new();
@@ -194,7 +199,7 @@ async fn read_handshake(
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: IpcStream,
     router: RouterHandle,
     secret: String,
 ) -> Result<()> {
@@ -204,7 +209,7 @@ async fn handle_connection(
         return Ok(());
     }
 
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
     // 5.3: secret handshake line before any request. On success the server
@@ -257,7 +262,7 @@ async fn handle_connection(
 }
 
 async fn write_response(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut WriteHalf,
     resp: &CoreChannelResponse,
 ) -> Result<()> {
     let json = serde_json::to_string(resp)
@@ -282,7 +287,7 @@ async fn write_response(
 /// client re-snapshots on reconnect.
 async fn serve_subscription(
     router: RouterHandle,
-    mut writer: tokio::net::unix::OwnedWriteHalf,
+    mut writer: WriteHalf,
 ) -> Result<()> {
     const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -322,7 +327,7 @@ async fn serve_subscription(
 }
 
 async fn write_frame(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut WriteHalf,
     frame: &SessionStreamFrame,
 ) -> Result<()> {
     let json = serde_json::to_string(frame)
@@ -377,7 +382,7 @@ async fn state_snapshot_all(router: &RouterHandle) -> serde_json::Value {
 /// 一串提交合并为一帧）。广播无人订阅/关闭时，快照后保持连接等待。
 async fn serve_state_subscription(
     router: RouterHandle,
-    mut writer: tokio::net::unix::OwnedWriteHalf,
+    mut writer: WriteHalf,
 ) -> Result<()> {
     use sebas_router::state_store::StateChange;
     const MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
@@ -496,7 +501,7 @@ async fn serve_state_subscription(
 }
 
 async fn flush_pending(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut WriteHalf,
     pending: &mut Vec<String>,
 ) -> Result<()> {
     for scope in pending.drain(..) {
@@ -506,7 +511,7 @@ async fn flush_pending(
 }
 
 async fn write_state_frame(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut WriteHalf,
     frame: &StateStreamFrame,
 ) -> Result<()> {
     let json = serde_json::to_string(frame)
@@ -902,6 +907,7 @@ mod tests {
         let path = dir.path().join("core.sock");
         {
             let _l = bind_channel_socket(&path).expect("first bind");
+            #[cfg(unix)]
             assert!(path.exists());
             // The listener is alive; a second bind must NOT steal it.
             assert!(bind_channel_socket(&path).is_err(), "live socket must refuse rebind");

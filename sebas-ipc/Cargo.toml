@@ -1,0 +1,12 @@
+[package]
+name = "sebas-ipc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+interprocess = { version = "2", features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = "3"

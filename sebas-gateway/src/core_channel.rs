@@ -1,13 +1,13 @@
 //! 核心通道状态订阅客户端 (add-state-store 5.3)。
 //!
-//! 当 core channel Unix socket 可用时, 订阅状态变更通知, 收到通知后触发
+//! 当 core channel 本地 socket 可用时, 订阅状态变更通知, 收到通知后触发
 //! provider/alias 热重载。通道不可用时降级为文件监听 (hot_reload 保持)。
 //!
-//! 协议: NDJSON over Unix socket, 与 `src/core_channel/protocol.rs` 同规范。
-//! 握手带 `SEBAS_CORE_SECRET`(watchdog 注入, 与 core/webui 同密钥); 订阅是
-//! 持久流——先一帧全域快照, 之后每帧一条 scope 变更(一串提交已由服务端
-//! 合并)。断连时保持最后有效配置, 由 `ReloadStatus` 记录不可用状态供
-//! `/admin/stats` 暴露。
+//! 协议: NDJSON over 本地 IPC (Unix socket / Windows named pipe), 与
+//! `src/core_channel/protocol.rs` 同规范。握手带 `SEBAS_CORE_SECRET`
+//! (watchdog 注入, 与 core/webui 同密钥); 订阅是持久流——先一帧全域快照,
+//! 之后每帧一条 scope 变更(一串提交已由服务端合并)。断连时保持最后有效
+//! 配置, 由 `ReloadStatus` 记录不可用状态供 `/admin/stats` 暴露。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use crate::server::AppState;
 
-/// 核心通道 Unix socket 路径, 由 `SEBAS_CORE_SOCKET` 环境变量指定。
+/// 核心通道 socket 路径, 由 `SEBAS_CORE_SOCKET` 环境变量指定。
 /// 未设置时返回 `None` (通道不可用, 走文件监听)。
 pub(crate) fn socket_path() -> Option<PathBuf> {
     let raw = std::env::var("SEBAS_CORE_SOCKET").ok()?;
@@ -94,18 +94,17 @@ pub(crate) async fn reload_from_channel(state: &AppState, path: &PathBuf) {
 }
 
 /// 通用短连接通道请求：握手 → 发一帧请求 → 收一帧响应。
-/// 返回完整响应（`CoreChannelResponse` 形状）。请求/响应均为 NDJSON on Unix。
+/// 返回完整响应（`CoreChannelResponse` 形状）。请求/响应均为 NDJSON on 本地 IPC。
 async fn channel_request(
     path: &PathBuf,
     req: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
 
-    let stream = UnixStream::connect(path)
+    let stream = sebas_ipc::connect(path)
         .await
         .map_err(|e| format!("连接 core channel 失败: {e}"))?;
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
     // 握手: 带 `SEBAS_CORE_SECRET` (watchdog 注入, 与 core/webui 同密钥)。
@@ -209,12 +208,11 @@ enum StateStreamFrame {
 /// 返回时连接已断开 (调用方退避重连)。
 async fn subscribe_once(state: &AppState, path: &PathBuf) -> Result<(), String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
 
-    let stream = UnixStream::connect(path)
+    let stream = sebas_ipc::connect(path)
         .await
         .map_err(|e| format!("连接 core channel 失败: {e}"))?;
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
     // 握手: 带 `SEBAS_CORE_SECRET` (watchdog 注入, 与 core/webui 同密钥)。

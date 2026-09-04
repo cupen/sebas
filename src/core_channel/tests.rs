@@ -16,9 +16,20 @@ use sebas_webui::session_backend::{Reachability, SessionBackend, SessionRejectio
 use std::path::Path as StdPath;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 const SECRET: &str = "test-core-secret";
+
+/// 等待通道可连接（跨平台：named pipe 无文件残留，不能靠 path.exists()）。
+async fn wait_channel_ready(path: &StdPath) {
+    for _ in 0..250 {
+        if let Ok(stream) = sebas_ipc::connect(path).await {
+            drop(stream);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("core session channel never became connectable");
+}
 
 struct TestCore {
     path: std::path::PathBuf,
@@ -49,19 +60,32 @@ async fn start_core_with_map(dir: &StdPath, map: SessionMap) -> TestCore {
     tokio::spawn(async move {
         let _ = server::serve(serve_router, serve_path, SECRET.into(), close_rx).await;
     });
-    // Wait for the socket to appear.
-    for _ in 0..100 {
-        if path.exists() {
-            return TestCore {
-                path,
-                close_tx,
-                handle: router,
-                _out_rx: out_rx,
-            };
+    wait_channel_ready(&path).await;
+    TestCore {
+        path,
+        close_tx,
+        handle: router,
+        _out_rx: out_rx,
+    }
+}
+
+/// 等待通道下线（unix：socket 文件消失；Windows：连接失败即视为消失）。
+async fn wait_channel_gone(path: &StdPath) {
+    #[cfg(unix)]
+    for _ in 0..250 {
+        if !path.exists() {
+            return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("core session channel socket never appeared");
+    #[cfg(not(unix))]
+    for _ in 0..250 {
+        if sebas_ipc::connect(path).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("core session channel still reachable after shutdown");
 }
 
 /// Raw one-shot request helper for protocol-level tests.
@@ -70,8 +94,8 @@ async fn raw_request(
     secret: Option<&str>,
     req: &CoreChannelRequest,
 ) -> std::io::Result<Option<String>> {
-    let stream = UnixStream::connect(path).await?;
-    let (r, mut w) = stream.into_split();
+    let stream = sebas_ipc::connect(path).await?;
+    let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
     if let Some(s) = secret {
         let hs = serde_json::to_string(&ChannelHandshake {
@@ -105,8 +129,8 @@ async fn missing_handshake_closes_connection_without_response() {
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
     // No handshake: connect and immediately write a request.
-    let stream = UnixStream::connect(&core.path).await.unwrap();
-    let (r, mut w) = stream.into_split();
+    let stream = sebas_ipc::connect(&core.path).await.unwrap();
+    let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
     let json = serde_json::to_string(&CoreChannelRequest::Snapshot).unwrap();
     w.write_all(json.as_bytes()).await.unwrap();
@@ -122,8 +146,8 @@ async fn wrong_and_empty_secrets_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
     for secret in ["", "totally-wrong"] {
-        let stream = UnixStream::connect(&core.path).await.unwrap();
-        let (r, mut w) = stream.into_split();
+        let stream = sebas_ipc::connect(&core.path).await.unwrap();
+        let (r, mut w) = sebas_ipc::split(stream);
         let mut reader = BufReader::new(r);
         let hs = serde_json::to_string(&ChannelHandshake {
             secret: secret.to_string(),
@@ -155,8 +179,8 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
 
-    let stream = UnixStream::connect(&core.path).await.unwrap();
-    let (r, mut w) = stream.into_split();
+    let stream = sebas_ipc::connect(&core.path).await.unwrap();
+    let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
     let hs = serde_json::to_string(&ChannelHandshake {
         secret: SECRET.into(),
@@ -235,7 +259,12 @@ async fn backend_methods_reach_the_right_handlers() {
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1);
     assert_eq!(snap[0].status, "spawning");
-    assert_eq!(snap[0].project_dir.as_deref(), Some("/tmp"));
+    // 服务端 canonicalize project_dir 后存储（5.5）；断言跟随本平台的
+    // canonical 形式（Windows 会把 "/tmp" 变成 verbatim 路径）。
+    let expected_dir = std::fs::canonicalize("/tmp")
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "/tmp".to_string());
+    assert_eq!(snap[0].project_dir.as_deref(), Some(expected_dir.as_str()));
 
     // activate on the core side → snapshot reflects active + session id.
     // (The spawned key is channel-neutral on the wire; the webui-trait client
@@ -331,7 +360,11 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1);
     assert_eq!(snap[0].status, "spawning");
-    assert_eq!(snap[0].project_dir.as_deref(), Some("/tmp"));
+    // 服务端会 canonicalize project_dir：Windows 得到 verbatim 形式（\\?\D:\tmp）。
+    let expected_dir = std::fs::canonicalize("/tmp")
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "/tmp".into());
+    assert_eq!(snap[0].project_dir.as_deref(), Some(expected_dir.as_str()));
     assert!(
         core._out_rx.try_recv().is_err(),
         "placeholder creation must not emit a spawn instruction"
@@ -392,12 +425,8 @@ async fn client_converges_after_server_restart() {
 
     // Kill the server (graceful shutdown removes the socket file).
     let _ = core.close_tx.send(true);
-    for _ in 0..100 {
-        if !core.path.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_channel_gone(&core.path).await;
+    #[cfg(unix)]
     assert!(!core.path.exists(), "socket must be removed on shutdown");
 
     // While the core is down, reachability reports unreachable with a cause.
@@ -415,12 +444,7 @@ async fn client_converges_after_server_restart() {
     tokio::spawn(async move {
         let _ = server::serve(router2, path2.clone(), SECRET.into(), close2_rx).await;
     });
-    for _ in 0..100 {
-        if core.path.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_channel_ready(&core.path).await;
 
     // Same client instance converges: one-shot methods work again.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -450,8 +474,8 @@ async fn lagging_subscriber_is_disconnected_and_can_resnapshot() {
     // Subscribe but deliberately stall: after the snapshot frame, read
     // nothing while the core publishes more events than the broadcast
     // capacity (256).
-    let stream = UnixStream::connect(&core.path).await.unwrap();
-    let (r, mut w) = stream.into_split();
+    let stream = sebas_ipc::connect(&core.path).await.unwrap();
+    let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
     let hs = serde_json::to_string(&ChannelHandshake {
         secret: SECRET.into(),
@@ -551,8 +575,8 @@ async fn state_subscription_serves_snapshot_frame_without_engine() {
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
 
-    let stream = UnixStream::connect(&core.path).await.unwrap();
-    let (r, mut w) = stream.into_split();
+    let stream = sebas_ipc::connect(&core.path).await.unwrap();
+    let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
     let hs = serde_json::to_string(&ChannelHandshake {
         secret: SECRET.into(),

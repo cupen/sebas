@@ -7,10 +7,10 @@ use crate::watchdog::executor::ControlExecutor;
 use crate::watchdog::services::service_from_str;
 use crate::watchdog::supervisor::ServiceName;
 use serde::{Deserialize, Serialize};
+use sebas_ipc::{IpcListener, IpcStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -171,11 +171,11 @@ pub async fn serve(path: PathBuf, secret: String, executor: ControlExecutor) -> 
     if path.exists() {
         let _ = tokio::fs::remove_file(&path).await;
     }
-    let listener = UnixListener::bind(&path)?;
+    let listener: IpcListener = sebas_ipc::bind(&path)?;
     set_socket_permissions(&path)?;
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream: IpcStream = sebas_ipc::accept(&listener).await?;
         let executor = executor.clone();
         let secret = secret.clone();
         tokio::spawn(async move {
@@ -187,8 +187,8 @@ pub async fn serve(path: PathBuf, secret: String, executor: ControlExecutor) -> 
 }
 
 pub async fn request(path: &Path, envelope: &ControlEnvelope) -> Result<RpcControlResponse> {
-    let stream = UnixStream::connect(path).await?;
-    let (reader, mut writer) = stream.into_split();
+    let stream = sebas_ipc::connect(path).await?;
+    let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
     let json = serde_json::to_string(envelope)
@@ -209,11 +209,11 @@ pub async fn request(path: &Path, envelope: &ControlEnvelope) -> Result<RpcContr
 }
 
 async fn handle_stream(
-    stream: UnixStream,
+    stream: IpcStream,
     executor: ControlExecutor,
     secret: String,
 ) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     reader.read_line(&mut line).await?;

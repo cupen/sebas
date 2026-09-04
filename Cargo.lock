@@ -838,6 +838,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1517,6 +1523,21 @@ dependencies = [
  "serde",
  "similar",
  "tempfile",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
+dependencies = [
+ "doctest-file",
+ "futures-core",
+ "libc",
+ "recvmsg",
+ "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2356,6 +2377,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2783,6 +2810,7 @@ dependencies = [
  "sebas-channels",
  "sebas-feishu",
  "sebas-gateway",
+ "sebas-ipc",
  "sebas-router",
  "sebas-webui",
  "serde",
@@ -2876,6 +2904,7 @@ dependencies = [
  "http-body-util",
  "notify",
  "reqwest 0.12.28",
+ "sebas-ipc",
  "serde",
  "serde_json",
  "tempfile",
@@ -2883,6 +2912,15 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "sebas-ipc"
+version = "0.1.0"
+dependencies = [
+ "interprocess",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -4045,6 +4083,12 @@ checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi-util"
