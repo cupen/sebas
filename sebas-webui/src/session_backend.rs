@@ -377,6 +377,39 @@ impl SessionBackend for InProcessBackend {
         Reachability::Reachable
     }
 
+    async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        // In-process backend: use the engine when available.
+        let engine = sebas_router::state_store::engine()?;
+        match domain {
+            "settings" => engine.load_settings().await.ok().flatten(),
+            "providers" => {
+                let state = engine.load_persisted_state().await;
+                Some(serde_json::to_value(&state).ok()?)
+            }
+            "projects" => {
+                // Projects are stored in the DB via the engine; load them via
+                // the StateHandle. The engine's DbStateEngine doesn't expose
+                // projects directly, so we read from the DB writer thread.
+                // Fallback to the file-based projects module when the engine
+                // has no projects data.
+                None
+            }
+            _ => None,
+        }
+    }
+
+    async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        let engine = sebas_router::state_store::engine()
+            .ok_or_else(|| "state store 未初始化".to_string())?;
+        match domain {
+            "settings" => {
+                let value = payload.get("value").cloned().unwrap_or(payload);
+                engine.save_settings(value).await
+            }
+            other => Err(format!("unknown domain: {other}")),
+        }
+    }
+
     fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
         Some(self.notices.subscribe())
     }
