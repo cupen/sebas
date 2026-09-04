@@ -387,12 +387,9 @@ impl SessionBackend for InProcessBackend {
                 Some(serde_json::to_value(&state).ok()?)
             }
             "projects" => {
-                // Projects are stored in the DB via the engine; load them via
-                // the StateHandle. The engine's DbStateEngine doesn't expose
-                // projects directly, so we read from the DB writer thread.
-                // Fallback to the file-based projects module when the engine
-                // has no projects data.
-                None
+                // Load projects from the DB via the engine.
+                let projects = engine.load_projects().await.ok()?;
+                Some(serde_json::json!({ "projects": projects }))
             }
             _ => None,
         }

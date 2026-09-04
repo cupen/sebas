@@ -68,6 +68,14 @@ pub trait StateStoreEngine: Send + Sync {
     async fn save_persisted_state(&self, state: PersistedState) -> anyhow::Result<()>;
     async fn load_settings(&self) -> Result<Option<serde_json::Value>, String>;
     async fn save_settings(&self, cfg: serde_json::Value) -> Result<(), String>;
+    /// Load projects as JSON Value (array of project rows).
+    async fn load_projects(&self) -> Result<Vec<serde_json::Value>, String>;
+    /// Save projects (replace all).
+    async fn save_projects(&self, projects: Vec<serde_json::Value>) -> Result<(), String>;
+    /// Add a project entry.
+    async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String>;
+    /// Remove a project by path.
+    async fn remove_project(&self, path: &str) -> Result<bool, String>;
 }
 
 /// 初始化全局状态存储引擎。
