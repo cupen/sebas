@@ -349,6 +349,30 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
+    /// 0-turn placeholder (P2 fix): create the session row over the wire
+    /// without an agent child — the trait default would fall back to
+    /// `spawn("")`, putting the empty prompt on the wire exactly the bug this
+    /// fixes. Model is carried; kind stays pinned core-side (same as
+    /// [`Self::spawn_with`]).
+    async fn create_placeholder(
+        &self,
+        project_dir: Option<String>,
+        _backend: Option<String>,
+        model: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::CreatePlaceholder {
+                project_dir,
+                model,
+            })
+            .await?
+        {
+            CoreChannelResponse::Spawned { key } => Ok(key),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         match self
             .request(&CoreChannelRequest::Message { key, message })

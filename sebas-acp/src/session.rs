@@ -19,7 +19,10 @@ pub(crate) type ResponderSlot = oneshot::Sender<Decision>;
 
 /// Per-session handle stored in the manager's table. No process handle is
 /// exposed — the driver owns the child; `cancel_tx` signals the driver loop to
-/// exit (which disconnects and kills the child).
+/// exit (which disconnects and kills the child), and `run_task` lets an
+/// explicit kill hard-abort the run loop when the agent is stuck mid-turn
+/// (P3: cancel alone does not fire while the driver awaits a slow
+/// `session/prompt`, so the child process would linger).
 /// (No `Debug` derive: `ResponderSlot` does not implement `Debug`.)
 pub struct AcpSessionHandle {
     pub session_id: String,
@@ -27,6 +30,10 @@ pub struct AcpSessionHandle {
     pub evt_rx: Arc<Mutex<mpsc::Receiver<AcpEvent>>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
     pub pending_responders: Arc<Mutex<std::collections::HashMap<String, ResponderSlot>>>,
+    /// The spawned run loop task (drives the driver's connect/read loop).
+    /// `kill()` aborts it so the connection (and the child process group)
+    /// drops immediately.
+    pub run_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct SessionMeta {

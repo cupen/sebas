@@ -1048,6 +1048,37 @@ impl RouterHandle {
         }
     }
 
+    /// Create a 0-turn placeholder session WITHOUT spawning an agent child
+    /// (P2 fix: a create-session request with no prompt must not send an
+    /// empty `session/prompt` to the agent, which opencode hangs on). The
+    /// requested project_dir/kind/model are remembered on the mapping so the
+    /// first message spawns the right agent (via `Out::WebSpawn`).
+    pub async fn web_create_placeholder(
+        &self,
+        project_dir: Option<String>,
+        kind: Option<String>,
+        model: Option<String>,
+    ) -> ChannelKey {
+        let key = ChannelKey::web_new();
+        match self
+            .map
+            .begin_spawn_with(key.clone(), kind.clone(), model.clone())
+            .await
+        {
+            Ok(outcome) => {
+                self.map.set_project_dir(&key, project_dir.clone()).await;
+                if !matches!(outcome, crate::state::BeginSpawn::AlreadySpawning) {
+                    self.publish_created(&key).await;
+                }
+                key
+            }
+            Err(e) => {
+                tracing::warn!(?e, "web_create_placeholder: begin_spawn_with failed");
+                key
+            }
+        }
+    }
+
     /// Send a message to an existing session from the WebUI.
     /// Routes the message through the session map (same logic as Feishu
     /// text messages) and emits the appropriate Out instruction. Command
@@ -1126,15 +1157,31 @@ impl RouterHandle {
                 .await;
             }
             Ok(crate::state::TextRoute::SpawnNew) => {
-                // route_text inserted a Spawning placeholder for `key`.
+                // route_text inserted a Spawning placeholder for `key`. A
+                // 0-turn placeholder created with no prompt carries the
+                // requested project_dir/kind/model on the mapping — read them
+                // back so the first message spawns the right agent (P2 fix).
+                let (project_dir, kind, model) = self
+                    .map
+                    .get(&key)
+                    .await
+                    .map(|m| {
+                        (
+                            m.project_dir.clone(),
+                            m.pending_kind.clone(),
+                            m.pending_model.clone(),
+                        )
+                    })
+                    .unwrap_or((None, None, None));
                 self.publish_created(&key).await;
                 self.emit(Out::WebSpawn {
                     key,
                     prompt: message,
-                    project_dir: None,
-                    kind: None,
-                    // 直达消息路径没有模型参数（用户指定模型走创建表单）。
-                    model: None,
+                    project_dir,
+                    kind,
+                    // 直达消息路径的模型参数来自 0-turn 创建时记住的
+                    // pending_model（用户指定模型走创建表单）。
+                    model,
                 })
                 .await;
             }

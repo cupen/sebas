@@ -602,6 +602,20 @@ impl SessionBackend for DualSessionBackend {
         }
     }
 
+    /// 0-turn placeholder: route to the backend that would own the session,
+    /// so neither spawns an agent child for an empty prompt (P2).
+    async fn create_placeholder(
+        &self,
+        project_dir: Option<String>,
+        backend: Option<String>,
+        model: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        match backend.as_deref() {
+            Some("native") => self.native.spawn(String::new(), project_dir).await,
+            _ => self.acp.create_placeholder(project_dir, backend, model).await,
+        }
+    }
+
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         self.route(&key).message(key, message).await
     }

@@ -208,6 +208,72 @@ async fn acp_fresh_spawn_mints_id_and_reports_not_resumed() {
     mgr.kill(&outcome).await;
 }
 
+/// P3: `kill()` must hard-abort the driver run loop so the child process is
+/// actually reaped (a cancel signal alone does not fire while the driver is
+/// blocked awaiting a slow agent reply — the child would linger). We find the
+/// mock's pid via /proc before killing and assert it is gone afterwards.
+#[tokio::test]
+async fn kill_reaps_child_process() {
+    let mgr = acp_manager(Duration::from_secs(10));
+    // A unique journal path doubles as a /proc marker for THIS test's child
+    // (concurrent tests spawn their own mock agents).
+    let journal_dir = tempfile::tempdir().expect("tempdir for journal");
+    let journal = journal_dir.path().join("kill-journal.jsonl");
+    let journal_str = journal.to_string_lossy().into_owned();
+    let mut args = mock_args("load-ok");
+    args.push("--journal".into());
+    args.push(journal_str.clone());
+
+    let outcome = mgr
+        .create_session("acp", args, None, vec![], "".into())
+        .await
+        .expect("fresh spawn must succeed");
+
+    // The mock agent child is alive right after spawn; poll briefly for the
+    // pid (the driver spawns the subprocess inside its run task).
+    let mut pid = None;
+    for _ in 0..50 {
+        if let Some(p) = find_fake_acp_pid(&journal_str) {
+            pid = Some(p);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pid = pid.expect("mock child must be running after spawn");
+
+    mgr.kill(&outcome).await;
+    // Aborting the run loop drops the connection → process-group kill.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !pid_alive(pid),
+        "mock child pid {pid} must be gone after kill"
+    );
+}
+
+/// Scan /proc for a live `fake-acp-agent` child whose cmdline carries the
+/// unique journal path marker (so concurrent tests' children are ignored).
+/// `/proc` root mixes PID dirs with pseudo files (`cpuinfo`, …) and entries
+/// can vanish mid-scan, so non-PID/unreadable entries are skipped, not fatal.
+fn find_fake_acp_pid(journal_marker: &str) -> Option<u32> {
+    for entry in std::fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        if cmdline.contains(journal_marker) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn pid_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 // ---------------------------------------------------------------------------
 // resume uses the caller-provided real ACP session id, not the routing id
 // (openspec/changes/add-acp-session-id-mapping; the mock journals the id it

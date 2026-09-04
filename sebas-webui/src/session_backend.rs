@@ -181,6 +181,22 @@ pub trait SessionBackend: Send + Sync {
         let _ = (domain, payload);
         Err("state store 不可用".into())
     }
+
+    /// Create a 0-turn placeholder session without spawning an agent child
+    /// (P2 fix: an empty prompt must not be sent to the agent — opencode
+    /// hangs on `session/prompt ""`). `backend` is the same execution-backend
+    /// hint as [`SessionBackend::spawn_with`] (`"acp:<slug>"` etc.), and
+    /// `model` the requested model id; both are remembered for the first
+    /// message's spawn. The default falls back to `spawn("", …)` for backends
+    /// without placeholder support (keeps the old callable surface honest).
+    async fn create_placeholder(
+        &self,
+        project_dir: Option<String>,
+        _backend: Option<String>,
+        _model: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        self.spawn(String::new(), project_dir).await
+    }
 }
 
 // ─── In-process implementation (task 2.2) ──────────────────────────────────
@@ -370,6 +386,22 @@ impl SessionBackend for InProcessBackend {
     ) -> Result<ChannelKey, SessionRejection> {
         let kind = backend.and_then(parse_acp_kind);
         Ok(self.router.web_spawn(prompt, project_dir, kind, model).await)
+    }
+
+    /// 0-turn placeholder: create the session row without spawning an agent
+    /// child (P2 fix). The requested kind/model are remembered on the mapping
+    /// so the first message spawns the right agent.
+    async fn create_placeholder(
+        &self,
+        project_dir: Option<String>,
+        backend: Option<String>,
+        model: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        let kind = backend.as_deref().and_then(parse_acp_kind);
+        Ok(self
+            .router
+            .web_create_placeholder(project_dir, kind, model)
+            .await)
     }
 
     async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {

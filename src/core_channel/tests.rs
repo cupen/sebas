@@ -308,6 +308,78 @@ async fn backend_methods_reach_the_right_handlers() {
 
 // ── 6.2: reconnect convergence ──────────────────────────────────────────────
 
+/// P2 修复（wire 路径）：`create_placeholder` 经通道建 0-turn 占位——
+/// 不产生 `Out::WebSpawn`（无子进程、空 prompt 不上送 agent），映射记住
+/// model；首条消息经 `Message` 触发 SpawnNew 并携带记住的 model（kind 仍
+/// 钉在 core 默认，与 `Spawn` 的 wire 策略一致）。
+#[tokio::test]
+async fn create_placeholder_wires_a_zero_turn_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let key = backend
+        .create_placeholder(
+            Some("/tmp".into()),
+            Some("acp:opencode".into()),
+            Some("m-free".into()),
+        )
+        .await
+        .expect("placeholder created");
+
+    // 占位在快照里可见（spawning、带 project_dir），且没有 spawn 指令发出。
+    let snap = backend.snapshot().await;
+    assert_eq!(snap.len(), 1);
+    assert_eq!(snap[0].status, "spawning");
+    assert_eq!(snap[0].project_dir.as_deref(), Some("/tmp"));
+    assert!(
+        core._out_rx.try_recv().is_err(),
+        "placeholder creation must not emit a spawn instruction"
+    );
+
+    // 映射记住了 model（kind 钉默认）。
+    let (channel_key, m) = core
+        .handle
+        .map
+        .snapshot_all()
+        .await
+        .into_iter()
+        .next()
+        .expect("placeholder mapped");
+    assert_eq!(channel_key, key);
+    assert_eq!(m.pending_model.as_deref(), Some("m-free"));
+    assert_eq!(m.pending_kind, None);
+
+    // 不可用 project_dir → 与 Spawn 同款校验拒绝。
+    assert_eq!(
+        backend
+            .create_placeholder(Some("/nonexistent-sebas-p2".into()), None, None)
+            .await,
+        Err(SessionRejection::UnusableProjectDir)
+    );
+
+    // 首条消息触发 spawn 路径（SpawnNew → Out::WebSpawn），不排队。
+    backend
+        .message(key.clone(), "hello".into())
+        .await
+        .expect("message accepted");
+    match core._out_rx.try_recv().expect("WebSpawn emitted") {
+        sebas_router::Out::WebSpawn {
+            key: k,
+            prompt,
+            kind,
+            model,
+            ..
+        } => {
+            assert_eq!(k, channel_key);
+            assert_eq!(prompt, "hello");
+            assert_eq!(kind, None);
+            assert_eq!(model.as_deref(), Some("m-free"));
+        }
+        other => panic!("expected Out::WebSpawn, got {other:?}"),
+    }
+}
+
 /// 杀掉并重启 server，客户端不重建也能收敛（6.2）。
 #[tokio::test]
 async fn client_converges_after_server_restart() {

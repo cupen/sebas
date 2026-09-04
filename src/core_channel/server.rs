@@ -550,6 +550,35 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
                 CoreChannelResponse::Spawned { key }
             }
         },
+        CoreChannelRequest::CreatePlaceholder { project_dir, model } => {
+            // 0-turn 占位（P2 修复）：只建行、不 spawn 子进程——空 prompt 绝
+            // 不上送 agent。project_dir 校验与 Spawn 同款；kind 与 Spawn 一致
+            // 钉在 core 配置的默认 agent 上。
+            match &project_dir {
+                Some(dir) => {
+                    if !usable_project_dir(dir) {
+                        CoreChannelResponse::Rejected {
+                            rejection: SessionRejection::UnusableProjectDir,
+                        }
+                    } else {
+                        let canonical =
+                            std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+                        let key = router
+                            .web_create_placeholder(
+                                Some(canonical.display().to_string()),
+                                None,
+                                model,
+                            )
+                            .await;
+                        CoreChannelResponse::Spawned { key }
+                    }
+                }
+                None => {
+                    let key = router.web_create_placeholder(None, None, model).await;
+                    CoreChannelResponse::Spawned { key }
+                }
+            }
+        }
         CoreChannelRequest::SetSessionModel { key, model_id } => {
             // 中程切换模型：解析路由 session_id 后经 Out::SendAcp 送达 SetModel。
             let Some(sid) = router.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned))

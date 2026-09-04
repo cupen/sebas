@@ -36,6 +36,14 @@ pub struct Mapping {
     /// Working directory for the project (set when spawned via WebUI).
     /// `None` for Feishu-originated sessions or sessions without a project dir.
     pub project_dir: Option<String>,
+    /// Execution-backend kind requested at create time (a 0-turn placeholder
+    /// remembers it until the first message triggers the spawn). `None` =
+    /// fall back to the configured default kind.
+    pub pending_kind: Option<String>,
+    /// Model id requested at create time (a 0-turn placeholder remembers it
+    /// until the first message triggers the spawn; add-acp-model-selection).
+    /// `None` = the agent's default model.
+    pub pending_model: Option<String>,
     /// The agent's real ACP session id when it differs from the routing id
     /// (native-ACP agents, e.g. opencode; the `session/new` id on a fresh
     /// spawn, the loaded conversation id on a successful resume). `None` for
@@ -61,6 +69,8 @@ impl Mapping {
             },
             last_active_unix: crate::router::now_unix(),
             project_dir: None,
+            pending_kind: None,
+            pending_model: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -79,6 +89,8 @@ impl Mapping {
             },
             last_active_unix: crate::router::now_unix(),
             project_dir: None,
+            pending_kind: None,
+            pending_model: None,
             acp_session_id,
             current_model: None,
             available_models: None,
@@ -92,6 +104,27 @@ impl Mapping {
             },
             last_active_unix: crate::router::now_unix(),
             project_dir: None,
+            pending_kind: None,
+            pending_model: None,
+            acp_session_id: None,
+            current_model: None,
+            available_models: None,
+        }
+    }
+
+    /// A Spawning placeholder created eagerly with a 0-turn session request
+    /// (no prompt yet): remember the requested kind/model so the first message
+    /// spawns the right agent (0-turn 会话修复，P2）。普通 spawn 流程直接
+    /// 消费时这些字段保持 None（走默认 kind / agent 默认模型）。
+    pub fn spawning_with(kind: Option<String>, model: Option<String>) -> Self {
+        Self {
+            state: MappingState::Spawning {
+                pending: Vec::new(),
+            },
+            last_active_unix: crate::router::now_unix(),
+            project_dir: None,
+            pending_kind: kind,
+            pending_model: model,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -105,6 +138,8 @@ impl Mapping {
             },
             last_active_unix,
             project_dir: None,
+            pending_kind: None,
+            pending_model: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -216,12 +251,25 @@ impl SessionMap {
                         Ok(TextRoute::Resume(old))
                     }
                     MappingState::Spawning { pending } => {
-                        if pending.len() < MAX_PENDING {
+                        if m.pending_kind.is_some() || m.pending_model.is_some() {
+                            // A 0-turn placeholder (created with no prompt)
+                            // awaits its first message: flip it to a plain
+                            // spawning placeholder (the pending kind/model are
+                            // consumed by the SpawnNew caller) and hand the
+                            // message to the spawn path (P2 fix). Without
+                            // this, the first message would be queued and no
+                            // child would ever spawn.
+                            m.state = MappingState::Spawning {
+                                pending: Vec::new(),
+                            };
+                            Ok(TextRoute::SpawnNew)
+                        } else if pending.len() < MAX_PENDING {
                             pending.push(prompt);
+                            Ok(TextRoute::Enqueued)
                         } else {
                             tracing::warn!("pending queue full; dropping newest message");
+                            Ok(TextRoute::Enqueued)
                         }
-                        Ok(TextRoute::Enqueued)
                     }
                 }
             }
@@ -251,6 +299,36 @@ impl SessionMap {
                     return Err(RouterError::Capacity(self.capacity));
                 }
                 g.insert(key, Mapping::spawning());
+                Ok(BeginSpawn::Fresh)
+            }
+        }
+    }
+
+    /// [`SessionMap::begin_spawn`] plus a requested kind/model to remember on
+    /// the placeholder (0-turn sessions: the first message spawns the right
+    /// agent — P2 fix). Only the `Fresh`/`ReplacedActive` insert carries the
+    /// new fields; an already-spawning placeholder keeps its existing ones.
+    pub async fn begin_spawn_with(
+        &self,
+        key: ChannelKey,
+        kind: Option<String>,
+        model: Option<String>,
+    ) -> Result<BeginSpawn, RouterError> {
+        let mut g = self.inner.write().await;
+        match g.get(&key) {
+            Some(m) if matches!(m.state, MappingState::Spawning { .. }) => {
+                Ok(BeginSpawn::AlreadySpawning)
+            }
+            Some(_) => {
+                self.clear_queue(&key).await;
+                g.insert(key, Mapping::spawning_with(kind, model));
+                Ok(BeginSpawn::ReplacedActive)
+            }
+            None => {
+                if g.len() >= self.capacity {
+                    return Err(RouterError::Capacity(self.capacity));
+                }
+                g.insert(key, Mapping::spawning_with(kind, model));
                 Ok(BeginSpawn::Fresh)
             }
         }

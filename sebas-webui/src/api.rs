@@ -305,13 +305,27 @@ pub async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Response {
     let prompt = req.prompt.unwrap_or_default();
-    let key = match state
-        .backend
-        .spawn_with(prompt, req.project_dir, req.backend.as_deref(), req.model)
-        .await
-    {
-        Ok(k) => k,
-        Err(rej) => return rejection_response(rej),
+    // 0-turn 占位（P2）：无 prompt 时只建行、不 spawn 子进程、不把空串当
+    // prompt 发给 agent（opencode 收到 `session/prompt ""` 会挂起）。kind/
+    // model/project_dir 记在 mapping 上，首条消息到达时才 spawn。
+    let key = if prompt.trim().is_empty() {
+        match state
+            .backend
+            .create_placeholder(req.project_dir.clone(), req.backend.clone(), req.model.clone())
+            .await
+        {
+            Ok(k) => k,
+            Err(rej) => return rejection_response(rej),
+        }
+    } else {
+        match state
+            .backend
+            .spawn_with(prompt, req.project_dir, req.backend.as_deref(), req.model)
+            .await
+        {
+            Ok(k) => k,
+            Err(rej) => return rejection_response(rej),
+        }
     };
     state.backend.set_focus(Some(key.clone())).await;
     let encoded = encode_session_key(&key);

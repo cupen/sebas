@@ -329,6 +329,7 @@ impl SessionManager {
             evt_rx: Arc::new(Mutex::new(evt_rx)),
             cancel_tx: Some(cancel_tx),
             pending_responders,
+            run_task: Some(run_task),
         };
         self.inner.lock().await.insert(
             sid.clone(),
@@ -357,6 +358,14 @@ impl SessionManager {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(tx) = meta.handle.cancel_tx {
                 let _ = tx.send(());
+            }
+            // P3: cancel alone does not fire while the driver is blocked in
+            // `session/prompt` (e.g. opencode generating a long reply), so the
+            // child would linger. Hard-abort the run loop: the connect closure
+            // drops, which drops the `ConnectionTo`/`ChildGuard` and kills the
+            // child's process group.
+            if let Some(task) = meta.handle.run_task {
+                task.abort();
             }
         }
     }
@@ -475,6 +484,9 @@ impl SessionManager {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(tx) = m.handle.cancel_tx {
                 let _ = tx.send(());
+            }
+            if let Some(task) = m.handle.run_task {
+                task.abort();
             }
         }
     }

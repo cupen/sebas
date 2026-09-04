@@ -43,6 +43,17 @@ pub enum CoreChannelRequest {
         #[serde(default)]
         model: Option<String>,
     },
+    /// Create a 0-turn placeholder session WITHOUT spawning an agent child
+    /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
+    /// `session/prompt ""`). The requested model is remembered on the
+    /// mapping; the first message spawns (kind stays pinned to the core's
+    /// configured default, same policy as `Spawn`).
+    CreatePlaceholder {
+        project_dir: Option<String>,
+        /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
+        #[serde(default)]
+        model: Option<String>,
+    },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
     /// Send a message to an existing session.
@@ -190,6 +201,10 @@ mod tests {
             CoreChannelRequest::Snapshot,
             CoreChannelRequest::Spawn {
                 prompt: "hello".into(),
+                project_dir: Some("/tmp/p".into()),
+                model: Some("m1".into()),
+            },
+            CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
             },
