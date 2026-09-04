@@ -616,3 +616,131 @@ async fn help_command_emits_help_card() {
         other => panic!("expected SendCard (help card), got {other:?}"),
     }
 }
+
+// ---------- 原生执行体桥（make-feishu-optional-webui-primary） ----------
+
+use sebas_router::native_bridge::{NativeApprovalDecision, NativeSessionBridge};
+use std::sync::Arc;
+
+/// 记录「是否走桥」的假桥：is_native 恒返回 `default_native`，prompt 记一笔
+/// 并注册 mapping（模拟真实桥把会话登记进 router）。
+#[derive(Clone, Default)]
+struct FakeNativeBridge {
+    prompted: Arc<std::sync::Mutex<Vec<String>>>,
+    default_native: bool,
+}
+
+impl FakeNativeBridge {
+    fn new(default_native: bool) -> Self {
+        Self {
+            prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
+            default_native,
+        }
+    }
+    fn prompts(&self) -> Vec<String> {
+        self.prompted.lock().unwrap().clone()
+    }
+}
+
+impl NativeSessionBridge for FakeNativeBridge {
+    fn is_native(&self, key: &SessionKey) -> bool {
+        // 已登记的原生会话（此处简化：default_native 即判定）。
+        self.default_native
+    }
+    fn prompt(self: Arc<Self>, key: SessionKey, text: String) {
+        self.prompted.lock().unwrap().push(format!("{}|{}", key.chat_id, text));
+    }
+    fn answer_permission(&self, _rid: &str, _d: NativeApprovalDecision) -> bool {
+        false
+    }
+}
+
+/// 无桥（native=None）时 feishu PassThrough 应保持现状：route_text → SpawnNew
+/// → Out::SpawnAcp，不产生任何原生会话。
+#[tokio::test]
+async fn feishu_text_without_bridge_stays_acp() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_no_bridge".into(),
+        thread_id: None,
+    };
+    let (router, mut out_rx) = RouterHandle::new(map);
+
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "hi".into(),
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
+        .await;
+
+    let out = next_out(&mut out_rx).await;
+    assert!(
+        matches!(out, Out::SpawnAcp { .. }),
+        "无桥时应发射 SpawnAcp（acp 桥默认），got {out:?}"
+    );
+}
+
+/// default_native=true 时：新 feishu 文本经桥直达原生内核，不发射 SpawnAcp，
+/// 也不渲染飞书卡片（Out 流里不应出现 SendCard/AckMsg 之外的卡片类事件）。
+#[tokio::test]
+async fn feishu_text_with_native_default_routes_to_bridge() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_native".into(),
+        thread_id: None,
+    };
+    let (router, mut out_rx) = RouterHandle::new(map);
+    let fake = Arc::new(FakeNativeBridge::new(true));
+    let bridge: Arc<dyn NativeSessionBridge> = fake.clone();
+    router.set_native_bridge(Some(bridge)).await;
+
+    router
+        .dispatch(FeishuIn::Text {
+            key: key.clone(),
+            text: "build it".into(),
+            reply_to: None,
+            chat_type: "private".into(),
+            mentions: vec![],
+        })
+        .await;
+
+    // 走桥：prompt 收到该 chat + 消息。
+    assert_eq!(fake.prompts(), vec!["oc_native|build it".to_string()]);
+    // 不应发射 SpawnAcp（acp 路径被跳过）。
+    let outs = drain(&mut out_rx).await;
+    assert!(
+        !outs.iter().any(|o| matches!(o, Out::SpawnAcp { .. })),
+        "原生路径不应发射 SpawnAcp，got {outs:?}"
+    );
+}
+
+/// 原生会话续聊：同一 chat 再次来消息仍走桥（default 仍为 true），不重新 spawn。
+#[tokio::test]
+async fn feishu_native_session_continues_via_bridge() {
+    let map = SessionMap::new();
+    let key = SessionKey {
+        chat_id: "oc_native2".into(),
+        thread_id: None,
+    };
+    let (router, mut out_rx) = RouterHandle::new(map);
+    let fake = Arc::new(FakeNativeBridge::new(true));
+    let bridge: Arc<dyn NativeSessionBridge> = fake.clone();
+    router.set_native_bridge(Some(bridge)).await;
+
+    for text in ["first", "second"] {
+        router
+            .dispatch(FeishuIn::Text {
+                key: key.clone(),
+                text: text.into(),
+                reply_to: None,
+                chat_type: "private".into(),
+                mentions: vec![],
+            })
+            .await;
+    }
+    assert_eq!(fake.prompts(), vec!["oc_native2|first".to_string(), "oc_native2|second".to_string()]);
+    let _ = drain(&mut out_rx).await;
+}

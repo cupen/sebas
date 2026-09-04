@@ -1,47 +1,51 @@
 /**
- * App shell: sidebar navigation + routed outlet. Web Awesome supplies the
- * interactive primitives (buttons, inputs); sebas-* components own layout.
+ * App shell: sidebar (brand + project tree + settings entry) + routed
+ * outlet — IA v2, aligned with the preview prototype (`preview/preview-app.ts`):
+ * 侧栏承载项目树与 pinned 在底部的 Settings 入口，旧的 NAV_ITEMS 链接列表
+ * 已删除（settings/gateway/about 并入设置弹窗与工作台，admin 直接移除）。
  *
  * Link interception is document-level (composedPath) so anchors rendered
  * inside any view's shadow root navigate SPA-side too — shadow retargeting
- * hides them from a shell-scoped listener.
+ * hides them from a shell-scoped listener. The workbench composer's
+ * "settings →" control likewise crosses shadow boundaries: it dispatches a
+ * bubbling composed `open-settings` event that <main> catches here to open
+ * the centered settings modal (the old `/settings` route redirects to `/`).
  */
 
-import { LitElement, css, html, nothing } from 'lit'
+import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { matchRoute, navigate, type RouteDef } from './router.js'
+import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
 import { icon } from './components/icons.js'
 
-// Web Awesome primitives used across the app (self-registered, bundler
-// tree-shakes the rest of the library).
-import '@awesome.me/webawesome/dist/components/button/button.js'
+// The sidebar tree + settings modal are shell-owned; the outlet views are
+// registered in main.ts.
+import './views/project-rail.js'
+import './views/settings-modal.js'
 
-// Exported for tests: the nav/route resolution audit iterates these.
+// Exported for tests: the route resolution audit iterates these. IA v2 keeps
+// only the workbench, the all-sessions table and session deep links;
+// `/settings` `/gateway` `/about` redirect to `/` (see redirectFor) and
+// `/admin/*` is deleted outright — it falls through to the dashboard
+// fallback in onNavigate like any unknown path.
 export const ROUTES: RouteDef[] = [
   { id: 'dashboard', pattern: '/' },
-  // `/sessions` stays routed (rail link + old deep links) but is demoted
-  // from the primary nav — sessions are reached through the workbench rail.
+  // `/sessions` stays routed (History group header link + old deep links).
   { id: 'sessions', pattern: '/sessions' },
   { id: 'session-detail', pattern: '/sessions/:key' },
-  { id: 'settings', pattern: '/settings' },
-  { id: 'gateway', pattern: '/gateway' },
-  { id: 'about', pattern: '/about' },
-  { id: 'admin-login', pattern: '/admin/login' },
-  { id: 'admin', pattern: '/admin/:view' },
-]
-
-export const NAV_ITEMS = [
-  { label: 'Dashboard', href: '/', icon: 'dashboard' },
-  { label: 'Settings', href: '/settings', icon: 'settings' },
-  { label: 'Gateway', href: '/gateway', icon: 'gateway' },
-  { label: 'About', href: '/about', icon: 'about' },
-  { label: 'Admin', href: '/admin/status', icon: 'shield' },
 ]
 
 @customElement('sebas-app')
 export class SebasApp extends LitElement {
-  @state()
-  private routeId: string = 'dashboard'
+  @state() private routeId: string = 'dashboard'
+
+  /**
+   * Selected project path, owned here so the sidebar tree and the workbench
+   * main area stay in sync across route changes (the rail is shell-mounted
+   * now, the dashboard only consumes it).
+   */
+  @state() private selectedPath: string | null = null
+  /** Whether the centered settings modal is open (sidebar entry toggles it). */
+  @state() private settingsOpen = false
 
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
@@ -49,17 +53,28 @@ export class SebasApp extends LitElement {
 
   static styles = css`
     :host {
+      /* 应用框架（预览原型同款）：100vh 固定高度 + overflow hidden，
+         侧栏与出口区各自内部滚动，页面本身不滚。环境渐变背景照抄
+         preview-app.ts。 */
       display: flex;
-      min-height: 100vh;
+      width: 100vw;
+      height: 100vh;
+      min-height: 0;
+      overflow: hidden;
       background: var(--sebas-bg);
+      background-image: radial-gradient(1100px 480px at 82% -12%, rgba(91, 100, 242, 0.09), transparent 62%),
+        radial-gradient(900px 420px at -8% 108%, rgba(56, 209, 221, 0.05), transparent 60%);
+      background-attachment: fixed;
       color: var(--sebas-text);
     }
     nav {
-      width: 232px;
+      width: 220px;
       flex: 0 0 auto;
       position: sticky;
       top: 0;
       height: 100vh;
+      box-sizing: border-box; /* 高度吃进 padding，否则 100vh+padding 撑破框架 */
+      min-height: 0; /* flex 项默认 min-height:auto 会撑破 100vh 框架 */
       overflow-y: auto;
       background: var(--sebas-surface);
       border-right: 1px solid var(--sebas-border);
@@ -72,7 +87,7 @@ export class SebasApp extends LitElement {
       display: flex;
       align-items: center;
       gap: var(--sebas-space-3);
-      padding: var(--sebas-space-2) var(--sebas-space-2) var(--sebas-space-5);
+      padding: var(--sebas-space-2) var(--sebas-space-2) var(--sebas-space-4);
       text-decoration: none;
       color: var(--sebas-text-bright);
     }
@@ -105,60 +120,80 @@ export class SebasApp extends LitElement {
       text-transform: uppercase;
       color: var(--sebas-text-faint);
     }
-    nav a.item {
+    /* Pinned settings entry (预览原型同款 sticky footer)：树滚动时按钮
+     * 始终钉在侧栏可见底部。 */
+    .sidebar-footer {
+      position: sticky;
+      bottom: calc(-1 * var(--sebas-space-4)); /* 抵消 nav 的底部 padding */
+      margin-top: auto;
+      background: var(--sebas-surface);
+      padding-top: var(--sebas-space-2);
+      z-index: 1;
+    }
+    .settings-btn {
       display: flex;
       align-items: center;
       gap: 10px;
+      width: 100%;
       padding: 7px 10px;
+      border: none;
       border-radius: var(--sebas-radius-md);
+      background: none;
       color: var(--sebas-text-dim);
-      font-size: 0.875rem;
+      font: inherit;
+      font-size: 0.85rem;
       font-weight: 500;
-      text-decoration: none;
+      text-align: left;
+      cursor: pointer;
       transition:
         background var(--sebas-dur) var(--sebas-ease),
         color var(--sebas-dur) var(--sebas-ease);
     }
-    nav a.item svg {
-      opacity: 0.8;
-      flex: 0 0 auto;
-    }
-    nav a.item:hover {
+    .settings-btn:hover {
       background: var(--sebas-surface-2);
       color: var(--sebas-text-bright);
     }
-    nav a.item[aria-current='page'] {
-      background: var(--sebas-accent-soft);
-      color: var(--sebas-accent);
+    .settings-btn svg {
+      opacity: 0.8;
+      flex: 0 0 auto;
     }
-    nav a.item[aria-current='page'] svg {
-      opacity: 1;
-    }
-    nav a:focus-visible {
+    .settings-btn:focus-visible {
       outline: var(--sebas-focus-ring);
       outline-offset: 2px;
     }
     .spacer {
-      flex: 1;
-    }
-    .side-foot {
-      padding: var(--sebas-space-3) var(--sebas-space-2);
-      color: var(--sebas-text-faint);
-      font-size: 0.72rem;
-      letter-spacing: 0.02em;
+      flex: 0 0 8px;
     }
     main {
       flex: 1;
       min-width: 0;
-      padding: var(--sebas-space-8) var(--sebas-space-10) var(--sebas-space-10);
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
     }
     .outlet {
+      /* 满幅工作台：workbench 类路由（/ 与 /sessions/:key）直接铺满
+         出口区（去掉居中窄栏），滚动交给视图内部（turn-stream）。 */
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      position: relative; /* 子视图定位上下文 */
+    }
+    /* 文档型路由（/sessions 表格页）维持 1080px 可读列宽并自行滚动：
+       与预览原型“全屏应用”的差异在 IA 上是刻意的（表格页是次级页）。 */
+    .outlet.padded {
+      width: 100%;
       max-width: 1080px;
       margin: 0 auto;
+      padding: var(--sebas-space-6) var(--sebas-space-8);
+      overflow-y: auto;
     }
     /* Route change mounts a fresh view — replay a soft rise-in. */
     .outlet > * {
       animation: sebas-view-in 0.28s var(--sebas-ease) both;
+      min-height: 0;
     }
     @keyframes sebas-view-in {
       from {
@@ -176,8 +211,9 @@ export class SebasApp extends LitElement {
       }
     }
     @media (max-width: 900px) {
-      main {
-        padding: var(--sebas-space-6) var(--sebas-space-5);
+      /* 无 main padding——窄屏只收窄文档型路由的内边距。 */
+      .outlet.padded {
+        padding: var(--sebas-space-5) var(--sebas-space-4);
       }
     }
     @media (max-width: 640px) {
@@ -202,15 +238,27 @@ export class SebasApp extends LitElement {
       .brand .name small {
         display: none;
       }
-      nav a.item {
-        padding: 6px 9px;
-      }
-      .spacer,
-      .side-foot {
+      /* 窄屏时项目树收进顶栏之外（预览原型的 Projects/Chat 顶页签明确
+       * 不在本期范围内）——只留品牌 + Settings 图标，保证 375px 无横向
+       * 滚动；/sessions 仍可经会话详情页的 "All sessions" 回链到达。 */
+      sebas-project-rail,
+      .spacer {
         display: none;
       }
-      main {
-        padding: var(--sebas-space-4);
+      .sidebar-footer {
+        position: static;
+        margin-top: 0;
+        padding-top: 0;
+        background: none;
+      }
+      .settings-btn {
+        width: auto;
+        margin-left: auto;
+        padding: 6px;
+        gap: 0;
+      }
+      .settings-btn .settings-label {
+        display: none;
       }
     }
   `
@@ -243,9 +291,14 @@ export class SebasApp extends LitElement {
   }
 
   private onNavigate(): void {
+    // Retired IA-v1 paths (/settings /gateway /about) canonicalise to `/`
+    // before matching, so address bar and rendered view agree.
+    const retired = redirectFor(location.pathname)
+    if (retired) history.replaceState({}, '', retired)
     const match = matchRoute(ROUTES, location.pathname)
     if (!match) {
-      // Unknown path: render the dashboard rather than a dead screen.
+      // Unknown path (incl. the deleted /admin/*): render the workbench
+      // rather than a dead screen.
       this.routeId = 'dashboard'
       this.params = {}
     } else {
@@ -254,26 +307,32 @@ export class SebasApp extends LitElement {
     }
   }
 
+  /**
+   * Full-bleed outlet routes: the workbench (`/`) and the session detail
+   * (`/sessions/:key`) are app-frame panes — the outlet carries no padding
+   * and the view flexes to fill the frame, scrolling internally. Document
+   * routes (the `/sessions` table) keep the readable 1080px padded column.
+   */
+  private isWideRoute(): boolean {
+    return this.routeId === 'dashboard' || this.routeId === 'session-detail'
+  }
+
+  /** 侧栏项目树选中项目 → 记录并回到 workbench（其它路由上点树也要生效）。 */
+  private onRailSelect = (e: Event): void => {
+    this.selectedPath = (e as CustomEvent<{ path: string | null }>).detail.path
+    if (location.pathname !== '/') navigate('/')
+  }
+
   private renderOutlet() {
     switch (this.routeId) {
       case 'dashboard':
-        return html`<sebas-dashboard></sebas-dashboard>`
+        return html`<sebas-dashboard .selectedPath=${this.selectedPath}></sebas-dashboard>`
       case 'sessions':
         return html`<sebas-sessions></sebas-sessions>`
       case 'session-detail':
         return html`<sebas-session-detail key=${this.params['key'] ?? ''}></sebas-session-detail>`
-      case 'settings':
-        return html`<sebas-settings></sebas-settings>`
-      case 'gateway':
-        return html`<sebas-gateway></sebas-gateway>`
-      case 'about':
-        return html`<sebas-about></sebas-about>`
-      case 'admin-login':
-        return html`<sebas-admin-login></sebas-admin-login>`
-      case 'admin':
-        return html`<sebas-admin view=${this.params['view'] ?? 'status'}></sebas-admin>`
       default:
-        return html`<sebas-dashboard></sebas-dashboard>`
+        return html`<sebas-dashboard .selectedPath=${this.selectedPath}></sebas-dashboard>`
     }
   }
 
@@ -284,19 +343,29 @@ export class SebasApp extends LitElement {
           <span class="mark" aria-hidden="true">❯</span>
           <span class="name">sebas<small>agent router</small></span>
         </a>
-        ${NAV_ITEMS.map(
-          (item) => html`<a
-            class="item"
-            href=${item.href}
-            aria-current=${location.pathname === item.href ? 'page' : nothing}
+        <sebas-project-rail
+          .activePath=${this.selectedPath}
+          @rail-select=${this.onRailSelect}
+        ></sebas-project-rail>
+        <div class="spacer" aria-hidden="true"></div>
+        <div class="sidebar-footer">
+          <button
+            class="settings-btn"
+            aria-haspopup="dialog"
+            aria-label="Open settings"
+            @click=${() => (this.settingsOpen = true)}
           >
-            ${icon(item.icon)}${item.label}</a
-          >`,
-        )}
-        <div class="spacer"></div>
-        <div class="side-foot">local agent router console</div>
+            ${icon('settings', 16)}<span class="settings-label">Settings</span>
+          </button>
+        </div>
       </nav>
-      <main><div class="outlet">${this.renderOutlet()}</div></main>
+      <main
+        @open-settings=${() => (this.settingsOpen = true)}
+      ><div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div></main>
+      <sebas-settings-modal
+        ?open=${this.settingsOpen}
+        @close=${() => (this.settingsOpen = false)}
+      ></sebas-settings-modal>
     `
   }
 }

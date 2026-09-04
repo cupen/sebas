@@ -24,6 +24,8 @@ export interface SessionRow {
   is_active: boolean
   /** Bound project directory. `null` = inbox (no project). */
   project_dir: string | null
+  /** Short preview of the first user message, used as display label. */
+  prompt_preview: string | null
 }
 
 export interface SessionSummary {
@@ -267,9 +269,9 @@ export const api = {
   agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
 
   // Session mutations
-  createSession: (prompt: string, projectDir?: string | null, backend?: string | null) =>
+  createSession: (prompt?: string | null, projectDir?: string | null, backend?: string | null) =>
     post<{ key: string }>('/api/sessions', {
-      prompt,
+      prompt: prompt ?? null,
       project_dir: projectDir ?? null,
       backend: backend ?? null,
     }),
@@ -315,6 +317,21 @@ export const api = {
 
   // Project registry (Workbench left rail).
   projects,
+
+  // Archive
+  archiveList: () => get<ArchiveList>('/api/archive'),
+  archiveSession: (encodedKey: string) =>
+    post<{ status: string; entry: ArchiveEntry }>(`/api/sessions/${encodedKey}/archive`),
+  restoreSession: (encodedKey: string) =>
+    post<{ status: string; entry: ArchiveEntry }>(`/api/sessions/${encodedKey}/restore`),
+
+  // Filesystem
+  fsBrowse: (path: string) =>
+    get<FsBrowseResponse>(`/api/fs/browse?path=${encodeURIComponent(path)}`),
+  fsBrowseDirs: (path: string, root?: string | null) =>
+    root
+      ? get<FsBrowseResponse>(`/api/fs/browse-dirs?path=${encodeURIComponent(path)}&root=${encodeURIComponent(root)}`)
+      : get<FsBrowseResponse>(`/api/fs/browse-dirs?path=${encodeURIComponent(path)}`),
 }
 
 // ---- Project API ----
@@ -331,6 +348,26 @@ export interface ProjectBranchInfo {
   path: string
   branch: string | null
   accessible: boolean
+}
+
+/** One archived session entry. */
+export interface ArchiveEntry {
+  session_key: string
+  project_path: string
+  label: string
+  archived_at: number
+  retention_deadline: number
+}
+
+/** Response from GET /api/archive. */
+export interface ArchiveList {
+  archived_sessions: ArchiveEntry[]
+}
+
+/** Response from GET /api/fs/browse-dirs. */
+export interface FsBrowseResponse {
+  path: string
+  entries: { name: string; is_dir: boolean; has_subdirs?: boolean }[]
 }
 
 async function unwrapText(resp: Response): Promise<string> {

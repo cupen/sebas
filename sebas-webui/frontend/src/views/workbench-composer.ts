@@ -2,7 +2,9 @@
  * Workbench composer: pinned at the top of the dashboard right pane. Lets
  * the operator spin up a new session from the workbench without leaving the
  * overview; binds the new session to the currently-selected project, or
- * routes it to the inbox when nothing is selected.
+ * routes it to the inbox when nothing is selected. Plain Enter sends
+ * (Shift+Enter inserts a newline; an IME-composing Enter is ignored) via
+ * the 28px accent send button.
  *
  * Reaches the agent-core reachability report from /api/summary to gate
  * submit when the core is offline (a submit would only bounce). A transient
@@ -15,7 +17,6 @@ import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo, type BackendHint } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
-import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
@@ -36,11 +37,11 @@ export class SebasWorkbenchComposer extends LitElement {
 
   @state() private text = ''
   @state() private sending = false
+  @state() private error: string | null = null
   /** Execution-backend hint forwarded with the spawn request. */
   @state() private backend: BackendHint = 'acp'
   /** Reachable third-party agent kinds for the create-session dropdown. */
   @state() private kinds: AgentKindInfo[] = []
-  @state() private error: string | null = null
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
 
@@ -50,76 +51,120 @@ export class SebasWorkbenchComposer extends LitElement {
       :host {
         display: block;
       }
-      .provider-strip {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: var(--sebas-space-3);
-        color: var(--sebas-text-dim);
-        font-size: 0.78rem;
-        margin-bottom: var(--sebas-space-2);
-      }
-      .provider-strip .label {
-        font-family: var(--sebas-font-mono);
-        color: var(--sebas-text-dim);
-      }
-      .provider-strip .label.placeholder {
-        color: var(--sebas-text-faint);
-        letter-spacing: 0.15em;
-      }
-      .provider-strip a {
-        font-size: 0.78rem;
-        color: var(--sebas-text-faint);
-      }
-      .binding {
-        display: block;
-        font-family: var(--sebas-font-mono);
-        font-size: 0.75rem;
-        color: var(--sebas-text-faint);
-        margin-bottom: var(--sebas-space-2);
-      }
-      /* Composer card: matches the dark-mode aesthetic of the
-       * session-detail composer so the operator feels they're using the
-       * same control in both places. */
+      /* Composer: ONE rounded shell (preview 工作台同款), the wa-textarea
+       * inside is chrome-stripped so the shell is the only visible card. */
       .composer {
         background: var(--sebas-surface);
         border: 1px solid var(--sebas-border);
-        border-radius: var(--sebas-radius-lg);
-        box-shadow: var(--sebas-shadow-up);
+        border-radius: 18px;
         padding: var(--sebas-space-3);
         display: flex;
-        gap: var(--sebas-space-3);
-        align-items: flex-end;
-      }
-      .composer .backend-select {
-        flex: 0 0 auto;
-        width: 175px;
+        flex-direction: column;
+        gap: var(--sebas-space-2);
       }
       .composer wa-textarea {
-        flex: 1;
+        width: 100%;
+      }
+      /* 剥掉 wa-textarea 自带的底色/边框/阴影，只留纯文本输入区。 */
+      .composer wa-textarea::part(base) {
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        min-height: 36px;
+        max-height: 200px;
+        padding: 4px 8px;
       }
       /* 8.2: the native textarea lives in wa-textarea's shadow root, so the
-         shared focus-visible rule can't reach it — ring the host instead. */
+         shared focus-visible rule can't reach it — ring the host instead.
+         5.5 / design D5: composer focus is "your move", so the ring is the
+         --signal accent, not the shared indigo focus ring. */
       .composer wa-textarea:focus-within {
-        outline: var(--sebas-focus-ring);
+        outline: 2px solid var(--sebas-signal);
         outline-offset: 2px;
         border-radius: var(--sebas-radius-sm);
       }
-      .composer .send-col {
+      /* Bottom toolbar: provider label + binding + backend on the left, send
+       * on the right — the loose text rows that used to sit above the card. */
+      .composer-bottom {
         display: flex;
-        flex-direction: column;
         align-items: center;
-        gap: 4px;
+        gap: var(--sebas-space-2);
+        flex-wrap: wrap;
+        font-size: 0.78rem;
+        color: var(--sebas-text-dim);
       }
-      .composer kbd {
+      .composer-bottom .left-tools {
+        display: flex;
+        align-items: center;
+        gap: var(--sebas-space-2);
+        min-width: 0;
+      }
+      .composer-bottom .right-tools {
+        display: flex;
+        align-items: center;
+        gap: var(--sebas-space-2);
+        margin-left: auto;
+      }
+      .composer-bottom .label {
         font-family: var(--sebas-font-mono);
-        font-size: 0.62rem;
+      }
+      .composer-bottom .label.placeholder {
         color: var(--sebas-text-faint);
-        background: var(--sebas-surface-2);
-        border: 1px solid var(--sebas-border);
-        border-radius: var(--sebas-radius-sm);
-        padding: 1px 5px;
-        white-space: nowrap;
+        letter-spacing: 0.15em;
+      }
+      .composer-bottom .binding {
+        font-family: var(--sebas-font-mono);
+        color: var(--sebas-text-faint);
+      }
+      .composer-bottom a {
+        font-size: 0.78rem;
+        color: var(--sebas-text-faint);
+      }
+      /* Backend picker: a slim select inside the toolbar. */
+      .composer-bottom .backend-select {
+        font-size: 0.78rem;
+        --wa-select-min-height: 24px;
+        max-width: 220px;
+      }
+      /* IA v2：settings → 打开居中设置弹窗（冒泡 open-settings 事件，由
+       * app-shell 监听）；按钮外观与原链接一致。 */
+      .composer-bottom .settings-link {
+        border: none;
+        background: none;
+        padding: 0;
+        font: inherit;
+        font-size: 0.78rem;
+        color: var(--sebas-text-faint);
+        cursor: pointer;
+        transition: color var(--sebas-dur) var(--sebas-ease);
+      }
+      .composer-bottom .settings-link:hover {
+        color: var(--sebas-text-bright);
+      }
+      .composer-bottom .settings-link:focus-visible {
+        outline: var(--sebas-focus-ring);
+        outline-offset: 2px;
+      }
+      /* 28px accent icon send button; disabled dims instead of vanishing. */
+      .send-button {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        background: var(--sebas-accent);
+        color: var(--sebas-accent-ink);
+        border: none;
+        border-radius: var(--sebas-radius-md);
+        cursor: pointer;
+        padding: 0;
+        transition: opacity var(--sebas-dur) var(--sebas-ease);
+      }
+      .send-button:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      .send-button:hover:enabled {
+        filter: brightness(1.05);
       }
       .divider {
         border: none;
@@ -196,17 +241,19 @@ export class SebasWorkbenchComposer extends LitElement {
     return html`<span class="binding">→ inbox</span>`
   }
 
+  /**
+   * "settings →" no longer navigates (the retired /settings route redirects
+   * to /); it opens the shell's centered settings modal by dispatching a
+   * bubbling composed event that app-shell listens for.
+   */
+  private openSettings(): void {
+    this.dispatchEvent(new CustomEvent('open-settings', { bubbles: true, composed: true }))
+  }
+
   render() {
     const disabled = this.disabled()
     const placeholder = this.providerLabel ?? null
     return html`
-      <div class="provider-strip">
-        ${placeholder
-          ? html`<span class="label">${placeholder}</span>`
-          : html`<span class="label placeholder">· · ·</span>`}
-        <a href="/settings">settings →</a>
-      </div>
-      ${this.renderBinding()}
       ${this.unreachable
         ? html`
             <div class="callout callout-warning" role="status">
@@ -222,7 +269,7 @@ export class SebasWorkbenchComposer extends LitElement {
           `
         : nothing}
       <div class="composer">
-        <wa-select
+<wa-select
           class="backend-select"
           aria-label="Execution backend"
           value=${this.backend}
@@ -248,19 +295,51 @@ export class SebasWorkbenchComposer extends LitElement {
           .value=${this.text}
           @input=${(e: Event) => (this.text = (e.target as HTMLTextAreaElement).value)}
           @keydown=${(e: KeyboardEvent) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void this.submit()
+            // 回车直接发送；Shift+Enter 换行；IME 组词中的回车不触发发送。
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+              e.preventDefault()
+              void this.submit()
+            }
           }}
         ></wa-textarea>
-        <div class="send-col">
-          <wa-button
-            variant="brand"
-            appearance="accent"
-            ?disabled=${disabled}
-            ?loading=${this.sending}
-            @click=${() => void this.submit()}
-            >Send</wa-button
-          >
-          <kbd>⌘/Ctrl ⏎</kbd>
+        <div class="composer-bottom">
+          <div class="left-tools">
+            ${placeholder
+              ? html`<span class="label">${placeholder}</span>`
+              : html`<span class="label placeholder">· · ·</span>`}
+            ${this.renderBinding()}
+            <wa-select
+              class="backend-select"
+              aria-label="Execution backend"
+              value=${this.backend}
+              ?disabled=${disabled}
+              @change=${(e: Event) => {
+                const value = (e.target as HTMLInputElement).value
+                if (value === 'acp' || value === 'native') this.backend = value
+              }}
+            >
+              <wa-option value="acp">acp</wa-option>
+              <wa-option value="native">native</wa-option>
+            </wa-select>
+          </div>
+          <div class="right-tools">
+            <button
+              class="settings-link"
+              type="button"
+              aria-haspopup="dialog"
+              @click=${this.openSettings}
+            >
+              settings →
+            </button>
+            <button
+              class="send-button"
+              aria-label="Send"
+              ?disabled=${disabled}
+              @click=${() => void this.submit()}
+            >
+              ${icon('forward', 14)}
+            </button>
+          </div>
         </div>
       </div>
       <hr class="divider" />

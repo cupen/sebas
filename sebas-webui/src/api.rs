@@ -88,7 +88,9 @@ fn reachability_payload(r: &Reachability) -> serde_json::Value {
 }
 
 /// GET /api/sessions — every session row plus counts, focused-first.
+/// Runs archive cleanup before returning.
 pub async fn sessions_list(State(state): State<WebUiState>) -> Response {
+    crate::archive::cleanup_expired();
     let infos = state.backend.snapshot().await;
     let focused = state.backend.focused().await;
     let (rows, active, dormant, spawning) = build_session_rows(&infos, focused.as_ref());
@@ -218,7 +220,11 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
-    pub prompt: String,
+    /// Optional prompt for the new session. When omitted, the session is
+    /// created as a 0-turn placeholder (no ACP child is spawned until the
+    /// first message is sent).
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// Optional project directory for the new session's working dir. When
     /// omitted (or null), the session is bound to the workbench inbox
     /// (`project_dir = None`). The backend may reject a non-directory
@@ -237,16 +243,19 @@ pub struct SendMessageRequest {
     pub message: String,
 }
 
-/// POST /api/sessions — create a session from a prompt. Returns 201 with
-/// the encoded key; the session is still spawning, so the client can
-/// navigate to its detail view immediately.
+/// POST /api/sessions — create a session. Returns 201 with
+/// the encoded key. When `prompt` is provided, the session is spawned
+/// with that first message (ACP child starts immediately). When omitted,
+/// a 0-turn placeholder session is created (no ACP child until the first
+/// message).
 pub async fn create_session(
     State(state): State<WebUiState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Response {
+    let prompt = req.prompt.unwrap_or_default();
     let key = match state
         .backend
-        .spawn_with(req.prompt, req.project_dir, req.backend.as_deref())
+        .spawn_with(prompt, req.project_dir, req.backend.as_deref())
         .await
     {
         Ok(k) => k,
@@ -258,11 +267,16 @@ pub async fn create_session(
 }
 
 /// POST /api/sessions/{key}/message — send a message into the session.
+/// Returns 400 if the session is archived.
 pub async fn send_message(
     State(state): State<WebUiState>,
     Path(key): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Response {
+    // Reject messages to archived sessions.
+    if crate::archive::is_archived(&key) {
+        return api_error(StatusCode::BAD_REQUEST, "Session is archived");
+    }
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
@@ -328,6 +342,20 @@ pub async fn switch_session(State(state): State<WebUiState>, Path(key): Path<Str
         })),
     )
         .into_response()
+}
+
+/// GET /api/fs/browse-dirs?path=...&root=... — list only subdirectories for
+/// the directory tree picker. `root` defaults to `/` (full filesystem).
+/// All paths are resolved relative to and bounded within `root`.
+pub async fn browse_dirs(
+    axum::extract::Query(params): axum::extract::Query<crate::fs::BrowseParams>,
+) -> Response {
+    let path = params.path.as_deref().unwrap_or("");
+    let root = params.root.as_deref();
+    match crate::fs::browse_dirs(path, root) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 // ---- Project API endpoints ----
@@ -409,7 +437,65 @@ pub async fn projects_branch(
     .into_response()
 }
 
-// ---- WebSocket realtime channel ----
+// ---- Archive API endpoints ----
+
+/// GET /api/archive — list archived sessions. Runs cleanup before returning.
+pub async fn archive_list(State(_state): State<WebUiState>) -> Response {
+    crate::archive::cleanup_expired();
+    let entries = crate::archive::list();
+    Json(json!({ "archived_sessions": entries })).into_response()
+}
+
+/// POST /api/sessions/{key}/archive — archive a session.
+/// Moves it from the active session list into the archive. The session is
+/// closed (child killed if active) and set to read-only.
+pub async fn archive_session(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+
+    // Look up the session to get its project_dir and label.
+    let infos = state.backend.snapshot().await;
+    let info = match infos.iter().find(|i| {
+        i.chat_id == session_key.chat_id && i.thread_id == session_key.thread_id
+    }) {
+        Some(i) => i,
+        None => return api_error(StatusCode::NOT_FOUND, "Session not found"),
+    };
+
+    let project_path = info.project_dir.clone().unwrap_or_default();
+    let label = info.user_prompt.clone().unwrap_or_else(|| info.session_id.clone().unwrap_or_else(|| "unnamed".to_string()));
+
+    // Close the session first (kills child if active).
+    if let Err(_rej) = state.backend.close(session_key).await {
+        // If close fails (unknown, unavailable), we still proceed with the archive.
+    }
+
+    match crate::archive::archive_session(&key, &project_path, &label, state.archive_retention_days) {
+        Ok(entry) => (StatusCode::OK, Json(json!({ "status": "archived", "entry": entry }))).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// POST /api/sessions/{key}/restore — restore an archived session to its
+/// original project.
+pub async fn restore_session(
+    State(_state): State<WebUiState>,
+    Path(key): Path<String>,
+) -> Response {
+    match crate::archive::restore_session(&key) {
+        Some(entry) => {
+            // The session key is the same, so it reappears in the next snapshot
+            // fetch. The frontend will re-fetch the session list.
+            (StatusCode::OK, Json(json!({ "status": "restored", "entry": entry }))).into_response()
+        }
+        None => api_error(StatusCode::NOT_FOUND, "Archived session not found"),
+    }
+}
 
 /// GET /ws — upgrade to a WebSocket and stream session events as
 /// self-describing JSON frames. Every connected client receives every

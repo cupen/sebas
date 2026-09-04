@@ -16,6 +16,7 @@ pub const HELP_TEXT: &str = "可用命令:\n\
 /upgrade [dev|--dev] [dry-run|--dry-run] — 通过 watchdog 升级并重启\n\
 /rollback — 通过 watchdog 回滚并重启\n\
 /restart — 通过 watchdog 重启 core\n\
+/confirm <token> — 确认执行待确认的危险操作（/upgrade /rollback /restart 提交后）\n\
 /services — 查看 watchdog 服务状态\n\
 /system — 查看 watchdog 系统状态\n\
 /gateway on|off|restart|status — 管理 gateway 服务\n\
@@ -60,6 +61,9 @@ pub enum Command {
     },
     Rollback,
     Restart,
+    /// `/confirm <token>` — 兑换待确认危险操作的令牌（sebas-29s）。
+    /// token 为空时入站层回复用法提示。
+    Confirm(String),
     Services,
     /// `/system` — watchdog 系统状态（openspec/specs/router-commands/spec.md control commands）。
     System,
@@ -130,6 +134,9 @@ pub fn parse_command(input: &str) -> Command {
         }
         "/rollback" if arg.is_empty() => Command::Rollback,
         "/restart" if arg.is_empty() => Command::Restart,
+        // `/confirm <token>`：token 为空也解析为 Confirm（入站层回用法提示），
+        // 不走 PassThrough——把裸 /confirm 转发给 claude code 毫无意义。
+        "/confirm" => Command::Confirm(arg.into()),
         "/services" if arg.is_empty() => Command::Services,
         // `/system` 是只读状态命令，与 `/status` 同级：忽略尾随参数（例如
         // `/system  now` 仍视为 System），不要求空 arg。
@@ -194,6 +201,21 @@ mod tests {
         assert_eq!(
             parse_command("/gateway"),
             Command::PassThrough("/gateway".into())
+        );
+    }
+
+    #[test]
+    fn parses_confirm_command() {
+        assert_eq!(
+            parse_command("/confirm tok_abc123"),
+            Command::Confirm("tok_abc123".into())
+        );
+        // 裸 /confirm 不走 PassThrough（转发给 claude code 毫无意义），
+        // 解析为空 token 由入站层回用法提示。
+        assert_eq!(parse_command("/confirm"), Command::Confirm(String::new()));
+        assert_eq!(
+            parse_command("/confirmtx"),
+            Command::PassThrough("/confirmtx".into())
         );
     }
 

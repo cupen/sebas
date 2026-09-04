@@ -86,6 +86,34 @@ async fn webui_status_routes_to_watchdog_webui() {
     );
 }
 
+/// `/confirm <token>` routes to `Out::WatchdogConfirm` without requiring an
+/// active session (sebas-29s): confirmation redemption is a chat-level control
+/// op, the dispatcher re-uses the same Feishu actor for the Confirm RPC.
+#[tokio::test]
+async fn confirm_command_routes_to_watchdog_confirm() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    dispatch_text(&router, "/confirm tok_abc123").await;
+    let out = next_out(&mut out_rx).await;
+    assert!(
+        matches!(out, Out::WatchdogConfirm { ref key, ref token }
+            if key.chat_id == "oc_control" && token == "tok_abc123"),
+        "expected WatchdogConfirm, got {out:?}"
+    );
+}
+
+/// Bare `/confirm` (no token) must not forward anywhere — it replies with
+/// usage text instead of silently dropping or passing through to claude.
+#[tokio::test]
+async fn bare_confirm_replies_usage_text() {
+    let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
+    dispatch_text(&router, "/confirm").await;
+    let out = next_out(&mut out_rx).await;
+    assert!(
+        matches!(out, Out::PlainText { ref content, .. } if content.contains("/confirm <token>")),
+        "expected usage PlainText, got {out:?}"
+    );
+}
+
 /// A non-control slash command with an unmapped key must not route to a
 /// watchdog event — it stays a core routing decision (spawn/passthrough),
 /// proving the control split keeps core commands on the core path.

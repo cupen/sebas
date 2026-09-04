@@ -32,19 +32,33 @@ export class SebasSessionDetail extends LitElement {
   static styles = [
     viewStyles,
     css`
+      /* 满幅面板（预览原型 workbench 同款）：宿主随 outlet 拉伸，
+         状态头钉顶、transcript 吃满余高、composer 钉底。 */
+      :host {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        min-width: 0;
+      }
       .detail {
         display: flex;
         flex-direction: column;
-        gap: var(--sebas-space-4);
-        min-height: calc(100vh - 170px);
+        flex: 1;
+        min-height: 0;
       }
       .head {
         display: flex;
         align-items: center;
         gap: var(--sebas-space-3);
         flex-wrap: wrap;
-        padding: var(--sebas-space-3) var(--sebas-space-4);
+        flex-shrink: 0;
+        padding: var(--sebas-space-3) var(--sebas-space-5);
         border-left: 3px solid var(--sebas-status-dormant);
+        border-bottom: 1px solid var(--sebas-border);
+        background: var(--sebas-surface);
+        border-radius: 0;
+        box-shadow: none;
         transition: border-color var(--sebas-dur) var(--sebas-ease);
       }
       .head[data-status='starting'] {
@@ -119,14 +133,14 @@ export class SebasSessionDetail extends LitElement {
         color: var(--sebas-text-faint);
         margin-bottom: var(--sebas-space-1);
       }
-      /* Transcript: the streaming area scrolls internally; the composer
-       * stays pinned underneath (margin-top: auto on a full-height column). */
+      /* Transcript: 满幅面板区——flex 吃满余高，滚动由内层
+         <sebas-transcript-view fill> 的 .scroll 负责（单一滚动区），
+         composer 钉在底部。 */
       .transcript {
         flex: 1 1 auto;
-        min-height: 200px;
-        max-height: 58vh;
-        overflow-y: auto;
-        padding: var(--sebas-space-4) var(--sebas-space-5);
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
       }
       .transcript .entry {
         padding: var(--sebas-space-2) 0;
@@ -206,22 +220,34 @@ export class SebasSessionDetail extends LitElement {
       .body .hljs-type {
         color: #38d1dd;
       }
-      /* Composer, pinned to the bottom of the column. */
+      /* Composer 底座：钉在面板底部的通栏（预览原型 composer-area 同款），
+         内层 .composer-shell 才是 18px 圆角 shell。 */
       .composer {
-        margin-top: auto;
+        flex-shrink: 0;
+        border-top: 1px solid var(--sebas-border);
+        background: var(--sebas-bg);
+        padding: 0 var(--sebas-space-5) var(--sebas-space-4);
+      }
+      .composer-shell {
         background: var(--sebas-surface);
         border: 1px solid var(--sebas-border);
-        border-radius: var(--sebas-radius-lg);
-        box-shadow: var(--sebas-shadow-up);
+        border-radius: 18px;
         padding: var(--sebas-space-3);
         display: flex;
-        gap: var(--sebas-space-3);
-        align-items: flex-end;
-        position: sticky;
-        bottom: var(--sebas-space-4);
+        flex-direction: column;
+        gap: var(--sebas-space-2);
       }
       .composer wa-textarea {
-        flex: 1;
+        width: 100%;
+      }
+      /* 剥掉 wa-textarea 自带的底色/边框/阴影，只留纯文本输入区。 */
+      .composer wa-textarea::part(base) {
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        min-height: 36px;
+        max-height: 200px;
+        padding: 4px 8px;
       }
       /* 8.2: the native textarea lives in wa-textarea's shadow root, so the
          shared focus-visible rule can't reach it — ring the host instead. */
@@ -230,21 +256,32 @@ export class SebasSessionDetail extends LitElement {
         outline-offset: 2px;
         border-radius: var(--sebas-radius-sm);
       }
-      .composer .send-col {
+      .composer-bottom {
         display: flex;
-        flex-direction: column;
         align-items: center;
-        gap: 4px;
+        justify-content: flex-end;
+        gap: var(--sebas-space-2);
       }
-      .composer kbd {
-        font-family: var(--sebas-font-mono);
-        font-size: 0.62rem;
-        color: var(--sebas-text-faint);
-        background: var(--sebas-surface-2);
-        border: 1px solid var(--sebas-border);
-        border-radius: var(--sebas-radius-sm);
-        padding: 1px 5px;
-        white-space: nowrap;
+      /* 28px accent icon send button; disabled dims instead of vanishing. */
+      .send-button {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        background: var(--sebas-accent);
+        color: var(--sebas-accent-ink);
+        border: none;
+        border-radius: var(--sebas-radius-md);
+        cursor: pointer;
+        padding: 0;
+        transition: opacity var(--sebas-dur) var(--sebas-ease);
+      }
+      .send-button:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      .send-button:hover:enabled {
+        filter: brightness(1.05);
       }
       .dialog-body {
         margin: 0;
@@ -348,7 +385,7 @@ export class SebasSessionDetail extends LitElement {
     const d = this.data
     return html`
       <div class="detail">
-        <div class="head panel" data-status=${d.status_slug}>
+        <div class="head" data-status=${d.status_slug}>
           <sebas-status-badge
             slug=${d.status_slug}
             label=${d.status_label}
@@ -391,7 +428,7 @@ export class SebasSessionDetail extends LitElement {
         <sebas-review-cards .sessionKey=${d.encoded_key}></sebas-review-cards>
 
         <section
-          class="panel transcript body"
+          class="transcript"
           aria-label="Session transcript"
         >
           ${d.body.length === 0
@@ -403,27 +440,38 @@ export class SebasSessionDetail extends LitElement {
                 </div>
               `
             : html`<sebas-transcript-view
+                fill
                 .entries=${d.body}
                 sessionKey=${d.encoded_key}
               ></sebas-transcript-view>`}
         </section>
 
         <div class="composer">
-          <wa-textarea
-            placeholder="Message the agent…"
-            aria-label="Message"
-            resize="auto"
-            value=${this.message}
-            @input=${(e: Event) => (this.message = (e.target as HTMLTextAreaElement).value)}
-            @keydown=${(e: KeyboardEvent) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) this.send()
-            }}
-          ></wa-textarea>
-          <div class="send-col">
-            <wa-button variant="brand" appearance="accent" ?loading=${this.sending} @click=${this.send}
-              >Send</wa-button
-            >
-            <kbd>⌘/Ctrl ⏎</kbd>
+          <div class="composer-shell">
+            <wa-textarea
+              placeholder="Message the agent…"
+              aria-label="Message"
+              resize="auto"
+              value=${this.message}
+              @input=${(e: Event) => (this.message = (e.target as HTMLTextAreaElement).value)}
+              @keydown=${(e: KeyboardEvent) => {
+                // 回车直接发送；Shift+Enter 换行；IME 组词中的回车不触发发送。
+                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                  e.preventDefault()
+                  void this.send()
+                }
+              }}
+            ></wa-textarea>
+            <div class="composer-bottom">
+              <button
+                class="send-button"
+                aria-label="Send"
+                ?disabled=${this.sending}
+                @click=${this.send}
+              >
+                ${icon('forward', 14)}
+              </button>
+            </div>
           </div>
         </div>
 

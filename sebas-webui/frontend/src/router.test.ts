@@ -1,15 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { matchRoute } from './router.js'
 
+// IA v2 production routes (app-shell.ts ROUTES): the workbench, the
+// sessions table and session deep links. /settings /gateway /about
+// redirect to / and /admin/* is deleted — no fixture entries for them.
 const ROUTES = [
   { id: 'dashboard', pattern: '/' },
   { id: 'sessions', pattern: '/sessions' },
   { id: 'session-detail', pattern: '/sessions/:key' },
-  { id: 'settings', pattern: '/settings' },
-  { id: 'gateway', pattern: '/gateway' },
-  { id: 'about', pattern: '/about' },
-  { id: 'admin-login', pattern: '/admin/login' },
-  { id: 'admin', pattern: '/admin/:view' },
 ]
 
 describe('matchRoute', () => {
@@ -17,10 +15,8 @@ describe('matchRoute', () => {
     expect(matchRoute(ROUTES, '/')).toEqual({ id: 'dashboard', params: {} })
   })
 
-  it('matches plain views', () => {
-    for (const id of ['sessions', 'settings', 'gateway', 'about']) {
-      expect(matchRoute(ROUTES, `/${id}`)?.id).toBe(id)
-    }
+  it('matches the sessions list', () => {
+    expect(matchRoute(ROUTES, '/sessions')?.id).toBe('sessions')
   })
 
   it('captures the session key param RAW (still percent-encoded)', () => {
@@ -32,14 +28,10 @@ describe('matchRoute', () => {
     expect(m?.params['key']).toBe('oc_abc%00')
   })
 
-  it('matches admin login before the admin :view wildcard', () => {
-    expect(matchRoute(ROUTES, '/admin/login')?.id).toBe('admin-login')
-    expect(matchRoute(ROUTES, '/admin/status')?.id).toBe('admin')
-    expect(matchRoute(ROUTES, '/admin/status')?.params['view']).toBe('status')
-  })
-
-  it('returns null for unmatched paths', () => {
+  it('returns null for unmatched (incl. retired and deleted) paths', () => {
     expect(matchRoute(ROUTES, '/nope')).toBeNull()
     expect(matchRoute(ROUTES, '/sessions/extra/deep')).toBeNull()
+    expect(matchRoute(ROUTES, '/settings')).toBeNull()
+    expect(matchRoute(ROUTES, '/admin/status')).toBeNull()
   })
 })

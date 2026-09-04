@@ -201,6 +201,14 @@ impl RouterHandle {
             }
             Command::Provider => self.on_provider(key).await,
             Command::PassThrough(p) => {
+                // 原生会话续聊（make-feishu-optional-webui-primary）：key 已是
+                // agent-* 前缀 → 走桥，不经 acp 的 route_text/continue_session。
+                if let Some(bridge) = self.native.read().await.clone()
+                    && bridge.is_native(&key)
+                {
+                    bridge.prompt(key, p);
+                    return;
+                }
                 match self.map.route_text(key.clone(), p.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
                         // emit_turn_card publishes the new-turn phase reset.
@@ -231,6 +239,13 @@ impl RouterHandle {
             }
             Command::Btw(text) => {
                 // /btw: same routing as PassThrough, but priority=true so it jumps the queue.
+                // 原生会话同样直通桥（make-feishu-optional-webui-primary）。
+                if let Some(bridge) = self.native.read().await.clone()
+                    && bridge.is_native(&key)
+                {
+                    bridge.prompt(key, text);
+                    return;
+                }
                 match self.map.route_text(key.clone(), text.clone()).await {
                     Ok(crate::state::TextRoute::Continue(sid)) => {
                         // emit_turn_card publishes the new-turn phase reset.
@@ -624,6 +639,14 @@ impl RouterHandle {
         // 新会话也不继承上一条入站的回复目标（话题内 root_id）。和 allowlist
         // 一样随会话终止清理，防止 ReplyTargetMap 无界增长。
         self.reply_targets.clear(&key).await;
+        // 原生执行体路由（make-feishu-optional-webui-primary，design D2）：
+        // 该 chat 已是原生会话（agent-* 前缀）→ 走桥；否则走 acp 桥（默认）。
+        if let Some(bridge) = self.native.read().await.clone()
+            && bridge.is_native(&key)
+        {
+            bridge.prompt(key, prompt);
+            return;
+        }
         // Only emit SpawnAcp. The root card is sent by the dispatcher *after*
         // `create_session` mints the real session_id, so the card's MsgIdMap
         // entry (and later streaming UpdateCards) key off that session_id.

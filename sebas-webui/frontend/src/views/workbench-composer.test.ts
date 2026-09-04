@@ -97,7 +97,7 @@ vi.mock('../api/client.js', () => ({
 
 // Import the composer module now that the api is mocked and the
 // ElementInternals polyfill is in place. The WA module side-effects
-// (registering wa-button/wa-textarea) and the @customElement decorator
+// (registering wa-textarea/wa-select/wa-option) and the @customElement decorator
 // on SebasWorkbenchComposer both run at this point.
 import './workbench-composer.js'
 
@@ -204,7 +204,7 @@ describe('sebas-workbench-composer', () => {
 
     const created = vi.fn()
     el.addEventListener('composer-created', created)
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     expect(sendBtn).toBeTruthy()
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
@@ -230,7 +230,7 @@ describe('sebas-workbench-composer', () => {
 
     const created = vi.fn()
     el.addEventListener('composer-created', created)
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
@@ -245,7 +245,7 @@ describe('sebas-workbench-composer', () => {
   it('submit is no-op when text is empty', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     const el = await mount({ projectDir: null })
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     expect(api.createSession).not.toHaveBeenCalled()
@@ -271,7 +271,7 @@ describe('sebas-workbench-composer', () => {
     select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
     await el.updateComplete
 
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
@@ -307,7 +307,7 @@ describe('sebas-workbench-composer', () => {
     select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
     await el.updateComplete
 
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
@@ -328,7 +328,7 @@ describe('sebas-workbench-composer', () => {
     ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
     await el.updateComplete
 
-    const sendBtn = el.shadowRoot?.querySelector('wa-button')
+    const sendBtn = el.shadowRoot?.querySelector('.send-button')
     ;(sendBtn as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete

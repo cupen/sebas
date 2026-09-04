@@ -56,8 +56,3 @@ body {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
-
-sebas-app {
-  display: block;
-  min-height: 100vh;
-}

@@ -145,7 +145,9 @@ async fn seed_and_send_root_card(
 ) -> anyhow::Result<()> {
     // seed_card（openspec/specs/feishu-cards/spec.md）: 记录 user_prompt 供
     // 后续 flush 重渲染引用块。幂等。
-    router.seed_card(session_id.to_string(), prompt.to_string()).await;
+    router
+        .seed_card(session_id.to_string(), prompt.to_string())
+        .await;
     // Send the seed card (empty body) and record its message_id keyed by the
     // real session_id (so streaming UpdateCards resolve correctly).
     // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
@@ -178,7 +180,11 @@ async fn seed_and_send_root_card(
         {
             Ok(rid) => {
                 reactions
-                    .record(session_id, sebas_router::card_state::phase::SEED.into(), rid)
+                    .record(
+                        session_id,
+                        sebas_router::card_state::phase::SEED.into(),
+                        rid,
+                    )
                     .await
             }
             Err(e) => warn!(%session_id, "initial react failed: {e}"),
@@ -591,6 +597,21 @@ pub(crate) async fn dispatch_out(
                 warn!(?e, "send_text failed");
             }
         }
+        Out::WatchdogConfirm { key, token } => {
+            // 兑换待确认令牌（sebas-29s）：Confirm RPC 复用同一 Feishu actor
+            // （同 chat_id，open_id 两侧均为空串），watchdog 校验同 actor
+            // 单次兑换后以 detached 方式执行原操作并返回其 operation_id，
+            // 因此确认后同样按长操作轮询进度。
+            let content = submit_watchdog_control(
+                &key,
+                crate::watchdog::control_rpc::RpcControlRequest::Confirm { token },
+                "确认执行",
+            )
+            .await;
+            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+                warn!(?e, "send_text failed");
+            }
+        }
         Out::WatchdogServices { key } => {
             let content = submit_watchdog_control(
                 &key,
@@ -722,12 +743,15 @@ async fn submit_watchdog_control(
         }
     };
 
-    // 长操作（update/rollback/restart）提交后需要轮询 progress 事件；其余为同步查询，无需轮询。
+    // 长操作（update/rollback/restart）提交后需要轮询 progress 事件；Confirm
+    // 兑换后 watchdog 以 detached 执行原长操作并返回其 operation_id，同样轮询。
+    // 其余为同步查询，无需轮询。
     let is_long_op = matches!(
         &request,
         crate::watchdog::control_rpc::RpcControlRequest::Update { .. }
             | crate::watchdog::control_rpc::RpcControlRequest::Rollback { .. }
             | crate::watchdog::control_rpc::RpcControlRequest::RestartCore
+            | crate::watchdog::control_rpc::RpcControlRequest::Confirm { .. }
     );
     let envelope = feishu_control_envelope(key, secret.clone(), request);
 
@@ -785,8 +809,11 @@ async fn submit_watchdog_control(
             action,
             message,
             expires_in,
-            ..
-        }) => format!("{label}请求需要确认: {message} (action={action}, {expires_in}s 内有效)"),
+            token,
+        }) => format!(
+            "{label}请求需要确认: {message} (action={action})\n\
+             确认执行: 回复 /confirm {token}（{expires_in}s 内有效）"
+        ),
         Err(e) => format!("{label}请求失败: {e}"),
     }
 }
@@ -863,6 +890,150 @@ async fn poll_operation_progress(
     lines.join("\n")
 }
 
+pub(crate) async fn dispatch_out_without_feishu(
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    gateway_cfg: Option<&GatewayConfig>,
+    out: Out,
+) -> anyhow::Result<()> {
+    match out {
+        Out::WebSpawn {
+            key,
+            prompt,
+            project_dir,
+            kind,
+        } => {
+            handle_web_spawn(
+                cfg,
+                router,
+                mgr,
+                gateway_cfg,
+                key,
+                prompt,
+                project_dir,
+                kind,
+            )
+            .await
+        }
+        Out::SpawnResume {
+            key,
+            session_id: old_sid,
+            prompt,
+            ..
+        } => {
+            handle_spawn_resume_without_feishu(cfg, router, mgr, gateway_cfg, key, old_sid, prompt)
+                .await
+        }
+        Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
+        other => {
+            debug!(
+                ?other,
+                "feishu-less outbound pump dropped a chat-facing Out"
+            );
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_web_spawn(
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    gateway_cfg: Option<&GatewayConfig>,
+    key: SessionKey,
+    prompt: String,
+    project_dir: Option<String>,
+    requested_kind: Option<String>,
+) -> anyhow::Result<()> {
+    let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
+    let command = cfg.acp.command_for(&kind).unwrap_or_default();
+    let (session_id, pending, rx) = match acp_spawn_and_activate(
+        mgr,
+        router,
+        &key,
+        &prompt,
+        &kind,
+        command,
+        project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
+        gateway_cfg,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            router.fail_spawn(&key).await;
+            warn!(?e, "web_spawn: acp_spawn_and_activate failed");
+            return Ok(());
+        }
+    };
+    // Seed card state and wire the pump (no Feishu card operations).
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
+    let idle_timeout = idle_timeout_from(cfg, &kind);
+    spawn_acp_pump_with_idle(
+        rx,
+        router.clone(),
+        session_id.clone(),
+        idle_timeout,
+        Some(mgr.clone()),
+    );
+    // Flush prompts queued during spawn.
+    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+        warn!(?e, "web_spawn: flush_pending_prompts failed");
+    }
+    Ok(())
+}
+
+async fn handle_spawn_resume_without_feishu(
+    cfg: &Config,
+    router: &RouterHandle,
+    mgr: &Arc<SessionManager>,
+    gateway_cfg: Option<&GatewayConfig>,
+    key: SessionKey,
+    old_sid: String,
+    prompt: String,
+) -> anyhow::Result<()> {
+    let kind = cfg.acp.default_kind().to_string();
+    let command = cfg.acp.command_for(&kind).unwrap_or_default();
+    let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
+        mgr,
+        router,
+        &key,
+        &old_sid,
+        &prompt,
+        &kind,
+        command,
+        cfg.acp.work_dir_for(&kind),
+        gateway_cfg,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            router.fail_spawn(&key).await;
+            warn!(?e, %old_sid, "resume failed (feishu-less run; no card sent)");
+            return Ok(());
+        }
+    };
+    if !resumed {
+        info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
+    }
+    router.seed_card(session_id.clone(), prompt.clone()).await;
+    let idle_timeout = idle_timeout_from(cfg, &kind);
+    spawn_acp_pump_with_idle(
+        rx,
+        router.clone(),
+        session_id.clone(),
+        idle_timeout,
+        Some(mgr.clone()),
+    );
+    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
+        warn!(?e, "resume: flush_pending_prompts failed");
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,134 +1399,4 @@ mod tests {
             }
         );
     }
-}
-
-pub(crate) async fn dispatch_out_without_feishu(
-    cfg: &Config,
-    router: &RouterHandle,
-    mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
-    out: Out,
-) -> anyhow::Result<()> {
-    match out {
-        Out::WebSpawn {
-            key,
-            prompt,
-            project_dir,
-            kind,
-        } => handle_web_spawn(cfg, router, mgr, gateway_cfg, key, prompt, project_dir, kind).await,
-        Out::SpawnResume {
-            key,
-            session_id: old_sid,
-            prompt,
-            ..
-        } => {
-            handle_spawn_resume_without_feishu(cfg, router, mgr, gateway_cfg, key, old_sid, prompt)
-                .await
-        }
-        Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
-        other => {
-            debug!(?other, "feishu-less outbound pump dropped a chat-facing Out");
-            Ok(())
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_web_spawn(
-    cfg: &Config,
-    router: &RouterHandle,
-    mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
-    key: SessionKey,
-    prompt: String,
-    project_dir: Option<String>,
-    requested_kind: Option<String>,
-) -> anyhow::Result<()> {
-    let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
-    let command = cfg.acp.command_for(&kind).unwrap_or_default();
-    let (session_id, pending, rx) = match acp_spawn_and_activate(
-        mgr,
-        router,
-        &key,
-        &prompt,
-        &kind,
-        command,
-        project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
-        gateway_cfg,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            router.fail_spawn(&key).await;
-            warn!(?e, "web_spawn: acp_spawn_and_activate failed");
-            return Ok(());
-        }
-    };
-    // Seed card state and wire the pump (no Feishu card operations).
-    router.seed_card(session_id.clone(), prompt.clone()).await;
-    // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
-    let idle_timeout = idle_timeout_from(cfg, &kind);
-    spawn_acp_pump_with_idle(
-        rx,
-        router.clone(),
-        session_id.clone(),
-        idle_timeout,
-        Some(mgr.clone()),
-    );
-    // Flush prompts queued during spawn.
-    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
-        warn!(?e, "web_spawn: flush_pending_prompts failed");
-    }
-    Ok(())
-}
-
-async fn handle_spawn_resume_without_feishu(
-    cfg: &Config,
-    router: &RouterHandle,
-    mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
-    key: SessionKey,
-    old_sid: String,
-    prompt: String,
-) -> anyhow::Result<()> {
-    let kind = cfg.acp.default_kind().to_string();
-    let command = cfg.acp.command_for(&kind).unwrap_or_default();
-    let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
-        mgr,
-        router,
-        &key,
-        &old_sid,
-        &prompt,
-        &kind,
-        command,
-        cfg.acp.work_dir_for(&kind),
-        gateway_cfg,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            router.fail_spawn(&key).await;
-            warn!(?e, %old_sid, "resume failed (feishu-less run; no card sent)");
-            return Ok(());
-        }
-    };
-    if !resumed {
-        info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
-    }
-    router.seed_card(session_id.clone(), prompt.clone()).await;
-    let idle_timeout = idle_timeout_from(cfg, &kind);
-    spawn_acp_pump_with_idle(
-        rx,
-        router.clone(),
-        session_id.clone(),
-        idle_timeout,
-        Some(mgr.clone()),
-    );
-    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
-        warn!(?e, "resume: flush_pending_prompts failed");
-    }
-    Ok(())
 }

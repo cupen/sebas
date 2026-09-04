@@ -46,6 +46,23 @@ export function matchRoute(routes: RouteDef[], path: string): RouteMatch | null 
   return null
 }
 
+/**
+ * IA v2 退役路径：settings / gateway / about 并入侧栏设置弹窗与工作台，
+ * 旧链接（收藏夹、历史记录）统一 canonical 回 `/`，而不是 404。
+ * admin 按决策直接删除——`/admin/*` 不做重定向，当作未知路径交给
+ * app-shell 的 fallback（渲染 workbench）。
+ */
+export const RETIRED_REDIRECTS: Readonly<Record<string, string>> = {
+  '/settings': '/',
+  '/gateway': '/',
+  '/about': '/',
+}
+
+/** Redirect target for a retired path; `null` when the path stands as-is. */
+export function redirectFor(path: string): string | null {
+  return RETIRED_REDIRECTS[path] ?? null
+}
+
 /** Navigate via the History API and notify listeners. */
 export function navigate(path: string): void {
   history.pushState({}, '', path)

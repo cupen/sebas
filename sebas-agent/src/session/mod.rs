@@ -161,6 +161,13 @@ impl SessionManager {
         self.approver.is_some()
     }
 
+    /// 取回当前审批回答者（若已挂）。宿主要把「回填决定」导向内核实际使用
+    /// 的同一个 approver 时用——例如 webui 的 `NativeAgentBackend` 持
+    /// `Arc<dyn Approver>` 直接 `answer()`，避免双 hub 错位。
+    pub fn approver(&self) -> Option<Arc<dyn Approver>> {
+        self.approver.clone()
+    }
+
     /// 创建绑定 `workdir` 的会话（多会话并发，彼此隔离）。
     pub fn create_session(&self, workdir: PathBuf) -> SessionHandle {
         let key = uuid::Uuid::new_v4().to_string();

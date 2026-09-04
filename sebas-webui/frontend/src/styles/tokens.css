@@ -1,8 +1,11 @@
 /* Design tokens for the sebas console.
  *
  * Dark is the default theme: the palette below is the dark scheme, and the
- * `prefers-color-scheme: light` override further down re-maps it for users
- * whose system explicitly asks for light. Every status colour ships as a
+ * `:root:not(.wa-dark)` override further down re-maps it for light. The single
+ * switch is the `wa-dark` class on <html> (default on, shipped by index.html
+ * and applied pre-paint from src/theme.ts), so a user can override the OS
+ * preference from Settings → Appearance and Web Awesome, these tokens and
+ * wa-overrides.css all move together. Every status colour ships as a
  * trio (foreground/dot, tinted background, border) so badges, table rows,
  * cards and headers can share one consistent semantic source. Colour is
  * never the only status channel — the status badge always renders label +
@@ -35,8 +38,13 @@
   --sebas-accent-soft: rgba(139, 147, 255, 0.13);
   --sebas-accent-border: rgba(139, 147, 255, 0.38);
 
+  /* Signal: the operator-demand accent — "your move". Marks a pending
+   * permission request and the composer holding focus, and nothing else
+   * (status hues describe the machine; this describes the human's turn). */
+  --sebas-signal: #ff9457;
+
   /* Status: hue + a shape glyph pair from the API so greyscale survives.
-   * Each status = foreground (dot + label) / tinted bg / border. */
+   * Each status = foreground (dot + tinted bg / border). */
   --sebas-status-starting: #6ea8fe;
   --sebas-status-starting-bg: rgba(110, 168, 254, 0.12);
   --sebas-status-starting-border: rgba(110, 168, 254, 0.32);
@@ -97,63 +105,57 @@
   --sebas-selection-bg: rgba(139, 147, 255, 0.32);
 }
 
-/* Light re-map: engages only on an explicit light system preference. */
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
+/* Light re-map: engages whenever <html> is missing the wa-dark class —
+ * system-light via theme.ts, or an explicit light choice in
+ * Settings → Appearance. */
+:root:not(.wa-dark) {
+  color-scheme: light;
 
-    --sebas-bg: #f4f5f9;
-    --sebas-surface: #ffffff;
-    --sebas-surface-2: #f0f2f7;
-    --sebas-surface-3: #e7eaf2;
-    --sebas-well: #f6f8fa;
-    --sebas-border: #dfe3ec;
-    --sebas-border-strong: #c6cddd;
+  --sebas-bg: #f4f5f9;
+  --sebas-surface: #ffffff;
+  --sebas-surface-2: #f0f2f7;
+  --sebas-surface-3: #e7eaf2;
+  --sebas-well: #f6f8fa;
+  --sebas-border: #dfe3ec;
+  --sebas-border-strong: #c6cddd;
 
-    --sebas-text-bright: #0f131c;
-    --sebas-text: #1e2532;
-    --sebas-text-dim: #5c6880;
-    --sebas-text-faint: #9aa3b7;
+  --sebas-text-bright: #0f131c;
+  --sebas-text: #1e2532;
+  --sebas-text-dim: #5c6880;
+  --sebas-text-faint: #9aa3b7;
 
-    --sebas-accent: #4750d8;
-    --sebas-accent-strong: #4750d8;
-    --sebas-accent-hover: #363ec2;
-    --sebas-accent-ink: #ffffff;
-    --sebas-accent-soft: rgba(71, 80, 216, 0.08);
-    --sebas-accent-border: rgba(71, 80, 216, 0.3);
+  --sebas-accent: #4750d8;
+  --sebas-accent-strong: #4750d8;
+  --sebas-accent-hover: #363ec2;
+  --sebas-accent-ink: #ffffff;
+  --sebas-accent-soft: rgba(71, 80, 216, 0.08);
+  --sebas-accent-border: rgba(71, 80, 216, 0.3);
 
-    --sebas-status-starting: #2f6fdd;
-    --sebas-status-starting-bg: rgba(47, 111, 221, 0.08);
-    --sebas-status-starting-border: rgba(47, 111, 221, 0.26);
-    --sebas-status-queued: #0d95a8;
-    --sebas-status-queued-bg: rgba(13, 149, 168, 0.08);
-    --sebas-status-queued-border: rgba(13, 149, 168, 0.26);
-    --sebas-status-working: #a85f08;
-    --sebas-status-working-bg: rgba(168, 95, 8, 0.08);
-    --sebas-status-working-border: rgba(168, 95, 8, 0.26);
-    --sebas-status-done: #178040;
-    --sebas-status-done-bg: rgba(23, 128, 64, 0.08);
-    --sebas-status-done-border: rgba(23, 128, 64, 0.26);
-    --sebas-status-failed: #d13438;
-    --sebas-status-failed-bg: rgba(209, 52, 56, 0.08);
-    --sebas-status-failed-border: rgba(209, 52, 56, 0.26);
-    --sebas-status-dormant: #64748b;
-    --sebas-status-dormant-bg: rgba(100, 116, 139, 0.09);
-    --sebas-status-dormant-border: rgba(100, 116, 139, 0.26);
+  --sebas-signal: #c2410c;
 
-    --sebas-shadow-1: 0 1px 2px rgba(15, 19, 28, 0.08);
-    --sebas-shadow-2: 0 12px 32px rgba(15, 19, 28, 0.14);
-    --sebas-shadow-up: 0 -10px 28px rgba(15, 19, 28, 0.1);
-    --sebas-selection-bg: rgba(71, 80, 216, 0.22);
-  }
-}
+  --sebas-status-starting: #2f6fdd;
+  --sebas-status-starting-bg: rgba(47, 111, 221, 0.08);
+  --sebas-status-starting-border: rgba(47, 111, 221, 0.26);
+  --sebas-status-queued: #0d95a8;
+  --sebas-status-queued-bg: rgba(13, 149, 168, 0.08);
+  --sebas-status-queued-border: rgba(13, 149, 168, 0.26);
+  --sebas-status-working: #a85f08;
+  --sebas-status-working-bg: rgba(168, 95, 8, 0.08);
+  --sebas-status-working-border: rgba(168, 95, 8, 0.26);
+  --sebas-status-done: #178040;
+  --sebas-status-done-bg: rgba(23, 128, 64, 0.08);
+  --sebas-status-done-border: rgba(23, 128, 64, 0.26);
+  --sebas-status-failed: #d13438;
+  --sebas-status-failed-bg: rgba(209, 52, 56, 0.08);
+  --sebas-status-failed-border: rgba(209, 52, 56, 0.26);
+  --sebas-status-dormant: #64748b;
+  --sebas-status-dormant-bg: rgba(100, 116, 139, 0.09);
+  --sebas-status-dormant-border: rgba(100, 116, 139, 0.26);
 
-/* The dark palette above is already the default; this block re-asserts the
- * scheme for embedders that flip the UA to dark after load. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-  }
+  --sebas-shadow-1: 0 1px 2px rgba(15, 19, 28, 0.08);
+  --sebas-shadow-2: 0 12px 32px rgba(15, 19, 28, 0.14);
+  --sebas-shadow-up: 0 -10px 28px rgba(15, 19, 28, 0.1);
+  --sebas-selection-bg: rgba(71, 80, 216, 0.22);
 }
 
 /* Reduced motion: drop non-essential animation, keep functional state. */

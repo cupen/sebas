@@ -332,8 +332,7 @@ async fn handle_envelope(
             {
                 return RpcControlResponse::Rejected {
                     code: "invalid_request".into(),
-                    message: "core 的启停请通过 WebUI 服务页或 CLI 控制面（飞书渠道不支持）"
-                        .into(),
+                    message: "core 的启停请通过 WebUI 服务页或 CLI 控制面（飞书渠道不支持）".into(),
                 };
             }
             match service_set_request(&service, &desired, persist) {
@@ -834,7 +833,79 @@ mod tests {
     }
 
     // ── 真实 Unix-socket 往返（覆盖 line-framing + secret/version） ──
-    //
+
+    /// 验收测试（sebas-29s）：飞书侧危险操作确认令牌可兑换。
+    /// 同一 Feishu actor 提交 Update → PendingConfirmation，再以同 actor
+    /// Confirm 兑换 token → Accepted（watchdog 以 detached 执行原操作，
+    /// NoopRunner 保证测试无副作用）。
+    #[tokio::test]
+    async fn feishu_pending_confirmation_token_is_redeemable() {
+        let executor = test_executor();
+        let actor = RpcActor::Feishu {
+            open_id: String::new(),
+            chat_id: Some("oc_confirm".into()),
+        };
+
+        let resp = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "cfm_submit".into(),
+                secret: TEST_SECRET.into(),
+                actor: actor.clone(),
+                request: RpcControlRequest::Update {
+                    dev: true,
+                    dry_run: false,
+                },
+            },
+            executor.clone(),
+            TEST_SECRET,
+        )
+        .await;
+        let RpcControlResponse::PendingConfirmation { token, .. } = resp else {
+            panic!("Feishu Update must yield PendingConfirmation, got {resp:?}")
+        };
+
+        let resp = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "cfm_redeem".into(),
+                secret: TEST_SECRET.into(),
+                actor,
+                request: RpcControlRequest::Confirm {
+                    token: token.clone(),
+                },
+            },
+            executor,
+            TEST_SECRET,
+        )
+        .await;
+        assert!(
+            matches!(resp, RpcControlResponse::Accepted { .. }),
+            "same-actor Confirm must redeem the token to Accepted, got {resp:?}"
+        );
+
+        // 单次兑换：二次 Confirm 同一 token 必须被拒。
+        let resp = handle_envelope(
+            ControlEnvelope {
+                version: 1,
+                request_id: "cfm_replay".into(),
+                secret: TEST_SECRET.into(),
+                actor: RpcActor::Feishu {
+                    open_id: String::new(),
+                    chat_id: Some("oc_confirm".into()),
+                },
+                request: RpcControlRequest::Confirm { token },
+            },
+            test_executor(),
+            TEST_SECRET,
+        )
+        .await;
+        assert!(
+            matches!(resp, RpcControlResponse::Rejected { .. }),
+            "replayed token must be rejected, got {resp:?}"
+        );
+    }
+
     // 上面 handle_envelope 直调测试绕过了 `request`/`serve` 的 line-buffered
     // JSON-over-Unix-socket framing；这里 spawn 真 listener 走完整链，证明
     // 「core 提交 envelope → watchdog 收包 → 分类 → 回包」在 socket 边界上

@@ -171,3 +171,4 @@ async fn drain_permission_reply(
 fn _assert_trait_object(b: Arc<dyn SessionBackend>) {
     let _ = b;
 }
+

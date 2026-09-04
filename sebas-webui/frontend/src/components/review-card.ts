@@ -64,7 +64,9 @@ export class SebasReviewCards extends LitElement {
         gap: var(--sebas-space-2);
         background: var(--sebas-surface);
         border: 1px solid var(--sebas-border-strong);
-        border-left: 3px solid var(--sebas-status-working);
+        /* 5.5 / design D5: a pending permission request is "your move" — the
+         * --signal accent, not a status hue (statuses describe the machine). */
+        border-left: 3px solid var(--sebas-signal);
         border-radius: var(--sebas-radius-md);
         box-shadow: var(--sebas-shadow-1);
         padding: var(--sebas-space-4);
@@ -81,7 +83,7 @@ export class SebasReviewCards extends LitElement {
       }
       .review-card .head svg {
         align-self: center;
-        color: var(--sebas-status-working);
+        color: var(--sebas-signal);
         flex: 0 0 auto;
       }
       .review-card[data-state='expired'] .head svg {
