@@ -1,13 +1,18 @@
-//! Workspace-level tests for the `sebas replay` subcommand.
+//! Workspace-level tests for the `sebas replay` subcommand and the feishu
+//! ingest boundary.
 //!
-//! These tests exercise the shared `replay_frame` helper directly so the
-//! FS read path is skipped — the test boundary is the parse + dispatch step
-//! that both the live WS handler and the offline replay command share.
+//! Two paths are covered:
+//! - the feishu-boundary ingest (`ingest_feishu_frame`): envelope parse,
+//!   dedup, gates, neutral translation, dispatch — what the live WS loop
+//!   runs;
+//! - the offline replay (`replay::run` / `replay_frame`): neutral
+//!   `ChannelEvent` JSON frames dispatched straight into the router.
 
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use sebas::replay::replay_frame;
-use sebas::run::RouterEventHandler;
+use sebas::run::{RouterEventHandler, ingest_feishu_frame};
 use tokio::sync::mpsc::Receiver;
 
 /// Build a fresh `RouterEventHandler` with an empty `SessionMap` and a
@@ -51,15 +56,15 @@ async fn replay_one_text_message_emits_spawn_acp() {
     .expect("serialize envelope");
 
     assert!(
-        replay_frame(&handler, &payload),
-        "replay_frame should accept a well-formed text envelope"
+        ingest_feishu_frame(&handler, &payload),
+        "ingest should accept a well-formed text envelope"
     );
 
     // First event should be the ack reaction on the user's message.
     // SEED reaction = Feishu emoji_type "Get"（👌，card_state.rs 有意选择）。
     let ack = recv_within(&mut rx, 64)
         .await
-        .expect("expected Out::AckMsg after replay_frame");
+        .expect("expected Out::AckMsg after ingest");
     let ack_ok =
         matches!(&ack, Out::AckMsg { message_id, emoji } if message_id == "om_1" && emoji == "Get");
     assert!(
@@ -70,7 +75,7 @@ async fn replay_one_text_message_emits_spawn_acp() {
     // Then the actual spawn.
     let out = recv_within(&mut rx, 64)
         .await
-        .expect("expected Out::SpawnAcp after replay_frame");
+        .expect("expected Out::SpawnAcp after ingest");
     assert!(
         matches!(out, Out::SpawnAcp { .. }),
         "expected Out::SpawnAcp, got {out:?}"
@@ -96,13 +101,13 @@ async fn replay_button_cb_routes_to_help_when_session_dead() {
     .expect("serialize envelope");
 
     assert!(
-        replay_frame(&handler, &payload),
-        "replay_frame should accept a well-formed card.action.trigger envelope"
+        ingest_feishu_frame(&handler, &payload),
+        "ingest should accept a well-formed card.action.trigger envelope"
     );
 
     let out = recv_within(&mut rx, 64)
         .await
-        .expect("expected an Out after replay_frame for a dead-session button cb");
+        .expect("expected an Out after ingest for a dead-session button cb");
 
     // The current router routing for a button cb with no live session is
     // `Out::SendCard` carrying the dead-session card (see `on_button` in
@@ -154,7 +159,7 @@ async fn private_dm_p2p_passes_default_chat_type_filter() {
 
     let payload = text_message_payload("p2p");
     assert!(
-        replay_frame(&handler, &payload),
+        ingest_feishu_frame(&handler, &payload),
         "私聊 chat_type=\"p2p\" 应通过默认过滤并派发（sebas-5y5）"
     );
 
@@ -174,7 +179,7 @@ async fn private_dm_p2p_passes_default_chat_type_filter() {
 async fn group_passes_and_private_alias_still_allows_p2p() {
     let (handler, _rx) = make_live_wired_handler();
     assert!(
-        replay_frame(&handler, &text_message_payload("group")),
+        ingest_feishu_frame(&handler, &text_message_payload("group")),
         "群聊 chat_type=\"group\" 应通过默认过滤"
     );
 
@@ -182,33 +187,26 @@ async fn group_passes_and_private_alias_still_allows_p2p() {
     let mut legacy = RouterEventHandler::new(router, String::new(), None);
     legacy.allowed_chat_types = vec!["private".into(), "group".into()];
     assert!(
-        replay_frame(&legacy, &text_message_payload("p2p")),
+        ingest_feishu_frame(&legacy, &text_message_payload("p2p")),
         "存量配置 \"private\" 应视作 \"p2p\" 的别名放行私聊消息"
     );
 }
 
 /// `replay::run` 的 FS 路径：目录 glob、按文件名排序、逐帧 dispatch、
-/// 坏帧 warn-and-skip、dir 不存在 → Err。
+/// 坏帧 warn-and-skip、dir 不存在 → Err。夹具是**中立 ChannelEvent**
+/// JSON（与 WS 侧 dump 的形状一致）。
 #[tokio::test]
 async fn replay_run_reads_sorted_frames_and_skips_bad_ones() {
     let dir = std::env::temp_dir().join(format!("sebas-replay-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let mk_frame = |chat: &str| {
-        serde_json::to_string_pretty(&serde_json::json!({
-            "schema": "2.0",
-            "header": { "event_type": "im.message.receive_v1", "tenant_key": "t" },
-            "event": {
-                "sender": { "sender_id": { "open_id": "ou_anyone" } },
-                "message": {
-                    "chat_id": chat,
-                    "message_id": "om_1",
-                    "message_type": "text",
-                    "content": "{\"text\":\"hi\"}"
-                }
-            }
-        }))
-        .unwrap()
+        let evt = ChannelEvent::Text {
+            key: ChannelKey::feishu(chat, None),
+            text: "hi".into(),
+            reply_target: Some("om_1".into()),
+        };
+        serde_json::to_string_pretty(&evt).unwrap()
     };
     // 时间戳前缀保证字典序 = 捕获序；混入一个坏帧和一个非 .json 文件。
     std::fs::write(dir.join("001-a.json"), mk_frame("oc_a")).unwrap();
@@ -231,4 +229,28 @@ async fn replay_run_reads_sorted_frames_and_skips_bad_ones() {
     assert!(missing.is_err(), "missing dir must error");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `replay_frame` 直连 `RouterHandle`：中立 Text 帧派发后应产生
+/// AckMsg（reply_target 落在 ack 上）+ SpawnAcp，证明离线路径与
+/// WS 路径经同一 router 决策。
+#[tokio::test]
+async fn replay_frame_dispatches_neutral_text() {
+    let (router, mut rx) = RouterHandle::new(SessionMap::new());
+    let evt = ChannelEvent::Text {
+        key: ChannelKey::feishu("oc_test", None),
+        text: "hi".into(),
+        reply_target: Some("om_1".into()),
+    };
+    let payload = serde_json::to_vec(&evt).unwrap();
+
+    assert!(replay_frame(&router, &payload), "neutral frame dispatches");
+
+    let ack = recv_within(&mut rx, 64)
+        .await
+        .expect("expected Out::AckMsg from neutral replay");
+    assert!(
+        matches!(&ack, Out::AckMsg { message_id, .. } if message_id == "om_1"),
+        "expected Out::AckMsg for om_1, got {ack:?}"
+    );
 }

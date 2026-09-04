@@ -12,8 +12,8 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::AcpCommand;
-use sebas_feishu::cards::CardConfig;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::cards::CardConfig;
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
@@ -39,17 +39,12 @@ async fn second_text_flips_fsm_and_forwards_continue() {
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
-    let key = SessionKey {
-        chat_id: "oc_continue".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_continue", None);
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "first".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
@@ -104,12 +99,10 @@ async fn second_text_flips_fsm_and_forwards_continue() {
     //    values the router produces for the FSM-flip + continue-forward
     //    path. We only consume up to SendAcp ContinueSession.
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "second".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 

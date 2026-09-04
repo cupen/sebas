@@ -3,17 +3,14 @@
 //! event sequence, and applying events to a snapshot reproduces the router's own
 //! state.
 
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::router::SessionEvent;
 use sebas_router::state::{Mapping, SessionMap};
 use sebas_router::RouterHandle;
 use std::collections::HashMap;
 
-fn key(id: &str) -> SessionKey {
-    SessionKey {
-        chat_id: format!("oc_{id}"),
-        thread_id: None,
-    }
+fn key(id: &str) -> ChannelKey {
+    ChannelKey::feishu(&format!("oc_{id}"), None)
 }
 
 /// Task 1.2: create → status change → remove publishes the exact sequence.
@@ -39,7 +36,8 @@ async fn events_follow_create_status_change_remove() {
     assert_eq!(seq.len(), 3, "expected exactly [Created, Updated, Removed], got {seq:?}");
     match &seq[0] {
         SessionEvent::Created { session } => {
-            assert_eq!(session.chat_id, key.chat_id);
+            assert_eq!(session.channel, key.channel_str());
+            assert_eq!(session.key, key.reference);
             assert_eq!(session.status, "spawning");
             assert_eq!(session.project_dir.as_deref(), Some("/tmp/p"));
             assert_eq!(session.session_id, None);
@@ -54,9 +52,9 @@ async fn events_follow_create_status_change_remove() {
         other => panic!("second event should be Updated, got {other:?}"),
     }
     match &seq[2] {
-        SessionEvent::Removed { chat_id, thread_id } => {
-            assert_eq!(chat_id, &key.chat_id);
-            assert_eq!(thread_id, &None);
+        SessionEvent::Removed { channel, key: k } => {
+            assert_eq!(channel, &key.channel_str().to_string());
+            assert_eq!(k, &key.reference);
         }
         other => panic!("third event should be Removed, got {other:?}"),
     }
@@ -108,8 +106,8 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
     let (router, _rx) = RouterHandle::new(map);
     let mut events = router.subscribe_session_events();
 
-    // Client-side cache: (chat_id, thread_id) → SessionInfo.
-    let mut cache: HashMap<(String, Option<String>), sebas_router::SessionInfo> = HashMap::new();
+    // Client-side cache: (channel, key) → SessionInfo.
+    let mut cache: HashMap<(String, String), sebas_router::SessionInfo> = HashMap::new();
 
     let ka = key("a");
     router
@@ -128,16 +126,10 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
     while let Ok(ev) = events.try_recv() {
         match ev {
             SessionEvent::Created { session } | SessionEvent::Updated { session } => {
-                cache.insert(
-                    (session.chat_id.clone(), session.thread_id.clone()),
-                    session,
-                );
+                cache.insert((session.channel.clone(), session.key.clone()), session);
             }
-            SessionEvent::Removed {
-                chat_id,
-                thread_id,
-            } => {
-                cache.remove(&(chat_id, thread_id));
+            SessionEvent::Removed { channel, key } => {
+                cache.remove(&(channel, key));
             }
             SessionEvent::Resync => {}
         }
@@ -146,14 +138,15 @@ async fn applying_events_to_snapshot_reproduces_router_state() {
     assert_eq!(cache.len(), snapshot.len(), "cache {cache:?} vs snapshot {snapshot:?}");
     for info in &snapshot {
         let cached = cache
-            .get(&(info.chat_id.clone(), info.thread_id.clone()))
+            .get(&(info.channel.clone(), info.key.clone()))
             .expect("snapshot session present in cache");
         assert_eq!(cached, info);
     }
     // Exactly the surviving web session remains, active (web_spawn minted its
     // own `web-{nanos}` key — kb was never given a mapping).
     assert_eq!(snapshot.len(), 1);
-    assert_eq!(snapshot[0].chat_id, kb_key.chat_id);
+    assert_eq!(snapshot[0].channel, kb_key.channel_str());
+    assert_eq!(snapshot[0].key, kb_key.reference);
     assert_eq!(snapshot[0].status, "active");
     assert_eq!(snapshot[0].session_id.as_deref(), Some("s-b"));
 }

@@ -2,16 +2,14 @@
 //! `web_close_session` tears down the mapping + (when present) the live
 //! child process; `web_set_active` records the focused session.
 
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::RouterHandle;
 use sebas_router::router::CloseOutcome;
 use sebas_router::state::{Mapping, SessionMap};
 
-fn web_key(id: &str) -> SessionKey {
-    SessionKey {
-        chat_id: format!("web-{id}"),
-        thread_id: None,
-    }
+fn web_key(id: &str) -> ChannelKey {
+    // Historical `web-{id}` chat shape, now web-channel reference.
+    ChannelKey::new("web", format!("web-{id}"))
 }
 
 #[tokio::test]
@@ -84,12 +82,10 @@ async fn close_session_clears_reply_target() {
     let (router, _rx) = RouterHandle::new(map.clone());
     // 模拟入站消息写入 reply target（话题内 = 话题根消息 message_id）。
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "hello".into(),
-            reply_to: Some("om_root".into()),
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: Some("om_root".into()),
         })
         .await;
     assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));

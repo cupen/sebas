@@ -10,8 +10,8 @@
 use crate::events::WebUiEvent;
 use crate::models::{CardConfigInfo, CardElementView, SessionStatus};
 use crate::routes::{
-    build_session_rows, decode_session_key, encode_key, encode_session_key, format_relative_time,
-    format_uptime, session_summary,
+    build_session_rows, decode_session_key, encode_channel_key, encode_session_key,
+    format_relative_time, format_uptime, session_summary,
 };
 use crate::server::WebUiState;
 use crate::session_backend::{Reachability, SessionRejection};
@@ -60,7 +60,7 @@ pub async fn summary(State(state): State<WebUiState>) -> Response {
     let active_session = focused.as_ref().and_then(|f| {
         infos
             .iter()
-            .find(|i| i.chat_id == f.chat_id && i.thread_id == f.thread_id)
+            .find(|i| i.channel == f.channel.as_str() && i.key == f.reference)
             .map(session_summary)
     });
 
@@ -118,7 +118,7 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
     let infos = state.backend.snapshot().await;
     let info = match infos
         .iter()
-        .find(|i| i.chat_id == session_key.chat_id && i.thread_id == session_key.thread_id)
+        .find(|i| i.channel == session_key.channel.as_str() && i.key == session_key.reference)
     {
         Some(i) => i,
         None => return api_error(StatusCode::NOT_FOUND, "Session not found"),
@@ -154,8 +154,8 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
     let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
 
     let data = json!({
-        "chat_id": info.chat_id,
-        "thread_id": info.thread_id,
+        "channel": info.channel,
+        "reference": info.key,
         "session_id": info.session_id,
         "status": info.status,
         "status_label": derived.label(),
@@ -326,7 +326,7 @@ pub async fn switch_session(State(state): State<WebUiState>, Path(key): Path<Str
     let infos = state.backend.snapshot().await;
     if !infos
         .iter()
-        .any(|i| i.chat_id == session_key.chat_id && i.thread_id == session_key.thread_id)
+        .any(|i| i.channel == session_key.channel.as_str() && i.key == session_key.reference)
     {
         return api_error(StatusCode::NOT_FOUND, "Session not found");
     }
@@ -461,7 +461,7 @@ pub async fn archive_session(
     // Look up the session to get its project_dir and label.
     let infos = state.backend.snapshot().await;
     let info = match infos.iter().find(|i| {
-        i.chat_id == session_key.chat_id && i.thread_id == session_key.thread_id
+        i.channel == session_key.channel.as_str() && i.key == session_key.reference
     }) {
         Some(i) => i,
         None => return api_error(StatusCode::NOT_FOUND, "Session not found"),
@@ -513,17 +513,17 @@ pub async fn ws_handler(State(state): State<WebUiState>, upgrade: WebSocketUpgra
 fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
     match ev {
         SessionEvent::Created { session } => Some(WebUiEvent::SessionCreated {
-            session_id: encode_key(&session.chat_id, session.thread_id.as_deref()),
+            session_id: encode_channel_key(&session.channel, &session.key),
         }),
         SessionEvent::Updated { session } => Some(WebUiEvent::SessionUpdated {
-            session_id: encode_key(&session.chat_id, session.thread_id.as_deref()),
+            session_id: encode_channel_key(&session.channel, &session.key),
             status: session.status,
         }),
         SessionEvent::Removed {
-            chat_id,
-            thread_id,
+            channel,
+            key,
         } => Some(WebUiEvent::SessionRemoved {
-            session_id: encode_key(&chat_id, thread_id.as_deref()),
+            session_id: encode_channel_key(&channel, &key),
         }),
         SessionEvent::Resync => None,
     }

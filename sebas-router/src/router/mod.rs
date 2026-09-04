@@ -21,13 +21,14 @@ use crate::card_events::{
     apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title,
 };
 use crate::card_state::CardState;
+use crate::cards::CardConfig;
 use crate::commands::GatewayAction;
 use crate::crud::ProviderForms;
 use crate::state::{Mapping, SessionMap};
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
-use sebas_feishu::cards::{CardConfig, CardElement, DivText, render_accumulated_card};
-pub use sebas_feishu::events::SessionKey;
+use sebas_channels::card::{AppUsage, ChannelCard, TurnChrome};
+use sebas_channels::key::ChannelKey;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,10 +38,10 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 #[derive(Debug)]
 pub enum Out {
     SpawnAcp {
-        key: SessionKey,
+        key: ChannelKey,
         prompt: String,
         /// Feishu `message_id` of the input message that triggered this spawn
-        /// (the user's own message, i.e. `FeishuIn::Text.reply_to`). Recorded
+        /// (the user's own message, i.e. the channel text event's reply target). Recorded
         /// so the session's state reactions (👀/🚧/✅/❌) land on that message
         /// instead of the card. `None` for `/new`, WebUI, or replay spawns.
         input_msg_id: Option<String>,
@@ -49,11 +50,11 @@ pub enum Out {
     /// with `session_id`; the dispatcher falls back to a fresh session when
     /// the agent cannot load it.
     SpawnResume {
-        key: SessionKey,
+        key: ChannelKey,
         session_id: String,
         prompt: String,
         /// Feishu `message_id` of the input message that triggered this resume
-        /// (`FeishuIn::Text.reply_to`), threaded through so the resumed
+        /// (the channel text event's reply target), threaded through so the resumed
         /// session's cards reply to that message. `None` for WebUI resumes.
         input_msg_id: Option<String>,
     },
@@ -61,9 +62,12 @@ pub enum Out {
         session_id: String,
         cmd: AcpCommand,
     },
+    /// Send a neutral presentation instance (the router's accumulated
+    /// [`ChannelCard`]). The channel adapter renders it into its native
+    /// card JSON and sends it (`feishu`: `send_card`).
     SendCard {
-        key: SessionKey,
-        card: serde_json::Value,
+        key: ChannelKey,
+        card: ChannelCard,
         msg_id: Option<String>,
         /// When `Some(req_id)`, the dispatcher records the Feishu message_id
         /// of this card keyed by `req_id` so a later button click can flip
@@ -85,13 +89,13 @@ pub enum Out {
     /// place rather than let Feishu show a stale prompt the user can keep
     /// clicking. Keyed by message_id so we don't need a per-session map.
     UpdateCardByMsgId {
-        key: SessionKey,
+        key: ChannelKey,
         msg_id: String,
-        card: serde_json::Value,
+        card: ChannelCard,
     },
     UpdateCard {
         session_id: String,
-        card: serde_json::Value,
+        card: ChannelCard,
     },
     React {
         session_id: String,
@@ -106,47 +110,47 @@ pub enum Out {
         emoji: String,
     },
     HelpText {
-        key: SessionKey,
+        key: ChannelKey,
     },
     /// Plain-text reply to the originating chat (e.g. `/settings`, `/help`).
     /// The dispatcher uses FeishuClient::send_text — not a card.
     PlainText {
-        key: SessionKey,
+        key: ChannelKey,
         content: String,
     },
     WatchdogUpgrade {
-        key: SessionKey,
+        key: ChannelKey,
         dev: bool,
         dry_run: bool,
     },
     WatchdogRollback {
-        key: SessionKey,
+        key: ChannelKey,
     },
     WatchdogRestart {
-        key: SessionKey,
+        key: ChannelKey,
     },
     /// `/confirm <token>` — 兑换待确认危险操作的令牌（sebas-29s）。dispatch
     /// 以同一 Feishu actor（同 chat_id）发送 Confirm RPC，watchdog 校验
     /// 同 actor 同参数单次兑换后真正执行原操作。
     WatchdogConfirm {
-        key: SessionKey,
+        key: ChannelKey,
         token: String,
     },
     WatchdogServices {
-        key: SessionKey,
+        key: ChannelKey,
     },
     /// `/system` — watchdog 系统状态（openspec/specs/router-commands/spec.md control commands, Phase 3）。
     WatchdogSystem {
-        key: SessionKey,
+        key: ChannelKey,
     },
     /// `/gateway on|off|restart|status` — 管理 gateway 服务（openspec/specs/router-commands/spec.md）。
     WatchdogGateway {
-        key: SessionKey,
+        key: ChannelKey,
         action: GatewayAction,
     },
     /// `/webui status` — 查看 webui 服务状态（openspec/specs/router-commands/spec.md）。
     WatchdogWebui {
-        key: SessionKey,
+        key: ChannelKey,
     },
     /// Spawn a session without sending a root card to Feishu (web-originated
     /// sessions). The dispatcher creates the ACP session and wires the pump,
@@ -157,7 +161,7 @@ pub enum Out {
     /// agent kind from the webui backend hint (`acp:<slug>`); None = the
     /// configured default kind.
     WebSpawn {
-        key: SessionKey,
+        key: ChannelKey,
         prompt: String,
         project_dir: Option<String>,
         kind: Option<String>,
@@ -200,7 +204,7 @@ pub struct RouterHandle {
     /// `PermissionRequest` arrives, the router checks this and auto-
     /// approves without rendering a card. The bridge sees the same
     /// approve/deny either way; the difference is purely UX.
-    /// Scope: per-SessionKey (= per Feishu chat/thread). Cleared when the
+    /// Scope: per-ChannelKey (= per feishu chat/thread). Cleared when the
     /// session is removed (`/new`, terminal error, daemon restart).
     allowlist: SessionAllowlist,
     /// Provider CRUD 表单实例（`/provider` 命令 + 卡片回调路由）。
@@ -223,13 +227,13 @@ pub struct RouterHandle {
     /// to highlight the active row and to decide which session's detail
     /// page to deep-link into. `None` until the user clicks Switch on a
     /// row (or opens a session detail page).
-    active_session: Arc<RwLock<Option<SessionKey>>>,
+    active_session: Arc<RwLock<Option<ChannelKey>>>,
     /// 最近入站回复目标（话题内 = 话题根消息 message_id）。话题出站卡
     /// （权限卡等）用它作为 root_id；sebas 出站层（初始卡/失败提示卡）经
     /// [`RouterHandle::reply_target`] 读取。纯内存、不持久化。
     reply_targets: ReplyTargetMap,
     /// Tracks the Feishu `message_id` of the interactive help card per chat
-    /// (keyed by `SessionKey` serialized to string). When the user clicks a
+    /// (keyed by `ChannelKey` serialized to string). When the user clicks a
     /// group tab, the router looks up this msg_id and sends `UpdateCardByMsgId`
     /// to flip the card in place rather than creating a new message.
     help_card_msgid: MsgIdMap,
@@ -370,7 +374,7 @@ impl RouterHandle {
     }
 
     /// Snapshot all session mappings (for WebUI dashboard).
-    pub async fn session_snapshot(&self) -> Vec<(SessionKey, Mapping)> {
+    pub async fn session_snapshot(&self) -> Vec<(ChannelKey, Mapping)> {
         self.map.snapshot_all().await
     }
 
@@ -378,14 +382,14 @@ impl RouterHandle {
     /// Unlike `session_alive` (live child only), this accepts Spawning
     /// placeholders — the channel's message/close rejection rule is
     /// "unknown key", not "no live child".
-    pub async fn session_exists(&self, key: &SessionKey) -> bool {
+    pub async fn session_exists(&self, key: &ChannelKey) -> bool {
         self.map.get(key).await.is_some()
     }
 
     /// External snapshot of every known session — the shape the WebUI's
     /// session rows need (mapping + card phase/prompt, `SessionInfo`).
     pub async fn session_info_snapshot(&self) -> Vec<SessionInfo> {
-        let keys: Vec<SessionKey> = self
+        let keys: Vec<ChannelKey> = self
             .map
             .snapshot_all()
             .await
@@ -404,7 +408,7 @@ impl RouterHandle {
 
     /// Build the external `SessionInfo` for `key`: mapping state joined with
     /// card-derived phase/prompt. Returns `None` when no mapping exists.
-    pub async fn session_info_for(&self, key: &SessionKey) -> Option<SessionInfo> {
+    pub async fn session_info_for(&self, key: &ChannelKey) -> Option<SessionInfo> {
         let m = self.map.get(key).await?;
         let (status, session_id) = match &m.state {
             crate::state::MappingState::Active { session_id } => {
@@ -423,8 +427,8 @@ impl RouterHandle {
             None => (None, None),
         };
         Some(SessionInfo {
-            chat_id: key.chat_id.clone(),
-            thread_id: key.thread_id.clone(),
+            channel: key.channel_str().to_string(),
+            key: key.reference.clone(),
             session_id,
             status: status.into(),
             phase,
@@ -437,7 +441,7 @@ impl RouterHandle {
     /// The session's transcript after `from` (monotonic positions).
     /// `None` when no mapping exists for `key`; a session without a
     /// transcript (Spawning, or no content yet) yields an empty vec.
-    pub async fn session_turns(&self, key: &SessionKey, from: u64) -> Option<Vec<TurnEntry>> {
+    pub async fn session_turns(&self, key: &ChannelKey, from: u64) -> Option<Vec<TurnEntry>> {
         let m = self.map.get(key).await?;
         let Some(sid) = m.session_id() else {
             return Some(Vec::new());
@@ -491,7 +495,7 @@ impl RouterHandle {
     /// `InProcessBackend` relays `AcpEvent::PermissionRequest` into its
     /// review-card feed already — reusing the shape means feishu-originated
     /// native sessions surface permission cards for free, encoded key lookup
-    /// included. `session_id` is the URL-safe encoded `SessionKey`.
+    /// included. `session_id` is the URL-safe encoded `ChannelKey`.
     pub fn publish_native_permission(
         &self,
         session_id: String,
@@ -509,7 +513,7 @@ impl RouterHandle {
 
     /// 原生内核会话登记为已存在（幂等）：事件驱动地刷新一次 Updated，
     /// 让 webui/channel 看到最新状态。
-    pub async fn touch_native_session(&self, key: &SessionKey) {
+    pub async fn touch_native_session(&self, key: &ChannelKey) {
         if self.session_info_for(key).await.is_some() {
             self.publish_updated(key).await;
         }
@@ -518,7 +522,7 @@ impl RouterHandle {
     /// 关闭原生会话（映射移除 + 广播 Removed）。桥在终端错误/会话结束时
     /// 调用。`remove_by_key` 是幂等的（无映射则 no-op），这里总是广播
     /// Removed 以收敛订阅者视图。
-    pub async fn fail_native_session(&self, key: &SessionKey) {
+    pub async fn fail_native_session(&self, key: &ChannelKey) {
         let existed = self.map.get(key).await.is_some();
         self.map.remove_by_key(key).await;
         if existed {
@@ -547,22 +551,22 @@ impl RouterHandle {
         let _ = self.events.send(event);
     }
 
-    async fn publish_created(&self, key: &SessionKey) {
+    async fn publish_created(&self, key: &ChannelKey) {
         if let Some(session) = self.session_info_for(key).await {
             self.publish(SessionEvent::Created { session });
         }
     }
 
-    async fn publish_updated(&self, key: &SessionKey) {
+    async fn publish_updated(&self, key: &ChannelKey) {
         if let Some(session) = self.session_info_for(key).await {
             self.publish(SessionEvent::Updated { session });
         }
     }
 
-    fn publish_removed(&self, key: &SessionKey) {
+    fn publish_removed(&self, key: &ChannelKey) {
         self.publish(SessionEvent::Removed {
-            chat_id: key.chat_id.clone(),
-            thread_id: key.thread_id.clone(),
+            channel: key.channel_str().to_string(),
+            key: key.reference.clone(),
         });
     }
 
@@ -618,7 +622,7 @@ impl RouterHandle {
     pub async fn record_perm_card_msg_id(
         &self,
         request_id: String,
-        key: SessionKey,
+        key: ChannelKey,
         msg_id: String,
         tool_name: String,
         args: Value,
@@ -652,17 +656,17 @@ impl RouterHandle {
 
     /// Record the Feishu `message_id` of the interactive help card for a chat.
     /// Called from the outbound dispatcher after `send_card` returns the msg_id.
-    /// Keyed by `SessionKey` serialized to string so the router can later look it
+    /// Keyed by `ChannelKey` serialized to string so the router can later look it
     /// up and PATCH the card in place when the user clicks a group tab.
-    pub async fn record_help_card_msgid(&self, key: &SessionKey, msg_id: String) {
-        let key_str = serde_json::to_string(key).expect("SessionKey serialization");
+    pub async fn record_help_card_msgid(&self, key: &ChannelKey, msg_id: String) {
+        let key_str = serde_json::to_string(key).expect("ChannelKey serialization");
         self.help_card_msgid.record(key_str, msg_id).await;
     }
 
     /// Look up the Feishu `message_id` of the help card for a chat.
     /// Returns `None` if no help card was sent yet (or the msg_id was evicted).
-    pub async fn help_card_msg_id(&self, key: &SessionKey) -> Option<String> {
-        let key_str = serde_json::to_string(key).expect("SessionKey serialization");
+    pub async fn help_card_msg_id(&self, key: &ChannelKey) -> Option<String> {
+        let key_str = serde_json::to_string(key).expect("ChannelKey serialization");
         self.help_card_msgid.get(&key_str).await
     }
 
@@ -699,7 +703,7 @@ impl RouterHandle {
                     .await;
             }
             AcpEvent::ThinkingDelta { delta, .. } => {
-                if cfg.thinking != sebas_feishu::cards::ThinkingDisplay::Hide {
+                if cfg.thinking != crate::cards::ThinkingDisplay::Hide {
                     self.transcript_push(session_id, TurnEntry::thinking(0, delta.clone()))
                         .await;
                 }
@@ -736,11 +740,9 @@ impl RouterHandle {
                         st.usage.model = Some(model.clone());
                     }
                     if let Some(input) = usage.input_tokens {
-                        st.usage.round_input += input;
                         st.usage.total_input += input;
                     }
                     if let Some(output) = usage.output_tokens {
-                        st.usage.round_output += output;
                         st.usage.total_output += output;
                     }
                     return None;
@@ -753,8 +755,8 @@ impl RouterHandle {
                 }
                 // On Finished, reset round counters for the next turn.
                 if matches!(event, AcpEvent::Finished { .. }) {
-                    st.usage.round_input = 0;
-                    st.usage.round_output = 0;
+                    st.usage.total_input = 0;
+                    st.usage.total_output = 0;
                 }
                 apply_event_to_card(&mut st.body, event, &cfg);
                 next
@@ -781,29 +783,36 @@ impl RouterHandle {
         .await;
     }
 
-    /// flush_card：快照 → render_accumulated_card → Out::UpdateCard。
+    /// flush_card：快照 → 累积中立卡（turn chrome + body）→ Out::UpdateCard。
     /// 无 CardState 则 no-op。openspec/specs/feishu-cards/spec.md。节流契约保证 flush 只在 debounce 到点或
     /// Finished/terminal 即时被调，故不维护 dirty flag。
     pub async fn flush_card(&self, session_id: &str) {
         let Some(st) = self.card_states.snapshot(session_id).await else {
             return;
         };
-        let theme_color = self.card_cfg.read().await.theme_color.clone();
         // 更新父面板标题：添加已折叠项数和经过时间（"🤔 折腾中 · 3项 · 45s"）。
         let elapsed = st.started_at.elapsed();
         let count = count_folded_items(&st.body);
         let mut body = st.body.clone();
         update_parent_title(&mut body, count, &elapsed);
-        let card = render_accumulated_card(
-            &st.user_prompt,
-            session_id,
-            &body,
-            &theme_color,
-            Some(&st.usage),
-        );
+        let usage = AppUsage {
+            model: st.usage.model.clone(),
+            total_input: st.usage.total_input,
+            total_output: st.usage.total_output,
+        };
+        let card = ChannelCard {
+            title: String::new(),
+            theme: self.card_cfg.read().await.theme_color.clone(),
+            elements: body,
+            turn: Some(TurnChrome {
+                prompt: st.user_prompt.clone(),
+                session_id: session_id.to_string(),
+                usage: Some(usage),
+            }),
+        };
         self.emit(Out::UpdateCard {
             session_id: session_id.to_string(),
-            card: serde_json::to_value(&card).expect("accumulated card serializes"),
+            card,
         })
         .await;
     }
@@ -836,28 +845,28 @@ impl RouterHandle {
         let count = count_folded_items(&st.body);
         let mut body = st.body.clone();
         update_parent_title(&mut body, count, &elapsed);
-        let card = render_accumulated_card(
-            &st.user_prompt,
-            session_id,
-            &body,
-            &theme_color,
-            Some(&st.usage),
-        );
+        let usage = AppUsage {
+            model: st.usage.model.clone(),
+            total_input: st.usage.total_input,
+            total_output: st.usage.total_output,
+        };
         self.emit(Out::UpdateCard {
             session_id: session_id.to_string(),
-            card: serde_json::to_value(&card).expect("accumulated card serializes"),
+            card: ChannelCard {
+                title: String::new(),
+                theme: theme_color.clone(),
+                elements: body,
+                turn: Some(TurnChrome {
+                    prompt: st.user_prompt.clone(),
+                    session_id: session_id.to_string(),
+                    usage: Some(usage),
+                }),
+            },
         })
         .await;
 
         // 2. 构造"接上条"提示，重置 body
-        let continuation_note = CardElement::Div {
-            text: DivText {
-                tag: "plain_text".into(),
-                content: "📎 接上条，内容继续".into(),
-                text_size: Some("notation".into()),
-                text_color: Some("grey".into()),
-            },
-        };
+        let continuation_note = crate::card_events::continuation_note();
         let fresh_body = vec![continuation_note.clone()];
         self.card_states
             .reset_body(session_id, vec![continuation_note])
@@ -865,16 +874,23 @@ impl RouterHandle {
 
         // 3. 发射新卡（SendCard），附带旧卡 message_id 作为 root_id 实现回复关系
         let old_msg_id = self.msgid.get(session_id).await;
-        let new_card = render_accumulated_card(
-            &st.user_prompt,
-            session_id,
-            &fresh_body,
-            &theme_color,
-            Some(&st.usage),
-        );
+        let usage2 = AppUsage {
+            model: st.usage.model.clone(),
+            total_input: st.usage.total_input,
+            total_output: st.usage.total_output,
+        };
         self.emit(Out::SendCard {
             key,
-            card: serde_json::to_value(&new_card).expect("new card serializes"),
+            card: ChannelCard {
+                title: String::new(),
+                theme: theme_color,
+                elements: fresh_body,
+                turn: Some(TurnChrome {
+                    prompt: st.user_prompt.clone(),
+                    session_id: session_id.to_string(),
+                    usage: Some(usage2),
+                }),
+            },
             msg_id: Some(session_id.to_string()),
             perm_request_id: None,
             perm_meta: None,
@@ -894,7 +910,7 @@ impl RouterHandle {
     /// once `SessionManager::create_session` has minted the real session_id, so
     /// that continuations, permission-card routing (reverse lookup) and
     /// liveness checks can find the session.
-    pub async fn insert_mapping(&self, key: SessionKey, session_id: String) {
+    pub async fn insert_mapping(&self, key: ChannelKey, session_id: String) {
         let existed = self.map.get(&key).await.is_some();
         if let Err(e) = self
             .map
@@ -914,14 +930,14 @@ impl RouterHandle {
     /// 最近一次入站消息的回复目标（话题内 = 话题根消息 message_id）。
     /// 话题出站卡（初始 root 卡、spawn/resume 失败提示卡）用它作为
     /// `root_id`，保证回复聚合在原话题。主线 key 返回 `None`（Q7 现状）。
-    pub async fn reply_target(&self, key: &SessionKey) -> Option<String> {
+    pub async fn reply_target(&self, key: &ChannelKey) -> Option<String> {
         self.reply_targets.get(key).await
     }
 
     /// True if a live (Active) session is mapped for `key` (used to reject
     /// button callbacks that arrive after a session has ended, and to keep
     /// `/new` from double-spawning while a spawn is in flight).
-    pub async fn session_alive(&self, key: &SessionKey) -> bool {
+    pub async fn session_alive(&self, key: &ChannelKey) -> bool {
         self.map
             .get(key)
             .await
@@ -931,7 +947,7 @@ impl RouterHandle {
 
     /// Flip Spawning -> Active for `key` and drain queued prompts.
     /// Called by the dispatcher once `create_session` has minted the id.
-    pub async fn activate(&self, key: &SessionKey, session_id: String) -> Vec<String> {
+    pub async fn activate(&self, key: &ChannelKey, session_id: String) -> Vec<String> {
         let existed = self.map.get(key).await.is_some();
         let pending = self.map.activate(key, session_id).await;
         if existed {
@@ -943,7 +959,7 @@ impl RouterHandle {
     }
 
     /// Spawn failed/timeout: remove the Spawning placeholder for `key`.
-    pub async fn fail_spawn(&self, key: &SessionKey) {
+    pub async fn fail_spawn(&self, key: &ChannelKey) {
         // Only publish when a placeholder was actually removed — fail_spawn
         // is a no-op for Active/Dormant mappings.
         let was_spawning = self
@@ -968,8 +984,8 @@ impl RouterHandle {
         prompt: String,
         project_dir: Option<String>,
         kind: Option<String>,
-    ) -> SessionKey {
-        let key = SessionKey::web_key();
+    ) -> ChannelKey {
+        let key = ChannelKey::web_new();
         match self.map.begin_spawn(key.clone()).await {
             Ok(outcome) => {
                 // Record project_dir on the mapping before emitting, so the
@@ -999,7 +1015,7 @@ impl RouterHandle {
     /// Send a message to an existing session from the WebUI.
     /// Routes the message through the session map (same logic as Feishu
     /// text messages) and emits the appropriate Out instruction.
-    pub async fn web_send_message(&self, key: SessionKey, message: String) {
+    pub async fn web_send_message(&self, key: ChannelKey, message: String) {
         match self.map.route_text(key.clone(), message.clone()).await {
             Ok(crate::state::TextRoute::Continue(sid)) => {
                 // 记录本轮用户 prompt 到 transcript（与 feishu 路径的
@@ -1055,13 +1071,13 @@ impl RouterHandle {
     /// highlights the active row and the sidebar shows it under "Active".
     /// Idempotent; safe to call on every page load.
     /// Set (or clear with `None`) the WebUI-focused session. Idempotent.
-    pub async fn web_set_active(&self, key: Option<SessionKey>) {
+    pub async fn web_set_active(&self, key: Option<ChannelKey>) {
         let mut g = self.active_session.write().await;
         *g = key;
     }
 
     /// Snapshot of the currently focused session, if any.
-    pub async fn active_session_snapshot(&self) -> Option<SessionKey> {
+    pub async fn active_session_snapshot(&self) -> Option<ChannelKey> {
         self.active_session.read().await.clone()
     }
 
@@ -1075,7 +1091,7 @@ impl RouterHandle {
     ///   target (topic root message_id) so recycled keys don't inherit
     ///   stale aggregation targets.
     /// - Clears `active_session` if this key was the focused one.
-    pub async fn web_close_session(&self, key: SessionKey) -> CloseOutcome {
+    pub async fn web_close_session(&self, key: ChannelKey) -> CloseOutcome {
         let Some(mapping) = self.map.get(&key).await else {
             return CloseOutcome::NotFound;
         };
@@ -1122,7 +1138,7 @@ impl RouterHandle {
     /// to drive the next turn.
     async fn emit_turn_card(
         &self,
-        key: SessionKey,
+        key: ChannelKey,
         session_id: &str,
         prompt: String,
         root_id: Option<String>,
@@ -1130,10 +1146,20 @@ impl RouterHandle {
         self.card_states.drop(session_id).await;
         self.seed_card(session_id.to_string(), prompt.clone()).await;
         let theme_color = self.card_cfg.read().await.theme_color.clone();
-        let card = render_accumulated_card(&prompt, session_id, &[], &theme_color, None);
+        let turn_prompt = prompt.clone();
+        let card = ChannelCard {
+            title: String::new(),
+            theme: theme_color,
+            elements: Vec::new(),
+            turn: Some(TurnChrome {
+                prompt: turn_prompt,
+                session_id: session_id.to_string(),
+                usage: None,
+            }),
+        };
         self.emit(Out::SendCard {
             key: key.clone(),
-            card: serde_json::to_value(&card).unwrap(),
+            card,
             // Record the new card under the session so streaming UpdateCards
             // resolve to THIS turn's card (previous turn stays frozen).
             msg_id: Some(session_id.to_string()),
@@ -1165,7 +1191,7 @@ impl RouterHandle {
     /// (Finished, incidental settle from streaming events) call this to pop
     /// the next queued turn. Terminal errors abandon the queue — the session
     /// is being torn down and queued turns are dropped alongside.
-    pub(super) async fn drain_queue_if_terminal(&self, key: &SessionKey, session_id: &str) {
+    pub(super) async fn drain_queue_if_terminal(&self, key: &ChannelKey, session_id: &str) {
         use crate::card_state::phase::{DONE, FAILED};
 
         // Only drain if status is terminal and queue has entries.
@@ -1213,27 +1239,24 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Encode a `SessionKey` for URLs / the channel wire: `chat_id\0thread_id`
-/// percent-encoded (same convention as the WebUI's `routes::encode_key`).
-/// No external dependency — the charset is small (chat/thread ids are
-/// alnum plus a few separators) so a targeted percent-encoder suffices.
-pub fn encode_key(key: &SessionKey) -> String {
-    let raw = format!("{}\0{}", key.chat_id, key.thread_id.clone().unwrap_or_default());
+/// Encode a `ChannelKey` for URLs / the channel wire: `channel\0reference`
+/// percent-encoded. A channel-prefixed pair round-trips exactly; the feishu
+/// reference keeps its `chat\0thread` composite inside the reference field.
+/// No external dependency — the charset is small (channel names and
+/// references are alnum plus a few separators) so a targeted percent-encoder
+/// suffices.
+pub fn encode_key(key: &ChannelKey) -> String {
+    let raw = format!("{}\0{}", key.channel_str(), &key.reference);
     percent_encode(&raw)
 }
 
-/// Decode a percent-encoded `SessionKey` (inverse of [`encode_key`]).
-pub fn decode_key(encoded: &str) -> Option<SessionKey> {
+/// Decode a percent-encoded `ChannelKey` (inverse of [`encode_key`]).
+pub fn decode_key(encoded: &str) -> Option<ChannelKey> {
     let decoded = percent_decode(encoded)?;
-    let (chat_id, thread_id) = decoded.split_once('\0')?;
-    Some(SessionKey {
-        chat_id: chat_id.to_string(),
-        thread_id: if thread_id.is_empty() {
-            None
-        } else {
-            Some(thread_id.to_string())
-        },
-    })
+    match decoded.split_once('\0') {
+        Some((channel, reference)) => Some(ChannelKey::new(channel, reference)),
+        None => Some(ChannelKey::feishu(&decoded, None)),
+    }
 }
 
 fn percent_encode(s: &str) -> String {

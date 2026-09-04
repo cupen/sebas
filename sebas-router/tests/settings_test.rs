@@ -1,4 +1,4 @@
-use sebas_feishu::cards::{CardConfig, ThinkingDisplay};
+use sebas_router::cards::{CardConfig, ThinkingDisplay};
 use sebas_router::settings::{load_settings, save_settings, settings_path};
 
 #[test]

@@ -9,7 +9,8 @@ use crate::session_boot::{
     flush_pending_prompts, spawn_acp_pump_with_idle,
 };
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::cards::render_accumulated_card;
+use sebas_channels::card::{ChannelCard, TurnChrome};
+use sebas_channels::ChannelKey;
 use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
 use sebas_feishu::events::SessionKey;
 use sebas_gateway::config::GatewayConfig;
@@ -24,6 +25,48 @@ use tracing::{debug, info, warn};
 /// 群聊/p2p 通用，不提「开新话题」。
 const TOPIC_INVALID_NOTICE: &str = "该话题已失效，本次会话已结束。请重新发消息开始新会话。";
 
+/// Render the router's neutral presentation into the feishu card JSON the
+/// FeishuClient sends/patches. Turn cards (`card.turn == Some(..)`) get the
+/// full frame the adapter owns (topic header, quote block, usage footer);
+/// standalone UI cards (help/provider/permission/status) render verbatim.
+///
+/// The dispatcher never re-implements `feishu-cards` rendering rules — the
+/// adapter's pure renderers are the single source of the mapping.
+fn render_out_card(card: &ChannelCard) -> serde_json::Value {
+    let framed = match &card.turn {
+        Some(turn) => sebas_feishu::adapter::render_channel_card_frame(
+            &turn.prompt,
+            &turn.session_id,
+            card,
+            turn.usage.as_ref().map(|u| sebas_feishu::cards::CardFooter {
+                model: u.model.clone(),
+                round_input: 0,
+                round_output: 0,
+                total_input: u.total_input,
+                total_output: u.total_output,
+            })
+            .as_ref(),
+        ),
+        None => sebas_feishu::adapter::render_standalone_card(card),
+    };
+    serde_json::to_value(framed).expect("rendered feishu card serializes")
+}
+
+/// Build a neutral per-turn `ChannelCard` (empty body + turn chrome) for the
+/// spawn/resume root card the dispatcher seeds and POSTs.
+fn root_turn_card(prompt: &str, session_id: &str, theme: &str) -> ChannelCard {
+    ChannelCard {
+        title: String::new(),
+        theme: theme.to_string(),
+        elements: Vec::new(),
+        turn: Some(TurnChrome {
+            prompt: prompt.to_string(),
+            session_id: session_id.to_string(),
+            usage: None,
+        }),
+    }
+}
+
 /// 出站卡统一回复目标：所有 `Out::SendCard` 都应走 reply 形式挂回用户发言。
 /// - 显式 `root_id`（如 `Out::SendCard.root_id`，换卡、permission 解析）原样透传；
 /// - 否则取 router 存的最近入站消息 `reply_target`：话题内 = 话题根消息
@@ -33,7 +76,7 @@ const TOPIC_INVALID_NOTICE: &str = "该话题已失效，本次会话已结束�
 /// 用户发言下，方便沿 thread 跟踪整段对话。
 pub(crate) async fn topic_reply_target(
     router: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     root_id: Option<String>,
 ) -> Option<String> {
     match root_id {
@@ -71,18 +114,24 @@ pub(crate) async fn send_card_topic_aware(
     http: &reqwest::Client,
     tokens: &sebas_feishu::client::TokenManager,
     router: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     card: serde_json::Value,
     root_id: Option<String>,
 ) -> anyhow::Result<TopicSendOutcome> {
+    let feishu_key = feishu_session_key(key);
+    let thread_id = key
+        .reference
+        .split_once('\0')
+        .map(|(_, t)| t)
+        .filter(|t| !t.is_empty());
     match feishu
         .send_card(
             http,
             tokens,
-            key,
+            &feishu_key,
             card,
             root_id.as_deref(),
-            key.thread_id.as_deref(),
+            thread_id,
         )
         .await
     {
@@ -91,7 +140,7 @@ pub(crate) async fn send_card_topic_aware(
             if let Some(code) = classify_topic_invalid(&e) {
                 warn!(code, error = %e, "topic send failed; notifying user and closing session");
                 if let Err(e2) = feishu
-                    .send_text(http, tokens, key, TOPIC_INVALID_NOTICE)
+                    .send_text(http, tokens, &feishu_key, TOPIC_INVALID_NOTICE)
                     .await
                 {
                     warn!(?e2, "topic-invalid notice send failed");
@@ -136,7 +185,7 @@ async fn seed_and_send_root_card(
     router: &RouterHandle,
     reactions: &ReactionTracker,
     cfg: &Config,
-    key: &SessionKey,
+    key: &ChannelKey,
     session_id: &str,
     prompt: &str,
     // 飞书消息 message_id：root 卡 reply 挂到该输入消息下（主线）。
@@ -150,9 +199,10 @@ async fn seed_and_send_root_card(
         .await;
     // Send the seed card (empty body) and record its message_id keyed by the
     // real session_id (so streaming UpdateCards resolve correctly).
-    // render_accumulated_card 用真实 theme，与后续 flush 产出的卡结构一致
-    //（避免初始卡蓝、后续卡变色的跳变）。
-    let card = render_accumulated_card(prompt, session_id, &[], &cfg.card.theme_color, None);
+    // 用真实 theme，与后续 flush 产出的卡结构一致（避免初始卡蓝、后续卡
+    // 变色的跳变）；卡面 chrome 由 adapter 渲染（task 3：router 只产中立卡）。
+    let card = root_turn_card(prompt, session_id, &cfg.card.theme_color);
+    let card_json = render_out_card(&card);
     // 话题会话：初始 root 卡回复到话题根消息（Q5），保证整轮对话聚合在
     // 原话题；主线回退到用户输入消息。话题失效时 send_card_topic_aware
     // 发文本提示并熔断 —— 首次出站就失效更要终止。
@@ -163,7 +213,7 @@ async fn seed_and_send_root_card(
         tokens,
         router,
         key,
-        serde_json::to_value(&card)?,
+        card_json,
         reply,
     )
     .await?;
@@ -222,9 +272,11 @@ pub(crate) async fn dispatch_out(
             // cards (permission prompts, help) don't need to be updated later.
             // 话题会话且 Out 未带 root_id 时，用 router 存的最近回复目标兜底
             // （覆盖权限卡等所有 Out::SendCard 出站卡，Q5）。
+            let card_json = render_out_card(&card);
             let reply = topic_reply_target(router, &key, root_id).await;
             let outcome =
-                send_card_topic_aware(feishu, http, tokens, router, &key, card, reply).await?;
+                send_card_topic_aware(feishu, http, tokens, router, &key, card_json, reply)
+                    .await?;
             // TopicInvalid：已熔断（会话被终止），等价于旧空 message_id ——
             // 跳过 record_root_msg_id / record_perm_card_msg_id。
             if let TopicSendOutcome::Sent(new_id) = outcome {
@@ -259,7 +311,8 @@ pub(crate) async fn dispatch_out(
         }
         Out::UpdateCard { session_id, card } => {
             if let Some(message_id) = router.root_msg_id(&session_id).await {
-                feishu.update_card(http, tokens, &message_id, card).await?;
+                let card_json = render_out_card(&card);
+                feishu.update_card(http, tokens, &message_id, card_json).await?;
             } else {
                 debug!(?session_id, "no root msg_id recorded; skipping update");
             }
@@ -270,7 +323,8 @@ pub(crate) async fn dispatch_out(
             // session is still alive but we just want to flip the prompt in
             // place. Failure is non-fatal: a stale msg_id is a no-op on
             // Feishu's side.
-            if let Err(e) = feishu.update_card(http, tokens, &msg_id, card).await {
+            let card_json = render_out_card(&card);
+            if let Err(e) = feishu.update_card(http, tokens, &msg_id, card_json).await {
                 warn!(%msg_id, error=%e, "perm card update failed");
             }
             let _ = key; // chat context — currently unused; the API only needs msg_id
@@ -356,9 +410,11 @@ pub(crate) async fn dispatch_out(
                 Ok(v) => v,
                 Err(e) => {
                     router.fail_spawn(&key).await;
-                    let card = sebas_feishu::cards::render_error_card(&format!(
-                        "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
-                    ));
+                    let neutral =
+                        sebas_router::cards_ui::error_card(&format!(
+                            "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
+                        ));
+                    let card = render_out_card(&neutral);
                     let reply = topic_reply_target(router, &key, None).await;
                     if let Err(e2) = send_card_topic_aware(
                         feishu,
@@ -366,7 +422,7 @@ pub(crate) async fn dispatch_out(
                         tokens,
                         router,
                         &key,
-                        serde_json::to_value(&card)?,
+                        card,
                         reply,
                     )
                     .await
@@ -489,9 +545,10 @@ pub(crate) async fn dispatch_out(
                 Ok(v) => v,
                 Err(e) => {
                     router.fail_spawn(&key).await;
-                    let card = sebas_feishu::cards::render_error_card(&format!(
+                    let neutral = sebas_router::cards_ui::error_card(&format!(
                         "agent 恢复失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
+                    let card = render_out_card(&neutral);
                     let reply = topic_reply_target(router, &key, None).await;
                     if let Err(e2) = send_card_topic_aware(
                         feishu,
@@ -499,7 +556,7 @@ pub(crate) async fn dispatch_out(
                         tokens,
                         router,
                         &key,
-                        serde_json::to_value(&card)?,
+                        card,
                         reply,
                     )
                     .await
@@ -512,7 +569,8 @@ pub(crate) async fn dispatch_out(
             };
             if !resumed {
                 info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
-                let card = sebas_feishu::cards::render_session_lost_card();
+                let neutral = sebas_router::cards_ui::session_lost_card();
+                let card = render_out_card(&neutral);
                 let reply = topic_reply_target(router, &key, None).await;
                 if let Err(e2) = send_card_topic_aware(
                     feishu,
@@ -520,7 +578,7 @@ pub(crate) async fn dispatch_out(
                     tokens,
                     router,
                     &key,
-                    serde_json::to_value(&card)?,
+                    card,
                     reply,
                 )
                 .await
@@ -567,14 +625,14 @@ pub(crate) async fn dispatch_out(
             info!(?key, "send help (no-op: help text not implemented)");
         }
         Out::PlainText { key, content } => {
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
         Out::WatchdogUpgrade { key, dev, dry_run } => {
             let request = crate::watchdog::control_rpc::RpcControlRequest::Update { dev, dry_run };
             let content = submit_watchdog_control(&key, request, "升级").await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -582,7 +640,7 @@ pub(crate) async fn dispatch_out(
             let request =
                 crate::watchdog::control_rpc::RpcControlRequest::Rollback { dry_run: false };
             let content = submit_watchdog_control(&key, request, "回滚").await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -593,7 +651,7 @@ pub(crate) async fn dispatch_out(
                 "重启 core",
             )
             .await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -608,7 +666,7 @@ pub(crate) async fn dispatch_out(
                 "确认执行",
             )
             .await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -619,7 +677,7 @@ pub(crate) async fn dispatch_out(
                 "服务状态查询",
             )
             .await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -630,7 +688,7 @@ pub(crate) async fn dispatch_out(
                 "系统状态查询",
             )
             .await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -640,7 +698,7 @@ pub(crate) async fn dispatch_out(
             // status → ServiceStatusFor(gateway).
             let request = gateway_control_request(action);
             let content = submit_watchdog_control(&key, request, "gateway 服务").await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -653,7 +711,7 @@ pub(crate) async fn dispatch_out(
                 "webui 服务状态",
             )
             .await;
-            if let Err(e) = feishu.send_text(http, tokens, &key, &content).await {
+            if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
         }
@@ -667,8 +725,31 @@ pub(crate) async fn dispatch_out(
 /// every message, so `chat_id` is authoritative and `open_id` is left empty.
 /// Pure and synchronous so adapter-contract tests can assert the normalized
 /// request without a live control socket.
+/// Extract the feishu chat id from a ChannelKey reference (`chat\0thread`
+/// composite → chat part; bare reference → the whole reference).
+fn feishu_chat_id(key: &ChannelKey) -> String {
+    key.reference
+        .split_once('\0')
+        .map(|(c, _)| c)
+        .unwrap_or(&key.reference)
+        .to_string()
+}
+
+/// Translate a neutral `ChannelKey` to the feishu-shaped key the
+/// `FeishuClient` API still takes (feishu references are `chat\0thread`
+/// composites; any other channel is not expected at this seam — feishu
+/// dispatch only sees feishu keys).
+fn feishu_session_key(key: &ChannelKey) -> SessionKey {
+    let (chat_id, thread_id) = key
+        .reference
+        .split_once('\0')
+        .map(|(c, t)| (c.to_string(), Some(t.to_string())))
+        .unwrap_or_else(|| (key.reference.clone(), None));
+    SessionKey { chat_id, thread_id }
+}
+
 fn feishu_control_envelope(
-    key: &SessionKey,
+    key: &ChannelKey,
     secret: String,
     request: crate::watchdog::control_rpc::RpcControlRequest,
 ) -> crate::watchdog::control_rpc::ControlEnvelope {
@@ -678,7 +759,9 @@ fn feishu_control_envelope(
         secret,
         actor: crate::watchdog::control_rpc::RpcActor::Feishu {
             open_id: String::new(),
-            chat_id: Some(key.chat_id.clone()),
+            // Feishu control RPC authority: the feishu reference is the chat
+            // (thread part irrelevant for control ops).
+            chat_id: Some(feishu_chat_id(key)),
         },
         request,
     }
@@ -728,7 +811,7 @@ fn gateway_control_request(
 }
 
 async fn submit_watchdog_control(
-    key: &SessionKey,
+    key: &ChannelKey,
     request: crate::watchdog::control_rpc::RpcControlRequest,
     label: &str,
 ) -> String {
@@ -827,7 +910,7 @@ async fn submit_watchdog_control(
 /// 上限：最多 `POLL_ROUNDS` 轮、每轮间隔 `POLL_INTERVAL`，未到终态返回已见进度并提示
 /// 可用 `/events` 查后续。
 async fn poll_operation_progress(
-    key: &SessionKey,
+    key: &ChannelKey,
     secret: &str,
     operation_id: &str,
     base: String,
@@ -942,7 +1025,7 @@ async fn handle_web_spawn(
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
     gateway_cfg: Option<&GatewayConfig>,
-    key: SessionKey,
+    key: ChannelKey,
     prompt: String,
     project_dir: Option<String>,
     requested_kind: Option<String>,
@@ -991,7 +1074,7 @@ async fn handle_spawn_resume_without_feishu(
     router: &RouterHandle,
     mgr: &Arc<SessionManager>,
     gateway_cfg: Option<&GatewayConfig>,
-    key: SessionKey,
+    key: ChannelKey,
     old_sid: String,
     prompt: String,
 ) -> anyhow::Result<()> {
@@ -1037,7 +1120,7 @@ async fn handle_spawn_resume_without_feishu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sebas_feishu::events::FeishuIn;
+    use sebas_channels::{ChannelEvent, ChannelKey};
     use sebas_router::state::{Mapping, SessionMap};
 
     /// 话题会话：root_id 为空时用 router 存的最近回复目标兜底；显式带
@@ -1045,10 +1128,7 @@ mod tests {
     #[tokio::test]
     async fn topic_reply_target_falls_back_for_thread_sessions() {
         let map = SessionMap::new();
-        let key = SessionKey {
-            chat_id: "oc_topic".into(),
-            thread_id: Some("omt_t1".into()),
-        };
+        let key = ChannelKey::feishu("oc_topic", Some("omt_t1"));
         map.insert(key.clone(), Mapping::active("s1"))
             .await
             .unwrap();
@@ -1056,12 +1136,10 @@ mod tests {
 
         // 入站话题消息写入 reply target（话题根消息 message_id）。
         router
-            .dispatch(FeishuIn::Text {
+            .dispatch(ChannelEvent::Text {
                 key: key.clone(),
                 text: "hello".into(),
-                reply_to: Some("om_root".into()),
-                chat_type: "private".into(),
-                mentions: vec![],
+                reply_target: Some("om_root".into()),
             })
             .await;
 
@@ -1084,10 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn topic_reply_target_falls_back_for_mainline_too() {
         let map = SessionMap::new();
-        let key = SessionKey {
-            chat_id: "oc_main".into(),
-            thread_id: None,
-        };
+        let key = ChannelKey::feishu("oc_main", None);
         // 预映射 session，否则未映射的 PassThrough 会触发 spawn_new → 清掉
         // reply_targets，让兜底拿不到值。
         map.insert(key.clone(), Mapping::active("s1"))
@@ -1097,12 +1172,10 @@ mod tests {
 
         // 入站主线消息写入 reply target（用户自己的 message_id）。
         router
-            .dispatch(FeishuIn::Text {
+            .dispatch(ChannelEvent::Text {
                 key: key.clone(),
                 text: "hello".into(),
-                reply_to: Some("om_user_msg".into()),
-                chat_type: "private".into(),
-                mentions: vec![],
+                reply_target: Some("om_user_msg".into()),
             })
             .await;
 
@@ -1149,10 +1222,7 @@ mod tests {
     /// Phase 5 前为空），并生成唯一的、机器友好的 request_id。
     #[test]
     fn feishu_control_envelope_carries_chat_actor() {
-        let key = SessionKey {
-            chat_id: "oc_proxy".into(),
-            thread_id: Some("omt_t".into()),
-        };
+        let key = ChannelKey::feishu("oc_proxy", Some("omt_t"));
         let envelope = feishu_control_envelope(
             &key,
             "secret-1".into(),
@@ -1183,10 +1253,7 @@ mod tests {
     /// label 的两次请求必须可区分）。
     #[test]
     fn feishu_control_request_ids_are_unique() {
-        let key = SessionKey {
-            chat_id: "oc_proxy".into(),
-            thread_id: None,
-        };
+        let key = ChannelKey::feishu("oc_proxy", None);
         let a = feishu_control_envelope(
             &key,
             "secret-1".into(),
@@ -1274,10 +1341,7 @@ mod tests {
             std::env::remove_var("SEBAS_CONTROL_SECRET");
         }
 
-        let key = SessionKey {
-            chat_id: "oc_no_secret".into(),
-            thread_id: None,
-        };
+        let key = ChannelKey::feishu("oc_no_secret", None);
         let out = submit_watchdog_control(
             &key,
             crate::watchdog::control_rpc::RpcControlRequest::Update {
@@ -1322,10 +1386,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        let key = SessionKey {
-            chat_id: "oc_e2e_upgrade".into(),
-            thread_id: None,
-        };
+        let key = ChannelKey::feishu("oc_e2e_upgrade", None);
         let envelope = feishu_control_envelope(
             &key,
             E2E_SECRET.into(),

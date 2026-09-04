@@ -3,8 +3,8 @@
 //! 存储（FileStore 委托给 unified state.json，见 openspec/specs/provider-management/spec.md
 //! 与 docs/design-history.md ADR-4）随变更持久化。
 
-use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
-use sebas_feishu::forms::{FormField, FormSpec};
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
+use sebas_channels::card::{FormField, FormSpec};
 use sebas_router::CrudStore;
 use sebas_router::Out;
 use sebas_router::crud::{CrudForm, FileStore, Item};
@@ -75,12 +75,7 @@ fn spec() -> FormSpec {
     )
 }
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_provider".into(),
-        thread_id: None,
-    }
-}
+fn key() -> ChannelKey { ChannelKey::feishu("oc_provider".into(), None) }
 
 fn item(name: &str) -> Item {
     let mut m = Map::new();
@@ -98,8 +93,8 @@ fn item_with_key(name: &str, key: &str) -> Item {
     m
 }
 
-fn card_action(payload: Value, msg_id: &str) -> CardAction {
-    CardAction {
+fn card_action(payload: Value, msg_id: &str) -> ChannelAction {
+    ChannelAction {
         session_id: String::new(),
         request_id: None,
         decision: None,
@@ -146,19 +141,13 @@ async fn provider_command_opens_main_card_with_seed() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/provider".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(ChannelEvent::Text { key: key(), text: "/provider".into(), reply_target: None })
         .await;
 
     let out = rx.recv().await.unwrap();
     match out {
         Out::SendCard { card, .. } => {
-            let s = card.to_string();
+            let s = card.to_json();
             // 标题。
             assert!(s.contains("Provider 管理"), "{s}");
             // 种子的 provider 名出现在下拉里。
@@ -192,48 +181,40 @@ async fn provider_create_submit_delete_round_trip() {
 
     // 点「＋ 新增」→ 表单卡原地出现。
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key(),
             action: card_action(json!({"form": "provider-custom", "op": "create"}), "om_1"),
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::UpdateCardByMsgId { msg_id, card, .. } = out else {
         panic!("expected UpdateCardByMsgId, got {out:?}");
     };
     assert_eq!(msg_id, "om_1");
-    assert!(card.to_string().contains("\"tag\":\"form\""), "{card}");
+    assert!(card.to_json().contains("\"tag\":\"form\""), "{card:?}");
 
     // 提交 → 列表卡原地更新，记录进 FileStore 并落盘。
     let mut fv = BTreeMap::new();
     fv.insert("name".into(), json!("openai"));
     fv.insert("base_url".into(), json!("https://api.openai.com"));
     router
-        .dispatch(FeishuIn::FormCb {
-            key: key(),
-            value: json!({"form": "provider-custom", "op": "submit"}),
-            form_value: fv,
-            message_id: Some("om_1".into()),
-            chat_type: "p2p".into(),
-        })
+        .dispatch(ChannelEvent::FormCb { key: key(), value: json!({"form": "provider-custom", "op": "submit"}), form_value: fv, card_ref: Some("om_1".into()) })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::UpdateCardByMsgId { card, .. } = out else {
         panic!("expected UpdateCardByMsgId, got {out:?}");
     };
-    assert!(card.to_string().contains("openai"), "{card}");
+    assert!(card.to_json().contains("openai"), "{card:?}");
 
     // 删除种子里的 deepseek（写墓碑）。
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key(),
             action: card_action(
                 json!({"form": "provider-custom", "op": "delete", "id": "deepseek"}),
                 "om_2",
             ),
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
     let out = rx.recv().await.unwrap();
     assert!(matches!(out, Out::UpdateCardByMsgId { .. }), "{out:?}");
@@ -261,8 +242,8 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(FeishuIn::ButtonCb { key: key(),
-            action: CardAction {
+        .dispatch(ChannelEvent::ButtonCb { key: key(),
+            action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
@@ -272,8 +253,7 @@ async fn permission_shaped_button_is_not_routed_to_provider_crud() {
                     "chat_type": "p2p",
                 }),
             },
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
 
     // 没有活跃 ACP 会话 → 死会话卡（SendCard）；如果误路由到 CRUD 会是
@@ -293,14 +273,13 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
     let (router, mut rx) = provider_router(&dir);
 
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key(),
             action: card_action(
                 json!({"form": "provider-custom", "op": "cancel"}),
                 "om_cancel",
             ),
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
 
     let out = rx.recv().await.unwrap();
@@ -308,7 +287,7 @@ async fn cancel_button_returns_to_list_not_to_dead_session_card() {
         Out::UpdateCardByMsgId { msg_id, card, .. } => {
             assert_eq!(msg_id, "om_cancel", "cancel 应原地更新原表单卡");
             // 列表卡包含「＋ 新增（预设/自定义）」按钮，证明回到 CRUD 列表。
-            let s = card.to_string();
+            let s = card.to_json();
             assert!(s.contains("＋ 新增（预设）"), "{s}");
             assert!(s.contains("＋ 新增（自定义）"), "{s}");
         }
@@ -352,19 +331,13 @@ async fn secret_key_is_never_displayed_in_plaintext_in_main_card() {
     // 主卡：deepseek 的折叠面板里 API Key 行应是「已配置」，且永远不
     // 出现明文密钥（无论新旧设计）。
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/provider".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(ChannelEvent::Text { key: key(), text: "/provider".into(), reply_target: None })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::SendCard { card, .. } = out else {
         panic!("expected SendCard");
     };
-    let s = card.to_string();
+    let s = card.to_json();
     assert!(s.contains("已配置"), "应展示 API Key：已配置：{s}");
     assert!(
         !s.contains("sk-super-secret"),
@@ -406,20 +379,19 @@ async fn edit_form_does_not_prefill_secret() {
     // 直接触发既有表单的编辑路径（不走新主卡的按钮，因为我们只想验证
     // 旧契约：编辑表单不预填密钥）。
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key(),
             action: card_action(
                 json!({"form": "provider-custom", "op": "edit", "id": "deepseek"}),
                 "om_e",
             ),
-            chat_type: "p2p".into(),
-        })
+                    })
         .await;
     let out = rx.recv().await.unwrap();
     let Out::UpdateCardByMsgId { card, .. } = out else {
         panic!("expected UpdateCardByMsgId");
     };
-    let s = card.to_string();
+    let s = card.to_json();
     assert!(
         !s.contains("sk-super-secret"),
         "edit form must not prefill secret: {s}"
@@ -460,13 +432,7 @@ async fn empty_secret_submit_preserves_existing_key() {
     fv.insert("name".into(), json!("deepseek"));
     fv.insert("base_url".into(), json!("https://new.example"));
     router
-        .dispatch(FeishuIn::FormCb {
-            key: key(),
-            value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}),
-            form_value: fv,
-            message_id: Some("om_s".into()),
-            chat_type: "p2p".into(),
-        })
+        .dispatch(ChannelEvent::FormCb { key: key(), value: json!({"form": "provider-custom", "op": "submit", "id": "deepseek"}), form_value: fv, card_ref: Some("om_s".into()) })
         .await;
     let _ = rx.recv().await.unwrap();
 

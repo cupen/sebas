@@ -309,7 +309,8 @@ fn current_uid() -> u32 {
 /// Load card config from settings.json, falling back to the TOML `[card]` section.
 fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
     match sebas_router::settings::load_settings(&sebas_router::settings::settings_path()) {
-        Ok(Some(s)) => s,
+        Ok(Some(s)) => serde_json::from_value(serde_json::to_value(&s).expect("card config serializes"))
+            .expect("card config round-trips between mirror shapes"),
         Ok(None) => cfg.card.clone(),
         Err(e) => {
             warn!(error = %e, "settings.json parse failed; using config defaults");

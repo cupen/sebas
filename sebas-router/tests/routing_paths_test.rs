@@ -3,15 +3,20 @@
 //! 全事件类型，MsgIdMap 存取，terminal error 清理。
 
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
-use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle, compose_media_prompt};
 use sebas_router::state::{Mapping, SessionMap};
 use std::time::Duration;
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_x", None)
+}
+
+fn text(key: ChannelKey, text: impl Into<String>, reply_target: Option<&str>) -> ChannelEvent {
+    ChannelEvent::Text {
+        key,
+        text: text.into(),
+        reply_target: reply_target.map(str::to_string),
     }
 }
 
@@ -39,10 +44,7 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Vec<Out> {
 #[tokio::test]
 async fn spawn_new_clears_reply_target() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_topic".into(),
-        thread_id: Some("omt_t1".into()),
-    };
+    let key = ChannelKey::feishu("oc_topic".into(), Some("omt_t1".into()));
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -50,26 +52,14 @@ async fn spawn_new_clears_reply_target() {
 
     // 入站话题消息写入 reply target；已映射会话走 Continue，不触发 spawn_new。
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "hello".into(),
-            reply_to: Some("om_root".into()),
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key.clone(), "hello", Some("om_root")))
         .await;
     assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));
 
     // 摘掉映射后下一条消息走 SpawnNew → spawn_new 必须清 reply target。
     map.remove_by_key(&key).await;
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "fresh".into(),
-            reply_to: Some("om_root".into()),
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key.clone(), "fresh", Some("om_root")))
         .await;
     assert_eq!(
         router.reply_target(&key).await,
@@ -87,16 +77,12 @@ async fn button_cb_dead_session_gets_dead_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
-            action: CardAction {
+        .dispatch(ChannelEvent::ButtonCb { key: key(), action: ChannelAction {
                 session_id: "ghost".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_once".into()),
                 value: serde_json::Value::Null,
-            },
-            chat_type: "p2p".into(),
-        })
+            }, })
         .await;
     match next_out(&mut out_rx).await {
         Out::SendCard { card, .. } => {
@@ -113,16 +99,12 @@ async fn button_cb_missing_request_id_gets_help() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
-            action: CardAction {
+        .dispatch(ChannelEvent::ButtonCb { key: key(), action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: None,
                 decision: Some("allow_once".into()),
                 value: serde_json::Value::Null,
-            },
-            chat_type: "p2p".into(),
-        })
+            }, })
         .await;
     assert!(matches!(next_out(&mut out_rx).await, Out::HelpText { .. }));
 }
@@ -144,16 +126,12 @@ async fn button_cb_unknown_decision_fails_closed_to_deny() {
         )
         .await;
     router
-        .dispatch(FeishuIn::ButtonCb {
-            key: key(),
-            action: CardAction {
+        .dispatch(ChannelEvent::ButtonCb { key: key(), action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: Some("r9".into()),
                 decision: Some("yolo".into()),
                 value: serde_json::Value::Null,
-            },
-            chat_type: "p2p".into(),
-        })
+            }, })
         .await;
     // First Out is the in-place flip (UpdateCardByMsgId); drain until SendAcp.
     let out = loop {
@@ -186,18 +164,12 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
 
-    for (text, expect) in [("/compact", "/compact"), ("/cost", "/cost")] {
+    for (cmd_text, expect) in [("/compact", "/compact"), ("/cost", "/cost")] {
         router
-            .dispatch(FeishuIn::Text {
-                key: key(),
-                text: text.into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
-            })
+            .dispatch(text(key(), cmd_text, None))
             .await;
 
-        if text == "/compact" {
+        if cmd_text == "/compact" {
             // /compact now sends a progress card first, then the command
             match next_out(&mut out_rx).await {
                 Out::SendCard { .. } => {} // progress card
@@ -213,18 +185,12 @@ async fn slash_compact_cost_cancel_forward_to_live_session() {
                 assert_eq!(session_id, "s1");
                 assert_eq!(prompt, expect);
             }
-            other => panic!("expected ContinueSession for {text}, got {other:?}"),
+            other => panic!("expected ContinueSession for {cmd_text}, got {other:?}"),
         }
     }
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/cancel".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "/cancel", None))
         .await;
     match next_out(&mut out_rx).await {
         Out::SendAcp {
@@ -242,13 +208,7 @@ async fn slash_compact_without_session_gets_plain_error() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/compact".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "/compact", None))
         .await;
     match next_out(&mut out_rx).await {
         Out::PlainText { content, .. } => {
@@ -262,23 +222,17 @@ async fn slash_compact_without_session_gets_plain_error() {
 #[tokio::test]
 async fn slash_status_cancel_without_session_get_plain_error() {
     // sebas-ixv：/status /cancel 无会话同样明确报错（与 /compact 同约定）。
-    for text in ["/status", "/cancel"] {
+    for cmd_text in ["/status", "/cancel"] {
         let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
         router
-            .dispatch(FeishuIn::Text {
-                key: key(),
-                text: text.into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
-            })
+            .dispatch(text(key(), cmd_text, None))
             .await;
         match next_out(&mut out_rx).await {
             Out::PlainText { content, .. } => {
-                assert!(content.contains("没有活跃会话"), "{text}: {content}");
-                assert!(content.contains(text), "{text}: {content}");
+                assert!(content.contains("没有活跃会话"), "{cmd_text}: {content}");
+                assert!(content.contains(cmd_text), "{cmd_text}: {content}");
             }
-            other => panic!("expected PlainText for {text}, got {other:?}"),
+            other => panic!("expected PlainText for {cmd_text}, got {other:?}"),
         }
     }
 }
@@ -287,24 +241,18 @@ async fn slash_status_cancel_without_session_get_plain_error() {
 async fn switch_resume_cd_get_unsupported_reply() {
     // sebas-ixv：/switch /resume /cd 已解析但路由未接入，必须明确回复
     // 「暂未支持」，不得静默丢弃。
-    for text in ["/switch 1", "/resume s1", "/cd /tmp"] {
+    for cmd_text in ["/switch 1", "/resume s1", "/cd /tmp"] {
         let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
         router
-            .dispatch(FeishuIn::Text {
-                key: key(),
-                text: text.into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
-            })
+            .dispatch(text(key(), cmd_text, None))
             .await;
         match next_out(&mut out_rx).await {
             Out::PlainText { content, .. } => {
-                let cmd = text.split_whitespace().next().unwrap();
-                assert!(content.contains("暂未支持"), "{text}: {content}");
-                assert!(content.contains(cmd), "{text}: {content}");
+                let cmd = cmd_text.split_whitespace().next().unwrap();
+                assert!(content.contains("暂未支持"), "{cmd_text}: {content}");
+                assert!(content.contains(cmd), "{cmd_text}: {content}");
             }
-            other => panic!("expected PlainText for {text}, got {other:?}"),
+            other => panic!("expected PlainText for {cmd_text}, got {other:?}"),
         }
     }
 }
@@ -315,13 +263,7 @@ async fn slash_status_forwards_continue_session() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/status".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "/status", None))
         .await;
 
     match next_out(&mut out_rx).await {
@@ -341,13 +283,7 @@ async fn slash_sessions_lists_empty() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/sessions".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "/sessions", None))
         .await;
 
     match next_out(&mut out_rx).await {
@@ -364,13 +300,7 @@ async fn slash_sessions_lists_active() {
     map.insert(key(), Mapping::active("s1")).await.unwrap();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/sessions".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "/sessions", None))
         .await;
 
     match next_out(&mut out_rx).await {
@@ -389,13 +319,7 @@ async fn media_message_composes_prompt_and_spawns() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Media {
-            key: key(),
-            files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()],
-            caption: Some("看这两张".into()),
-            reply_to: None,
-            chat_type: "private".into(),
-        })
+        .dispatch(ChannelEvent::Media { key: key(), files: vec!["/tmp/a.png".into(), "/tmp/b.pdf".into()], caption: Some("看这两张".into()), reply_target: None })
         .await;
     match next_out(&mut out_rx).await {
         Out::SpawnAcp { prompt, .. } => {
@@ -542,13 +466,7 @@ async fn insert_mapping_marks_alive_and_routes() {
     router.insert_mapping(key(), "s7".into()).await;
     assert!(router.session_alive(&key()).await);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "yo".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "yo", None))
         .await;
     // Per-turn flow: a fresh card is posted first, then the prompt is
     // forwarded to the session.
@@ -576,10 +494,7 @@ async fn fail_spawn_ignores_active_and_missing_entries() {
     // remove_by_session 对不存在的 session：no-op。
     map.remove_by_session("ghost").await;
     // activate 无占位 → 插入新映射（warn 路径）。
-    let orphan = SessionKey {
-        chat_id: "oc_orphan".into(),
-        thread_id: None,
-    };
+    let orphan = ChannelKey::feishu("oc_orphan".into(), None);
     let pending = map.activate(&orphan, "s9".into()).await;
     assert!(pending.is_empty());
     assert_eq!(map.get(&orphan).await.unwrap().session_id(), Some("s9"));
@@ -590,13 +505,7 @@ async fn help_command_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map);
     router
-        .dispatch(FeishuIn::Text {
-            key: key(),
-            text: "/help".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key(), "/help", None))
         .await;
     let out = next_out(&mut out_rx).await;
     match out {
@@ -608,7 +517,7 @@ async fn help_command_emits_help_card() {
                 "help card should carry HELP_CARD_TAG"
             );
             // 卡片应包含分组 tab 按钮和命令
-            let s = card.to_string();
+            let s = card.to_json();
             assert!(s.contains("💬 会话管理"), "help card missing session tab");
             assert!(s.contains("/new"), "help card missing /new command");
             assert!(s.contains("/cancel"), "help card missing /cancel command");
@@ -643,12 +552,12 @@ impl FakeNativeBridge {
 }
 
 impl NativeSessionBridge for FakeNativeBridge {
-    fn is_native(&self, key: &SessionKey) -> bool {
+    fn is_native(&self, _key: &ChannelKey) -> bool {
         // 已登记的原生会话（此处简化：default_native 即判定）。
         self.default_native
     }
-    fn prompt(self: Arc<Self>, key: SessionKey, text: String) {
-        self.prompted.lock().unwrap().push(format!("{}|{}", key.chat_id, text));
+    fn prompt(self: Arc<Self>, key: ChannelKey, text: String) {
+        self.prompted.lock().unwrap().push(format!("{}|{}", key.reference, text));
     }
     fn answer_permission(&self, _rid: &str, _d: NativeApprovalDecision) -> bool {
         false
@@ -660,20 +569,11 @@ impl NativeSessionBridge for FakeNativeBridge {
 #[tokio::test]
 async fn feishu_text_without_bridge_stays_acp() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_no_bridge".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_no_bridge".into(), None);
     let (router, mut out_rx) = RouterHandle::new(map);
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "hi".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key.clone(), "hi", None))
         .await;
 
     let out = next_out(&mut out_rx).await;
@@ -688,23 +588,14 @@ async fn feishu_text_without_bridge_stays_acp() {
 #[tokio::test]
 async fn feishu_text_with_native_default_routes_to_bridge() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_native".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_native".into(), None);
     let (router, mut out_rx) = RouterHandle::new(map);
     let fake = Arc::new(FakeNativeBridge::new(true));
     let bridge: Arc<dyn NativeSessionBridge> = fake.clone();
     router.set_native_bridge(Some(bridge)).await;
 
     router
-        .dispatch(FeishuIn::Text {
-            key: key.clone(),
-            text: "build it".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
-        })
+        .dispatch(text(key.clone(), "build it", None))
         .await;
 
     // 走桥：prompt 收到该 chat + 消息。
@@ -721,24 +612,15 @@ async fn feishu_text_with_native_default_routes_to_bridge() {
 #[tokio::test]
 async fn feishu_native_session_continues_via_bridge() {
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_native2".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_native2".into(), None);
     let (router, mut out_rx) = RouterHandle::new(map);
     let fake = Arc::new(FakeNativeBridge::new(true));
     let bridge: Arc<dyn NativeSessionBridge> = fake.clone();
     router.set_native_bridge(Some(bridge)).await;
 
-    for text in ["first", "second"] {
+    for cmd_text in ["first", "second"] {
         router
-            .dispatch(FeishuIn::Text {
-                key: key.clone(),
-                text: text.into(),
-                reply_to: None,
-                chat_type: "private".into(),
-                mentions: vec![],
-            })
+            .dispatch(text(key.clone(), cmd_text, None))
             .await;
     }
     assert_eq!(fake.prompts(), vec!["oc_native2|first".to_string(), "oc_native2|second".to_string()]);

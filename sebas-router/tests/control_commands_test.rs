@@ -6,7 +6,7 @@
 //! commands), matching the openspec/specs/router-commands/spec.md
 //! control-commands contract.
 
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::commands::GatewayAction;
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
@@ -14,11 +14,8 @@ use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(2);
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_control".into(),
-        thread_id: None,
-    }
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_control", None)
 }
 
 async fn next_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
@@ -30,12 +27,10 @@ async fn next_out(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Out {
 
 async fn dispatch_text(router: &RouterHandle, text: &str) {
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key(),
             text: text.into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 }
@@ -48,7 +43,7 @@ async fn system_command_routes_to_watchdog_system() {
     dispatch_text(&router, "/system").await;
     let out = next_out(&mut out_rx).await;
     assert!(
-        matches!(out, Out::WatchdogSystem { ref key } if key.chat_id == "oc_control"),
+        matches!(out, Out::WatchdogSystem { ref key } if key.reference == "oc_control"),
         "expected WatchdogSystem, got {out:?}"
     );
 }
@@ -59,7 +54,7 @@ async fn gateway_on_routes_to_watchdog_gateway() {
     dispatch_text(&router, "/gateway on").await;
     let out = next_out(&mut out_rx).await;
     assert!(
-        matches!(out, Out::WatchdogGateway { ref key, ref action } if key.chat_id == "oc_control" && matches!(action, GatewayAction::On)),
+        matches!(out, Out::WatchdogGateway { ref key, ref action } if key.reference == "oc_control" && matches!(action, GatewayAction::On)),
         "expected WatchdogGateway(on), got {out:?}"
     );
 }
@@ -81,7 +76,7 @@ async fn webui_status_routes_to_watchdog_webui() {
     dispatch_text(&router, "/webui status").await;
     let out = next_out(&mut out_rx).await;
     assert!(
-        matches!(out, Out::WatchdogWebui { ref key } if key.chat_id == "oc_control"),
+        matches!(out, Out::WatchdogWebui { ref key } if key.reference == "oc_control"),
         "expected WatchdogWebui, got {out:?}"
     );
 }
@@ -96,7 +91,7 @@ async fn confirm_command_routes_to_watchdog_confirm() {
     let out = next_out(&mut out_rx).await;
     assert!(
         matches!(out, Out::WatchdogConfirm { ref key, ref token }
-            if key.chat_id == "oc_control" && token == "tok_abc123"),
+            if key.reference == "oc_control" && token == "tok_abc123"),
         "expected WatchdogConfirm, got {out:?}"
     );
 }

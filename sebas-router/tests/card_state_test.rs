@@ -1,8 +1,8 @@
 //! CardStateMap 存储语义单测（FSM/累积在 card_state_test 的后续测试 + Task 5 覆盖）。
 
 use sebas_acp::claude::session::AcpEvent;
-use sebas_feishu::cards::CardConfig;
-use sebas_feishu::cards::CardElement;
+use sebas_channels::card::ChannelElement as CardElement;
+use sebas_router::cards::CardConfig;
 use sebas_router::card_state::{CardState, CardStateMap};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
@@ -128,10 +128,11 @@ async fn apply_event_accumulates_without_emitting_out() {
             assert!(s.contains("a"), "含 TextDelta: {s}");
             assert!(s.contains("think"), "含 ThinkingDelta: {s}");
             assert!(s.contains("Bash"), "含 ToolEnd: {s}");
-            // 标题现在是 user_prompt 首行（derive_topic）。
-            assert!(
-                s.contains("\"content\":\"hi\""),
-                "标题为 user_prompt 'hi': {s}"
+            // 标题（turn prompt）现在是 user_prompt（adapter 侧派生 topic）。
+            assert_eq!(
+                card.turn.as_ref().map(|t| t.prompt.as_str()),
+                Some("hi"),
+                "turn prompt 为 user_prompt 'hi'"
             );
         }
         other => panic!("expected UpdateCard, got {other:?}"),
@@ -177,11 +178,11 @@ async fn fsm_eyes_to_construction_to_done() {
         .unwrap();
     match o {
         Out::UpdateCard { card, .. } => {
-            // 状态 emoji 不再进卡：标题是 user_prompt 首行（derive_topic）。
-            let s = serde_json::to_string(&card).unwrap();
-            assert!(
-                s.contains("\"content\":\"p\""),
-                "标题为 user_prompt 'p': {s}"
+            // 状态 emoji 不再进卡：turn prompt 是 user_prompt（adapter side 派生 topic）。
+            assert_eq!(
+                card.turn.as_ref().map(|t| t.prompt.as_str()),
+                Some("p"),
+                "turn prompt 为 user_prompt 'p'"
             );
         }
         other => panic!("expected UpdateCard, got {other:?}"),
@@ -286,8 +287,7 @@ async fn new_with_card_config_uses_theme() {
         .unwrap();
     match o {
         Out::UpdateCard { card, .. } => {
-            let s = serde_json::to_string(&card).unwrap();
-            assert!(s.contains("\"template\":\"orange\""));
+            assert_eq!(card.theme, "orange", "theme 流入中立卡");
         }
         other => panic!("expected UpdateCard, got {other:?}"),
     }
@@ -392,14 +392,11 @@ async fn terminal_error_does_not_emit_reaction() {
 
 #[tokio::test]
 async fn continue_after_done_flips_reaction_back_to_working() {
-    use sebas_feishu::events::{FeishuIn, SessionKey};
+    use sebas_channels::{ChannelEvent, ChannelKey};
     use sebas_router::state::Mapping;
 
     let map = SessionMap::new();
-    let k = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let k = ChannelKey::feishu("oc_x", None);
     map.insert(k.clone(), Mapping::active("r3"))
         .await
         .expect("insert within capacity");
@@ -422,12 +419,10 @@ async fn continue_after_done_flips_reaction_back_to_working() {
 
     // 用户追问：continue 回切 WORKING —— 先刷卡，再换 reaction，最后 SendAcp
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: k,
             text: "第二题".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 
@@ -435,10 +430,10 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     match o1 {
         Out::UpdateCard { card, .. } => {
             // flush_card 走在 emit_turn_card 之前，使用上一轮的 user_prompt。
-            let s = serde_json::to_string(&card).unwrap();
-            assert!(
-                s.contains("\"content\":\"第一题\""),
-                "本轮 UpdateCard 是上一轮的终态（user_prompt=第一题）: {s}"
+            assert_eq!(
+                card.turn.as_ref().map(|t| t.prompt.as_str()),
+                Some("第一题"),
+                "本轮 UpdateCard 是上一轮的终态（user_prompt=第一题）"
             );
         }
         other => panic!("expected UpdateCard, got {other:?}"),
@@ -451,15 +446,15 @@ async fn continue_after_done_flips_reaction_back_to_working() {
     let o3 = recv(&mut out_rx).await;
     match o3 {
         Out::SendCard { card, root_id, .. } => {
-            // emit_turn_card 重新 seed：新轮的 user_prompt 进入标题。
+            // emit_turn_card 重新 seed：新轮的 user_prompt 进入 turn chrome。
             assert!(
                 root_id.is_none(),
                 "per-turn card reply target 由 Out 自己负责: {root_id:?}"
             );
-            let s = serde_json::to_string(&card).unwrap();
-            assert!(
-                s.contains("\"content\":\"第二题\""),
-                "per-turn card 标题是本轮 user_prompt '第二题': {s}"
+            assert_eq!(
+                card.turn.as_ref().map(|t| t.prompt.as_str()),
+                Some("第二题"),
+                "per-turn card 的 turn prompt 是本轮 user_prompt '第二题'"
             );
         }
         other => panic!("expected SendCard, got {other:?}"),
@@ -471,16 +466,13 @@ async fn continue_after_done_flips_reaction_back_to_working() {
 
 // ---- sebas card-flip: permission card click feedback ----
 
-use sebas_feishu::cards::render_resolved_permission_card;
-use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+use sebas_router::cards_ui::resolved_permission_card as render_resolved_permission_card;
+use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 
 #[tokio::test]
 async fn permission_card_click_emits_resolved_card_flip() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_perm".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_perm", None);
     // Seed an active session mapping so `on_button` passes the
     // `session_alive` check (production: the session is alive while
     // there's a Claude child process for this chat).
@@ -501,22 +493,21 @@ async fn permission_card_click_emits_resolved_card_flip() {
         .await;
     // User clicks Allow once on the card.
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key.clone(),
-            action: CardAction {
+            action: ChannelAction {
                 decision: Some("allow_once".into()),
                 session_id: "sess-1".into(),
                 request_id: Some("req-1".into()),
                 value: serde_json::json!({ "chat_type": "p2p" }),
             },
-            chat_type: "p2p".into(),
         })
         .await;
     // First Out: UpdateCardByMsgId that flips the original card in place.
     let o1 = recv(&mut out_rx).await;
     let msg_id = match &o1 {
         Out::UpdateCardByMsgId { key: k, msg_id, .. } => {
-            assert_eq!(k.chat_id, "oc_perm");
+            assert_eq!(k.reference, "oc_perm");
             assert_eq!(msg_id, "om_real");
             msg_id.clone()
         }
@@ -557,10 +548,7 @@ async fn stale_permission_click_emits_expired_card() {
     // No record_perm_card_msg_id call — simulates the case where the
     // request was already resolved (responder consumed) or never tracked.
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_perm".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_perm", None);
     // Seed an active session so `on_button` reaches the click path
     // (the stale branch is taken because perm_cards.take returns None,
     // not because the session is dead).
@@ -569,15 +557,14 @@ async fn stale_permission_click_emits_expired_card() {
         .insert(key.clone(), sebas_router::state::Mapping::active("sess-stale"))
         .await;
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key.clone(),
-            action: CardAction {
+            action: ChannelAction {
                 decision: Some("allow_once".into()),
                 session_id: "sess-1".into(),
                 request_id: Some("req-stale".into()),
                 value: serde_json::json!({ "chat_type": "p2p" }),
             },
-            chat_type: "p2p".into(),
         })
         .await;
     // Stale click should NOT emit UpdateCardByMsgId (nothing to update
@@ -593,7 +580,7 @@ async fn stale_permission_click_emits_expired_card() {
     let Out::SendCard { key: k, card, .. } = got else {
         panic!("expected SendCard for expired");
     };
-    assert_eq!(k.chat_id, "oc_perm");
+    assert_eq!(k.reference, "oc_perm");
     let s = serde_json::to_string(&card).unwrap();
     assert!(s.contains("已过期"), "expired card body: {s}");
     assert_no_more(&mut out_rx).await;
@@ -699,15 +686,12 @@ fn tool_signature_claude_style_bash_args_match_across_invocations() {
 
 #[tokio::test]
 async fn allowlist_grant_and_check() {
-    use sebas_feishu::events::SessionKey;
+    use sebas_channels::ChannelKey;
     use sebas_router::router::RouterHandle;
     use sebas_router::state::SessionMap;
 
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     // Initial state: not allowed.
     assert!(
         !router
@@ -735,10 +719,7 @@ async fn allowlist_grant_and_check() {
             .await
     );
     // Different chat → not allowed.
-    let other_key = SessionKey {
-        chat_id: "oc_y".into(),
-        thread_id: None,
-    };
+    let other_key = ChannelKey::feishu("oc_y", None);
     assert!(
         !router
             .allowlist()
@@ -749,15 +730,12 @@ async fn allowlist_grant_and_check() {
 
 #[tokio::test]
 async fn allowlist_clear_drops_everything_for_chat() {
-    use sebas_feishu::events::SessionKey;
+    use sebas_channels::ChannelKey;
     use sebas_router::router::RouterHandle;
     use sebas_router::state::SessionMap;
 
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     router
         .allowlist()
         .grant(&key, "Bash", &json!({"command": "ls"}))
@@ -790,15 +768,12 @@ async fn allowlist_clear_drops_everything_for_chat() {
 
 #[tokio::test]
 async fn new_command_clears_session_allowlist() {
-    use sebas_feishu::events::{FeishuIn, SessionKey};
+    use sebas_channels::{ChannelEvent, ChannelKey};
     use sebas_router::router::RouterHandle;
     use sebas_router::state::SessionMap;
 
     let (router, _rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     router
         .allowlist()
         .grant(&key, "Bash", &json!({"command": "ls"}))
@@ -813,12 +788,10 @@ async fn new_command_clears_session_allowlist() {
     // /new starts a FRESH session in the same chat: "Allow session" grants
     // are scoped to the session that approved them and must not carry over.
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "/new".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 
@@ -834,16 +807,13 @@ async fn new_command_clears_session_allowlist() {
 #[tokio::test]
 async fn allow_session_click_grants_and_auto_approves_identical_call() {
     use sebas_acp::claude::session::AcpEvent;
-    use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+    use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
     use sebas_router::router::{Out, RouterHandle};
     use sebas_router::state::{Mapping, SessionMap};
     use std::time::Duration;
 
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -895,15 +865,14 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
 
     // User clicks 相同调用不再询问.
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key.clone(),
-            action: CardAction {
+            action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_session".into()),
                 value: json!({ "chat_type": "p2p" }),
             },
-            chat_type: "p2p".into(),
         })
         .await;
     // Expect: card flip + PermissionReply(AllowSession), and the grant
@@ -968,16 +937,13 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
 #[tokio::test]
 async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
     use sebas_acp::claude::session::AcpEvent;
-    use sebas_feishu::events::{CardAction, FeishuIn, SessionKey};
+    use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
     use sebas_router::router::{Out, RouterHandle};
     use sebas_router::state::{Mapping, SessionMap};
     use std::time::Duration;
 
     let map = SessionMap::new();
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -1009,15 +975,14 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
         )
         .await;
     router
-        .dispatch(FeishuIn::ButtonCb {
+        .dispatch(ChannelEvent::ButtonCb {
             key: key.clone(),
-            action: CardAction {
+            action: ChannelAction {
                 session_id: "s1".into(),
                 request_id: Some("r1".into()),
                 decision: Some("allow_session".into()),
                 value: json!({ "chat_type": "p2p" }),
             },
-            chat_type: "p2p".into(),
         })
         .await;
     // Drain card flip + reply.
@@ -1061,15 +1026,12 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
 
 #[tokio::test]
 async fn permission_request_after_grant_auto_approves_without_card() {
-    use sebas_feishu::events::SessionKey;
+    use sebas_channels::ChannelKey;
     use sebas_router::router::RouterHandle;
     use sebas_router::state::SessionMap;
 
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     let session_id = "sess-1".to_string();
     // Seed the session map so apply_event_to_out can resolve the key.
     let _ = router
@@ -1136,11 +1098,8 @@ async fn permission_request_after_grant_auto_approves_without_card() {
 #[test]
 fn out_send_card_carries_root_id() {
     let out = Out::SendCard {
-        key: sebas_feishu::events::SessionKey {
-            chat_id: "oc_test".into(),
-            thread_id: None,
-        },
-        card: serde_json::json!({"type": "card"}),
+        key: sebas_channels::ChannelKey::feishu("oc_test", None),
+        card: sebas_channels::ChannelCard::new("t", "blue"),
         msg_id: None,
         perm_request_id: None,
         perm_meta: None,
@@ -1160,11 +1119,8 @@ fn out_send_card_carries_root_id() {
 #[test]
 fn out_send_card_root_id_none_round_trips() {
     let out = Out::SendCard {
-        key: sebas_feishu::events::SessionKey {
-            chat_id: "oc_test".into(),
-            thread_id: None,
-        },
-        card: serde_json::json!({"type": "card"}),
+        key: sebas_channels::ChannelKey::feishu("oc_test", None),
+        card: sebas_channels::ChannelCard::new("t", "blue"),
         msg_id: None,
         perm_request_id: None,
         perm_meta: None,
@@ -1182,15 +1138,12 @@ async fn permission_request_without_grant_still_renders_card() {
     // Sanity counterpart to the auto-approve test: a fresh (Bash, ls)
     // call when nothing is on the allowlist must still show the card so
     // the user can decide.
-    use sebas_feishu::events::SessionKey;
+    use sebas_channels::ChannelKey;
     use sebas_router::router::RouterHandle;
     use sebas_router::state::SessionMap;
 
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
     let session_id = "sess-1".to_string();
     let _ = router
         .map
@@ -1219,7 +1172,7 @@ async fn permission_request_without_grant_still_renders_card() {
             perm_request_id,
             ..
         } => {
-            assert_eq!(k.chat_id, "oc_x");
+            assert_eq!(k.reference, "oc_x");
             assert_eq!(perm_request_id.as_deref(), Some("req-fresh"));
         }
         other => panic!("expected SendCard, got {other:?}"),

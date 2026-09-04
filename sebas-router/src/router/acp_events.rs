@@ -3,8 +3,8 @@
 //! `RouterHandle` 的 impl 延续块（子模块可访问私有字段），从 router.rs 拆出。
 
 use super::{Out, RouterHandle, extract_session_id};
+use crate::cards_ui;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
-use sebas_feishu::cards::render_permission_card;
 
 impl RouterHandle {
     /// Dispatch an inbound `AcpEvent`, extracting the session_id from the
@@ -32,14 +32,14 @@ impl RouterHandle {
             } => {
                 // 独立权限广播（design D6）：与飞书卡片路径并行，任何订阅者
                 // （如 webui InProcessBackend）都能拿到这条 PermissionRequest。
-                // 即使飞书侧因无 SessionKey 而丢弃卡片，广播也照发不误。
+                // 即使通道侧因无 ChannelKey 而丢弃卡片，广播也照发不误。
                 let _ = self.perm_events.send(event.clone());
 
-                // Resolve the SessionKey that owns this session so Feishu has a
+                // Resolve the ChannelKey that owns this session so Feishu has a
                 // real `receive_id`. Without this the card would carry an empty
                 // chat_id and Feishu rejects it.
                 let Some(key) = self.map.lookup_key_by_session(session_id).await else {
-                    tracing::warn!(%session_id, "no SessionKey for permission request; dropping card");
+                    tracing::warn!(%session_id, "no ChannelKey for permission request; dropping card");
                     return;
                 };
                 // Auto-approve if the user previously clicked "本会话不再
@@ -62,10 +62,10 @@ impl RouterHandle {
                     .await;
                     return;
                 }
-                let card = render_permission_card(session_id, request_id, tool_name, args);
+                let card = cards_ui::permission_card(session_id, request_id, tool_name, args);
                 self.emit(Out::SendCard {
                     key,
-                    card: serde_json::to_value(&card).expect("permission card serializes"),
+                    card,
                     msg_id: None,
                     // Mark this card for in-place update on click. The dispatcher
                     // records the Feishu message_id keyed by request_id so a
@@ -88,7 +88,7 @@ impl RouterHandle {
                 // → drop_card。**不** emit_reaction —— 终态视觉由 card body 表达
                 // （card_events::apply_event_to_card 把 ❌ 错误行 push 到 body），
                 // reaction 维持"已收到 / 折腾中"语义。drop_card 无条件执行（无论
-                // SessionKey 是否还在都该清 CardState 防无界增长）。
+                // ChannelKey 是否还在都该清 CardState 防无界增长）。
                 self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
                 let sid = session_id.as_str();

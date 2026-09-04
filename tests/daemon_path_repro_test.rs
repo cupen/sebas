@@ -5,7 +5,7 @@
 //! CLI itself — fake-claude speaks its stream-json + control protocol.)
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::router::RouterHandle;
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
@@ -31,10 +31,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
     let (router, _out_rx) = RouterHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
-    let key = SessionKey {
-        chat_id: "oc_x".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_x", None);
 
     let t0 = std::time::Instant::now();
     let (_sid, _pending, _rx) = sebas::run::acp_spawn_and_activate(

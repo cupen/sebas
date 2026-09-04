@@ -1,9 +1,12 @@
-//! 主运行编排：装配各子系统（router/manager/feishu/ws）并跑到信号退出。
+//! 主运行编排：装配各子系统（router/manager/adapter 注册表）并跑到信号退出。
 //!
-//! 职责拆分（原 run.rs 922 行）：
+//! 职责拆分：
 //! - 出站分发 `Out` → 副作用： [`crate::dispatch`]
 //! - ACP 会话生命周期（spawn/resume/pump）: [`crate::session_boot`]
-//! - 飞书 WS 事件循环： [`crate::ws_loop`]
+//! - 通道适配器装配（decouple-feishu-channel task 4）：按配置实例化已启用
+//!   adapter（飞书 = [`sebas_feishu::adapter::FeishuAdapter`]）填入
+//!   [`sebas_channels::AdapterRegistry`]，入站 `ChannelEvent` 经 inbound
+//!   通道交给 router；飞书 WS 循环由 adapter 自己拥有。
 //!
 //! 下面的 re-export 是 facade：integration tests 与 `replay` 仍走
 //! `sebas::run::{...}` 路径，拆模块不牵动调用方。
@@ -12,16 +15,19 @@ pub use crate::session_boot::{
     acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, restore_session_map,
     spawn_acp_pump,
 };
-pub use crate::ws_loop::RouterEventHandler;
+pub use crate::ws_loop::{RouterEventHandler, ingest_feishu_frame};
 
 use crate::config::{AgentConfig, Config};
 use crate::dispatch::{dispatch_out, dispatch_out_without_feishu};
 use crate::error::Result;
 use crate::reactions::ReactionTracker;
-use crate::ws_loop::{run_ws_loop, spawn_test_session};
+use crate::ws_loop::spawn_test_session;
 use sebas_acp::claude::manager::{AgentEntry, SessionManager};
 use sebas_acp::{AcpDriver, AgentDriver, ClaudeDriver};
-use sebas_feishu::client::{FeishuClient, FeishuConfig};
+use sebas_channels::key::ChannelName;
+use sebas_channels::AdapterRegistry;
+use sebas_feishu::adapter::{FeishuAdapter, FeishuAdapterConfig};
+use sebas_feishu::client::FeishuClient;
 use sebas_feishu::messages::{ReceiveIdType, SendTextRequest};
 use sebas_gateway::config::GatewayConfig;
 use sebas_router::router::RouterHandle;
@@ -135,9 +141,18 @@ pub async fn run(
     // Strict: malformed settings.json refuses to start with a clear error.
     // Missing settings.json → fall back to TOML [card] so first-boot users
     // get the configured values rather than serde defaults.
+    //
+    // decouple-feishu-channel task 3/4：`settings.json` 由 router 的中立
+    // `CardConfig` 读写（两面 serde 形状逐一相同）；这里把它转成 router
+    // 需要的类型（serde 往返，零字段映射代码）。
     let merged_card_cfg = match settings::load_settings(&settings::settings_path()) {
         Ok(Some(s)) => s,
-        Ok(None) => cfg.card.clone(),
+        Ok(None) => {
+            // TOML `[card]` 是 feishu 渲染配置（adapter 读取）；转为 router
+            // 中立镜像（serde 形状逐一相同，往返即映射）。
+            serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
+                .expect("card config round-trips between mirror shapes")
+        }
         Err(e) => {
             error!(error = %e, "settings.json 解析失败，拒绝启动");
             return Err(crate::error::SebasError::Config(e));
@@ -148,7 +163,11 @@ pub async fn run(
         build_agent_registry(&cfg),
     ));
     let provider_forms = crate::provider::build_form(&raw_config);
-    let webui_card_cfg = merged_card_cfg.clone();
+    // WebUI 设置页的快照配置是 feishu 渲染配置（`[card]`），与 router 镜像
+    // 同形；从已合并的 router 镜像转回 feishu 类型。
+    let webui_card_cfg: sebas_feishu::cards::CardConfig =
+        serde_json::from_value(serde_json::to_value(&merged_card_cfg).expect("card config serializes"))
+            .expect("card config round-trips between mirror shapes");
     // 原生内核 manager（make-feishu-optional-webui-primary）：webui 的
     // NativeAgentBackend 与飞书原生桥共享同一个执行面（LLM 通道/工具注册表/
     // 审批 hub）。凭据缺失时 manager 仍可建，spawn 时按 cause 拒绝并诚实降级。
@@ -175,10 +194,33 @@ pub async fn run(
     // router's phase machine can swap 👀→🚧→✅ rather than pile them up.
     let reactions = Arc::new(ReactionTracker::default());
 
+    // ── WS dump dir（adapter 入站快照用）──
+    // feishu 未启用时不创建目录。
+    let ws_dump_dir = match dump_inbound.as_ref() {
+        Some(p) if feishu_enabled => match std::fs::create_dir_all(p) {
+            Ok(()) => Some(std::path::PathBuf::from(p)),
+            Err(e) => {
+                warn!(?e, path = %p, "failed to create inbound dump dir; disabling dump");
+                None
+            }
+        },
+        _ => None,
+    };
+    if let Some(d) = &ws_dump_dir {
+        info!(dir = %d.display(), "inbound WS payloads will be dumped here");
+    }
+
     // feishu 启用：建 client、取 token、发 hello/test、spawn 出站 pump。
     // feishu 未启用（sebas-2ty）：全部跳过，出站接收端直接丢弃（与
     // standalone WebUI 同语义：Out 事件静默丢弃），进程等关闭信号。
     let http = reqwest::Client::new();
+    // ── 适配器注册表装配（decouple-feishu-channel task 4/5）──
+    // `web` 通道常驻注册（webui 的入站面是 HTTP API → SessionBackend，无
+    // 传输循环）；飞书 adapter 按下方 `[feishu] enabled` 门禁注册。注册表
+    // 回答"哪些通道活跃"（启动时打日志），渲染/传输细节归各 adapter。
+    let mut registry = AdapterRegistry::new();
+    registry.register(Box::new(sebas_webui::web_adapter::WebAdapter));
+
     if feishu_enabled {
         // Test affordance: `SEBAS_TEST_FAKE_TOKEN=1` skips the live Feishu auth
         // HTTP call and substitutes a stub token. Used by integration tests that
@@ -250,15 +292,51 @@ pub async fn run(
             .await?;
         }
 
-        // Spawn outbound pump
-        let cfg_for_outbound = cfg.clone();
-        let tokens_for_outbound = tokens;
-        let http_for_outbound = http;
-        let feishu = FeishuClient::new(FeishuConfig {
+        // ── 适配器注册表装配（decouple-feishu-channel task 4）──
+        // 按配置实例化飞书 adapter，注册进 `AdapterRegistry`；入站
+        // `ChannelEvent` 经 `inbound` 通道交给 core（router）。WS 循环由
+        // adapter 自己拥有（`spawn` 内部启动），core 不再硬编码启动 WS。
+        let feishu = FeishuClient::new(sebas_feishu::client::FeishuConfig {
             app_id: cfg.feishu.app_id.clone(),
             app_secret: cfg.feishu.app_secret.clone(),
             owner_id: cfg.feishu.owner_id.clone(),
         });
+        let adapter = FeishuAdapter::new(
+            feishu.clone(),
+            FeishuAdapterConfig {
+                app_id: cfg.feishu.app_id.clone(),
+                app_secret: cfg.feishu.app_secret.clone(),
+                owner_id: cfg.feishu.owner_id.clone(),
+                allowed_chat_types: cfg.feishu.allowed_chat_types.clone(),
+                bot_name: cfg.feishu.bot_name.clone(),
+                dump_dir: ws_dump_dir,
+                // `[card]` 渲染配置：由 adapter 解释（theme/truncation/fold）。
+                card_config: webui_card_cfg.clone(),
+            },
+        );
+        registry.register(Box::new(adapter.clone()));
+        let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<sebas_channels::ChannelEvent>(
+            cfg.router.channel_buffer,
+        );
+        // 每个 adapter 一个 inbound 扇出：core 侧一个消费者任务，把
+        // `ChannelEvent` 交给 router.dispatch。
+        let inbound_router = router.clone();
+        tokio::spawn(async move {
+            while let Some(evt) = inbound_rx.recv().await {
+                inbound_router.dispatch(evt).await;
+            }
+        });
+        if let Some(feishu_adapter) = registry.get(&ChannelName::FEISHU.into()) {
+            if let Err(e) = feishu_adapter.spawn(inbound_tx) {
+                error!(error = %e, "failed to spawn feishu adapter; continuing without inbound");
+            } else {
+                info!("feishu adapter registered + WS loop spawned");
+            }
+        }
+        // Spawn outbound pump
+        let cfg_for_outbound = cfg.clone();
+        let tokens_for_outbound = tokens;
+        let http_for_outbound = http;
         let router_for_outbound = router.clone();
         let mgr_for_outbound = mgr.clone();
         let reactions_for_outbound = reactions;
@@ -308,6 +386,15 @@ pub async fn run(
             }
         });
     }
+
+    // 注册表含全部活跃通道（web 常驻 + 按配置启用的飞书）。绑定到函数
+    // 作用域让 adapter 实例活满进程生命周期；日志即 spec 的"registry 可
+    // 查询哪些通道活跃"。
+    info!(
+        channels = ?registry.names().map(|n| n.as_str().to_string()).collect::<Vec<_>>(),
+        "active channel adapters"
+    );
+    let _registry = registry;
 
     // Start WebUI dashboard server if requested
     if webui {
@@ -376,28 +463,8 @@ pub async fn run(
     };
 
     // Run the long-connection event loop inline in a `tokio::select!` so the
-    // shutdown signal can drop the WebSocket future and close the connection
-    // promptly. If the reconnect loop ever exits, keep waiting for ctrl_c so
-    // the normal session cleanup and state snapshot still run.
-    // feishu 未启用时以 pending future 占位：进程只等关闭信号（sebas-2ty）。
-    let ws_router = router.clone();
-    let ws_owner = cfg.feishu.owner_id.clone();
-    let ws_app_id = cfg.feishu.app_id.clone();
-    let ws_app_secret = cfg.feishu.app_secret.clone();
-    let ws_dump_dir = match dump_inbound.as_ref() {
-        Some(p) if feishu_enabled => match std::fs::create_dir_all(p) {
-            Ok(()) => Some(std::path::PathBuf::from(p)),
-            Err(e) => {
-                warn!(?e, path = %p, "failed to create inbound dump dir; disabling dump");
-                None
-            }
-        },
-        _ => None,
-    };
-    if let Some(d) = &ws_dump_dir {
-        info!(dir = %d.display(), "inbound WS payloads will be dumped here");
-    }
-
+    // feishu 未启用时进程只等关闭信号（sebas-2ty）；WS 生命周期由 adapter
+    // 的 spawn 任务拥有（见前面的注册表装配）。
     // Test affordance: `SEBAS_TEST_SPAWN_SESSION=1` mints a session via the
     // `acp.claude.path` binary at startup. Without this, the daemon idles
     // and no child is ever spawned — which makes the SIGTERM-cleanup test
@@ -425,30 +492,14 @@ pub async fn run(
             std::future::pending::<()>().await;
         }
     };
-    let mut ws_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-        if feishu_enabled {
-            Box::pin(run_ws_loop(
-                &ws_app_id,
-                &ws_app_secret,
-                &ws_owner,
-                ws_router,
-                ws_dump_dir,
-                cfg.feishu.allowed_chat_types.clone(),
-                cfg.feishu.bot_name.clone(),
-            ))
-        } else {
-            Box::pin(std::future::pending())
-        };
+    // feishu WS 生命周期由 adapter 的 spawn 任务拥有（task 4）：进程只在
+    // 信号上等待；WS 循环退出（重连/致命错误）不结束 core。
     tokio::select! {
         _ = sigint => {
             info!("shutting down (SIGINT)");
         }
         _ = sigterm => {
             info!("shutting down (SIGTERM)");
-        }
-        _ = &mut ws_fut => {
-            warn!("WS loop exited; awaiting ctrl_c");
-            tokio::signal::ctrl_c().await.ok();
         }
     }
 

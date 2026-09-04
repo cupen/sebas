@@ -14,7 +14,7 @@ use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
 };
 use async_trait::async_trait;
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
     Reachability, SessionBackend, SessionRejection,
@@ -293,14 +293,14 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    async fn focused(&self) -> Option<SessionKey> {
+    async fn focused(&self) -> Option<ChannelKey> {
         match self.request(&CoreChannelRequest::Focused).await {
             Ok(CoreChannelResponse::Focused { key }) => key,
             _ => None,
         }
     }
 
-    async fn set_focus(&self, key: Option<SessionKey>) {
+    async fn set_focus(&self, key: Option<ChannelKey>) {
         let _ = self.request(&CoreChannelRequest::SetFocus { key }).await;
     }
 
@@ -312,7 +312,7 @@ impl SessionBackend for CoreChannelBackend {
         &self,
         prompt: String,
         project_dir: Option<String>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::Spawn {
                 prompt,
@@ -326,7 +326,7 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
+    async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         match self
             .request(&CoreChannelRequest::Message { key, message })
             .await?
@@ -337,7 +337,7 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         match self.request(&CoreChannelRequest::Close { key }).await? {
             CoreChannelResponse::Ok => Ok(()),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),
@@ -345,7 +345,7 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+    async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         match self.request(&CoreChannelRequest::Turns { key, from }).await? {
             CoreChannelResponse::Turns { entries } => Ok(entries),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),

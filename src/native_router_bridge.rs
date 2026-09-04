@@ -12,7 +12,7 @@
 
 use sebas_agent::policy::ApprovalAnswer;
 use sebas_agent::session::{AgentEvent, SessionManager};
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::native_bridge::{NativeApprovalDecision, NativeSessionBridge};
 use sebas_router::{RouterHandle, TurnEntry};
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ struct NativeSession {
 pub struct RouterNativeBridge {
     manager: Arc<SessionManager>,
     router: RouterHandle,
-    /// 编码后的 SessionKey → 会话。
+    /// 编码后的 ChannelKey → 会话。
     sessions: Arc<Mutex<HashMap<String, NativeSession>>>,
     /// 待决权限请求：request_id → 内核 session_id（供回填）。
     pending: Arc<Mutex<HashMap<String, String>>>,
@@ -60,13 +60,13 @@ impl RouterNativeBridge {
         })
     }
 
-    /// 编码 `SessionKey` 为 router/通道侧形态（复用 router 的共享实现）。
-    fn encode(key: &SessionKey) -> String {
+    /// 编码 `ChannelKey` 为 router/通道侧形态（复用 router 的共享实现）。
+    fn encode(key: &ChannelKey) -> String {
         sebas_router::router::encode_key(key)
     }
 
     /// 该 key 是否已是原生会话（在桥的 sessions 表中）。
-    fn is_registered(&self, key: &SessionKey) -> bool {
+    fn is_registered(&self, key: &ChannelKey) -> bool {
         let g = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         g.contains_key(&Self::encode(key))
     }
@@ -76,7 +76,7 @@ impl RouterNativeBridge {
     /// UUID（`turn_log` 的键，`session_turns` 按此读取）。
     async fn pump(
         bridge: Arc<Self>,
-        key: SessionKey,
+        key: ChannelKey,
         session_id: String,
         mut rx: tokio::sync::broadcast::Receiver<AgentEvent>,
     ) {
@@ -150,12 +150,12 @@ impl RouterNativeBridge {
 }
 
 impl NativeSessionBridge for RouterNativeBridge {
-    fn is_native(&self, key: &SessionKey) -> bool {
+    fn is_native(&self, key: &ChannelKey) -> bool {
         // 已登记的原生会话 → 走桥；新会话按默认执行体（default_native）。
         self.is_registered(key) || self.default_native
     }
 
-    fn prompt(self: Arc<Self>, key: SessionKey, text: String) {
+    fn prompt(self: Arc<Self>, key: ChannelKey, text: String) {
         tokio::spawn(async move {
             let encoded = Self::encode(&key);
             // 已存在 → 续聊。
@@ -271,10 +271,7 @@ mod tests {
         tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
         let bridge = RouterNativeBridge::new(manager(), router.clone());
 
-        let key = SessionKey {
-            chat_id: "agent-f-1".into(),
-            thread_id: None,
-        };
+        let key = ChannelKey::new("feishu", "agent-f-1");
         bridge.prompt(key.clone(), "go".into());
 
         // router 应出现该原生会话的 mapping（Active + 内核 session_id）。

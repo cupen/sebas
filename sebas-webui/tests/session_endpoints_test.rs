@@ -6,8 +6,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use sebas_acp::claude::AcpEvent;
+use sebas_channels::ChannelKey;
 use sebas_feishu::cards::CardConfig;
-use sebas_feishu::events::SessionKey;
 use sebas_router::router::RouterHandle;
 use sebas_router::state::{Mapping, SessionMap};
 use sebas_webui::build_router;
@@ -15,20 +15,13 @@ use sebas_webui::models::GatewayInfo;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn key(id: &str) -> SessionKey {
-    SessionKey {
-        chat_id: format!("oc_{id}"),
-        thread_id: None,
-    }
+fn key(id: &str) -> ChannelKey {
+    ChannelKey::feishu(&format!("oc_{id}"), None)
 }
 
-fn encode(key: &SessionKey) -> String {
-    let raw = format!(
-        "{}\0{}",
-        key.chat_id,
-        key.thread_id.as_deref().unwrap_or("")
-    );
-    urlencoding::encode(&raw).into_owned()
+/// 与 routes::encode_session_key 同形：`channel\0reference` 后 URL 编码。
+fn encode(key: &ChannelKey) -> String {
+    urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference)).into_owned()
 }
 
 /// RouterHandle preloaded with one Active (s1), one Dormant (s2), one
@@ -119,10 +112,7 @@ async fn switch_session_marks_active_and_returns_redirect() {
 #[tokio::test]
 async fn switch_unknown_session_returns_404() {
     let (_router, _rx, app) = fixture().await;
-    let encoded = encode(&SessionKey {
-        chat_id: "oc_ghost".into(),
-        thread_id: None,
-    });
+    let encoded = encode(&ChannelKey::feishu("oc_ghost", None));
     let resp = app
         .oneshot(
             Request::builder()
@@ -233,10 +223,7 @@ async fn close_spawning_placeholder_returns_200_and_drops_it() {
 #[tokio::test]
 async fn close_unknown_session_returns_404() {
     let (_router, _rx, app) = fixture().await;
-    let encoded = encode(&SessionKey {
-        chat_id: "oc_ghost".into(),
-        thread_id: None,
-    });
+    let encoded = encode(&ChannelKey::feishu("oc_ghost", None));
     let resp = app
         .oneshot(
             Request::builder()
@@ -810,36 +797,37 @@ async fn create_session_with_project_dir_binds_to_path() {
     let key_str = v["key"].as_str().expect("key string").to_string();
 
     // The newly-spawned session's mapping records the project_dir. Web-spawned
-    // keys come from `SessionKey::web_key()` (chat_id = "web-{nanos}",
-    // no thread_id) and live as a Spawning placeholder until the dispatcher
-    // promotes them — so identify by chat_id starting with "web-" and a
-    // status of "spawning".
+    // keys come from `ChannelKey::web_new()` (channel "web", reference
+    // "web-{nanos}-{seq}") and live as a Spawning placeholder until the
+    // dispatcher promotes them — so identify by a reference starting with
+    // "web-" and a status of "spawning".
     let infos = router.session_info_snapshot().await;
     let new_info = infos
         .iter()
-        .find(|i| i.chat_id.starts_with("web-") && i.status == "spawning")
+        .find(|i| i.channel == "web" && i.key.starts_with("web-") && i.status == "spawning")
         .expect("new web-spawned session info present");
     assert_eq!(new_info.project_dir.as_deref(), Some("/tmp/some-webui-test"));
 
-    // The encoded key round-trips back to the same SessionKey web_spawn
-    // produced: no thread_id, so no NUL separator.
+    // The encoded key round-trips back to the same ChannelKey web_spawn
+    // produced: channel "web" + a "web-*" reference.
     let raw = urlencoding::decode(&key_str).unwrap().into_owned();
+    let (channel, reference) = raw
+        .split_once('\0')
+        .expect("encoded key carries the channel\\0reference separator");
+    assert_eq!(channel, "web", "encoded key channel; got {raw:?}");
     assert!(
-        raw.starts_with("web-"),
-        "encoded key should decode to a web-* chat_id; got {raw:?}"
+        reference.starts_with("web-"),
+        "encoded key should decode to a web-* reference; got {raw:?}"
     );
 
     // The focus pointer moved to the new session.
     let focused = router.active_session_snapshot().await;
     let focused = focused.expect("focus moved to the new session");
+    assert_eq!(focused.channel.as_str(), "web");
     assert!(
-        focused.chat_id.starts_with("web-"),
-        "focused chat_id should match the freshly-created web key; got {:?}",
-        focused.chat_id
-    );
-    assert_eq!(
-        focused.thread_id, None,
-        "web_key() never sets a thread_id"
+        focused.reference.starts_with("web-"),
+        "focused reference should match the freshly-created web key; got {:?}",
+        focused.reference
     );
 
     // Sanity: the new key the client received is exactly the focused key,
@@ -850,22 +838,20 @@ async fn create_session_with_project_dir_binds_to_path() {
 
 // ---- Concurrency across projects (task 6.1) and remove-project semantics (task 6.2) ----
 
-/// Decode an encoded web session key back to its `SessionKey`. Encoded keys
-/// always carry the NUL separator (empty thread_id side for web keys).
-fn decode_web_key(encoded: &str) -> SessionKey {
+/// Decode an encoded web session key back to its `ChannelKey`. Encoded keys
+/// carry the `channel\0reference` separator; web keys are channel "web" with
+/// a "web-*" reference.
+fn decode_web_key(encoded: &str) -> ChannelKey {
     let raw = urlencoding::decode(encoded).unwrap().into_owned();
-    let (chat_id, thread_id) = raw
+    let (channel, reference) = raw
         .split_once('\0')
-        .expect("encoded key carries the NUL separator");
+        .expect("encoded key carries the channel\\0reference separator");
+    assert_eq!(channel, "web", "expected a web-* channel; got {channel:?}");
     assert!(
-        chat_id.starts_with("web-"),
-        "expected a web-* chat_id; got {chat_id:?}"
+        reference.starts_with("web-"),
+        "expected a web-* reference; got {reference:?}"
     );
-    assert_eq!(thread_id, "", "web keys never carry a thread_id");
-    SessionKey {
-        chat_id: chat_id.to_string(),
-        thread_id: None,
-    }
+    ChannelKey::new("web", reference.to_string())
 }
 
 /// Canonical absolute path of a temp project dir. The registry canonicalizes
@@ -921,7 +907,7 @@ async fn spawn_and_drive_project_session(
     project_dir: &str,
     acp_session_id: &str,
     content: &str,
-) -> (String, SessionKey) {
+) -> (String, ChannelKey) {
     let resp = post_json(
         app,
         "/api/sessions",
@@ -977,8 +963,8 @@ fn assert_detail_untouched(before: &serde_json::Value, after: &serde_json::Value
         "detail transcript body must be byte-for-byte unchanged"
     );
     for field in [
-        "chat_id",
-        "thread_id",
+        "channel",
+        "reference",
         "session_id",
         "status",
         "status_slug",
@@ -1027,7 +1013,7 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
         .session_info_snapshot()
         .await
         .into_iter()
-        .find(|i| i.chat_id == key_a.chat_id)
+        .find(|i| i.channel == key_a.channel.as_str() && i.key == key_a.reference)
         .expect("A mapping present");
 
     // Switch to project B and drive it.
@@ -1045,7 +1031,7 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
         .await
         .expect("focus pointer set");
     assert_eq!(
-        focused.chat_id, key_b.chat_id,
+        focused, key_b,
         "spawning B must move the focus pointer to B"
     );
 
@@ -1076,7 +1062,7 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
         .session_info_snapshot()
         .await
         .into_iter()
-        .find(|i| i.chat_id == key_a.chat_id)
+        .find(|i| i.channel == key_a.channel.as_str() && i.key == key_a.reference)
         .expect("A mapping still present");
     assert_eq!(info_before, info_after, "A's mapping must be untouched");
     let (_, detail_after) = get_json(&app, &format!("/api/sessions/{encoded_a}")).await;
@@ -1168,4 +1154,52 @@ async fn removing_project_keeps_its_session_running_and_reachable() {
     let (_, summary) = get_json(&app, "/api/summary").await;
     assert_eq!(summary["reachability"]["ok"], true);
     assert_eq!(summary["total_sessions"], 4);
+}
+
+/// decouple-feishu-channel task 5.1: web 与 feishu 会话在中立 `ChannelKey`
+/// 下平级——同一快照可见、同一列表渲染，互不串扰（无跨通道 key 冲突），
+/// wire 上只有 `channel`/`reference`，没有飞书形状字段。
+#[tokio::test]
+async fn web_and_feishu_sessions_are_peers_in_one_snapshot() {
+    let map = SessionMap::new();
+    let web_key = ChannelKey::new("web", "web-1000");
+    let feishu_key = ChannelKey::feishu("oc_peer", Some("om_t"));
+    map.insert(web_key.clone(), Mapping::active("s-web"))
+        .await
+        .unwrap();
+    map.insert(feishu_key.clone(), Mapping::spawning())
+        .await
+        .unwrap();
+
+    let (router, _rx) = RouterHandle::new(map);
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(router.clone()),
+    );
+    let app = build_router(backend, GatewayInfo::default(), CardConfig::default());
+
+    let (status, list) = get_json(&app, "/api/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = list["recent_sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "both channels' sessions listed");
+
+    let web_row = rows
+        .iter()
+        .find(|r| r["channel"] == "web")
+        .expect("web session listed");
+    let feishu_row = rows
+        .iter()
+        .find(|r| r["channel"] == "feishu")
+        .expect("feishu session listed");
+    assert_eq!(web_row["reference"], "web-1000");
+    assert_eq!(feishu_row["reference"], "oc_peer\u{0}om_t");
+    // Neutral wire shape: no feishu id fields leak onto the wire.
+    assert!(web_row.get("chat_id").is_none());
+    assert!(web_row.get("thread_id").is_none());
+
+    // URL keys round-trip per channel without collision.
+    assert_ne!(web_row["encoded_key"], feishu_row["encoded_key"]);
+
+    // Focused snapshot includes both channels too.
+    let (_, summary) = get_json(&app, "/api/summary").await;
+    assert_eq!(summary["total_sessions"], 2);
 }

@@ -11,7 +11,7 @@
 //! degradation rendering when the core is not connected.
 
 use async_trait::async_trait;
-use sebas_feishu::events::SessionKey;
+use sebas_channels::key::ChannelKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -90,10 +90,10 @@ pub trait SessionBackend: Send + Sync {
     async fn snapshot(&self) -> Vec<SessionInfo>;
 
     /// The currently focused session, if any.
-    async fn focused(&self) -> Option<SessionKey>;
+    async fn focused(&self) -> Option<ChannelKey>;
 
     /// Mark the focused session (idempotent; clearing with `None`).
-    async fn set_focus(&self, key: Option<SessionKey>);
+    async fn set_focus(&self, key: Option<ChannelKey>);
 
     /// Subscribe to session events (created / updated / removed / resync).
     /// Bounded: a lagging consumer sees `broadcast::error::RecvError::Lagged`.
@@ -106,18 +106,18 @@ pub trait SessionBackend: Send + Sync {
         &self,
         prompt: String,
         project_dir: Option<String>,
-    ) -> Result<SessionKey, SessionRejection>;
+    ) -> Result<ChannelKey, SessionRejection>;
 
     /// Send a message to an existing session. Unknown keys are rejected.
-    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection>;
+    async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection>;
 
     /// Close a session (kills the live child when there is one).
-    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection>;
+    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection>;
 
     /// The session's rendered transcript at or after `from` (monotonic
     /// positions — a second call at the returned last position yields only
     /// newer entries).
-    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection>;
+    async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection>;
 
     /// Whether the session authority is reachable right now, and if not, why.
     async fn reachability(&self) -> Reachability;
@@ -144,7 +144,7 @@ pub trait SessionBackend: Send + Sync {
         prompt: String,
         project_dir: Option<String>,
         _backend: Option<&str>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
     }
 }
@@ -181,7 +181,7 @@ impl InProcessBackend {
 
         // Relay the router's independent ACP permission broadcast (design D6)
         // into the `PermissionNotice` review-card feed. `session_id` is the
-        // URL-safe encoded SessionKey — the same shape the WebUI routes and the
+        // URL-safe encoded ChannelKey — the same shape the WebUI routes and the
         // review-card filter key off.
         {
             let router = router.clone();
@@ -252,11 +252,11 @@ impl SessionBackend for InProcessBackend {
         self.router.session_info_snapshot().await
     }
 
-    async fn focused(&self) -> Option<SessionKey> {
+    async fn focused(&self) -> Option<ChannelKey> {
         self.router.active_session_snapshot().await
     }
 
-    async fn set_focus(&self, key: Option<SessionKey>) {
+    async fn set_focus(&self, key: Option<ChannelKey>) {
         self.router.web_set_active(key).await;
     }
 
@@ -268,7 +268,7 @@ impl SessionBackend for InProcessBackend {
         &self,
         prompt: String,
         project_dir: Option<String>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         // web_spawn never fails structurally: the placeholder is inserted and
         // the spawn failure surfaces as a Removed event later.
         Ok(self.router.web_spawn(prompt, project_dir, None).await)
@@ -282,12 +282,12 @@ impl SessionBackend for InProcessBackend {
         prompt: String,
         project_dir: Option<String>,
         backend: Option<&str>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         let kind = backend.and_then(parse_acp_kind);
         Ok(self.router.web_spawn(prompt, project_dir, kind).await)
     }
 
-    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
+    async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         // Route semantics preserved: an unknown key spawns a new session (the
         // feishu inbound path behaves the same). Typed rejections apply to the
         // channel server, which pre-checks existence.
@@ -295,7 +295,7 @@ impl SessionBackend for InProcessBackend {
         Ok(())
     }
 
-    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         match self.router.web_close_session(key).await {
             sebas_router::router::CloseOutcome::Closed => Ok(()),
             sebas_router::router::CloseOutcome::NotFound => {
@@ -306,12 +306,12 @@ impl SessionBackend for InProcessBackend {
         }
     }
 
-    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+    async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         self.router
             .session_turns(&key, from)
             .await
             .ok_or(SessionRejection::UnknownSession {
-                key: key.chat_id.clone(),
+                key: key.reference.clone(),
             })
     }
 
@@ -383,7 +383,7 @@ pub struct FakeBackend {
 #[derive(Default)]
 struct FakeState {
     sessions: Vec<SessionInfo>,
-    focused: Option<SessionKey>,
+    focused: Option<ChannelKey>,
     transcripts: HashMap<String, Vec<TurnEntry>>,
 }
 
@@ -451,7 +451,7 @@ impl FakeBackend {
         let _ = self.events.send(ev);
     }
 
-    fn key_str(key: &SessionKey) -> String {
+    fn key_str(key: &ChannelKey) -> String {
         serde_json::to_string(key).unwrap_or_default()
     }
 }
@@ -462,11 +462,11 @@ impl SessionBackend for FakeBackend {
         self.inner.read().await.sessions.clone()
     }
 
-    async fn focused(&self) -> Option<SessionKey> {
+    async fn focused(&self) -> Option<ChannelKey> {
         self.inner.read().await.focused.clone()
     }
 
-    async fn set_focus(&self, key: Option<SessionKey>) {
+    async fn set_focus(&self, key: Option<ChannelKey>) {
         self.inner.write().await.focused = key;
     }
 
@@ -478,7 +478,7 @@ impl SessionBackend for FakeBackend {
         &self,
         prompt: String,
         project_dir: Option<String>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         if !self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
             let cause = self
                 .unreachable_cause
@@ -491,13 +491,10 @@ impl SessionBackend for FakeBackend {
         let n = self
             .next_spawn
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let key = SessionKey {
-            chat_id: format!("web-fake-{n}"),
-            thread_id: None,
-        };
+        let key = ChannelKey::new("web", format!("web-fake-{n}"));
         let session = SessionInfo {
-            chat_id: key.chat_id.clone(),
-            thread_id: None,
+            channel: key.channel.as_str().to_string(),
+            key: key.reference.clone(),
             session_id: None,
             status: "spawning".into(),
             phase: None,
@@ -514,7 +511,7 @@ impl SessionBackend for FakeBackend {
         Ok(key)
     }
 
-    async fn message(&self, key: SessionKey, _message: String) -> Result<(), SessionRejection> {
+    async fn message(&self, key: ChannelKey, _message: String) -> Result<(), SessionRejection> {
         if !self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
             let cause = self
                 .unreachable_cause
@@ -528,7 +525,7 @@ impl SessionBackend for FakeBackend {
             let g = self.inner.read().await;
             g.sessions
                 .iter()
-                .any(|s| s.chat_id == key.chat_id && s.thread_id == key.thread_id)
+                .any(|s| s.channel == key.channel.as_str() && s.key == key.reference)
         };
         if exists {
             Ok(())
@@ -539,7 +536,7 @@ impl SessionBackend for FakeBackend {
         }
     }
 
-    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         if !self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
             let cause = self
                 .unreachable_cause
@@ -552,7 +549,7 @@ impl SessionBackend for FakeBackend {
         let mut g = self.inner.write().await;
         let before = g.sessions.len();
         g.sessions
-            .retain(|s| !(s.chat_id == key.chat_id && s.thread_id == key.thread_id));
+            .retain(|s| !(s.channel == key.channel.as_str() && s.key == key.reference));
         if g.sessions.len() == before {
             return Err(SessionRejection::UnknownSession {
                 key: Self::key_str(&key),
@@ -563,18 +560,18 @@ impl SessionBackend for FakeBackend {
         }
         drop(g);
         self.emit(SessionEvent::Removed {
-            chat_id: key.chat_id,
-            thread_id: key.thread_id,
+            channel: key.channel.as_str().to_string(),
+            key: key.reference,
         });
         Ok(())
     }
 
-    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+    async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         let g = self.inner.read().await;
         let Some(sid) = g
             .sessions
             .iter()
-            .find(|s| s.chat_id == key.chat_id && s.thread_id == key.thread_id)
+            .find(|s| s.channel == key.channel.as_str() && s.key == key.reference)
             .and_then(|s| s.session_id.clone())
         else {
             return Err(SessionRejection::UnknownSession {
@@ -633,10 +630,7 @@ mod tests {
 
         // message/close on the key work; unknown keys are rejected.
         assert!(backend.message(key.clone(), "yo".into()).await.is_ok());
-        let bogus = SessionKey {
-            chat_id: "nope".into(),
-            thread_id: None,
-        };
+        let bogus = ChannelKey::new("web", "nope");
         assert_eq!(
             backend.message(bogus.clone(), "yo".into()).await,
             Err(SessionRejection::UnknownSession {
@@ -653,8 +647,8 @@ mod tests {
         // 给它一个 session_id 再推 transcript。
         backend
             .set_sessions(vec![SessionInfo {
-                chat_id: key.chat_id.clone(),
-                thread_id: None,
+                channel: key.channel.as_str().to_string(),
+                key: key.reference.clone(),
                 session_id: Some("s9".into()),
                 status: "active".into(),
                 phase: None,

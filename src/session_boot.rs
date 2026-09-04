@@ -13,8 +13,9 @@ use crate::spawn_env::resolve_spawn_overrides;
 use sebas_acp::claude::ClaudeCodeDriver;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
+use sebas_channels::ChannelKey;
 use sebas_gateway::config::GatewayConfig;
-use sebas_router::router::{RouterHandle, SessionKey};
+use sebas_router::router::RouterHandle;
 use sebas_router::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -107,7 +108,7 @@ fn spawn_overrides(
 pub async fn acp_spawn_and_activate(
     mgr: &Arc<SessionManager>,
     router: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     prompt: &str,
     kind: &str,
     command: Vec<String>,
@@ -164,7 +165,7 @@ pub async fn acp_spawn_and_activate(
 pub async fn acp_resume_and_activate(
     mgr: &Arc<SessionManager>,
     router: &RouterHandle,
-    key: &SessionKey,
+    key: &ChannelKey,
     old_session_id: &str,
     prompt: &str,
     kind: &str,
@@ -239,9 +240,9 @@ pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
 /// Spawn/resume 之后的 ACP 侧启动序列（与飞书无关）：
 /// seed 卡片状态、启动事件泵、冲刷 spawn 窗口内排队的 prompt。
 ///
-/// 这是 [`crate::dispatch`] 中 `SpawnAcp` / `SpawnResume`（飞书路径，先由
-/// `seed_and_send_root_card` 发卡）与 `WebSpawn`（无飞书路径）共用的
-/// **引擎侧半场**。刻意不接收 `FeishuClient` / `TokenManager` /
+/// 这是 [`crate::dispatch`] 中 `SpawnAcp` / `SpawnResume` / `WebSpawn`
+/// 共用的**引擎侧半场**（decouple-feishu-channel 后 spawn 指令与通道
+/// 无关；发卡等通道呈现由各通道边界负责）。刻意不接收 `FeishuClient` / `TokenManager` /
 /// `ReactionTracker` / `Config`：`idle_timeout` 由调用方从
 /// `[acp.claude] idle_kill_secs` 解析后传入，保持本函数的输入只描述
 /// ACP 会话本身。

@@ -25,7 +25,7 @@
 //!    duplicate). A lagging subscriber is dropped (connection closed) rather
 //!    than delivered a gap; the client re-snapshots on reconnect.
 
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use serde::{Deserialize, Serialize};
 
@@ -41,13 +41,13 @@ pub enum CoreChannelRequest {
         project_dir: Option<String>,
     },
     /// Send a message to an existing session.
-    Message { key: SessionKey, message: String },
+    Message { key: ChannelKey, message: String },
     /// Close (kill) a session.
-    Close { key: SessionKey },
+    Close { key: ChannelKey },
     /// Fetch rendered transcript content at/after a monotonic position.
-    Turns { key: SessionKey, from: u64 },
+    Turns { key: ChannelKey, from: u64 },
     /// Mark the focused session.
-    SetFocus { key: Option<SessionKey> },
+    SetFocus { key: Option<ChannelKey> },
     /// Ask for the focused session.
     Focused,
     /// Start the event stream (see module docs for the frame order).
@@ -61,13 +61,13 @@ pub enum CoreChannelResponse {
     /// Snapshot result.
     Snapshot { sessions: Vec<SessionInfo> },
     /// Spawn result: the new session key.
-    Spawned { key: SessionKey },
+    Spawned { key: ChannelKey },
     /// Message/close/focus accepted; nothing to return.
     Ok,
     /// Turn-content result.
     Turns { entries: Vec<TurnEntry> },
     /// Focused-session result.
-    Focused { key: Option<SessionKey> },
+    Focused { key: Option<ChannelKey> },
     /// Typed rejection — names the reason; nothing was mutated.
     Rejected { #[serde(flatten)] rejection: sebas_webui::session_backend::SessionRejection },
 }
@@ -105,10 +105,7 @@ mod tests {
     /// 4.1 验收：每个请求/响应变体经 serde 往返后与原值一致。
     #[test]
     fn every_request_and_response_variant_round_trips() {
-        let key = SessionKey {
-            chat_id: "oc_1".into(),
-            thread_id: Some("om_t".into()),
-        };
+        let key = ChannelKey::feishu("oc_1", Some("om_t"));
         let requests = vec![
             CoreChannelRequest::Snapshot,
             CoreChannelRequest::Spawn {
@@ -167,8 +164,8 @@ mod tests {
     #[test]
     fn stream_frame_parses_back_in_order() {
         let info = SessionInfo {
-            chat_id: "oc_1".into(),
-            thread_id: None,
+            channel: "feishu".into(),
+            key: "oc_1".into(),
             session_id: Some("s1".into()),
             status: "active".into(),
             phase: None,
@@ -187,8 +184,8 @@ mod tests {
             },
             SessionStreamFrame::Event {
                 event: SessionEvent::Removed {
-                    chat_id: "oc_1".into(),
-                    thread_id: None,
+                    channel: "feishu".into(),
+                    key: "oc_1".into(),
                 },
             },
             SessionStreamFrame::Event {

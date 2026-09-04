@@ -8,8 +8,8 @@
 //! they just don't traverse HTTP here.
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::cards::CardConfig;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_router::cards::CardConfig;
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::SessionMap;
 use std::path::PathBuf;
@@ -36,17 +36,12 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
 
     // 1) Inject a Feishu text. Router dispatch goes on_text → spawn_new →
     //    emit Out::SpawnAcp on the outbound channel.
-    let key = SessionKey {
-        chat_id: "oc_full_e2e".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_full_e2e", None);
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "hello".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
 
@@ -151,17 +146,12 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
     let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
-    let key = SessionKey {
-        chat_id: "oc_slow".into(),
-        thread_id: None,
-    };
+    let key = ChannelKey::feishu("oc_slow", None);
     router
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key.clone(),
             text: "hello".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let spawn = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())

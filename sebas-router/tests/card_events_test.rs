@@ -1,5 +1,6 @@
 use sebas_acp::claude::session::AcpEvent;
-use sebas_feishu::cards::{CardConfig, CardElement, ThinkingDisplay};
+use sebas_channels::card::ChannelElement as CardElement;
+use sebas_router::cards::{CardConfig, ThinkingDisplay};
 use sebas_router::card_events::apply_event_to_card;
 
 fn cfg() -> CardConfig {
@@ -173,7 +174,7 @@ fn thinking_show_panel_header_is_thinking_label() {
     let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
         panic!("not a thinking panel");
     };
-    assert!(panel.header.title.content.contains("💭"));
+    assert!(panel.header_title.content.contains("💭"));
     assert!(!panel.expanded, "默认折叠");
 }
 
@@ -194,12 +195,12 @@ fn tool_start_folds_into_collapsible_panel() {
     match &body[0] {
         CardElement::CollapsiblePanel(parent) => {
             assert!(!parent.expanded, "父面板默认折叠");
-            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.header_title.content, "🤔 折腾中");
             assert_eq!(parent.elements.len(), 1);
             match &parent.elements[0] {
                 CardElement::CollapsiblePanel(tool_panel) => {
                     assert!(!tool_panel.expanded, "工具面板默认折叠");
-                    assert_eq!(tool_panel.header.title.content, "📖 Bash");
+                    assert_eq!(tool_panel.header_title.content, "📖 Bash");
                     assert!(matches!(
                         tool_panel.elements[0],
                         CardElement::Markdown { .. }
@@ -318,11 +319,11 @@ fn tool_lifecycle_folds_into_single_panel() {
     assert_eq!(body.len(), 1);
     match &body[0] {
         CardElement::CollapsiblePanel(parent) => {
-            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.header_title.content, "🤔 折腾中");
             assert_eq!(parent.elements.len(), 1);
             match &parent.elements[0] {
                 CardElement::CollapsiblePanel(panel) => {
-                    assert_eq!(panel.header.title.content, "✓ Bash");
+                    assert_eq!(panel.header_title.content, "✓ Bash");
                     // [args markdown, 进度灰注, 结果 markdown（超过软上限 5，全文保留 20 字）]
                     assert_eq!(panel.elements.len(), 3);
                     match &panel.elements[0] {
@@ -372,11 +373,11 @@ fn tool_end_zero_suppresses_result_output() {
     assert_eq!(body.len(), 1);
     match &body[0] {
         CardElement::CollapsiblePanel(parent) => {
-            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.header_title.content, "🤔 折腾中");
             assert_eq!(parent.elements.len(), 1);
             match &parent.elements[0] {
                 CardElement::CollapsiblePanel(panel) => {
-                    assert_eq!(panel.header.title.content, "✓ Bash");
+                    assert_eq!(panel.header_title.content, "✓ Bash");
                     assert_eq!(panel.elements.len(), 1, "只有 args，没有结果内容");
                 }
                 other => panic!("expected tool CollapsiblePanel, got {other:?}"),
@@ -412,7 +413,7 @@ fn tool_end_hard_limit_truncates_inside_panel() {
     );
     match &body[0] {
         CardElement::CollapsiblePanel(parent) => {
-            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.header_title.content, "🤔 折腾中");
             assert_eq!(parent.elements.len(), 1);
             match &parent.elements[0] {
                 CardElement::CollapsiblePanel(panel) => {
@@ -620,7 +621,7 @@ fn parent_element_count_limit_drops_oldest_child() {
     // 父面板应在 80 个递归元素限制内（每个工具面板自身 + 内部 Markdown 计 2 个元素）
     match &body[0] {
         CardElement::CollapsiblePanel(parent) => {
-            assert_eq!(parent.header.title.content, "🤔 折腾中");
+            assert_eq!(parent.header_title.content, "🤔 折腾中");
             // 82 工具面板 × 2 + 1(父面板) = 165 > 80 → 丢到 39 个工具面板 = 79 个元素
             let remaining = parent.elements.len();
             assert!(remaining > 0, "should have some tool panels left");
@@ -632,12 +633,12 @@ fn parent_element_count_limit_drops_oldest_child() {
             let CardElement::CollapsiblePanel(first) = &parent.elements[0] else {
                 panic!("expected tool panel");
             };
-            assert_eq!(first.header.title.content, "📖 Tool44");
+            assert_eq!(first.header_title.content, "📖 Tool44");
             // 最后一个子面板应是 Tool82
             let CardElement::CollapsiblePanel(last) = &parent.elements[remaining - 1] else {
                 panic!("expected tool panel");
             };
-            assert_eq!(last.header.title.content, "📖 Tool82");
+            assert_eq!(last.header_title.content, "📖 Tool82");
         }
         other => panic!("expected parent CollapsiblePanel, got {other:?}"),
     }

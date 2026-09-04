@@ -2712,6 +2712,7 @@ dependencies = [
  "rustls",
  "sebas-acp",
  "sebas-agent",
+ "sebas-channels",
  "sebas-feishu",
  "sebas-gateway",
  "sebas-router",
@@ -2769,13 +2770,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sebas-channels"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "sebas-feishu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "insta",
+ "openlark",
  "reqwest 0.12.28",
+ "sebas-channels",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2813,7 +2825,7 @@ dependencies = [
  "dirs 5.0.1",
  "reqwest 0.12.28",
  "sebas-acp",
- "sebas-feishu",
+ "sebas-channels",
  "serde",
  "serde_json",
  "tempfile",
@@ -2835,6 +2847,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rust-embed",
  "sebas-acp",
+ "sebas-channels",
  "sebas-feishu",
  "sebas-router",
  "serde",

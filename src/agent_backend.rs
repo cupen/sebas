@@ -5,8 +5,9 @@
 //! the built-in kernel) selectable per spawn.
 //!
 //! Mapping conventions:
-//! - native sessions live under `SessionKey`s whose `chat_id` is
-//!   `agent-{8-hex}` (thread `None`) — the composite routes on that prefix;
+//! - native sessions live under `ChannelKey`s on the `feishu` channel (the
+//!   reference is a bare `agent-{8-hex}` chat id, no `\0` thread part — the
+//!   composite routes on that prefix);
 //! - each `AgentEvent` from the kernel pump updates the session transcript
 //!   (prompt / streamed text / tool traces, one `TurnEntry` per flush) and
 //!   republishes a session `Updated` event;
@@ -18,7 +19,7 @@ use sebas_agent::policy::{Approver, ApprovalAnswer, ApproverHub, PolicyConfig, P
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::policy::SandboxMode;
 use sebas_agent::tools::ToolRegistry;
-use sebas_feishu::events::SessionKey;
+use sebas_channels::ChannelKey;
 use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
     PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
@@ -67,10 +68,12 @@ impl NativeSession {
         });
     }
 
-    fn info(&self, key: &SessionKey) -> SessionInfo {
+    fn info(&self, key: &ChannelKey) -> SessionInfo {
+        // Native keys are feishu-channel `agent-{8-hex}` references with no
+        // thread part; feed the flattened SessionInfo directly off the key.
         SessionInfo {
-            chat_id: key.chat_id.clone(),
-            thread_id: key.thread_id.clone(),
+            channel: key.channel_str().to_string(),
+            key: key.reference.clone(),
             session_id: Some(self.handle.key.clone()),
             status: "active".into(),
             phase: None,
@@ -197,8 +200,8 @@ impl NativeAgentBackend {
         })
     }
 
-    fn encode_key(key: &SessionKey) -> String {
-        serde_json::to_string(key).expect("SessionKey serialization")
+    fn encode_key(key: &ChannelKey) -> String {
+        serde_json::to_string(key).expect("ChannelKey serialization")
     }
 
     async fn session_info(&self, encoded: &str) -> Option<SessionInfo> {
@@ -206,10 +209,10 @@ impl NativeAgentBackend {
         g.get(encoded).map(|s| s.info(&Self::decode_agent_key(encoded)))
     }
 
-    fn decode_agent_key(encoded: &str) -> SessionKey {
-        serde_json::from_str(encoded).unwrap_or(SessionKey {
-            chat_id: encoded.to_string(),
-            thread_id: None,
+    fn decode_agent_key(encoded: &str) -> ChannelKey {
+        serde_json::from_str(encoded).unwrap_or_else(|_| ChannelKey {
+            channel: "feishu".into(),
+            reference: encoded.to_string(),
         })
     }
 
@@ -217,7 +220,7 @@ impl NativeAgentBackend {
     /// events + review-card notices. Runs until the session task dies.
     async fn pump(
         mut rx: broadcast::Receiver<AgentEvent>,
-        key: SessionKey,
+        key: ChannelKey,
         encoded: String,
         sessions: Arc<RwLock<HashMap<String, NativeSession>>>,
         events: broadcast::Sender<SessionEvent>,
@@ -296,8 +299,8 @@ impl NativeAgentBackend {
             if removed {
                 sessions.write().await.remove(&encoded);
                 let _ = events.send(SessionEvent::Removed {
-                    chat_id: key.chat_id.clone(),
-                    thread_id: key.thread_id.clone(),
+                    channel: key.channel_str().to_string(),
+                    key: key.reference.clone(),
                 });
                 break;
             }
@@ -315,12 +318,12 @@ impl SessionBackend for NativeAgentBackend {
         out
     }
 
-    async fn focused(&self) -> Option<SessionKey> {
+    async fn focused(&self) -> Option<ChannelKey> {
         // The native backend does not track focus; the acp side owns it.
         None
     }
 
-    async fn set_focus(&self, _key: Option<SessionKey>) {}
+    async fn set_focus(&self, _key: Option<ChannelKey>) {}
 
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
@@ -330,7 +333,7 @@ impl SessionBackend for NativeAgentBackend {
         &self,
         prompt: String,
         project_dir: Option<String>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         if let Some(cause) = &self.unavailable_cause {
             return Err(SessionRejection::Unavailable { cause: cause.clone() });
         }
@@ -345,10 +348,9 @@ impl SessionBackend for NativeAgentBackend {
             None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         };
         let handle = self.manager.create_session(workdir);
-        let key = SessionKey {
-            chat_id: format!("agent-{}", &handle.key[..8.min(handle.key.len())]),
-            thread_id: None,
-        };
+        // Native sessions live on the feishu channel with a bare
+        // `agent-{8-hex}` reference (no thread part).
+        let key = ChannelKey::new("feishu", format!("agent-{}", &handle.key[..8.min(handle.key.len())]));
         let encoded = Self::encode_key(&key);
         {
             let mut g = self.sessions.write().await;
@@ -391,7 +393,7 @@ impl SessionBackend for NativeAgentBackend {
         Ok(key)
     }
 
-    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
+    async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
         let g = self.sessions.read().await;
         let Some(session) = g.get(&encoded) else {
@@ -401,7 +403,7 @@ impl SessionBackend for NativeAgentBackend {
         Ok(())
     }
 
-    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
         let mut g = self.sessions.write().await;
         let Some(session) = g.remove(&encoded) else {
@@ -411,7 +413,7 @@ impl SessionBackend for NativeAgentBackend {
         Ok(())
     }
 
-    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+    async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         let encoded = Self::encode_key(&key);
         let g = self.sessions.read().await;
         let Some(session) = g.get(&encoded) else {
@@ -534,11 +536,13 @@ impl DualSessionBackend {
         })
     }
 
-    fn is_native(key: &SessionKey) -> bool {
-        key.chat_id.starts_with("agent-")
+    /// Native keys are feishu-channel `agent-*` references; everything else
+    /// (including feishu chat keys and web keys) routes to the ACP bridge.
+    fn is_native(key: &ChannelKey) -> bool {
+        key.channel_str() == "feishu" && key.reference.starts_with("agent-")
     }
 
-    fn route(&self, key: &SessionKey) -> &dyn SessionBackend {
+    fn route(&self, key: &ChannelKey) -> &dyn SessionBackend {
         if Self::is_native(key) {
             self.native.as_ref()
         } else {
@@ -556,11 +560,11 @@ impl SessionBackend for DualSessionBackend {
         all
     }
 
-    async fn focused(&self) -> Option<SessionKey> {
+    async fn focused(&self) -> Option<ChannelKey> {
         self.acp.focused().await
     }
 
-    async fn set_focus(&self, key: Option<SessionKey>) {
+    async fn set_focus(&self, key: Option<ChannelKey>) {
         match key {
             Some(k) if Self::is_native(&k) => self.native.set_focus(Some(k)).await,
             other => self.acp.set_focus(other).await,
@@ -575,7 +579,7 @@ impl SessionBackend for DualSessionBackend {
         &self,
         prompt: String,
         project_dir: Option<String>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         self.acp.spawn(prompt, project_dir).await
     }
 
@@ -584,7 +588,7 @@ impl SessionBackend for DualSessionBackend {
         prompt: String,
         project_dir: Option<String>,
         backend: Option<&str>,
-    ) -> Result<SessionKey, SessionRejection> {
+    ) -> Result<ChannelKey, SessionRejection> {
         match backend {
             Some("native") => self.native.spawn(prompt, project_dir).await,
             // `acp` / `acp:<slug>` (and any other non-native hint) route to
@@ -593,15 +597,15 @@ impl SessionBackend for DualSessionBackend {
         }
     }
 
-    async fn message(&self, key: SessionKey, message: String) -> Result<(), SessionRejection> {
+    async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         self.route(&key).message(key, message).await
     }
 
-    async fn close(&self, key: SessionKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         self.route(&key).close(key).await
     }
 
-    async fn turns(&self, key: SessionKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
+    async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         self.route(&key).turns(key, from).await
     }
 
@@ -632,6 +636,7 @@ fn agent_sandbox_mode() -> SandboxMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sebas_channels::ChannelKey;
     use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
     use sebas_agent::llm::fake::FakeLlmClient;
     use sebas_agent::policy::NetworkMode;
@@ -734,7 +739,7 @@ mod tests {
             .spawn_with("go".into(), None, Some("native"))
             .await
             .expect("spawn native");
-        assert!(DualSessionBackend::is_native(&key), "{:?}", key.chat_id);
+        assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);
         // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
         let acp_key = dual.spawn_with("hi".into(), None, None).await.expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
@@ -755,10 +760,7 @@ mod tests {
     #[tokio::test]
     async fn acp_permission_round_trips_through_dual_backend() {
         let map = SessionMap::new();
-        let key = SessionKey {
-            chat_id: "oc_dual".into(),
-            thread_id: None,
-        };
+        let key = ChannelKey::feishu("oc_dual", None);
         map.insert(key.clone(), Mapping::active("s1"))
             .await
             .unwrap();

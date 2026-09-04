@@ -1,5 +1,6 @@
 ---
-source: feishu/tests/forms_test.rs
+source: sebas-feishu/tests/forms_test.rs
+assertion_line: 90
 expression: card
 ---
 schema: "2.0"
@@ -13,53 +14,53 @@ body:
     - tag: form
       name: note
       elements:
-        - content: "**标题** *"
-          tag: markdown
-        - default_value: 旧标题
-          name: title
+        - tag: markdown
+          content: "**标题** *"
+        - tag: input
           placeholder:
+            tag: plain_text
             content: 标题
-            tag: plain_text
+          width: fill
+          name: title
           required: true
-          tag: input
-          width: fill
-        - content: "**内容**"
-          tag: markdown
-        - name: body
+          default_value: 旧标题
+        - tag: markdown
+          content: "**内容**"
+        - tag: input
           placeholder:
-            content: 正文
             tag: plain_text
-          tag: input
+            content: 正文
           width: fill
-        - content: "**优先级** *"
-          tag: markdown
-        - name: priority
+          name: body
+        - tag: markdown
+          content: "**优先级** *"
+        - tag: select_static
+          placeholder:
+            tag: plain_text
+            content: 请选择
           options:
             - text:
-                content: P0
                 tag: plain_text
+                content: P0
               value: p0
             - text:
-                content: P1
                 tag: plain_text
+                content: P1
               value: p1
-          placeholder:
-            content: 请选择
-            tag: plain_text
-          required: true
-          tag: select_static
-          type: default
           width: fill
-        - behaviors:
+          type: default
+          required: true
+          name: priority
+        - tag: button
+          text:
+            tag: plain_text
+            content: 提交
+          type: primary
+          behaviors:
             - type: callback
               value:
                 form: note
-                id: n1
                 op: submit
+                id: n1
           form_action_type: submit
           name: note_submit
-          tag: button
-          text:
-            content: 提交
-            tag: plain_text
-          type: primary
