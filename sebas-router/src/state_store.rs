@@ -317,6 +317,16 @@ pub fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
+/// 在同步代码里等待 engine 的 future。调用点可能位于 tokio worker 线程的
+/// async 上下文中（启动期 provider 表单构建、HTTP handler 的同步桥等），
+/// 直接 `Handle::block_on` 会 panic（"Cannot start a runtime from within a
+/// runtime"），必须先 `block_in_place` 让出当前 worker。ENGINE 只在
+/// `sebas run` 的多线程运行时里初始化，不受 block_in_place 的
+/// current_thread 限制影响。
+fn block_on_engine<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+}
+
 /// 版本感知加载 + 反向迁移：见模块文档的版本矩阵。
 ///
 /// 错误一侧只丢一侧（state 坏 → runtime default；overlay 坏 → providers
@@ -325,9 +335,7 @@ pub fn expand_tilde(p: &str) -> String {
 /// 当 `init_engine` 已调用时, 委托给引擎。
 pub fn load() -> PersistedState {
     if let Some(engine) = ENGINE.get() {
-        // 在 tokio 运行时上下文中 block_on 是安全的（core 始终在 tokio 中运行）。
-        return tokio::runtime::Handle::current()
-            .block_on(engine.load_persisted_state());
+        return block_on_engine(engine.load_persisted_state());
     }
     load_at(&state_path(), &providers_path())
 }
@@ -340,8 +348,7 @@ pub fn load() -> PersistedState {
 pub fn save(s: &PersistedState) -> anyhow::Result<()> {
     if let Some(engine) = ENGINE.get() {
         let state = s.clone();
-        return tokio::runtime::Handle::current()
-            .block_on(engine.save_persisted_state(state))
+        return block_on_engine(engine.save_persisted_state(state))
             .map_err(|e| anyhow::anyhow!("{}", e));
     }
     save_at(&state_path(), &providers_path(), s)
@@ -355,12 +362,10 @@ where
     F: FnOnce(&mut PersistedState),
 {
     if let Some(engine) = ENGINE.get() {
-        let mut state = tokio::runtime::Handle::current()
-            .block_on(engine.load_persisted_state());
+        let mut state = block_on_engine(engine.load_persisted_state());
         f(&mut state);
         let snapshot = state.clone();
-        tokio::runtime::Handle::current()
-            .block_on(engine.save_persisted_state(state))
+        block_on_engine(engine.save_persisted_state(state))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         return Ok(snapshot);
     }
