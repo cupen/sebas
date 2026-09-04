@@ -677,6 +677,12 @@ impl GatewayConfig {
                 path.display()
             ))
         })?;
+        self.apply_overlay(file)
+    }
+
+    /// 把 overlay 值合并进当前配置（providers 覆盖 + deleted 墓碑 + 模型别名
+    /// 编译）。文件路径与 core channel 快照共用同一 merge 语义（5.3 投影）。
+    fn apply_overlay(&mut self, file: ProviderOverlay) -> Result<()> {
         for name in &file.deleted {
             self.providers.remove(name);
         }
@@ -719,6 +725,16 @@ impl GatewayConfig {
             self.routes = alias_routes;
         }
         Ok(())
+    }
+
+    /// 从 core channel 的 state snapshot（PersistedState 形状，含
+    /// providers/deleted/model_aliases 段）应用 overlay 合并（5.3 投影）。
+    /// 返回 Err 由调用方记入 reload_status（校验失败保旧内核）。
+    pub fn apply_overlay_value(&mut self, snapshot: &serde_json::Value) -> Result<()> {
+        let overlay: ProviderOverlay = serde_json::from_value(snapshot.clone()).map_err(|e| {
+            GatewayError::Config(format!("state snapshot 不是合法 overlay: {e}"))
+        })?;
+        self.apply_overlay(overlay)
     }
 
     fn validate(&self) -> Result<()> {

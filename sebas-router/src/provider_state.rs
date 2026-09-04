@@ -78,7 +78,7 @@ pub fn state_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod env_override_tests {
     use super::*;
-    use crate::state_store::{self, PersistedState};
+    use crate::state_store::{self};
     use crate::test_util::lock_state_file;
 
     // 串行化所有 env 访问：和 spawn_env.rs 同源问题。

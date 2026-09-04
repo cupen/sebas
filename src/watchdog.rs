@@ -145,6 +145,7 @@ impl ServiceSpawner for WebUiSpawner {
             &self.config_path,
             &self.control_secret,
             Some(&self.core_secret),
+            None,
             &["webui"],
             "webui",
         )
@@ -156,6 +157,8 @@ impl ServiceSpawner for WebUiSpawner {
 struct GatewaySpawner {
     config_path: String,
     control_secret: String,
+    core_secret: String,
+    core_socket: String,
     debug: bool,
 }
 
@@ -169,7 +172,8 @@ impl ServiceSpawner for GatewaySpawner {
         spawn_aux_process(
             &self.config_path,
             &self.control_secret,
-            None,
+            Some(&self.core_secret),
+            Some(&self.core_socket),
             &args,
             "gateway",
         )
@@ -182,6 +186,7 @@ async fn spawn_aux_process(
     config_path: &str,
     control_secret: &str,
     core_secret: Option<&str>,
+    core_socket: Option<&str>,
     args: &[&str],
     label: &str,
 ) -> Result<SpawnedInstance> {
@@ -195,9 +200,14 @@ async fn spawn_aux_process(
         .arg(config_path)
         .env("SEBAS_CONTROL_SECRET", control_secret);
     // The standalone WebUI is a core session channel client: it needs the
-    // same secret the core gets. Gateway never touches sessions.
+    // same secret the core gets. The gateway (5.3 订阅投影) additionally
+    // needs the channel path to subscribe to state changes — it discovers
+    // the socket exclusively via this env var (core resolves it itself).
     if let Some(core_secret) = core_secret {
         cmd.env("SEBAS_CORE_SECRET", core_secret);
+    }
+    if let Some(core_socket) = core_socket {
+        cmd.env("SEBAS_CORE_SOCKET", core_socket);
     }
     cmd.stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -314,12 +324,24 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
 
     // gateway：config 开关（默认关）；`--debug` 强制启用 debug 形态
     // （内置 test provider，不转发上游）。同样始终注册以便后续启停。
+    // 注入 core channel 的 secret + socket 路径（5.3 订阅投影）：gateway
+    // 订阅状态变更需要与 core 相同的密钥与通道位置——core 自己按同一
+    // config 计算路径（channel_path 或缺省），此处直接用同一解析结果。
+    let core_channel_path = config
+        .core
+        .channel_path
+        .clone()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::core_channel::default_socket_path);
     services.register(
         ServiceSpec::new(
             ServiceName::Gateway,
             Arc::new(GatewaySpawner {
                 config_path: config_path.clone(),
                 control_secret: secret.clone(),
+                core_secret: core_secret.clone(),
+                core_socket: core_channel_path.display().to_string(),
                 debug,
             }),
             DesiredState::Enabled,

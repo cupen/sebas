@@ -467,3 +467,55 @@ async fn unreachable_causes_are_distinct() {
     // asserted at the server level above (5.3 tests) and by 8.5 manually.
     let _ = std::path::Path::new("/nonexistent").exists();
 }
+
+// ── 4.2/5.4: state subscription stream ──────────────────────────────────────
+
+/// 4.2 协议层：StateSubscribe 连接先收全域快照帧（engine 未初始化时各域
+/// 返回 error payload，但帧结构仍在）。mutation→Changed 的链路验证在
+/// `tests/state_subscription_test.rs`（独立进程，避免污染 lib 单测的
+/// 全局 engine 状态）。
+#[tokio::test]
+async fn state_subscription_serves_snapshot_frame_without_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    let stream = UnixStream::connect(&core.path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    let mut reader = BufReader::new(r);
+    let hs = serde_json::to_string(&ChannelHandshake {
+        secret: SECRET.into(),
+    })
+    .unwrap();
+    w.write_all(hs.as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    assert!(ack.contains("handshake"));
+
+    let sub = serde_json::to_string(&CoreChannelRequest::StateSubscribe).unwrap();
+    w.write_all(sub.as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.flush().await.unwrap();
+
+    // 快照帧必须在（即使 engine 未初始化——各域回 error payload，帧照发）。
+    let mut line = String::new();
+    let n = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .expect("snapshot frame must arrive")
+        .unwrap();
+    assert!(n > 0);
+    let frame: crate::core_channel::protocol::StateStreamFrame =
+        serde_json::from_str(line.trim()).unwrap();
+    match &frame {
+        crate::core_channel::protocol::StateStreamFrame::Snapshot { domains } => {
+            for domain in ["providers", "settings", "projects", "sessions"] {
+                assert!(
+                    domains.get(domain).is_some(),
+                    "snapshot must include domain {domain}: {domains}"
+                );
+            }
+        }
+        other => panic!("first state frame must be the snapshot, got {other:?}"),
+    }
+    drop(w);
+}

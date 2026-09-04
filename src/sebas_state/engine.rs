@@ -33,7 +33,10 @@ impl StateStoreEngine for DbStateEngine {
         self.handle
             .exec(move |conn| crate::sebas_state::repo::save_persisted_state(conn, &state))
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        // providers + aliases + settings 域都随 PersistedState 一次提交。
+        sebas_router::state_store::notify_change("providers");
+        Ok(())
     }
 
     async fn load_settings(&self) -> Result<Option<Value>, String> {
@@ -50,7 +53,9 @@ impl StateStoreEngine for DbStateEngine {
             .map_err(|e| format!("settings value 不是有效 CardConfig: {e}"))?;
         self.handle
             .exec(move |conn| crate::sebas_state::repo::save_settings(conn, &card_cfg))
-            .await
+            .await?;
+        sebas_router::state_store::notify_change("settings");
+        Ok(())
     }
 
     async fn load_projects(&self) -> Result<Vec<Value>, String> {
@@ -69,7 +74,9 @@ impl StateStoreEngine for DbStateEngine {
             .collect();
         self.handle
             .exec(move |conn| crate::sebas_state::repo::save_projects(conn, &rows))
-            .await
+            .await?;
+        sebas_router::state_store::notify_change("projects");
+        Ok(())
     }
 
     async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String> {
@@ -77,13 +84,20 @@ impl StateStoreEngine for DbStateEngine {
         let n = name.to_string();
         self.handle
             .exec(move |conn| crate::sebas_state::repo::add_project(conn, &p, &n, added_at))
-            .await
+            .await?;
+        sebas_router::state_store::notify_change("projects");
+        Ok(())
     }
 
     async fn remove_project(&self, path: &str) -> Result<bool, String> {
         let p = path.to_string();
-        self.handle
+        let removed = self
+            .handle
             .exec(move |conn| crate::sebas_state::repo::remove_project(conn, &p))
-            .await
+            .await?;
+        if removed {
+            sebas_router::state_store::notify_change("projects");
+        }
+        Ok(removed)
     }
 }

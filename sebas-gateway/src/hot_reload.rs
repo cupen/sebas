@@ -24,6 +24,10 @@ use crate::server::AppState;
 pub struct ReloadStatus {
     last_error: RwLock<Option<String>>,
     last_ok_at: RwLock<Option<SystemTime>>,
+    /// 数据源（core state channel）不可用的成因（5.3）。与 `last_error`
+    /// 区分：reload 失败可能是配置校验问题，数据源不可用是通道断连。
+    /// 通道恢复时清空。
+    source_unavailable: RwLock<Option<String>>,
     /// admin 写路径记录：最近一次 admin 成功写入后的 providers.json 内容
     /// hash。watcher 触发时若文件 hash 仍等于它 → 该事件来自 admin 自写
     /// （admin 已 reload），跳过；否则是外部写，需要 reload。
@@ -43,6 +47,28 @@ impl ReloadStatus {
 
     pub fn ok_at(&self) -> Option<SystemTime> {
         *self.last_ok_at.read().ok()?
+    }
+
+    /// 数据源不可用的成因（None = 通道健康）。
+    pub fn source_unavailable(&self) -> Option<String> {
+        self.source_unavailable
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// 记录数据源不可用（5.3 断连）。
+    pub(crate) fn record_source_unavailable(&self, cause: &str) {
+        if let Ok(mut g) = self.source_unavailable.write() {
+            *g = Some(cause.to_string());
+        }
+    }
+
+    /// 数据源恢复（通道重连成功）。
+    pub(crate) fn record_source_ok(&self) {
+        if let Ok(mut g) = self.source_unavailable.write() {
+            *g = None;
+        }
     }
 
     pub(crate) fn record_ok_quiet(&self) {

@@ -1,10 +1,14 @@
-//! Split state store: runtime 状态与 provider 数据分文件持久化。
+//! Split state store: runtime 状态与 provider 数据。
+//!
+//! **优先走 SQLite 状态库**（`init_engine` 后）：`load/save/update` 全部委托
+//! 给 `StateStoreEngine`（core 进程内的 `DbStateEngine`，add-state-store）。
+//! 文件路径（`~/.sebas/state.json` + `providers.json`）仅在后端不可用
+//! （engine 未初始化，如 DB 初始化失败/测试夹具）时作为降级回退。
 //!
 //! - `~/.sebas/state.json`（`SEBAS_STATE_FILE` 可覆盖）：runtime 决策
 //!   （`version` + `mode` + `default_selection`），spawn 翻译的输入。
 //! - `~/.sebas/providers.json`（`SEBAS_GATEWAY_PROVIDER_OVERLAY` 可覆盖）：
-//!   provider 数据单一真源（`providers` CRUD delta + `deleted` 墓碑 +
-//!   gateway 侧的 `model_aliases` 等段——本模块不解释未知段，写时保留）。
+//!   provider 数据（`providers` CRUD delta + `deleted` 墓碑 + `model_aliases`）。
 //!
 //! ## 演进史
 //!
@@ -12,9 +16,11 @@
 //! - openspec/specs/provider-management/spec.md：合并进 state.json v2 单文件，providers.json 被
 //!   迁移删除 —— 但 gateway 一直读 providers.json，卡片编辑到不了 gateway
 //!   （断链）。
-//! - 本 change（gateway-admin-api-and-model-aliases）：拆回。providers.json
-//!   成为飞书 `/provider` 卡片（本 crate）与 gateway admin API 双写者共用
-//!   的单一真源；state.json 只留 runtime 段。
+//! - gateway-admin-api-and-model-aliases：拆回。providers.json 成为飞书
+//!   `/provider` 卡片与 gateway admin API 双写者共用的单一真源；state.json
+//!   只留 runtime 段。
+//! - add-state-store：SQLite 成为唯一写路径（core 进程）；providers.json /
+//!   state.json 保留在磁盘但不再被引擎路径读取，仅作降级回退。
 //!
 //! ## state.json wire（runtime）
 //!
@@ -58,9 +64,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// 全局状态存储引擎 (add-state-store)。
-static ENGINE: OnceLock<Box<dyn StateStoreEngine + Send + Sync>> = OnceLock::new();
-
 /// 状态存储引擎 trait: 抽象 SQLite/文件后端。
 #[async_trait::async_trait]
 pub trait StateStoreEngine: Send + Sync {
@@ -78,9 +81,50 @@ pub trait StateStoreEngine: Send + Sync {
     async fn remove_project(&self, path: &str) -> Result<bool, String>;
 }
 
-/// 初始化全局状态存储引擎。
+/// 全局状态存储引擎 (add-state-store)。
+static ENGINE: OnceLock<Box<dyn StateStoreEngine + Send + Sync>> = OnceLock::new();
+/// 状态变更通知广播 (add-state-store 4.2): 写者提交成功后按 scope 投递,
+/// 订阅者据此重投影。合并语义: 一串提交可以合并为一个通知(由订阅端
+/// debounce / 服务端合并窗口决定, 本通道只保证"提交后至少一帧")。
+static CHANGE_TX: OnceLock<tokio::sync::broadcast::Sender<StateChange>> = OnceLock::new();
+
+/// 状态变更通知 (design D6): 单一事件流 + scope 标签。
+/// 提交后投递, 允许合并(一串提交一个通知)。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum StateChange {
+    /// 某域发生变更。`scope` ∈ providers | aliases | settings | projects |
+    /// sessions。
+    Changed { scope: String },
+    /// 全部域重置(引擎重建/全量同步)。
+    Reset,
+}
+
+/// 初始化全局状态存储引擎 + 变更通知广播。
 pub fn init_engine(engine: Box<dyn StateStoreEngine + Send + Sync>) {
-    ENGINE.set(engine).ok().expect("state store engine 已初始化");
+    let (tx, _) = tokio::sync::broadcast::channel(64);
+    CHANGE_TX
+        .set(tx)
+        .ok()
+        .expect("state change broadcast 已初始化");
+    ENGINE
+        .set(engine)
+        .ok()
+        .expect("state store engine 已初始化");
+}
+
+/// 提交成功后按 scope 发一条变更通知。广播无人订阅时是 no-op。
+pub fn notify_change(scope: &str) {
+    if let Some(tx) = CHANGE_TX.get() {
+        let _ = tx.send(StateChange::Changed {
+            scope: scope.to_string(),
+        });
+    }
+}
+
+/// 订阅状态变更通知。
+pub fn subscribe_changes() -> Option<tokio::sync::broadcast::Receiver<StateChange>> {
+    CHANGE_TX.get().map(|tx| tx.subscribe())
 }
 
 /// 获取引擎引用。
@@ -195,6 +239,15 @@ impl<'de> Deserialize<'de> for DefaultSelection {
     }
 }
 
+/// 一条模型别名（与 gateway admin API 的 wire 同形状）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ModelAliasEntry {
+    pub provider: String,
+    /// 缺省 = 别名即 upstream model（透传）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_model: Option<String>,
+}
+
 /// 内存聚合视图：runtime（state.json）+ provider 数据（providers.json）。
 ///
 /// 仅作为 load() 的返回值与 update() 闭包的操作对象；`save()` 会把它**拆开**
@@ -214,6 +267,11 @@ pub struct PersistedState {
     /// `model=None`，upgrade step 在 `repair_mode` 后落地为新 wire 形状。
     #[serde(default, alias = "default_provider_for_direct")]
     pub default_selection: Option<DefaultSelection>,
+    /// 模型别名（add-state-store 5.3）：gateway admin API 拥有。随状态库
+    /// 流转——DB 侧存 model_aliases 表，文件侧透传 providers.json 的
+    /// `model_aliases` 段。
+    #[serde(default)]
+    pub model_aliases: BTreeMap<String, ModelAliasEntry>,
 }
 
 fn default_state_version() -> u32 {
@@ -228,6 +286,7 @@ impl Default for PersistedState {
             deleted: Vec::new(),
             mode: ProviderMode::default(),
             default_selection: None,
+            model_aliases: BTreeMap::new(),
         }
     }
 }
@@ -348,7 +407,8 @@ struct RuntimeSide {
 
 fn load_at(state_p: &Path, overlay_p: &Path) -> PersistedState {
     let runtime = load_runtime_side(state_p);
-    let (mut providers, mut deleted, _overlay_raw_ok) = load_overlay_sections(overlay_p);
+    let (mut providers, mut deleted, model_aliases, _overlay_raw_ok) =
+        load_overlay_sections(overlay_p);
 
     // 反向迁移：stranded providers/deleted 合并进 providers.json（state 侧
     // 优先 —— 旧单文件时代的 load 已把 overlay 合并进 state，state 是超集），
@@ -363,7 +423,7 @@ fn load_at(state_p: &Path, overlay_p: &Path) -> PersistedState {
                 deleted.push(d);
             }
         }
-        if save_overlay(overlay_p, &providers, &deleted).is_ok() {
+        if save_overlay(overlay_p, &providers, &deleted, Some(&model_aliases)).is_ok() {
             let clean = RuntimeWire {
                 version: STATE_VERSION_V2,
                 mode: runtime.mode.clone(),
@@ -377,6 +437,7 @@ fn load_at(state_p: &Path, overlay_p: &Path) -> PersistedState {
             deleted,
             mode: runtime.mode,
             default_selection: runtime.default_selection,
+            model_aliases,
         });
     }
 
@@ -398,6 +459,7 @@ fn load_at(state_p: &Path, overlay_p: &Path) -> PersistedState {
         deleted,
         mode: runtime.mode,
         default_selection: runtime.default_selection,
+        model_aliases,
     })
 }
 
@@ -490,22 +552,30 @@ fn providers_raw_present(overlay_p: &Path) -> bool {
     overlay_p.exists()
 }
 
-/// 读 providers.json → (providers, deleted, raw_ok)。解析失败 / 不存在 →
-/// (空, 空, false)。破损文件的备份自愈由上层（provider.rs build_form）负责。
-fn load_overlay_sections(overlay_p: &Path) -> (BTreeMap<String, Item>, Vec<String>, bool) {
+/// 读 providers.json → (providers, deleted, model_aliases, raw_ok)。
+/// 解析失败 / 不存在 → (空, 空, 空, false)。破损文件的备份自愈由上层
+/// （provider.rs build_form）负责。
+fn load_overlay_sections(
+    overlay_p: &Path,
+) -> (
+    BTreeMap<String, Item>,
+    Vec<String>,
+    BTreeMap<String, ModelAliasEntry>,
+    bool,
+) {
     let raw = match std::fs::read_to_string(overlay_p) {
         Ok(r) => r,
-        Err(_) => return (BTreeMap::new(), Vec::new(), false),
+        Err(_) => return (BTreeMap::new(), Vec::new(), BTreeMap::new(), false),
     };
     match serde_json::from_str::<OverlayWire>(&raw) {
-        Ok(ov) => (ov.providers, ov.deleted, true),
+        Ok(ov) => (ov.providers, ov.deleted, ov.model_aliases, true),
         Err(e) => {
             tracing::warn!(
                 path = %overlay_p.display(),
                 error = %e,
                 "providers.json 解析失败，providers 回退默认"
             );
-            (BTreeMap::new(), Vec::new(), false)
+            (BTreeMap::new(), Vec::new(), BTreeMap::new(), false)
         }
     }
 }
@@ -521,14 +591,16 @@ struct RuntimeWire {
     default_selection: Option<DefaultSelection>,
 }
 
-/// providers.json 的 wire（本模块只解释 providers/deleted；未知段在
-/// save_overlay 的 RMW 里保留）。
+/// providers.json 的 wire（本模块解释 providers/deleted/model_aliases；
+/// 其它未知段在 save_overlay 的 RMW 里保留）。
 #[derive(Default, Deserialize)]
 struct OverlayWire {
     #[serde(default)]
     providers: BTreeMap<String, Item>,
     #[serde(default)]
     deleted: Vec<String>,
+    #[serde(default)]
+    model_aliases: BTreeMap<String, ModelAliasEntry>,
 }
 
 /// 旧版 state.json 的 wire 形状：只 mode + default_provider_for_direct。
@@ -558,7 +630,12 @@ fn write_runtime(path: &Path, wire: &RuntimeWire) -> anyhow::Result<()> {
 /// 写 providers.json：Map 级 RMW —— 读现有文件为 raw Map（保留
 /// `model_aliases` 等未知段），只覆写 `providers`/`deleted` 两个 key。
 /// 现有文件缺失 / 解析失败 → 从空 Map 开始（破损文件的备份自愈在上层）。
-fn save_overlay(path: &Path, providers: &BTreeMap<String, Item>, deleted: &[String]) -> anyhow::Result<()> {
+fn save_overlay(
+    path: &Path,
+    providers: &BTreeMap<String, Item>,
+    deleted: &[String],
+    model_aliases: Option<&BTreeMap<String, ModelAliasEntry>>,
+) -> anyhow::Result<()> {
     let mut root: Map<String, Value> = std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
@@ -569,6 +646,12 @@ fn save_overlay(path: &Path, providers: &BTreeMap<String, Item>, deleted: &[Stri
         serde_json::to_value(providers)?,
     );
     root.insert("deleted".to_string(), serde_json::to_value(deleted)?);
+    if let Some(aliases) = model_aliases {
+        root.insert(
+            "model_aliases".to_string(),
+            serde_json::to_value(aliases)?,
+        );
+    }
     write_json_atomic(path, &Value::Object(root))
 }
 
@@ -594,7 +677,7 @@ fn write_json_atomic(path: &Path, value: &Value) -> anyhow::Result<()> {
 fn save_at(state_p: &Path, overlay_p: &Path, s: &PersistedState) -> anyhow::Result<()> {
     // providers.json 先写（真源），state.json 后写 —— 崩溃在两写之间时，
     // providers 数据已落盘，runtime 段最多回退 default（可自愈）。
-    save_overlay(overlay_p, &s.providers, &s.deleted)?;
+    save_overlay(overlay_p, &s.providers, &s.deleted, Some(&s.model_aliases))?;
     write_runtime(
         state_p,
         &RuntimeWire {
@@ -899,6 +982,7 @@ mod tests {
                 provider: "deepseek".into(),
             },
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
+            model_aliases: BTreeMap::new(),
         };
         save_at(&state_p, &prov_p, &original).unwrap();
 
@@ -1027,6 +1111,7 @@ mod tests {
                 provider: "deepseek".into(),
             },
             default_selection: Some(DefaultSelection::new("deepseek")),
+            model_aliases: BTreeMap::new(),
         };
         save_at(&state_p, &prov_p, &s).unwrap();
         let mut loaded = load_at(&state_p, &prov_p);
