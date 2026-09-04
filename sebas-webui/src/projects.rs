@@ -187,6 +187,12 @@ pub fn reorder(ordered_paths: &[String]) -> Result<Vec<ProjectEntry>, String> {
     Ok(next)
 }
 
+/// 全量保存给定顺序的项目列表（状态库回退路径用：把 DB 列表形状转回
+/// ProjectEntry 后写文件注册表）。
+pub fn save_ordered(entries: &[ProjectEntry]) -> Result<(), String> {
+    save(entries)
+}
+
 /// Returns true when the project's directory exists and is reachable. Used
 /// by the UI to render a row that still lists its sessions but is visually
 /// marked unreachable.
@@ -243,7 +249,7 @@ pub fn refresh_branch(path: &str) -> Option<String> {
 /// Reads `.git/HEAD`. Handles two cases:
 /// - Plain ref: `ref: refs/heads/main` → branch = `main`
 /// - Detached HEAD: raw commit sha → branch = None (we don't fabricate names)
-fn probe_git_branch(repo: &Path) -> Option<String> {
+pub fn probe_git_branch(repo: &Path) -> Option<String> {
     let head = std::fs::read_to_string(repo.join(".git/HEAD")).ok()?;
     let head = head.trim();
     let rest = head.strip_prefix("ref:")?.trim();

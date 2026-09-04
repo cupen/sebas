@@ -176,16 +176,52 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
     Json(data).into_response()
 }
 
-/// GET /api/settings — card config and basic gateway info. The card config
-/// is the static snapshot the caller loaded at startup; the session channel
-/// does not transport settings.
+/// GET /api/settings — card config and basic gateway info. 状态库可用时（
+/// add-state-store 5.2）card config 从 backend 实时读取；否则回退启动快照。
 pub async fn settings(State(state): State<WebUiState>) -> Response {
-    let card_config_info = CardConfigInfo {
-        theme_color: state.card_config.theme_color.clone(),
-        fold_long_output: state.card_config.fold_long_output,
-        thinking_display: format!("{:?}", state.card_config.thinking),
-        max_user_text_chars: state.card_config.max_user_text_chars,
-        max_tool_output_chars: state.card_config.max_tool_output_chars,
+    // 尝试从后端状态库读最新 settings（CardConfig 形状）。
+    let card_config_info = match state.backend.state_snapshot("settings").await {
+        Some(v) => {
+            // v 是 CardConfig 的形状；转成 CardConfigInfo。
+            let theme_color = v
+                .get("theme_color")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&state.card_config.theme_color)
+                .to_string();
+            let fold_long_output = v
+                .get("fold_long_output")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(state.card_config.fold_long_output);
+            let thinking = v
+                .get("thinking")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{:?}", state.card_config.thinking));
+            let max_user_text_chars = v
+                .get("max_user_text_chars")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(state.card_config.max_user_text_chars);
+            let max_tool_output_chars = v
+                .get("max_tool_output_chars")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(state.card_config.max_tool_output_chars);
+            CardConfigInfo {
+                theme_color,
+                fold_long_output,
+                thinking_display: thinking,
+                max_user_text_chars,
+                max_tool_output_chars,
+            }
+        }
+        None => CardConfigInfo {
+            theme_color: state.card_config.theme_color.clone(),
+            fold_long_output: state.card_config.fold_long_output,
+            thinking_display: format!("{:?}", state.card_config.thinking),
+            max_user_text_chars: state.card_config.max_user_text_chars,
+            max_tool_output_chars: state.card_config.max_tool_output_chars,
+        },
     };
 
     let data = json!({
@@ -395,39 +431,130 @@ pub async fn browse_dirs(
 
 // ---- Project API endpoints ----
 
-/// GET /api/projects — list all registered projects.
-pub async fn projects_list(State(_state): State<WebUiState>) -> Response {
-    Json(json!({ "projects": crate::projects::list() })).into_response()
+/// 从 backend 读取项目列表（DB 引擎 / core 通道）。backend 不可达时回退
+/// 本地文件注册表（webui 进程独占视图，spec 未约束其降级语义）。
+/// 返回 JSON 数组（ProjectRow / ProjectEntry 形状，前端兼容）。
+async fn projects_from_backend(
+    state: &WebUiState,
+) -> Result<Vec<serde_json::Value>, Response> {
+    if let Some(v) = state.backend.state_snapshot("projects").await {
+        let arr = v
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        return Ok(arr);
+    }
+    // 回退：webui 本地文件注册表。
+    Ok(crate::projects::list()
+        .into_iter()
+        .map(|e| serde_json::to_value(&e).unwrap_or_default())
+        .collect())
 }
 
-/// POST /api/projects — register a new project directory.
+/// GET /api/projects — list all registered projects（状态库优先，文件回退）。
+pub async fn projects_list(State(state): State<WebUiState>) -> Response {
+    match projects_from_backend(&state).await {
+        Ok(projects) => Json(json!({ "projects": projects })).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// POST /api/projects — register a new project directory（状态库优先）。
 pub async fn projects_add(
-    State(_state): State<WebUiState>,
+    State(state): State<WebUiState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return api_error(StatusCode::BAD_REQUEST, "missing 'path' field"),
     };
-    match crate::projects::add(path) {
-        Ok(entry) => (StatusCode::CREATED, Json(json!(entry))).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    // 本地校验：路径必须存在且是目录（canonicalize 后注册 canonical 路径）。
+    let dir = std::path::Path::new(path);
+    if !dir.exists() {
+        return api_error(StatusCode::BAD_REQUEST, format!("路径不存在: {path}"));
+    }
+    if !dir.is_dir() {
+        return api_error(StatusCode::BAD_REQUEST, format!("路径不是目录: {path}"));
+    }
+    let canonical = match dir.canonicalize() {
+        Ok(c) => c.to_string_lossy().to_string(),
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, format!("无法解析路径: {path}")),
+    };
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed".to_string());
+    // 重复检查：列表里已有 canonical 路径 → 409。
+    if let Ok(projects) = projects_from_backend(&state).await
+        && projects
+            .iter()
+            .any(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()))
+    {
+        return api_error(StatusCode::CONFLICT, format!("项目已注册: {path}"));
+    }
+    // backend 可用 → 状态库；不可用 → 文件注册表（降级）。
+    if state
+        .backend
+        .state_mutate(
+            "projects",
+            json!({ "op": "add", "path": canonical.clone(), "name": name.clone() }),
+        )
+        .await
+        .is_ok()
+        || crate::projects::add(&canonical).is_ok()
+    {
+        // 返回新条目（从列表反查，保证与数据源一致）。
+        match projects_from_backend(&state).await {
+            Ok(list) => {
+                let entry = list.into_iter().find(|p| {
+                    p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
+                });
+                if let Some(entry) = entry {
+                    return (StatusCode::CREATED, Json(entry)).into_response();
+                }
+            }
+            Err(_) => {}
+        }
+        (StatusCode::CREATED, Json(json!({ "path": canonical, "name": name }))).into_response()
+    } else {
+        api_error(StatusCode::SERVICE_UNAVAILABLE, "无法注册项目（状态库与本地均失败）")
     }
 }
 
-/// POST /api/projects/{path}/remove — unregister a project.
+/// POST /api/projects/{path}/remove — unregister a project（状态库优先）。
 pub async fn projects_remove(
-    State(_state): State<WebUiState>,
+    State(state): State<WebUiState>,
     Path(path): Path<String>,
 ) -> Response {
     let decoded = match urlencoding::decode(&path) {
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid path encoding"),
     };
-    match crate::projects::remove(&decoded) {
-        Ok(true) => Json(json!({ "status": "removed" })).into_response(),
-        Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    // 先试状态库；失败（不存在或不可达）再试文件。
+    match state
+        .backend
+        .state_mutate("projects", json!({ "op": "remove", "path": decoded.clone() }))
+        .await
+    {
+        Ok(()) => Json(json!({ "status": "removed" })).into_response(),
+        Err(e) => {
+            if e.contains("不存在") {
+                // 状态库没有 → 试文件注册表。
+                match crate::projects::remove(&decoded) {
+                    Ok(true) => Json(json!({ "status": "removed" })).into_response(),
+                    Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
+                    Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "remove failed"),
+                }
+            } else {
+                // 状态库不可达 → 回退文件。
+                match crate::projects::remove(&decoded) {
+                    Ok(true) => Json(json!({ "status": "removed" })).into_response(),
+                    Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
+                    Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, e),
+                }
+            }
+        }
     }
 }
 
@@ -438,32 +565,108 @@ pub struct ReorderRequest {
     pub paths: Vec<String>,
 }
 
-/// POST /api/projects/reorder — persist the user's rail ordering.
+/// POST /api/projects/reorder — persist the user's rail ordering（状态库优先）。
 pub async fn projects_reorder(
-    State(_state): State<WebUiState>,
+    State(state): State<WebUiState>,
     Json(req): Json<ReorderRequest>,
 ) -> Response {
-    match crate::projects::reorder(&req.paths) {
-        Ok(entries) => Json(json!({ "projects": entries })).into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    // 读当前列表 → 按新顺序重排（未知路径落地为 add_time 顺序尾部）→ save。
+    let mut projects = match projects_from_backend(&state).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let mut by_path: std::collections::HashMap<String, serde_json::Value> =
+        projects.drain(..).map(|p| {
+            let path = p
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            (path, p)
+        }).collect();
+    let mut next: Vec<serde_json::Value> = Vec::with_capacity(req.paths.len());
+    let mut seen = std::collections::HashSet::new();
+    for path in &req.paths {
+        if seen.insert(path.clone())
+            && let Some(entry) = by_path.remove(path)
+        {
+            next.push(entry);
+        }
+    }
+    // 未提及的项目追加尾部（按 added_at 稳定）。
+    let mut tail: Vec<(i64, serde_json::Value)> = by_path
+        .into_values()
+        .map(|v| {
+            let t = v
+                .get("added_at")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0);
+            (t, v)
+        })
+        .collect();
+    tail.sort_by_key(|(t, _)| *t);
+    next.extend(tail.into_iter().map(|(_, v)| v));
+    // 重写 sort_order 为列表序号（状态库 save 语义）。
+    for (i, entry) in next.iter_mut().enumerate() {
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("sort_order".into(), json!(i as i64));
+        }
+    }
+    // 状态库优先；不可达时回退文件注册表 reorder。
+    let via_backend = state
+        .backend
+        .state_mutate("projects", json!({ "op": "save", "projects": next.clone() }))
+        .await
+        .is_ok();
+    if via_backend {
+        return Json(json!({ "projects": next })).into_response();
+    }
+    // 文件回退：把 next 形状转回 ProjectEntry 数组。
+    let entries: Vec<crate::projects::ProjectEntry> = next
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    match crate::projects::save_ordered(&entries) {
+        Ok(()) => Json(json!({ "projects": entries })).into_response(),
+        Err(e) => api_error(StatusCode::SERVICE_UNAVAILABLE, e),
     }
 }
 
-/// GET /api/projects/{path}/branch — current git branch (TTL-cached server-side).
+/// GET /api/projects/{path}/branch — current git branch (TTL-cached server-side)。
+/// Git 探测是本地文件系统操作；backend 不可达时列表来自文件回退，语义一致。
 pub async fn projects_branch(
-    State(_state): State<WebUiState>,
+    State(state): State<WebUiState>,
     Path(path): Path<String>,
 ) -> Response {
     let decoded = match urlencoding::decode(&path) {
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid path encoding"),
     };
-    let projects = crate::projects::list();
-    if !projects.iter().any(|p| p.path == decoded) {
+    let projects = match projects_from_backend(&state).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let entry = projects
+        .iter()
+        .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(decoded.as_str()));
+    let Some(entry) = entry else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
-    }
-    let branch = crate::projects::read_branch(&decoded);
+    };
     let accessible = crate::projects::is_accessible(&decoded);
+    // TTL 缓存：branch_at 距今 < 30s 用缓存。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let branch_at = entry.get("branch_at").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cached_branch = entry.get("branch").and_then(|v| v.as_str()).map(str::to_string);
+    let branch = if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some() {
+        cached_branch
+    } else {
+        let fresh = crate::projects::probe_git_branch(std::path::Path::new(&decoded));
+        // 简化：返回探测值，不强制写回（分支缓存不是共享真源）。
+        fresh
+    };
     Json(json!({
         "path": decoded,
         "branch": branch,

@@ -97,6 +97,44 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// 写路径统一入口（5.3 通道代理）：core channel 可用时把 provider/alias
+/// 变更写到 core 状态库，否则回退 overlay 文件。
+/// 返回 `Ok(true)` = 走了通道；`Ok(false)` = 走了文件回退。
+/// 调用方在 Ok 后继续走统一的 reload（`reload_and_swap` 或通道快照投影）。
+pub(crate) async fn channel_write(
+    domain: &str,
+    payload: serde_json::Value,
+) -> Result<bool, String> {
+    let Some(socket) = crate::core_channel::socket_path() else {
+        return Ok(false);
+    };
+    match crate::core_channel::mutate_state(&socket, domain, payload).await {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            tracing::warn!(error = %e, domain = %domain, "core channel mutation 失败, 回退文件写路径");
+            Ok(false)
+        }
+    }
+}
+
+/// 写后的统一 reload（async）：
+/// - 通道写成功 → 立即用通道快照投影重建配置（响应前生效）。
+/// - 文件写 / 通道不可用 → 走 `reload_and_swap`（文件 overlay 重读）。
+pub(crate) async fn reload_after_write(state: &AppState) -> Result<(), String> {
+    if let Some(socket) = crate::core_channel::socket_path() {
+        // 同步拉一次快照投影（不等订阅广播，保证响应已含新配置）。
+        crate::core_channel::reload_from_channel(state, &socket).await;
+        // 投影成功会 record_source_ok + record_ok_quiet；失败已 record_err。
+        // 这里以投影是否成功为准返回。
+        if state.reload_status.error().is_none() && state.reload_status.source_unavailable().is_none()
+        {
+            return Ok(());
+        }
+        tracing::info!("通道投影未生效，回退文件重载");
+    }
+    crate::admin::reload_and_swap(state)
+}
+
 /// 启动时调用：standalone 无 secret 模式 warn 一次。
 pub fn warn_no_secret_once() {
     let secret = std::env::var("SEBAS_CONTROL_SECRET").unwrap_or_default();
@@ -169,13 +207,22 @@ pub(crate) fn reload_and_swap(state: &AppState) -> Result<(), String> {
 }
 
 fn reload_and_swap_inner(state: &AppState) -> Result<(), String> {
+    let cfg = rebuild_from_seed(state)?;
+    state
+        .swap_core(cfg)
+        .map_err(|e| format!("热替换失败: {e}"))
+}
+
+/// 从 config.toml 种子重建 GatewayConfig，保留外壳启动期字段。
+/// 不含 overlay 合并（调用方决定数据源：文件 or core channel 快照）。
+pub(crate) fn rebuild_from_seed(state: &AppState) -> Result<GatewayConfig, String> {
     let core = state.core();
     let toml_path = &core.cfg.config_source;
     let raw_toml = std::fs::read_to_string(toml_path)
         .map_err(|e| format!("读 config.toml ({toml_path}) 失败: {e}"))?;
     let mut cfg = GatewayConfig::parse(&raw_toml).map_err(|e| format!("解析失败: {e}"))?;
-    // parse 内部已合并 overlay；保留外壳的启动期字段（listen/超时等不因
-    // reload 变化——它们来自原 cfg 而非新读）。
+    // 保留外壳的启动期字段（listen/超时等不因 reload 变化——它们来自原
+    // cfg 而非新读）。
     cfg.listen = core.cfg.listen.clone();
     cfg.max_body_bytes = core.cfg.max_body_bytes;
     cfg.connect_timeout_secs = core.cfg.connect_timeout_secs;
@@ -183,9 +230,7 @@ fn reload_and_swap_inner(state: &AppState) -> Result<(), String> {
     cfg.usage_file = core.cfg.usage_file.clone();
     cfg.debug = core.cfg.debug;
     cfg.rate_limit = core.cfg.rate_limit;
-    state
-        .swap_core(cfg)
-        .map_err(|e| format!("热替换失败: {e}"))
+    Ok(cfg)
 }
 
 // -------------------- providers CRUD --------------------
@@ -218,7 +263,6 @@ async fn create_provider(
     let Some(item) = body.as_object() else {
         return err_400("body 必须是对象");
     };
-    let path = overlay_path(&state);
     // 校验先行：候选在内存完整跑 resolve 管线。
     if let Err(e) = config::validate_provider_entry(&name, item) {
         return err_400(&e.to_string());
@@ -228,28 +272,42 @@ async fn create_provider(
     if core.cfg.providers.contains_key(&name) {
         return err_409(&format!("provider '{name}' 已存在"));
     }
+    // 5.3 通道代理：core channel 可用时写状态库；否则回退 overlay 文件。
     let item_value = item.clone();
     let name2 = name.clone();
-    if let Err(e) = write_overlay_rmw(&path, |root| {
-        let providers = root
-            .entry("providers".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Some(map) = providers.as_object_mut() else {
-            return Err("providers 段损坏（非对象）".into());
-        };
-        if map.contains_key(&name2) {
-            return Err(format!("provider '{name2}' 已存在"));
+    let via_channel = match channel_write(
+        "providers",
+        json!({"op": "put", "name": name2.clone(), "item": item_value.clone()}),
+    )
+    .await
+    {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => return err_500(&e),
+    };
+    if !via_channel {
+        let path = overlay_path(&state);
+        if let Err(e) = write_overlay_rmw(&path, |root| {
+            let providers = root
+                .entry("providers".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let Some(map) = providers.as_object_mut() else {
+                return Err("providers 段损坏（非对象）".into());
+            };
+            if map.contains_key(&name2) {
+                return Err(format!("provider '{name2}' 已存在"));
+            }
+            map.insert(name2.clone(), Value::Object(item_value.clone()));
+            // 创建即撤销墓碑。
+            if let Some(deleted) = root.get_mut("deleted").and_then(Value::as_array_mut) {
+                deleted.retain(|d| d.as_str() != Some(name2.as_str()));
+            }
+            Ok(())
+        }) {
+            return err_500(&e);
         }
-        map.insert(name2.clone(), Value::Object(item_value.clone()));
-        // 创建即撤销墓碑。
-        if let Some(deleted) = root.get_mut("deleted").and_then(Value::as_array_mut) {
-            deleted.retain(|d| d.as_str() != Some(name2.as_str()));
-        }
-        Ok(())
-    }) {
-        return err_500(&e);
     }
-    match reload_and_swap(&state) {
+    match reload_after_write(&state).await {
         Ok(()) => (StatusCode::CREATED, Json(json!({"created": name}))).into_response(),
         Err(e) => err_500(&e),
     }
@@ -297,22 +355,34 @@ async fn update_provider(
     }
     let merged_value = Value::Object(merged);
     let name2 = name.clone();
-    if let Err(e) = write_overlay_rmw(&path, |root| {
-        let providers = root
-            .entry("providers".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Some(map) = providers.as_object_mut() else {
-            return Err("providers 段损坏（非对象）".into());
-        };
-        map.insert(name2.clone(), merged_value.clone());
-        if let Some(deleted) = root.get_mut("deleted").and_then(Value::as_array_mut) {
-            deleted.retain(|d| d.as_str() != Some(name2.as_str()));
+    // 5.3 通道代理：优先写状态库（put 全量覆盖）；不可用回退文件。
+    let via_channel = match channel_write(
+        "providers",
+        json!({"op": "put", "name": name2.clone(), "item": merged_value.clone()}),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return err_500(&e),
+    };
+    if !via_channel {
+        if let Err(e) = write_overlay_rmw(&path, |root| {
+            let providers = root
+                .entry("providers".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let Some(map) = providers.as_object_mut() else {
+                return Err("providers 段损坏（非对象）".into());
+            };
+            map.insert(name2.clone(), merged_value.clone());
+            if let Some(deleted) = root.get_mut("deleted").and_then(Value::as_array_mut) {
+                deleted.retain(|d| d.as_str() != Some(name2.as_str()));
+            }
+            Ok(())
+        }) {
+            return err_500(&e);
         }
-        Ok(())
-    }) {
-        return err_500(&e);
     }
-    match reload_and_swap(&state) {
+    match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"updated": name}))).into_response(),
         Err(e) => err_500(&e),
     }
@@ -336,10 +406,55 @@ async fn delete_provider(
         .and_then(Value::as_object)
         .is_some_and(|m| m.contains_key(&name));
     if !in_seed && !in_overlay {
+        // 通道模式：provider 可能在状态库而非 overlay/种子（卡片写入）。
+        let socket_available = crate::core_channel::socket_path().is_some();
+        if socket_available {
+            let via_channel = match channel_write(
+                "providers",
+                json!({"op": "delete", "name": name.clone()}),
+            )
+            .await
+            {
+                Ok(true) => true,
+                Ok(false) => false,
+                Err(e) => {
+                    // 状态库说 provider 不存在 → 404。
+                    if e.contains("不存在") {
+                        return err_404(&format!("provider '{name}' 不存在"));
+                    }
+                    return err_500(&e);
+                }
+            };
+            if via_channel {
+                return match reload_after_write(&state).await {
+                    Ok(()) => (StatusCode::OK, Json(json!({"deleted": name}))).into_response(),
+                    Err(e) => err_500(&e),
+                };
+            }
+        }
         return err_404(&format!("provider '{name}' 不存在"));
     }
     let name2 = name.clone();
     let seed_sourced = in_seed && !in_overlay;
+    // 5.3 通道代理优先：读到了（seed/overlay）但也许状态库是另一套——
+    // 统一写状态库（含墓碑），失败回退文件。
+    let via_channel = match channel_write(
+        "providers",
+        json!({"op": "delete", "name": name2.clone()}),
+    )
+    .await
+    {
+        Ok(true) => {
+            if let Err(e) = reload_after_write(&state).await {
+                return err_500(&e);
+            }
+            return (StatusCode::OK, Json(json!({"deleted": name}))).into_response();
+        }
+        Ok(false) => false,
+        Err(e) => return err_500(&e),
+    };
+    let _ = via_channel;
+    let _ = seed_sourced;
     if let Err(e) = write_overlay_rmw(&path, |root| {
         if let Some(map) = root.get_mut("providers").and_then(Value::as_object_mut) {
             map.remove(&name2);
@@ -358,7 +473,7 @@ async fn delete_provider(
     }) {
         return err_500(&e);
     }
-    match reload_and_swap(&state) {
+    match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"deleted": name}))).into_response(),
         Err(e) => err_500(&e),
     }
@@ -405,21 +520,34 @@ async fn create_alias(State(state): State<AppState>, Json(body): Json<Value>) ->
     if alias_exists(&path, &alias) {
         return err_409(&format!("别名 '{alias}' 已存在"));
     }
-    let entry_value = entry;
+    let entry_value = entry.clone();
     let alias2 = alias.clone();
-    if let Err(e) = write_overlay_rmw(&path, |root| {
-        let aliases = root
-            .entry("model_aliases".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Some(map) = aliases.as_object_mut() else {
-            return Err("model_aliases 段损坏（非对象）".into());
-        };
-        map.insert(alias2.clone(), entry_value.clone());
-        Ok(())
-    }) {
-        return err_500(&e);
+    // 5.3 通道代理：aliases 域写状态库；不可用回退文件。
+    let via_channel = match channel_write(
+        "aliases",
+        json!({"op": "put", "alias": alias2.clone(), "entry": entry_value.clone()}),
+    )
+    .await
+    {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => return err_500(&e),
+    };
+    if !via_channel {
+        if let Err(e) = write_overlay_rmw(&path, |root| {
+            let aliases = root
+                .entry("model_aliases".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let Some(map) = aliases.as_object_mut() else {
+                return Err("model_aliases 段损坏（非对象）".into());
+            };
+            map.insert(alias2.clone(), entry_value.clone());
+            Ok(())
+        }) {
+            return err_500(&e);
+        }
     }
-    match reload_and_swap(&state) {
+    match reload_after_write(&state).await {
         Ok(()) => (StatusCode::CREATED, Json(json!({"created": alias}))).into_response(),
         Err(e) => err_500(&e),
     }
@@ -439,21 +567,34 @@ async fn update_alias(
     if !alias_exists(&path, &alias) {
         return err_404(&format!("别名 '{alias}' 不存在"));
     }
-    let entry_value = entry;
+    let entry_value = entry.clone();
     let alias2 = alias.clone();
-    if let Err(e) = write_overlay_rmw(&path, |root| {
-        let aliases = root
-            .entry("model_aliases".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Some(map) = aliases.as_object_mut() else {
-            return Err("model_aliases 段损坏（非对象）".into());
-        };
-        map.insert(alias2.clone(), entry_value.clone());
-        Ok(())
-    }) {
-        return err_500(&e);
+    // 5.3 通道代理。
+    let via_channel = match channel_write(
+        "aliases",
+        json!({"op": "put", "alias": alias2.clone(), "entry": entry_value.clone()}),
+    )
+    .await
+    {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => return err_500(&e),
+    };
+    if !via_channel {
+        if let Err(e) = write_overlay_rmw(&path, |root| {
+            let aliases = root
+                .entry("model_aliases".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let Some(map) = aliases.as_object_mut() else {
+                return Err("model_aliases 段损坏（非对象）".into());
+            };
+            map.insert(alias2.clone(), entry_value.clone());
+            Ok(())
+        }) {
+            return err_500(&e);
+        }
     }
-    match reload_and_swap(&state) {
+    match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"updated": alias}))).into_response(),
         Err(e) => err_500(&e),
     }
@@ -469,18 +610,28 @@ async fn delete_alias(
         return err_404(&format!("别名 '{alias}' 不存在"));
     }
     let alias2 = alias.clone();
-    if let Err(e) = write_overlay_rmw(&path, |root| {
-        if let Some(map) = root
-            .get_mut("model_aliases")
-            .and_then(Value::as_object_mut)
-        {
-            map.remove(&alias2);
+    // 5.3 通道代理：aliases 域写状态库；不可用回退文件。
+    let via_channel = match channel_write("aliases", json!({"op": "delete", "alias": alias2.clone()}))
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => return err_500(&e),
+    };
+    if !via_channel {
+        if let Err(e) = write_overlay_rmw(&path, |root| {
+            if let Some(map) = root
+                .get_mut("model_aliases")
+                .and_then(Value::as_object_mut)
+            {
+                map.remove(&alias2);
+            }
+            Ok(())
+        }) {
+            return err_500(&e);
         }
-        Ok(())
-    }) {
-        return err_500(&e);
     }
-    match reload_and_swap(&state) {
+    match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"deleted": alias}))).into_response(),
         Err(e) => err_500(&e),
     }
@@ -577,52 +728,116 @@ async fn probe_provider(
     // ?apply=true：写回 provider 的 models 字段。
     let applied = query.as_deref() == Some("apply=true");
     if applied {
-        let path = overlay_path(&state);
         let models_value = serde_json::to_value(&models).unwrap_or(Value::Array(Vec::new()));
         let name2 = name.clone();
-        if let Err(e) = write_overlay_rmw(&path, |root| {
-            let providers = root
-                .entry("providers".to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            let Some(map) = providers.as_object_mut() else {
-                return Err("providers 段损坏（非对象）".into());
-            };
-            let entry = map
-                .entry(name2.clone())
-                .or_insert_with(|| Value::Object(Map::new()));
-            let Some(obj) = entry.as_object_mut() else {
-                return Err(format!("provider '{name2}' 条目非对象"));
-            };
-            // overlay 条目整体替换种子条目——若本 provider 原本只在
-            // config.toml 里（overlay 无条目），只写 models 会抹掉
-            // base_url/preset 导致校验失败。seed 里带过的连接字段须一并
-            // 带入 overlay 条目。
-            if obj.is_empty()
-                && let Some(seed) = state
-                    .core()
-                    .cfg
-                    .providers
-                    .get(&name2)
-            {
-                if let Some(v) = &seed.base_url_anthropic {
-                    obj.insert("base_url_anthropic".into(), Value::String(v.clone()));
-                }
-                if let Some(v) = &seed.base_url_openai {
-                    obj.insert("base_url_openai".into(), Value::String(v.clone()));
-                }
-                if let Some(v) = &seed.api_key_env {
-                    obj.insert("api_key_env".into(), Value::String(v.clone()));
-                }
-                if let Some(v) = &seed.api_key {
-                    obj.insert("api_key".into(), Value::String(v.clone()));
+        // 5.3 通道代理：从状态库快照读当前条目 → 补 models → put。
+        // 通道不可用时回退文件（保留 seed 字段合并逻辑）。
+        let via_channel = match crate::core_channel::socket_path() {
+            Some(socket) => {
+                let item =
+                    // 拉 providers 快照 → 该 provider 条目。
+                    match crate::core_channel::fetch_state_snapshot(&socket, "providers").await {
+                        Ok(snap) => {
+                            let providers = snap
+                                .get("providers")
+                                .and_then(Value::as_object)
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut item = providers
+                                .get(&name2)
+                                .cloned()
+                                .unwrap_or_else(|| Value::Object(Map::new()));
+                            // 若状态库无此条目（seed 来源），用当前内核的 cfg 条目补连接字段。
+                            if let Some(obj) = item.as_object_mut() {
+                                if obj.is_empty()
+                                    && let Some(seed) = state.core().cfg.providers.get(&name2)
+                                {
+                                    if let Some(v) = &seed.base_url_anthropic {
+                                        obj.insert("base_url_anthropic".into(), Value::String(v.clone()));
+                                    }
+                                    if let Some(v) = &seed.base_url_openai {
+                                        obj.insert("base_url_openai".into(), Value::String(v.clone()));
+                                    }
+                                    if let Some(v) = &seed.api_key_env {
+                                        obj.insert("api_key_env".into(), Value::String(v.clone()));
+                                    }
+                                    if let Some(v) = &seed.api_key {
+                                        obj.insert("api_key".into(), Value::String(v.clone()));
+                                    }
+                                }
+                                obj.insert("models".into(), models_value.clone());
+                            }
+                            item
+                        }
+                        Err(_) => Value::Null,
+                    };
+                if item.is_null() {
+                    Ok(false)
+                } else {
+                    match channel_write(
+                        "providers",
+                        json!({"op": "put", "name": name2.clone(), "item": item}),
+                    )
+                    .await
+                    {
+                        Ok(true) => Ok(true),
+                        Ok(false) => Ok(false),
+                        Err(e) => Err(e),
+                    }
                 }
             }
-            obj.insert("models".into(), models_value.clone());
-            Ok(())
-        }) {
+            None => Ok(false),
+        };
+        if let Err(e) = via_channel {
             return err_500(&e);
         }
-        if let Err(e) = reload_and_swap(&state) {
+        let via_channel = via_channel.unwrap_or(false);
+        if !via_channel {
+            let path = overlay_path(&state);
+            if let Err(e) = write_overlay_rmw(&path, |root| {
+                let providers = root
+                    .entry("providers".to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                let Some(map) = providers.as_object_mut() else {
+                    return Err("providers 段损坏（非对象）".into());
+                };
+                let entry = map
+                    .entry(name2.clone())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                let Some(obj) = entry.as_object_mut() else {
+                    return Err(format!("provider '{name2}' 条目非对象"));
+                };
+                // overlay 条目整体替换种子条目——若本 provider 原本只在
+                // config.toml 里（overlay 无条目），只写 models 会抹掉
+                // base_url/preset 导致校验失败。seed 里带过的连接字段须一并
+                // 带入 overlay 条目。
+                if obj.is_empty()
+                    && let Some(seed) = state
+                        .core()
+                        .cfg
+                        .providers
+                        .get(&name2)
+                {
+                    if let Some(v) = &seed.base_url_anthropic {
+                        obj.insert("base_url_anthropic".into(), Value::String(v.clone()));
+                    }
+                    if let Some(v) = &seed.base_url_openai {
+                        obj.insert("base_url_openai".into(), Value::String(v.clone()));
+                    }
+                    if let Some(v) = &seed.api_key_env {
+                        obj.insert("api_key_env".into(), Value::String(v.clone()));
+                    }
+                    if let Some(v) = &seed.api_key {
+                        obj.insert("api_key".into(), Value::String(v.clone()));
+                    }
+                }
+                obj.insert("models".into(), models_value.clone());
+                Ok(())
+            }) {
+                return err_500(&e);
+            }
+        }
+        if let Err(e) = reload_after_write(&state).await {
             return err_500(&e);
         }
     }
@@ -712,6 +927,10 @@ async fn stats(State(state): State<AppState>) -> Response {
     // 4.2：热重载状态（无失败时字段缺省——机器可读的「健康」信号）。
     if let Some(e) = state.reload_status.error() {
         out["last_reload_error"] = Value::String(e);
+    }
+    // 5.3：数据源（core state channel）不可用（断连时保持最后有效配置）。
+    if let Some(cause) = state.reload_status.source_unavailable() {
+        out["source_unavailable"] = Value::String(cause);
     }
     if let Some(t) = state.reload_status.ok_at() {
         out["last_reload_ok_at"] = Value::Number(

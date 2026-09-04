@@ -53,22 +53,36 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
     };
 
     // 读 model_aliases (块作用域确保 stmt 及时 drop)
-    {
+    let model_aliases = {
         let mut stmt = conn
             .prepare("SELECT alias, provider, upstream_model FROM model_aliases ORDER BY alias")
             .map_err(|e| format!("准备 model_aliases 查询失败: {e}"))?;
 
-        let _alias_rows: Vec<(String, String, Option<String>)> = stmt
+        let rows = stmt
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })
-            .map_err(|e| format!("查询 model_aliases 失败: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
-        // model_aliases 会嵌入 providers.json 的 `model_aliases` 段, 但
-        // PersistedState 不直接包含它 —— 它通过 overlay 文件透传。
-        // 目前我们先忽略 aliases 的 DB 加载, 等 gateway 消费端切换时处理。
-    }
+            .map_err(|e| format!("查询 model_aliases 失败: {e}"))?;
+
+        let mut aliases: BTreeMap<String, sebas_router::state_store::ModelAliasEntry> =
+            BTreeMap::new();
+        for row in rows {
+            let (alias, provider, upstream_model) =
+                row.map_err(|e| format!("读取 model_alias 行失败: {e}"))?;
+            aliases.insert(
+                alias,
+                sebas_router::state_store::ModelAliasEntry {
+                    provider,
+                    upstream_model,
+                },
+            );
+        }
+        aliases
+    };
 
     // 读 settings 中的 mode/default_selection (如果存在)
     let (mode, default_selection) = load_runtime_state(conn);
@@ -79,6 +93,7 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
         deleted,
         mode,
         default_selection,
+        model_aliases,
     })
 }
 
@@ -119,11 +134,12 @@ pub fn save_persisted_state(conn: &mut Connection, state: &sebas_router::state_s
         .transaction()
         .map_err(|e| format!("保存状态事务开始失败: {e}"))?;
 
-    // 清空旧数据
-    tx.execute("DELETE FROM providers", [])
-        .map_err(|e| format!("清空 providers 表失败: {e}"))?;
+    // 清空旧数据（先清 aliases 再清 providers——`model_aliases.provider`
+    // 有 REFERENCES providers(id) 外键，FK ON 时顺序不能反）。
     tx.execute("DELETE FROM model_aliases", [])
         .map_err(|e| format!("清空 model_aliases 表失败: {e}"))?;
+    tx.execute("DELETE FROM providers", [])
+        .map_err(|e| format!("清空 providers 表失败: {e}"))?;
 
     // 写 providers (非软删)
     let now = crate::sebas_state::db::unix_now();
@@ -145,6 +161,17 @@ pub fn save_persisted_state(conn: &mut Connection, state: &sebas_router::state_s
             params![id, now],
         )
         .map_err(|e| format!("写入 deleted provider {id} 失败: {e}"))?;
+    }
+
+    // 写 model_aliases (add-state-store 5.3：随状态库流转)
+    for (alias, entry) in &state.model_aliases {
+        tx.execute(
+            "INSERT INTO model_aliases (alias, provider, upstream_model, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(alias) DO UPDATE SET provider = ?2, upstream_model = ?3",
+            params![alias, entry.provider, entry.upstream_model, now],
+        )
+        .map_err(|e| format!("写入 model alias {alias} 失败: {e}"))?;
     }
 
     // 写 runtime state
@@ -470,6 +497,7 @@ mod tests {
             deleted: vec!["openai".into()],
             mode: ProviderMode::Direct { provider: "deepseek".into() },
             default_selection: Some(DefaultSelection::with_model("deepseek", "deepseek-chat")),
+            model_aliases: BTreeMap::new(),
         };
 
         save_persisted_state(&mut conn, &original).unwrap();

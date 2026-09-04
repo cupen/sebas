@@ -96,9 +96,74 @@ pub enum SessionStreamFrame {
     Event { event: SessionEvent },
 }
 
-/// The handshake line sent by the client immediately after connecting,
-/// before any request. Wrong/absent secret → the server closes the
-/// connection without reading a request.
+/// One frame of the **state** subscription stream (add-state-store 4.2).
+/// Exactly one full snapshot frame first (all domains), then one `Changed`
+/// frame per merged change batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum StateStreamFrame {
+    /// 全域快照（providers / settings / projects / sessions）。
+    Snapshot { domains: serde_json::Value },
+    /// 某域发生变更（一串提交可合并为一帧）。
+    Changed { scope: String },
+}
+
+/// 4.2 验收：state 订阅流（快照帧 + 变更帧）serde 往返后与原值一致。
+    #[test]
+    fn state_stream_frame_round_trips() {
+        let frames = vec![
+            StateStreamFrame::Snapshot {
+                domains: serde_json::json!({
+                    "providers": {},
+                    "settings": null,
+                    "projects": [],
+                    "sessions": []
+                }),
+            },
+            StateStreamFrame::Changed {
+                scope: "providers".into(),
+            },
+            StateStreamFrame::Changed {
+                scope: "settings".into(),
+            },
+        ];
+        for f in &frames {
+            let json = serde_json::to_string(f).unwrap();
+            let back: StateStreamFrame = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, f, "round-trip mismatch for {json}");
+        }
+        // Wire shape carries the "frame" tag.
+        assert_eq!(
+            serde_json::to_value(&frames[0]).unwrap()["frame"],
+            "snapshot"
+        );
+        assert_eq!(
+            serde_json::to_value(&frames[1]).unwrap()["frame"],
+            "changed"
+        );
+        assert_eq!(
+            serde_json::to_value(&frames[1]).unwrap()["scope"],
+            "providers"
+        );
+    }
+
+    /// 4.2：StateChange wire 形状带 `cmd` tag（与通道请求同风格）。
+    #[test]
+    fn state_change_wire_shape() {
+        use sebas_router::state_store::StateChange;
+        let changed = StateChange::Changed {
+            scope: "projects".into(),
+        };
+        let json = serde_json::to_value(&changed).unwrap();
+        assert_eq!(json["cmd"], "changed");
+        assert_eq!(json["scope"], "projects");
+        let back: StateChange = serde_json::from_value(json).unwrap();
+        assert_eq!(back, changed);
+    }
+
+    /// The handshake line sent by the client immediately after connecting,
+    /// before any request. Wrong/absent secret → the server closes the
+    /// connection without reading a request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelHandshake {
     pub secret: String,

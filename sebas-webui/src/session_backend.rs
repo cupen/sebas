@@ -196,6 +196,55 @@ fn parse_acp_kind(backend: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// projects 域 mutation 分发（与 core channel 服务端同款）：payload 用
+/// `op` 字段区分子操作——add / remove / save。
+async fn project_mutation(
+    engine: &(dyn sebas_router::state_store::StateStoreEngine + Send + Sync),
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let op = payload
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("save");
+    match op {
+        "add" => {
+            let path = payload
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "add: 缺少 path 字段".to_string())?;
+            let name = payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "add: 缺少 name 字段".to_string())?;
+            let added_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            engine.add_project(path, name, added_at).await
+        }
+        "remove" => {
+            let path = payload
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "remove: 缺少 path 字段".to_string())?;
+            match engine.remove_project(path).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("remove: project '{path}' 不存在")),
+                Err(e) => Err(e),
+            }
+        }
+        "save" => {
+            let projects = payload
+                .get("projects")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            engine.save_projects(projects).await
+        }
+        other => Err(format!("projects: 未知 op '{other}'")),
+    }
+}
+
 /// In-process backend over the router. Used by `sebas run --webui`, where the
 /// webui lives in the same process as the session authority.
 pub struct InProcessBackend {
@@ -402,6 +451,10 @@ impl SessionBackend for InProcessBackend {
             "settings" => {
                 let value = payload.get("value").cloned().unwrap_or(payload);
                 engine.save_settings(value).await
+            }
+            "projects" => {
+                // 与 core channel 服务端同款 op 分发（add/remove/save）。
+                project_mutation(engine.as_ref(), &payload).await
             }
             other => Err(format!("unknown domain: {other}")),
         }
