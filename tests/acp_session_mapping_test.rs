@@ -11,7 +11,7 @@
 //! `acp-new-<nanoid>`，`load-ok` 接受任意 load id，`load-fails` 拒绝）。
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_feishu::events::{FeishuIn, SessionKey};
+use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::{MappingState, SessionMap};
 use std::collections::HashMap;
@@ -25,11 +25,10 @@ fn fake_acp() -> PathBuf {
         .join(format!("fake-acp-agent{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn key() -> SessionKey {
-    SessionKey {
-        chat_id: "oc_acp_map".into(),
-        thread_id: None,
-    }
+fn key() -> ChannelKey {
+    // feishu 通道的 channel-neutral key（decouple-feishu-channel 后 router
+    // 入站/操作走 ChannelKey；feishu SessionKey 由 adapter 负责转换）。
+    ChannelKey::feishu("oc_acp_map", None)
 }
 
 fn acp_manager() -> SessionManager {
@@ -176,12 +175,10 @@ async fn acp_resume_uses_mapped_real_id_after_restart() {
     let mgr2 = Arc::new(acp_manager());
     let (router2, mut out_rx) = RouterHandle::new(map2.clone());
     router2
-        .dispatch(FeishuIn::Text {
+        .dispatch(ChannelEvent::Text {
             key: key(),
             text: "继续".into(),
-            reply_to: None,
-            chat_type: "private".into(),
-            mentions: vec![],
+            reply_target: None,
         })
         .await;
     let out = tokio::time::timeout(Duration::from_millis(500), out_rx.recv())
@@ -285,10 +282,7 @@ async fn legacy_state_without_acp_session_id_restores_as_none() {
     let json = r#"{"oc_legacy":{"session_id":"s-legacy","last_active_unix":7}}"#;
     let map = SessionMap::restore_json(json).unwrap();
     let m = map
-        .get(&SessionKey {
-            chat_id: "oc_legacy".into(),
-            thread_id: None,
-        })
+        .get(&ChannelKey::feishu("oc_legacy", None))
         .await
         .unwrap();
     assert_eq!(m.acp_session_id, None);

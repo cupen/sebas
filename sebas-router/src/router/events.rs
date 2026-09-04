@@ -201,6 +201,8 @@ mod tests {
             user_prompt: None,
             last_active_unix: 0,
             project_dir: None,
+            current_model: None,
+            available_models: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
