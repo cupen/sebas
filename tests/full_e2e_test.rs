@@ -60,7 +60,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
     //    prompt, and returns the cloned event receiver taken before any
     //    slow I/O (D6 guarantee).
     let work_dir_a = support::TestDir::new("full_e2e", "first");
-    let (session_id, pending, rx) = sebas::run::acp_spawn_and_activate(
+    let (session_id, pending, rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &key,
@@ -69,7 +69,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         vec![fake.to_str().unwrap().to_string(), ],
         Some(work_dir_a.path().to_string_lossy().into_owned()),
         None,
-    )
+        None)
     .await
     .expect("spawn fake CLI through production fn");
 
@@ -164,7 +164,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
     };
 
     let work_dir_b = support::TestDir::new("full_e2e", "second");
-    let (session_id, pending, rx) = sebas::run::acp_spawn_and_activate(
+    let (session_id, pending, rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &key,
@@ -176,7 +176,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
         vec![fake.to_str().unwrap().to_string(), "--slow-ms".into(), "800".into()],
         Some(work_dir_b.path().to_string_lossy().into_owned()),
         None,
-    )
+        None)
     .await
     .expect("spawn fake CLI");
     router.seed_card(session_id.clone(), prompt.clone()).await;

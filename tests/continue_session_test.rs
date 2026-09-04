@@ -57,7 +57,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
     };
 
     let work_dir = support::TestDir::new("continue_session", "work");
-    let (session_id, _pending, _rx) = sebas::run::acp_spawn_and_activate(
+    let (session_id, _pending, _rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &key,
@@ -66,7 +66,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
         vec![fake.to_str().unwrap().to_string(), "--slow-ms".into(), "200".into()],
         Some(work_dir.path().to_string_lossy().into_owned()),
         None,
-    )
+        None)
     .await
     .expect("spawn bridge");
     router.seed_card(session_id.clone(), prompt.clone()).await;

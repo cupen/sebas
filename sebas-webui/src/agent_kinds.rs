@@ -185,4 +185,23 @@ mod tests {
         assert!(info.reachable, "sh should be on PATH: {info:?}");
         assert!(info.cause.is_none());
     }
+
+    /// opencode (`opencode acp`) 走现有 `discover_agent` 探测应兼容：二进制在
+    /// PATH 时报告 reachable + 裸版本号（add-opencode-acp 的接入契约）。
+    /// 二进制缺失时该测试自动跳过（不入失败），CI 无 opencode 也绿。
+    #[tokio::test]
+    async fn opencode_acp_probe_is_compatible() {
+        let info = discover_agent("opencode", &["opencode".into(), "acp".into()]).await;
+        if !info.reachable {
+            eprintln!("opencode not on PATH; skipping opencode probe assertion");
+            return;
+        }
+        assert!(info.cause.is_none(), "reachable opencode has no cause: {info:?}");
+        let v = info.version.as_deref().unwrap_or_default();
+        // opencode `--version` prints a bare semver like `1.18.25`.
+        assert!(
+            !v.is_empty() && v.chars().next().map_or(false, |c| c.is_ascii_digit()),
+            "opencode version should be a bare version number, got {v:?}"
+        );
+    }
 }

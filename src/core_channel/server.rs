@@ -338,6 +338,7 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
         CoreChannelRequest::Spawn {
             prompt,
             project_dir,
+            model,
         } => match &project_dir {
             Some(dir) => {
                 // 5.5: canonicalize + stat BEFORE any spawn; no existence
@@ -349,16 +350,37 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
                 } else {
                     let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
                     let key = router
-                        .web_spawn(prompt, Some(canonical.display().to_string()), None)
+                        .web_spawn(prompt, Some(canonical.display().to_string()), None, model)
                         .await;
                     CoreChannelResponse::Spawned { key }
                 }
             }
             None => {
-                let key = router.web_spawn(prompt, None, None).await;
+                let key = router.web_spawn(prompt, None, None, model).await;
                 CoreChannelResponse::Spawned { key }
             }
         },
+        CoreChannelRequest::SetSessionModel { key, model_id } => {
+            // 中程切换模型：解析路由 session_id 后经 Out::SendAcp 送达 SetModel。
+            let Some(sid) = router.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned))
+            else {
+                return CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::UnknownSession {
+                        key: key_str(&key),
+                    },
+                };
+            };
+            router
+                .emit(sebas_router::Out::SendAcp {
+                    session_id: sid.clone(),
+                    cmd: sebas_acp::AcpCommand::SetModel {
+                        session_id: sid,
+                        model_id,
+                    },
+                })
+                .await;
+            CoreChannelResponse::Ok
+        }
         CoreChannelRequest::Message { key, message } => {
             // 5.6: unknown key → typed rejection, nothing mutated.
             if !router.session_exists(&key).await {

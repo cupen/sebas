@@ -495,7 +495,7 @@ async fn fail_spawn_ignores_active_and_missing_entries() {
     map.remove_by_session("ghost").await;
     // activate 无占位 → 插入新映射（warn 路径）。
     let orphan = ChannelKey::feishu("oc_orphan".into(), None);
-    let pending = map.activate(&orphan, "s9".into()).await;
+    let pending = map.activate(&orphan, "s9".into(), None, None).await;
     assert!(pending.is_empty());
     assert_eq!(map.get(&orphan).await.unwrap().session_id(), Some("s9"));
 }

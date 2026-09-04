@@ -143,6 +143,11 @@ pub struct SessionRow {
     /// A short preview of the session's first user message, used by the
     /// agent sidebar as a display label when no project_dir is set.
     pub prompt_preview: Option<String>,
+    /// 当前生效的模型 id（add-acp-model-selection）；`None` = agent 无模型面。
+    pub current_model: Option<String>,
+    /// 该会话可选的模型 id 列表（agent 的 configOptions）。创建会话表单用它
+    /// 作为下拉数据源（取最近一个暴露模型列表的会话）。
+    pub available_models: Option<Vec<String>>,
 }
 
 /// Dashboard overview data.

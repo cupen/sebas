@@ -67,7 +67,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
             ],
             None,
             None,
-        )
+            None)
         .await
     });
 
@@ -80,7 +80,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
         })
         .await;
 
-    let (session_id, pending, rx) = spawn.await.unwrap().expect("spawn ok");
+    let (session_id, pending, rx, _model_info) = spawn.await.unwrap().expect("spawn ok");
     assert_eq!(pending, vec!["msg2".to_string()]);
     sebas::run::flush_pending_prompts(&mgr, &session_id, pending)
         .await
@@ -154,7 +154,7 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
 
     // Spawn the session with "crash" as the INITIAL prompt. The returned
     // `rx` is cloned before the prompt reaches the agent.
-    let (session_id, _pending, rx) = sebas::run::acp_spawn_and_activate(
+    let (session_id, _pending, rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &k,
@@ -163,7 +163,7 @@ async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
         vec![fake().to_str().unwrap().to_string(), ],
         None,
         None,
-    )
+        None)
     .await
     .expect("spawn ok");
 

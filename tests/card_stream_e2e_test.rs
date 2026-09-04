@@ -54,7 +54,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     };
 
     // 走 production spawn：create_session + rx 克隆 + CreateSession prompt + activate.
-    let (session_id, _pending, rx) = sebas::run::acp_spawn_and_activate(
+    let (session_id, _pending, rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &k,
@@ -63,7 +63,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         vec![fake().to_str().unwrap().to_string(), ],
         None,
         None,
-    )
+        None)
     .await
     .expect("spawn ok");
 

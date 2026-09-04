@@ -90,6 +90,7 @@ vi.mock('../api/client.js', () => ({
   api: {
     summary: vi.fn(),
     settings: vi.fn(),
+    sessions: vi.fn(),
     createSession: vi.fn(),
     agentKinds: vi.fn(),
   },
@@ -163,6 +164,14 @@ beforeEach(() => {
       { name: 'codex', slug: 'codex', reachable: false, cause: 'command not found' },
     ],
   })
+  ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
+    recent_sessions: [],
+    active_count: 0,
+    dormant_count: 0,
+    spawning_count: 0,
+    total_sessions: 0,
+    active_session_key: null,
+  })
 })
 
 afterEach(() => {
@@ -184,6 +193,90 @@ describe('sebas-workbench-composer', () => {
     const callout = el.shadowRoot?.querySelector<HTMLElement>('.callout-warning')
     expect(callout?.textContent ?? '').toContain('gateway down')
     expect(callout?.textContent ?? '').toContain('core not connected')
+  })
+
+  it('shows a model dropdown from the latest session and forwards the model', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
+      recent_sessions: [
+        {
+          encoded_key: 'oc_gemini%00',
+          chat_id: 'oc_gemini',
+          thread_id: null,
+          session_id: 's1',
+          session_id_short: 's1',
+          status: 'active',
+          status_label: 'Working',
+          status_slug: 'working',
+          status_glyph: '▶',
+          last_active: '0s ago',
+          last_active_unix: 42,
+          is_active: false,
+          project_dir: null,
+          prompt_preview: 'hi',
+          current_model: 'pro-model',
+          available_models: ['free-model', 'pro-model', 'gemini-2.5'],
+        },
+      ],
+      active_count: 1,
+      dormant_count: 0,
+      spawning_count: 0,
+      total_sessions: 1,
+      active_session_key: null,
+    } as never)
+    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_m' })
+    const el = await mount({ projectDir: null })
+
+    // The dropdown is rendered and preselects the session's current model.
+    const sel = el.shadowRoot?.querySelector('wa-select[aria-label="Model"]') as HTMLElement & {
+      value: string
+    }
+    expect(sel).toBeTruthy()
+    expect(sel.value).toBe('pro-model')
+
+    // Submit through the model picker value.
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'use this model'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+    ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.createSession).toHaveBeenCalledWith('use this model', null, 'acp', 'pro-model')
+  })
+
+  it('hides the model dropdown when no session exposes available_models', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
+      recent_sessions: [
+        {
+          encoded_key: 'oc_claude%00',
+          chat_id: 'oc_claude',
+          thread_id: null,
+          session_id: 's1',
+          session_id_short: 's1',
+          status: 'active',
+          status_label: 'Working',
+          status_slug: 'working',
+          status_glyph: '▶',
+          last_active: '0s ago',
+          last_active_unix: 42,
+          is_active: false,
+          project_dir: null,
+          prompt_preview: 'hi',
+          current_model: null,
+          available_models: null,
+        },
+      ],
+      active_count: 1,
+      dormant_count: 0,
+      spawning_count: 0,
+      total_sessions: 1,
+      active_session_key: null,
+    } as never)
+    const el = await mount({ projectDir: null })
+    const sel = el.shadowRoot?.querySelector('wa-select[aria-label="Model"]')
+    expect(sel).toBeNull()
   })
 
   it('submit calls createSession with project_dir null when projectDir prop is null', async () => {
@@ -211,7 +304,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('hello agent', null, 'acp')
+    expect(api.createSession).toHaveBeenCalledWith('hello agent', null, 'acp', null)
     expect(created).toHaveBeenCalledTimes(1)
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_inbox')
   })
@@ -236,7 +329,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('work on this', '/home/me/code/sebas', 'acp')
+    expect(api.createSession).toHaveBeenCalledWith('work on this', '/home/me/code/sebas', 'acp', null)
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_proj')
     // Binding caption shows the trailing path segment.
     expect(el.shadowRoot?.textContent ?? '').toContain('sebas')
@@ -277,7 +370,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('run natively', null, 'native')
+    expect(api.createSession).toHaveBeenCalledWith('run natively', null, 'native', null)
   })
 
   it('lists only reachable agent kinds and forwards the selected acp:<slug> hint', async () => {
@@ -313,7 +406,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('use gemini', null, 'acp:gemini')
+    expect(api.createSession).toHaveBeenCalledWith('use gemini', null, 'acp:gemini', null)
   })
 
   it('error path surfaces inline and preserves text', async () => {

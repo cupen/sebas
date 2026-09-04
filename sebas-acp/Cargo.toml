@@ -29,3 +29,10 @@ tempfile = "3"
 [[bin]]
 name = "fake-claude-cli"
 path = "../tests/bin/fake-claude.rs"
+
+# Programmable mock ACP agent (the agent/stdio side) for the ACP resume
+# integration tests. Scenario-selected via argv (unavailable | load-fails |
+# load-ok), logs received request methods to an optional --journal path.
+[[bin]]
+name = "fake-acp-agent"
+path = "tests/bin/fake-acp-agent.rs"

@@ -63,7 +63,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     };
 
     let work_dir = support::TestDir::new("permission_flow", "work");
-    let (session_id, _pending, _rx) = sebas::run::acp_spawn_and_activate(
+    let (session_id, _pending, _rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &key,
@@ -72,7 +72,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
         vec![fake.to_str().unwrap().to_string(), ],
         Some(work_dir.path().to_string_lossy().into_owned()),
         None,
-    )
+        None)
     .await
     .expect("spawn fake CLI");
 

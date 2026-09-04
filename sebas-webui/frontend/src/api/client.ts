@@ -26,6 +26,10 @@ export interface SessionRow {
   project_dir: string | null
   /** Short preview of the first user message, used as display label. */
   prompt_preview: string | null
+  /** 当前生效的模型 id（ACP agent 的 configOptions）；null = 无模型选择面。 */
+  current_model: string | null
+  /** 该会话可选的模型 id 列表；fallback 给创建会话表单当下拉数据源。 */
+  available_models: string[] | null
 }
 
 export interface SessionSummary {
@@ -90,6 +94,10 @@ export interface SessionDetail {
   msg_id: string | null
   last_active: string
   encoded_key: string
+  /** 当前生效的模型 id（add-acp-model-selection）；null = agent 无模型选项。 */
+  current_model: string | null
+  /** 可选模型列表（agent 的 configOptions），会话详情模型选择器的数据源。 */
+  available_models: string[] | null
 }
 
 /**
@@ -269,11 +277,22 @@ export const api = {
   agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
 
   // Session mutations
-  createSession: (prompt?: string | null, projectDir?: string | null, backend?: string | null) =>
+  createSession: (
+    prompt?: string | null,
+    projectDir?: string | null,
+    backend?: string | null,
+    model?: string | null,
+  ) =>
     post<{ key: string }>('/api/sessions', {
       prompt: prompt ?? null,
       project_dir: projectDir ?? null,
       backend: backend ?? null,
+      model: model ?? null,
+    }),
+  /** 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。 */
+  setSessionModel: (encodedKey: string, modelId: string) =>
+    post<{ status: string }>(`/api/sessions/${encodedKey}/model`, {
+      model_id: modelId,
     }),
   /**
    * Answer a gated tool call (review card). Resolves `{status: "delivered"}`

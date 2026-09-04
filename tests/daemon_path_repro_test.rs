@@ -34,7 +34,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
     let key = ChannelKey::feishu("oc_x", None);
 
     let t0 = std::time::Instant::now();
-    let (_sid, _pending, _rx) = sebas::run::acp_spawn_and_activate(
+    let (_sid, _pending, _rx, _model_info) = sebas::run::acp_spawn_and_activate(
         &mgr,
         &router,
         &key,
@@ -43,7 +43,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
         vec![fake.to_str().unwrap().to_string(), ],
         Some(work_dir.path().to_string_lossy().into_owned()),
         None,
-    )
+        None)
     .await
     .expect("spawn fake CLI through production path");
 

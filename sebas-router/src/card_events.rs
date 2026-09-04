@@ -114,6 +114,11 @@ pub fn apply_event_to_card(body: &mut Vec<ChannelElement>, event: &AcpEvent, cfg
         }),
         AcpEvent::PermissionRequest { .. } => {} // 独立 SendCard，不累积
         AcpEvent::UsageUpdate { .. } => {}       // 不影响卡片 body（usage 单独跟踪）
+        // 模型切换成功：在 transcript 里留一行可见反馈（快照 current_model
+        // 由 router 的 ModelChanged 处理同步更新）。
+        AcpEvent::ModelChanged { model_id, .. } => body.push(ChannelElement::Markdown {
+            content: format!("⚙ model → `{model_id}`"),
+        }),
     }
     enforce_total_budget(body, cfg);
 }

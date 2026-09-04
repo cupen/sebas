@@ -183,8 +183,8 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     );
 
     // Mutate AFTER the snapshot: every change must arrive as event frames.
-    let key = core.handle.web_spawn("racing prompt".into(), None, None).await;
-    core.handle.activate(&key, "s-live".into()).await;
+    let key = core.handle.web_spawn("racing prompt".into(), None, None, None).await;
+    core.handle.activate(&key, "s-live".into(), None, None).await;
 
     let mut saw_created = false;
     let mut saw_updated = false;
@@ -243,7 +243,7 @@ async fn backend_methods_reach_the_right_handlers() {
     // router's mapping directly.)
     let (channel_key, _) = core.handle.map.snapshot_all().await.into_iter().next()
         .expect("spawned session mapped");
-    core.handle.activate(&channel_key, "s-live".into()).await;
+    core.handle.activate(&channel_key, "s-live".into(), None, None).await;
     let snap = backend.snapshot().await;
     assert_eq!(snap[0].status, "active");
     assert_eq!(snap[0].session_id.as_deref(), Some("s-live"));

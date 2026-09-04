@@ -836,6 +836,85 @@ async fn create_session_with_project_dir_binds_to_path() {
     assert_eq!(reenc, key_str);
 }
 
+#[tokio::test]
+async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_works() {
+    let (router, mut rx, app) = fixture().await;
+
+    // 1) create-with-model：POST 带 model → 201，且发出的 Out::WebSpawn 携带
+    //    该 model（D3：会话建立后、首 prompt 前应用）。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"prompt":"hello","model":"pro-model","backend":"acp:opencode"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    let key_str = v["key"].as_str().expect("key string").to_string();
+
+    // web_spawn 经 Out::WebSpawn 出站：断言 model 已透传。
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rx.recv(),
+    )
+    .await
+    .expect("WebSpawn out within timeout")
+    .expect("out channel open");
+    match out {
+        sebas_router::router::Out::WebSpawn { model, prompt, .. } => {
+            assert_eq!(prompt, "hello");
+            assert_eq!(model.as_deref(), Some("pro-model"));
+        }
+        other => panic!("expected Out::WebSpawn carrying model, got {other:?}"),
+    }
+
+    // 2) 中程切换模型：POST /api/sessions/{key}/model → 经 Out::SendAcp
+    //    送达 SetModel 命令。
+    // 先把映射装成 Active（web_spawn 只建 placehholder；activate 需要真实 sid）。
+    let decoded = decode_web_key(&key_str);
+    router
+        .activate(&decoded, "route-s1".into(), Some("acp-real-1".into()), None)
+        .await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{key_str}/model"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model_id":"gemini-2.5"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("\"status\":\"ok\""), "unexpected: {body}");
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("SendAcp out within timeout")
+        .expect("out channel open");
+    match out {
+        sebas_router::router::Out::SendAcp {
+            session_id,
+            cmd: sebas_acp::AcpCommand::SetModel { model_id, .. },
+        } => {
+            assert_eq!(session_id, "route-s1");
+            assert_eq!(model_id, "gemini-2.5");
+        }
+        other => panic!("expected Out::SendAcp SetModel, got {other:?}"),
+    }
+}
+
 // ---- Concurrency across projects (task 6.1) and remove-project semantics (task 6.2) ----
 
 /// Decode an encoded web session key back to its `ChannelKey`. Encoded keys
@@ -925,7 +1004,7 @@ async fn spawn_and_drive_project_session(
     };
     let key = decode_web_key(&encoded);
 
-    router.activate(&key, acp_session_id.to_string()).await;
+    router.activate(&key, acp_session_id.to_string(), None, None).await;
 
     // The prompt lands in the transcript (kind "prompt") but is filtered
     // from the rendered detail body.

@@ -40,6 +40,14 @@ pub struct SessionInfo {
     pub last_active_unix: i64,
     /// Working directory for project sessions (WebUI-spawned).
     pub project_dir: Option<String>,
+    /// （add-acp-model-selection）会话当前的模型 id；`None` = agent 未暴露
+    /// 模型选项（webui 不显示模型 UI），或会话尚无模型信息（Spawning）。
+    #[serde(default)]
+    pub current_model: Option<String>,
+    /// 该 ACP 会话可选的模型 id 列表（来自 agent 的 `configOptions`，非硬编码）；
+    /// `None`/空 = 无模型选择面。webui 创建会话下拉的数据源。
+    #[serde(default)]
+    pub available_models: Option<Vec<String>>,
 }
 
 impl SessionInfo {
@@ -147,6 +155,8 @@ mod tests {
             user_prompt: Some("hello".into()),
             last_active_unix: 1234,
             project_dir: Some("/tmp/p".into()),
+            current_model: Some("m1".into()),
+            available_models: Some(vec!["m1".into(), "m2".into()]),
         };
         let cases = vec![
             SessionEvent::Created {
@@ -191,6 +201,8 @@ mod tests {
             user_prompt: None,
             last_active_unix: 0,
             project_dir: None,
+            current_model: None,
+            available_models: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");

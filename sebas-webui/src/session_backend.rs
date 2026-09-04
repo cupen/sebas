@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-
 /// Whether the backend can currently reach the session authority (the core),
 /// and if not, why — rendered verbatim so degradation is honest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +113,22 @@ pub trait SessionBackend: Send + Sync {
     /// Close a session (kills the live child when there is one).
     async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection>;
 
+    /// 中程切换会话模型（add-acp-model-selection）：把所选的 model id 送给
+    /// 会话驱动（ACP `session/set_config_option{configId:"model"}`）。成功 =
+    /// 命令已进入会话通道（wire 层接受与否经事件流反馈：`ModelChanged` =
+    /// 成功，非 terminal `Error` = 模型被 agent 拒绝）。失败 =
+    /// 会话未知/不可达（改会话不再被跟踪）。默认实现：没有模型交互
+    /// （原生内核等）的后端返回不可达。
+    async fn set_session_model(
+        &self,
+        _key: ChannelKey,
+        _model_id: String,
+    ) -> Result<(), SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不支持会话级模型切换".into(),
+        })
+    }
+
     /// The session's rendered transcript at or after `from` (monotonic
     /// positions — a second call at the returned last position yields only
     /// newer entries).
@@ -138,12 +153,15 @@ pub trait SessionBackend: Send + Sync {
 
     /// Create a session, optionally pinning the execution backend. The
     /// default ignores the hint (single-backend seams); composite seams
-    /// route on it.
+    /// route on it. `model`（add-acp-model-selection）是创建时请求的模型 id：
+    /// 会话建立后、首个 prompt 前应用（失败报非致命错误、会话仍可对话）。
+    /// 默认实现忽略 model（单后端 seams 无模型选择面）。
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
         _backend: Option<&str>,
+        _model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
     }
@@ -271,20 +289,43 @@ impl SessionBackend for InProcessBackend {
     ) -> Result<ChannelKey, SessionRejection> {
         // web_spawn never fails structurally: the placeholder is inserted and
         // the spawn failure surfaces as a Removed event later.
-        Ok(self.router.web_spawn(prompt, project_dir, None).await)
+        Ok(self.router.web_spawn(prompt, project_dir, None, None).await)
     }
 
     /// Parse a backend hint (`"native"` handled by the composite seam;
     /// `"acp"` / `"acp:<slug>"` arrive here) into the requested agent kind,
-    /// then spawn through the router with that kind pinned.
+    /// then spawn through the router with that kind pinned and the requested
+    /// model id threaded to the spawn out（D3：建会话后、首 prompt 前应用）。
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
         backend: Option<&str>,
+        model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         let kind = backend.and_then(parse_acp_kind);
-        Ok(self.router.web_spawn(prompt, project_dir, kind).await)
+        Ok(self.router.web_spawn(prompt, project_dir, kind, model).await)
+    }
+
+    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+        // 解析路由 session_id（web 会话的 chat_id 是 web-* 键，不是 ACP
+        // routing id），再经 Out::SendAcp 送达 SetModel。
+        let Some(sid) = self.router.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned))
+        else {
+            return Err(SessionRejection::UnknownSession {
+                key: key.reference.clone(),
+            });
+        };
+        self.router
+            .emit(sebas_router::Out::SendAcp {
+                session_id: sid.clone(),
+                cmd: sebas_acp::AcpCommand::SetModel {
+                    session_id: sid,
+                    model_id,
+                },
+            })
+            .await;
+        Ok(())
     }
 
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
@@ -501,6 +542,8 @@ impl SessionBackend for FakeBackend {
             user_prompt: None,
             last_active_unix: 0,
             project_dir,
+            current_model: None,
+            available_models: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -655,6 +698,8 @@ mod tests {
                 user_prompt: None,
                 last_active_unix: 0,
                 project_dir: None,
+                current_model: None,
+                available_models: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

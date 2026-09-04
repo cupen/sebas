@@ -17,6 +17,8 @@ import '../components/review-card.js'
 import './transcript-view.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
+import '@awesome.me/webawesome/dist/components/select/select.js'
+import '@awesome.me/webawesome/dist/components/option/option.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
 
 @customElement('sebas-session-detail')
@@ -27,6 +29,8 @@ export class SebasSessionDetail extends LitElement {
   @state() private message = ''
   @state() private sending = false
   @state() private confirmClose = false
+  /** 中程切换模型（add-acp-model-selection）：非空 = 请求已发出，等事件回流。 */
+  @state() private modelSwitching = false
   private unsubscribe?: () => void
 
   static styles = [
@@ -101,6 +105,16 @@ export class SebasSessionDetail extends LitElement {
         color: var(--sebas-text-dim);
         font-size: 0.78rem;
         font-variant-numeric: tabular-nums;
+      }
+      /* 中程模型选择器：meta 行内的紧凑下拉（add-acp-model-selection）。 */
+      .head .model-pick {
+        display: inline-flex;
+        align-items: center;
+      }
+      .head .model-select {
+        --wa-select-min-height: 24px;
+        font-size: 0.75rem;
+        max-width: 260px;
       }
       .head .actions {
         margin-left: auto;
@@ -354,6 +368,28 @@ export class SebasSessionDetail extends LitElement {
     }
   }
 
+  /**
+   * 中程切换模型（add-acp-model-selection 2.3）：把选择送后端 → 驱动发
+   * `session/set_config_option{configId:"model"}`。wire 层失败（agent 拒绝
+   * 无效模型）经非 terminal Error 事件回流，这里显示错误；快照的
+   * `current_model` 在 `ModelChanged` 到达后由 refetch 刷新。
+   */
+  private async setModel(modelId: string): Promise<void> {
+    if (!this.data || modelId === this.data.current_model || this.modelSwitching) return
+    this.modelSwitching = true
+    this.error = ''
+    try {
+      await api.setSessionModel(this.key, modelId)
+      // 命令已送达驱动；连刷两次以捕捉 ModelChanged 之后的快照更新。
+      await new Promise((r) => setTimeout(r, 400))
+      this.refetch()
+    } catch (e) {
+      this.error = String(e)
+    } finally {
+      this.modelSwitching = false
+    }
+  }
+
   private async doClose(): Promise<void> {
     this.confirmClose = false
     try {
@@ -402,6 +438,26 @@ export class SebasSessionDetail extends LitElement {
                 ? html`<span class="mono" title=${d.session_id}>${d.session_id.slice(0, 12)}</span>`
                 : nothing}
               <span>last active ${d.last_active}</span>
+              ${d.available_models && d.available_models.length > 0
+                ? html`<span class="model-pick">
+                    <wa-select
+                      class="model-select"
+                      size="xs"
+                      hoist
+                      value=${d.current_model ?? ''}
+                      ?disabled=${this.modelSwitching}
+                      aria-label="Session model"
+                      @wa-change=${(e: Event) => {
+                        const v = (e as unknown as { target: { value: string } }).target.value
+                        if (v) void this.setModel(v)
+                      }}
+                    >
+                      ${d.available_models.map(
+                        (m) => html`<wa-option value=${m}>${m}</wa-option>`,
+                      )}
+                    </wa-select>
+                  </span>`
+                : nothing}
             </span>
           </div>
           <div class="actions">

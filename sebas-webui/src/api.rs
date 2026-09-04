@@ -168,6 +168,10 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         "msg_id": Option::<String>::None,
         "last_active": format_relative_time(info.last_active_unix),
         "encoded_key": encode_session_key(&session_key),
+        // （add-acp-model-selection）会话模型面：无模型选项的 agent（如
+        // Claude）这两个字段为 null —— 前端不显示模型 UI。
+        "current_model": info.current_model,
+        "available_models": info.available_models,
     });
     Json(data).into_response()
 }
@@ -236,6 +240,18 @@ pub struct CreateSessionRequest {
     /// agent). Single-backend seams ignore it.
     #[serde(default)]
     pub backend: Option<String>,
+    /// Optional model id for the new session (add-acp-model-selection D3):
+    /// applied after the session is established, before the first prompt.
+    /// Only agents that expose a `model` config option honor it; for others
+    /// the field is a silent no-op (the session uses its default model and
+    /// no model UI is shown).
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SetModelRequest {
+    pub model_id: String,
 }
 
 #[derive(Deserialize)]
@@ -255,7 +271,7 @@ pub async fn create_session(
     let prompt = req.prompt.unwrap_or_default();
     let key = match state
         .backend
-        .spawn_with(prompt, req.project_dir, req.backend.as_deref())
+        .spawn_with(prompt, req.project_dir, req.backend.as_deref(), req.model)
         .await
     {
         Ok(k) => k,
@@ -264,6 +280,25 @@ pub async fn create_session(
     state.backend.set_focus(Some(key.clone())).await;
     let encoded = encode_session_key(&key);
     (StatusCode::CREATED, Json(json!({ "key": encoded }))).into_response()
+}
+
+/// POST /api/sessions/{key}/model — set the session's model mid-session
+/// (add-acp-model-selection 2.3). The command is delivered to the session
+/// driver；wire 层接受与否经事件流反馈（`ModelChanged` = 成功；非 terminal
+/// `Error` = 模型被 agent 拒绝，UI 显示错误、模型不变）。
+pub async fn set_session_model(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+    Json(req): Json<SetModelRequest>,
+) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    if let Err(rej) = state.backend.set_session_model(session_key, req.model_id).await {
+        return rejection_response(rej);
+    }
+    (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
 }
 
 /// POST /api/sessions/{key}/message — send a message into the session.

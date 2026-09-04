@@ -32,6 +32,13 @@ app_secret = ""
 path = "claude"
 args = []
 
+# 原生 ACP agent 接入（driver="acp"，任意支持 Agent Client Protocol v1 的 CLI，
+# 如 opencode / gemini --acp）：配置即用，无需改代码（add-opencode-acp）。
+# 二选一即可——下面 opencode 条目已注释，取消注释即启用：
+# [acp.agents.opencode]
+# driver = "acp"
+# command = ["opencode", "acp"]
+
 
 # 卡片流配置（全部可选，行为契约见 openspec/specs/feishu-cards/spec.md）
 # [card]
