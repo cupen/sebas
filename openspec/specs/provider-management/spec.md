@@ -242,16 +242,16 @@ the ACP binary.
   reason, the wrapper prints it to stderr, and the process exits 1 without
   running the agent
 
-### Requirement: Broken overlay self-heal
+### Requirement: Provider card reflects store availability
 
-If the state overlay file is unreadable or corrupt, the system SHALL back it
-up (`.broken-<unix_ms>-<pid>.json`), reload with an empty overlay on top of
-the config seed, and keep `/provider` usable rather than failing the card.
+The `/provider` card SHALL render normally while the state store is reachable. When the store is unavailable or corrupt, the card SHALL present an explicit unavailable state with the cause, disable mutation entry points, and leave all user data untouched.
 
-#### Scenario: corrupt overlay recovery
+#### Scenario: Store unavailable shows cause
 
-- **WHEN** the state file contains invalid JSON and the user sends
-  `/provider`
-- **THEN** the corrupt file is preserved as a `.broken-*` backup, the card
-  renders from the seed providers, and subsequent writes create a fresh
-  overlay
+- **WHEN** the state store is unreachable while a `/provider` card flow is active
+- **THEN** the card renders an explicit unavailable state naming the cause, with mutations disabled
+
+#### Scenario: No silent data loss from the card path
+
+- **WHEN** the state store reports corruption
+- **THEN** no card-driven operation deletes or resets provider data; recovery goes through the documented manual paths

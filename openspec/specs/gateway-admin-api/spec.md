@@ -67,80 +67,55 @@ that exists in the config seed MUST persist across restarts (tombstone).
 
 ### Requirement: Write-then-apply semantics
 
-A successful admin mutation SHALL be durably persisted before the response is
-returned, by atomically replacing the provider overlay file (temp file +
-rename) so concurrent readers never observe torn content, and by preserving
-overlay sections and fields the gateway does not own (e.g. `model_aliases`
-entries when mutating providers). A mutation whose parsed content is invalid
-MUST be rejected with 400 before any file write. After a successful mutation,
-the new configuration MUST be effective for requests that arrive after the
-response, without a process restart; requests already in flight continue
-under the configuration they started with.
+A successful admin mutation SHALL be durably persisted before the response is returned, as a single committed transaction in the core state store, so concurrent readers never observe partial content, and by preserving stored data the gateway does not own (e.g. alias rows when mutating providers). A mutation whose parsed content is invalid MUST be rejected with 400 before any store write. After a successful mutation, the new configuration MUST be effective for requests that arrive after the response, without a process restart; requests already in flight continue under the configuration they started with.
 
 #### Scenario: edit takes effect immediately
 
-- **WHEN** `PUT /admin/providers/alpha` changes the OpenAI base URL and the
-  next request arrives after the response
+- **WHEN** `PUT /admin/providers/alpha` changes the OpenAI base URL and the next request arrives after the response
 - **THEN** that request is forwarded to the new base URL
 
 #### Scenario: invalid mutation rejected before write
 
-- **WHEN** `POST /admin/providers` submits a provider with no base URL for
-  either protocol and no preset
-- **THEN** the response is 400, the overlay file is unchanged, and the
-  running
-  configuration is unchanged
+- **WHEN** `POST /admin/providers` submits a provider with no base URL for either protocol and no preset
+- **THEN** the response is 400, the state store is unchanged, and the running configuration is unchanged
 
 ### Requirement: Configuration source
 
-The gateway SHALL read provider overrides (providers, deletion tombstones,
-model aliases) from the provider overlay file (`~/.sebas/providers.json`;
-overridable by `SEBAS_GATEWAY_PROVIDER_OVERLAY`), merged on top of the
-config seed. The overlay file is the single source of truth for provider
-data, shared with the feishu `/provider` card writer. On machines already
-migrated to the unified state file (`~/.sebas/state.json` v2) whose
-providers/deleted sections still live there, the system SHALL migrate that
-data back into the provider overlay file (one-time, on router-side load);
-after migration the state file keeps only its runtime sections (mode,
-default_selection). When no overlay file exists, the config seed alone
-applies (unchanged behavior).
+The gateway SHALL read provider overrides (providers, deletions, model aliases) through the core channel state methods, backed by the core state store, merged on top of the config seed. The state store is the single source of truth for provider data, written by core on behalf of both the feishu `/provider` card path and this admin API. When no stored provider data exists, the config seed alone applies (unchanged behavior). Legacy JSON files SHALL NOT be imported: the state store starts empty.
 
 #### Scenario: card-edited provider reaches gateway
 
-- **WHEN** the overlay file contains provider `beta` with an OpenAI base URL
-  and the gateway starts (or reloads)
+- **WHEN** the `/provider` card flow stores provider `beta` with an OpenAI base URL and the gateway loads (or receives a change notification)
 - **THEN** `beta` is routable through the gateway without editing config.toml
+
+#### Scenario: seeded-only machine unchanged
+
+- **WHEN** the state store contains no provider rows
+- **THEN** the config seed alone applies
 
 #### Scenario: migrated state file data moves back
 
-- **WHEN** a machine has providers stored only in the unified state file
-  (post-2026-08-17 migration) and the provider store is loaded
-- **THEN** those providers are written into the provider overlay file and
-  remain routable through the gateway
+- **WHEN** a machine upgrades with providers stored only in the legacy JSON files (state.json / providers.json)
+- **THEN** the state store starts empty (no legacy import), and providers are re-created through the `/provider` card or admin API before they route again
 
 ### Requirement: External change hot reload
 
-The gateway SHALL detect external modifications of the provider overlay file
-(feishu `/provider` card writes, manual edits) via file-change notification
-and apply the new providers and model aliases without a restart, debounced
-so a burst of writes results in one reload. When modified content is invalid
-or corrupt, the gateway MUST keep serving the last valid configuration, log
-the failure, and expose the reload error through the admin surface; the next
-valid write recovers automatically. `POST /admin/reload` re-reads
-configuration on demand and reports success or the parse error.
+The gateway SHALL receive provider and model alias change notifications via its core channel subscription and apply the new configuration without a restart; a burst of commits MAY be coalesced so multiple notifications result in one reload. When the channel is unreachable or a notification is invalid, the gateway MUST keep serving the last valid configuration, log the failure, and expose the state through the admin surface; recovery happens automatically on the next valid change or reconnect. `POST /admin/reload` re-fetches configuration via the state methods on demand and reports success or the error.
 
 #### Scenario: card edit hot-applies
 
-- **WHEN** the feishu `/provider` card writes a new provider into the
-  overlay file while the gateway is running
-- **THEN** within a short debounce window the provider becomes routable with
-  no restart
+- **WHEN** the feishu `/provider` card flow commits a new provider while the gateway is running
+- **THEN** within a short coalescing window the provider becomes routable with no restart
+
+#### Scenario: channel failure keeps serving
+
+- **WHEN** the core channel is down
+- **THEN** the gateway keeps routing with the last valid configuration and `/admin/stats` reports the state source as unavailable
 
 #### Scenario: corrupt external write keeps serving
 
-- **WHEN** the overlay file is externally overwritten with invalid JSON
-- **THEN** the gateway keeps routing with the last valid configuration and
-  `/admin/stats` reports a reload error
+- **WHEN** a change notification cannot be applied (invalid content) or the state source reports an error
+- **THEN** the gateway keeps routing with the last valid configuration and `/admin/stats` reports the error
 
 ### Requirement: Model probe endpoint
 
