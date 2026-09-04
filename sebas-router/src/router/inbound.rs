@@ -174,6 +174,19 @@ impl RouterHandle {
             Command::Restart => {
                 self.request_watchdog_restart(key).await;
             }
+            Command::Confirm(token) => {
+                // 确认兑换与 /upgrade 同级：chat 级控制操作，不需要活跃会话。
+                // 裸 /confirm 无 token 时回用法提示，不静默。
+                if token.is_empty() {
+                    self.emit(Out::PlainText {
+                        key,
+                        content: "用法: /confirm <token>。token 来自 /upgrade /rollback /restart 提交后的待确认回复。".into(),
+                    })
+                    .await;
+                } else {
+                    self.emit(Out::WatchdogConfirm { key, token }).await;
+                }
+            }
             Command::Services => {
                 self.request_watchdog_services(key).await;
             }
@@ -254,7 +267,9 @@ impl RouterHandle {
                 if let Some(sid) = sid {
                     self.forward_compact(&sid, key.clone()).await;
                 } else {
-                    self.emit(Out::HelpText { key }).await;
+                    // 无会话明确报错（sebas-ixv）：HelpText 在 dispatch 层是
+                    // no-op，等于静默丢弃。按错误回复约定发 PlainText。
+                    self.no_session_reply(key, "/compact").await;
                 }
             }
             Command::Cost | Command::Cancel | Command::Status => {
@@ -266,13 +281,37 @@ impl RouterHandle {
                 if let Some(sid) = sid {
                     self.forward_to_session(&sid, text).await;
                 } else {
-                    self.emit(Out::HelpText { key }).await;
+                    // 同上：无会话不静默（sebas-ixv）。
+                    let cmd = text.split_whitespace().next().unwrap_or("");
+                    self.no_session_reply(key, cmd).await;
                 }
             }
-            _ => {
-                self.emit(Out::HelpText { key }).await;
-            }
+            // `/switch` `/resume` `/cd` 已解析但路由未实现（多会话切换/指定恢复/
+            // 目录切换需要 dispatcher 与 state 层支持，超出 router 单侧能力）。原落到
+            // `_ => HelpText` 臂静默丢弃（sebas-ixv）；按错误回复约定发 PlainText
+            // 明确告知，不再零反馈。
+            Command::Switch(_) | Command::Resume(_) | Command::Cd(_) => {
+                let cmd = text.split_whitespace().next().unwrap_or("");
+                self.emit(Out::PlainText {
+                    key,
+                    content: format!(
+                        "{cmd} 暂未支持（已解析但路由未接入）。可用 /new 开新会话、/sessions 查看会话。"
+                    ),
+                })
+                .await;
+            } // match 已穷尽所有 Command 变体（sebas-ixv）：无需兜底臂。
         }
+    }
+
+    /// 无活跃会话时的统一错误回复（sebas-ixv）：需要会话的命令在 key 无映射
+    /// 时给用户明确的 PlainText，而不是落到 dispatch 层为 no-op 的 HelpText。
+    /// 文案与 `list_sessions` 空列表口径一致。
+    async fn no_session_reply(&self, key: SessionKey, cmd: &str) {
+        self.emit(Out::PlainText {
+            key,
+            content: format!("当前没有活跃会话，{cmd} 需要活跃会话。发送 /new 开始新会话。"),
+        })
+        .await;
     }
 
     async fn request_watchdog_upgrade(&self, key: SessionKey, dev: bool, dry_run: bool) {
