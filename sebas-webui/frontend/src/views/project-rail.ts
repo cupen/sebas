@@ -380,7 +380,8 @@ export class SebasProjectRail extends LitElement {
           <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">Choose a directory to add as a project:</p>
           <sebas-folder-picker class="folder-picker" @folder-selected=${this.onFolderSelected}></sebas-folder-picker>
           <p style="font-size:0.8rem;color:var(--sebas-text-faint);margin:0;text-align:center;">or</p>
-          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @wa-input=${(e: any) => (this.addPath = e.target.value)}>
+          <!-- Web Awesome 3.x 派发标准 input 事件（不派发 wa-input），手动路径才能联动启用提交按钮。 -->
+          <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => (this.addPath = e.target.value)}>
             <wa-icon slot="start" name="folder" aria-hidden="true"></wa-icon>
           </wa-input>
           ${this.addError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;">${this.addError}</div>` : nothing}
