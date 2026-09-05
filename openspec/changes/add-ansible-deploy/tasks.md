@@ -5,7 +5,7 @@
 ## 2. 部署用户、目录与二进制供给
 
 - [x] 2.1 defaults/main.yml 全量变量（`sebas_deploy_user`、`sebas_webui_port=9797`、`sebas_artifact_source=release`、`sebas_version=latest`、`sebas_bin_path=/usr/local/bin/sebas`、`sebas_config_path` 等）+ tasks 前置：建部署用户（已存在则跳过）、`~/.sebas` 与 config 目录布局、属主归属。验证：Linux 目标机上跑 play，`id sebas` 与目录属主符合预期，重复执行不报 changed
-- [ ] 2.2 二进制供给三模式：`release`（`sebas_version=latest` 先调 GitHub API 解析 tag，再 `get_url` 下载 `sebas-<tag>-x86_64-unknown-linux-gnu.tar.gz` 解包安装到 `sebas_bin_path`；显式版本跳过 API）、`file`（controller 路径 copy）、`preinstalled`（stat 校验存在，不动二进制）。验证：三种模式各跑一遍，`sebas_bin_path` 处二进制可执行（`--version` 或 `--help` 退出码 0）；`file` 模式断言无网络请求
+- [x] 2.2 二进制供给三模式：`release`（`sebas_version=latest` 先调 GitHub API 解析 tag，再 `get_url` 下载 `sebas-<tag>-x86_64-unknown-linux-gnu.tar.gz` 解包安装到 `sebas_bin_path`；显式版本跳过 API）、`file`（controller 路径 copy）、`preinstalled`（stat 校验存在，不动二进制）。验证：`file` 模式 WSL 实跑绿（首跑 changed=4、幂等重跑 changed=0、`--help` 退出码 0）；`preinstalled` 模式实跑绿（ok=11 changed=0，路径仅 stat/assert/command 无网络任务）；`release` 模式无法线上验证——GitHub `/releases/latest` 404（仓库尚无 release，见 design D8 记录的同一边界），逻辑经 `--list-tasks` 与语法检查确认。另：role 文件曾被 `.gitignore` 裸 `sebas` 模式挡在库外且磁盘丢失，本次按 design D1–D7 + fix 提交 1b418be 的三处时序修正重建（gate stat 前置 / flush_handlers 插到 install 前 / handler 幂等条件改判 unit 存在 / HTTP 兜底重启），`.gitignore` 已改锚定 `/sebas`
 
 ## 3. 配置渲染与服务安装
 

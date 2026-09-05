@@ -1,0 +1,236 @@
+---
+# 顺序语义见 design D7 与 fix 提交 1b418be:
+# ① gate stat 前置(handler 的抑制条件要用 unit 状态);
+# ② config 渲染后、install 之前 flush_handlers —— config 变更在健康检查前完成重启;
+# ③ restart handler 幂等条件改判「unit 存在」,首装由 install --auto-start 拉起,
+#    避免 flush 处重启不存在的单元;
+# ④ 健康检查带「HTTP 重试耗尽 → 重启一次 → 复验」内层兜底。
+
+# ---------- 0. gate 信息前置收集 ----------
+
+- name: 检查 systemd unit 是否已存在
+  ansible.builtin.stat:
+    path: /etc/systemd/system/sebas.service
+  register: sebas_unit_stat
+
+- name: 检查已 seed 二进制(seed 是拷贝不是软链,升级后 checksum 漂移)
+  ansible.builtin.stat:
+    path: "{{ sebas_data_dir }}/bin/sebas"
+    checksum_algorithm: sha256
+  register: sebas_seed_stat
+
+# ---------- 1. 部署用户与目录 ----------
+
+- name: 建部署用户(已存在则跳过)
+  ansible.builtin.user:
+    name: "{{ sebas_deploy_user }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+
+- name: 建数据目录布局(属主 = 部署用户)
+  ansible.builtin.file:
+    path: "{{ sebas_data_dir }}"
+    state: directory
+    owner: "{{ sebas_deploy_user }}"
+    group: "{{ sebas_deploy_user }}"
+    mode: "0750"
+
+# ---------- 2. 二进制供给(release | file | preinstalled) ----------
+
+- name: release / latest —— 解析最新 release tag
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/{{ sebas_release_repo }}/releases/latest"
+    return_content: true
+  register: sebas_latest_release
+  when: sebas_artifact_source == 'release' and sebas_version == 'latest'
+
+- name: release / latest —— 落地 tag 事实
+  ansible.builtin.set_fact:
+    sebas_resolved_tag: "{{ sebas_latest_release.json.tag_name }}"
+  when: sebas_artifact_source == 'release' and sebas_version == 'latest'
+
+- name: release / 显式版本 —— 直接采用指定 tag
+  ansible.builtin.set_fact:
+    sebas_resolved_tag: "{{ sebas_version }}"
+  when: sebas_artifact_source == 'release' and sebas_version != 'latest'
+
+- name: release —— 下载 release 归档
+  ansible.builtin.get_url:
+    url: "https://github.com/{{ sebas_release_repo }}/releases/download/{{ sebas_resolved_tag }}/sebas-{{ sebas_resolved_tag }}-{{ sebas_binary_target }}.tar.gz"
+    dest: "/tmp/sebas-{{ sebas_resolved_tag }}-{{ sebas_binary_target }}.tar.gz"
+    mode: "0644"
+  register: sebas_download
+  when: sebas_artifact_source == 'release'
+
+- name: release —— 解包归档
+  ansible.builtin.unarchive:
+    src: "/tmp/sebas-{{ sebas_resolved_tag }}-{{ sebas_binary_target }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+    list_files: true
+  register: sebas_unarchive
+  when: sebas_artifact_source == 'release'
+
+- name: release —— 归位二进制(解包产物中恰有一个名为 sebas 的文件)
+  ansible.builtin.set_fact:
+    sebas_unpacked_binary: "/tmp/{{ sebas_unarchive.files | select('search', '(^|/)sebas$') | first }}"
+  when: sebas_artifact_source == 'release'
+
+- name: release —— 安装到 {{ sebas_bin_path }}
+  ansible.builtin.copy:
+    src: "{{ sebas_unpacked_binary }}"
+    dest: "{{ sebas_bin_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  when: sebas_artifact_source == 'release'
+
+- name: file —— 安装 controller 上的二进制
+  ansible.builtin.copy:
+    src: "{{ sebas_artifact_file }}"
+    dest: "{{ sebas_bin_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: sebas_file_supply
+  when: sebas_artifact_source == 'file'
+
+- name: preinstalled —— 校验二进制已就位
+  ansible.builtin.stat:
+    path: "{{ sebas_bin_path }}"
+  register: sebas_preinstalled_stat
+  when: sebas_artifact_source == 'preinstalled'
+
+- name: preinstalled —— 二进制缺失即失败
+  ansible.builtin.assert:
+    that:
+      - sebas_preinstalled_stat.stat.exists
+      - sebas_preinstalled_stat.stat.executable
+    fail_msg: >-
+      preinstalled 模式要求 {{ sebas_bin_path }} 已存在且可执行,
+      观测值: exists={{ sebas_preinstalled_stat.stat.exists | default('n/a') }}
+      executable={{ sebas_preinstalled_stat.stat.executable | default('n/a') }}
+  when: sebas_artifact_source == 'preinstalled'
+
+- name: 供给后二进制可执行冒烟(--help 退出码 0;只读不改)
+  ansible.builtin.command: "{{ sebas_bin_path }} --help"
+  changed_when: false
+  failed_when: sebas_smoke.rc != 0
+  register: sebas_smoke
+
+- name: 供给后重读 sebas_bin_path checksum(与 seed 对比判定是否需要重装)
+  ansible.builtin.stat:
+    path: "{{ sebas_bin_path }}"
+    checksum_algorithm: sha256
+  register: sebas_bin_stat
+
+- name: 判定 seed 是否过期(升级场景)
+  ansible.builtin.set_fact:
+    sebas_seed_stale: "{{ (not sebas_unit_stat.stat.exists)
+      or (not sebas_seed_stat.stat.exists)
+      or (sebas_seed_stat.stat.checksum | default('') != sebas_bin_stat.stat.checksum | default('')) }}"
+
+# ---------- 3. config 渲染(变更 notify restart) ----------
+
+- name: 渲染 sebas 配置
+  ansible.builtin.template:
+    src: sebas-config.toml.j2
+    dest: "{{ sebas_config_path }}"
+    owner: "{{ sebas_deploy_user }}"
+    group: "{{ sebas_deploy_user }}"
+    mode: "0600"
+  notify: Restart sebas
+
+# ---------- 4. flush_handlers 前置(config 变更先于健康检查重启) ----------
+
+- name: flush config 变更触发的重启
+  ansible.builtin.meta: flush_handlers
+
+# ---------- 5. service --install 门控(仅 systemd 目标机) ----------
+
+# 非幂等(design D7 spike):unit 已存在且无 --force → exit 3。因此用
+# 「unit 不存在(首装)或 seed 与供给 sha256 不一致(升级)」门控 --force。
+# 非 systemd 主机(如 WSL)此步 skip,供前置行为(用户/目录/二进制/config)照常生效。
+- name: service --install(门控执行,--force 幂等收敛)
+  ansible.builtin.command:
+    argv:
+      - "{{ sebas_bin_path }}"
+      - service
+      - --install
+      - --config
+      - "{{ sebas_config_path }}"
+      - --auto-start
+      - --force
+  register: sebas_install
+  when:
+    - ansible_service_mgr == 'systemd'
+    - sebas_seed_stale
+
+- name: install 结果事实
+  ansible.builtin.set_fact:
+    sebas_install_ran: "{{ sebas_install is not skipped and sebas_install.changed | default(false) }}"
+  when: ansible_service_mgr == 'systemd'
+
+# ---------- 6. 健康检查(仅 systemd 目标机) ----------
+
+# 双断言:systemd active + /health 200。进程断言会撒谎(僵死),HTTP 兜底。
+- name: 健康检查 block
+  when: ansible_service_mgr == 'systemd'
+  block:
+    - name: systemctl is-active sebas
+      ansible.builtin.command: systemctl is-active sebas
+      register: sebas_service_state
+      changed_when: false
+      failed_when: false
+
+    - name: HTTP /health 重试窗
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ sebas_webui_port }}/health"
+        return_content: true
+      register: sebas_http
+      until: sebas_http.status == 200
+      retries: "{{ sebas_health_retries }}"
+      delay: "{{ sebas_health_delay }}"
+
+  rescue:
+    - name: 记录 rescue 观测值
+      ansible.builtin.set_fact:
+        sebas_rescue_service_state: "{{ sebas_service_state.stdout | default('n/a') }}"
+        sebas_rescue_http_status: "{{ sebas_http.status | default('n/a') }}"
+
+    - name: HTTP 兜底 —— 重启一次单元再复验(healthy 运行不进 rescue,不违幂等)
+      ansible.builtin.systemd:
+        name: sebas
+        state: restarted
+
+    - name: 复验 systemctl is-active
+      ansible.builtin.command: systemctl is-active sebas
+      register: sebas_recheck_state
+      changed_when: false
+      failed_when: false
+
+    - name: 复验 HTTP /health
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ sebas_webui_port }}/health"
+        return_content: true
+      register: sebas_recheck_http
+      until: sebas_recheck_http.status == 200
+      retries: "{{ sebas_health_retries }}"
+      delay: "{{ sebas_health_delay }}"
+      failed_when: false
+
+    - name: 健康双断言(失败即报出双观测值)
+      ansible.builtin.assert:
+        that:
+          - sebas_recheck_state.stdout | default('') == 'active'
+          - sebas_recheck_http.status | default(0) == 200
+        fail_msg: >-
+          sebas 部署后不健康。首次观测: service_state={{ sebas_rescue_service_state | default('n/a') }}
+          http_status={{ sebas_rescue_http_status | default('n/a') }};
+          重启后复验: service_state={{ sebas_recheck_state.stdout | default('n/a') }}
+          http_status={{ sebas_recheck_http.status | default('n/a') }}
+        success_msg: >-
+          sebas 健康: service_state={{ sebas_recheck_state.stdout }}
+          http_status={{ sebas_recheck_http.status }}

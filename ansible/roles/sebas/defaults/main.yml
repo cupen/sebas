@@ -1,0 +1,32 @@
+---
+# sebas 单机部署 role 默认变量(见 openspec/changes/add-ansible-deploy/design.md D1-D7)。
+# 变量可在 inventory / play / extra-vars 层覆盖。
+
+# 部署用户与目录
+sebas_deploy_user: sebas
+sebas_deploy_home: "/home/{{ sebas_deploy_user }}"
+sebas_data_dir: "{{ sebas_deploy_home }}/.sebas"
+sebas_config_path: "{{ sebas_data_dir }}/config.toml"
+
+# WebUI bind(正式形态:watchdog 托管 webui)
+sebas_webui_host: 127.0.0.1
+sebas_webui_port: 9797
+
+# 二进制供给:release | file | preinstalled
+sebas_artifact_source: release
+# release 模式:sebas_version=latest 先调 GitHub API 解析 tag,再下载
+# sebas-<tag>-<sebas_binary_target>.tar.gz;显式版本号跳过 API 调用。
+sebas_version: latest
+sebas_release_repo: cupen/sebas
+sebas_binary_target: x86_64-unknown-linux-gnu
+# file 模式:controller 上的二进制路径(copy 到 sebas_bin_path)
+sebas_artifact_file: ""
+# 统一安装点(service --install 从这里 seed 到 <data_dir>/bin/sebas)
+sebas_bin_path: /usr/local/bin/sebas
+
+# ACP 子进程(模板最小面,详见 design D3)
+sebas_acp_claude_path: claude
+
+# 健康检查重试窗:retries x delay 秒
+sebas_health_retries: 10
+sebas_health_delay: 3

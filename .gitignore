@@ -16,7 +16,8 @@ logs/
 # sebas 本地运行时状态（cookies/downloads/usage jsonl 等）
 /state/
 *.xml
-sebas
+# 根目录 cargo 产物二进制;不带锚点会把 ansible/roles/sebas/ 等同名目录一并忽略
+/sebas
 
 .e2e/
 node_modules/
