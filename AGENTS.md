@@ -42,6 +42,12 @@ The operator's real sebas (AppImage, port **9797**, real `~/.sebas` /
 do not bind its ports, do not read or copy its credentials, and never point
 sandbox processes at its files.
 
+**WebUI sandbox shortcut**: `bash scripts/test_webui_sandbox.sh` spins up the
+throwaway webui on port 9879 with auth **disabled by default** (login-free GUI
+testing). `SANDBOX_AUTH=1` turns auth on with the unified test account
+**admin / admin** (`webui-passwd` only warns on passwords shorter than 8
+chars). Ctrl-C stops it and deletes the sandbox dir.
+
 1. Every sandbox path goes under a throwaway dir (e.g. `/tmp/sebas-itest/`)
    and must override **all** of the defaults that otherwise fall back to the
    real `~/.sebas`:

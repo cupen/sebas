@@ -27,6 +27,11 @@ pub enum Cmd {
     /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
     #[command(name = "webui")]
     WebUi(WebUiArgs),
+    /// 初始化 / 修改 WebUI 登录账户（用户名 + 密码，PBKDF2 落盘）。
+    /// 配置凭据后 webui 全部 API/WS 需登录；非 loopback bind 也只有
+    /// 凭据存在时才放行。运行中的 webui 经 mtime 热重载，无需重启。
+    #[command(name = "webui-passwd")]
+    WebUiPasswd(WebUiPasswdArgs),
     /// Start the watchdog daemon.
     Watchdog(WatchdogArgs),
     /// One-shot update implementation used by watchdog.
@@ -163,6 +168,22 @@ pub struct WebUiArgs {
     /// Path to the sebas config.toml.
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
+}
+
+/// `sebas webui-passwd` — create or update the WebUI login account.
+#[derive(Parser)]
+pub struct WebUiPasswdArgs {
+    /// 账户用户名。缺省时保留现有凭据的用户名（首次建户必须提供）。
+    #[arg(long)]
+    pub user: Option<String>,
+    /// 新密码（明文；<8 字符仅告警不拦截——测试环境统一 admin/admin）。
+    /// 优先用 --password-stdin，避免密码进入 shell history。
+    #[arg(long)]
+    pub password: Option<String>,
+    /// 从 stdin 读一行作为新密码
+    /// （`printf '%s' 'pw' | sebas webui-passwd --password-stdin`）。
+    #[arg(long, conflicts_with = "password")]
+    pub password_stdin: bool,
 }
 
 /// `sebas watchdog` — start the watchdog daemon.

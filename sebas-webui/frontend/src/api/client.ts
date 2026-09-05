@@ -239,6 +239,14 @@ export type PermissionDecision =
   | { decision: 'escalate'; reason: string }
 
 /** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
+/** GET /api/auth/me 的响应：服务端是否启用登录鉴权 + 当前会话状态。 */
+export interface AuthInfo {
+  enabled: boolean
+  authenticated: boolean
+  username: string | null
+}
+
+/** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
 export class ApiError extends Error {
   readonly status: number
   constructor(status: number, message: string) {
@@ -247,8 +255,19 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Global handler fired whenever an API call gets a 401 while webui 登录鉴权
+ * is enabled — the shell registers it to flip to the login view (e.g. when a
+ * session expires mid-use). Login/logout calls bypass it.
+ */
+let onUnauthorized: (() => void) | null = null
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler
+}
+
 async function unwrap<T>(resp: Response): Promise<T> {
   if (resp.ok) return (await resp.json()) as T
+  if (resp.status === 401 && onUnauthorized) onUnauthorized()
   let message = `HTTP ${resp.status}`
   try {
     const body = (await resp.json()) as { error?: string }
@@ -297,6 +316,12 @@ export const api = {
   gateway: () => get<{ gateway: GatewayInfo }>('/api/gateway'),
   about: () => get<About>('/api/about'),
   agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
+
+  // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie）
+  authMe: () => get<AuthInfo>('/api/auth/me'),
+  authLogin: (username: string, password: string) =>
+    post<{ status: string; username: string }>('/api/auth/login', { username, password }),
+  authLogout: () => post<{ status: string }>('/api/auth/logout'),
 
   // Session mutations
   createSession: (

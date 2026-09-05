@@ -74,6 +74,13 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::WebUiPasswd(args) => {
+            if let Err(e) = sebas::webui_cmd::run_passwd(args.into()) {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::Control(args) => run_control(args).await,
         Cmd::Status(args) => run_control_status(args, ControlCmd::Status).await,
         Cmd::Services(args) => run_control_status(args, ControlCmd::Services).await,
@@ -425,6 +432,16 @@ impl From<GatewayArgs> for sebas::gateway_cmd::GatewayArgs {
 impl From<WebUiArgs> for sebas::webui_cmd::WebUiArgs {
     fn from(a: WebUiArgs) -> Self {
         Self::new(a.config)
+    }
+}
+
+impl From<cli::WebUiPasswdArgs> for sebas::webui_cmd::WebUiPasswdArgs {
+    fn from(a: cli::WebUiPasswdArgs) -> Self {
+        Self {
+            user: a.user,
+            password: a.password,
+            password_stdin: a.password_stdin,
+        }
     }
 }
 

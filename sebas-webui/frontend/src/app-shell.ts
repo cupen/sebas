@@ -12,15 +12,17 @@
  * the centered settings modal (the old `/settings` route redirects to `/`).
  */
 
-import { LitElement, css, html } from 'lit'
+import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
+import { api, setUnauthorizedHandler } from './api/client.js'
 import { icon } from './components/icons.js'
 
 // The sidebar tree + settings modal are shell-owned; the outlet views are
 // registered in main.ts.
 import './views/project-rail.js'
 import './views/settings-modal.js'
+import './views/login-view.js'
 
 // Exported for tests: the route resolution audit iterates these. IA v2 keeps
 // only the workbench, the all-sessions table and session deep links;
@@ -37,6 +39,14 @@ export const ROUTES: RouteDef[] = [
 @customElement('sebas-app')
 export class SebasApp extends LitElement {
   @state() private routeId: string = 'dashboard'
+
+  /**
+   * 登录鉴权门禁（webui auth）：checking = /api/auth/me 探测中；login =
+   * 服务端启用鉴权且当前无有效会话（渲染登录页替代工作台）；ready = 放行。
+   */
+  @state() private authState: 'checking' | 'login' | 'ready' = 'checking'
+  /** 已登录账户名（仅用于侧栏登出入口与登录页预填；null = 未登录/未启用）。 */
+  @state() private authUsername: string | null = null
 
   /**
    * Selected project path, owned here so the sidebar tree and the workbench
@@ -281,7 +291,46 @@ export class SebasApp extends LitElement {
     }
     window.addEventListener('popstate', this.onNavigateBound)
     document.addEventListener('click', this.onClick)
+    // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。
+    setUnauthorizedHandler(() => this.showLogin())
     this.onNavigate()
+    void this.checkAuth()
+  }
+
+  /** 探明服务端鉴权状态，决定渲染登录页还是工作台。 */
+  private async checkAuth(): Promise<void> {
+    try {
+      const info = await api.authMe()
+      if (info.enabled && !info.authenticated) {
+        this.authUsername = null
+        this.authState = 'login'
+        return
+      }
+      this.authUsername = info.authenticated ? info.username : null
+      this.authState = 'ready'
+    } catch {
+      // /api/auth/me 本身失败（网络/服务异常）：按未启用处理，后续请求的
+      // 401 会经 setUnauthorizedHandler 再切回登录页。
+      this.authState = 'ready'
+    }
+  }
+
+  private showLogin(): void {
+    this.authState = 'login'
+  }
+
+  private onLoginSuccess = (e: Event): void => {
+    this.authUsername = (e as CustomEvent<{ username: string }>).detail.username
+    this.authState = 'ready'
+  }
+
+  private async onLogout(): Promise<void> {
+    try {
+      await api.authLogout()
+    } catch {
+      // 注销失败（会话已过期等）也无妨：照样回登录页。
+    }
+    this.showLogin()
   }
 
   disconnectedCallback(): void {
@@ -337,6 +386,16 @@ export class SebasApp extends LitElement {
   }
 
   render() {
+    if (this.authState === 'checking') {
+      // 鉴权探测期间先不渲染任何内容，避免登录页/工作台闪现。
+      return html``
+    }
+    if (this.authState === 'login') {
+      return html`<sebas-login
+        .hintUsername=${this.authUsername}
+        @login-success=${this.onLoginSuccess}
+      ></sebas-login>`
+    }
     return html`
       <nav aria-label="Primary">
         <a class="brand" href="/" aria-label="sebas console home">
@@ -349,6 +408,16 @@ export class SebasApp extends LitElement {
         ></sebas-project-rail>
         <div class="spacer" aria-hidden="true"></div>
         <div class="sidebar-footer">
+          ${this.authUsername
+            ? html`<button
+                class="settings-btn"
+                aria-label="Sign out"
+                title="退出登录"
+                @click=${() => void this.onLogout()}
+              >
+                ${icon('logout', 16)}<span class="settings-label">退出 (${this.authUsername})</span>
+              </button>`
+            : nothing}
           <button
             class="settings-btn"
             aria-haspopup="dialog"

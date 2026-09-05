@@ -119,6 +119,11 @@ args = []
 # host = "127.0.0.1"
 # port = 9797
 #
+# # 登录鉴权总开关（add-webui-auth-switch），默认 true：凭据存在即强制登录
+# # （sebas webui-passwd 建户）。测试/联调环境可设 false 全路由免登录；
+# # 关闭时非 loopback host 一律拒绝启动（防止误关开关叠加公网暴露）。
+# auth = true
+#
 # [watchdog.core]      # core 子进程 = 飞书 bot + ACP（默认停用）
 # enabled = false
 #

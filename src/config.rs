@@ -374,6 +374,11 @@ pub struct WatchdogWebUiConfig {
     /// Bind port for watchdog-owned WebUI.
     #[serde(default = "default_webui_port")]
     pub port: u16,
+    /// 登录鉴权总开关（add-webui-auth-switch）。默认 true：凭据存在即强制
+    /// 登录。测试/联调环境可设 false 全路由免登录；关闭时非 loopback bind
+    /// 一律拒绝（见 webui_cmd 的安全门）。
+    #[serde(default = "default_webui_auth")]
+    pub auth: bool,
 }
 
 impl Default for WatchdogWebUiConfig {
@@ -382,11 +387,16 @@ impl Default for WatchdogWebUiConfig {
             enabled: default_webui_enabled(),
             host: default_webui_host(),
             port: default_webui_port(),
+            auth: default_webui_auth(),
         }
     }
 }
 
 fn default_webui_enabled() -> bool {
+    true
+}
+
+fn default_webui_auth() -> bool {
     true
 }
 
@@ -783,6 +793,28 @@ enabled = false
 "#;
         let cfg = Config::parse(raw).expect("显式关闭应可解析");
         assert!(!cfg.watchdog.webui.enabled, "显式 false 应优先于默认值");
+    }
+
+    #[test]
+    fn watchdog_webui_auth_defaults_true() {
+        let cfg = Config::parse("").expect("空配置应可解析");
+        assert!(
+            cfg.watchdog.webui.auth,
+            "鉴权开关缺省必须为 true（生产安全底线）"
+        );
+    }
+
+    #[test]
+    fn watchdog_webui_auth_explicit_false_wins() {
+        let raw = r#"
+[watchdog.webui]
+auth = false
+"#;
+        let cfg = Config::parse(raw).expect("显式关鉴权应可解析");
+        assert!(
+            !cfg.watchdog.webui.auth,
+            "显式 false 应优先于默认值"
+        );
     }
 
     #[test]

@@ -470,8 +470,27 @@ pub async fn run(
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
+        let webui_auth = cfg.watchdog.webui.auth;
         tokio::spawn(async move {
-            sebas_webui::run(backend, gateway_info, webui_card_cfg, agent_kinds, listener).await;
+            // 登录鉴权与独立 webui 进程同一套（add-webui-auth-switch）：
+            // 开关关闭 → disabled 态全路由免登录；打开 → 凭据文件 + env 引导。
+            // run --webui 恒绑 127.0.0.1，不受非 loopback 门影响。
+            let auth = if webui_auth {
+                crate::webui_cmd::bootstrap_auth()
+            } else {
+                tracing::warn!("webui 鉴权已通过 [watchdog.webui] auth = false 关闭：全部路由免登录");
+                std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
+            };
+            sebas_webui::run_with_admin_adapter_and_auth(
+                backend,
+                gateway_info,
+                webui_card_cfg,
+                agent_kinds,
+                listener,
+                None,
+                auth,
+            )
+            .await;
         });
         info!("webui dashboard starting on 127.0.0.1:{webui_port}");
     }

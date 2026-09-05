@@ -156,32 +156,9 @@ impl Default for SessionStore {
 }
 
 /// Generate a random hex token of the given byte length (result is 2×len hex chars).
+/// 会话 token 属安全凭据，必须来自 OS CSPRNG（旧实现是时间种子 LCG，可预测）。
 pub fn generate_token(byte_len: usize) -> String {
-    use std::time::SystemTime;
-    let mut buf = vec![0u8; byte_len];
-    // Use a simple hash of the current time + a counter as a seed.
-    // For production, this should use a proper CSPRNG.
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let seed = nanos.to_le_bytes();
-    let mut state = 0u64;
-    for b in seed.chunks(2) {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(b[0] as u64);
-    }
-    for chunk in buf.chunks_mut(8) {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let val = state.to_le_bytes();
-        for (dst, src) in chunk.iter_mut().zip(val.iter()) {
-            *dst = *src;
-        }
-    }
-    hex::encode(buf)
+    hex::encode(crate::auth::random_bytes(byte_len))
 }
 
 #[cfg(test)]

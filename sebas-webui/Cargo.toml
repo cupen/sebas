@@ -10,6 +10,11 @@ sebas-channels = { path = "../sebas-channels" }
 sebas-acp = { path = "../sebas-acp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 鉴权：PBKDF2-HMAC-SHA256 密码哈希 + OS CSPRNG（盐 / 会话 token）。
+sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.4"
+dirs = "6"
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.8", features = ["ws"] }

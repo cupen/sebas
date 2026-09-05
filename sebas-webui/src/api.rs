@@ -17,7 +17,7 @@ use crate::server::WebUiState;
 use crate::session_backend::{Reachability, SessionRejection};
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -264,6 +264,89 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
 pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
     let kinds = state.agent_kinds.agent_kinds().await;
     Json(json!({ "kinds": kinds })).into_response()
+}
+
+// ---- Auth endpoints（webui 登录鉴权，见 `auth` 模块） ----
+
+/// GET /api/auth/me — 探明鉴权状态。始终 200：`enabled` = 服务端是否配置了
+/// 凭据；`authenticated` = 当前请求是否携带有效会话；`username` 仅在已
+/// 认证时给出。前端据此决定渲染登录页还是工作台。
+pub async fn auth_me(State(state): State<WebUiState>, headers: axum::http::HeaderMap) -> Response {
+    if !state.auth.enabled() {
+        return Json(json!({ "enabled": false, "authenticated": false, "username": null }))
+            .into_response();
+    }
+    let authenticated = match crate::server::extract_webui_session_cookie(&headers) {
+        Some(sid) => state.auth.session_store.validate(&sid).await.is_ok(),
+        None => false,
+    };
+    let username = if authenticated { state.auth.username() } else { None };
+    Json(json!({
+        "enabled": true,
+        "authenticated": authenticated,
+        "username": username,
+    }))
+    .into_response()
+}
+
+/// POST /api/auth/login — `{ username, password }` → 会话 cookie。
+/// 限速按来源 IP（SessionStore），失败统一 401（不区分用户名/密码错误）。
+#[derive(Deserialize)]
+pub struct AuthLoginForm {
+    pub username: String,
+    pub password: String,
+}
+
+pub async fn auth_login(
+    State(state): State<WebUiState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    Json(form): Json<AuthLoginForm>,
+) -> Response {
+    let client_ip = addr.ip().to_string();
+    match state
+        .auth
+        .login(&client_ip, &form.username, &form.password)
+        .await
+    {
+        Ok(session_id) => {
+            let cookie = format!(
+                "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                crate::auth::SESSION_COOKIE_NAME,
+                session_id
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::SET_COOKIE, cookie)],
+                Json(json!({ "status": "ok", "username": form.username })),
+            )
+                .into_response()
+        }
+        Err(crate::auth::LoginError::RateLimited) => api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many login attempts. Try again later.",
+        ),
+        Err(_) => api_error(StatusCode::UNAUTHORIZED, "Invalid username or password."),
+    }
+}
+
+/// POST /api/auth/logout — 结束当前会话并清 cookie。
+pub async fn auth_logout(
+    State(state): State<WebUiState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Some(session_id) = crate::server::extract_webui_session_cookie(&headers) {
+        state.auth.logout(&session_id).await;
+    }
+    let cookie = format!(
+        "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        crate::auth::SESSION_COOKIE_NAME
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(json!({ "status": "ok" })),
+    )
+        .into_response()
 }
 
 // ---- Mutation endpoints ----
