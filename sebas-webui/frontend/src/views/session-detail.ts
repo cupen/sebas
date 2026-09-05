@@ -404,6 +404,13 @@ export class SebasSessionDetail extends LitElement {
     if (this.error)
       return html`
         <div class="callout callout-error" role="alert">${icon('alert')}<span>${this.error}</span></div>
+        <!-- 会话死亡（如 spawn 后立即退出）不该把操作员困死在本页：
+             给一条与 brand 链接同模式的返回工作台出口。 -->
+        <p style="margin: var(--sebas-space-4) 0 0;">
+          <a href="/" style="color: var(--sebas-text-faint); font-size: 0.85rem;"
+            >← Back to workbench</a
+          >
+        </p>
       `
     if (!this.data)
       return html`
@@ -437,9 +444,15 @@ export class SebasSessionDetail extends LitElement {
               ${d.session_id
                 ? html`<span class="mono" title=${d.session_id}>${d.session_id.slice(0, 12)}</span>`
                 : nothing}
+              <!-- add-composer-agent-binding：agent 建会话时定死——只读展示
+                   （null = 默认 kind）。 -->
+              <span class="mono" title="This session's agent is fixed — chosen when it was created"
+                >${d.agent_kind ?? 'acp · default'}</span
+              >
               <span>last active ${d.last_active}</span>
               ${d.available_models && d.available_models.length > 0
                 ? html`<span class="model-pick">
+                    <!-- Web Awesome 3.x 派发标准 change 事件（不派发 wa-change）。 -->
                     <wa-select
                       class="model-select"
                       size="xs"
@@ -447,7 +460,7 @@ export class SebasSessionDetail extends LitElement {
                       value=${d.current_model ?? ''}
                       ?disabled=${this.modelSwitching}
                       aria-label="Session model"
-                      @wa-change=${(e: Event) => {
+                      @change=${(e: Event) => {
                         const v = (e as unknown as { target: { value: string } }).target.value
                         if (v) void this.setModel(v)
                       }}

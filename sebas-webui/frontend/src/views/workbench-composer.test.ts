@@ -93,6 +93,8 @@ vi.mock('../api/client.js', () => ({
     sessions: vi.fn(),
     createSession: vi.fn(),
     agentKinds: vi.fn(),
+    sendMessage: vi.fn(),
+    setSessionModel: vi.fn(),
   },
 }))
 
@@ -125,6 +127,10 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   const el = document.createElement('sebas-workbench-composer') as SebasWorkbenchComposer
   if (initial.projectDir !== undefined) el.projectDir = initial.projectDir
   if (initial.providerLabel !== undefined) el.providerLabel = initial.providerLabel
+  if (initial.sessionKey !== undefined) el.sessionKey = initial.sessionKey
+  if (initial.agentKind !== undefined) el.agentKind = initial.agentKind
+  if (initial.sessionModels !== undefined) el.sessionModels = initial.sessionModels
+  if (initial.currentModel !== undefined) el.currentModel = initial.currentModel
   document.body.appendChild(el)
   // LitElement schedules its first update asynchronously; then the
   // composer kicks off an async reachability fetch in connectedCallback.
@@ -430,5 +436,174 @@ describe('sebas-workbench-composer', () => {
     expect(errorCallout?.textContent ?? '').toContain('boom: 500')
     // Text preserved for retry — the composer does not clear on failure.
     expect(ta.value).toBe('retry me')
+  })
+
+  // ── Enter 发送路径（@keydown on wa-textarea）─────────────────────────────
+
+  it('plain Enter sends; Shift+Enter does not', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_enter' })
+    const el = await mount({ projectDir: null })
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'enter to send'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    // Shift+Enter：不发送。
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, composed: true }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.createSession).not.toHaveBeenCalled()
+
+    // 普通 Enter：发送。
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.createSession).toHaveBeenCalledTimes(1)
+    expect(api.createSession).toHaveBeenCalledWith('enter to send', null, 'acp', null)
+  })
+
+  it('Enter is a no-op while reachability is unreachable', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)
+    const el = await mount({ projectDir: null })
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+    ta.value = 'should not send'
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(api.createSession).not.toHaveBeenCalled()
+  })
+
+  // ── 跟随模式（add-composer-agent-binding）：聚焦会话的输入框 ────────────
+
+  describe('follow-up mode (focused session)', () => {
+    const focus = {
+      sessionKey: 'web%00web-1',
+      agentKind: 'claude',
+      sessionModels: ['sonnet', 'haiku'],
+      currentModel: 'sonnet',
+    }
+
+    it('sends to the focused session and never creates a new one', async () => {
+      ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+      ;(api.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'delivered' })
+      const el = await mount(focus)
+
+      const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+      ta.value = 'one more turn'
+      ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+      await el.updateComplete
+
+      const sent = vi.fn()
+      el.addEventListener('composer-sent', sent)
+      ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+
+      expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'one more turn')
+      expect(api.createSession).not.toHaveBeenCalled()
+      expect(sent).toHaveBeenCalledTimes(1)
+    })
+
+    it('renders the agent as small read-only text — no backend select anywhere', async () => {
+      ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+      const el = await mount(focus)
+
+      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Execution backend"]')).toBeNull()
+      const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
+        (n) => n.textContent ?? '',
+      )
+      expect(labels).toContain('claude')
+      // 创建模式才有的绑定/供应商提示在跟随模式下不渲染。
+      expect(el.shadowRoot?.querySelector('.binding')).toBeNull()
+    })
+
+    it('agent kind null falls back to the default-kind label', async () => {
+      ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+      const el = await mount({ ...focus, agentKind: null })
+      const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
+        (n) => n.textContent ?? '',
+      )
+      expect(labels).toContain('acp · default')
+    })
+
+    it('model dropdown lists the focused session models and switches via setSessionModel', async () => {
+      ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+      ;(api.setSessionModel as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'ok' })
+      const el = await mount(focus)
+
+      const sel = el.shadowRoot?.querySelector(
+        'wa-select[aria-label="Model"]',
+      ) as unknown as HTMLElement & { value: string }
+      expect(sel.value).toBe('sonnet')
+      sel.value = 'haiku'
+      sel.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+
+      expect(api.setSessionModel).toHaveBeenCalledWith('web%00web-1', 'haiku')
+      expect(api.createSession).not.toHaveBeenCalled()
+    })
+
+    it('"+ new session" chip flips to creation mode and back', async () => {
+      ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+      ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_new' })
+      const el = await mount(focus)
+      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Execution backend"]')).toBeNull()
+
+      const chip = () => el.shadowRoot?.querySelector('.mode-chip') as HTMLElement
+      chip().click()
+      await el.updateComplete
+
+      // 创建模式：agent 下拉回来了，chips 变为取消。
+      const backend = el.shadowRoot?.querySelector(
+        'wa-select[aria-label="Execution backend"]',
+      ) as unknown as HTMLElement & { value: string }
+      expect(backend).toBeTruthy()
+      expect(chip().textContent?.trim()).toBe('cancel')
+
+      const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
+      ta.value = 'brand new session'
+      ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+      await el.updateComplete
+      ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
+      await new Promise((r) => setTimeout(r, 0))
+      await el.updateComplete
+      expect(api.createSession).toHaveBeenCalledWith('brand new session', null, 'acp', null)
+      expect(api.sendMessage).not.toHaveBeenCalled()
+
+      chip().click()
+      await el.updateComplete
+      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Execution backend"]')).toBeNull()
+    })
+  })
+
+  // ── Reachability 轮询（断连横幅随 core 恢复自动消失）─────────────────────
+
+  it('reachability recovers on poll without remounting', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)
+    const el = await mount({ projectDir: null })
+    expect(el.shadowRoot?.querySelector('.callout-warning')).toBeTruthy()
+    // connectedCallback 安装了轮询定时器。
+    const timer = (el as unknown as { reachabilityTimer: number | undefined }).reachabilityTimer
+    expect(timer).not.toBeUndefined()
+
+    // core 恢复：下一次轮询拉到 ok → 横幅消失、composer 重新可用。
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    await (el as unknown as { loadReachability(): Promise<void> }).loadReachability()
+    await el.updateComplete
+    expect(el.shadowRoot?.querySelector('.callout-warning')).toBeNull()
+    const textarea = el.shadowRoot?.querySelector('wa-textarea')
+    expect(textarea?.hasAttribute('disabled')).toBe(false)
+
+    // 卸载后定时器被清理。
+    el.remove()
+    await el.updateComplete
+    expect(
+      (el as unknown as { reachabilityTimer: number | undefined }).reachabilityTimer,
+    ).toBeUndefined()
   })
 })
