@@ -1,0 +1,10 @@
+---
+# sebas 单机部署（systemd + watchdog 正型）。
+# 默认 inventory 指向 localhost（见 inventory/hosts.ini），部署远端主机换 -i 即可。
+# 前提：目标机为 systemd Linux；控制账户具备目标机 root 权限（免密 sudo 或直接 root）。
+- name: Deploy sebas
+  hosts: sebas
+  become: true
+  gather_facts: true
+  roles:
+    - sebas

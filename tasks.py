@@ -90,3 +90,26 @@ def accept(c, case=None):
     if result.failed:
         print("acceptance suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
         raise SystemExit(1)
+
+
+@task(
+    help={
+        "source": "sebas_artifact_source: release (default) | file | preinstalled",
+        "port": "sebas_webui_port override",
+        "extra": "Extra args passed through to ansible-playbook",
+    }
+)
+def deploy(c, source=None, port=None, extra=""):
+    """Deploy via ansible (default local inventory; needs a Linux/WSL control machine)."""
+    overrides = ""
+    if source:
+        overrides += f" -e sebas_artifact_source={source}"
+    if port:
+        overrides += f" -e sebas_webui_port={port}"
+    passthrough = f" {extra}" if extra else ""
+    cmd = f"ansible-playbook site.yml{overrides}{passthrough}"
+    result = c.run(cmd, cd="ansible", echo=True)
+    if result.failed:
+        print("❌ deploy failed")
+        raise SystemExit(1)
+    print("✅ deployed")
