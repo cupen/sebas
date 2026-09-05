@@ -41,10 +41,13 @@ fn write_config(dir: &Path, data_dir: &Path) -> PathBuf {
     // 否则锁创建会以 "创建锁文件失败" 告败。真实安装目录在首次安装前已存在，
     // 这里显式建好以对齐。
     std::fs::create_dir_all(data_dir).unwrap();
+    // TOML basic string 不能裸写反斜杠（`\w` 等是非法转义），Windows 路径
+    // 归一为正斜杠——std::path 在 Windows 上同样接受。
+    let data_dir_toml = data_dir.display().to_string().replace('\\', "/");
     let toml = format!(
         "[feishu]\napp_id = \"test-app\"\napp_secret = \"test-secret\"\n\n\
          [watchdog.storage]\ndata_dir = \"{}\"\n",
-        data_dir.display()
+        data_dir_toml
     );
     let path = dir.join("config.toml");
     std::fs::write(&path, toml).unwrap();
