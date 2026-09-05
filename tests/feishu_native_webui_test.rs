@@ -102,7 +102,8 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     // transcript 可读：工具轨迹 + 收尾文本最终出现在 turn 流。轮询至 deadline，
     // 超时也把当前的 transcript 打出来便于诊断。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut last: Vec<sebas_router::TurnEntry> = Vec::new();
+    // 循环体每轮先赋值再读，无需初值。
+    let mut last: Vec<sebas_router::TurnEntry>;
     loop {
         // webui InProcessBackend 的 trait 键是中立 ChannelKey；feishu 通道的
         // key 用引用（chat_id，无 thread）。

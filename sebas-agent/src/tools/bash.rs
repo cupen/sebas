@@ -6,15 +6,16 @@
 
 use super::{Tool, ToolCtx};
 use crate::message::{ToolErrorKind, ToolOutput};
-use crate::policy::sandbox::{
-    apply_landlock, firewall_check, scrub_env, SandboxMode, SandboxProfile,
-};
+use crate::policy::sandbox::SandboxMode;
+#[cfg(unix)]
+use crate::policy::sandbox::{SandboxProfile, apply_landlock, firewall_check, scrub_env};
 use std::time::Duration;
 
 /// bash 输出上限：尾部 30k（spec「size-capped with truncation indicated」）。
 pub const BASH_OUTPUT_CAP: usize = 30_000;
 
 /// 管道捕获上限（design N6）：超限后继续排空管道但不累积，防大输出撑爆内存。
+#[cfg(unix)]
 const MAX_CAPTURE_BYTES: usize = 1_000_000;
 
 pub struct BashTool {

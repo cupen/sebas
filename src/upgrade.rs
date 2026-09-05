@@ -101,20 +101,16 @@ pub fn try_lock(data_dir: &Path) -> Result<()> {
     // 文件锁
     let lock_path = data_dir.join("upgrade.lock");
     if lock_path.exists() {
-        // 检查锁文件是否过期（PID 是否还在运行）
-        let content = std::fs::read_to_string(&lock_path).unwrap_or_default();
-        if let Ok(pid) = content.trim().parse::<u32>() {
-            // 检查进程是否存在
-            #[cfg(unix)]
-            {
+        // 检查锁文件是否过期（PID 是否还在运行；Windows 没有 kill(pid, 0)，
+        // 一律按过期处理——清除后重建）。
+        #[cfg(unix)]
+        {
+            let content = std::fs::read_to_string(&lock_path).unwrap_or_default();
+            if let Ok(pid) = content.trim().parse::<u32>() {
                 let exists = unsafe { libc::kill(pid as i32, 0) == 0 };
                 if exists {
                     return Err(SebasError::Upgrade("正在升级中，请勿重复操作".into()));
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                // Windows 上没有 kill(pid, 0)，直接覆盖
             }
         }
         // 锁文件过期，清除
@@ -511,9 +507,9 @@ fn update_symlink(target: &Path, link: &Path) -> Result<()> {
             .map_err(|e| SebasError::Upgrade(format!("删除旧软链失败: {e}")))?;
     }
     // 创建新软链（相对路径）
-    let rel = make_relative(link, target);
     #[cfg(unix)]
     {
+        let rel = make_relative(link, target);
         std::os::unix::fs::symlink(&rel, link)
             .map_err(|e| SebasError::Upgrade(format!("创建软链失败: {e}")))?;
     }
@@ -526,6 +522,7 @@ fn update_symlink(target: &Path, link: &Path) -> Result<()> {
 }
 
 /// 计算相对路径
+#[cfg(unix)]
 fn make_relative(base: &Path, target: &Path) -> PathBuf {
     let base_dir = match base.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),

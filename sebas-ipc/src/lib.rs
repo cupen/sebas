@@ -15,7 +15,9 @@
 //! SYSTEM/Administrators 可访问）+ secret。
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::tokio::Stream as TokioStream;

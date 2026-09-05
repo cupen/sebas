@@ -105,6 +105,7 @@ async fn session_lifecycle_journey() {
     //    Restoring requires a GRACEFUL exit (the state dump happens on
     //    shutdown); Windows has no portable graceful signal for a child, so
     //    the restore segment is unix-gated like the graceful-exit coverage.
+    #[cfg(unix)]
     let hint = sb.path.clone();
     #[cfg(unix)]
     {

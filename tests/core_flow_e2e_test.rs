@@ -12,6 +12,7 @@
 //! Any panic keeps the sandbox dir (with core.log / webui.log) for
 //! postmortem — the path is printed on drop.
 
+#[cfg(unix)]
 use std::sync::Arc;
 use std::time::Duration;
 

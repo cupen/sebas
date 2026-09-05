@@ -11,10 +11,15 @@
 //! 已知边界（记录不隐瞒）：Landlock 只拒不藏（stat/ls 可见敏感路径）、无 PID/IPC
 //! 隔离、UDP 不在 v4–v9 TCP 位内；bwrap 硬化 tier 留作后续。
 
+#[cfg(unix)]
 use super::{DANGEROUS_HEADS, DANGEROUS_PATTERNS};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 /// 沙箱档位选择（配置面）：Auto = Landlock 可用即用，否则防火墙；Firewall = 强制回退档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -60,6 +65,7 @@ pub fn landlock_supported() -> bool {
 }
 
 /// 防火墙检查：危险命令字面探测（头 token + 全命令子串）。命中 → Denied。
+#[cfg(unix)]
 pub(crate) fn firewall_check(command: &str) -> Result<(), String> {
     let cmd = command.trim();
     if DANGEROUS_PATTERNS.iter().any(|p| cmd.contains(p)) {
@@ -82,6 +88,7 @@ pub(crate) fn firewall_check(command: &str) -> Result<(), String> {
 }
 
 /// env 清洗：剥离密钥类变量（*_KEY/*_TOKEN/*_SECRET/*_PASSWORD、SEBAS_*）。
+#[cfg(unix)]
 pub(crate) fn scrub_env(cmd: &mut tokio::process::Command) {
     let kept: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| !is_secret_env(k))
@@ -92,6 +99,7 @@ pub(crate) fn scrub_env(cmd: &mut tokio::process::Command) {
     }
 }
 
+#[cfg(unix)]
 fn is_secret_env(k: &str) -> bool {
     let ku = k.to_ascii_uppercase();
     ku.starts_with("SEBAS_")
@@ -103,6 +111,7 @@ fn is_secret_env(k: &str) -> bool {
 
 /// 在 bash 子进程内实施 Landlock（经 `pre_exec`：fork → restrict → exec）。
 /// 失败（内核不支持/受限容器）→ `spawn()` 报错，由调用方回退防火墙档。
+#[cfg(unix)]
 pub(crate) fn apply_landlock(cmd: &mut tokio::process::Command, workdir: PathBuf) {
     #[cfg(target_os = "linux")]
     {

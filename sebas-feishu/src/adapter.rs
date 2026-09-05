@@ -812,7 +812,7 @@ mod tests {
     use super::*;
     use crate::events::CardAction;
     use sebas_channels::card::{Behavior, DivText};
-    use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
+    use sebas_channels::{ChannelEvent, ChannelKey};
 
     /// Task 3.3 (decouple-feishu-channel): the adapter owns callback →
     /// neutral-event restoration — every FeishuIn variant maps to a
