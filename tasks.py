@@ -61,3 +61,32 @@ def clean(c):
     image_tag = f"{IMAGE}:latest"
     c.run(f"docker rmi {image_tag} 2>/dev/null || true", echo=True)
     print(f"🧹 Cleaned: {image_tag}")
+
+@task(help={"case": "Run a single e2e case by name (cargo test filter)"})
+def e2e(c, case=None):
+    """Build the workspace and run the process-level core-flow e2e suite."""
+    print("Building workspace (sebas + fake-claude) ...")
+    result = c.run("cargo build", echo=True)
+    if result.failed:
+        raise SystemExit(1)
+    test_filter = f"{case} " if case else ""
+    cmd = f"cargo test --test core_flow_e2e_test {test_filter}-- --ignored".replace("  ", " ")
+    result = c.run(cmd, echo=True)
+    if result.failed:
+        print("e2e suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
+        raise SystemExit(1)
+
+
+@task(help={"case": "Run a single acceptance journey by name (cargo test filter)"})
+def accept(c, case=None):
+    """Build the workspace and run the acceptance suite (journey-level)."""
+    print("Building workspace (sebas + fake-claude) ...")
+    result = c.run("cargo build", echo=True)
+    if result.failed:
+        raise SystemExit(1)
+    test_filter = f"{case} " if case else ""
+    cmd = f"cargo test --test acceptance_suite_test {test_filter}-- --ignored".replace("  ", " ")
+    result = c.run(cmd, echo=True)
+    if result.failed:
+        print("acceptance suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
+        raise SystemExit(1)

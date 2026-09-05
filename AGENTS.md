@@ -83,6 +83,12 @@ sandbox processes at its files.
 
 ### Sandbox debug recipe (proven end-to-end, agent-runnable)
 
+一键自动化：本菜谱已固化为进程级 e2e 套件——`invoke e2e`（构建 + 跑
+`tests/core_flow_e2e_test.rs`；单用例 `invoke e2e --case <name>`）或
+`cargo test --test core_flow_e2e_test -- --ignored`。验收套件（旅程级，
+覆盖面账本见 `tests/acceptance/COVERAGE.md`）：`invoke accept` 或
+`cargo test --test acceptance_suite_test -- --ignored`。
+
 `--debug` makes the gateway inject a built-in `test` provider that answers
 requests itself (fixed text + echo, no upstream dial, downstream auth
 skipped), and pointing `[acp.claude] path` at the `tests/bin` fake-claude
