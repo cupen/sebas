@@ -17,7 +17,7 @@
 //! - `/quit` / `/exit` / Ctrl-D 退出
 //!
 //! 端点选择（design N9）：默认直连 provider（Anthropic Messages 兼容端点）；
-//! 设置 `SEBAS_AGENT_GATEWAY_URL` 则改走本地 gateway（可选路径，wire 协议相同）。
+//! 设置 `SEBAS_AGENT_ROUTER_URL` 则改走本地 router（可选路径，wire 协议相同）。
 //! 事件流打印到 stderr；不改 CLI 命令表。
 
 use sebas_agent::llm::anthropic::AnthropicMessagesClient;
@@ -43,11 +43,11 @@ fn print_help() {
     eprintln!();
     eprintln!("env (direct provider, default):");
     eprintln!("  SEBAS_AGENT_PROVIDER_BASE_URL  (default: https://api.anthropic.com)");
-    eprintln!("  SEBAS_AGENT_PROVIDER_API_KEY   (required unless gateway is set)");
+    eprintln!("  SEBAS_AGENT_PROVIDER_API_KEY   (required unless router is set)");
     eprintln!("  SEBAS_AGENT_MODEL              (default: claude-sonnet-4-5)");
-    eprintln!("env (optional gateway):");
-    eprintln!("  SEBAS_AGENT_GATEWAY_URL        (e.g. http://127.0.0.1:8787)");
-    eprintln!("  SEBAS_AGENT_GATEWAY_AUTH       (default: sk-gw-local-dev)");
+    eprintln!("env (optional router):");
+    eprintln!("  SEBAS_AGENT_ROUTER_URL        (e.g. http://127.0.0.1:8787)");
+    eprintln!("  SEBAS_AGENT_ROUTER_AUTH       (default: sk-gw-local-dev)");
 }
 
 /// 将事件记录为 JSONL 的工具。
@@ -291,18 +291,18 @@ async fn main() {
 
     let recorder = record.as_ref().map(Recorder::new);
 
-    // LLM 通道（design N9）：直连 provider 默认，gateway 可选。
-    let client = if let Ok(url) = std::env::var("SEBAS_AGENT_GATEWAY_URL") {
-        let auth = env_or("SEBAS_AGENT_GATEWAY_AUTH", "sk-gw-local-dev");
-        eprintln!("[agent-dev] via gateway {url}");
-        AnthropicMessagesClient::gateway(url, auth)
+    // LLM 通道（design N9）：直连 provider 默认，router 可选。
+    let client = if let Ok(url) = std::env::var("SEBAS_AGENT_ROUTER_URL") {
+        let auth = env_or("SEBAS_AGENT_ROUTER_AUTH", "sk-gw-local-dev");
+        eprintln!("[agent-dev] via router {url}");
+        AnthropicMessagesClient::router(url, auth)
     } else {
         let base = env_or("SEBAS_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
         let key = env_or("SEBAS_AGENT_PROVIDER_API_KEY", "");
         if key.is_empty() {
             eprintln!(
                 "[agent-dev] missing SEBAS_AGENT_PROVIDER_API_KEY \
-                 (or set SEBAS_AGENT_GATEWAY_URL to go through the gateway)"
+                 (or set SEBAS_AGENT_ROUTER_URL to go through the router)"
             );
             std::process::exit(2);
         }

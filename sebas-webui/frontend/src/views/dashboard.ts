@@ -285,10 +285,10 @@ export class SebasDashboard extends LitElement {
       .then((s) => {
         // fix-webui-detached-status：真源不可用（providers_available=false）
         // 如实呈现"状态不可用"，与"真的没配 provider"区分开。
-        if (s.gateway?.providers_available === false) {
+        if (s.router?.providers_available === false) {
           this.providerLabel = 'provider status unavailable'
         } else {
-          const first = s.gateway?.providers?.[0]
+          const first = s.router?.providers?.[0]
           this.providerLabel = first ? first.name : 'no provider configured'
         }
       })

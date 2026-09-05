@@ -8,10 +8,10 @@ use http_body_util::BodyExt;
 use sebas_acp::claude::AcpEvent;
 use sebas_channels::ChannelKey;
 use sebas_feishu::cards::CardConfig;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::{Mapping, SessionMap};
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::{Mapping, SessionMap};
 use sebas_webui::build_router;
-use sebas_webui::models::GatewayInfo;
+use sebas_webui::models::RouterInfo;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -24,13 +24,13 @@ fn encode(key: &ChannelKey) -> String {
     urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference)).into_owned()
 }
 
-/// RouterHandle preloaded with one Active (s1), one Dormant (s2), one
+/// DispatchHandle preloaded with one Active (s1), one Dormant (s2), one
 /// Spawning (s3) session, plus the axum app wired against the in-process
 /// backend seam. The outbound receiver stays alive so `emit` never trips
 /// its closed-channel debug assertion.
 async fn fixture() -> (
-    RouterHandle,
-    tokio::sync::mpsc::Receiver<sebas_router::router::Out>,
+    DispatchHandle,
+    tokio::sync::mpsc::Receiver<sebas_dispatch::engine::Out>,
     axum::Router,
 ) {
     let map = SessionMap::new();
@@ -43,11 +43,11 @@ async fn fixture() -> (
         .unwrap();
     map.insert(k3.clone(), Mapping::spawning()).await.unwrap();
 
-    let (router, rx) = RouterHandle::new(map);
+    let (router, rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
-    let app = build_router(backend, GatewayInfo::default(), CardConfig::default());
+    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
     (router, rx, app)
 }
 
@@ -869,7 +869,7 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
     .expect("WebSpawn out within timeout")
     .expect("out channel open");
     match out {
-        sebas_router::router::Out::WebSpawn { model, prompt, .. } => {
+        sebas_dispatch::engine::Out::WebSpawn { model, prompt, .. } => {
             assert_eq!(prompt, "hello");
             assert_eq!(model.as_deref(), Some("pro-model"));
         }
@@ -904,7 +904,7 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
         .expect("SendAcp out within timeout")
         .expect("out channel open");
     match out {
-        sebas_router::router::Out::SendAcp {
+        sebas_dispatch::engine::Out::SendAcp {
             session_id,
             cmd: sebas_acp::AcpCommand::SetModel { model_id, .. },
         } => {
@@ -981,7 +981,7 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Val
 /// encoded key and the decoded key.
 async fn spawn_and_drive_project_session(
     app: &axum::Router,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     prompt: &str,
     project_dir: &str,
     acp_session_id: &str,
@@ -1250,11 +1250,11 @@ async fn web_and_feishu_sessions_are_peers_in_one_snapshot() {
         .await
         .unwrap();
 
-    let (router, _rx) = RouterHandle::new(map);
+    let (router, _rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
-    let app = build_router(backend, GatewayInfo::default(), CardConfig::default());
+    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
 
     let (status, list) = get_json(&app, "/api/sessions").await;
     assert_eq!(status, StatusCode::OK);

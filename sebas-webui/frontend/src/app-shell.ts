@@ -2,7 +2,7 @@
  * App shell: sidebar (brand + project tree + settings entry) + routed
  * outlet — IA v2, aligned with the preview prototype (`preview/preview-app.ts`):
  * 侧栏承载项目树与 pinned 在底部的 Settings 入口，旧的 NAV_ITEMS 链接列表
- * 已删除（settings/gateway/about 并入设置弹窗与工作台，admin 直接移除）。
+ * 已删除（settings/router/about 并入设置弹窗与工作台，admin 直接移除）。
  *
  * Link interception is document-level (composedPath) so anchors rendered
  * inside any view's shadow root navigate SPA-side too — shadow retargeting
@@ -26,7 +26,7 @@ import './views/login-view.js'
 
 // Exported for tests: the route resolution audit iterates these. IA v2 keeps
 // only the workbench, the all-sessions table and session deep links;
-// `/settings` `/gateway` `/about` redirect to `/` (see redirectFor) and
+// `/settings` `/router` `/about` redirect to `/` (see redirectFor) and
 // `/admin/*` is deleted outright — it falls through to the dashboard
 // fallback in onNavigate like any unknown path.
 export const ROUTES: RouteDef[] = [
@@ -340,7 +340,7 @@ export class SebasApp extends LitElement {
   }
 
   private onNavigate(): void {
-    // Retired IA-v1 paths (/settings /gateway /about) canonicalise to `/`
+    // Retired IA-v1 paths (/settings /router /about) canonicalise to `/`
     // before matching, so address bar and rendered view agree.
     const retired = redirectFor(location.pathname)
     if (retired) history.replaceState({}, '', retired)

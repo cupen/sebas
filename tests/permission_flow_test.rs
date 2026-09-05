@@ -5,16 +5,16 @@
 //! → (real) bridge receives AllowOnce via mgr.send.
 //!
 //! Skips the feishu HTTP/WS transport, same recipe as `full_e2e_test`:
-//! FeishuIn is fed straight into `RouterHandle::dispatch`, Out is
+//! FeishuIn is fed straight into `DispatchHandle::dispatch`, Out is
 //! observed on the outbound channel and cross-checked with what the
 //! SessionManager actually receives.
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
-use sebas_router::cards::CardConfig;
+use sebas_dispatch::cards::CardConfig;
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ async fn permission_request_emits_sendcard_and_button_reply_sends_acp() {
     assert!(fake.exists());
 
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = DispatchHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = ChannelKey::feishu("oc_perm", None);

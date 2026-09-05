@@ -13,7 +13,7 @@
 //!
 //! The unit runs the **watchdog** entrypoint (`<stable-binary> watchdog
 //! --config <config>`), not the bare core: systemd supervises exactly one
-//! process and the watchdog supervises core/gateway/webui, owns the control
+//! process and the watchdog supervises core/router/webui, owns the control
 //! socket + `services.json` desired-state, and performs self-upgrade. The
 //! stable binary lives at `<data_dir>/bin/sebas` (seeded at install, replaced
 //! in place by `sebas update`), so a machine reboot runs the latest version.
@@ -115,11 +115,14 @@ pub fn render_unit(inputs: UnitInputs<'_>) -> String {
     s.push_str(&format!("User={}\n", inputs.user));
     s.push_str(&format!("Group={}\n", inputs.user));
     s.push_str(&format!("Environment=RUST_LOG={}\n", inputs.log_level));
-    // The watchdog entrypoint: systemd supervises one process; watchdog
-    // supervises core/gateway/webui + self-upgrade + control plane.
+    // The `run` entrypoint (the watchdog daemon): systemd supervises one
+    // process; the watchdog supervises core/router/webui + self-upgrade +
+    // control plane. Already-installed units keep their old
+    // `watchdog --config` ExecStart bootable via the hidden clap alias.
     s.push_str(&format!(
-        "ExecStart={} watchdog --config {}\n",
+        "ExecStart={} {} --config {}\n",
         systemd_escape(&inputs.binary_abs.display().to_string()),
+        crate::RUN_SUBCOMMAND,
         systemd_escape(&inputs.config_abs.display().to_string()),
     ));
     s.push_str("Restart=on-failure\n");
@@ -190,7 +193,7 @@ fn validate_platform() -> anyhow::Result<()> {
     if cfg!(not(unix)) || cfg!(target_os = "macos") {
         return Err(exit_err(
             6,
-            "systemd is not available on this platform; use `sebas run` directly",
+            "systemd is not available on this platform; use `sebas core` directly",
         ));
     }
 
@@ -494,7 +497,7 @@ mod tests {
         let s = render_unit(std_inputs("cupen"));
         assert!(s.contains("[Unit]"));
         assert!(s.contains("Description="));
-        assert!(s.contains("ExecStart=\"/usr/local/bin/sebas\" watchdog --config \"/home/u/cfg.toml\""));
+        assert!(s.contains("ExecStart=\"/usr/local/bin/sebas\" run --config \"/home/u/cfg.toml\""));
         assert!(s.contains("Environment=RUST_LOG=info"));
         assert!(s.contains("Restart=on-failure"));
         assert!(s.contains("RestartSec=5"));
@@ -510,10 +513,10 @@ mod tests {
     }
 
     #[test]
-    fn unit_runs_watchdog_not_core() {
+    fn unit_runs_run_daemon_not_core() {
         let s = render_unit(std_inputs("cupen"));
-        assert!(s.contains("watchdog --config"), "ExecStart must run watchdog");
-        assert!(!s.contains(" run --config"), "must not run the bare core");
+        assert!(s.contains("run --config"), "ExecStart must run the run (watchdog) entrypoint, not the bare core");
+        assert!(!s.contains(" core --config"), "must not run the bare core");
     }
 
     #[test]
@@ -536,7 +539,7 @@ mod tests {
         };
         let s = render_unit(inputs);
         // Both args wrapped in a single quoted token.
-        assert!(s.contains("ExecStart=\"/opt/my sebas/bin/sebas\" watchdog --config \"/etc/sebas cfg/sebas.toml\""));
+        assert!(s.contains("ExecStart=\"/opt/my sebas/bin/sebas\" run --config \"/etc/sebas cfg/sebas.toml\""));
     }
 
     #[test]

@@ -65,7 +65,7 @@ export interface ProviderInfo {
   base_url_openai: string | null
 }
 
-export interface GatewayInfo {
+export interface RouterInfo {
   listen: string | null
   provider_count: number
   debug: boolean
@@ -157,7 +157,7 @@ export interface About {
   uptime: string
   version: string
   rustc_version: string
-  gateway_listen: string | null
+  router_listen: string | null
   provider_count: number
 }
 
@@ -312,8 +312,8 @@ export const api = {
   summary: () => get<Summary>('/api/summary'),
   sessions: () => get<SessionList>('/api/sessions'),
   session: (encodedKey: string) => get<SessionDetail>(`/api/sessions/${encodedKey}`),
-  settings: () => get<{ card_config: CardConfig; gateway: GatewayInfo }>('/api/settings'),
-  gateway: () => get<{ gateway: GatewayInfo }>('/api/gateway'),
+  settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
+  router: () => get<{ router: RouterInfo }>('/api/router'),
   about: () => get<About>('/api/about'),
   agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
 

@@ -26,7 +26,7 @@
 //!    than delivered a gap; the client re-snapshots on reconnect.
 
 use sebas_channels::ChannelKey;
-use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
@@ -183,7 +183,7 @@ pub enum StateStreamFrame {
     /// 4.2：StateChange wire 形状带 `cmd` tag（与通道请求同风格）。
     #[test]
     fn state_change_wire_shape() {
-        use sebas_router::state_store::StateChange;
+        use sebas_dispatch::state_store::StateChange;
         let changed = StateChange::Changed {
             scope: "projects".into(),
         };

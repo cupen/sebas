@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-sebas-router = { path = "../sebas-router" }
+sebas-dispatch = { path = "../sebas-dispatch" }
 sebas-feishu = { path = "../sebas-feishu" }
 sebas-channels = { path = "../sebas-channels" }
 sebas-acp = { path = "../sebas-acp" }

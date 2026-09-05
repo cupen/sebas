@@ -3,15 +3,15 @@
 //! `run()` uses for its spawn path (`acp_spawn_and_activate` +
 //! `spawn_acp_pump` + `flush_pending_prompts`). This skips the Feishu
 //! HTTP/WS transport (no `FeishuClient`, no `dispatch_out`): `FeishuIn`
-//! is injected straight into `RouterHandle::dispatch`, and `Out` events
+//! is injected straight into `DispatchHandle::dispatch`, and `Out` events
 //! are observed on the outbound channel — they ARE the prod intent,
 //! they just don't traverse HTTP here.
 
 use sebas_acp::claude::manager::SessionManager;
-use sebas_router::cards::CardConfig;
+use sebas_dispatch::cards::CardConfig;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +31,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
 
     // Build the same shape `run()` constructs (run.rs:43–49).
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = DispatchHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     // 1) Inject a Feishu text. Router dispatch goes on_text → spawn_new →
@@ -114,7 +114,7 @@ async fn dispatch_text_drives_bridge_to_finished_emoji() {
         };
         match got {
             Out::UpdateCard { .. } => saw_update = true,
-            Out::React { emoji, .. } if emoji == sebas_router::card_state::phase::DONE => {
+            Out::React { emoji, .. } if emoji == sebas_dispatch::card_state::phase::DONE => {
                 saw_react_done = true;
                 break;
             }
@@ -143,7 +143,7 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
     assert!(fake.exists());
 
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = DispatchHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = ChannelKey::feishu("oc_slow", None);
@@ -200,10 +200,10 @@ async fn slow_stream_exposes_full_fsm_via_debounced_pump() {
             Err(_) => continue,
         };
         if let Out::React { emoji, .. } = &got {
-            if emoji == sebas_router::card_state::phase::WORKING {
+            if emoji == sebas_dispatch::card_state::phase::WORKING {
                 saw_react_working = true;
             }
-            if emoji == sebas_router::card_state::phase::DONE {
+            if emoji == sebas_dispatch::card_state::phase::DONE {
                 saw_react_done = true;
                 if saw_react_working {
                     working_before_done = true;

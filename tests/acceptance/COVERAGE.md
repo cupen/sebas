@@ -3,7 +3,7 @@
 > 账本规则：每个能力一行，requirement 簇逐条标注命中证据（验收旅程 J*、进程级 e2e E*、
 > 既有测试引用）或豁免（注明 cause）。未命中且未豁免 = 缺口（⚠️）。
 > **核心功能集**（80% 硬指标）：① 会话管理 = session-lifecycle + session-persistence +
-> acp-session-mapping；② models 管理 = acp-model-selection + gateway-model-aliases +
+> acp-session-mapping；② models 管理 = acp-model-selection + router-model-aliases +
 > provider-management；③ agent workbench 相关 = agent-workbench + permission-flow；
 > ④ 项目管理 = project-session-actions + state-store(projects) + webui(projects 面)。
 > 核心集增删必须留变更说明。
@@ -20,7 +20,7 @@
 | 核心簇 | requirement 数 | 命中 | 命中率 | 套件内旅程 |
 |---|---|---|---|---|
 | ① 会话管理 | 13 | 13 | 100% | `session_lifecycle_journey` |
-| ② models 管理 | 19 | 18 | 95% | `provider_governance_journey`、`native_agent_turn_via_gateway_journey` |
+| ② models 管理 | 19 | 18 | 95% | `provider_governance_journey`、`native_agent_turn_via_router_journey` |
 | ③ agent workbench 相关 | 21 | 19 | 90% | `workbench_aggregate_journey` |
 | ④ 项目管理 | 12 | 12 | 100% | `projects_session_journey` |
 | **核心合计** | **65** | **62** | **95%** | 每簇 ≥1 条 ✓ |
@@ -55,22 +55,22 @@
 | acp-model-selection | 会话模型清单暴露 | ✅ | sebas-webui `session_endpoints_test`、src `agent_backend` 内联测试 |
 | | set_config_option 换模型 | ✅ | add-acp-model-selection 测试（sebas-acp）|
 | | 模型选择存活于会话生命周期 | ✅ | 同上 |
-| gateway-model-aliases | 别名实体与持久化 | ✅ | sebas-gateway `config` overlay 测试 |
+| router-model-aliases | 别名实体与持久化 | ✅ | sebas-router `config` overlay 测试 |
 | | 别名解析优先级 | ✅ | 同上 |
 | | 上游模型翻译 | ✅ | J: `provider_governance_journey`（my-claude→stub-model）|
-| | 别名校验 | ✅ | sebas-gateway `admin_test` |
-| | 别名作用域 | ✅ | sebas-gateway 内联测试 |
+| | 别名校验 | ✅ | sebas-router `admin_test` |
+| | 别名作用域 | ✅ | sebas-router 内联测试 |
 | provider-management | /provider 主卡布局 | 🚫 | 浏览器级 UI 渲染（豁免，见豁免清单）|
 | | 模式切换 | ✅ | sebas-webui 内联/admin 测试 |
-| | Provider CRUD 表单（API 面）| ✅ | sebas-gateway `admin_test`；J: provider_governance |
-| | 密钥脱敏 | ✅ | sebas-gateway `admin_test`（api_key_configured）|
-| | 模型探测 | ✅ | sebas-gateway `admin_test`（probe）|
+| | Provider CRUD 表单（API 面）| ✅ | sebas-router `admin_test`；J: provider_governance |
+| | 密钥脱敏 | ✅ | sebas-router `admin_test`（api_key_configured）|
+| | 模型探测 | ✅ | sebas-router `admin_test`（probe）|
 | | Off 模式解析 | ✅ | src 内联测试 |
 | | 直连模式 env 翻译 | ✅ | src 内联测试；J: native（SEBAS_AGENT_PROVIDER_* 直连 stub）|
 | | 模型旗标优先级 | ✅ | src 内联测试 |
 | | Gateway 模式 env 翻译 | ✅ | src `agent_backend` 内联测试 |
 | | Provider 错误中止 | ✅ | src 内联测试 |
-| | Provider 卡片反映 store 可用性 | ✅ | sebas-gateway `admin_test` |
+| | Provider 卡片反映 store 可用性 | ✅ | sebas-router `admin_test` |
 
 ### ③ agent workbench 相关（核心）
 
@@ -84,7 +84,7 @@
 | | composer 只承诺进程能力 | ✅ | sebas-webui `agent_kinds_test`；J: workbench（agent-kinds）|
 | | 会话来源可见 | ✅ | sebas-webui 内联测试 |
 | | 项目视图真实工作副本上下文 | ⚠️ | projects_branch 端点缺旅程/端点测试（非阻塞缺口）|
-| | 原生内核会话执行 | ✅ | J: `native_agent_turn_via_gateway_journey`（E 级）|
+| | 原生内核会话执行 | ✅ | J: `native_agent_turn_via_router_journey`（E 级）|
 | | 原生内核 gated call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/fail-closed）|
 | | 目录浏览器加项目 | ✅ | sebas-webui `api_endpoints_test`（browse-dirs）|
 | | 无 prompt 新会话 | ✅ | J: `workbench_aggregate_journey`（占位会话）|
@@ -135,8 +135,8 @@
 | gateway-admin-api | ✅ | `admin_test`；J: provider_governance（/admin/stats）|
 | gateway-auth-rate-limit | ✅ | `auth_test`、`rate_limit_test`；J: `gateway_downstream_auth_journey` |
 | gateway-core | ✅ | `proxy_smoke_test`、`contract_test`、`debug_provider_test`、`failure_test`；E: gateway debug |
-| gateway-metrics | ✅ | sebas-gateway `metrics` 测试；J: /admin/stats 200 |
-| gateway-model-aliases | ✅ | 见核心簇② |
+| gateway-metrics | ✅ | sebas-router `metrics` 测试；J: /admin/stats 200 |
+| router-model-aliases | ✅ | 见核心簇② |
 | opencode-agent | 🚫 | 需真实 opencode CLI（模拟桩不可用）；driver 抽象由 agent-driver 测试覆盖 |
 | permission-flow | ✅ | 见核心簇③ |
 | project-session-actions | ✅ | 见核心簇④ |
@@ -168,7 +168,7 @@
 
 ## 实施期发现（只记录不顺手修，见 design Non-goals）
 
-1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_gateway_journey` 的断言可升级为 status_slug=done。
+1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_router_journey` 的断言可升级为 status_slug=done。
 2. **`run --gateway` 忽略 `SEBAS_GATEWAY_LISTEN`**（run.rs:87 写死 127.0.0.1:0）：detached 形态下 `SEBAS_AGENT_GATEWAY_URL` 无法预注入（网关地址只能事后从日志读）。native 走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径作为替代（本套件已覆盖）。
 3. **会话状态落盘仅在优雅退出**：硬杀（TerminateProcess）不产生状态转储；Windows 无便携优雅信号，故重启恢复段 unix 门控。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。

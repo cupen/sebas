@@ -12,8 +12,8 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::{MappingState, SessionMap};
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::{MappingState, SessionMap};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ fn acp_manager() -> SessionManager {
 /// 返回 routing id（会话仍活，调用方负责 kill）。
 async fn spawn_fresh(
     mgr: &Arc<SessionManager>,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     map: &SessionMap,
     scenario: &str,
 ) -> String {
@@ -82,7 +82,7 @@ async fn spawn_fresh(
 #[allow(clippy::type_complexity)]
 async fn resume(
     mgr: &Arc<SessionManager>,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     old_sid: &str,
     scenario: &str,
 ) -> (String, bool) {
@@ -105,7 +105,7 @@ async fn resume(
 #[tokio::test]
 async fn acp_spawn_persists_real_session_id_mapping() {
     let map = SessionMap::new();
-    let (router, _out_rx) = RouterHandle::new(map.clone());
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(acp_manager());
 
     let sid = spawn_fresh(&mgr, &router, &map, "load-ok").await;
@@ -137,7 +137,7 @@ async fn resume_without_mapped_session_id_falls_back_to_fresh() {
     // 诚实回退 fresh（resumed=false、新 routing id + 新真实 id）。
     let json = r#"{"oc_acp_map":{"session_id":"s-gone","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
-    let (router, _out_rx) = RouterHandle::new(map.clone());
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(acp_manager());
 
     let (sid, resumed) = resume(&mgr, &router, "s-gone", "load-fails").await;
@@ -163,7 +163,7 @@ async fn acp_resume_uses_mapped_real_id_after_restart() {
     // 建会话 → dump → restore（模拟 daemon 重启）→ resume：
     // 映射的 acp_session_id 让 resume 用真实 id 发 session/load（非 routing id）。
     let map = SessionMap::new();
-    let (router, _out_rx) = RouterHandle::new(map.clone());
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(acp_manager());
 
     let sid = spawn_fresh(&mgr, &router, &map, "load-ok").await;
@@ -180,7 +180,7 @@ async fn acp_resume_uses_mapped_real_id_after_restart() {
 
     // 第一次入站文本 → SpawnResume（Dormant 被 claim）。
     let mgr2 = Arc::new(acp_manager());
-    let (router2, mut out_rx) = RouterHandle::new(map2.clone());
+    let (router2, mut out_rx) = DispatchHandle::new(map2.clone());
     router2
         .dispatch(ChannelEvent::Text {
             key: key(),
@@ -237,7 +237,7 @@ async fn load_failure_keeps_original_mapping_in_state() {
     // 以 dormant 归档记录保留在存储（D4：旧会话仍可被未来 load 寻址，
     // 不因一次失败而抹除）。
     let map = SessionMap::new();
-    let (router, _out_rx) = RouterHandle::new(map.clone());
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(acp_manager());
 
     let sid = spawn_fresh(&mgr, &router, &map, "load-ok").await;
@@ -247,7 +247,7 @@ async fn load_failure_keeps_original_mapping_in_state() {
     let map2 = SessionMap::restore_json(&json).unwrap();
 
     let mgr2 = Arc::new(acp_manager());
-    let (router2, _out_rx2) = RouterHandle::new(map2.clone());
+    let (router2, _out_rx2) = DispatchHandle::new(map2.clone());
     let (sid2, resumed) = resume(&mgr2, &router2, &sid, "load-fails").await;
 
     assert!(!resumed, "rejected load → resumed=false");

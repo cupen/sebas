@@ -6,8 +6,8 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::ChannelKey;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +28,7 @@ async fn daemon_handshake_with_fake_cli_finishes_under_5s() {
     let work_dir = support::TestDir::new("daemon_path_repro", "work");
 
     let map = SessionMap::new();
-    let (router, _out_rx) = RouterHandle::new(map);
+    let (router, _out_rx) = DispatchHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = ChannelKey::feishu("oc_x", None);

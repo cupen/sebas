@@ -1446,8 +1446,8 @@ export class SebasPreviewApp extends LitElement {
 
           <div class="service-card">
             <div class="service-info">
-              <div class="service-name">Gateway</div>
-              <div class="service-desc">ACP gateway — listens on 127.0.0.1:8787</div>
+              <div class="service-name">Router</div>
+              <div class="service-desc">ACP router — listens on 127.0.0.1:8787</div>
             </div>
             <div class="service-status">
               <span class="dot on"></span> Running
@@ -1482,7 +1482,7 @@ export class SebasPreviewApp extends LitElement {
       case 'network':
         return html`
           <h3>Network</h3>
-          <p class="desc">Configure an outbound proxy for all sebas connections (provider APIs, gateway, feishu).</p>
+          <p class="desc">Configure an outbound proxy for all sebas connections (provider APIs, router, feishu).</p>
 
           <div class="network-card">
             <div class="network-switch-row">
@@ -1539,7 +1539,7 @@ export class SebasPreviewApp extends LitElement {
             <thead><tr><th>Variable</th><th>Value</th></tr></thead>
             <tbody>
               <tr><td>SEBAS_HOME</td><td>/home/user/.config/sebas</td></tr>
-              <tr><td>SEBAS_GATEWAY_ADDR</td><td>127.0.0.1:8787</td></tr>
+              <tr><td>SEBAS_ROUTER_ADDR</td><td>127.0.0.1:8787</td></tr>
               <tr><td>SEBAS_WEBUI_PORT</td><td>9797</td></tr>
               <tr><td>SEBAS_LOG_LEVEL</td><td>info</td></tr>
               <tr><td>SEBAS_DEFAULT_PROVIDER</td><td>alpha</td></tr>

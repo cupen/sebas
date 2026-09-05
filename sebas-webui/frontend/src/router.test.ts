@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { matchRoute } from './router.js'
 
 // IA v2 production routes (app-shell.ts ROUTES): the workbench, the
-// sessions table and session deep links. /settings /gateway /about
+// sessions table and session deep links. /settings /router /about
 // redirect to / and /admin/* is deleted — no fixture entries for them.
 const ROUTES = [
   { id: 'dashboard', pattern: '/' },

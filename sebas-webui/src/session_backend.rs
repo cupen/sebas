@@ -1,7 +1,7 @@
 //! The session backend seam (openspec/changes/add-core-session-channel — task 2.1).
 //!
 //! Mirrors the `AdminAdapter` seam: the webui crate owns the trait, the sebas
-//! binary crate supplies implementations (in-process over `RouterHandle`, or
+//! binary crate supplies implementations (in-process over `DispatchHandle`, or
 //! the core session channel socket client). The webui crate never depends on
 //! the binary crate — that is the seam's whole point.
 //!
@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
-use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -241,7 +241,7 @@ fn parse_acp_kind(backend: &str) -> Option<String> {
 /// projects 域 mutation 分发（与 core channel 服务端同款）：payload 用
 /// `op` 字段区分子操作——add / remove / save。
 async fn project_mutation(
-    engine: &(dyn sebas_router::state_store::StateStoreEngine + Send + Sync),
+    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
     payload: &serde_json::Value,
 ) -> Result<(), String> {
     let op = payload
@@ -290,7 +290,7 @@ async fn project_mutation(
 /// In-process backend over the router. Used by `sebas run --webui`, where the
 /// webui lives in the same process as the session authority.
 pub struct InProcessBackend {
-    router: sebas_router::RouterHandle,
+    router: sebas_dispatch::DispatchHandle,
     /// Review-card notices relayed from the router's ACP permission broadcast.
     notices: broadcast::Sender<PermissionNotice>,
     /// `request_id` → routing `session_id`, recorded when a PermissionRequest
@@ -300,7 +300,7 @@ pub struct InProcessBackend {
 }
 
 impl InProcessBackend {
-    pub fn new(router: sebas_router::RouterHandle) -> Self {
+    pub fn new(router: sebas_dispatch::DispatchHandle) -> Self {
         let (notices, _) = broadcast::channel(64);
         let request_sessions = Arc::new(RwLock::new(HashMap::new()));
 
@@ -440,7 +440,7 @@ impl SessionBackend for InProcessBackend {
             });
         };
         self.router
-            .emit(sebas_router::Out::SendAcp {
+            .emit(sebas_dispatch::Out::SendAcp {
                 session_id: sid.clone(),
                 cmd: sebas_acp::AcpCommand::SetModel {
                     session_id: sid,
@@ -461,8 +461,8 @@ impl SessionBackend for InProcessBackend {
 
     async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         match self.router.web_close_session(key).await {
-            sebas_router::router::CloseOutcome::Closed => Ok(()),
-            sebas_router::router::CloseOutcome::NotFound => {
+            sebas_dispatch::engine::CloseOutcome::Closed => Ok(()),
+            sebas_dispatch::engine::CloseOutcome::NotFound => {
                 Err(SessionRejection::UnknownSession {
                     key: String::new(),
                 })
@@ -486,7 +486,7 @@ impl SessionBackend for InProcessBackend {
 
     async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
         // In-process backend: use the engine when available.
-        let engine = sebas_router::state_store::engine()?;
+        let engine = sebas_dispatch::state_store::engine()?;
         match domain {
             "settings" => engine.load_settings().await.ok().flatten(),
             "providers" => {
@@ -503,7 +503,7 @@ impl SessionBackend for InProcessBackend {
     }
 
     async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
-        let engine = sebas_router::state_store::engine()
+        let engine = sebas_dispatch::state_store::engine()
             .ok_or_else(|| "state store 未初始化".to_string())?;
         match domain {
             "settings" => {
@@ -536,14 +536,14 @@ impl SessionBackend for InProcessBackend {
         // 决定回填到原生内核（ApproverHub）。先试 native，失败再回退 acp。
         let native = match decision.clone() {
             PermissionDecision::AllowOnce => {
-                sebas_router::native_bridge::NativeApprovalDecision::AllowOnce
+                sebas_dispatch::native_bridge::NativeApprovalDecision::AllowOnce
             }
             PermissionDecision::AllowSession => {
-                sebas_router::native_bridge::NativeApprovalDecision::AllowSession
+                sebas_dispatch::native_bridge::NativeApprovalDecision::AllowSession
             }
-            PermissionDecision::Deny => sebas_router::native_bridge::NativeApprovalDecision::Deny,
+            PermissionDecision::Deny => sebas_dispatch::native_bridge::NativeApprovalDecision::Deny,
             PermissionDecision::Escalate { reason } => {
-                sebas_router::native_bridge::NativeApprovalDecision::Escalate { reason }
+                sebas_dispatch::native_bridge::NativeApprovalDecision::Escalate { reason }
             }
         };
         if self.router.answer_native_permission(request_id, native).await {
@@ -552,7 +552,7 @@ impl SessionBackend for InProcessBackend {
         // acp 会话：走既有 Out::SendAcp PermissionReply。
         let decision = map_permission_decision(decision);
         self.router
-            .emit(sebas_router::Out::SendAcp {
+            .emit(sebas_dispatch::Out::SendAcp {
                 session_id: session_id.clone(),
                 cmd: sebas_acp::AcpCommand::PermissionReply {
                     session_id,
@@ -829,8 +829,8 @@ mod tests {
     // 2.2 验收：in-process 满足 trait 且永远 Reachable。
     #[tokio::test]
     async fn in_process_backend_satisfies_trait_and_is_reachable() {
-        let map = sebas_router::SessionMap::new();
-        let (router, _rx) = sebas_router::RouterHandle::new(map);
+        let map = sebas_dispatch::SessionMap::new();
+        let (router, _rx) = sebas_dispatch::DispatchHandle::new(map);
         let backend = InProcessBackend::new(router);
         assert_eq!(backend.reachability().await, Reachability::Reachable);
         assert!(backend.snapshot().await.is_empty());

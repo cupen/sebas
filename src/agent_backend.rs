@@ -22,7 +22,7 @@ use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionMana
 use sebas_agent::policy::SandboxMode;
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
-use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
     PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
 };
@@ -138,7 +138,7 @@ impl LlmClient for DeadLlmClient {
     ) -> Result<LlmTurn, LlmError> {
         Err(LlmError::terminal(
             "native backend has no LLM credentials \
-             (set SEBAS_AGENT_PROVIDER_API_KEY or SEBAS_AGENT_GATEWAY_URL)",
+             (set SEBAS_AGENT_PROVIDER_API_KEY or SEBAS_AGENT_ROUTER_URL)",
         ))
     }
 }
@@ -147,7 +147,7 @@ impl NativeAgentBackend {
     /// 从环境装配原生内核 manager（design N9）。优先直连
     /// `SEBAS_AGENT_PROVIDER_BASE_URL` + `SEBAS_AGENT_PROVIDER_API_KEY`
     /// （默认端点 `https://api.anthropic.com`），或
-    /// `SEBAS_AGENT_GATEWAY_URL`（+ 可选 `SEBAS_AGENT_GATEWAY_AUTH`）走 gateway。
+    /// `SEBAS_AGENT_ROUTER_URL`（+ 可选 `SEBAS_AGENT_ROUTER_AUTH`）走 router。
     ///
     /// 无凭据时返回 `(manager, Some(cause), …)`——manager 可建但每个 spawn
     /// 会拒绝并报 cause；可用模型与默认模型从 `SEBAS_AGENT_MODELS` /
@@ -160,12 +160,29 @@ impl NativeAgentBackend {
         Vec<String>,
         String,
     ) {
-        let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) =
-            if let Ok(url) = std::env::var("SEBAS_AGENT_GATEWAY_URL") {
-                let auth = std::env::var("SEBAS_AGENT_GATEWAY_AUTH")
+        let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) = {
+            // 旧名回退（rename-cli-surface 兼容窗口）：新名优先，旧名命中时告警。
+            let router_url = match std::env::var("SEBAS_AGENT_ROUTER_URL") {
+                Ok(v) => Some(v),
+                Err(_) => match std::env::var("SEBAS_AGENT_GATEWAY_URL") {
+                    Ok(v) => {
+                        tracing::warn!("env SEBAS_AGENT_GATEWAY_URL 已更名为 SEBAS_AGENT_ROUTER_URL（旧名本期仍生效）");
+                        Some(v)
+                    }
+                    Err(_) => None,
+                },
+            };
+            if let Some(url) = router_url {
+                let auth = std::env::var("SEBAS_AGENT_ROUTER_AUTH")
+                    .or_else(|_| {
+                        std::env::var("SEBAS_AGENT_GATEWAY_AUTH").map(|v| {
+                            tracing::warn!("env SEBAS_AGENT_GATEWAY_AUTH 已更名为 SEBAS_AGENT_ROUTER_AUTH（旧名本期仍生效）");
+                            v
+                        })
+                    })
                     .unwrap_or_else(|_| "sk-gw-local-dev".into());
                 (
-                    Some(Arc::new(AnthropicMessagesClient::gateway(url, auth))),
+                    Some(Arc::new(AnthropicMessagesClient::router(url, auth))),
                     None,
                 )
             } else {
@@ -181,12 +198,13 @@ impl NativeAgentBackend {
                         None,
                         Some(
                             "native backend needs SEBAS_AGENT_PROVIDER_API_KEY \
-                             (or SEBAS_AGENT_GATEWAY_URL)"
+                             (or SEBAS_AGENT_ROUTER_URL)"
                                 .into(),
                         ),
                     ),
                 }
-            };
+            }
+        };
 
         let model = std::env::var("SEBAS_AGENT_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".into());
         // 无凭据时不 panic：以死客户端占位构造。`spawn` 先检查
@@ -823,8 +841,8 @@ mod tests {
     use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
     use sebas_agent::llm::fake::FakeLlmClient;
     use sebas_agent::policy::NetworkMode;
-    use sebas_router::router::Out;
-    use sebas_router::state::{Mapping, SessionMap};
+    use sebas_dispatch::engine::Out;
+    use sebas_dispatch::state::{Mapping, SessionMap};
 
     fn manager() -> SessionManager {
         // 脚本化：先破坏面 bash（→ Ask），再收尾文本。
@@ -996,8 +1014,8 @@ mod tests {
     }
 
     /// 出站接收端必须保活：router 发送在通道关闭时会 panic。
-    async fn make_router() -> sebas_router::RouterHandle {
-        let (router, mut out_rx) = sebas_router::RouterHandle::new(sebas_router::SessionMap::new());
+    async fn make_router() -> sebas_dispatch::DispatchHandle {
+        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(sebas_dispatch::SessionMap::new());
         tokio::spawn(async move {
             while out_rx.recv().await.is_some() {}
         });
@@ -1014,7 +1032,7 @@ mod tests {
         map.insert(key.clone(), Mapping::active("s1"))
             .await
             .unwrap();
-        let (router, mut out_rx) = sebas_router::RouterHandle::new(map);
+        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(map);
 
         let acp: Arc<dyn SessionBackend> = Arc::new(
             sebas_webui::session_backend::InProcessBackend::new(router.clone()),

@@ -146,8 +146,8 @@ export class SebasPreviewWorkbench extends LitElement {
     { value: 'direct/claude-opus-4', label: 'direct / claude-opus-4' },
     { value: 'direct/deepseek-reasoner', label: 'direct / deepseek-reasoner' },
     { value: 'direct/deepseek-chat', label: 'direct / deepseek-chat' },
-    { value: 'gateway/claude-sonnet-4', label: 'gateway / claude-sonnet-4' },
-    { value: 'gateway/claude-opus-4', label: 'gateway / claude-opus-4' },
+    { value: 'router/claude-sonnet-4', label: 'router / claude-sonnet-4' },
+    { value: 'router/claude-opus-4', label: 'router / claude-opus-4' },
     { value: 'off/—', label: 'off / —' },
   ]
 

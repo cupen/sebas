@@ -15,7 +15,7 @@ use super::protocol::{
 };
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
-use sebas_router::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
     PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
 };

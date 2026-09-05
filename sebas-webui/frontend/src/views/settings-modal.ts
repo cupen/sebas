@@ -3,13 +3,13 @@
  * 原型 preview-app.ts 的 settings-dialog 布局——暗色面板、左侧分区导航、
  * 右侧内容区、右上关闭按钮。分区由 `section` 属性驱动：
  *
- *   - models   → provider 列表（/api/gateway 的 providers：名称 + base URL）
- *   - services → Gateway 服务状态（listen / debug / auth）
+ *   - models   → provider 列表（/api/router 的 providers：名称 + base URL）
+ *   - services → Router 服务状态（listen / debug / auth）
  *   - appearance → 主题三态（system / dark / light；切换与持久化在 theme.ts）
  *   - env      → 环境变量名清单（后端无 env 端点，值一律如实标注
  *                "managed by core config"，绝不编造）
  *   - about    → /api/about 的真实数据（version / rustc / uptime /
- *                gateway listen / provider count）
+ *                router listen / provider count）
  *
  * 预览原型里的 'ui' 分区换成这里的 appearance（有了真实的可切换项）；
  * 'network' 分区不迁移。
@@ -20,13 +20,13 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type About, type GatewayInfo } from '../api/client.js'
+import { api, type About, type RouterInfo } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import { getThemeMode, resolvesToLight, setThemeMode, type ThemeMode } from '../theme.js'
 
 /**
- * 设置弹窗分区。Models 与 Services 都来自 /api/gateway（是可用的唯一
+ * 设置弹窗分区。Models 与 Services 都来自 /api/router（是可用的唯一
  * 后端数据面），appearance 由 theme.ts 承担，Env/About 由本组件直渲染
  * （数据源见文件头注释）。预览原型中的 'network' 分区不迁移——没有
  * 真实的可切换项。
@@ -58,17 +58,17 @@ const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string
 ]
 
 /**
- * sebas 工作区实际读取的环境变量（grep 自 sebas-router / sebas-gateway /
+ * sebas 工作区实际读取的环境变量（grep 自 sebas-router / sebas-router /
  * sebas-acp / sebas-webui / core config）。后端没有任何 env 端点，所以
  * 这里只列名字与用途，值一列如实写 "managed by core config"。
  */
 const ENV_VARS: ReadonlyArray<{ name: string; what: string }> = [
-  { name: 'SEBAS_GATEWAY_CONFIG', what: 'Gateway config file path' },
-  { name: 'SEBAS_GATEWAY_LISTEN', what: 'Gateway listen address override' },
-  { name: 'SEBAS_GATEWAY_PROVIDER_OVERLAY', what: 'Provider overlay file' },
+  { name: 'SEBAS_ROUTER_CONFIG', what: 'Router config file path' },
+  { name: 'SEBAS_ROUTER_LISTEN', what: 'Router listen address override' },
+  { name: 'SEBAS_ROUTER_PROVIDER_OVERLAY', what: 'Provider overlay file' },
   { name: 'SEBAS_STATE_FILE', what: 'Session state store path' },
   { name: 'SEBAS_WEBUI_PASSWORD', what: 'WebUI admin password (presence enables auth)' },
-  { name: 'SEBAS_CONTROL_SECRET', what: 'Gateway control-plane secret' },
+  { name: 'SEBAS_CONTROL_SECRET', what: 'Router control-plane secret' },
   { name: 'SEBAS_LOG_LEVEL', what: 'Core log filter' },
   { name: 'SEBAS_HANG_TIMEOUT_SECS', what: 'Agent driver hang timeout (seconds)' },
   { name: 'SEBAS_FEISHU_APP_ID', what: 'Feishu app id' },
@@ -89,9 +89,9 @@ export class SebasSettingsModal extends LitElement {
   @state() private aboutData: About | null = null
   @state() private aboutError = ''
   @state() private aboutLoading = false
-  /** /api/gateway 响应（Models/Services 分区共享）；懒加载，切到时拉取。 */
-  @state() private gateway: GatewayInfo | null = null
-  @state() private gatewayError = ''
+  /** /api/router 响应（Models/Services 分区共享）；懒加载，切到时拉取。 */
+  @state() private router: RouterInfo | null = null
+  @state() private routerError = ''
   /** 当前主题三态（Appearance 分区）；初值来自 localStorage（theme.ts）。 */
   @state() private themeMode: ThemeMode = getThemeMode()
 
@@ -502,7 +502,7 @@ export class SebasSettingsModal extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // About 分区懒加载：切到 about 时拉一次（失败可重试——下次切换再取）。
     if (changed.has('section') && this.section === 'about') this.loadAbout()
-    // Models/Services 分区共享 gateway 数据，懒加载一次。
+    // Models/Services 分区共享 router 数据，懒加载一次。
     if (changed.has('section') && (this.section === 'models' || this.section === 'services')) {
       this.loadGateway()
     }
@@ -536,14 +536,14 @@ export class SebasSettingsModal extends LitElement {
   }
 
   private loadGateway(): void {
-    if (this.gateway || this.gatewayError) return // 已加载或已失败（可重试开关）
+    if (this.router || this.routerError) return // 已加载或已失败（可重试开关）
     api
-      .gateway()
+      .router()
       .then((d) => {
-        this.gateway = d.gateway
+        this.router = d.router
       })
       .catch((e) => {
-        this.gatewayError = String(e)
+        this.routerError = String(e)
       })
   }
 
@@ -554,8 +554,8 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  // 分区渲染：models/services 共享 /api/gateway 数据（provider 列表 /
-  // Gateway 服务状态），env/about 由本组件直渲染（数据源见文件头注释）。
+  // 分区渲染：models/services 共享 /api/router 数据（provider 列表 /
+  // Router 服务状态），env/about 由本组件直渲染（数据源见文件头注释）。
   private renderSection(section: SettingsSection) {
     switch (section) {
       case 'models':
@@ -609,13 +609,13 @@ export class SebasSettingsModal extends LitElement {
 
   /** Models：provider 列表（名称 + base URL）。 */
   private renderModels() {
-    if (this.gatewayError)
+    if (this.routerError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.gatewayError}</span>
+          ${icon('alert')}<span>Failed to load: ${this.routerError}</span>
         </div>
       `
-    if (!this.gateway)
+    if (!this.router)
       return html`
         <div class="panel panel-pad">
           ${[0, 1].map(
@@ -628,7 +628,7 @@ export class SebasSettingsModal extends LitElement {
           )}
         </div>
       `
-    const providers = this.gateway.providers
+    const providers = this.router.providers
     return html`
       <div class="provider-list">
         ${providers.length === 0
@@ -647,15 +647,15 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** Services：Gateway 后台服务状态（listen / debug / auth）。 */
+  /** Services：Router 后台服务状态（listen / debug / auth）。 */
   private renderServices() {
-    if (this.gatewayError)
+    if (this.routerError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.gatewayError}</span>
+          ${icon('alert')}<span>Failed to load: ${this.routerError}</span>
         </div>
       `
-    if (!this.gateway)
+    if (!this.router)
       return html`
         <div class="panel panel-pad">
           ${[0, 1].map(
@@ -668,13 +668,13 @@ export class SebasSettingsModal extends LitElement {
           )}
         </div>
       `
-    const g = this.gateway
+    const g = this.router
     const auth = g.has_auth ? 'configured' : 'none'
     return html`
       <div class="service-card">
         <div class="service-info">
-          <div class="service-name">Gateway</div>
-          <div class="service-desc">ACP gateway — listens on ${g.listen ?? '—'}</div>
+          <div class="service-name">Router</div>
+          <div class="service-desc">ACP router — listens on ${g.listen ?? '—'}</div>
         </div>
         <div class="service-status">
           <span class="dot on"></span> Running
@@ -759,8 +759,8 @@ export class SebasSettingsModal extends LitElement {
           <dd>${a.rustc_version}</dd>
         </div>
         <div class="kv">
-          <dt>Gateway listen</dt>
-          <dd>${a.gateway_listen ?? '—'}</dd>
+          <dt>Router listen</dt>
+          <dd>${a.router_listen ?? '—'}</dd>
         </div>
         <div class="kv">
           <dt>Providers</dt>

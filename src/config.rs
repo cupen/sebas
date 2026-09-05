@@ -8,7 +8,7 @@ pub struct Config {
     #[serde(default)]
     pub acp: AcpConfig,
     #[serde(default)]
-    pub router: RouterConfig,
+    pub dispatch: DispatchConfig,
     #[serde(default)]
     pub card: sebas_feishu::cards::CardConfig,
     #[serde(default)]
@@ -259,7 +259,7 @@ impl AcpConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct RouterConfig {
+pub struct DispatchConfig {
     #[serde(default = "default_state_file")]
     pub state_file: String,
     #[serde(default = "default_channel_buffer")]
@@ -268,7 +268,7 @@ pub struct RouterConfig {
     pub max_concurrent_sessions: usize,
 }
 
-impl Default for RouterConfig {
+impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
             state_file: default_state_file(),
@@ -344,7 +344,7 @@ pub struct WatchdogConfig {
     #[serde(default)]
     pub webui: WatchdogWebUiConfig,
     #[serde(default)]
-    pub gateway: WatchdogGatewayConfig,
+    pub router: WatchdogRouterConfig,
 }
 
 /// watchdog 模式下 core 子进程（飞书 bot + ACP）的开关。
@@ -365,7 +365,7 @@ pub struct WatchdogCoreConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WatchdogWebUiConfig {
     /// Let watchdog own the WebUI lifecycle. 默认开：watchdog 唯一默认启动
-    /// 的服务，其余（core/gateway）由 WebUI 服务页按需启停。
+    /// 的服务，其余（core/router）由 WebUI 服务页按需启停。
     #[serde(default = "default_webui_enabled")]
     pub enabled: bool,
     /// Bind address. Phase 2.3 tightens non-loopback security.
@@ -408,11 +408,11 @@ fn default_webui_port() -> u16 {
     9797
 }
 
-/// watchdog 模式下 gateway 子进程的开关（默认关：未 opt-in 不 spawn）。
-/// 生产 gateway 默认形态仍是裸 core 的 in-process `run --gateway`；
+/// watchdog 模式下 router 子进程的开关（默认关：未 opt-in 不 spawn）。
+/// 生产 router 默认形态仍是裸 core 的 in-process `run --router`；
 /// 显式开启后由 watchdog 作为受管子进程监督（sebas-08c）。
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct WatchdogGatewayConfig {
+pub struct WatchdogRouterConfig {
     #[serde(default)]
     pub enabled: bool,
 }
@@ -486,6 +486,45 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
     }
 }
 
+/// rename-cli-surface：改名前的配置节名迁移（解析前重写 TOML 文本）。
+/// - `[router]` → `[router]`（模型路由；无歧义）
+/// - `[router]` → `[dispatch]`（会话分发）：`[router]` 既是旧节名又是新节名，
+///   无法凭名字区分——按内容特征判定：含 dispatch 专属键（state_file /
+///   channel_buffer / max_concurrent_sessions）视为旧节迁移，否则视为新节保留。
+/// 命中迁移时 warn 一行提示（不报错，旧配置照常启动）。
+fn migrate_renamed_sections(raw: &str) -> String {
+    let Ok(mut table) = raw.parse::<toml::Table>() else {
+        return raw.to_string();
+    };
+    // 先让位（旧 [router]=会话分发 → [dispatch]）再入位（旧 [gateway]=模型路由
+    // → [router]），顺序不可换。
+    if let Some(router) = table.remove("router") {
+        let looks_legacy_dispatch = router.as_table().is_some_and(|t| {
+            t.contains_key("state_file")
+                || t.contains_key("channel_buffer")
+                || t.contains_key("max_concurrent_sessions")
+        });
+        if looks_legacy_dispatch {
+            eprintln!("warn: 配置节 [router] 已更名为 [dispatch]（已自动迁移）：请重命名配置节");
+            table.insert("dispatch".into(), router);
+        } else {
+            table.insert("router".into(), router);
+        }
+    }
+    if let Some(gateway) = table.remove("gateway") {
+        eprintln!("warn: 配置节 [gateway] 已更名为 [router]（已自动迁移）：请重命名配置节");
+        table.insert("router".into(), gateway);
+    }
+    // [watchdog.gateway] → [watchdog.router]（受管 router 子进程开关）。
+    if let Some(watchdog) = table.get_mut("watchdog").and_then(|v| v.as_table_mut()) {
+        if let Some(gw) = watchdog.remove("gateway") {
+            eprintln!("warn: 配置节 [watchdog.gateway] 已更名为 [watchdog.router]（已自动迁移）：请重命名配置节");
+            watchdog.insert("router".into(), gw);
+        }
+    }
+    table.to_string()
+}
+
 fn default_github_repo() -> String {
     "cupen/sebas".into()
 }
@@ -525,8 +564,9 @@ impl Config {
     /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
         warn_deprecated_watchdog_keys(s);
+        let s = migrate_renamed_sections(s);
         let mut cfg: Config =
-            toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
+            toml::from_str(&s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
         cfg.acp.migrate_legacy_claude();
         cfg.apply_env_overrides();
         cfg.validate()?;
@@ -557,7 +597,7 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         // feishu 是可选项（sebas-2ty）：app_id/app_secret 同时为空 = 不接入
-        // 飞书（`sebas run` 以无飞书模式运行；watchdog 下 core 服务默认不
+        // 飞书（`sebas core` 以无飞书模式运行；watchdog 下 core 服务默认不
         // 启动）。只配其一属于半配置，明确报错而不是静默半启用。
         if self.feishu.app_id.is_empty() != self.feishu.app_secret.is_empty() {
             return Err(SebasError::Config(
@@ -592,7 +632,7 @@ impl Config {
     ///    目录（缺失则创建；创建/探测失败 → 友好 Config 错误，不 panic）。
     /// 2. ACP 子进程二进制可达：绝对路径查存在+可执行位；裸名字扫 PATH。
     pub fn validate_runtime(&self) -> Result<()> {
-        if let Some(parent) = std::path::Path::new(&self.router.state_file).parent() {
+        if let Some(parent) = std::path::Path::new(&self.dispatch.state_file).parent() {
             check_dir_writable(parent, "router.state_file 父目录")?;
         }
         check_dir_writable(
@@ -609,7 +649,7 @@ impl Config {
     }
 
     fn with_expanded_paths(mut self) -> Self {
-        self.router.state_file = expand_tilde(&self.router.state_file);
+        self.dispatch.state_file = expand_tilde(&self.dispatch.state_file);
         for agent in self.acp.agents.values_mut() {
             if let AgentConfig::Claude(c) = agent {
                 c.sessions_dir = expand_tilde(&c.sessions_dir);
@@ -696,11 +736,11 @@ mod tests {
     #[test]
     fn webui_enabled_by_default_and_core_disabled() {
         // watchdog 默认服务面 = 仅 WebUI（sebas-2ty）：webui 默认开，
-        // core（飞书 bot）与 gateway 默认关，由 WebUI 服务页按需启停。
+        // core（飞书 bot）与 router 默认关，由 WebUI 服务页按需启停。
         let cfg = Config::parse("").expect("空配置应可解析（feishu 可选）");
         assert!(cfg.watchdog.webui.enabled, "webui 应默认启用");
         assert!(!cfg.watchdog.core.enabled, "core 应默认停用");
-        assert!(!cfg.watchdog.gateway.enabled, "gateway 应默认停用");
+        assert!(!cfg.watchdog.router.enabled, "router 应默认停用");
         assert!(!cfg.feishu.enabled(), "无凭证时 feishu 应视为未启用");
     }
 

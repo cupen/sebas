@@ -1,12 +1,12 @@
 /**
- * Preview gateway stub.
+ * Preview router stub.
  */
 
 import { LitElement, css, html } from 'lit'
 import { customElement } from 'lit/decorators.js'
 import { viewStyles } from '../../styles/shared.js'
 
-@customElement('sebas-preview-gateway')
+@customElement('sebas-preview-router')
 export class SebasPreviewGateway extends LitElement {
   static styles = [
     viewStyles,
@@ -20,13 +20,13 @@ export class SebasPreviewGateway extends LitElement {
     return html`
       <header class="page-head">
         <div>
-          <h1 class="page-title">Gateway</h1>
-          <p class="page-sub">API gateway provider list and base URLs.</p>
+          <h1 class="page-title">Router</h1>
+          <p class="page-sub">API router provider list and base URLs.</p>
         </div>
       </header>
 
       <section class="panel">
-        <div class="panel-head"><h2 class="panel-title">Gateway info</h2></div>
+        <div class="panel-head"><h2 class="panel-title">Router info</h2></div>
         <dl style="margin:0;padding:var(--sebas-space-2) var(--sebas-space-4);">
           <div class="kv"><dt>Listen</dt><dd class="mono">127.0.0.1:8787</dd></div>
           <div class="kv"><dt>Providers</dt><dd class="mono">2</dd></div>
@@ -40,6 +40,6 @@ export class SebasPreviewGateway extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'sebas-preview-gateway': SebasPreviewGateway
+    'sebas-preview-router': SebasPreviewGateway
   }
 }

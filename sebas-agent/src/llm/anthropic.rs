@@ -1,7 +1,7 @@
 //! Anthropic Messages 流式客户端（task 2.2/2.3，design N5）。
 //!
 //! 端点可配置（D3 修订）：直连 provider（默认，[`AnthropicMessagesClient::direct_provider`]）
-//! 或本地 gateway（[`AnthropicMessagesClient::gateway`]）。两者都是"Anthropic Messages
+//! 或本地 router（[`AnthropicMessagesClient::router`]）。两者都是"Anthropic Messages
 //! 流式 HTTP 端点"，对内核只是端点与凭证不同，wire protocol 完全一致。
 //! 不内嵌任何 provider SDK（spec：LLM channel）。
 
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// 鉴权风格。
 #[derive(Debug, Clone)]
 pub enum Auth {
-    /// Anthropic 风格 `x-api-key` 头（直连 provider 与 gateway 的 claude 兼容入口均用此）。
+    /// Anthropic 风格 `x-api-key` 头（直连 provider 与 router 的 claude 兼容入口均用此）。
     ApiKey(String),
     /// `Authorization: Bearer` 头。
     Bearer(String),
@@ -40,13 +40,13 @@ pub struct AnthropicMessagesClient {
 
 impl AnthropicMessagesClient {
     /// 直连 provider（默认路径）：base_url 如 `https://api.anthropic.com` 或任意
-    /// Anthropic 兼容上游；不需要运行 gateway。
+    /// Anthropic 兼容上游；不需要运行 router。
     pub fn direct_provider(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self::with_auth(base_url, Auth::ApiKey(api_key.into()))
     }
 
-    /// 经可选 gateway：端点为本地 gateway（如 `http://127.0.0.1:8787`）。
-    pub fn gateway(url: impl Into<String>, auth_token: impl Into<String>) -> Self {
+    /// 经可选 router：端点为本地 router（如 `http://127.0.0.1:8787`）。
+    pub fn router(url: impl Into<String>, auth_token: impl Into<String>) -> Self {
         Self::with_auth(url, Auth::ApiKey(auth_token.into()))
     }
 
@@ -378,8 +378,8 @@ mod tests {
 
     #[tokio::test]
     async fn direct_provider_endpoint_receives_the_request() {
-        // spec「Direct provider endpoint without a gateway」：配置 provider
-        // base URL + 凭证 → 请求发往该端点，全程无 gateway。
+        // spec「Direct provider endpoint without a router」：配置 provider
+        // base URL + 凭证 → 请求发往该端点，全程无 router。
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (hit_tx, hit_rx) = std::sync::mpsc::channel::<String>();

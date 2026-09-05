@@ -1,11 +1,11 @@
-//! Route handlers: pure helpers for the JSON API + the gateway BFF proxies.
+//! Route handlers: pure helpers for the JSON API + the router BFF proxies.
 
 use crate::models::{SessionRow, SessionStatus};
 use crate::server::WebUiState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use sebas_channels::key::ChannelKey;
-use sebas_router::SessionInfo;
+use sebas_dispatch::SessionInfo;
 
 // ---- Helper functions ----
 
@@ -143,23 +143,23 @@ pub(crate) fn format_uptime(d: std::time::Duration) -> String {
     }
 }
 
-// ---- gateway BFF mutation 路由（Task 6.3）：全部转发 admin API ----
+// ---- router BFF mutation 路由（Task 6.3）：全部转发 admin API ----
 
-fn gateway_client_of(state: &WebUiState) -> crate::gateway_client::GatewayClient {
-    let listen = state.gateway.listen.clone().unwrap_or_default();
-    crate::gateway_client::GatewayClient::new(&listen)
+fn router_client_of(state: &WebUiState) -> crate::router_client::RouterClient {
+    let listen = state.router.listen.clone().unwrap_or_default();
+    crate::router_client::RouterClient::new(&listen)
 }
 
 /// 无 listen 或无 secret → 503（mutation 面不可用；只读 loopback 仍可看页）。
-fn mutation_available(client: &crate::gateway_client::GatewayClient, state: &WebUiState) -> bool {
-    state.gateway.listen.is_some() && client.has_secret()
+fn mutation_available(client: &crate::router_client::RouterClient, state: &WebUiState) -> bool {
+    state.router.listen.is_some() && client.has_secret()
 }
 
-pub async fn gateway_api_provider_create(
+pub async fn router_api_provider_create(
     State(state): State<WebUiState>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -169,12 +169,12 @@ pub async fn gateway_api_provider_create(
     }
 }
 
-pub async fn gateway_api_provider_update(
+pub async fn router_api_provider_update(
     State(state): State<WebUiState>,
     Path(name): Path<String>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -184,11 +184,11 @@ pub async fn gateway_api_provider_update(
     }
 }
 
-pub async fn gateway_api_provider_delete(
+pub async fn router_api_provider_delete(
     State(state): State<WebUiState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -198,11 +198,11 @@ pub async fn gateway_api_provider_delete(
     }
 }
 
-pub async fn gateway_api_provider_probe(
+pub async fn router_api_provider_probe(
     State(state): State<WebUiState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -212,11 +212,11 @@ pub async fn gateway_api_provider_probe(
     }
 }
 
-pub async fn gateway_api_alias_create(
+pub async fn router_api_alias_create(
     State(state): State<WebUiState>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -226,12 +226,12 @@ pub async fn gateway_api_alias_create(
     }
 }
 
-pub async fn gateway_api_alias_update(
+pub async fn router_api_alias_update(
     State(state): State<WebUiState>,
     Path(alias): Path<String>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -241,11 +241,11 @@ pub async fn gateway_api_alias_update(
     }
 }
 
-pub async fn gateway_api_alias_delete(
+pub async fn router_api_alias_delete(
     State(state): State<WebUiState>,
     Path(alias): Path<String>,
 ) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -255,8 +255,8 @@ pub async fn gateway_api_alias_delete(
     }
 }
 
-pub async fn gateway_api_reload(State(state): State<WebUiState>) -> axum::response::Response {
-    let client = gateway_client_of(&state);
+pub async fn router_api_reload(State(state): State<WebUiState>) -> axum::response::Response {
+    let client = router_client_of(&state);
     if !mutation_available(&client, &state) {
         return err_503_no_secret();
     }
@@ -266,9 +266,9 @@ pub async fn gateway_api_reload(State(state): State<WebUiState>) -> axum::respon
     }
 }
 
-/// gateway mutation 守卫（Task 6.3，语义与 admin_mutation_guard 一致但
+/// router mutation 守卫（Task 6.3，语义与 admin_mutation_guard 一致但
 /// 不依赖 AdminState）：POST-only（405）+ loopback origin 检查（403）。
-pub async fn gateway_mutation_guard(
+pub async fn router_mutation_guard(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -293,7 +293,7 @@ pub async fn gateway_mutation_guard(
                     })
                     .unwrap_or(false)
         })
-        .unwrap_or(true); // 无 origin（CLI/curl）放行——gateway 侧另有 bearer 鉴权
+        .unwrap_or(true); // 无 origin（CLI/curl）放行——router 侧另有 bearer 鉴权
     if !origin_ok {
         return (axum::http::StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
@@ -311,7 +311,7 @@ fn err_json(msg: String) -> axum::response::Response {
 fn err_503_no_secret() -> axum::response::Response {
     (
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        axum::Json(serde_json::json!({"error": "gateway admin mutation 不可用（未配置 SEBAS_CONTROL_SECRET 或 gateway 未启动）"})),
+        axum::Json(serde_json::json!({"error": "router admin mutation 不可用（未配置 SEBAS_CONTROL_SECRET 或 router 未启动）"})),
     )
         .into_response()
 }

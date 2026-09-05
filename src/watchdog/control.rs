@@ -52,7 +52,7 @@ pub enum UpdateTarget {
 pub enum ManagedService {
     Core,
     WebUi,
-    Gateway,
+    Router,
     Feishu,
 }
 

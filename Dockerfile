@@ -49,8 +49,8 @@ COPY --from=builder /app/target/release/sebas /usr/local/bin/sebas
 
 WORKDIR /app
 
-# sebas run 在找不到 config.toml 时会回退到环境变量
+# sebas core 在找不到 config.toml 时会回退到环境变量
 # （SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET），
 # 也可以用 -v ./config.toml:/app/config.toml 挂载配置。
 ENTRYPOINT ["/usr/local/bin/sebas"]
-CMD ["run", "--config", "/app/config.toml"]
+CMD ["core", "--config", "/app/config.toml"]

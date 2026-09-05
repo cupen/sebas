@@ -7,8 +7,8 @@
 
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 use sebas_channels::ChannelKey;
-use sebas_router::router::Out;
-use sebas_router::state::{Mapping, SessionMap};
+use sebas_dispatch::engine::Out;
+use sebas_dispatch::state::{Mapping, SessionMap};
 use sebas_webui::session_backend::{
     InProcessBackend, PermissionDecision, SessionBackend,
 };
@@ -32,7 +32,7 @@ async fn acp_permission_round_trips_through_in_process_backend() {
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
-    let (router, mut out_rx) = sebas_router::RouterHandle::new(map);
+    let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(map);
     let backend = InProcessBackend::new(router.clone());
 
     // 先订阅审查卡流，再触发权限请求（broadcast 只转发订阅后的事件）。
@@ -94,7 +94,7 @@ async fn escalate_decision_downgrades_to_allow_once() {
     map.insert(key.clone(), Mapping::active("s2"))
         .await
         .unwrap();
-    let (router, mut out_rx) = sebas_router::RouterHandle::new(map);
+    let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(map);
     let backend = InProcessBackend::new(router.clone());
 
     let mut notices = backend.permission_requests().expect("notices");
@@ -134,7 +134,7 @@ async fn escalate_decision_downgrades_to_allow_once() {
 
 #[tokio::test]
 async fn unknown_request_answers_false() {
-    let (router, _out_rx) = sebas_router::RouterHandle::new(SessionMap::new());
+    let (router, _out_rx) = sebas_dispatch::DispatchHandle::new(SessionMap::new());
     let backend = InProcessBackend::new(router);
     assert!(
         !backend

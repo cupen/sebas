@@ -49,7 +49,7 @@ cp config/config.toml.example config.toml
 
 # 2. 构建并启动（webui 默认监听 127.0.0.1:9797）
 cargo build --release
-./target/release/sebas run --config ./config.toml --webui
+./target/release/sebas core --config ./config.toml --webui
 ```
 
 浏览器打开 <http://127.0.0.1:9797>（工作台在 `/agent` 页）：新建项目、开会话、发指令，agent 的输出实时出现在时间线里。
@@ -101,7 +101,7 @@ docker run -d --name sebas \
   --restart unless-stopped \
   -p 9797:9797 \
   ghcr.io/cupen/sebas:latest \
-  sebas run --webui
+  sebas core --webui
 ```
 
 或挂载配置文件：
@@ -112,7 +112,7 @@ docker run -d --name sebas \
   -p 9797:9797 \
   -v /path/to/config.toml:/app/config.toml:ro \
   ghcr.io/cupen/sebas:latest \
-  sebas run --webui
+  sebas core --webui
 ```
 
 > 注意：容器内需有 `claude` CLI 才能驱动 agent——建议将宿主机二进制挂载进容器或在自定义镜像中预装。日志：`docker logs -f sebas`；本地构建镜像：`invoke build-image`。
@@ -157,7 +157,7 @@ docker run -d --name sebas \
 sebas 内置一个双协议（Anthropic/OpenAI）纯透传 LLM 网关。让 Claude Code 或任意兼容 SDK 经 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 指向本网关，即可将流量路由到 DeepSeek、Kimi、GLM、MiniMax、Ark、DashScope、Gemini 等上游 provider。
 
 ```toml
-[gateway]
+[router]
 listen = "127.0.0.1:8787"
 auth_token = "sk-gw-local-dev"
 
@@ -166,13 +166,13 @@ protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[gateway.routes]
+[router.routes]
 "claude-*" = ["anthropic"]
 ```
 
 ```bash
-# 随主服务启动（或独立进程：sebas gateway --config …）
-sebas run --config ./config.toml --gateway
+# 随主服务启动（或独立进程：sebas router --config …）
+sebas core --config ./config.toml --router
 
 # 客户端接入
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claude
@@ -204,13 +204,13 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claud
      中立事件 ChannelEvent  ⇅  中立卡片 ChannelCard
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│ core（sebas run，长驻进程，会话状态的单一权威）       │
+│ core（sebas core，长驻进程，会话状态的单一权威）      │
 │   router：会话映射 · slash 命令 · 权限状态机 · 编排   │
 │   执行体：ACP 桥（Claude Code 子进程）               │
 │           │ 原生内核 sebas-agent（开发中）           │
 └──────────────────────┬──────────────────────────────┘
                        ▼
-        sebas-gateway（Anthropic/OpenAI → 多 provider）
+        sebas-router（Anthropic/OpenAI → 多 provider）
 ```
 
 核心不特判任何通道：适配器把渠道入站事件翻译为中立 `ChannelEvent`，把中立 `ChannelCard` 渲染为渠道形态。
@@ -228,7 +228,8 @@ sebas/
 ├── sebas-router/         # 路由引擎（会话映射、命令解析、权限状态机）
 ├── sebas-acp/            # ACP 桥：驱动 Claude Code 等外部 agent
 ├── sebas-agent/          # 原生 agent 内核（开发中）
-├── sebas-gateway/        # LLM Provider 网关（Anthropic/OpenAI 双协议）
+├── sebas-router/         # 模型路由：LLM provider 透传代理（Anthropic/OpenAI 双协议；原 sebas-gateway）
+├── sebas-dispatch/       # 会话分发领域层（会话映射/命令/权限；原 sebas-router）
 ├── config/               # 配置文件示例
 ├── tests/                # 集成测试（含 fake-claude 测试桩）
 └── docs/                 # 设计文档（架构、前端联调等）

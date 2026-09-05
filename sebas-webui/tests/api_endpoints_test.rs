@@ -1,5 +1,5 @@
 //! Integration tests for the JSON API surface (`/api/*`): summary, session
-//! list/detail, settings/gateway/about, and the session mutations with the
+//! list/detail, settings/router/about, and the session mutations with the
 //! unified `{ "error": ... }` envelope. Drives the router in-process via
 //! axum's `oneshot` — no live listener required.
 
@@ -8,12 +8,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sebas_channels::ChannelKey;
 use http_body_util::BodyExt;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::{Mapping, SessionMap};
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::{Mapping, SessionMap};
 use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
-use sebas_webui::models::GatewayInfo;
+use sebas_webui::models::RouterInfo;
 use sebas_webui::build_router;
 
 fn key(id: &str) -> ChannelKey {
@@ -24,12 +24,12 @@ fn encode(key: &ChannelKey) -> String {
     urlencoding::encode(&format!("{}\0{}", key.channel.as_str(), key.reference)).into_owned()
 }
 
-/// RouterHandle preloaded with one Active (s1), one Dormant (s2), one
+/// DispatchHandle preloaded with one Active (s1), one Dormant (s2), one
 /// Spawning (s3) session, plus the axum app wired against the in-process
 /// backend seam. The second element is the outbound receiver: keeping it
-/// alive prevents `RouterHandle::emit`'s closed-channel debug assertion
+/// alive prevents `DispatchHandle::emit`'s closed-channel debug assertion
 /// from firing when a test drives the create/message mutations.
-async fn fixture() -> (RouterHandle, tokio::sync::mpsc::Receiver<sebas_router::router::Out>, axum::Router) {
+async fn fixture() -> (DispatchHandle, tokio::sync::mpsc::Receiver<sebas_dispatch::engine::Out>, axum::Router) {
     let map = SessionMap::new();
     let k1 = key("a");
     let k2 = key("b");
@@ -40,11 +40,11 @@ async fn fixture() -> (RouterHandle, tokio::sync::mpsc::Receiver<sebas_router::r
         .unwrap();
     map.insert(k3.clone(), Mapping::spawning()).await.unwrap();
 
-    let (router, rx) = RouterHandle::new(map);
+    let (router, rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
-    let app = build_router(backend, GatewayInfo::default(), CardConfig::default());
+    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
     (router, rx, app)
 }
 
@@ -181,18 +181,18 @@ async fn session_detail_rejects_invalid_and_unknown_keys() {
 }
 
 #[tokio::test]
-async fn settings_gateway_about_expose_page_data() {
+async fn settings_router_about_expose_page_data() {
     let (_router, _rx, app) = fixture().await;
     let (status, v) = get_json(&app, "/api/settings").await;
     assert_eq!(status, StatusCode::OK);
     assert!(v["card_config"].is_object(), "card_config missing: {v}");
     assert!(v["card_config"]["theme_color"].as_str().is_some());
-    assert!(v["gateway"].is_object());
+    assert!(v["router"].is_object());
 
-    let (status, v) = get_json(&app, "/api/gateway").await;
+    let (status, v) = get_json(&app, "/api/router").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(v["gateway"].is_object());
-    assert!(v["gateway"]["provider_count"].is_u64());
+    assert!(v["router"].is_object());
+    assert!(v["router"]["provider_count"].is_u64());
 
     let (status, v) = get_json(&app, "/api/about").await;
     assert_eq!(status, StatusCode::OK);

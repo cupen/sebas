@@ -14,9 +14,9 @@ use sebas_acp::claude::ClaudeCodeDriver;
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::ChannelKey;
-use sebas_gateway::config::GatewayConfig;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_router::config::RouterConfig;
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -24,7 +24,7 @@ use tracing::{debug, warn};
 /// 触发 abort 的 env var 名（openspec/specs/provider-management/spec.md）。
 ///
 /// 当 [`crate::spawn_env::compute_provider_resolution`] 检测到配置错误
-/// （缺失 provider / `api_key_env` 未设 / gateway.listen 空等），driver
+/// （缺失 provider / `api_key_env` 未设 / router.listen 空等），driver
 /// 会把单一 env var `SEBAS_PROVIDER_ERROR=<reason>` 注入 `extra_env`。
 /// spawn wrapper 看到这条 var 就立刻 `eprintln!` + `exit(1)`，不真的去
 /// fork `claude` 子进程。这是把「silent Off fallback」升级为「in-band
@@ -66,7 +66,7 @@ pub(crate) fn abort_if_provider_error(extra_env: &[(String, String)]) {
     }
 }
 
-/// Compute (extra_env, full command) from provider state + gateway config.
+/// Compute (extra_env, full command) from provider state + router config.
 /// Centralizes the spawn-time translation. The provider override only applies
 /// to the dedicated Claude driver (it injects `ANTHROPIC_BASE_URL` /
 /// `OPENAI_API_KEY`); native-ACP agents manage their own provider and get an
@@ -78,14 +78,14 @@ pub(crate) fn abort_if_provider_error(extra_env: &[(String, String)]) {
 fn spawn_overrides(
     kind: &str,
     command: Vec<String>,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
     if kind != "claude" {
         return (Vec::new(), command);
     }
-    let state = sebas_router::provider_state::load();
+    let state = sebas_dispatch::provider_state::load();
     let driver = ClaudeCodeDriver;
-    let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, gateway_cfg);
+    let (extra_env, extra_args) = resolve_spawn_overrides(&driver, &state, router_cfg);
     abort_if_provider_error(&extra_env);
     let mut full = command;
     full.extend(extra_args);
@@ -101,9 +101,9 @@ fn spawn_overrides(
 /// removal (D6). `pub` for integration tests (tests/spawn_race_test.rs);
 /// not part of the stable API.
 ///
-/// `gateway_cfg` is the parsed `[gateway]` config from config.toml (or
+/// `router_cfg` is the parsed `[router]` config from config.toml (or
 /// `None` when the daemon runs without one). Used to resolve
-/// `ProviderMode::Gateway` → URL + auth token; ignored for Off / Direct.
+/// `ProviderMode::Router` → URL + auth token; ignored for Off / Direct.
 ///
 /// `model`（add-acp-model-selection D3）：创建时请求的模型 id。`Some` 时在
 /// 会话建立后、首 prompt 前经 `SetModel` 应用（失败报非致命错误、会话仍
@@ -115,13 +115,13 @@ fn spawn_overrides(
 #[allow(clippy::too_many_arguments)]
 pub async fn acp_spawn_and_activate(
     mgr: &Arc<SessionManager>,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     key: &ChannelKey,
     prompt: &str,
     kind: &str,
     command: Vec<String>,
     work_dir: Option<String>,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
     model: Option<String>,
 ) -> anyhow::Result<(
     String,
@@ -129,7 +129,7 @@ pub async fn acp_spawn_and_activate(
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
     Option<sebas_acp::AcpModelInfo>,
 )> {
-    let (extra_env, full_command) = spawn_overrides(kind, command, gateway_cfg);
+    let (extra_env, full_command) = spawn_overrides(kind, command, router_cfg);
     let session_id = mgr
         .create_session(
             kind,
@@ -190,7 +190,7 @@ pub async fn acp_spawn_and_activate(
 /// cloned IMMEDIATELY after the spawn returns, before any slow I/O (D6).
 ///
 /// Provider-mode env/args apply on resume just as on fresh spawn — same
-/// `gateway_cfg` and same runtime state produce the same overrides.
+/// `router_cfg` and same runtime state produce the same overrides.
 ///
 /// `model`（add-acp-model-selection）：`Some` 时在 resume（或 fallback-fresh）
 /// 建立后、首 prompt 前经 `SetModel` 应用；`None` = 沿用 agent 会话设置的
@@ -198,14 +198,14 @@ pub async fn acp_spawn_and_activate(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub async fn acp_resume_and_activate(
     mgr: &Arc<SessionManager>,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     key: &ChannelKey,
     old_session_id: &str,
     prompt: &str,
     kind: &str,
     command: Vec<String>,
     work_dir: Option<String>,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
     model: Option<String>,
 ) -> anyhow::Result<(
     String,
@@ -213,7 +213,7 @@ pub async fn acp_resume_and_activate(
     std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>>,
     bool,
 )> {
-    let (extra_env, full_command) = spawn_overrides(kind, command, gateway_cfg);
+    let (extra_env, full_command) = spawn_overrides(kind, command, router_cfg);
     // Resume by the agent's real ACP session id when the persisted mapping
     // for `key` has one (native-ACP agents like opencode address a
     // conversation by their OWN id, not sebas's routing uuid); `None` keeps
@@ -288,7 +288,7 @@ pub async fn acp_resume_and_activate(
 /// - corrupt JSON → quarantine the file to `<path>.corrupt-<unix>` and
 ///   boot with an empty table instead of refusing to start.
 ///
-/// `capacity` wires `[router] max_concurrent_sessions` into the map.
+/// `capacity` wires `[dispatch] max_concurrent_sessions` into the map.
 pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
     let state_raw = std::fs::read_to_string(state_file).unwrap_or_else(|_| "{}".into());
     match state_raw.trim() {
@@ -334,7 +334,7 @@ pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
 ///    （逐条发送会违反 ACP 的 one-prompt-in-flight 规则）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn boot_session_pump_and_flush(
-    router: &RouterHandle,
+    router: &DispatchHandle,
     mgr: &Arc<SessionManager>,
     session_id: String,
     prompt: String,
@@ -398,7 +398,7 @@ pub fn spawn_acp_pump(
     rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
     >,
-    router: RouterHandle,
+    router: DispatchHandle,
     session_id: String,
 ) {
     spawn_acp_pump_with_idle(rx, router, session_id, None, None);
@@ -418,7 +418,7 @@ pub fn spawn_acp_pump_with_idle(
     rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<sebas_acp::claude::session::AcpEvent>>,
     >,
-    router: RouterHandle,
+    router: DispatchHandle,
     session_id: String,
     idle_timeout: Option<Duration>,
     mgr: Option<std::sync::Arc<SessionManager>>,

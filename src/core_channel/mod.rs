@@ -2,7 +2,7 @@
 //! single session authority (openspec/changes/add-core-session-channel).
 //!
 //! - [`protocol`]: wire types (newline-delimited JSON frames).
-//! - [`server`]: the core-side server over the live `RouterHandle`.
+//! - [`server`]: the core-side server over the live `DispatchHandle`.
 //! - [`client`]: the standalone-WebUI-side `SessionBackend` implementation.
 
 pub mod client;

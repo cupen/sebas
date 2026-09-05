@@ -9,7 +9,7 @@
 //! - 表单容器客户端要求 V6.6+，老版本显示 fallback。
 //!
 //! 本模块只负责「schema → 表单卡片」的渲染与回调值整理，不绑定任何业务
-//! 实体。通用 CRUD 状态机在 `sebas_router::crud`（存储 trait + 列表/增删改流程）。
+//! 实体。通用 CRUD 状态机在 `sebas_dispatch::crud`（存储 trait + 列表/增删改流程）。
 //!
 //! 类型边界的说明（decouple-feishu-channel task 3）：schema 类型（`FormSpec`
 //! / `FormField` / `SelectOption`）已经**中立化**到 `sebas-channels`，router 与
@@ -81,7 +81,7 @@ pub fn render_form_card(
 
     // 提交按钮：`form_action_type: "submit"` 触发整批表单数据回调。
     // 注意：容器内的 reset 按钮不允许带 behaviors 回调（API 11310），
-    // 所以「取消/返回列表」由调用方放在表单容器外渲染（见 sebas_router::crud）。
+    // 所以「取消/返回列表」由调用方放在表单容器外渲染（见 sebas_dispatch::crud）。
     elements.push(submit_button(&spec.form_name, &spec.submit_label, &submit));
 
     card.body.elements.push(CardElement::Form {

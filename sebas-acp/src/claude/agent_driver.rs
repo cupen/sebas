@@ -7,7 +7,7 @@
 //! routing/orchestration code, where it had no business living.
 //!
 //! This module narrows the seam: `sebas` decides what semantics it wants
-//! (`Off` / `Direct` / `Gateway`) and hands that to a driver; the driver
+//! (`Off` / `Direct` / `Router`) and hands that to a driver; the driver
 //! owns the agent-specific translation. Spawning code (`manager.rs` /
 //! `ConnectConfig` plumbing) merges the driver's output into the env / argv
 //! passed to the subprocess.
@@ -17,9 +17,9 @@
 //! When (if) Codex / Gemini CLI / etc. lands, promote to a trait at that
 //! seam — by then the type family will be informed by two real call sites.
 //!
-//! **注意**：Gateway 模式 agent 看到的永远是 Anthropic 协议面 ——
-//! gateway 自身支持双协议（见 `sebas_gateway::proto::OPENAI_PATHS`），但仅
-//! 服务于「外部 OpenAI 客户端直连 gateway」场景；sebas 自身用 Gateway
+//! **注意**：Router 模式 agent 看到的永远是 Anthropic 协议面 ——
+//! router 自身支持双协议（见 `sebas_router::proto::OPENAI_PATHS`），但仅
+//! 服务于「外部 OpenAI 客户端直连 router」场景；sebas 自身用 Router
 //! 模式时不可路由到 OpenAI-only provider。见 openspec/specs/provider-management/spec.md。
 //!
 //! Note: this file lives alongside `driver.rs`, which is the SDK engine
@@ -30,8 +30,8 @@
 /// Which upstream API protocol a `Direct` provider speaks.
 ///
 /// Renamed from `Protocol` to disambiguate from
-/// `sebas_gateway::proto::WireProtocol` (which carries the same meaning but at
-/// the gateway→upstream seam, not the agent→upstream seam).
+/// `sebas_router::proto::WireProtocol` (which carries the same meaning but at
+/// the router→upstream seam, not the agent→upstream seam).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentProtocol {
     /// Anthropic Messages API (`/v1/messages`, x-api-key auth).
@@ -56,12 +56,12 @@ pub enum ProviderResolution {
         base_url: String,
         auth_token: String,
     },
-    /// Talk through sebas's gateway: the agent gets the gateway URL and a
-    /// gateway-minted token. The gateway is what reaches the upstream.
-    Gateway { url: String, auth_token: String },
+    /// Talk through sebas's router: the agent gets the router URL and a
+    /// router-minted token. The router is what reaches the upstream.
+    Router { url: String, auth_token: String },
     /// Provider resolution failed: configuration
     /// error — missing URL, unset `api_key_env`, unknown named provider,
-    /// gateway mode without `[gateway]` config, etc. The driver emits a
+    /// router mode without `[router]` config, etc. The driver emits a
     /// single in-band signal env var `SEBAS_PROVIDER_ERROR=<reason>` so
     /// the spawn wrapper can short-circuit (print + `exit(1)`) instead of
     /// silently launching claude with whatever it finds in its own
@@ -76,8 +76,8 @@ pub enum ProviderResolution {
 ///   parent shell / its own config.
 /// - `Direct { Anthropic, .. }` → `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 /// - `Direct { OpenAi, .. }` → `OPENAI_BASE_URL` + `OPENAI_API_KEY`.
-/// - `Gateway { .. }` → `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`
-///   pointing at the gateway. The gateway exposes itself as an
+/// - `Router { .. }` → `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`
+///   pointing at the router. The router exposes itself as an
 ///   Anthropic-protocol endpoint regardless of which upstream it proxies
 ///   (the agent never has to know).
 ///
@@ -107,10 +107,10 @@ impl ClaudeCodeDriver {
                 ("OPENAI_BASE_URL".to_string(), base_url.clone()),
                 ("OPENAI_API_KEY".to_string(), auth_token.clone()),
             ],
-            // Gateway always rides the Anthropic protocol here — the
-            // gateway itself presents an Anthropic-shaped API surface to
-            // the agent, regardless of what's behind the gateway.
-            ProviderResolution::Gateway { url, auth_token } => vec![
+            // Router always rides the Anthropic protocol here — the
+            // router itself presents an Anthropic-shaped API surface to
+            // the agent, regardless of what's behind the router.
+            ProviderResolution::Router { url, auth_token } => vec![
                 ("ANTHROPIC_BASE_URL".to_string(), url.clone()),
                 ("ANTHROPIC_AUTH_TOKEN".to_string(), auth_token.clone()),
             ],
@@ -185,19 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn gateway_uses_anthropic_env_pointing_at_gateway() {
+    fn router_uses_anthropic_env_pointing_at_router() {
         let d = driver();
-        let env = d.resolve_env(&ProviderResolution::Gateway {
-            url: "https://gateway.example/v1".into(),
+        let env = d.resolve_env(&ProviderResolution::Router {
+            url: "https://router.example/v1".into(),
             auth_token: "gw-tok".into(),
         });
         assert!(env.contains(&(
             "ANTHROPIC_BASE_URL".to_string(),
-            "https://gateway.example/v1".to_string()
+            "https://router.example/v1".to_string()
         )));
         assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "gw-tok".to_string())));
-        // Gateway never leaks the OpenAI vars — the agent only sees the
-        // Anthropic-shaped surface the gateway presents.
+        // Router never leaks the OpenAI vars — the agent only sees the
+        // Anthropic-shaped surface the router presents.
         assert!(!env.iter().any(|(k, _)| k.starts_with("OPENAI")));
     }
 
@@ -219,7 +219,7 @@ mod tests {
                 base_url: "u".into(),
                 auth_token: "t".into(),
             },
-            ProviderResolution::Gateway {
+            ProviderResolution::Router {
                 url: "u".into(),
                 auth_token: "t".into(),
             },
@@ -245,13 +245,13 @@ mod tests {
     fn error_variant_emits_sebas_provider_error_env_only() {
         let d = driver();
         let env = d.resolve_env(&ProviderResolution::Error {
-            reason: "provider 'deepseek' not found in overlay or gateway config".into(),
+            reason: "provider 'deepseek' not found in overlay or router config".into(),
         });
         assert_eq!(
             env,
             vec![(
                 "SEBAS_PROVIDER_ERROR".to_string(),
-                "provider 'deepseek' not found in overlay or gateway config".to_string()
+                "provider 'deepseek' not found in overlay or router config".to_string()
             )]
         );
         // No partial-state pollution: no provider-shaped env must leak

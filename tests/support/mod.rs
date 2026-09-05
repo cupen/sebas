@@ -44,7 +44,7 @@ impl TestDir {
     }
 
     /// Same as `new` but with the crate name spelled explicitly. Use
-    /// this from `gateway/tests/support/mod.rs` (a different crate's
+    /// this from `router/tests/support/mod.rs` (a different crate's
     /// `CARGO_PKG_NAME`).
     pub fn with_crate(test_name: &str, sub: &str, crate_name: &str) -> Self {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
@@ -260,7 +260,7 @@ impl Sandbox {
         let core_log = path.join("core.log");
         let webui_log = path.join("webui.log");
         let providers = path.join("providers.json");
-        let usage = path.join("gateway-usage.jsonl");
+        let usage = path.join("router-usage.jsonl");
         let fake_claude = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
 
         // TOML basic strings reject bare backslashes — normalize to `/`
@@ -274,7 +274,7 @@ path = "{fake_claude}"
 sessions_dir = "{}"
 work_dir = "{}"
 
-[router]
+[dispatch]
 state_file = "{}"
 
 [media]
@@ -288,13 +288,13 @@ enabled = true
 host = "127.0.0.1"
 port = {webui_port}
 
-# gateway validate requires >=1 provider with a base_url; the debug `test`
+# router validate requires >=1 provider with a base_url; the debug `test`
 # provider is injected only after parse. This dummy never dials anything
 # in debug mode.
 [provider.anthropic]
 api_key = "sk-sandbox-dummy"
 
-[gateway]
+[router]
 provider_overlay = "{}"
 usage_file = "{}"
 "#,
@@ -330,7 +330,7 @@ usage_file = "{}"
             ("SEBAS_STATE_DB", forward_slash(&self.path.join("sebas.db"))),
             ("SEBAS_STATE_FILE", forward_slash(&self.path.join("state.json"))),
             (
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 forward_slash(&self.path.join("providers.json")),
             ),
             // Keep log files plain ASCII so assertions can match them.
@@ -364,7 +364,7 @@ usage_file = "{}"
             .unwrap_or_else(|e| panic!("spawn sebas {args:?}: {e}"))
     }
 
-    /// Core: `sebas run -c <config> --gateway --debug` (detached: no --webui;
+    /// Core: `sebas run -c <config> --router --debug` (detached: no --webui;
     /// the channel socket comes up because SEBAS_CORE_SECRET is set).
     pub fn spawn_core(&self) -> tokio::process::Child {
         self.spawn_core_extra(&[])
@@ -375,10 +375,10 @@ usage_file = "{}"
     pub fn spawn_core_extra(&self, extra: &[(&str, &str)]) -> tokio::process::Child {
         self.spawn(
             &[
-                "run",
+                "core",
                 "-c",
                 &forward_slash(&self.config_path),
-                "--gateway",
+                "--router",
                 "--debug",
             ],
             &self.core_secret,
@@ -387,11 +387,11 @@ usage_file = "{}"
         )
     }
 
-    /// Core with the gateway but WITHOUT `--debug` (downstream auth enforced;
+    /// Core with the router but WITHOUT `--debug` (downstream auth enforced;
     /// no built-in test provider). For auth-rejection journeys.
-    pub fn spawn_core_gateway_auth(&self) -> tokio::process::Child {
+    pub fn spawn_core_router_auth(&self) -> tokio::process::Child {
         self.spawn(
-            &["run", "-c", &forward_slash(&self.config_path), "--gateway"],
+            &["core", "-c", &forward_slash(&self.config_path), "--router"],
             &self.core_secret,
             &[],
             &self.core_log,
@@ -414,22 +414,22 @@ usage_file = "{}"
         format!("http://127.0.0.1:{}", self.webui_port)
     }
 
-    /// Require a downstream token on the gateway proxy surface (`auth_token`
-    /// inserted into the `[gateway]` section). Must be called before spawn.
-    pub fn set_gateway_auth_token(&self, token: &str) {
+    /// Require a downstream token on the router proxy surface (`auth_token`
+    /// inserted into the `[router]` section). Must be called before spawn.
+    pub fn set_router_auth_token(&self, token: &str) {
         let toml = std::fs::read_to_string(&self.config_path).expect("read config");
         let patched = toml.replace(
-            "[gateway]",
-            &format!("[gateway]\nauth_token = \"{token}\""),
+            "[router]",
+            &format!("[router]\nauth_token = \"{token}\""),
         );
-        assert_ne!(toml, patched, "[gateway] section not found in config");
+        assert_ne!(toml, patched, "[router] section not found in config");
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
-    /// In-process webui form: `sebas run -c <config> --gateway --debug
+    /// In-process webui form: `sebas run -c <config> --router --debug
     /// --webui --webui-port <p>`. Returns the child and the dashboard port.
-    /// Extra envs may pin the gateway port (`SEBAS_GATEWAY_LISTEN`) so the
-    /// native agent can be pointed at it via `SEBAS_AGENT_GATEWAY_URL`.
+    /// Extra envs may pin the router port (`SEBAS_ROUTER_LISTEN`) so the
+    /// native agent can be pointed at it via `SEBAS_AGENT_ROUTER_URL`.
     pub fn spawn_core_inprocess_webui(&self, extra: &[(&str, &str)]) -> (tokio::process::Child, u16) {
         let dashboard_port = free_port();
         let log_file = std::fs::OpenOptions::new()
@@ -442,10 +442,10 @@ usage_file = "{}"
             .unwrap_or_else(|e| panic!("clone log handle: {e}"));
         let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
             .args([
-                "run",
+                "core",
                 "-c",
                 &forward_slash(&self.config_path),
-                "--gateway",
+                "--router",
                 "--debug",
                 "--webui",
                 "--webui-port",
@@ -572,18 +572,18 @@ pub async fn wait_unreachable_with_cause(cli: &reqwest::Client, sb: &Sandbox) ->
     .await
 }
 
-/// Parse the gateway bind address from the core log
-/// (`gateway started … addr=127.0.0.1:<port>`).
-pub async fn wait_gateway_addr(sb: &Sandbox) -> String {
+/// Parse the router bind address from the core log
+/// (`router started … addr=127.0.0.1:<port>`).
+pub async fn wait_router_addr(sb: &Sandbox) -> String {
     let log_path = sb.core_log.clone();
     let hint = sb.path.clone();
-    wait_for("gateway addr in core log", Duration::from_secs(15), &hint, move || {
+    wait_for("router addr in core log", Duration::from_secs(15), &hint, move || {
         let log_path = log_path.clone();
         Box::pin(async move {
             let log = std::fs::read_to_string(&log_path).ok()?;
             for line in log.lines().rev() {
                 let line = strip_ansi(line);
-                if line.contains("gateway started") {
+                if line.contains("router started") {
                     if let Some(idx) = line.find("addr=") {
                         let addr = line[idx + 5..].split_whitespace().next()?;
                         if addr.parse::<std::net::SocketAddr>().is_ok() {

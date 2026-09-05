@@ -10,7 +10,7 @@ pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod fs;
-pub mod gateway_client;
+pub mod router_client;
 pub mod models;
 pub mod projects;
 pub mod routes;

@@ -59,20 +59,20 @@ pub enum RpcControlRequest {
     },
     RestartCore,
     ServiceStatus,
-    /// `/gateway status` / `/webui status`: query a single managed service's
+    /// `/router status` / `/webui status`: query a single managed service's
     /// status. The server filters `ServiceStatus` down to `service`.
     ServiceStatusFor {
         service: String,
     },
-    /// `/gateway on|off`: set a managed service's desired state.
-    /// `service` ∈ {core, gateway, webui}, `desired` ∈ {on, off}. core 的
+    /// `/router on|off`: set a managed service's desired state.
+    /// `service` ∈ {core, router, webui}, `desired` ∈ {on, off}. core 的
     /// 启停只接受 CLI/WebUI actor（飞书 actor 拒绝，见 handle 侧）。
     ServiceSet {
         service: String,
         desired: String,
         persist: bool,
     },
-    /// `/gateway restart`: restart a managed service. Same Phase 4
+    /// `/router restart`: restart a managed service. Same Phase 4
     /// limitation as `ServiceSet`.
     ServiceRestart {
         service: String,
@@ -321,7 +321,7 @@ async fn handle_envelope(
         // 受管服务期望态：core 也允许启停（sebas-2ty：feishu 可选，core 由
         // WebUI 服务页控制），但飞书 actor 例外——core 停止后确认卡片无法
         // 送达（dead-man's switch），core 的启停只走 CLI/WebUI 控制面。
-        // webui/gateway 照旧走 executor 的 ServiceSet（含 persist 落盘）。
+        // webui/router 照旧走 executor 的 ServiceSet（含 persist 落盘）。
         RpcControlRequest::ServiceSet {
             service,
             desired,
@@ -399,7 +399,7 @@ fn managed_service(name: ServiceName) -> crate::watchdog::control::ManagedServic
     match name {
         ServiceName::Core => crate::watchdog::control::ManagedService::Core,
         ServiceName::WebUi => crate::watchdog::control::ManagedService::WebUi,
-        ServiceName::Gateway => crate::watchdog::control::ManagedService::Gateway,
+        ServiceName::Router => crate::watchdog::control::ManagedService::Router,
     }
 }
 
@@ -673,21 +673,21 @@ mod tests {
         );
     }
 
-    /// `/gateway status` and `/webui status` query a single service; the RPC
+    /// `/router status` and `/webui status` query a single service; the RPC
     /// server filters the full service list down to the requested name.
     #[tokio::test]
     async fn service_status_for_filters_to_requested_service() {
         let response = handle_envelope(
             ControlEnvelope {
                 version: 1,
-                request_id: "feishu_gateway_status".into(),
+                request_id: "feishu_router_status".into(),
                 secret: TEST_SECRET.into(),
                 actor: RpcActor::Feishu {
                     open_id: String::new(),
                     chat_id: Some("oc_abc".into()),
                 },
                 request: RpcControlRequest::ServiceStatusFor {
-                    service: "gateway".into(),
+                    service: "router".into(),
                 },
             },
             test_executor(),
@@ -695,7 +695,7 @@ mod tests {
         )
         .await;
 
-        // 空 ServiceManager：gateway 未注册，过滤结果为空（而非报错）。
+        // 空 ServiceManager：router 未注册，过滤结果为空（而非报错）。
         match response {
             RpcControlResponse::Services { services } => {
                 assert!(services.is_empty());
@@ -711,14 +711,14 @@ mod tests {
         let response = handle_envelope(
             ControlEnvelope {
                 version: 1,
-                request_id: "feishu_gateway".into(),
+                request_id: "feishu_router".into(),
                 secret: TEST_SECRET.into(),
                 actor: RpcActor::Feishu {
                     open_id: String::new(),
                     chat_id: Some("oc_abc".into()),
                 },
                 request: RpcControlRequest::ServiceSet {
-                    service: "gateway".into(),
+                    service: "router".into(),
                     desired: "on".into(),
                     persist: false,
                 },
@@ -728,7 +728,7 @@ mod tests {
         )
         .await;
 
-        // 旧断言已失效：gateway set 现在真实执行（Feishu actor 会先得到
+        // 旧断言已失效：router set 现在真实执行（Feishu actor 会先得到
         // PendingConfirmation），不再是 service_unavailable。
         assert!(matches!(
             response,
@@ -790,15 +790,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_restart_gateway_executes() {
+    async fn service_restart_router_executes() {
         let response = handle_envelope(
             ControlEnvelope {
                 version: 1,
-                request_id: "cli_gateway_restart".into(),
+                request_id: "cli_router_restart".into(),
                 secret: TEST_SECRET.into(),
                 actor: RpcActor::Cli { uid: 1000 },
                 request: RpcControlRequest::ServiceRestart {
-                    service: "gateway".into(),
+                    service: "router".into(),
                 },
             },
             test_executor(),
@@ -806,7 +806,7 @@ mod tests {
         )
         .await;
 
-        // gateway restart 现在真实执行（Cli actor 直接 Accepted）。
+        // router restart 现在真实执行（Cli actor 直接 Accepted）。
         assert!(matches!(response, RpcControlResponse::Accepted { .. }));
     }
 

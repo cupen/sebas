@@ -8,13 +8,13 @@ use rusqlite::{params, Connection};
 
 // ---- Provider state ----
 
-/// 从 DB 加载 provider 数据, 构造 `sebas_router::state_store::PersistedState`。
+/// 从 DB 加载 provider 数据, 构造 `sebas_dispatch::state_store::PersistedState`。
 ///
 /// 读取 providers 表(含软删) + model_aliases 表, 与 `provider_state.rs` 的
 /// runtime 段合并。
-pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state_store::PersistedState, String> {
+pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_dispatch::state_store::PersistedState, String> {
     
-    use sebas_router::state_store::PersistedState;
+    use sebas_dispatch::state_store::PersistedState;
     use std::collections::BTreeMap;
 
     // Block scope ensures stmt is dropped before mutable borrows below
@@ -33,7 +33,7 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
             })
             .map_err(|e| format!("查询 providers 失败: {e}"))?;
 
-        let mut providers: BTreeMap<String, sebas_router::crud::Item> = BTreeMap::new();
+        let mut providers: BTreeMap<String, sebas_dispatch::crud::Item> = BTreeMap::new();
         let mut deleted: Vec<String> = Vec::new();
 
         for row in rows {
@@ -41,7 +41,7 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
             if del != 0 {
                 deleted.push(id);
             } else {
-                if let Ok(item) = serde_json::from_str::<sebas_router::crud::Item>(&config) {
+                if let Ok(item) = serde_json::from_str::<sebas_dispatch::crud::Item>(&config) {
                     providers.insert(id, item);
                 } else {
                     tracing::warn!("provider {id} 配置 JSON 解析失败, 跳过");
@@ -68,14 +68,14 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
             })
             .map_err(|e| format!("查询 model_aliases 失败: {e}"))?;
 
-        let mut aliases: BTreeMap<String, sebas_router::state_store::ModelAliasEntry> =
+        let mut aliases: BTreeMap<String, sebas_dispatch::state_store::ModelAliasEntry> =
             BTreeMap::new();
         for row in rows {
             let (alias, provider, upstream_model) =
                 row.map_err(|e| format!("读取 model_alias 行失败: {e}"))?;
             aliases.insert(
                 alias,
-                sebas_router::state_store::ModelAliasEntry {
+                sebas_dispatch::state_store::ModelAliasEntry {
                     provider,
                     upstream_model,
                 },
@@ -88,7 +88,7 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
     let (mode, default_selection) = load_runtime_state(conn);
 
     Ok(PersistedState {
-        version: sebas_router::state_store::STATE_VERSION_V2,
+        version: sebas_dispatch::state_store::STATE_VERSION_V2,
         providers,
         deleted,
         mode,
@@ -100,8 +100,8 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_router::state
 /// 从 DB 加载 runtime 状态 (mode + default_selection)。
 fn load_runtime_state(
     conn: &mut Connection,
-) -> (sebas_router::provider_state::ProviderMode, Option<sebas_router::state_store::DefaultSelection>) {
-    use sebas_router::provider_state::ProviderMode;
+) -> (sebas_dispatch::provider_state::ProviderMode, Option<sebas_dispatch::state_store::DefaultSelection>) {
+    use sebas_dispatch::provider_state::ProviderMode;
     
 
     let json: Option<String> = conn
@@ -129,7 +129,7 @@ fn load_runtime_state(
 /// 保存 PersistedState 到 DB。
 ///
 /// 写入 providers 表 (upsert + 软删) + 运行时状态到 settings 表。
-pub fn save_persisted_state(conn: &mut Connection, state: &sebas_router::state_store::PersistedState) -> Result<(), String> {
+pub fn save_persisted_state(conn: &mut Connection, state: &sebas_dispatch::state_store::PersistedState) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("保存状态事务开始失败: {e}"))?;
@@ -197,8 +197,8 @@ pub fn save_persisted_state(conn: &mut Connection, state: &sebas_router::state_s
 /// 更新 PersistedState (RMW 模式), 与 `state_store::update` 对应。
 pub fn update_persisted_state(
     conn: &mut Connection,
-    f: impl FnOnce(&mut sebas_router::state_store::PersistedState),
-) -> Result<sebas_router::state_store::PersistedState, String> {
+    f: impl FnOnce(&mut sebas_dispatch::state_store::PersistedState),
+) -> Result<sebas_dispatch::state_store::PersistedState, String> {
     let mut state = load_persisted_state(conn)?;
     f(&mut state);
     save_persisted_state(conn, &state)?;
@@ -386,9 +386,9 @@ pub fn save_session_map(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RuntimeStateRow {
     #[serde(default)]
-    mode: sebas_router::provider_state::ProviderMode,
+    mode: sebas_dispatch::provider_state::ProviderMode,
     #[serde(default)]
-    default_selection: Option<sebas_router::state_store::DefaultSelection>,
+    default_selection: Option<sebas_dispatch::state_store::DefaultSelection>,
 }
 
 // ---- Async 包装 (通过 StateHandle) ----
@@ -398,7 +398,7 @@ pub struct Repo;
 
 impl Repo {
     /// 加载 PersistedState。
-    pub async fn load_persisted_state(handle: &StateHandle) -> Result<sebas_router::state_store::PersistedState, String> {
+    pub async fn load_persisted_state(handle: &StateHandle) -> Result<sebas_dispatch::state_store::PersistedState, String> {
         handle
             .exec(|conn| load_persisted_state(conn))
             .await
@@ -476,15 +476,15 @@ mod tests {
         let state = load_persisted_state(&mut conn).unwrap();
         assert!(state.providers.is_empty());
         assert!(state.deleted.is_empty());
-        assert_eq!(state.mode, sebas_router::provider_state::ProviderMode::Off);
+        assert_eq!(state.mode, sebas_dispatch::provider_state::ProviderMode::Off);
         assert_eq!(state.default_selection, None);
     }
 
     #[test]
     fn save_and_load_provider_state_round_trips() {
         let (_dir, mut conn) = setup_db();
-        use sebas_router::provider_state::ProviderMode;
-        use sebas_router::state_store::{DefaultSelection, PersistedState};
+        use sebas_dispatch::provider_state::ProviderMode;
+        use sebas_dispatch::state_store::{DefaultSelection, PersistedState};
         use std::collections::BTreeMap;
 
         let mut item = serde_json::Map::new();
@@ -567,13 +567,13 @@ mod tests {
     #[test]
     fn update_persisted_state_rmw() {
         let (_dir, mut conn) = setup_db();
-        use sebas_router::provider_state::ProviderMode;
+        use sebas_dispatch::provider_state::ProviderMode;
 
         update_persisted_state(&mut conn, |s| {
-            s.mode = ProviderMode::Gateway;
+            s.mode = ProviderMode::Router;
         }).unwrap();
 
         let state = load_persisted_state(&mut conn).unwrap();
-        assert_eq!(state.mode, ProviderMode::Gateway);
+        assert_eq!(state.mode, ProviderMode::Router);
     }
 }

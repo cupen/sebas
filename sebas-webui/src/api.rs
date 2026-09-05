@@ -5,7 +5,7 @@
 //! `webui-api` capability: every SPA view (and any future local client)
 //! consumes it. All session data flows through the `SessionBackend` seam —
 //! handlers never know whether the session authority is in-process
-//! (`run --webui`) or across the core session channel (standalone webui).
+//! (`core --webui`) or across the core session channel (standalone webui).
 
 use crate::events::WebUiEvent;
 use crate::models::{CardConfigInfo, CardElementView, SessionStatus};
@@ -21,7 +21,7 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use sebas_router::SessionEvent;
+use sebas_dispatch::SessionEvent;
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
@@ -138,7 +138,7 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
 
     // A known session with no readable transcript yet renders empty
     // rather than failing the view.
-    let entries: Vec<sebas_router::TurnEntry> =
+    let entries: Vec<sebas_dispatch::TurnEntry> =
         state.backend.turns(session_key.clone(), 0).await.unwrap_or_default();
     // The transcript carries the agent/tool output blocks; the current
     // turn's prompt travels in `user_prompt`. The SPA renders markdown
@@ -187,7 +187,7 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
     Json(data).into_response()
 }
 
-/// GET /api/settings — card config and basic gateway info. 状态库可用时（
+/// GET /api/settings — card config and basic router info. 状态库可用时（
 /// add-state-store 5.2）card config 从 backend 实时读取；否则回退启动快照。
 pub async fn settings(State(state): State<WebUiState>) -> Response {
     // 尝试从后端状态库读最新 settings（CardConfig 形状）。
@@ -261,8 +261,8 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
         }
         _ => (json!([]), false),
     };
-    let mut gateway = serde_json::to_value(&state.gateway).unwrap_or_else(|_| json!({}));
-    if let Some(obj) = gateway.as_object_mut() {
+    let mut router = serde_json::to_value(&state.router).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = router.as_object_mut() {
         obj.insert("providers".into(), providers_value.clone());
         obj.insert(
             "provider_count".into(),
@@ -273,14 +273,14 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
 
     let data = json!({
         "card_config": card_config_info,
-        "gateway": gateway,
+        "router": router,
     });
     Json(data).into_response()
 }
 
-/// GET /api/gateway — detailed provider status.
-pub async fn gateway(State(state): State<WebUiState>) -> Response {
-    Json(json!({ "gateway": state.gateway })).into_response()
+/// GET /api/router — detailed provider status.
+pub async fn router(State(state): State<WebUiState>) -> Response {
+    Json(json!({ "router": state.router })).into_response()
 }
 
 /// GET /api/about — version info and system status.
@@ -289,8 +289,8 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
         "uptime": format_uptime(state.started_at.elapsed()),
         "version": env!("CARGO_PKG_VERSION"),
         "rustc_version": env!("CARGO_PKG_RUST_VERSION"),
-        "gateway_listen": state.gateway.listen,
-        "provider_count": state.gateway.provider_count,
+        "router_listen": state.router.listen,
+        "provider_count": state.router.provider_count,
     });
     Json(data).into_response()
 }

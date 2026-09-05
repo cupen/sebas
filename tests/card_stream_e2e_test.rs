@@ -5,8 +5,8 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +33,7 @@ fn card_str(out: &Out) -> String {
 #[tokio::test]
 async fn fake_claude_stream_merges_five_chunks_then_done() {
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = DispatchHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
     let key = ChannelKey::feishu("oc_stream", None);
 
@@ -100,7 +100,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
                 merged = s; // keep last for the panic message
             }
             Out::React { emoji, .. } => {
-                if emoji == sebas_router::card_state::phase::WORKING {
+                if emoji == sebas_dispatch::card_state::phase::WORKING {
                     saw_working = true;
                 }
             }
@@ -125,7 +125,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         };
         match o {
             Out::UpdateCard { .. } | Out::SendCard { .. } => {} // 卡不携带状态 emoji，忽略
-            Out::React { ref emoji, .. } if emoji == sebas_router::card_state::phase::DONE => {
+            Out::React { ref emoji, .. } if emoji == sebas_dispatch::card_state::phase::DONE => {
                 got_done_react = true;
             }
             Out::React { .. } => {} // tick 补发的 OnIt，忽略

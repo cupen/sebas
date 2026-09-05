@@ -2,7 +2,7 @@
 //!
 //! decouple-feishu-channel task 3/4：生产 WS 循环已下沉到 feishu adapter
 //! （`sebas_feishu::adapter::FeishuAdapter::spawn` → 内部 `run_ws_loop`）。
-//! 这里保留 `RouterEventHandler` + `feishu_in_to_channel_event` +
+//! 这里保留 `DispatchEventHandler` + `feishu_in_to_channel_event` +
 //! `ingest_feishu_frame`：envelope 解析、去重、门禁、中立化翻译都在这一层
 //! 完成，dump 的是翻译后的中立 `ChannelEvent`（`sebas replay` 消费同一
 //! 形状，replay 侧零飞书引用）。
@@ -12,7 +12,7 @@ use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::AcpCommand;
 use sebas_feishu::events::{FeishuEnvelope, FeishuIn};
 use open_lark::ws_client::EventHandler;
-use sebas_router::router::RouterHandle;
+use sebas_dispatch::engine::DispatchHandle;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -31,8 +31,8 @@ use tracing::{debug, info, warn};
 /// Fields are `pub` so tests and the adapter wiring can construct one
 /// directly without a constructor.
 #[derive(Clone)]
-pub struct RouterEventHandler {
-    pub router: RouterHandle,
+pub struct DispatchEventHandler {
+    pub router: DispatchHandle,
     pub owner_id: String,
     /// Optional directory for **translated neutral event** snapshots. When set,
     /// every gated inbound frame is written as `ChannelEvent` JSON to
@@ -55,9 +55,9 @@ fn norm_chat_type(t: &str) -> &str {
     if t == "private" { "p2p" } else { t }
 }
 
-impl RouterEventHandler {
+impl DispatchEventHandler {
     pub fn new(
-        router: RouterHandle,
+        router: DispatchHandle,
         owner_id: String,
         dump_dir: Option<std::path::PathBuf>,
     ) -> Self {
@@ -106,7 +106,7 @@ impl RouterEventHandler {
     }
 }
 
-impl EventHandler for RouterEventHandler {
+impl EventHandler for DispatchEventHandler {
     fn handle(
         &self,
         payload: &[u8],
@@ -129,7 +129,7 @@ impl EventHandler for RouterEventHandler {
 /// is async and spawned. Returns `true` if a frame was translated and
 /// dispatched, `false` if it was skipped (parse failure, owner filter,
 /// gates, or unrecognized envelope).
-pub fn ingest_feishu_frame(handler: &RouterEventHandler, raw: &[u8]) -> bool {
+pub fn ingest_feishu_frame(handler: &DispatchEventHandler, raw: &[u8]) -> bool {
     let text = match std::str::from_utf8(raw) {
         Ok(t) => t,
         Err(e) => {
@@ -213,7 +213,7 @@ pub fn ingest_feishu_frame(handler: &RouterEventHandler, raw: &[u8]) -> bool {
 /// the router, so a child process is alive as a descendant of the sebas
 /// pid by the time SIGTERM arrives. Production callers never set
 /// `SEBAS_TEST_SPAWN_SESSION`, so this path is dormant.
-pub(crate) async fn spawn_test_session(cfg: &Config, router: &RouterHandle, mgr: &SessionManager) {
+pub(crate) async fn spawn_test_session(cfg: &Config, router: &DispatchHandle, mgr: &SessionManager) {
     let kind = cfg.acp.default_kind().to_string();
     let command = cfg.acp.command_for(&kind).unwrap_or_default();
     let session_id = match mgr

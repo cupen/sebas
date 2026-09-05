@@ -6,7 +6,7 @@ publish = false
 
 # Build-time tooling only. Not part of sebas runtime; excluded from
 # workspace dependency graph via dedicated crate (no crate-level deps
-# on sebas/ router/ gateway). Pulls reqwest for the models.dev fetch
+# on sebas/ router/ router). Pulls reqwest for the models.dev fetch
 # (build-time network access is fine — this bin is never run in prod).
 
 [[bin]]

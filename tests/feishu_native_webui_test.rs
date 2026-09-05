@@ -2,13 +2,13 @@
 //! （make-feishu-optional-webui-primary，design D2/D3）。
 //!
 //! 验证：feishu `FeishuIn::Text` 经 router dispatch 路由到
-//! `RouterNativeBridge`（default_native = true）→ 原生内核创建会话并登记
+//! `DispatchNativeBridge`（default_native = true）→ 原生内核创建会话并登记
 //! mapping → webui `InProcessBackend` snapshot 看到该 oc_* 会话 →
 //! transcript（工具轨迹 + 收尾文本）可读 → 权限请求可经 webui 审查卡回填。
 
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::state::SessionMap;
-use sebas_router::RouterHandle;
+use sebas_dispatch::state::SessionMap;
+use sebas_dispatch::DispatchHandle;
 use sebas_webui::session_backend::{InProcessBackend, PermissionDecision, SessionBackend};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,12 +43,12 @@ fn native_manager() -> Arc<sebas_agent::session::SessionManager> {
 async fn feishu_native_session_appears_in_webui_snapshot() {
     let map = SessionMap::new();
     let key = ChannelKey::feishu("oc_native_webui", None);
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = DispatchHandle::new(map);
     // 丢弃 Out（原生路径不发 SpawnAcp/卡片）。
     tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
 
     // 装配真实桥（core 侧 = run.rs 的装配方式）。
-    let bridge = sebas::native_router_bridge::RouterNativeBridge::with_default(
+    let bridge = sebas::native_dispatch_bridge::DispatchNativeBridge::with_default(
         native_manager(),
         router.clone(),
         true, // feishu native_default = true
@@ -103,7 +103,7 @@ async fn feishu_native_session_appears_in_webui_snapshot() {
     // 超时也把当前的 transcript 打出来便于诊断。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     // 循环体每轮先赋值再读，无需初值。
-    let mut last: Vec<sebas_router::TurnEntry>;
+    let mut last: Vec<sebas_dispatch::TurnEntry>;
     loop {
         // webui InProcessBackend 的 trait 键是中立 ChannelKey；feishu 通道的
         // key 用引用（chat_id，无 thread）。

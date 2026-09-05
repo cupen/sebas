@@ -11,7 +11,7 @@ use std::collections::HashMap;
 ///
 /// Card header titles are now topic-driven (`derive_topic`), so this mapping is
 /// no longer wired into the rendered header — the FSM state itself is surfaced
-/// as Feishu reactions (see `sebas_router::card_state::phase`). Kept as a pub helper
+/// as Feishu reactions (see `sebas_dispatch::card_state::phase`). Kept as a pub helper
 /// for tests and any downstream that still needs the glyph ↔ phase map.
 // (derive_session_title 已废弃：UUID 短形式对用户不可读；标题回到
 // `derive_topic(user_prompt)` 首行非空 prompt。)
@@ -556,7 +556,7 @@ fn short_model_name(model: &str) -> String {
 /// + body 各元素 + footer 灰注。
 ///
 /// 标题由 `derive_topic(user_prompt)` 派生（首条非空 prompt 行），不再携带
-/// 状态 emoji；状态由 Feishu reaction 表达（见 `sebas_router::card_state::phase`）。
+/// 状态 emoji；状态由 Feishu reaction 表达（见 `sebas_dispatch::card_state::phase`）。
 /// 当 `footer` 为 Some 时展示模型名和 token 用量，否则回退 `msg_id: {session_id}`。
 ///
 /// Footer 三段语义（避免把 in/out 当 round、ctx 当 in+out 求和的常见错）：
@@ -928,7 +928,7 @@ fn help_command_groups() -> HelpGroupTable {
                 ("/restart", "重启 core"),
                 ("/services", "查看服务状态"),
                 ("/system", "查看系统状态"),
-                ("/gateway on|off|restart|status", "管理 gateway"),
+                ("/router on|off|restart|status", "管理 router"),
                 ("/webui status", "查看 webui 状态"),
             ],
         ),
@@ -987,7 +987,7 @@ pub fn render_help_card(group: &str, theme: &str) -> Card {
 
     // Divider + command buttons for the selected group.
     // 横排：每行 2-3 个 column，每个 column 内 = button(cmd) + 灰色 Div(desc)
-    // 垂直堆叠。超长 cmd（如 "/gateway on|off|restart|status"）单独占满整行。
+    // 垂直堆叠。超长 cmd（如 "/router on|off|restart|status"）单独占满整行。
     card.push_divider();
     let mut pending_columns: Vec<CardColumn> = Vec::new();
     let mut current_width = 0_u8; // 当前行累计「视觉权重」；满 6 触发 flush

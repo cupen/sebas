@@ -3,17 +3,17 @@
 //!
 //! 数据流：`/provider` 列表的种子来自 config.toml 的顶层 `[provider.*]`
 //! （只读，不改写，支持 preset 惯例默认）；bot 里新增/修改/删除的变更以
-//! delta 形式持久化到 `~/.sebas/providers.json`（overlay）。gateway 启动时
+//! delta 形式持久化到 `~/.sebas/providers.json`（overlay）。router 启动时
 //! 把同一份 overlay 合并进自身配置
-//! （见 `sebas_gateway::config::GatewayConfig::merge_provider_overlay`），实现
-//! 「在飞书里改 provider，gateway 重启后生效」。
+//! （见 `sebas_router::config::RouterConfig::merge_provider_overlay`），实现
+//! 「在飞书里改 provider，router 重启后生效」。
 //!
 //! 密钥策略：表单直接收 `api_key`（飞书里无法设置环境变量）。密钥存进
 //! overlay 文件（~/.sebas/providers.json），列表/日志中掩码回显；如需
 //! 更严格的落盘隔离，可后续把密钥挪到独立 secrets 文件。
 //!
 //! `default_model`：bot 侧的「spawn 时落到 agent 的默认 model」选择，仅
-//! 写入 overlay（不落 gateway `ProviderConfig`），由后续
+//! 写入 overlay（不落 router `ProviderConfig`），由后续
 //! `ClaudeCodeDriver::resolve_args()`（bead sebas-63f.8）传给 agent。表单里是
 //! 手填文本框（preset / custom 一致）——model 列表的权威来源是 provider
 //! 官方 `/models` 接口（详情面板的「🔍 探测 model 列表」按钮），静态
@@ -23,8 +23,8 @@ use sebas_feishu::cards::{
     CardElement, CardText, CollapsiblePanel, CollapsiblePanelHeader, StandardIcon,
 };
 use sebas_feishu::forms::{FormField, FormSpec, SelectOption};
-use sebas_gateway::config::GatewayConfig;
-use sebas_router::crud::{CrudForm, FileStore, Item};
+use sebas_router::config::RouterConfig;
+use sebas_dispatch::crud::{CrudForm, FileStore, Item};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub fn spec_preset() -> FormSpec {
                 name: "preset".into(),
                 label: "预设".into(),
                 required: true,
-                options: sebas_gateway::config::presets()
+                options: sebas_router::config::presets()
                     .iter()
                     .map(|p| SelectOption {
                         value: p.name.to_string(),
@@ -146,7 +146,7 @@ pub fn spec_preset() -> FormSpec {
 /// 找不到对应 preset（例如用户选了不存在的 custom preset）时返回空 vec，
 /// 调用方应「不叠加面板」而不是报错。
 pub fn render_preset_details(preset_name: &str) -> Vec<CardElement> {
-    let Some(p) = sebas_gateway::config::presets()
+    let Some(p) = sebas_router::config::presets()
         .iter()
         .find(|p| p.name == preset_name)
     else {
@@ -185,7 +185,7 @@ pub fn render_preset_details(preset_name: &str) -> Vec<CardElement> {
     })]
 }
 
-/// 自定义模式表单：所有字段都让用户填（与 gateway `ProviderConfig` 字段对齐）。
+/// 自定义模式表单：所有字段都让用户填（与 router `ProviderConfig` 字段对齐）。
 /// base_url_anthropic / base_url_openai 各自独立，可只填一个（只支持对应协议）。
 pub fn spec_custom() -> FormSpec {
     FormSpec::new(
@@ -283,15 +283,15 @@ pub fn spec() -> FormSpec {
     spec_custom()
 }
 
-/// 把 gateway 配置里的 provider 转成 CRUD item（种子）。
+/// 把 router 配置里的 provider 转成 CRUD item（种子）。
 ///
-/// `default_model` 不在 gateway `ProviderConfig` 上（bead sebas-63f.4）：
-/// 用户通过 bot 表单写入的值仅落在 overlay 文件，不向 gateway 同步。
+/// `default_model` 不在 router `ProviderConfig` 上（bead sebas-63f.4）：
+/// 用户通过 bot 表单写入的值仅落在 overlay 文件，不向 router 同步。
 /// 后续 `ClaudeCodeDriver::resolve_args()`（bead sebas-63f.8）会从 overlay 读到
 /// 这个值传给 agent。这里不写入 `default_model`，让表单编辑时初始为空；
 /// overlay 里已有 `default_model` 的项会在 `item_to_initial` 里被预填。
-// TODO: gateway config sync is out of scope for this bead.
-pub fn item_from_provider(name: &str, p: &sebas_gateway::config::ProviderConfig) -> Item {
+// TODO: router config sync is out of scope for this bead.
+pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) -> Item {
     let mut m = Map::new();
     m.insert("name".into(), Value::String(name.into()));
     if let Some(u) = &p.base_url_anthropic {
@@ -315,20 +315,26 @@ pub fn item_from_provider(name: &str, p: &sebas_gateway::config::ProviderConfig)
 }
 
 /// provider overlay 路径：默认 `~/.sebas/providers.json`，
-/// 可用 `SEBAS_GATEWAY_PROVIDER_OVERLAY` 覆盖（与 gateway 侧一致）。
+/// 可用 `SEBAS_ROUTER_PROVIDER_OVERLAY` 覆盖（与 router 侧一致）。
 pub fn overlay_path() -> std::path::PathBuf {
-    let raw = std::env::var("SEBAS_GATEWAY_PROVIDER_OVERLAY")
+    let raw = std::env::var("SEBAS_ROUTER_PROVIDER_OVERLAY")
+        .or_else(|_| {
+            std::env::var("SEBAS_GATEWAY_PROVIDER_OVERLAY").map(|v| {
+                tracing::warn!("env SEBAS_GATEWAY_PROVIDER_OVERLAY 已更名为 SEBAS_ROUTER_PROVIDER_OVERLAY（旧名本期仍生效）");
+                v
+            })
+        })
         .unwrap_or_else(|_| "~/.sebas/providers.json".into());
     std::path::PathBuf::from(crate::config::expand_tilde(&raw))
 }
 
 /// `/provider` 命令的两张表单（共享同一个 overlay 存储）。
 /// 定义在 router 里；sebas root crate 只是装配。
-pub use sebas_router::crud::ProviderForms;
+pub use sebas_dispatch::crud::ProviderForms;
 
 /// 构造两套 provider CRUD 表单：种子来自 config.toml 的顶层 `[provider.*]`，
 /// 变更持久化到 `state.json`（详见 openspec/specs/provider-management/spec.md 与
-/// `sebas_router::state_store`）。
+/// `sebas_dispatch::state_store`）。
 ///
 /// **Self-heal（openspec/specs/provider-management/spec.md）**：legacy overlay 文件（`providers.json`，
 /// `state.json` 不存在时一次性迁移源）破损时不再让 `/provider` 死掉 —
@@ -342,14 +348,14 @@ pub use sebas_router::crud::ProviderForms;
 /// state_store::load 看到 broken overlay 只 warn + 返回 default，
 /// 损坏文件就留在原位无人清理（openspec/specs/provider-management/spec.md 不允许）。
 pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
-    let seed = match GatewayConfig::parse(raw_config) {
+    let seed = match RouterConfig::parse(raw_config) {
         Ok(g) => g
             .providers
             .iter()
             .map(|(name, p)| item_from_provider(name, p))
             .collect(),
         Err(e) => {
-            tracing::warn!(error = %e, "provider 种子解析失败（config.toml 缺 [gateway] 或 [provider] 段），从空列表开始");
+            tracing::warn!(error = %e, "provider 种子解析失败（config.toml 缺 [router] 或 [provider] 段），从空列表开始");
             Vec::new()
         }
     };
@@ -473,7 +479,7 @@ fn apply_preset_defaults(item: &mut Item) {
     let Some(preset_name) = item.get("preset").and_then(Value::as_str) else {
         return;
     };
-    let Some(p) = sebas_gateway::config::presets()
+    let Some(p) = sebas_router::config::presets()
         .iter()
         .find(|p| p.name == preset_name)
     else {
@@ -514,10 +520,10 @@ fn apply_preset_defaults(item: &mut Item) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sebas_router::CrudStore;
+    use sebas_dispatch::CrudStore;
     use std::sync::Mutex;
 
-    // 串行化 `SEBAS_GATEWAY_PROVIDER_OVERLAY` env 访问，与
+    // 串行化 `SEBAS_ROUTER_PROVIDER_OVERLAY` env 访问，与
     // `spawn_env::tests` 同惯例（全局 env 跨测试并发跑会撞）。
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -530,10 +536,10 @@ mod tests {
     }
 
     /// 写一个最小 config.toml（含 [provider.deepseek] 种子），让
-    /// `build_form` 走真实 GatewayConfig::parse 路径。
+    /// `build_form` 走真实 RouterConfig::parse 路径。
     fn minimal_config_with_seed() -> String {
         r#"
-[gateway]
+[router]
 listen = "127.0.0.1:0"
 
 [provider.deepseek]
@@ -549,7 +555,7 @@ listen = "127.0.0.1:0"
         let state_path = path.with_file_name("state.json");
         // SAFETY: ENV_LOCK held by caller.
         unsafe {
-            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", path.to_str().unwrap());
+            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", path.to_str().unwrap());
             std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
         }
     }
@@ -557,7 +563,7 @@ listen = "127.0.0.1:0"
     fn clear_overlay_env() {
         // SAFETY: ENV_LOCK held by caller.
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
             std::env::remove_var("SEBAS_STATE_FILE");
         }
     }
@@ -1054,8 +1060,8 @@ listen = "127.0.0.1:0"
     /// 目录为空（守住「只在错误路径备份」的承诺，见
     /// openspec/specs/provider-management/spec.md）。
     ///
-    /// change gateway-admin-api-and-model-aliases：providers.json 拆回
-    /// 独立文件成为单一真源（卡片 + gateway admin API 双写者共用），
+    /// change router-admin-api-and-model-aliases：providers.json 拆回
+    /// 独立文件成为单一真源（卡片 + router admin API 双写者共用），
     /// **不再**迁移到 state.json 后删除。本测试断言新语义：providers.json
     /// 保留在原位、内容不变。
     #[tokio::test]

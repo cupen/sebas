@@ -1,6 +1,6 @@
 //! sebas-agent — sebas 的原生 in-process coding agent 内核。
 //!
-//! - [`llm`]：Anthropic Messages 流式客户端（端点可配置：默认直连 provider，gateway 可选）
+//! - [`llm`]：Anthropic Messages 流式客户端（端点可配置：默认直连 provider，router 可选）
 //!   与 [`llm::fake::FakeLlmClient`] 测试替身
 //! - [`tools`]：统一 Tool trait + 六件套（bash / read / write / edit / glob / grep）
 //! - [`policy`]：权限策略引擎（三层判定 + 交互审批 + fail-closed）与 bash 沙箱

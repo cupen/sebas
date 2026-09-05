@@ -868,7 +868,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/admin/services/gateway/disable")
+                    .uri("/api/admin/services/router/disable")
                     .header("origin", "http://127.0.0.1:9797")
                     .body(Body::empty())
                     .unwrap(),

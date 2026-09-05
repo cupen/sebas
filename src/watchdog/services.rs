@@ -219,10 +219,10 @@ impl ServiceManager {
         Some(snap)
     }
 
-    /// 全部服务快照（固定顺序 core → webui → gateway）。
+    /// 全部服务快照（固定顺序 core → webui → router）。
     pub async fn all_snapshots(&self) -> Vec<ServiceSnapshot> {
         let mut out = Vec::new();
-        for name in [ServiceName::Core, ServiceName::WebUi, ServiceName::Gateway] {
+        for name in [ServiceName::Core, ServiceName::WebUi, ServiceName::Router] {
             if let Some(snap) = self.snapshot(name).await {
                 out.push(snap);
             }
@@ -272,7 +272,7 @@ pub fn service_from_str(s: &str) -> Option<ServiceName> {
     match s {
         "core" => Some(ServiceName::Core),
         "webui" => Some(ServiceName::WebUi),
-        "gateway" => Some(ServiceName::Gateway),
+        "router" => Some(ServiceName::Router),
         _ => None,
     }
 }
@@ -402,9 +402,9 @@ mod tests {
         let path = tmp_path("disabled");
         let _ = std::fs::remove_file(&path);
         let mgr = ServiceManager::new(path.clone());
-        mgr.register(fast_spec(ServiceName::Gateway), false);
+        mgr.register(fast_spec(ServiceName::Router), false);
         tokio::time::sleep(Duration::from_millis(10)).await;
-        let snap = mgr.snapshot(ServiceName::Gateway).await.unwrap();
+        let snap = mgr.snapshot(ServiceName::Router).await.unwrap();
         assert_eq!(
             snap.state,
             ServiceState::Disabled,
@@ -439,23 +439,23 @@ mod tests {
         let path = tmp_path("persist");
         let _ = std::fs::remove_file(&path);
         let mgr = ServiceManager::new(path.clone());
-        mgr.register(fast_spec(ServiceName::Gateway), true);
+        mgr.register(fast_spec(ServiceName::Router), true);
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        mgr.set_desired(ServiceName::Gateway, DesiredState::Disabled, true)
+        mgr.set_desired(ServiceName::Router, DesiredState::Disabled, true)
             .await
             .unwrap();
         assert!(path.exists(), "persist=true 必须写 services.json");
         mgr.shutdown_all().await;
 
-        // 「重启 watchdog」：新 manager 读同一文件，gateway 期望态应为 off。
+        // 「重启 watchdog」：新 manager 读同一文件，router 期望态应为 off。
         let read = ServiceManager::read_persisted(&path);
         assert_eq!(
-            read.get(&ServiceName::Gateway),
+            read.get(&ServiceName::Router),
             Some(&DesiredState::Disabled)
         );
         assert_eq!(
-            initial_desired(true, read.get(&ServiceName::Gateway).copied()),
+            initial_desired(true, read.get(&ServiceName::Router).copied()),
             DesiredState::Disabled
         );
         let _ = std::fs::remove_file(&path);
@@ -467,10 +467,10 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let mgr = ServiceManager::new(path);
         let err = mgr
-            .set_desired(ServiceName::Gateway, DesiredState::Disabled, false)
+            .set_desired(ServiceName::Router, DesiredState::Disabled, false)
             .await
             .unwrap_err();
-        assert_eq!(err, ServiceOpError::UnknownService("gateway".into()));
+        assert_eq!(err, ServiceOpError::UnknownService("router".into()));
     }
 
     // 保留的 webui 助手测试。
@@ -500,7 +500,7 @@ port = 9798
 
     #[test]
     fn service_name_roundtrip() {
-        for name in ["core", "webui", "gateway"] {
+        for name in ["core", "webui", "router"] {
             let parsed = service_from_str(name).unwrap();
             assert_eq!(parsed.as_str(), name);
         }

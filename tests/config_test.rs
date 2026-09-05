@@ -12,7 +12,7 @@ owner_id = "ou_x"
     assert_eq!(cfg.feishu.app_id, "cli_x");
     // defaults filled
     assert_eq!(cfg.acp.idle_kill_for("claude"), 172800);
-    assert_eq!(cfg.router.max_concurrent_sessions, 32);
+    assert_eq!(cfg.dispatch.max_concurrent_sessions, 32);
     assert_eq!(cfg.log.level, "info");
     assert!(cfg.log.file.is_none());
 }
@@ -124,7 +124,7 @@ owner_id = "ou_x"
 "#;
     let cfg = Config::parse(toml).unwrap();
     assert!(
-        cfg.router
+        cfg.dispatch
             .state_file
             .starts_with(&std::env::var("HOME").unwrap_or_default())
     );
@@ -148,7 +148,7 @@ app_secret = "sec"
 [acp.claude]
 path = "{bin}"
 
-[router]
+[dispatch]
 state_file = "{}/state/sessions.json"
 
 [media]

@@ -147,7 +147,7 @@ beforeEach(() => {
       max_user_text_chars: 0,
       max_tool_output_chars: 0,
     },
-    gateway: {
+    router: {
       listen: null,
       provider_count: 1,
       debug: false,
@@ -286,7 +286,7 @@ describe('provider label sourcing (fix-webui-detached-status)', () => {
     document.body.innerHTML = ''
   })
 
-  async function labelFor(gateway: Record<string, unknown>): Promise<string | null> {
+  async function labelFor(router: Record<string, unknown>): Promise<string | null> {
     apiMocks.settings.mockResolvedValue({
       card_config: {
         theme_color: '#000',
@@ -295,7 +295,7 @@ describe('provider label sourcing (fix-webui-detached-status)', () => {
         max_user_text_chars: 0,
         max_tool_output_chars: 0,
       },
-      gateway,
+      router,
     })
     const el = await mount()
     const label = (el as unknown as { providerLabel: string | null }).providerLabel

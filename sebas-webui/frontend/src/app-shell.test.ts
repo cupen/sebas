@@ -2,8 +2,8 @@
 /**
  * IA v2 shell audit：侧栏 = 品牌 + 项目树（sebas-project-rail）+ 底部
  * pinned 的 Settings 入口（打开居中设置弹窗）；旧的 NAV_ITEMS 链接列表
- * （Dashboard/Settings/Gateway/About/Admin）整体删除。路由仅保留
- * `/`、`/sessions`、`/sessions/:key`；退役路径 /settings /gateway /about
+ * （Dashboard/Settings/Router/About/Admin）整体删除。路由仅保留
+ * `/`、`/sessions`、`/sessions/:key`；退役路径 /settings /router /about
  * 经 router.redirectFor canonical 回 `/`；/admin/* 直接删除——当作未知
  * 路径落到 workbench fallback。
  */
@@ -80,7 +80,7 @@ beforeEach(() => {
       max_user_text_chars: 0,
       max_tool_output_chars: 0,
     },
-    gateway: { listen: null, provider_count: 0, debug: false, has_auth: false, providers: [] },
+    router: { listen: null, provider_count: 0, debug: false, has_auth: false, providers: [] },
   })
   apiMocks.projectsList.mockResolvedValue({ projects: [projectFixture] })
   apiMocks.projectsBranch.mockRejectedValue(new Error('not fetched in this test'))

@@ -18,8 +18,8 @@ use sebas::core_channel::protocol::{
 use sebas::core_channel::server;
 use sebas::sebas_state::engine::DbStateEngine;
 use sebas::sebas_state::writer::StateWriter;
-use sebas_router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_dispatch::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,8 +30,8 @@ const SECRET: &str = "test-state-secret";
 struct TestCore {
     path: std::path::PathBuf,
     close_tx: tokio::sync::watch::Sender<bool>,
-    _handle: RouterHandle,
-    _out_rx: tokio::sync::mpsc::Receiver<sebas_router::Out>,
+    _handle: DispatchHandle,
+    _out_rx: tokio::sync::mpsc::Receiver<sebas_dispatch::Out>,
 }
 
 impl Drop for TestCore {
@@ -42,7 +42,7 @@ impl Drop for TestCore {
 }
 
 async fn start_core(dir: &std::path::Path) -> TestCore {
-    let (router, out_rx) = RouterHandle::new(SessionMap::new());
+    let (router, out_rx) = DispatchHandle::new(SessionMap::new());
     let path = dir.join("core.sock");
     let (close_tx, close_rx) = tokio::sync::watch::channel(false);
     let serve_path = path.clone();
@@ -74,11 +74,11 @@ async fn start_core(dir: &std::path::Path) -> TestCore {
 fn init_state_engine(dir: &std::path::Path) -> &'static StateWriter {
     use std::sync::OnceLock;
     static WRITER: OnceLock<StateWriter> = OnceLock::new();
-    if sebas_router::state_store::engine().is_none() {
+    if sebas_dispatch::state_store::engine().is_none() {
         let path = dir.join("state.db");
         let writer = StateWriter::start(path).expect("state writer starts");
         let engine = Box::new(DbStateEngine::new(writer.handle().clone()));
-        sebas_router::state_store::init_engine(engine);
+        sebas_dispatch::state_store::init_engine(engine);
         let _ = WRITER.set(writer);
     }
     WRITER.get().expect("writer initialized")
@@ -137,7 +137,7 @@ async fn mutation_delivers_change_notification_on_subscription() {
     }
 
     // Mutation: settings（空对象 = 合法 CardConfig）+ projects（add）。
-    let engine = sebas_router::state_store::engine().expect("engine initialized");
+    let engine = sebas_dispatch::state_store::engine().expect("engine initialized");
     engine
         .save_settings(serde_json::json!({}))
         .await
@@ -193,7 +193,7 @@ async fn mutation_delivers_change_notification_on_subscription() {
 }
 
 /// 5.3 通道代理：providers / aliases 经 `StateMutation` 写入状态库，
-/// 随后的快照能读回（gateway admin 写路径的协议基础）。
+/// 随后的快照能读回（router admin 写路径的协议基础）。
 #[tokio::test]
 async fn providers_and_aliases_mutation_round_trip_over_channel() {
     let _guard = TEST_SERIAL.lock().unwrap();

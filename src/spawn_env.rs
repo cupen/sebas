@@ -2,8 +2,8 @@
 //!
 //! Sits between two already-built pieces:
 //!
-//! - `sebas_router::provider_state::ProviderRuntimeState`（bead sebas-63f.3）：runtime 决策
-//!   ——「当前走 Off / Direct / Gateway」。
+//! - `sebas_dispatch::provider_state::ProviderRuntimeState`（bead sebas-63f.3）：runtime 决策
+//!   ——「当前走 Off / Direct / Router」。
 //! - `sebas_acp::claude::ClaudeCodeDriver`（bead sebas-63f.2）：把 `ProviderResolution`
 //!   翻成 agent 进程看得懂的 env vars + CLI args。
 //!
@@ -12,7 +12,7 @@
 //! 暴露一个统一的 [`resolve_spawn_overrides`]，返回 `(extra_env, extra_args)`，
 //! 追加到 `claude_args` 上送进 `SessionManager::create_session`。
 //!
-//! 失败语义（openspec/specs/provider-management/spec.md）：spawn-time 解析失败（gateway URL 没配、
+//! 失败语义（openspec/specs/provider-management/spec.md）：spawn-time 解析失败（router URL 没配、
 //! named provider 在 overlay 里找不到、api_key_env 没值）一律返回
 //! `ProviderResolution::Error { reason }`。driver 把这个变体翻译成单条
 //! `SEBAS_PROVIDER_ERROR=<reason>` env var，spawn wrapper（`session_boot`）
@@ -22,8 +22,8 @@
 //! 自己环境的问题。新行为把错误直接喂给用户。
 
 use sebas_acp::claude::{ClaudeCodeDriver, ProviderResolution};
-use sebas_gateway::config::GatewayConfig;
-use sebas_router::provider_state::{ProviderMode, ProviderRuntimeState};
+use sebas_router::config::RouterConfig;
+use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -35,9 +35,9 @@ use std::collections::HashMap;
 /// 优先读 legacy overlay（兼容旧用户）；overlay 不存在时回退到 unified
 /// `state.json`（新部署走 state_store 后，providers.json 已被迁移 + 删除）。
 ///
-/// `default_model` 只在 overlay item 上（gateway `ProviderConfig` 没有这字段，
-/// 故意不向 gateway 同步 —— sebas-63f.4 设计决定），所以必须从 overlay 读，
-/// 不能从 `gateway_cfg.providers` 拿。
+/// `default_model` 只在 overlay item 上（router `ProviderConfig` 没有这字段，
+/// 故意不向 router 同步 —— sebas-63f.4 设计决定），所以必须从 overlay 读，
+/// 不能从 `router_cfg.providers` 拿。
 fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
     // 优先：legacy overlay（state.json 统一前的旧路径）。
     let overlay_path = crate::provider::overlay_path();
@@ -60,7 +60,7 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
     }
     // 回退：unified state.json（统一后的新路径；旧用户首次 load 时
     // overlay 已被迁移 + 删除）。行为契约见 openspec/specs/provider-management/spec.md。
-    let state = sebas_router::state_store::load();
+    let state = sebas_dispatch::state_store::load();
     if state.deleted.iter().any(|d| d == name) {
         return None;
     }
@@ -80,7 +80,7 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
 /// （向后兼容 openspec/specs/provider-management/spec.md）。
 ///
 /// 密钥优先级：`api_key` 明文（仅测试用，warn 一条） > `api_key_env` 读 env
-/// （env 缺失/空 → 回退 `Off` + warn）。和 `GatewayConfig::resolve_api_keys`
+/// （env 缺失/空 → 回退 `Off` + warn）。和 `RouterConfig::resolve_api_keys`
 /// 走同一套优先级，行为一致。
 fn direct_resolution_from_overlay(
     name: &str,
@@ -203,16 +203,16 @@ fn direct_resolution_from_overlay(
     )
 }
 
-/// 从 `GatewayConfig` 派生 `ProviderResolution::Gateway`。
+/// 从 `RouterConfig` 派生 `ProviderResolution::Router`。
 ///
-/// URL 取 `gateway_cfg.listen`（如 `127.0.0.1:8787`），前面补 `http://`。
+/// URL 取 `router_cfg.listen`（如 `127.0.0.1:8787`），前面补 `http://`。
 /// Auth token 取 `auth_token[0]`（空数组或空字符串 → 不带 auth，但 warn）。
 /// 至少 `listen` 必须非空 —— 否则 `Off` + warn。
-fn gateway_resolution(cfg: &GatewayConfig) -> (ProviderResolution, Option<String>) {
+fn router_resolution(cfg: &RouterConfig) -> (ProviderResolution, Option<String>) {
     let listen = cfg.listen.trim();
     if listen.is_empty() {
-        let reason = "ProviderMode::Gateway but gateway.listen is empty in config".to_string();
-        tracing::warn!("ProviderMode::Gateway but gateway.listen is empty; aborting spawn");
+        let reason = "ProviderMode::Router but router.listen is empty in config".to_string();
+        tracing::warn!("ProviderMode::Router but router.listen is empty; aborting spawn");
         return (ProviderResolution::Error { reason }, None);
     }
     let url = format!("http://{listen}");
@@ -220,15 +220,15 @@ fn gateway_resolution(cfg: &GatewayConfig) -> (ProviderResolution, Option<String
     if auth_token.is_empty() {
         tracing::warn!(
             listen = %listen,
-            "ProviderMode::Gateway but gateway.auth_token is empty; agent will call without Bearer/x-api-key"
+            "ProviderMode::Router but router.auth_token is empty; agent will call without Bearer/x-api-key"
         );
     }
-    (ProviderResolution::Gateway { url, auth_token }, None)
+    (ProviderResolution::Router { url, auth_token }, None)
 }
 
 /// 解析 `ProviderMode` + `DefaultSelection` → `ProviderResolution` + 可选的
 /// `default_model`（spawn 时追加 `--model <id>`，仅 Direct / Off-with-default
-/// 模式下生效；Gateway 一律 `None`）。
+/// 模式下生效；Router 一律 `None`）。
 ///
 /// openspec/specs/provider-management/spec.md 三处决策点：
 ///
@@ -253,7 +253,7 @@ fn gateway_resolution(cfg: &GatewayConfig) -> (ProviderResolution, Option<String
 /// 新行为：spawn wrapper 检测 `SEBAS_PROVIDER_ERROR` 后 print + exit(1)。
 pub fn compute_provider_resolution(
     state: &ProviderRuntimeState,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
 ) -> (ProviderResolution, Option<String>) {
     // 把「Off 但 default_selection.provider 已设」归一为隐式 Direct。
     let effective_mode: ProviderMode = match &state.mode {
@@ -268,38 +268,38 @@ pub fn compute_provider_resolution(
     };
     match &effective_mode {
         ProviderMode::Off => (ProviderResolution::Off, None),
-        ProviderMode::Gateway => match gateway_cfg {
-            Some(cfg) => gateway_resolution(cfg),
-            // 没有可用的 gateway（既没 --gateway 内嵌、config.toml 也没有对应
-            // 段）→ 回退 Off + warn，而不是拒绝启动。mode=gateway 但 gateway
+        ProviderMode::Router => match router_cfg {
+            Some(cfg) => router_resolution(cfg),
+            // 没有可用的 router（既没 --router 内嵌、config.toml 也没有对应
+            // 段）→ 回退 Off + warn，而不是拒绝启动。mode=router 但 router
             // 没起来时，让 claude 走自己 env 配置（Off 的语义）比整 bot 卡死
-            // 在「refusing to launch」强。真把 gateway 配坏了（listen 空）仍
-            // 由 gateway_resolution 返回 Error（显式失败语义保留）。
+            // 在「refusing to launch」强。真把 router 配坏了（listen 空）仍
+            // 由 router_resolution 返回 Error（显式失败语义保留）。
             None => {
                 tracing::warn!(
-                    "ProviderMode::Gateway but no gateway config provided; falling back to Off"
+                    "ProviderMode::Router but no router config provided; falling back to Off"
                 );
                 (ProviderResolution::Off, None)
             }
         },
         ProviderMode::Direct { provider } => {
             // 优先读 overlay（用户 bot 里改的）；overlay 缺则回退到
-            // gateway_cfg 里的同名 provider（仅 config.toml 种子，没经过
+            // router_cfg 里的同名 provider（仅 config.toml 种子，没经过
             // /provider 编辑的 provider 走这条路径）。
             let (resolution, overlay_model) = if let Some(item) = read_overlay_item(provider) {
                 direct_resolution_from_overlay(provider, &item)
-            } else if let Some(cfg) = gateway_cfg
+            } else if let Some(cfg) = router_cfg
                 && let Some(p) = cfg.providers.get(provider)
             {
-                // gateway 侧 resolution：已经过 preset 解析与 overlay 合并。
-                // 这里用 gateway 自己的 ProviderConfig 反推 Direct 给 agent：
+                // router 侧 resolution：已经过 preset 解析与 overlay 合并。
+                // 这里用 router 自己的 ProviderConfig 反推 Direct 给 agent：
                 //   - base_url_anthropic/openai 决定协议；
                 //   - api_key_env 读 env，api_key 明文兜底。
-                build_direct_from_gateway_config(provider, p)
+                build_direct_from_router_config(provider, p)
             } else {
                 // 两者都缺 → 这位 provider 名既不指向 overlay 项、也不指向
-                // gateway seed。按持久化层的约定（state_store.rs 的契约：「必须
-                // 存在于 providers 或 gateway_cfg，否则 spawn-time 兜底回退
+                // router seed。按持久化层的约定（state_store.rs 的契约：「必须
+                // 存在于 providers 或 router_cfg，否则 spawn-time 兜底回退
                 // Off + warn」），回退 Off + warn，而不是拒绝启动：这条路径可能
                 // 来自泄漏进 state.json 的幽灵 provider（如测试字面量
                 // "env-override"），不该让用户连 claude 都拉不起来。真正把
@@ -307,7 +307,7 @@ pub fn compute_provider_resolution(
                 // 各自的 URL / 密钥校验仍会喷 Error（显式失败语义保留）。
                 tracing::warn!(
                     provider = %provider,
-                    "Direct provider not found in overlay or gateway config; falling back to Off"
+                    "Direct provider not found in overlay or router config; falling back to Off"
                 );
                 (ProviderResolution::Off, None)
             };
@@ -325,12 +325,12 @@ pub fn compute_provider_resolution(
     }
 }
 
-/// 从 `sebas_gateway::config::ProviderConfig` 构造 `ProviderResolution::Direct`。
+/// 从 `sebas_router::config::ProviderConfig` 构造 `ProviderResolution::Direct`。
 /// 与 `direct_resolution_from_overlay` 语义一致，只是输入形状不同 —— 复用
 /// 同一套协议选择 + 密钥优先级，避免两套逻辑漂移。
-fn build_direct_from_gateway_config(
+fn build_direct_from_router_config(
     name: &str,
-    p: &sebas_gateway::config::ProviderConfig,
+    p: &sebas_router::config::ProviderConfig,
 ) -> (ProviderResolution, Option<String>) {
     let (proto, base_url) = if let Some(u) = p.base_url_anthropic.as_deref() {
         (sebas_acp::claude::AgentProtocol::Anthropic, u.to_string())
@@ -338,11 +338,11 @@ fn build_direct_from_gateway_config(
         (sebas_acp::claude::AgentProtocol::OpenAi, u.to_string())
     } else {
         let reason = format!(
-            "direct provider '{name}' in gateway config has no base_url_anthropic or base_url_openai"
+            "direct provider '{name}' in router config has no base_url_anthropic or base_url_openai"
         );
         tracing::warn!(
             provider = %name,
-            "Direct provider missing URLs in gateway config; aborting spawn"
+            "Direct provider missing URLs in router config; aborting spawn"
         );
         return (ProviderResolution::Error { reason }, None);
     };
@@ -368,7 +368,7 @@ fn build_direct_from_gateway_config(
         plain.clone()
     } else {
         let reason = format!(
-            "direct provider '{name}' has neither api_key_env nor api_key in gateway config"
+            "direct provider '{name}' has neither api_key_env nor api_key in router config"
         );
         tracing::warn!(
             provider = %name,
@@ -383,7 +383,7 @@ fn build_direct_from_gateway_config(
             base_url,
             auth_token,
         },
-        None, // gateway ProviderConfig 不带 default_model（设计如此）
+        None, // router ProviderConfig 不带 default_model（设计如此）
     )
 }
 
@@ -401,9 +401,9 @@ fn build_direct_from_gateway_config(
 pub fn resolve_spawn_overrides(
     driver: &ClaudeCodeDriver,
     state: &ProviderRuntimeState,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
 ) -> (Vec<(String, String)>, Vec<String>) {
-    let (resolution, default_model) = compute_provider_resolution(state, gateway_cfg);
+    let (resolution, default_model) = compute_provider_resolution(state, router_cfg);
     if let ProviderResolution::Error { reason } = &resolution {
         tracing::warn!(
             reason = %reason,
@@ -423,13 +423,13 @@ pub fn resolve_spawn_overrides(
 mod tests {
     use super::*;
     use sebas_acp::claude::{AgentProtocol, ClaudeCodeDriver};
-    use sebas_gateway::config::GatewayConfig;
-    use sebas_router::provider_state::{ProviderMode, ProviderRuntimeState};
-    use sebas_router::state_store::DefaultSelection;
+    use sebas_router::config::RouterConfig;
+    use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
+    use sebas_dispatch::state_store::DefaultSelection;
     use std::sync::Mutex;
 
-    // 串行化所有 env 访问：`SEBAS_GATEWAY_PROVIDER_OVERLAY` 是全局变量，
-    // 跨测试并发跑会撞；与 `gateway/src/config.rs::tests` 同惯例。
+    // 串行化所有 env 访问：`SEBAS_ROUTER_PROVIDER_OVERLAY` 是全局变量，
+    // 跨测试并发跑会撞；与 `router/src/config.rs::tests` 同惯例。
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn driver() -> ClaudeCodeDriver {
@@ -449,21 +449,21 @@ mod tests {
         }
     }
 
-    fn gateway_state() -> ProviderRuntimeState {
+    fn router_state() -> ProviderRuntimeState {
         ProviderRuntimeState {
-            mode: ProviderMode::Gateway,
+            mode: ProviderMode::Router,
             default_selection: None,
         }
     }
 
-    /// Build a minimal `GatewayConfig` for tests — GatewayConfig has no
+    /// Build a minimal `RouterConfig` for tests — RouterConfig has no
     /// `Default` impl (out of scope for this task), so we set the fields
     /// the spawn-env resolver actually touches (`listen`, `auth_token`,
     /// `providers`) and leave the rest at their defaults via `parse`.
-    fn test_gateway(listen: &str, auth_token: Vec<String>) -> GatewayConfig {
+    fn test_router(listen: &str, auth_token: Vec<String>) -> RouterConfig {
         let raw = format!(
             r#"
-[gateway]
+[router]
 listen = "{listen}"
 auth_token = {auth_token:?}
 # 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
@@ -472,7 +472,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
 [provider.anthropic]
 "#
         );
-        GatewayConfig::parse(&raw).expect("test gateway config parses")
+        RouterConfig::parse(&raw).expect("test router config parses")
     }
 
     fn write_overlay(dir: &std::path::Path, body: &str) {
@@ -481,14 +481,14 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         std::fs::write(&path, body).unwrap();
         // SAFETY: ENV_LOCK held across all overlay-touching tests.
         unsafe {
-            std::env::set_var("SEBAS_GATEWAY_PROVIDER_OVERLAY", path.to_str().unwrap());
+            std::env::set_var("SEBAS_ROUTER_PROVIDER_OVERLAY", path.to_str().unwrap());
         }
     }
 
     fn clear_overlay_env() {
         // SAFETY: ENV_LOCK held.
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
@@ -845,7 +845,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         );
         let state = direct_state("nonexistent");
         let (resolution, _) = compute_provider_resolution(&state, None);
-        // 幽灵 / 拼错的 provider：overlay 与 gateway 都没有 → 兜底 Off + warn，
+        // 幽灵 / 拼错的 provider：overlay 与 router 都没有 → 兜底 Off + warn，
         // 不拒绝启动（持久化层约定的 backoff）。
         assert!(
             matches!(resolution, ProviderResolution::Off),
@@ -976,10 +976,10 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         }
     }
 
-    // ---- Direct: gateway_cfg fallback (no overlay entry) ----
+    // ---- Direct: router_cfg fallback (no overlay entry) ----
 
     #[test]
-    fn direct_falls_back_to_gateway_cfg_when_overlay_missing() {
+    fn direct_falls_back_to_router_cfg_when_overlay_missing() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         write_overlay(dir.path(), r#"{ "providers": {} }"#);
@@ -987,16 +987,16 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "sk-anth-gw");
         }
-        // 显式构造一份带 `anthropic` provider 的 gateway config，让
-        // 「overlay 没找到 → gateway_cfg 兜底」分支被命中。
+        // 显式构造一份带 `anthropic` provider 的 router config，让
+        // 「overlay 没找到 → router_cfg 兜底」分支被命中。
         let raw = r#"
-[gateway]
+[router]
 listen = "127.0.0.1:8787"
 auth_token = "x"
 [provider.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
 "#;
-        let cfg = GatewayConfig::parse(raw).expect("test gateway parses");
+        let cfg = RouterConfig::parse(raw).expect("test router parses");
         let state = direct_state("anthropic");
         let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
         match resolution {
@@ -1009,7 +1009,7 @@ api_key_env = "ANTHROPIC_API_KEY"
                 assert_eq!(base_url, "https://api.anthropic.com");
                 assert_eq!(auth_token, "sk-anth-gw");
             }
-            other => panic!("expected Direct via gateway_cfg, got {other:?}"),
+            other => panic!("expected Direct via router_cfg, got {other:?}"),
         }
         // SAFETY: ENV_LOCK held.
         unsafe {
@@ -1017,46 +1017,46 @@ api_key_env = "ANTHROPIC_API_KEY"
         }
     }
 
-    // ---- Gateway ----
+    // ---- Router ----
 
     #[test]
-    fn gateway_mode_uses_http_listen_url_and_first_auth_token() {
+    fn router_mode_uses_http_listen_url_and_first_auth_token() {
         let _g = ENV_LOCK.lock().unwrap();
-        let cfg = test_gateway("127.0.0.1:8787", vec!["sk-gw".to_string()]);
-        let state = gateway_state();
+        let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
+        let state = router_state();
         let (resolution, model) = compute_provider_resolution(&state, Some(&cfg));
         match resolution {
-            ProviderResolution::Gateway { url, auth_token } => {
+            ProviderResolution::Router { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8787");
                 assert_eq!(auth_token, "sk-gw");
             }
-            other => panic!("expected Gateway, got {other:?}"),
+            other => panic!("expected Router, got {other:?}"),
         }
         assert!(model.is_none());
     }
 
     #[test]
-    fn gateway_mode_without_cfg_falls_back_to_off() {
+    fn router_mode_without_cfg_falls_back_to_off() {
         let _g = ENV_LOCK.lock().unwrap();
-        let state = gateway_state();
+        let state = router_state();
         let (resolution, _) = compute_provider_resolution(&state, None);
-        // mode=gateway 但没有任何可用 gateway → 兜底 Off，不拒绝启动（与
+        // mode=router 但没有任何可用 router → 兜底 Off，不拒绝启动（与
         // Phantom Direct provider 同理：runtime 状态与可解析配置脱节时，
         // 让 claude 走自己的配置，而不是整 bot 卡在 refusing to launch）。
         assert!(
             matches!(resolution, ProviderResolution::Off),
-            "Gateway mode without cfg must fall back to Off, got {resolution:?}"
+            "Router mode without cfg must fall back to Off, got {resolution:?}"
         );
     }
 
     #[test]
-    fn gateway_mode_empty_listen_returns_error() {
+    fn router_mode_empty_listen_returns_error() {
         let _g = ENV_LOCK.lock().unwrap();
         // parse 走一遍拿到合法 cfg，再把 listen 改成空——这样我们精确覆盖
-        // `gateway_mode_uses_http_listen_url_and_first_auth_token` 的反向分支。
-        let mut cfg = test_gateway("127.0.0.1:8787", vec!["sk-gw".to_string()]);
+        // `router_mode_uses_http_listen_url_and_first_auth_token` 的反向分支。
+        let mut cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
         cfg.listen = "".to_string();
-        let state = gateway_state();
+        let state = router_state();
         let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
         match &resolution {
             ProviderResolution::Error { reason } => {
@@ -1065,7 +1065,7 @@ api_key_env = "ANTHROPIC_API_KEY"
                     "reason must mention listen field; got: {reason}"
                 );
             }
-            other => panic!("Gateway mode with empty listen must yield Error, got {other:?}"),
+            other => panic!("Router mode with empty listen must yield Error, got {other:?}"),
         }
     }
 
@@ -1076,11 +1076,11 @@ api_key_env = "ANTHROPIC_API_KEY"
     fn resolve_spawn_overrides_error_emits_sebas_provider_error_env() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_overlay_env();
-        // 触发 Error：用 gateway_state() 配 listen="" 的 GatewayConfig。
-        // 注：2e5ba41 之后 gateway_state()+None 改为回退 Off（旧路径不再
+        // 触发 Error：用 router_state() 配 listen="" 的 RouterConfig。
+        // 注：2e5ba41 之后 router_state()+None 改为回退 Off（旧路径不再
         // 产生 Error），所以这里走 empty-listen 分支拿 Error 变体。
-        let state = gateway_state();
-        let cfg = test_gateway("", vec!["sk-gw".to_string()]);
+        let state = router_state();
+        let cfg = test_router("", vec!["sk-gw".to_string()]);
         let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
         assert!(
             env.iter().any(|(k, _)| k == "SEBAS_PROVIDER_ERROR"),
@@ -1109,10 +1109,10 @@ api_key_env = "ANTHROPIC_API_KEY"
     }
 
     #[test]
-    fn gateway_mode_emits_anthropic_env_via_driver() {
+    fn router_mode_emits_anthropic_env_via_driver() {
         let _g = ENV_LOCK.lock().unwrap();
-        let cfg = test_gateway("127.0.0.1:8787", vec!["sk-gw".to_string()]);
-        let state = gateway_state();
+        let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
+        let state = router_state();
         let (env, args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
         assert!(
             env.iter()
@@ -1211,7 +1211,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         unsafe {
             std::env::set_var("SEBAS_STATE_FILE", state_path.to_str().unwrap());
             std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 overlay_path.to_str().unwrap(),
             );
         }
@@ -1222,7 +1222,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"version":2,"providers":{"test_prov":{"preset":"deepseek","base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"off"},"default_selection":null}"#,
         )
         .unwrap();
-        let st = sebas_router::provider_state::load();
+        let st = sebas_dispatch::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         assert!(matches!(
             compute_provider_resolution(&st, None).0,
@@ -1237,7 +1237,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"version":2,"providers":{"test_prov":{"preset":"deepseek","base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"direct","provider":"test_prov"},"default_selection":{"provider":"test_prov"}}"#,
         )
         .unwrap();
-        let st = sebas_router::provider_state::load();
+        let st = sebas_dispatch::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
             ProviderResolution::Direct {
@@ -1263,20 +1263,20 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         assert!(args.is_empty(), "no default_model → no --model args");
 
-        // --- Scenario C: Gateway → Gateway ---
+        // --- Scenario C: Router → Router ---
         std::fs::write(
             &state_path,
-            r#"{"mode":{"kind":"gateway"},"default_selection":null}"#,
+            r#"{"mode":{"kind":"router"},"default_selection":null}"#,
         )
         .unwrap();
-        let st = sebas_router::provider_state::load();
-        let cfg = test_gateway("127.0.0.1:8888", vec!["sk-gw-test".to_string()]);
+        let st = sebas_dispatch::provider_state::load();
+        let cfg = test_router("127.0.0.1:8888", vec!["sk-gw-test".to_string()]);
         match compute_provider_resolution(&st, Some(&cfg)).0 {
-            ProviderResolution::Gateway { url, auth_token } => {
+            ProviderResolution::Router { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8888");
                 assert_eq!(auth_token, "sk-gw-test");
             }
-            other => panic!("expected Gateway, got {other:?}"),
+            other => panic!("expected Router, got {other:?}"),
         }
 
         // --- Scenario D: Direct + 不存在的 provider → 兜底 Off（持久化层约定
@@ -1289,7 +1289,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{"mode":{"kind":"direct","provider":"nonexistent"},"default_selection":null}"#,
         )
         .unwrap();
-        let st = sebas_router::provider_state::load();
+        let st = sebas_dispatch::provider_state::load();
         let (env, args) = resolve_spawn_overrides(&driver(), &st, None);
         match compute_provider_resolution(&st, None).0 {
             ProviderResolution::Off => {}
@@ -1315,7 +1315,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         // SAFETY: ENV_LOCK held.
         unsafe {
             std::env::remove_var("SEBAS_STATE_FILE");
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
@@ -1342,7 +1342,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         unsafe {
             std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 dir.path().join("providers.json").to_str().unwrap(),
             );
         }
@@ -1362,7 +1362,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("expected Direct, got {other:?}"),
         }
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
@@ -1388,7 +1388,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         unsafe {
             std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 dir.path().join("providers.json").to_str().unwrap(),
             );
         }
@@ -1408,7 +1408,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("expected Direct, got {other:?}"),
         }
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
@@ -1434,7 +1434,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         unsafe {
             std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 dir.path().join("providers.json").to_str().unwrap(),
             );
         }
@@ -1460,7 +1460,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             ),
         }
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
@@ -1485,7 +1485,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         unsafe {
             std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 dir.path().join("providers.json").to_str().unwrap(),
             );
         }
@@ -1509,7 +1509,7 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("显式 protocol=openai 缺 base_url_openai → 必须 Error；got {other:?}"),
         }
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
@@ -1535,7 +1535,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         );
         unsafe {
             std::env::set_var(
-                "SEBAS_GATEWAY_PROVIDER_OVERLAY",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 dir.path().join("providers.json").to_str().unwrap(),
             );
         }
@@ -1551,38 +1551,38 @@ api_key_env = "ANTHROPIC_API_KEY"
             other => panic!("expected Direct, got {other:?}"),
         }
         unsafe {
-            std::env::remove_var("SEBAS_GATEWAY_PROVIDER_OVERLAY");
+            std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
         }
     }
 
-    /// Gateway 模式 + gateway config 里有 listen 但 auth_token 是空数组：
+    /// Router 模式 + router config 里有 listen 但 auth_token 是空数组：
     /// 不应 panic / 不应拒绝；URL 仍构造，auth_token 是空字符串（agent 会
-    /// 在没 Bearer 的情况下调 gateway，gateway 自己拒）。这是用户故意不配
+    /// 在没 Bearer 的情况下调 router，router 自己拒）。这是用户故意不配
     /// auth 的合法状态。
     #[tokio::test]
-    async fn gateway_with_empty_auth_token_still_constructs_url() {
+    async fn router_with_empty_auth_token_still_constructs_url() {
         let raw = r#"
-[gateway]
+[router]
 listen = "127.0.0.1:8787"
 auth_token = []
 [provider.anthropic]
 base_url_anthropic = "https://api.anthropic.com"
 "#;
-        let cfg = GatewayConfig::parse(raw).expect("test gateway parses");
+        let cfg = RouterConfig::parse(raw).expect("test router parses");
         let state = ProviderRuntimeState {
-            mode: ProviderMode::Gateway,
+            mode: ProviderMode::Router,
             default_selection: None,
         };
         let (resolution, _) = compute_provider_resolution(&state, Some(&cfg));
         match resolution {
-            ProviderResolution::Gateway { url, auth_token } => {
+            ProviderResolution::Router { url, auth_token } => {
                 assert_eq!(url, "http://127.0.0.1:8787");
                 assert_eq!(
                     auth_token, "",
-                    "空 auth_token 数组 → 空字符串（agent 调 gateway 不带 Bearer）"
+                    "空 auth_token 数组 → 空字符串（agent 调 router 不带 Bearer）"
                 );
             }
-            other => panic!("expected Gateway, got {other:?}"),
+            other => panic!("expected Router, got {other:?}"),
         }
     }
 }

@@ -9,17 +9,17 @@
 //!   `ChannelEvent` JSON frames dispatched straight into the router.
 
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use sebas::replay::replay_frame;
-use sebas::run::{RouterEventHandler, ingest_feishu_frame};
+use sebas::run::{DispatchEventHandler, ingest_feishu_frame};
 use tokio::sync::mpsc::Receiver;
 
-/// Build a fresh `RouterEventHandler` with an empty `SessionMap` and a
+/// Build a fresh `DispatchEventHandler` with an empty `SessionMap` and a
 /// captured `Out` receiver so the test can assert what was dispatched.
-fn make_handler(owner_id: &str) -> (RouterEventHandler, Receiver<Out>) {
-    let (router, rx) = RouterHandle::new(SessionMap::new());
-    let handler = RouterEventHandler::new(router, owner_id.to_string(), None);
+fn make_handler(owner_id: &str) -> (DispatchEventHandler, Receiver<Out>) {
+    let (router, rx) = DispatchHandle::new(SessionMap::new());
+    let handler = DispatchEventHandler::new(router, owner_id.to_string(), None);
     (handler, rx)
 }
 
@@ -123,9 +123,9 @@ async fn replay_button_cb_routes_to_help_when_session_dead() {
 /// 按 run_ws_loop 的真实装配接线：config 默认 allowed_chat_types +
 /// 默认 bot_name（而非 make_handler 的空列表放行）。sebas-5y5 的回归
 /// 覆盖点：飞书私聊 wire 值是 "p2p"，默认白名单若按字面匹配会静默丢弃。
-fn make_live_wired_handler() -> (RouterEventHandler, Receiver<Out>) {
-    let (router, rx) = RouterHandle::new(SessionMap::new());
-    let mut handler = RouterEventHandler::new(router, String::new(), None);
+fn make_live_wired_handler() -> (DispatchEventHandler, Receiver<Out>) {
+    let (router, rx) = DispatchHandle::new(SessionMap::new());
+    let mut handler = DispatchEventHandler::new(router, String::new(), None);
     let feishu_cfg = sebas::config::FeishuConfig::default();
     handler.allowed_chat_types = feishu_cfg.allowed_chat_types;
     handler.bot_name = feishu_cfg.bot_name;
@@ -183,8 +183,8 @@ async fn group_passes_and_private_alias_still_allows_p2p() {
         "群聊 chat_type=\"group\" 应通过默认过滤"
     );
 
-    let (router, _rx2) = RouterHandle::new(SessionMap::new());
-    let mut legacy = RouterEventHandler::new(router, String::new(), None);
+    let (router, _rx2) = DispatchHandle::new(SessionMap::new());
+    let mut legacy = DispatchEventHandler::new(router, String::new(), None);
     legacy.allowed_chat_types = vec!["private".into(), "group".into()];
     assert!(
         ingest_feishu_frame(&legacy, &text_message_payload("p2p")),
@@ -231,12 +231,12 @@ async fn replay_run_reads_sorted_frames_and_skips_bad_ones() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `replay_frame` 直连 `RouterHandle`：中立 Text 帧派发后应产生
+/// `replay_frame` 直连 `DispatchHandle`：中立 Text 帧派发后应产生
 /// AckMsg（reply_target 落在 ack 上）+ SpawnAcp，证明离线路径与
 /// WS 路径经同一 router 决策。
 #[tokio::test]
 async fn replay_frame_dispatches_neutral_text() {
-    let (router, mut rx) = RouterHandle::new(SessionMap::new());
+    let (router, mut rx) = DispatchHandle::new(SessionMap::new());
     let evt = ChannelEvent::Text {
         key: ChannelKey::feishu("oc_test", None),
         text: "hi".into(),

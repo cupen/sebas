@@ -20,7 +20,7 @@ use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
-use sebas_router::RouterHandle;
+use sebas_dispatch::DispatchHandle;
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -92,7 +92,7 @@ pub fn bind_channel_socket(path: &Path) -> Result<IpcListener> {
 /// that send an empty secret — the uid check still applies).
 pub async fn serve(
     backend: Arc<dyn SessionBackend>,
-    router: RouterHandle,
+    router: DispatchHandle,
     path: PathBuf,
     secret: String,
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -207,7 +207,7 @@ async fn read_handshake(
 async fn handle_connection(
     stream: IpcStream,
     backend: Arc<dyn SessionBackend>,
-    router: RouterHandle,
+    router: DispatchHandle,
     secret: String,
 ) -> Result<()> {
     if !peer_uid_ok(&stream) {
@@ -383,10 +383,10 @@ async fn write_frame(
 /// 取单个域的快照 payload。与 `CoreChannelResponse::StateSnapshot` 共用，
 /// 也供状态订阅流的全域快照复用。
 async fn snapshot_domain(
-    router: &RouterHandle,
+    router: &DispatchHandle,
     domain: &str,
 ) -> serde_json::Value {
-    let Some(engine) = sebas_router::state_store::engine() else {
+    let Some(engine) = sebas_dispatch::state_store::engine() else {
         return serde_json::json!({"error": "state store 未初始化"});
     };
     match domain {
@@ -412,7 +412,7 @@ async fn snapshot_domain(
 }
 
 /// 全域快照：providers / settings / projects / sessions。
-async fn state_snapshot_all(router: &RouterHandle) -> serde_json::Value {
+async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
     let mut domains = serde_json::Map::new();
     for domain in ["providers", "settings", "projects", "sessions"] {
         domains.insert(domain.to_string(), snapshot_domain(router, domain).await);
@@ -423,10 +423,10 @@ async fn state_snapshot_all(router: &RouterHandle) -> serde_json::Value {
 /// 4.2 状态订阅：先发全域快照，再持续转发变更通知（合并窗口 100ms，
 /// 一串提交合并为一帧）。广播无人订阅/关闭时，快照后保持连接等待。
 async fn serve_state_subscription(
-    router: RouterHandle,
+    router: DispatchHandle,
     mut writer: WriteHalf,
 ) -> Result<()> {
-    use sebas_router::state_store::StateChange;
+    use sebas_dispatch::state_store::StateChange;
     const MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
     // Frame 1: the full snapshot.
@@ -435,7 +435,7 @@ async fn serve_state_subscription(
     write_state_frame(&mut writer, &snapshot).await?;
 
     // 无广播（引擎未初始化通知通道）时挂起等连接关闭。
-    let Some(mut changes) = sebas_router::state_store::subscribe_changes() else {
+    let Some(mut changes) = sebas_dispatch::state_store::subscribe_changes() else {
         info!("state subscription: change broadcast 未初始化, 快照后空闲等待");
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         return Ok(());
@@ -572,7 +572,7 @@ async fn write_state_frame(
 /// demands a typed rejection).
 async fn dispatch(
     backend: &Arc<dyn SessionBackend>,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     req: CoreChannelRequest,
 ) -> CoreChannelResponse {
     match req {
@@ -697,7 +697,7 @@ async fn dispatch(
         // Handled by the connection loop before dispatch; unreachable here.
         CoreChannelRequest::Subscribe => CoreChannelResponse::Ok,
         CoreChannelRequest::StateSnapshot { domain } => {
-            match sebas_router::state_store::engine() {
+            match sebas_dispatch::state_store::engine() {
                 Some(_) => {
                     let payload = snapshot_domain(router, &domain).await;
                     CoreChannelResponse::StateSnapshot { domain, payload }
@@ -710,7 +710,7 @@ async fn dispatch(
             }
         }
         CoreChannelRequest::StateMutation { domain, payload } => {
-            match sebas_router::state_store::engine() {
+            match sebas_dispatch::state_store::engine() {
                 Some(engine) => {
                     let result = match domain.as_str() {
                         "settings" => {
@@ -755,7 +755,7 @@ fn key_str(key: &ChannelKey) -> String {
 /// - `{"op": "remove", "path": "..."}` → 删除（不存在返回错误）
 /// - `{"op": "save", "projects": [...]}` → 全量替换
 async fn project_mutation(
-    engine: &(dyn sebas_router::state_store::StateStoreEngine + Send + Sync),
+    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
     payload: &serde_json::Value,
 ) -> std::result::Result<(), String> {
     let op = payload
@@ -805,7 +805,7 @@ async fn project_mutation(
 /// - `{"op":"save","state":{PersistedState 形状}}` → 全量替换
 /// 全部经 RMW（读 → 改 → save_persisted_state），与 router 卡片写路径同语义。
 async fn providers_mutation(
-    engine: &(dyn sebas_router::state_store::StateStoreEngine + Send + Sync),
+    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
     payload: &serde_json::Value,
 ) -> std::result::Result<(), String> {
     let op = payload
@@ -857,7 +857,7 @@ async fn providers_mutation(
                 .get("state")
                 .cloned()
                 .ok_or_else(|| "save: 缺少 state 字段".to_string())?;
-            let incoming: sebas_router::state_store::PersistedState =
+            let incoming: sebas_dispatch::state_store::PersistedState =
                 serde_json::from_value(raw)
                     .map_err(|e| format!("save: 非法 PersistedState: {e}"))?;
             // 保留 mode/default_selection（admin 面不管运行时状态，只写 provider 数据）。
@@ -879,7 +879,7 @@ async fn providers_mutation(
 /// - `{"op":"delete","alias":"..."}`
 /// - `{"op":"save","aliases":{alias: entry,...}}` → 全量替换
 async fn aliases_mutation(
-    engine: &(dyn sebas_router::state_store::StateStoreEngine + Send + Sync),
+    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
     payload: &serde_json::Value,
 ) -> std::result::Result<(), String> {
     let op = payload
@@ -893,7 +893,7 @@ async fn aliases_mutation(
                 .get("alias")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "put: 缺少 alias 字段".to_string())?;
-            let entry: sebas_router::state_store::ModelAliasEntry = serde_json::from_value(
+            let entry: sebas_dispatch::state_store::ModelAliasEntry = serde_json::from_value(
                 payload
                     .get("entry")
                     .cloned()
@@ -928,7 +928,7 @@ async fn aliases_mutation(
                 .ok_or_else(|| "save: 缺少 aliases 字段".to_string())?;
             let incoming: std::collections::BTreeMap<
                 String,
-                sebas_router::state_store::ModelAliasEntry,
+                sebas_dispatch::state_store::ModelAliasEntry,
             > = serde_json::from_value(raw).map_err(|e| format!("save: aliases 非法: {e}"))?;
             state.model_aliases = incoming;
             engine

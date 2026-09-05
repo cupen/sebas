@@ -12,10 +12,10 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::AcpCommand;
-use sebas_router::cards::CardConfig;
+use sebas_dispatch::cards::CardConfig;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
     assert!(fake.exists());
 
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new_with_config(map, CardConfig::default(), 256);
+    let (router, mut out_rx) = DispatchHandle::new_with_config(map, CardConfig::default(), 256);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(15)));
 
     let key = ChannelKey::feishu("oc_continue", None);
@@ -88,7 +88,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Err(_) => continue,
         };
         if let Out::React { emoji, .. } = got
-            && emoji == sebas_router::card_state::phase::DONE
+            && emoji == sebas_dispatch::card_state::phase::DONE
         {
             first_done = true;
         }
@@ -116,7 +116,7 @@ async fn second_text_flips_fsm_and_forwards_continue() {
             Err(_) => continue,
         };
         match got {
-            Out::React { emoji, .. } if emoji == sebas_router::card_state::phase::WORKING => {
+            Out::React { emoji, .. } if emoji == sebas_dispatch::card_state::phase::WORKING => {
                 saw_react_working = true
             }
             Out::SendAcp {

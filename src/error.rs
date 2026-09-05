@@ -15,11 +15,11 @@ pub enum SebasError {
     #[error("acp error: {0}")]
     Acp(String),
 
+    #[error("dispatch error: {0}")]
+    Dispatch(String),
+
     #[error("router error: {0}")]
     Router(String),
-
-    #[error("gateway error: {0}")]
-    Gateway(String),
 
     #[error("upgrade error: {0}")]
     Upgrade(String),

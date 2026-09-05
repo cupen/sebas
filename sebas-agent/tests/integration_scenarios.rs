@@ -1,5 +1,5 @@
 //! 集成测试（task 6.2，design N10 场景矩阵）：spec 全部 Scenario 有对应
-//! 命名测试。FakeLlmClient 双模式驱动，无需真 gateway / provider / 模型。
+//! 命名测试。FakeLlmClient 双模式驱动，无需真 router / provider / 模型。
 
 use sebas_agent::llm::fake::FakeLlmClient;
 use sebas_agent::message::{BudgetConfig, ContentBlock, Message};

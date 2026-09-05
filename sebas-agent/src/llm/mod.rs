@@ -1,7 +1,7 @@
 //! LLM 客户端抽象（design N5）：trait + 请求/响应类型。
 //!
 //! 生产实现 [`anthropic::AnthropicMessagesClient`] 面向任意 Anthropic Messages
-//! 流式端点——直连 provider（默认）或经可选 gateway；测试实现 [`fake::FakeLlmClient`]。
+//! 流式端点——直连 provider（默认）或经可选 router；测试实现 [`fake::FakeLlmClient`]。
 
 pub mod anthropic;
 

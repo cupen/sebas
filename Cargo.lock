@@ -2808,8 +2808,8 @@ dependencies = [
  "sebas-acp",
  "sebas-agent",
  "sebas-channels",
+ "sebas-dispatch",
  "sebas-feishu",
- "sebas-gateway",
  "sebas-ipc",
  "sebas-router",
  "sebas-webui",
@@ -2875,6 +2875,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sebas-dispatch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dirs 5.0.1",
+ "reqwest 0.12.28",
+ "sebas-acp",
+ "sebas-channels",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sebas-feishu"
 version = "0.1.0"
 dependencies = [
@@ -2893,7 +2911,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "sebas-gateway"
+name = "sebas-ipc"
+version = "0.1.0"
+dependencies = [
+ "interprocess",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "sebas-router"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -2915,33 +2942,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sebas-ipc"
-version = "0.1.0"
-dependencies = [
- "interprocess",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "sebas-router"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dirs 5.0.1",
- "reqwest 0.12.28",
- "sebas-acp",
- "sebas-channels",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "sebas-webui"
 version = "0.1.0"
 dependencies = [
@@ -2958,8 +2958,8 @@ dependencies = [
  "rust-embed",
  "sebas-acp",
  "sebas-channels",
+ "sebas-dispatch",
  "sebas-feishu",
- "sebas-router",
  "serde",
  "serde_json",
  "sha2 0.10.9",

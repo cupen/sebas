@@ -198,7 +198,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     );
 
     // Bind to the configured port. Fails if the port is already in use
-    // (by another WebUI process or the legacy `sebas run --webui` path).
+    // (by another WebUI process or the legacy `sebas core --webui` path).
     // On failure, exit with a specific code so the watchdog supervisor can
     // distinguish bind failures from other crashes and mark the service as
     // Degraded instead of endlessly retrying.
@@ -230,17 +230,17 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .collect();
 
     // Run the WebUI server. This blocks until the server stops.
-    // fix-webui-detached-status：gateway 静态事实（listen/debug/has_auth 与
+    // fix-webui-detached-status：router 静态事实（listen/debug/has_auth 与
     // TOML 声明的 provider）与 in-process 形态同一装配，不再以
-    // `GatewayInfo::default()` 占位——那会让 composer 恒显
+    // `RouterInfo::default()` 占位——那会让 composer 恒显
     // "no provider configured"。
-    let gateway_info = crate::run::build_gateway_info(
-        sebas_gateway::config::GatewayConfig::parse(&raw).ok().as_ref(),
+    let router_info = crate::run::build_router_info(
+        sebas_router::config::RouterConfig::parse(&raw).ok().as_ref(),
     );
     let backend_dyn: Arc<dyn sebas_webui::SessionBackend> = backend;
     sebas_webui::run_with_admin_adapter_and_auth(
         backend_dyn,
-        gateway_info,
+        router_info,
         merged_card_cfg,
         agent_kinds,
         listener,
@@ -435,7 +435,7 @@ fn current_uid() -> u32 {
 
 /// Load card config from settings.json, falling back to the TOML `[card]` section.
 fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
-    match sebas_router::settings::load_settings(&sebas_router::settings::settings_path()) {
+    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
         Ok(Some(s)) => serde_json::from_value(serde_json::to_value(&s).expect("card config serializes"))
             .expect("card config round-trips between mirror shapes"),
         Ok(None) => cfg.card.clone(),
@@ -447,7 +447,7 @@ fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
 }
 
 /// Install a tracing subscriber for the standalone WebUI process.
-/// Filter comes from `RUST_LOG` (default `"info"`), mirroring gateway_cmd.
+/// Filter comes from `RUST_LOG` (default `"info"`), mirroring router_cmd.
 /// `try_init` is used so the first caller wins and later calls are no-ops.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
@@ -474,7 +474,7 @@ mod auth_gate_tests {
 app_id = ""
 app_secret = ""
 
-[router]
+[dispatch]
 state_file = "{dir}/state.json"
 
 [media]

@@ -25,7 +25,7 @@ impl SessionStatus {
     /// Derive from a mapping state discriminant and the raw card phase.
     ///
     /// `state` is `"active"`, `"spawning"` or `"dormant"`; `phase` is a
-    /// `sebas_router::card_state::phase` constant, or empty when the router has no
+    /// `sebas_dispatch::card_state::phase` constant, or empty when the router has no
     /// card state for the session yet. An active session with no phase is
     /// Queued, not Working: the child process exists but has not produced
     /// anything, and claiming otherwise would be a lie the operator acts on.
@@ -170,9 +170,9 @@ pub struct DashboardData {
     pub active_session_key: Option<String>,
 }
 
-/// Gateway info for the settings page.
+/// Router info for the settings page.
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct GatewayInfo {
+pub struct RouterInfo {
     pub listen: Option<String>,
     pub provider_count: usize,
     pub debug: bool,

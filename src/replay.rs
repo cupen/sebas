@@ -2,7 +2,7 @@
 //!
 //! Reads every `*.json` file in the directory (sorted by filename), parses
 //! each as a neutral [`ChannelEvent`] (the post-adapter, post-gating shape
-//! the live WS loop dumps), and dispatches into a fresh `RouterHandle`.
+//! the live WS loop dumps), and dispatches into a fresh `DispatchHandle`.
 //! No Feishu client, no ACP child, no HTTP server — this is a pure
 //! router/manager exercise used to reproduce router decisions and
 //! `apply_event_to_out` actions offline.
@@ -17,8 +17,8 @@
 use std::path::PathBuf;
 
 use sebas_channels::ChannelEvent;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use tracing::{debug, info, warn};
 
 /// Arguments for `sebas replay --dir <DIR>`.
@@ -33,7 +33,7 @@ pub struct ReplayArgs {
 ///
 /// Returns `true` if the frame was parsed and dispatched to the router,
 /// `false` if it was skipped (UTF-8 / JSON parse failure).
-pub fn replay_frame(router: &RouterHandle, raw: &[u8]) -> bool {
+pub fn replay_frame(router: &DispatchHandle, raw: &[u8]) -> bool {
     let text = match std::str::from_utf8(raw) {
         Ok(t) => t,
         Err(e) => {
@@ -93,7 +93,7 @@ pub async fn run(args: ReplayArgs) -> anyhow::Result<u64> {
     // the duration of `run` so the spawned dispatch tasks can successfully
     // push — `mpsc::Sender::send` returns an error if all receivers are
     // dropped, which would silently swallow every frame.
-    let (router, _rx) = RouterHandle::new(SessionMap::new());
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
 
     let mut count: u64 = 0;
     for p in &paths {

@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * Settings modal (IA v2)：左侧分区导航 + 右侧内容。五个分区——
- *   - models   provider 列表（名称 + base URL，来自 /api/gateway）
- *   - services Gateway 后台服务状态（listen / debug / auth）
+ *   - models   provider 列表（名称 + base URL，来自 /api/router）
+ *   - services Router 后台服务状态（listen / debug / auth）
  *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
  *   - env      环境变量名清单，值一律 "managed by core config"
  *   - about    /api/about 真实字段
@@ -29,13 +29,13 @@ Object.defineProperty(globalThis, 'localStorage', { value: themeLs, configurable
 beforeEach(() => themeStore.clear())
 
 const apiMocks = vi.hoisted(() => ({
-  gateway: vi.fn(),
+  router: vi.fn(),
   about: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
   api: {
-    gateway: apiMocks.gateway,
+    router: apiMocks.router,
     about: apiMocks.about,
   },
 }))
@@ -67,8 +67,8 @@ function navItems(el: SebasSettingsModal): HTMLElement[] {
 }
 
 beforeEach(() => {
-  apiMocks.gateway.mockResolvedValue({
-    gateway: {
+  apiMocks.router.mockResolvedValue({
+    router: {
       listen: '127.0.0.1:8787',
       provider_count: 2,
       debug: false,
@@ -83,7 +83,7 @@ beforeEach(() => {
     uptime: '3h 12m',
     version: '0.4.2',
     rustc_version: '1.88',
-    gateway_listen: '127.0.0.1:8787',
+    router_listen: '127.0.0.1:8787',
     provider_count: 2,
   })
 })
@@ -102,11 +102,11 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('defaults to the Models section rendering providers from /api/gateway', async () => {
+  it('defaults to the Models section rendering providers from /api/router', async () => {
     const el = await mount()
     expect(el.section).toBe('models')
     await settle(el)
-    expect(apiMocks.gateway).toHaveBeenCalled()
+    expect(apiMocks.router).toHaveBeenCalled()
     const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.provider-row')]
     expect(rows.length).toBe(2)
     expect(el.shadowRoot!.textContent).toContain('alpha')
@@ -115,17 +115,17 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('Services section renders the Gateway service card', async () => {
+  it('Services section renders the Router service card', async () => {
     const el = await mount()
     navItems(el)[1]!.click()
     await el.updateComplete
     await settle(el)
     expect(el.section).toBe('services')
-    expect(apiMocks.gateway).toHaveBeenCalled()
+    expect(apiMocks.router).toHaveBeenCalled()
     const cards = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')]
     expect(cards.length).toBe(2)
     const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('Gateway')
+    expect(text).toContain('Router')
     expect(text).toContain('127.0.0.1:8787')
     expect(text).toContain('2 provider(s)')
     expect(text).toContain('auth configured')
@@ -140,7 +140,7 @@ describe('sebas-settings-modal sections', () => {
     expect(el.section).toBe('env')
     const rows = [...el.shadowRoot!.querySelectorAll('.env-table tbody tr')]
     expect(rows.length).toBeGreaterThan(0)
-    expect(el.shadowRoot!.textContent).toContain('SEBAS_GATEWAY_LISTEN')
+    expect(el.shadowRoot!.textContent).toContain('SEBAS_ROUTER_LISTEN')
     // Every row's value is the "not exposed" marker — no fabricated data.
     for (const row of rows) {
       expect(row.querySelector('.value')?.textContent).toBe('managed by core config')

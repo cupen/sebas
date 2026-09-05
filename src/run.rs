@@ -15,7 +15,7 @@ pub use crate::session_boot::{
     acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts, restore_session_map,
     spawn_acp_pump,
 };
-pub use crate::ws_loop::{RouterEventHandler, ingest_feishu_frame};
+pub use crate::ws_loop::{DispatchEventHandler, ingest_feishu_frame};
 
 use crate::config::{AgentConfig, Config};
 use crate::dispatch::{dispatch_out, dispatch_out_without_feishu};
@@ -29,8 +29,8 @@ use sebas_channels::AdapterRegistry;
 use sebas_feishu::adapter::{FeishuAdapter, FeishuAdapterConfig};
 use sebas_feishu::client::FeishuClient;
 use sebas_feishu::messages::{ReceiveIdType, SendTextRequest};
-use sebas_gateway::config::GatewayConfig;
-use sebas_router::router::RouterHandle;
+use sebas_router::config::RouterConfig;
+use sebas_dispatch::engine::DispatchHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -61,7 +61,7 @@ pub async fn run(
     raw_config: String,
     test_msg: Option<String>,
     dump_inbound: Option<String>,
-    gateway_cfg: Option<GatewayConfig>,
+    router_cfg: Option<RouterConfig>,
     webui: bool,
     webui_port: u16,
 ) -> Result<()> {
@@ -81,15 +81,15 @@ pub async fn run(
     // Friendly Config error, no panic; runs before any network/spawn work.
     cfg.validate_runtime()?;
 
-    // `run --gateway`：在随机端口上启动内置 gateway，实际端口记入日志
+    // `run --router`：在随机端口上启动内置 router，实际端口记入日志
     // （调用方按需把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL 指向该地址）。
-    if let Some(ref gw_cfg) = gateway_cfg {
+    if let Some(ref gw_cfg) = router_cfg {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .map_err(|e| crate::error::SebasError::Gateway(format!("绑定随机端口失败: {e}")))?;
-        let (addr, _handle) = sebas_gateway::server::serve_with_listener(gw_cfg.clone(), listener)
-            .map_err(|e| crate::error::SebasError::Gateway(e.to_string()))?;
-        info!(%addr, "gateway started (run --gateway); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
+            .map_err(|e| crate::error::SebasError::Router(format!("绑定随机端口失败: {e}")))?;
+        let (addr, _handle) = sebas_router::server::serve_with_listener(gw_cfg.clone(), listener)
+            .map_err(|e| crate::error::SebasError::Router(e.to_string()))?;
+        info!(%addr, "router started (core --router); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
     }
 
     // feishu 是可选项（sebas-2ty / make-feishu-optional-webui-primary）：
@@ -125,30 +125,30 @@ pub async fn run(
             .map(|v| v.is_empty())
             .unwrap_or(true)
     {
-        // 裸 core 启动：/upgrade / /rollback / /gateway 等需要 watchdog RPC 的命令
+        // 裸 core 启动：/upgrade / /rollback / /router 等需要 watchdog RPC 的命令
         // 在此模式下不可用。启动时给可执行提示，避免用户调用 /upgrade 后才发现。
         warn!(
             "当前为裸 core 启动模式（SEBAS_IPC 未设置 + SEBAS_CONTROL_SECRET 未配置）：\
-             /upgrade、/rollback、/restart、/gateway 等命令需要 watchdog 转发，\
+             /upgrade、/rollback、/restart、/router 等命令需要 watchdog 转发，\
              在此模式下调用会失败。如需启用，请通过 `sebas` watchdog 启动 core（openspec/specs/watchdog/spec.md）"
         );
     }
 
-    let map = restore_session_map(&cfg.router.state_file, cfg.router.max_concurrent_sessions);
+    let map = restore_session_map(&cfg.dispatch.state_file, cfg.dispatch.max_concurrent_sessions);
 
     // 5.5: 初始化状态库 DB (add-state-store)。
     // 如果 DB 初始化失败, 退回到文件存储 (向后兼容)。
     {
         let raw = std::env::var("SEBAS_STATE_DB")
             .unwrap_or_else(|_| "~/.sebas/sebas.db".into());
-        let expanded = sebas_router::state_store::expand_tilde(&raw);
+        let expanded = sebas_dispatch::state_store::expand_tilde(&raw);
         let path = std::path::PathBuf::from(&expanded);
         match crate::sebas_state::writer::StateWriter::start(path.clone()) {
             Ok(writer) => {
                 let engine = Box::new(crate::sebas_state::engine::DbStateEngine::new(
                     writer.handle().clone(),
                 ));
-                sebas_router::state_store::init_engine(engine);
+                sebas_dispatch::state_store::init_engine(engine);
                 tracing::info!(path = %path.display(), "state store DB 已初始化");
             }
             Err(e) => {
@@ -167,11 +167,11 @@ pub async fn run(
     // 需要的类型（serde 往返，零字段映射代码）。
     //
     // 当 state store DB 可用时, 优先从 DB 读 settings; 再回退到文件。
-    let merged_card_cfg = if let Some(engine) = sebas_router::state_store::engine() {
+    let merged_card_cfg = if let Some(engine) = sebas_dispatch::state_store::engine() {
         match engine.load_settings().await {
             Ok(Some(value)) => {
                 // DB 中有 settings, 用 Value 反序列化回 router CardConfig
-                match serde_json::from_value::<sebas_router::CardConfig>(value) {
+                match serde_json::from_value::<sebas_dispatch::CardConfig>(value) {
                     Ok(cfg) => cfg,
                     Err(e) => {
                         tracing::warn!(error = %e, "DB settings 反序列化失败, 回退到文件");
@@ -215,14 +215,14 @@ pub async fn run(
         );
     // 先建 router（native = None），再构造桥（桥需要 router 句柄），最后注入——
     // 解决桥↔router 循环依赖。
-    let (router, mut out_rx) = RouterHandle::new_with_provider_form(
+    let (router, mut out_rx) = DispatchHandle::new_with_provider_form(
         map,
         merged_card_cfg,
-        cfg.router.channel_buffer,
+        cfg.dispatch.channel_buffer,
         provider_forms,
         Some(mgr.clone()),
     );
-    let native_bridge = crate::native_router_bridge::RouterNativeBridge::with_default(
+    let native_bridge = crate::native_dispatch_bridge::DispatchNativeBridge::with_default(
         native_mgr.clone(),
         router.clone(),
         cfg.feishu.native_default,
@@ -354,7 +354,7 @@ pub async fn run(
         );
         registry.register(Box::new(adapter.clone()));
         let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<sebas_channels::ChannelEvent>(
-            cfg.router.channel_buffer,
+            cfg.dispatch.channel_buffer,
         );
         // 每个 adapter 一个 inbound 扇出：core 侧一个消费者任务，把
         // `ChannelEvent` 交给 router.dispatch。
@@ -378,7 +378,7 @@ pub async fn run(
         let router_for_outbound = router.clone();
         let mgr_for_outbound = mgr.clone();
         let reactions_for_outbound = reactions;
-        let gateway_cfg_for_outbound = gateway_cfg.clone();
+        let router_cfg_for_outbound = router_cfg.clone();
         tokio::spawn(async move {
             while let Some(out) = out_rx.recv().await {
                 if let Err(e) = dispatch_out(
@@ -389,7 +389,7 @@ pub async fn run(
                     &router_for_outbound,
                     &mgr_for_outbound,
                     &reactions_for_outbound,
-                    gateway_cfg_for_outbound.as_ref(),
+                    router_cfg_for_outbound.as_ref(),
                     out,
                 )
                 .await
@@ -403,18 +403,18 @@ pub async fn run(
         // spawn/消息/恢复（Out::WebSpawn / SendAcp / SpawnResume）由
         // no-feishu 分发器驱动真实 ACP 会话；卡片/reaction 等聊天向
         // Out 丢弃（没有聊天目的地）。此前直接 drop(out_rx)，导致
-        // `run --webui` 的会话永远停在 Starting。
+        // `core --webui` 的会话永远停在 Starting。
         let cfg_for_outbound = cfg.clone();
         let router_for_outbound = router.clone();
         let mgr_for_outbound = mgr.clone();
-        let gateway_cfg_for_outbound = gateway_cfg.clone();
+        let router_cfg_for_outbound = router_cfg.clone();
         tokio::spawn(async move {
             while let Some(out) = out_rx.recv().await {
                 if let Err(e) = dispatch_out_without_feishu(
                     &cfg_for_outbound,
                     &router_for_outbound,
                     &mgr_for_outbound,
-                    gateway_cfg_for_outbound.as_ref(),
+                    router_cfg_for_outbound.as_ref(),
                     out,
                 )
                 .await
@@ -456,7 +456,7 @@ pub async fn run(
         // session backend (no SessionManager — spawn/close dispatch through
         // the router's outbound pump).
         let backend = webui_backend.clone();
-        let gateway_info = build_gateway_info(gateway_cfg.as_ref());
+        let router_info = build_router_info(router_cfg.as_ref());
         // 创建会话下拉的可达 agent 列表：从 `cfg.acp.agents` 提取 (slug, argv)。
         let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = cfg
             .acp
@@ -469,12 +469,12 @@ pub async fn run(
             .collect();
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
-            .map_err(|e| crate::error::SebasError::Gateway(format!("绑定 webui 端口失败: {e}")))?;
+            .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
         let webui_auth = cfg.watchdog.webui.auth;
         tokio::spawn(async move {
             // 登录鉴权与独立 webui 进程同一套（add-webui-auth-switch）：
             // 开关关闭 → disabled 态全路由免登录；打开 → 凭据文件 + env 引导。
-            // run --webui 恒绑 127.0.0.1，不受非 loopback 门影响。
+            // core --webui 恒绑 127.0.0.1，不受非 loopback 门影响。
             let auth = if webui_auth {
                 crate::webui_cmd::bootstrap_auth()
             } else {
@@ -483,7 +483,7 @@ pub async fn run(
             };
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
-                gateway_info,
+                router_info,
                 webui_card_cfg,
                 agent_kinds,
                 listener,
@@ -497,11 +497,11 @@ pub async fn run(
 
     // Core session channel (5.9): the watchdog injects `SEBAS_CORE_SECRET`
     // into the core child (and the standalone WebUI), so its presence marks
-    // "this process is the core under the watchdog" — the bare `sebas run`
+    // "this process is the core under the watchdog" — the bare `sebas core`
     // keeps no socket, matching the client-side gate in webui_cmd.rs. `serve`
     // owns the socket lifecycle (bind, reclaim stale, remove on shutdown).
     // Session mutations are delegated to the composite backend (design D1),
-    // so detached WebUI and `run --webui` see identical behavior.
+    // so detached WebUI and `core --webui` see identical behavior.
     let channel_shutdown = if !std::env::var("SEBAS_CORE_SECRET").unwrap_or_default().is_empty() {
         let core_secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
         let channel_path = crate::core_channel::socket_path(&cfg);
@@ -585,8 +585,8 @@ pub async fn run(
     let json = router
         .dump_json()
         .await
-        .map_err(|e| crate::error::SebasError::Router(e.to_string()))?;
-    if let Err(e) = std::fs::write(&cfg.router.state_file, json) {
+        .map_err(|e| crate::error::SebasError::Dispatch(e.to_string()))?;
+    if let Err(e) = std::fs::write(&cfg.dispatch.state_file, json) {
         warn!(?e, "failed to persist session state");
     }
 
@@ -614,14 +614,14 @@ fn init_tracing(cfg: &Config) {
     subscriber.init();
 }
 
-/// Build a GatewayInfo from the optional gateway config for the WebUI.
+/// Build a RouterInfo from the optional router config for the WebUI.
 /// fix-webui-detached-status：pub(crate) 供 standalone webui（`sebas webui`）
-/// 复用同一装配——detached 形态不再以 `GatewayInfo::default()` 占位。
-pub(crate) fn build_gateway_info(
-    gateway_cfg: Option<&GatewayConfig>,
-) -> sebas_webui::models::GatewayInfo {
-    let Some(gw) = gateway_cfg else {
-        return sebas_webui::models::GatewayInfo::default();
+/// 复用同一装配——detached 形态不再以 `RouterInfo::default()` 占位。
+pub(crate) fn build_router_info(
+    router_cfg: Option<&RouterConfig>,
+) -> sebas_webui::models::RouterInfo {
+    let Some(gw) = router_cfg else {
+        return sebas_webui::models::RouterInfo::default();
     };
     let providers = gw
         .providers
@@ -632,7 +632,7 @@ pub(crate) fn build_gateway_info(
             base_url_openai: p.base_url_openai.clone(),
         })
         .collect();
-    sebas_webui::models::GatewayInfo {
+    sebas_webui::models::RouterInfo {
         listen: Some(gw.listen.clone()),
         provider_count: gw.providers.len(),
         debug: gw.debug,
@@ -642,8 +642,8 @@ pub(crate) fn build_gateway_info(
 }
 
 /// 回退到 settings.json 读取, 再回退到 TOML `[card]`。
-fn fallback_settings(cfg: &Config) -> sebas_router::CardConfig {
-    match sebas_router::settings::load_settings(&sebas_router::settings::settings_path()) {
+fn fallback_settings(cfg: &Config) -> sebas_dispatch::CardConfig {
+    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
         Ok(Some(s)) => s,
         Ok(None) => {
             serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
@@ -671,16 +671,16 @@ async fn init_watchdog_ipc() {
 }
 
 #[cfg(test)]
-mod gateway_info_tests {
-    use super::build_gateway_info;
-    use sebas_gateway::config::{GatewayConfig, ProviderConfig};
+mod router_info_tests {
+    use super::build_router_info;
+    use sebas_router::config::{RouterConfig, ProviderConfig};
     use std::collections::HashMap;
 
     // fix-webui-detached-status 2.1：detached webui 与 in-process 共用同一
-    // 装配。直接构造 GatewayConfig，不走 env 敏感的 parse（并行测试会改
+    // 装配。直接构造 RouterConfig，不走 env 敏感的 parse（并行测试会改
     // SEBAS_GATEWAY_PROVIDER_OVERLAY，污染 parse）。
-    fn gw_config() -> GatewayConfig {
-        GatewayConfig {
+    fn gw_config() -> RouterConfig {
+        RouterConfig {
             listen: "127.0.0.1:50770".into(),
             max_body_bytes: 1024,
             connect_timeout_secs: 5,
@@ -709,8 +709,8 @@ mod gateway_info_tests {
     }
 
     #[test]
-    fn gateway_config_populates_info() {
-        let info = build_gateway_info(Some(&gw_config()));
+    fn router_config_populates_info() {
+        let info = build_router_info(Some(&gw_config()));
         assert_eq!(info.listen.as_deref(), Some("127.0.0.1:50770"));
         assert_eq!(info.provider_count, 1);
         assert_eq!(info.providers[0].name, "anthropic");
@@ -718,11 +718,11 @@ mod gateway_info_tests {
         assert!(!info.debug);
     }
 
-    // 无 gateway 配置（纯会话核心）→ default：这是"真的没配 gateway"，
+    // 无 router 配置（纯会话核心）→ default：这是"真的没配 router"，
     // 与 detached 占位缺陷不同。
     #[test]
-    fn missing_gateway_section_falls_back_to_default() {
-        let info = build_gateway_info(None);
+    fn missing_router_section_falls_back_to_default() {
+        let info = build_router_info(None);
         assert_eq!(info.listen, None);
         assert_eq!(info.provider_count, 0);
         assert!(info.providers.is_empty());

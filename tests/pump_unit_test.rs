@@ -4,8 +4,8 @@
 //! 不依赖 fake-claude 二进制。
 
 use sebas_acp::claude::session::AcpEvent;
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::{Mapping, SessionMap};
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::{Mapping, SessionMap};
 use sebas::run::spawn_acp_pump;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +27,7 @@ fn card_str(out: &Out) -> String {
 #[tokio::test]
 async fn five_deltas_merge_into_one_updatecard() {
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = DispatchHandle::new(map);
     router.seed_card("s1".into(), "hi".into()).await;
     let (tx, rx) = mpsc::channel::<AcpEvent>(64);
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
@@ -56,7 +56,7 @@ async fn five_deltas_merge_into_one_updatecard() {
         .expect("React 🚧 follows the merged card")
         .expect("channel open");
     assert!(
-        matches!(second, Out::React { ref emoji, .. } if emoji == sebas_router::card_state::phase::WORKING),
+        matches!(second, Out::React { ref emoji, .. } if emoji == sebas_dispatch::card_state::phase::WORKING),
         "合并卡后紧跟 React WORKING: {second:?}"
     );
     let third = tokio::time::timeout(Duration::from_millis(120), out_rx.recv()).await;
@@ -66,7 +66,7 @@ async fn five_deltas_merge_into_one_updatecard() {
 #[tokio::test]
 async fn finished_flushes_immediately_after_stream() {
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = DispatchHandle::new(map);
     router.seed_card("s2".into(), "p".into()).await;
     let (tx, rx) = mpsc::channel::<AcpEvent>(64);
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
@@ -92,7 +92,7 @@ async fn finished_flushes_immediately_after_stream() {
             .expect("channel open");
         // 状态由 Feishu reaction 表达，不再进卡：DONE 反应即 Finished 落地。
         match o {
-            Out::React { ref emoji, .. } if emoji == sebas_router::card_state::phase::DONE => {
+            Out::React { ref emoji, .. } if emoji == sebas_dispatch::card_state::phase::DONE => {
                 got_done = true;
                 break;
             }
@@ -110,7 +110,7 @@ async fn terminal_error_flushes_removes_and_exits() {
     map.insert(key.clone(), Mapping::active("s3"))
         .await
         .unwrap();
-    let (router, mut out_rx) = RouterHandle::new(map.clone());
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
     router.seed_card("s3".into(), "p".into()).await;
     let (tx, rx) = mpsc::channel::<AcpEvent>(64);
     let rx = Arc::new(tokio::sync::Mutex::new(rx));

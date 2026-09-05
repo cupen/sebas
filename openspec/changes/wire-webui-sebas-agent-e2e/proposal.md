@@ -1,6 +1,6 @@
 ## Why
 
-WebUI 工作台（项目树 + composer + turn 流）与原生内核 sebas-agent 都已可用，但两者只在 `run --webui` in-process 形态下端到端打通。watchdog 托管的正式形态（`sebas webui` 经核心通道）断在四处：核心通道 Spawn 协议没有执行体（backend）提示、没有审批消息、没有模型方法，且原生内核缺凭据不反映在 reachability 上。结果：正式部署下选 native 会静默落到 ACP 或提交时才报错，审批卡片不出现，模型下拉为空。"跑通"= 两种部署形态下 workbench → sebas agent 的创建、对话、审批、模型选择全部真实可用。
+WebUI 工作台（项目树 + composer + turn 流）与原生内核 sebas-agent 都已可用，但两者只在 `core --webui`（本文写作时为 `run --webui`，rename-cli-surface 后更名）in-process 形态下端到端打通。watchdog 托管的正式形态（`sebas webui` 经核心通道）断在四处：核心通道 Spawn 协议没有执行体（backend）提示、没有审批消息、没有模型方法，且原生内核缺凭据不反映在 reachability 上。结果：正式部署下选 native 会静默落到 ACP 或提交时才报错，审批卡片不出现，模型下拉为空。"跑通"= 两种部署形态下 workbench → sebas agent 的创建、对话、审批、模型选择全部真实可用。
 
 ## What Changes
 

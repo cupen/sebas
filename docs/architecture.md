@@ -10,7 +10,7 @@
 ## 1. 进程全景
 
 **单一 `sebas` 二进制，子命令决定进程角色。** 不存在第二个常驻二进制：
-watchdog、core、webui、gateway 都是同一个可执行文件在不同命令行下的不同"人格"。
+run(watchdog 守护)、core、webui、router 都是同一个可执行文件在不同命令行下的不同"人格"。
 子命令与 `src/cli.rs` 中 `Cmd` 枚举一一对应（枚举定义：`src/cli.rs`）：
 
 ```
@@ -21,25 +21,25 @@ watchdog、core、webui、gateway 都是同一个可执行文件在不同命令�
    ┌──────────────┬───────────────┬──────────┼──────────────┬─────────────┐
    │              │               │          │              │             │
 ┌──▼───┐      ┌───▼───┐      ┌────▼───┐  ┌───▼────┐  ┌─────▼─────┐  ┌────▼────┐
-│ run  │      │watchdog│      │ webui  │  │gateway │  │  ctl /    │  │ record/ │
+│ core │      │  run   │      │ webui  │  │ router │  │  ctl /    │  │ record/ │
 │      │      │        │      │        │  │        │  │  status/  │  │ replay/ │
 │      │      │        │      │        │  │        │  │  services │  │ update/ │
 └──┬───┘      └───┬───┘      └───┬────┘  └───┬────┘  └─────┬─────┘  └────┬────┘
    │              │              │           │             │             │
-core 进程      watchdog 守护   独立 WebUI   独立网关     控制 CLI      一次性工具
+core 进程      watchdog 守护   独立 WebUI   独立模型路由  控制 CLI      一次性工具
 (飞书 bot     （拉起并监督    （连 core     （provider  （经 control  （fixture 录制/
  + ACP +      core/webui/    socket 或     透传代理）   socket 与     回放/系统服务
- 通道服务）    gateway 子进程) 进程内后端                 watchdog 对话)  安装/升级实现）
+ 通道服务）    router 子进程) 进程内后端                 watchdog 对话)  安装/升级实现）
 ```
 
 各角色一句话：
 
 | 子命令 | 进程角色 | 说明 |
 |---|---|---|
-| `sebas run` | **core 进程** | 长驻服务本体：飞书 WebSocket 长连接 + ACP 会话驱动 + core session channel socket。`--webui` 可顺带在进程内起 WebUI（`InProcessBackend`），`--gateway` 可顺带起内置 gateway（`src/run.rs`） |
-| `sebas watchdog` | **watchdog 守护** | 父进程：按配置拉起 core / webui / gateway 子进程并监督（重启/退避/升级/回滚）（`src/watchdog.rs`） |
+| `sebas core` | **core 进程** | 长驻服务本体：飞书 WebSocket 长连接 + ACP 会话驱动 + core session channel socket。`--webui` 可顺带在进程内起 WebUI（`InProcessBackend`），`--router` 可顺带起内置 router（`src/run.rs`） |
+| `sebas run` | **watchdog 守护** | 父进程：按配置拉起 core / webui / router 子进程并监督（重启/退避/升级/回滚）（`src/watchdog.rs`；旧名 `watchdog` 仍为隐藏别名） |
 | `sebas webui` | **独立 WebUI** | 独立的 dashboard 进程，经 core session channel socket 观察与驱动会话（`src/webui_cmd.rs`）。由 watchdog 拉起，或手动指向同一 socket |
-| `sebas gateway` | **独立网关** | provider 透传代理独立进程（`src/gateway_cmd.rs`） |
+| `sebas router` | **独立模型路由** | provider 透传代理独立进程（`src/router_cmd.rs`；旧名 `sebas gateway` 仍为隐藏别名） |
 | `sebas ctl` / `status` / `services` | **控制 CLI** | 向 watchdog 控制面发 RPC 的薄客户端（`src/main.rs` 中 `Cmd::Ctl/Status/Services` → `run_control*`） |
 | `sebas record` / `replay` | **一次性工具** | ACP stdio 流量录制为 fixture / 按 fixture 回放（`src/record.rs`、`src/replay.rs`，规格见 `openspec/specs/replay-debug/spec.md`） |
 | `sebas update` | **一次性工具** | watchdog 调用的一次性升级实现（`src/update.rs`、`src/upgrade.rs`） |
@@ -49,13 +49,13 @@ core 进程      watchdog 守护   独立 WebUI   独立网关     控制 CLI   
 
 ## 2. watchdog 监督模型
 
-`sebas watchdog` 是唯一会拉起其他进程的角色。它管理三个受管服务
+`sebas run`（watchdog 守护）是唯一会拉起其他进程的角色。它管理三个受管服务
 （`ServiceName::Core / WebUi / Gateway`，来源：`src/watchdog/supervisor.rs`）：
 
 - **core**：飞书 bot + ACP 会话驱动 + core session channel socket。
   是"会话状态的单一权威"——standalone WebUI 的一切会话读写都经 socket 到 core。
 - **webui**：dashboard 进程。自身不持有会话状态。
-- **gateway**：provider 透传代理。
+- **router**：provider 透传代理（模型路由）。
 
 ### 2.1 生命周期状态机
 
@@ -67,7 +67,7 @@ core 进程      watchdog 守护   独立 WebUI   独立网关     控制 CLI   
               ┌──────────┐  spawn 成功
    Disabled ──►  Starting │────────────┐   readiness 门：
    (配置层未启用)└──────────┘            │    core 等管道 {"cmd":"ready"}
-                    ▲                   ▼    webui/gateway 无门：spawn 即 Running
+                    ▲                   ▼    webui/router 无门：spawn 即 Running
                     │              ┌─────────┐
         ServiceSet/ │              │ Running │
         Restart 复位│              └────┬────┘
@@ -99,15 +99,16 @@ core 进程      watchdog 守护   独立 WebUI   独立网关     控制 CLI   
 
 ### 2.2 默认启动策略
 
-**仅 WebUI 默认启用；core 与 gateway 默认停用。**
+**仅 WebUI 默认启用；core 与 router 默认停用。**
 （来源：`src/config.rs` `WatchdogCoreConfig` / `WatchdogWebUiConfig` /
 `WatchdogGatewayConfig` 的 doc 注释与 `default_webui_enabled()`）
 
 - `watchdog.webui.enabled` 默认 `true`——watchdog 唯一默认启动的服务。
 - `watchdog.core.enabled` 默认 `false`——feishu 是可选项（不配 app_id/secret 即不接飞书），
   需要时在 WebUI 服务页启用，或配置里显式 `enabled = true`。
-- `watchdog.gateway.enabled` 默认 `false`——生产 gateway 的默认形态仍是
-  `sebas run --gateway` 的进程内模式；显式开启后才由 watchdog 作为受管子进程监督。
+- `[watchdog.router] enabled` 默认 `false`——生产 router 的默认形态仍是
+  `sebas core --router` 的进程内模式；显式开启后才由 watchdog 作为受管子进程监督
+  （配置节旧名 `[watchdog.gateway]` 仍被兼容解析并告警）。
 
 期望态的三层合成（来源：`src/watchdog/services.rs`，模块注释 "三层（design.md D5）"）：
 
@@ -118,7 +119,7 @@ config 默认（config.toml [watchdog.*].enabled）
 ```
 
 WebUI 服务页或 CLI 设置 `ServiceSet { persist: true }` 时同步写 `services.json`
-（`ServiceName` ∈ {core, gateway, webui} × `DesiredState` ∈ {enabled, disabled}），
+（`ServiceName` ∈ {core, router, webui} × `DesiredState` ∈ {enabled, disabled}），
 下次 watchdog 启动时经 `initial_desired()` 读回
 （来源：`src/watchdog/services.rs::initial_desired` / `persist` 写入路径）。
 
@@ -132,8 +133,8 @@ watchdog（父）与 core（子）之间的管道**只承载一件事**：core �
 写一行 `{"cmd":"ready"}`（`ChildMsg::Ready`，来源：`src/ipc.rs`），父进程读到即把
 该服务从 `Starting` 翻到 `Running`。管道不承载任何控制操作，也不承载生命周期语义
 之外的信息（子进程存活检测由父进程 `child.wait()` 承担）。
-webui / gateway 无 readiness 概念：spawn 即视为 Running
-（来源：`src/watchdog/supervisor.rs`，"无 readiness 门的进程（webui/gateway）：spawn 即 Running"）。
+webui / router 无 readiness 概念：spawn 即视为 Running
+（来源：`src/watchdog/supervisor.rs`，"无 readiness 门的进程（webui/router）：spawn 即 Running"）
 
 ### 3.2 控制 = Unix socket control RPC
 
@@ -152,7 +153,7 @@ CLI（`sebas ctl/status/services`）与 WebUI 服务页共用同一通道、同�
 | `Rollback { dry_run }` | 回滚操作（仅计划） |
 | `RestartCore` | 重启 core 子进程 |
 | `ServiceStatus` | 受管服务状态快照 |
-| `ServiceStatusFor { service }` | 单服务状态查询（`/gateway status`、`/webui status`） |
+| `ServiceStatusFor { service }` | 单服务状态查询（`/router status`、`/webui status`） |
 | `ServiceSet { service, desired, persist }` | 设置服务期望态（on/off；core 仅接受 CLI/WebUI actor） |
 | `ServiceRestart { service }` | 重启单个受管服务 |
 | `Confirm { token }` | 用不透明 token 确认危险操作（token 对应动作只在 watchdog 的 pending 注册表里） |
@@ -191,11 +192,12 @@ workspace 成员与 `Cargo.toml` 的 `members` 一致
 
 | crate | 一句话职责 |
 |---|---|
-| `sebas`（根） | 二进制装配与各子命令入口：run / watchdog / webui / gateway / ctl / record / replay / update / service；出站分发与 session 装配 |
+| `sebas`（根） | 二进制装配与各子命令入口：core / run / webui / router / ctl / record / replay / update / service；出站分发与 session 装配 |
 | `sebas-router` | 会话路由核心：SessionMap/FSM、卡片状态机、命令解析、CRUD 表单、会话事件广播（webui 与通道的数据源） |
 | `sebas-feishu` | 飞书接入：WebSocket 事件、卡片渲染、出站 API 客户端（send_card / react / 话题感知发送） |
 | `sebas-acp` | ACP 引擎适配：claude stream-json + 控制协议子进程驱动（spawn / prompt / 事件映射 / 崩溃与挂起看护） |
-| `sebas-gateway` | LLM provider 透传网关：Anthropic/OpenAI 双协议嗅探、路由、鉴权、用量统计 |
+| `sebas-router`（原 sebas-gateway） | 模型路由：LLM provider 透传代理，Anthropic/OpenAI 双协议嗅探、路由、鉴权、用量统计 |
+| `sebas-dispatch`（原 sebas-router） | core 进程内的会话分发领域层：会话映射、入站 dispatch、slash 命令、权限处理 |
 | `sebas-webui` | WebUI dashboard：axum 路由、模板渲染、SSE 推送；会话读写全部经 `SessionBackend` seam（进程内或 socket），不依赖 sebas 二进制 crate |
 | `xtask` | 构建期工具：update-models（拉取 models.dev 生成模型表）、check-docs（幽灵引用检查） |
 

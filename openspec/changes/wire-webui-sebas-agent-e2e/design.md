@@ -1,6 +1,6 @@
 ## Context
 
-工作台与原生内核只在 in-process（`run --webui`）形态下打通：`NativeAgentBackend` 直接持有 `sebas_agent::session::SessionManager`，`DualSessionBackend` 按 key 前缀分发。detached 形态（`sebas webui` → 核心通道）下：
+工作台与原生内核只在 in-process（`core --webui`；rename-cli-surface 前为 `run --webui`）形态下打通：`NativeAgentBackend` 直接持有 `sebas_agent::session::SessionManager`，`DualSessionBackend` 按 key 前缀分发。detached 形态（`sebas webui` → 核心通道）下：
 
 - 核心通道协议（`src/core_channel/protocol.rs`）只有 Spawn / Message / Close / Turns / Subscribe / StateSnapshot / StateMutation / StateSubscribe；`Spawn` 无 backend 字段，客户端丢弃 backend 提示（`client.rs`），模型方法缺失。
 - 核心侧通道 server 直接驱动 `RouterHandle`（ACP），不经过 `DualSessionBackend`；原生内核 manager 目前只在 `run.rs` 的 webui 分支构建。
@@ -26,7 +26,7 @@
 ## Decisions
 
 **D1 — 核心常驻双执行体，通道 server 复用 `DualSessionBackend`**
-核心进程启动时（`sebas run`）无条件构建 `DualSessionBackend`（ACP + 原生，原生凭据缺失时 manager 仍建、spawn 时报 cause），通道 server 的 Spawn/Message/Close/SetModel 全部委托给它，而不是自己驱动 `RouterHandle`。这使 in-process 与 detached 共用同一条分发逻辑，也顺带消除两处行为漂移的土壤。
+核心进程启动时（`sebas core`）无条件构建 `DualSessionBackend`（ACP + 原生，原生凭据缺失时 manager 仍建、spawn 时报 cause），通道 server 的 Spawn/Message/Close/SetModel 全部委托给它，而不是自己驱动 `DispatchHandle`（原 RouterHandle）。这使 in-process 与 detached 共用同一条分发逻辑，也顺带消除两处行为漂移的土壤。
 *备选*：通道 server 内嵌一份 native 分发逻辑 —— 两份 if-else 必然漂移，否决。
 
 **D2 — Spawn 增加可选 `backend` 字段，默认 `acp`**

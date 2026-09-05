@@ -33,7 +33,7 @@ pub enum FeishuIn {
     /// payload (`behaviors[].value`), `form_value` maps component `name` to
     /// the submitted value, and `message_id` is the card's
     /// `context.open_message_id` so the handler can flip the card in place
-    /// after processing (see `sebas_router::crud`).
+    /// after processing (see `sebas_dispatch::crud`).
     FormCb {
         key: SessionKey,
         value: serde_json::Value,

@@ -74,13 +74,14 @@ impl ServiceSpawner for CoreSpawner {
         let exe = std::env::current_exe()
             .map_err(|e| SebasError::Upgrade(format!("无法确定 sebas 子进程路径: {e}")))?;
         info!(
-            "启动 sebas core 子进程: {} run --config {}",
+            "启动 sebas core 子进程: {} {} --config {}",
             exe.display(),
+            crate::CORE_SUBCOMMAND,
             self.config_path
         );
 
         let mut child = Command::new(&exe)
-            .arg("run")
+            .arg(crate::CORE_SUBCOMMAND)
             .arg("--config")
             .arg(&self.config_path)
             .stdin(std::process::Stdio::piped())
@@ -153,8 +154,8 @@ impl ServiceSpawner for WebUiSpawner {
     }
 }
 
-/// gateway 子进程：`current_exe() gateway --config <path> [--debug]`。
-struct GatewaySpawner {
+/// router 子进程：`current_exe() router --config <path> [--debug]`。
+struct RouterSpawner {
     config_path: String,
     control_secret: String,
     core_secret: String,
@@ -163,9 +164,9 @@ struct GatewaySpawner {
 }
 
 #[async_trait::async_trait]
-impl ServiceSpawner for GatewaySpawner {
+impl ServiceSpawner for RouterSpawner {
     async fn spawn(&self) -> Result<SpawnedInstance> {
-        let mut args = vec!["gateway"];
+        let mut args = vec!["router"];
         if self.debug {
             args.push("--debug");
         }
@@ -175,7 +176,7 @@ impl ServiceSpawner for GatewaySpawner {
             Some(&self.core_secret),
             Some(&self.core_socket),
             &args,
-            "gateway",
+            "router",
         )
         .await
     }
@@ -200,7 +201,7 @@ async fn spawn_aux_process(
         .arg(config_path)
         .env("SEBAS_CONTROL_SECRET", control_secret);
     // The standalone WebUI is a core session channel client: it needs the
-    // same secret the core gets. The gateway (5.3 订阅投影) additionally
+    // same secret the core gets. The router (5.3 订阅投影) additionally
     // needs the channel path to subscribe to state changes — it discovers
     // the socket exclusively via this env var (core resolves it itself).
     if let Some(core_secret) = core_secret {
@@ -322,9 +323,9 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
         config.webui.enabled,
     );
 
-    // gateway：config 开关（默认关）；`--debug` 强制启用 debug 形态
+    // router：config 开关（默认关）；`--debug` 强制启用 debug 形态
     // （内置 test provider，不转发上游）。同样始终注册以便后续启停。
-    // 注入 core channel 的 secret + socket 路径（5.3 订阅投影）：gateway
+    // 注入 core channel 的 secret + socket 路径（5.3 订阅投影）：router
     // 订阅状态变更需要与 core 相同的密钥与通道位置——core 自己按同一
     // config 计算路径（channel_path 或缺省），此处直接用同一解析结果。
     let core_channel_path = config
@@ -336,8 +337,8 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
         .unwrap_or_else(crate::core_channel::default_socket_path);
     services.register(
         ServiceSpec::new(
-            ServiceName::Gateway,
-            Arc::new(GatewaySpawner {
+            ServiceName::Router,
+            Arc::new(RouterSpawner {
                 config_path: config_path.clone(),
                 control_secret: secret.clone(),
                 core_secret: core_secret.clone(),
@@ -346,7 +347,7 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
             }),
             DesiredState::Enabled,
         ),
-        config.gateway.enabled || debug,
+        config.router.enabled || debug,
     );
 
     // 监督 task 各自永续运行；watchdog 主 task 停泊在关闭信号上。
@@ -392,7 +393,7 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{WatchdogGatewayConfig, WatchdogStorageConfig, WatchdogUpgradeConfig};
+    use crate::config::{WatchdogRouterConfig, WatchdogStorageConfig, WatchdogUpgradeConfig};
     use std::fs;
 
     fn test_config(tmp_data_dir: &std::path::Path) -> WatchdogConfig {
@@ -404,7 +405,7 @@ mod tests {
                 keep_versions: 1,
             },
             webui: Default::default(),
-            gateway: WatchdogGatewayConfig::default(),
+            router: WatchdogRouterConfig::default(),
         }
     }
 

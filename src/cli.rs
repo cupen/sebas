@@ -9,8 +9,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Run the long-lived sebas service.
-    Run(RunArgs),
+    /// Run the long-lived sebas core service (sessions, adapters, channels).
+    Core(CoreArgs),
     /// Install or uninstall the systemd system unit for sebas (requires root).
     Service(ServiceArgs),
     /// Replay captured inbound events from a directory of `.json` files.
@@ -20,9 +20,11 @@ pub enum Cmd {
     /// Type/paste JSON-RPC lines on stdin; responses print to stdout; both
     /// directions are appended to --output as {"dir","msg"} journal lines.
     Record(RecordArgs),
-    /// Run the LLM provider gateway (Anthropic/OpenAI dual-protocol
-    /// transparent proxy). See openspec/specs/gateway-core/spec.md.
-    Gateway(GatewayArgs),
+    /// Run the LLM provider router (Anthropic/OpenAI dual-protocol
+    /// transparent proxy). See openspec/specs/router-core/spec.md.
+    /// 旧名 `gateway` 保留为隐藏别名（rename-cli-surface）。
+    #[command(alias = "gateway")]
+    Router(RouterArgs),
     /// Start the standalone WebUI dashboard server.
     /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
     #[command(name = "webui")]
@@ -32,8 +34,11 @@ pub enum Cmd {
     /// 凭据存在时才放行。运行中的 webui 经 mtime 热重载，无需重启。
     #[command(name = "webui-passwd")]
     WebUiPasswd(WebUiPasswdArgs),
-    /// Start the watchdog daemon.
-    Watchdog(WatchdogArgs),
+    /// Run the watchdog daemon: supervise core/webui/router children and
+    /// self-upgrade. 旧名 `watchdog` 保留为隐藏别名（已装 systemd unit 的
+    /// ExecStart 仍写 `watchdog --config`，升级后不重装也能启动）。
+    #[command(alias = "watchdog")]
+    Run(RunArgs),
     /// One-shot update implementation used by watchdog.
     Update(UpdateArgs),
     /// Send a command to the watchdog control plane.
@@ -49,18 +54,18 @@ pub enum Cmd {
     AgentKinds(AgentKindsArgs),
 }
 
-/// Run mode — the long-lived sebas service.
+/// Core mode — the long-lived sebas core service.
 #[derive(Parser)]
-pub struct RunArgs {
+pub struct CoreArgs {
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 
-    /// 同时在随机端口（127.0.0.1:0）上启动内置 gateway；实际端口在日志中输出。
+    /// 同时在随机端口（127.0.0.1:0）上启动内置 router；实际端口在日志中输出。
     /// provider 从配置顶层 `[provider.*]` 读取。
     #[arg(long)]
-    pub gateway: bool,
+    pub router: bool,
 
-    /// 同时让内置 gateway 进入 debug 模式：增加 `test` 模型，由 gateway 自身
+    /// 同时让内置 router 进入 debug 模式：增加 `test` 模型，由 router 自身
     /// 应答（固定文字 + 回显输入），不转发外部上游。
     #[arg(long)]
     pub debug: bool,
@@ -149,13 +154,13 @@ pub struct RecordArgs {
     pub agent_args: Vec<String>,
 }
 
-/// `sebas gateway` — run the LLM provider gateway.
+/// `sebas router` — run the LLM provider router.
 #[derive(Parser)]
-pub struct GatewayArgs {
+pub struct RouterArgs {
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 
-    /// 启用 debug 模式：增加内置 `test` 模型，gateway 自身应答
+    /// 启用 debug 模式：增加内置 `test` 模型，router 自身应答
     /// （固定文字 + 回显输入），不转发外部上游。
     #[arg(long)]
     pub debug: bool,
@@ -186,15 +191,15 @@ pub struct WebUiPasswdArgs {
     pub password_stdin: bool,
 }
 
-/// `sebas watchdog` — start the watchdog daemon.
-/// Manages the sebas child process and handles self-upgrade.
+/// `sebas run` — start the watchdog daemon.
+/// Manages the sebas child processes and handles self-upgrade.
 #[derive(Parser)]
-pub struct WatchdogArgs {
+pub struct RunArgs {
     /// Path to the sebas config.toml.
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 
-    /// 同时在固定端口上以 debug 模式额外启动一个独立 gateway HTTP 服务
+    /// 同时在固定端口上以 debug 模式额外启动一个独立 router HTTP 服务
     /// （内置 `test` 模型自应答、不转发上游），便于本地 curl 调试。
     #[arg(long)]
     pub debug: bool,

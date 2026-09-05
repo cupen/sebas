@@ -6,22 +6,22 @@
 
 use sebas_feishu::cards::CardConfig;
 use futures_util::{SinkExt, StreamExt};
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use sebas_webui::models::GatewayInfo;
+use sebas_webui::models::RouterInfo;
 use sebas_webui::build_router;
 
-async fn spawn_server() -> (String, tokio::sync::mpsc::Receiver<sebas_router::router::Out>) {
+async fn spawn_server() -> (String, tokio::sync::mpsc::Receiver<sebas_dispatch::engine::Out>) {
     let map = SessionMap::new();
-    let (router, rx) = RouterHandle::new(map);
+    let (router, rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
-    let app = build_router(backend, GatewayInfo::default(), CardConfig::default());
+    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

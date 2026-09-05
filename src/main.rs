@@ -2,7 +2,7 @@ mod cli;
 
 use clap::Parser;
 use cli::{
-    AgentKindsCmd, Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, GatewayArgs, OutputFormat,
+    AgentKindsCmd, Cli, Cmd, ControlArgs, ControlCmd, ControlStatusArgs, RouterArgs, OutputFormat,
     RecordArgs, ReplayArgs, ServiceArgs, WebUiArgs,
 };
 use std::path::PathBuf;
@@ -46,8 +46,8 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Gateway(args) => {
-            if let Err(e) = sebas::gateway_cmd::run(args.into()).await {
+        Cmd::Router(args) => {
+            if let Err(e) = sebas::router_cmd::run(args.into()).await {
                 eprintln!("error: {e:?}");
                 std::process::exit(1);
             }
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Status(args) => run_control_status(args, ControlCmd::Status).await,
         Cmd::Services(args) => run_control_status(args, ControlCmd::Services).await,
         Cmd::Ctl(args) => run_control(args).await,
-        Cmd::Watchdog(args) => {
+        Cmd::Run(args) => {
             let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
             sebas::watchdog::run_watchdog(cfg.watchdog, args.config, args.debug)
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         }
-        Cmd::Run(run) => {
+        Cmd::Core(run) => {
             let raw = std::fs::read_to_string(&run.config).unwrap_or_else(|_| {
                 // No file -> use minimal defaults; require env vars for credentials
                 let app_id = std::env::var("SEBAS_FEISHU_APP_ID").unwrap_or_default();
@@ -109,25 +109,25 @@ async fn main() -> anyhow::Result<()> {
                 )
             });
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut gateway_cfg = if run.gateway {
+            let mut router_cfg = if run.router {
                 Some(
-                    sebas_gateway::config::GatewayConfig::parse(&raw)
+                    sebas_router::config::RouterConfig::parse(&raw)
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
                 )
             } else {
                 None
             };
             if run.debug
-                && let Some(c) = gateway_cfg.as_mut()
+                && let Some(c) = router_cfg.as_mut()
             {
-                sebas_gateway::debug::enable_debug_test_provider(c);
+                sebas_router::debug::enable_debug_test_provider(c);
             }
             sebas::run::run(
                 cfg,
                 raw,
                 run.test_msg,
                 run.dump_inbound,
-                gateway_cfg,
+                router_cfg,
                 run.webui,
                 run.webui_port,
             )
@@ -323,7 +323,7 @@ fn friendly_rpc_error(err: anyhow::Error, socket: &std::path::Path) -> anyhow::E
                 ErrorKind::NotFound => {
                     return anyhow::anyhow!(
                         "watchdog control socket not found at {}\n\
-                         hint: is `sebas watchdog` running? override path with --socket \
+                         hint: is `sebas run` (watchdog) running? override path with --socket \
                          or $SEBAS_CONTROL_SOCKET",
                         socket.display()
                     );
@@ -332,7 +332,7 @@ fn friendly_rpc_error(err: anyhow::Error, socket: &std::path::Path) -> anyhow::E
                     return anyhow::anyhow!(
                         "watchdog control socket refused connection at {}\n\
                          hint: the socket exists but watchdog is not listening; \
-                         check `sebas watchdog` logs",
+                         check `sebas run` (watchdog) logs",
                         socket.display()
                     );
                 }
@@ -340,7 +340,7 @@ fn friendly_rpc_error(err: anyhow::Error, socket: &std::path::Path) -> anyhow::E
                     return anyhow::anyhow!(
                         "permission denied connecting to watchdog socket at {}\n\
                          hint: socket is mode 0600 owned by the user running \
-                         `sebas watchdog`; run as that user, via sudo -u, or \
+                         `sebas run`; run as that user, via sudo -u, or \
                          systemd RunAsUser",
                         socket.display()
                     );
@@ -420,8 +420,8 @@ impl From<RecordArgs> for sebas::record::RecordArgs {
     }
 }
 
-impl From<GatewayArgs> for sebas::gateway_cmd::GatewayArgs {
-    fn from(a: GatewayArgs) -> Self {
+impl From<RouterArgs> for sebas::router_cmd::RouterArgs {
+    fn from(a: RouterArgs) -> Self {
         Self {
             config: a.config,
             debug: a.debug,
@@ -463,9 +463,9 @@ mod tests {
 
     #[test]
     fn run_subcommand_accepts_config_flag() {
-        let cli = Cli::try_parse_from(["sebas", "run", "--config", "x.toml"])
-            .expect("`sebas run --config <path>` must parse");
-        let Cmd::Run(args) = cli.cmd else {
+        let cli = Cli::try_parse_from(["sebas", "core", "--config", "x.toml"])
+            .expect("`sebas core --config <path>` must parse");
+        let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
         assert_eq!(args.config, "x.toml");
@@ -474,38 +474,38 @@ mod tests {
     /// The watchdog spawns its child and `service` bakes an `ExecStart`
     /// both keyed on `sebas::CORE_SUBCOMMAND`; the clap subcommand here must
     /// agree or the supervisor and unit silently target a different argv. If
-    /// this fails, rename `Cmd::Run` and `CORE_SUBCOMMAND` together.
+    /// this fails, rename `Cmd::Core` and `CORE_SUBCOMMAND` together.
     #[test]
     fn run_subcommand_name_matches_core_subcommand_const() {
         let cli = Cli::try_parse_from(["sebas", sebas::CORE_SUBCOMMAND, "--config", "x.toml"])
             .expect("`sebas {CORE_SUBCOMMAND} --config <path>` must parse");
-        assert!(matches!(cli.cmd, Cmd::Run(_)));
+        assert!(matches!(cli.cmd, Cmd::Core(_)));
     }
 
     #[test]
     fn run_subcommand_config_defaults_to_cwd_config_toml() {
-        let cli = Cli::try_parse_from(["sebas", "run"]).expect("bare `run` must parse");
-        let Cmd::Run(args) = cli.cmd else {
+        let cli = Cli::try_parse_from(["sebas", "core"]).expect("bare `run` must parse");
+        let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
         assert_eq!(args.config, "./config.toml");
     }
 
     #[test]
-    fn run_subcommand_accepts_gateway_flag() {
-        let cli = Cli::try_parse_from(["sebas", "run", "--gateway", "--config", "x.toml"])
-            .expect("`sebas run --gateway --config <path>` must parse");
-        let Cmd::Run(args) = cli.cmd else {
+    fn run_subcommand_accepts_router_flag() {
+        let cli = Cli::try_parse_from(["sebas", "core", "--router", "--config", "x.toml"])
+            .expect("`sebas core --router --config <path>` must parse");
+        let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
-        assert!(args.gateway, "--gateway flag must be captured");
+        assert!(args.router, "--router flag must be captured");
     }
 
     #[test]
     fn run_subcommand_accepts_short_config_flag() {
-        let cli = Cli::try_parse_from(["sebas", "run", "-c", "x.toml"])
-            .expect("`sebas run -c <path>` must parse");
-        let Cmd::Run(args) = cli.cmd else {
+        let cli = Cli::try_parse_from(["sebas", "core", "-c", "x.toml"])
+            .expect("`sebas core -c <path>` must parse");
+        let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
         assert_eq!(args.config, "x.toml");
@@ -518,31 +518,31 @@ mod tests {
     }
 
     #[test]
-    fn gateway_subcommand_accepts_config_flag() {
-        let cli = Cli::try_parse_from(["sebas", "gateway", "--config", "x.toml"])
-            .expect("`sebas gateway --config <path>` must parse");
-        let Cmd::Gateway(args) = cli.cmd else {
-            panic!("expected Gateway subcommand");
+    fn router_subcommand_accepts_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "router", "--config", "x.toml"])
+            .expect("`sebas router --config <path>` must parse");
+        let Cmd::Router(args) = cli.cmd else {
+            panic!("expected Router subcommand");
         };
         assert_eq!(args.config, "x.toml");
     }
 
     #[test]
-    fn gateway_subcommand_accepts_short_config_flag() {
-        let cli = Cli::try_parse_from(["sebas", "gateway", "-c", "x.toml"])
-            .expect("`sebas gateway -c <path>` must parse");
-        let Cmd::Gateway(args) = cli.cmd else {
-            panic!("expected Gateway subcommand");
+    fn router_subcommand_accepts_short_config_flag() {
+        let cli = Cli::try_parse_from(["sebas", "router", "-c", "x.toml"])
+            .expect("`sebas router -c <path>` must parse");
+        let Cmd::Router(args) = cli.cmd else {
+            panic!("expected Router subcommand");
         };
         assert_eq!(args.config, "x.toml");
     }
 
     #[test]
-    fn gateway_subcommand_accepts_debug_flag() {
-        let cli = Cli::try_parse_from(["sebas", "gateway", "--debug", "-c", "x.toml"])
-            .expect("`sebas gateway --debug -c <path>` must parse");
-        let Cmd::Gateway(args) = cli.cmd else {
-            panic!("expected Gateway subcommand");
+    fn router_subcommand_accepts_debug_flag() {
+        let cli = Cli::try_parse_from(["sebas", "router", "--debug", "-c", "x.toml"])
+            .expect("`sebas router --debug -c <path>` must parse");
+        let Cmd::Router(args) = cli.cmd else {
+            panic!("expected Router subcommand");
         };
         assert!(args.debug, "--debug flag must be captured");
     }
@@ -654,9 +654,9 @@ mod tests {
 
     #[test]
     fn run_no_webui_flag_parses() {
-        let cli = Cli::try_parse_from(["sebas", "run", "--no-webui", "-c", "x.toml"])
-            .expect("`sebas run --no-webui` must parse");
-        let Cmd::Run(args) = cli.cmd else {
+        let cli = Cli::try_parse_from(["sebas", "core", "--no-webui", "-c", "x.toml"])
+            .expect("`sebas core --no-webui` must parse");
+        let Cmd::Core(args) = cli.cmd else {
             panic!("expected Run subcommand");
         };
         assert!(args.no_webui, "--no-webui 应被解析");
@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn run_webui_and_no_webui_conflict() {
         assert!(
-            Cli::try_parse_from(["sebas", "run", "--webui", "--no-webui", "-c", "x.toml"]).is_err(),
+            Cli::try_parse_from(["sebas", "core", "--webui", "--no-webui", "-c", "x.toml"]).is_err(),
             "--webui 与 --no-webui 互斥"
         );
     }
@@ -877,7 +877,7 @@ mod tests {
                 "services",
                 RpcControlResponse::Services {
                     services: vec![RpcServiceStatus {
-                        name: "gateway".into(),
+                        name: "router".into(),
                         status: "Running".into(),
                         desired: "Enabled".into(),
                         uptime_secs: Some(120),
@@ -924,7 +924,7 @@ mod tests {
             "expected not-found message, got: {msg}"
         );
         assert!(
-            msg.contains("is `sebas watchdog` running"),
+            msg.contains("is `sebas run` (watchdog) running"),
             "hint missing: {msg}"
         );
     }

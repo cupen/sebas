@@ -13,9 +13,9 @@ use sebas_channels::card::{ChannelCard, TurnChrome};
 use sebas_channels::ChannelKey;
 use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
 use sebas_feishu::events::SessionKey;
-use sebas_gateway::config::GatewayConfig;
-use sebas_router::commands::GatewayAction;
-use sebas_router::router::{Out, RouterHandle};
+use sebas_router::config::RouterConfig;
+use sebas_dispatch::commands::RouterAction;
+use sebas_dispatch::engine::{Out, DispatchHandle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -75,7 +75,7 @@ fn root_turn_card(prompt: &str, session_id: &str, theme: &str) -> ChannelCard {
 /// 主线保持 None 的旧 Q7 行为已废除：主线权限卡 / 失败提示卡现在也会挂在
 /// 用户发言下，方便沿 thread 跟踪整段对话。
 pub(crate) async fn topic_reply_target(
-    router: &RouterHandle,
+    router: &DispatchHandle,
     key: &ChannelKey,
     root_id: Option<String>,
 ) -> Option<String> {
@@ -104,7 +104,7 @@ fn classify_topic_invalid(e: &anyhow::Error) -> Option<i32> {
 }
 
 /// 发送卡片；话题失效（230019/230071）时不重试、不重发：向会话发一条文本
-/// 提示，并调 `RouterHandle::web_close_session` 终止会话（kill ACP 子进程、
+/// 提示，并调 `DispatchHandle::web_close_session` 终止会话（kill ACP 子进程、
 /// 清 SessionMap/CardState/MsgIdMap/allowlist/ReplyTargetMap），返回
 /// `TopicInvalid` 供调用方按「未发出」处理。会话映射已删，后续入站走「无
 /// 会话」路径，不会再向失效话题出站 —— 提示只发一次，无需去重标记。
@@ -113,7 +113,7 @@ pub(crate) async fn send_card_topic_aware(
     feishu: &FeishuClient,
     http: &reqwest::Client,
     tokens: &sebas_feishu::client::TokenManager,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     key: &ChannelKey,
     card: serde_json::Value,
     root_id: Option<String>,
@@ -182,7 +182,7 @@ async fn seed_and_send_root_card(
     feishu: &FeishuClient,
     http: &reqwest::Client,
     tokens: &TokenManager,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     reactions: &ReactionTracker,
     cfg: &Config,
     key: &ChannelKey,
@@ -225,14 +225,14 @@ async fn seed_and_send_root_card(
         // API 合法值（"Get" = 👌 已收到）。Best-effort: a reaction failure
         // must not abort session creation.
         match feishu
-            .react(http, tokens, &msg_id, sebas_router::card_state::phase::SEED)
+            .react(http, tokens, &msg_id, sebas_dispatch::card_state::phase::SEED)
             .await
         {
             Ok(rid) => {
                 reactions
                     .record(
                         session_id,
-                        sebas_router::card_state::phase::SEED.into(),
+                        sebas_dispatch::card_state::phase::SEED.into(),
                         rid,
                     )
                     .await
@@ -251,10 +251,10 @@ pub(crate) async fn dispatch_out(
     http: &reqwest::Client,
     tokens: &sebas_feishu::client::TokenManager,
     cfg: &Config,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     mgr: &Arc<SessionManager>,
     reactions: &ReactionTracker,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
     out: Out,
 ) -> anyhow::Result<()> {
     match out {
@@ -403,7 +403,7 @@ pub(crate) async fn dispatch_out(
                 &kind,
                 command,
                 cfg.acp.work_dir_for(&kind),
-                gateway_cfg,
+                router_cfg,
                 // 飞书路径无模型参数（feishu 卡片无模型选择 UI）→ 默认模型。
                 None,
             )
@@ -413,7 +413,7 @@ pub(crate) async fn dispatch_out(
                 Err(e) => {
                     router.fail_spawn(&key).await;
                     let neutral =
-                        sebas_router::cards_ui::error_card(&format!(
+                        sebas_dispatch::cards_ui::error_card(&format!(
                             "agent 启动失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                         ));
                     let card = render_out_card(&neutral);
@@ -493,7 +493,7 @@ pub(crate) async fn dispatch_out(
                 &kind,
                 command,
                 project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
-                gateway_cfg,
+                router_cfg,
                 model,
             )
             .await
@@ -542,7 +542,7 @@ pub(crate) async fn dispatch_out(
                 &kind,
                 command,
                 cfg.acp.work_dir_for(&kind),
-                gateway_cfg,
+                router_cfg,
                 // 飞书 resume 路径无模型参数：沿用会话当前模型。
                 None,
             )
@@ -551,7 +551,7 @@ pub(crate) async fn dispatch_out(
                 Ok(v) => v,
                 Err(e) => {
                     router.fail_spawn(&key).await;
-                    let neutral = sebas_router::cards_ui::error_card(&format!(
+                    let neutral = sebas_dispatch::cards_ui::error_card(&format!(
                         "agent 恢复失败/超时：{e}。请检查 claude 是否安装、PATH 是否正确。"
                     ));
                     let card = render_out_card(&neutral);
@@ -575,7 +575,7 @@ pub(crate) async fn dispatch_out(
             };
             if !resumed {
                 info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
-                let neutral = sebas_router::cards_ui::session_lost_card();
+                let neutral = sebas_dispatch::cards_ui::session_lost_card();
                 let card = render_out_card(&neutral);
                 let reply = topic_reply_target(router, &key, None).await;
                 if let Err(e2) = send_card_topic_aware(
@@ -698,12 +698,12 @@ pub(crate) async fn dispatch_out(
                 warn!(?e, "send_text failed");
             }
         }
-        Out::WatchdogGateway { key, action } => {
+        Out::WatchdogRouter { key, action } => {
             // Phase 3: route the command; ServiceManager (Phase 4) does the
             // actual work. on/off → ServiceSet; restart → ServiceRestart;
-            // status → ServiceStatusFor(gateway).
-            let request = gateway_control_request(action);
-            let content = submit_watchdog_control(&key, request, "gateway 服务").await;
+            // status → ServiceStatusFor(router).
+            let request = router_control_request(action);
+            let content = submit_watchdog_control(&key, request, "router 服务").await;
             if let Err(e) = feishu.send_text(http, tokens, &feishu_session_key(&key), &content).await {
                 warn!(?e, "send_text failed");
             }
@@ -786,32 +786,32 @@ fn next_request_id() -> String {
     format!("feishu_{nanos}_{seq}")
 }
 
-/// Normalize a `/gateway <action>` action into the watchdog control request
+/// Normalize a `/router <action>` action into the watchdog control request
 /// (openspec/specs/watchdog/spec.md control commands). `on`/`off` map to `ServiceSet`
 /// with `persist=false` (persistence requires the Phase 4 atomic config write,
 /// per openspec/specs/watchdog/spec.md); `restart` maps to `ServiceRestart`; `status` maps to
-/// `ServiceStatusFor(gateway)`. The match is exhaustive so a new action
+/// `ServiceStatusFor(router)`. The match is exhaustive so a new action
 /// cannot silently fall through to a setter.
-fn gateway_control_request(
-    action: GatewayAction,
+fn router_control_request(
+    action: RouterAction,
 ) -> crate::watchdog::control_rpc::RpcControlRequest {
     use crate::watchdog::control_rpc::RpcControlRequest;
     match action {
-        GatewayAction::On => RpcControlRequest::ServiceSet {
-            service: "gateway".into(),
+        RouterAction::On => RpcControlRequest::ServiceSet {
+            service: "router".into(),
             desired: "on".into(),
             persist: false,
         },
-        GatewayAction::Off => RpcControlRequest::ServiceSet {
-            service: "gateway".into(),
+        RouterAction::Off => RpcControlRequest::ServiceSet {
+            service: "router".into(),
             desired: "off".into(),
             persist: false,
         },
-        GatewayAction::Status => RpcControlRequest::ServiceStatusFor {
-            service: "gateway".into(),
+        RouterAction::Status => RpcControlRequest::ServiceStatusFor {
+            service: "router".into(),
         },
-        GatewayAction::Restart => RpcControlRequest::ServiceRestart {
-            service: "gateway".into(),
+        RouterAction::Restart => RpcControlRequest::ServiceRestart {
+            service: "router".into(),
         },
     }
 }
@@ -981,9 +981,9 @@ async fn poll_operation_progress(
 
 pub(crate) async fn dispatch_out_without_feishu(
     cfg: &Config,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
     out: Out,
 ) -> anyhow::Result<()> {
     match out {
@@ -998,7 +998,7 @@ pub(crate) async fn dispatch_out_without_feishu(
                 cfg,
                 router,
                 mgr,
-                gateway_cfg,
+                router_cfg,
                 key,
                 prompt,
                 project_dir,
@@ -1013,7 +1013,7 @@ pub(crate) async fn dispatch_out_without_feishu(
             prompt,
             ..
         } => {
-            handle_spawn_resume_without_feishu(cfg, router, mgr, gateway_cfg, key, old_sid, prompt)
+            handle_spawn_resume_without_feishu(cfg, router, mgr, router_cfg, key, old_sid, prompt)
                 .await
         }
         Out::SendAcp { session_id, cmd } => Ok(mgr.send(&session_id, cmd).await?),
@@ -1030,9 +1030,9 @@ pub(crate) async fn dispatch_out_without_feishu(
 #[allow(clippy::too_many_arguments)]
 async fn handle_web_spawn(
     cfg: &Config,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
     key: ChannelKey,
     prompt: String,
     project_dir: Option<String>,
@@ -1049,7 +1049,7 @@ async fn handle_web_spawn(
         &kind,
         command,
         project_dir.or_else(|| cfg.acp.work_dir_for(&kind)),
-        gateway_cfg,
+        router_cfg,
         model,
     )
     .await
@@ -1081,9 +1081,9 @@ async fn handle_web_spawn(
 
 async fn handle_spawn_resume_without_feishu(
     cfg: &Config,
-    router: &RouterHandle,
+    router: &DispatchHandle,
     mgr: &Arc<SessionManager>,
-    gateway_cfg: Option<&GatewayConfig>,
+    router_cfg: Option<&RouterConfig>,
     key: ChannelKey,
     old_sid: String,
     prompt: String,
@@ -1099,7 +1099,7 @@ async fn handle_spawn_resume_without_feishu(
         &kind,
         command,
         cfg.acp.work_dir_for(&kind),
-        gateway_cfg,
+        router_cfg,
         // webui resume 路径暂无模型参数（创建/中程切换走 POST model）。
         None,
     )
@@ -1133,7 +1133,7 @@ async fn handle_spawn_resume_without_feishu(
 mod tests {
     use super::*;
     use sebas_channels::{ChannelEvent, ChannelKey};
-    use sebas_router::state::{Mapping, SessionMap};
+    use sebas_dispatch::state::{Mapping, SessionMap};
 
     /// 话题会话：root_id 为空时用 router 存的最近回复目标兜底；显式带
     /// root_id 优先。这是权限卡等出站卡 root_id 的唯一收口（F3）。
@@ -1144,7 +1144,7 @@ mod tests {
         map.insert(key.clone(), Mapping::active("s1"))
             .await
             .unwrap();
-        let (router, _rx) = RouterHandle::new(map);
+        let (router, _rx) = DispatchHandle::new(map);
 
         // 入站话题消息写入 reply target（话题根消息 message_id）。
         router
@@ -1180,7 +1180,7 @@ mod tests {
         map.insert(key.clone(), Mapping::active("s1"))
             .await
             .unwrap();
-        let (router, _rx) = RouterHandle::new(map);
+        let (router, _rx) = DispatchHandle::new(map);
 
         // 入站主线消息写入 reply target（用户自己的 message_id）。
         router
@@ -1434,41 +1434,41 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// `/gateway on|off` 归一化为 ServiceSet(gateway, persist=false)；
-    /// `/gateway status` 归一化为 ServiceStatusFor(gateway)；
-    /// `/gateway restart` 归一化为 ServiceRestart(gateway)。这是 WebUI/Feishu
+    /// `/router on|off` 归一化为 ServiceSet(router, persist=false)；
+    /// `/router status` 归一化为 ServiceStatusFor(router)；
+    /// `/router restart` 归一化为 ServiceRestart(router)。这是 WebUI/Feishu
     /// 共享的归一化契约（openspec/specs/watchdog/spec.md；跨 adapter 一致性
     /// 背景见 docs/design-history.md ADR-6）。
     #[test]
-    fn gateway_actions_normalize_to_control_requests() {
+    fn router_actions_normalize_to_control_requests() {
         use crate::watchdog::control_rpc::RpcControlRequest;
 
         assert_eq!(
-            gateway_control_request(GatewayAction::On),
+            router_control_request(RouterAction::On),
             RpcControlRequest::ServiceSet {
-                service: "gateway".into(),
+                service: "router".into(),
                 desired: "on".into(),
                 persist: false,
             }
         );
         assert_eq!(
-            gateway_control_request(GatewayAction::Off),
+            router_control_request(RouterAction::Off),
             RpcControlRequest::ServiceSet {
-                service: "gateway".into(),
+                service: "router".into(),
                 desired: "off".into(),
                 persist: false,
             }
         );
         assert_eq!(
-            gateway_control_request(GatewayAction::Status),
+            router_control_request(RouterAction::Status),
             RpcControlRequest::ServiceStatusFor {
-                service: "gateway".into(),
+                service: "router".into(),
             }
         );
         assert_eq!(
-            gateway_control_request(GatewayAction::Restart),
+            router_control_request(RouterAction::Restart),
             RpcControlRequest::ServiceRestart {
-                service: "gateway".into(),
+                service: "router".into(),
             }
         );
     }

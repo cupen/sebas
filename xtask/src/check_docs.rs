@@ -226,7 +226,7 @@ mod tests {
         .unwrap();
         fs::write(
             root.join("docs/design-history.md"),
-            "原文: docs/superpowers/specs/2026-08-06-gateway-design.md\n",
+            "原文: docs/superpowers/specs/2026-08-06-router-design.md\n",
         )
         .unwrap();
 
@@ -243,7 +243,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("src/lib.rs"),
-            "//! Behavior: openspec/specs/gateway-core/spec.md; rationale: docs/design-history.md\n",
+            "//! Behavior: openspec/specs/router-core/spec.md; rationale: docs/design-history.md\n",
         )
         .unwrap();
         assert!(scan(&root).is_empty());

@@ -5,7 +5,7 @@ use crate::agent_kinds::{AgentKindProvider, AgentKindSource, ConfigAgentKindProv
 use crate::api;
 use crate::assets;
 use crate::auth::{AuthHandle, SESSION_COOKIE_NAME};
-use crate::models::GatewayInfo;
+use crate::models::RouterInfo;
 use crate::routes;
 use crate::session_backend::SessionBackend;
 use axum::Router;
@@ -21,13 +21,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Shared state for the WebUI server. All session data flows through the
-/// backend seam — the webui crate never touches `RouterHandle` (the
+/// backend seam — the webui crate never touches `DispatchHandle` (the
 /// in-process case wraps it inside `InProcessBackend`; the standalone case
 /// speaks the core session channel over a Unix socket).
 #[derive(Clone)]
 pub struct WebUiState {
     pub backend: Arc<dyn SessionBackend>,
-    pub gateway: GatewayInfo,
+    pub router: RouterInfo,
     pub started_at: Instant,
     /// Static snapshot of the card config for the settings page. The session
     /// channel does not transport settings; the caller loads it (from the
@@ -48,12 +48,12 @@ pub struct WebUiState {
 /// Build the axum Router with all WebUI routes.
 pub fn build_router(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
 ) -> Router {
     build_router_full(
         backend,
-        gateway,
+        router,
         card_config,
         None,
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
@@ -66,13 +66,13 @@ pub fn build_router(
 /// canned provider; production can inject a config-driven one).
 pub fn build_router_with_agent_kind_provider(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Arc<dyn AgentKindProvider>,
 ) -> Router {
     build_router_full(
         backend,
-        gateway,
+        router,
         card_config,
         None,
         agent_kinds,
@@ -84,13 +84,13 @@ pub fn build_router_with_agent_kind_provider(
 /// Build the axum Router with optional watchdog admin adapter.
 pub fn build_router_with_admin_adapter(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
 ) -> Router {
     build_router_full(
         backend,
-        gateway,
+        router,
         card_config,
         admin_adapter,
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
@@ -102,7 +102,7 @@ pub fn build_router_with_admin_adapter(
 /// Build the axum Router with an explicit auth handle（登录鉴权接线入口）。
 pub fn build_router_with_auth(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     agent_kinds: Arc<dyn AgentKindProvider>,
@@ -111,7 +111,7 @@ pub fn build_router_with_auth(
 ) -> Router {
     build_router_full(
         backend,
-        gateway,
+        router,
         card_config,
         admin_adapter,
         agent_kinds,
@@ -122,7 +122,7 @@ pub fn build_router_with_auth(
 
 fn build_router_full(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     agent_kinds: Arc<dyn AgentKindProvider>,
@@ -131,7 +131,7 @@ fn build_router_full(
 ) -> Router {
     let state = WebUiState {
         backend,
-        gateway,
+        router,
         started_at: Instant::now(),
         card_config,
         agent_kinds,
@@ -159,7 +159,7 @@ fn build_router_full(
             post(api::answer_permission),
         )
         .route("/api/settings", get(api::settings))
-        .route("/api/gateway", get(api::gateway))
+        .route("/api/router", get(api::router))
         .route("/api/about", get(api::about))
         .route("/api/agent-kinds", get(api::agent_kinds))
         .route("/api/auth/me", get(api::auth_me))
@@ -179,42 +179,42 @@ fn build_router_full(
         .route("/ws", get(api::ws_handler))
         .with_state(state.clone());
 
-    // gateway BFF mutation 面（Task 6.3）：独立子 router，守卫只套这一组
+    // router BFF mutation 面（Task 6.3）：独立子 router，守卫只套这一组
     // （POST-only + loopback origin check）。
-    let gateway_mutations = Router::new()
+    let router_mutations = Router::new()
         .route(
-            "/gateway/api/providers",
-            post(routes::gateway_api_provider_create),
+            "/router/api/providers",
+            post(routes::router_api_provider_create),
         )
         .route(
-            "/gateway/api/providers/{name}",
-            axum::routing::put(routes::gateway_api_provider_update)
-                .delete(routes::gateway_api_provider_delete),
+            "/router/api/providers/{name}",
+            axum::routing::put(routes::router_api_provider_update)
+                .delete(routes::router_api_provider_delete),
         )
         .route(
-            "/gateway/api/providers/{name}/probe",
-            post(routes::gateway_api_provider_probe),
+            "/router/api/providers/{name}/probe",
+            post(routes::router_api_provider_probe),
         )
         .route(
-            "/gateway/api/model-aliases",
-            post(routes::gateway_api_alias_create),
+            "/router/api/model-aliases",
+            post(routes::router_api_alias_create),
         )
         .route(
-            "/gateway/api/model-aliases/{alias}",
-            axum::routing::put(routes::gateway_api_alias_update)
-                .delete(routes::gateway_api_alias_delete),
+            "/router/api/model-aliases/{alias}",
+            axum::routing::put(routes::router_api_alias_update)
+                .delete(routes::router_api_alias_delete),
         )
-        .route("/gateway/api/reload", post(routes::gateway_api_reload))
-        .layer(axum::middleware::from_fn(routes::gateway_mutation_guard))
+        .route("/router/api/reload", post(routes::router_api_reload))
+        .layer(axum::middleware::from_fn(routes::router_mutation_guard))
         .with_state(state.clone());
 
     // The JSON admin API is always mounted: without an adapter, reads report
     // `adapter_ok: false` and mutations answer 503 (honest degradation).
     // It carries its own AdminState, merged as a stateless Router.
     // 登录鉴权层套在 merge 之后的全量路由上（按路径选择：/api/*、
-    // /gateway/api/*、/ws；静态资源与 /health 放行），webui 登录未启用时
-    // 各路由维持自身原有的防护（admin env-password、gateway origin check）。
-    core.merge(gateway_mutations)
+    // /router/api/*、/ws；静态资源与 /health 放行），webui 登录未启用时
+    // 各路由维持自身原有的防护（admin env-password、router origin check）。
+    core.merge(router_mutations)
         .merge(admin::build_api_admin_router(AdminState::new(
             admin_adapter,
         )))
@@ -232,10 +232,10 @@ fn is_auth_exempt_path(path: &str) -> bool {
     path == "/api/auth/login" || path == "/api/auth/me" || path == "/api/auth/logout"
 }
 
-/// 需要登录的路径面：JSON API、gateway BFF、WebSocket。静态 SPA 资源与
+/// 需要登录的路径面：JSON API、router BFF、WebSocket。静态 SPA 资源与
 /// `/health`（watchdog 探活）保持公开。
 fn is_protected_path(path: &str) -> bool {
-    path == "/ws" || path.starts_with("/api/") || path.starts_with("/gateway/api/")
+    path == "/ws" || path.starts_with("/api/") || path.starts_with("/router/api/")
 }
 
 /// 提取 webui 会话 cookie 值。
@@ -320,14 +320,14 @@ fn is_safe_method(method: &str) -> bool {
 /// without config-driven agents).
 pub async fn run(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
 ) {
     run_full(
         backend,
-        gateway,
+        router,
         card_config,
         agent_kinds,
         listener,
@@ -341,7 +341,7 @@ pub async fn run(
 /// Run the WebUI server with an optional watchdog admin adapter.
 pub async fn run_with_admin_adapter(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
@@ -349,7 +349,7 @@ pub async fn run_with_admin_adapter(
 ) {
     run_full(
         backend,
-        gateway,
+        router,
         card_config,
         agent_kinds,
         listener,
@@ -363,7 +363,7 @@ pub async fn run_with_admin_adapter(
 /// Run the WebUI server with an auth handle（登录鉴权接线入口）。
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
@@ -372,7 +372,7 @@ pub async fn run_with_admin_adapter_and_auth(
 ) {
     run_full(
         backend,
-        gateway,
+        router,
         card_config,
         agent_kinds,
         listener,
@@ -386,7 +386,7 @@ pub async fn run_with_admin_adapter_and_auth(
 #[allow(clippy::too_many_arguments)]
 async fn run_full(
     backend: Arc<dyn SessionBackend>,
-    gateway: GatewayInfo,
+    router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Vec<AgentKindSource>,
     listener: tokio::net::TcpListener,
@@ -397,7 +397,7 @@ async fn run_full(
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let app = build_router_full(
         backend,
-        gateway,
+        router,
         card_config,
         admin_adapter,
         provider,
@@ -423,7 +423,7 @@ mod health_dup_tests {
     // build_router_full 无论是否有 admin adapter 都会 merge admin router，
     // 故此处构建完整 router 即可覆盖该冲突。
     use super::*;
-    use crate::models::GatewayInfo;
+    use crate::models::RouterInfo;
     use crate::session_backend::FakeBackend;
     use sebas_feishu::cards::CardConfig;
 
@@ -431,7 +431,7 @@ mod health_dup_tests {
     fn full_router_builds_without_route_conflict() {
         let _app = build_router(
             std::sync::Arc::new(FakeBackend::new()),
-            GatewayInfo::default(),
+            RouterInfo::default(),
             CardConfig::default(),
         );
     }
@@ -443,7 +443,7 @@ mod auth_guard_tests {
     //! 静态资源 / /health 放行；登录-使用-注销闭环；同源校验；限速。
     use super::*;
     use crate::auth::Credentials;
-    use crate::models::GatewayInfo;
+    use crate::models::RouterInfo;
     use crate::session_backend::FakeBackend;
     use axum::body::Body;
     use axum::extract::ConnectInfo;
@@ -468,7 +468,7 @@ mod auth_guard_tests {
         .unwrap();
         let app = build_router_with_auth(
             Arc::new(FakeBackend::new()),
-            GatewayInfo::default(),
+            RouterInfo::default(),
             CardConfig::default(),
             None,
             Arc::new(ConfigAgentKindProvider::new(Vec::new())),
@@ -513,7 +513,7 @@ mod auth_guard_tests {
     async fn auth_disabled_keeps_routes_open() {
         let app = build_router(
             Arc::new(FakeBackend::new()),
-            GatewayInfo::default(),
+            RouterInfo::default(),
             CardConfig::default(),
         );
         let (status, _) = req(app, "GET", "/api/summary", None, None, None).await;
@@ -690,7 +690,7 @@ mod auth_guard_tests {
         // disabled handle 的 path 为空：enabled() 恒 false，与凭据文件无关。
         let app = build_router_with_auth(
             Arc::new(FakeBackend::new()),
-            GatewayInfo::default(),
+            RouterInfo::default(),
             CardConfig::default(),
             None,
             Arc::new(ConfigAgentKindProvider::new(Vec::new())),

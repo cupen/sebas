@@ -12,7 +12,7 @@ use std::time::Duration;
 
 mod support;
 
-use support::{http_client, post_json, wait_for, wait_gateway_addr, Sandbox};
+use support::{http_client, post_json, wait_for, wait_router_addr, Sandbox};
 
 const TURN: Duration = Duration::from_secs(30);
 const STARTUP: Duration = Duration::from_secs(30);
@@ -180,7 +180,7 @@ async fn session_lifecycle_journey() {
 }
 
 /// Models-management journey (provider governance): a local stub upstream +
-/// provider overlay + model alias → gateway routes `my-claude` to the stub
+/// provider overlay + model alias → router routes `my-claude` to the stub
 /// with the aliased upstream model; admin surface serves stats.
 #[tokio::test]
 #[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
@@ -193,7 +193,7 @@ async fn provider_governance_journey() {
     let asked_model: Arc<tokio::sync::Mutex<Option<String>>> = Arc::default();
     let stub = spawn_stub_upstream(asked_model.clone()).await;
 
-    // Provider overlay (read once at gateway build → write before spawn):
+    // Provider overlay (read once at router build → write before spawn):
     // provider `stub` pointing at the local upstream + alias my-claude →
     // upstream model `stub-model`.
     std::fs::write(
@@ -212,11 +212,11 @@ async fn provider_governance_journey() {
     .expect("write providers overlay");
 
     let _core = sb.spawn_core();
-    let gateway = wait_gateway_addr(&sb).await;
+    let router = wait_router_addr(&sb).await;
 
     let (status, body) = post_json(
         &cli,
-        &format!("{gateway}/v1/messages"),
+        &format!("{router}/v1/messages"),
         serde_json::json!({
             "model": "my-claude",
             "max_tokens": 16,
@@ -224,7 +224,7 @@ async fn provider_governance_journey() {
         }),
     )
     .await
-    .expect("gateway /v1/messages via alias");
+    .expect("router /v1/messages via alias");
     assert_eq!(status, 200, "alias routing: {body}");
     assert_eq!(body["id"].as_str(), Some("msg_stub"), "stub reply: {body}");
 
@@ -237,7 +237,7 @@ async fn provider_governance_journey() {
 
     // Admin surface: loopback clients are allowed without a control secret.
     let stats = cli
-        .get(format!("{gateway}/admin/stats"))
+        .get(format!("{router}/admin/stats"))
         .send()
         .await
         .expect("admin stats");
@@ -246,12 +246,12 @@ async fn provider_governance_journey() {
 
 /// Native-kernel journey (spike 1.2): `SEBAS_AGENT_PROVIDER_BASE_URL` pointed
 /// at a local stub provider; a `backend: "native"` spawn completes a full
-/// turn with no real credentials. (The `SEBAS_AGENT_GATEWAY_URL` variant is
-/// the watchdog's production wiring — `run --gateway` binds a random port, so
+/// turn with no real credentials. (The `SEBAS_AGENT_ROUTER_URL` variant is
+/// the watchdog's production wiring — `run --router` binds a random port, so
 /// it cannot be pre-injected at process level; see COVERAGE.md notes.)
 #[tokio::test]
 #[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
-async fn native_agent_turn_via_gateway_journey() {
+async fn native_agent_turn_via_router_journey() {
     let sb = Sandbox::new("acceptance", "native");
     let cli = http_client();
 
@@ -447,20 +447,20 @@ async fn workbench_aggregate_journey() {
     );
 }
 
-/// Gateway downstream-auth journey: with `auth_token` configured and the
-/// gateway NOT in debug mode (debug skips downstream auth), the proxy surface
+/// Router downstream-auth journey: with `auth_token` configured and the
+/// router NOT in debug mode (debug skips downstream auth), the proxy surface
 /// rejects tokenless requests. The authorized-path 200 is covered by every
 /// other journey riding the debug `test` provider.
 #[tokio::test]
 #[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
-async fn gateway_downstream_auth_journey() {
+async fn router_downstream_auth_journey() {
     let sb = Sandbox::new("acceptance", "auth");
-    sb.set_gateway_auth_token("sk-gw-test-token");
+    sb.set_router_auth_token("sk-gw-test-token");
     let cli = http_client();
-    let _core = sb.spawn_core_gateway_auth();
-    let gateway = wait_gateway_addr(&sb).await;
+    let _core = sb.spawn_core_router_auth();
+    let router = wait_router_addr(&sb).await;
 
-    let url = format!("{gateway}/v1/messages");
+    let url = format!("{router}/v1/messages");
     let payload = serde_json::json!({
         "model": "claude-x",
         "max_tokens": 16,

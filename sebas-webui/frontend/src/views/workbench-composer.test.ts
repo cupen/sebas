@@ -120,7 +120,7 @@ const summaryReachable: Summary = {
 
 const summaryUnreachable: Summary = {
   ...summaryReachable,
-  reachability: { ok: false, cause: 'gateway down' },
+  reachability: { ok: false, cause: 'router down' },
 }
 
 async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
@@ -155,7 +155,7 @@ beforeEach(() => {
       max_user_text_chars: 0,
       max_tool_output_chars: 0,
     },
-    gateway: {
+    router: {
       listen: null,
       provider_count: 0,
       debug: false,
@@ -197,7 +197,7 @@ describe('sebas-workbench-composer', () => {
     const textarea = el.shadowRoot?.querySelector('wa-textarea')
     expect(textarea?.hasAttribute('disabled')).toBe(true)
     const callout = el.shadowRoot?.querySelector<HTMLElement>('.callout-warning')
-    expect(callout?.textContent ?? '').toContain('gateway down')
+    expect(callout?.textContent ?? '').toContain('router down')
     expect(callout?.textContent ?? '').toContain('core not connected')
   })
 

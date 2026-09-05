@@ -5,8 +5,8 @@
 use sebas_acp::claude::manager::SessionManager;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent};
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +28,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
             .unwrap_or(0)
     ));
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = DispatchHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
     let key = ChannelKey::feishu("oc_race", None);
 
@@ -130,7 +130,7 @@ async fn racing_texts_yield_one_spawn_and_joined_pending() {
 #[tokio::test]
 async fn crash_on_first_prompt_reaches_pump_despite_slow_sendcard() {
     let map = SessionMap::new();
-    let (router, mut out_rx) = RouterHandle::new(map);
+    let (router, mut out_rx) = DispatchHandle::new(map);
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
     let key = ChannelKey::feishu("oc_crash", None);
 

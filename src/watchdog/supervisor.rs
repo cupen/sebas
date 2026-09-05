@@ -33,7 +33,7 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 pub enum ServiceName {
     Core,
     WebUi,
-    Gateway,
+    Router,
 }
 
 impl ServiceName {
@@ -41,7 +41,7 @@ impl ServiceName {
         match self {
             ServiceName::Core => "core",
             ServiceName::WebUi => "webui",
-            ServiceName::Gateway => "gateway",
+            ServiceName::Router => "router",
         }
     }
 }
@@ -360,7 +360,7 @@ async fn supervise(
         let pid = child.pid();
         {
             let mut snap = snapshot.lock().await;
-            // 无 readiness 门的进程（webui/gateway）：spawn 即 Running。
+            // 无 readiness 门的进程（webui/router）：spawn 即 Running。
             snap.state = match readiness {
                 Some(_) => ServiceState::Starting,
                 None => ServiceState::Running,

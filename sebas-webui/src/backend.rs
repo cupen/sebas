@@ -1,7 +1,7 @@
 //! The session backend seam.
 //!
 //! The WebUI crate must not know whether the session core lives in this
-//! process ([`RouterHandle`]-backed) or across a Unix socket (standalone
+//! process ([`DispatchHandle`]-backed) or across a Unix socket (standalone
 //! `sebas webui` talking to the daemon). Everything session-shaped flows
 //! through [`SessionBackend`]:
 //!
@@ -14,7 +14,7 @@
 //! - [`SessionBackend::reachability`] — the honest-degradation report the
 //!   summary endpoint surfaces as `core_connected` (+ cause).
 //!
-//! [`RouterHandle`]: ../sebas_router/router/struct.RouterHandle.html
+//! [`DispatchHandle`]: ../sebas_dispatch/router/struct.DispatchHandle.html
 //! [`message`]: SessionBackend::message
 
 use crate::events::WebUiEvent;
@@ -119,7 +119,7 @@ pub trait SessionBackend: Send + Sync + 'static {
     async fn turns(&self, key: &str, position: u64) -> Result<TurnContent, Rejection>;
 
     /// The core's card-rendering config, for the settings page. Required by
-    /// the webui-api spec ("GET /api/settings carries card config + gateway
+    /// the webui-api spec ("GET /api/settings carries card config + router
     /// info") — read-only display data; the channel does not stream config
     /// changes, so a socket backend serves its last-known snapshot.
     async fn card_config(&self) -> CardConfigInfo;

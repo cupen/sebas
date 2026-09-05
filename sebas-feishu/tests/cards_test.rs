@@ -141,7 +141,7 @@ fn permission_card_snapshot() {
 }
 
 /// /help 卡片必须用 `column_set` 把命令按钮横排（每行 2-3 个），而不是
-/// 之前的「每个命令一整行」。同时超长命令（如 /gateway on|off|...）单独
+/// 之前的「每个命令一整行」。同时超长命令（如 /router on|off|...）单独
 /// 占满整行；每列内 = button + 灰色 desc Div 垂直堆叠。
 #[test]
 fn help_card_uses_column_set_rows() {
@@ -190,7 +190,7 @@ fn help_card_uses_column_set_rows() {
     }
 }
 
-/// service 组的 /gateway on|off|restart|status 是已知「超长」命令，必须
+/// service 组的 /router on|off|restart|status 是已知「超长」命令，必须
 /// 单独占满整行（columns.len() == 1，column 内含该命令的 button）。
 #[test]
 fn help_card_wide_command_takes_full_row() {
@@ -202,7 +202,7 @@ fn help_card_wide_command_takes_full_row() {
         if let CardElement::ColumnSet { columns, .. } = el
             && columns.len() == 1
             && let CardElement::Button { text, .. } = &columns[0].elements[0]
-            && text.content.contains("/gateway")
+            && text.content.contains("/router")
         {
             found_wide = true;
             break;
@@ -210,7 +210,7 @@ fn help_card_wide_command_takes_full_row() {
     }
     assert!(
         found_wide,
-        "/gateway command should be rendered as a single-column row (full-width)"
+        "/router command should be rendered as a single-column row (full-width)"
     );
 }
 

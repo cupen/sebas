@@ -77,7 +77,7 @@ path = {fake_claude_path:?}
 sessions_dir = {sessions_dir:?}
 idle_kill_secs = 60
 
-[router]
+[dispatch]
 state_file = {state_path:?}
 channel_buffer = 16
 max_concurrent_sessions = 4
@@ -138,7 +138,7 @@ async fn sigterm_cleans_up_child_and_persists_state() {
 
     // ---- 3. Spawn sebas with cwd=work_dir so it picks up our config. -----
     let mut child = tokio::process::Command::new(&sebas_bin)
-        .arg("run")
+        .arg("core")
         .current_dir(work_dir.path())
         .env("SEBAS_TEST_FAKE_TOKEN", "1")
         .env("SEBAS_TEST_SPAWN_SESSION", "1")

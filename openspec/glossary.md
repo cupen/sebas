@@ -6,16 +6,27 @@
 
 ## 进程角色(单一二进制,子命令决定人格)
 
-- **core(core 进程)**:`sebas run` 的长驻服务本体。会话状态的**单一权威**、
+- **core(core 进程)**:`sebas core` 的长驻服务本体。会话状态的**单一权威**、
   唯一 spawn ACP 子进程的进程;持有会话映射、core session channel socket,
   按配置承载通道适配器(飞书 WS 等)。(architecture.md §1)
-- **watchdog(守护)**:唯一拉起其他进程的角色;按配置监督 core / webui /
-  gateway 子进程(重启/退避/升级)。(architecture.md §2)
+- **run(watchdog 守护)**:唯一拉起其他进程的角色,入口命令 `sebas run`
+  (旧名 `watchdog`,现为隐藏别名);按配置监督 core / webui /
+  router 子进程(重启/退避/升级)。(architecture.md §2)
 - **webui(WebUI)**:dashboard 进程,自身不持有会话状态;经 core session
   channel 观察与驱动会话,或在 core 进程内运行(进程内后端)。
-- **gateway(网关)**:provider 透传代理进程,对外提供 OpenAI 兼容 API。
-- **router(sebas-router crate)**:core 进程内的领域层——会话映射、入站事件
-  dispatch、slash 命令解析、权限处理、出站呈现编排。不是独立进程。
+- **router(模型路由)**:provider 透传代理进程,入口命令 `sebas router`
+  (旧名 `gateway`,现为隐藏别名),对外提供 OpenAI 兼容 API。
+- **dispatch(sebas-dispatch crate,会话分发)**:core 进程内的领域层——会话映射、
+  入站事件 dispatch、slash 命令解析、权限处理、出站呈现编排。不是独立进程。
+  (原名 sebas-router;rename-cli-surface 改名)
+
+### 三义消解(重要)
+
+「router」一词在仓库里有三种含义,默认指第一种:
+1. **CLI `sebas router` / `sebas-router` crate** = 模型路由(Anthropic/OpenAI
+   双协议 provider 代理);
+2. **`sebas-dispatch` crate**(原名 sebas-router)= core 进程内的会话分发领域层;
+3. **前端 `router.ts`** = SPA 的 URL 路由,与以上两者无关。
 
 ## 领域概念
 
@@ -65,7 +76,8 @@
 
 | 易混 | 区分 |
 |---|---|
-| core vs router | core 是进程角色;router 是该进程内的领域层 crate |
+| core vs dispatch | core 是进程角色;dispatch(原 sebas-router)是该进程内的会话分发领域层 crate |
+| router(模型路由)vs dispatch(会话分发) | 前者是独立的 provider 代理进程(`sebas router`);后者是 core 进程内的领域层 crate(原 sebas-router) |
 | webui(进程)vs `web`(通道) | 前者是 dashboard 进程;后者是它在通道抽象里的注册名 |
 | sebas-agent vs ACP 桥 | 两种执行体:自研内核 vs 经 ACP 驱动的外部 agent |
 | 项目 vs 工作台 | 项目是目录(组织单元);工作台是 webui 里呈现它的页面 |

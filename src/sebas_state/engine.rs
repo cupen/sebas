@@ -3,7 +3,7 @@
 //! 通过 `StateHandle` 将 async 请求派发到 DB 写者线程。
 
 use crate::sebas_state::writer::StateHandle;
-use sebas_router::state_store::{PersistedState, StateStoreEngine};
+use sebas_dispatch::state_store::{PersistedState, StateStoreEngine};
 use serde_json::Value;
 
 /// 基于 SQLite 的状态存储引擎。
@@ -35,7 +35,7 @@ impl StateStoreEngine for DbStateEngine {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         // providers + aliases + settings 域都随 PersistedState 一次提交。
-        sebas_router::state_store::notify_change("providers");
+        sebas_dispatch::state_store::notify_change("providers");
         Ok(())
     }
 
@@ -54,7 +54,7 @@ impl StateStoreEngine for DbStateEngine {
         self.handle
             .exec(move |conn| crate::sebas_state::repo::save_settings(conn, &card_cfg))
             .await?;
-        sebas_router::state_store::notify_change("settings");
+        sebas_dispatch::state_store::notify_change("settings");
         Ok(())
     }
 
@@ -75,7 +75,7 @@ impl StateStoreEngine for DbStateEngine {
         self.handle
             .exec(move |conn| crate::sebas_state::repo::save_projects(conn, &rows))
             .await?;
-        sebas_router::state_store::notify_change("projects");
+        sebas_dispatch::state_store::notify_change("projects");
         Ok(())
     }
 
@@ -85,7 +85,7 @@ impl StateStoreEngine for DbStateEngine {
         self.handle
             .exec(move |conn| crate::sebas_state::repo::add_project(conn, &p, &n, added_at))
             .await?;
-        sebas_router::state_store::notify_change("projects");
+        sebas_dispatch::state_store::notify_change("projects");
         Ok(())
     }
 
@@ -96,7 +96,7 @@ impl StateStoreEngine for DbStateEngine {
             .exec(move |conn| crate::sebas_state::repo::remove_project(conn, &p))
             .await?;
         if removed {
-            sebas_router::state_store::notify_change("projects");
+            sebas_dispatch::state_store::notify_change("projects");
         }
         Ok(removed)
     }

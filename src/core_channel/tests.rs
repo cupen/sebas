@@ -10,8 +10,8 @@ use crate::core_channel::protocol::{
 };
 use crate::core_channel::server;
 use sebas_channels::ChannelKey;
-use sebas_router::state::SessionMap;
-use sebas_router::{RouterHandle, SessionEvent};
+use sebas_dispatch::state::SessionMap;
+use sebas_dispatch::{DispatchHandle, SessionEvent};
 use sebas_webui::session_backend::{PermissionDecision, Reachability, SessionBackend, SessionRejection};
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -35,10 +35,10 @@ async fn wait_channel_ready(path: &StdPath) {
 struct TestCore {
     path: std::path::PathBuf,
     close_tx: tokio::sync::watch::Sender<bool>,
-    handle: RouterHandle,
-    /// 出站接收端必须保活：RouterHandle::emit 在 debug 构建下对 closed
+    handle: DispatchHandle,
+    /// 出站接收端必须保活：DispatchHandle::emit 在 debug 构建下对 closed
     /// channel 直接断言失败（spec 的 dev bug 语义）。
-    _out_rx: tokio::sync::mpsc::Receiver<sebas_router::Out>,
+    _out_rx: tokio::sync::mpsc::Receiver<sebas_dispatch::Out>,
 }
 
 impl Drop for TestCore {
@@ -53,7 +53,7 @@ async fn start_core(dir: &StdPath) -> TestCore {
 }
 
 async fn start_core_with_map(dir: &StdPath, map: SessionMap) -> TestCore {
-    let (router, out_rx) = RouterHandle::new(map);
+    let (router, out_rx) = DispatchHandle::new(map);
     let path = dir.join("core.sock");
     let (close_tx, close_rx) = tokio::sync::watch::channel(false);
     let serve_path = path.clone();
@@ -400,7 +400,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
         .await
         .expect("message accepted");
     match core._out_rx.try_recv().expect("WebSpawn emitted") {
-        sebas_router::Out::WebSpawn {
+        sebas_dispatch::Out::WebSpawn {
             key: k,
             prompt,
             kind,
@@ -442,7 +442,7 @@ async fn client_converges_after_server_restart() {
 
     // Restart the server on the same path (stale socket already removed).
     let path2 = core.path.clone();
-    let (_router2, _rx2) = RouterHandle::new(SessionMap::new());
+    let (_router2, _rx2) = DispatchHandle::new(SessionMap::new());
     let router2 = _router2.clone();
     let (_close2, close2_rx) = tokio::sync::watch::channel(false);
     let backend2: Arc<dyn sebas_webui::SessionBackend> = Arc::new(

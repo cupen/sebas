@@ -6,11 +6,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use sebas_feishu::cards::CardConfig;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use sebas_webui::agent_kinds::{AgentKindInfo, AgentKindProvider};
 use sebas_webui::build_router_with_agent_kind_provider;
-use sebas_webui::models::GatewayInfo;
+use sebas_webui::models::RouterInfo;
 use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -39,12 +39,12 @@ fn info(slug: &str, reachable: bool, cause: Option<&str>, version: Option<&str>)
 
 async fn app_with(kinds: Vec<AgentKindInfo>) -> axum::Router {
     let map = SessionMap::new();
-    let (router, _rx) = RouterHandle::new(map);
+    let (router, _rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> =
         Arc::new(sebas_webui::session_backend::InProcessBackend::new(router));
     build_router_with_agent_kind_provider(
         backend,
-        GatewayInfo::default(),
+        RouterInfo::default(),
         CardConfig::default(),
         Arc::new(CannedProvider { kinds }),
     )

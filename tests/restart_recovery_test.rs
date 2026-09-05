@@ -6,8 +6,8 @@
 
 use sebas_acp::claude::manager::SessionManager;
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_router::router::{Out, RouterHandle};
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::state::SessionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +34,7 @@ async fn restored_mapping_lazily_resumes_with_load_capable_agent() {
     // State file as a previous daemon's dump left it.
     let json = r#"{"oc_restart":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
-    let (router, mut out_rx) = RouterHandle::new(map.clone());
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
 
     // First text after restart → SpawnResume (NOT a SendAcp black hole).
@@ -105,7 +105,7 @@ async fn restored_mapping_resume_rejected_falls_back_to_fresh() {
     // session-lost notice (asserted at the card level in the e2e suite).
     let json = r#"{"oc_restart":{"session_id":"sess-old","last_active_unix":1}}"#;
     let map = SessionMap::restore_json(json).unwrap();
-    let (router, mut out_rx) = RouterHandle::new(map.clone());
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
     let mgr = Arc::new(SessionManager::claude_only(Duration::from_secs(30)));
 
     router

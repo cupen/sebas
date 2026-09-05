@@ -66,7 +66,7 @@ pub struct ControlExecutor {
     runner: Arc<dyn UpdaterRunner>,
     config: WatchdogConfig,
     config_path: String,
-    /// Managed-service table (core/webui/gateway supervision handles).
+    /// Managed-service table (core/webui/router supervision handles).
     services: ServiceManager,
     /// Single-use, short-lived confirmation grants for dangerous actions
     /// (openspec/specs/watchdog/spec.md). Shared across executor clones.
@@ -444,7 +444,7 @@ impl ControlExecutor {
         let service_name = |s: &ManagedService| match s {
             ManagedService::Core => ServiceName::Core,
             ManagedService::WebUi => ServiceName::WebUi,
-            ManagedService::Gateway | ManagedService::Feishu => ServiceName::Gateway,
+            ManagedService::Router | ManagedService::Feishu => ServiceName::Router,
         };
         match request {
             ControlRequest::Update {
@@ -564,7 +564,7 @@ impl ControlExecutor {
     }
 
     /// Return the current status of a single managed service, or an empty
-    /// service list when the service is unknown (used by `/gateway status`
+    /// service list when the service is unknown (used by `/router status`
     /// and `/webui status`, openspec/specs/watchdog/spec.md).
     pub async fn service_status_for(&self, service: &str) -> RpcControlResponse {
         match self.service_status().await {
@@ -995,7 +995,7 @@ mod tests {
     // service_from_str 与 executor 的 ServiceSet 名称面共享（防漂移）。
     #[test]
     fn service_from_str_knows_all_rpc_service_names() {
-        for name in ["core", "webui", "gateway"] {
+        for name in ["core", "webui", "router"] {
             assert!(service_from_str(name).is_some());
         }
     }

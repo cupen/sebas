@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-router", "sebas-feishu", "sebas-acp", "sebas-gateway", "sebas-webui", "sebas-ipc", "xtask", "sebas-agent", "sebas-channels"]
+members = ["sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "xtask", "sebas-agent", "sebas-channels"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -24,11 +24,11 @@ debug = false
 
 
 [dependencies]
-sebas-router = { path = "sebas-router" }
+sebas-dispatch = { path = "sebas-dispatch" }
 sebas-ipc = { path = "sebas-ipc" }
 sebas-feishu = { path = "sebas-feishu" }
 sebas-acp = { path = "sebas-acp" }
-sebas-gateway = { path = "sebas-gateway" }
+sebas-router = { path = "sebas-router" }
 sebas-webui = { path = "sebas-webui" }
 sebas-agent = { path = "sebas-agent" }
 sebas-channels = { path = "sebas-channels" }

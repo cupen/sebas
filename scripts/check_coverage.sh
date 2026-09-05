@@ -20,21 +20,23 @@ set -euo pipefail
 json="${1:?usage: check_coverage.sh <coverage.json>}"
 
 OVERALL_MIN=65
-ROUTER_MIN=90
+# rename-cli-surface：crate 目录改名——旧 sebas-router（会话分发）→ sebas-dispatch，
+# 旧 sebas-gateway（模型路由）→ sebas-router。阈值随各自目录走，数值不变。
+DISPATCH_MIN=90
 CARDS_MIN=90
-GATEWAY_MIN=70
+ROUTER_MIN=70
 
 overall=$(jq -r '.data[0].totals.lines.percent' "$json")
-router=$(jq -r '
-  [.data[].files[] | select(.filename | test("/sebas-router/src/")) | .summary.lines]
+dispatch=$(jq -r '
+  [.data[].files[] | select(.filename | test("/sebas-dispatch/src/")) | .summary.lines]
   | (map(.covered) | add) as $c | (map(.count) | add) as $t
   | if $t == 0 then 100 else ($c * 100 / $t) end' "$json")
 cards=$(jq -r '
   [.data[].files[] | select(.filename | endswith("sebas-feishu/src/cards.rs")) | .summary.lines]
   | (map(.covered) | add) as $c | (map(.count) | add) as $t
   | if $t == 0 then 100 else ($c * 100 / $t) end' "$json")
-gateway=$(jq -r '
-  [.data[].files[] | select(.filename | test("/sebas-gateway/src/")) | .summary.lines]
+router=$(jq -r '
+  [.data[].files[] | select(.filename | test("/sebas-router/src/")) | .summary.lines]
   | (map(.covered) | add) as $c | (map(.count) | add) as $t
   | if $t == 0 then 100 else ($c * 100 / $t) end' "$json")
 
@@ -49,9 +51,9 @@ check() { # check <name> <actual> <min>
 }
 
 check "overall" "$overall" "$OVERALL_MIN"
-check "sebas-router/" "$router" "$ROUTER_MIN"
+check "sebas-dispatch/" "$dispatch" "$DISPATCH_MIN"
 check "cards.rs" "$cards" "$CARDS_MIN"
-check "sebas-gateway/" "$gateway" "$GATEWAY_MIN"
+check "sebas-router/" "$router" "$ROUTER_MIN"
 
 if [ "$fail" -ne 0 ]; then
   echo "coverage gate failed (spec §4.3; overall 棘轮下限见脚本头注释)" >&2

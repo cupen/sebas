@@ -40,7 +40,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
 }
 
 /// 纯函数：把探测结果格式化为 `slug reachable version cause?` 行（缺省字段
-/// 用 `-` 占位），便于测试与未来扩展（如对齐 `sebas gateway list` 列布局）。
+/// 用 `-` 占位），便于测试与未来扩展（如对齐 `sebas router list` 列布局）。
 pub fn format_table(kinds: &[AgentKindInfo]) -> Vec<String> {
     kinds
         .iter()

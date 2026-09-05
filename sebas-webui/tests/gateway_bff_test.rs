@@ -1,5 +1,5 @@
-//! Gateway BFF 集成测试（Task 6.2/6.3）：
-//! - `/gateway` 动态拉取 admin API 数据（live 模式）+ gateway 关闭时降级。
+//! Router BFF 集成测试（Task 6.2/6.3）：
+//! - `/router` 动态拉取 admin API 数据（live 模式）+ router 关闭时降级。
 //! - mutation 路由：GET → 405；非 loopback origin → 403；无 secret → 503；
 //!   有 secret 时转发 admin API（create → 列表出现 → delete → 消失）。
 
@@ -7,19 +7,19 @@ use sebas_feishu::cards::CardConfig;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use sebas_router::router::RouterHandle;
-use sebas_router::state::SessionMap;
+use sebas_dispatch::engine::DispatchHandle;
+use sebas_dispatch::state::SessionMap;
 use std::sync::Arc;
 use tower::ServiceExt;
-use sebas_webui::models::GatewayInfo;
+use sebas_webui::models::RouterInfo;
 use sebas_webui::build_router;
 
-async fn app_with(gateway_listen: Option<String>) -> axum::Router {
-    let (router, _rx) = RouterHandle::new(SessionMap::new());
+async fn app_with(router_listen: Option<String>) -> axum::Router {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
     let backend: Arc<dyn sebas_webui::SessionBackend> =
         Arc::new(sebas_webui::session_backend::InProcessBackend::new(router));
-    let gw = GatewayInfo {
-        listen: gateway_listen,
+    let gw = RouterInfo {
+        listen: router_listen,
         provider_count: 1,
         debug: false,
         has_auth: true,
@@ -40,14 +40,14 @@ async fn body_string(body: Body) -> String {
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
-async fn api_gateway_reports_snapshot_when_gateway_down() {
-    // SSR 网关页已由 SPA 取代；等价语义改为 API 面：/api/gateway 返回启动
+async fn api_router_reports_snapshot_when_router_down() {
+    // SSR 网关页已由 SPA 取代；等价语义改为 API 面：/api/router 返回启动
     // 快照（providers 含 snapshot-provider），SPA 侧自行渲染降级提示。
-    let app = app_with(Some("127.0.0.1:59999".into())).await; // 无 gateway 监听
+    let app = app_with(Some("127.0.0.1:59999".into())).await; // 无 router 监听
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/api/gateway")
+                .uri("/api/router")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -59,14 +59,14 @@ async fn api_gateway_reports_snapshot_when_gateway_down() {
 }
 
 #[tokio::test]
-async fn gateway_bff_read_routes_are_mutation_only() {
-    // BFF mutation 面（POST/PUT/DELETE）不接受 GET——SPA 用 /api/gateway
-    // 快照 + gateway 自身 admin API（经 BFF 转发）组合出只读视图。
+async fn router_bff_read_routes_are_mutation_only() {
+    // BFF mutation 面（POST/PUT/DELETE）不接受 GET——SPA 用 /api/router
+    // 快照 + router 自身 admin API（经 BFF 转发）组合出只读视图。
     let app = app_with(Some("127.0.0.1:59999".into())).await;
     for uri in [
-        "/gateway/api/providers",
-        "/gateway/api/model-aliases",
-        "/gateway/api/reload",
+        "/router/api/providers",
+        "/router/api/model-aliases",
+        "/router/api/reload",
     ] {
         let resp = app
             .clone()
@@ -91,7 +91,7 @@ async fn mutation_routes_guarded() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/gateway/api/providers")
+                .uri("/router/api/providers")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -104,7 +104,7 @@ async fn mutation_routes_guarded() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/gateway/api/providers")
+                .uri("/router/api/providers")
                 .header("origin", "http://evil.example")
                 .body(Body::empty())
                 .unwrap(),
@@ -119,7 +119,7 @@ async fn mutation_routes_guarded() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/gateway/api/providers")
+                .uri("/router/api/providers")
                 .header("origin", "http://127.0.0.1:8080")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"x"}"#))
@@ -133,7 +133,7 @@ async fn mutation_routes_guarded() {
 #[tokio::test]
 async fn mutation_round_trip_via_admin_api() {
     let _g = ENV_LOCK.lock().await;
-    // mock gateway admin：create → list 出现 → delete → 消失。
+    // mock router admin：create → list 出现 → delete → 消失。
     use std::sync::atomic::{AtomicUsize, Ordering};
     let created = Arc::new(AtomicUsize::new(0));
     let deleted = Arc::new(AtomicUsize::new(0));
@@ -178,7 +178,7 @@ async fn mutation_round_trip_via_admin_api() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/gateway/api/providers")
+                .uri("/router/api/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"alpha","preset":"deepseek"}"#))
                 .unwrap(),
@@ -192,7 +192,7 @@ async fn mutation_round_trip_via_admin_api() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/gateway/api/providers/alpha")
+                .uri("/router/api/providers/alpha")
                 .body(Body::empty())
                 .unwrap(),
         )

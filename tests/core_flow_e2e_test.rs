@@ -1,5 +1,5 @@
 //! Process-level e2e for the core flows in the detached (watchdog) topology:
-//! a real core child (`sebas run --gateway --debug`) plus a standalone
+//! a real core child (`sebas run --router --debug`) plus a standalone
 //! `sebas webui` process connected through the core session channel.
 //!
 //! Every case runs in a throwaway sandbox (`support::Sandbox`) — config file,
@@ -19,7 +19,7 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    http_client, post_json, wait_for, wait_gateway_addr, wait_reachable,
+    http_client, post_json, wait_for, wait_router_addr, wait_reachable,
     wait_unreachable_with_cause, webui_healthy, Sandbox,
 };
 
@@ -117,18 +117,18 @@ async fn session_round_trip_via_webui_http() {
     );
 }
 
-/// The built-in debug gateway answers `model = "test"` over /v1/messages.
+/// The built-in debug router answers `model = "test"` over /v1/messages.
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
-async fn gateway_debug_provider_serves_messages() {
-    let sb = Sandbox::new("core_flow_e2e", "gateway");
+async fn router_debug_provider_serves_messages() {
+    let sb = Sandbox::new("core_flow_e2e", "router");
     let cli = http_client();
     let _core = sb.spawn_core();
 
-    let gateway = wait_gateway_addr(&sb).await;
+    let router = wait_router_addr(&sb).await;
     let (status, body) = post_json(
         &cli,
-        &format!("{gateway}/v1/messages"),
+        &format!("{router}/v1/messages"),
         serde_json::json!({
             "model": "test",
             "max_tokens": 16,
@@ -136,8 +136,8 @@ async fn gateway_debug_provider_serves_messages() {
         }),
     )
     .await
-    .expect("gateway /v1/messages");
-    assert_eq!(status, 200, "debug gateway: {body}");
+    .expect("router /v1/messages");
+    assert_eq!(status, 200, "debug router: {body}");
     assert_eq!(
         body["id"].as_str(),
         Some("msg_test_debug"),

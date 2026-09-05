@@ -6,7 +6,7 @@
 //! 测试覆盖；本测试聚焦「提交即持久」的 DB 契约。
 
 use sebas::sebas_state::writer::StateWriter;
-use sebas_router::state_store::StateStoreEngine;
+use sebas_dispatch::state_store::StateStoreEngine;
 
 /// 写一条 settings + 一条 project → 关闭写者（模拟进程结束）→
 /// 重新打开同一 DB → 数据仍在。
@@ -92,7 +92,7 @@ fn providers_and_aliases_survive_writer_restart() {
             state.deleted.push("legacy".into());
             state.model_aliases.insert(
                 "my-claude".into(),
-                sebas_router::state_store::ModelAliasEntry {
+                sebas_dispatch::state_store::ModelAliasEntry {
                     provider: "anthropic".into(),
                     upstream_model: Some("claude-sonnet-4".into()),
                 },

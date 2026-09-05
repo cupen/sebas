@@ -53,7 +53,7 @@ chars). Ctrl-C stops it and deletes the sandbox dir.
    real `~/.sebas`:
 
    - config `-c` path (there is no sandbox-safe default), with
-     `[router] state_file`, `[media] download_dir`,
+     `[dispatch] state_file`, `[media] download_dir`,
      `[acp.claude] sessions_dir` / `work_dir`,
      `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
      (pick a port ≠ 9797, e.g. 9877) all set inside it;
@@ -64,15 +64,15 @@ chars). Ctrl-C stops it and deletes the sandbox dir.
      `~/.sebas/sebas.db` — the easy one to miss: without it the sandbox
      opens the real DB even with everything else sandboxed),
      `SEBAS_STATE_FILE` (provider state JSON, default
-     `~/.sebas/state.json`), and `SEBAS_GATEWAY_PROVIDER_OVERLAY`
+     `~/.sebas/state.json`), and `SEBAS_ROUTER_PROVIDER_OVERLAY`
      (default `~/.sebas/providers.json`).
 
 2. Run the two halves exactly as the watchdog would:
 
    ```bash
    SEBAS_CORE_SECRET=fake SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
-     SEBAS_GATEWAY_PROVIDER_OVERLAY=… \
-     target/debug/sebas run -c /tmp/sebas-itest/config.toml          # core
+     SEBAS_ROUTER_PROVIDER_OVERLAY=… \
+     target/debug/sebas core -c /tmp/sebas-itest/config.toml         # core
    SEBAS_CORE_SECRET=fake \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
    ```
@@ -95,7 +95,7 @@ chars). Ctrl-C stops it and deletes the sandbox dir.
 覆盖面账本见 `tests/acceptance/COVERAGE.md`）：`invoke accept` 或
 `cargo test --test acceptance_suite_test -- --ignored`。
 
-`--debug` makes the gateway inject a built-in `test` provider that answers
+`--debug` makes the router inject a built-in `test` provider that answers
 requests itself (fixed text + echo, no upstream dial, downstream auth
 skipped), and pointing `[acp.claude] path` at the `tests/bin` fake-claude
 stub (built by `cargo build` together with the main binary) lets ACP
@@ -115,7 +115,7 @@ throwaway dir (e.g. `/tmp/sebas-debug`).
    sessions_dir = "<SB>/claude-sessions"
    work_dir = "<SB>/work"
 
-   [router]
+   [dispatch]
    state_file = "<SB>/sessions.json"
 
    [media]
@@ -125,17 +125,17 @@ throwaway dir (e.g. `/tmp/sebas-debug`).
    channel_path = "<SB>/core-channel.sock"
 
    [watchdog.webui]
-   enabled = false          # bare run owns the webui via --webui-port
+   enabled = false          # bare core owns the webui via --webui-port
 
-   # gateway validate requires ≥1 provider with a base_url — the debug
+   # router validate requires ≥1 provider with a base_url — the debug
    # `test` provider is injected only AFTER parse, so it cannot satisfy
    # validate. This dummy never dials anything in debug mode.
    [provider.anthropic]
    api_key = "sk-sandbox-dummy"
 
-   [gateway]
+   [router]
    provider_overlay = "<SB>/providers.json"   # missing file = no-op
-   usage_file = "<SB>/gateway-usage.jsonl"
+   usage_file = "<SB>/router-usage.jsonl"
    ```
 
 2. Start the core in debug mode:
@@ -144,20 +144,20 @@ throwaway dir (e.g. `/tmp/sebas-debug`).
    cargo build
    SEBAS_CORE_SECRET=fake SEBAS_STATE_DB="<SB>/sebas.db" \
      SEBAS_STATE_FILE="<SB>/state.json" \
-     SEBAS_GATEWAY_PROVIDER_OVERLAY="<SB>/providers.json" \
-     target/debug/sebas run -c "<SB>/config.toml" \
-     --gateway --debug --webui --webui-port 9877 > "<SB>/core.log" 2>&1
+     SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
+     target/debug/sebas core -c "<SB>/config.toml" \
+     --router --debug --webui --webui-port 9877 > "<SB>/core.log" 2>&1
    ```
 
-   The built-in gateway binds a random port — read it from the log line
-   `gateway started (run --gateway) … addr=127.0.0.1:<port>`.
+   The built-in router binds a random port — read it from the log line
+   `router started (core --router) … addr=127.0.0.1:<port>`.
 
 3. Verify:
    - `GET http://127.0.0.1:9877/health` → `ok`; `/api/summary` →
      `reachability.ok = true` and `execution_bodies` shows acp `ok: true`
      (`native` stays `ok: false` in the sandbox — it needs
      `SEBAS_AGENT_PROVIDER_API_KEY`; report that honestly, don't fix).
-   - gateway `POST /v1/messages` with `{"model":"test",…}` → 200
+   - router `POST /v1/messages` with `{"model":"test",…}` → 200
      `msg_test_debug`; the namespace form `test/<anything>` routes there too.
    - round-trip: `POST /api/sessions` with `{"prompt":"hello","backend":"acp"}`
      — that is the real request shape; `{"channel","message"}` is silently
@@ -165,7 +165,7 @@ throwaway dir (e.g. `/tmp/sebas-debug`).
      `GET /api/sessions/<encoded_key>` → fake-claude's "hello world", status
      Done.
    - Windows Git Bash curl gotcha: non-ASCII text in `-d '…'` is sent as
-     GBK, the gateway's JSON parse fails, model extraction yields none, and
+     GBK, the router's JSON parse fails, model extraction yields none, and
      the request dies with a misleading 502 `no_route` **even though
      routing is fine** (check `/admin/stats` — `routes: 1` means the debug
      route is present). Use ASCII payloads or `-d @file.json` (UTF-8).

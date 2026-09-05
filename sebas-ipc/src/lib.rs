@@ -1,4 +1,4 @@
-//! 跨平台本地 IPC 传输层（核心会话通道 / 控制 RPC / gateway 状态订阅共用）。
+//! 跨平台本地 IPC 传输层（核心会话通道 / 控制 RPC / router 状态订阅共用）。
 //!
 //! 基于 `interprocess` 的 local socket 抽象：Unix 上是 Unix domain socket
 //! （文件路径语义与历史行为一致，含僵尸 socket 回收），Windows 上由
