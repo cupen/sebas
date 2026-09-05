@@ -9,7 +9,7 @@
 //! 之后每帧一条 scope 变更(一串提交已由服务端合并)。断连时保持最后有效
 //! 配置, 由 `ReloadStatus` 记录不可用状态供 `/admin/stats` 暴露。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -63,7 +63,7 @@ async fn subscribe_loop(state: AppState, path: PathBuf) {
 /// 订阅触发的 reload（5.3 投影）：优先从 core channel 拉 providers/aliases
 /// 快照重建配置；通道快照失败时回退文件 overlay（`reload_and_swap`）。
 /// 成功后清除「数据源不可用」，失败保旧内核并记录错误。
-pub(crate) async fn reload_from_channel(state: &AppState, path: &PathBuf) {
+pub(crate) async fn reload_from_channel(state: &AppState, path: &Path) {
     let result = async {
         let snapshot = fetch_state_snapshot(path, "providers").await?;
         let mut cfg = crate::admin::rebuild_from_seed(state)?;
@@ -96,7 +96,7 @@ pub(crate) async fn reload_from_channel(state: &AppState, path: &PathBuf) {
 /// 通用短连接通道请求：握手 → 发一帧请求 → 收一帧响应。
 /// 返回完整响应（`CoreChannelResponse` 形状）。请求/响应均为 NDJSON on 本地 IPC。
 async fn channel_request(
-    path: &PathBuf,
+    path: &Path,
     req: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -154,7 +154,7 @@ async fn channel_request(
 /// 短连接请求 core 的 `StateSnapshot{domain}`，返回 payload。
 /// 订阅触发 reload 时用于从通道拉最新 providers/aliases（5.3 投影）。
 pub(crate) async fn fetch_state_snapshot(
-    path: &PathBuf,
+    path: &Path,
     domain: &str,
 ) -> Result<serde_json::Value, String> {
     let req = serde_json::json!({"cmd": "state_snapshot", "domain": domain});
@@ -174,7 +174,7 @@ pub(crate) async fn fetch_state_snapshot(
 
 /// 短连接 core `StateMutation{domain}`。成功 → Ok；被拒 → Err(成因)。
 pub(crate) async fn mutate_state(
-    path: &PathBuf,
+    path: &Path,
     domain: &str,
     payload: serde_json::Value,
 ) -> Result<(), String> {
@@ -206,7 +206,7 @@ enum StateStreamFrame {
 
 /// 一次完整的订阅会话: 连接 → 握手 → 发送请求 → 读快照 → 持续读通知。
 /// 返回时连接已断开 (调用方退避重连)。
-async fn subscribe_once(state: &AppState, path: &PathBuf) -> Result<(), String> {
+async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let stream = sebas_ipc::connect(path)

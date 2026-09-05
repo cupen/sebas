@@ -86,6 +86,7 @@ pub struct GatewayConfig {
 /// - `rpm`: 每分钟请求数（便捷写法，本实现忽略）
 /// - `capacity` + `refill_per_sec`: token-bucket 原始参数：
 ///   容量 = 瞬时允许的突发请求数；refill_per_sec = 每秒补充速率。
+///
 /// 都未设（capacity=None 且 rpm=None）→ 不限流。
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 pub struct RateLimitConfig {
@@ -520,6 +521,7 @@ fn option_string(s: String) -> Option<String> {
 /// 从 provider overlay JSON 条目里读 `models`。支持两种格式：
 /// - 数组（gateway 直接读）：`["a", "b"]`
 /// - 逗号分隔字符串（来自 `/provider` 表单提交）：`"a,b"`
+///
 /// 保持书写顺序 = 强→弱。缺省 → 空列表。
 fn parse_models_list(item: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
     match item.get("models") {

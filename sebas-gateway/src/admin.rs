@@ -365,8 +365,8 @@ async fn update_provider(
         Ok(v) => v,
         Err(e) => return err_500(&e),
     };
-    if !via_channel {
-        if let Err(e) = write_overlay_rmw(&path, |root| {
+    if !via_channel
+        && let Err(e) = write_overlay_rmw(&path, |root| {
             let providers = root
                 .entry("providers".to_string())
                 .or_insert_with(|| Value::Object(Map::new()));
@@ -378,9 +378,9 @@ async fn update_provider(
                 deleted.retain(|d| d.as_str() != Some(name2.as_str()));
             }
             Ok(())
-        }) {
-            return err_500(&e);
-        }
+        })
+    {
+        return err_500(&e);
     }
     match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"updated": name}))).into_response(),
@@ -533,8 +533,8 @@ async fn create_alias(State(state): State<AppState>, Json(body): Json<Value>) ->
         Ok(false) => false,
         Err(e) => return err_500(&e),
     };
-    if !via_channel {
-        if let Err(e) = write_overlay_rmw(&path, |root| {
+    if !via_channel
+        && let Err(e) = write_overlay_rmw(&path, |root| {
             let aliases = root
                 .entry("model_aliases".to_string())
                 .or_insert_with(|| Value::Object(Map::new()));
@@ -543,9 +543,9 @@ async fn create_alias(State(state): State<AppState>, Json(body): Json<Value>) ->
             };
             map.insert(alias2.clone(), entry_value.clone());
             Ok(())
-        }) {
-            return err_500(&e);
-        }
+        })
+    {
+        return err_500(&e);
     }
     match reload_after_write(&state).await {
         Ok(()) => (StatusCode::CREATED, Json(json!({"created": alias}))).into_response(),
@@ -580,8 +580,8 @@ async fn update_alias(
         Ok(false) => false,
         Err(e) => return err_500(&e),
     };
-    if !via_channel {
-        if let Err(e) = write_overlay_rmw(&path, |root| {
+    if !via_channel
+        && let Err(e) = write_overlay_rmw(&path, |root| {
             let aliases = root
                 .entry("model_aliases".to_string())
                 .or_insert_with(|| Value::Object(Map::new()));
@@ -590,9 +590,9 @@ async fn update_alias(
             };
             map.insert(alias2.clone(), entry_value.clone());
             Ok(())
-        }) {
-            return err_500(&e);
-        }
+        })
+    {
+        return err_500(&e);
     }
     match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"updated": alias}))).into_response(),
@@ -618,8 +618,8 @@ async fn delete_alias(
         Ok(false) => false,
         Err(e) => return err_500(&e),
     };
-    if !via_channel {
-        if let Err(e) = write_overlay_rmw(&path, |root| {
+    if !via_channel
+        && let Err(e) = write_overlay_rmw(&path, |root| {
             if let Some(map) = root
                 .get_mut("model_aliases")
                 .and_then(Value::as_object_mut)
@@ -627,9 +627,9 @@ async fn delete_alias(
                 map.remove(&alias2);
             }
             Ok(())
-        }) {
-            return err_500(&e);
-        }
+        })
+    {
+        return err_500(&e);
     }
     match reload_after_write(&state).await {
         Ok(()) => (StatusCode::OK, Json(json!({"deleted": alias}))).into_response(),

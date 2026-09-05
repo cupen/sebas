@@ -450,7 +450,7 @@ impl SessionMap {
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         session_id.hash(&mut h);
-        let archive_key = ChannelKey::new("web", &format!("closed-{:016x}", h.finish()));
+        let archive_key = ChannelKey::new("web", format!("closed-{:016x}", h.finish()));
         let mut g = self.inner.write().await;
         // 已存在则只补 last_active——不覆盖已记录的 acp_session_id。
         match g.get_mut(&archive_key) {

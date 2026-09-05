@@ -266,7 +266,7 @@ mod tests {
             name.to_string(),
             ProviderConfig {
                 base_url_anthropic: (proto == WireProtocol::Anthropic).then(|| url.clone()),
-                base_url_openai: (proto == WireProtocol::OpenAi).then(|| url),
+                base_url_openai: (proto == WireProtocol::OpenAi).then_some(url),
                 api_key_env: None,
                 api_key: Some("test-key".into()),
                 model_map: HashMap::new(),

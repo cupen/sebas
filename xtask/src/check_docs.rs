@@ -73,7 +73,7 @@ pub fn scan(root: &Path) -> Vec<Hit> {
 }
 
 fn is_scannable(path: &Path, name: &str) -> bool {
-    if SKIP_FILES.iter().any(|s| name == *s) {
+    if SKIP_FILES.contains(&name) {
         return false;
     }
     path.extension()

@@ -200,7 +200,7 @@ mod tests {
         let v = info.version.as_deref().unwrap_or_default();
         // opencode `--version` prints a bare semver like `1.18.25`.
         assert!(
-            !v.is_empty() && v.chars().next().map_or(false, |c| c.is_ascii_digit()),
+            !v.is_empty() && v.chars().next().is_some_and(|c| c.is_ascii_digit()),
             "opencode version should be a bare version number, got {v:?}"
         );
     }

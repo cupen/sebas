@@ -20,7 +20,7 @@ use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
-use sebas_router::{RouterHandle, SessionEvent};
+use sebas_router::RouterHandle;
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,9 +158,8 @@ async fn wait_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
 #[cfg(unix)]
 fn peer_uid_ok(stream: &IpcStream) -> bool {
     use std::os::fd::{AsFd, AsRawFd};
-    let sebas_ipc::IpcStream::UdSocket(uds) = stream else {
-        return true;
-    };
+    // unix 上 interprocess 的 Stream 只有 UdSocket 一个变体，模式不可反驳。
+    let sebas_ipc::IpcStream::UdSocket(uds) = stream;
     let mut ucred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -679,13 +678,6 @@ async fn dispatch(
         CoreChannelRequest::Focused => CoreChannelResponse::Focused {
             key: router.active_session_snapshot().await,
         },
-        CoreChannelRequest::SetFocus { key } => {
-            backend.set_focus(key).await;
-            CoreChannelResponse::Ok
-        }
-        CoreChannelRequest::Focused => CoreChannelResponse::Focused {
-            key: backend.focused().await,
-        },
         CoreChannelRequest::ApprovalAnswer {
             request_id,
             decision,
@@ -726,13 +718,13 @@ async fn dispatch(
                             engine.save_settings(value).await
                         }
                         "projects" => {
-                            project_mutation(engine.as_ref(), &payload).await
+                            project_mutation(engine, &payload).await
                         }
                         "providers" => {
-                            providers_mutation(engine.as_ref(), &payload).await
+                            providers_mutation(engine, &payload).await
                         }
                         "aliases" => {
-                            aliases_mutation(engine.as_ref(), &payload).await
+                            aliases_mutation(engine, &payload).await
                         }
                         other => Err(format!("unknown domain: {other}")),
                     };

@@ -19,7 +19,7 @@ fn fmt_u64(n: u64) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, &c) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
             out.push('_');
         }
         out.push(c as char);
@@ -54,7 +54,7 @@ pub fn render_models_body(entries: &[RawEntry]) -> String {
             );
             continue;
         };
-        let max_out = entry.max_output_tokens.unwrap_or_else(|| ctx / 4);
+        let max_out = entry.max_output_tokens.unwrap_or(ctx / 4);
         if current_provider != Some(entry.provider_name.as_str()) {
             if current_provider.is_some() {
                 out.push('\n');

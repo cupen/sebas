@@ -50,13 +50,10 @@ async fn wait_for_text(mgr: &SessionManager, id: &str, needle: &str) -> String {
             .await
             .expect("timeout waiting for event")
             .expect("event stream closed");
-        match evt {
-            AcpEvent::TextDelta { delta, .. } => {
-                if delta.contains(needle) {
-                    return delta;
-                }
-            }
-            _ => {}
+        if let AcpEvent::TextDelta { delta, .. } = evt
+            && delta.contains(needle)
+        {
+            return delta;
         }
     }
     panic!("no TextDelta containing {needle:?} within 20 events");

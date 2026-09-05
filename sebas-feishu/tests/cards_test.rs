@@ -199,15 +199,13 @@ fn help_card_wide_command_takes_full_row() {
     let card = render_help_card("service", "blue");
     let mut found_wide = false;
     for el in &card.body.elements {
-        if let CardElement::ColumnSet { columns, .. } = el {
-            if columns.len() == 1 {
-                if let CardElement::Button { text, .. } = &columns[0].elements[0] {
-                    if text.content.contains("/gateway") {
-                        found_wide = true;
-                        break;
-                    }
-                }
-            }
+        if let CardElement::ColumnSet { columns, .. } = el
+            && columns.len() == 1
+            && let CardElement::Button { text, .. } = &columns[0].elements[0]
+            && text.content.contains("/gateway")
+        {
+            found_wide = true;
+            break;
         }
     }
     assert!(

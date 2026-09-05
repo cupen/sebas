@@ -367,7 +367,7 @@ pub fn help_card(group: &str, theme: &str) -> ChannelCard {
     };
     let (tab_label, commands) = &groups[group];
 
-    let mut card = ChannelCard::new(&format!("📖 帮助 — {tab_label}"), theme);
+    let mut card = ChannelCard::new(format!("📖 帮助 — {tab_label}"), theme);
 
     // Tab buttons row: all groups as buttons, current group highlighted.
     let tab_order = ["session", "system", "service", "other"];
@@ -500,15 +500,13 @@ mod tests {
         let card = help_card("service", "blue");
         let mut found_wide = false;
         for el in &card.elements {
-            if let ChannelElement::ColumnSet { columns, .. } = el {
-                if columns.len() == 1 {
-                    if let ChannelElement::Button { text, .. } = &columns[0].elements[0] {
-                        if text.content.contains("/gateway") {
-                            found_wide = true;
-                            break;
-                        }
-                    }
-                }
+            if let ChannelElement::ColumnSet { columns, .. } = el
+                && columns.len() == 1
+                && let ChannelElement::Button { text, .. } = &columns[0].elements[0]
+                && text.content.contains("/gateway")
+            {
+                found_wide = true;
+                break;
             }
         }
         assert!(

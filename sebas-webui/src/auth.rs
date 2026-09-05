@@ -39,10 +39,10 @@ pub const SESSION_COOKIE_NAME: &str = "sebas_webui_session";
 
 /// 凭据文件路径：`SEBAS_WEBUI_AUTH_FILE` 优先，否则 `~/.sebas/webui-auth.json`。
 pub fn default_auth_file() -> PathBuf {
-    if let Ok(p) = std::env::var("SEBAS_WEBUI_AUTH_FILE") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Ok(p) = std::env::var("SEBAS_WEBUI_AUTH_FILE")
+        && !p.is_empty()
+    {
+        return PathBuf::from(p);
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

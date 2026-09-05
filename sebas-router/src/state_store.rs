@@ -105,7 +105,6 @@ pub fn init_engine(engine: Box<dyn StateStoreEngine + Send + Sync>) {
     let (tx, _) = tokio::sync::broadcast::channel(64);
     CHANGE_TX
         .set(tx)
-        .ok()
         .expect("state change broadcast 已初始化");
     ENGINE
         .set(engine)
@@ -128,8 +127,8 @@ pub fn subscribe_changes() -> Option<tokio::sync::broadcast::Receiver<StateChang
 }
 
 /// 获取引擎引用。
-pub fn engine() -> Option<&'static Box<dyn StateStoreEngine + Send + Sync>> {
-    ENGINE.get()
+pub fn engine() -> Option<&'static (dyn StateStoreEngine + Send + Sync)> {
+    ENGINE.get().map(|b| b.as_ref())
 }
 
 /// 一条记录：字段名 -> 值。Provider CRUD 用。

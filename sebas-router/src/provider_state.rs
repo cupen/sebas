@@ -105,11 +105,12 @@ mod env_override_tests {
         assert_eq!(loaded, ProviderRuntimeState::default());
 
         // save() / load() 在 env 路径上往返成功。
-        let mut s = ProviderRuntimeState::default();
-        s.mode = ProviderMode::Direct {
-            provider: "env-override".into(),
+        let s = ProviderRuntimeState {
+            mode: ProviderMode::Direct {
+                provider: "env-override".into(),
+            },
+            default_selection: Some(DefaultSelection::new("env-override")),
         };
-        s.default_selection = Some(DefaultSelection::new("env-override"));
         save(&s).expect("save to env-override path");
         assert!(custom.exists(), "save 应创建 env 指定的文件");
         let reloaded = load();

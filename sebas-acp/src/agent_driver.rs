@@ -83,16 +83,19 @@ pub struct DriverHandle {
     /// - `None`: drivers that handshake synchronously inside `spawn` (the
     ///   Claude driver); `session_id`/`resumed` are already final.
     ///
-    /// 元组四元组：`(final_routing_id, resumed, acp_session_id, model_info)`。
-    /// `acp_session_id` 与 `model` 由 ACP 驱动在连接闭包内解析后一次性递出。
-    pub handshake: Option<
-        tokio::sync::oneshot::Receiver<(String, bool, Option<String>, Option<AcpModelInfo>)>,
-    >,
+    /// 元组四元组见 [`HandshakeRx`]。`acp_session_id` 与 `model` 由 ACP 驱动
+    /// 在连接闭包内解析后一次性递出。
+    pub handshake: Option<HandshakeRx>,
     /// The driver's read/command loop, boxed. Awaiting it drives the session
     /// to completion (cancel, terminal error, or child exit). The manager
     /// owns the command sender (`cmd_rx` was passed in via [`DriverConfig`]).
     pub run: futures::future::BoxFuture<'static, ()>,
 }
+
+/// [`DriverHandle::handshake`] 递出的四元组：
+/// `(final_routing_id, resumed, acp_session_id, model_info)`。
+pub type HandshakeRx =
+    tokio::sync::oneshot::Receiver<(String, bool, Option<String>, Option<AcpModelInfo>)>;
 
 /// Why a spawn failed.
 #[derive(Debug, thiserror::Error)]

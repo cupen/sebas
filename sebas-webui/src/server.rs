@@ -291,19 +291,19 @@ async fn auth_guard(State(state): State<WebUiState>, req: Request<Body>, next: N
 
     // CSRF：浏览器发起的跨站写请求会带 Origin 头——与 Host 不一致即拒绝。
     // SameSite=Lax cookie 已挡掉绝大多数跨站携带，这里兜底非浏览器场景。
-    if !is_safe_method(req.method().as_str()) {
-        if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-            let same_origin = origin_authority(origin)
-                .zip(req.headers().get(header::HOST).and_then(|h| h.to_str().ok()))
-                .map(|(origin_host, host)| origin_host.eq_ignore_ascii_case(host))
-                .unwrap_or(false);
-            if !same_origin {
-                return (
-                    StatusCode::FORBIDDEN,
-                    axum::Json(serde_json::json!({ "error": "cross-origin request rejected" })),
-                )
-                    .into_response();
-            }
+    if !is_safe_method(req.method().as_str())
+        && let Some(origin) = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok())
+    {
+        let same_origin = origin_authority(origin)
+            .zip(req.headers().get(header::HOST).and_then(|h| h.to_str().ok()))
+            .map(|(origin_host, host)| origin_host.eq_ignore_ascii_case(host))
+            .unwrap_or(false);
+        if !same_origin {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "error": "cross-origin request rejected" })),
+            )
+                .into_response();
         }
     }
 
@@ -383,6 +383,7 @@ pub async fn run_with_admin_adapter_and_auth(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_full(
     backend: Arc<dyn SessionBackend>,
     gateway: GatewayInfo,

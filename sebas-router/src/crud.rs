@@ -368,7 +368,7 @@ impl ProviderForms {
     async fn build_list_card(&self) -> ChannelCard {
         let items = self.preset.store.list().await;
         let spec = &self.preset.spec;
-        let mut card = ChannelCard::new(&format!("{}列表", spec.title), &spec.template);
+        let mut card = ChannelCard::new(format!("{}列表", spec.title), &spec.template);
         if items.is_empty() {
             card.push_text("暂无记录");
         } else {
@@ -734,7 +734,7 @@ impl<S: CrudStore> CrudForm<S> {
 
     async fn render_list_card(&self) -> ChannelCard {
         let items = self.store.list().await;
-        let mut card = ChannelCard::new(&format!("{}列表", self.spec.title), &self.spec.template);
+        let mut card = ChannelCard::new(format!("{}列表", self.spec.title), &self.spec.template);
         if items.is_empty() {
             card.push_text("暂无记录");
         } else {
@@ -841,6 +841,9 @@ fn upsert_item(items: &mut Vec<Item>, item: Item, id_field: &str) {
 }
 
 #[cfg(test)]
+// 测试用 STATE_FILE_LOCK 串行化 env 变更：每个 #[tokio::test] 独立 runtime，
+// 跨 await 持 std 锁只会让其它测试等待，不构成死锁——这是刻意的。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::test_util::lock_state_file;
@@ -1101,7 +1104,7 @@ mod tests {
 
         let initial = form.recompute_initial(Some("ds"), &fv).await;
         // 关键断言是 secret 没出现在 initial 里——它本来也不该回显。
-        assert!(initial.get("api_key").is_none());
+        assert!(!initial.contains_key("api_key"));
         // base_url_anthropic 被 preset 默认值覆盖了（用户的意图：切 preset 就用新端点）。
         assert_eq!(
             initial.get("base_url_anthropic").map(String::as_str),

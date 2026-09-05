@@ -3,6 +3,10 @@
 //! 存储（FileStore 委托给 unified state.json，见 openspec/specs/provider-management/spec.md
 //! 与 docs/design-history.md ADR-4）随变更持久化。
 
+// ENV_LOCK 串行化 env 变更：每个 #[tokio::test] 独立 runtime，跨 await 持
+// std 锁只会让其它测试等待，不构成死锁——这是刻意的。
+#![allow(clippy::await_holding_lock)]
+
 use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
 use sebas_channels::card::{FormField, FormSpec};
 use sebas_router::CrudStore;
@@ -75,7 +79,7 @@ fn spec() -> FormSpec {
     )
 }
 
-fn key() -> ChannelKey { ChannelKey::feishu("oc_provider".into(), None) }
+fn key() -> ChannelKey { ChannelKey::feishu("oc_provider", None) }
 
 fn item(name: &str) -> Item {
     let mut m = Map::new();

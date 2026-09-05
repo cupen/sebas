@@ -417,9 +417,7 @@ fn client_capabilities() -> ClientCapabilities {
 /// 的 select 选项 → current + options 列表。无 model 选项 → `None`（webui
 /// 不显示下拉、不报错）。
 fn extract_model_info(opts: Option<&[SessionConfigOption]>) -> Option<AcpModelInfo> {
-    let Some(opts) = opts else {
-        return None;
-    };
+    let opts = opts?;
     let model = opts.iter().find(|o| {
         o.id.0.as_ref() == "model"
             || o

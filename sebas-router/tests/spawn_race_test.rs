@@ -6,7 +6,7 @@ use sebas_router::router::{Out, RouterHandle};
 use sebas_router::state::{Mapping, MappingState, SessionMap, TextRoute};
 use std::time::Duration;
 
-fn key() -> ChannelKey { ChannelKey::feishu("oc_race".into(), None) }
+fn key() -> ChannelKey { ChannelKey::feishu("oc_race", None) }
 
 #[tokio::test]
 async fn second_text_during_spawn_is_queued_not_spawned() {

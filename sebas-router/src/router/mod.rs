@@ -705,11 +705,11 @@ impl RouterHandle {
         // ModelChanged（add-acp-model-selection）：更新映射 current model 并
         // 发布 Updated，让快照立即反映中程切换 —— 覆盖流式 pump（apply_event）
         // 与即时路径（apply_event_to_out）两条到达线。
-        if let AcpEvent::ModelChanged { model_id, .. } = event {
-            if let Some(key) = self.map.lookup_key_by_session(session_id).await {
-                self.map.set_current_model(&key, model_id.clone()).await;
-                self.publish_updated(&key).await;
-            }
+        if let AcpEvent::ModelChanged { model_id, .. } = event
+            && let Some(key) = self.map.lookup_key_by_session(session_id).await
+        {
+            self.map.set_current_model(&key, model_id.clone()).await;
+            self.publish_updated(&key).await;
         }
         match event {
             AcpEvent::TextDelta { delta, .. } => {
@@ -1386,7 +1386,7 @@ pub fn now_unix() -> i64 {
 /// references are alnum plus a few separators) so a targeted percent-encoder
 /// suffices.
 pub fn encode_key(key: &ChannelKey) -> String {
-    let raw = format!("{}\0{}", key.channel_str(), &key.reference);
+    let raw = format!("{}\0{}", key.channel_str(), key.reference);
     percent_encode(&raw)
 }
 

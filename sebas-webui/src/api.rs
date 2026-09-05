@@ -578,30 +578,25 @@ pub async fn browse_dirs(
 /// 从 backend 读取项目列表（DB 引擎 / core 通道）。backend 不可达时回退
 /// 本地文件注册表（webui 进程独占视图，spec 未约束其降级语义）。
 /// 返回 JSON 数组（ProjectRow / ProjectEntry 形状，前端兼容）。
-async fn projects_from_backend(
-    state: &WebUiState,
-) -> Result<Vec<serde_json::Value>, Response> {
+async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
     if let Some(v) = state.backend.state_snapshot("projects").await {
-        let arr = v
+        return v
             .get("projects")
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
-        return Ok(arr);
     }
     // 回退：webui 本地文件注册表。
-    Ok(crate::projects::list()
+    crate::projects::list()
         .into_iter()
         .map(|e| serde_json::to_value(&e).unwrap_or_default())
-        .collect())
+        .collect()
 }
 
 /// GET /api/projects — list all registered projects（状态库优先，文件回退）。
 pub async fn projects_list(State(state): State<WebUiState>) -> Response {
-    match projects_from_backend(&state).await {
-        Ok(projects) => Json(json!({ "projects": projects })).into_response(),
-        Err(resp) => resp,
-    }
+    let projects = projects_from_backend(&state).await;
+    Json(json!({ "projects": projects })).into_response()
 }
 
 /// POST /api/projects — register a new project directory（状态库优先）。
@@ -630,10 +625,10 @@ pub async fn projects_add(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
     // 重复检查：列表里已有 canonical 路径 → 409。
-    if let Ok(projects) = projects_from_backend(&state).await
-        && projects
-            .iter()
-            .any(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()))
+    if projects_from_backend(&state)
+        .await
+        .iter()
+        .any(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()))
     {
         return api_error(StatusCode::CONFLICT, format!("项目已注册: {path}"));
     }
@@ -649,16 +644,12 @@ pub async fn projects_add(
         || crate::projects::add(&canonical).is_ok()
     {
         // 返回新条目（从列表反查，保证与数据源一致）。
-        match projects_from_backend(&state).await {
-            Ok(list) => {
-                let entry = list.into_iter().find(|p| {
-                    p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
-                });
-                if let Some(entry) = entry {
-                    return (StatusCode::CREATED, Json(entry)).into_response();
-                }
-            }
-            Err(_) => {}
+        let entry = projects_from_backend(&state)
+            .await
+            .into_iter()
+            .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()));
+        if let Some(entry) = entry {
+            return (StatusCode::CREATED, Json(entry)).into_response();
         }
         (StatusCode::CREATED, Json(json!({ "path": canonical, "name": name }))).into_response()
     } else {
@@ -715,10 +706,7 @@ pub async fn projects_reorder(
     Json(req): Json<ReorderRequest>,
 ) -> Response {
     // 读当前列表 → 按新顺序重排（未知路径落地为 add_time 顺序尾部）→ save。
-    let mut projects = match projects_from_backend(&state).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    let mut projects = projects_from_backend(&state).await;
     let mut by_path: std::collections::HashMap<String, serde_json::Value> =
         projects.drain(..).map(|p| {
             let path = p
@@ -786,10 +774,7 @@ pub async fn projects_branch(
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid path encoding"),
     };
-    let projects = match projects_from_backend(&state).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    let projects = projects_from_backend(&state).await;
     let entry = projects
         .iter()
         .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(decoded.as_str()));

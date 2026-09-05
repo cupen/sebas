@@ -10,7 +10,7 @@ const WAIT: Duration = Duration::from_millis(500);
 async fn full_round_trip_text_to_events() {
     let map = SessionMap::new();
     let (handle, mut out_rx) = RouterHandle::new(map.clone());
-    let key = ChannelKey::feishu("oc_x".into(), None);
+    let key = ChannelKey::feishu("oc_x", None);
 
     // 1) Text in → expect SpawnAcp only. The root SendCard is now emitted by
     // the dispatcher (after create_session mints the real session_id), not the

@@ -9,7 +9,7 @@ use std::time::Duration;
 async fn permission_request_emits_card_with_buttons() {
     let map = SessionMap::new();
     // The router resolves session_id -> SessionKey via the map, so seed it.
-    let key = ChannelKey::feishu("oc_x".into(), None);
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -44,7 +44,7 @@ async fn permission_request_emits_card_with_buttons() {
 #[tokio::test]
 async fn permission_card_in_topic_leaves_root_id_none() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_topic".into(), Some("omt_t1".into()));
+    let key = ChannelKey::feishu("oc_topic", Some("omt_t1"));
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -91,7 +91,7 @@ async fn permission_card_in_topic_leaves_root_id_none() {
 #[tokio::test]
 async fn permission_card_mainline_keeps_root_id_none() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_x".into(), None);
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -129,7 +129,7 @@ async fn permission_card_mainline_keeps_root_id_none() {
 #[tokio::test]
 async fn button_callback_emits_permission_reply() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_x".into(), None);
+    let key = ChannelKey::feishu("oc_x", None);
     // on_button now requires a live session mapping before forwarding a reply.
     map.insert(key.clone(), Mapping::active("s1"))
         .await
@@ -157,7 +157,7 @@ async fn button_callback_emits_permission_reply() {
 
     router
         .dispatch(ChannelEvent::ButtonCb {
-            key: key,
+            key,
             action,
                     })
         .await;
@@ -195,7 +195,7 @@ async fn button_callback_emits_permission_reply() {
 async fn button_callback_on_dead_session_emits_help_card() {
     let map = SessionMap::new();
     let (router, mut out_rx) = RouterHandle::new(map.clone());
-    let key = ChannelKey::feishu("oc_gone".into(), None);
+    let key = ChannelKey::feishu("oc_gone", None);
     let action = ChannelAction {
         session_id: "s_dead".into(),
         request_id: Some("r1".into()),
@@ -205,7 +205,7 @@ async fn button_callback_on_dead_session_emits_help_card() {
 
     router
         .dispatch(ChannelEvent::ButtonCb {
-            key: key,
+            key,
             action,
                     })
         .await;
@@ -227,7 +227,7 @@ async fn button_callback_on_dead_session_emits_help_card() {
 #[tokio::test]
 async fn button_callback_unknown_decision_defaults_to_deny() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_x".into(), None);
+    let key = ChannelKey::feishu("oc_x", None);
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -251,7 +251,7 @@ async fn button_callback_unknown_decision_defaults_to_deny() {
     };
     router
         .dispatch(ChannelEvent::ButtonCb {
-            key: key,
+            key,
             action,
                     })
         .await;

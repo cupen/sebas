@@ -266,7 +266,7 @@ async fn run(
                     };
                     log_set_config(
                         &req.session_id.to_string(),
-                        &req.config_id.0.to_string(),
+                        &req.config_id.0,
                         &value,
                     );
                     // 脚本化拒绝无效 model：返回 RPC 错误（等价于 agent 拒绝）。

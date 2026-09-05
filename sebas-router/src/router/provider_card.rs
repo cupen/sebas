@@ -899,7 +899,7 @@ fn build_probe_result_card(
     probe_url: &str,
     models: &[String],
 ) -> ChannelCard {
-    let mut card = ChannelCard::new(&format!("探测结果：{provider_name}"), "blue");
+    let mut card = ChannelCard::new(format!("探测结果：{provider_name}"), "blue");
     card.push_note(format!("base_url 类型：{base_kind} · {probe_url}"));
     card.push_divider();
 
@@ -939,7 +939,7 @@ fn build_probe_result_card(
 
 /// 探测失败 / 无 base_url 时的结果卡：单行说明 + 返回按钮。
 fn build_probe_error_card(provider_name: &str, reason: &str) -> ChannelCard {
-    let mut card = ChannelCard::new(&format!("探测结果：{provider_name}"), "red");
+    let mut card = ChannelCard::new(format!("探测结果：{provider_name}"), "red");
     card.push_text(format!("探测失败：{reason}，请手填默认 model。"));
     card.push_divider();
     card.push_actions(vec![ButtonSpec::new(
@@ -995,6 +995,9 @@ async fn refresh_card(handle: &RouterHandle, key: &ChannelKey, message_id: Optio
 // ===========================================================================
 
 #[cfg(test)]
+// 测试用 STATE_FILE_LOCK 串行化 env 变更：每个 #[tokio::test] 独立 runtime，
+// 跨 await 持 std 锁只会让其它测试等待，不构成死锁——这是刻意的。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::crud::{CrudForm, FileStore, ProviderForms};

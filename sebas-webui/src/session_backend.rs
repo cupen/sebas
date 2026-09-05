@@ -512,7 +512,7 @@ impl SessionBackend for InProcessBackend {
             }
             "projects" => {
                 // 与 core channel 服务端同款 op 分发（add/remove/save）。
-                project_mutation(engine.as_ref(), &payload).await
+                project_mutation(engine, &payload).await
             }
             other => Err(format!("unknown domain: {other}")),
         }

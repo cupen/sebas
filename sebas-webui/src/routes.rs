@@ -104,7 +104,7 @@ pub(crate) fn encode_channel_key(channel: &str, reference: &str) -> String {
 
 /// Encode a ChannelKey for use in URLs.
 pub(crate) fn encode_session_key(key: &ChannelKey) -> String {
-    encode_channel_key(&key.channel.as_str(), &key.reference)
+    encode_channel_key(key.channel.as_str(), &key.reference)
 }
 
 /// Decode a URL-encoded ChannelKey.

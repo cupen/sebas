@@ -285,7 +285,7 @@ async fn alias_crud_round_trip() {
     assert_eq!(resp.status(), 200);
     let raw = std::fs::read_to_string(&overlay).unwrap();
     let v: Value = serde_json::from_str(&raw).unwrap();
-    assert!(v["model_aliases"].as_object().map_or(true, |m| !m.contains_key("fast")));
+    assert!(v["model_aliases"].as_object().is_none_or(|m| !m.contains_key("fast")));
 }
 
 #[tokio::test]
@@ -343,7 +343,7 @@ async fn probe_lists_and_applies_models() {
         .unwrap();
     assert_eq!(resp.status(), 200, "apply: {}", resp.text().await.unwrap_or_default());
     let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert!(body["models"].as_array().map_or(false, |a| !a.is_empty()), "body: {body}");
+    assert!(body["models"].as_array().is_some_and(|a| !a.is_empty()), "body: {body}");
     let raw = std::fs::read_to_string(&overlay).unwrap();
     assert!(raw.contains("gpt-4"), "apply 须写回 models 列表: {raw}");
     // 上游收到的请求带了 key（Authorization bearer）。

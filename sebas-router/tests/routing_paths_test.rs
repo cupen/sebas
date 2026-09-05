@@ -44,7 +44,7 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Out>) -> Vec<Out> {
 #[tokio::test]
 async fn spawn_new_clears_reply_target() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_topic".into(), Some("omt_t1".into()));
+    let key = ChannelKey::feishu("oc_topic", Some("omt_t1"));
     map.insert(key.clone(), Mapping::active("s1"))
         .await
         .unwrap();
@@ -494,7 +494,7 @@ async fn fail_spawn_ignores_active_and_missing_entries() {
     // remove_by_session 对不存在的 session：no-op。
     map.remove_by_session("ghost").await;
     // activate 无占位 → 插入新映射（warn 路径）。
-    let orphan = ChannelKey::feishu("oc_orphan".into(), None);
+    let orphan = ChannelKey::feishu("oc_orphan", None);
     let pending = map.activate(&orphan, "s9".into(), None, None).await;
     assert!(pending.is_empty());
     assert_eq!(map.get(&orphan).await.unwrap().session_id(), Some("s9"));
@@ -569,7 +569,7 @@ impl NativeSessionBridge for FakeNativeBridge {
 #[tokio::test]
 async fn feishu_text_without_bridge_stays_acp() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_no_bridge".into(), None);
+    let key = ChannelKey::feishu("oc_no_bridge", None);
     let (router, mut out_rx) = RouterHandle::new(map);
 
     router
@@ -588,7 +588,7 @@ async fn feishu_text_without_bridge_stays_acp() {
 #[tokio::test]
 async fn feishu_text_with_native_default_routes_to_bridge() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_native".into(), None);
+    let key = ChannelKey::feishu("oc_native", None);
     let (router, mut out_rx) = RouterHandle::new(map);
     let fake = Arc::new(FakeNativeBridge::new(true));
     let bridge: Arc<dyn NativeSessionBridge> = fake.clone();
@@ -612,7 +612,7 @@ async fn feishu_text_with_native_default_routes_to_bridge() {
 #[tokio::test]
 async fn feishu_native_session_continues_via_bridge() {
     let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_native2".into(), None);
+    let key = ChannelKey::feishu("oc_native2", None);
     let (router, mut out_rx) = RouterHandle::new(map);
     let fake = Arc::new(FakeNativeBridge::new(true));
     let bridge: Arc<dyn NativeSessionBridge> = fake.clone();

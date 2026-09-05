@@ -15,7 +15,7 @@ use sebas_router::state::{Mapping, SessionMap};
 #[tokio::test]
 async fn continue_session_emits_per_turn_send_card_with_root_id() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc_x".into(), None);
+    let key = ChannelKey::feishu("oc_x", None);
     let _ = router
         .map
         .insert(key.clone(), Mapping::active("sess-1"))
@@ -76,7 +76,7 @@ async fn continue_session_emits_per_turn_send_card_with_root_id() {
 #[tokio::test]
 async fn terminal_error_clears_queued_turns() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
 
@@ -133,7 +133,7 @@ async fn terminal_error_clears_queued_turns() {
 #[tokio::test]
 async fn continue_while_in_flight_enqueues_no_card_no_sendacp_only_queue_react() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
     // First turn is mid-flight (no Finished yet) — emoji stays at SEED but the
@@ -181,7 +181,7 @@ async fn continue_while_in_flight_enqueues_no_card_no_sendacp_only_queue_react()
 #[tokio::test]
 async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
     // Mid-flight.
@@ -271,7 +271,7 @@ async fn drain_queue_emits_next_turn_card_and_sendacp_after_finished() {
 #[tokio::test]
 async fn terminal_error_abandons_queued_turns() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
     // Mid-flight.
@@ -325,7 +325,7 @@ async fn terminal_error_abandons_queued_turns() {
 #[tokio::test]
 async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
     router
@@ -391,7 +391,7 @@ async fn btw_command_queues_with_priority_ahead_of_existing_fifo() {
 #[tokio::test]
 async fn missing_reply_to_is_fire_and_forget_root_id_none() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
 
@@ -430,7 +430,7 @@ async fn missing_reply_to_is_fire_and_forget_root_id_none() {
 #[tokio::test]
 async fn three_turns_three_distinct_root_ids() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
 
@@ -540,7 +540,7 @@ async fn three_turns_three_distinct_root_ids() {
 #[tokio::test]
 async fn streaming_update_after_second_turn_targets_current_card() {
     let (router, mut out_rx) = RouterHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc".into(), None);
+    let key = ChannelKey::feishu("oc", None);
     let _ = router.map.insert(key.clone(), Mapping::active("s1")).await;
     router.seed_card("s1".into(), "first".into()).await;
 

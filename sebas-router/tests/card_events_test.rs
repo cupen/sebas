@@ -91,13 +91,13 @@ fn thinking_show_aggregates_adjacent_deltas() {
     // 收在父面板内：body[0] 是父面板，其内子面板内容 "A\nB"。
     assert_eq!(body.len(), 1);
     let CardElement::CollapsiblePanel(parent) = &body[0] else {
-        panic!("expected parent CollapsiblePanel, got {:?}", &body[0]);
+        panic!("expected parent CollapsiblePanel, got {:?}", body[0]);
     };
     assert_eq!(parent.elements.len(), 1);
     let CardElement::CollapsiblePanel(panel) = &parent.elements[0] else {
         panic!(
             "expected thinking CollapsiblePanel, got {:?}",
-            &parent.elements[0]
+            parent.elements[0]
         );
     };
     assert_eq!(panel.elements.len(), 1);
