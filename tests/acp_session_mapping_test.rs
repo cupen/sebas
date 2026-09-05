@@ -20,9 +20,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn fake_acp() -> PathBuf {
-    // CARGO_BIN_EXE_* 由 cargo 在编译期注入当前 target 目录的真实路径，
-    // 不受 CARGO_TARGET_DIR 覆盖影响（硬编码 target/debug 会在 override 下失联）。
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-acp-agent"))
+    // 桩是 sebas-acp 的 bin（依赖 agent_client_protocol，不能搬进根包），
+    // 由 `cargo build -p sebas-acp` 落到 target/debug。这里在编译期捕获本次
+    // 构建实际的 CARGO_TARGET_DIR（被 override 时与桩构建保持一致），
+    // 默认回退 <root>/target——硬编码相对路径在 override 下会失联。
+    let target_dir = option_env!("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    target_dir
+        .join("debug")
+        .join(format!("fake-acp-agent{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn key() -> ChannelKey {
