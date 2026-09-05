@@ -56,12 +56,14 @@
 
 纯新增目录，不影响既有部署路径。回滚 = 删除 `ansible/` 目录与 README 小节。已部署的机器卸载走既有 `sebas service --uninstall` + 删用户/目录，playbook 不提供 destroy（非目标，避免误删数据）。
 
-**D8 — 验证环境与验证边界（实现期定案）**
-本机为 Windows，验证载体为 WSL2 kali（ansible 2.21 控制机 + `wsl -u root` 目标机）。边界：
-- WSL 无 systemd（PID 1 非 systemd）→ install 前置检测直接退出码 6，`systemctl` 不可用；**service 全链（install/systemctl is-active/restart handler/幂等重跑中的重启断言）无法在本机验证**，playbook 以 `--skip-tags service` 分层验证其余部分。
-- 仓库私有、GitHub release 资产不可达（Windows/kali 均超时）→ **release 模式无法线上验证**，file 模式（WSL 内 `cargo build --release` 产物）承担二进制供给的真实验证。
-- release 模式 asset 名模板化（`sebas_release_asset`），首次公开发布后按实际 tag 命名核对。
-- 渲染配置的可启动性用 Windows 构建二进制做开机冒烟（config 解析跨平台一致），不走 systemd。
+**D8 — 验证环境与验证边界（远程 systemd 目标机复验后更新）**
+控制机：WSL2 kali（ansible 2.21）。目标机双形态均验证：
+- **本地**（默认 inventory，localhost/connection=local）：用户/目录/属主、file/preinstalled 供给、幂等重跑 changed=0、config 渲染 + 真实 Linux 二进制开机冒烟（/health ok、SIGTERM 优雅退出）。
+- **远程 systemd 目标机**（`-i` 指向仓库外 inventory，仅写 ssh 别名，凭据与地址零入库）：全量首跑绿（install changed → active → /health ok，handler 抑制）；无变更重跑 changed=0 且 `ActiveEnterTimestamp` 不动；config 变更恰一次重启后新端口健康绿；占位端口负面用例 playbook 红且 rescue 报出双观测值（`service_state=active` + `http_status=404`——进程存活断言会撒谎，HTTP 断言兜住）。
+- 实现期发现并修复：① handler 在 play 末尾才 flush，健康检查先于重启跑——`flush_handlers` 前置到 install 之前；② "systemd active 但 webui 子进程僵死"的假健康不自愈——健康检查加"HTTP 重试耗尽 → 重启一次 → 复验"内层兜底（healthy 运行不触发重启，不违幂等要求）。
+- 运行时观察（非本变更范围）：watchdog 对僵死的 webui 子进程不自动 respawn，需单元重启恢复——另行立项跟踪。
+- release 模式：仓库公开但尚无 release（`/releases/latest` 404），asset 名按 release.yml 模板（`sebas-<tag>-<target>.tar.gz`）实现，首发 release 后核对 tag 命名即可。
+- ansible-lint 控制机未安装（任务标注"若可用"），`--syntax-check` 全过。
 
 ## Open Questions
 
