@@ -259,6 +259,9 @@ impl SessionTask {
         let mut history: Vec<Message> = Vec::new();
         let read_files = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let mut pending: VecDeque<String> = VecDeque::new();
+        // （wire-webui-sebas-agent-e2e 2.1）turn 进行中收到的 SetModel 先存
+        // 这里，turn 结束后应用——保证"下一次 turn 生效"不被吞掉。
+        let mut pending_model: Option<String> = None;
 
         'session: while let Some(cmd) = self.cmd_rx.recv().await {
             let mut text = match cmd {
@@ -318,8 +321,8 @@ impl SessionTask {
                                 }
                                 // 正在进行的 turn 已 pin 自己的 model snapshot；
                                 // SetModel 在 turn 内的语义是"下一次生效"，与
-                                // Prompt 排队一致：收下即丢，不打断当前 turn。
-                                Some(SessionCmd::SetModel(_)) => {}
+                                // Prompt 排队一致：先记下，turn 结束后应用。
+                                Some(SessionCmd::SetModel(m)) => pending_model = Some(m),
                                 None => cancel.cancel(), // 管理器已丢句柄：收尾当前 turn
                             },
                             out = &mut fut => break out,
@@ -347,6 +350,10 @@ impl SessionTask {
                             terminal,
                         });
                     }
+                }
+                // turn 结束：应用 turn 期间收到的 SetModel（下一次 turn 起用）。
+                if let Some(m) = pending_model.take() {
+                    self.config.model = m;
                 }
                 match pending.pop_front() {
                     Some(next) => {
@@ -534,6 +541,88 @@ mod tests {
         assert!(
             systems.iter().all(|s| s.contains("AGENTS-MARKER-CONTENT")),
             "every turn's request carries the memory injection"
+        );
+    }
+
+    /// 记录每个 turn 请求的 model id 的 scripted client——验证「会话级模型
+    /// override 作用于后续 turn；未设置的会话回落到默认模型」
+    /// （wire-webui-sebas-agent-e2e 2.1 验收）。
+    struct ModelRecordingClient {
+        models: Arc<std::sync::Mutex<Vec<String>>>,
+        turns: std::sync::Mutex<VecDeque<LlmTurn>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ModelRecordingClient {
+        async fn stream_turn(
+            &self,
+            req: &LlmRequest,
+            _sink: &(dyn Fn(StreamEvent) + Send + Sync),
+        ) -> Result<LlmTurn, LlmError> {
+            self.models.lock().unwrap().push(req.model.clone());
+            self.turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| LlmError::terminal("model recording script exhausted"))
+        }
+    }
+
+    #[tokio::test]
+    async fn set_model_override_applies_to_next_turn_and_unset_falls_back_to_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = ModelRecordingClient {
+            models: models.clone(),
+            turns: std::sync::Mutex::new(VecDeque::from(vec![
+                FakeLlmClient::say("first"),
+                FakeLlmClient::say("second"),
+                FakeLlmClient::say("third"),
+                FakeLlmClient::say("fourth"),
+            ])),
+        };
+        let manager = SessionManager::new(
+            Arc::new(client),
+            ToolRegistry::new(Duration::from_secs(10)),
+            SessionConfig::default(),
+        );
+
+        // 会话 A：先按默认模型跑一个 turn，再 override，下一 turn 生效。
+        let handle_a = manager.create_session(dir.path().join("a"));
+        let mut rx_a = handle_a.subscribe();
+        handle_a.prompt("one").await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), wait_terminal(&mut rx_a))
+            .await
+            .unwrap();
+        handle_a.set_model("m-next").await;
+        handle_a.prompt("two").await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), wait_terminal(&mut rx_a))
+            .await
+            .unwrap();
+
+        // 会话 B：从不设置 override —— 两个 turn 都用默认模型（缺省回落）。
+        let handle_b = manager.create_session(dir.path().join("b"));
+        let mut rx_b = handle_b.subscribe();
+        handle_b.prompt("one").await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), wait_terminal(&mut rx_b))
+            .await
+            .unwrap();
+        handle_b.prompt("two").await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), wait_terminal(&mut rx_b))
+            .await
+            .unwrap();
+
+        let models = models.lock().unwrap();
+        let default = SessionConfig::default().model;
+        assert_eq!(models[0], default, "unset session starts on the default model");
+        assert_eq!(
+            models[1], "m-next",
+            "override must apply from the next turn on"
+        );
+        assert_eq!(
+            &models[2..],
+            &[default.clone(), default.clone()],
+            "a session without override keeps using the default model"
         );
     }
 

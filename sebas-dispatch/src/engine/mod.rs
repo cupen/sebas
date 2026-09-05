@@ -441,6 +441,9 @@ impl DispatchHandle {
             available_models: m.available_models.clone(),
             agent_kind: m.pending_kind.clone(),
             usage,
+            // 执行体归属由复合后端在快照/事件出口统一打标（D4）；router 自身
+            // 只跟踪 ACP 侧映射，留 None 交给上游。
+            backend: None,
         })
     }
 

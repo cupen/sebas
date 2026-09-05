@@ -151,6 +151,9 @@ pub struct SessionRow {
     /// 会话创建时绑定的执行后端 kind（add-composer-agent-binding）；
     /// `None` = 配置的默认 kind。
     pub agent_kind: Option<String>,
+    /// （wire-webui-sebas-agent-e2e D4）会话所属执行体（"acp"/"native"，
+    /// 由复合后端打标）；`None` = 未打标。
+    pub backend: Option<String>,
 }
 
 /// Dashboard overview data.

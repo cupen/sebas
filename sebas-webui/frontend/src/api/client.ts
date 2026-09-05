@@ -32,6 +32,8 @@ export interface SessionRow {
   available_models: string[] | null
   /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
   agent_kind: string | null
+  /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
+  backend?: string | null
 }
 
 export interface SessionSummary {
@@ -49,6 +51,8 @@ export interface SessionSummary {
   available_models: string[] | null
   /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
   agent_kind: string | null
+  /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
+  backend?: string | null
 }
 
 export interface CardConfig {
@@ -146,6 +150,8 @@ export interface SessionDetail {
   available_models: string[] | null
   /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
   agent_kind: string | null
+  /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
+  backend?: string | null
 }
 
 /**

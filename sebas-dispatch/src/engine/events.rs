@@ -57,6 +57,11 @@ pub struct SessionInfo {
     /// `None` = 尚无 usage 事件。`#[serde(default)]` 兼容旧快照/旧事件。
     #[serde(default)]
     pub usage: Option<sebas_channels::card::AppUsage>,
+    /// （wire-webui-sebas-agent-e2e D4）会话所属执行体：`"acp"` / `"native"`，
+    /// 由复合后端在快照/事件中转时打标。`#[serde(default)]` 兼容旧报文
+    /// （缺字段 = 未打标，展示层回退到 agent_kind / 默认执行体）。
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 impl SessionInfo {
@@ -168,6 +173,8 @@ mod tests {
             available_models: Some(vec!["m1".into(), "m2".into()]),
             agent_kind: Some("claude".into()),
             usage: None,
+            // wire-webui-sebas-agent-e2e D4：执行体标签随快照/事件往返。
+            backend: Some("native".into()),
         };
         let cases = vec![
             SessionEvent::Created {
@@ -216,6 +223,7 @@ mod tests {
             available_models: None,
             agent_kind: None,
             usage: None,
+            backend: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");

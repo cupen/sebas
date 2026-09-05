@@ -98,6 +98,8 @@ impl NativeSession {
             // 原生内核 usage 暂不经快照面暴露（extract-im-service 2.3 覆盖
             // ACP 卡片 footer 数据源；native 面另接）。
             usage: None,
+            // wire-webui-sebas-agent-e2e D4：native 会话在快照/事件中自带执行体标。
+            backend: Some("native".into()),
         }
     }
 }
@@ -575,6 +577,22 @@ pub struct DualSessionBackend {
 }
 
 impl DualSessionBackend {
+    /// wire-webui-sebas-agent-e2e D4：给 acp 侧转发的事件打执行体标
+    /// （native 侧的 info() 自带 `native` 标，无需在此处理）。
+    fn stamp_acp_backend(ev: SessionEvent) -> SessionEvent {
+        match ev {
+            SessionEvent::Created { mut session } => {
+                session.backend = Some("acp".into());
+                SessionEvent::Created { session }
+            }
+            SessionEvent::Updated { mut session } => {
+                session.backend = Some("acp".into());
+                SessionEvent::Updated { session }
+            }
+            other => other,
+        }
+    }
+
     pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
@@ -586,7 +604,7 @@ impl DualSessionBackend {
                 loop {
                     match rx.recv().await {
                         Ok(ev) => {
-                            let _ = tx.send(ev);
+                            let _ = tx.send(Self::stamp_acp_backend(ev));
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => break,
@@ -684,6 +702,12 @@ impl DualSessionBackend {
 impl SessionBackend for DualSessionBackend {
     async fn snapshot(&self) -> Vec<SessionInfo> {
         let mut all = self.acp.snapshot().await;
+        // D4：acp 侧条目在快照出口统一打标（native 侧的 info() 自带 native 标）。
+        for s in all.iter_mut() {
+            if s.backend.is_none() {
+                s.backend = Some("acp".into());
+            }
+        }
         all.extend(self.native.snapshot().await);
         all.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
         all
@@ -721,7 +745,18 @@ impl SessionBackend for DualSessionBackend {
     ) -> Result<ChannelKey, SessionRejection> {
         Self::validate_backend_hint(backend)?;
         match backend {
-            Some("native") => self.native.spawn(prompt, project_dir).await,
+            Some("native") => {
+                let key = self.native.spawn(prompt, project_dir).await?;
+                // wire-webui-sebas-agent-e2e 4.2：创建时选定的模型对 native
+                // 会话同样生效——走会话级 override 缝（作用于后续 turn 并
+                // 反映在快照 current_model 上），不再被静默丢弃。会话刚由
+                // 本调用建成，set 理论不会失败；万一失败也不否定已建成的
+                // 会话。
+                if let Some(m) = _model {
+                    let _ = self.native.set_session_model(key.clone(), m).await;
+                }
+                Ok(key)
+            }
             // `acp` / `acp:<slug>` route to the ACP backend, which parses the
             // slug and pins the kind. The model id (add-acp-model-selection)
             // is threaded into the spawn.
@@ -739,7 +774,14 @@ impl SessionBackend for DualSessionBackend {
     ) -> Result<ChannelKey, SessionRejection> {
         Self::validate_backend_hint(backend.as_deref())?;
         match backend.as_deref() {
-            Some("native") => self.native.spawn(String::new(), project_dir).await,
+            Some("native") => {
+                let key = self.native.spawn(String::new(), project_dir).await?;
+                // 与 spawn_with 同缝：占位会话记住创建时选定的模型（4.2）。
+                if let Some(m) = model {
+                    let _ = self.native.set_session_model(key.clone(), m).await;
+                }
+                Ok(key)
+            }
             _ => self.acp.create_placeholder(project_dir, backend, model).await,
         }
     }
@@ -926,15 +968,91 @@ mod tests {
                 make_router().await,
             ));
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
-        // backend hint = native → key 前缀 agent-。
+        // backend hint = native → key 前缀 agent-；创建时选定的模型随 spawn
+        // 生效于会话级 override（4.2：选中生效于快照）。
         let key = dual
-            .spawn_with("go".into(), None, Some("native"), None)
+            .spawn_with("go".into(), None, Some("native"), Some("m-spawn".into()))
             .await
             .expect("spawn native");
         assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);
+        let info = dual
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| s.channel_key() == key)
+            .expect("native session in snapshot");
+        assert_eq!(
+            info.current_model.as_deref(),
+            Some("m-spawn"),
+            "spawn-time model must land in the session snapshot"
+        );
         // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
         let acp_key = dual.spawn_with("hi".into(), None, None, None).await.expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
+    }
+
+    // wire-webui-sebas-agent-e2e 2.2：set_session_model 按 key 分发——native
+    // key 命中内核（override 反映在快照 current_model），unknown key 返回
+    // typed rejection，不再无条件转发 ACP。
+    #[tokio::test]
+    async fn dual_set_session_model_routes_native_key_and_rejects_unknown() {
+        let acp: Arc<dyn SessionBackend> =
+            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
+                make_router().await,
+            ));
+        let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
+
+        // native key：spawn（隔离 workdir）→ 放行 gated 调用 → 等 turn 收尾，
+        // 让 set_model 走内核空闲期路径（turn 中收下、下一 turn 才生效）。
+        let ws = tempfile::tempdir().unwrap();
+        let key = dual
+            .spawn_with("go".into(), Some(ws.path().to_string_lossy().into()), Some("native"), None)
+            .await
+            .expect("spawn native");
+        let mut notices = dual.permission_requests().expect("dual has notices");
+        let notice = tokio::time::timeout(Duration::from_secs(10), notices.recv())
+            .await
+            .expect("notice timeout")
+            .expect("notice");
+        assert!(
+            dual.answer_permission(&notice.request_id, PermissionDecision::AllowOnce)
+                .await,
+            "decision must reach the pending request"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let turns = dual.turns(key.clone(), 0).await.unwrap();
+                let joined: String = turns.iter().map(|t| t.content.clone()).collect();
+                if joined.contains("gated call was approved") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+
+        dual.set_session_model(key.clone(), "m-kernel".into())
+            .await
+            .expect("native set_model must reach the kernel");
+        let info = dual
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| s.channel_key() == key)
+            .expect("native session in snapshot");
+        assert_eq!(
+            info.current_model.as_deref(),
+            Some("m-kernel"),
+            "override must show up in the session snapshot"
+        );
+
+        // unknown key（native 前缀但不存在）→ typed rejection，且不建会话。
+        let bogus = ChannelKey::new("feishu", "agent-doesnotexist");
+        match dual.set_session_model(bogus, "m-x".into()).await {
+            Err(SessionRejection::UnknownSession { .. }) => {}
+            other => panic!("expected UnknownSession, got {other:?}"),
+        }
+        assert_eq!(dual.snapshot().await.len(), 1, "no session may be created");
     }
 
     // fix-webui-detached-status 1.2：未知执行体提示 typed rejection 且不建会话。

@@ -440,6 +440,90 @@ mod health_dup_tests {
 }
 
 #[cfg(test)]
+mod summary_bodies_tests {
+    //! wire-webui-sebas-agent-e2e 3.1 路由层验收：`/api/summary` 把后端的
+    //! 逐执行体可用性（execution_bodies）原样透传给 composer；后端不区分
+    //! 执行体时该段为 null（前端降级为只看整体 reachability）。
+    use super::*;
+    use crate::models::GatewayInfo;
+    use crate::session_backend::{ExecutionBodyStatus, FakeBackend};
+    use axum::extract::ConnectInfo;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use tower::ServiceExt;
+
+    fn test_addr() -> std::net::SocketAddr {
+        std::net::SocketAddr::new(
+            std::net::IpAddr::from([127, 0, 0, 1]),
+            12345,
+        )
+    }
+
+    async fn get_summary(app: Router) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/summary")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn summary_passes_through_per_body_availability() {
+        let backend = FakeBackend::new();
+        backend.set_execution_bodies(Some(vec![
+            ExecutionBodyStatus {
+                name: "acp".into(),
+                ok: true,
+                cause: None,
+            },
+            ExecutionBodyStatus {
+                name: "native".into(),
+                ok: false,
+                cause: Some("no provider credentials".into()),
+            },
+        ]));
+        let app = build_router(Arc::new(backend), GatewayInfo::default(), CardConfig::default());
+
+        let (status, body) = get_summary(app).await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = body["execution_bodies"]
+            .as_array()
+            .expect("execution_bodies must be an array");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["name"], "acp");
+        assert_eq!(bodies[0]["ok"], true);
+        assert!(bodies[0]["cause"].is_null());
+        assert_eq!(bodies[1]["name"], "native");
+        assert_eq!(bodies[1]["ok"], false);
+        assert_eq!(bodies[1]["cause"], "no provider credentials");
+    }
+
+    #[tokio::test]
+    async fn summary_reports_null_bodies_when_backend_does_not_distinguish() {
+        let app = build_router(
+            Arc::new(FakeBackend::new()),
+            GatewayInfo::default(),
+            CardConfig::default(),
+        );
+
+        let (status, body) = get_summary(app).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["execution_bodies"].is_null(),
+            "no per-body report must degrade to null: {}",
+            body["execution_bodies"]
+        );
+    }
+}
+
+#[cfg(test)]
 mod auth_guard_tests {
     //! 登录鉴权门的路由级测试：未启用时零影响；启用后 /api、/ws 要会话，
     //! 静态资源 / /health 放行；登录-使用-注销闭环；同源校验；限速。

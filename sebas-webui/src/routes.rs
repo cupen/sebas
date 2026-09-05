@@ -47,6 +47,7 @@ pub(crate) fn build_session_rows(
                 current_model: info.current_model.clone(),
                 available_models: info.available_models.clone(),
                 agent_kind: info.agent_kind.clone(),
+                backend: info.backend.clone(),
                 encoded_key: encode_channel_key(&info.channel, &info.key),
                 channel: info.channel.clone(),
                 reference: info.key.clone(),
@@ -93,6 +94,8 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
         "current_model": info.current_model,
         "available_models": info.available_models,
         "agent_kind": info.agent_kind,
+        // （wire-webui-sebas-agent-e2e D4）会话所属执行体；null = 未打标。
+        "backend": info.backend,
     })
 }
 

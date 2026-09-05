@@ -183,6 +183,9 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         "available_models": info.available_models,
         // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
         "agent_kind": info.agent_kind,
+        // （wire-webui-sebas-agent-e2e D4）会话所属执行体（acp/native）；
+        // null = 未打标（旧快照兼容）。
+        "backend": info.backend,
     });
     Json(data).into_response()
 }

@@ -123,6 +123,24 @@ const summaryUnreachable: Summary = {
   reachability: { ok: false, cause: 'router down' },
 }
 
+// wire-webui-sebas-agent-e2e 4.1：逐执行体可用性——native 缺凭据时后端下拉
+// 中该选项禁选并标注 cause。
+const summaryNativeUnavailable: Summary = {
+  ...summaryReachable,
+  execution_bodies: [
+    { name: 'acp', ok: true, cause: null },
+    { name: 'native', ok: false, cause: 'no provider credentials' },
+  ],
+}
+
+const summaryNativeAvailable: Summary = {
+  ...summaryReachable,
+  execution_bodies: [
+    { name: 'acp', ok: true, cause: null },
+    { name: 'native', ok: true, cause: null },
+  ],
+}
+
 async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   const el = document.createElement('sebas-workbench-composer') as SebasWorkbenchComposer
   if (initial.projectDir !== undefined) el.projectDir = initial.projectDir
@@ -582,6 +600,51 @@ describe('sebas-workbench-composer', () => {
   })
 
   // ── Reachability 轮询（断连横幅随 core 恢复自动消失）─────────────────────
+
+  // ── wire-webui-sebas-agent-e2e 4.1：后端下拉按执行体可用性渲染 ───────────
+
+  it('renders the native option disabled with its cause when the native body is unavailable', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeUnavailable)
+    const el = await mount({ projectDir: null })
+
+    const native = el.shadowRoot?.querySelector(
+      'wa-option[value="native"]',
+    ) as HTMLElement | null
+    expect(native).toBeTruthy()
+    expect(native!.hasAttribute('disabled')).toBe(true)
+    expect(native?.textContent ?? '').toContain('unavailable')
+    expect(native?.textContent ?? '').toContain('no provider credentials')
+    // acp 侧不受 native 状态影响。
+    const acp = el.shadowRoot?.querySelector('wa-option[value="acp"]') as HTMLElement | null
+    expect(acp).toBeTruthy()
+    expect(acp!.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('keeps the native option selectable when the native body reports available', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeAvailable)
+    const el = await mount({ projectDir: null })
+
+    const native = el.shadowRoot?.querySelector(
+      'wa-option[value="native"]',
+    ) as HTMLElement | null
+    expect(native).toBeTruthy()
+    expect(native!.hasAttribute('disabled')).toBe(false)
+    expect(native?.textContent ?? '').not.toContain('unavailable')
+  })
+
+  it('re-enables the native option on the next poll without remounting', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeUnavailable)
+    const el = await mount({ projectDir: null })
+    let native = el.shadowRoot?.querySelector('wa-option[value="native"]') as HTMLElement | null
+    expect(native?.hasAttribute('disabled')).toBe(true)
+
+    // core 恢复（凭据注入）：下一次轮询拉到 ok → 禁选解除，无需重挂载。
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeAvailable)
+    await (el as unknown as { loadReachability(): Promise<void> }).loadReachability()
+    await el.updateComplete
+    native = el.shadowRoot?.querySelector('wa-option[value="native"]') as HTMLElement | null
+    expect(native?.hasAttribute('disabled')).toBe(false)
+  })
 
   it('reachability recovers on poll without remounting', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)

@@ -374,6 +374,7 @@ mod tests {
             available_models: None,
             agent_kind: None,
             usage: None,
+            backend: Some("native".into()),
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {
@@ -432,5 +433,11 @@ mod tests {
                 backend: None,
             }
         );
+        // 快照条目的旧格式（无 backend/current_model 字段）同样可反序列化。
+        let legacy_info = r#"{"channel":"feishu","key":"oc_1","session_id":null,"status":"active","last_active_unix":0}"#;
+        let info: SessionInfo = serde_json::from_str(legacy_info).unwrap();
+        assert_eq!(info.current_model, None);
+        assert_eq!(info.backend, None);
+        assert_eq!(info.agent_kind, None);
     }
 }

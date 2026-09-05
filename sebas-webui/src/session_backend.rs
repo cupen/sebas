@@ -605,6 +605,9 @@ pub struct FakeBackend {
     /// fix-webui-detached-status：可设置的 state 域快照（route 层测试用）。
     /// 域缺省 = state_snapshot 对该域返回 None（真源不可达）。
     state_domains: std::sync::Mutex<HashMap<String, Option<serde_json::Value>>>,
+    /// （wire-webui-sebas-agent-e2e 3.1）可注入的逐执行体可用性（route 层
+    /// 测试用）。`None` = 后端不区分执行体（summary 透传 null）。
+    execution_bodies: std::sync::Mutex<Option<Vec<ExecutionBodyStatus>>>,
 }
 
 #[derive(Default)]
@@ -630,6 +633,7 @@ impl FakeBackend {
             unreachable_cause: std::sync::Mutex::new(None),
             next_spawn: std::sync::atomic::AtomicU64::new(1),
             state_domains: std::sync::Mutex::new(HashMap::new()),
+            execution_bodies: std::sync::Mutex::new(None),
         }
     }
 
@@ -681,6 +685,12 @@ impl FakeBackend {
         self.reachable
             .store(reachable, std::sync::atomic::Ordering::SeqCst);
         *self.unreachable_cause.lock().unwrap() = Some(cause.to_string());
+    }
+
+    /// （wire-webui-sebas-agent-e2e 3.1）注入逐执行体可用性，summary 原样
+    /// 透传；`None` = 后端不区分执行体。
+    pub fn set_execution_bodies(&self, bodies: Option<Vec<ExecutionBodyStatus>>) {
+        *self.execution_bodies.lock().expect("execution bodies lock") = bodies;
     }
 
     /// Emit an event as if the authority had published it.
@@ -742,6 +752,7 @@ impl SessionBackend for FakeBackend {
             available_models: None,
             agent_kind: None,
             usage: None,
+            backend: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -847,6 +858,13 @@ impl SessionBackend for FakeBackend {
             Reachability::Unreachable { cause }
         }
     }
+
+    async fn execution_bodies(&self) -> Option<Vec<ExecutionBodyStatus>> {
+        self.execution_bodies
+            .lock()
+            .expect("execution bodies lock")
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -909,6 +927,7 @@ mod tests {
                 available_models: None,
                 agent_kind: None,
                 usage: None,
+                backend: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;
