@@ -53,8 +53,9 @@ export class SebasDashboard extends LitElement {
   @state() private selectedBranch: string | null = null
   /**
    * Provider label rendered next to the composer (e.g. "anthropic / claude").
-   * `null` while loading; `"no provider configured"` if no providers
-   * are registered.
+   * `null` while loading; `"no provider configured"` if no providers are
+   * registered; `"provider status unavailable"` when the provider source
+   * itself cannot be reached (honest degradation, fix-webui-detached-status).
    */
   @state() private providerLabel: string | null = null
   private unsubscribe?: () => void
@@ -282,8 +283,14 @@ export class SebasDashboard extends LitElement {
     api
       .settings()
       .then((s) => {
-        const first = s.gateway?.providers?.[0]
-        this.providerLabel = first ? first.name : 'no provider configured'
+        // fix-webui-detached-status：真源不可用（providers_available=false）
+        // 如实呈现"状态不可用"，与"真的没配 provider"区分开。
+        if (s.gateway?.providers_available === false) {
+          this.providerLabel = 'provider status unavailable'
+        } else {
+          const first = s.gateway?.providers?.[0]
+          this.providerLabel = first ? first.name : 'no provider configured'
+        }
       })
       .catch(() => {
         /* leave existing label in place */

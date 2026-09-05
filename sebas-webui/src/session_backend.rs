@@ -42,6 +42,10 @@ pub enum SessionRejection {
     Capacity { limit: usize },
     /// The request could not be delivered to the session authority.
     Unavailable { cause: String },
+    /// The targeted execution backend cannot serve the request even though
+    /// the core is reachable (e.g. native without provider credentials), or
+    /// the caller named a backend hint the core does not know.
+    BackendUnavailable { backend: String, cause: String },
 }
 
 impl std::fmt::Display for SessionRejection {
@@ -53,6 +57,9 @@ impl std::fmt::Display for SessionRejection {
             }
             SessionRejection::Capacity { limit } => write!(f, "会话数已达上限 {limit}"),
             SessionRejection::Unavailable { cause } => write!(f, "核心不可达: {cause}"),
+            SessionRejection::BackendUnavailable { backend, cause } => {
+                write!(f, "执行体不可用: {backend} — {cause}")
+            }
         }
     }
 }
@@ -569,6 +576,9 @@ pub struct FakeBackend {
     unreachable_cause: std::sync::Mutex<Option<String>>,
     /// The next spawn index — used to mint distinct fake keys.
     next_spawn: std::sync::atomic::AtomicU64,
+    /// fix-webui-detached-status：可设置的 state 域快照（route 层测试用）。
+    /// 域缺省 = state_snapshot 对该域返回 None（真源不可达）。
+    state_domains: std::sync::Mutex<HashMap<String, Option<serde_json::Value>>>,
 }
 
 #[derive(Default)]
@@ -593,6 +603,7 @@ impl FakeBackend {
             reachable: std::sync::atomic::AtomicBool::new(true),
             unreachable_cause: std::sync::Mutex::new(None),
             next_spawn: std::sync::atomic::AtomicU64::new(1),
+            state_domains: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -628,6 +639,15 @@ impl FakeBackend {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         });
+    }
+
+    /// fix-webui-detached-status：注入某个 state 域的快照（None = 该域
+    /// 不可用），供 route 层测试 settings 的 provider 真源行为。
+    pub fn set_state_domain(&self, domain: &str, payload: Option<serde_json::Value>) {
+        self.state_domains
+            .lock()
+            .expect("state domain lock")
+            .insert(domain.to_string(), payload);
     }
 
     /// Flip reachability; `cause` is reported while unreachable.
@@ -778,6 +798,15 @@ impl SessionBackend for FakeBackend {
             .unwrap_or_default())
     }
 
+    async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        self.state_domains
+            .lock()
+            .expect("state domain lock")
+            .get(domain)
+            .cloned()
+            .flatten()
+    }
+
     async fn reachability(&self) -> Reachability {
         if self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
             Reachability::Reachable
@@ -882,5 +911,45 @@ mod tests {
             backend.message(key, "x".into()).await,
             Err(SessionRejection::Unavailable { .. })
         ));
+    }
+
+    // fix-webui-detached-status 1.1：新变体的 serde 往返与 Display，
+    // 既有变体的 wire 形状不因新增而变化。
+    #[test]
+    fn backend_unavailable_rejection_serializes_round_trip() {
+        let r = SessionRejection::BackendUnavailable {
+            backend: "native".into(),
+            cause: "needs SEBAS_AGENT_PROVIDER_API_KEY".into(),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            json,
+            r#"{"code":"backend_unavailable","backend":"native","cause":"needs SEBAS_AGENT_PROVIDER_API_KEY"}"#
+        );
+        let back: SessionRejection = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(
+            r.to_string(),
+            "执行体不可用: native — needs SEBAS_AGENT_PROVIDER_API_KEY"
+        );
+    }
+
+    #[test]
+    fn legacy_rejection_wire_shapes_unchanged() {
+        // 旧报文仍可解码；code 名保持 snake_case 稳定。
+        for (json, expect) in [
+            (r#"{"code":"unknown_session","key":"web-legacy-k"}"#, "unknown"),
+            (r#"{"code":"unusable_project_dir"}"#, "dir"),
+            (r#"{"code":"capacity","limit":3}"#, "cap"),
+            (r#"{"code":"unavailable","cause":"socket gone"}"#, "unavail"),
+        ] {
+            let r: SessionRejection = serde_json::from_str(json).unwrap();
+            match expect {
+                "unknown" => assert!(matches!(r, SessionRejection::UnknownSession { .. })),
+                "dir" => assert_eq!(r, SessionRejection::UnusableProjectDir),
+                "cap" => assert!(matches!(r, SessionRejection::Capacity { limit: 3 })),
+                _ => assert!(matches!(r, SessionRejection::Unavailable { .. })),
+            }
+        }
     }
 }

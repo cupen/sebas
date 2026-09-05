@@ -615,7 +615,11 @@ fn init_tracing(cfg: &Config) {
 }
 
 /// Build a GatewayInfo from the optional gateway config for the WebUI.
-fn build_gateway_info(gateway_cfg: Option<&GatewayConfig>) -> sebas_webui::models::GatewayInfo {
+/// fix-webui-detached-status：pub(crate) 供 standalone webui（`sebas webui`）
+/// 复用同一装配——detached 形态不再以 `GatewayInfo::default()` 占位。
+pub(crate) fn build_gateway_info(
+    gateway_cfg: Option<&GatewayConfig>,
+) -> sebas_webui::models::GatewayInfo {
     let Some(gw) = gateway_cfg else {
         return sebas_webui::models::GatewayInfo::default();
     };
@@ -664,4 +668,63 @@ async fn init_watchdog_ipc() {
         return;
     }
     info!("watchdog IPC 连接就绪");
+}
+
+#[cfg(test)]
+mod gateway_info_tests {
+    use super::build_gateway_info;
+    use sebas_gateway::config::{GatewayConfig, ProviderConfig};
+    use std::collections::HashMap;
+
+    // fix-webui-detached-status 2.1：detached webui 与 in-process 共用同一
+    // 装配。直接构造 GatewayConfig，不走 env 敏感的 parse（并行测试会改
+    // SEBAS_GATEWAY_PROVIDER_OVERLAY，污染 parse）。
+    fn gw_config() -> GatewayConfig {
+        GatewayConfig {
+            listen: "127.0.0.1:50770".into(),
+            max_body_bytes: 1024,
+            connect_timeout_secs: 5,
+            read_timeout_secs: 5,
+            usage_file: String::new(),
+            debug: false,
+            provider_overlay: String::new(),
+            default_provider: None,
+            auth_token: vec!["tok".into()],
+            rate_limit: Default::default(),
+            providers: HashMap::from([(
+                "anthropic".into(),
+                ProviderConfig {
+                    base_url_anthropic: Some("https://api.anthropic.com".into()),
+                    base_url_openai: None,
+                    api_key_env: None,
+                    api_key: Some("sk-x".into()),
+                    model_map: HashMap::new(),
+                    models: vec![],
+                },
+            )]),
+            routes: vec![],
+            model_aliases: HashMap::new(),
+            config_source: String::new(),
+        }
+    }
+
+    #[test]
+    fn gateway_config_populates_info() {
+        let info = build_gateway_info(Some(&gw_config()));
+        assert_eq!(info.listen.as_deref(), Some("127.0.0.1:50770"));
+        assert_eq!(info.provider_count, 1);
+        assert_eq!(info.providers[0].name, "anthropic");
+        assert!(info.has_auth);
+        assert!(!info.debug);
+    }
+
+    // 无 gateway 配置（纯会话核心）→ default：这是"真的没配 gateway"，
+    // 与 detached 占位缺陷不同。
+    #[test]
+    fn missing_gateway_section_falls_back_to_default() {
+        let info = build_gateway_info(None);
+        assert_eq!(info.listen, None);
+        assert_eq!(info.provider_count, 0);
+        assert!(info.providers.is_empty());
+    }
 }

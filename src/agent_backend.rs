@@ -419,7 +419,11 @@ impl SessionBackend for NativeAgentBackend {
         project_dir: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(cause) = &self.unavailable_cause {
-            return Err(SessionRejection::Unavailable { cause: cause.clone() });
+            // fix-webui-detached-status：执行体侧拒绝不再冒充"核心不可达"。
+            return Err(SessionRejection::BackendUnavailable {
+                backend: "native".into(),
+                cause: cause.clone(),
+            });
         }
         let workdir: PathBuf = match project_dir.as_ref() {
             Some(dir) => {
@@ -647,6 +651,21 @@ impl DualSessionBackend {
         key.channel_str() == "feishu" && key.reference.starts_with("agent-")
     }
 
+    /// fix-webui-detached-status：显式 `backend` 提示只认已知集合——缺省
+    /// （旧客户端）与 `acp`/`acp:<slug>` 落 ACP，`native` 落原生内核，其余
+    /// 是调用方错误，typed rejection 且不建会话（不再静默回退 ACP）。
+    /// slug 是否可解析由 ACP 侧的 agent kinds 把关，这里只看前缀形式。
+    fn validate_backend_hint(backend: Option<&str>) -> Result<(), SessionRejection> {
+        match backend {
+            None | Some("native") | Some("acp") => Ok(()),
+            Some(hint) if hint.starts_with("acp:") => Ok(()),
+            Some(hint) => Err(SessionRejection::BackendUnavailable {
+                backend: hint.to_string(),
+                cause: "unknown backend hint".into(),
+            }),
+        }
+    }
+
     fn route(&self, key: &ChannelKey) -> &dyn SessionBackend {
         if Self::is_native(key) {
             self.native.as_ref()
@@ -695,11 +714,12 @@ impl SessionBackend for DualSessionBackend {
         backend: Option<&str>,
         _model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        Self::validate_backend_hint(backend)?;
         match backend {
             Some("native") => self.native.spawn(prompt, project_dir).await,
-            // `acp` / `acp:<slug>` (and any other non-native hint) route to
-            // the ACP backend, which parses the slug and pins the kind. The
-            // model id (add-acp-model-selection) is threaded into the spawn.
+            // `acp` / `acp:<slug>` route to the ACP backend, which parses the
+            // slug and pins the kind. The model id (add-acp-model-selection)
+            // is threaded into the spawn.
             _ => self.acp.spawn_with(prompt, project_dir, backend, _model).await,
         }
     }
@@ -712,6 +732,7 @@ impl SessionBackend for DualSessionBackend {
         backend: Option<String>,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        Self::validate_backend_hint(backend.as_deref())?;
         match backend.as_deref() {
             Some("native") => self.native.spawn(String::new(), project_dir).await,
             _ => self.acp.create_placeholder(project_dir, backend, model).await,
@@ -905,6 +926,73 @@ mod tests {
         // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
         let acp_key = dual.spawn_with("hi".into(), None, None, None).await.expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
+    }
+
+    // fix-webui-detached-status 1.2：未知执行体提示 typed rejection 且不建会话。
+    #[tokio::test]
+    async fn unknown_backend_hint_rejects_without_session() {
+        let acp: Arc<dyn SessionBackend> =
+            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
+                make_router().await,
+            ));
+        let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
+
+        for hint in ["warp-drive", "Native", "acpx", "claude"] {
+            let err = dual
+                .spawn_with("hi".into(), None, Some(hint), None)
+                .await
+                .expect_err("unknown hint must reject");
+            match &err {
+                SessionRejection::BackendUnavailable { backend, cause } => {
+                    assert_eq!(backend, hint);
+                    assert!(cause.contains("unknown backend hint"), "{cause}");
+                }
+                other => panic!("expected BackendUnavailable, got {other:?}"),
+            }
+            assert!(
+                err.to_string().contains("执行体不可用"),
+                "wording must name the backend, not the core: {err}"
+            );
+        }
+        // 占位创建同受校验；且全程未产生任何会话。
+        assert!(dual
+            .create_placeholder(None, Some("warp-drive".into()), None)
+            .await
+            .is_err());
+        assert!(dual.snapshot().await.is_empty(), "no session may be created");
+
+        // 显式 acp / acp:<slug> / 缺省依旧放行（路由到 acp）。
+        for hint in [None, Some("acp"), Some("acp:claude")] {
+            dual.spawn_with("hi".into(), None, hint, None)
+                .await
+                .unwrap_or_else(|e| panic!("hint {hint:?} must route to acp: {e}"));
+        }
+    }
+
+    // fix-webui-detached-status 1.2：native 缺凭据的拒绝指名执行体，
+    // 不再复用"核心不可达"文案。
+    #[tokio::test]
+    async fn native_missing_credentials_rejection_names_the_backend() {
+        let acp: Arc<dyn SessionBackend> =
+            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
+                make_router().await,
+            ));
+        let native = NativeAgentBackend::with_manager_arc(
+            Arc::new(manager()),
+            Some("native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_GATEWAY_URL)".into()),
+            vec!["claude-sonnet-4-5".into()],
+            "claude-sonnet-4-5".into(),
+        );
+        let dual = DualSessionBackend::new(acp, native);
+
+        let err = dual
+            .spawn_with("hi".into(), None, Some("native"), None)
+            .await
+            .expect_err("native without credentials must reject");
+        let text = err.to_string();
+        assert!(text.contains("执行体不可用: native"), "{text}");
+        assert!(!text.contains("核心不可达"), "{text}");
+        assert!(dual.snapshot().await.is_empty());
     }
 
     /// 出站接收端必须保活：router 发送在通道关闭时会 panic。

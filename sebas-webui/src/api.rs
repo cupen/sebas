@@ -42,6 +42,7 @@ fn rejection_response(rej: SessionRejection) -> Response {
     let status = match &rej {
         SessionRejection::UnknownSession { .. } => StatusCode::NOT_FOUND,
         SessionRejection::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        SessionRejection::BackendUnavailable { .. } => StatusCode::CONFLICT,
         SessionRejection::UnusableProjectDir | SessionRejection::Capacity { .. } => {
             StatusCode::BAD_REQUEST
         }
@@ -234,9 +235,45 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
         },
     };
 
+    // fix-webui-detached-status：provider 列表取状态库真源（两种部署形态
+    // 同源，运行期经 admin API 的增删改免重启可见）；真源不可达时如实标注
+    // `providers_available: false`，不把空集冒充"未配置"。
+    let (providers_value, providers_available) = match state.backend.state_snapshot("providers").await
+    {
+        Some(v) if v.get("error").is_none() => {
+            let list: Vec<serde_json::Value> = v
+                .get("providers")
+                .and_then(serde_json::Value::as_object)
+                .map(|cards| {
+                    cards
+                        .iter()
+                        .map(|(id, card)| {
+                            json!({
+                                "name": id,
+                                "base_url_anthropic": card.get("base_url_anthropic"),
+                                "base_url_openai": card.get("base_url_openai"),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (serde_json::Value::Array(list), true)
+        }
+        _ => (json!([]), false),
+    };
+    let mut gateway = serde_json::to_value(&state.gateway).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = gateway.as_object_mut() {
+        obj.insert("providers".into(), providers_value.clone());
+        obj.insert(
+            "provider_count".into(),
+            json!(providers_value.as_array().map(|a| a.len()).unwrap_or(0)),
+        );
+        obj.insert("providers_available".into(), json!(providers_available));
+    }
+
     let data = json!({
         "card_config": card_config_info,
-        "gateway": state.gateway,
+        "gateway": gateway,
     });
     Json(data).into_response()
 }

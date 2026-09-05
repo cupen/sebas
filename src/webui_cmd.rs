@@ -230,10 +230,17 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .collect();
 
     // Run the WebUI server. This blocks until the server stops.
+    // fix-webui-detached-status：gateway 静态事实（listen/debug/has_auth 与
+    // TOML 声明的 provider）与 in-process 形态同一装配，不再以
+    // `GatewayInfo::default()` 占位——那会让 composer 恒显
+    // "no provider configured"。
+    let gateway_info = crate::run::build_gateway_info(
+        sebas_gateway::config::GatewayConfig::parse(&raw).ok().as_ref(),
+    );
     let backend_dyn: Arc<dyn sebas_webui::SessionBackend> = backend;
     sebas_webui::run_with_admin_adapter_and_auth(
         backend_dyn,
-        sebas_webui::models::GatewayInfo::default(),
+        gateway_info,
         merged_card_cfg,
         agent_kinds,
         listener,

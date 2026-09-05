@@ -317,3 +317,58 @@ async fn mutations_reject_non_post_with_405() {
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "GET {uri}");
     }
 }
+
+// fix-webui-detached-status 2.2：/api/settings 的 provider 真源行为。
+// fake backend 注入 state_snapshot("providers")，断言三种情形的响应形状。
+mod provider_source {
+    use super::*;
+
+    fn fake_app(backend: Arc<dyn sebas_webui::SessionBackend>) -> axum::Router {
+        build_router(backend, GatewayInfo::default(), CardConfig::default())
+    }
+
+    #[tokio::test]
+    async fn providers_from_state_store_are_served() {
+        let fake = sebas_webui::session_backend::FakeBackend::new();
+        fake.set_state_domain(
+            "providers",
+            Some(serde_json::json!({
+                "version": 2,
+                "providers": {
+                    "anthropic": {"id": "anthropic", "base_url_anthropic": "https://api.anthropic.com"}
+                },
+                "deleted": []
+            })),
+        );
+        let app = fake_app(Arc::new(fake));
+        let (status, v) = get_json(&app, "/api/settings").await;
+        assert_eq!(status, StatusCode::OK);
+        let gw = &v["gateway"];
+        assert_eq!(gw["providers_available"], true);
+        assert_eq!(gw["provider_count"], 1);
+        assert_eq!(gw["providers"][0]["name"], "anthropic");
+    }
+
+    #[tokio::test]
+    async fn state_store_error_reports_unavailable_not_empty() {
+        let fake = sebas_webui::session_backend::FakeBackend::new();
+        fake.set_state_domain(
+            "providers",
+            Some(serde_json::json!({"error": "state store 未初始化"})),
+        );
+        let app = fake_app(Arc::new(fake));
+        let (_, v) = get_json(&app, "/api/settings").await;
+        assert_eq!(v["gateway"]["providers_available"], false);
+        assert_eq!(v["gateway"]["providers"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn missing_domain_reports_unavailable() {
+        // backend 对该域返回 None（如通道断开）→ 同样如实标注不可用。
+        let fake = sebas_webui::session_backend::FakeBackend::new();
+        let app = fake_app(Arc::new(fake));
+        let (_, v) = get_json(&app, "/api/settings").await;
+        assert_eq!(v["gateway"]["providers_available"], false);
+        assert_eq!(v["gateway"]["providers"], serde_json::json!([]));
+    }
+}

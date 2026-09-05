@@ -269,3 +269,58 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 })
+
+describe('provider label sourcing (fix-webui-detached-status)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    apiMocks.summary.mockResolvedValue(summaryBase)
+    apiMocks.session.mockResolvedValue(detailFixture())
+    apiMocks.sessions.mockResolvedValue({ recent_sessions: [] })
+    apiMocks.projectsBranch.mockResolvedValue({
+      path: '/home/me/sebas',
+      branch: 'feat/webui',
+      accessible: true,
+    })
+  })
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  async function labelFor(gateway: Record<string, unknown>): Promise<string | null> {
+    apiMocks.settings.mockResolvedValue({
+      card_config: {
+        theme_color: '#000',
+        fold_long_output: false,
+        thinking_display: 'auto',
+        max_user_text_chars: 0,
+        max_tool_output_chars: 0,
+      },
+      gateway,
+    })
+    const el = await mount()
+    const label = (el as unknown as { providerLabel: string | null }).providerLabel
+    el.remove()
+    return label
+  }
+
+  it('shows the first provider name when the source has data', async () => {
+    expect(
+      await labelFor({
+        providers_available: true,
+        providers: [{ name: 'anthropic / claude' }],
+      }),
+    ).toBe('anthropic / claude')
+  })
+
+  it('distinguishes an unavailable provider source from "no provider configured"', async () => {
+    expect(await labelFor({ providers_available: false, providers: [] })).toBe(
+      'provider status unavailable',
+    )
+  })
+
+  it('keeps "no provider configured" when the source is reachable but empty', async () => {
+    expect(await labelFor({ providers_available: true, providers: [] })).toBe(
+      'no provider configured',
+    )
+  })
+})
