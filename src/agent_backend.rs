@@ -85,6 +85,8 @@ impl NativeSession {
             // 原生内核目前没有会话级模型选择面（Claude 专用驱动）。
             current_model: None,
             available_models: None,
+            // 原生内核不属于任何 ACP kind（add-composer-agent-binding）。
+            agent_kind: None,
         }
     }
 }

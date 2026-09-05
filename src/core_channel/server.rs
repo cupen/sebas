@@ -534,6 +534,7 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
             prompt,
             project_dir,
             model,
+            kind,
         } => match &project_dir {
             Some(dir) => {
                 // 5.5: canonicalize + stat BEFORE any spawn; no existence
@@ -545,20 +546,21 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
                 } else {
                     let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
                     let key = router
-                        .web_spawn(prompt, Some(canonical.display().to_string()), None, model)
+                        .web_spawn(prompt, Some(canonical.display().to_string()), kind, model)
                         .await;
                     CoreChannelResponse::Spawned { key }
                 }
             }
             None => {
-                let key = router.web_spawn(prompt, None, None, model).await;
+                let key = router.web_spawn(prompt, None, kind, model).await;
                 CoreChannelResponse::Spawned { key }
             }
         },
-        CoreChannelRequest::CreatePlaceholder { project_dir, model } => {
+        CoreChannelRequest::CreatePlaceholder { project_dir, model, kind } => {
             // 0-turn 占位（P2 修复）：只建行、不 spawn 子进程——空 prompt 绝
-            // 不上送 agent。project_dir 校验与 Spawn 同款；kind 与 Spawn 一致
-            // 钉在 core 配置的默认 agent 上。
+            // 不上送 agent。project_dir 校验与 Spawn 同款；kind/model 记在
+            // mapping 上，首条消息触发 spawn 时生效
+            // （add-composer-agent-binding：kind 随帧上送，不再钉默认）。
             match &project_dir {
                 Some(dir) => {
                     if !usable_project_dir(dir) {
@@ -571,7 +573,7 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
                         let key = router
                             .web_create_placeholder(
                                 Some(canonical.display().to_string()),
-                                None,
+                                kind,
                                 model,
                             )
                             .await;
@@ -579,7 +581,7 @@ async fn dispatch(router: &RouterHandle, req: CoreChannelRequest) -> CoreChannel
                     }
                 }
                 None => {
-                    let key = router.web_create_placeholder(None, None, model).await;
+                    let key = router.web_create_placeholder(None, kind, model).await;
                     CoreChannelResponse::Spawned { key }
                 }
             }

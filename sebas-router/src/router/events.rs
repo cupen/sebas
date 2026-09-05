@@ -48,6 +48,11 @@ pub struct SessionInfo {
     /// `None`/空 = 无模型选择面。webui 创建会话下拉的数据源。
     #[serde(default)]
     pub available_models: Option<Vec<String>>,
+    /// 会话创建时绑定的执行后端 kind（add-composer-agent-binding；源自
+    /// mapping 的 `pending_kind`，spawn 后不清除）。`None` = 配置的默认
+    /// kind（解析留给展示层）。`#[serde(default)]` 兼容旧事件/旧快照。
+    #[serde(default)]
+    pub agent_kind: Option<String>,
 }
 
 impl SessionInfo {
@@ -157,6 +162,7 @@ mod tests {
             project_dir: Some("/tmp/p".into()),
             current_model: Some("m1".into()),
             available_models: Some(vec!["m1".into(), "m2".into()]),
+            agent_kind: Some("claude".into()),
         };
         let cases = vec![
             SessionEvent::Created {
@@ -203,6 +209,7 @@ mod tests {
             project_dir: None,
             current_model: None,
             available_models: None,
+            agent_kind: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");

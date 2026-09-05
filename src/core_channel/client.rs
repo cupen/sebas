@@ -215,6 +215,17 @@ fn unavailable(cause: String) -> SessionRejection {
     SessionRejection::Unavailable { cause }
 }
 
+/// Parse a webui backend hint into the requested ACP agent kind slug —
+/// same semantics as `sebas_webui::session_backend`'s in-process helper
+/// (`"acp:<slug>"` → `Some(slug)`; bare `"acp"` / `"native"` / anything
+/// else → `None`, the configured default kind).
+fn parse_acp_kind(backend: &str) -> Option<String> {
+    backend
+        .strip_prefix("acp:")
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
 /// Connect, mapping error kinds onto their distinct causes (6.3).
 async fn connect(
     path: &Path,
@@ -323,12 +334,15 @@ impl SessionBackend for CoreChannelBackend {
         backend: Option<&str>,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        let _ = backend; // the core channel spawn route pins the configured kind
+        // add-composer-agent-binding：backend hint 里的 kind 上送 core
+        // （此前被丢弃——standalone webui 下建会话永远钉默认 kind）。
+        let kind = backend.and_then(parse_acp_kind);
         match self
             .request(&CoreChannelRequest::Spawn {
                 prompt,
                 project_dir,
                 model,
+                kind,
             })
             .await?
         {
@@ -352,18 +366,19 @@ impl SessionBackend for CoreChannelBackend {
     /// 0-turn placeholder (P2 fix): create the session row over the wire
     /// without an agent child — the trait default would fall back to
     /// `spawn("")`, putting the empty prompt on the wire exactly the bug this
-    /// fixes. Model is carried; kind stays pinned core-side (same as
-    /// [`Self::spawn_with`]).
+    /// fixes. Model and kind are carried (add-composer-agent-binding).
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
-        _backend: Option<String>,
+        backend: Option<String>,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        let kind = backend.as_deref().and_then(parse_acp_kind);
         match self
             .request(&CoreChannelRequest::CreatePlaceholder {
                 project_dir,
                 model,
+                kind,
             })
             .await?
         {

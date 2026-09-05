@@ -42,17 +42,24 @@ pub enum CoreChannelRequest {
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
+        /// （add-composer-agent-binding）创建时绑定的 ACP agent kind slug
+        /// （None = core 配置的默认 kind）。旧帧无此字段 → serde default。
+        #[serde(default)]
+        kind: Option<String>,
     },
     /// Create a 0-turn placeholder session WITHOUT spawning an agent child
     /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
-    /// `session/prompt ""`). The requested model is remembered on the
-    /// mapping; the first message spawns (kind stays pinned to the core's
-    /// configured default, same policy as `Spawn`).
+    /// `session/prompt ""`). The requested model/kind are remembered on the
+    /// mapping; the first message spawns with them.
     CreatePlaceholder {
         project_dir: Option<String>,
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
+        /// （add-composer-agent-binding）创建时绑定的 ACP agent kind slug
+        /// （None = core 配置的默认 kind）。旧帧无此字段 → serde default。
+        #[serde(default)]
+        kind: Option<String>,
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
@@ -203,10 +210,12 @@ mod tests {
                 prompt: "hello".into(),
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
+                kind: Some("claude".into()),
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
+                kind: None,
             },
             CoreChannelRequest::SetSessionModel {
                 key: key.clone(),
@@ -287,6 +296,7 @@ mod tests {
             project_dir: None,
             current_model: None,
             available_models: None,
+            agent_kind: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {
