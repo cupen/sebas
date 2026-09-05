@@ -52,8 +52,10 @@ import { ROUTES, SebasApp } from './app-shell.js'
 import './views/dashboard.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+// fileURLToPath: Windows 下 URL().pathname 会得到 "/D:/..."，join 后成 "D:\D:\..."
+import { fileURLToPath } from 'node:url'
 
-const here = dirname(new URL(import.meta.url).pathname)
+const here = dirname(fileURLToPath(import.meta.url))
 
 const projectFixture = { path: '/home/me/sebas', name: 'sebas', added_at: 1, branch: 'main' }
 

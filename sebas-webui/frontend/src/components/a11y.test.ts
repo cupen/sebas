@@ -22,7 +22,9 @@ describe('accessibility baseline', () => {
   it('reduced motion + theme class hooks ship in tokens.css, focus ring in app.css', async () => {
     const fs = await import('node:fs')
     const path = await import('node:path')
-    const here = path.dirname(new URL(import.meta.url).pathname)
+    // fileURLToPath: Windows 下 URL().pathname 会得到 "/D:/..."，join 后成 "D:\D:\..."
+    const { fileURLToPath } = await import('node:url')
+    const here = path.dirname(fileURLToPath(import.meta.url))
     const tokens = fs.readFileSync(path.join(here, '../../src/styles/tokens.css'), 'utf8')
     expect(tokens).toContain('prefers-reduced-motion')
     // Light re-map is keyed on the single wa-dark switch (see src/theme.ts),
@@ -41,7 +43,8 @@ describe('accessibility baseline', () => {
   it('close buttons carry accessible names in the sessions view', async () => {
     const { readFileSync } = await import('node:fs')
     const { dirname, join } = await import('node:path')
-    const hereDir = dirname(new URL(import.meta.url).pathname)
+    const { fileURLToPath } = await import('node:url')
+    const hereDir = dirname(fileURLToPath(import.meta.url))
     const src = readFileSync(join(hereDir, '../views/sessions.ts'), 'utf8')
     // Close is an icon-ish destructive control in row context: the template
     // must give it an accessible name derived from the row key.
