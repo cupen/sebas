@@ -12,7 +12,7 @@ Rust 进程，浏览器全程同源，与生产嵌入形态路径一致。
 # WebUI API 默认监听 127.0.0.1:9797
 
 # 终端 2：Vite dev server（前端源码热更新）
-cd sebas-webui/frontend && ../../.tooling/pnpm dev
+cd sebas-webui/frontend && pnpm dev
 # 输出 Local: http://localhost:5273/（专用端口，strictPort——被占用时直接报错而不是顺延）
 ```
 
@@ -30,7 +30,7 @@ cd sebas-webui/frontend && ../../.tooling/pnpm dev
 - **Gateway BFF**（`/gateway/api/*`，POST/PUT/DELETE）：后端守卫只放行 loopback
   origin，Vite dev origin 同属 127.0.0.1，联调时行为与生产一致（无
   `SEBAS_CONTROL_SECRET` 时返回 503）。
-- **测试**：`../../.tooling/pnpm test`（vitest，不依赖后端）；联调中的端到端
+- **测试**：`pnpm test`（vitest，不依赖后端）；联调中的端到端
   验证用浏览器或 curl 直接打 Vite 地址即可。
 
 > 仓库集成测试与沙箱联调约定见 `AGENTS.md`。
