@@ -30,7 +30,9 @@ frontend. Division of labor:
 
 - **Frontend**: the operator runs `pnpm run dev` in `sebas-webui/frontend`
   (Vite on `127.0.0.1:5273`, strictPort). HMR auto-applies frontend edits —
-  never start/stop/reconfigure that dev server yourself.
+  never start/stop/reconfigure that dev server yourself. If you need the
+  frontend running for your own verification, use the separate
+  `pnpm run dev:sandbox` script instead — `dev` belongs to the operator.
 - **Backend**: build and run it yourself (`cargo build`), in a **sandbox**.
 
 ### Sandbox rules (never touch the operator's real instance)
@@ -51,13 +53,19 @@ sandbox processes at its files.
      (pick a port ≠ 9797, e.g. 9877) all set inside it;
    - env: `SEBAS_CORE_SECRET=<fake>` (mimics the watchdog's injection; its
      presence is what arms the core session channel and the webui client),
-     `SEBAS_STATE_FILE`, `SEBAS_GATEWAY_PROVIDER_OVERLAY` — the latter two
-     default to the real `~/.sebas` files, so they are mandatory.
+     plus the three that default to the real `~/.sebas` files — all
+     mandatory: `SEBAS_STATE_DB` (state store SQLite, default
+     `~/.sebas/sebas.db` — the easy one to miss: without it the sandbox
+     opens the real DB even with everything else sandboxed),
+     `SEBAS_STATE_FILE` (provider state JSON, default
+     `~/.sebas/state.json`), and `SEBAS_GATEWAY_PROVIDER_OVERLAY`
+     (default `~/.sebas/providers.json`).
 
 2. Run the two halves exactly as the watchdog would:
 
    ```bash
-   SEBAS_CORE_SECRET=fake SEBAS_STATE_FILE=… SEBAS_GATEWAY_PROVIDER_OVERLAY=… \
+   SEBAS_CORE_SECRET=fake SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
+     SEBAS_GATEWAY_PROVIDER_OVERLAY=… \
      target/debug/sebas run -c /tmp/sebas-itest/config.toml          # core
    SEBAS_CORE_SECRET=fake \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
@@ -73,14 +81,97 @@ sandbox processes at its files.
    dumps state — itself worth asserting), stop the webui, delete the sandbox
    dir, and confirm the ports are free.
 
+### Sandbox debug recipe (proven end-to-end, agent-runnable)
+
+`--debug` makes the gateway inject a built-in `test` provider that answers
+requests itself (fixed text + echo, no upstream dial, downstream auth
+skipped), and pointing `[acp.claude] path` at the `tests/bin` fake-claude
+stub (built by `cargo build` together with the main binary) lets ACP
+sessions complete full turns with zero real credentials. Let `<SB>` be the
+throwaway dir (e.g. `/tmp/sebas-debug`).
+
+1. `mkdir -p` the dirs the config references — especially `work_dir`, which
+   must **exist on disk before any ACP session spawns** — then write
+   `<SB>/config.toml`:
+
+   ```toml
+   [feishu]
+   enabled = false
+
+   [acp.claude]
+   path = "<repo>/target/debug/fake-claude.exe"   # no .exe suffix on unix
+   sessions_dir = "<SB>/claude-sessions"
+   work_dir = "<SB>/work"
+
+   [router]
+   state_file = "<SB>/sessions.json"
+
+   [media]
+   download_dir = "<SB>/downloads"
+
+   [watchdog.core]
+   channel_path = "<SB>/core-channel.sock"
+
+   [watchdog.webui]
+   enabled = false          # bare run owns the webui via --webui-port
+
+   # gateway validate requires ≥1 provider with a base_url — the debug
+   # `test` provider is injected only AFTER parse, so it cannot satisfy
+   # validate. This dummy never dials anything in debug mode.
+   [provider.anthropic]
+   api_key = "sk-sandbox-dummy"
+
+   [gateway]
+   provider_overlay = "<SB>/providers.json"   # missing file = no-op
+   usage_file = "<SB>/gateway-usage.jsonl"
+   ```
+
+2. Start the core in debug mode:
+
+   ```bash
+   cargo build
+   SEBAS_CORE_SECRET=fake SEBAS_STATE_DB="<SB>/sebas.db" \
+     SEBAS_STATE_FILE="<SB>/state.json" \
+     SEBAS_GATEWAY_PROVIDER_OVERLAY="<SB>/providers.json" \
+     target/debug/sebas run -c "<SB>/config.toml" \
+     --gateway --debug --webui --webui-port 9877 > "<SB>/core.log" 2>&1
+   ```
+
+   The built-in gateway binds a random port — read it from the log line
+   `gateway started (run --gateway) … addr=127.0.0.1:<port>`.
+
+3. Verify:
+   - `GET http://127.0.0.1:9877/health` → `ok`; `/api/summary` →
+     `reachability.ok = true` and `execution_bodies` shows acp `ok: true`
+     (`native` stays `ok: false` in the sandbox — it needs
+     `SEBAS_AGENT_PROVIDER_API_KEY`; report that honestly, don't fix).
+   - gateway `POST /v1/messages` with `{"model":"test",…}` → 200
+     `msg_test_debug`; the namespace form `test/<anything>` routes there too.
+   - round-trip: `POST /api/sessions` with `{"prompt":"hello","backend":"acp"}`
+     — that is the real request shape; `{"channel","message"}` is silently
+     deserialized into an empty placeholder session. Then
+     `GET /api/sessions/<encoded_key>` → fake-claude's "hello world", status
+     Done.
+   - Windows Git Bash curl gotcha: non-ASCII text in `-d '…'` is sent as
+     GBK, the gateway's JSON parse fails, model extraction yields none, and
+     the request dies with a misleading 502 `no_route` **even though
+     routing is fine** (check `/admin/stats` — `routes: 1` means the debug
+     route is present). Use ASCII payloads or `-d @file.json` (UTF-8).
+
+4. Clean up per rule 4 — every sandbox artifact (incl. the state DB) lives
+   inside `<SB>`, so deleting the dir is complete.
+
 ### What a sandbox can and cannot verify
 
 Verifiable: route surface, channel/socket lifecycle (appears while running,
 removed on graceful exit), webui↔core connect/reconnect (`reachability` in
 `/api/summary` flips `ok`/`cause`), spawn/message round-trips, typed
-rejections, wrong-secret refusal. **Not** verifiable without the operator's
-provider credentials: a real ACP child completing a turn — sessions spawn,
-then the child dies honestly; do not interpret that as a channel failure.
+rejections, wrong-secret refusal. With the fake-claude stub as the ACP agent
+(recipe above), a full session turn completes end-to-end — against synthetic
+answers, not a real model. **Not** verifiable without the operator's
+provider credentials: a REAL ACP child completing a turn — without the stub,
+sessions spawn then the child dies honestly; do not interpret that as a
+channel failure.
 Report such limits explicitly instead of marking the task done.
 
 ## Quick Reference

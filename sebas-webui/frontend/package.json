@@ -6,6 +6,7 @@
   "packageManager": "pnpm@11.24.0",
   "scripts": {
     "dev": "vite",
+    "dev:sandbox": "vite --mode sandbox",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
