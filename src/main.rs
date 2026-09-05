@@ -67,6 +67,18 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Cmd::Im(args) => {
+            let args = sebas::im_cmd::ImArgs {
+                config: args.config,
+                test_msg: args.test_msg,
+                dump_inbound: args.dump_inbound,
+            };
+            if let Err(e) = sebas::im_cmd::run(args).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::WebUi(args) => {
             if let Err(e) = sebas::webui_cmd::run(args.into()).await {
                 eprintln!("error: {e:?}");
@@ -88,7 +100,12 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Run(args) => {
             let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
             let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-            sebas::watchdog::run_watchdog(cfg.watchdog, args.config, args.debug)
+            sebas::watchdog::run_watchdog(
+                cfg.watchdog,
+                args.config,
+                args.debug,
+                cfg.feishu.is_enabled(),
+            )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
@@ -122,15 +139,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 sebas_router::debug::enable_debug_test_provider(c);
             }
-            sebas::run::run(
-                cfg,
-                raw,
-                run.test_msg,
-                run.dump_inbound,
-                router_cfg,
-                run.webui,
-                run.webui_port,
-            )
+            sebas::run::run(cfg, raw, router_cfg, run.webui, run.webui_port)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())

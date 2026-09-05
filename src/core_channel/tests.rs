@@ -668,3 +668,234 @@ async fn approval_answer_for_unknown_request_id_returns_typed_rejection() {
         "unknown request id must report false so callers retry/ignore"
     );
 }
+
+
+/// （extract-im-service 2.1）EnsureMessage：未知 feishu key 自动建会话、
+/// 已知 key 等价 Message；`Message` 的「未知即拒绝」语义保持不变。
+#[tokio::test]
+async fn ensure_message_spawns_unknown_key_and_message_still_rejects() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let chat = ChannelKey::feishu("oc_ensure_test", None);
+
+    // 未知 key：Message 仍按 webui 语义拒绝。
+    assert!(backend.message(chat.clone(), "hi".into()).await.is_err());
+
+    // EnsureMessage：未知 key 自动建会话（Spawning 占位进快照）。
+    backend
+        .ensure_message(chat.clone(), "hello from im".into())
+        .await
+        .expect("ensure on unknown key creates a session");
+    let snap = backend.snapshot().await;
+    assert_eq!(snap.len(), 1, "ensure created exactly one session: {snap:?}");
+    assert_eq!(snap[0].channel, "feishu");
+    assert!(snap[0].key.contains("oc_ensure_test"));
+    assert_eq!(snap[0].status, "spawning");
+
+    // 已知 key：EnsureMessage 等价 Message → Ok（spawning 中入站按 Enqueued
+    // 排队语义处理，不报错——与 feishu 入站文本路径一致）。
+    backend
+        .ensure_message(chat.clone(), "second line".into())
+        .await
+        .expect("ensure on known key delivers");
+
+    // transcript 记账依赖真实 spawn 流程（seed_card），需要 ACP 子进程；
+    // 本测试环境（无子进程）不覆盖，由 process-e2e 套件覆盖。
+}
+
+/// （extract-im-service 2.2）Cancel：未知 key typed rejection；活跃会话 Ok
+/// 且会话保留（快照仍在）。
+#[tokio::test]
+async fn cancel_rejects_unknown_and_accepts_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    // 未知 key → typed rejection。
+    let bogus = ChannelKey::feishu("oc_cancel_unknown", None);
+    let err = backend.cancel(bogus.clone()).await.expect_err("unknown must reject");
+    match err {
+        SessionRejection::UnknownSession { .. } => {}
+        other => panic!("expected UnknownSession, got {other:?}"),
+    }
+
+    // spawn + activate → 活跃会话；Cancel → Ok 且会话仍在快照中。
+    let key = backend.spawn("work".into(), None).await.expect("spawn");
+    let (channel_key, _) = core.handle.map.snapshot_all().await.into_iter().next().unwrap();
+    core.handle
+        .activate(&channel_key, "s-cancel".into(), None, None)
+        .await;
+    backend.cancel(key.clone()).await.expect("cancel live session");
+    let snap = backend.snapshot().await;
+    assert_eq!(snap.len(), 1, "cancel keeps the session: {snap:?}");
+}
+
+
+/// （extract-im-service 2.4）ACP 桥审批面经通道全环：ACP PermissionRequest →
+/// 订阅流 ApprovalRequested 帧（带 request_id + 会话 key）→ ApprovalAnswer
+/// 回路由为 Out::SendAcp{PermissionReply}。迟到/未知 request_id 已由
+/// `approval_answer_for_unknown_request_id_returns_typed_rejection` 覆盖
+/// （fail-closed）。无客户端连接时内核侧 fail-closed 由 ACP 驱动自身保证
+/// （hook 停车超时路径），通道层不做缓存重放（协议模块注释）。
+#[tokio::test]
+async fn acp_permission_request_streams_and_answer_routes_back() {
+    use sebas_acp::AcpEvent;
+    use sebas_webui::session_backend::SessionBackend;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = start_core(dir.path()).await;
+
+    // 订阅流：snapshot 帧先到。
+    let stream = sebas_ipc::connect(&core.path).await.unwrap();
+    let (r, mut w) = sebas_ipc::split(stream);
+    let mut reader = BufReader::new(r);
+    let hs = serde_json::to_string(&ChannelHandshake { secret: SECRET.into() }).unwrap();
+    w.write_all(hs.as_bytes()).await.unwrap();
+    w.write_all(b"
+").await.unwrap();
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.unwrap();
+    let sub = serde_json::to_string(&CoreChannelRequest::Subscribe).unwrap();
+    w.write_all(sub.as_bytes()).await.unwrap();
+    w.write_all(b"
+").await.unwrap();
+    w.flush().await.unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let frame: SessionStreamFrame = serde_json::from_str(line.trim()).unwrap();
+    assert!(matches!(frame, SessionStreamFrame::Snapshot { .. }));
+
+    // 建会话并激活，然后合成一条 ACP PermissionRequest 走 router 应用路径
+    // （apply_event_to_out 是 ACP 泵的真实入口，权限广播从这里发出）。
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+    let key = backend.spawn("will need permission".into(), None).await.unwrap();
+    core.handle.activate(&key, "s-perm".into(), None, None).await;
+    core.handle
+        .apply_event_to_out(
+            "s-perm".into(),
+            &AcpEvent::PermissionRequest {
+                session_id: "s-perm".into(),
+                request_id: "toolu_perm_1".into(),
+                tool_name: "bash".into(),
+                args: serde_json::json!({"command": "ls"}),
+            },
+        )
+        .await;
+
+    // 订阅流上应出现 ApprovalRequested 帧。
+    let mut saw_approval = false;
+    for _ in 0..8 {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let frame: SessionStreamFrame = serde_json::from_str(line.trim()).unwrap();
+        if let SessionStreamFrame::ApprovalRequested { notice } = &frame {
+            assert_eq!(notice.request_id, "toolu_perm_1");
+            // session_id 是 URL-safe 编码的 ChannelKey（InProcessBackend 中继口径）。
+            // session_id 是 URL-safe 编码的 ChannelKey（webui routes 口径）；
+            // 这里只断言非空 + tool 正确，编码一致性由 webui 侧测试覆盖。
+            assert!(!notice.session_id.is_empty());
+            assert_eq!(notice.tool_name, "bash");
+            saw_approval = true;
+            break;
+        }
+    }
+    assert!(saw_approval, "ApprovalRequested frame must reach the subscriber");
+
+    // 决定回路由：ApprovalAnswer 走独立请求连接（订阅连接只推流不处理
+    // 请求）→ Ok，且 Out::SendAcp{PermissionReply} 路由回 ACP 会话。
+    let resp = raw_request(
+        &core.path,
+        Some(SECRET),
+        &CoreChannelRequest::ApprovalAnswer {
+            request_id: "toolu_perm_1".into(),
+            decision: PermissionDecision::AllowOnce,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
+    assert!(matches!(resp, CoreChannelResponse::Ok), "answer accepted, got {resp:?}");
+
+    // Drain queued Out events briefly; the PermissionReply must be among them.
+    let mut saw_reply = false;
+    for _ in 0..16 {
+        match tokio::time::timeout(Duration::from_millis(300), core._out_rx.recv()).await {
+            Ok(Some(out)) => {
+                eprintln!("[dbg] out: {out:?}");
+                if let sebas_dispatch::Out::SendAcp { session_id, cmd } = out {
+                    assert_eq!(session_id, "s-perm");
+                    assert!(matches!(cmd, sebas_acp::AcpCommand::PermissionReply { .. }));
+                    saw_reply = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    assert!(saw_reply, "PermissionReply must reach the outbound queue");
+}
+
+
+/// （extract-im-service 4.1）附件面：路径不存在的附件 typed rejection；
+/// 存在的本地文件投递 Ok（标记组合后由执行体按路径消化）。
+#[tokio::test]
+async fn ensure_message_attachments_are_validated() {
+    use crate::core_channel::protocol::Attachment;
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    let missing = Attachment {
+        path: "/definitely/not/here.png".into(),
+        mime: Some("image/png".into()),
+        name: Some("here.png".into()),
+    };
+    let resp = raw_request(
+        &core.path,
+        Some(SECRET),
+        &CoreChannelRequest::EnsureMessage {
+            key: ChannelKey::feishu("oc_attach", None),
+            message: "see this".into(),
+            attachments: vec![missing],
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
+    match resp {
+        CoreChannelResponse::Rejected { rejection } => match rejection {
+            SessionRejection::Unavailable { cause } => {
+                assert!(cause.contains("附件路径不存在"), "got: {cause}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        },
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+
+    // 存在的文件 → Ok（ensure 语义建会话照常）。
+    let good = dir.path().join("img.png");
+    std::fs::write(&good, b"fake-png").unwrap();
+    let resp = raw_request(
+        &core.path,
+        Some(SECRET),
+        &CoreChannelRequest::EnsureMessage {
+            key: ChannelKey::feishu("oc_attach", None),
+            message: "see this".into(),
+            attachments: vec![Attachment {
+                path: good.display().to_string(),
+                mime: Some("image/png".into()),
+                name: Some("img.png".into()),
+            }],
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
+    assert!(matches!(resp, CoreChannelResponse::Ok), "good attachment accepted, got {resp:?}");
+}

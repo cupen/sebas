@@ -54,6 +54,7 @@ pub enum ManagedService {
     WebUi,
     Router,
     Feishu,
+    Im,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

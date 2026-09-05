@@ -34,6 +34,7 @@ pub enum ServiceName {
     Core,
     WebUi,
     Router,
+    Im,
 }
 
 impl ServiceName {
@@ -42,6 +43,7 @@ impl ServiceName {
             ServiceName::Core => "core",
             ServiceName::WebUi => "webui",
             ServiceName::Router => "router",
+            ServiceName::Im => "im",
         }
     }
 }

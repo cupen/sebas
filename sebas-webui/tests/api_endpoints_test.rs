@@ -324,7 +324,7 @@ mod provider_source {
     use super::*;
 
     fn fake_app(backend: Arc<dyn sebas_webui::SessionBackend>) -> axum::Router {
-        build_router(backend, GatewayInfo::default(), CardConfig::default())
+        build_router(backend, RouterInfo::default(), CardConfig::default())
     }
 
     #[tokio::test]

@@ -10,6 +10,46 @@ use sebas_channels::card::{
 };
 use crate::cards::CardConfig;
 
+/// 卡片累积的中立输入（extract-im-service）：core 内的 `AcpEvent` 与 im
+/// 进程经通道拉取的 turn 流都归一到此形状 —— 卡片机单份实现，两端复用
+/// （design D3）。`PermissionRequest`/`UsageUpdate` 不进卡片 body（审批走
+/// 独立卡、usage 随 SessionInfo），故 `from_acp` 对其返回 None。
+#[derive(Debug, Clone)]
+pub enum CardInput {
+    TextDelta { delta: String },
+    ThinkingDelta { delta: String },
+    ToolStart { tool_name: String, args: serde_json::Value },
+    ToolEnd { tool_name: String, result: String },
+    ToolProgress { tool_name: String, progress: String },
+    Finished,
+    Error { message: String },
+    ModelChanged { model_id: String },
+}
+
+impl CardInput {
+    pub fn from_acp(event: &AcpEvent) -> Option<Self> {
+        Some(match event {
+            AcpEvent::TextDelta { delta, .. } => CardInput::TextDelta { delta: delta.clone() },
+            AcpEvent::ThinkingDelta { delta, .. } => CardInput::ThinkingDelta { delta: delta.clone() },
+            AcpEvent::ToolStart { tool_name, args, .. } => {
+                CardInput::ToolStart { tool_name: tool_name.clone(), args: args.clone() }
+            }
+            AcpEvent::ToolEnd { tool_name, result, .. } => {
+                CardInput::ToolEnd { tool_name: tool_name.clone(), result: result.clone() }
+            }
+            AcpEvent::ToolProgress { tool_name, progress, .. } => {
+                CardInput::ToolProgress { tool_name: tool_name.clone(), progress: progress.clone() }
+            }
+            AcpEvent::Finished { .. } => CardInput::Finished,
+            AcpEvent::Error { message, .. } => CardInput::Error { message: message.clone() },
+            AcpEvent::ModelChanged { model_id, .. } => {
+                CardInput::ModelChanged { model_id: model_id.clone() }
+            }
+            AcpEvent::PermissionRequest { .. } | AcpEvent::UsageUpdate { .. } => return None,
+        })
+    }
+}
+
 /// 把一个事件累积进 body（openspec/specs/feishu-cards/spec.md）。复活 ThinkingDelta/ToolEnd/ToolProgress。
 /// fold_long_output=true 时：ToolStart 折叠成一个 collapsible_panel（默认收起），
 /// ToolProgress/ToolEnd 都收进对应工具面板，卡片里每个工具只占一行；
@@ -20,20 +60,25 @@ use crate::cards::CardConfig;
 ///   另有总量兜底（24000 字符上限 + 80 递归元素上限，Hr 连后一个一起丢）。
 /// - PermissionRequest 不累积（走独立 SendCard）。
 pub fn apply_event_to_card(body: &mut Vec<ChannelElement>, event: &AcpEvent, cfg: &CardConfig) {
-    match event {
-        AcpEvent::TextDelta { delta, .. } => {
+    if let Some(input) = CardInput::from_acp(event) {
+        apply_input_to_card(body, &input, cfg);
+    }
+}
+
+/// 中立输入累积（extract-im-service）：`apply_event_to_card` 的 CardInput 形状。
+pub fn apply_input_to_card(body: &mut Vec<ChannelElement>, input: &CardInput, cfg: &CardConfig) {
+    match input {
+        CardInput::TextDelta { delta } => {
             push_text_truncated(body, delta, cfg.max_user_text_chars, cfg.fold_long_output);
         }
-        AcpEvent::ThinkingDelta { delta, .. } => {
+        CardInput::ThinkingDelta { delta } => {
             if cfg.thinking == crate::cards::ThinkingDisplay::Hide {
                 // 完全丢弃：模型仍在思考，只是卡片不展示。
             } else {
                 append_thinking_delta(body, delta, cfg.fold_long_output);
             }
         }
-        AcpEvent::ToolStart {
-            tool_name, args, ..
-        } => {
+        CardInput::ToolStart { tool_name, args } => {
             // Tool args in a fenced JSON code block — readable for nested
             // objects/arrays, vs inline backtick which collapses to one line.
             let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
@@ -65,9 +110,7 @@ pub fn apply_event_to_card(body: &mut Vec<ChannelElement>, event: &AcpEvent, cfg
                 );
             }
         }
-        AcpEvent::ToolEnd {
-            tool_name, result, ..
-        } => {
+        CardInput::ToolEnd { tool_name, result } => {
             if cfg.fold_long_output {
                 if let Some(panel) = last_tool_panel_mut(body, tool_name) {
                     panel.header_title.content = format!("✓ {tool_name}");
@@ -81,11 +124,7 @@ pub fn apply_event_to_card(body: &mut Vec<ChannelElement>, event: &AcpEvent, cfg
                 push_tool_end_result(body, tool_name, result, cfg);
             }
         }
-        AcpEvent::ToolProgress {
-            tool_name,
-            progress,
-            ..
-        } => {
+        CardInput::ToolProgress { tool_name, progress } => {
             if let Some(panel) = last_tool_panel_mut(body, tool_name) {
                 // 限制进度通知数量：超过上限时移除最旧的进度通知，
                 // 防止工具面板内部元素超 100 上限。
@@ -105,18 +144,16 @@ pub fn apply_event_to_card(body: &mut Vec<ChannelElement>, event: &AcpEvent, cfg
                 body.push(note_element(format!("⏳ {tool_name}: {progress}")));
             }
         }
-        AcpEvent::Finished { .. } => {
+        CardInput::Finished => {
             // 父面板标题从 "折腾中" → "已搞定"
             mark_parent_completed(body);
         }
-        AcpEvent::Error { message, .. } => body.push(ChannelElement::Markdown {
+        CardInput::Error { message } => body.push(ChannelElement::Markdown {
             content: format!("❌ {message}"),
         }),
-        AcpEvent::PermissionRequest { .. } => {} // 独立 SendCard，不累积
-        AcpEvent::UsageUpdate { .. } => {}       // 不影响卡片 body（usage 单独跟踪）
         // 模型切换成功：在 transcript 里留一行可见反馈（快照 current_model
         // 由 router 的 ModelChanged 处理同步更新）。
-        AcpEvent::ModelChanged { model_id, .. } => body.push(ChannelElement::Markdown {
+        CardInput::ModelChanged { model_id } => body.push(ChannelElement::Markdown {
             content: format!("⚙ model → `{model_id}`"),
         }),
     }

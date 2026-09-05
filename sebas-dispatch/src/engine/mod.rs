@@ -421,12 +421,12 @@ impl DispatchHandle {
             }
             crate::state::MappingState::Spawning { .. } => ("spawning", None),
         };
-        let (phase, user_prompt) = match session_id.as_ref() {
+        let (phase, user_prompt, usage) = match session_id.as_ref() {
             Some(sid) => match self.card_states.snapshot(sid).await {
-                Some(st) => (Some(st.status_emoji), Some(st.user_prompt)),
-                None => (None, None),
+                Some(st) => (Some(st.status_emoji), Some(st.user_prompt), Some(st.usage)),
+                None => (None, None, None),
             },
-            None => (None, None),
+            None => (None, None, None),
         };
         Some(SessionInfo {
             channel: key.channel_str().to_string(),
@@ -440,6 +440,7 @@ impl DispatchHandle {
             current_model: m.current_model.clone(),
             available_models: m.available_models.clone(),
             agent_kind: m.pending_kind.clone(),
+            usage,
         })
     }
 
@@ -778,7 +779,10 @@ impl DispatchHandle {
             .await;
         let next = *next_cell.lock().unwrap();
         // 卡片 emoji 相位转移 = 外部可见的 phase 变化，对外发 Updated。
-        if next.is_some()
+        // extract-im-service 2.3：UsageUpdate 也发布 —— usage 随 SessionInfo
+        // 到达通道订阅端（detached im 的 footer 数据源，design D3）。
+        let usage_changed = matches!(event, AcpEvent::UsageUpdate { .. });
+        if (next.is_some() || usage_changed)
             && let Some(key) = self.map.lookup_key_by_session(session_id).await
         {
             self.publish_updated(&key).await;
@@ -1085,6 +1089,28 @@ impl DispatchHandle {
     /// text messages) and emits the appropriate Out instruction. Command
     /// text is parsed like the Feishu path (B 档冒烟 2026-09-04：webui 直达
     /// 路径此前把 `/cancel` 当普通 prompt 发给 opencode，中断无效）。
+    /// （extract-im-service 2.2）取消该 key 会话的在飞 turn（`/cancel` 的
+    /// 通道面）：找到映射则发 `AcpCommand::Cancel` 并返回 true；未知 key
+    /// 返回 false（调用方转 typed rejection）。会话本身保留、可继续对话。
+    pub async fn web_cancel_session(&self, key: &ChannelKey) -> bool {
+        let sid = self
+            .map
+            .get(key)
+            .await
+            .and_then(|m| m.session_id().map(str::to_owned));
+        match sid {
+            Some(sid) => {
+                self.emit(Out::SendAcp {
+                    session_id: sid.clone(),
+                    cmd: AcpCommand::Cancel { session_id: sid },
+                })
+                .await;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub async fn web_send_message(&self, key: ChannelKey, message: String) {
         match crate::commands::parse_command(&message) {
             // 命令臂：无活跃会话明确回复（与 feishu 路径一致，sebas-ixv）。

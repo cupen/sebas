@@ -95,6 +95,9 @@ impl NativeSession {
             available_models: Some(self.available_models.clone()),
             // 原生内核不属于任何 ACP kind（add-composer-agent-binding）。
             agent_kind: None,
+            // 原生内核 usage 暂不经快照面暴露（extract-im-service 2.3 覆盖
+            // ACP 卡片 footer 数据源；native 面另接）。
+            usage: None,
         }
     }
 }
@@ -763,6 +766,10 @@ impl SessionBackend for DualSessionBackend {
 
     async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         self.route(&key).close(key).await
+    }
+
+    async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+        self.route(&key).cancel(key).await
     }
 
     async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {

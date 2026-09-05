@@ -39,6 +39,10 @@ pub enum Cmd {
     /// ExecStart 仍写 `watchdog --config`，升级后不重装也能启动）。
     #[command(alias = "watchdog")]
     Run(RunArgs),
+    /// Start the standalone IM service (Feishu bot host). Spawned by the
+    /// watchdog when `[watchdog.im] enabled = true`（extract-im-service）。
+    #[command(name = "im")]
+    Im(ImArgs),
     /// One-shot update implementation used by watchdog.
     Update(UpdateArgs),
     /// Send a command to the watchdog control plane.
@@ -70,12 +74,6 @@ pub struct CoreArgs {
     #[arg(long)]
     pub debug: bool,
 
-    /// Send a startup "sebas 已启动" message to this chat_id, then continue running.
-    /// Useful for verifying outbound is wired correctly. chat_id format depends on
-    /// receive_id_type: open_id (private) or chat_id (group).
-    #[arg(long)]
-    pub test_msg: Option<String>,
-
     /// Start the WebUI dashboard server.
     #[arg(long, conflicts_with = "no_webui")]
     pub webui: bool,
@@ -89,11 +87,6 @@ pub struct CoreArgs {
     #[arg(long, conflicts_with = "webui")]
     pub no_webui: bool,
 
-    /// Dump every raw inbound WS payload to this directory as one .json file per
-    /// event (timestamp-prefixed). Useful for local replay/debug without needing
-    /// the live Feishu connection. Disabled when omitted.
-    #[arg(long)]
-    pub dump_inbound: Option<String>,
 }
 
 #[derive(Parser)]
@@ -275,6 +268,19 @@ pub struct ControlStatusArgs {
 pub enum OutputFormat {
     Human,
     Json,
+}
+
+/// `sebas im` — start the standalone IM service.
+#[derive(Parser)]
+pub struct ImArgs {
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+    /// Optional startup test message (sent to this receive_id as chat_id).
+    #[arg(long)]
+    pub test_msg: Option<String>,
+    /// Dump inbound WS payloads to this directory (debug affordance).
+    #[arg(long)]
+    pub dump_inbound: Option<String>,
 }
 
 /// Watchdog control-plane subcommands. Phase 6 (sebas-npc) freezes this surface

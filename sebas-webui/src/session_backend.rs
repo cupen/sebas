@@ -128,6 +128,21 @@ pub trait SessionBackend: Send + Sync {
     /// Send a message to an existing session. Unknown keys are rejected.
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection>;
 
+    /// （extract-im-service 2.1）ensure 语义的消息投递：未知 key 自动建会话、
+    /// dormant 会话懒复活（IM 前端的聊天式投递）。缺省退化为普通 `message`
+    /// ——未知 key 被执行体拒绝；具备建会话语义的执行体覆写本方法。
+    async fn ensure_message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
+        self.message(key, message).await
+    }
+
+    /// （extract-im-service 2.2）取消会话在飞 turn；会话保留、可继续对话。
+    /// 缺省拒绝——不支持取消的执行体如实上报，不伪装成功。
+    async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+        Err(SessionRejection::UnknownSession {
+            key: serde_json::to_string(&key).unwrap_or_default(),
+        })
+    }
+
     /// Close a session (kills the live child when there is one).
     async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection>;
 
@@ -470,6 +485,17 @@ impl SessionBackend for InProcessBackend {
         }
     }
 
+    /// （extract-im-service 2.2）取消在飞 turn：映射存在即发 `AcpCommand::Cancel`。
+    async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+        if self.router.web_cancel_session(&key).await {
+            Ok(())
+        } else {
+            Err(SessionRejection::UnknownSession {
+                key: serde_json::to_string(&key).unwrap_or_default(),
+            })
+        }
+    }
+
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
         self.router
             .session_turns(&key, from)
@@ -715,6 +741,7 @@ impl SessionBackend for FakeBackend {
             current_model: None,
             available_models: None,
             agent_kind: None,
+            usage: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -881,6 +908,7 @@ mod tests {
                 current_model: None,
                 available_models: None,
                 agent_kind: None,
+                usage: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

@@ -273,6 +273,7 @@ pub fn service_from_str(s: &str) -> Option<ServiceName> {
         "core" => Some(ServiceName::Core),
         "webui" => Some(ServiceName::WebUi),
         "router" => Some(ServiceName::Router),
+        "im" => Some(ServiceName::Im),
         _ => None,
     }
 }

@@ -449,6 +449,10 @@ fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
 /// Install a tracing subscriber for the standalone WebUI process.
 /// Filter comes from `RUST_LOG` (default `"info"`), mirroring router_cmd.
 /// `try_init` is used so the first caller wins and later calls are no-ops.
+pub fn init_tracing_for_im() {
+    init_tracing();
+}
+
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));

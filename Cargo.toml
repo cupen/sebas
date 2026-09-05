@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "xtask", "sebas-agent", "sebas-channels"]
+members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "xtask", "sebas-agent", "sebas-channels"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -25,6 +25,7 @@ debug = false
 
 [dependencies]
 sebas-dispatch = { path = "sebas-dispatch" }
+sebas-im = { path = "sebas-im" }
 sebas-ipc = { path = "sebas-ipc" }
 sebas-feishu = { path = "sebas-feishu" }
 sebas-acp = { path = "sebas-acp" }
@@ -41,7 +42,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
-dirs = "6"
+dirs = "7"
 libc = "0.2"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -55,9 +56,9 @@ async-trait = "0.1"
 openlark = { version = "0.20", default-features = false, features = ["communication", "websocket"] }
 cc-agent-sdk = { version = "0.1.7"}
 # cc-agent-sdk = { version = "0.1.6", path = "vendor/cc-agent-sdk" }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

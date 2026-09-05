@@ -30,6 +30,32 @@ use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
+/// （extract-im-service 4.1）随消息投递的本地附件引用：im 进程把媒体解析到
+/// 本地（`[media] download_dir`），核心与执行体在同一台机器上直接按路径
+/// 读取（不传字节流）。serde 兼容：`#[serde(default)]` 挂在宿主字段上。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Attachment {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl Attachment {
+    /// 投递给执行体的文本标记（本地路径引用；agent 可用文件读取工具消化）。
+    pub fn marker(&self) -> String {
+        let mime = self.mime.as_deref().unwrap_or("application/octet-stream");
+        let name = self.name.clone().unwrap_or_else(|| {
+            std::path::Path::new(&self.path)
+                .file_name()
+                .map(|n| n.display().to_string())
+                .unwrap_or_else(|| self.path.clone())
+        });
+        format!("[附件: {} ({mime}) 路径 {}]", name, self.path)
+    }
+}
+
 /// One request over the core session channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -67,8 +93,28 @@ pub enum CoreChannelRequest {
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
-    /// Send a message to an existing session.
-    Message { key: ChannelKey, message: String },
+    /// Send a message to an existing session. Attachments（extract-im-service
+    /// 4.1）随 serde default 增列：旧报文缺省空附件，行为不变。服务端校验
+    /// 每个附件路径存在后，以本地路径引用随文本投递（同机部署路径共享）。
+    Message {
+        key: ChannelKey,
+        message: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
+    /// （extract-im-service 2.1）IM 前端 ensure 语义的消息投递：未知 key 按
+    /// 入站文本历史语义自动建会话、dormant 会话懒复活；已知 active key 等
+    /// 价 `Message`。与 `Message` 的差别仅在服务端跳过存在性预检——webui
+    /// 的「未知即拒绝」语义不受影响。
+    EnsureMessage {
+        key: ChannelKey,
+        message: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
+    /// （extract-im-service 2.2）取消该会话在飞 turn；会话保留、可继续对话。
+    /// 会话未知 → typed rejection。
+    Cancel { key: ChannelKey },
     /// Close (kill) a session.
     Close { key: ChannelKey },
     /// Fetch rendered transcript content at/after a monotonic position.
@@ -239,7 +285,18 @@ mod tests {
             CoreChannelRequest::Message {
                 key: key.clone(),
                 message: "msg".into(),
+                attachments: vec![Attachment {
+                    path: "/tmp/img.png".into(),
+                    mime: Some("image/png".into()),
+                    name: Some("img.png".into()),
+                }],
             },
+            CoreChannelRequest::EnsureMessage {
+                key: key.clone(),
+                message: "hello from im".into(),
+                attachments: vec![],
+            },
+            CoreChannelRequest::Cancel { key: key.clone() },
             CoreChannelRequest::Close { key: key.clone() },
             CoreChannelRequest::Turns {
                 key: key.clone(),
@@ -316,6 +373,7 @@ mod tests {
             current_model: None,
             available_models: None,
             agent_kind: None,
+            usage: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

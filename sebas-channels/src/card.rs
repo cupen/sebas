@@ -7,7 +7,7 @@
 //! `Form.submit`) are opaque `serde_json::Value` blobs defined by the router's
 //! callback protocol and parsed back by the adapter.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -48,7 +48,7 @@ pub struct TurnChrome {
 /// cumulative totals only (the round counters are never rendered — the footer
 /// contract is `{model} · in: {total_input} out: {total_output} ·
 /// ctx: {total_input}`).
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AppUsage {
     /// Full model name (e.g. `claude-sonnet-4-20250514`); the adapter shortens
     /// it for display.

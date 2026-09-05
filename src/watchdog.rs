@@ -154,6 +154,28 @@ impl ServiceSpawner for WebUiSpawner {
     }
 }
 
+/// im 子进程：`current_exe() im --config <path>`（extract-im-service）。
+struct ImSpawner {
+    config_path: String,
+    control_secret: String,
+    core_secret: String,
+}
+
+#[async_trait::async_trait]
+impl ServiceSpawner for ImSpawner {
+    async fn spawn(&self) -> Result<SpawnedInstance> {
+        spawn_aux_process(
+            &self.config_path,
+            &self.control_secret,
+            Some(&self.core_secret),
+            None,
+            &["im"],
+            "im",
+        )
+        .await
+    }
+}
+
 /// router 子进程：`current_exe() router --config <path> [--debug]`。
 struct RouterSpawner {
     config_path: String,
@@ -259,7 +281,12 @@ fn rollback_hook(config: WatchdogConfig) -> super::watchdog::supervisor::Unready
 // ─── 装配 ──────────────────────────────────────────────────
 
 /// 运行 watchdog 模式：ServiceManager + control RPC + 各服务监督 task。
-pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bool) -> Result<()> {
+pub async fn run_watchdog(
+    config: WatchdogConfig,
+    config_path: String,
+    debug: bool,
+    im_enabled_default: bool,
+) -> Result<()> {
     init_watchdog_tracing();
     let dbg = debug;
     tracing::info!(debug_enabled = dbg, "watchdog 启动");
@@ -350,6 +377,22 @@ pub async fn run_watchdog(config: WatchdogConfig, config_path: String, debug: bo
         config.router.enabled || debug,
     );
 
+    // im：`[watchdog.im] enabled` 缺省跟随飞书启用判定（feishu-option spec）；
+    // 显式给出时以显式值为准。飞书部署由此自动获得 im 服务。
+    let im_enabled = config.im.enabled.unwrap_or(im_enabled_default);
+    services.register(
+        ServiceSpec::new(
+            ServiceName::Im,
+            Arc::new(ImSpawner {
+                config_path: config_path.clone(),
+                control_secret: secret.clone(),
+                core_secret: core_secret.clone(),
+            }),
+            DesiredState::Enabled,
+        ),
+        im_enabled,
+    );
+
     // 监督 task 各自永续运行；watchdog 主 task 停泊在关闭信号上。
     // kill_on_drop 只在进程内 Drop 时生效——收到信号时默认动作是立即
     // 终止，Drop 根本不会运行，子进程会被孤儿化；孤儿 core 仍持有飞书
@@ -406,6 +449,7 @@ mod tests {
             },
             webui: Default::default(),
             router: WatchdogRouterConfig::default(),
+            im: Default::default(),
         }
     }
 

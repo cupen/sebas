@@ -400,6 +400,7 @@ fn managed_service(name: ServiceName) -> crate::watchdog::control::ManagedServic
         ServiceName::Core => crate::watchdog::control::ManagedService::Core,
         ServiceName::WebUi => crate::watchdog::control::ManagedService::WebUi,
         ServiceName::Router => crate::watchdog::control::ManagedService::Router,
+        ServiceName::Im => crate::watchdog::control::ManagedService::Im,
     }
 }
 

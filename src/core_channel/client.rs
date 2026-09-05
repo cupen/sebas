@@ -46,6 +46,24 @@ pub struct CoreChannelBackend {
 }
 
 impl CoreChannelBackend {
+    /// （extract-im-service 4.1）带附件的 ensure 投递：附件经服务端校验后以
+    /// 本地路径标记随文本投递。
+    pub async fn ensure_message_with(
+        &self,
+        key: ChannelKey,
+        message: String,
+        attachments: Vec<crate::core_channel::protocol::Attachment>,
+    ) -> Result<(), SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::EnsureMessage { key, message, attachments })
+            .await?
+        {
+            CoreChannelResponse::Ok => Ok(()),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
     pub fn new(path: PathBuf, secret: String) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
@@ -390,7 +408,7 @@ impl SessionBackend for CoreChannelBackend {
 
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         match self
-            .request(&CoreChannelRequest::Message { key, message })
+            .request(&CoreChannelRequest::Message { key, message, attachments: vec![] })
             .await?
         {
             CoreChannelResponse::Ok => Ok(()),
@@ -401,6 +419,22 @@ impl SessionBackend for CoreChannelBackend {
 
     async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
         match self.request(&CoreChannelRequest::Close { key }).await? {
+            CoreChannelResponse::Ok => Ok(()),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// （extract-im-service 2.1）ensure 语义走专线请求：服务端跳过存在性
+    /// 预检，未知 key 由核心按入站文本历史语义建会话。
+    async fn ensure_message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
+        self.ensure_message_with(key, message, Vec::new()).await
+    }
+
+
+    /// （extract-im-service 2.2）取消会话在飞 turn。
+    async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+        match self.request(&CoreChannelRequest::Cancel { key }).await? {
             CoreChannelResponse::Ok => Ok(()),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),
             other => Err(unavailable(format!("unexpected response: {other:?}"))),

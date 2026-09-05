@@ -445,6 +445,7 @@ impl ControlExecutor {
             ManagedService::Core => ServiceName::Core,
             ManagedService::WebUi => ServiceName::WebUi,
             ManagedService::Router | ManagedService::Feishu => ServiceName::Router,
+            ManagedService::Im => ServiceName::Im,
         };
         match request {
             ControlRequest::Update {

@@ -345,6 +345,8 @@ pub struct WatchdogConfig {
     pub webui: WatchdogWebUiConfig,
     #[serde(default)]
     pub router: WatchdogRouterConfig,
+    #[serde(default)]
+    pub im: WatchdogImConfig,
 }
 
 /// watchdog 模式下 core 子进程（飞书 bot + ACP）的开关。
@@ -415,6 +417,15 @@ fn default_webui_port() -> u16 {
 pub struct WatchdogRouterConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// `[watchdog.im]`：独立 IM 服务（`sebas im`）的托管开关。缺省跟随飞书
+/// 启用判定（`[feishu] enabled` 或隐式回退）；显式给出时以显式值为准
+/// （extract-im-service，spec feishu-option / watchdog）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WatchdogImConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

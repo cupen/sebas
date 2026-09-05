@@ -647,7 +647,7 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
-        CoreChannelRequest::Message { key, message } => {
+        CoreChannelRequest::Message { key, message, attachments } => {
             // 5.6: unknown web/feishu key → typed rejection, nothing mutated.
             // Native keys are unknown to the router map — the native backend
             // rejects them itself.
@@ -658,11 +658,41 @@ async fn dispatch(
                     },
                 };
             }
+            let message = match compose_attachments(message, attachments).await {
+                Ok(m) => m,
+                Err(cause) => {
+                    return CoreChannelResponse::Rejected {
+                        rejection: SessionRejection::Unavailable { cause },
+                    }
+                }
+            };
             match backend.message(key, message).await {
                 Ok(()) => CoreChannelResponse::Ok,
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
+        CoreChannelRequest::EnsureMessage { key, message, attachments } => {
+            // extract-im-service 2.1：ensure 语义 —— 跳过存在性预检，路由交给
+            // backend（InProcess 路径经 web_send_message 的 route_text：未知
+            // key 自动建会话、dormant 懒复活、busy 排队；native key 仍由
+            // native backend 如实拒绝）。附件校验同 Message（4.1）。
+            let message = match compose_attachments(message, attachments).await {
+                Ok(m) => m,
+                Err(cause) => {
+                    return CoreChannelResponse::Rejected {
+                        rejection: SessionRejection::Unavailable { cause },
+                    }
+                }
+            };
+            match backend.message(key, message).await {
+                Ok(()) => CoreChannelResponse::Ok,
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
+        CoreChannelRequest::Cancel { key } => match backend.cancel(key).await {
+            Ok(()) => CoreChannelResponse::Ok,
+            Err(rejection) => CoreChannelResponse::Rejected { rejection },
+        },
         CoreChannelRequest::Close { key } => match backend.close(key).await {
             Ok(()) => CoreChannelResponse::Ok,
             Err(rejection) => CoreChannelResponse::Rejected { rejection },
@@ -744,6 +774,32 @@ async fn dispatch(
         }
         CoreChannelRequest::StateSubscribe => CoreChannelResponse::Ok,
     }
+}
+
+/// （extract-im-service 4.1）附件校验 + 文本标记组合：路径不存在的附件
+/// typed rejection（不静默丢弃）；存在的以本地路径标记追加到投递文本，
+/// 执行体经文件读取把图收进模型上下文（design D8）。
+async fn compose_attachments(
+    message: String,
+    attachments: Vec<crate::core_channel::protocol::Attachment>,
+) -> std::result::Result<String, String> {
+    if attachments.is_empty() {
+        return Ok(message);
+    }
+    let mut markers = Vec::new();
+    for att in attachments {
+        let path = std::path::Path::new(&att.path);
+        match tokio::fs::metadata(path).await {
+            Ok(md) if md.is_file() => markers.push(att.marker()),
+            _ => return Err(format!("附件路径不存在或不可读：{}", att.path)),
+        }
+    }
+    let mut m = message;
+    m.push_str("
+");
+    m.push_str(&markers.join("
+"));
+    Ok(m)
 }
 
 fn key_str(key: &ChannelKey) -> String {

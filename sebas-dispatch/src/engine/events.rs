@@ -53,6 +53,10 @@ pub struct SessionInfo {
     /// kind（解析留给展示层）。`#[serde(default)]` 兼容旧事件/旧快照。
     #[serde(default)]
     pub agent_kind: Option<String>,
+    /// （extract-im-service 2.3）累计 token 用量（卡片 footer 的中立数据源）。
+    /// `None` = 尚无 usage 事件。`#[serde(default)]` 兼容旧快照/旧事件。
+    #[serde(default)]
+    pub usage: Option<sebas_channels::card::AppUsage>,
 }
 
 impl SessionInfo {
@@ -163,6 +167,7 @@ mod tests {
             current_model: Some("m1".into()),
             available_models: Some(vec!["m1".into(), "m2".into()]),
             agent_kind: Some("claude".into()),
+            usage: None,
         };
         let cases = vec![
             SessionEvent::Created {
@@ -210,6 +215,7 @@ mod tests {
             current_model: None,
             available_models: None,
             agent_kind: None,
+            usage: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -223,4 +229,39 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
     }
+}
+
+
+/// （extract-im-service 2.3）usage 字段 serde 兼容：旧形状（无 usage）仍反
+/// 序列化；带 usage 的形状完整往返。
+#[test]
+fn session_info_usage_field_is_additive() {
+    use sebas_channels::card::AppUsage;
+
+    let full = SessionInfo {
+        channel: "feishu".into(),
+        key: "oc_u".into(),
+        session_id: Some("s1".into()),
+        status: "active".into(),
+        phase: Some("OnIt".into()),
+        user_prompt: Some("p".into()),
+        last_active_unix: 1,
+        project_dir: None,
+        current_model: None,
+        available_models: None,
+        agent_kind: None,
+        usage: Some(AppUsage {
+            model: Some("claude-x".into()),
+            total_input: 10,
+            total_output: 25,
+        }),
+    };
+    let json = serde_json::to_string(&full).unwrap();
+    let back: SessionInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, full);
+
+    // 旧形状：无 usage 字段的 JSON 反序列化为 None。
+    let legacy = r#"{"channel":"feishu","key":"oc_u","session_id":"s1","status":"active","phase":null,"user_prompt":null,"last_active_unix":1,"project_dir":null,"current_model":null,"available_models":null,"agent_kind":null}"#;
+    let back: SessionInfo = serde_json::from_str(legacy).unwrap();
+    assert_eq!(back.usage, None);
 }
