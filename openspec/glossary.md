@@ -83,3 +83,7 @@
 | 项目 vs 工作台 | 项目是目录(组织单元);工作台是 webui 里呈现它的页面 |
 | 产品定位"工作台" vs 页面级"工作台" | 前者指 sebas 整体(README 定位用法:"自托管的 agent 工作台");后者专指 webui 的 `/agent` 页。上下文无法区分时优先按页面级理解 |
 | 会话 vs turn | 会话是持久载体;turn 是其中一次问答执行 |
+
+- **im 服务**：独立 IM 服务进程（`sebas im`，`sebas-im` crate）——IM 适配器
+  宿主与交互面（卡片/命令/表单/reactions/媒体），经核心会话通道观察并驱动
+  会话；core 是纯会话核心，不注册任何 IM 适配器（extract-im-service）。

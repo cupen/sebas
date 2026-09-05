@@ -134,7 +134,9 @@ docker run -d --name sebas \
    ```
 
    显式开关：`enabled = true` 强制接入（凭据不全拒绝启动）、`enabled = false` 强制停用；缺省按凭据是否齐全隐式判定。
-3. 重启后私聊机器人发 `hello`，应看到流式卡片与 Emoji 反应（🖊 输入中 → ⚙ 执行中 → ✅ 完成）。
+
+   > **架构（extract-im-service）**：飞书接入 = core + im 双服务形态。core 是纯会话核心（不建立任何 IM 连接）；watchdog 在飞书启用时自动拉起独立 `sebas im` 进程（也可手动运行 `sebas im -c config.toml`），由它承载飞书 WebSocket、卡片渲染、命令与表单，经核心会话通道驱动会话。
+3. 重启后私聊机器人发 `hello`，应看到流式卡片与 Emoji 反应（🖊 输入中 → ⚙ 执行中 → ✅ 完成）。**BREAKING（extract-im-service）**：core 进程不再直挂飞书——升级后飞书必须走 im 服务形态（watchdog 默认自动拉起）。
 
 ### 飞书内 slash 命令
 
