@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn fake_acp() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/debug")
-        .join(format!("fake-acp-agent{}", std::env::consts::EXE_SUFFIX))
+    // CARGO_BIN_EXE_* 由 cargo 在编译期注入当前 target 目录的真实路径，
+    // 不受 CARGO_TARGET_DIR 覆盖影响（硬编码 target/debug 会在 override 下失联）。
+    PathBuf::from(env!("CARGO_BIN_EXE_fake-acp-agent"))
 }
 
 fn key() -> ChannelKey {

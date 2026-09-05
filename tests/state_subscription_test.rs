@@ -7,6 +7,10 @@
 //!
 //! lib 单测不能初始化全局 engine（会污染 spawn_env 等依赖「engine 未
 //! 初始化走文件路径」的并行测试），所以放到这里。
+//!
+//! 整个文件跑在 unix domain socket 上（tokio UnixStream + `.sock` 路径），
+//! 仅在 unix 编译；Windows 上该测试目标为空。
+#![cfg(unix)]
 
 use sebas::core_channel::protocol::{
     ChannelHandshake, CoreChannelRequest, StateStreamFrame,

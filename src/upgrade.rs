@@ -639,6 +639,9 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    // 断言 unix symlink 语义（current 软链 + read_link）；Windows 走
+    // update_symlink 的 copy 回退，语义不同且不建 current 目录，先门控到 unix。
+    #[cfg(unix)]
     #[test]
     fn test_install_and_rollback() {
         let tmp = std::env::temp_dir().join("sebas-test-install");
@@ -772,6 +775,8 @@ mod tests {
         assert_eq!(dir3, PathBuf::from("/var/lib/sebas"));
     }
 
+    // 同 test_install_and_rollback：断言 unix symlink 语义。
+    #[cfg(unix)]
     #[test]
     fn test_install_version_preserves_rollback() {
         // 安装多个版本后，rollback 应保留上一版本

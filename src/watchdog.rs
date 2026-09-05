@@ -408,6 +408,9 @@ mod tests {
         }
     }
 
+    // 断言 unix symlink 语义（current 软链）；Windows 的 copy 回退语义
+    // 不同，先门控到 unix，见 upgrade.rs update_symlink。
+    #[cfg(unix)]
     #[test]
     fn rollback_to_previous_restores_previous_version() {
         let tmp = std::env::temp_dir().join("sebas-wd-rollback-test");

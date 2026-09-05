@@ -70,3 +70,10 @@ path = "src/main.rs"
 [[bin]]
 name = "fake-claude"
 path = "tests/bin/fake-claude.rs"
+
+# ACP 集成测试（tests/acp_session_mapping_test.rs）用的可编程 mock。源码在
+# sebas-acp（那边也有同名 bin），这里随主二进制一起构建，保证 cargo test
+# 开箱即用；测试经 CARGO_BIN_EXE_fake-acp-agent 定位。
+[[bin]]
+name = "fake-acp-agent"
+path = "sebas-acp/tests/bin/fake-acp-agent.rs"
