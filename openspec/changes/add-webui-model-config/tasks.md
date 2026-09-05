@@ -5,8 +5,8 @@
 
 ## 2. 通道协议与核心分发
 
-- [ ] 2.1 `src/core_channel/protocol.rs`:新增 `ProviderUpsert` / `ProviderDelete` / `ProbeModels` / `SetAgentDefaults` 请求与各自应答(typed rejection 语义同既有);补序列化往返单测
-- [ ] 2.2 `src/core_channel/server.rs`:四种请求委托 1.1 的语义函数落状态库,回传更新后的 provider 视图;Rust 集成测试覆盖:detached 形态经通道 upsert 后 `state_snapshot("providers")` 反映变更、缺 name 的 upsert 返回 typed rejection 且无写入
+- [ ] 2.1 通道 provider 管理复用既有 `StateMutation { domain: "providers" }`(server.rs 已有 put/delete/save 域分发,gateway 侧已有 mutate_state client):`src/core_channel/server.rs` 的 `providers_mutation` 补 `set_default` op(`{op:"set_default", provider, model}` 更新 default_selection)与 `probe` op(经 `sebas_gateway` 的 fetch_models 拨号,可选 apply 写回 models);补单测(set_default 落盘、probe 失败不改目录)
+- [ ] 2.2 Rust 集成测试覆盖:detached 形态经通道 StateMutation put 后 `state_snapshot("providers")` 反映变更、delete 触发软删+清默认、缺 name 的 put 返回 typed rejection 且无写入
 
 ## 3. native 后端模型来源
 
