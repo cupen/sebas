@@ -10,8 +10,8 @@ lifecycle, and bare-core degraded mode.
 
 ### Requirement: Core child supervision
 
-The watchdog SHALL spawn the core as `current_exe() run --config <path>` —
-the same binary, run subcommand, and the watchdog's own config — with piped
+The watchdog SHALL spawn the core as `current_exe() core --config <path>` —
+the same binary, core subcommand, and the watchdog's own config — with piped
 stdio, `kill_on_drop`, and env `SEBAS_IPC=1` plus a per-instance
 `SEBAS_CONTROL_SECRET`. The core signals readiness over the pipe; a child
 exit is classified and the watchdog loops to respawn after a fixed 1000 ms
@@ -33,7 +33,7 @@ SIGKILL.
 
 ### Requirement: Crash backoff
 
-The crash counter SHALL apply per managed service (core, webui, gateway),
+The crash counter SHALL apply per managed service (core, webui, router),
 each with an independent counter that resets when that service's previous
 crash was more than 1 h ago. Restarts proceed while the service's crash
 count is at or below the maximum (3); once exceeded, the watchdog sleeps
@@ -227,14 +227,14 @@ one execution.
 ### Requirement: Service lifecycle
 
 The watchdog SHALL manage auxiliary services — the WebUI child and the
-gateway child — as supervised child processes spawned from the same binary
-(`sebas webui --config <path>` / `sebas gateway --config <path>`, each given
+router child — as supervised child processes spawned from the same binary
+(`sebas webui --config <path>` / `sebas router --config <path>`, each given
 the control secret). The WebUI child SHALL be spawned when
-`[watchdog.webui] enabled = true`; the gateway child SHALL be spawned only
-when gateway management is explicitly enabled in the watchdog config
+`[watchdog.webui] enabled = true`; the router child SHALL be spawned only
+when router management is explicitly enabled in the watchdog config
 (default off — existing deployments see no new process until they opt in).
-With `--debug`, the watchdog additionally spawns the debug gateway child
-(`sebas gateway --debug`) as today.
+With `--debug`, the watchdog additionally spawns the debug router child
+(`sebas router --debug`) as today.
 
 Auxiliary children SHALL survive core restarts (only the core child is
 respawned by an upgrade), and an auxiliary child that exits SHALL itself be
@@ -283,9 +283,9 @@ dangerous-action path).
 
 #### Scenario: service set persisted across watchdog restart
 
-- **WHEN** `ServiceSet { service: "gateway", desired: "on", persist: true }`
+- **WHEN** `ServiceSet { service: "router", desired: "on", persist: true }`
   is accepted and the watchdog is later restarted
-- **THEN** the watchdog spawns the gateway child again without a new
+- **THEN** the watchdog spawns the router child again without a new
   `ServiceSet`
 
 #### Scenario: service commands on core are rejected
@@ -297,7 +297,7 @@ dangerous-action path).
 ### Requirement: Managed service table
 
 The watchdog SHALL supervise all child processes through one declarative
-table of managed services — core, webui, and gateway — where each entry
+table of managed services — core, webui, and router — where each entry
 declares its spawn specification (argv, env), its desired state (from
 config or `ServiceSet`), and its restart policy. The supervision loop SHALL
 treat every entry uniformly for spawn, exit classification, and restart
@@ -312,9 +312,9 @@ surface.
 
 #### Scenario: gateway managed when enabled
 
-- **WHEN** the watchdog config enables gateway management
-- **THEN** the watchdog spawns `sebas gateway --config <path>` as a
-  supervised child and `ServiceStatus` includes a real gateway entry
+- **WHEN** the watchdog config enables router management
+- **THEN** the watchdog spawns `sebas router --config <path>` as a
+  supervised child and `ServiceStatus` includes a real router entry
 
 #### Scenario: disabled service reports disabled
 

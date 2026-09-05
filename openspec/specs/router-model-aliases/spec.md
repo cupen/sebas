@@ -1,6 +1,7 @@
-## Purpose
+# router-model-aliases Specification
 
-模型别名：给模型起自定义名称并绑定到指定 provider 的路由实体——客户端用别名发请求，gateway 将其路由到绑定的 provider 并按需改写为上游真实模型名。
+## Purpose
+模型别名：给模型起自定义名称并绑定到指定 provider 的路由实体——客户端用别名发请求，router 将其路由到绑定的 provider 并按需改写为上游真实模型名。
 
 ## Requirements
 
@@ -10,7 +11,7 @@ A model alias SHALL be persisted in the core state store as a row with fields: `
 
 #### Scenario: alias persists across restart
 
-- **WHEN** an alias `my-claude` is created and the gateway process restarts
+- **WHEN** an alias `my-claude` is created and the router process restarts
 - **THEN** requests for model `my-claude` still route to the bound provider
 
 ### Requirement: Alias resolution precedence
@@ -43,7 +44,7 @@ matching is exact — aliases never participate in glob matching.
 
 ### Requirement: Upstream model translation
 
-When an alias defines `upstream_model`, the gateway SHALL rewrite the
+When an alias defines `upstream_model`, the router SHALL rewrite the
 request's top-level `model` field to that value before forwarding (same
 best-effort semantics as model-map renaming: non-JSON or field-less bodies
 forward unchanged). When `upstream_model` is omitted, the request's model
@@ -74,12 +75,12 @@ are dropped at load time with a warning; the remaining aliases still apply
 
 - **WHEN** the provider overlay file is hand-edited to contain an alias
   referencing a non-existent provider
-- **THEN** the gateway starts or reloads with that alias dropped, logs a
+- **THEN** the router starts or reloads with that alias dropped, logs a
   warning naming the alias, and other aliases remain effective
 
 ### Requirement: Alias scope
 
-Model aliases SHALL affect gateway routing only. Direct and Off provider
+Model aliases SHALL affect router routing only. Direct and Off provider
 modes translate spawn-time environment independently and MUST NOT consult or
 rewrite aliases.
 

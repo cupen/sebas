@@ -33,7 +33,7 @@ watchdog 默认 SHALL 将 webui 注册为主控服务（`[watchdog.webui] enable
 #### Scenario: 默认部署只起 webui
 
 - **WHEN** 无显式配置覆盖 watchdog 默认值
-- **THEN** `sebas watchdog` 只拉起 webui 服务，core 与 gateway 均不启动
+- **THEN** `sebas run`（watchdog 守护）只拉起 webui 服务，core 与 router 均不启动
 
 #### Scenario: 通过 webui 服务页启用 core
 

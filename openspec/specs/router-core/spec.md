@@ -1,7 +1,7 @@
-# gateway-core Specification
+# router-core Specification
 
 ## Purpose
-Defines the gateway data plane: the dual-protocol endpoint surface and
+Defines the router data plane: the dual-protocol endpoint surface and
 protocol sniffing, model-to-provider routing (exact, glob, namespace,
 default), upstream forwarding with byte-faithful streaming, model renaming,
 error translation, timeouts, and cancellation.
@@ -10,9 +10,9 @@ error translation, timeouts, and cancellation.
 
 ### Requirement: Endpoint surface
 
-The gateway SHALL serve `GET /healthz` (literal `ok`), the admin surface
-(`/admin/*` and `GET /metrics`, specified by the gateway-admin-api and
-gateway-metrics capabilities — mounted above the catch-all proxy handler and
+The router SHALL serve `GET /healthz` (literal `ok`), the admin surface
+(`/admin/*` and `GET /metrics`, specified by the router-admin-api and
+router-metrics capabilities — mounted above the catch-all proxy handler and
 authenticated independently of proxy traffic), and handle every other path
 through a single catch-all proxy handler. Paths under `/v1` or `/v1/*` are
 proxied; paths with the explicit prefixes `/anthropic/*` and `/openai/*` are
@@ -37,7 +37,7 @@ proxied with the prefix stripped; any other non-admin path yields `404`
 
 ### Requirement: Bare-path protocol sniffing
 
-For bare `/v1/*` paths the gateway SHALL determine the protocol from the
+For bare `/v1/*` paths the router SHALL determine the protocol from the
 path and headers only (never the request body), in priority order: (1)
 Anthropic path table — `/v1/messages` and its subpaths; (2) OpenAI path
 table — the known OpenAI endpoints (`/v1/chat/completions`,
@@ -115,7 +115,7 @@ provider routes to that provider with the remainder as the upstream model
 (an unknown first segment falls through to normal matching); (2) model alias
 exact match — an alias from the provider overlay file's `model_aliases`
 routes to its
-bound provider (see gateway-model-aliases for translation semantics) and
+bound provider (see router-model-aliases for translation semantics) and
 wins over a same-named config route; (3) exact model match; (4) glob match
 (`*` patterns, deterministic under collision — lexicographically first);
 (5) the default provider. A route group listing multiple providers uses only
@@ -146,7 +146,7 @@ that provider is the implicit default.
 ### Requirement: Model rename
 
 When the resolved provider's `model_map` maps the requested model to an
-upstream name, the gateway SHALL rewrite the top-level `model` field of the
+upstream name, the router SHALL rewrite the top-level `model` field of the
 buffered JSON body to the mapped name (preserving all other fields) and use
 the mapped name as the upstream model. Unmapped models pass through
 unchanged with no body rewrite.
@@ -159,7 +159,7 @@ unchanged with no body rewrite.
 
 ### Requirement: Upstream request construction
 
-The gateway SHALL construct the upstream request as: provider `base_url`
+The router SHALL construct the upstream request as: provider `base_url`
 for the request protocol + the bare target path + preserved query string.
 Request headers are sanitized — hop-by-hop headers and the downstream
 credentials (`authorization`, `x-api-key`) are stripped, business headers
@@ -187,7 +187,7 @@ client chunk-by-chunk with bytes forwarded unmodified — no event parsing, no
 re-framing, no injected heartbeat. The streaming decision is based solely on
 the upstream response content-type, never on the request's `stream` flag.
 Truncated or malformed upstream SSE frames pass through byte-for-byte
-without causing a gateway error.
+without causing a router error.
 
 #### Scenario: byte-for-byte sse
 
@@ -217,7 +217,7 @@ preserved). An upstream body-read failure yields `502 upstream_error`.
 
 ### Requirement: Error translation
 
-Gateway-generated errors SHALL be rendered in the protocol-appropriate shape
+Router-generated errors SHALL be rendered in the protocol-appropriate shape
 for the sniffed request protocol — Anthropic
 `{"type":"error","error":{"type":...,"message":...}}` or OpenAI
 `{"error":{"message":...,"type":...,"code":null}}` — with content-type
@@ -244,13 +244,13 @@ byte-for-byte with headers.
 
 #### Scenario: no key leak
 
-- **WHEN** any gateway-side error renders
+- **WHEN** any router-side error renders
 - **THEN** the message text contains neither the downstream key nor the
   upstream key
 
 ### Requirement: Timeouts and cancellation
 
-The gateway SHALL apply a connect timeout (default 10 s) and a per-read
+The router SHALL apply a connect timeout (default 10 s) and a per-read
 timeout (default 600 s) that resets on upstream activity — a live SSE stream
 that keeps emitting is never cut. There is no hard total-request timeout.
 Client disconnect SHALL implicitly cancel the upstream request through
@@ -265,11 +265,11 @@ response-body drop.
 
 - **WHEN** an SSE stream emits chunks steadily for longer than the read
   timeout
-- **THEN** the stream is not cut by the gateway
+- **THEN** the stream is not cut by the router
 
 ### Requirement: No protocol translation
 
-The gateway SHALL forward same-protocol only: a resolved provider that lacks
+The router SHALL forward same-protocol only: a resolved provider that lacks
 a base URL for the request's protocol is a routing error (`ProtocolMismatch`
 → 400), never a conversion between Anthropic and OpenAI wire formats.
 
@@ -282,14 +282,14 @@ a base URL for the request's protocol is a routing error (`ProtocolMismatch`
 
 ### Requirement: Debug test provider
 
-With `--debug`, the gateway SHALL inject a built-in `test` provider and
-`test → test` route: the gateway itself answers (echoing the last user
+With `--debug`, the router SHALL inject a built-in `test` provider and
+`test → test` route: the router itself answers (echoing the last user
 message) for both protocols and both stream modes, skipping upstream auth
 and key resolution and the protocol-consistency check.
 
 #### Scenario: debug echo
 
-- **WHEN** the gateway runs with `--debug` and a request carries model
+- **WHEN** the router runs with `--debug` and a request carries model
   `test`
 - **THEN** the response is served locally, echoing the request's user
   content, with no upstream contact

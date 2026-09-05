@@ -10,7 +10,7 @@ side-effect boundary that makes replay safe to run without a live bot.
 
 ### Requirement: Inbound recording
 
-`sebas run --dump-inbound <dir>` SHALL record every raw inbound WS frame to
+`sebas core --dump-inbound <dir>` SHALL record every raw inbound WS frame to
 one JSON file per frame, named `{unix_nanos}-{pid}.json`, written before
 parsing. The dump directory is created lazily on startup; if creation fails
 the service logs a warning and continues with recording disabled. Recording
@@ -61,7 +61,7 @@ a hard error. The run prints the count of successfully dispatched frames.
 
 Replay SHALL drive the exact same parse-and-dispatch path as the live WS
 loop (both delegate to one shared frame handler), into a fresh
-`RouterHandle` with an empty session map — no prior session state is
+`DispatchHandle` with an empty session map — no prior session state is
 restored, so every replay run starts from blank state and re-creates
 whatever the frames imply.
 

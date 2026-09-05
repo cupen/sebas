@@ -1,4 +1,4 @@
-# router-commands Specification
+# dispatch-commands Specification
 
 ## Purpose
 Defines the slash-command surface: how commands are parsed from inbound text, how each command is routed (local handling, forwarding to the live session, or forwarding to the watchdog control plane), the behavior when no live session exists, and the feedback the user receives for each command class.
@@ -26,11 +26,11 @@ The system SHALL match commands case-sensitively against the exact command word 
 
 ### Requirement: Per-command argument validation
 
-Each command SHALL enforce its own argument contract: `/switch` requires a numeric argument (otherwise the line passes through); `/rollback`, `/restart`, `/services` reject any argument; `/gateway` accepts only `on|off|restart|status`; `/webui` accepts only `status`; `/upgrade` accepts only `dev`/`--dev` and `--dry-run`/`dry-run` flags; `/system` ignores trailing arguments; empty `/btw` passes through as text.
+Each command SHALL enforce its own argument contract: `/switch` requires a numeric argument (otherwise the line passes through); `/rollback`, `/restart`, `/services` reject any argument; `/router` accepts only `on|off|restart|status`; `/webui` accepts only `status`; `/upgrade` accepts only `dev`/`--dev` and `--dry-run`/`dry-run` flags; `/system` ignores trailing arguments; empty `/btw` passes through as text.
 
-#### Scenario: Gateway with invalid action passes through
+#### Scenario: Router with invalid action passes through
 
-- **WHEN** the user sends `/gateway enable`
+- **WHEN** the user sends `/router enable`
 - **THEN** the line is not recognized as a command and passes through as a prompt
 
 #### Scenario: Upgrade flag normalization
@@ -83,7 +83,7 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 
 ### Requirement: Control commands forwarded to the watchdog
 
-`/upgrade [dev] [--dry-run]`, `/rollback`, `/restart`, `/services`, `/system`, `/gateway <action>`, and `/webui status` SHALL be translated into watchdog control requests and their results returned as plain text messages — no session is required. When the control credential is not configured, the system SHALL reply with a plain-text notice explaining bare-core mode instead of issuing the request. A watchdog communication failure or rejection SHALL surface as a plain-text failure message.
+`/upgrade [dev] [--dry-run]`, `/rollback`, `/restart`, `/services`, `/system`, `/router <action>`, and `/webui status` SHALL be translated into watchdog control requests and their results returned as plain text messages — no session is required. When the control credential is not configured, the system SHALL reply with a plain-text notice explaining bare-core mode instead of issuing the request. A watchdog communication failure or rejection SHALL surface as a plain-text failure message.
 
 #### Scenario: /system with no session
 
