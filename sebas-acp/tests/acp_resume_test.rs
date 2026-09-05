@@ -212,6 +212,9 @@ async fn acp_fresh_spawn_mints_id_and_reports_not_resumed() {
 /// actually reaped (a cancel signal alone does not fire while the driver is
 /// blocked awaiting a slow agent reply — the child would linger). We find the
 /// mock's pid via /proc before killing and assert it is gone afterwards.
+/// Liveness probing below is /proc-based → unix only (Windows liveness needs
+/// a different mechanism; the reap semantics themselves are also unix).
+#[cfg(unix)]
 #[tokio::test]
 async fn kill_reaps_child_process() {
     let mgr = acp_manager(Duration::from_secs(10));
@@ -254,6 +257,7 @@ async fn kill_reaps_child_process() {
 /// unique journal path marker (so concurrent tests' children are ignored).
 /// `/proc` root mixes PID dirs with pseudo files (`cpuinfo`, …) and entries
 /// can vanish mid-scan, so non-PID/unreadable entries are skipped, not fatal.
+#[cfg(unix)]
 fn find_fake_acp_pid(journal_marker: &str) -> Option<u32> {
     for entry in std::fs::read_dir("/proc").ok()? {
         let Ok(entry) = entry else { continue };
@@ -270,6 +274,7 @@ fn find_fake_acp_pid(journal_marker: &str) -> Option<u32> {
     None
 }
 
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
