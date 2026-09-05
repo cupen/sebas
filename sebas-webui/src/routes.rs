@@ -46,6 +46,7 @@ pub(crate) fn build_session_rows(
                 prompt_preview: info.user_prompt.clone(),
                 current_model: info.current_model.clone(),
                 available_models: info.available_models.clone(),
+                agent_kind: info.agent_kind.clone(),
                 encoded_key: encode_channel_key(&info.channel, &info.key),
                 channel: info.channel.clone(),
                 reference: info.key.clone(),
@@ -91,6 +92,7 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
         "encoded_key": encode_channel_key(&info.channel, &info.key),
         "current_model": info.current_model,
         "available_models": info.available_models,
+        "agent_kind": info.agent_kind,
     })
 }
 

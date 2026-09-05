@@ -93,6 +93,8 @@ impl NativeSession {
             // 变量清单；当前模型取会话级 override，缺省为内核默认。
             current_model: self.current_model_override.clone().or(Some(self.default_model.clone())),
             available_models: Some(self.available_models.clone()),
+            // 原生内核不属于任何 ACP kind（add-composer-agent-binding）。
+            agent_kind: None,
         }
     }
 }

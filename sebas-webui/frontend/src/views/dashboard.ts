@@ -62,6 +62,13 @@ export class SebasDashboard extends LitElement {
     const detail = (e as CustomEvent<{ key: string }>).detail
     navigate(`/sessions/${detail.key}`)
   }
+  /**
+   * add-composer-agent-binding：跟随模式下 composer 发出消息/切模型后乐观
+   * 重取聚焦 detail——transcript 不等下一个 WS/summary 周期就能反映本轮。
+   */
+  private onComposerSent = (): void => {
+    this.loadFocused(this.data?.active_session_key ?? null)
+  }
 
   static styles = [
     viewStyles,
@@ -368,7 +375,12 @@ export class SebasDashboard extends LitElement {
         <sebas-workbench-composer
           .projectDir=${this.selectedPath}
           .providerLabel=${this.providerLabel}
+          .sessionKey=${d.active_session?.encoded_key ?? null}
+          .agentKind=${d.active_session?.agent_kind ?? null}
+          .sessionModels=${d.active_session?.available_models ?? []}
+          .currentModel=${d.active_session?.current_model ?? null}
           @composer-created=${this.onComposerCreated}
+          @composer-sent=${this.onComposerSent}
         ></sebas-workbench-composer>
       </div>
     `

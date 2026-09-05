@@ -54,6 +54,9 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     is_active: false,
     project_dir: '/home/me/sebas',
     prompt_preview: null,
+    current_model: null,
+    available_models: null,
+    agent_kind: null,
     ...overrides,
   }
 }
@@ -88,6 +91,9 @@ function detailFixture(): SessionDetail {
     msg_id: null,
     last_active: 'just now',
     encoded_key: 'oc_live%00',
+    current_model: null,
+    available_models: null,
+    agent_kind: 'claude',
   }
 }
 
@@ -104,6 +110,9 @@ function focusedSummary(): Summary {
       status_slug: 'working',
       status_glyph: '●',
       encoded_key: 'oc_live%00',
+      current_model: null,
+      available_models: null,
+      agent_kind: 'claude',
     },
     active_session_key: 'oc_live%00',
   }

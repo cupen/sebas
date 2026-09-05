@@ -573,6 +573,7 @@ impl SessionMap {
                     last_active_unix: m.last_active_unix,
                     acp_session_id: m.acp_session_id.clone(),
                     current_model: m.current_model.clone(),
+                    pending_kind: m.pending_kind.clone(),
                 };
                 out.insert(
                     key_str,
@@ -612,6 +613,9 @@ impl SessionMap {
             m.acp_session_id = dto.acp_session_id;
             // 上次模型（内存层字段；state-store 落地后转 sessions 表列）。
             m.current_model = dto.current_model;
+            // 创建时绑定的执行后端 kind（add-composer-agent-binding）；
+            // 旧文件无该字段 → None → UI 显示默认 kind。
+            m.pending_kind = dto.pending_kind;
             map.insert(key, m);
         }
         Ok(Self {
@@ -663,4 +667,61 @@ struct MappingDto {
     /// `current_model` 列收编前先落这里）。`#[serde(default)]` 兼容旧文件。
     #[serde(default)]
     current_model: Option<String>,
+    /// 创建时绑定的执行后端 kind（add-composer-agent-binding；`None` =
+    /// 默认 kind）。`#[serde(default)]` 兼容旧文件。
+    #[serde(default)]
+    pending_kind: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// add-composer-agent-binding 1.2：pending_kind 落盘 → 重载保留；
+    /// 旧文件（无该字段）→ None（UI 回退默认 kind 标签）。
+    #[tokio::test]
+    async fn pending_kind_round_trips_through_disk_shape() {
+        let map = SessionMap::new();
+        let mut m = Mapping::dormant("s1", 1);
+        m.pending_kind = Some("claude".into());
+        map.insert(ChannelKey::new("web", "web-kind"), m).await.unwrap();
+        let mut bare = Mapping::dormant("s2", 2);
+        bare.pending_kind = None;
+        map.insert(ChannelKey::new("web", "web-bare"), bare).await.unwrap();
+
+        let json = map.dump_json().await.unwrap();
+        assert!(
+            json.contains("\"pending_kind\":\"claude\""),
+            "dump carries pending_kind, got: {json}"
+        );
+
+        let restored = SessionMap::restore_json(&json).unwrap();
+        assert_eq!(
+            restored
+                .get(&ChannelKey::new("web", "web-kind"))
+                .await
+                .unwrap()
+                .pending_kind
+                .as_deref(),
+            Some("claude"),
+            "restore keeps the bound kind"
+        );
+        assert_eq!(
+            restored
+                .get(&ChannelKey::new("web", "web-bare"))
+                .await
+                .unwrap()
+                .pending_kind,
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_record_without_pending_kind_restores_as_none() {
+        let json = r#"{"oc_legacy":{"session_id":"s-old","last_active_unix":1}}"#;
+        let map = SessionMap::restore_json(json).unwrap();
+        let key = ChannelKey::feishu("oc_legacy", None);
+        let m = map.get(&key).await.unwrap();
+        assert_eq!(m.pending_kind, None, "legacy files read as default kind");
+    }
 }

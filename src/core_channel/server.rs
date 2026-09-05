@@ -609,10 +609,16 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
-        CoreChannelRequest::CreatePlaceholder { project_dir, model } => {
+        CoreChannelRequest::CreatePlaceholder {
+            project_dir,
+            model,
+            backend: hint,
+        } => {
             // 0-turn 占位（P2 修复）：只建行、不 spawn 子进程——空 prompt 绝
-            // 不上送 agent。project_dir 校验与 Spawn 同款；执行体 hint 不上线，
-            // 占位会话走 ACP 默认（原生内核的占位会话后续按需扩展）。
+            // 不上送 agent。project_dir 校验与 Spawn 同款；执行体 hint 随帧
+            // 上送、记在 mapping 上，首条消息触发 spawn 时生效
+            // （add-composer-agent-binding：composer 建 0-turn 会话是常态
+            // 路径，hint 不上线则用户在创建模式选的 agent 被静默丢弃）。
             if let Some(dir) = &project_dir {
                 if !usable_project_dir(dir) {
                     return CoreChannelResponse::Rejected {
@@ -627,7 +633,7 @@ async fn dispatch(
                     .to_string()
             });
             match backend
-                .create_placeholder(project_dir, None, model)
+                .create_placeholder(project_dir, hint, model)
                 .await
             {
                 Ok(key) => CoreChannelResponse::Spawned { key },

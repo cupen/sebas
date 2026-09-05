@@ -44,20 +44,26 @@ pub enum CoreChannelRequest {
         #[serde(default)]
         model: Option<String>,
         /// （wire-webui-sebas-agent-e2e）执行体提示：`"native"` = 原生内核，
-        /// `"acp"`/None = ACP 桥（旧客户端缺省行为不变）。
+        /// `"acp"`/None = ACP 桥，`"acp:<slug>"` = 指定 ACP agent kind
+        /// （add-composer-agent-binding：slug 经复合后端钉进 mapping）。
         #[serde(default)]
         backend: Option<String>,
     },
     /// Create a 0-turn placeholder session WITHOUT spawning an agent child
     /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
-    /// `session/prompt ""`). The requested model is remembered on the
-    /// mapping; the first message spawns (kind stays pinned to the core's
-    /// configured default, same policy as `Spawn`).
+    /// `session/prompt ""`). The requested model/执行体 hint are remembered
+    /// on the mapping; the first message spawns with them
+    /// （add-composer-agent-binding：占位帧同样携带 backend——composer 建
+    /// 0-turn 会话是常态路径，hint 不上线则用户选的 agent 被静默丢弃）。
     CreatePlaceholder {
         project_dir: Option<String>,
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
+        /// 执行体提示，语义与 `Spawn.backend` 一致。旧帧无此字段 →
+        /// serde default（None = 默认执行体）。
+        #[serde(default)]
+        backend: Option<String>,
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
@@ -219,11 +225,12 @@ mod tests {
                 prompt: "hello".into(),
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
-                backend: Some("native".into()),
+                backend: Some("acp:claude".into()),
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
+                backend: None,
             },
             CoreChannelRequest::SetSessionModel {
                 key: key.clone(),
@@ -308,6 +315,7 @@ mod tests {
             project_dir: None,
             current_model: None,
             available_models: None,
+            agent_kind: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

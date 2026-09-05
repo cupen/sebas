@@ -148,6 +148,9 @@ pub struct SessionRow {
     /// 该会话可选的模型 id 列表（agent 的 configOptions）。创建会话表单用它
     /// 作为下拉数据源（取最近一个暴露模型列表的会话）。
     pub available_models: Option<Vec<String>>,
+    /// 会话创建时绑定的执行后端 kind（add-composer-agent-binding）；
+    /// `None` = 配置的默认 kind。
+    pub agent_kind: Option<String>,
 }
 
 /// Dashboard overview data.

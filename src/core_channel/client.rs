@@ -227,6 +227,7 @@ fn unavailable(cause: String) -> SessionRejection {
     SessionRejection::Unavailable { cause }
 }
 
+
 /// Connect, mapping error kinds onto their distinct causes (6.3).
 async fn connect(
     path: &Path,
@@ -364,18 +365,20 @@ impl SessionBackend for CoreChannelBackend {
     /// 0-turn placeholder (P2 fix): create the session row over the wire
     /// without an agent child — the trait default would fall back to
     /// `spawn("")`, putting the empty prompt on the wire exactly the bug this
-    /// fixes. Model is carried; kind stays pinned core-side (same as
-    /// [`Self::spawn_with`]).
+    /// fixes. The execution-backend hint rides along
+    /// （add-composer-agent-binding：composer 建 0-turn 会话是常态路径，
+    /// hint 不上线则用户在创建模式选的 agent 会被静默丢弃）。
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
-        _backend: Option<String>,
+        backend: Option<String>,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::CreatePlaceholder {
                 project_dir,
                 model,
+                backend,
             })
             .await?
         {

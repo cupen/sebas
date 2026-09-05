@@ -342,8 +342,8 @@ async fn backend_methods_reach_the_right_handlers() {
 
 /// P2 修复（wire 路径）：`create_placeholder` 经通道建 0-turn 占位——
 /// 不产生 `Out::WebSpawn`（无子进程、空 prompt 不上送 agent），映射记住
-/// model；首条消息经 `Message` 触发 SpawnNew 并携带记住的 model（kind 仍
-/// 钉在 core 默认，与 `Spawn` 的 wire 策略一致）。
+/// model 与 kind（add-composer-agent-binding：backend hint 的 kind 随帧
+/// 上送，首条消息经 `Message` 触发 SpawnNew 时按它 spawn 正确的 agent）。
 #[tokio::test]
 async fn create_placeholder_wires_a_zero_turn_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -373,7 +373,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
         "placeholder creation must not emit a spawn instruction"
     );
 
-    // 映射记住了 model（kind 钉默认）。
+    // 映射记住了 model 与解析后的 kind（acp:opencode → "opencode"）。
     let (channel_key, m) = core
         .handle
         .map
@@ -384,7 +384,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
         .expect("placeholder mapped");
     assert_eq!(channel_key, key);
     assert_eq!(m.pending_model.as_deref(), Some("m-free"));
-    assert_eq!(m.pending_kind, None);
+    assert_eq!(m.pending_kind.as_deref(), Some("opencode"));
 
     // 不可用 project_dir → 与 Spawn 同款校验拒绝。
     assert_eq!(
@@ -409,7 +409,8 @@ async fn create_placeholder_wires_a_zero_turn_session() {
         } => {
             assert_eq!(k, channel_key);
             assert_eq!(prompt, "hello");
-            assert_eq!(kind, None);
+            // 首条消息按占位记住的 kind spawn（add-composer-agent-binding）。
+            assert_eq!(kind.as_deref(), Some("opencode"));
             assert_eq!(model.as_deref(), Some("m-free"));
         }
         other => panic!("expected Out::WebSpawn, got {other:?}"),

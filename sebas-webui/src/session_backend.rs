@@ -694,6 +694,7 @@ impl SessionBackend for FakeBackend {
             project_dir,
             current_model: None,
             available_models: None,
+            agent_kind: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -850,6 +851,7 @@ mod tests {
                 project_dir: None,
                 current_model: None,
                 available_models: None,
+                agent_kind: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

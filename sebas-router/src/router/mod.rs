@@ -439,6 +439,7 @@ impl RouterHandle {
             project_dir: m.project_dir.clone(),
             current_model: m.current_model.clone(),
             available_models: m.available_models.clone(),
+            agent_kind: m.pending_kind.clone(),
         })
     }
 

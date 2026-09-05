@@ -444,6 +444,11 @@ export class SebasSessionDetail extends LitElement {
               ${d.session_id
                 ? html`<span class="mono" title=${d.session_id}>${d.session_id.slice(0, 12)}</span>`
                 : nothing}
+              <!-- add-composer-agent-binding：agent 建会话时定死——只读展示
+                   （null = 默认 kind）。 -->
+              <span class="mono" title="This session's agent is fixed — chosen when it was created"
+                >${d.agent_kind ?? 'acp · default'}</span
+              >
               <span>last active ${d.last_active}</span>
               ${d.available_models && d.available_models.length > 0
                 ? html`<span class="model-pick">

@@ -180,6 +180,8 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         // Claude）这两个字段为 null —— 前端不显示模型 UI。
         "current_model": info.current_model,
         "available_models": info.available_models,
+        // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
+        "agent_kind": info.agent_kind,
     });
     Json(data).into_response()
 }

@@ -1,18 +1,27 @@
 /**
- * Workbench composer: pinned at the top of the dashboard right pane. Lets
- * the operator spin up a new session from the workbench without leaving the
- * overview; binds the new session to the currently-selected project, or
- * routes it to the inbox when nothing is selected. Plain Enter sends
- * (Shift+Enter inserts a newline; an IME-composing Enter is ignored) via
- * the 28px accent send button.
+ * Workbench composer (add-composer-agent-binding): the conversation-area
+ * input is SESSION-SCOPED, in one of two modes.
+ *
+ * Follow-up mode (a session is focused): submit sends the message to the
+ * focused session (`POST /api/sessions/{key}/message`) — it never spawns a
+ * new one. The focused session's agent is fixed at creation time, so the
+ * bottom toolbar shows the agent as small read-only text next to a model
+ * dropdown (switching = `session/set_config_option` via the model endpoint).
+ *
+ * Creation mode (no focused session, or the operator pressed the "new
+ * session" chip): submit spawns a session bound to the selected project (or
+ * the inbox) with the execution backend + model picked in the toolbar — the
+ * only place an agent can be chosen, because after spawn the binding is
+ * immutable.
  *
  * Reaches the agent-core reachability report from /api/summary to gate
- * submit when the core is offline (a submit would only bounce). A transient
- * submit error is surfaced inline via the shared `.callout-error` style and
- * the message text is preserved so the operator can retry.
+ * submit when the core is offline (a submit would only bounce), re-polled
+ * on a 5s interval so the banner and disabled state follow reality. A
+ * transient submit error is surfaced inline via the shared `.callout-error`
+ * style and the message text is preserved so the operator can retry.
  */
 
-import { LitElement, css, html, nothing } from 'lit'
+import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo, type BackendHint } from '../api/client.js'
 import { icon } from '../components/icons.js'
@@ -37,11 +46,25 @@ export class SebasWorkbenchComposer extends LitElement {
    * while loading.
    */
   @property({ attribute: false }) providerLabel: string | null = null
+  /**
+   * Focused session's encoded key (add-composer-agent-binding). Non-null
+   * puts the composer in follow-up mode; null is creation mode.
+   */
+  @property({ attribute: false }) sessionKey: string | null = null
+  /**
+   * Focused session's bound agent kind from the wire (`null` = the
+   * configured default kind). Only rendered in follow-up mode.
+   */
+  @property({ attribute: false }) agentKind: string | null = null
+  /** Focused session's selectable models (agent configOptions). */
+  @property({ attribute: false }) sessionModels: string[] = []
+  /** Focused session's current model id. */
+  @property({ attribute: false }) currentModel: string | null = null
 
   @state() private text = ''
   @state() private sending = false
   @state() private error: string | null = null
-  /** Execution-backend hint forwarded with the spawn request. */
+  /** Execution-backend hint forwarded with the spawn request (creation). */
   @state() private backend: BackendHint = 'acp'
   /** Reachable third-party agent kinds for the create-session dropdown. */
   @state() private kinds: AgentKindInfo[] = []
@@ -59,8 +82,20 @@ export class SebasWorkbenchComposer extends LitElement {
    * 才能发现的失败）。
    */
   @state() private nativeAvailability: { ok: boolean; cause?: string } | null = null
+  /** 中程切换聚焦会话模型时的在途标记（add-acp-model-selection 语义）。 */
+  @state() private modelSwitching = false
+  /**
+   * Operator explicitly requested creation while a session is focused;
+   * cleared whenever the focused key changes.
+   */
+  @state() private createRequested = false
   /** Reachability 轮询定时器（connectedCallback 启动，disconnectedCallback 清理）。 */
   private reachabilityTimer: number | undefined = undefined
+
+  /** Follow-up when a session is focused and creation wasn't requested. */
+  private get isFollowMode(): boolean {
+    return this.sessionKey !== null && !this.createRequested
+  }
 
   static styles = [
     viewStyles,
@@ -100,8 +135,7 @@ export class SebasWorkbenchComposer extends LitElement {
         outline-offset: 2px;
         border-radius: var(--sebas-radius-sm);
       }
-      /* Bottom toolbar: provider label + binding + backend on the left, send
-       * on the right — the loose text rows that used to sit above the card. */
+      /* Bottom toolbar: agent/binding/model on the left, send on the right. */
       .composer-bottom {
         display: flex;
         align-items: center;
@@ -137,11 +171,31 @@ export class SebasWorkbenchComposer extends LitElement {
         font-size: 0.78rem;
         color: var(--sebas-text-faint);
       }
-      /* Backend picker: a slim select inside the toolbar. */
+      /* Toolbar selects (agent/model): slim selects inside the toolbar. */
       .composer-bottom .backend-select {
         font-size: 0.78rem;
         --wa-select-min-height: 24px;
         max-width: 220px;
+      }
+      /* add-composer-agent-binding：会话切换 chips（新会话/取消新建）。与
+       * settings-link 同款弱化外观，避免在输入框旁喧宾夺主。 */
+      .composer-bottom .mode-chip {
+        border: 1px solid var(--sebas-border);
+        background: none;
+        border-radius: 999px;
+        padding: 1px 10px;
+        font: inherit;
+        font-size: 0.72rem;
+        color: var(--sebas-text-faint);
+        cursor: pointer;
+        transition: color var(--sebas-dur) var(--sebas-ease);
+      }
+      .composer-bottom .mode-chip:hover {
+        color: var(--sebas-text-bright);
+      }
+      .composer-bottom .mode-chip:focus-visible {
+        outline: var(--sebas-focus-ring);
+        outline-offset: 2px;
       }
       /* IA v2：settings → 打开居中设置弹窗（冒泡 open-settings 事件，由
        * app-shell 监听）；按钮外观与原链接一致。 */
@@ -211,10 +265,17 @@ export class SebasWorkbenchComposer extends LitElement {
     }
   }
 
+  protected updated(changed: PropertyValues): void {
+    // 聚焦会话变了（切换/关闭/新建跳转）——显式的"新会话"请求随之作废，
+    // 让 composer 回到与新聚焦会话匹配的跟随模式。
+    if (changed.has('sessionKey')) this.createRequested = false
+  }
+
   /**
    * 模型下拉数据源（add-acp-model-selection D4）：创建会话表单的模型列表来自
    * 快照里最近一个暴露 `available_models` 的会话（agent 的 configOptions）。
    * 无模型选项的 agent（如 Claude）→ 空列表 → 不显示下拉、不报错。
+   * （跟随模式不用这份借来的数据——它用聚焦会话自己的 `sessionModels`。）
    */
   private async loadModelOptions(): Promise<void> {
     try {
@@ -288,6 +349,33 @@ export class SebasWorkbenchComposer extends LitElement {
     if (this.disabled()) return
     const prompt = this.text.trim()
     if (!prompt) return
+    if (this.isFollowMode) return void this.submitFollow(prompt)
+    return void this.submitCreate(prompt)
+  }
+
+  /** 跟随模式：发给聚焦会话，绝不新建。 */
+  private async submitFollow(prompt: string): Promise<void> {
+    const key = this.sessionKey
+    if (!key) return
+    this.sending = true
+    this.error = null
+    try {
+      await api.sendMessage(key, prompt)
+      this.text = ''
+      // 舞台就地刷新：dashboard 监听后立刻重取聚焦 detail（WS 推送之外的
+      // 乐观刷新，避免等下一个 summary 周期）。
+      this.dispatchEvent(
+        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
+      )
+    } catch (e) {
+      this.error = String(e)
+    } finally {
+      this.sending = false
+    }
+  }
+
+  /** 创建模式：选定的 agent + 模型在这里定死进新会话。 */
+  private async submitCreate(prompt: string): Promise<void> {
     this.sending = true
     this.error = null
     try {
@@ -305,6 +393,38 @@ export class SebasWorkbenchComposer extends LitElement {
     } finally {
       this.sending = false
     }
+  }
+
+  /** 跟随模式的模型切换：`session/set_config_option`（add-acp-model-selection）。 */
+  private async switchModel(modelId: string): Promise<void> {
+    const key = this.sessionKey
+    if (!key || this.modelSwitching) return
+    this.modelSwitching = true
+    this.error = null
+    try {
+      await api.setSessionModel(key, modelId)
+      this.dispatchEvent(
+        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
+      )
+    } catch (e) {
+      this.error = String(e)
+    } finally {
+      this.modelSwitching = false
+    }
+  }
+
+  /**
+   * Follow-up mode's read-only agent label: the bound kind resolved to its
+   * display name via /api/agent-kinds; unknown/unreachable kinds fall back
+   * to the raw slug, and `null` (the wire's "no kind recorded") means the
+   * configured default.
+   */
+  private agentLabel(): string {
+    if (this.agentKind) {
+      const k = this.kinds.find((x) => x.slug === this.agentKind)
+      return k?.name ?? this.agentKind
+    }
+    return 'acp · default'
   }
 
   private renderBinding() {
@@ -326,7 +446,9 @@ export class SebasWorkbenchComposer extends LitElement {
 
   render() {
     const disabled = this.disabled()
-    const placeholder = this.providerLabel ?? null
+    const follow = this.isFollowMode
+    const modelList = follow ? this.sessionModels : this.modelOptions
+    const modelValue = follow ? this.currentModel : this.model
     return html`
       ${this.unreachable
         ? html`
@@ -343,30 +465,8 @@ export class SebasWorkbenchComposer extends LitElement {
           `
         : nothing}
       <div class="composer">
-<wa-select
-          class="backend-select"
-          aria-label="Execution backend"
-          value=${this.backend}
-          ?disabled=${disabled}
-          @change=${(e: Event) => {
-            const value = (e.target as HTMLInputElement).value
-            if (value === 'acp' || value === 'native' || value.startsWith('acp:')) {
-              this.backend = value as BackendHint
-            }
-          }}
-        >
-          <wa-option value="acp">acp · default kind</wa-option>
-          ${this.kinds.map(
-            (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
-          )}
-          ${this.nativeAvailability && !this.nativeAvailability.ok
-            ? html`<wa-option value="native" disabled
-                >native · built-in kernel (unavailable: ${this.nativeAvailability.cause ?? 'no provider credentials'})</wa-option
-              >`
-            : html`<wa-option value="native">native · built-in kernel</wa-option>`}
-        </wa-select>
         <wa-textarea
-          placeholder="Message the agent…"
+          placeholder=${follow ? 'Ask for follow-up changes…' : 'Message the agent…'}
           aria-label="Message"
           resize="auto"
           ?disabled=${disabled}
@@ -382,42 +482,69 @@ export class SebasWorkbenchComposer extends LitElement {
         ></wa-textarea>
         <div class="composer-bottom">
           <div class="left-tools">
-            ${placeholder
-              ? html`<span class="label">${placeholder}</span>`
-              : html`<span class="label placeholder">· · ·</span>`}
-            ${this.renderBinding()}
-            ${this.modelOptions.length > 0
+            ${follow
+              ? html`<span
+                  class="label"
+                  title="This session's agent is fixed — chosen when it was created"
+                  >${this.agentLabel()}</span
+                >`
+              : html`
+                  ${this.providerLabel
+                    ? html`<span class="label">${this.providerLabel}</span>`
+                    : html`<span class="label placeholder">· · ·</span>`}
+                  ${this.renderBinding()}
+                `}
+            ${modelList.length > 0
               ? html`<wa-select
                   class="backend-select model-select"
                   aria-label="Model"
-                  value=${this.model ?? ''}
-                  ?disabled=${disabled}
+                  value=${modelValue ?? ''}
+                  ?disabled=${disabled || (follow && this.modelSwitching)}
                   @change=${(e: Event) => {
-                    this.model = (e.target as HTMLSelectElement).value || null
+                    const v = (e.target as HTMLSelectElement).value || null
+                    if (follow) {
+                      if (v) void this.switchModel(v)
+                    } else {
+                      this.model = v
+                    }
                   }}
                 >
-                  ${this.modelOptions.map(
-                    (m) => html`<wa-option value=${m}>${m}</wa-option>`,
-                  )}
+                  ${modelList.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
                 </wa-select>`
               : nothing}
-            <wa-select
-              class="backend-select"
-              aria-label="Execution backend"
-              value=${this.backend}
-              ?disabled=${disabled}
-              @change=${(e: Event) => {
-                const value = (e.target as HTMLInputElement).value
-                if (value === 'acp' || value === 'native') this.backend = value
-              }}
-            >
-              <wa-option value="acp">acp</wa-option>
-              ${this.nativeAvailability && !this.nativeAvailability.ok
-                ? html`<wa-option value="native" disabled
-                    >native (unavailable)</wa-option
-                  >`
-                : html`<wa-option value="native">native</wa-option>`}
-            </wa-select>
+            ${follow
+              ? nothing
+              : html`<wa-select
+                  class="backend-select"
+                  aria-label="Execution backend"
+                  value=${this.backend}
+                  ?disabled=${disabled}
+                  @change=${(e: Event) => {
+                    const value = (e.target as HTMLInputElement).value
+                    if (value === 'acp' || value === 'native' || value.startsWith('acp:')) {
+                      this.backend = value as BackendHint
+                    }
+                  }}
+                >
+                  <wa-option value="acp">acp · default kind</wa-option>
+                  ${this.kinds.map(
+                    (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
+                  )}
+                  ${this.nativeAvailability && !this.nativeAvailability.ok
+                    ? html`<wa-option value="native" disabled
+                        >native · built-in kernel (unavailable: ${this.nativeAvailability.cause ?? 'no provider credentials'})</wa-option
+                      >`
+                    : html`<wa-option value="native">native</wa-option>`}
+                </wa-select>`}
+            ${this.sessionKey !== null
+              ? html`<button
+                  class="mode-chip"
+                  type="button"
+                  @click=${() => (this.createRequested = !this.createRequested)}
+                >
+                  ${follow ? '+ new session' : 'cancel'}
+                </button>`
+              : nothing}
           </div>
           <div class="right-tools">
             <button

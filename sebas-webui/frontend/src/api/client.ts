@@ -30,6 +30,8 @@ export interface SessionRow {
   current_model: string | null
   /** 该会话可选的模型 id 列表；fallback 给创建会话表单当下拉数据源。 */
   available_models: string[] | null
+  /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
+  agent_kind: string | null
 }
 
 export interface SessionSummary {
@@ -41,6 +43,12 @@ export interface SessionSummary {
   status_slug: StatusSlug
   status_glyph: string
   encoded_key: string
+  /** 当前生效的模型 id；null = 无模型选择面。 */
+  current_model: string | null
+  /** 该会话可选的模型 id 列表；null/空 = 无模型选择面。 */
+  available_models: string[] | null
+  /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
+  agent_kind: string | null
 }
 
 export interface CardConfig {
@@ -98,6 +106,8 @@ export interface SessionDetail {
   current_model: string | null
   /** 可选模型列表（agent 的 configOptions），会话详情模型选择器的数据源。 */
   available_models: string[] | null
+  /** 创建时绑定的执行后端 kind（add-composer-agent-binding）；null = 默认 kind。 */
+  agent_kind: string | null
 }
 
 /**
