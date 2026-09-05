@@ -1,8 +1,8 @@
 # sebas
 
-**把 AI 同事装进口袋。**
+**自托管 agent 工作台：工位上并肩，手机上遥控。**
 
-在工位上，在网页工作台里和 agent 并肩干活；离开工位，用飞书 / IM 指挥它继续干活。sebas 是一个自托管的 agent 工作台，驱动 Claude Code 等兼容 agent——网页主控，IM 遥控，多会话并行。
+工位上，在网页工作台里和 agent 一起干活；离开工位，用飞书 / IM 指挥它继续干活。sebas 是一个自托管的 agent 工作台，驱动 Claude Code 等兼容 agent——网页主控，IM 遥控，多会话并行。
 
 > 状态：开发中，核心链路已贯通（网页 / 飞书双通道 → 多会话执行 → 流式回写）。
 
@@ -60,7 +60,7 @@ cargo build --release
 
 ### systemd 服务（watchdog）
 
-`service --install` 写一个 systemd 系统 unit，由 **watchdog** 监督：默认只启动 WebUI，core（agent 执行）与飞书按需在 WebUI 服务页启用。升级用 `sebas update`。
+`service --install` 会写入一个 systemd 系统 unit，由 **watchdog** 监督：默认只启动 WebUI，core（agent 执行）与飞书按需在 WebUI 服务页启用。升级用 `sebas update`。
 
 ```bash
 # 需要一个已存在的非 root 账户与绝对路径的 config.toml

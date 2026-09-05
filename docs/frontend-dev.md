@@ -7,8 +7,8 @@ Rust 进程，浏览器全程同源，与生产嵌入形态路径一致。
 ## 启动
 
 ```bash
-# 终端 1：Rust 后端（任何形态都可以——裸跑、watchdog 均可）
-cargo run -- release 二进制或 ./target/release/sebas run --config <你的配置> --webui
+# 终端 1：Rust 后端（裸跑或 watchdog 形态均可）
+./target/release/sebas run --config <你的配置> --webui
 # WebUI API 默认监听 127.0.0.1:9797
 
 # 终端 2：Vite dev server（前端源码热更新）
@@ -22,8 +22,8 @@ cd sebas-webui/frontend && ../../.tooling/pnpm dev
 
 ## 注意事项
 
-- **端口冲突**：5173 是 Vite 默认端口，被其他项目占用时会自动顺延到
-  5174/5175…，以启动日志打印的为准；后端端口固定 9797 不受影响。
+- **端口**：Vite 固定使用 5273（strictPort），被占用时直接报错而不是顺延，
+  释放端口后重启即可；后端端口 9797 不受影响。
 - **改前端即时生效**（HMR）；改 Rust 代码需要重新编译重启后端进程，前端无需动。
 - **WebSocket 实时事件**走代理 `ws: true` 透传，`session.created/updated/removed`
   事件链路与生产形态一致；断线由前端自动重连。
