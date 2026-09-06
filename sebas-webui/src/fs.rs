@@ -68,8 +68,18 @@ pub fn safe_path(
 
     #[cfg(windows)]
     let requested = normalize_windows(path);
+    // unix 同样保住「绝对请求替换 root 基座」的 Path::join 语义：只去尾部
+    // 冗余斜杠（"/" 整体视作 root），绝不剥前导 /——剥了会把绝对请求错误
+    // 拼成 root 内相对路径，越界请求也只会误报「不存在」而非「超出范围」。
     #[cfg(not(windows))]
-    let requested = path.trim_start_matches('/').to_string();
+    let requested = {
+        let trimmed = path.trim_end_matches('/');
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            trimmed.to_string()
+        }
+    };
 
     let target = if requested.is_empty() || requested == "." {
         root_canonical.clone()
