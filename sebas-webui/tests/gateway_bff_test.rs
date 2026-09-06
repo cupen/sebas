@@ -61,15 +61,27 @@ async fn api_router_reports_snapshot_when_router_down() {
 }
 
 #[tokio::test]
-async fn router_bff_read_routes_are_mutation_only() {
-    // BFF mutation 面（POST/PUT/DELETE）不接受 GET——SPA 用 /api/router
-    // 快照 + router 自身 admin API（经 BFF 转发）组合出只读视图。
+async fn router_bff_read_routes_disposition() {
+    // 24412c6 后的 GET 分派契约：/router/api/providers 是管理页只读代理
+    // （router 挂 → 502 转发错误）；model-aliases / reload 无 GET 路由，
+    // 落入 mutation 子 router 的 POST-only → 405。
     let app = app_with(Some("127.0.0.1:59999".into())).await;
-    for uri in [
-        "/router/api/providers",
-        "/router/api/model-aliases",
-        "/router/api/reload",
-    ] {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/router/api/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "GET providers 经 BFF 转发，router 不可达即 502"
+    );
+    for uri in ["/router/api/model-aliases", "/router/api/reload"] {
         let resp = app
             .clone()
             .oneshot(
@@ -88,7 +100,7 @@ async fn router_bff_read_routes_are_mutation_only() {
 async fn mutation_routes_guarded() {
     let _g = ENV_LOCK.lock().await;
     let app = app_with(Some("127.0.0.1:59999".into())).await;
-    // GET → 405（POST-only）。
+    // GET → 只读代理（router 挂 → 502），不走 mutation 守卫。
     let resp = app
         .clone()
         .oneshot(
@@ -99,7 +111,7 @@ async fn mutation_routes_guarded() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     // 非 loopback origin → 403。
     let resp = app
         .clone()
