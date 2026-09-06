@@ -789,6 +789,7 @@ mod tests {
             current_model: None,
             available_models: None,
             agent_kind: None,
+            backend: None,
             usage: None,
         };
         fe.on_session_info(info.clone()).await;
