@@ -10,6 +10,8 @@
 >
 > 旅程用例：`invoke accept`（`tests/acceptance_suite_test.rs`）
 > 冒烟用例：`invoke e2e`（`tests/core_flow_e2e_test.rs`）
+> 浏览器级旅程：`invoke webui-e2e`（`tests/webui-e2e/`，Playwright + chromium，
+> 旅程账本见 `tests/webui-e2e/README.md` 与 `openspec/changes/add-webui-playwright-tests`）
 
 ## 矩阵图例
 
@@ -25,7 +27,8 @@
 | ④ 项目管理 | 12 | 12 | 100% | `projects_session_journey` |
 | **核心合计** | **65** | **62** | **95%** | 每簇 ≥1 条 ✓ |
 
-全量 247 条中：豁免 22 条（飞书真实传输、opencode CLI、浏览器级 UI 渲染），
+全量 247 条中：豁免 22 条（飞书真实传输、opencode CLI；原"浏览器级 UI 渲染"
+豁免已由 `webui-browser-e2e` 旅程套件接替），
 非核心缺口 3 条（见各行 ⚠️）。可沙箱验收面（225 条）命中 216，≈96%（长期方向 ≥90%，非门槛）。
 
 ## 能力矩阵
@@ -147,7 +150,26 @@
 | session-persistence | ✅ | 见核心簇① |
 | state-store | ✅ | 见核心簇④ |
 | watchdog | ✅+⚠️ | src `watchdog.rs`/`upgrade.rs` 内联测试、`upgrade_dev_test`；监督循环的进程级旅程 ⚠️（非阻塞）|
-| webui | ✅ | sebas-webui 全套端点测试；E: detached 双进程启动/健康/重连（`core_flow_e2e_test`）|
+| webui | ✅ | sebas-webui 全套端点测试；E: detached 双进程启动/健康/重连（`core_flow_e2e_test`）；浏览器级 UI 旅程 ✅（`webui-browser-e2e`，见下）|
+
+### webui-browser-e2e（非核心：浏览器级 UI 旅程，Playwright）
+
+> 入口 `invoke webui-e2e`（`tests/webui-e2e/`，独立 pnpm 包）；后端为一次性沙箱
+> （`sebas core --router --debug --webui` + fake-claude 桩），chromium headless。
+
+| 旅程 | spec 文件 | 对应 requirement 场景 |
+|---|---|---|
+| 首屏结构与 reachability 如实显示 | `first-paint.spec.ts` | webui-browser-e2e「首屏与 reachability」 |
+| 会话回合往返 + 重载恢复 | `session-roundtrip.spec.ts` | 「首回合往返」「重载恢复」 |
+| 流式分批渲染（无固定 sleep） | `streaming.spec.ts` | 「流式分批渲染」 |
+| 审批卡片 deny / allow-once / allow-session | `permission.spec.ts` | 「拒绝路径」「单次允许路径」「会话级允许」 |
+| 非终态拒绝与崩溃的诚实呈现 | `errors.spec.ts` | 「错误呈现」 |
+| 项目经 folder-picker 增删 | `projects.spec.ts` | 「项目增删」 |
+| close / archive / 深链 / 退役路径 / 模型诚实缺省 | `session-mgmt.spec.ts` | 「close 与 archive」「深链与退役路径」「模型面诚实缺省」 |
+| 鉴权闭环（错误凭据/登录/登出/深链重定向） | `auth.spec.ts`（`playwright.auth.config.ts`） | 「登录闭环」 |
+
+原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
+浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
 
 ## 豁免清单（cause + 替代验证）
 
@@ -155,7 +177,7 @@
 |---|---|---|
 | 飞书真实 WS/HTTP 传输 | 需真实 app 凭据，沙箱不可得 | 进程内注入级测试（router 派发/出站事件即生产意图）|
 | 飞书端卡片渲染 | 同上 | 卡片 JSON 生成单测（`card_stream_e2e_test`）|
-| 浏览器级 workbench UI 渲染 | 簇 C 另行立项 | 组件级 vitest + HTTP 面旅程 |
+| 浏览器级 workbench UI 渲染 | ~~簇 C 另行立项~~ 已由 webui-browser-e2e 落地（`invoke webui-e2e`）| `tests/webui-e2e/` 旅程套件（Playwright + fake-claude 沙箱）|
 | opencode-agent 真实代理 | 需真实 opencode CLI | AcpDriver 抽象层测试 |
 | agent-bench 真实模型跑分 | 需真实凭据 | bench 断言逻辑单测 |
 
