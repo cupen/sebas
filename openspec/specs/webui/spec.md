@@ -24,8 +24,10 @@ optional `prompt` field), `GET
 `GET /api/router`, `GET /api/about`, the project APIs `GET /api/projects` and
 `POST /api/projects` (register), `POST /api/projects/reorder`, `POST
 /api/projects/{path}/remove`, `GET /api/projects/{path}/branch`, `GET
-/api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped
-to a server-configured work root), `POST
+/api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to
+the server's work directory — the configured work dir of the default agent
+kind, falling back to the WebUI process working directory; an explicit `root`
+query parameter overrides the default), `POST
 /api/sessions/{key}/archive` (archive a session), `POST
 /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive`
 (list archived sessions with expiry info), and `GET /ws`
@@ -44,6 +46,12 @@ browser assets the UI needs to render — styles, fonts, Web Awesome, markdown
 rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI
 SHALL NOT depend on an external CDN at render time. Navigation SHALL only link
 to routes this surface serves.
+
+`GET /api/fs/browse-dirs` SHALL honour a path round-trip contract: the `path`
+echoed in a listing response SHALL be accepted verbatim as the `path` of a
+subsequent request for that same directory, and request paths that mix `/` and
+`\` separators SHALL resolve to the same directory. The echoed path SHALL NOT
+carry a Windows verbatim (`\\?\`) prefix.
 
 #### Scenario: dashboard route
 
@@ -89,10 +97,25 @@ to routes this surface serves.
 - **THEN** each resolves to a route served by this surface, including SPA
   client routes resolved through the fallback
 
+#### Scenario: browse-dirs defaults to the server work directory
+
+- **WHEN** `GET /api/fs/browse-dirs` is called with no `root` parameter
+- **THEN** the listing is rooted at the server's configured work directory
+  (or the process working directory when none is configured), and the
+  response `path` echoes that directory
+
+#### Scenario: browse-dirs path round-trips on expand
+
+- **WHEN** the `path` echoed by a directory listing is sent back unchanged as
+  the `path` of a request for one of its subdirectories (client-side join of
+  the echoed parent and a child name)
+- **THEN** the response is 200 with that subdirectory's entries, including on
+  Windows where canonicalised paths would otherwise carry a `\\?\` prefix
+
 #### Scenario: directory browser rejects parent escape
 
 - **WHEN** `GET /api/fs/browse-dirs?path=/etc&root=/home/user` is called
-- **AND** the path is canonicalised and found to navigate outside the operator's home directory
+- **AND** the path resolves outside the scoped root
 - **THEN** the response is 400 with an error message
 
 #### Scenario: archive endpoint exists
