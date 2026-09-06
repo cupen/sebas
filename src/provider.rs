@@ -318,12 +318,6 @@ pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) 
 /// 可用 `SEBAS_ROUTER_PROVIDER_OVERLAY` 覆盖（与 router 侧一致）。
 pub fn overlay_path() -> std::path::PathBuf {
     let raw = std::env::var("SEBAS_ROUTER_PROVIDER_OVERLAY")
-        .or_else(|_| {
-            std::env::var("SEBAS_GATEWAY_PROVIDER_OVERLAY").map(|v| {
-                tracing::warn!("env SEBAS_GATEWAY_PROVIDER_OVERLAY 已更名为 SEBAS_ROUTER_PROVIDER_OVERLAY（旧名本期仍生效）");
-                v
-            })
-        })
         .unwrap_or_else(|_| "~/.sebas/providers.json".into());
     std::path::PathBuf::from(crate::config::expand_tilde(&raw))
 }

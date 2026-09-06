@@ -22,8 +22,6 @@ pub enum Cmd {
     Record(RecordArgs),
     /// Run the LLM provider router (Anthropic/OpenAI dual-protocol
     /// transparent proxy). See openspec/specs/router-core/spec.md.
-    /// 旧名 `gateway` 保留为隐藏别名（rename-cli-surface）。
-    #[command(alias = "gateway")]
     Router(RouterArgs),
     /// Start the standalone WebUI dashboard server.
     /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
@@ -35,9 +33,7 @@ pub enum Cmd {
     #[command(name = "webui-passwd")]
     WebUiPasswd(WebUiPasswdArgs),
     /// Run the watchdog daemon: supervise core/webui/router children and
-    /// self-upgrade. 旧名 `watchdog` 保留为隐藏别名（已装 systemd unit 的
-    /// ExecStart 仍写 `watchdog --config`，升级后不重装也能启动）。
-    #[command(alias = "watchdog")]
+    /// self-upgrade.
     Run(RunArgs),
     /// Start the standalone IM service (Feishu bot host). Spawned by the
     /// watchdog when `[watchdog.im] enabled = true`（extract-im-service）。

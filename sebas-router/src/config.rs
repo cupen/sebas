@@ -579,9 +579,8 @@ impl RouterConfig {
     /// toml → preset 填充（raw → resolved）→ env 覆盖（`SEBAS_ROUTER_LISTEN`）
     /// → validate → tilde 展开（`usage_file`）。
     pub fn parse(raw: &str) -> Result<Self> {
-        let raw = migrate_renamed_sections(raw);
         let file: RouterFile =
-            toml::from_str(&raw).map_err(|e| RouterError::Config(format!("toml parse: {e}")))?;
+            toml::from_str(raw).map_err(|e| RouterError::Config(format!("toml parse: {e}")))?;
 
         // provider 唯一来源：顶层 `[provider.*]`。
         let providers = file.provider;
@@ -1761,30 +1760,4 @@ m1 = ["anthropic"]
         let cfg = validate_provider_entry("deepseek", &good).expect("preset 候选有效");
         assert!(cfg.base_url_openai.is_some(), "preset 补全 URL");
     }
-}
-
-/// rename-cli-surface：旧 `[gateway]` 节自动迁移为 `[router]`（解析前重写，
-/// 命中时 warn）。旧 `[router]`（会话分发语义）改名为 `[dispatch]`，对本
-/// crate 是无关节——移走以免被误认成本 router 配置。
-fn migrate_renamed_sections(raw: &str) -> String {
-    let Ok(mut table) = raw.parse::<toml::Table>() else {
-        return raw.to_string();
-    };
-    if let Some(router) = table.remove("router") {
-        let looks_legacy_dispatch = router.as_table().is_some_and(|t| {
-            t.contains_key("state_file")
-                || t.contains_key("channel_buffer")
-                || t.contains_key("max_concurrent_sessions")
-        });
-        if looks_legacy_dispatch {
-            table.insert("dispatch".into(), router);
-        } else {
-            table.insert("router".into(), router);
-        }
-    }
-    if let Some(gateway) = table.remove("gateway") {
-        tracing::warn!("配置节 [gateway] 已更名为 [router]（已自动迁移）：请重命名配置节");
-        table.insert("router".into(), gateway);
-    }
-    table.to_string()
 }

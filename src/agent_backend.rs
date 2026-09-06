@@ -164,25 +164,9 @@ impl NativeAgentBackend {
         String,
     ) {
         let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) = {
-            // 旧名回退（rename-cli-surface 兼容窗口）：新名优先，旧名命中时告警。
-            let router_url = match std::env::var("SEBAS_AGENT_ROUTER_URL") {
-                Ok(v) => Some(v),
-                Err(_) => match std::env::var("SEBAS_AGENT_GATEWAY_URL") {
-                    Ok(v) => {
-                        tracing::warn!("env SEBAS_AGENT_GATEWAY_URL 已更名为 SEBAS_AGENT_ROUTER_URL（旧名本期仍生效）");
-                        Some(v)
-                    }
-                    Err(_) => None,
-                },
-            };
+            let router_url = std::env::var("SEBAS_AGENT_ROUTER_URL").ok();
             if let Some(url) = router_url {
                 let auth = std::env::var("SEBAS_AGENT_ROUTER_AUTH")
-                    .or_else(|_| {
-                        std::env::var("SEBAS_AGENT_GATEWAY_AUTH").map(|v| {
-                            tracing::warn!("env SEBAS_AGENT_GATEWAY_AUTH 已更名为 SEBAS_AGENT_ROUTER_AUTH（旧名本期仍生效）");
-                            v
-                        })
-                    })
                     .unwrap_or_else(|_| "sk-gw-local-dev".into());
                 (
                     Some(Arc::new(AnthropicMessagesClient::router(url, auth))),
@@ -1004,7 +988,7 @@ mod tests {
             ));
         let native = NativeAgentBackend::with_manager_arc(
             Arc::new(manager()),
-            Some("native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_GATEWAY_URL)".into()),
+            Some("native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)".into()),
             vec!["claude-sonnet-4-5".into()],
             "claude-sonnet-4-5".into(),
         );

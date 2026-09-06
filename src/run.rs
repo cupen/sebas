@@ -478,7 +478,7 @@ mod router_info_tests {
 
     // fix-webui-detached-status 2.1：detached webui 与 in-process 共用同一
     // 装配。直接构造 RouterConfig，不走 env 敏感的 parse（并行测试会改
-    // SEBAS_GATEWAY_PROVIDER_OVERLAY，污染 parse）。
+    // SEBAS_ROUTER_PROVIDER_OVERLAY，污染 parse）。
     fn gw_config() -> RouterConfig {
         RouterConfig {
             listen: "127.0.0.1:50770".into(),

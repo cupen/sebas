@@ -27,8 +27,6 @@ pub enum ProviderMode {
     #[default]
     Off,
     Direct { provider: String },
-    /// 改名前的持久化值是 `"gateway"`（rename-cli-surface）：alias 兼容读旧值。
-    #[serde(alias = "gateway")]
     Router,
 }
 

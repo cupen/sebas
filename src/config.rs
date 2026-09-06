@@ -497,45 +497,6 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
     }
 }
 
-/// rename-cli-surface：改名前的配置节名迁移（解析前重写 TOML 文本）。
-/// - `[router]` → `[router]`（模型路由；无歧义）
-/// - `[router]` → `[dispatch]`（会话分发）：`[router]` 既是旧节名又是新节名，
-///   无法凭名字区分——按内容特征判定：含 dispatch 专属键（state_file /
-///   channel_buffer / max_concurrent_sessions）视为旧节迁移，否则视为新节保留。
-/// 命中迁移时 warn 一行提示（不报错，旧配置照常启动）。
-fn migrate_renamed_sections(raw: &str) -> String {
-    let Ok(mut table) = raw.parse::<toml::Table>() else {
-        return raw.to_string();
-    };
-    // 先让位（旧 [router]=会话分发 → [dispatch]）再入位（旧 [gateway]=模型路由
-    // → [router]），顺序不可换。
-    if let Some(router) = table.remove("router") {
-        let looks_legacy_dispatch = router.as_table().is_some_and(|t| {
-            t.contains_key("state_file")
-                || t.contains_key("channel_buffer")
-                || t.contains_key("max_concurrent_sessions")
-        });
-        if looks_legacy_dispatch {
-            eprintln!("warn: 配置节 [router] 已更名为 [dispatch]（已自动迁移）：请重命名配置节");
-            table.insert("dispatch".into(), router);
-        } else {
-            table.insert("router".into(), router);
-        }
-    }
-    if let Some(gateway) = table.remove("gateway") {
-        eprintln!("warn: 配置节 [gateway] 已更名为 [router]（已自动迁移）：请重命名配置节");
-        table.insert("router".into(), gateway);
-    }
-    // [watchdog.gateway] → [watchdog.router]（受管 router 子进程开关）。
-    if let Some(watchdog) = table.get_mut("watchdog").and_then(|v| v.as_table_mut()) {
-        if let Some(gw) = watchdog.remove("gateway") {
-            eprintln!("warn: 配置节 [watchdog.gateway] 已更名为 [watchdog.router]（已自动迁移）：请重命名配置节");
-            watchdog.insert("router".into(), gw);
-        }
-    }
-    table.to_string()
-}
-
 fn default_github_repo() -> String {
     "cupen/sebas".into()
 }
@@ -575,9 +536,8 @@ impl Config {
     /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
         warn_deprecated_watchdog_keys(s);
-        let s = migrate_renamed_sections(s);
         let mut cfg: Config =
-            toml::from_str(&s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
+            toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
         cfg.acp.migrate_legacy_claude();
         cfg.apply_env_overrides();
         cfg.validate()?;
