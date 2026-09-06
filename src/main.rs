@@ -9,6 +9,12 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // reqwest 0.12 链路启用 rustls/aws-lc-rs，openlark(reqwest 0.13) 链路启用
+    // rustls/ring；两个 feature 同时存在时 rustls 拒绝自动选择 provider，
+    // TLS 初始化即 panic（im 连飞书 WS 必炸）。所有子进程都从本二进制派生，
+    // 在入口统一显式选定即可全覆盖。
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Service(args) => {
