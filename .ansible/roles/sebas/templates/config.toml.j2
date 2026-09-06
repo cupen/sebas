@@ -15,6 +15,10 @@
 [watchdog.storage]
 data_dir = "{{ sebas_data_dir }}"
 
+[watchdog.core]
+enabled = {{ sebas_core_enabled | to_json }}
+channel_path = "{{ sebas_core_channel_path }}"
+
 [watchdog.webui]
 host = "{{ sebas_webui_host }}"
 port = {{ sebas_webui_port }}

@@ -1,0 +1,11 @@
+{# systemd drop-in：不改动 service --install 生成的 unit 本体。
+   - SEBAS_CORE_SECRET：watchdog 读它后拉起 core session channel 并注入
+     core/webui/im 子进程；留空则不注入（channel 不武装）。
+   - ReadWritePaths：unit 的 ProtectHome=read-only 会把整个 /home 挂成
+     只读，而 dispatch state 与 channel socket 都在部署用户 home 子树
+     （sebas_data_dir）内，须显式放行可写。 #}
+[Service]
+{% if sebas_core_secret | length > 0 %}
+Environment="SEBAS_CORE_SECRET={{ sebas_core_secret }}"
+{% endif %}
+ReadWritePaths={{ sebas_deploy_home }}

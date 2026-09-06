@@ -6,6 +6,10 @@
 # is_unit_active branch), so we guard this handler with the same condition
 # the install task records — one config change → one restart, never two.
 
+- name: daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
 - name: restart sebas
   ansible.builtin.systemd:
     name: sebas

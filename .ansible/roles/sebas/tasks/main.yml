@@ -179,6 +179,28 @@
     mode: "0640"
   notify: restart sebas
 
+# ---------------------------------------------------- systemd drop-in
+
+# `service --install` 生成的 unit 自带 ProtectHome=read-only：core 的
+# dispatch state 与 channel socket 都在 home 子树内，须 drop-in 显式放行；
+# SEBAS_CORE_SECRET 也经此注入 watchdog 进程。改动走 daemon-reload。
+- name: Ensure systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/sebas.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render systemd drop-in (core secret + ReadWritePaths)
+  ansible.builtin.template:
+    src: systemd-override.conf.j2
+    dest: /etc/systemd/system/sebas.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: daemon-reload
+
 # --------------------------------------------------------------- install
 
 - name: Install sebas as a systemd service

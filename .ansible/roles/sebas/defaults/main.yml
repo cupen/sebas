@@ -78,3 +78,18 @@ sebas_health_delay: 3
 # unit's `ProtectHome=read-only` doesn't reject the parent's create/check
 # probe; the bare binary defaults to `~/.config/sebas/sessions.json`.
 sebas_dispatch_state_file: "{{ sebas_data_dir }}/dispatch-state.json"
+
+# --- core 子进程与 session channel -----------------------------------------
+
+# `sebas run` 下的 core 子进程（飞书 bot + ACP）开关。默认关：feishu 可选，
+# 需要 bot 时在此显式打开（等价 [watchdog.core] enabled = true）。
+sebas_core_enabled: false
+
+# core session channel 的共享密钥：watchdog 注入 core/webui 子进程
+# （SEBAS_CORE_SECRET），socket 之外叠加同 uid 校验。留空 = 不武装
+# channel（webui↔core socket 不会拉起）。生产请用 vault，不要明文。
+sebas_core_secret: ""
+
+# core session channel 的 Unix socket 路径（须在 sebas_data_dir 内，
+# 配合下方 drop-in 的 ReadWritePaths 才可写）。
+sebas_core_channel_path: "{{ sebas_data_dir }}/core-channel.sock"
