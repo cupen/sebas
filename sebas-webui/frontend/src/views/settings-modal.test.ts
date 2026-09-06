@@ -37,6 +37,8 @@ const apiMocks = vi.hoisted(() => ({
   routerProviderUpdate: vi.fn(),
   routerProviderDelete: vi.fn(),
   routerProviderProbe: vi.fn(),
+  agentDefaults: vi.fn(),
+  setAgentDefaults: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -56,6 +58,8 @@ vi.mock('../api/client.js', () => ({
     routerProviderUpdate: apiMocks.routerProviderUpdate,
     routerProviderDelete: apiMocks.routerProviderDelete,
     routerProviderProbe: apiMocks.routerProviderProbe,
+    agentDefaults: apiMocks.agentDefaults,
+    setAgentDefaults: apiMocks.setAgentDefaults,
   },
 }))
 
@@ -133,6 +137,7 @@ beforeEach(() => {
       },
     ],
   })
+  apiMocks.agentDefaults.mockResolvedValue({ provider: null, model: null })
   apiMocks.routerPresets.mockResolvedValue({
     presets: [
       {
@@ -345,4 +350,19 @@ describe('sebas-settings-modal closing', () => {
     expect(el.shadowRoot!.querySelector('.panel')).toBeNull()
     el.remove()
   })
+})
+
+
+it('shows the current agent default and badges the matching provider row', async () => {
+  apiMocks.agentDefaults.mockResolvedValue({ provider: 'alpha', model: 'm1' })
+  const el = await mount()
+  await new Promise((r) => setTimeout(r, 0))
+  await el.updateComplete
+
+  const status = el.shadowRoot?.querySelector('.provider-toolbar [role="status"]')
+  expect(status?.textContent ?? '').toContain('default: alpha / m1')
+  const badge = el.shadowRoot?.querySelector('.provider-badge.default')
+  expect(badge).toBeTruthy()
+  const row = badge?.closest('.provider-row')
+  expect(row?.textContent ?? '').toContain('alpha')
 })

@@ -27,6 +27,7 @@ import {
   type RouterProviderAdmin,
   type ProviderPreset,
   type ProviderPayload,
+  type AgentDefaults,
   ApiError,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
@@ -125,6 +126,10 @@ export class SebasSettingsModal extends LitElement {
     protocol: string
   } | null = null
   @state() private deleteTarget: string | null = null
+  /** 当前默认 provider/model（add-agent-defaults-catalog；null = 未设置）。 */
+  @state() private defaults: AgentDefaults | null = null
+  /** 设默认对话框的草稿：目标 provider + 可选 model（null = provider 默认）。 */
+  @state() private defaultDraft: { provider: string; model: string | null } | null = null
   @state() private busy = false
   @state() private actionError = ''
   @state() private probeResult: { name: string; models: string[]; note: string } | null = null
@@ -324,6 +329,11 @@ export class SebasSettingsModal extends LitElement {
       font-weight: 600;
       border: 1px solid var(--sebas-border);
       color: var(--sebas-text-dim);
+    }
+    .provider-badge.default {
+      background: color-mix(in srgb, var(--sebas-accent) 18%, transparent);
+      color: var(--sebas-accent);
+      border-color: var(--sebas-accent-border);
     }
     .provider-badge.preset {
       background: var(--sebas-accent-soft);
@@ -703,6 +713,14 @@ export class SebasSettingsModal extends LitElement {
         this.adminError = e instanceof ApiError ? e.message : String(e)
         this.adminProviders = []
       })
+    api
+      .agentDefaults()
+      .then((d) => {
+        this.defaults = d
+      })
+      .catch(() => {
+        this.defaults = null
+      })
     if (this.presets === null) {
       api
         .routerPresets()
@@ -955,6 +973,21 @@ export class SebasSettingsModal extends LitElement {
         <wa-button appearance="outlined" @click=${() => this.openCreateCustom()}>
           ＋ New (custom)
         </wa-button>
+        <span class="label" role="status">
+          ${this.defaults?.provider
+            ? `default: ${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}`
+            : 'no default set'}
+        </span>
+        ${this.defaults?.provider
+          ? html`<button
+              class="row-action"
+              title="Clear the default for new sessions"
+              ?disabled=${this.busy}
+              @click=${() => void this.clearDefault()}
+            >
+              ✕
+            </button>`
+          : nothing}
         ${this.adminError
           ? html`<span class="toolbar-error" role="alert">${this.adminError}</span>`
           : nothing}
@@ -1000,8 +1033,19 @@ export class SebasSettingsModal extends LitElement {
         <span class="provider-key ${p.api_key_configured ? 'on' : 'off'}">
           ${p.api_key_configured ? 'key configured' : 'no key'}
         </span>
+        ${this.defaults?.provider === p.name
+          ? html`<span class="provider-badge default" role="status">default</span>`
+          : nothing}
         <span class="provider-row-url" title=${url ?? ''}>${url ?? 'no base url'}</span>
         <span class="provider-row-actions">
+          <button
+            class="row-action"
+            title="Set as default for new sessions"
+            ?disabled=${this.busy}
+            @click=${() => this.openSetDefault(p)}
+          >
+            ★
+          </button>
           ${p.base_url_openai_chat || p.base_url_openai_responses || p.preset
             ? html`
                 <button
@@ -1231,7 +1275,94 @@ export class SebasSettingsModal extends LitElement {
           Delete
         </wa-button>
       </wa-dialog>
+
+      <wa-dialog
+        label="Set default for new sessions"
+        ?open=${this.defaultDraft !== null}
+        @wa-hide=${() => (this.defaultDraft = null)}
+      >
+        ${this.defaultDraft === null
+          ? nothing
+          : html`
+              <p class="dialog-text">
+                New sessions will start with provider
+                <strong>${this.defaultDraft.provider}</strong>
+                ${this.defaultDraft.model ? ` and model <strong>${this.defaultDraft.model}</strong>` : ''}.
+              </p>
+              ${this.modelChoicesFor(this.defaultDraft.provider).length > 0
+                ? html`
+                    <wa-select
+                      label="Default model"
+                      value=${this.defaultDraft.model ?? ''}
+                      @change=${(e: Event) =>
+                        (this.defaultDraft = {
+                          ...this.defaultDraft!,
+                          model: (e.target as HTMLSelectElement).value || null,
+                        })}
+                    >
+                      <wa-option value="">(provider default)</wa-option>
+                      ${this.modelChoicesFor(this.defaultDraft.provider).map(
+                        (m) => html`<wa-option value=${m}>${m}</wa-option>`,
+                      )}
+                    </wa-select>
+                  `
+                : html`<p class="dialog-text">This provider has no model catalog yet.</p>`}
+            `}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.defaultDraft = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="brand"
+          ?disabled=${this.busy || this.defaultDraft === null}
+          @click=${() => void this.confirmSetDefault()}
+        >
+          ${this.busy ? 'Saving…' : 'Set default'}
+        </wa-button>
+      </wa-dialog>
     `
+  }
+
+  /** 设默认对话框的模型选项：目标 provider 的 catalog（admin 列表）。 */
+  private modelChoicesFor(provider: string): string[] {
+    return this.adminProviders.find((p) => p.name === provider)?.models ?? []
+  }
+
+  private openSetDefault(p: RouterProviderAdmin): void {
+    this.actionError = ''
+    this.defaultDraft = { provider: p.name, model: null }
+  }
+
+  private async clearDefault(): Promise<void> {
+    this.busy = true
+    this.actionError = ''
+    try {
+      this.defaults = await api.setAgentDefaults({ provider: null, model: null })
+      window.dispatchEvent(new CustomEvent('sebas:refetch', { bubbles: true, composed: true }))
+    } catch (err) {
+      this.actionError = err instanceof ApiError ? err.message : String(err)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  private async confirmSetDefault(): Promise<void> {
+    if (!this.defaultDraft || this.busy) return
+    this.busy = true
+    this.actionError = ''
+    try {
+      this.defaults = await api.setAgentDefaults({
+        provider: this.defaultDraft.provider,
+        model: this.defaultDraft.model,
+      })
+      this.defaultDraft = null
+      // composer 等消费方即时重取模型数据源（与 app-shell 的 refetch 约定一致）。
+      window.dispatchEvent(new CustomEvent('sebas:refetch', { bubbles: true, composed: true }))
+    } catch (err) {
+      this.actionError = err instanceof ApiError ? err.message : String(err)
+    } finally {
+      this.busy = false
+    }
   }
 
   private editorLabel(): string {

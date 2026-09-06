@@ -529,3 +529,90 @@ api_key = "sk-alpha"
     assert_eq!(alpha["requests"], 3, "alpha 聚合: {alpha}");
     assert!(body["uptime_secs"].is_u64(), "uptime: {body}");
 }
+
+// -------------------- agent defaults（add-agent-defaults-catalog）--------------------
+
+/// PUT /admin/defaults 的小助手（reqwest 无 json feature，手动序列化）。
+/// provider 为空串 = 清除默认。
+async fn put_defaults(
+    gw: &support::TestRouter,
+    provider: &str,
+    model: Option<&str>,
+) -> reqwest::Response {
+    let body = serde_json::json!({
+        "provider": if provider.is_empty() { Value::Null } else { Value::String(provider.into()) },
+        "model": model.map(Value::from).unwrap_or(Value::Null),
+    });
+    client()
+        .put(format!("http://{}/admin/defaults", gw.addr))
+        .header("Authorization", "Bearer sec-test-123")
+        .header("content-type", "application/json")
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// defaults 闭环：初始未设置 → 设置（校验 provider/model）→ 回读 → 清除。
+/// anthropic 是 CFG_TMPL 里的 preset 派生 provider，catalog 跟随代码表。
+#[tokio::test]
+async fn agent_defaults_round_trip() {
+    let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
+    let url = |p: &str| format!("http://{}/admin/defaults", gw.addr);
+    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
+
+    // 初始未设置。
+    let resp = auth(client().get(url(""))).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert!(body["provider"].is_null() && body["model"].is_null(), "{body}");
+
+    // 设置合法组合 → 200 回显，回读一致。
+    let resp = put_defaults(&gw, "anthropic", Some("claude-opus-4-20250514")).await;
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await.unwrap());
+    let resp = auth(client().get(url(""))).send().await.unwrap();
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["provider"], "anthropic");
+    assert_eq!(body["model"], "claude-opus-4-20250514");
+
+    // 未知 provider → 400；不在 catalog 的 model → 400（均不落盘）。
+    let resp = put_defaults(&gw, "ghost", None).await;
+    assert_eq!(resp.status(), 400);
+    let resp = put_defaults(&gw, "anthropic", Some("gpt-4o")).await;
+    assert_eq!(resp.status(), 400);
+    let resp = auth(client().get(url(""))).send().await.unwrap();
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["provider"], "anthropic", "失败写不得改动既有默认");
+
+    // 清除（provider 缺省 = 清除）→ 双 null，回读一致。
+    let resp = put_defaults(&gw, "", None).await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert!(body["provider"].is_null());
+}
+
+/// 删除默认 provider 时联动清除 defaults（不残留悬空默认）。
+#[tokio::test]
+async fn agent_defaults_cleared_on_provider_delete() {
+    let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
+    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
+
+    let resp = put_defaults(&gw, "anthropic", Some("claude-opus-4-20250514")).await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = auth(client().delete(format!("http://{}/admin/providers/anthropic", gw.addr)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = auth(client().get(format!("http://{}/admin/defaults", gw.addr)))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert!(
+        body["provider"].is_null(),
+        "删除默认 provider 后 defaults 必须被清除: {body}"
+    );
+}

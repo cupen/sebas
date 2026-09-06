@@ -135,6 +135,11 @@ impl RouterClient {
         self.get("/admin/stats").await
     }
 
+    /// 默认 provider/model（add-agent-defaults-catalog）；未设置时双 null。
+    pub async fn agent_defaults(&self) -> Result<Value, RouterClientError> {
+        self.get("/admin/defaults").await
+    }
+
     // ---- 变更面（POST/PUT/DELETE，全部经 admin API）----
 
     pub async fn create_provider(&self, body: &Value) -> Result<Value, RouterClientError> {
@@ -181,6 +186,11 @@ impl RouterClient {
 
     pub async fn reload(&self) -> Result<Value, RouterClientError> {
         self.post_json("/admin/reload", None).await
+    }
+
+    pub async fn set_agent_defaults(&self, body: &Value) -> Result<Value, RouterClientError> {
+        self.request_json(reqwest::Method::PUT, "/admin/defaults", Some(body))
+            .await
     }
 
     async fn request_json(

@@ -38,6 +38,7 @@ pub fn build_admin_router(state: AppState) -> Router {
         )
         .route("/admin/providers/{name}/probe", post(probe_provider))
         .route("/admin/presets", get(list_presets))
+        .route("/admin/defaults", get(get_defaults).put(put_defaults))
         .route(
             "/admin/model-aliases",
             get(list_aliases).post(create_alias),
@@ -281,6 +282,125 @@ async fn list_presets() -> Response {
     Json(json!({ "presets": out })).into_response()
 }
 
+// -------------------- agent defaults（add-agent-defaults-catalog）--------------------
+
+/// defaults.json 路径：与 providers.json 同目录同域、独立文件——defaults 不
+/// 是 provider，不混进 overlay 的 providers 段。core channel 不参与（core
+/// 不消费 defaults），写者只有本模块与 WebUI BFF 的透明代理。
+fn defaults_path(state: &AppState) -> PathBuf {
+    let mut p = overlay_path(state);
+    p.set_file_name("defaults.json");
+    p
+}
+
+/// 读 defaults 文件：`{"provider": "...", "model": "..." | null}`。文件缺失
+/// 或损坏 → None（未设置；损坏不报错——defaults 丢失的降级是无默认，符合
+/// 「如实回退内置默认」语义，与 providers.json 的保旧不同）。
+fn read_defaults(path: &std::path::Path) -> Option<(String, Option<String>)> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    let provider = v.get("provider")?.as_str()?.to_string();
+    if provider.is_empty() {
+        return None;
+    }
+    let model = v
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .map(String::from);
+    Some((provider, model))
+}
+
+/// catalog 校验：model 须属于该 provider 的模型目录——preset 派生查代码表，
+/// 自定义查 entry 的 models；目录为空（无法校验，如 probe 前的自定义条目）→
+/// 放行。
+fn model_in_catalog(p: &config::ProviderConfig, model: &str) -> bool {
+    let catalog: Vec<String> = match &p.preset {
+        Some(preset) => config::presets()
+            .iter()
+            .find(|pp| pp.name == *preset)
+            .map(|pp| pp.models.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default(),
+        None => p.models.clone(),
+    };
+    catalog.is_empty() || catalog.iter().any(|m| m == model)
+}
+
+/// GET /admin/defaults：当前默认 provider/model；未设置 → 双 null。
+async fn get_defaults(State(state): State<AppState>) -> Response {
+    match read_defaults(&defaults_path(&state)) {
+        Some((provider, model)) => {
+            Json(json!({ "provider": provider, "model": model })).into_response()
+        }
+        None => Json(json!({ "provider": Value::Null, "model": Value::Null })).into_response(),
+    }
+}
+
+/// PUT /admin/defaults：设置或清除默认。`provider` 缺省/为 null = 清除
+/// （幂等，未设置也成功）；设置时 provider 须存在，model 须属于其目录。
+/// 校验先行：400 不碰文件。
+async fn put_defaults(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let provider = body
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let path = defaults_path(&state);
+    let Some(provider) = provider else {
+        // 清除默认：移除文件即回到「未设置」。
+        let _ = std::fs::remove_file(&path);
+        return Json(json!({ "provider": Value::Null, "model": Value::Null })).into_response();
+    };
+    let core = state.core();
+    let Some(p) = core.cfg.providers.get(provider) else {
+        return err_400(&format!("provider '{provider}' 不存在"));
+    };
+    if let Some(model) = model
+        && !model_in_catalog(p, model)
+    {
+        return err_400(&format!(
+            "model '{model}' 不属于 provider '{provider}' 的模型目录"
+        ));
+    }
+    let doc = json!({ "provider": provider, "model": model });
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return err_500(&format!("创建目录失败: {e}"));
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = match serde_json::to_string_pretty(&doc) {
+        Ok(b) => b,
+        Err(e) => return err_500(&format!("序列化失败: {e}")),
+    };
+    if let Err(e) = std::fs::write(&tmp, body) {
+        return err_500(&format!("写临时文件失败: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        return err_500(&format!("rename 失败: {e}"));
+    }
+    Json(doc).into_response()
+}
+
+/// provider 删除后联动：指向它的 defaults 一并清除（否则 composer 会拿到
+/// 一个已不存在 provider 的目录）。best-effort：清除失败不阻断删除本身。
+fn clear_defaults_for(state: &AppState, provider: &str) {
+    let path = defaults_path(state);
+    let matches = read_defaults(&path).is_some_and(|(p, _)| p == provider);
+    if matches {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// POST /admin/providers：创建。重名 409；无效 400（不碰文件）。
 async fn create_provider(
     State(state): State<AppState>,
@@ -477,6 +597,7 @@ async fn delete_provider(
             if let Err(e) = reload_after_write(&state).await {
                 return err_500(&e);
             }
+            clear_defaults_for(&state, &name);
             return (StatusCode::OK, Json(json!({"deleted": name}))).into_response();
         }
         Ok(false) => false,
@@ -503,7 +624,10 @@ async fn delete_provider(
         return err_500(&e);
     }
     match reload_after_write(&state).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"deleted": name}))).into_response(),
+        Ok(()) => {
+            clear_defaults_for(&state, &name);
+            (StatusCode::OK, Json(json!({"deleted": name}))).into_response()
+        }
         Err(e) => err_500(&e),
     }
 }

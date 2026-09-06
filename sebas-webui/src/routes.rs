@@ -276,6 +276,32 @@ pub async fn router_api_alias_delete(
     }
 }
 
+/// GET /api/agent-defaults：默认 provider/model 只读代理（composer 选择器
+/// 的 pre-session catalog 数据源，add-agent-defaults-catalog）。
+pub async fn agent_defaults_get(State(state): State<WebUiState>) -> axum::response::Response {
+    let client = router_client_of(&state);
+    match client.agent_defaults().await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
+    }
+}
+
+/// PUT /api/agent-defaults：设置默认 provider/model。router mutation 姿态
+/// 与 provider CRUD 一致：无 listen/无控制秘密 → 503。
+pub async fn agent_defaults_put(
+    State(state): State<WebUiState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let client = router_client_of(&state);
+    if !mutation_available(&client, &state) {
+        return err_503_no_secret();
+    }
+    match client.set_agent_defaults(&body).await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
+    }
+}
+
 pub async fn router_api_reload(State(state): State<WebUiState>) -> axum::response::Response {
     let client = router_client_of(&state);
     if !mutation_available(&client, &state) {

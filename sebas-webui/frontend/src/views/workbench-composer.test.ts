@@ -95,6 +95,8 @@ vi.mock('../api/client.js', () => ({
     agentKinds: vi.fn(),
     sendMessage: vi.fn(),
     setSessionModel: vi.fn(),
+    agentDefaults: vi.fn(),
+    routerProviders: vi.fn(),
   },
 }))
 
@@ -669,4 +671,83 @@ describe('sebas-workbench-composer', () => {
       (el as unknown as { reachabilityTimer: number | undefined }).reachabilityTimer,
     ).toBeUndefined()
   })
+})
+
+
+// ── add-agent-defaults-catalog：创建模式选择器的 catalog 数据源 ───────────
+
+it('creation mode offers the catalog of the defaults provider before any session', async () => {
+  ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+  ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
+    recent_sessions: [],
+    active_count: 0,
+    dormant_count: 0,
+    spawning_count: 0,
+    total_sessions: 0,
+    active_session_key: null,
+  } as never)
+  ;(api.agentDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    provider: 'glm',
+    model: 'm2',
+  })
+  ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    providers: [
+      { name: 'glm', models: ['m1', 'm2'], api_key_configured: true },
+    ],
+  })
+
+  const el = await mount({
+    sessionKey: 'web%00web-1',
+    agentKind: 'claude',
+    sessionModels: ['sonnet', 'haiku'],
+    currentModel: 'sonnet',
+  })
+  const chip = () => el.shadowRoot?.querySelector('.mode-chip') as HTMLElement
+  chip().click()
+  await el.updateComplete
+  await new Promise((r) => setTimeout(r, 0))
+  await el.updateComplete
+
+  const sel = el.shadowRoot?.querySelector(
+    'wa-select[aria-label="Model"]',
+  ) as unknown as HTMLSelectElement & { value: string }
+  expect(sel).toBeTruthy()
+  const options = [...el.shadowRoot!.querySelectorAll('wa-option')].map((o) =>
+    o.getAttribute('value'),
+  )
+  expect(options).toContain('m1')
+  expect(options).toContain('m2')
+  // defaults.model 命中 catalog 时预选它。
+  expect(sel.value).toBe('m2')
+})
+
+it('creation mode states catalog unavailability honestly when nothing is available', async () => {
+  ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+  ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
+    recent_sessions: [],
+    active_count: 0,
+    dormant_count: 0,
+    spawning_count: 0,
+    total_sessions: 0,
+    active_session_key: null,
+  } as never)
+  ;(api.agentDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    provider: null,
+    model: null,
+  })
+
+  const el = await mount({
+    sessionKey: 'web%00web-1',
+    agentKind: 'claude',
+    sessionModels: ['sonnet', 'haiku'],
+    currentModel: 'sonnet',
+  })
+  const chip = () => el.shadowRoot?.querySelector('.mode-chip') as HTMLElement
+  chip().click()
+  await el.updateComplete
+  await new Promise((r) => setTimeout(r, 0))
+  await el.updateComplete
+
+  const hint = el.shadowRoot?.querySelector('[role="status"]')
+  expect(hint?.textContent ?? '').toContain('no model catalog')
 })

@@ -175,6 +175,10 @@ fn build_router_full(
         .route("/router/api/providers", get(routes::router_api_providers_list))
         .route("/api/about", get(api::about))
         .route("/api/agent-kinds", get(api::agent_kinds))
+        .route(
+            "/api/agent-defaults",
+            get(routes::agent_defaults_get),
+        )
         .route("/api/auth/me", get(api::auth_me))
         .route("/api/auth/login", post(api::auth_login))
         .route("/api/auth/logout", post(api::auth_logout))
@@ -218,6 +222,10 @@ fn build_router_full(
                 .delete(routes::router_api_alias_delete),
         )
         .route("/router/api/reload", post(routes::router_api_reload))
+        .route(
+            "/api/agent-defaults",
+            axum::routing::put(routes::agent_defaults_put),
+        )
         .layer(axum::middleware::from_fn(routes::router_mutation_guard))
         .with_state(state.clone());
 
@@ -459,12 +467,132 @@ mod health_dup_tests {
 }
 
 #[cfg(test)]
+mod agent_defaults_tests {
+    //! add-agent-defaults-catalog 2.1 路由层验收：GET/PUT /api/agent-defaults
+    //! 经 BFF 代理 router admin（bearer 注入），无控制秘密时 PUT 503。
+    use super::*;
+    use crate::models::RouterInfo;
+    use crate::session_backend::FakeBackend;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use tower::ServiceExt;
+
+    /// 进程 env 串行锁：RouterClient 构造期读 SEBAS_CONTROL_SECRET。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    /// mock router admin：GET 回固定默认，PUT 回显载荷与 bearer。
+    async fn mock_admin() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new()
+            .route(
+                "/admin/defaults",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({"provider": "glm", "model": "m2"}))
+                })
+                .put(|h: axum::http::HeaderMap, body: String| async move {
+                    let auth = h
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("none")
+                        .to_string();
+                    let mut v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    v["auth"] = Value::String(auth);
+                    axum::Json(v)
+                }),
+            )
+            .with_state(());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("{addr}"), handle)
+    }
+
+    fn app_with_listen(listen: &str) -> Router {
+        build_router_with_auth(
+            Arc::new(FakeBackend::new()),
+            RouterInfo { listen: Some(listen.to_string()), ..RouterInfo::default() },
+            CardConfig::default(),
+            None,
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            Arc::new(AuthHandle::disabled()),
+        )
+    }
+
+    async fn req(app: Router, method: &str, uri: &str, body: Option<String>) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder
+            .body(Body::from(body.unwrap_or_default()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_and_put_proxied_with_bearer() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("SEBAS_CONTROL_SECRET", "sec- defaults-x"); }
+        let (addr, _h) = mock_admin().await;
+        let app = app_with_listen(&addr);
+
+        let (status, body) = req(app.clone(), "GET", "/api/agent-defaults", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["provider"], "glm");
+
+        let (status, body) = req(
+            app,
+            "PUT",
+            "/api/agent-defaults",
+            Some(r#"{"provider":"glm","model":"m2"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["provider"], "glm");
+        assert_eq!(body["auth"], "Bearer sec- defaults-x", "bearer 必须注入");
+        unsafe { std::env::remove_var("SEBAS_CONTROL_SECRET"); }
+    }
+
+    #[tokio::test]
+    async fn put_without_secret_is_503() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("SEBAS_CONTROL_SECRET"); }
+        let (addr, _h) = mock_admin().await;
+        let app = app_with_listen(&addr);
+        let (status, body) = req(
+            app,
+            "PUT",
+            "/api/agent-defaults",
+            Some(r#"{"provider":"glm"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+}
+
+#[cfg(test)]
 mod summary_bodies_tests {
     //! wire-webui-sebas-agent-e2e 3.1 路由层验收：`/api/summary` 把后端的
     //! 逐执行体可用性（execution_bodies）原样透传给 composer；后端不区分
     //! 执行体时该段为 null（前端降级为只看整体 reachability）。
     use super::*;
-    use crate::models::GatewayInfo;
     use crate::session_backend::{ExecutionBodyStatus, FakeBackend};
     use axum::extract::ConnectInfo;
     use http_body_util::BodyExt;
@@ -508,7 +636,7 @@ mod summary_bodies_tests {
                 cause: Some("no provider credentials".into()),
             },
         ]));
-        let app = build_router(Arc::new(backend), GatewayInfo::default(), CardConfig::default());
+        let app = build_router(Arc::new(backend), RouterInfo::default(), CardConfig::default());
 
         let (status, body) = get_summary(app).await;
         assert_eq!(status, StatusCode::OK);
@@ -528,7 +656,7 @@ mod summary_bodies_tests {
     async fn summary_reports_null_bodies_when_backend_does_not_distinguish() {
         let app = build_router(
             Arc::new(FakeBackend::new()),
-            GatewayInfo::default(),
+            RouterInfo::default(),
             CardConfig::default(),
         );
 

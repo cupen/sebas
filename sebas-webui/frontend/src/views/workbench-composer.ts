@@ -73,6 +73,9 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private model: string | null = null
   /** 模型下拉的数据源：最近一个暴露 available_models 的会话的模型列表。 */
   @state() private modelOptions: string[] = []
+  /** add-agent-defaults-catalog：创建模式下既无会话模型也无 backend catalog
+   * （defaults 指向的 provider 没有模型目录）——下拉位置显示显式不可用提示。 */
+  @state() private catalogUnavailable = false
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
   /**
@@ -245,11 +248,15 @@ export class SebasWorkbenchComposer extends LitElement {
     `,
   ]
 
+  private reloadModelsBound = (): void => void this.loadModelOptions()
+
   connectedCallback(): void {
     super.connectedCallback()
     void this.loadReachability()
     void this.loadKinds()
     void this.loadModelOptions()
+    // defaults/catalog 变更（管理页 set/clear）即时反映到选择器。
+    window.addEventListener('sebas:refetch', this.reloadModelsBound)
     // Reachability 只在挂载时求值一次会让断连横幅永不恢复（core 回来后
     // composer 仍被禁用）——周期性重查，横幅与禁用态随真实状态翻转。
     this.reachabilityTimer = window.setInterval(() => {
@@ -258,6 +265,7 @@ export class SebasWorkbenchComposer extends LitElement {
   }
 
   disconnectedCallback(): void {
+    window.removeEventListener('sebas:refetch', this.reloadModelsBound)
     super.disconnectedCallback()
     if (this.reachabilityTimer !== undefined) {
       window.clearInterval(this.reachabilityTimer)
@@ -269,6 +277,8 @@ export class SebasWorkbenchComposer extends LitElement {
     // 聚焦会话变了（切换/关闭/新建跳转）——显式的"新会话"请求随之作废，
     // 让 composer 回到与新聚焦会话匹配的跟随模式。
     if (changed.has('sessionKey')) this.createRequested = false
+    // 进入创建模式时重取模型数据源——defaults/catalog 可能刚在管理页设置过。
+    if (changed.has('createRequested') && this.createRequested) void this.loadModelOptions()
   }
 
   /**
@@ -278,6 +288,7 @@ export class SebasWorkbenchComposer extends LitElement {
    * （跟随模式不用这份借来的数据——它用聚焦会话自己的 `sessionModels`。）
    */
   private async loadModelOptions(): Promise<void> {
+    // 第一优先：会话级 available_models（既有语义，acp-model-selection）。
     try {
       const data = await api.sessions()
       const latest = data.recent_sessions
@@ -285,20 +296,41 @@ export class SebasWorkbenchComposer extends LitElement {
         .sort((a, b) => b.last_active_unix - a.last_active_unix)
         .find((r) => Array.isArray(r.available_models) && r.available_models.length > 0)
       if (latest && latest.available_models) {
+        this.catalogUnavailable = false
         this.modelOptions = latest.available_models
         // 预选会话当前模型（若列表里含它），否则选第一项。
         this.model =
           latest.current_model && this.modelOptions.includes(latest.current_model)
             ? latest.current_model
             : (this.modelOptions[0] ?? null)
-      } else {
-        this.modelOptions = []
-        this.model = null
+        return
       }
     } catch {
-      this.modelOptions = []
-      this.model = null
+      // sessions 不可达不代表 catalog 不可达——继续尝试 defaults。
     }
+    // 第二优先（add-agent-defaults-catalog）：defaults 指向 provider 的
+    // catalog——任何会话存在之前选择器就有可用模型。
+    try {
+      const defaults = await api.agentDefaults()
+      if (defaults.provider) {
+        const { providers } = await api.routerProviders()
+        const match = providers.find((p) => p.name === defaults.provider)
+        const catalog = Array.isArray(match?.models) ? (match as { models: string[] }).models : []
+        if (catalog.length > 0) {
+          this.modelOptions = catalog
+          this.model =
+            defaults.model && catalog.includes(defaults.model) ? defaults.model : catalog[0]
+          this.catalogUnavailable = false
+          return
+        }
+      }
+    } catch {
+      // router 不可达 → 落到不可用提示。
+    }
+    // 兜底：显式不可用（而非空列表/伪造选项）。
+    this.modelOptions = []
+    this.model = null
+    this.catalogUnavailable = true
   }
 
   private async loadKinds(): Promise<void> {
@@ -511,7 +543,14 @@ export class SebasWorkbenchComposer extends LitElement {
                 >
                   ${modelList.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
                 </wa-select>`
-              : nothing}
+              : !follow && this.catalogUnavailable
+                ? html`<span
+                    class="label placeholder"
+                    title="Set a default provider with models in Settings → Models"
+                    role="status"
+                    >no model catalog</span
+                  >`
+                : nothing}
             ${follow
               ? nothing
               : html`<wa-select

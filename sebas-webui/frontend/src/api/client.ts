@@ -84,6 +84,12 @@ export interface RouterProviderAdmin {
   models: string[]
 }
 
+/** /api/agent-defaults（新会话默认 provider/model；BFF 透传 router admin）。 */
+export interface AgentDefaults {
+  provider: string | null
+  model: string | null
+}
+
 /** /router/api/presets 的条目（内置 preset 表只读视图，跟随代码）。 */
 export interface ProviderPreset {
   name: string
@@ -450,6 +456,9 @@ export const api = {
     post<{ models: string[]; applied: boolean }>(
       `/router/api/providers/${encodeURIComponent(name)}/probe?apply=true`,
     ),
+  agentDefaults: () => get<AgentDefaults>('/api/agent-defaults'),
+  setAgentDefaults: (payload: { provider: string | null; model?: string | null }) =>
+    put<AgentDefaults>('/api/agent-defaults', payload),
 
   // Admin reads
   adminStatus: () => get<AdminStatus>('/api/admin/status'),
