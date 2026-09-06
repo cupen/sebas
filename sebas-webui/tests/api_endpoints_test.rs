@@ -343,7 +343,7 @@ mod provider_source {
         let app = fake_app(Arc::new(fake));
         let (status, v) = get_json(&app, "/api/settings").await;
         assert_eq!(status, StatusCode::OK);
-        let gw = &v["gateway"];
+        let gw = &v["router"];
         assert_eq!(gw["providers_available"], true);
         assert_eq!(gw["provider_count"], 1);
         assert_eq!(gw["providers"][0]["name"], "anthropic");
@@ -358,8 +358,8 @@ mod provider_source {
         );
         let app = fake_app(Arc::new(fake));
         let (_, v) = get_json(&app, "/api/settings").await;
-        assert_eq!(v["gateway"]["providers_available"], false);
-        assert_eq!(v["gateway"]["providers"], serde_json::json!([]));
+        assert_eq!(v["router"]["providers_available"], false);
+        assert_eq!(v["router"]["providers"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -368,7 +368,7 @@ mod provider_source {
         let fake = sebas_webui::session_backend::FakeBackend::new();
         let app = fake_app(Arc::new(fake));
         let (_, v) = get_json(&app, "/api/settings").await;
-        assert_eq!(v["gateway"]["providers_available"], false);
-        assert_eq!(v["gateway"]["providers"], serde_json::json!([]));
+        assert_eq!(v["router"]["providers_available"], false);
+        assert_eq!(v["router"]["providers"], serde_json::json!([]));
     }
 }
