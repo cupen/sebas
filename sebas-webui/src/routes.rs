@@ -318,14 +318,6 @@ pub async fn router_mutation_guard(
     next.run(req).await
 }
 
-fn err_json(msg: String) -> axum::response::Response {
-    (
-        axum::http::StatusCode::BAD_GATEWAY,
-        axum::Json(serde_json::json!({"error": msg})),
-    )
-        .into_response()
-}
-
 fn err_503_no_secret() -> axum::response::Response {
     (
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
