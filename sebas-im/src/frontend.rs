@@ -166,19 +166,6 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         }
     }
 
-    async fn ack(&self, message_id: &str) {
-        if message_id.is_empty() {
-            return;
-        }
-        if let Err(e) = self
-            .feishu
-            .react(&self.http, &self.tokens, message_id, phase::SEED)
-            .await
-        {
-            warn!(?e, "ack reaction failed");
-        }
-    }
-
     async fn on_text(&self, key: ChannelKey, text: String) {
         match parse_command(&text) {
             Command::New(prompt) => {

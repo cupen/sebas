@@ -3,22 +3,16 @@
 //! 从 `run.rs` 拆出；只被出站泵（`crate::run`）调用。
 
 use crate::config::Config;
-use sebas_im::reactions::{ReactPlan, ReactionTracker};
 use crate::session_boot::{
-    acp_resume_and_activate, acp_spawn_and_activate, boot_session_pump_and_flush,
-    flush_pending_prompts, spawn_acp_pump_with_idle,
+    acp_resume_and_activate, acp_spawn_and_activate, flush_pending_prompts,
+    spawn_acp_pump_with_idle,
 };
 use sebas_acp::claude::manager::SessionManager;
-use sebas_channels::card::{ChannelCard, TurnChrome};
 use sebas_channels::ChannelKey;
-use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
-use sebas_feishu::events::SessionKey;
 use sebas_router::config::RouterConfig;
-use sebas_dispatch::commands::RouterAction;
 use sebas_dispatch::engine::{Out, DispatchHandle};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// 话题失效提示文案（Q8→F1 熔断）：发一次提示并终止会话，不重试、不重发。
@@ -34,35 +28,8 @@ fn idle_timeout_from(cfg: &Config, kind: &str) -> Option<Duration> {
 
 // 参数即 outbound 共享上下文（client/http/tokens/cfg/router/mgr/reactions），
 // 打包 struct 只会给每个 match arm 增加 `ctx.` 噪音。
-/// Normalize a `/router <action>` action into the watchdog control request
-/// (openspec/specs/watchdog/spec.md control commands). `on`/`off` map to `ServiceSet`
-/// with `persist=false` (persistence requires the Phase 4 atomic config write,
-/// per openspec/specs/watchdog/spec.md); `restart` maps to `ServiceRestart`; `status` maps to
-/// `ServiceStatusFor(router)`. The match is exhaustive so a new action
-/// cannot silently fall through to a setter.
-fn router_control_request(
-    action: RouterAction,
-) -> crate::watchdog::control_rpc::RpcControlRequest {
-    use crate::watchdog::control_rpc::RpcControlRequest;
-    match action {
-        RouterAction::On => RpcControlRequest::ServiceSet {
-            service: "router".into(),
-            desired: "on".into(),
-            persist: false,
-        },
-        RouterAction::Off => RpcControlRequest::ServiceSet {
-            service: "router".into(),
-            desired: "off".into(),
-            persist: false,
-        },
-        RouterAction::Status => RpcControlRequest::ServiceStatusFor {
-            service: "router".into(),
-        },
-        RouterAction::Restart => RpcControlRequest::ServiceRestart {
-            service: "router".into(),
-        },
-    }
-}
+// `router_control_request` 在 tests 模块里——它只服务
+// `router_actions_normalize_to_control_requests` 这条归一化契约测试。
 
 pub(crate) async fn dispatch_out_without_feishu(
     cfg: &Config,
@@ -216,81 +183,37 @@ async fn handle_spawn_resume_without_feishu(
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use sebas_channels::{ChannelEvent, ChannelKey};
-    use sebas_dispatch::state::{Mapping, SessionMap};
-
-    // ---------- Phase 3 Task 3.1: Feishu control adapter contract ----------
-
-    // ── /upgrade 端到端：dispatch.submit → watchdog.serve → UpdaterRunner ──
-    //
-    // 此前 RPC envelope 测试只覆盖 dispatch→server 的 wire 层；UpdaterRunner 是
-    // 收到 Accepted/PendingConfirmation 后真正要执行的步骤。这里 spawn 真
-    // watchdog serve 在临时 socket 上，把 feishu_control_envelope + request 接
-    // 上一个会记录 UpdatePlan 的 RecordingRunner，断言「Update{dev,dry_run}
-    // → plan.dev/dry_run 与请求一致」。env-var-missing 错误信息单独测。
-
-    use crate::watchdog::control::ControlService;
-    use crate::watchdog::control_rpc::{RpcControlResponse, serve as rpc_serve};
-    use crate::watchdog::executor::ControlExecutor;
-    use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
-    use std::sync::Arc as StdArc;
-
-    const E2E_SECRET: &str = "e2e-secret-7";
-
-    struct RecordingRunner {
-        captured: std::sync::Mutex<Option<(UpdatePlan, crate::config::WatchdogConfig)>>,
-    }
-
-    impl RecordingRunner {
-        fn new() -> Self {
-            Self {
-                captured: std::sync::Mutex::new(None),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl UpdaterRunner for RecordingRunner {
-        async fn run(
-            &self,
-            plan: &UpdatePlan,
-            watchdog: &crate::config::WatchdogConfig,
-        ) -> Result<(), crate::error::SebasError> {
-            *self.captured.lock().unwrap() = Some((plan.clone(), watchdog.clone()));
-            Ok(())
-        }
-    }
-
-    fn e2e_executor(runner: StdArc<dyn UpdaterRunner>) -> ControlExecutor {
-        let control = StdArc::new(tokio::sync::Mutex::new(ControlService::new()));
-        ControlExecutor::new(
-            control,
-            runner,
-            crate::config::WatchdogConfig::default(),
-            "./config.toml".into(),
-            crate::watchdog::services::ServiceManager::new(
-                std::env::temp_dir().join(format!("sebas-exec-noop-{}.json", std::process::id())),
-            ),
-        )
-    }
-
-    fn unique_socket(label: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "sebas-e2e-{label}-{nanos}-{}.sock",
-            std::process::id()
-        ))
-    }
+    use sebas_dispatch::commands::RouterAction;
 
     /// `/router on|off` 归一化为 ServiceSet(router, persist=false)；
     /// `/router status` 归一化为 ServiceStatusFor(router)；
     /// `/router restart` 归一化为 ServiceRestart(router)。这是 WebUI/Feishu
     /// 共享的归一化契约（openspec/specs/watchdog/spec.md；跨 adapter 一致性
     /// 背景见 docs/design-history.md ADR-6）。
+    fn router_control_request(
+        action: RouterAction,
+    ) -> crate::watchdog::control_rpc::RpcControlRequest {
+        use crate::watchdog::control_rpc::RpcControlRequest;
+        match action {
+            RouterAction::On => RpcControlRequest::ServiceSet {
+                service: "router".into(),
+                desired: "on".into(),
+                persist: false,
+            },
+            RouterAction::Off => RpcControlRequest::ServiceSet {
+                service: "router".into(),
+                desired: "off".into(),
+                persist: false,
+            },
+            RouterAction::Status => RpcControlRequest::ServiceStatusFor {
+                service: "router".into(),
+            },
+            RouterAction::Restart => RpcControlRequest::ServiceRestart {
+                service: "router".into(),
+            },
+        }
+    }
+
     #[test]
     fn router_actions_normalize_to_control_requests() {
         use crate::watchdog::control_rpc::RpcControlRequest;

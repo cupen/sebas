@@ -315,43 +315,6 @@ pub fn restore_session_map(state_file: &str, capacity: usize) -> SessionMap {
     }
 }
 
-/// Spawn/resume 之后的 ACP 侧启动序列（与飞书无关）：
-/// seed 卡片状态、启动事件泵、冲刷 spawn 窗口内排队的 prompt。
-///
-/// 这是 [`crate::dispatch`] 中 `SpawnAcp` / `SpawnResume` / `WebSpawn`
-/// 共用的**引擎侧半场**（decouple-feishu-channel 后 spawn 指令与通道
-/// 无关；发卡等通道呈现由各通道边界负责）。刻意不接收 `FeishuClient` / `TokenManager` /
-/// `ReactionTracker` / `Config`：`idle_timeout` 由调用方从
-/// `[acp.claude] idle_kill_secs` 解析后传入，保持本函数的输入只描述
-/// ACP 会话本身。
-///
-/// 顺序契约（与拆分前逐条一致，无行为变化）：
-/// 1. `seed_card`：记录 user_prompt 供后续 flush 重渲染引用块。幂等。
-///    必须在 pump 启动前，否则首个事件 lazy seed 会用 prompt="" 冲掉引用块。
-/// 2. 启动事件泵（`rx` 已在 `acp_spawn_and_activate` 里于任何慢 I/O 前
-///    克隆，D6 保证首次即崩的终端事件不丢）。
-/// 3. `flush_pending_prompts`：排队 prompt 合并为一次 ContinueSession
-///    （逐条发送会违反 ACP 的 one-prompt-in-flight 规则）。
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn boot_session_pump_and_flush(
-    router: &DispatchHandle,
-    mgr: &Arc<SessionManager>,
-    session_id: String,
-    prompt: String,
-    pending: Vec<String>,
-    rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AcpEvent>>>,
-    // sebas-9pz ②: idle_kill_secs 死配置接线 —— 由调用方解析；None =
-    // 永不过期（生产默认 48h 只在显式配置非零值时启用）。
-    idle_timeout: Option<Duration>,
-) -> anyhow::Result<()> {
-    router.seed_card(session_id.clone(), prompt).await;
-    spawn_acp_pump_with_idle(rx, router.clone(), session_id.clone(), idle_timeout, Some(mgr.clone()));
-    if let Err(e) = flush_pending_prompts(mgr, &session_id, pending).await {
-        warn!(?e, "failed to flush pending prompts");
-    }
-    Ok(())
-}
-
 /// Flush prompts queued during spawn as ONE ContinueSession (one-by-one
 /// would violate ACP's one-prompt-in-flight rule). `pub` for tests.
 pub async fn flush_pending_prompts(
