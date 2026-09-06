@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, parseBackendHint } from './client.js'
+import { api, ApiError, parseBackendHint, withQuery } from './client.js'
 
 const fetchMock = vi.fn()
 
@@ -94,5 +94,40 @@ describe('api wire shapes', () => {
 
   it('parseBackendHint recognises native', () => {
     expect(parseBackendHint('native')).toEqual({ driver: 'native' })
+  })
+})
+
+describe('withQuery (add-webui-picker-workdir-start)', () => {
+  it('URLSearchParams-encodes backslashes, verbatim prefixes and CJK', () => {
+    expect(withQuery('/api/fs/browse-dirs', { path: '\\\\?\\D:\\目录' })).toBe(
+      '/api/fs/browse-dirs?path=%5C%5C%3F%5CD%3A%5C%E7%9B%AE%E5%BD%95',
+    )
+  })
+
+  it('encodes + and & that a hand-rolled template risks', () => {
+    expect(withQuery('/x', { path: 'a+b&c=d' })).toBe('/x?path=a%2Bb%26c%3Dd')
+  })
+
+  it('omits empty/null/undefined values so the server default applies', () => {
+    expect(withQuery('/api/fs/browse-dirs', { path: '', root: null, keep: 'v' })).toBe(
+      '/api/fs/browse-dirs?keep=v',
+    )
+  })
+
+  it('fsBrowseDirs omits root when unset (server work-dir default)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(okResponse({ path: 'X:\\', entries: [] }))
+    await api.fsBrowseDirs('')
+    const url = fetchMock.mock.calls[0][0] as string
+    expect(url).toBe('/api/fs/browse-dirs')
+  })
+
+  it('fsBrowseDirs sends an explicit root when given', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(okResponse({ path: 'X:\\w', entries: [] }))
+    await api.fsBrowseDirs('sub', 'X:\\w')
+    const url = fetchMock.mock.calls[0][0] as string
+    expect(url.startsWith('/api/fs/browse-dirs?')).toBe(true)
+    expect(url).toContain('root=X%3A%5Cw')
   })
 })

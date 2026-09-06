@@ -326,6 +326,22 @@ async function get<T>(path: string): Promise<T> {
   return unwrap<T>(await fetch(path, { headers: { accept: 'application/json' } }))
 }
 
+/**
+ * Build a request URL with a query string. One place owns query encoding
+ * (URLSearchParams) so values containing `\`, `+`, `&`, CJK, … survive the
+ * round trip (add-webui-picker-workdir-start). `null`/`undefined`/empty
+ * values are omitted entirely — an absent param lets the server apply its
+ * own default (e.g. browse-dirs' work root), unlike an empty string.
+ */
+export function withQuery(path: string, params: Record<string, string | null | undefined>): string {
+  const qs = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value) qs.set(key, value)
+  }
+  const query = qs.toString()
+  return query ? `${path}?${query}` : path
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T> {
   return unwrap<T>(
     await fetch(path, {
@@ -466,11 +482,10 @@ export const api = {
 
   // Filesystem
   fsBrowse: (path: string) =>
-    get<FsBrowseResponse>(`/api/fs/browse?path=${encodeURIComponent(path)}`),
+    get<FsBrowseResponse>(withQuery('/api/fs/browse', { path })),
+  // root 省略（null/undefined/空串）→ 服务端默认 work root（拾取器即用此）。
   fsBrowseDirs: (path: string, root?: string | null) =>
-    root
-      ? get<FsBrowseResponse>(`/api/fs/browse-dirs?path=${encodeURIComponent(path)}&root=${encodeURIComponent(root)}`)
-      : get<FsBrowseResponse>(`/api/fs/browse-dirs?path=${encodeURIComponent(path)}`),
+    get<FsBrowseResponse>(withQuery('/api/fs/browse-dirs', { path, root: root ?? undefined })),
 }
 
 // ---- Project API ----
