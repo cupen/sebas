@@ -78,7 +78,8 @@ cat > "$WORK/config.toml" <<EOF
 [feishu]
 enabled = false
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = "$W_FAKE"
 sessions_dir = "$W_CFG/claude-sessions"
 work_dir = "$W_CFG/work"
