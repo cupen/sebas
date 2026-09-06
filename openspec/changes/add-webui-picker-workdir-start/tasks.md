@@ -29,4 +29,4 @@
 
 ## 5. 收尾
 
-- [x] 5.1 全量质量门：`cargo test`、`pnpm -C sebas-webui/frontend test`、`openspec validate add-webui-picker-workdir-start --strict`。验证：全绿。（注：本 change 触及的测试全绿——fs 14/14、sebas-webui 其余、workspace 各 crate、前端 131/131；`cargo test` 尚有 2 个 agent_kinds 预存失败（`present_binary_reports_reachable` / `opencode_acp_probe_is_compatible`，Windows 下 PATHEXT/.exe 探测缺失），已用 `git stash` 在 HEAD 基线复现证明与本 change 无关，另行立 beads 跟踪。）
+- [x] 5.1 全量质量门：`cargo test`、`pnpm -C sebas-webui/frontend test`、`openspec validate add-webui-picker-workdir-start --strict`。验证：全绿。（注：本 change 触及的测试全绿——fs 14/14、前端 131/131、validate 通过；workspace 尚有两类与本 change 无关的预存问题：① agent_kinds 2 个失败（`present_binary_reports_reachable` / `opencode_acp_probe_is_compatible`，Windows PATHEXT/.exe 探测缺失，git stash 于 HEAD 基线复现）；② `provider_channel_test::channel_provider_mutation_round_trip` 顺序依赖抖动（同二进制两测试共享进程级 state engine，channel 测试的「providers 为空」断言仅在先跑时成立，3 连跑 1 绿 2 红）——均另行跟踪。）
