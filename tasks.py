@@ -92,6 +92,74 @@ def accept(c, case=None):
         raise SystemExit(1)
 
 
+def _webui_e2e_preflight(c):
+    """pnpm + Playwright chromium preflight; installs what is missing."""
+    result = c.run("pnpm --version", hide=True, warn=True)
+    if result.failed:
+        print("❌ pnpm is required (corepack enable or install pnpm)")
+        raise SystemExit(1)
+    e2e_dir = "tests/webui-e2e"
+    if not os.path.isdir(os.path.join(e2e_dir, "node_modules")):
+        print("Installing tests/webui-e2e dependencies ...")
+        if c.run(f"pnpm install --dir {e2e_dir}", echo=True).failed:
+            raise SystemExit(1)
+    result = c.run(
+        f"pnpm --dir {e2e_dir} exec playwright install chromium", echo=True, warn=True
+    )
+    # Already-installed browsers exit 0; a failed download blocks the run.
+    if result.failed and "already installed" not in (result.stdout or ""):
+        raise SystemExit(1)
+
+
+@task(help={"case": "Run a single webui journey (spec file stem: first-paint, auth, ...)"})
+def webui_e2e(c, case=None):
+    """Build + run the browser-level webui e2e suite (Playwright, sandboxed)."""
+    # Frontend dist is baked into the binary at build time — rebuild it when
+    # the frontend sources are newer than the last dist build.
+    dist_index = "sebas-webui/frontend/dist/index.html"
+    need_dist = not os.path.exists(dist_index)
+    if not need_dist:
+        dist_mtime = os.path.getmtime(dist_index)
+        src_root = "sebas-webui/frontend/src"
+        for root, _dirs, files in os.walk(src_root):
+            for f in files:
+                if f.endswith((".ts", ".css", ".html")):
+                    if os.path.getmtime(os.path.join(root, f)) > dist_mtime:
+                        need_dist = True
+                        break
+            if need_dist:
+                break
+    if need_dist:
+        print("Building frontend dist (sources newer than dist) ...")
+        if c.run("pnpm run --dir sebas-webui/frontend build", echo=True).failed:
+            raise SystemExit(1)
+    else:
+        print("frontend dist up to date")
+
+    print("Building workspace (sebas + fake-claude) ...")
+    if c.run("cargo build --bin sebas --bin fake-claude", echo=True).failed:
+        raise SystemExit(1)
+
+    _webui_e2e_preflight(c)
+
+    e2e_dir = "tests/webui-e2e"
+    if case:
+        # --case auth runs the auth-on form; anything else filters the main suite.
+        if case == "auth":
+            cmd = f"pnpm --dir {e2e_dir} exec playwright test --config playwright.auth.config.ts"
+        else:
+            cmd = f"pnpm --dir {e2e_dir} exec playwright test {case}"
+    else:
+        cmd = f"pnpm --dir {e2e_dir} exec playwright test && pnpm --dir {e2e_dir} exec playwright test --config playwright.auth.config.ts"
+    result = c.run(cmd, echo=True)
+    if result.failed:
+        print(
+            "webui-e2e FAILED — sandbox scene kept for debugging (path printed above)."
+        )
+        print("Reuse it interactively: E2E_REUSE=1 E2E_KEEP=1 invoke webui-e2e --case <name>")
+        raise SystemExit(1)
+
+
 @task(
     help={
         "source": "sebas_artifact_source: release (default) | file | preinstalled",
