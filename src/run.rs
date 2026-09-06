@@ -270,6 +270,13 @@ pub async fn run(
                 command: cfg.acp.command_for(slug).unwrap_or_default(),
             })
             .collect();
+        // add-webui-picker-workdir-start：browse-dirs 的服务端默认浏览根 =
+        // 默认 agent kind 的 work_dir（dispatch 的会话 work dir 回退语义），
+        // 未配置时回退进程 cwd；两者皆无 → browse-dirs 硬错误。
+        let webui_work_root = match cfg.acp.work_dir_for(cfg.acp.default_kind()) {
+            Some(dir) => Some(std::path::PathBuf::from(dir)),
+            None => std::env::current_dir().ok(),
+        };
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
@@ -292,6 +299,7 @@ pub async fn run(
                 listener,
                 None,
                 auth,
+                webui_work_root,
             )
             .await;
         });

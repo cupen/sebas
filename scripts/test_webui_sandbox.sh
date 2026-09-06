@@ -19,6 +19,15 @@ AUTH="${SANDBOX_AUTH:-0}"
 # TOML 布尔字面量（SANDBOX_AUTH 用 0/1 便于 shell 传参）。
 AUTH_TOML="false"; [ "$AUTH" = "1" ] && AUTH_TOML="true"
 WORK="${SANDBOX_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/sebas-webui-itest.XXXXXX")}"
+# Windows Git Bash：mktemp 产出 POSIX 路径（/tmp/...），但写进 TOML 的路径
+# 必须是 Windows 进程可解析的形式——add-webui-picker-workdir-start 起
+# browse-dirs 默认根取 work_dir，解析失败会如实硬错误。cygpath -m 产出
+# C:/... 混合分隔符形式（TOML 与 std::fs 都接受）。
+if command -v cygpath >/dev/null 2>&1; then
+  WORK_TOML="$(cygpath -m "$WORK")"
+else
+  WORK_TOML="$WORK"
+fi
 
 if [ ! -x "$BIN" ]; then
   echo "error: $BIN 不存在，先 cargo build" >&2
@@ -32,20 +41,20 @@ app_id = ""
 app_secret = ""
 
 [router]
-state_file = "$WORK/state.json"
+state_file = "$WORK_TOML/state.json"
 
 [media]
-download_dir = "$WORK/media"
+download_dir = "$WORK_TOML/media"
 
 [acp.claude]
 path = "claude"
 args = []
-sessions_dir = "$WORK/acp"
-work_dir = "$WORK"
+sessions_dir = "$WORK_TOML/acp"
+work_dir = "$WORK_TOML"
 
 [watchdog.core]
 enabled = false
-channel_path = "$WORK/core.sock"
+channel_path = "$WORK_TOML/core.sock"
 
 [watchdog.webui]
 enabled = true

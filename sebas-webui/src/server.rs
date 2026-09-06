@@ -43,6 +43,11 @@ pub struct WebUiState {
     /// 登录鉴权（用户名/密码，见 `auth` 模块）。凭据未配置时鉴权关闭，
     /// 全部路由维持原有行为。
     pub auth: Arc<AuthHandle>,
+    /// 服务端默认浏览根（add-webui-picker-workdir-start）：browse-dirs 未带
+    /// 显式 `root` 时的范围。由接线方注入（core --webui 内嵌与独立 webui
+    /// 进程），取配置的默认 agent kind work_dir，未配置时回退进程 cwd；
+    /// `None` 时 browse-dirs 硬错误（不再回退文件系统根）。
+    pub work_root: Option<std::path::PathBuf>,
 }
 
 /// Build the axum Router with all WebUI routes.
@@ -59,6 +64,7 @@ pub fn build_router(
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
         30,
         Arc::new(AuthHandle::disabled()),
+        None,
     )
 }
 
@@ -78,6 +84,7 @@ pub fn build_router_with_agent_kind_provider(
         agent_kinds,
         30,
         Arc::new(AuthHandle::disabled()),
+        None,
     )
 }
 
@@ -96,6 +103,7 @@ pub fn build_router_with_admin_adapter(
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
         30,
         Arc::new(AuthHandle::disabled()),
+        None,
     )
 }
 
@@ -117,6 +125,7 @@ pub fn build_router_with_auth(
         agent_kinds,
         archive_retention_days,
         auth,
+        None,
     )
 }
 
@@ -128,6 +137,7 @@ fn build_router_full(
     agent_kinds: Arc<dyn AgentKindProvider>,
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
+    work_root: Option<std::path::PathBuf>,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -137,6 +147,7 @@ fn build_router_full(
         agent_kinds,
         archive_retention_days,
         auth,
+        work_root,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -336,6 +347,7 @@ pub async fn run(
         None,
         30,
         Arc::new(AuthHandle::disabled()),
+        None,
     )
     .await;
 }
@@ -358,11 +370,14 @@ pub async fn run_with_admin_adapter(
         admin_adapter,
         30,
         Arc::new(AuthHandle::disabled()),
+        None,
     )
     .await;
 }
 
 /// Run the WebUI server with an auth handle（登录鉴权接线入口）。
+/// `work_root` 供给 browse-dirs 的服务端默认浏览根（配置的 work dir 或
+/// 回退进程 cwd，由接线方决定）；`None` 时该端点在双 root 皆缺时硬错误。
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
@@ -371,6 +386,7 @@ pub async fn run_with_admin_adapter_and_auth(
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     auth: Arc<AuthHandle>,
+    work_root: Option<std::path::PathBuf>,
 ) {
     run_full(
         backend,
@@ -381,6 +397,7 @@ pub async fn run_with_admin_adapter_and_auth(
         admin_adapter,
         30,
         auth,
+        work_root,
     )
     .await;
 }
@@ -395,6 +412,7 @@ async fn run_full(
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
+    work_root: Option<std::path::PathBuf>,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let app = build_router_full(
@@ -405,6 +423,7 @@ async fn run_full(
         provider,
         archive_retention_days,
         auth,
+        work_root,
     );
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");

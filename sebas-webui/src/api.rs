@@ -565,14 +565,16 @@ pub async fn switch_session(State(state): State<WebUiState>, Path(key): Path<Str
 }
 
 /// GET /api/fs/browse-dirs?path=...&root=... — list only subdirectories for
-/// the directory tree picker. `root` defaults to `/` (full filesystem).
-/// All paths are resolved relative to and bounded within `root`.
+/// the directory tree picker. Root precedence: explicit `root` beats the
+/// server-injected work root (add-webui-picker-workdir-start); with neither,
+/// `fs::safe_path` errors. Path semantics (round-trip, bounds) live in
+/// `fs::safe_path`.
 pub async fn browse_dirs(
     axum::extract::Query(params): axum::extract::Query<crate::fs::BrowseParams>,
+    State(state): State<WebUiState>,
 ) -> Response {
     let path = params.path.as_deref().unwrap_or("");
-    let root = params.root.as_deref();
-    match crate::fs::browse_dirs(path, root) {
+    match crate::fs::browse_dirs(path, params.root.as_deref(), state.work_root.as_deref()) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }

@@ -228,6 +228,13 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         })
         .collect();
 
+    // add-webui-picker-workdir-start：browse-dirs 的服务端默认浏览根，取值
+    // 与 core --webui 内嵌形态一致（默认 kind 的 work_dir，回退进程 cwd）。
+    let webui_work_root = match cfg.acp.work_dir_for(cfg.acp.default_kind()) {
+        Some(dir) => Some(std::path::PathBuf::from(dir)),
+        None => std::env::current_dir().ok(),
+    };
+
     // Run the WebUI server. This blocks until the server stops.
     // fix-webui-detached-status：router 静态事实（listen/debug/has_auth 与
     // TOML 声明的 provider）与 in-process 形态同一装配，不再以
@@ -245,6 +252,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         listener,
         admin_adapter,
         auth,
+        webui_work_root,
     )
     .await;
 
