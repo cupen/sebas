@@ -82,8 +82,9 @@ async fn start_mini_upstream() -> (std::net::SocketAddr, Arc<Mutex<UpstreamCaptu
 }
 
 /// 构造一个指向 `upstream_addr` 的 router config：
-/// - provider `anthropic` base_url = `http://{upstream_addr}`，明文 api_key
-///   `test-upstream-anthropic-key`（仅测试用，resolve_api_keys 会 warn）。
+/// - 自定义 provider `mock`（非 preset，允许显式 base_url）base_url_anthropic =
+///   `http://{upstream_addr}`，明文 api_key `test-upstream-anthropic-key`
+///   （仅测试用，resolve_api_keys 会 warn）。
 /// - 下游 token `sk-downstream-gw`。
 /// - model_map：claude-sonnet → upstream-claude-sonnet-4，用于验证 rename 透传。
 fn router_cfg(upstream_addr: std::net::SocketAddr) -> String {
@@ -92,16 +93,16 @@ fn router_cfg(upstream_addr: std::net::SocketAddr) -> String {
 [router]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
-default_provider = "anthropic"
+default_provider = "mock"
 
 auth_token = "sk-downstream-gw"
 name = "proxy-smoke"
 
-[provider.anthropic]
+[provider.mock]
 base_url_anthropic = "http://{upstream_addr}"
 api_key = "test-upstream-anthropic-key"
 
-[provider.anthropic.model_map]
+[provider.mock.model_map]
 claude-sonnet = "upstream-claude-sonnet-4"
 "#
     )
