@@ -29,7 +29,6 @@ capacity = 2
 refill_per_sec = 0.0001
 
 [provider.anthropic]
-base_url_anthropic = "https://api.anthropic.com"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
 [router.routes]
@@ -121,7 +120,6 @@ capacity = 1
 refill_per_sec = 0.0001
 
 [provider.anthropic]
-base_url_anthropic = "https://api.anthropic.com"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
 [router.routes]
