@@ -1,0 +1,72 @@
+---
+# sebas role — defaults
+#
+# All variables have defaults; the playbook is a no-config WebUI-only deploy
+# out of the box. Override per-host via host_vars/<host>.yml or `--extra-vars`.
+
+# --- identity & layout ---------------------------------------------------
+
+# OS account the systemd unit runs as. `sebas service --install` rejects root
+# (see src/cli.rs ServiceArgs::user + validate_user in src/service.rs), so the
+# role creates a regular user with a home directory.
+sebas_deploy_user: sebas
+
+# Home for the deploy user; config + data live under it. `sebas service
+# --install` reads [watchdog.storage].data_dir from the config and falls back
+# to this home when unset, so we keep it explicit and pass it to the template.
+sebas_deploy_home: "/home/{{ sebas_deploy_user }}"
+
+# Where the rendered config.toml is written on the target. Must be absolute
+# — `service --install` rejects relative paths (validate_config in src/service.rs).
+sebas_config_path: "{{ sebas_deploy_home }}/.sebas/config.toml"
+
+# Where sebas keeps its mutable state (sessions DB, downloads, gateway usage
+# logs, acp.claude working dir). Passed into [watchdog.storage].data_dir.
+sebas_data_dir: "{{ sebas_deploy_home }}/.sebas"
+
+# --- webui listen ---------------------------------------------------------
+#
+# Single source of truth: `host:port` string. Templates split it when they
+# need the parts (Jinja `sebas_webui_listen | split(':')` or the derived
+# facts sebas_webui_host / sebas_webui_port the role sets up).
+sebas_webui_listen: "127.0.0.1:9797"
+
+# --- binary provisioning --------------------------------------------------
+
+# Where the sebas binary lands on the target. `service --install` reads from
+# the *invoking* path (`binary_abs()` resolves argv[0]) and then seeds a stable
+# copy at <data_dir>/bin/sebas; the symlink here is best-effort convenience.
+sebas_bin_path: /usr/local/bin/sebas
+
+# Which provisioning mode to use:
+#   release       — download from GitHub releases (default)
+#   file          — copy a controller-local binary
+#   preinstalled  — trust whatever is already on the target
+sebas_artifact_source: release
+
+# Release tag to fetch. `latest` means resolve via GitHub `releases/latest`.
+sebas_version: latest
+
+# GitHub repo slug for release downloads.
+sebas_github_repo: cupen/sebas
+
+# Only relevant when sebas_artifact_source=file: controller-local path to a
+# prebuilt tarball (or, for legacy callers, a bare binary — see the (file)
+# tasks for which paths are accepted). The tarball layout must match what
+# GitHub releases ship: <sebas_artifact_basename>/sebas (a single binary
+# inside a leading directory).
+sebas_artifact_file: ""
+
+# --- config extras --------------------------------------------------------
+
+# Extra TOML appended verbatim to the rendered config. Use for sections the
+# role does not own (gateway provider overlays, feishu creds, etc.). Empty by
+# default — keep WebUI-only deploys minimal.
+sebas_config_extra: ""
+
+# --- health check ---------------------------------------------------------
+
+# How many retries × delay (seconds) when polling the systemd service and
+# the /health endpoint after install. 10 × 3s = 30s grace window.
+sebas_health_retries: 10
+sebas_health_delay: 3

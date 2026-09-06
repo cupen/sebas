@@ -1,0 +1,13 @@
+---
+# sebas role — handlers.
+#
+# `restart sebas` is the single restart surface. `service --install` already
+# restarts the unit when the unit was already active (see src/service.rs
+# is_unit_active branch), so we guard this handler with the same condition
+# the install task records — one config change → one restart, never two.
+
+- name: restart sebas
+  ansible.builtin.systemd:
+    name: sebas
+    state: restarted
+  when: sebas_install is not defined or not (sebas_install.changed | default(false))
