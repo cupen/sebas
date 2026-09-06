@@ -15,12 +15,11 @@ overrides, and the control-plane client.
 (install/uninstall systemd unit), `replay` (offline event replay), `record`
 (ACP stdio fixture capture), `webui` (dashboard server), `update` (one-shot
 updater), `control` (control-plane client) — plus the aliases `status`
-(= `control status`), `services` (= `control services`), `ctl` (= `control`),
-and the hidden compatibility aliases `watchdog` (= `run`) and `gateway`
-(= `router`). The hidden aliases keep pre-rename invocations — notably
-already-installed systemd units whose `ExecStart` names `watchdog` — working
-unchanged. Invoking bare `sebas` with no subcommand is a parse error; the
-core never runs by default.
+(= `control status`), `services` (= `control services`), and `ctl`
+(= `control`). The pre-rename compatibility aliases `watchdog` and
+`gateway` SHALL NOT be accepted: nothing was released under the old
+surface, so old invocations fail as unknown subcommands. Invoking bare
+`sebas` with no subcommand is a parse error; the core never runs by default.
 
 #### Scenario: bare invocation rejected
 
@@ -33,12 +32,11 @@ core never runs by default.
 - **WHEN** the user runs `sebas status --secret ...`
 - **THEN** the command behaves as `sebas control status`
 
-#### Scenario: watchdog alias starts the daemon
+#### Scenario: pre-rename subcommand aliases rejected
 
-- **WHEN** the user runs `sebas watchdog --config <config>` (an
-  already-installed unit's `ExecStart` form)
-- **THEN** the watchdog daemon starts exactly as `sebas run --config
-  <config>` would
+- **WHEN** the user runs `sebas gateway ...` or `sebas watchdog ...`
+- **THEN** the CLI reports an unknown subcommand and exits nonzero without
+  starting any service
 
 ### Requirement: Service unit generation
 
@@ -178,10 +176,9 @@ blank variable never blanks a configured credential). Additionally
 overrides the router's provider overlay, and `RUST_LOG` drives tracing for
 the router/webui/watchdog entrypoints (the core filters on `[log] level`).
 The pre-rename names `SEBAS_GATEWAY_PROVIDER_OVERLAY`,
-`SEBAS_AGENT_GATEWAY_URL`, and `SEBAS_AGENT_GATEWAY_AUTH` SHALL remain
-honored when their new names (`SEBAS_ROUTER_PROVIDER_OVERLAY`,
-`SEBAS_AGENT_ROUTER_URL`, `SEBAS_AGENT_ROUTER_AUTH`) are unset — for one
-release window, with a deprecation warning naming the replacement.
+`SEBAS_AGENT_GATEWAY_URL`, and `SEBAS_AGENT_GATEWAY_AUTH` SHALL NOT be
+honored — only the new names (`SEBAS_ROUTER_PROVIDER_OVERLAY`,
+`SEBAS_AGENT_ROUTER_URL`, `SEBAS_AGENT_ROUTER_AUTH`) take effect.
 
 #### Scenario: env satisfies required field
 
@@ -194,11 +191,11 @@ release window, with a deprecation warning naming the replacement.
 - **WHEN** `SEBAS_FEISHU_APP_ID=""` is exported and the TOML has an app id
 - **THEN** the TOML value is kept
 
-#### Scenario: legacy router env still honored
+#### Scenario: pre-rename env names are not honored
 
 - **WHEN** only `SEBAS_GATEWAY_PROVIDER_OVERLAY` is set
-- **THEN** the router uses its value as the provider overlay and logs a
-  deprecation warning pointing at `SEBAS_ROUTER_PROVIDER_OVERLAY`
+- **THEN** the router uses the provider overlay from its config (or none)
+  and never reads the pre-rename variable
 
 ### Requirement: Control client
 

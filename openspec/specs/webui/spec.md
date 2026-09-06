@@ -65,13 +65,13 @@ to routes this surface serves.
 - **THEN** `/api/admin/*` reads report `adapter_ok: false` and mutations
   return 503
 
-#### Scenario: gateway page reflects live state
+#### Scenario: router data reflects live state
 
 - **WHEN** a provider is renamed through the router admin API and the
   browser then requests `GET /api/router`
 - **THEN** the response lists the new provider name without a WebUI restart
 
-#### Scenario: gateway mutations unavailable without secret
+#### Scenario: router mutations unavailable without secret
 
 - **WHEN** the WebUI runs without a control secret and a mutation is posted
   to `/router/api/providers`
@@ -205,7 +205,7 @@ path for mutations.
 - **WHEN** a mutation POST carries `Origin: https://evil.example`
 - **THEN** the response is 403
 
-#### Scenario: gateway mutation is post-only and origin-checked
+#### Scenario: router mutation is post-only and origin-checked
 
 - **WHEN** a GET hits `/router/api/providers` or a router mutation POST
   carries a non-loopback origin without a valid CSRF token

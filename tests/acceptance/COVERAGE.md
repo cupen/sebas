@@ -132,10 +132,10 @@
 | feishu-cards | ✅+🚫 | 卡模型/流式节流/轮转 ✅（`card_stream_e2e_test`、sebas-feishu 内联）；飞书端渲染 🚫 豁免 |
 | feishu-option | ✅ | `feishu_native_webui_test`、config 测试 |
 | feishu-reactions | ✅ | src `reactions.rs` 内联测试 |
-| gateway-admin-api | ✅ | `admin_test`；J: provider_governance（/admin/stats）|
-| gateway-auth-rate-limit | ✅ | `auth_test`、`rate_limit_test`；J: `gateway_downstream_auth_journey` |
-| gateway-core | ✅ | `proxy_smoke_test`、`contract_test`、`debug_provider_test`、`failure_test`；E: gateway debug |
-| gateway-metrics | ✅ | sebas-router `metrics` 测试；J: /admin/stats 200 |
+| router-admin-api | ✅ | `admin_test`；J: provider_governance（/admin/stats）|
+| router-auth-rate-limit | ✅ | `auth_test`、`rate_limit_test`；J: `router_downstream_auth_journey` |
+| router-core | ✅ | `proxy_smoke_test`、`contract_test`、`debug_provider_test`、`failure_test`；E: router debug |
+| router-metrics | ✅ | sebas-router `metrics` 测试；J: /admin/stats 200 |
 | router-model-aliases | ✅ | 见核心簇② |
 | opencode-agent | 🚫 | 需真实 opencode CLI（模拟桩不可用）；driver 抽象由 agent-driver 测试覆盖 |
 | permission-flow | ✅ | 见核心簇③ |
@@ -169,6 +169,6 @@
 ## 实施期发现（只记录不顺手修，见 design Non-goals）
 
 1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_router_journey` 的断言可升级为 status_slug=done。
-2. **`run --gateway` 忽略 `SEBAS_GATEWAY_LISTEN`**（run.rs:87 写死 127.0.0.1:0）：detached 形态下 `SEBAS_AGENT_GATEWAY_URL` 无法预注入（网关地址只能事后从日志读）。native 走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径作为替代（本套件已覆盖）。
+2. **`run --router` 忽略 `SEBAS_ROUTER_LISTEN`**（run.rs:87 写死 127.0.0.1:0）：detached 形态下 `SEBAS_AGENT_ROUTER_URL` 无法预注入（router 地址只能事后从日志读）。native 走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径作为替代（本套件已覆盖）。
 3. **会话状态落盘仅在优雅退出**：硬杀（TerminateProcess）不产生状态转储；Windows 无便携优雅信号，故重启恢复段 unix 门控。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。

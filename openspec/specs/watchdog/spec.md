@@ -103,7 +103,7 @@ The RPC SHALL serve: `Status`, `EventsSince`, `Update`, `Rollback`,
 `RestartCore`, `ServiceStatus`, `ServiceStatusFor`, `ServiceSet`,
 `ServiceRestart`, `Confirm`, and `Cancel`. `ServiceSet` and
 `ServiceRestart` SHALL act on the auxiliary managed services (webui,
-gateway) as specified in the Service lifecycle requirement; requests naming
+router) as specified in the Service lifecycle requirement; requests naming
 the core service SHALL be rejected with an actionable error.
 `Confirm` and `Cancel` SHALL be accepted only from a Feishu actor with a
 `chat_id`; any other actor gets `unauthorized`.
@@ -310,7 +310,7 @@ The core child's pipe protocol SHALL consist of the readiness handshake
 longer travel over the pipe — the control RPC socket is the sole command
 surface.
 
-#### Scenario: gateway managed when enabled
+#### Scenario: router managed when enabled
 
 - **WHEN** the watchdog config enables router management
 - **THEN** the watchdog spawns `sebas router --config <path>` as a

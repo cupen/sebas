@@ -9,13 +9,13 @@
 - **core(core 进程)**:`sebas core` 的长驻服务本体。会话状态的**单一权威**、
   唯一 spawn ACP 子进程的进程;持有会话映射、core session channel socket,
   按配置承载通道适配器(飞书 WS 等)。(architecture.md §1)
-- **run(watchdog 守护)**:唯一拉起其他进程的角色,入口命令 `sebas run`
-  (旧名 `watchdog`,现为隐藏别名);按配置监督 core / webui /
+- **run(watchdog 守护)**:唯一拉起其他进程的角色,入口命令 `sebas run`;
+  按配置监督 core / webui /
   router 子进程(重启/退避/升级)。(architecture.md §2)
 - **webui(WebUI)**:dashboard 进程,自身不持有会话状态;经 core session
   channel 观察与驱动会话,或在 core 进程内运行(进程内后端)。
-- **router(模型路由)**:provider 透传代理进程,入口命令 `sebas router`
-  (旧名 `gateway`,现为隐藏别名),对外提供 OpenAI 兼容 API。
+- **router(模型路由)**:provider 透传代理进程,入口命令 `sebas router`,
+  对外提供 OpenAI 兼容 API。
 - **dispatch(sebas-dispatch crate,会话分发)**:core 进程内的领域层——会话映射、
   入站事件 dispatch、slash 命令解析、权限处理、出站呈现编排。不是独立进程。
   (原名 sebas-router;rename-cli-surface 改名)

@@ -11,7 +11,7 @@ handed to the ACP child process.
 ### Requirement: /provider main card layout
 
 The `/provider` command SHALL render a single management card with four
-sections, top to bottom: (1) three mode buttons `Off` / `Direct` / `Gateway`
+sections, top to bottom: (1) three mode buttons `Off` / `Direct` / `Router`
 with the current mode rendered `primary`; (2) a DIRECT-mode default provider
 dropdown (options: all provider names in alphabetical order plus
 `（未设置）`); (3) the provider list — one collapsed `collapsible_panel` per
@@ -38,8 +38,8 @@ Clicking a mode button SHALL write the mode to the state file and refresh the
 management card in place. Switching to `Direct` while no default provider is
 selected SHALL auto-fill the alphabetically-first provider as the default
 (without setting a default model). The persisted mode value SHALL be
-`router`; a state file carrying the pre-rename value `gateway` SHALL still
-parse as `Router` mode.
+`router`; a state file carrying the pre-rename value `gateway` SHALL fail
+to parse — nothing was released under the old value, so no alias is kept.
 
 #### Scenario: direct auto-fill
 
@@ -48,17 +48,17 @@ parse as `Router` mode.
 - **THEN** the state file records mode `direct` with default provider
   `alpha`, and the refreshed card marks `alpha` as the DIRECT default
 
-#### Scenario: gateway mode write
+#### Scenario: router mode write
 
 - **WHEN** the user clicks `Router`
 - **THEN** the state file records mode `router` and the card refreshes with
   `Router` rendered as the active mode
 
-#### Scenario: legacy state value still loads
+#### Scenario: pre-rename state value rejected
 
-- **WHEN** the state file contains `"kind": "gateway"` from a pre-rename
-  version
-- **THEN** the state loads with `Router` mode active and no error
+- **WHEN** the state file contains `"kind": "gateway"`
+- **THEN** parsing fails with an error naming the state file instead of
+  silently guessing the mode
 
 ### Requirement: Provider CRUD forms
 
@@ -209,7 +209,7 @@ Router mode the `--model` flag SHALL never be added.
   `alpha`'s `default_model` is `m2`
 - **THEN** the child receives `--model m2`
 
-#### Scenario: gateway never pins model
+#### Scenario: router never pins model
 
 - **WHEN** mode is `router` and both default selection model and provider
   default model exist
@@ -223,7 +223,7 @@ and first `auth_token` into `ANTHROPIC_BASE_URL=http://{listen}` +
 protocol face to the agent. An empty `listen` is a resolution error; an
 empty `auth_token` proceeds with a warning.
 
-#### Scenario: gateway env construction
+#### Scenario: router env construction
 
 - **WHEN** mode is `router` with `listen = "127.0.0.1:8787"` and
   `auth_token = ["sk-x"]`
