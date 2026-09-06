@@ -2,7 +2,7 @@
 
 ## Purpose
 
-把 sebas 的三方 coding-agent 接入从 Claude Code 单实现抽象成驱动层：`AgentDriver` trait + 两类实现——Claude 专用驱动（保留 `cc-agent-sdk`，换取 Claude 专有能力如 token 用量计数）与通用 ACP 驱动（用 `agent-client-protocol` v1 驱动任意原生 ACP agent）。下游 router/飞书/webui 只消费统一的 `AcpEvent`/`AcpCommand` 防腐层词表，因此逐个新增三方 agent 只改配置、不改代码。配置 schema 从 `acp.claude` 迁移到 `acp.agents.<kind>`，权限往返跨驱动统一进入 webui 审查卡。
+把 sebas 的三方 coding-agent 接入从 Claude Code 单实现抽象成驱动层：`AgentDriver` trait + 两类实现——Claude 专用驱动（保留 `cc-agent-sdk`，换取 Claude 专有能力如 token 用量计数）与通用 ACP 驱动（用 `agent-client-protocol` v1 驱动任意原生 ACP agent）。下游 router/飞书/webui 只消费统一的 `AcpEvent`/`AcpCommand` 防腐层词表，因此逐个新增三方 agent 只改配置、不改代码。权限往返跨驱动统一进入 webui 审查卡。
 
 ## Requirements
 
@@ -41,20 +41,22 @@ The system SHALL key configured agents by an open `kind` slug (a string), not by
 - **WHEN** a session is created with a backend hint selecting an ACP agent
 - **THEN** the spawned session accepts prompts, streams text and tool events, and answers cancellation exactly like a Claude session
 
-### Requirement: Configuration shape with backward-compatible migration
+### Requirement: Legacy `[acp.claude]` block is rejected
 
-The system SHALL change `AcpConfig` from `acp.claude.*` to `acp.agents.<kind>` plus a `default` key. The system SHALL, on load, migrate a configuration file that uses the legacy `acp.claude` block into `acp.agents.claude` and SHALL warn when migration happens. When `default` is absent and exactly one agent is configured, that agent SHALL be the implicit default.
+Configurations using the legacy `[acp.claude]` table SHALL be rejected at parse time. The TOML deserializer reports the offending `[acp.claude]` line; the loader does not rewrite the block into `[acp.agents.claude]` and does not pick a default on the user's behalf. Configurations that declare only `[acp.agents.<kind>]` tables (with `default` either set explicitly or implicit when exactly one agent is configured) continue to load as today.
 
-#### Scenario: Existing claude-only config keeps working
+#### Scenario: Legacy `[acp.claude]` block fails parse
 
-- **WHEN** the TOML config has `[acp.claude]` and no `agents` block
-- **THEN** the loader treats that block as `agents.claude`, sets `default` to `claude`, and the runtime spawns Claude Code exactly as before
-- **AND** the migration is announced with a single warning
+- **WHEN** the TOML config contains `[acp.claude]`
+- **THEN** parsing fails with an error naming the `[acp.claude]` line and the loader does not produce a `Config`
 
-#### Scenario: Bare default resolves to the sole configured agent
+#### Scenario: New `[acp.agents.claude]` block loads
 
-- **WHEN** `default` is absent and only one agent is configured
-- **THEN** a session created with the bare `acp` hint resolves to that agent
+- **WHEN** the TOML config contains
+  `[acp.agents.claude] driver = "claude" path = "…" args = […]`
+- **THEN** parsing succeeds and `cfg.acp.agents["claude"]` is set
+- **AND** with no other agent configured and no `default` set, `cfg.acp.default`
+  resolves to `"claude"` (implicit single-agent default)
 
 ### Requirement: Cross-driver permission routing through the webui review card
 

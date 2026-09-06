@@ -484,7 +484,8 @@ state_file = "{dir}/state.json"
 [media]
 download_dir = "{dir}/media"
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = "claude"
 args = []
 

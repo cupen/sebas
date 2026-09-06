@@ -18,7 +18,8 @@ fn test_cfg() -> Config {
 app_id = "cli_x"
 app_secret = "sec"
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = {:?}
 "#,
         fake().to_str().unwrap()

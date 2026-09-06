@@ -72,7 +72,8 @@ app_id = "fake-app-id"
 app_secret = "fake-app-secret"
 owner_id = ""
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = {fake_claude_path:?}
 sessions_dir = {sessions_dir:?}
 idle_kill_secs = 60

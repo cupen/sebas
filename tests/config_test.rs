@@ -48,7 +48,9 @@ app_id = "cli_x"
 app_secret = "sec"
 owner_id = "ou_x"
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
+path = "/bin/cat"
 idle_kill_secs = 60
 
 [log]
@@ -60,7 +62,7 @@ level = "debug"
 }
 
 #[test]
-fn legacy_claude_block_migrates_to_agents() {
+fn legacy_claude_block_fails_parse() {
     let toml = r#"
 [feishu]
 app_id = "cli_x"
@@ -71,14 +73,10 @@ owner_id = "ou_x"
 path = "/bin/cat"
 idle_kill_secs = 60
 "#;
-    let cfg = Config::parse(toml).unwrap();
-    assert_eq!(cfg.acp.default.as_deref(), Some("claude"));
-    assert!(cfg.acp.agents.contains_key("claude"));
-    assert_eq!(cfg.acp.idle_kill_for("claude"), 60);
-    assert_eq!(
-        cfg.acp.command_for("claude"),
-        Some(vec!["/bin/cat".to_string()])
-    );
+    let err = Config::parse(&toml)
+        .expect_err("legacy [acp.claude] must be rejected at parse time")
+        .to_string();
+    assert!(err.contains("acp.claude"), "error names the offending table: {err}");
 }
 
 #[test]
@@ -145,7 +143,8 @@ fn validate_runtime_accepts_reachable_binary_and_writable_dirs() {
 app_id = "cli_x"
 app_secret = "sec"
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = "{bin}"
 
 [dispatch]
@@ -174,7 +173,8 @@ fn validate_runtime_rejects_missing_binary() {
 app_id = "cli_x"
 app_secret = "sec"
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = "definitely-not-a-real-binary-sebas-test"
 "#;
     let cfg = Config::parse(toml).unwrap();
@@ -199,7 +199,8 @@ fn validate_runtime_rejects_unwritable_dir() {
 app_id = "cli_x"
 app_secret = "sec"
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = "/bin/cat"
 
 [media]

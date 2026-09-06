@@ -21,17 +21,16 @@ pub struct Config {
 
 /// Wrapper for all ACP agent configs. TOML section `[acp.<agent>]` nests here.
 /// Multi-agent: `default` names the kind used when a session does not request
-/// one; `agents` maps an open kind slug to its driver-backed config. The
-/// legacy single-`claude` block is migrated into `agents.claude` on load.
+/// one; `agents` maps an open kind slug to its driver-backed config.
+/// `deny_unknown_fields` rejects legacy blocks like `[acp.claude]` at parse
+/// time instead of silently dropping them.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcpConfig {
     #[serde(default)]
     pub default: Option<String>,
     #[serde(default)]
     pub agents: std::collections::HashMap<String, AgentConfig>,
-    /// Legacy `[acp.claude]` block; migrated to `agents.claude` in `parse`.
-    #[serde(default)]
-    pub claude: Option<AcpClaudeConfig>,
 }
 
 /// One configured agent, tagged by driver. `Claude` drives the dedicated
@@ -234,21 +233,10 @@ impl AcpConfig {
             .unwrap_or_else(default_idle_kill)
     }
 
-    /// Migrate the legacy `[acp.claude]` block into `agents.claude` and pick a
-    /// default (design D2). Idempotent; called once in `parse`.
-    fn migrate_legacy_claude(&mut self) {
-        if let Some(claude) = self.claude.take() {
-            if !self.agents.contains_key("claude") {
-                self.agents
-                    .insert("claude".to_string(), AgentConfig::Claude(claude));
-            }
-            if self.default.is_none() {
-                self.default = Some("claude".to_string());
-            }
-            tracing::warn!("`acp.claude` is deprecated; migrated to `[acp.agents.claude]`");
-        }
-        // A single configured agent with no explicit default becomes the
-        // default (back-compat with a bare `acp` hint).
+    /// When `default` is absent and exactly one agent is configured, that
+    /// agent becomes the implicit default (lets a bare `acp` hint resolve
+    /// to the only configured kind). Idempotent; called once in `parse`.
+    fn apply_implicit_default(&mut self) {
         if self.default.is_none() && self.agents.len() == 1 {
             let only = self.agents.keys().next().cloned().unwrap_or_default();
             if !only.is_empty() {
@@ -538,7 +526,7 @@ impl Config {
         warn_deprecated_watchdog_keys(s);
         let mut cfg: Config =
             toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
-        cfg.acp.migrate_legacy_claude();
+        cfg.acp.apply_implicit_default();
         cfg.apply_env_overrides();
         cfg.validate()?;
         Ok(cfg.with_expanded_paths())

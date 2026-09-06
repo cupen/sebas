@@ -13,8 +13,12 @@ overrides, and the control-plane client.
 `sebas` SHALL expose the subcommands: `core` (long-lived core service),
 `run` (the watchdog daemon), `router` (model router), `service`
 (install/uninstall systemd unit), `replay` (offline event replay), `record`
-(ACP stdio fixture capture), `webui` (dashboard server), `update` (one-shot
-updater), `control` (control-plane client) — plus the aliases `status`
+(ACP stdio fixture capture), `webui` (dashboard server), `webui-passwd`
+(create or update the WebUI login account), `im` (standalone IM service —
+the Feishu bot host, spawned by the watchdog when
+`[watchdog.im] enabled = true`), `update` (one-shot updater), `control`
+(control-plane client), and `agent-kinds list` (reachability report for
+configured third-party agents) — plus the aliases `status`
 (= `control status`), `services` (= `control services`), and `ctl`
 (= `control`). The pre-rename compatibility aliases `watchdog` and
 `gateway` SHALL NOT be accepted: nothing was released under the old

@@ -269,7 +269,8 @@ impl Sandbox {
             r#"[feishu]
 enabled = false
 
-[acp.claude]
+[acp.agents.claude]
+driver = "claude"
 path = "{fake_claude}"
 sessions_dir = "{}"
 work_dir = "{}"
