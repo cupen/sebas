@@ -45,6 +45,7 @@ pub async fn run(args: RouterArgs) -> Result<()> {
 /// later calls are a no-op.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
     let _ = fmt().with_env_filter(filter).try_init();
 }

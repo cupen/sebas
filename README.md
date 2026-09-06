@@ -1,8 +1,9 @@
 # sebas
 
-**工位、沙发、候机厅——和 AI 同事说干就干。**
+**工位、沙发、候机厅——无论你在哪，AI 同事永不下班。**
 
-工位上，在网页工作台里和 agent 一起干活；离开工位，用飞书 / IM 指挥它继续干活。sebas 是一个自托管的 agent 工作台，驱动 Claude Code 等兼容 agent——网页主控，IM 遥控，多会话并行。
+sebas 是一个 agent 工作台，通过项目管理和 agent 编排，可驱动 Claude Code / Codex 等 agent 持续干活——网页主控，IM 遥控，多会话并行。
+工位上，和 AI 同事一起干活；不在工位上，用飞书 / IM 语音指挥它继续干活。
 
 > 状态：开发中，核心链路已贯通（网页 / 飞书双通道 → 多会话执行 → 流式回写）。
 
@@ -49,10 +50,10 @@ cp config/config.toml.example config.toml
 
 # 2. 构建并启动（webui 默认监听 127.0.0.1:9797）
 cargo build --release
-./target/release/sebas core --config ./config.toml --webui
+./target/release/sebas run --config ./config.toml --webui
 ```
 
-浏览器打开 <http://127.0.0.1:9797>（工作台在 `/agent` 页）：新建项目、开会话、发指令，agent 的输出实时出现在时间线里。
+浏览器打开 <http://127.0.0.1:9797>, 新建项目、开会话、发指令，agent 的输出实时出现在时间线里。
 
 ---
 

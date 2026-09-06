@@ -691,6 +691,13 @@ fn check_binary_reachable(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Appended to every default tracing filter: the third-party openlark WS
+/// client logs its full connect URL (incl. access_key/ticket) at info.
+pub(crate) const LOG_FILTER_QUIET: &str = ",openlark_client=warn";
+
+/// Default filter when neither RUST_LOG nor [log] level is configured.
+pub(crate) const DEFAULT_LOG_FILTER: &str = "info,openlark_client=warn";
+
 pub fn expand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()

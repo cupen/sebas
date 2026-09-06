@@ -55,7 +55,8 @@ fn services_persist_path() -> std::path::PathBuf {
 /// 会被静默丢弃——表现为「启动后没有任何子进程日志」。
 fn init_watchdog_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
     let _ = fmt().with_env_filter(filter).try_init();
 }
 
@@ -73,7 +74,7 @@ impl ServiceSpawner for CoreSpawner {
     async fn spawn(&self) -> Result<SpawnedInstance> {
         let exe = std::env::current_exe()
             .map_err(|e| SebasError::Upgrade(format!("无法确定 sebas 子进程路径: {e}")))?;
-        info!(
+        tracing::debug!(
             "starting sebas core child: {} {} --config {}",
             exe.display(),
             crate::CORE_SUBCOMMAND,
@@ -239,7 +240,7 @@ async fn spawn_aux_process(
     let child = cmd
         .spawn()
         .map_err(|e| SebasError::Upgrade(format!("启动 {label} 子进程失败: {e}")))?;
-    info!("{label} child started (pid={})", child.id().unwrap_or(0));
+    // spawn/exit 由 supervisor 统一记录，这里不再重复打一条。
     Ok(SpawnedInstance {
         child: Box::new(ProcessChild(child)),
         readiness: None,

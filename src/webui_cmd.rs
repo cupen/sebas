@@ -179,7 +179,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         );
     }
 
-    info!(
+    tracing::debug!(
         "starting standalone webui on {} (config={})",
         endpoint.bind_addr(),
         args.config
@@ -216,8 +216,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     let admin_adapter = control_admin_adapter();
 
-    info!("webui dashboard listening on {}", endpoint.bind_addr());
-
+    // 监听就绪由 sebas_webui::server 统一记录（embedded 模式只有那一条）。
     // 创建会话下拉的可达 agent 列表（独立 WebUI 进程同样读 config 提供）。
     let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = cfg
         .acp
@@ -455,7 +454,8 @@ pub fn init_tracing_for_im() {
 
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
     let _ = fmt().with_env_filter(filter).try_init();
 }
 

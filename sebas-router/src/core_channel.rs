@@ -41,9 +41,11 @@ pub fn spawn_subscriber(state: AppState) {
 /// 断连时退避重连, 并记录「数据源不可用」供 /admin/stats。
 async fn subscribe_loop(state: AppState, path: PathBuf) {
     let mut backoff = Duration::from_secs(1);
-    // core 被停用（watchdog 默认不拉起 core）时 socket 永远不会出现：只在
-    // 一轮连续失败的开头 WARN 一次，其后降级 debug，避免控制台无限刷屏。
-    let mut warned = false;
+    // core 停用时 socket 永远不会出现——这是预期状态，只在 debug 级别记录
+    // （运行状态可从 /admin/stats 的 reload_status 看到）。只有「曾经连上后
+    // 断开」才算通道故障，WARN 一次（每轮连续失败一条）。
+    let mut ever_connected = false;
+    let mut reported = false;
     loop {
         // 每次尝试前标记数据源不可用 (重连成功后由 subscribe_once 清除)。
         state
@@ -53,17 +55,26 @@ async fn subscribe_loop(state: AppState, path: PathBuf) {
             Ok(()) => {
                 // 正常断开 (core 关闭通道后重连)。
                 backoff = Duration::from_secs(1);
-                warned = false;
+                ever_connected = true;
+                reported = false;
             }
             Err(e) => {
-                if warned {
-                    tracing::debug!(error = %e, "core channel subscribe failed, backoff {backoff:?}");
+                // connect 阶段失败 = 通道从未建立；其余错误说明连接曾建立过。
+                if !e.contains("core channel connect failed") {
+                    ever_connected = true;
+                }
+                if !reported {
+                    if ever_connected {
+                        tracing::warn!(error = %e, "core channel lost, reconnecting, backoff {backoff:?}");
+                    } else {
+                        tracing::debug!(
+                            error = %e,
+                            "core channel unavailable (core disabled or starting), hot reload via file watch"
+                        );
+                    }
+                    reported = true;
                 } else {
-                    tracing::warn!(
-                        error = %e,
-                        "core channel subscribe failed (core not running? hot reload falls back to file watch), backoff {backoff:?}"
-                    );
-                    warned = true;
+                    tracing::debug!(error = %e, "core channel subscribe failed, backoff {backoff:?}");
                 }
             }
         }
@@ -82,7 +93,7 @@ pub(crate) async fn reload_from_channel(state: &AppState, path: &Path) {
         // apply_overlay_value 会覆盖 providers + deleted + model_aliases。
         cfg.apply_overlay_value(&snapshot)
             .map_err(|e| e.to_string())?;
-        state.swap_core(cfg).map_err(|e| format!("热替换失败: {e}"))?;
+        state.swap_core(cfg).map_err(|e| format!("hot swap failed: {e}"))?;
         Ok::<(), String>(())
     }
     .await;
@@ -96,7 +107,9 @@ pub(crate) async fn reload_from_channel(state: &AppState, path: &Path) {
             tracing::warn!("core channel snapshot failed, keeping old config: {e}");
             state.reload_status.record_err(&e);
             // 快照拉取失败但通道仍活着（如 parse 错误）→ 尝试文件回退。
-            if e.contains("连接 core channel 失败") || e.contains("握手") || e.contains("响应读取失败")
+            if e.contains("core channel connect failed")
+                || e.contains("handshake")
+                || e.contains("response read failed")
             {
                 tracing::info!("core channel unavailable, falling back to file overlay reload");
                 let _ = crate::admin::reload_and_swap(state);
@@ -115,52 +128,52 @@ async fn channel_request(
 
     let stream = sebas_ipc::connect(path)
         .await
-        .map_err(|e| format!("连接 core channel 失败: {e}"))?;
+        .map_err(|e| format!("core channel connect failed: {e}"))?;
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
     // 握手: 带 `SEBAS_CORE_SECRET` (watchdog 注入, 与 core/webui 同密钥)。
     let secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
     let hs = serde_json::json!({"secret": secret});
-    let mut line = serde_json::to_string(&hs).map_err(|e| format!("序列化握手失败: {e}"))?;
+    let mut line = serde_json::to_string(&hs).map_err(|e| format!("handshake serialize failed: {e}"))?;
     line.push('\n');
     writer
         .write_all(line.as_bytes())
         .await
-        .map_err(|e| format!("握手写入失败: {e}"))?;
+        .map_err(|e| format!("handshake write failed: {e}"))?;
     writer
         .flush()
         .await
-        .map_err(|e| format!("握手 flush 失败: {e}"))?;
+        .map_err(|e| format!("handshake flush failed: {e}"))?;
 
     let mut ack = String::new();
     reader
         .read_line(&mut ack)
         .await
-        .map_err(|_| "握手 ack 读取失败 (secret 可能被拒绝)".to_string())?;
+        .map_err(|_| "handshake ack read failed (secret may have been rejected)".to_string())?;
     if ack.trim().is_empty() {
-        return Err("握手 ack 为空".into());
+        return Err("handshake ack empty".into());
     }
 
     let mut req_line =
-        serde_json::to_string(req).map_err(|e| format!("序列化请求失败: {e}"))?;
+        serde_json::to_string(req).map_err(|e| format!("request serialize failed: {e}"))?;
     req_line.push('\n');
     writer
         .write_all(req_line.as_bytes())
         .await
-        .map_err(|e| format!("请求写入失败: {e}"))?;
+        .map_err(|e| format!("request write failed: {e}"))?;
     writer
         .flush()
         .await
-        .map_err(|e| format!("请求 flush 失败: {e}"))?;
+        .map_err(|e| format!("request flush failed: {e}"))?;
 
     let mut resp = String::new();
     reader
         .read_line(&mut resp)
         .await
-        .map_err(|_| "响应读取失败".to_string())?;
+        .map_err(|_| "response read failed".to_string())?;
     let resp_line = resp.trim();
-    serde_json::from_str(resp_line).map_err(|e| format!("解析响应失败: {e}"))
+    serde_json::from_str(resp_line).map_err(|e| format!("response parse failed: {e}"))
 }
 
 /// 短连接请求 core 的 `StateSnapshot{domain}`，返回 payload。
@@ -177,9 +190,9 @@ pub(crate) async fn fetch_state_snapshot(
         payload: serde_json::Value,
     }
     let parsed: SnapshotResp = serde_json::from_value(resp)
-        .map_err(|e| format!("解析快照响应失败: {e}"))?;
+        .map_err(|e| format!("snapshot response parse failed: {e}"))?;
     if parsed.cmd != "state_snapshot" {
-        return Err(format!("意外响应 cmd: {}", parsed.cmd));
+        return Err(format!("unexpected response cmd: {}", parsed.cmd));
     }
     Ok(parsed.payload)
 }
@@ -223,46 +236,46 @@ async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
 
     let stream = sebas_ipc::connect(path)
         .await
-        .map_err(|e| format!("连接 core channel 失败: {e}"))?;
+        .map_err(|e| format!("core channel connect failed: {e}"))?;
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
     // 握手: 带 `SEBAS_CORE_SECRET` (watchdog 注入, 与 core/webui 同密钥)。
     let secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
     let hs = serde_json::json!({"secret": secret});
-    let mut line = serde_json::to_string(&hs).map_err(|e| format!("序列化握手失败: {e}"))?;
+    let mut line = serde_json::to_string(&hs).map_err(|e| format!("handshake serialize failed: {e}"))?;
     line.push('\n');
     writer
         .write_all(line.as_bytes())
         .await
-        .map_err(|e| format!("握手写入失败: {e}"))?;
+        .map_err(|e| format!("handshake write failed: {e}"))?;
     writer
         .flush()
         .await
-        .map_err(|e| format!("握手 flush 失败: {e}"))?;
+        .map_err(|e| format!("handshake flush failed: {e}"))?;
 
     // 读握手 ack
     let mut ack = String::new();
     reader
         .read_line(&mut ack)
         .await
-        .map_err(|_| "握手 ack 读取失败 (secret 可能被拒绝)".to_string())?;
+        .map_err(|_| "handshake ack read failed (secret may have been rejected)".to_string())?;
     if ack.trim().is_empty() {
-        return Err("握手 ack 为空".into());
+        return Err("handshake ack empty".into());
     }
 
     // 发送 StateSubscribe 请求
     let req = serde_json::json!({"cmd": "state_subscribe"});
-    let mut req_line = serde_json::to_string(&req).map_err(|e| format!("序列化请求失败: {e}"))?;
+    let mut req_line = serde_json::to_string(&req).map_err(|e| format!("request serialize failed: {e}"))?;
     req_line.push('\n');
     writer
         .write_all(req_line.as_bytes())
         .await
-        .map_err(|e| format!("请求写入失败: {e}"))?;
+        .map_err(|e| format!("request write failed: {e}"))?;
     writer
         .flush()
         .await
-        .map_err(|e| format!("请求 flush 失败: {e}"))?;
+        .map_err(|e| format!("request flush failed: {e}"))?;
 
     // 读帧循环: 先快照, 之后持续读变更通知。
     let mut line = String::new();
@@ -272,12 +285,12 @@ async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
         let n = reader
             .read_line(&mut line)
             .await
-            .map_err(|e| format!("流读取失败: {e}"))?;
+            .map_err(|e| format!("stream read failed: {e}"))?;
         if n == 0 {
             return Err("connection dropped".into());
         }
         let frame: StateStreamFrame = serde_json::from_str(line.trim())
-            .map_err(|e| format!("解析帧失败: {e}"))?;
+            .map_err(|e| format!("frame parse failed: {e}"))?;
         match frame {
             StateStreamFrame::Snapshot { .. } => {
                 // 订阅成功: 连接健康, 清除数据源不可用并触发一次完全 reload。

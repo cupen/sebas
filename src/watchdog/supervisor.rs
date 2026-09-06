@@ -370,7 +370,7 @@ async fn supervise(
             snap.pid = pid;
             snap.started_at = Some(Instant::now());
         }
-        info!(service = name.as_str(), pid = ?pid, "child spawned");
+        info!(service = name.as_str(), pid = %pid_str(pid), "child spawned");
 
         let mut received_ready = false;
         let exit = loop {
@@ -420,7 +420,7 @@ async fn supervise(
                     received_ready = true;
                     readiness = None;
                     set_state(&snapshot, ServiceState::Running).await;
-                    info!(service = name.as_str(), pid = ?pid, "child ready");
+                    info!(service = name.as_str(), pid = %pid_str(pid), "child ready");
                 }
             }
         };
@@ -438,8 +438,8 @@ async fn supervise(
             }
             Exit::Crashed(code) => {
                 warn!(
-                    service = name.as_str(), pid = ?pid, code = ?code,
-                    "child exited (just_performed_update={just_performed_update}, ready={received_ready})"
+                    service = name.as_str(), pid = %pid_str(pid), code = %code_str(code), ready = received_ready,
+                    "child exited"
                 );
                 snapshot.lock().await.pid = None;
 
@@ -838,4 +838,13 @@ mod tests {
         assert!(handle.send(ServiceCommand::Shutdown).await);
         let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
     }
+}
+
+/// `Option` 值在日志里输出裸数字（未知输出 `-`），不输出 `Some(1234)`。
+fn pid_str(pid: Option<u32>) -> String {
+    pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into())
+}
+
+fn code_str(code: Option<i32>) -> String {
+    code.map(|c| c.to_string()).unwrap_or_else(|| "-".into())
 }
