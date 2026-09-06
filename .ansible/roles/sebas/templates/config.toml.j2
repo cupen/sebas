@@ -1,8 +1,16 @@
 {# Minimal viable sebas config rendered by the ansible role.
-   Only sections that need a default for the WebUI-only deploy are rendered;
-   everything else is left for `sebas_config_extra` (appended verbatim) or
-   the operator to add later. The watchdog channel secret (SEBAS_CORE_SECRET)
-   is owned by the watchdog at runtime — it never appears here. #}
+   Only the watchdog sections + dispatch state_file default are rendered
+   here; everything else — including `enabled = false` placeholders for
+   optional subsystems like feishu — is the operator's responsibility
+   via `sebas_config_extra` (appended verbatim).
+
+   The dispatch state_file default lives under {{ sebas_data_dir }} so
+   `validate_runtime`'s parent-dir check doesn't trip over the systemd
+   unit's `ProtectHome=read-only`: the bare sebas binary defaults to
+   `~/.config/sebas/sessions.json`, which systemd would refuse to create
+   even when ownership says sebas can write. The watchdog channel secret
+   (SEBAS_CORE_SECRET) is owned by the watchdog at runtime and never
+   appears here. #}
 
 [watchdog.storage]
 data_dir = "{{ sebas_data_dir }}"
@@ -11,8 +19,8 @@ data_dir = "{{ sebas_data_dir }}"
 host = "{{ sebas_webui_host }}"
 port = {{ sebas_webui_port }}
 
-[feishu]
-enabled = false
+[dispatch]
+state_file = "{{ sebas_dispatch_state_file }}"
 {% if sebas_config_extra | length > 0 %}
 
 # --- operator-supplied extras (sebas_config_extra) ---------------------

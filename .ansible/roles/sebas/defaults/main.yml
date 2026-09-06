@@ -70,3 +70,11 @@ sebas_config_extra: ""
 # the /health endpoint after install. 10 × 3s = 30s grace window.
 sebas_health_retries: 10
 sebas_health_delay: 3
+
+# --- state ----------------------------------------------------------------
+
+# Where `sebas core` (and the in-process channel server under `sebas run`)
+# persist dispatch state. Lives under `sebas_data_dir` so the systemd
+# unit's `ProtectHome=read-only` doesn't reject the parent's create/check
+# probe; the bare binary defaults to `~/.config/sebas/sessions.json`.
+sebas_dispatch_state_file: "{{ sebas_data_dir }}/dispatch-state.json"

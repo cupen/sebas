@@ -35,12 +35,17 @@
     sebas_version_resolved: >-
       {{ sebas_version if sebas_version != 'latest'
          else (sebas_github_latest.json.tag_name | regex_replace('^v', '')) }}
+  when: sebas_artifact_source == 'release'
 
 # Layout assumed: <basename>/sebas (matches taiki-e/upload-rust-binary-action
 # default `leading-dir: true`, which release.yml does not override).
 - name: Pin tarball basename as a fact
   ansible.builtin.set_fact:
-    sebas_artifact_basename: "sebas-{{ sebas_version_resolved }}-x86_64-unknown-linux-gnu"
+    sebas_artifact_basename: "{{ release_basename if sebas_artifact_source == 'release' else file_basename }}"
+  vars:
+    release_basename: "sebas-{{ sebas_version_resolved }}-x86_64-unknown-linux-gnu"
+    file_basename: "{{ sebas_artifact_file | basename | regex_replace('\\.tar\\.gz$', '') }}"
+  when: sebas_artifact_source in ['release', 'file']
 
 - name: Fail when sebas_artifact_source=file but no path is given
   ansible.builtin.fail:
@@ -86,6 +91,7 @@
     dest: "/tmp/{{ sebas_artifact_basename }}.tar.gz"
     mode: "0644"
   delegate_to: localhost
+  become: false
   when: sebas_artifact_source == 'release'
 
 - name: Pin sebas_tarball_path to the downloaded release tarball
@@ -111,6 +117,7 @@
     remote_src: true
     creates: "/tmp/{{ sebas_artifact_basename }}/sebas"
   delegate_to: localhost
+  become: false
   when: sebas_artifact_source in ['release', 'file']
 
 - name: Copy extracted binary to target
