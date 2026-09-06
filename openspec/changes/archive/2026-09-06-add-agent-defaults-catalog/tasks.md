@@ -22,4 +22,4 @@
 
 ## 5. 收尾
 
-- [ ] 5.1 全量质量门：`cargo test`、`pnpm -C sebas-webui/frontend test`、`openspec validate add-agent-defaults-catalog --strict`。验证：全绿。
+- [x] 5.1 全量质量门：`cargo test`、`pnpm -C sebas-webui/frontend test`、`openspec validate add-agent-defaults-catalog --strict`。验证：全绿。
