@@ -258,6 +258,7 @@ fn session_info_usage_field_is_additive() {
         current_model: None,
         available_models: None,
         agent_kind: None,
+        backend: None,
         usage: Some(AppUsage {
             model: Some("claude-x".into()),
             total_input: 10,
