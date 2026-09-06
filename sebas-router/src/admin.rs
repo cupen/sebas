@@ -75,7 +75,7 @@ pub async fn admin_auth(
         headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(extract_bearer_token)
             .is_some_and(|t| constant_time_eq(t, &secret))
     } else {
         addr.ip().is_loopback()
@@ -84,6 +84,21 @@ pub async fn admin_auth(
         return (StatusCode::UNAUTHORIZED, UNAUTHORIZED_MSG).into_response();
     }
     next.run(req).await
+}
+
+/// Bearer 解析：scheme 大小写不敏感 + trim（与 auth.rs extract_key 同规则）。
+fn extract_bearer_token(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if s.len() >= 6 && s[..6].eq_ignore_ascii_case("bearer") {
+        let after = &s[6..];
+        if after.starts_with(' ') || after.starts_with('\t') {
+            let rest = after.trim();
+            if !rest.is_empty() {
+                return Some(rest);
+            }
+        }
+    }
+    None
 }
 
 /// 手写常量时间比较（timing-safe，无需新依赖）。

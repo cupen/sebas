@@ -121,7 +121,7 @@ pub fn bootstrap_auth() -> Arc<AuthHandle> {
             std::env::var("SEBAS_WEBUI_PASSWORD"),
         ) {
             if !user.is_empty() && !pass.is_empty() {
-                if pass.len() < 8 {
+                if pass.chars().count() < 8 {
                     warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
                 }
                 match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {

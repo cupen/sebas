@@ -158,10 +158,13 @@ export class SebasLogin extends LitElement {
         }),
       )
     } catch (err) {
-      this.error =
-        err instanceof ApiError && err.status === 429
-          ? '尝试次数过多，请稍后再试'
-          : '用户名或密码错误'
+      if (err instanceof ApiError) {
+        if (err.status === 429) this.error = '尝试次数过多，请稍后再试'
+        else if (err.status === 401) this.error = '用户名或密码错误'
+        else this.error = `登录失败（HTTP ${err.status}）：${err.message}`
+      } else {
+        this.error = '网络连接失败，请检查服务是否可用'
+      }
     } finally {
       this.busy = false
     }

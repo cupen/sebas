@@ -308,7 +308,7 @@ pub async fn admin_mutation_guard(
         let session_csrf = req.extensions().get::<CsrfExtension>().map(|c| c.0.clone());
 
         let csrf_valid = match (csrf_token, session_csrf) {
-            (Some(token), Some(expected)) => token == expected,
+            (Some(token), Some(expected)) => constant_time_eq(token.as_bytes(), expected.as_bytes()),
             _ => false,
         };
 
@@ -327,13 +327,38 @@ pub async fn admin_mutation_guard(
 
 /// Check if the origin is a localhost origin.
 fn is_loopback_origin(origin: &str) -> bool {
-    // Accept http://127.0.0.1[:port] and http://localhost[:port]
-    if let Some(rest) = origin.strip_prefix("http://") {
-        let host = rest.split(':').next().unwrap_or(rest);
-        host == "127.0.0.1" || host == "localhost" || host == "::1"
+    // Accept http(s)://127.0.0.1[:port], http(s)://localhost[:port],
+    // http(s)://[::1][:port]（与 server.rs origin_authority 的任意 scheme
+    // 解析保持一致：本地 https 反代不再被误判为 foreign）。
+    let rest = match origin.split_once("://") {
+        Some((scheme, rest))
+            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
+        {
+            rest
+        }
+        _ => return false,
+    };
+    // authority = host[:port]（取 '/' 之前；IPv6 用 [..] 包裹）。
+    let authority = rest.split('/').next().unwrap_or("");
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or("")
     } else {
-        false
+        authority.split(':').next().unwrap_or(authority)
+    };
+    host.eq_ignore_ascii_case("127.0.0.1")
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+}
+
+/// 手写常量时间比较（admin 密码与 CSRF token 比对用，避免短路泄漏）。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 // ─── Login / Logout ─────────────────────────────────────────────────────────
@@ -477,8 +502,11 @@ pub async fn api_admin_auth_guard(
 
 /// POST /api/admin/login — authenticate with JSON `{ "password": ... }`.
 /// On success sets the admin session cookie (Path=/ so it covers
-/// `/api/admin/*`), HttpOnly, SameSite=Lax; the 24 h inactivity TTL lives
-/// in the session store.
+/// `/api/admin/*`), HttpOnly, SameSite=Lax, and returns the CSRF token in
+/// the JSON body (`{ "status": "ok", "csrf_token": "…" }`) — the HttpOnly
+/// cookie is invisible to JS, so without this the SPA could never send
+/// `X-CSRF-Token` and non-loopback mutations would always 403.
+/// The 24 h inactivity TTL lives in the session store.
 pub async fn api_login_action(
     State(state): State<AdminState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -496,7 +524,9 @@ pub async fn api_login_action(
     }
 
     let password_ok = match &state.password {
-        Some(expected) => form.password == expected.as_ref(),
+        Some(expected) => {
+            constant_time_eq(form.password.as_bytes(), expected.as_bytes())
+        }
         None => false,
     };
     if !password_ok {
@@ -508,19 +538,40 @@ pub async fn api_login_action(
     }
 
     state.session_store.reset_rate_limit(&client_ip).await;
-    let (session_id, _csrf) = state.session_store.create().await;
+    let (session_id, csrf) = state.session_store.create().await;
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Lax",
         SESSION_COOKIE_NAME, session_id
     );
     let mut resp = (
         StatusCode::OK,
-        Json(serde_json::json!({ "status": "ok" })),
+        Json(serde_json::json!({ "status": "ok", "csrf_token": csrf })),
     )
         .into_response();
     resp.headers_mut()
         .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
     resp
+}
+
+/// GET /api/admin/csrf — return the CSRF token for the current session.
+/// Lets an SPA that already holds a valid HttpOnly session cookie (e.g.
+/// page reload after upgrade, or a second tab) recover the token without
+/// re-login. Guarded by `api_admin_auth_guard`, so unauthenticated → 401.
+pub async fn api_csrf_action(
+    headers: axum::http::HeaderMap,
+    State(state): State<AdminState>,
+) -> axum::response::Response {
+    match extract_session_cookie(&headers) {
+        Some(id) => match state.session_store.validate(&id).await {
+            Ok(csrf_token) => (
+                StatusCode::OK,
+                Json(serde_json::json!({ "csrf_token": csrf_token })),
+            )
+                .into_response(),
+            Err(_) => api_401(),
+        },
+        None => api_401(),
+    }
 }
 
 /// POST /api/admin/logout — end the session and clear the cookie.
@@ -573,6 +624,7 @@ pub fn build_api_admin_router(state: AdminState) -> Router {
         .route("/api/admin/status", get(api_admin_status))
         .route("/api/admin/events", get(api_admin_events))
         .route("/api/admin/services", get(api_admin_services))
+        .route("/api/admin/csrf", get(api_csrf_action))
         .merge(mutation_routes)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -889,8 +941,11 @@ mod tests {
         assert!(is_loopback_origin("http://127.0.0.1:9797"));
         assert!(is_loopback_origin("http://localhost"));
         assert!(is_loopback_origin("http://127.0.0.1"));
+        assert!(is_loopback_origin("https://localhost:9797"));
+        assert!(is_loopback_origin("https://127.0.0.1:9797"));
+        assert!(is_loopback_origin("http://[::1]:9797"));
         assert!(!is_loopback_origin("http://evil.com"));
-        assert!(!is_loopback_origin("https://localhost:9797"));
+        assert!(!is_loopback_origin("https://evil.example"));
         assert!(!is_loopback_origin(""));
     }
 
@@ -1061,6 +1116,10 @@ mod tests {
         assert!(cookie.starts_with("sebas_admin_session="), "cookie: {cookie}");
         assert!(cookie.contains("HttpOnly"), "cookie: {cookie}");
         assert!(cookie.contains("Path=/"), "cookie must cover /api/admin: {cookie}");
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).expect("login returns JSON");
+        let csrf = body["csrf_token"].as_str().expect("login returns csrf_token");
+        assert!(!csrf.is_empty(), "csrf_token must be non-empty: {body}");
         let session_value = cookie
             .split(';')
             .next()
@@ -1071,6 +1130,46 @@ mod tests {
         // Authenticated read succeeds.
         let (status, _) = api_json_with_cookie(app.clone(), "GET", "/api/admin/status", &session_value).await;
         assert_eq!(status, StatusCode::OK);
+
+        // CSRF recovery endpoint returns the same token without re-login.
+        let (status, v) =
+            api_json_with_cookie(app.clone(), "GET", "/api/admin/csrf", &session_value).await;
+        assert_eq!(status, StatusCode::OK, "body: {v}");
+        assert_eq!(v["csrf_token"].as_str(), Some(csrf), "csrf endpoint must match login token");
+
+        // Non-loopback mutation with CSRF token succeeds (public-deploy shape).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/restart")
+                    .header("cookie", &session_value)
+                    .header("x-csrf-token", csrf)
+                    .header("origin", "https://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // No adapter in password_state → honest 503, not 403: proves CSRF passed.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Same request without CSRF + foreign origin → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/restart")
+                    .header("cookie", &session_value)
+                    .header("origin", "https://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // Logout clears the session.
         let (status, _) = api_json_with_cookie(app.clone(), "POST", "/api/admin/logout", &session_value).await;

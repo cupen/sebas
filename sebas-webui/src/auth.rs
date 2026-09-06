@@ -117,12 +117,15 @@ impl Credentials {
 
     /// 校验用户名 + 密码。用户名不匹配与密码错误同样返回 false（单账户
     /// 部署下不向攻击者区分「用户名错」与「密码错」）。
+    ///
+    /// 时序安全：无论用户名是否匹配都跑一次 PBKDF2（同盐同迭代次数），
+    /// 避免「用户名错直接返回 vs 密码错跑 120k 次哈希」的快慢差被用来
+    /// 先枚举用户名。用户名本身也用常量时间比较。
     pub fn verify(&self, username: &str, password: &str) -> bool {
-        if self.username != username {
-            return false;
-        }
         let candidate = pbkdf2_hmac_sha256(password.as_bytes(), &self.salt, self.iterations);
-        constant_time_eq(&candidate, &self.hash)
+        let password_ok = constant_time_eq(&candidate, &self.hash);
+        let username_ok = constant_time_eq(self.username.as_bytes(), username.as_bytes());
+        username_ok && password_ok
     }
 }
 
