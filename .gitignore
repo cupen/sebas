@@ -21,7 +21,7 @@ logs/
 # keep the role/inventory checked in, host-specific overrides out.
 .ansible/host_vars/
 
-# 根目录 cargo 产物二进制;不带锚点会把 ansible/roles/sebas/ 等同名目录一并忽略
+# 根目录 cargo 产物二进制;不带锚点会把 .ansible/roles/sebas/ 等同名目录一并忽略
 /sebas
 
 .e2e/
