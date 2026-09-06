@@ -61,8 +61,46 @@ export interface CardConfig {
 
 export interface ProviderInfo {
   name: string
+  /** 派生 preset 名；缺省 = 自定义 provider。 */
+  preset?: string | null
   base_url_anthropic: string | null
-  base_url_openai: string | null
+  base_url_openai_chat: string | null
+  base_url_openai_responses: string | null
+}
+
+/** /router/api/providers 的 admin 列表条目（BFF 透传 router admin API）。 */
+export interface RouterProviderAdmin {
+  name: string
+  preset?: string | null
+  base_url_anthropic: string | null
+  base_url_openai_chat: string | null
+  base_url_openai_responses: string | null
+  api_key_env: string | null
+  api_key_configured: boolean
+  models: string[]
+}
+
+/** /router/api/presets 的条目（内置 preset 表只读视图，跟随代码）。 */
+export interface ProviderPreset {
+  name: string
+  base_url_anthropic: string | null
+  base_url_openai_chat: string | null
+  base_url_openai_responses: string | null
+  api_key_env: string
+  models: string[]
+}
+
+/** provider 创建/编辑 payload（admin API 的键值子集）。 */
+export interface ProviderPayload {
+  name?: string
+  preset?: string
+  base_url_anthropic?: string
+  base_url_openai_chat?: string
+  base_url_openai_responses?: string
+  api_key?: string
+  api_key_env?: string
+  default_model?: string
+  protocol?: string
 }
 
 export interface RouterInfo {
@@ -292,6 +330,20 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   )
 }
 
+async function put<T>(path: string, body?: unknown): Promise<T> {
+  return unwrap<T>(
+    await fetch(path, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: body === undefined ? '{}' : JSON.stringify(body),
+    }),
+  )
+}
+
+async function del<T>(path: string): Promise<T> {
+  return unwrap<T>(await fetch(path, { method: 'DELETE', headers: { accept: 'application/json' } }))
+}
+
 // Project registry namespace — defined first so `api.projects` can re-export it below.
 const projects = {
   list: () => get<{ projects: Project[] }>('/api/projects'),
@@ -360,6 +412,21 @@ export const api = {
   switchSession: (encodedKey: string) =>
     post<{ status: string; redirect: string; active_session_key: string }>(
       `/api/sessions/${encodedKey}/switch`,
+    ),
+
+  // Router provider 管理（BFF → router admin API；preset 表跟随代码）。
+  routerProviders: () =>
+    get<{ providers: RouterProviderAdmin[] }>('/router/api/providers'),
+  routerPresets: () => get<{ presets: ProviderPreset[] }>('/router/api/presets'),
+  routerProviderCreate: (payload: ProviderPayload) =>
+    post<{ created: string }>('/router/api/providers', payload),
+  routerProviderUpdate: (name: string, payload: ProviderPayload) =>
+    put<{ updated: string }>(`/router/api/providers/${encodeURIComponent(name)}`, payload),
+  routerProviderDelete: (name: string) =>
+    del<{ deleted: string }>(`/router/api/providers/${encodeURIComponent(name)}`),
+  routerProviderProbe: (name: string) =>
+    post<{ models: string[]; applied: boolean }>(
+      `/router/api/providers/${encodeURIComponent(name)}/probe?apply=true`,
     ),
 
   // Admin reads

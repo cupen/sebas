@@ -26,7 +26,9 @@ async fn app_with(router_listen: Option<String>) -> axum::Router {
         providers: vec![sebas_webui::models::ProviderInfo {
             name: "snapshot-provider".into(),
             base_url_anthropic: Some("https://snapshot.example".into()),
-            base_url_openai: None,
+            base_url_openai_chat: None,
+            base_url_openai_responses: None,
+            preset: None,
         }],
     };
     build_router(backend, gw, CardConfig::default())

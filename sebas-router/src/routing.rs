@@ -11,8 +11,8 @@
 //! （唯一 provider 的隐式默认折叠进 `default_provider`）。model 缺失（GET 类）
 //! 直接走默认链，`upstream_model` 为 `None`。
 //!
-//! 协议一致性：解析到的 `provider.protocol` ≠ 请求 `proto` → `ProtocolMismatch`，
-//! 纯透传，不做协议转换。
+//! 协议一致性：解析到的 provider 缺请求 `proto` 对应的 base_url 槽位 →
+//! `ProtocolMismatch`，纯透传，不做协议转换。
 
 use std::collections::HashMap;
 
@@ -262,11 +262,14 @@ mod tests {
 
     fn simple_provider(name: &str, proto: WireProtocol) -> (String, ProviderConfig) {
         let url = format!("https://{name}.example.com");
+        let url_for = |p: WireProtocol| (p == proto).then(|| url.clone());
         (
             name.to_string(),
             ProviderConfig {
-                base_url_anthropic: (proto == WireProtocol::Anthropic).then(|| url.clone()),
-                base_url_openai: (proto == WireProtocol::OpenAi).then_some(url),
+                preset: None,
+                base_url_anthropic: url_for(WireProtocol::Anthropic),
+                base_url_openai_chat: url_for(WireProtocol::OpenAiChat),
+                base_url_openai_responses: url_for(WireProtocol::OpenAiResponses),
                 api_key_env: None,
                 api_key: Some("test-key".into()),
                 model_map: HashMap::new(),
@@ -331,7 +334,7 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[
                 ("anthropic", WireProtocol::Anthropic),
-                ("openai", WireProtocol::OpenAi),
+                ("openai", WireProtocol::OpenAiChat),
             ]),
             &[],
             Some("anthropic"),
@@ -352,14 +355,14 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[
                 ("anthropic", WireProtocol::Anthropic),
-                ("openai", WireProtocol::OpenAi),
+                ("openai", WireProtocol::OpenAiChat),
             ]),
             &[("foo/claude-sonnet", &["openai"])],
             Some("anthropic"),
         );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(Some("foo/claude-sonnet"), WireProtocol::OpenAi)
+            .resolve(Some("foo/claude-sonnet"), WireProtocol::OpenAiChat)
             .expect("unknown namespace should fall back to exact route");
         assert_eq!(d.provider, "openai");
         assert_eq!(d.upstream_model.as_deref(), Some("foo/claude-sonnet"));
@@ -375,14 +378,14 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[
                 ("anthropic", WireProtocol::Anthropic),
-                ("openai", WireProtocol::OpenAi),
+                ("openai", WireProtocol::OpenAiChat),
             ]),
             &[("claude-*", &["anthropic"]), ("claude-sonnet", &["openai"])],
             None,
         );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(Some("claude-sonnet"), WireProtocol::OpenAi)
+            .resolve(Some("claude-sonnet"), WireProtocol::OpenAiChat)
             .expect("exact should match");
         assert_eq!(d.provider, "openai");
     }
@@ -417,7 +420,7 @@ mod tests {
         );
         let table = RouteTable::from_config(&cfg);
         let err = table
-            .resolve(Some("claude-sonnet"), WireProtocol::OpenAi)
+            .resolve(Some("claude-sonnet"), WireProtocol::OpenAiChat)
             .expect_err("protocol mismatch");
         assert_eq!(
             err,
@@ -434,7 +437,7 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[
                 ("anthropic", WireProtocol::Anthropic),
-                ("openai", WireProtocol::OpenAi),
+                ("openai", WireProtocol::OpenAiChat),
             ]),
             &[],
             None,
@@ -442,7 +445,7 @@ mod tests {
         let table = RouteTable::from_config(&cfg);
         // 两个 provider 且无默认/路由 → 无隐式默认，NoRoute。
         let err = table
-            .resolve(Some("gpt-4"), WireProtocol::OpenAi)
+            .resolve(Some("gpt-4"), WireProtocol::OpenAiChat)
             .expect_err("no route should error");
         assert_eq!(err, RouteError::NoRoute);
     }
@@ -484,7 +487,7 @@ mod tests {
         );
         let table = RouteTable::from_config(&cfg);
         let err = table
-            .resolve(Some("claude-sonnet"), WireProtocol::OpenAi)
+            .resolve(Some("claude-sonnet"), WireProtocol::OpenAiChat)
             .expect_err("protocol mismatch must still surface");
         assert_eq!(
             err,
@@ -531,14 +534,14 @@ mod tests {
         let cfg = build_cfg(
             simple_providers(&[
                 ("anthropic", WireProtocol::Anthropic),
-                ("openai", WireProtocol::OpenAi),
+                ("openai", WireProtocol::OpenAiChat),
             ]),
             &[],
             Some("openai"),
         );
         let table = RouteTable::from_config(&cfg);
         let d = table
-            .resolve(None, WireProtocol::OpenAi)
+            .resolve(None, WireProtocol::OpenAiChat)
             .expect("default should resolve when model absent");
         assert_eq!(d.provider, "openai");
         assert_eq!(d.upstream_model, None);

@@ -37,6 +37,7 @@ pub fn build_admin_router(state: AppState) -> Router {
             axum::routing::put(update_provider).delete(delete_provider),
         )
         .route("/admin/providers/{name}/probe", post(probe_provider))
+        .route("/admin/presets", get(list_presets))
         .route(
             "/admin/model-aliases",
             get(list_aliases).post(create_alias),
@@ -230,26 +231,54 @@ pub(crate) fn rebuild_from_seed(state: &AppState) -> Result<RouterConfig, String
     cfg.usage_file = core.cfg.usage_file.clone();
     cfg.debug = core.cfg.debug;
     cfg.rate_limit = core.cfg.rate_limit;
+    // debug 模式的内置 test provider 是启动期内存注入、不在 config.toml
+    // 里——rebuild 会丢。debug 标志保留时按幂等语义重注入，否则首次
+    // admin 写（热替换）后 test 模型就 502 no_route。
+    if cfg.debug {
+        crate::debug::enable_debug_test_provider(&mut cfg);
+    }
     Ok(cfg)
 }
 
 // -------------------- providers CRUD --------------------
 
 /// GET /admin/providers：全 provider 列表，key 脱敏（api_key_configured bool）。
+/// 三槽位 + preset 来源字段；统一槽 `base_url_openai` 已移除、绝不出现在响应。
 async fn list_providers(State(state): State<AppState>) -> Response {
     let core = state.core();
     let mut out = Vec::new();
     for (name, p) in &core.cfg.providers {
         out.push(json!({
             "name": name,
+            "preset": p.preset,
             "base_url_anthropic": p.base_url_anthropic,
-            "base_url_openai": p.base_url_openai,
+            "base_url_openai_chat": p.base_url_openai_chat,
+            "base_url_openai_responses": p.base_url_openai_responses,
             "api_key_env": p.api_key_env,
             "api_key_configured": core.api_keys.contains_key(name),
             "models": p.models,
         }));
     }
     Json(json!({ "providers": out })).into_response()
+}
+
+/// GET /admin/presets：内置 preset 表只读视图（直出运行中二进制的代码表，
+/// 绝非存储副本——preset 数据跟随代码）。无 mutation 端点。
+async fn list_presets() -> Response {
+    let out: Vec<Value> = config::presets()
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "base_url_anthropic": p.base_url_anthropic,
+                "base_url_openai_chat": p.base_url_openai_chat,
+                "base_url_openai_responses": p.base_url_openai_responses,
+                "api_key_env": p.api_key_env,
+                "models": p.models,
+            })
+        })
+        .collect();
+    Json(json!({ "presets": out })).into_response()
 }
 
 /// POST /admin/providers：创建。重名 409；无效 400（不碰文件）。
@@ -686,8 +715,10 @@ fn alias_exists(path: &std::path::Path, alias: &str) -> bool {
 
 // -------------------- probe / reload / stats / metrics --------------------
 
-/// POST /admin/providers/{name}/probe：OpenAI `/models` 优先、Anthropic
-/// `/v1/models` 回退。`?apply=true` 时把列表写回 provider `models` 字段。
+/// POST /admin/providers/{name}/probe：OpenAI `/models` 优先（chat 槽 →
+/// responses 槽）、Anthropic `/v1/models` 回退。`?apply=true` 把列表写回
+/// provider `models` 字段——仅自定义 provider；preset 派生条目的 models
+/// 跟随代码，不落盘（响应 `applied: false`）。
 async fn probe_provider(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -697,17 +728,27 @@ async fn probe_provider(
     let Some(p) = core.cfg.providers.get(&name) else {
         return err_404(&format!("provider '{name}' 不存在"));
     };
+    let is_preset_derived = p.preset.is_some();
     let key = core.api_keys.get(&name).cloned();
-    let (openai_base, anthropic_base) =
-        (p.base_url_openai.clone(), p.base_url_anthropic.clone());
-    if openai_base.is_none() && anthropic_base.is_none() {
+    let openai_bases: Vec<&String> = [
+        p.base_url_openai_chat.as_ref(),
+        p.base_url_openai_responses.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let anthropic_base = p.base_url_anthropic.clone();
+    if openai_bases.is_empty() && anthropic_base.is_none() {
         return err_400(&format!("provider '{name}' 未配置任何 base URL"));
     }
     let client = state.client.clone();
-    // 依次尝试：OpenAI /models → Anthropic /v1/models。
+    // 依次尝试：OpenAI chat 槽 /models → OpenAI responses 槽 /models → Anthropic /v1/models。
     let mut models: Option<Vec<String>> = None;
     let mut last_err = String::new();
-    if let Some(base) = &openai_base {
+    for base in &openai_bases {
+        if models.is_some() {
+            break;
+        }
         match fetch_models(&client, &format!("{base}/models"), key.as_deref()).await {
             Ok(list) => models = Some(list),
             Err(e) => last_err = e,
@@ -725,8 +766,8 @@ async fn probe_provider(
         // 502 通用 message，不含 key（last_err 已是脱敏管线产物）。
         return err_502(&format!("上游 model 列表探测失败: {last_err}"));
     };
-    // ?apply=true：写回 provider 的 models 字段。
-    let applied = query.as_deref() == Some("apply=true");
+    // ?apply=true：写回 provider 的 models 字段。preset 派生条目跳过。
+    let applied = query.as_deref() == Some("apply=true") && !is_preset_derived;
     if applied {
         let models_value = serde_json::to_value(&models).unwrap_or(Value::Array(Vec::new()));
         let name2 = name.clone();
@@ -752,18 +793,7 @@ async fn probe_provider(
                                 if obj.is_empty()
                                     && let Some(seed) = state.core().cfg.providers.get(&name2)
                                 {
-                                    if let Some(v) = &seed.base_url_anthropic {
-                                        obj.insert("base_url_anthropic".into(), Value::String(v.clone()));
-                                    }
-                                    if let Some(v) = &seed.base_url_openai {
-                                        obj.insert("base_url_openai".into(), Value::String(v.clone()));
-                                    }
-                                    if let Some(v) = &seed.api_key_env {
-                                        obj.insert("api_key_env".into(), Value::String(v.clone()));
-                                    }
-                                    if let Some(v) = &seed.api_key {
-                                        obj.insert("api_key".into(), Value::String(v.clone()));
-                                    }
+                                    insert_seed_connection_fields(obj, seed);
                                 }
                                 obj.insert("models".into(), models_value.clone());
                             }
@@ -809,7 +839,7 @@ async fn probe_provider(
                 };
                 // overlay 条目整体替换种子条目——若本 provider 原本只在
                 // config.toml 里（overlay 无条目），只写 models 会抹掉
-                // base_url/preset 导致校验失败。seed 里带过的连接字段须一并
+                // base_url 导致校验失败。seed 里带过的连接字段须一并
                 // 带入 overlay 条目。
                 if obj.is_empty()
                     && let Some(seed) = state
@@ -818,18 +848,7 @@ async fn probe_provider(
                         .providers
                         .get(&name2)
                 {
-                    if let Some(v) = &seed.base_url_anthropic {
-                        obj.insert("base_url_anthropic".into(), Value::String(v.clone()));
-                    }
-                    if let Some(v) = &seed.base_url_openai {
-                        obj.insert("base_url_openai".into(), Value::String(v.clone()));
-                    }
-                    if let Some(v) = &seed.api_key_env {
-                        obj.insert("api_key_env".into(), Value::String(v.clone()));
-                    }
-                    if let Some(v) = &seed.api_key {
-                        obj.insert("api_key".into(), Value::String(v.clone()));
-                    }
+                    insert_seed_connection_fields(obj, seed);
                 }
                 obj.insert("models".into(), models_value.clone());
                 Ok(())
@@ -842,6 +861,27 @@ async fn probe_provider(
         }
     }
     Json(json!({"models": models, "applied": applied})).into_response()
+}
+
+/// probe apply 的 seed 回填：自定义 provider 首次落 overlay 时把 config.toml
+/// 种子里已验证的连接字段一并带入（否则只剩 models 的条目过不了校验）。
+/// preset 派生条目不会走到这里（apply 已跳过——它们的连接数据跟随代码）。
+fn insert_seed_connection_fields(obj: &mut Map<String, Value>, seed: &crate::config::ProviderConfig) {
+    if let Some(v) = &seed.base_url_anthropic {
+        obj.insert("base_url_anthropic".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &seed.base_url_openai_chat {
+        obj.insert("base_url_openai_chat".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &seed.base_url_openai_responses {
+        obj.insert("base_url_openai_responses".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &seed.api_key_env {
+        obj.insert("api_key_env".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &seed.api_key {
+        obj.insert("api_key".into(), Value::String(v.clone()));
+    }
 }
 
 /// GET 上游 model 列表（OpenAI `data[].id` / Anthropic `data[].id` 两种形状）。

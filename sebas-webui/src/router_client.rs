@@ -16,11 +16,30 @@ pub struct RouterClient {
 
 /// router 不可达/超时/非 2xx 的统一错误面。message 脱敏（不含 secret）。
 #[derive(Debug)]
-pub struct RouterClientError(pub String);
+pub struct RouterClientError {
+    /// 透传给前端的 HTTP 状态：4xx 原样（400 校验 / 404 / 409 重名），
+    /// router 不可达/读失败等本地问题 → 502。
+    pub status: axum::http::StatusCode,
+    pub message: String,
+}
+
+impl RouterClientError {
+    fn unreachable(message: String) -> Self {
+        Self { status: axum::http::StatusCode::BAD_GATEWAY, message }
+    }
+    fn from_status(status: reqwest::StatusCode, path: &str, message: Option<String>) -> Self {
+        let status = axum::http::StatusCode::from_u16(status.as_u16())
+            .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+        Self {
+            status,
+            message: message.unwrap_or_else(|| format!("router admin {path} 返回 {status}")),
+        }
+    }
+}
 
 impl std::fmt::Display for RouterClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -54,19 +73,17 @@ impl RouterClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| RouterClientError(format!("router 不可达: {e}")))?;
+            .map_err(|e| RouterClientError::unreachable(format!("router 不可达: {e}")))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| RouterClientError(format!("读响应失败: {e}")))?;
+            .map_err(|e| RouterClientError::unreachable(format!("读响应失败: {e}")))?;
         if !status.is_success() {
-            return Err(RouterClientError(format!(
-                "router admin {path} 返回 {status}"
-            )));
+            return Err(RouterClientError::from_status(status, path, None));
         }
         serde_json::from_str(&text)
-            .map_err(|e| RouterClientError(format!("响应非 JSON: {e}")))
+            .map_err(|e| RouterClientError::unreachable(format!("响应非 JSON: {e}")))
     }
 
     async fn post_json(&self, path: &str, body: Option<&Value>) -> Result<Value, RouterClientError> {
@@ -82,28 +99,32 @@ impl RouterClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| RouterClientError(format!("router 不可达: {e}")))?;
+            .map_err(|e| RouterClientError::unreachable(format!("router 不可达: {e}")))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| RouterClientError(format!("读响应失败: {e}")))?;
-        // 2xx 才是成功；4xx/5xx 把 router 的 error message 原样带给前端。
+            .map_err(|e| RouterClientError::unreachable(format!("读响应失败: {e}")))?;
+        // 2xx 才是成功；4xx/5xx 把 router 的 error message + 状态码原样带给前端。
         if !status.is_success() {
             let msg = serde_json::from_str::<Value>(&text)
                 .ok()
-                .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
-                .unwrap_or(format!("router admin {path} 返回 {status}"));
-            return Err(RouterClientError(msg));
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from));
+            return Err(RouterClientError::from_status(status, path, msg));
         }
         serde_json::from_str(&text)
-            .map_err(|e| RouterClientError(format!("响应非 JSON: {e}")))
+            .map_err(|e| RouterClientError::unreachable(format!("响应非 JSON: {e}")))
     }
 
     // ---- 只读面 ----
 
     pub async fn providers(&self) -> Result<Value, RouterClientError> {
         self.get("/admin/providers").await
+    }
+
+    /// 内置 preset 表只读视图（跟随代码；前端渲染 preset 只读值用）。
+    pub async fn presets(&self) -> Result<Value, RouterClientError> {
+        self.get("/admin/presets").await
     }
 
     pub async fn model_aliases(&self) -> Result<Value, RouterClientError> {
@@ -180,21 +201,20 @@ impl RouterClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| RouterClientError(format!("router 不可达: {e}")))?;
+            .map_err(|e| RouterClientError::unreachable(format!("router 不可达: {e}")))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| RouterClientError(format!("读响应失败: {e}")))?;
+            .map_err(|e| RouterClientError::unreachable(format!("读响应失败: {e}")))?;
         if !status.is_success() {
             let msg = serde_json::from_str::<Value>(&text)
                 .ok()
-                .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
-                .unwrap_or(format!("router admin {path} 返回 {status}"));
-            return Err(RouterClientError(msg));
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from));
+            return Err(RouterClientError::from_status(status, path, msg));
         }
         serde_json::from_str(&text)
-            .map_err(|e| RouterClientError(format!("响应非 JSON: {e}")))
+            .map_err(|e| RouterClientError::unreachable(format!("响应非 JSON: {e}")))
     }
 }
 

@@ -5,9 +5,11 @@
 //! 只有顶层 provider、无 `[router]` 段时，其余字段全部走默认值。
 //!
 //! provider 支持「名称即 preset」（可选显式 `preset = "..."` 别名）：
-//! anthropic / openai / deepseek / kimi / glm / minimax / ark / dashscope /
-//! gemini 自带 `protocol` / `base_url` / `api_key_env` 惯例默认，显式字段永远
-//! 覆盖；双协议 provider 必须显式 `protocol`（不猜）。
+//! preset 数据跟随代码表——base_url 三槽位（anthropic / openai_chat /
+//! openai_responses）与 models 一律在 resolve 期从内置表物化，preset 派生
+//! 条目显式写这些字段即配置错误；用户仅拥有 api_key / api_key_env /
+//! default_model / protocol。统一槽 `base_url_openai` 已移除（未发布，
+//! 不留别名），出现即拒绝。
 //! 下游客户端鉴权用 `[router] auth_token`（单个字符串或字符串数组），只做
 //! Bearer/x-api-key 匹配，无 per-key 限流/配额/模型白名单等特性。
 //! 不配置则路由不校验下游 token（裸奔，启动时 warn）。
@@ -152,18 +154,24 @@ fn default_config_source() -> String {
             .unwrap_or_else(|| "~/.sebas/config.toml".into())
 }
 
-/// 上游 provider。`api_key_env` 优先（密钥只从 env 读，不落盘/不落日志）；
-/// `api_key` 明文仅测试用（resolve 时 warn）。两者均无 → Config 错误。
+/// 上游 provider。`api_key_env` 优先；明文 `api_key` 由 UI/overlay 正常
+/// 写入（resolve 时 debug 提示，不再告警）。两者均无 → Config 错误。
 ///
-/// `base_url_anthropic` / `base_url_openai` 各自独立：同一 provider 可同时
-/// 暴露两种协议（如 deepseek、ark），各自指向不同的上游路径；请求按协议取
-/// 对应 URL，缺位 → `ProtocolMismatch`。至少一项必填。
+/// 三个 base_url 槽位各自独立：同一 provider 可同时暴露三种协议面
+/// （anthropic / openai chat completions / openai responses），请求按协议取
+/// 对应槽位，缺位 → `ProtocolMismatch`。至少一项必填。
+/// `preset` 记录派生来源（resolve 期物化，供 admin 展示与 probe 跳过回写）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
+    /// 派生本 provider 的 preset 名；`None` = 自定义 provider。
+    #[serde(default)]
+    pub preset: Option<String>,
     #[serde(default)]
     pub base_url_anthropic: Option<String>,
     #[serde(default)]
-    pub base_url_openai: Option<String>,
+    pub base_url_openai_chat: Option<String>,
+    #[serde(default)]
+    pub base_url_openai_responses: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(default)]
@@ -175,8 +183,8 @@ pub struct ProviderConfig {
     /// model 字段的最终名字。
     #[serde(default)]
     pub model_map: HashMap<String, String>,
-    /// 按从强到弱排列的模型名列表（手写）。`[n]` 后缀（如 `[1m]`）既是
-    /// 模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
+    /// 按从强到弱排列的模型名列表（手写或 preset 物化）。`[n]` 后缀（如
+    /// `[1m]`）既是模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
     /// `models` 顺序 = 强→弱，用于 Claude Code
     /// 4 个 MODEL 环境变量（OPUS/SONNET/HAIKU）的赋值；与 `model_map`
     /// 不重复，前者定 model 列表的强弱档位，后者定上游 id 重命名。
@@ -184,12 +192,13 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
 }
 
-/// 给定请求协议返回对应上游 URL；两项都为 None 视为未配置。
+/// 给定请求协议返回对应槽位 URL；三槽全空视为未配置（由 validate 拒绝）。
 impl ProviderConfig {
     pub fn url_for(&self, proto: WireProtocol) -> Option<&str> {
         match proto {
             WireProtocol::Anthropic => self.base_url_anthropic.as_deref(),
-            WireProtocol::OpenAi => self.base_url_openai.as_deref(),
+            WireProtocol::OpenAiChat => self.base_url_openai_chat.as_deref(),
+            WireProtocol::OpenAiResponses => self.base_url_openai_responses.as_deref(),
         }
     }
 
@@ -268,8 +277,9 @@ where
     }
 }
 
-/// TOML 原始形态的 provider 段：字段全 Option，preset 填充后再收敛成
-/// 对外 `ProviderConfig`（至少一个 `*_base_url` 必填）。
+/// TOML 原始形态的 provider 段：字段全 Option，preset 物化后收敛成
+/// 对外 `ProviderConfig`（preset 派生禁写 url/models；自定义至少一槽）。
+/// `base_url_openai` 统一槽已移除，字段保留仅为显式拒绝（见 resolve）。
 #[derive(Deserialize)]
 struct RawProviderConfig {
     /// 显式 preset 别名；缺省时「名称即 preset」。
@@ -277,8 +287,13 @@ struct RawProviderConfig {
     preset: Option<String>,
     #[serde(default)]
     base_url_anthropic: Option<String>,
+    /// 已移除的统一槽：出现即配置错误（无别名、不迁移）。
     #[serde(default)]
     base_url_openai: Option<String>,
+    #[serde(default)]
+    base_url_openai_chat: Option<String>,
+    #[serde(default)]
+    base_url_openai_responses: Option<String>,
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
@@ -290,15 +305,17 @@ struct RawProviderConfig {
 }
 
 /// provider 惯例默认（见 openspec/specs/provider-management/spec.md 的 Provider 格局调研）。
-/// 双协议 provider（anthropic + openai 端点都有）必须显式 `protocol`，不猜。
-/// 默认 env 名均可被 `api_key_env` 覆盖。pub 暴露供 bot 侧 `/provider` 表单
-/// 预填默认值（见 `src/provider.rs` 的 preset 规范化）。
+/// preset 数据跟随代码表：三槽位与 models 全部在 resolve 期物化，派生条目
+/// 不可覆盖。默认 env 名均可被 `api_key_env` 覆盖。pub 暴露供 bot 侧
+/// `/provider` 表单预填默认值（见 `src/provider.rs` 的 preset 规范化）。
 pub struct ProviderPreset {
     pub name: &'static str,
     /// anthropic 协议端点；`None` = 该 preset 不提供 anthropic 端点。
     pub base_url_anthropic: Option<&'static str>,
-    /// openai 协议端点；`None` = 该 preset 不提供 openai 端点。
-    pub base_url_openai: Option<&'static str>,
+    /// openai chat-completions 端点；`None` = 该 preset 不提供。
+    pub base_url_openai_chat: Option<&'static str>,
+    /// openai Responses API 端点；仅供应商公开支持时填写。
+    pub base_url_openai_responses: Option<&'static str>,
     /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
     pub api_key_env: &'static str,
     /// 该 provider 提供的 model 列表（静态约定，覆盖主页宣传的常用 model；
@@ -310,7 +327,8 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "anthropic",
         base_url_anthropic: Some("https://api.anthropic.com"),
-        base_url_openai: None,
+        base_url_openai_chat: None,
+        base_url_openai_responses: None,
         api_key_env: "ANTHROPIC_API_KEY",
         models: &[
             "claude-opus-4-20250514",
@@ -323,7 +341,8 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "openai",
         base_url_anthropic: None,
-        base_url_openai: Some("https://api.openai.com/v1"),
+        base_url_openai_chat: Some("https://api.openai.com/v1"),
+        base_url_openai_responses: Some("https://api.openai.com/v1"),
         api_key_env: "OPENAI_API_KEY",
         models: &[
             "gpt-4o",
@@ -338,14 +357,16 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "deepseek",
         base_url_anthropic: Some("https://api.deepseek.com/anthropic"),
-        base_url_openai: Some("https://api.deepseek.com"),
+        base_url_openai_chat: Some("https://api.deepseek.com"),
+        base_url_openai_responses: None,
         api_key_env: "DEEPSEEK_API_KEY",
         models: &["deepseek-chat", "deepseek-reasoner"],
     },
     ProviderPreset {
         name: "kimi",
         base_url_anthropic: Some("https://api.moonshot.cn/anthropic"),
-        base_url_openai: Some("https://api.moonshot.cn/v1"),
+        base_url_openai_chat: Some("https://api.moonshot.cn/v1"),
+        base_url_openai_responses: None,
         api_key_env: "MOONSHOT_API_KEY",
         models: &[
             "moonshot-v1-8k",
@@ -357,7 +378,8 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "glm",
         base_url_anthropic: Some("https://open.bigmodel.cn/api/anthropic"),
-        base_url_openai: Some("https://open.bigmodel.cn/api/paas/v4"),
+        base_url_openai_chat: Some("https://open.bigmodel.cn/api/paas/v4"),
+        base_url_openai_responses: None,
         api_key_env: "ZHIPU_API_KEY",
         models: &[
             "glm-4-plus",
@@ -370,7 +392,8 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "minimax",
         base_url_anthropic: Some("https://api.minimaxi.com/anthropic"),
-        base_url_openai: Some("https://api.minimaxi.com/v1"),
+        base_url_openai_chat: Some("https://api.minimaxi.com/v1"),
+        base_url_openai_responses: None,
         api_key_env: "MINIMAX_API_KEY",
         // TODO: 实际 ids 待确认 (MiniMax 官方 model 命名常变)
         models: &[
@@ -383,7 +406,8 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "ark",
         base_url_anthropic: Some("https://ark.cn-beijing.volces.com/api/plan"),
-        base_url_openai: Some("https://ark.cn-beijing.volces.com/api/plan/v3"),
+        base_url_openai_chat: Some("https://ark.cn-beijing.volces.com/api/plan/v3"),
+        base_url_openai_responses: None,
         api_key_env: "ARK_API_KEY",
         // TODO: 实际 endpoint ids (doubao-pro / lite 等含版本号后缀) 待确认
         models: &["doubao-pro", "doubao-lite", "doubao-1-5-pro"],
@@ -391,14 +415,16 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "dashscope",
         base_url_anthropic: None,
-        base_url_openai: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        base_url_openai_chat: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        base_url_openai_responses: None,
         api_key_env: "DASHSCOPE_API_KEY",
         models: &["qwen-turbo", "qwen-plus", "qwen-max", "qwen-long"],
     },
     ProviderPreset {
         name: "gemini",
         base_url_anthropic: None,
-        base_url_openai: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+        base_url_openai_chat: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+        base_url_openai_responses: None,
         api_key_env: "GEMINI_API_KEY",
         models: &[
             "gemini-1.5-pro",
@@ -419,41 +445,64 @@ pub fn presets() -> &'static [ProviderPreset] {
 }
 
 /// raw → resolved：把每个 provider 收敛成对外 `ProviderConfig`。
-/// - 名称即 preset（或显式 `preset = "..."` 别名）：preset 默认填入
-///   `base_url_anthropic` / `base_url_openai`（各自独立，可同时存在），
-///   显式字段覆盖对应协议位；
-/// - 单协议 preset（缺某协议位 URL）→ 显式字段必须留空；显式填了对方
-///   端点 → 配置错误（preset 不提供）；
-/// - 无 preset（自定义 provider）→ 至少一个 `*_base_url` 必填。
+/// - 名称即 preset（或显式 `preset = "..."` 别名）：preset 数据跟随代码表，
+///   三槽位与 models 全部在 resolve 期物化；派生条目显式写任一 url 槽或
+///   models → 配置错误（用户仅拥有 key / env / default_model / protocol）；
+/// - 无 preset（自定义 provider）→ 三个 url 槽至少一个必填。
 fn resolve_providers(
     raw: HashMap<String, RawProviderConfig>,
 ) -> Result<HashMap<String, ProviderConfig>> {
     let mut out = HashMap::with_capacity(raw.len());
     for (name, r) in raw {
-        let preset_name = r.preset.as_deref().unwrap_or(&name);
-        let preset = find_preset(preset_name);
-        let (base_url_anthropic, base_url_openai) = match preset {
-            Some(p) => resolve_preset_urls(
-                p,
-                &name,
-                preset_name,
-                r.base_url_anthropic,
-                r.base_url_openai,
-            )?,
-            None => {
-                let a = r.base_url_anthropic.unwrap_or_default();
-                let o = r.base_url_openai.unwrap_or_default();
-                if a.is_empty() && o.is_empty() {
-                    return Err(RouterError::Config(format!(
-                        "provider.{name}: 自定义 provider 至少需要 base_url_anthropic / base_url_openai 之一"
-                    )));
+        if r.base_url_openai.is_some() {
+            return Err(RouterError::Config(format!(
+                "provider.{name}: base_url_openai 已移除，请改用 base_url_openai_chat / base_url_openai_responses"
+            )));
+        }
+        let preset_name = r.preset.clone().unwrap_or_else(|| name.clone());
+        let preset = find_preset(&preset_name);
+        let (base_url_anthropic, base_url_openai_chat, base_url_openai_responses, models) =
+            match preset {
+                Some(p) => {
+                    // preset 数据跟随代码：任何 url 槽 / models 覆盖都拒绝。
+                    for (field, v) in [
+                        ("base_url_anthropic", &r.base_url_anthropic),
+                        ("base_url_openai_chat", &r.base_url_openai_chat),
+                        ("base_url_openai_responses", &r.base_url_openai_responses),
+                    ] {
+                        if v.is_some() {
+                            return Err(RouterError::Config(format!(
+                                "provider.{name}: preset '{preset_name}' 的数据跟随代码，不能写 {field}"
+                            )));
+                        }
+                    }
+                    if !r.models.is_empty() {
+                        return Err(RouterError::Config(format!(
+                            "provider.{name}: preset '{preset_name}' 的 models 跟随代码，不能写 models"
+                        )));
+                    }
+                    (
+                        p.base_url_anthropic.unwrap_or_default().to_string(),
+                        p.base_url_openai_chat.unwrap_or_default().to_string(),
+                        p.base_url_openai_responses.unwrap_or_default().to_string(),
+                        p.models.iter().map(|s| s.to_string()).collect(),
+                    )
                 }
-                (a, o)
-            }
-        };
+                None => {
+                    let a = r.base_url_anthropic.unwrap_or_default();
+                    let c = r.base_url_openai_chat.unwrap_or_default();
+                    let rs = r.base_url_openai_responses.unwrap_or_default();
+                    if a.is_empty() && c.is_empty() && rs.is_empty() {
+                        return Err(RouterError::Config(format!(
+                            "provider.{name}: 自定义 provider 至少需要 base_url_anthropic / base_url_openai_chat / base_url_openai_responses 之一"
+                        )));
+                    }
+                    (a, c, rs, r.models)
+                }
+            };
         // 默认 env 名只在「未显式指定任何 key 来源」时注入：显式 `api_key_env`
-        // 优先；显式 `api_key`（明文，仅测试用）则不应被 preset 默认 env 覆盖。
-        let api_key_env = r.api_key_env.or_else(|| {
+        // 优先；显式 `api_key`（明文）则不应被 preset 默认 env 覆盖。
+        let api_key_env = r.api_key_env.clone().or_else(|| {
             if r.api_key.is_none() {
                 preset.map(|p| p.api_key_env.to_string())
             } else {
@@ -463,12 +512,14 @@ fn resolve_providers(
         out.insert(
             name,
             ProviderConfig {
+                preset: preset.map(|p| p.name.to_string()),
                 base_url_anthropic: option_string(base_url_anthropic),
-                base_url_openai: option_string(base_url_openai),
+                base_url_openai_chat: option_string(base_url_openai_chat),
+                base_url_openai_responses: option_string(base_url_openai_responses),
                 api_key_env,
                 api_key: r.api_key,
                 model_map: r.model_map,
-                models: r.models,
+                models,
             },
         );
     }
@@ -483,6 +534,11 @@ pub fn validate_provider_entry(
     name: &str,
     item: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<ProviderConfig> {
+    if item.contains_key("base_url_openai") {
+        return Err(RouterError::Config(format!(
+            "provider.{name}: base_url_openai 已移除，请改用 base_url_openai_chat / base_url_openai_responses"
+        )));
+    }
     let raw = RawProviderConfig {
         preset: item
             .get("preset")
@@ -492,8 +548,13 @@ pub fn validate_provider_entry(
             .get("base_url_anthropic")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
-        base_url_openai: item
-            .get("base_url_openai")
+        base_url_openai: None,
+        base_url_openai_chat: item
+            .get("base_url_openai_chat")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        base_url_openai_responses: item
+            .get("base_url_openai_responses")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         api_key_env: item
@@ -539,40 +600,8 @@ fn parse_models_list(item: &serde_json::Map<String, serde_json::Value>) -> Vec<S
     }
 }
 
-/// 按 preset 解析 `base_url_anthropic` / `base_url_openai`：preset 默认 +
-/// 显式覆盖。preset 不提供的端点显式写了 → 错（避免误把错误的 URL 落到错
-/// 的协议位）。
-fn resolve_preset_urls(
-    p: &ProviderPreset,
-    name: &str,
-    preset_name: &str,
-    explicit_anthropic: Option<String>,
-    explicit_openai: Option<String>,
-) -> Result<(String, String)> {
-    let anthropic = match explicit_anthropic {
-        Some(b) => {
-            if p.base_url_anthropic.is_none() {
-                return Err(RouterError::Config(format!(
-                    "provider.{name}: preset '{preset_name}' 不提供 anthropic 端点，不能写 base_url_anthropic"
-                )));
-            }
-            b
-        }
-        None => p.base_url_anthropic.unwrap_or_default().to_string(),
-    };
-    let openai = match explicit_openai {
-        Some(b) => {
-            if p.base_url_openai.is_none() {
-                return Err(RouterError::Config(format!(
-                    "provider.{name}: preset '{preset_name}' 不提供 openai 端点，不能写 base_url_openai"
-                )));
-            }
-            b
-        }
-        None => p.base_url_openai.unwrap_or_default().to_string(),
-    };
-    Ok((anthropic, openai))
-}
+/// 按 preset 物化 base_url/models 的旧「显式覆盖」分支已随跟随代码语义移除
+/// （见 `resolve_providers`：覆盖即配置错误）。
 
 impl RouterConfig {
     /// 解析顺序对齐 root house style（src/config.rs）：
@@ -744,9 +773,12 @@ impl RouterConfig {
             return Err(RouterError::Config("provider 不能为空".into()));
         }
         for (name, p) in &self.providers {
-            if p.base_url_anthropic.is_none() && p.base_url_openai.is_none() {
+            if p.base_url_anthropic.is_none()
+                && p.base_url_openai_chat.is_none()
+                && p.base_url_openai_responses.is_none()
+            {
                 return Err(RouterError::Config(format!(
-                    "provider.{name}: base_url_anthropic / base_url_openai 至少需要一项"
+                    "provider.{name}: base_url_anthropic / base_url_openai_chat / base_url_openai_responses 至少需要一项"
                 )));
             }
         }
@@ -810,7 +842,7 @@ impl RouterConfig {
 
     /// 解析每个 provider 的上游 api key：
     /// - `api_key_env` 指向的 env 变量必须存在且非空（错误信息只含变量名，绝不含 key 值）；
-    /// - 否则回退明文 `api_key`（仅测试用，emit warn）；
+    /// - 否则回退明文 `api_key`（UI/overlay 正常写入，resolve 时 debug 提示一次）；
     /// - 两者都缺 → Config 错误。
     ///
     /// 解析走 `KeyResolver` trait，默认 impl 是
@@ -948,7 +980,7 @@ api_key_env = "DEEPSEEK_API_KEY"
             anth.base_url_anthropic.as_deref(),
             Some("https://api.anthropic.com")
         );
-        assert!(anth.base_url_openai.is_none());
+        assert!(anth.base_url_openai_chat.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert_eq!(cfg.routes.len(), 2);
         assert_eq!(cfg.routes[0].model, "claude-*");
@@ -1048,71 +1080,104 @@ api_key = "test-key"
     // -------------------- provider preset --------------------
 
     #[test]
-    fn preset_fills_defaults_and_explicit_fields_override() {
+    fn preset_fills_all_slots_and_models_from_code_table() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
+        // 名称即 preset：三槽位 + models 全部按代码表物化，条目零配置。
         let raw = r#"
 [router]
 auth_token = "sk-test"
-# 名称即 preset：base_url_anthropic / api_key_env 自动按 preset 填
 [provider.deepseek]
-# 不写任何 *_base_url → preset 默认填双协议 URL
-
-# 显式字段覆盖 preset 默认
-[provider.openai]
-base_url_openai = "http://localhost:9099/v1"
-api_key_env = "MY_OPENAI_KEY"
 "#;
         let cfg = parse_isolated(raw).expect("preset config should parse");
-
         let ds = cfg.providers.get("deepseek").expect("deepseek provider");
         assert_eq!(
             ds.base_url_anthropic.as_deref(),
             Some("https://api.deepseek.com/anthropic")
         );
         assert_eq!(
-            ds.base_url_openai.as_deref(),
+            ds.base_url_openai_chat.as_deref(),
             Some("https://api.deepseek.com")
         );
-        assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-
-        let oai = cfg.providers.get("openai").expect("openai provider");
-        // 单协议 preset（openai）：只填 base_url_openai，anthropic 缺位
-        assert!(oai.base_url_anthropic.is_none());
-        // 显式 base_url_openai 覆盖 preset 默认
+        assert!(ds.base_url_openai_responses.is_none());
         assert_eq!(
-            oai.base_url_openai.as_deref(),
-            Some("http://localhost:9099/v1")
+            ds.models,
+            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+            "models must materialize from the code table"
         );
-        assert_eq!(oai.api_key_env.as_deref(), Some("MY_OPENAI_KEY"));
+        assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(ds.preset.as_deref(), Some("deepseek"));
     }
 
     #[test]
-    fn preset_dual_protocol_fills_both_urls() {
+    fn preset_explicit_url_or_models_override_errors() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        // 双协议 preset 不再需要显式 protocol：两条 base_url 各自按 preset 填入，
-        // 由请求方按协议选 URL（缺位 → ProtocolMismatch）。
-        let raw = r#"
+        // preset 数据跟随代码：显式 url / models 一律配置错误。
+        for raw in [
+            r#"
 [router]
 auth_token = "sk-test"
 [provider.deepseek]
+base_url_anthropic = "https://mirror.example/anthropic"
+"#,
+            r#"
+[router]
+auth_token = "sk-test"
+[provider.deepseek]
+base_url_openai_chat = "https://mirror.example/v1"
+"#,
+            r#"
+[router]
+auth_token = "sk-test"
+[provider.deepseek]
+base_url_openai_responses = "https://mirror.example/v1"
+"#,
+            r#"
+[router]
+auth_token = "sk-test"
+[provider.deepseek]
+models = ["my-model"]
+"#,
+        ] {
+            let err = parse_isolated(raw).expect_err("preset override must error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("跟随代码"),
+                "error must explain follow-the-code semantics: {msg}"
+            );
+            assert!(
+                msg.contains("deepseek"),
+                "error must name the provider: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_unified_openai_slot_is_rejected() {
+        let _g = LOCK.lock().unwrap();
+        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        // 统一槽 base_url_openai 已移除：出现即拒绝，绝不静默服务任何协议。
+        let raw = r#"
+[router]
+auth_token = "sk-test"
+[provider.my-openai]
+base_url_openai = "http://localhost:9099/v1"
 "#;
-        let cfg = parse_isolated(raw).expect("dual-protocol preset without explicit url");
-        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
-        assert_eq!(
-            ds.base_url_anthropic.as_deref(),
-            Some("https://api.deepseek.com/anthropic")
-        );
-        assert_eq!(
-            ds.base_url_openai.as_deref(),
-            Some("https://api.deepseek.com")
+        let err = parse_isolated(raw).expect_err("removed slot must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("base_url_openai") && msg.contains("base_url_openai_chat"),
+            "error should name the removed field and its replacements: {msg}"
         );
     }
 
@@ -1133,31 +1198,16 @@ preset = "openai"
         let p = cfg.providers.get("my-openai").expect("aliased provider");
         assert!(p.base_url_anthropic.is_none());
         assert_eq!(
-            p.base_url_openai.as_deref(),
+            p.base_url_openai_chat.as_deref(),
             Some("https://api.openai.com/v1")
         );
-        assert_eq!(p.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
-    }
-
-    #[test]
-    fn preset_single_protocol_with_foreign_url_errors() {
-        let _g = LOCK.lock().unwrap();
-        // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
-        unsafe {
-            std::env::remove_var("SEBAS_ROUTER_LISTEN");
-        }
-        let raw = r#"
-[router]
-auth_token = "sk-test"
-[provider.openai]
-base_url_anthropic = "https://anthropic-from-openai.example"
-"#;
-        let err = parse_isolated(raw).expect_err("openai preset with base_url_anthropic");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("openai") && msg.contains("anthropic"),
-            "error should name preset and missing endpoint: {msg}"
+        assert_eq!(
+            p.base_url_openai_responses.as_deref(),
+            Some("https://api.openai.com/v1"),
+            "openai preset serves both openai slots from the same endpoint"
         );
+        assert_eq!(p.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(p.preset.as_deref(), Some("openai"));
     }
 
     #[test]
@@ -1175,11 +1225,31 @@ api_key_env = "MY_KEY"
 "#;
         let err = parse_isolated(raw).expect_err("custom provider without URLs");
         assert!(
-            err.to_string().contains("base_url_anthropic")
-                || err.to_string().contains("base_url_openai")
-                || err.to_string().contains("provider.my-custom"),
-            "custom provider must require at least one URL: {err}"
+            err.to_string().contains("base_url_openai_responses")
+                && err.to_string().contains("provider.my-custom"),
+            "custom provider must require at least one of the three slots: {err}"
         );
+    }
+
+    #[test]
+    fn custom_provider_single_response_slot_suffices() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        // 自定义 provider 只配 responses 槽：合法；chat/anthropic 缺位即
+        // 对应协议 400（路由层行为，此处只验证解析通过）。
+        let raw = r#"
+[router]
+auth_token = "sk-test"
+[provider.resp-only]
+base_url_openai_responses = "https://resp.example/v1"
+api_key = "test-key"
+"#;
+        let cfg = parse_isolated(raw).expect("responses-only custom provider parses");
+        let p = cfg.providers.get("resp-only").expect("provider");
+        assert!(p.base_url_anthropic.is_none() && p.base_url_openai_chat.is_none());
+        assert_eq!(p.preset, None, "custom provider carries no preset");
     }
 
     #[test]
@@ -1189,7 +1259,7 @@ api_key_env = "MY_KEY"
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        // anthropic preset + 显式明文 api_key（仅测试用）：不得再注入
+        // anthropic preset + 显式明文 api_key（UI/overlay 正常写入）：不得再注入
         // ANTHROPIC_API_KEY 默认 env，否则 resolve_api_keys 会误读 env。
         let raw = r#"
 [router]
@@ -1203,7 +1273,7 @@ api_key = "test-key"
             p.base_url_anthropic.as_deref(),
             Some("https://api.anthropic.com")
         );
-        assert!(p.base_url_openai.is_none());
+        assert!(p.base_url_openai_chat.is_none());
         assert_eq!(
             p.api_key_env, None,
             "explicit api_key must not get preset env"
@@ -1236,7 +1306,7 @@ auth_token = "sk-test"
             Some("https://api.deepseek.com/anthropic")
         );
         assert_eq!(
-            ds.base_url_openai.as_deref(),
+            ds.base_url_openai_chat.as_deref(),
             Some("https://api.deepseek.com")
         );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
@@ -1248,15 +1318,17 @@ auth_token = "sk-test"
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
+        // 自定义 provider 手写 models（preset 派生条目不允许写 models）。
         let raw = r#"
 [router]
-default_provider = "deepseek"
+default_provider = "ds-custom"
 
-[provider.deepseek]
+[provider.ds-custom]
+base_url_anthropic = "https://ds.example"
 models = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]
 "#;
         let cfg = parse_isolated(raw).expect("provider with models should parse");
-        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        let ds = cfg.providers.get("ds-custom").expect("custom provider");
         // models 手写列表按从强到弱保留
         assert_eq!(ds.models, vec!["deepseek-v4-pro[1m]", "deepseek-v4-flash"]);
         // 最强 = 默认
@@ -1297,7 +1369,7 @@ app_id = "x"
             p.base_url_anthropic.as_deref(),
             Some("https://api.anthropic.com")
         );
-        assert!(p.base_url_openai.is_none());
+        assert!(p.base_url_openai_chat.is_none());
         assert_eq!(p.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
@@ -1308,11 +1380,12 @@ app_id = "x"
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        // 顶层 `[provider.*]`：preset 自动填充 + 显式 base_url_anthropic/api_key 覆盖。
+        // 顶层 `[provider.*]`：自定义 provider 显式 url + 明文 key；preset
+        // 派生条目（deepseek）零配置物化。
         let raw = r#"
 [provider.deepseek]
 
-[provider.ark]
+[provider.my-ark]
 base_url_anthropic = "https://ark.cn-beijing.volces.com/api/plan"
 api_key = "test-ark-key"
 "#;
@@ -1323,18 +1396,19 @@ api_key = "test-ark-key"
             Some("https://api.deepseek.com/anthropic")
         );
         assert_eq!(
-            ds.base_url_openai.as_deref(),
+            ds.base_url_openai_chat.as_deref(),
             Some("https://api.deepseek.com")
         );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 
-        let ark = cfg.providers.get("ark").expect("ark provider");
+        let ark = cfg.providers.get("my-ark").expect("custom provider");
         assert_eq!(
             ark.base_url_anthropic.as_deref(),
             Some("https://ark.cn-beijing.volces.com/api/plan")
         );
         assert_eq!(ark.api_key.as_deref(), Some("test-ark-key"));
         assert_eq!(ark.api_key_env, None);
+        assert_eq!(ark.preset, None);
     }
 
     // -------------------- rate_limit --------------------
@@ -1553,7 +1627,7 @@ api_key = "test-key"
             "preset must fill the anthropic endpoint from the hardcoded table"
         );
         assert_eq!(
-            ds.base_url_openai.as_deref(),
+            ds.base_url_openai_chat.as_deref(),
             Some("https://api.deepseek.com"),
             "preset must fill the openai endpoint from the hardcoded table"
         );
@@ -1571,7 +1645,7 @@ api_key = "test-key"
             anth.base_url_anthropic.as_deref(),
             Some("https://api.anthropic.com")
         );
-        assert!(anth.base_url_openai.is_none());
+        assert!(anth.base_url_openai_chat.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY_V2"));
     }
 
@@ -1742,7 +1816,8 @@ m1 = ["anthropic"]
     }
 
     /// 校验辅助：无效候选（无 preset 无 URL）Err 且错误信息含 provider 名；
-    /// 有效 preset 候选解析出 URL。
+    /// 有效 preset 候选解析出 URL；旧统一槽名拒绝；preset 派生候选带 models
+    /// 字段拒绝（跟随代码）。
     #[test]
     fn validate_provider_entry_rejects_invalid_and_names_provider() {
         let mut bad = serde_json::Map::new();
@@ -1758,6 +1833,28 @@ m1 = ["anthropic"]
         let mut good = serde_json::Map::new();
         good.insert("preset".into(), serde_json::json!("deepseek"));
         let cfg = validate_provider_entry("deepseek", &good).expect("preset 候选有效");
-        assert!(cfg.base_url_openai.is_some(), "preset 补全 URL");
+        assert!(cfg.base_url_openai_chat.is_some(), "preset 补全 URL");
+        assert_eq!(
+            cfg.models,
+            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+            "preset models 物化自代码表"
+        );
+
+        let mut legacy = serde_json::Map::new();
+        legacy.insert("base_url_openai".into(), serde_json::json!("http://x"));
+        let err = validate_provider_entry("legacy", &legacy).unwrap_err();
+        assert!(
+            err.to_string().contains("base_url_openai_chat"),
+            "旧统一槽必须显式拒绝: {err}"
+        );
+
+        let mut with_models = serde_json::Map::new();
+        with_models.insert("preset".into(), serde_json::json!("deepseek"));
+        with_models.insert("models".into(), serde_json::json!(["m1"]));
+        let err = validate_provider_entry("ds2", &with_models).unwrap_err();
+        assert!(
+            err.to_string().contains("跟随代码"),
+            "preset 派生条目写 models 必须拒绝: {err}"
+        );
     }
 }

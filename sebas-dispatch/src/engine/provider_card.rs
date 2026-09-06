@@ -391,11 +391,14 @@ async fn handle_probe(
     let card = match probe_result {
         Ok(models) if !models.is_empty() => {
             // 把官方返回的 model 列表写回 `models` 目录字段（best-effort：
-            // 写失败只记日志，不影响结果卡展示）。
+            // 写失败只记日志，不影响结果卡展示）。preset 派生条目的 models
+            // 跟随代码，不落盘（结果卡展示 + 设默认 model 不受影响）。
             if let Some(mut item) = forms.preset.store.get(name).await {
-                item.insert("models".into(), Value::String(models.join(",")));
-                if let Err(e) = forms.preset.store.update(item).await {
-                    tracing::warn!(name, error = %e, "failed to write probe results to models dir");
+                if item.get("preset").and_then(Value::as_str).is_none() {
+                    item.insert("models".into(), Value::String(models.join(",")));
+                    if let Err(e) = forms.preset.store.update(item).await {
+                        tracing::warn!(name, error = %e, "failed to write probe results to models dir");
+                    }
                 }
             }
             build_probe_result_card(name, base_kind, &probe_url, &models)
@@ -687,14 +690,17 @@ fn render_provider_row(
         .and_then(|i| i.get("preset").and_then(Value::as_str))
         .filter(|s| !s.is_empty())
         .unwrap_or("自定义");
-    let url_anth = item
-        .and_then(|i| i.get("base_url_anthropic").and_then(Value::as_str))
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—");
-    let url_oai = item
-        .and_then(|i| i.get("base_url_openai").and_then(Value::as_str))
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—");
+    // preset 派生条目不落盘 url —— 从代码表物化展示（跟随代码）。
+    let field_or_dash = |i: &Item, field: &str| -> String {
+        effective_field(i, field).unwrap_or_else(|| "—".into())
+    };
+    let (url_anth, url_oai) = match item {
+        Some(i) => (
+            field_or_dash(i, "base_url_anthropic"),
+            field_or_dash(i, "base_url_openai_chat"),
+        ),
+        None => ("—".into(), "—".into()),
+    };
     let api_key_status = match item.and_then(|i| i.get("api_key")) {
         Some(v) if v.as_str().is_some_and(|s| !s.is_empty()) => "已配置",
         _ => "未配置",
@@ -724,8 +730,8 @@ fn render_provider_row(
     // 避免给用户一个必失败的入口。两个端点都设了 → 仍显示（probe 优先
     // 打 OpenAI URL）。
     let has_openai_url = item
-        .and_then(|i| i.get("base_url_openai").and_then(Value::as_str))
-        .is_some_and(|s| !s.is_empty());
+        .map(|i| effective_field(i, "base_url_openai_chat").is_some())
+        .unwrap_or(false);
     if has_openai_url {
         let probe_value = json!({ "form": FORM_PROBE, "name": name });
         elements.push(button_from("🔍 探测 model 列表", "default", &probe_value));
@@ -769,36 +775,53 @@ fn render_provider_row(
 // Helpers
 // ===========================================================================
 
+/// 读条目的有效连接字段：自定义 provider 直接读条目；preset 派生条目
+/// 不落盘 url/models——从代码内置 preset 表物化（跟随代码）。
+pub(crate) fn effective_field(item: &Item, field: &str) -> Option<String> {
+    if let Some(v) = item
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(v.to_string());
+    }
+    let preset_name = item.get("preset").and_then(Value::as_str)?;
+    let p = sebas_router::config::presets()
+        .iter()
+        .find(|p| p.name == preset_name)?;
+    match field {
+        "base_url_anthropic" => p.base_url_anthropic.map(str::to_string),
+        "base_url_openai_chat" => p.base_url_openai_chat.map(str::to_string),
+        "base_url_openai_responses" => p.base_url_openai_responses.map(str::to_string),
+        "models" => Some(p.models.join(",")),
+        _ => None,
+    }
+}
+
 /// 按 provider item 决定探测的目标 URL：
-/// 1. 优先 `base_url_openai`：openai-compatible 端点通常都暴露 `/models`，
-///    直接在 base 后追加 `/models`（preset 默认 openai URL 通常已带 `/v1`，
-///    例如 `https://api.openai.com/v1`）。
-/// 2. 否则 `base_url_anthropic`：best-effort 探测 `/v1/models`，anthropic
-///    协议一般不存在该路径，会失败卡——按 spec 标记为 best-effort。
-/// 3. 两个都没设 → 错误：探测无意义。
+/// 1. 优先 OpenAI chat 槽（条目字段或 preset 物化）：openai-compatible
+///    端点通常都暴露 `/models`，直接在 base 后追加 `/models`。
+/// 2. 否则 OpenAI responses 槽：同样追加 `/models`。
+/// 3. 否则 `base_url_anthropic`：best-effort 探测 `/v1/models`。
+/// 4. 全部缺失 → 错误：探测无意义。
 ///
 /// 返回 `(完整 url, "openai" | "anthropic")`。
 fn choose_probe_url(item: &Item) -> Result<(String, &'static str), String> {
-    let openai = item
-        .get("base_url_openai")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let anth = item
-        .get("base_url_anthropic")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let openai = ["base_url_openai_chat", "base_url_openai_responses"]
+        .iter()
+        .find_map(|f| effective_field(item, f));
+    let anth = effective_field(item, "base_url_anthropic");
     match (openai, anth) {
         (Some(base), _) => {
-            let base = trim_trailing_slash(base);
+            let base = trim_trailing_slash(&base);
             Ok((format!("{base}/models"), "openai"))
         }
         (None, Some(base)) => {
-            let base = trim_trailing_slash(base);
+            let base = trim_trailing_slash(&base);
             Ok((format!("{base}/v1/models"), "anthropic"))
         }
-        (None, None) => Err("未配置 base_url_openai / base_url_anthropic".into()),
+        (None, None) => Err("未配置任何 base_url 槽位".into()),
     }
 }
 
@@ -1013,15 +1036,9 @@ mod tests {
         let mut m = Map::new();
         m.insert("name".into(), Value::String(name.into()));
         if let Some(p) = preset {
+            // 新语义：preset 派生条目只带 preset 名 + 用户字段（url/models
+            // 跟随代码，不落盘）。
             m.insert("preset".into(), Value::String(p.into()));
-            m.insert(
-                "base_url_anthropic".into(),
-                Value::String(format!("https://{p}.example/anthropic")),
-            );
-            m.insert(
-                "base_url_openai".into(),
-                Value::String(format!("https://{p}.example/openai")),
-            );
             m.insert("api_key".into(), Value::String("sk-secret".into()));
         } else {
             m.insert(
@@ -1290,7 +1307,10 @@ mod tests {
             "面板 header 应为「name · model」一行摘要：{serialised}"
         );
         assert!(serialised.contains("**预设**"));
-        assert!(serialised.contains("https://deepseek.example/anthropic"));
+        assert!(
+            serialised.contains("https://api.deepseek.com/anthropic"),
+            "preset 派生条目展示代码表物化的 URL（跟随代码）：{serialised}"
+        );
         assert!(serialised.contains("已配置"));
         assert!(serialised.contains("deepseek-model"));
 
@@ -1655,12 +1675,12 @@ mod tests {
         assert_eq!(trim_trailing_slash("a/b"), "a/b");
     }
 
-    /// choose_probe_url：优先 base_url_openai，回退 base_url_anthropic。
+    /// choose_probe_url：优先 base_url_openai_chat，回退 base_url_anthropic。
     #[test]
     fn choose_probe_url_prefers_openai_then_anthropic() {
         let mut item = Map::new();
         item.insert(
-            "base_url_openai".into(),
+            "base_url_openai_chat".into(),
             Value::String("https://api.openai.com/v1".into()),
         );
         let (url, kind) = choose_probe_url(&item).unwrap();
@@ -1694,7 +1714,7 @@ mod tests {
         assert!(choose_probe_url(&item).is_err());
 
         let mut item = Map::new();
-        item.insert("base_url_openai".into(), Value::String("".into()));
+        item.insert("base_url_openai_chat".into(), Value::String("".into()));
         item.insert("base_url_anthropic".into(), Value::String("".into()));
         assert!(choose_probe_url(&item).is_err());
     }
@@ -1887,10 +1907,14 @@ mod tests {
             Some("openai"),
             "dispatch 应把 openai 写回 store"
         );
-        // 其它字段（base_url_anthropic / api_key）原样不动。
+        // 其它用户字段（api_key）原样不动；preset 派生条目不落盘 url。
         assert!(
-            updated.contains_key("base_url_anthropic"),
+            updated.contains_key("api_key"),
             "其它字段不应被 protocol 写入抹掉"
+        );
+        assert!(
+            !updated.contains_key("base_url_anthropic"),
+            "preset 派生条目不应落盘 base_url"
         );
     }
 
@@ -1926,7 +1950,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut custom_item = item("my-proxy", None);
         custom_item.insert(
-            "base_url_openai".into(),
+            "base_url_openai_chat".into(),
             Value::String("https://my-proxy.example/v1".into()),
         );
         let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
@@ -1951,7 +1975,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut custom_item = item("oai-only", None);
         custom_item.insert(
-            "base_url_openai".into(),
+            "base_url_openai_chat".into(),
             Value::String("https://oai-only.example/v1".into()),
         );
         // 显式移除 anthropic URL（item() helper 默认会填它）。
@@ -1980,7 +2004,7 @@ mod tests {
         let mut custom_item = item("anth-only", None);
         // item() helper 在 preset=None 时填了 base_url_anthropic；
         // 显式确认没有 base_url_openai（应一直都没有），并写一个干净的 anthropic URL。
-        custom_item.remove("base_url_openai");
+        custom_item.remove("base_url_openai_chat");
         custom_item.insert(
             "base_url_anthropic".into(),
             Value::String("https://anth-only.example".into()),
@@ -2030,7 +2054,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut custom_item = item("test401", None);
         custom_item.insert(
-            "base_url_openai".into(),
+            "base_url_openai_chat".into(),
             Value::String(format!("http://{addr}/v1")),
         );
         let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
@@ -2075,7 +2099,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut custom_item = item("local", None);
         custom_item.insert(
-            "base_url_openai".into(),
+            "base_url_openai_chat".into(),
             Value::String(format!("http://{addr}/v1")),
         );
         let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);

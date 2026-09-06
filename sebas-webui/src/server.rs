@@ -160,6 +160,8 @@ fn build_router_full(
         )
         .route("/api/settings", get(api::settings))
         .route("/api/router", get(api::router))
+        .route("/router/api/presets", get(routes::router_api_presets))
+        .route("/router/api/providers", get(routes::router_api_providers_list))
         .route("/api/about", get(api::about))
         .route("/api/agent-kinds", get(api::agent_kinds))
         .route("/api/auth/me", get(api::auth_me))

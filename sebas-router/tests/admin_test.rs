@@ -309,12 +309,14 @@ async fn probe_lists_and_applies_models() {
     use sebas_router::proto::WireProtocol;
     use support::start_mock_upstream;
 
-    let mock = start_mock_upstream(WireProtocol::OpenAi).await;
+    let mock = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let cfg = CFG_TMPL.replace(
         "[provider.openai]",
+        // mocko 为自定义 provider（双 OpenAI 槽位同指 mock）；apply 写回
+        // models 落 overlay 条目（自定义 provider 允许 models 落盘）。
         &format!(
-            "[provider.mocko]\nbase_url_openai = \"{}/v1\"\napi_key = \"sk-mock\"\n\n[provider.openai]"
-        , mock.url),
+            "[provider.mocko]\nbase_url_openai_chat = \"{}/v1\"\nbase_url_openai_responses = \"{}/v1\"\napi_key = \"sk-mock\"\n\n[provider.openai]"
+        , mock.url, mock.url),
     );
     let dir = tempfile_dir();
     std::fs::create_dir_all(&dir).unwrap();

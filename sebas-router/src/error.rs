@@ -27,7 +27,8 @@ pub type Result<T> = std::result::Result<T, RouterError>;
 
 /// 按协议面把路由自身错误渲染成对应风格错误响应体（见 openspec/specs/router-core/spec.md）：
 /// - Anthropic: `{"type":"error","error":{"type":..,"message":..}}`
-/// - OpenAI:    `{"error":{"message":..,"type":..,"code":null}}`
+/// - OpenAI 家族（chat completions / Responses 共用）:
+///   `{"error":{"message":..,"type":..,"code":null}}`
 ///
 /// `status` 由调用方按错误语义给出（401 鉴权 / 400 协议不匹配 / 502 无路由 …）。
 pub fn error_response(
@@ -36,14 +37,15 @@ pub fn error_response(
     err_type: &str,
     message: &str,
 ) -> axum::response::Response {
-    let body = match proto {
-        crate::proto::WireProtocol::Anthropic => serde_json::json!({
+    let body = if proto.is_openai_family() {
+        serde_json::json!({
+            "error": { "message": message, "type": err_type, "code": null }
+        })
+    } else {
+        serde_json::json!({
             "type": "error",
             "error": { "type": err_type, "message": message }
-        }),
-        crate::proto::WireProtocol::OpenAi => serde_json::json!({
-            "error": { "message": message, "type": err_type, "code": null }
-        }),
+        })
     };
     axum::response::Response::builder()
         .status(status)

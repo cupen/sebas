@@ -351,37 +351,37 @@ fn match_fixture(
             ANTHROPIC_MODEL_GET,
             "anthropic-model-get",
         ),
-        (WireProtocol::OpenAi, "/v1/chat/completions", Method::POST) if wants_stream => (
+        (WireProtocol::OpenAiChat, "/v1/chat/completions", Method::POST) if wants_stream => (
             StatusCode::OK,
             "text/event-stream",
             OPENAI_CHAT_SSE,
             "openai-chat-sse",
         ),
-        (WireProtocol::OpenAi, "/v1/chat/completions", Method::POST) => (
+        (WireProtocol::OpenAiChat, "/v1/chat/completions", Method::POST) => (
             StatusCode::OK,
             "application/json",
             OPENAI_CHAT_JSON,
             "openai-chat-json",
         ),
-        (WireProtocol::OpenAi, "/v1/responses", Method::POST) => (
+        (WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses, "/v1/responses", Method::POST) => (
             StatusCode::OK,
             "application/json",
             OPENAI_RESPONSES_JSON,
             "openai-responses-json",
         ),
-        (WireProtocol::OpenAi, "/v1/embeddings", Method::POST) => (
+        (WireProtocol::OpenAiChat, "/v1/embeddings", Method::POST) => (
             StatusCode::OK,
             "application/json",
             OPENAI_EMBEDDINGS,
             "openai-embeddings",
         ),
-        (WireProtocol::OpenAi, "/v1/models", Method::GET) => (
+        (WireProtocol::OpenAiChat, "/v1/models", Method::GET) => (
             StatusCode::OK,
             "application/json",
             OPENAI_MODELS_LIST,
             "openai-models-list",
         ),
-        (WireProtocol::OpenAi, p, Method::GET) if is_model_get(p) => (
+        (WireProtocol::OpenAiChat, p, Method::GET) if is_model_get(p) => (
             StatusCode::OK,
             "application/json",
             OPENAI_MODEL_GET,

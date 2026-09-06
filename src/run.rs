@@ -54,7 +54,7 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
 pub async fn run(
     cfg: Config,
     raw_config: String,
-    router_cfg: Option<RouterConfig>,
+    mut router_cfg: Option<RouterConfig>,
     webui: bool,
     webui_port: u16,
 ) -> Result<()> {
@@ -76,12 +76,15 @@ pub async fn run(
 
     // `run --router`：在随机端口上启动内置 router，实际端口记入日志
     // （调用方按需把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL 指向该地址）。
-    if let Some(ref gw_cfg) = router_cfg {
+    // 实际地址回写 `router_cfg.listen`：WebUI 的 router BFF 用同一快照
+    // 定位 admin 面（provider 管理页），拿配置默认值会打不到真实端口。
+    if let Some(gw_cfg) = router_cfg.as_mut() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定随机端口失败: {e}")))?;
         let (addr, _handle) = sebas_router::server::serve_with_listener(gw_cfg.clone(), listener)
             .map_err(|e| crate::error::SebasError::Router(e.to_string()))?;
+        gw_cfg.listen = addr.to_string();
         info!(%addr, "router started (core --router); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
     }
 
@@ -397,7 +400,8 @@ pub async fn run(
 
 fn init_tracing(cfg: &Config) {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_new(&cfg.log.level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(format!("{}{}", cfg.log.level, crate::config::LOG_FILTER_QUIET))
+        .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
     let subscriber = fmt().with_env_filter(filter);
     if let Some(ref path) = cfg.log.file
         && let Ok(file) = std::fs::File::create(path)
@@ -428,8 +432,10 @@ pub(crate) fn build_router_info(
         .iter()
         .map(|(name, p)| sebas_webui::models::ProviderInfo {
             name: name.clone(),
+            preset: p.preset.clone(),
             base_url_anthropic: p.base_url_anthropic.clone(),
-            base_url_openai: p.base_url_openai.clone(),
+            base_url_openai_chat: p.base_url_openai_chat.clone(),
+            base_url_openai_responses: p.base_url_openai_responses.clone(),
         })
         .collect();
     sebas_webui::models::RouterInfo {
@@ -494,8 +500,10 @@ mod router_info_tests {
             providers: HashMap::from([(
                 "anthropic".into(),
                 ProviderConfig {
+                    preset: Some("anthropic".into()),
                     base_url_anthropic: Some("https://api.anthropic.com".into()),
-                    base_url_openai: None,
+                    base_url_openai_chat: None,
+                    base_url_openai_responses: None,
                     api_key_env: None,
                     api_key: Some("sk-x".into()),
                     model_map: HashMap::new(),

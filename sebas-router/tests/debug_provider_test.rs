@@ -21,7 +21,7 @@ usage_file = "__USAGE__"
 key = "sk-gw-debug"
 name = "debug-test"
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "http://127.0.0.1:9"
 api_key = "test-key"
 "#;
@@ -36,16 +36,16 @@ usage_file = "__USAGE__"
 [[router.keys]]
 key = "sk-gw-debug"
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "http://127.0.0.1:9"
 api_key = "test-key"
 
-[provider.openai]
-base_url_openai = "http://127.0.0.1:9"
+[provider.oai-mock]
+base_url_openai_chat = "http://127.0.0.1:9"
 api_key = "test-key-oai"
 
 [router.routes]
-"claude-*" = ["anthropic"]
+"claude-*" = ["anth-mock"]
 "#;
 
 fn client() -> reqwest::Client {

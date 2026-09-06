@@ -2902,6 +2902,7 @@ dependencies = [
  "reqwest 0.12.28",
  "sebas-acp",
  "sebas-channels",
+ "sebas-router",
  "serde",
  "serde_json",
  "tempfile",

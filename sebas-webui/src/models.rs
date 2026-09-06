@@ -185,8 +185,12 @@ pub struct RouterInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderInfo {
     pub name: String,
+    /// 派生 preset 名；`None` = 自定义 provider。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     pub base_url_anthropic: Option<String>,
-    pub base_url_openai: Option<String>,
+    pub base_url_openai_chat: Option<String>,
+    pub base_url_openai_responses: Option<String>,
 }
 
 /// Card config data for the settings page.

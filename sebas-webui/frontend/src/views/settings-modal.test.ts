@@ -31,12 +31,31 @@ beforeEach(() => themeStore.clear())
 const apiMocks = vi.hoisted(() => ({
   router: vi.fn(),
   about: vi.fn(),
+  routerProviders: vi.fn(),
+  routerPresets: vi.fn(),
+  routerProviderCreate: vi.fn(),
+  routerProviderUpdate: vi.fn(),
+  routerProviderDelete: vi.fn(),
+  routerProviderProbe: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
+  ApiError: class ApiError extends Error {
+    readonly status: number
+    constructor(status: number, message: string) {
+      super(message)
+      this.status = status
+    }
+  },
   api: {
     router: apiMocks.router,
     about: apiMocks.about,
+    routerProviders: apiMocks.routerProviders,
+    routerPresets: apiMocks.routerPresets,
+    routerProviderCreate: apiMocks.routerProviderCreate,
+    routerProviderUpdate: apiMocks.routerProviderUpdate,
+    routerProviderDelete: apiMocks.routerProviderDelete,
+    routerProviderProbe: apiMocks.routerProviderProbe,
   },
 }))
 
@@ -74,10 +93,57 @@ beforeEach(() => {
       debug: false,
       has_auth: true,
       providers: [
-        { name: 'alpha', base_url_anthropic: 'https://a.example/v1', base_url_openai: null },
-        { name: 'beta', base_url_anthropic: null, base_url_openai: 'https://b.example/v1' },
+        {
+          name: 'alpha',
+          preset: 'deepseek',
+          base_url_anthropic: 'https://a.example/anthropic',
+          base_url_openai_chat: 'https://a.example/v1',
+          base_url_openai_responses: null,
+        },
+        {
+          name: 'beta',
+          base_url_anthropic: null,
+          base_url_openai_chat: 'https://b.example/v1',
+          base_url_openai_responses: null,
+        },
       ],
     },
+  })
+  apiMocks.routerProviders.mockResolvedValue({
+    providers: [
+      {
+        name: 'alpha',
+        preset: 'deepseek',
+        base_url_anthropic: 'https://a.example/anthropic',
+        base_url_openai_chat: 'https://a.example/v1',
+        base_url_openai_responses: null,
+        api_key_env: 'DEEPSEEK_API_KEY',
+        api_key_configured: true,
+        models: ['m1'],
+      },
+      {
+        name: 'beta',
+        preset: null,
+        base_url_anthropic: null,
+        base_url_openai_chat: 'https://b.example/v1',
+        base_url_openai_responses: null,
+        api_key_env: null,
+        api_key_configured: false,
+        models: [],
+      },
+    ],
+  })
+  apiMocks.routerPresets.mockResolvedValue({
+    presets: [
+      {
+        name: 'deepseek',
+        base_url_anthropic: 'https://api.deepseek.com/anthropic',
+        base_url_openai_chat: 'https://api.deepseek.com',
+        base_url_openai_responses: null,
+        api_key_env: 'DEEPSEEK_API_KEY',
+        models: ['deepseek-chat'],
+      },
+    ],
   })
   apiMocks.about.mockResolvedValue({
     uptime: '3h 12m',
@@ -102,15 +168,18 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('defaults to the Models section rendering providers from /api/router', async () => {
+  it('defaults to the Models section rendering providers from the admin list', async () => {
     const el = await mount()
     expect(el.section).toBe('models')
     await settle(el)
-    expect(apiMocks.router).toHaveBeenCalled()
+    expect(apiMocks.routerProviders).toHaveBeenCalled()
+    expect(apiMocks.routerPresets).toHaveBeenCalled()
     const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.provider-row')]
     expect(rows.length).toBe(2)
     expect(el.shadowRoot!.textContent).toContain('alpha')
-    expect(el.shadowRoot!.textContent).toContain('https://a.example/v1')
+    expect(el.shadowRoot!.textContent).toContain('deepseek · code')
+    expect(el.shadowRoot!.textContent).toContain('custom')
+    expect(el.shadowRoot!.textContent).toContain('https://a.example/anthropic')
     expect(el.shadowRoot!.textContent).toContain('beta')
     el.remove()
   })

@@ -244,8 +244,10 @@ mod tests {
             providers.insert(
                 (*n).to_string(),
                 crate::config::ProviderConfig {
+                    preset: None,
                     base_url_anthropic: Some(format!("https://{n}.example")),
-                    base_url_openai: None,
+                    base_url_openai_chat: None,
+                    base_url_openai_responses: None,
                     api_key: Some("test-key".into()),
                     api_key_env: None,
                     model_map: HashMap::new(),
@@ -291,8 +293,10 @@ mod tests {
         bad.providers.insert(
             "gamma".into(),
             crate::config::ProviderConfig {
+                preset: None,
                 base_url_anthropic: None,
-                base_url_openai: None,
+                base_url_openai_chat: None,
+                base_url_openai_responses: None,
                 api_key: None,
                 api_key_env: None,
                 model_map: HashMap::new(),

@@ -43,10 +43,10 @@ fn unauthorized(headers: &HeaderMap, path: &str) -> Response {
     crate::metrics::Metrics::global().observe_auth_rejected();
     let proto = resolve_target(headers, path)
         .map(|t| t.protocol)
-        .unwrap_or(WireProtocol::OpenAi);
+        .unwrap_or(WireProtocol::OpenAiChat);
     let err_type = match proto {
         WireProtocol::Anthropic => "authentication_error",
-        WireProtocol::OpenAi => "invalid_request_error",
+        WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses => "invalid_request_error",
     };
     error_response(
         proto,

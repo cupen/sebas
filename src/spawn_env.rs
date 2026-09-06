@@ -69,40 +69,45 @@ fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
 
 /// 把 overlay Item 映射到 `ProviderResolution::Direct`。
 ///
-/// 协议选择（openspec/specs/provider-management/spec.md — UI 在 `/provider` 详情面板里暴露的
-/// 「协议」radio 写到这里）：
-/// - `"anthropic"` → 强制走 `base_url_anthropic`；缺失 → `Off` + warn。
-/// - `"openai"`    → 强制走 `base_url_openai`；缺失 → `Off` + warn。
-/// - `"auto"` / 缺省 → 保持旧约定：优先 `base_url_anthropic`，其次
-///   `base_url_openai`。两者都缺 → `Off` + warn。
+/// URL 来源：自定义 provider 直接读条目上的 `base_url_anthropic` /
+/// `base_url_openai_chat`；preset 派生条目不落盘 url —— 从代码内置 preset
+/// 表物化（跟随代码，openspec/specs/provider-management/spec.md）。
+/// Responses 槽位不参与 Direct spawn——agent 不说 Responses 协议，
+/// responses-only provider 显式报错。
 ///
-/// 旧 overlay 没 `protocol` 字段的 provider 走「auto」分支，行为不变
-/// （向后兼容 openspec/specs/provider-management/spec.md）。
+/// 协议选择（UI 在 `/provider` 详情面板里暴露的「协议」radio 写到这里）：
+/// - `"anthropic"` → 强制走 anthropic 槽；缺失 → `Error` + warn。
+/// - `"openai"`    → 强制走 chat 槽；缺失 → `Error` + warn。
+/// - `"auto"` / 缺省 → 优先 anthropic 槽，其次 chat 槽。两者都缺 → `Error` + warn。
 ///
-/// 密钥优先级：`api_key` 明文（仅测试用，warn 一条） > `api_key_env` 读 env
-/// （env 缺失/空 → 回退 `Off` + warn）。和 `RouterConfig::resolve_api_keys`
-/// 走同一套优先级，行为一致。
+/// 密钥优先级：`api_key` 明文（debug 提示）> `api_key_env` 读 env（preset
+/// 派生条目缺省继承 preset 的默认 env 名）；env 缺失/空 → `Error` + warn。
+/// 和 `RouterConfig::resolve_api_keys` 走同一套优先级，行为一致。
 fn direct_resolution_from_overlay(
     name: &str,
     item: &Map<String, Value>,
 ) -> (ProviderResolution, Option<String>) {
-    let base_url_anthropic = item
-        .get("base_url_anthropic")
+    // preset 物化源：条目带 `preset` 字段时从代码表取连接数据。
+    let preset = item
+        .get("preset")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let base_url_openai = item
-        .get("base_url_openai")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let default_model = item
-        .get("default_model")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    // 协议选择：UI 在详情面板的 radio。缺省 = "auto" = 旧约定（Anthropic 优先），
-    // 不破坏现有用户的默认行为（openspec/specs/provider-management/spec.md）。
+        .and_then(|pn| {
+            sebas_router::config::presets()
+                .iter()
+                .find(|p| p.name == pn)
+        });
+    let item_url = |key: &str| -> Option<String> {
+        item.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let base_url_anthropic = item_url("base_url_anthropic")
+        .or_else(|| preset.and_then(|p| p.base_url_anthropic).map(str::to_string));
+    let base_url_openai_chat = item_url("base_url_openai_chat")
+        .or_else(|| preset.and_then(|p| p.base_url_openai_chat).map(str::to_string));
+    let default_model = item_url("default_model");
+    // 协议选择：UI 在详情面板的 radio。缺省 = "auto" = anthropic 优先。
     let protocol = item
         .get("protocol")
         .and_then(Value::as_str)
@@ -123,45 +128,47 @@ fn direct_resolution_from_overlay(
                 return (ProviderResolution::Error { reason }, default_model);
             }
         },
-        "openai" => match base_url_openai {
+        "openai" => match base_url_openai_chat {
             Some(u) => (sebas_acp::claude::AgentProtocol::OpenAi, u),
             None => {
                 let reason = format!(
-                    "direct provider '{name}' has explicit protocol=openai but no base_url_openai"
+                    "direct provider '{name}' has explicit protocol=openai but no base_url_openai_chat (a responses-only provider is not spawnable in Direct mode)"
                 );
                 tracing::warn!(
                     provider = %name,
-                    "direct provider sets protocol=openai but base_url_openai is missing, aborting spawn"
+                    "direct provider sets protocol=openai but base_url_openai_chat is missing, aborting spawn"
                 );
                 return (ProviderResolution::Error { reason }, default_model);
             }
         },
-        // "auto" 或未知值：旧约定（anthropic > openai）。
+        // "auto" 或未知值：anthropic > openai chat。
         _ => {
             if let Some(u) = base_url_anthropic {
                 (sebas_acp::claude::AgentProtocol::Anthropic, u)
-            } else if let Some(u) = base_url_openai {
+            } else if let Some(u) = base_url_openai_chat {
                 (sebas_acp::claude::AgentProtocol::OpenAi, u)
             } else {
                 let reason = format!(
-                    "direct provider '{name}' has no base_url_anthropic or base_url_openai"
+                    "direct provider '{name}' has no base_url_anthropic or base_url_openai_chat"
                 );
                 tracing::warn!(
                     provider = %name,
-                    "Direct provider has no base_url_anthropic / base_url_openai; aborting spawn"
+                    "Direct provider has no base_url_anthropic / base_url_openai_chat; aborting spawn"
                 );
                 return (ProviderResolution::Error { reason }, default_model);
             }
         }
     };
 
-    // 密钥：api_key 明文优先（仅测试），否则读 api_key_env。
+    // 密钥：api_key 明文优先，否则读 api_key_env（preset 派生缺省继承
+    // preset 的默认 env 名）；都没有 → Error。
+    let preset_env = preset.map(|p| p.api_key_env);
     let auth_token = if let Some(key) = item
         .get("api_key")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
-        tracing::warn!(
+        tracing::debug!(
             provider = %name,
             "Direct provider uses plaintext api_key (overlay-supplied); prefer api_key_env"
         );
@@ -170,6 +177,7 @@ fn direct_resolution_from_overlay(
         .get("api_key_env")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
+        .or(preset_env)
     {
         match std::env::var(env_var) {
             Ok(v) if !v.is_empty() => v,
@@ -332,17 +340,19 @@ fn build_direct_from_router_config(
     name: &str,
     p: &sebas_router::config::ProviderConfig,
 ) -> (ProviderResolution, Option<String>) {
+    // anthropic 槽优先，其次 chat 槽；responses-only provider 不可 spawn
+    // （agent 不说 Responses 协议）。
     let (proto, base_url) = if let Some(u) = p.base_url_anthropic.as_deref() {
         (sebas_acp::claude::AgentProtocol::Anthropic, u.to_string())
-    } else if let Some(u) = p.base_url_openai.as_deref() {
+    } else if let Some(u) = p.base_url_openai_chat.as_deref() {
         (sebas_acp::claude::AgentProtocol::OpenAi, u.to_string())
     } else {
         let reason = format!(
-            "direct provider '{name}' in router config has no base_url_anthropic or base_url_openai"
+            "direct provider '{name}' in router config has no base_url_anthropic or base_url_openai_chat (a responses-only provider is not spawnable in Direct mode)"
         );
         tracing::warn!(
             provider = %name,
-            "Direct provider missing URLs in router config; aborting spawn"
+            "Direct provider missing spawnable URLs in router config; aborting spawn"
         );
         return (ProviderResolution::Error { reason }, None);
     };
@@ -361,7 +371,7 @@ fn build_direct_from_router_config(
             }
         }
     } else if let Some(plain) = &p.api_key {
-        tracing::warn!(
+        tracing::debug!(
             provider = %name,
             "Direct provider uses plaintext api_key (config.toml-supplied); prefer api_key_env"
         );
@@ -559,7 +569,7 @@ provider_overlay = "__sebas_spawn_env_no_overlay__.json"
             r#"{
                 "providers": {
                     "dashscope": {
-                        "base_url_openai": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "base_url_openai_chat": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                         "api_key_env": "DASHSCOPE_API_KEY"
                     }
                 }
@@ -1196,7 +1206,6 @@ api_key_env = "ANTHROPIC_API_KEY"
             r#"{
                 "providers": {
                     "test_prov": {
-                        "preset": "deepseek",
                         "base_url_anthropic": "https://example.test/anthropic",
                         "api_key": "sk-test-direct"
                     }
@@ -1219,7 +1228,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         // --- Scenario A: Off → Off，无 env 无 args ---
         std::fs::write(
             &state_path,
-            r#"{"version":2,"providers":{"test_prov":{"preset":"deepseek","base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"off"},"default_selection":null}"#,
+            r#"{"version":2,"providers":{"test_prov":{"base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"off"},"default_selection":null}"#,
         )
         .unwrap();
         let st = sebas_dispatch::provider_state::load();
@@ -1234,7 +1243,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         // --- Scenario B: Direct + overlay 命中 → Direct(Anthropic) ---
         std::fs::write(
             &state_path,
-            r#"{"version":2,"providers":{"test_prov":{"preset":"deepseek","base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"direct","provider":"test_prov"},"default_selection":{"provider":"test_prov"}}"#,
+            r#"{"version":2,"providers":{"test_prov":{"base_url_anthropic":"https://example.test/anthropic","api_key":"sk-test-direct"}},"deleted":[],"mode":{"kind":"direct","provider":"test_prov"},"default_selection":{"provider":"test_prov"}}"#,
         )
         .unwrap();
         let st = sebas_dispatch::provider_state::load();
@@ -1334,7 +1343,7 @@ api_key_env = "ANTHROPIC_API_KEY"
                 "dual": {
                   "name": "dual",
                   "base_url_anthropic": "https://example.com/anthropic",
-                  "base_url_openai": "https://example.com/openai",
+                  "base_url_openai_chat": "https://example.com/openai",
                   "api_key": "sk-test"
                 }
               }
@@ -1379,7 +1388,7 @@ api_key_env = "ANTHROPIC_API_KEY"
                 "dual": {
                   "name": "dual",
                   "base_url_anthropic": "https://example.com/anthropic",
-                  "base_url_openai": "https://example.com/openai",
+                  "base_url_openai_chat": "https://example.com/openai",
                   "api_key": "sk-test",
                   "protocol": "openai"
                 }
@@ -1425,7 +1434,7 @@ api_key_env = "ANTHROPIC_API_KEY"
               "providers": {
                 "oai-only": {
                   "name": "oai-only",
-                  "base_url_openai": "https://example.com/openai",
+                  "base_url_openai_chat": "https://example.com/openai",
                   "api_key": "sk-test",
                   "protocol": "anthropic"
                 }
@@ -1502,11 +1511,11 @@ api_key_env = "ANTHROPIC_API_KEY"
                     "reason must mention the protocol; got: {reason}"
                 );
                 assert!(
-                    reason.contains("base_url_openai"),
+                    reason.contains("base_url_openai_chat"),
                     "reason must explain which URL field is missing; got: {reason}"
                 );
             }
-            other => panic!("显式 protocol=openai 缺 base_url_openai → 必须 Error；got {other:?}"),
+            other => panic!("显式 protocol=openai 缺 base_url_openai_chat → 必须 Error；got {other:?}"),
         }
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_PROVIDER_OVERLAY");
@@ -1526,7 +1535,7 @@ api_key_env = "ANTHROPIC_API_KEY"
                 "dual": {
                   "name": "dual",
                   "base_url_anthropic": "https://example.com/anthropic",
-                  "base_url_openai": "https://example.com/openai",
+                  "base_url_openai_chat": "https://example.com/openai",
                   "api_key": "sk-test",
                   "protocol": "anthropic"
                 }
@@ -1565,7 +1574,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 [router]
 listen = "127.0.0.1:8787"
 auth_token = []
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "https://api.anthropic.com"
 "#;
         let cfg = RouterConfig::parse(raw).expect("test router parses");

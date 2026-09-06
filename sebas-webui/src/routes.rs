@@ -155,6 +155,24 @@ fn mutation_available(client: &crate::router_client::RouterClient, state: &WebUi
     state.router.listen.is_some() && client.has_secret()
 }
 
+/// GET /router/api/providers：provider 列表只读代理（管理页数据源）。
+pub async fn router_api_providers_list(State(state): State<WebUiState>) -> axum::response::Response {
+    let client = router_client_of(&state);
+    match client.providers().await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
+    }
+}
+
+/// GET /router/api/presets：内置 preset 表只读视图（BFF 代理，无变更面）。
+pub async fn router_api_presets(State(state): State<WebUiState>) -> axum::response::Response {
+    let client = router_client_of(&state);
+    match client.presets().await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
+    }
+}
+
 pub async fn router_api_provider_create(
     State(state): State<WebUiState>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -165,7 +183,7 @@ pub async fn router_api_provider_create(
     }
     match client.create_provider(&body).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -180,7 +198,7 @@ pub async fn router_api_provider_update(
     }
     match client.update_provider(&name, &body).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -194,7 +212,7 @@ pub async fn router_api_provider_delete(
     }
     match client.delete_provider(&name).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -208,7 +226,7 @@ pub async fn router_api_provider_probe(
     }
     match client.probe_provider(&name, true).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -222,7 +240,7 @@ pub async fn router_api_alias_create(
     }
     match client.create_alias(&body).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -237,7 +255,7 @@ pub async fn router_api_alias_update(
     }
     match client.update_alias(&alias, &body).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -251,7 +269,7 @@ pub async fn router_api_alias_delete(
     }
     match client.delete_alias(&alias).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 
@@ -262,7 +280,7 @@ pub async fn router_api_reload(State(state): State<WebUiState>) -> axum::respons
     }
     match client.reload().await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err_json(e.0),
+        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }
 }
 

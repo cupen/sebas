@@ -23,12 +23,12 @@ provider_overlay = "__SEBAS_TEST_NO_OVERLAY__.json"
 
 auth_token = "sk-gw-test"
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "https://api.anthropic.com"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[provider.openai]
-base_url_openai = "https://api.openai.com"
+[provider.oai-mock]
+base_url_openai_chat = "https://api.openai.com"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 "#;
 

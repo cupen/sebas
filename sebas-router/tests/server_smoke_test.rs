@@ -29,11 +29,11 @@ auth_token = "sk-gw-test"
 # 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
 # 校验冲突导致 parse 失败）。
 provider_overlay = "__sebas_server_smoke_no_overlay__.json"
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "https://api.anthropic.com"
 api_key = "test-key"
-[provider.openai]
-base_url_openai = "https://api.openai.com/v1"
+[provider.oai-mock]
+base_url_openai_chat = "https://api.openai.com/v1"
 api_key = "test-key-oai"
 "#;
 
@@ -102,12 +102,12 @@ usage_file = "__USAGE__"
 [[router.keys]]
 key = "sk-gw-test"
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "https://api.anthropic.com"
 api_key = "test-key"
 
-[provider.openai]
-base_url_openai = "https://api.openai.com/v1"
+[provider.oai-mock]
+base_url_openai_chat = "https://api.openai.com/v1"
 api_key = "test-key-oai"
 "#;
     let gw = support::start_router(cfg).await;

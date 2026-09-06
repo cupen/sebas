@@ -123,7 +123,8 @@ fn inject_upstream_auth(out: &mut HeaderMap, proto: WireProtocol, upstream_key: 
                     .expect("upstream key must be a valid header value"),
             );
         }
-        WireProtocol::OpenAi => {
+        // OpenAI 家族（chat completions / Responses）都走 Bearer。
+        WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses => {
             let val = format!("Bearer {upstream_key}");
             out.insert(
                 "authorization",
@@ -199,7 +200,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         Some(t) => t,
         None => {
             return error_response(
-                WireProtocol::OpenAi,
+                WireProtocol::OpenAiChat,
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "path is not under /v1",
@@ -667,7 +668,7 @@ mod tests {
             ("content-type", "application/json"),
             ("x-request-id", "abc-123"),
         ]);
-        let out = filtered_request_headers(&src, WireProtocol::OpenAi, "sk-upstream-openai");
+        let out = filtered_request_headers(&src, WireProtocol::OpenAiChat, "sk-upstream-openai");
 
         assert_eq!(
             out.get("authorization").unwrap(),

@@ -3,25 +3,36 @@ use serde::{Deserialize, Serialize};
 /// 上游 provider 的 API 协议面。纯透传模式下决定请求/响应的格式归约
 /// （Anthropic 客户端走 Anthropic provider，OpenAI 同理），不做协议转换。
 ///
+/// OpenAI 家族拆两档：`OpenAiChat`（chat completions 及其余 OpenAI 端点）
+/// 与 `OpenAiResponses`（Responses API）——两者可指向 provider 的不同
+/// base_url 槽位（见 `ProviderConfig::url_for`），wire 格式仍同族。
+///
 /// Renamed from `Protocol` to disambiguate from
 /// `sebas_acp::claude::AgentProtocol` (which carries the same meaning but at the
 /// agent→upstream seam, not the router→upstream seam).
-///
-/// serde `rename_all = "lowercase"`：`Anthropic` <-> `"anthropic"`，
-/// `OpenAi` <-> `"openai"`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum WireProtocol {
+    #[serde(rename = "anthropic")]
     Anthropic,
-    OpenAi,
+    #[serde(rename = "openai_chat")]
+    OpenAiChat,
+    #[serde(rename = "openai_responses")]
+    OpenAiResponses,
 }
 
 impl WireProtocol {
     pub fn as_str(self) -> &'static str {
         match self {
             WireProtocol::Anthropic => "anthropic",
-            WireProtocol::OpenAi => "openai",
+            WireProtocol::OpenAiChat => "openai_chat",
+            WireProtocol::OpenAiResponses => "openai_responses",
         }
+    }
+
+    /// OpenAI 家族（chat / responses）共用的判定：鉴权、错误形状、usage
+    /// 提取在同族两档间一致。
+    pub fn is_openai_family(self) -> bool {
+        matches!(self, WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses)
     }
 }
 
@@ -37,15 +48,19 @@ pub struct Target {
 /// `/v1/messages` 命中 `/v1/messages` 与 `/v1/messages/x`，不命中 `/v1/messagesXYZ`。
 const ANTHROPIC_PATHS: &[&str] = &["/v1/messages"];
 
-/// OpenAI 专属路径表（见 openspec/specs/router-core/spec.md）。碰撞路径（`/v1/models`、`/v1/files`、
-/// `/v1/skills`）刻意不入表，由 `anthropic-version` header 仲裁。
+/// OpenAI Responses 专属路径表。独立于 chat 槽位路由（`/v1/responses` 及
+/// 其子路径打 `base_url_openai_responses`）。
+const OPENAI_RESPONSES_PATHS: &[&str] = &["/v1/responses"];
+
+/// OpenAI chat-completions 专属路径表（见 openspec/specs/router-core/spec.md）。
+/// 碰撞路径（`/v1/models`、`/v1/files`、`/v1/skills`）刻意不入表，由
+/// `anthropic-version` header 仲裁。
 ///
 /// ⚠️ **仅外部 OpenAI 客户端使用** —— sebas 自身走 Router 模式时，
 /// agent 只发 Anthropic 协议，本表对 sebas→router→upstream 路径不可见。
 /// 见 openspec/specs/provider-management/spec.md。
-const OPENAI_PATHS: &[&str] = &[
+const OPENAI_CHAT_PATHS: &[&str] = &[
     "/v1/chat/completions",
-    "/v1/responses",
     "/v1/embeddings",
     "/v1/moderations",
     "/v1/images",
@@ -80,6 +95,8 @@ fn path_matches_entry(path: &str, entry: &str) -> bool {
 
 /// 显式前缀挂载（`/anthropic/`、`/openai/`）——返回强制协议与剥离后的
 /// bare 路径（`/v1/...`）。段边界：`/anthropic/v1` 命中，`/anthropicfoo` 不命中。
+/// `/openai/` 强制 chat 档；Responses 无独立前缀（`/v1/responses` 路径本身
+/// 无歧义，嗅探即可命中）。
 fn explicit_prefix(path: &str) -> Option<(WireProtocol, &str)> {
     if let Some(rest) = path.strip_prefix("/anthropic")
         && (rest.starts_with('/') || rest.is_empty())
@@ -89,7 +106,7 @@ fn explicit_prefix(path: &str) -> Option<(WireProtocol, &str)> {
     if let Some(rest) = path.strip_prefix("/openai")
         && (rest.starts_with('/') || rest.is_empty())
     {
-        return Some((WireProtocol::OpenAi, rest));
+        return Some((WireProtocol::OpenAiChat, rest));
     }
     None
 }
@@ -102,9 +119,10 @@ fn is_under_v1(path: &str) -> bool {
 /// 协议嗅探（见 openspec/specs/router-core/spec.md）。优先级（高 → 低）：
 /// 1. 显式前缀 `/anthropic/`、`/openai/`（强制协议）
 /// 2. Anthropic 专属路径表（`/v1/messages`）
-/// 3. OpenAI 专属路径表
-/// 4. `anthropic-version` header
-/// 5. 默认 OpenAi
+/// 3. OpenAI Responses 专属路径表（`/v1/responses`）
+/// 4. OpenAI chat 专属路径表
+/// 5. `anthropic-version` header
+/// 6. 默认 OpenAiChat
 ///
 /// `path` 可带显式前缀（裸 `uri_path`）或 bare `/v1/...`，两种都能识别。
 pub fn sniff(headers: &axum::http::HeaderMap, path: &str) -> WireProtocol {
@@ -114,13 +132,19 @@ pub fn sniff(headers: &axum::http::HeaderMap, path: &str) -> WireProtocol {
     if ANTHROPIC_PATHS.iter().any(|e| path_matches_entry(path, e)) {
         return WireProtocol::Anthropic;
     }
-    if OPENAI_PATHS.iter().any(|e| path_matches_entry(path, e)) {
-        return WireProtocol::OpenAi;
+    if OPENAI_RESPONSES_PATHS
+        .iter()
+        .any(|e| path_matches_entry(path, e))
+    {
+        return WireProtocol::OpenAiResponses;
+    }
+    if OPENAI_CHAT_PATHS.iter().any(|e| path_matches_entry(path, e)) {
+        return WireProtocol::OpenAiChat;
     }
     if headers.contains_key("anthropic-version") {
         return WireProtocol::Anthropic;
     }
-    WireProtocol::OpenAi
+    WireProtocol::OpenAiChat
 }
 
 /// 解析嗅探目标：剥离显式前缀得到 bare `/v1/...` 路径 + 嗅探协议。
@@ -163,9 +187,9 @@ mod tests {
         assert_eq!(t.protocol, WireProtocol::Anthropic);
         assert_eq!(t.path, "/v1/chat/completions");
 
-        // /openai/ forces OpenAi even on the Anthropic-specific /v1/messages
+        // /openai/ forces OpenAiChat even on the Anthropic-specific /v1/messages
         let t = resolve_target(&no_hdrs(), "/openai/v1/messages").unwrap();
-        assert_eq!(t.protocol, WireProtocol::OpenAi);
+        assert_eq!(t.protocol, WireProtocol::OpenAiChat);
         assert_eq!(t.path, "/v1/messages");
 
         // sniff agrees with the forced protocol
@@ -175,7 +199,7 @@ mod tests {
         );
         assert_eq!(
             sniff(&no_hdrs(), "/openai/v1/messages"),
-            WireProtocol::OpenAi
+            WireProtocol::OpenAiChat
         );
     }
 
@@ -194,11 +218,37 @@ mod tests {
     }
 
     #[test]
+    fn responses_family_is_its_own_protocol() {
+        // /v1/responses and subpaths sniff as OpenAiResponses, distinct from chat
+        assert_eq!(
+            sniff(&no_hdrs(), "/v1/responses"),
+            WireProtocol::OpenAiResponses
+        );
+        assert_eq!(
+            sniff(&no_hdrs(), "/v1/responses/resp_abc"),
+            WireProtocol::OpenAiResponses
+        );
+        let t = resolve_target(&no_hdrs(), "/v1/responses").unwrap();
+        assert_eq!(t.protocol, WireProtocol::OpenAiResponses);
+        assert_eq!(t.path, "/v1/responses");
+
+        // chat path stays chat — no bleed between the two openai slots
+        assert_eq!(
+            sniff(&no_hdrs(), "/v1/chat/completions"),
+            WireProtocol::OpenAiChat
+        );
+        // segment boundary: /v1/responsesXYZ is not in the responses table
+        assert_ne!(
+            sniff(&no_hdrs(), "/v1/responsesXYZ"),
+            WireProtocol::OpenAiResponses
+        );
+    }
+
+    #[test]
     fn openai_specific_paths_detected() {
-        // Representative slice of the OpenAI path table; no header, no prefix
+        // Representative slice of the OpenAI chat path table; no header, no prefix
         for p in [
             "/v1/chat/completions",
-            "/v1/responses",
             "/v1/embeddings",
             "/v1/moderations",
             "/v1/images/generations",
@@ -222,20 +272,20 @@ mod tests {
         ] {
             assert_eq!(
                 sniff(&no_hdrs(), p),
-                WireProtocol::OpenAi,
-                "path {p} should be OpenAi"
+                WireProtocol::OpenAiChat,
+                "path {p} should be OpenAiChat"
             );
         }
 
         let t = resolve_target(&no_hdrs(), "/v1/chat/completions").unwrap();
-        assert_eq!(t.protocol, WireProtocol::OpenAi);
+        assert_eq!(t.protocol, WireProtocol::OpenAiChat);
         assert_eq!(t.path, "/v1/chat/completions");
     }
 
     #[test]
     fn collision_path_arbitrated_by_header_both_directions() {
         // /v1/models, /v1/files, /v1/skills are collision paths — not in any table.
-        // anthropic-version header → Anthropic; absent → default OpenAi.
+        // anthropic-version header → Anthropic; absent → default OpenAiChat.
         for p in ["/v1/models", "/v1/files", "/v1/skills"] {
             assert_eq!(
                 sniff(&hdrs_with(Some("2023-06-01")), p),
@@ -244,8 +294,8 @@ mod tests {
             );
             assert_eq!(
                 sniff(&no_hdrs(), p),
-                WireProtocol::OpenAi,
-                "path {p} without header → default OpenAi"
+                WireProtocol::OpenAiChat,
+                "path {p} without header → default OpenAiChat"
             );
         }
     }
@@ -264,31 +314,31 @@ mod tests {
 
         // /v1 root itself is valid
         let t = resolve_target(&no_hdrs(), "/v1").unwrap();
-        assert_eq!(t.protocol, WireProtocol::OpenAi); // default
+        assert_eq!(t.protocol, WireProtocol::OpenAiChat); // default
         assert_eq!(t.path, "/v1");
     }
 
     #[test]
     fn segment_boundary_no_false_match() {
-        // /v1/messagesfoo must NOT match the /v1/messages entry → default OpenAi,
+        // /v1/messagesfoo must NOT match the /v1/messages entry → default OpenAiChat,
         // proving the Anthropic table did not match.
-        assert_eq!(sniff(&no_hdrs(), "/v1/messagesfoo"), WireProtocol::OpenAi);
+        assert_eq!(sniff(&no_hdrs(), "/v1/messagesfoo"), WireProtocol::OpenAiChat);
         assert_ne!(
             sniff(&no_hdrs(), "/v1/messagesfoo"),
             WireProtocol::Anthropic
         );
 
         // /v1/chat/completionsXYZ with anthropic-version header → Anthropic,
-        // proving the OpenAI table did NOT match (table wins over header, so a
-        // false match would yield OpenAi instead).
+        // proving the OpenAI chat table did NOT match (table wins over header, so a
+        // false match would yield OpenAiChat instead).
         assert_eq!(
             sniff(&hdrs_with(Some("2023-06-01")), "/v1/chat/completionsXYZ"),
             WireProtocol::Anthropic
         );
-        // sanity: the real /v1/chat/completions with header → still OpenAi (table wins)
+        // sanity: the real /v1/chat/completions with header → still OpenAiChat (table wins)
         assert_eq!(
             sniff(&hdrs_with(Some("2023-06-01")), "/v1/chat/completions"),
-            WireProtocol::OpenAi
+            WireProtocol::OpenAiChat
         );
     }
 
@@ -299,10 +349,30 @@ mod tests {
             sniff(&hdrs_with(Some("2023-06-01")), "/v1/whoknows"),
             WireProtocol::Anthropic
         );
-        assert_eq!(sniff(&no_hdrs(), "/v1/whoknows"), WireProtocol::OpenAi);
+        assert_eq!(sniff(&no_hdrs(), "/v1/whoknows"), WireProtocol::OpenAiChat);
 
         let t = resolve_target(&hdrs_with(Some("2023-06-01")), "/v1/whoknows").unwrap();
         assert_eq!(t.protocol, WireProtocol::Anthropic);
         assert_eq!(t.path, "/v1/whoknows");
+    }
+
+    #[test]
+    fn serde_roundtrip_uses_explicit_names() {
+        assert_eq!(
+            serde_json::from_str::<WireProtocol>("\"anthropic\"").unwrap(),
+            WireProtocol::Anthropic
+        );
+        assert_eq!(
+            serde_json::from_str::<WireProtocol>("\"openai_chat\"").unwrap(),
+            WireProtocol::OpenAiChat
+        );
+        assert_eq!(
+            serde_json::from_str::<WireProtocol>("\"openai_responses\"").unwrap(),
+            WireProtocol::OpenAiResponses
+        );
+        assert_eq!(
+            serde_json::to_string(&WireProtocol::OpenAiResponses).unwrap(),
+            "\"openai_responses\""
+        );
     }
 }

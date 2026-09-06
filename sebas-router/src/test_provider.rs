@@ -3,8 +3,9 @@
 //! debug 模式给 router 增加一个自定义模型 `test`：请求不转发到外部上游，
 //! 而是由 router 自身应答——固定文字 + 回显输入里的最后一条用户消息，例如
 //! `I'm test provider. I received your message "hello".`。
-//! Anthropic（/v1/messages）与 OpenAI（/v1/chat/completions）两个协议面、
-//! 流式与非流式都支持。
+//! Anthropic（/v1/messages）、OpenAI chat（/v1/chat/completions）与
+//! OpenAI Responses（/v1/responses）三个协议面、流式与非流式都支持
+//! （Responses 档复用 OpenAI 家族响应形状——debug 应答只承诺回显）。
 
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -78,16 +79,18 @@ pub fn test_response(proto: WireProtocol, echoed: &str, stream: bool) -> Respons
             .header("content-type", "text/event-stream")
             .body(Body::from(anthropic_sse(&text)))
             .expect("static response parts valid"),
-        (WireProtocol::OpenAi, false) => Response::builder()
+        // OpenAI 家族（chat / Responses）共用形状。
+        (proto, false) if proto.is_openai_family() => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
             .body(Body::from(openai_json(&text)))
             .expect("static response parts valid"),
-        (WireProtocol::OpenAi, true) => Response::builder()
+        (proto, true) if proto.is_openai_family() => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
             .body(Body::from(openai_sse(&text)))
             .expect("static response parts valid"),
+        _ => unreachable!("all three protocols and both stream modes are covered"),
     }
 }
 
@@ -245,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_json_response_contains_text() {
-        let resp = test_response(WireProtocol::OpenAi, "hello", false);
+        let resp = test_response(WireProtocol::OpenAiChat, "hello", false);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
@@ -262,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_sse_response_contains_text_and_done() {
-        let resp = test_response(WireProtocol::OpenAi, "hello", true);
+        let resp = test_response(WireProtocol::OpenAiChat, "hello", true);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "text/event-stream"

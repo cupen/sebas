@@ -26,8 +26,10 @@ pub fn enable_debug_test_provider(cfg: &mut RouterConfig) {
     cfg.providers.insert(
         "test".to_string(),
         ProviderConfig {
+            preset: None,
             base_url_anthropic: Some("router://self".to_string()),
-            base_url_openai: Some("router://self".to_string()),
+            base_url_openai_chat: Some("router://self".to_string()),
+            base_url_openai_responses: Some("router://self".to_string()),
             api_key_env: None,
             api_key: None,
             model_map: HashMap::new(),

@@ -12,6 +12,8 @@ thiserror = "1"
 dirs = "5"
 anyhow = "1"
 sebas-channels = { path = "../sebas-channels" }
+# provider 卡片展示/探测需读内置 preset 表（preset 数据跟随代码）。
+sebas-router = { path = "../sebas-router" }
 sebas-acp = { path = "../sebas-acp" }
 async-trait = "0.1"
 # 仅 provider 探测 `/v1/models` 用，少量依赖；rustls-tls 省掉 native-tls 链接。

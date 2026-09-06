@@ -27,14 +27,17 @@ args = []
 # fold_long_output = true
 # thinking = "show"
 
-# LLM provider 网关（Anthropic/OpenAI 双协议纯透传，契约见
-# openspec/specs/router-core/spec.md）。运行：`sebas router -c <path>`
-# 或 watchdog 托管 [watchdog.router]；`--debug` 注入内置 test provider
-# （固定文字+回显，不拨上游，跳过鉴权）。
+# LLM provider 网关（三协议纯透传：Anthropic / OpenAI chat-completions /
+# OpenAI Responses，契约见 openspec/specs/router-core/spec.md）。运行：
+# `sebas router -c <path>` 或 watchdog 托管 [watchdog.router]；`--debug`
+# 注入内置 test provider（固定文字+回显，不拨上游，跳过鉴权）。
 #
 # provider 写顶层 [provider.<name>]，名称即 preset
-# （anthropic/openai/deepseek/kimi/glm/minimax/ark/dashscope/gemini）；
-# 双协议 preset 必须显式 protocol。
+# （anthropic/openai/deepseek/kimi/glm/minimax/ark/dashscope/gemini）。
+# preset 的 base_url / models 跟随代码内置表：派生条目显式写这些字段即
+# 配置错误；用户只配密钥（api_key / api_key_env）。统一槽 base_url_openai
+# 已移除——三槽位为 base_url_anthropic / base_url_openai_chat /
+# base_url_openai_responses，缺槽 = 该协议 400。
 # [router]
 # listen = "127.0.0.1:8787"     # watchdog 托管时忽略
 # default_provider = "deepseek" # 无 model 请求（如 GET /v1/models）的兜底
@@ -42,11 +45,16 @@ args = []
 # usage_file = "~/.sebas/router-usage.jsonl"
 #
 # [provider.anthropic]
-# # api_key = "..."    # 明文仅测试用（启动时 warn）
+# # api_key = "..."    # 明文可落 overlay（WebUI/卡片写入）；config.toml 建议 env
 #
 # [provider.deepseek]
-# protocol = "anthropic"
-# # models = ["deepseek-chat", "deepseek-reasoner"]   # 强→弱，映射到 Claude Code env
+#
+# 自定义 provider：三个槽位至少配一个。
+# [provider.my-gateway]
+# base_url_anthropic = "https://my-gateway.example/anthropic"
+# base_url_openai_chat = "https://my-gateway.example/v1"
+# base_url_openai_responses = "https://my-gateway.example/v1"
+# api_key_env = "MY_GATEWAY_KEY"
 #
 # 路由表：model（可含 glob，键加引号）→ provider 数组，顺序 = 优先级。
 # [router.routes]

@@ -29,21 +29,22 @@ fn base_config(anth_url: &str, oai_url: &str) -> String {
 [router]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
-default_provider = "anthropic"
+default_provider = "anth-mock"
 
 auth_token = ["sk-gw-contract", "sk-gw-openai"]
 
 [router.routes]
-"claude-*" = ["anthropic"]
-"gpt-*" = ["openai"]
-"text-*" = ["openai"]
+"claude-*" = ["anth-mock"]
+"gpt-*" = ["oai-mock"]
+"text-*" = ["oai-mock"]
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[provider.openai]
-base_url_openai = "{oai_url}"
+[provider.oai-mock]
+base_url_openai_chat = "{oai_url}"
+base_url_openai_responses = "{oai_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 "#
     )
@@ -56,22 +57,23 @@ fn rename_config(anth_url: &str, oai_url: &str) -> String {
 [router]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
-default_provider = "anthropic"
+default_provider = "anth-mock"
 
 auth_token = "sk-gw-contract"
 
 [router.routes]
-"claude-*" = ["anthropic"]
+"claude-*" = ["anth-mock"]
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[provider.anthropic.model_map]
+[provider.anth-mock.model_map]
 claude-sonnet = "claude-sonnet-4-20250514"
 
-[provider.openai]
-base_url_openai = "{oai_url}"
+[provider.oai-mock]
+base_url_openai_chat = "{oai_url}"
+base_url_openai_responses = "{oai_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 "#
     )
@@ -85,19 +87,20 @@ fn openai_default_config(anth_url: &str, oai_url: &str) -> String {
 [router]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
-default_provider = "openai"
+default_provider = "oai-mock"
 
 auth_token = "sk-gw-openai"
 
 [router.routes]
-"claude-*" = ["anthropic"]
+"claude-*" = ["anth-mock"]
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[provider.openai]
-base_url_openai = "{oai_url}"
+[provider.oai-mock]
+base_url_openai_chat = "{oai_url}"
+base_url_openai_responses = "{oai_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 "#
     )
@@ -123,7 +126,7 @@ impl TestEnv {
 
 async fn setup() -> TestEnv {
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
-    let oai = start_mock_upstream(WireProtocol::OpenAi).await;
+    let oai = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let cfg = base_config(&anth.url, &oai.url);
     let gw = start_router(&cfg).await;
     TestEnv { gw, anth, oai }
@@ -191,7 +194,7 @@ fn assert_key_injection(req: &RecordedRequest, proto: WireProtocol, downstream_k
                 "downstream Authorization must be stripped for Anthropic"
             );
         }
-        WireProtocol::OpenAi => {
+        WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses => {
             assert_eq!(
                 recorded_header_get(&req.headers, "authorization").unwrap(),
                 format!("Bearer {OAI_KEY}"),
@@ -414,7 +417,7 @@ async fn case_6_openai_chat_non_stream_byte_passthrough() {
 
     let rec = sole_request(&env.oai).await;
     assert_recorded_request(&rec, "POST", "/v1/chat/completions", body);
-    assert_key_injection(&rec, WireProtocol::OpenAi, "sk-gw-contract");
+    assert_key_injection(&rec, WireProtocol::OpenAiChat, "sk-gw-contract");
 }
 
 // ===== 7. POST /v1/chat/completions 流式 + usage 断言 =====
@@ -443,12 +446,12 @@ async fn case_7_openai_chat_sse_byte_passthrough_and_usage() {
 
     let rec = sole_request(&env.oai).await;
     assert_recorded_request(&rec, "POST", "/v1/chat/completions", body);
-    assert_key_injection(&rec, WireProtocol::OpenAi, "sk-gw-contract");
+    assert_key_injection(&rec, WireProtocol::OpenAiChat, "sk-gw-contract");
 
     // usage 断言：prompt=12 completion=34 → input=12 output=34
     let records = poll_usage_jsonl(&env.usage_path(), 1).await;
     let u = &records[0];
-    assert_eq!(u["protocol"], "openai");
+    assert_eq!(u["protocol"], "openai_chat");
     assert_eq!(u["status"], 200);
     assert_eq!(u["input_tokens"], 12);
     assert_eq!(u["output_tokens"], 34);
@@ -485,12 +488,12 @@ async fn case_8_openai_responses_byte_passthrough_and_usage() {
 
     let rec = sole_request(&env.oai).await;
     assert_recorded_request(&rec, "POST", "/v1/responses", body);
-    assert_key_injection(&rec, WireProtocol::OpenAi, "sk-gw-contract");
+    assert_key_injection(&rec, WireProtocol::OpenAiResponses, "sk-gw-contract");
 
     // usage 断言：responses shape input=8 output=20
     let records = poll_usage_jsonl(&env.usage_path(), 1).await;
     let u = &records[0];
-    assert_eq!(u["protocol"], "openai");
+    assert_eq!(u["protocol"], "openai_responses");
     assert_eq!(u["input_tokens"], 8);
     assert_eq!(u["output_tokens"], 20);
 }
@@ -521,7 +524,7 @@ async fn case_9_openai_embeddings_byte_passthrough() {
 
     let rec = sole_request(&env.oai).await;
     assert_recorded_request(&rec, "POST", "/v1/embeddings", body);
-    assert_key_injection(&rec, WireProtocol::OpenAi, "sk-gw-contract");
+    assert_key_injection(&rec, WireProtocol::OpenAiChat, "sk-gw-contract");
 }
 
 // ===== 10. GET /v1/models（无 anthropic-version → OpenAI mock）=====
@@ -529,7 +532,7 @@ async fn case_9_openai_embeddings_byte_passthrough() {
 #[tokio::test]
 async fn case_10_get_models_no_header_routes_to_openai_mock() {
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
-    let oai = start_mock_upstream(WireProtocol::OpenAi).await;
+    let oai = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let cfg = openai_default_config(&anth.url, &oai.url);
     let gw = start_router(&cfg).await;
     let env = TestEnv { gw, anth, oai };
@@ -551,7 +554,7 @@ async fn case_10_get_models_no_header_routes_to_openai_mock() {
 
     let rec = sole_request(&env.oai).await;
     assert_recorded_request(&rec, "GET", "/v1/models", "");
-    assert_key_injection(&rec, WireProtocol::OpenAi, "sk-gw-openai");
+    assert_key_injection(&rec, WireProtocol::OpenAiChat, "sk-gw-openai");
     // 路由断言：anthropic mock 未收到任何请求
     let anth_reqs = env.anth.requests.lock().await;
     assert!(
@@ -583,7 +586,7 @@ async fn case_11_get_model_by_id_openai_byte_passthrough() {
 
     let rec = sole_request(&env.oai).await;
     assert_recorded_request(&rec, "GET", "/v1/models/gpt-4", "");
-    assert_key_injection(&rec, WireProtocol::OpenAi, "sk-gw-contract");
+    assert_key_injection(&rec, WireProtocol::OpenAiChat, "sk-gw-contract");
 }
 
 // ===== 12. 显式前缀：/anthropic/v1/messages 与 /openai/v1/chat/completions 剥离前缀转发 =====
@@ -635,7 +638,7 @@ async fn case_12_explicit_prefix_strips_and_forwards() {
     let rec_o = sole_request(&env.oai).await;
     // 前缀剥离：mock 收到的 path 是 /v1/chat/completions
     assert_recorded_request(&rec_o, "POST", "/v1/chat/completions", body_o);
-    assert_key_injection(&rec_o, WireProtocol::OpenAi, "sk-gw-contract");
+    assert_key_injection(&rec_o, WireProtocol::OpenAiChat, "sk-gw-contract");
 }
 
 // ===== 13. model rename：provider model_map 命中，上游收到改写后的 model =====
@@ -643,7 +646,7 @@ async fn case_12_explicit_prefix_strips_and_forwards() {
 #[tokio::test]
 async fn case_13_model_rename_rewrites_upstream_model_field() {
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
-    let oai = start_mock_upstream(WireProtocol::OpenAi).await;
+    let oai = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let cfg = rename_config(&anth.url, &oai.url);
     let gw = start_router(&cfg).await;
     let env = TestEnv { gw, anth, oai };

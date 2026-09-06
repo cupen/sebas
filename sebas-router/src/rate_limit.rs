@@ -129,7 +129,7 @@ fn too_many(headers: &axum::http::HeaderMap, path: &str) -> Response {
     crate::metrics::Metrics::global().observe_rate_limited();
     let proto = resolve_target(headers, path)
         .map(|t| t.protocol)
-        .unwrap_or(WireProtocol::OpenAi);
+        .unwrap_or(WireProtocol::OpenAiChat);
     error_response(
         proto,
         StatusCode::TOO_MANY_REQUESTS,

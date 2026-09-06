@@ -61,20 +61,20 @@ usage_file = "{usage}"
 # 隔离：不合并开发机 ~/.sebas/providers.json（其 openai 条目与 preset
 # 校验冲突会让 router 启动即失败）。
 provider_overlay = "{}/no-overlay.json"
-default_provider = "anthropic"
+default_provider = "anth-mock"
 
 auth_token = "sk-gw-process"
 
 [router.routes]
-"claude-*" = ["anthropic"]
-"gpt-*" = ["openai"]
+"claude-*" = ["anth-mock"]
+"gpt-*" = ["oai-mock"]
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[provider.openai]
-base_url_openai = "{oai_url}"
+[provider.oai-mock]
+base_url_openai_chat = "{oai_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
 "#,
         dir.to_string_lossy().replace('\\', "/")
@@ -105,7 +105,7 @@ provider_overlay = "{}/no-overlay.json"
 
 auth_token = "sk-gw-top"
 
-[provider.anthropic]
+[provider.anth-mock]
 base_url_anthropic = "{anth_url}"
 api_key_env = "ANTHROPIC_API_KEY"
 "#,
@@ -162,7 +162,7 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
     }
 
     let anth = start_mock_upstream(WireProtocol::Anthropic).await;
-    let oai = start_mock_upstream(WireProtocol::OpenAi).await;
+    let oai = start_mock_upstream(WireProtocol::OpenAiChat).await;
     let dir = support::test_target_dir("process_e2e");
     let usage_path = dir.path().join("usage.jsonl");
     let port = pick_free_port().await;

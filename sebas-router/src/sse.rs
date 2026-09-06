@@ -101,7 +101,7 @@ pub fn parse_json_usage(proto: WireProtocol, body: &[u8]) -> UsageInfo {
     };
     match proto {
         WireProtocol::Anthropic => extract_anthropic_json(&v),
-        WireProtocol::OpenAi => extract_openai_usage(&v),
+        WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses => extract_openai_usage(&v),
     }
 }
 
@@ -145,7 +145,7 @@ fn parse_event(proto: WireProtocol, event_str: &str) -> UsageInfo {
 fn extract_usage_from_value(proto: WireProtocol, v: &serde_json::Value) -> UsageInfo {
     match proto {
         WireProtocol::Anthropic => extract_anthropic_sse_event(v),
-        WireProtocol::OpenAi => extract_openai_usage(v),
+        WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses => extract_openai_usage(v),
     }
 }
 
@@ -295,7 +295,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
 
     #[test]
     fn openai_chat_shape_prompt_completion_tokens() {
-        let mut p = SseUsageParser::new(WireProtocol::OpenAi);
+        let mut p = SseUsageParser::new(WireProtocol::OpenAiChat);
         // 末尾 chunk 带 usage（chat completions shape）。
         let chunk = b"data: {\"id\":\"chatcmpl-1\",\"choices\":[],\
 \"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"total_tokens\":46}}\n\n\
@@ -312,7 +312,7 @@ data: [DONE]\n\n";
 
     #[test]
     fn openai_responses_shape_input_output_tokens() {
-        let mut p = SseUsageParser::new(WireProtocol::OpenAi);
+        let mut p = SseUsageParser::new(WireProtocol::OpenAiChat);
         // response.completed 事件把 usage 放在 response.usage 下。
         let chunk = b"event: response.completed\ndata: {\"type\":\"response.completed\",\
 \"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":8,\"output_tokens\":20,\
@@ -329,7 +329,7 @@ data: [DONE]\n\n";
 
     #[test]
     fn done_marker_and_unknown_events_tolerated() {
-        let mut p = SseUsageParser::new(WireProtocol::OpenAi);
+        let mut p = SseUsageParser::new(WireProtocol::OpenAiChat);
         let chunk = b": ping comment\n\nevent: unknown_thing\ndata: {\"foo\":\"bar\"}\n\n\
 data: [DONE]\n\n";
         // 全部应被容忍——无 panic、无 usage。
@@ -379,7 +379,7 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\
         // OpenAI chat 非流式：usage.{prompt_tokens, completion_tokens}
         let chat = b"{\"id\":\"chatcmpl-1\",\"choices\":[],\
 \"usage\":{\"prompt_tokens\":13,\"completion_tokens\":27,\"total_tokens\":40}}";
-        let info = parse_json_usage(WireProtocol::OpenAi, chat);
+        let info = parse_json_usage(WireProtocol::OpenAiChat, chat);
         assert_eq!(info.input_tokens, Some(13));
         assert_eq!(info.output_tokens, Some(27));
         assert_eq!(info.cache_read_tokens, None);
@@ -387,7 +387,7 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\
         // OpenAI Responses 非流式：usage.{input_tokens, output_tokens}
         let resp = b"{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":9,\"output_tokens\":14,\
 \"total_tokens\":23}}";
-        let info = parse_json_usage(WireProtocol::OpenAi, resp);
+        let info = parse_json_usage(WireProtocol::OpenAiChat, resp);
         assert_eq!(info.input_tokens, Some(9));
         assert_eq!(info.output_tokens, Some(14));
 
@@ -396,7 +396,7 @@ event: message_delta\ndata: {\"type\":\"message_delta\",\
         assert_eq!(info, UsageInfo::default());
 
         // 合法 JSON 但无 usage → 全 None
-        let info = parse_json_usage(WireProtocol::OpenAi, b"{\"id\":\"x\"}");
+        let info = parse_json_usage(WireProtocol::OpenAiChat, b"{\"id\":\"x\"}");
         assert_eq!(info, UsageInfo::default());
     }
 }

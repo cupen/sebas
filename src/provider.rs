@@ -30,26 +30,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 预设表单：用户从代码里写好的 provider 里选一个，只填名称 + 密钥。
-/// base_url 在 normalizer 提交时按 preset 推断并以「只读」回填展示。
+/// 预设表单：用户从代码里写好的 provider 里选一个，只填名称 + 密钥 +
+/// 默认 model + 协议。preset 的 base_url / models 跟随代码表，不进表单、
+/// 不落盘（提交时 normalizer 会剥掉可能残留的 url/models 字段）。
 pub const FORM_PRESET: &str = "provider-preset";
 /// 自定义表单：用户手填所有参数（与原单表单形态一致）。
 pub const FORM_CUSTOM: &str = "provider-custom";
 pub const ID_FIELD: &str = "name";
 
-/// 预设模式表单：name + preset + api_key + default_model（4 个可见字段）。
+/// 预设模式表单：name + preset + api_key + default_model + protocol。
 ///
-/// base_url_* 字段原本是「disabled 文本框」放在表单里展示 preset 决定的端点
-/// —— 但飞书 `select_static` 在 form 容器内挂 behaviors 不稳定，preset 切换
-/// 没法实时回填那俩字段，且 disabled input 让表单看起来很拥挤。改成把这些
-/// preset 决定的只读详情放在表单独立的 `CardElement::CollapsiblePanel`（由
-/// 调用方在卡片 body 上叠加 `render_preset_details()`），表单只剩真正要
-/// 用户填的字段。
+/// preset 决定的只读详情（三槽位 URL / 默认 env 名）放在表单独立的
+/// `CardElement::CollapsiblePanel`（由调用方在卡片 body 上叠加
+/// `render_preset_details()`），表单只剩真正要用户填的字段。
 ///
-/// 提交时 `apply_preset_defaults` 按 preset 推断并把 base_url_* 写回存储，
-/// 所以存储侧的 shape 不变；编辑已有 provider 时 `item_to_initial()` 只
-/// 从 spec 字段读 initial，未列入 spec 的 base_url_* 也不会预填（反正
-/// 用户看不到这俩字段）。
+/// 提交时 `apply_preset_defaults` 只保留用户字段并剥掉 url/models——
+/// preset 数据跟随代码，存储侧不再持有副本（resolve/spawn 时从代码表
+/// 物化），代码更新 preset 后存量 provider 自动跟随。
 pub fn spec_preset() -> FormSpec {
     FormSpec::new(
         FORM_PRESET,
@@ -87,21 +84,9 @@ pub fn spec_preset() -> FormSpec {
                 secret: true,
                 disabled: false,
             },
-            FormField::Text {
-                name: "models".into(),
-                label: "模型列表".into(),
-                required: false,
-                placeholder: "用逗号分隔，从强到弱；或点下方「🔍 获取模型列表」从官方 API 拉取"
-                    .into(),
-                secret: false,
-                disabled: false,
-            },
-            // default_model（sebas-63f.4，2026-08-17 改回手填）：静态
-            // preset 表的型号列表会过时，单选下拉反而误导；权威来源是官方
-            // `/models` 接口（详情面板的「🔍 探测 model 列表」按钮会把
-            // 列表写回 `models` 目录并可一键设为默认），探测不可用时手填。
-            // `models` 是 provider 提供的完整列表（catalog），
-            // `default_model` 是偏好——两者并存。
+            // default_model：preset 的 models 列表跟随代码（表单不再提供
+            // catalog 输入），default_model 是用户偏好，权威来源是官方
+            // `/models` 探测结果卡。
             FormField::Text {
                 name: "default_model".into(),
                 label: "默认 model".into(),
@@ -110,10 +95,9 @@ pub fn spec_preset() -> FormSpec {
                 secret: false,
                 disabled: false,
             },
-            // 协议选择（openspec/specs/provider-management/spec.md）：把 Direct 模式的协议优先级
-            // 从「隐式 anthropic > openai」挪到 UI。"auto" = 旧行为（默认，
-            // 向后兼容）；显式 anthropic/openai 强制走对应协议端点，对应 URL
-            // 缺失时由 spawn_env 回退 Off + warn。
+            // 协议选择：Direct 模式的协议优先级。"auto" = 默认（anthropic
+            // 优先）；显式 anthropic/openai 强制走对应协议端点，缺失时由
+            // spawn_env 显式报错。
             FormField::Select {
                 name: "protocol".into(),
                 label: "协议".into(),
@@ -154,11 +138,13 @@ pub fn render_preset_details(preset_name: &str) -> Vec<CardElement> {
     };
 
     let url_anthropic = p.base_url_anthropic.unwrap_or("—");
-    let url_openai = p.base_url_openai.unwrap_or("—");
+    let url_openai_chat = p.base_url_openai_chat.unwrap_or("—");
+    let url_openai_responses = p.base_url_openai_responses.unwrap_or("—");
 
     let lines = [
         format!("**Base URL(Anthropic)**\n`{url_anthropic}`"),
-        format!("**Base URL(OpenAI)**\n`{url_openai}`"),
+        format!("**Base URL(OpenAI Chat)**\n`{url_openai_chat}`"),
+        format!("**Base URL(OpenAI Responses)**\n`{url_openai_responses}`"),
         format!("**默认 env**\n`{}`", p.api_key_env),
     ];
     let elements: Vec<CardElement> = lines
@@ -171,7 +157,7 @@ pub fn render_preset_details(preset_name: &str) -> Vec<CardElement> {
         header: CollapsiblePanelHeader {
             title: CardText {
                 tag: "plain_text".into(),
-                content: "📋 预设详情".into(),
+                content: "📋 预设详情（跟随代码）".into(),
             },
             icon: StandardIcon {
                 tag: "standard_icon".into(),
@@ -186,7 +172,7 @@ pub fn render_preset_details(preset_name: &str) -> Vec<CardElement> {
 }
 
 /// 自定义模式表单：所有字段都让用户填（与 router `ProviderConfig` 字段对齐）。
-/// base_url_anthropic / base_url_openai 各自独立，可只填一个（只支持对应协议）。
+/// 三个 base_url 槽位各自独立，可只填一个（只支持对应协议）。
 pub fn spec_custom() -> FormSpec {
     FormSpec::new(
         FORM_CUSTOM,
@@ -209,10 +195,18 @@ pub fn spec_custom() -> FormSpec {
                 disabled: false,
             },
             FormField::Text {
-                name: "base_url_openai".into(),
-                label: "Base URL(OpenAI)".into(),
+                name: "base_url_openai_chat".into(),
+                label: "Base URL(OpenAI Chat)".into(),
                 required: false,
-                placeholder: "留空表示不提供 OpenAI 协议".into(),
+                placeholder: "chat completions 端点；留空表示不提供".into(),
+                secret: false,
+                disabled: false,
+            },
+            FormField::Text {
+                name: "base_url_openai_responses".into(),
+                label: "Base URL(OpenAI Responses)".into(),
+                required: false,
+                placeholder: "Responses API 端点；留空表示不提供".into(),
                 secret: false,
                 disabled: false,
             },
@@ -241,8 +235,8 @@ pub fn spec_custom() -> FormSpec {
                 secret: false,
                 disabled: false,
             },
-            // default_model（sebas-63f.4）：custom provider 不在静态 preset
-            // 表里，model 名无法预填；让用户手填。
+            // default_model：custom provider 不在静态 preset 表里，model 名
+            // 无法预填；让用户手填。
             FormField::Text {
                 name: "default_model".into(),
                 label: "默认 model".into(),
@@ -251,9 +245,7 @@ pub fn spec_custom() -> FormSpec {
                 secret: false,
                 disabled: false,
             },
-            // 协议选择（openspec/specs/provider-management/spec.md）：custom provider 也走同一套
-            // 三档（auto / anthropic / openai）；preset 表单已加，custom 保持
-            // 字段对齐。
+            // 协议选择：custom provider 与 preset 表单字段对齐（三档）。
             FormField::Select {
                 name: "protocol".into(),
                 label: "协议".into(),
@@ -290,26 +282,36 @@ pub fn spec() -> FormSpec {
 /// 后续 `ClaudeCodeDriver::resolve_args()`（bead sebas-63f.8）会从 overlay 读到
 /// 这个值传给 agent。这里不写入 `default_model`，让表单编辑时初始为空；
 /// overlay 里已有 `default_model` 的项会在 `item_to_initial` 里被预填。
-// TODO: router config sync is out of scope for this bead.
 pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) -> Item {
     let mut m = Map::new();
     m.insert("name".into(), Value::String(name.into()));
-    if let Some(u) = &p.base_url_anthropic {
-        m.insert("base_url_anthropic".into(), Value::String(u.clone()));
-    }
-    if let Some(u) = &p.base_url_openai {
-        m.insert("base_url_openai".into(), Value::String(u.clone()));
+    if let Some(preset) = &p.preset {
+        // preset 派生条目：连接数据跟随代码，只带 preset 名 + 用户字段
+        // （url/models 一概不落盘，代码更新 preset 后存量条目自动跟随）。
+        m.insert("preset".into(), Value::String(preset.clone()));
+    } else {
+        // 自定义 provider：url/models 是用户数据，落盘。
+        if let Some(u) = &p.base_url_anthropic {
+            m.insert("base_url_anthropic".into(), Value::String(u.clone()));
+        }
+        if let Some(u) = &p.base_url_openai_chat {
+            m.insert("base_url_openai_chat".into(), Value::String(u.clone()));
+        }
+        if let Some(u) = &p.base_url_openai_responses {
+            m.insert(
+                "base_url_openai_responses".into(),
+                Value::String(u.clone()),
+            );
+        }
+        if !p.models.is_empty() {
+            m.insert("models".into(), Value::String(p.models.join(",")));
+        }
     }
     if let Some(key) = &p.api_key {
         m.insert("api_key".into(), Value::String(key.clone()));
     }
     if let Some(env) = &p.api_key_env {
         m.insert("api_key_env".into(), Value::String(env.clone()));
-    }
-    // 回写 models（从强到弱），表单用逗号分隔字符串，保证 /provider 保存时
-    // 不被 overlay 抹掉，且表单 Text 字段能展示。
-    if !p.models.is_empty() {
-        m.insert("models".into(), Value::String(p.models.join(",")));
     }
     m
 }
@@ -466,48 +468,22 @@ fn backup_broken_overlay(path: &Path) -> std::io::Result<PathBuf> {
 /// 保留签名一致让两套表单可以共享 `with_normalizer` 调用点。
 fn noop_normalizer(_item: &mut Item) {}
 
-/// 提交规范化：选中 preset 时补全默认值（与 config.toml preset 解析一致）。
-/// - `base_url_anthropic` / `base_url_openai` 各自按 preset 填缺项；
-/// - api_key / api_key_env 都没填 → 注入 preset 默认 env 名。
+/// 提交规范化（preset 表单）：preset 数据跟随代码——剥掉条目上可能残留的
+/// base_url / models 字段（router 校验会拒绝 preset 派生条目携带它们），
+/// 用户字段（api_key / api_key_env / default_model / protocol）原样保留。
+/// 默认 env 名不再注入：router resolve 与 Direct spawn 都会在缺 key 来源时
+/// 从代码表物化 preset 的 `api_key_env`，落盘副本只会变陈旧。
 fn apply_preset_defaults(item: &mut Item) {
-    let Some(preset_name) = item.get("preset").and_then(Value::as_str) else {
+    if item.get("preset").and_then(Value::as_str).is_none() {
         return;
-    };
-    let Some(p) = sebas_router::config::presets()
-        .iter()
-        .find(|p| p.name == preset_name)
-    else {
-        return;
-    };
-
-    let anth_empty = item
-        .get("base_url_anthropic")
-        .and_then(Value::as_str)
-        .is_none_or(|s| s.is_empty());
-    if anth_empty && let Some(u) = p.base_url_anthropic {
-        item.insert("base_url_anthropic".into(), Value::String(u.to_string()));
     }
-    let oai_empty = item
-        .get("base_url_openai")
-        .and_then(Value::as_str)
-        .is_none_or(|s| s.is_empty());
-    if oai_empty && let Some(u) = p.base_url_openai {
-        item.insert("base_url_openai".into(), Value::String(u.to_string()));
-    }
-
-    let has_key = item
-        .get("api_key")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    let has_env = item
-        .get("api_key_env")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    if !has_key && !has_env {
-        item.insert(
-            "api_key_env".into(),
-            Value::String(p.api_key_env.to_string()),
-        );
+    for field in [
+        "base_url_anthropic",
+        "base_url_openai_chat",
+        "base_url_openai_responses",
+        "models",
+    ] {
+        item.remove(field);
     }
 }
 
@@ -581,95 +557,70 @@ listen = "127.0.0.1:0"
     }
 
     #[test]
-    fn deepseek_preset_fills_both_urls_and_default_env() {
+    fn preset_item_keeps_only_user_fields() {
+        // preset 数据跟随代码：normalizer 剥掉 url/models，用户字段保留。
         let mut item = item_with(&[("name", "deepseek"), ("preset", "deepseek")]);
         apply_preset_defaults(&mut item);
-        assert_eq!(
-            item.get("base_url_anthropic").and_then(Value::as_str),
-            Some("https://api.deepseek.com/anthropic")
-        );
-        assert_eq!(
-            item.get("base_url_openai").and_then(Value::as_str),
-            Some("https://api.deepseek.com")
-        );
-        assert_eq!(
-            item.get("api_key_env").and_then(Value::as_str),
-            Some("DEEPSEEK_API_KEY")
-        );
+        assert!(item.get("base_url_anthropic").is_none());
+        assert!(item.get("base_url_openai_chat").is_none());
+        assert!(item.get("models").is_none());
+        assert_eq!(item.get("preset").and_then(Value::as_str), Some("deepseek"));
     }
 
     #[test]
-    fn preset_with_only_api_key_fills_both_urls() {
-        // 用户视角：选 deepseek 预设 + 粘密钥，两个 URL 全部补全。
+    fn preset_item_strips_stale_url_fields_and_keeps_key() {
+        // 编辑旧条目（或表单夹带 url 字段）时残留的 url/models 被剥掉，
+        // api_key 等用户数据不动。
         let mut item = item_with(&[
             ("name", "deepseek"),
             ("preset", "deepseek"),
+            ("base_url_anthropic", "https://stale.example/anthropic"),
+            ("base_url_openai_chat", "https://stale.example/v1"),
+            ("models", "stale-model"),
             ("api_key", "sk-ds"),
+            ("default_model", "deepseek-chat"),
         ]);
         apply_preset_defaults(&mut item);
+        assert!(item.get("base_url_anthropic").is_none());
+        assert!(item.get("base_url_openai_chat").is_none());
+        assert!(item.get("models").is_none());
+        assert_eq!(item.get("api_key").and_then(Value::as_str), Some("sk-ds"));
         assert_eq!(
-            item.get("base_url_anthropic").and_then(Value::as_str),
-            Some("https://api.deepseek.com/anthropic")
+            item.get("default_model").and_then(Value::as_str),
+            Some("deepseek-chat")
         );
-        assert_eq!(
-            item.get("base_url_openai").and_then(Value::as_str),
-            Some("https://api.deepseek.com")
-        );
+        // 默认 env 名不再落盘（resolve/spawn 期从代码表物化）。
         assert!(
             item.get("api_key_env").is_none(),
-            "有 api_key 时不注入默认 env"
+            "preset env 名跟随代码，不写入条目"
         );
     }
 
     #[test]
-    fn single_protocol_preset_fills_only_its_url() {
+    fn single_protocol_preset_also_strips_urls() {
         let mut item = item_with(&[
             ("name", "anthropic"),
             ("preset", "anthropic"),
             ("api_key", "sk-anthropic"),
         ]);
         apply_preset_defaults(&mut item);
-        assert_eq!(
-            item.get("base_url_anthropic").and_then(Value::as_str),
-            Some("https://api.anthropic.com")
-        );
-        assert!(
-            item.get("base_url_openai").is_none(),
-            "anthropic preset 不提供 openai 端点"
-        );
-        assert!(item.get("api_key_env").is_none());
+        assert!(item.get("base_url_anthropic").is_none());
+        assert!(item.get("base_url_openai_chat").is_none());
     }
 
     #[test]
-    fn explicit_base_urls_and_key_override_preset() {
+    fn custom_provider_urls_pass_through_preset_normalizer_untouched() {
+        // 无 preset 字段的条目（custom 表单也能落到这个 normalizer 的防御
+        // 路径）不做任何处理。
         let mut item = item_with(&[
-            ("name", "deepseek"),
-            ("preset", "deepseek"),
+            ("name", "my-custom"),
             ("base_url_anthropic", "http://localhost:9999/anth"),
-            ("base_url_openai", "http://localhost:9999/oai"),
-            ("api_key", "sk-test"),
         ]);
         apply_preset_defaults(&mut item);
-        // 显式字段不被 preset 覆盖。
         assert_eq!(
             item.get("base_url_anthropic").and_then(Value::as_str),
             Some("http://localhost:9999/anth")
         );
-        assert_eq!(
-            item.get("base_url_openai").and_then(Value::as_str),
-            Some("http://localhost:9999/oai")
-        );
-        // 显式 api_key 时不注入默认 env（否则 resolve_api_keys 会读错 env）。
-        assert!(item.get("api_key_env").is_none());
-    }
-
-    #[test]
-    fn no_preset_leaves_item_untouched() {
-        let mut item = item_with(&[("name", "my-custom")]);
-        apply_preset_defaults(&mut item);
-        assert!(item.get("base_url_anthropic").is_none());
-        assert!(item.get("base_url_openai").is_none());
-        assert!(item.get("api_key_env").is_none());
     }
 
     /// 用户在 preset 表单里挑了一个 model，apply_preset_defaults 不动它
@@ -759,32 +710,21 @@ listen = "127.0.0.1:0"
         }
     }
 
-    /// preset 表单 schema 只暴露 name / preset / api_key / default_model
-    /// 四个字段 —— base_url_anthropic / base_url_openai 已迁出到独立的
+    /// preset 表单 schema 只暴露 name / preset / api_key / default_model /
+    /// protocol 五个字段 —— base_url 与 models 跟随代码，已迁出到独立的
     /// 折叠面板（见 `render_preset_details`）。
     #[test]
-    fn preset_spec_has_only_three_editable_text_fields() {
+    fn preset_spec_has_only_user_owned_fields() {
         let spec = spec_preset();
         let names: Vec<&str> = spec.fields.iter().map(|f| f.name()).collect();
-        // 顺序：name / preset / api_key / models（HEAD 引入的 catalog）/
-        // default_model（63f）/ protocol（openspec/specs/provider-management/spec.md，详情面板
-        // 的协议 radio 也用这个 name）。
         assert_eq!(
             names,
-            vec![
-                "name",
-                "preset",
-                "api_key",
-                "models",
-                "default_model",
-                "protocol"
-            ],
+            vec!["name", "preset", "api_key", "default_model", "protocol"],
             "preset spec 字段顺序与 spec 锁定"
         );
 
-        // Text 字段（name / api_key / models）必须是可编辑
-        // （非 disabled），用户能正常输入。
-        for name in ["name", "api_key", "models"] {
+        // Text 字段（name / api_key / default_model）必须可编辑。
+        for name in ["name", "api_key", "default_model"] {
             let f = spec
                 .fields
                 .iter()
@@ -798,15 +738,18 @@ listen = "127.0.0.1:0"
             }
         }
 
-        // 不应再有 base_url_* 字段。
-        assert!(
-            spec.fields.iter().all(|f| f.name() != "base_url_anthropic"),
-            "preset spec 不应再含 base_url_anthropic"
-        );
-        assert!(
-            spec.fields.iter().all(|f| f.name() != "base_url_openai"),
-            "preset spec 不应再含 base_url_openai"
-        );
+        // 不应有任何 base_url_* 或 models 字段（跟随代码，不进表单）。
+        for banned in [
+            "base_url_anthropic",
+            "base_url_openai_chat",
+            "base_url_openai_responses",
+            "models",
+        ] {
+            assert!(
+                spec.fields.iter().all(|f| f.name() != banned),
+                "preset spec 不应含 {banned}"
+            );
+        }
     }
 
     /// openspec/specs/provider-management/spec.md：preset 表单的 protocol 字段是 Select，含
@@ -857,8 +800,8 @@ listen = "127.0.0.1:0"
         }
     }
 
-    /// anthropic preset 只有一个 anthropic 端点，折叠面板里应展示该 URL 与
-    /// 「—」占位（OpenAI 端点不存在）。
+    /// anthropic preset 只有一个 anthropic 端点，折叠面板里应展示该 URL、
+    /// 「跟随代码」标注与「—」占位。
     #[test]
     fn render_preset_details_for_anthropic() {
         let elements = render_preset_details("anthropic");
@@ -866,9 +809,9 @@ listen = "127.0.0.1:0"
         let CardElement::CollapsiblePanel(panel) = &elements[0] else {
             panic!("expected CollapsiblePanel, got {:?}", elements[0]);
         };
-        // 面板标题是「📋 预设详情」。
-        assert_eq!(panel.header.title.content, "📋 预设详情");
-        // 内容三行：两个 URL + 一个 env 名。Anthropic 没有 OpenAI 端点。
+        // 面板标题带「跟随代码」标注。
+        assert_eq!(panel.header.title.content, "📋 预设详情（跟随代码）");
+        // 内容四行：三个 URL + 一个 env 名。Anthropic 没有 OpenAI 端点。
         let rendered = panel
             .elements
             .iter()
@@ -904,8 +847,8 @@ listen = "127.0.0.1:0"
         );
     }
 
-    /// deepseek preset 同时有 anthropic 和 openai 两个端点，面板里两个 URL
-    /// 都应出现。
+    /// deepseek preset 有 anthropic 与 chat 两个端点（无 responses 端点），
+    /// 面板里 anthropic/chat URL 应出现、responses 位显示「—」。
     #[test]
     fn render_preset_details_for_deepseek_shows_both_urls() {
         let elements = render_preset_details("deepseek");
@@ -928,11 +871,40 @@ listen = "127.0.0.1:0"
         );
         assert!(
             rendered.contains("https://api.deepseek.com"),
-            "openai URL 应出现在面板：{rendered}"
+            "openai chat URL 应出现在面板：{rendered}"
         );
         assert!(
             rendered.contains("DEEPSEEK_API_KEY"),
             "默认 env 应出现在面板：{rendered}"
+        );
+        // deepseek 无公开 responses 端点 → 占位。
+        assert!(
+            rendered.contains("**Base URL(OpenAI Responses)**\n`—`"),
+            "responses 端点缺失应显示占位：{rendered}"
+        );
+    }
+
+    /// openai preset 双 OpenAI 槽位（chat + responses）同端点。
+    #[test]
+    fn render_preset_details_for_openai_shows_both_slots() {
+        let elements = render_preset_details("openai");
+        assert_eq!(elements.len(), 1);
+        let CardElement::CollapsiblePanel(panel) = &elements[0] else {
+            panic!("expected CollapsiblePanel");
+        };
+        let rendered = panel
+            .elements
+            .iter()
+            .map(|e| match e {
+                CardElement::Markdown { content } => content.clone(),
+                _ => panic!("unexpected child element"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            rendered.matches("https://api.openai.com/v1").count(),
+            2,
+            "chat 与 responses 槽位都指向同一端点：{rendered}"
         );
     }
 

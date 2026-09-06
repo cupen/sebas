@@ -250,8 +250,10 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
                         .map(|(id, card)| {
                             json!({
                                 "name": id,
+                                "preset": card.get("preset"),
                                 "base_url_anthropic": card.get("base_url_anthropic"),
-                                "base_url_openai": card.get("base_url_openai"),
+                                "base_url_openai_chat": card.get("base_url_openai_chat"),
+                                "base_url_openai_responses": card.get("base_url_openai_responses"),
                             })
                         })
                         .collect()
