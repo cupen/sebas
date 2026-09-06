@@ -4,12 +4,12 @@
 
 ### Requirement: Service lifecycle
 
-The watchdog SHALL manage auxiliary services — the WebUI child, the gateway
+The watchdog SHALL manage auxiliary services — the WebUI child, the router
 child, and the IM child — as supervised child processes spawned from the same
 binary (`sebas webui --config <path>` / `sebas router --config <path>` /
 `sebas im --config <path>`, each given the control secret). The WebUI child
-SHALL be spawned when `[watchdog.webui] enabled = true`; the gateway child
-SHALL be spawned only when gateway management is explicitly enabled in the
+SHALL be spawned when `[watchdog.webui] enabled = true`; the router child
+SHALL be spawned only when router management is explicitly enabled in the
 watchdog config (default off — existing deployments see no new process until
 they opt in); the IM child SHALL be spawned when `[watchdog.im] enabled = true`,
 whose default SHALL follow the feishu enablement decision (`[feishu] enabled`
@@ -26,7 +26,7 @@ liveness and desired state — never a synthesized or hardcoded value.
 
 `ServiceSet { service, desired, persist }` and
 `ServiceRestart { service }` SHALL execute for the auxiliary services
-(`webui`, `gateway`, `im`): `desired` ∈ {on, off} stops or starts the child;
+(`webui`, `router`, `im`): `desired` ∈ {on, off} stops or starts the child;
 `persist: true` records the desired state so it survives a watchdog restart,
 `persist: false` scopes it to the current watchdog run. `ServiceSet` or
 `ServiceRestart` naming the core service SHALL be rejected with an actionable
@@ -64,9 +64,9 @@ confirmed dangerous-action path).
 
 #### Scenario: service set persisted across watchdog restart
 
-- **WHEN** `ServiceSet { service: "gateway", desired: "on", persist: true }`
+- **WHEN** `ServiceSet { service: "router", desired: "on", persist: true }`
   is accepted and the watchdog is later restarted
-- **THEN** the watchdog spawns the gateway child again without a new
+- **THEN** the watchdog spawns the router child again without a new
   `ServiceSet`
 
 #### Scenario: service commands on core are rejected
@@ -78,7 +78,7 @@ confirmed dangerous-action path).
 ### Requirement: Managed service table
 
 The watchdog SHALL supervise all child processes through one declarative
-table of managed services — core, webui, gateway, and im — where each entry
+table of managed services — core, webui, router, and im — where each entry
 declares its spawn specification (argv, env), its desired state (from
 config or `ServiceSet`), and its restart policy. The supervision loop SHALL
 treat every entry uniformly for spawn, exit classification, and restart
@@ -91,11 +91,11 @@ The core child's pipe protocol SHALL consist of the readiness handshake
 longer travel over the pipe — the control RPC socket is the sole command
 surface.
 
-#### Scenario: gateway managed when enabled
+#### Scenario: router managed when enabled
 
-- **WHEN** the watchdog config enables gateway management
+- **WHEN** the watchdog config enables router management
 - **THEN** the watchdog spawns `sebas router --config <path>` as a
-  supervised child and `ServiceStatus` includes a real gateway entry
+  supervised child and `ServiceStatus` includes a real router entry
 
 #### Scenario: im managed when enabled
 

@@ -11,7 +11,7 @@
   按配置承载通道适配器(飞书 WS 等)。(architecture.md §1)
 - **run(watchdog 守护)**:唯一拉起其他进程的角色,入口命令 `sebas run`;
   按配置监督 core / webui /
-  router 子进程(重启/退避/升级)。(architecture.md §2)
+  router / im 子进程(重启/退避/升级)。(architecture.md §2)
 - **webui(WebUI)**:dashboard 进程,自身不持有会话状态;经 core session
   channel 观察与驱动会话,或在 core 进程内运行(进程内后端)。
 - **router(模型路由)**:provider 透传代理进程,入口命令 `sebas router`,

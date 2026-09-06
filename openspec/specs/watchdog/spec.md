@@ -103,8 +103,8 @@ The RPC SHALL serve: `Status`, `EventsSince`, `Update`, `Rollback`,
 `RestartCore`, `ServiceStatus`, `ServiceStatusFor`, `ServiceSet`,
 `ServiceRestart`, `Confirm`, and `Cancel`. `ServiceSet` and
 `ServiceRestart` SHALL act on the auxiliary managed services (webui,
-router) as specified in the Service lifecycle requirement; requests naming
-the core service SHALL be rejected with an actionable error.
+router, im) as specified in the Service lifecycle requirement; requests
+naming the core service SHALL be rejected with an actionable error.
 `Confirm` and `Cancel` SHALL be accepted only from a Feishu actor with a
 `chat_id`; any other actor gets `unauthorized`.
 
@@ -226,15 +226,18 @@ one execution.
 
 ### Requirement: Service lifecycle
 
-The watchdog SHALL manage auxiliary services — the WebUI child and the
-router child — as supervised child processes spawned from the same binary
-(`sebas webui --config <path>` / `sebas router --config <path>`, each given
-the control secret). The WebUI child SHALL be spawned when
-`[watchdog.webui] enabled = true`; the router child SHALL be spawned only
-when router management is explicitly enabled in the watchdog config
-(default off — existing deployments see no new process until they opt in).
-With `--debug`, the watchdog additionally spawns the debug router child
-(`sebas router --debug`) as today.
+The watchdog SHALL manage auxiliary services — the WebUI child, the router
+child, and the IM child — as supervised child processes spawned from the same
+binary (`sebas webui --config <path>` / `sebas router --config <path>` /
+`sebas im --config <path>`, each given the control secret). The WebUI child
+SHALL be spawned when `[watchdog.webui] enabled = true`; the router child
+SHALL be spawned only when router management is explicitly enabled in the
+watchdog config (default off — existing deployments see no new process until
+they opt in); the IM child SHALL be spawned when `[watchdog.im] enabled = true`,
+whose default SHALL follow the feishu enablement decision (`[feishu] enabled`
+or its implicit fallback) so that feishu deployments gain the IM service
+without a new config key. With `--debug`, the watchdog additionally spawns the
+debug router child (`sebas router --debug`) as today.
 
 Auxiliary children SHALL survive core restarts (only the core child is
 respawned by an upgrade), and an auxiliary child that exits SHALL itself be
@@ -244,13 +247,13 @@ state (running / restarting / stopped / disabled) derived from process
 liveness and desired state — never a synthesized or hardcoded value.
 
 `ServiceSet { service, desired, persist }` and
-`ServiceRestart { service }` SHALL execute for the auxiliary services:
-`desired` ∈ {on, off} stops or starts the child; `persist: true` records
-the desired state so it survives a watchdog restart, `persist: false`
-scopes it to the current watchdog run. `ServiceSet` or `ServiceRestart`
-naming the core service SHALL be rejected with an actionable error pointing
-at `RestartCore` (core restarts flow exclusively through the confirmed
-dangerous-action path).
+`ServiceRestart { service }` SHALL execute for the auxiliary services
+(`webui`, `router`, `im`): `desired` ∈ {on, off} stops or starts the child;
+`persist: true` records the desired state so it survives a watchdog restart,
+`persist: false` scopes it to the current watchdog run. `ServiceSet` or
+`ServiceRestart` naming the core service SHALL be rejected with an actionable
+error pointing at `RestartCore` (core restarts flow exclusively through the
+confirmed dangerous-action path).
 
 #### Scenario: webui survives core restart
 
@@ -297,7 +300,7 @@ dangerous-action path).
 ### Requirement: Managed service table
 
 The watchdog SHALL supervise all child processes through one declarative
-table of managed services — core, webui, and router — where each entry
+table of managed services — core, webui, router, and im — where each entry
 declares its spawn specification (argv, env), its desired state (from
 config or `ServiceSet`), and its restart policy. The supervision loop SHALL
 treat every entry uniformly for spawn, exit classification, and restart
@@ -315,6 +318,13 @@ surface.
 - **WHEN** the watchdog config enables router management
 - **THEN** the watchdog spawns `sebas router --config <path>` as a
   supervised child and `ServiceStatus` includes a real router entry
+
+#### Scenario: im managed when enabled
+
+- **WHEN** the watchdog config enables IM management (explicitly or via the
+  feishu-enablement default)
+- **THEN** the watchdog spawns `sebas im --config <path>` with the control
+  secret and `ServiceStatus` includes a real im entry
 
 #### Scenario: disabled service reports disabled
 
