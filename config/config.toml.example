@@ -1,131 +1,70 @@
-# 飞书机器人接入（可选）。默认主控是 WebUI（sebas watchdog 默认只启动
-# WebUI，core 停用）；需要 bot 时再配置并在 WebUI 服务页启用 core。
-#
-# 显式开关（缺省 = 回退历史隐式判定「app_id/app_secret 双非空」）：
-#   enabled = true  → 强制接入（凭据不完整会报错拒绝启动）
-#   enabled = false → 强制停用（即使凭据齐全也不接入飞书）
-# 只配 app_id 或 app_secret 其一会在启动时报错。也可由 env 覆盖。
+# 飞书机器人接入（可选）。凭据只配其一会启动报错。
+# enabled 缺省 = 隐式判定「app_id/app_secret 双非空」。
 [feishu]
 # enabled = true
 app_id = ""
 app_secret = ""
+# owner_id = "ou_xxx"        # 单用户鉴权；留空 = 不过滤发送者（启动时 warn）
+# hello_msg = "你好，我又回来了"   # 启动时发给每个恢复会话
 
-# 单用户鉴权：填你的 open_id（ou_ 开头），只允许该用户驱动 bot。
-# 留空 = 不过滤发送者（任何能私聊 bot 的用户都可驱动本机 claude），启动时会有 warn。
-# 强烈建议填上；open_id 可在飞书开放平台或 bot 收到的消息事件里查到。
-# owner_id = "ou_xxx"
-#
-# 新会话的默认执行体（可选，make-feishu-optional-webui-primary）：
-#   false（默认）= 走 acp 桥（Claude Code 子进程，飞书卡片渲染照旧）
-#   true         = 走原生 sebas-agent 内核（输出在 WebUI 看，飞书侧不渲染卡片）
-# native_default = true
-#
-# 启动时发给每个恢复会话的消息（空 = 不发）
-# hello_msg = "你好，我又回来了"
-#
-# env 覆盖（优先级高于本文件）：SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL
-
-
-# Claude Code 接入：sebas 直接以 stream-json + control protocol 拉起 `claude` CLI。
-# path 支持 PATH 查找；args 为附加 CLI 参数。
-[acp.claude]
-path = "claude"
+# Agent 接入（[acp.agents.<name>]）：
+#   driver = "claude"  → Claude Code CLI（stream-json + control protocol）
+#   driver = "acp"     → 任意支持 Agent Client Protocol v1 的 CLI（opencode/gemini…）
+[acp.agents.claude]
+driver = "claude"
+path = "claude"       # 支持 PATH 查找
 args = []
+# sessions_dir / work_dir / startup_timeout_secs / idle_kill_secs 均有默认值
 
-# 原生 ACP agent 接入（driver="acp"，任意支持 Agent Client Protocol v1 的 CLI，
-# 如 opencode / gemini --acp）：配置即用，无需改代码（add-opencode-acp）。
-# 二选一即可——下面 opencode 条目已注释，取消注释即启用：
 # [acp.agents.opencode]
 # driver = "acp"
 # command = ["opencode", "acp"]
 
-
-# 卡片流配置（全部可选，行为契约见 openspec/specs/feishu-cards/spec.md）
+# 卡片流（全部可选，契约见 openspec/specs/feishu-cards/spec.md）
 # [card]
-# max_user_text_chars = 4000    # 单元素文本软上限，超过则截断 + 灰注
-# max_tool_output_chars = 0     # 0 = 不输出 tool call 结果内容（默认）；>0 时超过则折叠进工具面板
-# fold_long_output = true       # true：tool call 折叠成可收起面板；false：内联全文
-# thinking = "show"             # 模型思考内容的卡片展示：show（折叠面板，默认）/ hide（不渲染）
+# max_user_text_chars = 4000
+# max_tool_output_chars = 0    # 0 = 不输出 tool call 结果内容
+# fold_long_output = true
+# thinking = "show"
 
-
-# LLM provider 网关（Anthropic/OpenAI 双协议面纯透传）。行为契约见
-# openspec/specs/gateway-core/spec.md。
+# LLM provider 网关（Anthropic/OpenAI 双协议纯透传，契约见
+# openspec/specs/router-core/spec.md）。运行：`sebas router -c <path>`
+# 或 watchdog 托管 [watchdog.router]；`--debug` 注入内置 test provider
+# （固定文字+回显，不拨上游，跳过鉴权）。
 #
-# 运行方式：
-#   sebas gateway -c <path>    独立进程，listen 用下面配置（--config 等价）
-#   sebas run --gateway        随主服务启动，随机端口（127.0.0.1:0），真实端口
-#                              输出到日志；把 ANTHROPIC_BASE_URL / OPENAI_BASE_URL
-#                              指向 http://127.0.0.1:<port> 即可接入
+# provider 写顶层 [provider.<name>]，名称即 preset
+# （anthropic/openai/deepseek/kimi/glm/minimax/ark/dashscope/gemini）；
+# 双协议 preset 必须显式 protocol。
+# [router]
+# listen = "127.0.0.1:8787"     # watchdog 托管时忽略
+# default_provider = "deepseek" # 无 model 请求（如 GET /v1/models）的兜底
+# auth_token = ["sk-local-dev"] # 不配置 = 不校验下游 token（启动时 warn）
+# usage_file = "~/.sebas/router-usage.jsonl"
 #
-# provider 统一写在顶层 [provider.<name>]（唯一写法，run 与 gateway 共用）：
-# 名称即 preset——anthropic / openai / deepseek / kimi / glm / minimax / ark /
-# dashscope / gemini 自带 protocol / base_url / api_key_env 默认值，显式字段覆盖；
-# 双协议 provider（deepseek/kimi/glm/minimax/ark）必须显式 protocol，不猜。
-#
-# debug 模式：sebas gateway --debug（或 run --gateway --debug），parse 后注入内置
-# test provider（model=test，gateway 自身应答固定文字 + 回显输入，不拨号上游）；
-# 同时跳过下游鉴权，key 可留空/不配置。
-#
-# Claude Code 接入提示：/model 选择器会请求 GET /v1/models（无 model 的请求），
-# 需要配 default_provider 兜底，否则返回 502 no_route。
-# [gateway]
-# default_provider = "deepseek"
-# listen = "127.0.0.1:8787"     # run --gateway 忽略此值（强制随机端口）
-# max_body_bytes = 67_108_864
-# connect_timeout_secs = 10
-# read_timeout_secs = 600
-# usage_file = "~/.sebas/gateway-usage.jsonl"
-#
-# env 覆盖（优先级高于本文件）：SEBAS_GATEWAY_LISTEN
-#
-# # 下游客户端 token（鉴权用；单个字符串或数组）
-# # 不配置 = 不校验 token（裸奔，启动时 warn）
-# auth_token = ["sk-local-dev"]
-#
-#
-# # 单行即用：protocol / base_url / api_key_env 由 preset 自动填充
 # [provider.anthropic]
-# # api_key = "..."                   # 明文仅测试用（启动时 warn）
-# # model_map = { "claude-3.5-sonnet" = "claude-3-5-sonnet-20241022" }
+# # api_key = "..."    # 明文仅测试用（启动时 warn）
 #
-#
-# # 双协议 preset 必须显式 protocol
 # [provider.deepseek]
 # protocol = "anthropic"
-# # base_url = "https://api.deepseek.com/anthropic"   # 自动填充，可覆盖
-# # api_key_env = "DEEPSEEK_API_KEY"                   # 自动填充，可覆盖
-# # # 按从强到弱排列的模型名列表（手写）。`[n]` 后缀（如 `[1m]`）既是模型名
-# # # 一部分，也表示上下文长度。会映射到 Claude Code 的
-# # # ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_OPUS_MODEL / _SONNET_ / _HAIKU_。
-# # # 单模型 → 4 变量全设；多模型 → OPUS=最强、SONNET=次强、HAIKU=最弱。
-# # models = ["deepseek-chat", "deepseek-reasoner"]
+# # models = ["deepseek-chat", "deepseek-reasoner"]   # 强→弱，映射到 Claude Code env
 #
-#
-# 路由表：model（可含 glob）→ provider 数组，数组顺序 = 优先级（先 = 主）。
-# glob 键需加引号；故障转移（主失败自动切换）暂未实现。
-# [gateway.routes]
+# 路由表：model（可含 glob，键加引号）→ provider 数组，顺序 = 优先级。
+# [router.routes]
 # "claude-*" = ["anthropic"]
 # "deepseek-*" = ["deepseek", "ark"]
 
-
-# ── watchdog 服务面（sebas-2ty）────────────────────────────────────────
-# `sebas watchdog` 默认只启动 WebUI；core（飞书 bot）与 gateway 默认停用，
-# 在 WebUI 服务页（/admin/services）启停，选择持久化到 ~/.sebas/services.json
-# （重启后保持，且优先于下面的 config 初值）。
-# WebUI 端口冲突时自动降级为 degraded，不影响 core 服务。
-#
-# [watchdog.webui]     # WebUI 控制台（默认启用）
-# enabled = true
+# watchdog 托管的服务开关。不写 = webui 开、core/router 关；
+# 在 WebUI 服务页启停会持久化到 ~/.sebas/services.json，优先于此处。
+# [watchdog.webui]     # 默认启用；端口冲突自动降级 degraded
 # host = "127.0.0.1"
 # port = 9797
+# auth = true          # false = 全路由免登录（仅测试用，非 loopback 拒绝启动）
 #
-# # 登录鉴权总开关（add-webui-auth-switch），默认 true：凭据存在即强制登录
-# # （sebas webui-passwd 建户）。测试/联调环境可设 false 全路由免登录；
-# # 关闭时非 loopback host 一律拒绝启动（防止误关开关叠加公网暴露）。
-# auth = true
+# [watchdog.core]      # core 子进程 = 飞书 bot + ACP
+# enabled = true
 #
-# [watchdog.core]      # core 子进程 = 飞书 bot + ACP（默认停用）
-# enabled = false
-#
-# [watchdog.gateway]   # gateway 子进程（默认停用；`sebas watchdog --debug` 强制启用）
-# enabled = false
+# [watchdog.router]    # router 受管子进程；watchdog --debug 强制启用
+# enabled = true
+
+# env 覆盖（优先级高于本文件）：SEBAS_ROUTER_LISTEN /
+# SEBAS_FEISHU_APP_ID / SEBAS_FEISHU_APP_SECRET / SEBAS_LOG_LEVEL

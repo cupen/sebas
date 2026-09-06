@@ -684,8 +684,8 @@ fn check_binary_reachable(path: &str) -> Result<()> {
     };
     if !found {
         return Err(SebasError::Config(format!(
-            "找不到 ACP agent 二进制 '{path}'。请安装 claude（并确认它以 ACP 模式运行所需的包装），\
-             或在 [acp.claude] path 配置可执行文件的绝对路径。"
+            "找不到 ACP agent 二进制 '{path}'。请安装该 CLI（claude 需以 ACP 模式运行的包装），\
+             或在 [acp.agents.<name>] path/command 配置可执行文件的绝对路径。"
         )));
     }
     Ok(())
