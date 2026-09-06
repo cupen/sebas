@@ -2,70 +2,73 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+```bash
+bd ready                # Find available work
+bd show <id>            # View issue details
+bd update <id> --claim  # Claim work atomically
+bd close <id>           # Complete work
+bd dolt push            # Push beads data to remote
+```
+
+> **Architecture in one line:** issues live in a local Dolt DB (`.beads/dolt/`);
+> cross-machine sync is `bd dolt push/pull` over `refs/dolt/data` on your git
+> remote — separate from `refs/heads/*`. `.beads/issues.jsonl` is a passive
+> export, not the wire protocol. One-screen overview and anti-patterns (JSONL
+> is not the source of truth; no `bd import` in normal operation; try the
+> default sync before third-party Dolt hosting):
+> [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md).
 
 ## Git Workflow
 
-- New features are developed on `feat/*` branches, never directly on `main`.
-- Commit messages are a single sentence following
-  [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0-beta.4/).
+- New features go on `feat/*` branches, never directly on `main`.
+- Commit messages follow
+  [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0-beta.4/)
+  and must be **one concise sentence** summarizing the change — no long-winded
+  bodies or stacked detail clauses; details belong in issues/PRs, not commits.
 - Merging a `feat/*` branch back to `main`:
-  1. Rebase the branch onto `main` first, then merge with `--no-ff`.
-  2. Exception: if the branch has few commits and adds no new feature, just
-     rebase onto `main` and fast-forward it into `main` (no merge commit).
+  1. Rebase onto `main` first, then merge with `--no-ff`.
+  2. Exception: few commits and no new feature → rebase onto `main` and
+     fast-forward (no merge commit).
 
 ## Frontend/Backend Integration Testing (联调)
 
-Backend changes count as done only after they are verified against the real
+Backend changes count as done only after verification against the real
 frontend. Division of labor:
 
 - **Frontend**: the operator runs `pnpm run dev` in `sebas-webui/frontend`
-  (Vite on `127.0.0.1:5273`, strictPort). HMR auto-applies frontend edits —
-  never start/stop/reconfigure that dev server yourself. If you need the
-  frontend running for your own verification, use the separate
-  `pnpm run dev:sandbox` script instead — `dev` belongs to the operator.
+  (Vite on `127.0.0.1:5273`, strictPort); HMR auto-applies edits — never
+  start/stop/reconfigure that server yourself. For your own verification use
+  `pnpm run dev:sandbox` instead.
 - **Backend**: build and run it yourself (`cargo build`), in a **sandbox**.
 
 ### Sandbox rules (never touch the operator's real instance)
 
 The operator's real sebas (AppImage, port **9797**, real `~/.sebas` /
-`~/.config/sebas` / provider credentials) is off-limits: do not restart it,
-do not bind its ports, do not read or copy its credentials, and never point
-sandbox processes at its files.
+`~/.config/sebas` / provider credentials) is off-limits: never restart it,
+bind its ports, read/copy its credentials, or point sandbox processes at its
+files.
 
-**WebUI sandbox shortcut**: `bash scripts/test_webui_sandbox.sh` spins up the
+**WebUI sandbox shortcut**: `bash scripts/test_webui_sandbox.sh` spins up a
 throwaway webui on port 9879 with auth **disabled by default** (login-free GUI
-testing). `SANDBOX_AUTH=1` turns auth on with the unified test account
+testing); `SANDBOX_AUTH=1` turns auth on with the test account
 **admin / admin** (`webui-passwd` only warns on passwords shorter than 8
 chars). Ctrl-C stops it and deletes the sandbox dir.
 
-1. Every sandbox path goes under a throwaway dir (e.g. `/tmp/sebas-itest/`)
-   and must override **all** of the defaults that otherwise fall back to the
-   real `~/.sebas`:
+1. Keep every sandbox path under one throwaway dir (e.g. `/tmp/sebas-itest/`)
+   and override **all** defaults that would fall back to the real `~/.sebas`:
 
-   - config `-c` path (there is no sandbox-safe default), with
+   - config `-c` path (no sandbox-safe default exists), with
      `[dispatch] state_file`, `[media] download_dir`,
      `[acp.claude] sessions_dir` / `work_dir`,
      `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
-     (pick a port ≠ 9797, e.g. 9877) all set inside it;
+     (port ≠ 9797, e.g. 9877) all set inside it;
    - env: `SEBAS_CORE_SECRET=<fake>` (mimics the watchdog's injection; its
-     presence is what arms the core session channel and the webui client),
-     plus the three that default to the real `~/.sebas` files — all
-     mandatory: `SEBAS_STATE_DB` (state store SQLite, default
-     `~/.sebas/sebas.db` — the easy one to miss: without it the sandbox
-     opens the real DB even with everything else sandboxed),
-     `SEBAS_STATE_FILE` (provider state JSON, default
-     `~/.sebas/state.json`), and `SEBAS_ROUTER_PROVIDER_OVERLAY`
-     (default `~/.sebas/providers.json`).
+     presence arms the core session channel and webui client), plus three
+     files that otherwise default into the real `~/.sebas` — all mandatory:
+     `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db` — the easy one to
+     miss: without it the sandbox opens the real DB even with everything else
+     sandboxed), `SEBAS_STATE_FILE` (default `~/.sebas/state.json`), and
+     `SEBAS_ROUTER_PROVIDER_OVERLAY` (default `~/.sebas/providers.json`).
 
 2. Run the two halves exactly as the watchdog would:
 
@@ -78,10 +81,9 @@ chars). Ctrl-C stops it and deletes the sandbox dir.
    ```
 
 3. Verify over HTTP on the sandbox port (`/health`, `/api/summary`,
-   `/api/sessions`, POST `/api/sessions` + `/{key}/message`), and/or open
-   `http://127.0.0.1:<sandbox-port>/` in the browser — `cargo build` bakes
-   the current `frontend/dist` into the binary, so the sandbox serves the
-   real UI.
+   `/api/sessions`, `POST /api/sessions` + `/{key}/message`), and/or open
+   `http://127.0.0.1:<sandbox-port>/` — `cargo build` bakes the current
+   `frontend/dist` into the binary, so the sandbox serves the real UI.
 
 4. Clean up: SIGTERM the core (graceful exit removes the channel socket and
    dumps state — itself worth asserting), stop the webui, delete the sandbox
@@ -91,20 +93,18 @@ chars). Ctrl-C stops it and deletes the sandbox dir.
 
 一键自动化：本菜谱已固化为进程级 e2e 套件——`invoke e2e`（构建 + 跑
 `tests/core_flow_e2e_test.rs`；单用例 `invoke e2e --case <name>`）或
-`cargo test --test core_flow_e2e_test -- --ignored`。验收套件（旅程级，
-覆盖面账本见 `tests/acceptance/COVERAGE.md`）：`invoke accept` 或
+`cargo test --test core_flow_e2e_test -- --ignored`。验收套件（旅程级，覆盖面
+见 `tests/acceptance/COVERAGE.md`）：`invoke accept` 或
 `cargo test --test acceptance_suite_test -- --ignored`。
 
 `--debug` makes the router inject a built-in `test` provider that answers
-requests itself (fixed text + echo, no upstream dial, downstream auth
-skipped), and pointing `[acp.claude] path` at the `tests/bin` fake-claude
-stub (built by `cargo build` together with the main binary) lets ACP
-sessions complete full turns with zero real credentials. Let `<SB>` be the
-throwaway dir (e.g. `/tmp/sebas-debug`).
+itself (fixed text + echo, no upstream dial, downstream auth skipped), and
+pointing `[acp.claude] path` at the `tests/bin` fake-claude stub (built by
+`cargo build`) lets ACP sessions complete full turns with zero real
+credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
-1. `mkdir -p` the dirs the config references — especially `work_dir`, which
-   must **exist on disk before any ACP session spawns** — then write
-   `<SB>/config.toml`:
+1. `mkdir -p` every dir the config references — `work_dir` must **exist on
+   disk before any ACP session spawns** — then write `<SB>/config.toml`:
 
    ```toml
    [feishu]
@@ -127,9 +127,9 @@ throwaway dir (e.g. `/tmp/sebas-debug`).
    [watchdog.webui]
    enabled = false          # bare core owns the webui via --webui-port
 
-   # router validate requires ≥1 provider with a base_url — the debug
-   # `test` provider is injected only AFTER parse, so it cannot satisfy
-   # validate. This dummy never dials anything in debug mode.
+   # router validate requires ≥1 provider with a base_url — the debug `test`
+   # provider is injected only AFTER parse, so it cannot satisfy validate.
+   # This dummy never dials anything in debug mode.
    [provider.anthropic]
    api_key = "sk-sandbox-dummy"
 
@@ -153,72 +153,54 @@ throwaway dir (e.g. `/tmp/sebas-debug`).
    `router started (core --router) … addr=127.0.0.1:<port>`.
 
 3. Verify:
-   - `GET http://127.0.0.1:9877/health` → `ok`; `/api/summary` →
-     `reachability.ok = true` and `execution_bodies` shows acp `ok: true`
-     (`native` stays `ok: false` in the sandbox — it needs
-     `SEBAS_AGENT_PROVIDER_API_KEY`; report that honestly, don't fix).
+   - `GET /health` → `ok`; `/api/summary` → `reachability.ok = true` and
+     `execution_bodies` shows acp `ok: true` (`native` stays `ok: false` in
+     the sandbox — it needs `SEBAS_AGENT_PROVIDER_API_KEY`; report that
+     honestly, don't fix).
    - router `POST /v1/messages` with `{"model":"test",…}` → 200
      `msg_test_debug`; the namespace form `test/<anything>` routes there too.
    - round-trip: `POST /api/sessions` with `{"prompt":"hello","backend":"acp"}`
-     — that is the real request shape; `{"channel","message"}` is silently
-     deserialized into an empty placeholder session. Then
+     (the real request shape — `{"channel","message"}` is silently
+     deserialized into an empty placeholder session), then
      `GET /api/sessions/<encoded_key>` → fake-claude's "hello world", status
      Done.
-   - Windows Git Bash curl gotcha: non-ASCII text in `-d '…'` is sent as
-     GBK, the router's JSON parse fails, model extraction yields none, and
-     the request dies with a misleading 502 `no_route` **even though
-     routing is fine** (check `/admin/stats` — `routes: 1` means the debug
-     route is present). Use ASCII payloads or `-d @file.json` (UTF-8).
+   - Windows Git Bash curl gotcha: non-ASCII text in `-d '…'` is sent as GBK,
+     the router's JSON parse fails, and the request dies with a misleading
+     502 `no_route` **even though routing is fine** (check `/admin/stats`:
+     `routes: 1` means the debug route is present). Use ASCII payloads or
+     `-d @file.json` (UTF-8).
 
-4. Clean up per rule 4 — every sandbox artifact (incl. the state DB) lives
-   inside `<SB>`, so deleting the dir is complete.
+4. Clean up per rule 4 — every artifact (incl. the state DB) lives inside
+   `<SB>`, so deleting the dir is complete.
 
 ### What a sandbox can and cannot verify
 
-Verifiable: route surface, channel/socket lifecycle (appears while running,
-removed on graceful exit), webui↔core connect/reconnect (`reachability` in
-`/api/summary` flips `ok`/`cause`), spawn/message round-trips, typed
-rejections, wrong-secret refusal. With the fake-claude stub as the ACP agent
-(recipe above), a full session turn completes end-to-end — against synthetic
-answers, not a real model. **Not** verifiable without the operator's
-provider credentials: a REAL ACP child completing a turn — without the stub,
-sessions spawn then the child dies honestly; do not interpret that as a
-channel failure.
-Report such limits explicitly instead of marking the task done.
-
-## Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+Verifiable: route surface; channel/socket lifecycle (present while running,
+removed on graceful exit); webui↔core connect/reconnect (`reachability` in
+`/api/summary` flips `ok`/`cause`); spawn/message round-trips; typed
+rejections; wrong-secret refusal. With the fake-claude stub as the ACP agent,
+a full session turn completes end-to-end — against synthetic answers, not a
+real model. **Not** verifiable without the operator's provider credentials: a
+REAL ACP child completing a turn — without the stub, sessions spawn then the
+child dies honestly; that is not a channel failure. Report such limits
+explicitly instead of marking the task done.
 
 ## Non-Interactive Shell Commands
 
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
+`cp`, `mv`, and `rm` may be aliased to `-i` (interactive) mode on some
+systems, hanging the agent on a y/n prompt. **Always use non-interactive
+forms:**
 
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
-
-**Use these forms instead:**
 ```bash
-# Force overwrite without prompting
 cp -f source dest           # NOT: cp source dest
 mv -f source dest           # NOT: mv source dest
 rm -f file                  # NOT: rm file
-
-# For recursive operations
 rm -rf directory            # NOT: rm -r directory
 cp -rf source dest          # NOT: cp -r source dest
 ```
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+Other commands that may prompt: `scp` / `ssh` → `-o BatchMode=yes`;
+`apt-get` → `-y`; `brew` → `HOMEBREW_NO_AUTO_UPDATE=1`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
