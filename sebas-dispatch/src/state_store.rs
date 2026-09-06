@@ -506,7 +506,7 @@ fn load_runtime_side(state_p: &Path) -> RuntimeSide {
                     tracing::warn!(
                         path = %state_p.display(),
                         error = %e,
-                        "state.json v2 解析失败，runtime 回退默认"
+                        "failed to parse state.json v2, runtime falls back to defaults"
                     );
                     RuntimeSide {
                         state_exists: true,
@@ -535,7 +535,7 @@ fn load_runtime_side(state_p: &Path) -> RuntimeSide {
             tracing::warn!(
                 path = %state_p.display(),
                 version = other,
-                "未知的 state.json version，runtime 回退默认"
+                "unknown state.json version, runtime falls back to defaults"
             );
             RuntimeSide {
                 state_exists: true,
@@ -577,7 +577,7 @@ fn load_overlay_sections(
             tracing::warn!(
                 path = %overlay_p.display(),
                 error = %e,
-                "providers.json 解析失败，providers 回退默认"
+                "failed to parse providers.json, providers fall back to defaults"
             );
             (BTreeMap::new(), Vec::new(), BTreeMap::new(), false)
         }
@@ -715,7 +715,7 @@ fn repair_mode(mut s: PersistedState) -> PersistedState {
     if let Some(provider) = tombstoned_provider {
         tracing::info!(
             provider = %provider,
-            "mode 指向已 tombstoned 的 provider，重置为 Off（repair-on-load）"
+            "mode points to a tombstoned provider, resetting to Off (repair-on-load)"
         );
         s.mode = ProviderMode::Off;
         if s.default_selection.as_ref().map(|d| d.provider.as_str()) == Some(provider.as_str()) {

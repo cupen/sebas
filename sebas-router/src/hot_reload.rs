@@ -121,11 +121,11 @@ impl ReloadStatus {
 pub fn reload(state: &AppState, _status: &ReloadStatus) -> Result<(), String> {
     match crate::admin::reload_and_swap(state) {
         Ok(()) => {
-            tracing::info!("providers.json 热重载成功");
+            tracing::info!("providers.json reloaded");
             Ok(())
         }
         Err(e) => {
-            tracing::warn!("providers.json 热重载失败（保旧内核继续服务）: {e}");
+            tracing::warn!("providers.json reload failed, keeping old config: {e}");
             Err(e)
         }
     }
@@ -160,13 +160,13 @@ async fn watch_loop(
     }) {
         Ok(w) => w,
         Err(e) => {
-            tracing::warn!("notify 不可用，降级 2s mtime 轮询: {e}");
+            tracing::warn!("notify unavailable, falling back to 2s mtime polling: {e}");
             let _ = ready.send(());
             return poll_loop(state, status, path).await;
         }
     };
     if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
-        tracing::warn!("notify watch {dir:?} 失败，降级 2s mtime 轮询: {e}");
+        tracing::warn!("notify watch {dir:?} failed, falling back to 2s mtime polling: {e}");
         let _ = ready.send(());
         return poll_loop(state, status, path).await;
     }

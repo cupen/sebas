@@ -91,7 +91,7 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
     if password.chars().count() < 8 {
         // 不做硬性拦截：测试环境统一用 admin/admin 这类短密码（见
         // scripts/test_webui_sandbox.sh）；公网部署由部署者自己权衡强度。
-        warn!("webui 登录密码不足 8 个字符，强度较弱；公网部署建议换强密码");
+        warn!("webui password is shorter than 8 chars, weak; use a strong password for public deploys");
     }
 
     auth::store_credentials(&path, &auth::Credentials::new(&username, &password))
@@ -122,7 +122,7 @@ pub fn bootstrap_auth() -> Arc<AuthHandle> {
         ) {
             if !user.is_empty() && !pass.is_empty() {
                 if pass.len() < 8 {
-                    warn!("SEBAS_WEBUI_PASSWORD 不足 8 字符（测试环境约定 admin/admin 可接受），公网部署建议换强密码");
+                    warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
                 }
                 match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {
                     Ok(()) => info!("webui auth bootstrapped from env for user {user} ({})", path.display()),
@@ -155,7 +155,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         bootstrap_auth()
     } else {
         warn!(
-            "webui 鉴权已通过 [watchdog.webui] auth = false 关闭：全部路由免登录"
+            "webui auth disabled via [watchdog.webui] auth = false: all routes are public"
         );
         Arc::new(AuthHandle::disabled())
     };
@@ -173,7 +173,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     }
     if !endpoint.is_loopback() {
         warn!(
-            "webui binds {}（非 loopback）：确认已配置登录凭据（{}）",
+            "webui binds {} (non-loopback): make sure login credentials are set ({})",
             endpoint.bind_addr(),
             auth.path().display()
         );

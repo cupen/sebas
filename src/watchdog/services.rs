@@ -113,7 +113,7 @@ impl ServiceManager {
             return HashMap::new();
         };
         let Ok(table) = serde_json::from_str::<HashMap<String, String>>(&raw) else {
-            warn!("services.json 解析失败，忽略: {}", path.display());
+            warn!("failed to parse services.json, ignoring: {}", path.display());
             return HashMap::new();
         };
         table
@@ -230,7 +230,7 @@ impl ServiceManager {
         out
     }
 
-    /// watchdog 退出：停全部 child 并结束监督 task。
+    /// watchdog exited：停全部 child 并结束监督 task。
     ///
     /// 发完 Shutdown 命令后**等待各服务真正进入 Stopped/Disabled**（上限
     /// 10s）：只 await 发送就返回的话，run_watchdog 随即退出、runtime drop

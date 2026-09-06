@@ -174,11 +174,11 @@ pub async fn run(args: ImArgs) -> Result<()> {
 
     let core_secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
     if core_secret.is_empty() {
-        warn!("SEBAS_CORE_SECRET 未注入：无法连接核心会话通道（core 不可达时将如实降级）");
+        warn!("SEBAS_CORE_SECRET not set: cannot connect to core session channel; features will degrade");
     }
     let control_secret = std::env::var("SEBAS_CONTROL_SECRET").unwrap_or_default();
     if control_secret.is_empty() {
-        warn!("SEBAS_CONTROL_SECRET 未注入：控制命令（/upgrade 等）将以纯文本如实提示不可用");
+        warn!("SEBAS_CONTROL_SECRET not set: control commands (/upgrade etc.) will report unavailable");
     }
 
     // ws dump 目录（--dump-inbound 随迁自 core）。

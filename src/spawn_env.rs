@@ -118,7 +118,7 @@ fn direct_resolution_from_overlay(
                 );
                 tracing::warn!(
                     provider = %name,
-                    "Direct provider 显式 protocol=anthropic 但缺 base_url_anthropic; aborting spawn"
+                    "direct provider sets protocol=anthropic but base_url_anthropic is missing, aborting spawn"
                 );
                 return (ProviderResolution::Error { reason }, default_model);
             }
@@ -131,7 +131,7 @@ fn direct_resolution_from_overlay(
                 );
                 tracing::warn!(
                     provider = %name,
-                    "Direct provider 显式 protocol=openai 但缺 base_url_openai; aborting spawn"
+                    "direct provider sets protocol=openai but base_url_openai is missing, aborting spawn"
                 );
                 return (ProviderResolution::Error { reason }, default_model);
             }

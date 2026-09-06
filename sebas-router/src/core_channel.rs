@@ -29,7 +29,7 @@ pub(crate) fn socket_path() -> Option<PathBuf> {
 /// 当 socket 路径可用时, 连接并订阅状态变更; 不可用时静默返回。
 pub fn spawn_subscriber(state: AppState) {
     let Some(path) = socket_path() else {
-        tracing::info!("core channel socket 未配置 (SEBAS_CORE_SOCKET), 使用文件监听");
+        tracing::info!("core channel socket not set (SEBAS_CORE_SOCKET), using file watch");
         return;
     };
     tokio::spawn(async move {
@@ -41,6 +41,9 @@ pub fn spawn_subscriber(state: AppState) {
 /// 断连时退避重连, 并记录「数据源不可用」供 /admin/stats。
 async fn subscribe_loop(state: AppState, path: PathBuf) {
     let mut backoff = Duration::from_secs(1);
+    // core 被停用（watchdog 默认不拉起 core）时 socket 永远不会出现：只在
+    // 一轮连续失败的开头 WARN 一次，其后降级 debug，避免控制台无限刷屏。
+    let mut warned = false;
     loop {
         // 每次尝试前标记数据源不可用 (重连成功后由 subscribe_once 清除)。
         state
@@ -50,9 +53,18 @@ async fn subscribe_loop(state: AppState, path: PathBuf) {
             Ok(()) => {
                 // 正常断开 (core 关闭通道后重连)。
                 backoff = Duration::from_secs(1);
+                warned = false;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "core channel 订阅失败, 退避 {backoff:?}");
+                if warned {
+                    tracing::debug!(error = %e, "core channel subscribe failed, backoff {backoff:?}");
+                } else {
+                    tracing::warn!(
+                        error = %e,
+                        "core channel subscribe failed (core not running? hot reload falls back to file watch), backoff {backoff:?}"
+                    );
+                    warned = true;
+                }
             }
         }
         tokio::time::sleep(backoff).await;
@@ -78,15 +90,15 @@ pub(crate) async fn reload_from_channel(state: &AppState, path: &Path) {
         Ok(()) => {
             state.reload_status.record_source_ok();
             state.reload_status.record_ok_quiet();
-            tracing::info!("core channel 快照投影成功, 配置已热替换");
+            tracing::info!("core channel snapshot applied, config hot swapped");
         }
         Err(e) => {
-            tracing::warn!("core channel 快照投影失败（保旧内核）: {e}");
+            tracing::warn!("core channel snapshot failed, keeping old config: {e}");
             state.reload_status.record_err(&e);
             // 快照拉取失败但通道仍活着（如 parse 错误）→ 尝试文件回退。
             if e.contains("连接 core channel 失败") || e.contains("握手") || e.contains("响应读取失败")
             {
-                tracing::info!("core channel 不可用, 回退文件 overlay 重载");
+                tracing::info!("core channel unavailable, falling back to file overlay reload");
                 let _ = crate::admin::reload_and_swap(state);
             }
         }
@@ -271,15 +283,15 @@ async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
                 // 订阅成功: 连接健康, 清除数据源不可用并触发一次完全 reload。
                 got_snapshot = true;
                 state.reload_status.record_source_ok();
-                tracing::info!("core channel 状态订阅成功, 触发 provider 重载");
+                tracing::info!("core channel subscribed, reloading providers");
                 reload_from_channel(state, path).await;
             }
             StateStreamFrame::Changed { scope } => {
                 if !got_snapshot {
                     // 未见快照先见变更, 协议外但可容错: 依旧触发 reload。
-                    tracing::warn!("未收到快照先收到变更({scope})");
+                    tracing::warn!("got change before snapshot (scope={scope})");
                 }
-                tracing::info!("core channel 状态变更: scope={scope}, 触发重载");
+                tracing::info!("core channel state change: scope={scope}, reloading");
                 reload_from_channel(state, path).await;
             }
         }

@@ -66,7 +66,7 @@ impl KeyResolver for EnvKeyResolver {
                 // 未来 per-request impl），明文 key 警告只打一次不刷屏。
                 if !PLAIN_WARN_EMITTED.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
-                        "router provider 使用明文 api_key（config 内联或 /provider overlay 写入；如需更严格的密钥管理请改用 api_key_env）"
+                        "router provider uses plaintext api_key (inline config or /provider overlay; prefer api_key_env for stricter key management)"
                     );
                 }
                 // 安全：match 已限定 Plain(s) 分支，这里取出 inner String。

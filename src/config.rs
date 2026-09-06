@@ -491,7 +491,7 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
     let hit = deprecated_watchdog_upgrade_hits(raw);
     if !hit.is_empty() {
         tracing::warn!(
-            "配置 [watchdog.upgrade] 含已废弃字段（{}）：这些字段不再有效，请从配置中移除",
+            "config [watchdog.upgrade] has deprecated fields ({}): they no longer work, remove them from the config",
             hit.join(", ")
         );
     }

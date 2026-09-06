@@ -54,14 +54,14 @@ fn load() -> Vec<ArchiveEntry> {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "archive.json 读取失败");
+            tracing::warn!(path = %path.display(), error = %e, "failed to read archive.json");
             return Vec::new();
         }
     };
     match serde_json::from_str::<ArchiveFile>(&raw) {
         Ok(file) => file.entries,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "archive.json 解析失败，返回空列表");
+            tracing::warn!(path = %path.display(), error = %e, "failed to parse archive.json, returning empty list");
             Vec::new()
         }
     }
@@ -155,7 +155,7 @@ pub fn cleanup_expired() -> usize {
     if removed > 0
         && let Err(e) = save(&entries)
     {
-        tracing::warn!(removed, error = %e, "清理过期归档条目后保存失败");
+        tracing::warn!(removed, error = %e, "failed to save after pruning expired archive entries");
     }
     removed
 }

@@ -709,7 +709,7 @@ impl RouterConfig {
                 tracing::warn!(
                     alias = %alias,
                     provider = %entry.provider,
-                    "model alias 引用不存在的 provider，已丢弃"
+                    "model alias references unknown provider, dropped"
                 );
                 continue;
             }

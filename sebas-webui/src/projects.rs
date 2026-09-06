@@ -52,14 +52,14 @@ fn load() -> Vec<ProjectEntry> {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "projects.json 读取失败");
+            tracing::warn!(path = %path.display(), error = %e, "failed to read projects.json");
             return Vec::new();
         }
     };
     match serde_json::from_str::<RegistryFile>(&raw) {
         Ok(file) => file.projects,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "projects.json 解析失败，返回空列表");
+            tracing::warn!(path = %path.display(), error = %e, "failed to parse projects.json, returning empty list");
             Vec::new()
         }
     }
@@ -223,7 +223,7 @@ pub fn read_branch(path: &str) -> Option<String> {
     entry.branch = branch.clone();
     entry.branch_at = now;
     if let Err(e) = save(&projects) {
-        tracing::warn!(path = %path, error = %e, "branch cache 写回失败");
+        tracing::warn!(path = %path, error = %e, "failed to write branch cache");
     }
     branch
 }
@@ -240,7 +240,7 @@ pub fn refresh_branch(path: &str) -> Option<String> {
         entry.branch = branch.clone();
         entry.branch_at = now;
         if let Err(e) = save(&projects) {
-            tracing::warn!(path = %path, error = %e, "branch cache 写回失败");
+            tracing::warn!(path = %path, error = %e, "failed to write branch cache");
         }
     }
     branch

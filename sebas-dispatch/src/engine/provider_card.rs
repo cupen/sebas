@@ -167,7 +167,7 @@ async fn handle_mode(
         }
         "router" => ProviderMode::Router,
         other => {
-            tracing::warn!(mode = %other, "未知 provider mode，忽略");
+            tracing::warn!(mode = %other, "unknown provider mode, ignoring");
             return refresh_card(handle, key, None).await;
         }
     };
@@ -191,14 +191,14 @@ async fn handle_mode(
         {
             tracing::info!(
                 default = %first,
-                "切到 Direct 且 default_selection 未设，自动填第一个 provider"
+                "switched to Direct with no default_selection, auto-filling first provider"
             );
             // 自动填的 selection 不带 model —— 用户还没显式选过 default model。
             s.default_selection = Some(DefaultSelection::new(first.clone()));
         }
         s.mode = new_mode.clone();
     }) {
-        tracing::warn!(error = %e, "provider_state 更新失败");
+        tracing::warn!(error = %e, "failed to update provider_state");
     }
     refresh_card(handle, key, None).await
 }
@@ -226,7 +226,7 @@ async fn handle_default_direct(
     if let Err(e) = provider_state::update(|s| {
         s.default_selection = selection.clone();
     }) {
-        tracing::warn!(error = %e, "default_selection 更新失败");
+        tracing::warn!(error = %e, "failed to update default_selection");
     }
     refresh_card(handle, key, None).await
 }
@@ -242,14 +242,14 @@ async fn handle_set_default_direct(
     _message_id: Option<String>,
 ) -> Out {
     let Some(name) = value.get("name").and_then(Value::as_str).map(str::to_owned) else {
-        tracing::warn!("provider-set-default-direct 缺少 name 字段");
+        tracing::warn!("provider-set-default-direct missing name field");
         return refresh_card(handle, key, None).await;
     };
     let selection = build_default_selection(handle, &name).await;
     if let Err(e) = provider_state::update(|s| {
         s.default_selection = Some(selection.clone());
     }) {
-        tracing::warn!(error = %e, "default_selection 更新失败");
+        tracing::warn!(error = %e, "failed to update default_selection");
     }
     refresh_card(handle, key, None).await
 }
@@ -263,7 +263,7 @@ async fn handle_delete(
     _message_id: Option<String>,
 ) -> Out {
     let Some(name) = value.get("name").and_then(Value::as_str) else {
-        tracing::warn!("provider-delete-confirm 缺少 name 字段");
+        tracing::warn!("provider-delete-confirm missing name field");
         return refresh_card(handle, key, None).await;
     };
     if let Some(forms) = &handle.provider_forms
@@ -276,7 +276,7 @@ async fn handle_delete(
             s.default_selection = None;
         }
     }) {
-        tracing::warn!(error = %e, "default_selection 清理失败");
+        tracing::warn!(error = %e, "failed to clean up default_selection");
     }
     refresh_card(handle, key, None).await
 }
@@ -318,7 +318,7 @@ async fn handle_create(
         return Out::HelpText { key: key.clone() };
     };
     let Some(form) = forms.dispatch(legacy_form) else {
-        tracing::warn!(form = legacy_form, "未找到 legacy form 实例");
+        tracing::warn!(form = legacy_form, "legacy form instance not found");
         return refresh_card(handle, key, message_id).await;
     };
     let payload = json!({ "form": legacy_form, "op": OP_CREATE });
@@ -345,7 +345,7 @@ async fn handle_probe(
     _message_id: Option<String>,
 ) -> Out {
     let Some(name) = value.get("name").and_then(Value::as_str) else {
-        tracing::warn!("provider-probe 缺少 name 字段");
+        tracing::warn!("provider-probe missing name field");
         return refresh_card(handle, key, _message_id).await;
     };
     let Some(forms) = &handle.provider_forms else {
@@ -378,7 +378,7 @@ async fn handle_probe(
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| {
-            tracing::warn!(error = %e, "reqwest client 构建失败");
+            tracing::warn!(error = %e, "failed to build reqwest client");
             e
         })
         .ok();
@@ -395,7 +395,7 @@ async fn handle_probe(
             if let Some(mut item) = forms.preset.store.get(name).await {
                 item.insert("models".into(), Value::String(models.join(",")));
                 if let Err(e) = forms.preset.store.update(item).await {
-                    tracing::warn!(name, error = %e, "探测结果写回 models 目录失败");
+                    tracing::warn!(name, error = %e, "failed to write probe results to models dir");
                 }
             }
             build_probe_result_card(name, base_kind, &probe_url, &models)
@@ -425,11 +425,11 @@ async fn handle_probe_apply(
     message_id: Option<String>,
 ) -> Out {
     let Some(name) = value.get("name").and_then(Value::as_str) else {
-        tracing::warn!("provider-probe-apply 缺少 name 字段");
+        tracing::warn!("provider-probe-apply missing name field");
         return refresh_card(handle, key, message_id).await;
     };
     let Some(model) = value.get("model").and_then(Value::as_str) else {
-        tracing::warn!("provider-probe-apply 缺少 model 字段");
+        tracing::warn!("provider-probe-apply missing model field");
         return refresh_card(handle, key, message_id).await;
     };
     let Some(forms) = &handle.provider_forms else {
@@ -445,7 +445,7 @@ async fn handle_probe_apply(
         None => Err(format!("provider '{name}' 已不存在")),
     };
     if let Err(e) = res {
-        tracing::warn!(name, model, error = %e, "默认 model 写回失败");
+        tracing::warn!(name, model, error = %e, "failed to write default model");
     }
     refresh_card(handle, key, message_id).await
 }
@@ -466,7 +466,7 @@ async fn handle_protocol(
     message_id: Option<String>,
 ) -> Out {
     let Some(name) = value.get("name").and_then(Value::as_str) else {
-        tracing::warn!("provider-set-protocol 缺少 name 字段");
+        tracing::warn!("provider-set-protocol missing name field");
         return refresh_card(handle, key, message_id).await;
     };
     // select_static on_change 把选中值回传到 `form_value[SELECT_NAME_PROTOCOL]`。
@@ -476,7 +476,7 @@ async fn handle_protocol(
         .map(str::to_owned)
         .filter(|s| matches!(s.as_str(), "auto" | "anthropic" | "openai"));
     let Some(new_proto) = new_proto else {
-        tracing::warn!(name, "provider-set-protocol 收到非法或缺失的协议值，忽略");
+        tracing::warn!(name, "provider-set-protocol got invalid or missing protocol value, ignoring");
         return refresh_card(handle, key, message_id).await;
     };
     let Some(forms) = &handle.provider_forms else {
@@ -490,7 +490,7 @@ async fn handle_protocol(
         None => Err(format!("provider '{name}' 已不存在")),
     };
     if let Err(e) = res {
-        tracing::warn!(name, error = %e, "详情面板 protocol 写回失败");
+        tracing::warn!(name, error = %e, "failed to write protocol to detail panel");
     }
     refresh_card(handle, key, message_id).await
 }
@@ -870,7 +870,7 @@ pub async fn probe_models(
     if models.is_empty() && !looks_like_openai_models_envelope(&body) {
         // body 不像 openai-compatible 的 model 列表 envelope——避免把任意
         // JSON 误判成空 model。这里依然返回空 Vec，让上层走错误分支。
-        tracing::debug!(?body, "model 列表响应不具备 data 字段，返回空 Vec");
+        tracing::debug!(?body, "model list response has no data field, returning empty vec");
     }
     Ok(models)
 }

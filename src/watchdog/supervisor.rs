@@ -169,7 +169,7 @@ pub enum ServiceCommand {
     /// 立即重启。core 上 `is_upgrade` 标记下一次 spawn 是新安装的二进制，
     /// 其未就绪即退将被分类为 NewBinaryNotReady（走回滚钩子而非崩溃计数）。
     Restart { is_upgrade: bool },
-    /// watchdog 退出：停 child 并结束监督 task。
+    /// watchdog exited：停 child 并结束监督 task。
     Shutdown,
 }
 
@@ -350,7 +350,7 @@ async fn supervise(
         let instance = match spec.spawner.spawn().await {
             Ok(instance) => instance,
             Err(e) => {
-                warn!(service = name.as_str(), "spawn 失败: {e}，稍后重试");
+                warn!(service = name.as_str(), "spawn failed: {e}, will retry");
                 set_state(&snapshot, ServiceState::Restarting).await;
                 tokio::time::sleep(spec.spawn_retry_delay).await;
                 continue;
@@ -439,7 +439,7 @@ async fn supervise(
             Exit::Crashed(code) => {
                 warn!(
                     service = name.as_str(), pid = ?pid, code = ?code,
-                    "child 退出 (just_performed_update={just_performed_update}, ready={received_ready})"
+                    "child exited (just_performed_update={just_performed_update}, ready={received_ready})"
                 );
                 snapshot.lock().await.pid = None;
 
@@ -447,7 +447,7 @@ async fn supervise(
                 if just_performed_update && !received_ready {
                     warn!(
                         service = name.as_str(),
-                        "升级后新二进制未就绪即退出；执行回滚钩子"
+                        "new binary exited without ready after upgrade, running rollback hook"
                     );
                     if let Some(hook) = spec.on_unready_after_upgrade.as_ref() {
                         hook().await;
@@ -464,7 +464,7 @@ async fn supervise(
                 if code == Some(EXIT_BIND_FAILED) {
                     warn!(
                         service = name.as_str(),
-                        "bind 失败（端口占用？），标记为 Degraded，等待 Restart 命令"
+                        "bind failed (port in use?), marking Degraded, waiting for Restart"
                     );
                     set_state(&snapshot, ServiceState::Degraded).await;
                     continue;
@@ -476,7 +476,7 @@ async fn supervise(
                         tokio::time::sleep(delay).await;
                     }
                     CrashDecision::CoolDown { delay } => {
-                        warn!(service = name.as_str(), "连续崩溃超限，冷却后继续监督");
+                        warn!(service = name.as_str(), "crash loop limit reached, cooling down");
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -513,7 +513,7 @@ impl ManagedChild for ProcessChild {
         match tokio::time::timeout(STOP_GRACE, self.0.wait()).await {
             Ok(_) => {}
             Err(_) => {
-                warn!("child 优雅退出超时，强制 kill");
+                warn!("child graceful exit timed out, killing");
                 let _ = self.0.kill().await;
             }
         }

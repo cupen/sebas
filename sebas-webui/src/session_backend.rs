@@ -380,7 +380,7 @@ fn map_permission_decision(d: PermissionDecision) -> sebas_acp::Decision {
         PermissionDecision::AllowSession => sebas_acp::Decision::AllowSession,
         PermissionDecision::Deny => sebas_acp::Decision::Deny,
         PermissionDecision::Escalate { reason } => {
-            tracing::warn!(%reason, "ACP 无 escalate 等价；降级为 AllowOnce");
+            tracing::warn!(%reason, "ACP has no escalate equivalent, falling back to AllowOnce");
             sebas_acp::Decision::AllowOnce
         }
     }

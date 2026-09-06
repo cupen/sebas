@@ -140,7 +140,7 @@ pub fn run_migrations(conn: &mut Connection, db_path: &Path) -> Result<Migration
         info!(
             from = db_version,
             to = version,
-            "正在执行数据库迁移"
+            "running database migration"
         );
 
         // 每个迁移在一个事务中执行: DDL 是事务性的, 失败时整体回滚。
@@ -162,7 +162,7 @@ pub fn run_migrations(conn: &mut Connection, db_path: &Path) -> Result<Migration
         from = db_version,
         to = CURRENT_VERSION,
         backup = %backup_path,
-        "数据库迁移完成"
+        "database migration done"
     );
 
     Ok(MigrationOutcome::Migrated {

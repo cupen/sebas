@@ -111,7 +111,7 @@ pub(crate) async fn channel_write(
     match crate::core_channel::mutate_state(&socket, domain, payload).await {
         Ok(()) => Ok(true),
         Err(e) => {
-            tracing::warn!(error = %e, domain = %domain, "core channel mutation 失败, 回退文件写路径");
+            tracing::warn!(error = %e, domain = %domain, "core channel mutation failed, falling back to file write");
             Ok(false)
         }
     }
@@ -130,7 +130,7 @@ pub(crate) async fn reload_after_write(state: &AppState) -> Result<(), String> {
         {
             return Ok(());
         }
-        tracing::info!("通道投影未生效，回退文件重载");
+        tracing::info!("channel projection not applied, falling back to file reload");
     }
     crate::admin::reload_and_swap(state)
 }
@@ -140,7 +140,7 @@ pub fn warn_no_secret_once() {
     let secret = std::env::var("SEBAS_CONTROL_SECRET").unwrap_or_default();
     if secret.is_empty() {
         tracing::warn!(
-            "[router] SEBAS_CONTROL_SECRET 未设置：admin 面仅接受 loopback 连接"
+            "[router] SEBAS_CONTROL_SECRET not set: admin surface accepts loopback only"
         );
     }
 }

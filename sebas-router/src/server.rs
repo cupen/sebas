@@ -99,7 +99,7 @@ pub fn build_state(cfg: RouterConfig) -> Result<AppState> {
     let auth_tokens: HashSet<String> = cfg.auth_token.iter().cloned().collect();
     if auth_tokens.is_empty() {
         tracing::warn!(
-            "[router] 未配置 auth_token：不校验下游 token（裸奔）。生产环境请配置 auth_token。"
+            "[router] auth_token not set: downstream tokens are not checked. Set auth_token for production."
         );
     }
     let client = reqwest::Client::builder()

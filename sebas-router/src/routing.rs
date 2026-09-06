@@ -123,7 +123,7 @@ impl RouteTable {
         let Some(provider_cfg) = self.providers.get(&provider_name) else {
             tracing::error!(
                 provider = %provider_name,
-                "resolve 命中不存在的 provider（内核不一致），回退 NoRoute"
+                "resolve hit unknown provider (state mismatch), falling back to NoRoute"
             );
             return Err(RouteError::NoRoute);
         };

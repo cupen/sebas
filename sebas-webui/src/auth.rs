@@ -260,7 +260,7 @@ impl AuthHandle {
         let credentials = match load_credentials(&path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!(path = %path.display(), error = %e, "webui 凭据文件损坏；登录将拒绝");
+                tracing::error!(path = %path.display(), error = %e, "webui credentials file corrupted, logins will be rejected");
                 // 占位凭据：verify 永远 false（用户名不可能匹配到）。
                 Some(Credentials {
                     username: "\u{0}corrupted".into(),
@@ -350,7 +350,7 @@ impl AuthHandle {
         let credentials = match load_credentials(&self.path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!(path = %self.path.display(), error = %e, "webui 凭据文件重读失败；沿用旧凭据");
+                tracing::error!(path = %self.path.display(), error = %e, "failed to reload webui credentials file, keeping old credentials");
                 // 保持旧凭据但更新 mtime，避免每次请求都重读失败。
                 None
             }

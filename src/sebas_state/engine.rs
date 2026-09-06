@@ -24,7 +24,7 @@ impl StateStoreEngine for DbStateEngine {
             .exec(|conn| crate::sebas_state::repo::load_persisted_state(conn))
             .await
             .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "DB 加载 PersistedState 失败, 回退默认");
+                tracing::warn!(error = %e, "failed to load PersistedState from DB, using defaults");
                 PersistedState::default()
             })
     }

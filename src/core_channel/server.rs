@@ -436,7 +436,7 @@ async fn serve_state_subscription(
 
     // 无广播（引擎未初始化通知通道）时挂起等连接关闭。
     let Some(mut changes) = sebas_dispatch::state_store::subscribe_changes() else {
-        info!("state subscription: change broadcast 未初始化, 快照后空闲等待");
+        info!("state subscription: change broadcast not initialized, idle after snapshot");
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         return Ok(());
     };

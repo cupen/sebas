@@ -74,7 +74,7 @@ impl ServiceSpawner for CoreSpawner {
         let exe = std::env::current_exe()
             .map_err(|e| SebasError::Upgrade(format!("无法确定 sebas 子进程路径: {e}")))?;
         info!(
-            "启动 sebas core 子进程: {} {} --config {}",
+            "starting sebas core child: {} {} --config {}",
             exe.display(),
             crate::CORE_SUBCOMMAND,
             self.config_path
@@ -239,7 +239,7 @@ async fn spawn_aux_process(
     let child = cmd
         .spawn()
         .map_err(|e| SebasError::Upgrade(format!("启动 {label} 子进程失败: {e}")))?;
-    info!("{label} 子进程已启动 (pid={})", child.id().unwrap_or(0));
+    info!("{label} child started (pid={})", child.id().unwrap_or(0));
     Ok(SpawnedInstance {
         child: Box::new(ProcessChild(child)),
         readiness: None,
@@ -255,12 +255,12 @@ async fn rollback_to_previous(config: &WatchdogConfig) -> Result<()> {
             "没有可回滚的版本（rollback/sebas 不存在）".into(),
         ));
     }
-    info!("开始回滚，data_dir={}", data_dir.display());
+    info!("rollback started, data_dir={}", data_dir.display());
     upgrade::try_lock(&data_dir)?;
     let result = upgrade::rollback(&data_dir);
     upgrade::unlock(&data_dir);
     result?;
-    info!("回滚完成，current 已切回上一版本");
+    info!("rollback done, current switched back to previous version");
     Ok(())
 }
 
@@ -270,9 +270,9 @@ fn rollback_hook(config: WatchdogConfig) -> super::watchdog::supervisor::Unready
         let cfg = config.clone();
         Box::pin(async move {
             if let Err(e) = rollback_to_previous(&cfg).await {
-                warn!("自动回滚失败: {e}（watchdog 保持运行）");
+                warn!("auto rollback failed: {e}, watchdog keeps running");
             } else {
-                info!("自动回滚成功，使用上一版本继续运行");
+                info!("auto rollback ok, running previous version");
             }
         })
     })
@@ -289,7 +289,7 @@ pub async fn run_watchdog(
 ) -> Result<()> {
     init_watchdog_tracing();
     let dbg = debug;
-    tracing::info!(debug_enabled = dbg, "watchdog 启动");
+    tracing::info!(debug_enabled = dbg, "watchdog started");
     let control = Arc::new(Mutex::new(ControlService::new()));
     let services = ServiceManager::new(services_persist_path());
     let executor = ControlExecutor::new(
@@ -412,14 +412,14 @@ pub async fn run_watchdog(
     };
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("watchdog 收到 SIGINT，关闭全部子进程");
+            tracing::info!("watchdog got SIGINT, stopping all children");
         }
         _ = sigterm => {
-            tracing::info!("watchdog 收到 SIGTERM，关闭全部子进程");
+            tracing::info!("watchdog got SIGTERM, stopping all children");
         }
     }
     services.shutdown_all().await;
-    tracing::info!("watchdog 退出");
+    tracing::info!("watchdog exited");
     Ok(())
 }
 

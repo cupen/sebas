@@ -85,7 +85,7 @@ impl StateWriter {
                 let mut conn = match crate::sebas_state::db::open(&db_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!(path = %db_path.display(), error = %e, "state writer 打开数据库失败");
+                        tracing::error!(path = %db_path.display(), error = %e, "state writer failed to open database");
                         let _ = ready_tx.send(Err(format!("打开数据库失败: {e}")));
                         return;
                     }
@@ -93,12 +93,12 @@ impl StateWriter {
 
                 // 执行迁移
                 if let Err(e) = crate::sebas_state::migration::run_migrations(&mut conn, &db_path) {
-                    tracing::error!(path = %db_path.display(), error = %e, "state writer 迁移失败");
+                    tracing::error!(path = %db_path.display(), error = %e, "state writer migration failed");
                     let _ = ready_tx.send(Err(format!("迁移失败: {e}")));
                     return;
                 }
 
-                tracing::info!(path = %db_path.display(), "state writer 就绪");
+                tracing::info!(path = %db_path.display(), "state writer ready");
                 let _ = ready_tx.send(Ok(()));
 
                 // 命令循环: 串行处理
@@ -108,7 +108,7 @@ impl StateWriter {
                     let _ = tx.send(result);
                 }
 
-                tracing::info!("state writer 已停止");
+                tracing::info!("state writer stopped");
             })
             .map_err(|e| format!("创建 state writer 线程失败: {e}"))?;
 

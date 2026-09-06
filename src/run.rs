@@ -99,7 +99,7 @@ pub async fn run(
         warn!(
             "当前为裸 core 启动模式（SEBAS_IPC 未设置 + SEBAS_CONTROL_SECRET 未配置）：\
              /upgrade、/rollback、/restart、/router 等命令需要 watchdog 转发，\
-             在此模式下调用会失败。如需启用，请通过 `sebas` watchdog 启动 core（openspec/specs/watchdog/spec.md）"
+             在此模式下调用会失败。如需启用，请通过 `sebas` watchdog started core（openspec/specs/watchdog/spec.md）"
         );
     }
 
@@ -118,10 +118,10 @@ pub async fn run(
                     writer.handle().clone(),
                 ));
                 sebas_dispatch::state_store::init_engine(engine);
-                tracing::info!(path = %path.display(), "state store DB 已初始化");
+                tracing::info!(path = %path.display(), "state store DB initialized");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "state store DB 初始化失败, 使用文件存储");
+                tracing::warn!(error = %e, "state store DB init failed, falling back to file storage");
             }
         }
     }
@@ -143,7 +143,7 @@ pub async fn run(
                 match serde_json::from_value::<sebas_dispatch::CardConfig>(value) {
                     Ok(cfg) => cfg,
                     Err(e) => {
-                        tracing::warn!(error = %e, "DB settings 反序列化失败, 回退到文件");
+                        tracing::warn!(error = %e, "failed to deserialize settings from DB, falling back to file");
                         fallback_settings(&cfg)
                     }
                 }
@@ -153,7 +153,7 @@ pub async fn run(
                 fallback_settings(&cfg)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "DB 读取 settings 失败, 回退到文件");
+                tracing::warn!(error = %e, "failed to read settings from DB, falling back to file");
                 fallback_settings(&cfg)
             }
         }
@@ -278,7 +278,7 @@ pub async fn run(
             let auth = if webui_auth {
                 crate::webui_cmd::bootstrap_auth()
             } else {
-                tracing::warn!("webui 鉴权已通过 [watchdog.webui] auth = false 关闭：全部路由免登录");
+                tracing::warn!("webui auth disabled via [watchdog.webui] auth = false: all routes are public");
                 std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
             };
             sebas_webui::run_with_admin_adapter_and_auth(
@@ -450,7 +450,7 @@ fn fallback_settings(cfg: &Config) -> sebas_dispatch::CardConfig {
                 .expect("card config round-trips between mirror shapes")
         }
         Err(e) => {
-            tracing::error!(error = %e, "settings.json 解析失败, 使用 TOML 兜底");
+            tracing::error!(error = %e, "failed to parse settings.json, falling back to TOML");
             serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
                 .expect("card config round-trips between mirror shapes")
         }
@@ -464,10 +464,10 @@ async fn init_watchdog_ipc() {
 
     let mut ipc = crate::ipc::ChildIpc::new();
     if let Err(e) = ipc.ready().await {
-        tracing::warn!("watchdog IPC ready 发送失败: {e}");
+        tracing::warn!("failed to send watchdog IPC ready: {e}");
         return;
     }
-    info!("watchdog IPC 连接就绪");
+    info!("watchdog IPC connected");
 }
 
 #[cfg(test)]

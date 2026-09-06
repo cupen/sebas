@@ -44,7 +44,7 @@ pub fn load_persisted_state(conn: &mut Connection) -> Result<sebas_dispatch::sta
                 if let Ok(item) = serde_json::from_str::<sebas_dispatch::crud::Item>(&config) {
                     providers.insert(id, item);
                 } else {
-                    tracing::warn!("provider {id} 配置 JSON 解析失败, 跳过");
+                    tracing::warn!("failed to parse provider {id} config JSON, skipping");
                 }
             }
         }
@@ -117,7 +117,7 @@ fn load_runtime_state(
             match serde_json::from_str::<RuntimeStateRow>(&raw) {
                 Ok(row) => (row.mode, row.default_selection),
                 Err(e) => {
-                    tracing::warn!(error = %e, "runtime_state 解析失败, 回退默认");
+                    tracing::warn!(error = %e, "failed to parse runtime_state, using defaults");
                     (ProviderMode::default(), None)
                 }
             }

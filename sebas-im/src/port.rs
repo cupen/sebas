@@ -101,7 +101,7 @@ pub struct NoControlPort;
 impl ControlPort for NoControlPort {
     async fn submit(&self, _req: ControlRequest) -> Result<String, String> {
         Err("控制面不可用：watchdog 未注入控制凭据（bare-core 模式），\
-             /upgrade 等命令需要通过 watchdog 启动 core。"
+             /upgrade 等命令需要通过 watchdog started core。"
             .into())
     }
 }

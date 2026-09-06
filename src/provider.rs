@@ -349,7 +349,7 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
             .map(|(name, p)| item_from_provider(name, p))
             .collect(),
         Err(e) => {
-            tracing::warn!(error = %e, "provider 种子解析失败（config.toml 缺 [router] 或 [provider] 段），从空列表开始");
+            tracing::warn!(error = %e, "failed to parse provider seed (missing [router] or [provider] section in config.toml), starting empty");
             Vec::new()
         }
     };
@@ -361,14 +361,14 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
         tracing::warn!(
             path = %path.display(),
             error = %parse_err,
-            "legacy overlay 解析失败，按 openspec/specs/provider-management/spec.md 备份后从空 seed 恢复"
+            "failed to parse legacy overlay, backing up then recovering from empty seed (see openspec/specs/provider-management/spec.md)"
         );
         if let Err(backup_err) = backup_broken_overlay(&path) {
             tracing::warn!(
                 path = %path.display(),
                 parse_error = %parse_err,
                 backup_error = %backup_err,
-                "legacy overlay 备份失败，/provider 不可用"
+                "legacy overlay backup failed, /provider unavailable"
             );
             return None;
         }
@@ -376,7 +376,7 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
         match FileStore::load(path, ID_FIELD, Vec::new()) {
             Ok(store) => return Some(Arc::new(make_forms(store))),
             Err(e) => {
-                tracing::warn!(error = %e, "备份成功后重新 load 仍失败，/provider 不可用");
+                tracing::warn!(error = %e, "reload after backup still failed, /provider unavailable");
                 return None;
             }
         }
@@ -384,7 +384,7 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
     match FileStore::load(path, ID_FIELD, seed) {
         Ok(store) => Some(Arc::new(make_forms(store))),
         Err(e) => {
-            tracing::warn!(error = %e, "provider 存储加载失败；/provider 不可用");
+            tracing::warn!(error = %e, "failed to load provider store, /provider unavailable");
             None
         }
     }
@@ -455,7 +455,7 @@ fn backup_broken_overlay(path: &Path) -> std::io::Result<PathBuf> {
                 from = %path.display(),
                 to = %backup_path.display(),
                 error = %rename_err,
-                "rename 失败（跨设备？），用 copy+remove 兜底完成备份"
+                "rename failed (cross-device?), backup done via copy+remove"
             );
             Ok(backup_path)
         }
