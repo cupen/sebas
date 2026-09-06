@@ -96,7 +96,7 @@ ansible-playbook site.yml -i inventory/prod.ini
 ansible-playbook site.yml --skip-tags sebas_install
 ```
 
-常用变量（全部有缺省，见 [`.ansible/roles/sebas/defaults/main.yml`](.ansible/roles/sebas/defaults/main.yml)）：`sebas_artifact_source`（release/file/preinstalled）、`sebas_version`（latest/显式 tag）、`sebas_deploy_user`、`sebas_webui_listen`（形如 `host:port`；模板里 split 取 host/port）、`sebas_config_extra`（追加 TOML 片段）。`file` 模式要求 `sebas_artifact_file` 指向一份 release 同 layout 的 tarball（`<basename>/sebas`）——本地手动 `cargo build --release` 后打包即可。升级 = 更新二进制后重跑 playbook（重跑会经 `service --install --force` 重新 seed 并重启）；已部署机器也可继续用 `sebas update`，两者都以 `<data_dir>/bin/sebas` 为准。仓库私有或无外网时用 file/preinstalled 模式。
+常用变量（全部有缺省，见 [`.ansible/roles/sebas/defaults/main.yml`](.ansible/roles/sebas/defaults/main.yml)）：`sebas_artifact_source`（release/file/preinstalled）、`sebas_version`（latest/显式 tag）、`sebas_deploy_user`、`sebas_webui_listen`（形如 `host:port`；模板里 split 取 host/port）、`sebas_config_extra`（追加 TOML 片段）、`sebas_core_enabled`/`sebas_core_secret`/`sebas_core_channel_path`（core 子进程与 session channel 武装三件套，role 会写 systemd drop-in 注入 secret 并放行 home 子树可写）。`file` 模式要求 `sebas_artifact_file` 指向一份 release 同 layout 的 tarball（`<basename>/sebas`）——本地手动 `cargo build --release` 后打包即可。升级 = 更新二进制后重跑 playbook（重跑会经 `service --install --force` 重新 seed 并重启）；已部署机器也可继续用 `sebas update`，两者都以 `<data_dir>/bin/sebas` 为准。仓库私有或无外网时用 file/preinstalled 模式。
 
 **反向代理 / nginx**：sebas 默认监听 loopback，仅本机可访问。公开部署需要 nginx 反代，模板见 [`.ansible/examples/nginx-sebas-vhost.conf`](.ansible/examples/nginx-sebas-vhost.conf)（占位符 `__SEBAS_DOMAIN__`/`__UPSTREAM_HOST__`/`__UPSTREAM_PORT__` 自行替换后 `nginx -t` 校验 + reload）。sebas 本身不绑证书、不管 TLS，由宿主 nginx 终结。
 
