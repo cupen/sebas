@@ -8,8 +8,7 @@ use cli::{
 use std::path::PathBuf;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // reqwest 0.12 链路启用 rustls/aws-lc-rs，openlark(reqwest 0.13) 链路启用
+async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/aws-lc-rs，openlark(reqwest 0.13) 链路启用
     // rustls/ring；两个 feature 同时存在时 rustls 拒绝自动选择 provider，
     // TLS 初始化即 panic（im 连飞书 WS 必炸）。所有子进程都从本二进制派生，
     // 在入口统一显式选定即可全覆盖。
@@ -54,8 +53,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Router(args) => {
             if let Err(e) = sebas::router_cmd::run(args.into()).await {
-                eprintln!("error: {e:?}");
-                std::process::exit(1);
+                // 生命周期子命令：ready 之前返回 Err 即启动失败 → 75 + 摘要
+                // （fail-fast-on-startup-errors 任务 1.1/1.2）。
+                startup_failure_exit(&e);
             }
             Ok(())
         }
@@ -80,15 +80,13 @@ async fn main() -> anyhow::Result<()> {
                 dump_inbound: args.dump_inbound,
             };
             if let Err(e) = sebas::im_cmd::run(args).await {
-                eprintln!("error: {e:?}");
-                std::process::exit(1);
+                startup_failure_exit(&e);
             }
             Ok(())
         }
         Cmd::WebUi(args) => {
             if let Err(e) = sebas::webui_cmd::run(args.into()).await {
-                eprintln!("error: {e:?}");
-                std::process::exit(1);
+                startup_failure_exit(&e);
             }
             Ok(())
         }
@@ -105,21 +103,28 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Ctl(args) => run_control(args).await,
         Cmd::Run(args) => {
             let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
-            let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-            sebas::watchdog::run_watchdog(
+            let cfg = match sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}")) {
+                Ok(cfg) => cfg,
+                Err(e) => startup_failure_exit(&e),
+            };
+            if let Err(e) = sebas::watchdog::run_watchdog(
                 cfg.watchdog,
                 args.config,
                 args.debug,
                 cfg.feishu.is_enabled(),
             )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .await
+            {
+                // watchdog 整体返回 Err = 启动失败终态（含受管服务连续 spawn
+                // 失败 / rollback 失败）→ 75 + 摘要（任务 2.3）。
+                startup_failure_exit(&e);
+            }
             Ok(())
         }
         Cmd::Update(args) => {
-            sebas::update::run(args.into())
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Err(e) = sebas::update::run(args.into()).await {
+                startup_failure_exit(&e);
+            }
             Ok(())
         }
         Cmd::Core(run) => {
@@ -131,12 +136,17 @@ async fn main() -> anyhow::Result<()> {
                     "[feishu]\napp_id = \"{app_id}\"\napp_secret = \"{app_secret}\"\nowner_id = \"ou_xxx\"\n"
                 )
             });
-            let cfg = sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let cfg = match sebas::config::Config::parse(&raw).map_err(|e| anyhow::anyhow!("{e}")) {
+                Ok(cfg) => cfg,
+                Err(e) => startup_failure_exit(&e),
+            };
             let mut router_cfg = if run.router {
-                Some(
-                    sebas_router::config::RouterConfig::parse(&raw)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?,
-                )
+                match sebas_router::config::RouterConfig::parse(&raw)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                {
+                    Ok(c) => Some(c),
+                    Err(e) => startup_failure_exit(&e),
+                }
             } else {
                 None
             };
@@ -145,12 +155,26 @@ async fn main() -> anyhow::Result<()> {
             {
                 sebas_router::debug::enable_debug_test_provider(c);
             }
-            sebas::run::run(cfg, raw, router_cfg, run.webui, run.webui_port, run.webui_host)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Err(e) =
+                sebas::run::run(cfg, raw, router_cfg, run.webui, run.webui_port, run.webui_host)
+                    .await
+            {
+                // ready 之后 run() 常驻到信号；返回 Err 一律按启动失败处理
+                // （fail-fast-on-startup-errors：退出码 75 区分启动失败与运行期崩溃）。
+                startup_failure_exit(&e);
+            }
             Ok(())
         }
     }
+}
+
+/// 生命周期子命令（core/webui/router/run/update/im）的统一启动失败出口
+/// （fail-fast-on-startup-errors 任务 1.1/1.2）：保留既有错误诊断输出，
+/// 再把 `startup-failure: <原因>` 打成 stderr 最后一行、按需写入
+/// `SEBAS_STARTUP_ERROR_FILE`，最后以 EX_TEMPFAIL (75) 退出。
+fn startup_failure_exit<E: std::fmt::Debug + std::fmt::Display>(err: &E) -> ! {
+    eprintln!("error: {err:?}");
+    sebas::startup_failure::exit_startup_failure(&err.to_string());
 }
 
 async fn run_control(args: ControlArgs) -> anyhow::Result<()> {
@@ -273,13 +297,13 @@ fn render_response(
                 .expect("RpcControlResponse is always serializable");
             println!("{json}");
         }
-        OutputFormat::Human => match response {
-            RpcControlResponse::Accepted {
-                operation_id,
-                status,
-            } => {
-                println!("accepted operation={operation_id} status={status}");
-            }
+            OutputFormat::Human => match response {
+                RpcControlResponse::Accepted {
+                    operation_id,
+                    status,
+                } => {
+                    println!("accepted operation={operation_id} status={status}");
+                }
             RpcControlResponse::Rejected { code, message } => {
                 eprintln!("rejected code={code} message={message}");
             }

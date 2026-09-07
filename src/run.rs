@@ -110,7 +110,9 @@ pub async fn run(
     let map = restore_session_map(&cfg.dispatch.state_file, cfg.dispatch.max_concurrent_sessions);
 
     // 5.5: 初始化状态库 DB (add-state-store)。
-    // 如果 DB 初始化失败, 退回到文件存储 (向后兼容)。
+    // fail-fast-on-startup-errors 任务 1.3：DB 不可写是启动失败（spec
+    // core-session-channel delta 明列），不再静默退回文件存储假装能跑——
+    // 那会把重启丢状态的问题推迟到第一次崩溃之后才暴露。
     {
         let raw = std::env::var("SEBAS_STATE_DB")
             .unwrap_or_else(|_| "~/.sebas/sebas.db".into());
@@ -125,7 +127,10 @@ pub async fn run(
                 tracing::info!(path = %path.display(), "state store DB initialized");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "state store DB init failed, falling back to file storage");
+                return Err(crate::error::SebasError::Config(format!(
+                    "state store DB 不可写 ({}): {e}",
+                    path.display()
+                )));
             }
         }
     }
@@ -357,6 +362,10 @@ pub async fn run(
         spawn_test_session(&cfg, &router, &mgr).await;
     }
 
+    // fail-fast-on-startup-errors：到这里启动已成功（ready）。清除启动错误
+    // 闩锁文件，让 channel 客户端不会把陈旧的启动失败报给已恢复的部署。
+    crate::startup_failure::clear_env_summary_file();
+
     info!("sebas started; waiting for SIGINT/SIGTERM");
     let sigint = async {
         tokio::signal::ctrl_c().await.ok();
@@ -399,11 +408,18 @@ pub async fn run(
     // teardown (terminal events strip mappings) and would lose the whole
     // snapshot if a child hangs the kill — the restored mappings are what
     // lazy respawn (openspec/specs/session-lifecycle/spec.md) works from.
-    let json = router
-        .dump_json()
-        .await
-        .map_err(|e| crate::error::SebasError::Dispatch(e.to_string()))?;
-    if let Err(e) = std::fs::write(&cfg.dispatch.state_file, json) {
+    // fail-fast-on-startup-errors：这是 ready 之后的优雅关闭路径——dump 失败
+    // 只告警不外抛，避免运行期失败冒充启动失败、污染退出码 75 的语义。
+    let json = match router.dump_json().await {
+        Ok(json) => Some(json),
+        Err(e) => {
+            warn!(?e, "failed to dump session state on shutdown");
+            None
+        }
+    };
+    if let Some(json) = json
+        && let Err(e) = std::fs::write(&cfg.dispatch.state_file, json)
+    {
         warn!(?e, "failed to persist session state");
     }
 

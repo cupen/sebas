@@ -192,25 +192,38 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     // The session backend: a client of the core session channel. The core
     // child owns the sessions; this process only renders and forwards.
+    // fail-fast-on-startup-errors（cli-service spec scenario）：watchdog
+    // secret 缺失时 standalone webui 的全部会话面必然不可用——在 ready 之前
+    // 按启动失败退出（75），不假装健康地起一个空壳面板。
+    let core_secret = std::env::var("SEBAS_CORE_SECRET").ok().unwrap_or_default();
+    if core_secret.is_empty() {
+        return Err(SebasError::Config(
+            "SEBAS_CORE_SECRET 未设置：standalone webui 是 core session channel 的客户端，\
+             没有共享密钥无法连接 core（watchdog 会为子进程注入该变量；手动运行时请显式设置）"
+                .into(),
+        ));
+    }
     let backend = crate::core_channel::client::CoreChannelBackend::new(
         crate::core_channel::socket_path(&cfg),
-        std::env::var("SEBAS_CORE_SECRET").ok().unwrap_or_default(),
+        core_secret,
     );
 
     // Bind to the configured port. Fails if the port is already in use
     // (by another WebUI process or the legacy `sebas core --webui` path).
     // On failure, exit with a specific code so the watchdog supervisor can
     // distinguish bind failures from other crashes and mark the service as
-    // Degraded instead of endlessly retrying.
+    // Degraded instead of endlessly retrying. fail-fast-on-startup-errors：
+    // 退出码仍为 75（= EXIT_STARTUP_FAILURE），但统一走 startup-failure 摘要
+    // 出口（stderr 末行 + SEBAS_STARTUP_ERROR_FILE，任务 1.2/1.3）。
     let listener = match tokio::net::TcpListener::bind(endpoint.bind_addr()).await {
         Ok(l) => l,
         Err(e) => {
-            warn!(
-                "bind webui {} failed: {e}; exiting with code {} (Degraded)",
-                endpoint.bind_addr(),
-                EXIT_BIND_FAILED,
+            let cause = format!(
+                "webui 端口绑定失败 {}（端口被占用？）: {e}",
+                endpoint.bind_addr()
             );
-            std::process::exit(EXIT_BIND_FAILED);
+            warn!("{cause}; exiting with code {EXIT_BIND_FAILED} (Degraded)");
+            crate::startup_failure::exit_startup_failure(&cause);
         }
     };
 

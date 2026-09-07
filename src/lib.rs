@@ -34,6 +34,7 @@ pub mod replay;
 pub mod run;
 pub mod sebas_state;
 mod session_boot;
+pub mod startup_failure;
 pub mod spawn_env;
 pub mod update;
 pub mod upgrade;

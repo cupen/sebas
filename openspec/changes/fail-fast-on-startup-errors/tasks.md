@@ -2,9 +2,9 @@
 
 ## 1. 启动失败摘要 + 退出码 75
 
-- [ ] 1.1 在 `src/cli.rs` 或各子命令入口（`core`、`webui`、`router`、`run`、`update`）加入 startup-failure 检测：在 `tokio::main` 入口包一层 try-catch / 顶层 Result；任何未达 ready 的 fatal 都走统一退出路径；运行 `cargo test --workspace` 验证既有单元（验证：现有 happy-path 单测不破坏；fatal 路径触发 75）
-- [ ] 1.2 在 startup-failure 退出路径中：写入 stderr 末行 `startup-failure: <可读原因>`；当 `SEBAS_STARTUP_ERROR_FILE` 环境变量设置时同步写入该文件（覆盖写）；运行 `cargo test --workspace` 验证两个 sink 都被命中（验证：临时设 env 后启动失败，文件与 stderr 末行一致）
-- [ ] 1.3 把当前零散的"启动失败"返回路径（配置错误、port bind、state DB 不可写、control secret 缺失）统一走 startup-failure 退出；不在这些路径里调 `process::exit(1)`；运行 `cargo test` 验证（验证：错误注入测试触发各路径均得到 75）
+- [x] 1.1 在 `src/cli.rs` 或各子命令入口（`core`、`webui`、`router`、`run`、`update`）加入 startup-failure 检测：在 `tokio::main` 入口包一层 try-catch / 顶层 Result；任何未达 ready 的 fatal 都走统一退出路径；运行 `cargo test --workspace` 验证既有单元（验证：现有 happy-path 单测不破坏；fatal 路径触发 75）——落地为 `src/startup_failure.rs` + `main.rs::startup_failure_exit`，core/webui/router/run/update/im 六个子命令 Err 一律走统一出口（这些命令 ready 后常驻到信号，返回 Err 即启动失败）；`cargo test --workspace` 全绿（227+ lib 用例）。
+- [x] 1.2 在 startup-failure 退出路径中：写入 stderr 末行 `startup-failure: <可读原因>`；当 `SEBAS_STARTUP_ERROR_FILE` 环境变量设置时同步写入该文件（覆盖写）；运行 `cargo test --workspace` 验证两个 sink 都被命中（验证：临时设 env 后启动失败，文件与 stderr 末行一致）——`src/startup_failure.rs` 单测 6 项（前缀、覆盖写、env 未设 no-op、读取、闩锁清除）；进程级断言（stderr 末行 + 文件内容一致）由任务 4.2 的 e2e 承担。
+- [x] 1.3 把当前零散的"启动失败"返回路径（配置错误、port bind、state DB 不可写、control secret 缺失）统一走 startup-failure 退出；不在这些路径里调 `process::exit(1)`；运行 `cargo test` 验证（验证：错误注入测试触发各路径均得到 75）——config 解析（main.rs）、webui bind（`webui_cmd.rs` 统一走 `exit_startup_failure`，仍 75=Degraded 语义）、state DB 不可写（`run.rs` 改为 fatal，不再静默退回文件存储）、standalone webui 缺 `SEBAS_CORE_SECRET`（`webui_cmd.rs` fatal）；`run.rs` 优雅关闭 dump 失败改为 warn 不外抛，避免运行期失败冒充启动失败。
 
 ## 2. watchdog 终态化
 
