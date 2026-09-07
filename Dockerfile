@@ -30,9 +30,11 @@ COPY xtask ./xtask
 COPY sebas-router ./sebas-router
 COPY sebas-feishu ./sebas-feishu
 COPY sebas-acp ./sebas-acp
-COPY sebas-gateway ./sebas-gateway
+COPY sebas-dispatch ./sebas-dispatch
+COPY sebas-im ./sebas-im
 COPY sebas-channels ./sebas-channels
 COPY sebas-agent ./sebas-agent
+COPY sebas-ipc ./sebas-ipc
 COPY sebas-webui ./sebas-webui
 
 RUN cargo build --release --locked --bin sebas
@@ -46,6 +48,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/sebas /usr/local/bin/sebas
+
+# 状态存储默认落在 ~/.sebas（容器内即 /root/.sebas），预建避免每次启动报
+# 一次"打开数据库失败→回退文件存储"的 ERROR。
+RUN mkdir -p /root/.sebas
 
 WORKDIR /app
 
