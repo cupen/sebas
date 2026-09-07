@@ -636,8 +636,10 @@ pub async fn projects_add(
     if !dir.is_dir() {
         return api_error(StatusCode::BAD_REQUEST, format!("路径不是目录: {path}"));
     }
-    let canonical = match dir.canonicalize() {
-        Ok(c) => c.to_string_lossy().to_string(),
+    // canonicalize_plain：解析真实路径但还原 Windows verbatim 前缀——
+    // `\\?\C:\…` 直接入库会经 API 泄漏进 UI，且与请求侧普通路径判等永假。
+    let canonical = match crate::fs::canonicalize_plain(dir) {
+        Ok(c) => c,
         Err(_) => return api_error(StatusCode::BAD_REQUEST, format!("无法解析路径: {path}")),
     };
     let name = dir

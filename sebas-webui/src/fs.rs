@@ -60,6 +60,20 @@ pub fn within_allowed_roots(candidate: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+/// 项目注册/回显用的规范形：canonicalize 解析真实路径后，把 Windows
+/// verbatim 前缀与混合分隔符还原成普通形（projects_add 曾把 `\\?\C:\…`
+/// 直接入库，前缀经 API 泄漏进 UI 头部，且与请求侧普通路径判等永假）。
+/// 范围判定不走这里——`within_allowed_roots` 是两侧同规范的纯比较。
+pub fn canonicalize_plain(path: &Path) -> std::io::Result<String> {
+    let canonical = std::fs::canonicalize(path)?;
+    let s = canonical.to_string_lossy();
+    #[cfg(windows)]
+    let s = normalize_windows(&s);
+    #[cfg(not(windows))]
+    let s = s.into_owned();
+    Ok(s)
+}
+
 /// Resolve a browse request to the directory to list as `(canonical target,
 /// echo form)`. The single owner of browse path semantics.
 ///
@@ -451,5 +465,16 @@ mod tests {
         assert_eq!(normalize_windows(r"\\?\UNC\server\share/x"), r"\\server\share\x");
         assert_eq!(normalize_windows("/bin"), r"\bin");
         assert_eq!(normalize_windows("."), ".");
+    }
+
+    #[test]
+    fn canonicalize_plain_strips_verbatim_and_round_trips() {
+        let (dir, _sub) = dir_with_sub();
+        let plain = canonicalize_plain(dir.path()).expect("canonicalize");
+        assert!(!plain.starts_with(r"\\?\"), "verbatim prefix leaked: {plain}");
+        assert!(Path::new(&plain).is_dir());
+        // 注册后再次解析同一普通路径必须得到同一字符串（分隔符不漂移）。
+        let again = canonicalize_plain(Path::new(&plain)).expect("re-canonicalize");
+        assert_eq!(plain, again);
     }
 }

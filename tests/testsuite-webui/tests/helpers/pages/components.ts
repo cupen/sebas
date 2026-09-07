@@ -23,9 +23,9 @@ export class ProjectRail {
     return this.host.locator('.row', { hasText: name })
   }
 
-  /** Expand a project row (chevron) to reveal its sessions. */
+  /** Expand a project row to reveal its sessions (204a901 起行本身即展开开关). */
   async expandProject(name: string): Promise<void> {
-    await this.projectRow(name).locator('.chevron').click()
+    await this.projectRow(name).click()
   }
 
   /** Expand the Inbox group (hidden when there are no inbox sessions). */

@@ -119,10 +119,9 @@ pub fn add(path: &str) -> Result<ProjectEntry, String> {
     if !dir.is_dir() {
         return Err(format!("路径不是目录: {path}"));
     }
-    let canonical = dir
-        .canonicalize()
-        .map_err(|_| format!("无法解析路径: {path}"))?;
-    let canonical_str = canonical.to_string_lossy().to_string();
+    let canonical_str =
+        crate::fs::canonicalize_plain(dir).map_err(|_| format!("无法解析路径: {path}"))?;
+    let canonical = Path::new(&canonical_str).to_path_buf();
     let mut projects = load();
     if projects.iter().any(|p| Path::new(&p.path) == canonical) {
         return Err(format!("项目已注册: {path}"));
@@ -149,8 +148,9 @@ pub fn add(path: &str) -> Result<ProjectEntry, String> {
 
 /// Remove a project by path. Returns `Ok(true)` if removed, `Ok(false)` if not found.
 pub fn remove(path: &str) -> Result<bool, String> {
-    let canonical = match Path::new(path).canonicalize() {
-        Ok(p) => p,
+    // 与 add 同一规范形判等（verbatim 前缀会让比较永假，remove 静默丢失）。
+    let canonical = match crate::fs::canonicalize_plain(Path::new(path)) {
+        Ok(c) => PathBuf::from(c),
         Err(_) => return Ok(false),
     };
     let mut projects = load();
