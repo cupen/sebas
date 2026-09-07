@@ -211,6 +211,14 @@ export class SettingsModal {
     await expect(this.panel).toBeVisible()
   }
 
+  /** Switch to a settings section by its nav label; waits for load to settle. */
+  async openSection(label: 'Models' | 'Services' | 'Appearance' | 'Env' | 'About'): Promise<void> {
+    await this.panel.locator('.nav-item', { hasText: label }).click()
+    await expect(
+      this.panel.locator('.nav-item', { hasText: label }),
+    ).toHaveAttribute('aria-current', 'true')
+  }
+
   async close(): Promise<void> {
     await this.closeButton.click()
     await expect(this.panel).toBeHidden()

@@ -161,6 +161,50 @@ export async function archiveSession(
   if (!resp.ok()) throw new Error(`archiveSession failed: HTTP ${resp.status()}`)
 }
 
+export interface RouterInfo {
+  listen: string | null
+  provider_count: number
+  debug: boolean
+  has_auth: boolean
+}
+
+export interface AboutInfo {
+  version: string
+  uptime: string
+  rustc_version: string
+  router_listen: string | null
+  provider_count: number
+}
+
+export interface AgentDefaults {
+  provider: string | null
+  model: string | null
+}
+
+/** Read-only router surface backing the settings Services section. */
+export async function getRouterInfo(request: APIRequestContext): Promise<RouterInfo> {
+  const d = (await (await request.get('/api/router')).json()) as { router: RouterInfo }
+  return d.router
+}
+
+/** Build metadata backing the settings About section. */
+export async function getAbout(request: APIRequestContext): Promise<AboutInfo> {
+  return (await request.get('/api/about')).json() as Promise<AboutInfo>
+}
+
+/** New-session defaults (sandbox truth is null/null without a control secret). */
+export async function getAgentDefaults(request: APIRequestContext): Promise<AgentDefaults> {
+  return (await request.get('/api/agent-defaults')).json() as Promise<AgentDefaults>
+}
+
+/** Raw provider-admin list (sandbox: read-only works, mutations 503). */
+export async function listRouterProviders(request: APIRequestContext): Promise<string[]> {
+  const d = (await (await request.get('/router/api/providers')).json()) as {
+    providers?: { name: string }[]
+  }
+  return (d.providers ?? []).map((p) => p.name)
+}
+
 export async function authMe(request: APIRequestContext): Promise<AuthInfo> {
   return (await request.get('/api/auth/me')).json() as Promise<AuthInfo>
 }

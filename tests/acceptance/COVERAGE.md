@@ -174,6 +174,11 @@
 | 无模型会话 set_model 终态拒绝如实呈现 + settings provider 只读 | `models.spec.ts`（二期 3.2 fallback C） | 二期「模型管理核心功能覆盖」（正向切换待驱动模型面立项，见实施期发现 6） |
 | 项目非法/重复拒绝（400/409）与移除持久化 | `projects.spec.ts`（二期 1.1） | 二期「项目管理核心功能覆盖」 |
 | 项目排序持久化与分支呈现（git/非 git） | `projects.spec.ts`（二期 1.2） | 同上 |
+| Services/About/Env 只读分区与 API 对账 | `settings.spec.ts`（三期 S1–S3） | 三期「设置面只读呈现覆盖」 |
+| agent-defaults 读呈现 + 沙箱写 503 诚实外显 | `settings.spec.ts`（三期 S4） | 三期「设置面写操作诚实降级覆盖」（写持久化待 control-secret 沙箱） |
+| provider 新建/编辑/删除/探测 503 内联错误且列表不变 | `settings.spec.ts`（三期 S5） | 同上 |
+| folder-picker 树展开点选回填、提交落栏 | `projects.spec.ts`（三期 P1） | 三期「项目选择器交互覆盖」 |
+| 空路径禁用提交；非法路径内联错误、框不关、注册表不变 | `projects.spec.ts`（三期 P2） | 同上 |
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
