@@ -21,5 +21,7 @@
 ## 4. 账本与收尾
 
 - [x] `tests/acceptance/COVERAGE.md` 在 testsuite-webui-browser 行下追加三期旅程证据；验证：矩阵无空白条目
-- [ ] 稳定性复跑：同一提交连续 3 次 `invoke testsuite-webui --case settings` + 3 次 `--case projects` 全绿；验证：settings 3 连绿 + projects 3 连绿 + 全量 30+3 全绿（2026-09-07 实跑；途中修 4 类选择器问题与 1 例真 flake，见下）
+- [x] 稳定性复跑：同一提交连续 3 次 `invoke testsuite-webui --case settings` + 3 次 `--case projects` 全绿；验证：settings 3 连绿 + projects 3 连绿 + 全量 30+3 全绿（2026-09-07 实跑；途中修 4 类选择器问题与 1 例真 flake，见下）
   - 修复记录：about 空 dd 用 toBeAttached；toolbar .label 改 span 限定；wa-dialog host 读 hidden 改断内部按钮；503/400 浏览器资源日志按窄口径过滤；S4 首行 provider 有无 catalog 两分支用 or 断言
+
+（复跑证据：以收敛后骨架（converge-webui-e2e-tree，33 it）全量 3 连绿覆盖本框要求——settings/projects 各 3 次含于全量，且另经历 `--case projects` 独立复跑 4 轮。2026-09-08。）

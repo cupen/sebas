@@ -10,7 +10,7 @@
 - [x] 1.6 重排 `dialog.spec.ts`：把同会话多轮（4.1）与输入守卫（4.2）拆为子功能；运行 `--case dialog` 验证全绿
 - [x] 1.7 重排 `session-roundtrip.spec.ts` / `streaming.spec.ts`：归入 `agent 对话覆盖` 大功能，子功能分别为「首回合往返 / 重载恢复」「流式分批」；分别运行 `--case` 验证全绿
 - [x] 1.8 重排 `errors.spec.ts` / `first-paint.spec.ts`：归入 `agent 对话覆盖`（errors：拒绝存活/崩溃诚实）与 `工作台首屏`（first-paint 单 it 不再硬拆）；分别运行 `--case` 验证全绿
-- [ ] 1.9 全量收尾：跑 `invoke testsuite-webui` 全量 3 连绿；it() 总数 33 与重排前一致；spec 文件头补 `> 功能：<requirement> / 子功能：<scenario>` 三行注释（验证：3 连绿 + 12 个文件头均有归属注释）
+- [x] 1.9 全量收尾：跑 `invoke testsuite-webui` 全量 3 连绿；it() 总数 33 与重排前一致；spec 文件头补 `> 功能：<requirement> / 子功能：<scenario>` 三行注释（验证：3 连绿 + 12 个文件头均有归属注释）
 
 ## 2. 账本：requirement 合并与 COVERAGE 树形化
 
@@ -22,10 +22,11 @@
 
 - [x] 3.1 在 `tasks.py` 的 `testsuite_webui` 函数内 `_testsuite_webui_preflight(c)` 调用之前新增 `_testsuite_webui_spec_structure(c)`：用 `rg -nE '^[ ]{0,2}test\(' tests/testsuite-webui/tests/*.spec.ts` 检索；任何命中则 `raise SystemExit(1)` 并把命中文件与行号打到 stderr（验证：故意在 `_probe.spec.ts` 加一个顶层 `test('probe', ...)` 调用 preflight，函数报错且 exit code 非 0）
 - [x] 3.2 负向验证：在 `tests/testsuite-webui/tests/` 下临时新建 `_probe.spec.ts` 含顶层裸 `test(...)`；运行 `invoke testsuite-webui --case nonexistent` 验证套件在 preflight 阶段拒绝运行并打印命中位置（验证：stderr 出现 `_probe.spec.ts:<line>`；无沙箱装配日志）
-- [ ] 3.3 删除 `_probe.spec.ts`；跑 `invoke testsuite-webui` 全量 3 连绿确认 preflight 在干净仓库下不误报（验证：3 连绿 + preflight 步骤无任何命中日志）
+- [x] 3.3 删除 `_probe.spec.ts`；跑 `invoke testsuite-webui` 全量 3 连绿确认 preflight 在干净仓库下不误报（验证：3 连绿 + preflight 步骤无任何命中日志）
 
 ## 4. 验收：账本闭环
 
-- [ ] 4.1 跑 `openspec status --change converge-webui-e2e-tree --json` 验证四个 artifact 全部 `done`（验证：`proposal/specs/design/tasks` 状态均为 done；`isPlanningComplete: true`）
-- [ ] 4.2 跑 `invoke testsuite-webui` 全量 3 连绿（验证：与 1.9/3.3 一致的稳定性门槛；COVERAGE 行数等于 33 无丢失）
-- [ ] 4.3 在 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 段落末尾追加一行 `骨架收敛（converge-webui-e2e-tree）` 指向本期 commit hash 与本 tasks（验证：账本自身可追溯本次重构）
+- [x] 4.1 跑 `openspec status --change converge-webui-e2e-tree --json` 验证四个 artifact 全部 `done`（验证：`proposal/specs/design/tasks` 状态均为 done；`isPlanningComplete: true`）
+- [x] 4.2 跑 `invoke testsuite-webui` 全量 3 连绿（验证：与 1.9/3.3 一致的稳定性门槛；COVERAGE 行数等于 33 无丢失）
+- [x] 4.3 在 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 段落末尾追加一行 `骨架收敛（converge-webui-e2e-tree）` 指向本期 commit hash 与本 tasks（验证：账本自身可追溯本次重构）
+（实跑证据：commit ba11f6f/8e66cc9 上全量 `invoke testsuite-webui` 3 连绿，每轮 30 main + 3 auth 全过、33 it 无增减；preflight 负向验证以临时 _probe.spec.ts 顶层裸 test 触发拒绝并打印文件行号后删除。）
