@@ -78,6 +78,11 @@ pub struct CoreArgs {
     #[arg(long, default_value = "9797")]
     pub webui_port: u16,
 
+    /// Bind address for the WebUI server (default: 127.0.0.1).
+    /// Docker/容器形态传 0.0.0.0，否则发布的端口不可达。
+    #[arg(long, default_value = "127.0.0.1")]
+    pub webui_host: String,
+
     /// Explicitly disable the WebUI dashboard server (symmetry with watchdog
     /// default, no-op in bare run mode).
     #[arg(long, conflicts_with = "webui")]

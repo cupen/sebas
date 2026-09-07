@@ -50,7 +50,7 @@ cp config/config.toml.example config.toml
 
 # 2. 构建并启动（webui 默认监听 127.0.0.1:9797）
 cargo build --release
-./target/release/sebas run --config ./config.toml --webui
+./target/release/sebas core --config ./config.toml --webui
 ```
 
 浏览器打开 <http://127.0.0.1:9797>, 新建项目、开会话、发指令，agent 的输出实时出现在时间线里。
@@ -102,15 +102,18 @@ ansible-playbook site.yml --skip-tags sebas_install
 
 ### Docker
 
+镜像启动时即校验 agent 二进制（缺 `claude` 会以明确报错退出）——原生安装的直接把宿主机二进制挂进去即可：
+
 ```bash
 docker run -d --name sebas \
   --restart unless-stopped \
   -p 9797:9797 \
+  -v "$(readlink -f "$(which claude)")":/usr/local/bin/claude:ro \
   ghcr.io/cupen/sebas:latest \
-  sebas core --webui
+  core --webui --webui-host 0.0.0.0
 ```
 
-或挂载配置文件：
+或挂载配置文件（`claude` 挂载同上，按需加上）：
 
 ```bash
 docker run -d --name sebas \
@@ -118,10 +121,10 @@ docker run -d --name sebas \
   -p 9797:9797 \
   -v /path/to/config.toml:/app/config.toml:ro \
   ghcr.io/cupen/sebas:latest \
-  sebas core --webui
+  core --webui --webui-host 0.0.0.0
 ```
 
-> 注意：容器内需有 `claude` CLI 才能驱动 agent——建议将宿主机二进制挂载进容器或在自定义镜像中预装。日志：`docker logs -f sebas`；本地构建镜像：`invoke build-image`。
+> `claude` 为 npm 等非自包含方式安装时无法直接挂载，建议在自定义镜像中预装（`FROM ghcr.io/cupen/sebas` 后 COPY）。`--webui-host 0.0.0.0` 仅容器内需要：webui 默认只绑 loopback，不传它发布的端口不可达。日志：`docker logs -f sebas`；本地构建镜像：`invoke build-image`。
 
 ---
 

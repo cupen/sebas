@@ -57,6 +57,7 @@ pub async fn run(
     mut router_cfg: Option<RouterConfig>,
     webui: bool,
     webui_port: u16,
+    webui_host: String,
 ) -> Result<()> {
     // 在 watchdog 下运行时初始化 IPC
     if crate::ipc::is_under_watchdog() {
@@ -277,7 +278,7 @@ pub async fn run(
             Some(dir) => Some(std::path::PathBuf::from(dir)),
             None => std::env::current_dir().ok(),
         };
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{webui_port}"))
+        let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
         let webui_auth = cfg.watchdog.webui.auth;
@@ -303,7 +304,7 @@ pub async fn run(
             )
             .await;
         });
-        info!("webui dashboard starting on 127.0.0.1:{webui_port}");
+        info!("webui dashboard starting on {webui_host}:{webui_port}");
     }
 
     // Core session channel (5.9): the watchdog injects `SEBAS_CORE_SECRET`
