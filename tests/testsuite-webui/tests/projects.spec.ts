@@ -217,3 +217,109 @@ test.describe('project add & remove', () => {
     expect(collector.clean()).toEqual([])
   })
 })
+
+/**
+ * Journey P.x — project picker interactions (phase-3 tasks P1–P2).
+ *
+ * P1 drives the folder-picker TREE (not the manual path field): lazy-expand
+ * a prepared parent dir, click-select the child, and submit — the full
+ * tree→input→rail loop. The wa-tree lazy-append pageerror is a recorded
+ * known-benign (helpers/errors.ts) and stays filtered.
+ * P2 pins the inline-error contract: empty path disables submit; a missing
+ * path surfaces the server rejection inside the dialog without closing it
+ * and without touching the registry.
+ */
+test.describe('project picker interactions', () => {
+  let collector: ErrorCollector
+
+  test.beforeEach(({ page }) => {
+    collector = new ErrorCollector(page)
+  })
+
+  test('P1 tree expand, click-select fills path, submit lands in rail', async ({ page }) => {
+    const rail = new ProjectRail(page)
+
+    await resetState(page.request)
+    const t = Date.now()
+    const work = path.join(sceneDir(), 'work')
+    const parent = path.join(work, `pick-parent-${t}`)
+    const child = path.join(parent, `pick-child-${t}`)
+    fs.mkdirSync(child, { recursive: true })
+
+    await page.goto('/')
+    await expect(rail.host).toBeVisible()
+    await rail.openAddDialog()
+
+    const dialog = rail.addDialog()
+    const tree = dialog.locator('sebas-folder-picker')
+    // The picker roots at the server work dir.
+    await expect(tree.locator('.root-path')).toContainText(work, { timeout: 10_000 })
+
+    // Lazy-expand the prepared parent; the child appears underneath it.
+    await tree.locator('wa-tree-item', { hasText: `pick-parent-${t}` }).first().click()
+    const childItem = tree.locator('wa-tree-item', { hasText: `pick-child-${t}` })
+    await expect(childItem).toBeVisible({ timeout: 10_000 })
+
+    // Click-select fills the manual path field (the dialog's submit gate).
+    await childItem.click()
+    const pathInput = dialog.locator('wa-input[label="Project path"] input')
+    await expect(pathInput).toHaveValue(child, { timeout: 10_000 })
+
+    // Submit through the dialog footer; the project lands in the rail.
+    await dialog.locator('wa-button').filter({ hasText: 'Add project' }).click()
+    await expect
+      .poll(async () => (await listProjects(page.request)).some((p) => p.path === child), {
+        timeout: 10_000,
+        intervals: [200],
+      })
+      .toBe(true)
+    await expect(rail.projectRow(`pick-child-${t}`)).toBeVisible({ timeout: 10_000 })
+
+    // Cleanup: unregister and remove the fixture dirs.
+    await removeProject(page.request, child)
+    fs.rmSync(parent, { recursive: true, force: true })
+
+    expect(collector.clean()).toEqual([])
+  })
+
+  test('P2 empty path disables submit; missing path errors inline, dialog stays', async ({
+    page,
+  }) => {
+    const rail = new ProjectRail(page)
+
+    await resetState(page.request)
+    const before = (await listProjects(page.request)).length
+
+    await page.goto('/')
+    await expect(rail.host).toBeVisible()
+    await rail.openAddDialog()
+
+    const dialog = rail.addDialog()
+    const submit = dialog.locator('wa-button').filter({ hasText: 'Add project' })
+    // Empty path: the footer submit stays disabled, nothing can be sent.
+    await expect(submit).toBeDisabled()
+
+    // Missing path: server rejects, the rejection surfaces INSIDE the dialog
+    // (no close, no registry write).
+    const missing = path.join(sceneDir(), `no-such-dir-${Date.now()}`)
+    const pathInput = dialog.locator('wa-input[label="Project path"] input')
+    await pathInput.click()
+    await pathInput.pressSequentially(missing)
+    await expect(submit).toBeEnabled()
+    await submit.click()
+    // The rejection renders in the div right after the path field (the
+    // dialog's only inline-error slot — a bare `div` matcher would also hit
+    // its ancestors, so scope structurally).
+    const inlineError = dialog.locator('wa-input[label="Project path"] + div')
+    await expect(inlineError).toContainText('不存在', { timeout: 10_000 })
+    // The dialog is still open (heading visible) and the registry untouched.
+    await expect(
+      dialog.locator('h2, [role="heading"]', { hasText: 'Add project' }).first(),
+    ).toBeVisible()
+    expect((await listProjects(page.request)).length).toBe(before)
+
+    await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+
+    expect(collector.clean()).toEqual([])
+  })
+})
