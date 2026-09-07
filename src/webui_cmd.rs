@@ -235,6 +235,11 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         None => std::env::current_dir().ok(),
     };
 
+    // add-webui-allowed-roots：白名单由纯函数组装（与 core --webui 内嵌
+    // 形态同一语义：未配置 = 空表不启用；配置了 = 默认根自动入列）。
+    let webui_allowed_roots =
+        crate::config::webui_allowed_roots(&cfg.watchdog.webui, webui_work_root.as_deref());
+
     // Run the WebUI server. This blocks until the server stops.
     // fix-webui-detached-status：router 静态事实（listen/debug/has_auth 与
     // TOML 声明的 provider）与 in-process 形态同一装配，不再以
@@ -253,6 +258,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         admin_adapter,
         auth,
         webui_work_root,
+        webui_allowed_roots,
     )
     .await;
 

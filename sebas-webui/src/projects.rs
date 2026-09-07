@@ -261,6 +261,14 @@ pub fn probe_git_branch(repo: &Path) -> Option<String> {
     }
 }
 
+/// 测试专用：注册表 env（SEBAS_PROJECTS_PATH）的进程级串行锁句柄。
+/// server.rs 的 allowed_roots_tests 与本模块测试共用，防止并发测试在
+/// 彼此临界区内改写 env。
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    tests::test_env_lock()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +279,13 @@ mod tests {
     static TEST_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
         tempfile::tempdir().expect("create temp dir for tests")
     });
+
+    /// 进程级注册表 env（SEBAS_PROJECTS_PATH）的测试串行锁。server.rs 的
+    /// allowed_roots_tests 也走文件注册表降级路径，必须与本模块共用一把
+    /// 锁，否则并发测试会在彼此的临界区内改写 env。
+    pub(super) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn test_registry_path() -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
