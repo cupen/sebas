@@ -389,6 +389,7 @@ impl DispatchHandle {
                 MappingState::Active { session_id } => (session_id.as_str(), "active"),
                 MappingState::Spawning { .. } => ("(spawning)", "spawning"),
                 MappingState::Dormant { session_id } => (session_id.as_str(), "dormant"),
+                MappingState::SpawnFailed { .. } => ("(spawn-failed)", "failed"),
             };
             let thread = thread_label(&sk.reference);
             let ts = m.last_active_unix;

@@ -153,6 +153,9 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         .map(|e| CardElementView {
             element_type: match e.element_type.as_str() {
                 "thinking" => "thinking",
+                // fail-fast-on-startup-errors：spawn-failed 错误事件按原类型
+                // 透传，前端据此渲染带计数的错误气泡。
+                "error" => "error",
                 _ => "markdown",
             },
             content: e.content.clone(),

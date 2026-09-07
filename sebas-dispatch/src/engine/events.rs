@@ -129,6 +129,13 @@ impl TurnEntry {
         Self::new(position, "content", "thinking", content)
     }
 
+    /// spawn 失败等启动期错误条目（fail-fast-on-startup-errors 3.1）：
+    /// `kind = "error"` + `element_type = "error"`，前端据此渲染为带计数的
+    /// 错误气泡而非普通 markdown。
+    pub fn error(position: u64, content: impl Into<String>) -> Self {
+        Self::new(position, "error", "error", content)
+    }
+
     fn new(position: u64, kind: &str, element_type: &str, content: impl Into<String>) -> Self {
         Self {
             position,

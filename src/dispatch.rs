@@ -107,8 +107,12 @@ async fn handle_web_spawn(
     {
         Ok(v) => v,
         Err(e) => {
-            router.fail_spawn(&key).await;
+            // fail-fast-on-startup-errors 3.2：不再只 warn 吞错——失败原因
+            // 立即推进 transcript（错误事件 + spawn-failed 状态 + Updated），
+            // 触发者（webui 前端）当期可见，不延后到 Removed。
+            let reason = format!("{e}");
             warn!(?e, "web_spawn: acp_spawn_and_activate failed");
+            router.fail_spawn(&key, &reason).await;
             return Ok(());
         }
     };
@@ -158,8 +162,10 @@ async fn handle_spawn_resume_without_feishu(
     {
         Ok(v) => v,
         Err(e) => {
-            router.fail_spawn(&key).await;
+            // 同 web_spawn：resume 失败也即时进 transcript，不再静默拆除。
+            let reason = format!("resume failed: {e}");
             warn!(?e, %old_sid, "resume failed (feishu-less run; no card sent)");
+            router.fail_spawn(&key, &reason).await;
             return Ok(());
         }
     };

@@ -33,6 +33,9 @@ impl SessionStatus {
         match state {
             "spawning" => Self::Starting,
             "dormant" => Self::Dormant,
+            // fail-fast-on-startup-errors：spawn 失败的会话诚实呈现为 Failed
+            // （而非继续假装 Starting/Queued）。
+            "spawn-failed" => Self::Failed,
             // "active", plus any unknown state, falls through to the phase.
             _ => match phase {
                 "OnIt" => Self::Working,

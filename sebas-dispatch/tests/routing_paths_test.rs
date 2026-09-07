@@ -484,10 +484,10 @@ async fn insert_mapping_marks_alive_and_routes() {
 async fn fail_spawn_ignores_active_and_missing_entries() {
     let map = SessionMap::new();
     // 无条目：no-op 不 panic。
-    map.fail_spawn(&key()).await;
+    map.fail_spawn(&key(), "boom").await;
     // Active 条目：不动。
     map.insert(key(), Mapping::active("s1")).await.unwrap();
-    map.fail_spawn(&key()).await;
+    map.fail_spawn(&key(), "boom").await;
     assert_eq!(map.get(&key()).await.unwrap().session_id(), Some("s1"));
     // 不存在 session 的 lookup：None。
     assert!(map.lookup_key_by_session("ghost").await.is_none());

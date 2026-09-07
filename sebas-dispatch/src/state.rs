@@ -22,11 +22,27 @@ pub struct QueuedTurn {
 /// daemon restart — the session_id is known but no child process is alive.
 /// The first inbound text lazily respawns it (openspec/specs/session-lifecycle/spec.md); `Dormant` never
 /// appears at runtime except via `restore_json`.
+///
+/// fail-fast-on-startup-errors（webui spec delta）：spawn 失败的会话不再被
+/// 静默拆除（Removed），而是保留为 `SpawnFailed` 终态——会话在列表/详情里
+/// 保持可见、状态标记 spawn-failed，transcript 以合成 id 持有一条 inline
+/// 错误。`SpawnFailed` 同样不入盘。
 #[derive(Debug, Clone)]
 pub enum MappingState {
     Spawning { pending: Vec<String> },
     Active { session_id: String },
     Dormant { session_id: String },
+    /// spawn 失败终态。`session_id` 是 transcript 寻址用的合成 id（"failed-N"），
+    /// 不是 live 路由 id；`reason` 是触发方（dispatch）记录的失败原因。
+    SpawnFailed { session_id: String, reason: String },
+}
+
+/// SpawnFailed transcript 的合成 id 计数器（进程内唯一即可；不入盘）。
+static FAILED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_failed_id() -> String {
+    let n = FAILED_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("failed-{n}")
 }
 
 #[derive(Debug, Clone)]
@@ -146,13 +162,53 @@ impl Mapping {
         }
     }
 
+    /// spawn 失败的映射：保留为可见的 spawn-failed 行，并带一条 transcript
+    /// 错误的合成寻址 id（fail-fast-on-startup-errors 3.1）。
+    pub fn spawn_failed(reason: impl Into<String>) -> Self {
+        Self {
+            state: MappingState::SpawnFailed {
+                session_id: next_failed_id(),
+                reason: reason.into(),
+            },
+            last_active_unix: crate::engine::now_unix(),
+            project_dir: None,
+            pending_kind: None,
+            pending_model: None,
+            acp_session_id: None,
+            current_model: None,
+            available_models: None,
+        }
+    }
+
     /// Live routing id — `Some` only for `Active` (a child process exists).
     /// `Dormant` deliberately returns `None` so liveness checks
     /// (`session_alive`, button-callback routing) treat it as dead.
+    /// `SpawnFailed` likewise returns `None` — nothing is live.
     pub fn session_id(&self) -> Option<&str> {
         match &self.state {
             MappingState::Active { session_id } => Some(session_id),
+            MappingState::Spawning { .. }
+            | MappingState::Dormant { .. }
+            | MappingState::SpawnFailed { .. } => None,
+        }
+    }
+
+    /// Transcript 寻址 id：`Active` 用路由 id；`SpawnFailed` 用合成 id（错误
+    /// 条目挂在它下面）。其余状态没有可寻址的 transcript。
+    pub fn transcript_id(&self) -> Option<&str> {
+        match &self.state {
+            MappingState::Active { session_id } => Some(session_id),
+            MappingState::SpawnFailed { session_id, .. } => Some(session_id),
             MappingState::Spawning { .. } | MappingState::Dormant { .. } => None,
+        }
+    }
+
+    /// The spawn-failure reason, when this mapping is in the `SpawnFailed`
+    /// terminal state.
+    pub fn spawn_failed_reason(&self) -> Option<&str> {
+        match &self.state {
+            MappingState::SpawnFailed { reason, .. } => Some(reason),
+            _ => None,
         }
     }
 
@@ -163,7 +219,7 @@ impl Mapping {
             MappingState::Active { session_id } | MappingState::Dormant { session_id } => {
                 Some(session_id)
             }
-            MappingState::Spawning { .. } => None,
+            MappingState::Spawning { .. } | MappingState::SpawnFailed { .. } => None,
         }
     }
 }
@@ -249,6 +305,15 @@ impl SessionMap {
                             pending: Vec::new(),
                         };
                         Ok(TextRoute::Resume(old))
+                    }
+                    MappingState::SpawnFailed { .. } => {
+                        // spawn-failed 会话上的新消息 = 用户重试：清掉失败态、
+                        // 回到 Spawning 占位并重新走 spawn（旧错误条目保留在
+                        // 原 transcript 下作为历史，视图随新会话推进）。
+                        m.state = MappingState::Spawning {
+                            pending: Vec::new(),
+                        };
+                        Ok(TextRoute::SpawnNew)
                     }
                     MappingState::Spawning { pending } => {
                         if m.pending_kind.is_some() || m.pending_model.is_some() {
@@ -361,7 +426,9 @@ impl SessionMap {
                 std::mem::swap(&mut m.state, &mut next);
                 let pending = match next {
                     MappingState::Spawning { pending } => pending,
-                    MappingState::Active { .. } | MappingState::Dormant { .. } => Vec::new(),
+                    MappingState::Active { .. }
+                    | MappingState::Dormant { .. }
+                    | MappingState::SpawnFailed { .. } => Vec::new(),
                 };
                 m.acp_session_id = acp_session_id;
                 m.current_model = model.as_ref().map(|info| info.current.clone());
@@ -382,17 +449,26 @@ impl SessionMap {
         }
     }
 
-    /// Spawn failed: remove the placeholder (queued prompts drop with it).
-    /// Only touches Spawning entries — never an Active session.
-    pub async fn fail_spawn(&self, key: &ChannelKey) {
+    /// Spawn failed（fail-fast-on-startup-errors 3.1）：Spawning 占位不再被
+    /// 静默拆除，而是转为 `SpawnFailed` 终态——返回新映射的 transcript 合成
+    /// id，调用方在其下追加 inline 错误条目。只触碰 Spawning 占位——永不动
+    /// Active 会话；非 Spawning（含已失败/未知 key）返回 `None` 且无副作用。
+    pub async fn fail_spawn(&self, key: &ChannelKey, reason: &str) -> Option<String> {
         let mut g = self.inner.write().await;
         let is_spawning = matches!(
             g.get(key).map(|m| &m.state),
             Some(MappingState::Spawning { .. })
         );
-        if is_spawning {
-            g.remove(key);
+        if !is_spawning {
+            return None;
         }
+        let failed = Mapping::spawn_failed(reason);
+        let transcript_id = match &failed.state {
+            MappingState::SpawnFailed { session_id, .. } => session_id.clone(),
+            _ => unreachable!("spawn_failed constructs SpawnFailed"),
+        };
+        g.insert(key.clone(), failed);
+        Some(transcript_id)
     }
 
     pub async fn insert(&self, key: ChannelKey, mapping: Mapping) -> Result<(), DispatchError> {

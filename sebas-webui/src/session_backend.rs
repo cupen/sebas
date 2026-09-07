@@ -409,8 +409,10 @@ impl SessionBackend for InProcessBackend {
         prompt: String,
         project_dir: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        // web_spawn never fails structurally: the placeholder is inserted and
-        // the spawn failure surfaces as a Removed event later.
+        // fail-fast-on-startup-errors（webui spec delta）：spawn 失败不再
+        // "surface as a Removed event later"——dispatch 立即把错误事件推进
+        // transcript、会话标记 spawn-failed 并发布 Updated；Removed 只作为
+        // 后续显式关闭等状态变更的次要信号。
         Ok(self.router.web_spawn(prompt, project_dir, None, None).await)
     }
 

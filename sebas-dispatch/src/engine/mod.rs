@@ -420,6 +420,9 @@ impl DispatchHandle {
                 ("dormant", Some(session_id.clone()))
             }
             crate::state::MappingState::Spawning { .. } => ("spawning", None),
+            // fail-fast-on-startup-errors：spawn-failed 是对外可见的诚实状态
+            // （webui spec delta「会话状态 SHALL 标记为 spawn-failed」）。
+            crate::state::MappingState::SpawnFailed { .. } => ("spawn-failed", None),
         };
         let (phase, user_prompt, usage) = match session_id.as_ref() {
             Some(sid) => match self.card_states.snapshot(sid).await {
@@ -450,14 +453,16 @@ impl DispatchHandle {
     /// The session's transcript after `from` (monotonic positions).
     /// `None` when no mapping exists for `key`; a session without a
     /// transcript (Spawning, or no content yet) yields an empty vec.
+    /// SpawnFailed 会话经合成 id 返回其错误条目（3.1：inline 错误可读）。
     pub async fn session_turns(&self, key: &ChannelKey, from: u64) -> Option<Vec<TurnEntry>> {
         let m = self.map.get(key).await?;
-        let Some(sid) = m.session_id() else {
+        let Some(sid) = m.transcript_id() else {
             return Some(Vec::new());
         };
+        let sid = sid.to_string();
         let g = self.turn_log.read().await;
         Some(
-            g.get(sid)
+            g.get(&sid)
                 .map(|log| log.iter().filter(|e| e.position >= from).cloned().collect())
                 .unwrap_or_default(),
         )
@@ -999,19 +1004,26 @@ impl DispatchHandle {
         }
     }
 
-    /// Spawn failed/timeout: remove the Spawning placeholder for `key`.
-    pub async fn fail_spawn(&self, key: &ChannelKey) {
-        // Only publish when a placeholder was actually removed — fail_spawn
-        // is a no-op for Active/Dormant mappings.
+    /// Spawn failed/timeout（fail-fast-on-startup-errors 3.1/3.2）：占位
+    /// 不再拆除、不发 Removed——会话转为 spawn-failed 终态（保持可见），
+    /// transcript 立即追加一条带原因的错误事件，并发布 Updated 让前端即时
+    /// 呈现。Removed 事件不再是 spawn failure 的首次呈现路径。
+    pub async fn fail_spawn(&self, key: &ChannelKey, reason: &str) {
+        // Only publish when a placeholder was actually transitioned —
+        // fail_spawn is a no-op for Active/Dormant/failed mappings.
         let was_spawning = self
             .map
             .get(key)
             .await
             .map(|m| matches!(m.state, crate::state::MappingState::Spawning { .. }))
             .unwrap_or(false);
-        self.map.fail_spawn(key).await;
+        let transcript_id = self.map.fail_spawn(key, reason).await;
         if was_spawning {
-            self.publish_removed(key);
+            if let Some(tid) = transcript_id {
+                let entry = TurnEntry::error(0, format!("**spawn failed**: {reason}"));
+                self.transcript_push(&tid, entry).await;
+            }
+            self.publish_updated(key).await;
         }
     }
 

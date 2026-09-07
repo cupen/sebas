@@ -38,6 +38,61 @@ const NEAR_BOTTOM_PX = 80
 const MARK_SEEN_DEBOUNCE_MS = 250
 
 /**
+ * Window (in unix seconds) within which consecutive identical error entries
+ * (fail-fast-on-startup-errors: repeated spawn failures) merge into a single
+ * counted bubble instead of flooding the transcript. "相邻 N 秒内的同类失败
+ * 事件合并为一条带计数的错误" — adjacency is measured between consecutive
+ * error entries, and only identical content merges.
+ */
+export const ERROR_MERGE_WINDOW_SECS = 10
+
+/** A transcript entry possibly carrying a merge count (errors only). */
+export type ErrorCountedView = CardElementView & { count?: number }
+
+/**
+ * Merge runs of identical `element_type === 'error'` entries that arrive
+ * within {@link ERROR_MERGE_WINDOW_SECS} of each other into one entry with a
+ * `count`. The merged entry keeps the FIRST timestamp of its run — that is
+ * the stable identity the seen-boundary seam anchors to. Non-error entries
+ * and non-adjacent errors pass through untouched.
+ */
+export function mergeSpawnErrors(entries: CardElementView[]): ErrorCountedView[] {
+  const out: ErrorCountedView[] = []
+  // State of the current adjacent run: last error ts + content, and the
+  // merged entry the run is counting into.
+  let lastErrTs = 0
+  let lastErrContent: string | null = null
+  let runEntry: ErrorCountedView | null = null
+  for (const e of entries) {
+    if (e.element_type !== 'error') {
+      out.push({ ...e })
+      lastErrTs = 0
+      lastErrContent = null
+      runEntry = null
+      continue
+    }
+    const canMerge =
+      runEntry !== null &&
+      lastErrContent === e.content &&
+      lastErrTs > 0 &&
+      e.created_at_unix > 0 &&
+      e.created_at_unix >= lastErrTs &&
+      e.created_at_unix - lastErrTs <= ERROR_MERGE_WINDOW_SECS
+    if (canMerge && runEntry) {
+      runEntry.count = (runEntry.count ?? 1) + 1
+      lastErrTs = e.created_at_unix
+      continue
+    }
+    const copy: ErrorCountedView = { ...e, count: 1 }
+    out.push(copy)
+    runEntry = copy
+    lastErrTs = e.created_at_unix
+    lastErrContent = e.content
+  }
+  return out
+}
+
+/**
  * Render a unix-seconds timestamp into the format dictated by the spec:
  *   - today          → HH:MM:SS
  *   - this year      → MM-DD HH:MM
@@ -94,6 +149,11 @@ export class SebasTranscriptView extends LitElement {
   @state() private unseenCount = 0
   /** Index of the first unseen entry; null when everything is seen. */
   @state() private seamIndex: number | null = 0
+  /**
+   * fail-fast-on-startup-errors 3.3：渲染管线输入——相邻同类错误条目合并
+   * 后的视图列表（seam/滚动/渲染都以此为准，合并后索引保持一致）。
+   */
+  @state() private renderEntries: ErrorCountedView[] = []
 
   /** Debounce timer for mark-as-seen writes. */
   private markSeenTimer: number | null = null
@@ -215,6 +275,25 @@ export class SebasTranscriptView extends LitElement {
       background: var(--sebas-accent-soft);
       color: var(--sebas-accent);
       border-color: transparent;
+    }
+    /* fail-fast-on-startup-errors 3.3：spawn-failed 错误气泡——failed 色
+       系（callout-error 同源 token），! 头像 + 计数徽标。 */
+    .turn-block .avatar.error {
+      background: var(--sebas-status-failed-bg, #fee2e2);
+      color: var(--sebas-status-failed, #b91c1c);
+      border-color: transparent;
+    }
+    .turn-block .bubble.error {
+      background: var(--sebas-status-failed-bg, #fee2e2);
+      border-color: var(--sebas-status-failed-border, #fecaca);
+    }
+    .turn-block .meta .author.error,
+    .turn-block .meta .count {
+      color: var(--sebas-status-failed, #b91c1c);
+    }
+    .turn-block .meta .count {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
     }
     .turn-block .bubble {
       flex: 1;
@@ -371,7 +450,10 @@ export class SebasTranscriptView extends LitElement {
   }
 
   protected willUpdate(changed: Map<string, unknown>): void {
-    if (changed.has('entries') || changed.has('sessionKey')) this.recomputeSeam()
+    if (changed.has('entries') || changed.has('sessionKey')) {
+      this.renderEntries = mergeSpawnErrors(this.entries)
+      this.recomputeSeam()
+    }
   }
 
   protected updated(changed: Map<string, unknown>): void {
@@ -433,7 +515,7 @@ export class SebasTranscriptView extends LitElement {
    */
   private recomputeSeam(): void {
     const seen = this.readSeen()
-    const ts = this.entries.map((e) => e.created_at_unix || 0)
+    const ts = this.renderEntries.map((e) => e.created_at_unix || 0)
     if (ts.length === 0) {
       this.seamIndex = null
       this.unseenCount = 0
@@ -446,20 +528,20 @@ export class SebasTranscriptView extends LitElement {
       this.unseenCount = 0
       return
     }
-    const idx = this.entries.findIndex((e) => (e.created_at_unix || 0) > seen)
+    const idx = this.renderEntries.findIndex((e) => (e.created_at_unix || 0) > seen)
     if (idx === -1) {
       this.seamIndex = null
       this.unseenCount = 0
     } else {
       this.seamIndex = idx
-      this.unseenCount = this.entries.length - idx
+      this.unseenCount = this.renderEntries.length - idx
     }
   }
 
   // ---- mark-all-seen ----------------------------------------------------
 
   private markAllSeen = (): void => {
-    const ts = this.entries.map((e) => e.created_at_unix || 0)
+    const ts = this.renderEntries.map((e) => e.created_at_unix || 0)
     const max = ts.length === 0 ? 0 : ts.reduce((a, b) => (b > a ? b : a), 0)
     this.writeSeen(max)
     this.seamIndex = null
@@ -500,7 +582,7 @@ export class SebasTranscriptView extends LitElement {
 
   /** Push the seen-boundary forward to the newest rendered entry. */
   private commitMarkSeen(): void {
-    const ts = this.entries.map((e) => e.created_at_unix || 0)
+    const ts = this.renderEntries.map((e) => e.created_at_unix || 0)
     if (ts.length === 0) return
     const max = ts.reduce((a, b) => (b > a ? b : a), 0)
     if (max > this.readSeen()) {
@@ -550,18 +632,37 @@ export class SebasTranscriptView extends LitElement {
     return html`
       <div class="scroll" role="log" aria-label="Session transcript">
         ${showSeam
-          ? this.entries.map((e, i) =>
+          ? this.renderEntries.map((e, i) =>
               i === this.seamIndex ? html`${seam}${this.renderEntry(e)}` : this.renderEntry(e),
             )
-          : html`${seam}${this.entries.map((e) => this.renderEntry(e))}`}
+          : html`${seam}${this.renderEntries.map((e) => this.renderEntry(e))}`}
       </div>
     `
   }
 
-  private renderEntry(e: CardElementView) {
+  private renderEntry(e: ErrorCountedView) {
     if (!e.content) return nothing
     const iso = isoTime(e.created_at_unix)
     const ts = formatTime(e.created_at_unix)
+    if (e.element_type === 'error') {
+      // fail-fast-on-startup-errors 3.3：spawn-failed 等错误事件渲染为独立
+      // 错误气泡（failed 色 + "!" 头像）；相邻同类合并后 count>1 时带 ×N
+      // 计数，不再整屏刷重复错误。
+      const count = e.count ?? 1
+      return html`
+        <div class="turn-block is-error" data-error-count=${count}>
+          <div class="avatar error">!</div>
+          <div class="bubble error">
+            <div class="meta">
+              <span class="author error">spawn failed</span>
+              ${count > 1 ? html`<span class="count">×${count}</span>` : nothing}
+              <time class="time" datetime=${iso || nothing}>${ts}</time>
+            </div>
+            <div class="body">${unsafeHTML(renderMarkdown(e.content))}</div>
+          </div>
+        </div>
+      `
+    }
     if (e.element_type === 'thinking') {
       // thinking 仍走 details 折叠，但整块搬进 assistant 气泡：meta 行
       // 照常（作者 + 时间），折叠行用预览稿 work-group 出血条样式。

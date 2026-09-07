@@ -59,11 +59,29 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
 }
 
 #[tokio::test]
-async fn fail_spawn_removes_placeholder() {
+async fn fail_spawn_keeps_session_visible_as_spawn_failed() {
+    // fail-fast-on-startup-errors 3.1：占位不再被移除，而是转为 spawn-failed
+    // 终态——会话保持可见、带失败原因，transcript 经合成 id 可读。
     let map = SessionMap::new();
     map.route_text(key(), "m".into()).await.expect("route_text");
-    map.fail_spawn(&key()).await;
-    assert!(map.get(&key()).await.is_none());
+    let transcript_id = map
+        .fail_spawn(&key(), "agent binary missing")
+        .await
+        .expect("spawning placeholder must transition");
+    let m = map.get(&key()).await.expect("mapping kept");
+    assert!(m.session_id().is_none(), "spawn-failed 不是 live 会话");
+    assert_eq!(
+        m.spawn_failed_reason(),
+        Some("agent binary missing"),
+        "失败原因随映射保留"
+    );
+    // transcript_id 与映射内合成 id 一致（engine 用它挂错误条目）。
+    match &m.state {
+        sebas_dispatch::state::MappingState::SpawnFailed { session_id, .. } => {
+            assert_eq!(*session_id, transcript_id);
+        }
+        other => panic!("expected SpawnFailed, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -210,4 +228,47 @@ async fn placeholder_replaces_active_and_keeps_pending_kind() {
         "replaced placeholder must spawn on first message, not enqueue"
     );
     let _ = router;
+}
+
+/// fail-fast-on-startup-errors 3.1：spawn 失败即时内显——会话保留为
+/// spawn-failed（不再 Removed），transcript 出现带原因的 error 事件，
+/// 事件流发布的是 Updated 而非 Removed。
+#[tokio::test]
+async fn fail_spawn_surfaces_error_inline_and_keeps_session_visible() {
+    let map = SessionMap::new();
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
+
+    // webui 建会话：占位插入（Created）。
+    let key = router.web_spawn("hello".into(), None, None, None).await;
+
+    // spawn 失败：dispatch 以失败原因回调。
+    router.fail_spawn(&key, "agent binary missing").await;
+
+    // 会话仍在列表里，状态诚实标记 spawn-failed。
+    let infos = router.session_info_snapshot().await;
+    let info = infos.iter().find(|i| i.key == key.reference).expect("session kept");
+    assert_eq!(info.status, "spawn-failed");
+    assert!(info.session_id.is_none());
+
+    // transcript 经合成 id 可读：一条带原因的 error 事件。
+    let turns = router.session_turns(&key, 0).await.expect("turns readable");
+    let errors: Vec<_> = turns.iter().filter(|e| e.kind == "error").collect();
+    assert_eq!(errors.len(), 1, "exactly one error entry: {turns:?}");
+    assert!(errors[0].element_type == "error");
+    assert!(
+        errors[0].content.contains("spawn failed") && errors[0].content.contains("agent binary missing"),
+        "error carries the reason: {}",
+        errors[0].content
+    );
+
+    // 事件流的首次呈现是 Updated（会话保持存在），不是 Removed。
+    let mut events = router.subscribe_session_events();
+    router.fail_spawn(&key, "second failure must be a no-op").await;
+    let mut saw_removed = false;
+    while let Ok(ev) = events.try_recv() {
+        if matches!(ev, sebas_dispatch::SessionEvent::Removed { .. }) {
+            saw_removed = true;
+        }
+    }
+    assert!(!saw_removed, "spawn failure must not publish Removed");
 }

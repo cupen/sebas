@@ -22,6 +22,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { CardElementView } from '../api/client.js'
+import { ERROR_MERGE_WINDOW_SECS, mergeSpawnErrors } from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
 
 // ---- localStorage polyfill --------------------------------------------
@@ -232,5 +233,85 @@ describe('sebas-transcript-view', () => {
     expect(styleText).toMatch(/:host\(\[fill\]\)\s*\{[^}]*flex:\s*1/)
     expect(styleText).toMatch(/:host\(\[fill\]\)[\s\S]*max-height:\s*none/)
     expect(el.shadowRoot!.querySelector<HTMLElement>('.scroll') === scroll).toBe(true)
+  })
+
+  // ---- fail-fast-on-startup-errors 3.3：spawn-failed 错误事件渲染 ----
+
+  const SPAWN_ERR = '**spawn failed**: agent binary missing'
+
+  function errEntry(at: number, content = SPAWN_ERR): CardElementView {
+    return { element_type: 'error', content, created_at_unix: at }
+  }
+
+  it('renders an error entry as a counted error bubble, not an assistant bubble', async () => {
+    const el = await mount({ entries: [errEntry(FIXED_DATES.T1)] })
+    const block = el.shadowRoot?.querySelector<HTMLElement>('.turn-block.is-error')
+    expect(block).not.toBeNull()
+    expect(block?.getAttribute('data-error-count')).toBe('1')
+    // 作者标签 + 内容都在。
+    expect(block?.textContent).toContain('spawn failed')
+    expect(block?.textContent).toContain('agent binary missing')
+    // 不带 ×N 徽标（单条）。
+    expect(block?.querySelector('.meta .count')).toBeNull()
+  })
+
+  it('merges adjacent identical errors within the window into one counted entry', async () => {
+    const el = await mount({
+      entries: [errEntry(FIXED_DATES.T1), errEntry(FIXED_DATES.T1 + ERROR_MERGE_WINDOW_SECS - 1)],
+    })
+    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-error')
+    expect(blocks?.length).toBe(1, '窗口内同类失败合并为一条')
+    expect(blocks?.[0]?.getAttribute('data-error-count')).toBe('2')
+    expect(blocks?.[0]?.querySelector<HTMLElement>('.meta .count')?.textContent?.trim()).toBe(
+      '×2',
+    )
+  })
+
+  it('keeps identical errors outside the window as separate entries', async () => {
+    const el = await mount({
+      entries: [errEntry(FIXED_DATES.T1), errEntry(FIXED_DATES.T1 + ERROR_MERGE_WINDOW_SECS + 1)],
+    })
+    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-error')
+    expect(blocks?.length).toBe(2, '窗口外不合并')
+    for (const b of blocks ?? []) {
+      expect(b.getAttribute('data-error-count')).toBe('1')
+    }
+  })
+
+  it('does not merge errors with different reasons', async () => {
+    const el = await mount({
+      entries: [errEntry(FIXED_DATES.T1), errEntry(FIXED_DATES.T1 + 1, 'other reason')],
+    })
+    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-error')
+    expect(blocks?.length).toBe(2)
+  })
+
+  it('mergeSpawnErrors: pure-function merge/non-merge/non-error-reset branches', () => {
+    const A = 'err-a'
+    // 三条相邻同类（间隔 5s）→ 合并为一条 count=3，ts 取首条（seam 锚定稳定）。
+    const merged = mergeSpawnErrors([
+      errEntry(100, A),
+      errEntry(105, A),
+      errEntry(110, A),
+    ])
+    expect(merged.length).toBe(1)
+    expect(merged[0].count).toBe(3)
+    expect(merged[0].created_at_unix).toBe(100)
+    // 间隔超窗 → 各自成条。
+    const split = mergeSpawnErrors([errEntry(100, A), errEntry(100 + ERROR_MERGE_WINDOW_SECS + 1, A)])
+    expect(split.length).toBe(2)
+    expect(split.every((e) => e.count === 1)).toBe(true)
+    // 中间插入普通条目 → 重置相邻性，不跨条目合并。
+    const reset = mergeSpawnErrors([
+      errEntry(100, A),
+      { element_type: 'markdown', content: 'x', created_at_unix: 101 },
+      errEntry(102, A),
+    ])
+    expect(reset.length).toBe(3)
+    expect(reset.filter((e) => e.element_type === 'error').every((e) => e.count === 1)).toBe(true)
+    // 非 error 条目原样透传（无 count 字段）。
+    const plain = mergeSpawnErrors(makeEntries())
+    expect(plain.length).toBe(3)
+    expect(plain.every((e) => e.count === undefined)).toBe(true)
   })
 })

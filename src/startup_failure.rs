@@ -83,10 +83,10 @@ pub fn read_env_summary() -> Option<String> {
 /// 成功达到 ready 后清除摘要闩锁（删除错误文件）。失败静默——文件只是
 /// 诊断辅助，不是状态真源。
 pub fn clear_env_summary_file() {
-    if let Some(path) = std::env::var_os(SUMMARY_FILE_ENV) {
-        if !path.is_empty() {
-            let _ = std::fs::remove_file(std::path::PathBuf::from(&path));
-        }
+    if let Some(path) = std::env::var_os(SUMMARY_FILE_ENV)
+        && !path.is_empty()
+    {
+        let _ = std::fs::remove_file(std::path::PathBuf::from(&path));
     }
 }
 
