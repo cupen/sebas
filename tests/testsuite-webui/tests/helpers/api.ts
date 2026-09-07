@@ -86,10 +86,17 @@ export async function getSession(
 
 export async function createSession(
   request: APIRequestContext,
-  opts: { prompt: string; projectDir?: string | null } = { prompt: 'hello' },
+  opts: { prompt: string; projectDir?: string | null; backend?: string } = { prompt: 'hello' },
 ): Promise<string> {
   const resp = await request.post('/api/sessions', {
-    data: { prompt: opts.prompt ?? null, project_dir: opts.projectDir ?? null, backend: 'acp' },
+    data: {
+      prompt: opts.prompt ?? null,
+      project_dir: opts.projectDir ?? null,
+      // `backend` rides through to the spawn: `acp` is the default driver,
+      // `acp:<slug>` pins a configured kind. fail-fast-on-startup-errors
+      // journeys pass an unknown slug to force a spawn failure inline.
+      backend: opts.backend ?? 'acp',
+    },
   })
   if (!resp.ok()) throw new Error(`createSession failed: HTTP ${resp.status()}`)
   const { key } = (await resp.json()) as { key: string }

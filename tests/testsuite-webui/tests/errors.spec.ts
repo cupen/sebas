@@ -18,6 +18,7 @@ import {
   getSession,
   listSessions,
   SessionDetailPage,
+  Transcript,
   waitStatus,
 } from './helpers/index'
 
@@ -83,6 +84,55 @@ test.describe('agent 对话覆盖', () => {
           { timeout: 10_000, intervals: [200] },
         )
         .toBe(false)
+
+      expect(collector.clean()).toEqual([])
+    })
+  })
+
+  test.describe('spawn 失败内显', () => {
+    /**
+     * fail-fast-on-startup-errors（openspec/changes/fail-fast-on-startup-errors
+     * 任务 4.1）：为一个未知 acp kind（`acp:missing-agent`）创建会话 → spawn
+     * 必然失败。webui 合同：spawn failure SHALL 立即 inline 到 transcript
+     * （错误事件带原因），会话状态标记 spawn-failed 且保持可见——Removed
+     * 不再是失败的首现路径，会话也不得凭空消失。
+     */
+    test('spawn failure inline: error event in transcript, session stays as spawn-failed', async ({
+      page,
+      request,
+    }) => {
+      const detail = new SessionDetailPage(page)
+
+      // 触发器：未知 agent kind → acp 驱动拒绝 spawn。
+      const key = await createSession(request, {
+        prompt: 'spawnfail probe',
+        backend: 'acp:missing-agent',
+      })
+
+      // API 真源：会话收敛到 spawn-failed（Failed），带 error 元素的
+      // transcript（原因内显），且 detail 仍然 200（未被拆除）。
+      const converged = await waitStatus(request, key, ['failed'], 60_000)
+      expect(converged.status_slug).toBe('failed')
+      const errorBlocks = converged.body.filter((b) => b.element_type === 'error')
+      expect(errorBlocks.length).toBeGreaterThanOrEqual(1)
+      expect(errorBlocks[0].content).toContain('spawn failed')
+      expect(errorBlocks[0].content).toContain('missing-agent')
+
+      // 会话未从列表消失（Removed 不是首现路径）。
+      const rows = await listSessions(request)
+      expect(rows.some((r) => r.encoded_key === key)).toBe(true)
+
+      // 浏览器呈现：详情页真实渲染（非 404 callout），transcript 内显错误
+      // 气泡，状态徽章为 failed。
+      await page.goto(`/sessions/${key}`)
+      await expect(detail.host).toBeVisible()
+      await expect(detail.errorCallout).toHaveCount(0)
+      const transcript = new Transcript(page)
+      await expect(transcript.turnWith('spawn failed').first()).toBeVisible({
+        timeout: 10_000,
+      })
+      await expect(transcript.turnWith('missing-agent').first()).toBeVisible()
+      await expect(detail.statusBadge).toHaveAttribute('slug', 'failed')
 
       expect(collector.clean()).toEqual([])
     })

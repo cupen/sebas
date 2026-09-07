@@ -129,8 +129,8 @@
 | agent-core | ✅ | sebas-agent 91 项内联测试（policy/tools/turn loop/budgets/streaming）|
 | agent-driver | ✅ | sebas-webui `agent_kinds_test`、src `agent_backend` 内联测试 |
 | channels | ✅ | sebas-channels crate 测试 |
-| cli-service | ✅ | `config_test`、`config_env_test`、`daemon_path_repro_test`、src `cli` 内联测试 |
-| core-session-channel | ✅ | src `core_channel/tests.rs`（协议往返/双路由/密钥）；E: startup/reachability/wrong-secret/restart（`testsuite_e2e_test`）|
+| cli-service | ✅ | `config_test`、`config_env_test`、`daemon_path_repro_test`、src `cli` 内联测试；E: startup_failure（fail-fast-on-startup-errors：garbage config → 退出码 75 + stderr 末行 `startup-failure:` 摘要 + `SEBAS_STARTUP_ERROR_FILE`，core 与 run 双形态，`testsuite_e2e_test`）|
+| core-session-channel | ✅ | src `core_channel/tests.rs`（协议往返/双路由/密钥）；E: startup/reachability/wrong-secret/restart + startup_failure 75 契约（`testsuite_e2e_test`）|
 | feishu-bridge | 🚫+✅ | 真实 WS/HTTP 传输豁免（需真实凭据）；进程内注入面 ✅（`feishu_native_webui_test`、ws_loop 内联测试）|
 | feishu-cards | ✅+🚫 | 卡模型/流式节流/轮转 ✅（`card_stream_e2e_test`、sebas-feishu 内联）；飞书端渲染 🚫 豁免 |
 | feishu-option | ✅ | `feishu_native_webui_test`、config 测试 |
@@ -149,8 +149,8 @@
 | session-lifecycle | ✅ | 见核心簇① |
 | session-persistence | ✅ | 见核心簇① |
 | state-store | ✅ | 见核心簇④ |
-| watchdog | ✅+⚠️ | src `watchdog.rs`/`upgrade.rs` 内联测试、`upgrade_dev_test`；监督循环的进程级旅程 ⚠️（非阻塞）|
-| webui | ✅ | sebas-webui 全套端点测试；E: detached 双进程启动/健康/重连（`testsuite_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，见下）|
+| watchdog | ✅+⚠️ | src `watchdog.rs`/`upgrade.rs` 内联测试、`upgrade_dev_test`；fail-fast-on-startup-errors：spawn 失败终态策略单测（N=1/3/10 边界、ready 清零、early-fatal 计入、post-ready 崩溃不计入、rollback 失败终态化）、E: startup_failure 75 契约；watchdog「连续 3 次 spawn fail → 整体退出 75」进程级旅程 ⚠️（非阻塞，真实二进制下 current_exe spawn 无法注入失败——见缺口清单 3）|
+| webui | ✅ | sebas-webui 全套端点测试；E: detached 双进程启动/健康/重连（`testsuite_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，含 web_spawn 失败内显，见下）|
 
 ### testsuite-webui-browser（非核心：浏览器级 UI 旅程，Playwright）
 
@@ -175,6 +175,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
 | agent 对话覆盖 | 错误诚实呈现 | crash — honest death: not-found presentation, no fake success | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors） |
 | 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
 | 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
 | 审批卡片旅程 | 会话级允许 | allow-session path — observed product gap: the follow-up call is gated again | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
@@ -225,7 +226,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 
 1. **detached 审批通道旅程**（permission-flow / agent-workbench）：审批事件经核心通道推送到 detached webui 的接线属进行中的 `wire-webui-sebas-agent-e2e` 任务 1.3；落地后补 `allow / deny` 两条旅程。既有进程内审批测试当前作为命中证据。
 2. **项目视图工作副本上下文**（agent-workbench）：`projects_branch` 端点无端点测试/旅程。
-3. **watchdog 监督循环进程级旅程**（watchdog）：崩溃退避/自动回滚仅有单元面；进程级需 watchdog 双进程沙箱（后续扩展 `support::Sandbox`）。
+3. **watchdog 监督循环进程级旅程**（watchdog）：崩溃退避/自动回滚仅有单元面；进程级需 watchdog 双进程沙箱（后续扩展 `support::Sandbox`）。fail-fast-on-startup-errors 已补齐可达部分：spawn 失败终态策略（N 边界/清零/early-fatal 计入）为 supervisor 单测、启动失败 75 契约为进程级 e2e（`startup_failure_*`）；「受管服务连续 3 次 spawn fail → watchdog 整体退出 75」仍缺进程级注入手段——spawner 用 `current_exe()` 派生子进程，真实二进制下 spawn 系统调用无法失败，早期退出又全部收敛为退出码 75（Degraded 语义）或 crash 退避（计数清零），故保留单元面覆盖（fake spawner 直驱监督循环 + 终态事件通道）。
 4. **record/replay 独立旅程**（replay-debug）：既有 `record_test`/`replay_test` 命中；端到端旅程待补。
 
 ## 实施期发现（只记录不顺手修，见 design Non-goals）
@@ -236,3 +237,10 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。
 5. **restore 不复活会话**（二期浏览器旅程发现）：`archive` 先 close（mapping + transcript 丢弃），`restore` 只删归档条目；恢复后详情页如实 404（`sessions.spec.ts` 2.2 已按此诚实语义断言）。与 project-session-actions「History 点击恢复可写」条文不一致，产品语义变更另立项。
 6. **无模型会话 set_model 是终态杀伤**（二期浏览器旅程发现）：webui 只投递（200 ok），Claude 驱动以终态 Error 应答 SetModel，会话被拆除（`models.spec.ts` 3.2 已按终态诚实断言）。正向模型切换需驱动模型面（configOptions 透出 + ModelChanged），待另立项。
+7. **sebas-agent 内联测试环境依赖**（fail-fast-on-startup-errors 实施期发现）：`cargo test -p sebas-agent` 在 Windows Git Bash 环境下 17 项失败（tools::bash / tools::search / loop_ 等，依赖 POSIX shell 语义）；清理树同样失败（71 passed / 17 failed 前后一致），与 change 无关，属环境缺口。同批发现 `card_stream_e2e_test` 在并行负载下偶发 5s deadline 超时（隔离运行稳定通过）。
+
+## 变更账本（core-set 增删与能力面变更说明）
+
+| 日期 | change | commit | 说明 |
+|---|---|---|---|
+| 2026-09-07 | fail-fast-on-startup-errors | `feat/fail-fast-startup-errors`（2e4d952 起，5.3 收尾 commit 为该分支末端） | 启动失败 fail-fast 规约：生命周期子命令启动失败统一退出码 75 + stderr 末行 `startup-failure:` 摘要 + `SEBAS_STARTUP_ERROR_FILE` 覆盖写；watchdog `[watchdog] max_spawn_failures`（默认 3）→ 服务终态 `failed-startup` + watchdog 整体退出 75；rollback 失败不再 silently continue；`sebas ctl status` 新增 `startup_failure` 摘要、`/api/summary` 的 `reachability.cause` 富化；webui web_spawn 失败 inline 进 transcript（spawn-failed 状态 + error 事件 + 相邻同类合并计数）。证据：E `startup_failure_core/run`（`testsuite_e2e_test`）、browser「spawn 失败内显」（`errors.spec.ts`）、supervisor 终态策略/`SpawnFailurePolicy` 单测。实施清单为本期 `tasks.md`。 |

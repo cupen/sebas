@@ -252,3 +252,91 @@ async fn graceful_exit_removes_channel_socket() {
         "session state must be dumped on graceful exit"
     );
 }
+
+/// fail-fast-on-startup-errors（tasks 2.3/4.2）：`sebas core` 对 garbage
+/// 配置在 ready 之前 fatal —— 进程以 EX_TEMPFAIL (75) 退出，stderr 最后一
+/// 行是 `startup-failure: <原因>` 摘要，且 `SEBAS_STARTUP_ERROR_FILE`（若
+/// 设置）被覆盖写入同一行。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn startup_failure_core_exits_75_with_summary() {
+    let sb = Sandbox::new("testsuite_e2e", "startup-failure-core");
+    // 覆写为 garbage 配置：TOML 解析必败 → ready 前 fatal。
+    std::fs::write(&sb.config_path, "not [ valid toml").expect("write garbage config");
+    let error_file = sb.path.join("startup-error.log");
+    let ef = support::forward_slash(&error_file);
+    let cfg = support::forward_slash(&sb.config_path);
+
+    let mut child = sb.spawn(
+        &["core", "-c", &cfg],
+        &sb.core_secret,
+        &[("SEBAS_STARTUP_ERROR_FILE", &ef)],
+        &sb.core_log,
+    );
+    let status = child.wait().await.expect("wait sebas core");
+    assert_eq!(
+        status.code(),
+        Some(sebas::startup_failure::EXIT_STARTUP_FAILURE),
+        "startup failure must exit 75 (EX_TEMPFAIL), got {status}"
+    );
+
+    // stderr 最后一行 = 摘要（单行，前缀固定）。
+    let log = std::fs::read_to_string(&sb.core_log).expect("read core log (stderr)");
+    let last = log
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("stderr not empty");
+    assert!(
+        last.starts_with("startup-failure: "),
+        "last stderr line must be the startup-failure summary, got: {last:?}"
+    );
+
+    // 错误摘要文件与 stderr 末行携带同一摘要。
+    let file = std::fs::read_to_string(&error_file)
+        .expect("SEBAS_STARTUP_ERROR_FILE must be written (overwrite)");
+    assert_eq!(
+        file.trim(),
+        last.trim(),
+        "error file must carry the same single-line summary as the stderr tail"
+    );
+}
+
+/// fail-fast-on-startup-errors（tasks 2.3/4.2）：watchdog 形态（`sebas run`）
+/// 对 garbage 配置同样在自身启动阶段 fatal → 75 + 摘要（config 解析发生在
+/// watchdog 进程内、任何子进程 spawn 之前）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn startup_failure_run_exits_75_with_summary() {
+    let sb = Sandbox::new("testsuite_e2e", "startup-failure-run");
+    std::fs::write(&sb.config_path, "not [ valid toml").expect("write garbage config");
+    let error_file = sb.path.join("startup-error.log");
+    let ef = support::forward_slash(&error_file);
+    let cfg = support::forward_slash(&sb.config_path);
+
+    let mut child = sb.spawn(
+        &["run", "-c", &cfg],
+        &sb.core_secret,
+        &[("SEBAS_STARTUP_ERROR_FILE", &ef)],
+        &sb.core_log,
+    );
+    let status = child.wait().await.expect("wait sebas run");
+    assert_eq!(
+        status.code(),
+        Some(sebas::startup_failure::EXIT_STARTUP_FAILURE),
+        "watchdog startup failure must exit 75, got {status}"
+    );
+
+    let log = std::fs::read_to_string(&sb.core_log).expect("read run log (stderr)");
+    let last = log
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("stderr not empty");
+    assert!(
+        last.starts_with("startup-failure: "),
+        "last stderr line must be the startup-failure summary, got: {last:?}"
+    );
+    let file = std::fs::read_to_string(&error_file).expect("startup error file written");
+    assert_eq!(file.trim(), last.trim());
+}

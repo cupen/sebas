@@ -24,9 +24,12 @@ pub const SUMMARY_PREFIX: &str = "startup-failure: ";
 /// `SEBAS_STARTUP_ERROR_FILE`：设置了就把摘要行覆盖写入该文件。
 pub const SUMMARY_FILE_ENV: &str = "SEBAS_STARTUP_ERROR_FILE";
 
-/// 组装摘要行：`startup-failure: <cause>`。
+/// 组装摘要行：`startup-failure: <cause>`。cause 压成单行（换行 → "; "）：
+/// stderr「最后一行」契约要求摘要必须独占一行——toml 解析错误等多行原因
+/// 否则会把摘要行切碎，触发者读到的末行只是原因的尾巴。
 pub fn summary_line(cause: &str) -> String {
-    format!("{SUMMARY_PREFIX}{cause}")
+    let flat = cause.replace(['\r', '\n'], "; ");
+    format!("{SUMMARY_PREFIX}{flat}")
 }
 
 /// 打印摘要行到 stderr（约定为该进程 stderr 的最后一行——调用方应先输出

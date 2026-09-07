@@ -172,7 +172,7 @@ impl Drop for SandboxDir {
     }
 }
 
-fn forward_slash(p: &Path) -> String {
+pub fn forward_slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
@@ -289,7 +289,11 @@ usage_file = "{}"
         ]
     }
 
-    fn spawn(
+    /// Spawn an arbitrary subcommand with the sandbox env + extra env vars
+    /// (fail-fast-on-startup-errors: startup-failure cases need `run`/`core`
+    /// against a garbage config + SEBAS_STARTUP_ERROR_FILE). stdout+stderr are
+    /// appended to `log` so the caller can assert on the stderr tail.
+    pub fn spawn(
         &self,
         args: &[&str],
         secret: &str,
