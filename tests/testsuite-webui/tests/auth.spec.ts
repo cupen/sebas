@@ -36,6 +36,31 @@ test.describe('auth journey', () => {
     expect(collector.pageErrors).toEqual([])
   })
 
+  test('session cookie survives reload until logout, then the gate returns', async ({ page }) => {
+    const login = new Login(page)
+
+    await page.goto('/')
+    await expect(login.host).toBeVisible()
+    await login.login('admin', 'admin')
+    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+
+    // Reload: the session cookie keeps the workbench up — no gate re-prompt.
+    await page.reload()
+    await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
+    await expect(login.host).toHaveCount(0)
+
+    // Logout: back to the gate, and it sticks across another reload.
+    await page
+      .locator('sebas-app .sidebar-footer .settings-btn', { hasText: '退出 (admin)' })
+      .click()
+    await expect(login.host).toBeVisible({ timeout: 15_000 })
+    await page.reload()
+    await expect(login.host).toBeVisible()
+    await expect(page.locator('sebas-dashboard')).toHaveCount(0)
+
+    expect(collector.pageErrors).toEqual([])
+  })
+
   test('wrong credentials rejected, admin/admin enters, logout returns', async ({ page }) => {
     const login = new Login(page)
 
