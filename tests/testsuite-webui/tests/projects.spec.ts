@@ -256,8 +256,10 @@ test.describe('project picker interactions', () => {
     await expect(tree.locator('.root-path')).toContainText(work, { timeout: 10_000 })
 
     // Lazy-expand the prepared parent; the child appears underneath it.
-    await tree.locator('wa-tree-item', { hasText: `pick-parent-${t}` }).first().click()
-    const childItem = tree.locator('wa-tree-item', { hasText: `pick-child-${t}` })
+    // (data-path scope: text match would also hit the expanded parent,
+    // whose subtree contains the child text.)
+    await tree.locator(`wa-tree-item[data-path="${parent}"]`).click()
+    const childItem = tree.locator(`wa-tree-item[data-path="${child}"]`)
     await expect(childItem).toBeVisible({ timeout: 10_000 })
 
     // Click-select fills the manual path field (the dialog's submit gate).
@@ -296,8 +298,9 @@ test.describe('project picker interactions', () => {
 
     const dialog = rail.addDialog()
     const submit = dialog.locator('wa-button').filter({ hasText: 'Add project' })
-    // Empty path: the footer submit stays disabled, nothing can be sent.
-    await expect(submit).toBeDisabled()
+    // Empty path: the footer submit carries the disabled attribute (wa-button
+    // is a custom element — assert the attribute, not native semantics).
+    await expect(submit).toHaveAttribute('disabled', '')
 
     // Missing path: server rejects, the rejection surfaces INSIDE the dialog
     // (no close, no registry write).
@@ -305,7 +308,7 @@ test.describe('project picker interactions', () => {
     const pathInput = dialog.locator('wa-input[label="Project path"] input')
     await pathInput.click()
     await pathInput.pressSequentially(missing)
-    await expect(submit).toBeEnabled()
+    await expect(submit).not.toHaveAttribute('disabled', '')
     await submit.click()
     // The rejection renders in the div right after the path field (the
     // dialog's only inline-error slot — a bare `div` matcher would also hit

@@ -43,6 +43,15 @@ export class ErrorCollector {
       //    are unrelated to the app-under-test and may 403 in the sandbox.
       if (text.includes('favicon')) return
       if (text.includes('404') && /\/api\/sessions\//.test(url)) return
+      // Intentional mutation-wall probes (phase-3 settings journeys): the
+      // sandbox answers router mutations with 503 and chromium logs the
+      // failed resource load; the journeys assert the honest UI presentation
+      // (inline error, unchanged lists), not network silence.
+      if (text.includes('503') && /\/router\/api\/|\/api\/agent-defaults/.test(url)) return
+      // Intentional rejection probe (phase-3 P2): registering a missing path
+      // answers 400 and chromium logs it; the journey asserts the inline
+      // dialog error and the untouched registry.
+      if (text.includes('400') && /\/api\/projects$/.test(url)) return
       if (url && !/^https?:\/\/127\.0\.0\.1:/i.test(url)) return
       this.consoleErrors.push(url ? `${text} (${url})` : text)
     })

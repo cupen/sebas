@@ -72,8 +72,9 @@ test.describe('settings surface', () => {
     await expect(row('Version')).toContainText(truth.version)
     await expect(row('Providers')).toContainText(String(truth.provider_count))
     await expect(row('Router listen')).toContainText(truth.router_listen ?? '—')
-    // Toolchain is empty in dev builds — pin the row's presence, not its value.
-    await expect(row('Rust toolchain')).toBeVisible()
+    // Toolchain is empty in dev builds (an empty dd reads hidden) — pin
+    // the row's attachment, not its visibility or value.
+    await expect(row('Rust toolchain')).toBeAttached()
     await expect(row('Uptime')).not.toBeEmpty()
     await settings.close()
 
@@ -108,8 +109,9 @@ test.describe('settings surface', () => {
     await page.goto('/')
     await settings.openViaComposer()
 
-    // Toolbar mirrors the null truth.
-    await expect(settings.panel.locator('.provider-toolbar .label')).toHaveText(
+    // Toolbar mirrors the null truth (span only — wa-button internals also
+    // carry .label slots, so scope structurally).
+    await expect(settings.panel.locator('.provider-toolbar span.label')).toHaveText(
       'no default set',
       { timeout: 10_000 },
     )
@@ -123,9 +125,12 @@ test.describe('settings surface', () => {
     await expect(
       dialog.locator('.dialog-text').filter({ hasText: providerName! }),
     ).toBeVisible()
-    // Sandbox providers carry no model catalog — the dialog says so honestly.
+    // Model choice is catalog-dependent: rows without a catalog honestly
+    // say so, rows with one offer the select — either branch is legitimate.
     await expect(
-      dialog.locator('.dialog-text', { hasText: 'This provider has no model catalog yet.' }),
+      dialog
+        .locator('.dialog-text', { hasText: 'This provider has no model catalog yet.' })
+        .or(dialog.locator('wa-select[label="Default model"]')),
     ).toBeVisible()
 
     // Save hits the 503 mutation wall: inline error, truth unchanged,
@@ -136,7 +141,7 @@ test.describe('settings surface', () => {
     })
     expect(await getAgentDefaults(page.request)).toEqual({ provider: null, model: null })
     await expect(
-      settings.panel.locator('.provider-toolbar .label'),
+      settings.panel.locator('.provider-toolbar span.label'),
     ).toHaveText('no default set')
     await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
     await settings.close()
@@ -160,7 +165,9 @@ test.describe('settings surface', () => {
     })
     await settings.panel.locator('wa-button').filter({ hasText: 'New (preset)' }).click()
     const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-    await expect(editor).toBeVisible()
+    // wa-dialog hosts read popover-hidden in the top layer — assert the
+    // rendered footer action instead (same discipline as the rail dialogs).
+    await expect(editor.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
     await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
     await expect(editor.locator('.callout-error[role="alert"]')).toContainText('名称不能为空')
     expect(postCalls).toBe(0)
@@ -186,7 +193,7 @@ test.describe('settings surface', () => {
       .locator('button[title="Edit"]')
       .click()
     const editDialog = page.locator('sebas-settings-modal wa-dialog.provider-editor')
-    await expect(editDialog).toBeVisible()
+    await expect(editDialog.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
     await editDialog.locator('wa-button').filter({ hasText: 'Save' }).click()
     await expect(editDialog.locator('.callout-error[role="alert"]')).toBeVisible({
       timeout: 10_000,
