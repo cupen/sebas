@@ -309,7 +309,7 @@ pub async fn run(
             )
             .await;
         });
-        info!("webui dashboard starting on {webui_host}:{webui_port}");
+        info!("webui dashboard starting on http://{webui_host}:{webui_port}");
     }
 
     // Core session channel (5.9): the watchdog injects `SEBAS_CORE_SECRET`
