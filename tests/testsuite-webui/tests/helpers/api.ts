@@ -117,6 +117,35 @@ export async function addProject(request: APIRequestContext, path: string): Prom
   if (!resp.ok()) throw new Error(`addProject failed: HTTP ${resp.status()}`)
 }
 
+/** Raw add: returns status + body so rejection semantics (400/409) are assertable. */
+export async function addProjectRaw(
+  request: APIRequestContext,
+  path: string,
+): Promise<{ status: number; body: string }> {
+  const resp = await request.post('/api/projects', { data: { path } })
+  return { status: resp.status(), body: await resp.text() }
+}
+
+/** Reorder the project registry to the given canonical-path sequence. */
+export async function reorderProjects(
+  request: APIRequestContext,
+  paths: string[],
+): Promise<void> {
+  const resp = await request.post('/api/projects/reorder', { data: { paths } })
+  if (!resp.ok()) throw new Error(`reorderProjects failed: HTTP ${resp.status()}`)
+}
+
+/** Branch info for a registered project path (git → name, non-git → null). */
+export async function getBranch(
+  request: APIRequestContext,
+  path: string,
+): Promise<{ status: number; branch: string | null }> {
+  const resp = await request.get(`/api/projects/${encodeURIComponent(path)}/branch`)
+  if (!resp.ok()) return { status: resp.status(), branch: null }
+  const d = (await resp.json()) as { branch?: string | null }
+  return { status: resp.status(), branch: d.branch ?? null }
+}
+
 export async function removeProject(request: APIRequestContext, path: string): Promise<void> {
   const resp = await request.post(
     `/api/projects/${encodeURIComponent(path)}/remove`,

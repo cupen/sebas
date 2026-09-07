@@ -167,6 +167,13 @@
 | 项目经 folder-picker 增删 | `projects.spec.ts` | 「项目增删」 |
 | close / archive / 深链 / 退役路径 / 模型诚实缺省 | `session-mgmt.spec.ts` | 「close 与 archive」「深链与退役路径」「模型面诚实缺省」 |
 | 鉴权闭环（错误凭据/登录/登出/深链重定向） | `auth.spec.ts`（`playwright.auth.config.ts`） | 「登录闭环」 |
+| 同会话两轮连续问答（按序追加、双 Done、重载不丢） | `dialog.spec.ts`（二期 4.1） | 二期「agent 对话核心功能覆盖」 |
+| 输入守卫（空/空白不建回合）与特殊字符长文本往返 | `dialog.spec.ts`（二期 4.2） | 同上 |
+| 双会话 switch 互切不串（列表点击 + 深链直达） | `sessions.spec.ts`（二期 2.1） | 二期「会话管理核心功能覆盖」 |
+| archive 写保护 400 + restore 诚实语义（History 消失 + 如实 404） | `sessions.spec.ts`（二期 2.2） | 同上（restore 不复活会话，见实施期发现 5） |
+| 无模型会话 set_model 终态拒绝如实呈现 + settings provider 只读 | `models.spec.ts`（二期 3.2 fallback C） | 二期「模型管理核心功能覆盖」（正向切换待驱动模型面立项，见实施期发现 6） |
+| 项目非法/重复拒绝（400/409）与移除持久化 | `projects.spec.ts`（二期 1.1） | 二期「项目管理核心功能覆盖」 |
+| 项目排序持久化与分支呈现（git/非 git） | `projects.spec.ts`（二期 1.2） | 同上 |
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
@@ -194,3 +201,5 @@
 2. **`run --router` 忽略 `SEBAS_ROUTER_LISTEN`**（run.rs:87 写死 127.0.0.1:0）：detached 形态下 `SEBAS_AGENT_ROUTER_URL` 无法预注入（router 地址只能事后从日志读）。native 走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径作为替代（本套件已覆盖）。
 3. **会话状态落盘仅在优雅退出**：硬杀（TerminateProcess）不产生状态转储；Windows 无便携优雅信号，故重启恢复段 unix 门控。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。
+5. **restore 不复活会话**（二期浏览器旅程发现）：`archive` 先 close（mapping + transcript 丢弃），`restore` 只删归档条目；恢复后详情页如实 404（`sessions.spec.ts` 2.2 已按此诚实语义断言）。与 project-session-actions「History 点击恢复可写」条文不一致，产品语义变更另立项。
+6. **无模型会话 set_model 是终态杀伤**（二期浏览器旅程发现）：webui 只投递（200 ok），Claude 驱动以终态 Error 应答 SetModel，会话被拆除（`models.spec.ts` 3.2 已按终态诚实断言）。正向模型切换需驱动模型面（configOptions 透出 + ModelChanged），待另立项。
