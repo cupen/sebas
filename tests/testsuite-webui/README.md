@@ -1,24 +1,24 @@
 # sebas webui browser-e2e（Playwright）
 
-浏览器级旅程套件：真实 chromium 驱动 webui，被测后端是 `scripts/webui_e2e_server.sh`
-装配的一次性沙箱（`sebas core --router --debug --webui` 单进程调试形态 +
+浏览器级旅程套件：真实 chromium 驱动 webui，被测后端是 `invoke testsuite-webui-server`
+（tasks.py）装配的一次性沙箱（`sebas core --router --debug --webui` 单进程调试形态 +
 `tests/bin` 的 fake-claude 桩）。绝不触碰真实 `~/.sebas` 与端口 9797。
 
 ## 一键运行
 
 ```bash
-invoke webui-e2e                 # 构建（dist 自动重建）→ 全量旅程 → 清理
-invoke webui-e2e --case auth     # 仅鉴权旅程（auth-on 形态，端口 9898）
-invoke webui-e2e --case first-paint  # 仅单个旅程 spec
+invoke testsuite-webui                 # 构建（dist 自动重建）→ 全量旅程 → 清理
+invoke testsuite-webui --case auth     # 仅鉴权旅程（auth-on 形态，端口 9898）
+invoke testsuite-webui --case first-paint  # 仅单个旅程 spec
 ```
 
 直接跑（仓库根）：
 
 ```bash
 cargo build --bin sebas --bin fake-claude
-pnpm install --dir tests/webui-e2e
-pnpm --dir tests/webui-e2e exec playwright install chromium
-pnpm --dir tests/webui-e2e exec playwright test
+pnpm install --dir tests/testsuite-webui
+pnpm --dir tests/testsuite-webui exec playwright install chromium
+pnpm --dir tests/testsuite-webui exec playwright test
 ```
 
 ## 旅程与账本
@@ -40,9 +40,9 @@ pnpm --dir tests/webui-e2e exec playwright test
 
 | 开关 | 作用 |
 |---|---|
-| `E2E_KEEP=1 invoke webui-e2e` | 通过后也保留沙箱现场（排障）|
-| `E2E_REUSE=1` | 复用上一次保留的沙箱（配合 E2E_KEEP）|
-| `E2E_PORT=<port>` | 覆盖沙箱端口（默认 9899；`E2E_AUTH=1` 时 9898）|
+| `TESTSUITE_KEEP=1 invoke testsuite-webui` | 通过后也保留沙箱现场（排障）|
+| `TESTSUITE_REUSE=1` | 复用上一次保留的沙箱（配合 TESTSUITE_KEEP）|
+| `TESTSUITE_PORT=<port>` | 覆盖沙箱端口（默认 9899；`TESTSUITE_AUTH=1` 时 9898）|
 
 任一用例失败时，keep-on-fail reporter 会把沙箱目录保留下来并在输出里打印路径
 （含后端日志 `core.log`），供复现。

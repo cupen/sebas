@@ -8,7 +8,7 @@
 //!
 //! Opt-in only (`#[ignore]`): process spawning is seconds-scale, so these
 //! never run in the default `cargo test` gate. Run them with
-//! `cargo test --test core_flow_e2e_test -- --ignored` or `invoke e2e`.
+//! `cargo test --test testsuite_e2e_test -- --ignored` or `invoke testsuite-e2e`.
 //! Any panic keeps the sandbox dir (with core.log / webui.log) for
 //! postmortem — the path is printed on drop.
 
@@ -26,9 +26,9 @@ use support::{
 /// Startup: core + standalone webui come up, webui reports the core channel
 /// reachable and /health serves.
 #[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn detached_startup_reports_reachability() {
-    let sb = Sandbox::new("core_flow_e2e", "startup");
+    let sb = Sandbox::new("testsuite_e2e", "startup");
     let cli = http_client();
     let _core = sb.spawn_core();
     let _webui = sb.spawn_webui(&sb.core_secret);
@@ -58,9 +58,9 @@ async fn detached_startup_reports_reachability() {
 /// Full session round-trip over the webui HTTP surface: create (ACP) →
 /// core channel → fake-claude turn → Done with the stub's reply visible.
 #[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn session_round_trip_via_webui_http() {
-    let sb = Sandbox::new("core_flow_e2e", "round-trip");
+    let sb = Sandbox::new("testsuite_e2e", "round-trip");
     let cli = http_client();
     let _core = sb.spawn_core();
     let _webui = sb.spawn_webui(&sb.core_secret);
@@ -119,9 +119,9 @@ async fn session_round_trip_via_webui_http() {
 
 /// The built-in debug router answers `model = "test"` over /v1/messages.
 #[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn router_debug_provider_serves_messages() {
-    let sb = Sandbox::new("core_flow_e2e", "router");
+    let sb = Sandbox::new("testsuite_e2e", "router");
     let cli = http_client();
     let _core = sb.spawn_core();
 
@@ -148,9 +148,9 @@ async fn router_debug_provider_serves_messages() {
 /// A webui presenting a wrong SEBAS_CORE_SECRET must never fake a connected
 /// state: /health still serves, reachability stays false with a cause.
 #[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn wrong_core_secret_refuses_connection() {
-    let sb = Sandbox::new("core_flow_e2e", "wrong-secret");
+    let sb = Sandbox::new("testsuite_e2e", "wrong-secret");
     let cli = http_client();
     let _core = sb.spawn_core();
     let _webui = sb.spawn_webui("definitely-not-the-secret");
@@ -168,9 +168,9 @@ async fn wrong_core_secret_refuses_connection() {
 /// Core lifecycle is honestly visible on the webui side: kill the core →
 /// reachability flips false with a cause; restart it → flips back to true.
 #[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn reachability_flips_across_core_restart() {
-    let sb = Sandbox::new("core_flow_e2e", "restart");
+    let sb = Sandbox::new("testsuite_e2e", "restart");
     let cli = http_client();
     let mut core = sb.spawn_core();
     let _webui = sb.spawn_webui(&sb.core_secret);
@@ -192,9 +192,9 @@ async fn reachability_flips_across_core_restart() {
 /// removes the channel socket and dumps session state.
 #[cfg(unix)]
 #[tokio::test]
-#[ignore = "process-level e2e; run with -- --ignored or invoke e2e"]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn graceful_exit_removes_channel_socket() {
-    let sb = Sandbox::new("core_flow_e2e", "sigterm");
+    let sb = Sandbox::new("testsuite_e2e", "sigterm");
     // SEBAS_TEST_SPAWN_SESSION=1 mints one fake-claude session at startup so
     // the state dump has content — same affordance sigterm_cleanup_test uses.
     let mut core = sb.spawn_core_extra(&[("SEBAS_TEST_SPAWN_SESSION", "1")]);
@@ -237,8 +237,10 @@ async fn graceful_exit_removes_channel_socket() {
         },
     )
     .await;
+    // ExitStatus Display is platform-dependent ("exit status: 0" on unix,
+    // "exit code: 0" on Windows) — accept either.
     assert!(
-        exited.contains("code: 0"),
+        exited.contains("exit status: 0") || exited.contains("exit code: 0"),
         "graceful exit must succeed, got: {exited}"
     );
     assert!(

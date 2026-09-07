@@ -44,7 +44,7 @@
 
 ### Requirement: 一键入口与稳定性
 
-`invoke webui-e2e` SHALL 保持唯一入口语义并容纳新增用例：支持按名过滤，断言遵循既有纪律（web-first + 轮询，禁固定 sleep），同一提交多次全绿为收尾门槛。
+`invoke testsuite-webui` SHALL 保持唯一入口语义并容纳新增用例：支持按名过滤，断言遵循既有纪律（web-first + 轮询，禁固定 sleep），同一提交多次全绿为收尾门槛。
 
 #### Scenario: 渐进补用例不改入口
 

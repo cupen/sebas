@@ -113,11 +113,11 @@
 
 ### Requirement: 一键入口与稳定性
 
-`invoke webui-e2e` SHALL 是套件唯一入口：构建（含 dist 自动重建）→ 装配沙箱 → 运行全部用例 → 清理；支持按名过滤单个旅程。断言 SHALL 基于状态轮询而非固定 sleep；同一提交重复运行 SHALL 稳定收敛（无依赖时序的偶发失败）。
+`invoke testsuite-webui` SHALL 是套件唯一入口：构建（含 dist 自动重建）→ 装配沙箱 → 运行全部用例 → 清理；支持按名过滤单个旅程。断言 SHALL 基于状态轮询而非固定 sleep；同一提交重复运行 SHALL 稳定收敛（无依赖时序的偶发失败）。
 
 #### Scenario: 一键运行
 
-- **WHEN** 在仓库根执行 `invoke webui-e2e`
+- **WHEN** 在仓库根执行 `invoke testsuite-webui`
 - **THEN** 无需人工步骤完成构建、运行与清理，退出码反映通过与否
 
 #### Scenario: 单旅程过滤

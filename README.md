@@ -243,17 +243,17 @@ sebas/
 ├── sebas-dispatch/       # 会话分发领域层（会话映射/命令/权限；原 sebas-router）
 ├── config/               # 配置文件示例
 ├── tests/                # 集成测试（含 fake-claude 测试桩）
-│   └── webui-e2e/        # 浏览器级 UI 旅程（Playwright + chromium，见下）
+│   └── testsuite-webui/        # 浏览器级 UI 旅程（Playwright + chromium，见下）
 └── docs/                 # 设计文档（架构、前端联调等）
 ```
 
 ## 测试
 
-- 进程级 e2e：`invoke e2e`（`tests/core_flow_e2e_test.rs`）；单用例 `invoke e2e --case <name>`。
-- 旅程级验收：`invoke accept`（`tests/acceptance_suite_test.rs`）；单旅程 `invoke accept --case <name>`。
-- **浏览器级 UI 旅程**（本仓库新增）：`invoke webui-e2e`。一键构建（dist 自动重建）→
+- 进程级 e2e：`invoke testsuite-e2e`（`tests/testsuite_e2e_test.rs`）；单用例 `invoke testsuite-e2e --case <name>`。
+- 旅程级验收：`invoke testsuite-acceptance`（`tests/testsuite_acceptance_test.rs`）；单旅程 `invoke testsuite-acceptance --case <name>`。
+- **浏览器级 UI 旅程**（本仓库新增）：`invoke testsuite-webui`。一键构建（dist 自动重建）→
   装配一次性沙箱（`sebas core --router --debug --webui` + fake-claude 桩，绝不触碰真实
   `~/.sebas` 与 9797）→ 运行全部旅程（主 config + auth config）→ 按运行结果清理。
-  单旅程：`invoke webui-e2e --case <spec 文件名>`（如 `--case first-paint`；`--case auth`
+  单旅程：`invoke testsuite-webui --case <spec 文件名>`（如 `--case first-paint`；`--case auth`
   跑鉴权形态，端口 9898）。任一用例失败会保留沙箱现场并在输出里打印路径（含后端日志
-  `core.log`），供复现：`E2E_REUSE=1 E2E_KEEP=1 invoke webui-e2e --case <name>`。
+  `core.log`），供复现：`TESTSUITE_REUSE=1 TESTSUITE_KEEP=1 invoke testsuite-webui --case <name>`。

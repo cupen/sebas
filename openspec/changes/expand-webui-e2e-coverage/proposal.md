@@ -1,4 +1,4 @@
-# expand-webui-e2e-coverage
+# expand-testsuite-webui-coverage
 
 ## Why
 
@@ -8,7 +8,7 @@
 
 - 按四大核心面（项目管理、会话管理、模型管理、agent 对话）渐进补充浏览器旅程用例，复用既有页面对象与 api helper，按需增补对象与 helper。
 - 补 harness 可测性前置：让沙箱里出现"有模型选项"的会话，否则模型正向语义无法在浏览器中断言；其余各面沿用既有沙箱形态与数据准备方式。
-- `invoke webui-e2e` 入口语义不变；`tests/acceptance/COVERAGE.md` 随覆盖面同步。
+- `invoke testsuite-webui` 入口语义不变；`tests/acceptance/COVERAGE.md` 随覆盖面同步。
 
 ## Capabilities
 

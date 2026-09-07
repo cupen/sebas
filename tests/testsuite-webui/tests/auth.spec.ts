@@ -1,7 +1,7 @@
 /**
  * Journey 3.8 — auth-on form (spec: 免登录直达 [对照] / 登录闭环).
  *
- * Runs ONLY under playwright.auth.config.ts (E2E_AUTH=1 sandbox on port
+ * Runs ONLY under playwright.auth.config.ts (TESTSUITE_AUTH=1 sandbox on port
  * 9898, admin/admin provisioned in the sandbox-local auth file). Covers:
  * the deep link under auth redirects to the login page, wrong credentials
  * are rejected in place, admin/admin enters the workbench, and logout

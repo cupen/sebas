@@ -8,10 +8,10 @@
 > ④ 项目管理 = project-session-actions + state-store(projects) + webui(projects 面)。
 > 核心集增删必须留变更说明。
 >
-> 旅程用例：`invoke accept`（`tests/acceptance_suite_test.rs`）
-> 冒烟用例：`invoke e2e`（`tests/core_flow_e2e_test.rs`）
-> 浏览器级旅程：`invoke webui-e2e`（`tests/webui-e2e/`，Playwright + chromium，
-> 旅程账本见 `tests/webui-e2e/README.md` 与 `openspec/changes/add-webui-playwright-tests`）
+> 旅程用例：`invoke testsuite-acceptance`（`tests/testsuite_acceptance_test.rs`）
+> 冒烟用例：`invoke testsuite-e2e`（`tests/testsuite_e2e_test.rs`）
+> 浏览器级旅程：`invoke testsuite-webui`（`tests/testsuite-webui/`，Playwright + chromium，
+> 旅程账本见 `tests/testsuite-webui/README.md` 与 `openspec/changes/add-webui-playwright-tests`）
 
 ## 矩阵图例
 
@@ -130,7 +130,7 @@
 | agent-driver | ✅ | sebas-webui `agent_kinds_test`、src `agent_backend` 内联测试 |
 | channels | ✅ | sebas-channels crate 测试 |
 | cli-service | ✅ | `config_test`、`config_env_test`、`daemon_path_repro_test`、src `cli` 内联测试 |
-| core-session-channel | ✅ | src `core_channel/tests.rs`（协议往返/双路由/密钥）；E: startup/reachability/wrong-secret/restart（`core_flow_e2e_test`）|
+| core-session-channel | ✅ | src `core_channel/tests.rs`（协议往返/双路由/密钥）；E: startup/reachability/wrong-secret/restart（`testsuite_e2e_test`）|
 | feishu-bridge | 🚫+✅ | 真实 WS/HTTP 传输豁免（需真实凭据）；进程内注入面 ✅（`feishu_native_webui_test`、ws_loop 内联测试）|
 | feishu-cards | ✅+🚫 | 卡模型/流式节流/轮转 ✅（`card_stream_e2e_test`、sebas-feishu 内联）；飞书端渲染 🚫 豁免 |
 | feishu-option | ✅ | `feishu_native_webui_test`、config 测试 |
@@ -150,11 +150,11 @@
 | session-persistence | ✅ | 见核心簇① |
 | state-store | ✅ | 见核心簇④ |
 | watchdog | ✅+⚠️ | src `watchdog.rs`/`upgrade.rs` 内联测试、`upgrade_dev_test`；监督循环的进程级旅程 ⚠️（非阻塞）|
-| webui | ✅ | sebas-webui 全套端点测试；E: detached 双进程启动/健康/重连（`core_flow_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，见下）|
+| webui | ✅ | sebas-webui 全套端点测试；E: detached 双进程启动/健康/重连（`testsuite_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，见下）|
 
 ### testsuite-webui-browser（非核心：浏览器级 UI 旅程，Playwright）
 
-> 入口 `invoke webui-e2e`（`tests/webui-e2e/`，独立 pnpm 包）；后端为一次性沙箱
+> 入口 `invoke testsuite-webui`（`tests/testsuite-webui/`，独立 pnpm 包）；后端为一次性沙箱
 > （`sebas core --router --debug --webui` + fake-claude 桩），chromium headless。
 
 | 旅程 | spec 文件 | 对应 requirement 场景 |
@@ -177,7 +177,7 @@
 |---|---|---|
 | 飞书真实 WS/HTTP 传输 | 需真实 app 凭据，沙箱不可得 | 进程内注入级测试（router 派发/出站事件即生产意图）|
 | 飞书端卡片渲染 | 同上 | 卡片 JSON 生成单测（`card_stream_e2e_test`）|
-| 浏览器级 workbench UI 渲染 | ~~簇 C 另行立项~~ 已由 testsuite-webui-browser 落地（`invoke webui-e2e`）| `tests/webui-e2e/` 旅程套件（Playwright + fake-claude 沙箱）|
+| 浏览器级 workbench UI 渲染 | ~~簇 C 另行立项~~ 已由 testsuite-webui-browser 落地（`invoke testsuite-webui`）| `tests/testsuite-webui/` 旅程套件（Playwright + fake-claude 沙箱）|
 | opencode-agent 真实代理 | 需真实 opencode CLI | AcpDriver 抽象层测试 |
 | agent-bench 真实模型跑分 | 需真实凭据 | bench 断言逻辑单测 |
 

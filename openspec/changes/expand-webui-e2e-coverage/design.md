@@ -1,4 +1,4 @@
-# design — expand-webui-e2e-coverage
+# design — expand-testsuite-webui-coverage
 
 ## Context
 

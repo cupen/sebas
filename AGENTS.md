@@ -48,11 +48,15 @@ The operator's real sebas (AppImage, port **9797**, real `~/.sebas` /
 bind its ports, read/copy its credentials, or point sandbox processes at its
 files.
 
-**WebUI sandbox shortcut**: `bash scripts/test_webui_sandbox.sh` spins up a
+**WebUI sandbox shortcut**: `invoke testsuite-webui-sandbox` spins up a
 throwaway webui on port 9879 with auth **disabled by default** (login-free GUI
-testing); `SANDBOX_AUTH=1` turns auth on with the test account
+testing); `invoke testsuite-webui-sandbox --auth` turns auth on with the test account
 **admin / admin** (`webui-passwd` only warns on passwords shorter than 8
-chars). Ctrl-C stops it and deletes the sandbox dir.
+chars). Ctrl-C stops it and deletes the sandbox dir. The same assembly serves
+Playwright (`invoke testsuite-webui-server` on port 9899, 9898 with `TESTSUITE_AUTH=1`);
+both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
+(their configs used stale keys the current binary rejects, e.g.
+`[acp.claude]`, `[router] state_file`).
 
 1. Keep every sandbox path under one throwaway dir (e.g. `/tmp/sebas-itest/`)
    and override **all** defaults that would fall back to the real `~/.sebas`:
@@ -91,11 +95,11 @@ chars). Ctrl-C stops it and deletes the sandbox dir.
 
 ### Sandbox debug recipe (proven end-to-end, agent-runnable)
 
-一键自动化：本菜谱已固化为进程级 e2e 套件——`invoke e2e`（构建 + 跑
-`tests/core_flow_e2e_test.rs`；单用例 `invoke e2e --case <name>`）或
-`cargo test --test core_flow_e2e_test -- --ignored`。验收套件（旅程级，覆盖面
-见 `tests/acceptance/COVERAGE.md`）：`invoke accept` 或
-`cargo test --test acceptance_suite_test -- --ignored`。
+一键自动化：本菜谱已固化为进程级 e2e 套件——`invoke testsuite-e2e`（构建 + 跑
+`tests/testsuite_e2e_test.rs`；单用例 `invoke testsuite-e2e --case <name>`）或
+`cargo test --test testsuite_e2e_test -- --ignored`。验收套件（旅程级，覆盖面
+见 `tests/acceptance/COVERAGE.md`）：`invoke testsuite-acceptance` 或
+`cargo test --test testsuite_acceptance_test -- --ignored`。
 
 `--debug` makes the router inject a built-in `test` provider that answers
 itself (fixed text + echo, no upstream dial, downstream auth skipped), and

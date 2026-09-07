@@ -69,16 +69,16 @@
 
 ### Requirement: 一键入口与诊断
 
-套件 SHALL 提供单条命令入口 `invoke accept`：构建工作区二进制后运行全部验收用例，退出码如实反映结果；`--case <用例名>` SHALL 透传为过滤器以手动单跑。用例失败时 MUST 保留沙箱目录与日志并打印路径（同 `testsuite-process-e2e` 约定）。
+套件 SHALL 提供单条命令入口 `invoke testsuite-acceptance`：构建工作区二进制后运行全部验收用例，退出码如实反映结果；`--case <用例名>` SHALL 透传为过滤器以手动单跑。用例失败时 MUST 保留沙箱目录与日志并打印路径（同 `testsuite-process-e2e` 约定）。
 
 #### Scenario: 一键全量验收
 
-- **WHEN** 操作员执行 `invoke accept`
+- **WHEN** 操作员执行 `invoke testsuite-acceptance`
 - **THEN** 构建完成后全部验收用例运行，任一失败则非零退出，全部通过则零退出
 
 #### Scenario: 手动单跑与现场保留
 
-- **WHEN** 开发者执行 `invoke accept --case <用例名>`，且该用例失败
+- **WHEN** 开发者执行 `invoke testsuite-acceptance --case <用例名>`，且该用例失败
 - **THEN** 仅该用例运行，其沙箱目录与 core/webui 日志被保留并打印路径
 
 ### Requirement: native 链路验收策略

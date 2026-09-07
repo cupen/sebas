@@ -1,10 +1,10 @@
 //! Acceptance suite (testsuite-acceptance): multi-step, journey-level cases that
 //! cross several capabilities over real process boundaries. Sandbox rules are
-//! the same as `core_flow_e2e_test` (support::Sandbox): everything inside a
+//! the same as `testsuite_e2e_test` (support::Sandbox): everything inside a
 //! throwaway dir, probed ports, no operator instance touched.
 //!
-//! Opt-in only: `cargo test --test acceptance_suite_test -- --ignored`
-//! or `invoke accept` (`--case <name>` filters). Coverage accounting for
+//! Opt-in only: `cargo test --test testsuite_acceptance_test -- --ignored`
+//! or `invoke testsuite-acceptance` (`--case <name>` filters). Coverage accounting for
 //! these cases lives in `tests/acceptance/COVERAGE.md`.
 
 use std::sync::Arc;
@@ -70,7 +70,7 @@ async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> Strin
 /// recovery): create → turn → follow-up message → core restart → mapping
 /// restored from the state file.
 #[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn session_lifecycle_journey() {
     let sb = Sandbox::new("acceptance", "lifecycle");
     let cli = http_client();
@@ -130,7 +130,10 @@ async fn session_lifecycle_journey() {
             Box::pin(async move { exit.lock().await.clone() })
         })
         .await;
-        assert!(exited.contains("code: 0"), "graceful exit: {exited}");
+        assert!(
+            exited.contains("exit status: 0") || exited.contains("exit code: 0"),
+            "graceful exit: {exited}"
+        );
         assert!(
             sb.state_file.exists(),
             "router state file must be dumped on graceful exit"
@@ -183,7 +186,7 @@ async fn session_lifecycle_journey() {
 /// provider overlay + model alias → router routes `my-claude` to the stub
 /// with the aliased upstream model; admin surface serves stats.
 #[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn provider_governance_journey() {
     let sb = Sandbox::new("acceptance", "providers");
     let cli = http_client();
@@ -250,7 +253,7 @@ async fn provider_governance_journey() {
 /// the watchdog's production wiring — `run --router` binds a random port, so
 /// it cannot be pre-injected at process level; see COVERAGE.md notes.)
 #[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn native_agent_turn_via_router_journey() {
     let sb = Sandbox::new("acceptance", "native");
     let cli = http_client();
@@ -342,7 +345,7 @@ async fn native_agent_turn_via_router_journey() {
 /// Project-management journey: register a sandbox dir as a project, list it,
 /// then create a session bound to that project dir.
 #[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn projects_session_journey() {
     let sb = Sandbox::new("acceptance", "projects");
     let cli = http_client();
@@ -395,7 +398,7 @@ async fn projects_session_journey() {
 /// Workbench aggregate journey: agent kinds feed the composer, sessions list
 /// and summary rows reflect a newly created session.
 #[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn workbench_aggregate_journey() {
     let sb = Sandbox::new("acceptance", "workbench");
     let cli = http_client();
@@ -452,7 +455,7 @@ async fn workbench_aggregate_journey() {
 /// rejects tokenless requests. The authorized-path 200 is covered by every
 /// other journey riding the debug `test` provider.
 #[tokio::test]
-#[ignore = "acceptance journey; run with -- --ignored or invoke accept"]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn router_downstream_auth_journey() {
     let sb = Sandbox::new("acceptance", "auth");
     sb.set_router_auth_token("sk-gw-test-token");

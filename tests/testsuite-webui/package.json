@@ -1,5 +1,5 @@
 {
-  "name": "sebas-webui-e2e",
+  "name": "sebas-testsuite-webui",
   "private": true,
   "version": "0.1.0",
   "type": "module",

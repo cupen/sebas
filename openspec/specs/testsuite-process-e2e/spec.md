@@ -8,16 +8,16 @@
 
 ### Requirement: 一键运行入口
 
-套件 SHALL 提供单条命令入口 `invoke e2e`：先构建工作区二进制（含 `sebas` 与 `fake-claude`），再运行全部进程级 e2e 用例。套件 MUST 也能不经 invoke 直接以 `cargo test --test core_flow_e2e_test -- --ignored` 运行。命令的退出码 SHALL 如实反映套件通过与否。
+套件 SHALL 提供单条命令入口 `invoke testsuite-e2e`：先构建工作区二进制（含 `sebas` 与 `fake-claude`），再运行全部进程级 e2e 用例。套件 MUST 也能不经 invoke 直接以 `cargo test --test testsuite_e2e_test -- --ignored` 运行。命令的退出码 SHALL 如实反映套件通过与否。
 
 #### Scenario: 一条命令完成构建与校验
 
-- **WHEN** 操作员在仓库根执行 `invoke e2e`
+- **WHEN** 操作员在仓库根执行 `invoke testsuite-e2e`
 - **THEN** 工作区完成构建后套件全部用例被执行，任一用例失败则命令以非零码退出，全部通过则以零码退出
 
 #### Scenario: 不依赖 invoke 也可运行
 
-- **WHEN** 操作员执行 `cargo test --test core_flow_e2e_test -- --ignored`
+- **WHEN** 操作员执行 `cargo test --test testsuite_e2e_test -- --ignored`
 - **THEN** 套件用例同样全部运行（二进制已构建的前提下）
 
 ### Requirement: 沙箱全隔离
@@ -36,11 +36,11 @@
 
 ### Requirement: 单用例手动运行与现场保留
 
-套件用例 SHALL 使用语义化且稳定的名称，使单个用例可经 cargo 过滤器手动运行：`cargo test --test core_flow_e2e_test <用例名> -- --ignored`；`invoke e2e` SHALL 提供 `--case` 参数把用例名透传为该过滤器（缺省仍运行全部）。任一用例失败时 MUST 保留其沙箱目录（含核心与 webui 日志）并向输出打印路径，供事后排查；保留目录落在 `target/tests/` 下，由 `cargo clean` 兜底清理。
+套件用例 SHALL 使用语义化且稳定的名称，使单个用例可经 cargo 过滤器手动运行：`cargo test --test testsuite_e2e_test <用例名> -- --ignored`；`invoke testsuite-e2e` SHALL 提供 `--case` 参数把用例名透传为该过滤器（缺省仍运行全部）。任一用例失败时 MUST 保留其沙箱目录（含核心与 webui 日志）并向输出打印路径，供事后排查；保留目录落在 `target/tests/` 下，由 `cargo clean` 兜底清理。
 
 #### Scenario: 按名称单独运行一个用例
 
-- **WHEN** 开发者执行 `invoke e2e --case <用例名>` 或等价的 cargo 过滤命令
+- **WHEN** 开发者执行 `invoke testsuite-e2e --case <用例名>` 或等价的 cargo 过滤命令
 - **THEN** 仅该用例被运行，其余用例不执行，退出码如实反映该用例结果
 
 #### Scenario: 失败保留现场
