@@ -67,8 +67,8 @@ export class SebasProjectRail extends LitElement {
     ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
     .row {
       position: relative; display: grid;
-      grid-template-columns: 14px 10px minmax(0, 1fr) auto auto;
-      gap: 6px; align-items: center; padding: 6px 8px;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px; align-items: center; padding: 6px 10px;
       border-radius: var(--sebas-radius-md); font-size: 0.85rem;
       color: var(--sebas-text-dim); cursor: pointer;
       transition: background var(--sebas-dur) var(--sebas-ease), color var(--sebas-dur) var(--sebas-ease);
@@ -78,14 +78,7 @@ export class SebasProjectRail extends LitElement {
     .row.active { background: var(--sebas-accent-soft); color: var(--sebas-accent); }
     .row.dragging { opacity: 0.4; }
     .row.drag-over { box-shadow: inset 0 2px 0 var(--sebas-accent); }
-    .handle {
-      display: grid; place-items: center; color: var(--sebas-text-faint);
-      cursor: grab; opacity: 0;
-      transition: opacity var(--sebas-dur) var(--sebas-ease), color var(--sebas-dur) var(--sebas-ease);
-    }
-    .row:hover .handle, .row:focus-within .handle, .row.dragging .handle { opacity: 1; }
-    .handle:active { cursor: grabbing; }
-    .chevron { display: grid; place-items: center; width: 10px; color: var(--sebas-text-faint); font-size: 9px; line-height: 1; transition: transform var(--sebas-dur) var(--sebas-ease); }
+    .chevron { display: inline-grid; place-items: center; width: 10px; color: var(--sebas-text-faint); font-size: 9px; line-height: 1; transition: transform var(--sebas-dur) var(--sebas-ease); }
     .chevron.open { transform: rotate(90deg); }
     .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
     .meta { display: flex; align-items: center; gap: 6px; color: var(--sebas-text-faint); font-size: 0.7rem; }
@@ -210,13 +203,8 @@ export class SebasProjectRail extends LitElement {
   }
 
   private onSelect(path: string) {
-    this.expanded = { ...this.expanded, [path]: true }
-    this.dispatchEvent(new CustomEvent('rail-select', { detail: { path }, bubbles: true, composed: true }))
-  }
-
-  private toggleExpand(e: Event, path: string) {
-    e.stopPropagation()
     this.expanded = { ...this.expanded, [path]: !(this.expanded[path] ?? false) }
+    this.dispatchEvent(new CustomEvent('rail-select', { detail: { path }, bubbles: true, composed: true }))
   }
 
   private openSession(row: SessionRow) { navigate(`/sessions/${row.encoded_key}`) }
@@ -342,8 +330,6 @@ export class SebasProjectRail extends LitElement {
     return html`
       <li>
         <div class=${['row', isActive ? 'active' : '', accessible ? '' : 'unreachable', dragging ? 'dragging' : '', dragOver ? 'drag-over' : ''].filter(Boolean).join(' ')} draggable="true" aria-current=${isActive ? 'true' : 'false'} aria-expanded=${isExpanded ? 'true' : 'false'} @click=${() => this.onSelect(p.path)} @dragstart=${(e: DragEvent) => this.onDragStart(e, index)} @dragover=${(e: DragEvent) => this.onDragOver(e, index)} @dragleave=${() => this.onDragLeave(index)} @drop=${(e: DragEvent) => this.onDrop(e, index)} @dragend=${() => this.onDragEnd()}>
-          <span class="handle" aria-hidden="true">${icon('drag', 14)}</span>
-          <span class="chevron ${isExpanded ? 'open' : ''}" aria-hidden="true" @click=${(e: Event) => this.toggleExpand(e, p.path)}>▶</span>
           <span class="name"><span>${p.name}</span>${waiting ? html`<span class="wait-dot" title="需要操作员介入" aria-label="需介入"></span>` : nothing}</span>
           <span class="meta">${branch ? html`<span class="branch">${branch}</span>` : nothing}${count > 0 ? html`<span class="count">${count}</span>` : nothing}</span>
           <button class="row-action" title="New session in ${p.name}" aria-label="New session in ${p.name}" @click=${(e: Event) => this.createSession(e, p)}>+</button>
