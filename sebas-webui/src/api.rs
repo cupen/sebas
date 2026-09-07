@@ -574,7 +574,12 @@ pub async fn browse_dirs(
     State(state): State<WebUiState>,
 ) -> Response {
     let path = params.path.as_deref().unwrap_or("");
-    match crate::fs::browse_dirs(path, params.root.as_deref(), state.work_root.as_deref()) {
+    match crate::fs::browse_dirs(
+        path,
+        params.root.as_deref(),
+        state.work_root.as_deref(),
+        &state.allowed_roots,
+    ) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -616,7 +621,15 @@ pub async fn projects_add(
         None => return api_error(StatusCode::BAD_REQUEST, "missing 'path' field"),
     };
     // 本地校验：路径必须存在且是目录（canonicalize 后注册 canonical 路径）。
+    // 范围判定先行于存在性判定（add-webui-allowed-roots）：fail-closed，
+    // 越界与无法解析同罪，避免借 400 文案差异探测白名单外目录的存在性；
+    // 错误信息不回显服务端解析后的路径（与 fs.rs 同一防泄露姿态）。
     let dir = std::path::Path::new(path);
+    if !state.allowed_roots.is_empty()
+        && !crate::fs::within_allowed_roots(dir, &state.allowed_roots)
+    {
+        return api_error(StatusCode::BAD_REQUEST, "路径超出允许范围: 不在 allowed_roots 白名单内");
+    }
     if !dir.exists() {
         return api_error(StatusCode::BAD_REQUEST, format!("路径不存在: {path}"));
     }

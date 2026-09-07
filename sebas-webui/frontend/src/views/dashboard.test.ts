@@ -167,6 +167,25 @@ afterEach(() => {
 })
 
 describe('sebas-dashboard (workbench main area)', () => {
+
+  it('shows an inline failure with a retry button when the summary load fails', async () => {
+    // add-webui-allowed-roots D6：初始加载失败 = 内联失败态 + 重试入口，
+    // 不再只是空白/静默过期。
+    apiMocks.summary.mockRejectedValue(new TypeError('Failed to fetch'))
+    const el = await mount()
+    const callout = el.shadowRoot?.querySelector<HTMLElement>('.callout-error')
+    expect(callout).toBeTruthy()
+    const retry = el.shadowRoot?.querySelector<HTMLButtonElement>('.retry-btn')
+    expect(retry).toBeTruthy()
+
+    // 点击重试：summary 成功返回后错误态清除、正常内容渲染。
+    apiMocks.summary.mockResolvedValue(summaryBase)
+    retry!.click()
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot?.querySelector('.callout-error')).toBeNull()
+  })
   it('drops the stats strip and the recent-sessions table entirely', async () => {
     const el = await mount()
     expect(el.shadowRoot!.querySelector('.stats')).toBeNull()

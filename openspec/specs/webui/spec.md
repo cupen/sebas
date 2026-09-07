@@ -137,6 +137,93 @@ carry a Windows verbatim (`\\?\`) prefix.
 - **WHEN** `GET /api/archive` is called
 - **THEN** the response lists all archived sessions with their original project, archive timestamp, and expiry
 
+#### Scenario: browse-dirs rejects a root outside the allowed list
+
+- **WHEN** `[watchdog.webui] allowed_roots` is configured as `["~/work"]`
+- **AND** `GET /api/fs/browse-dirs` is called with `root=/etc`
+- **THEN** the response is 400 with an out-of-scope error, and no directory
+  content outside the allowed roots is disclosed
+
+#### Scenario: browse-dirs accepts an allowed root
+
+- **WHEN** `allowed_roots` contains a directory and a request carries that
+  directory as the explicit `root` (or a subpath of it as `path`)
+- **THEN** the listing succeeds for that scope
+
+#### Scenario: unconfigured allowed_roots preserves current behavior
+
+- **WHEN** `allowed_roots` is absent or empty
+- **AND** `GET /api/fs/browse-dirs` is called with an explicit `root` that
+  exists
+- **THEN** the listing succeeds — the whitelist is opt-in, and the default
+  fallback root (work dir / process cwd) remains the no-`root` scope
+
+#### Scenario: project registration rejects a path outside allowed roots
+
+- **WHEN** `allowed_roots` is configured
+- **AND** `POST /api/projects` is called with a body path that resolves
+  outside every allowed root
+- **THEN** the response is 400 with an out-of-scope error and the project is
+  not registered
+
+#### Scenario: project registration accepts a path inside allowed roots
+
+- **WHEN** `allowed_roots` is configured
+- **AND** `POST /api/projects` is called with a path inside an allowed root
+- **THEN** the project registers as before
+
+#### Scenario: project registration without allowed_roots is unchanged
+
+- **WHEN** `allowed_roots` is absent or empty
+- **AND** `POST /api/projects` is called with an existing directory path
+- **THEN** the project registers as before (existence checks only)
+
+### Requirement: 降级与错误表现
+
+The WebUI frontend SHALL surface a visible global indicator when its live
+connection to the server (`/ws`) is lost, and SHALL clear that indicator and
+refresh visible view data automatically when the connection is restored
+(the existing refetch hook). Data requests that fail at the network level
+(server process down, DNS/connection failure) SHALL be distinguishable from
+server-side business errors (4xx/5xx with a backend error body) so views can
+react appropriately. List-style views (dashboard, project rail, sessions)
+SHALL render an inline failure state with a retry affordance instead of a
+blank panel when their initial data load fails. The workbench composer SHALL
+treat a failing `/api/summary` poll as core-unreachable for its submit gate,
+consistent with a reported `reachability.ok = false`.
+
+#### Scenario: ws 断线显示全局横幅
+
+- **WHEN** the `/ws` connection drops
+- **THEN** a global connection banner is visible in the app shell, and the
+  existing exponential-backoff reconnect keeps running
+
+#### Scenario: 重连恢复后横幅消失并刷新数据
+
+- **WHEN** the `/ws` connection is re-established
+- **THEN** the banner disappears and the visible views refetch their data
+  (the existing `sebas:refetch` behavior)
+
+#### Scenario: 网络级失败可区分于业务错误
+
+- **WHEN** a data request fails without an HTTP response (server process is
+  down, connection refused)
+- **THEN** the frontend error is a recognizable network-unreachable error
+  rather than a backend-`ApiError` with business semantics
+
+#### Scenario: 列表加载失败显示内联重试态
+
+- **WHEN** the initial data load of the dashboard, project rail, or sessions
+  view fails
+- **THEN** the view renders an inline failure state with a retry affordance
+  instead of an empty or silently stale panel
+
+#### Scenario: summary 轮询失败等同 core 不可达
+
+- **WHEN** the composer's periodic `/api/summary` request itself fails
+- **THEN** the submit gate treats the core as unreachable, matching the
+  behavior for a reported `reachability.ok = false`
+
 ### Requirement: Local-only binding
 
 The standalone WebUI SHALL default to a loopback bind (`127.0.0.1:9797`).

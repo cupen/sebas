@@ -48,6 +48,10 @@ pub struct WebUiState {
     /// 进程），取配置的默认 agent kind work_dir，未配置时回退进程 cwd；
     /// `None` 时 browse-dirs 硬错误（不再回退文件系统根）。
     pub work_root: Option<std::path::PathBuf>,
+    /// 项目管理可选目录白名单（add-webui-allowed-roots）。空 = 未启用
+    /// 范围约束；非空时 browse-dirs 的显式 root 与项目注册路径都必须落在
+    /// 白名单目录之一内。
+    pub allowed_roots: Vec<std::path::PathBuf>,
 }
 
 /// Build the axum Router with all WebUI routes.
@@ -65,6 +69,7 @@ pub fn build_router(
         30,
         Arc::new(AuthHandle::disabled()),
         None,
+        Vec::new(),
     )
 }
 
@@ -85,6 +90,7 @@ pub fn build_router_with_agent_kind_provider(
         30,
         Arc::new(AuthHandle::disabled()),
         None,
+        Vec::new(),
     )
 }
 
@@ -104,6 +110,7 @@ pub fn build_router_with_admin_adapter(
         30,
         Arc::new(AuthHandle::disabled()),
         None,
+        Vec::new(),
     )
 }
 
@@ -126,9 +133,36 @@ pub fn build_router_with_auth(
         archive_retention_days,
         auth,
         None,
+        Vec::new(),
     )
 }
 
+/// Build the axum Router with an explicit allowed-roots whitelist
+/// （add-webui-allowed-roots）：测试与特殊装配注入白名单的入口，语义同
+/// `build_router_with_auth` + 非空白名单。
+pub fn build_router_with_allowed_roots(
+    backend: Arc<dyn SessionBackend>,
+    router: RouterInfo,
+    card_config: CardConfig,
+    agent_kinds: Arc<dyn AgentKindProvider>,
+    auth: Arc<AuthHandle>,
+    work_root: Option<std::path::PathBuf>,
+    allowed_roots: Vec<std::path::PathBuf>,
+) -> Router {
+    build_router_full(
+        backend,
+        router,
+        card_config,
+        None,
+        agent_kinds,
+        30,
+        auth,
+        work_root,
+        allowed_roots,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_router_full(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
@@ -138,6 +172,7 @@ fn build_router_full(
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
     work_root: Option<std::path::PathBuf>,
+    allowed_roots: Vec<std::path::PathBuf>,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -148,6 +183,7 @@ fn build_router_full(
         archive_retention_days,
         auth,
         work_root,
+        allowed_roots,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -356,6 +392,7 @@ pub async fn run(
         30,
         Arc::new(AuthHandle::disabled()),
         None,
+        Vec::new(),
     )
     .await;
 }
@@ -379,6 +416,7 @@ pub async fn run_with_admin_adapter(
         30,
         Arc::new(AuthHandle::disabled()),
         None,
+        Vec::new(),
     )
     .await;
 }
@@ -386,6 +424,9 @@ pub async fn run_with_admin_adapter(
 /// Run the WebUI server with an auth handle（登录鉴权接线入口）。
 /// `work_root` 供给 browse-dirs 的服务端默认浏览根（配置的 work dir 或
 /// 回退进程 cwd，由接线方决定）；`None` 时该端点在双 root 皆缺时硬错误。
+/// `allowed_roots` 为项目管理目录白名单（add-webui-allowed-roots），空 =
+/// 不启用；非空时同时约束 browse-dirs 显式 root 与项目注册路径。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
@@ -395,6 +436,7 @@ pub async fn run_with_admin_adapter_and_auth(
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     auth: Arc<AuthHandle>,
     work_root: Option<std::path::PathBuf>,
+    allowed_roots: Vec<std::path::PathBuf>,
 ) {
     run_full(
         backend,
@@ -406,6 +448,7 @@ pub async fn run_with_admin_adapter_and_auth(
         30,
         auth,
         work_root,
+        allowed_roots,
     )
     .await;
 }
@@ -421,6 +464,7 @@ async fn run_full(
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
     work_root: Option<std::path::PathBuf>,
+    allowed_roots: Vec<std::path::PathBuf>,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let app = build_router_full(
@@ -432,6 +476,7 @@ async fn run_full(
         archive_retention_days,
         auth,
         work_root,
+        allowed_roots,
     );
     let addr = listener.local_addr().expect("bound listener");
     tracing::info!(%addr, "webui dashboard started");
@@ -945,5 +990,218 @@ mod auth_guard_tests {
             body.contains("\"enabled\":false") && body.contains("\"authenticated\":false"),
             "{body}"
         );
+    }
+}
+
+#[cfg(test)]
+mod allowed_roots_tests {
+    //! add-webui-allowed-roots 路由级验收：白名单启用后 browse-dirs 的
+    //! 显式 root 与项目注册路径都必须落在白名单内；空白名单时两者维持
+    //! 现状（opt-in 不破坏既有行为）。
+    use super::*;
+    use crate::models::RouterInfo;
+    use crate::session_backend::FakeBackend;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    fn app_with_roots(roots: Vec<std::path::PathBuf>) -> Router {
+        build_router_with_allowed_roots(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(AuthHandle::disabled()),
+            None,
+            roots,
+        )
+    }
+
+    async fn req(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<String>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder
+            .body(Body::from(body.unwrap_or_default()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, v)
+    }
+
+    /// 项目注册走文件注册表降级路径（FakeBackend 无 state_mutate 覆写），
+    /// env 是进程级的：与 projects.rs 测试共用同一把串行锁，用完恢复。
+    /// 锁跨 await 是刻意的——正是要把整个异步测试体串行化。
+    #[allow(clippy::await_holding_lock)]
+    async fn with_registry_env<F, R>(f: F) -> R
+    where
+        F: AsyncFnOnce() -> R,
+    {
+        let _g = crate::projects::test_env_lock();
+        let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
+        let registry = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock 保证进程内注册表相关测试串行。
+        unsafe {
+            std::env::set_var("SEBAS_PROJECTS_PATH", registry.path().join("p.json"));
+        }
+        let r = f().await;
+        // SAFETY: 同上。
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("SEBAS_PROJECTS_PATH", p),
+                None => std::env::remove_var("SEBAS_PROJECTS_PATH"),
+            }
+        }
+        r
+    }
+
+    #[tokio::test]
+    async fn project_add_rejects_path_outside_allowed_roots() {
+        let t = two_trees();
+        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        // fail-closed：即使路径真实存在，越界也 400（先范围后存在性）。
+        let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
+        let (status, resp) = req(
+            app,
+            "POST",
+            "/api/projects",
+            Some(body.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = resp["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("超出允许范围"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn project_add_accepts_path_inside_allowed_roots() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+            let dir = t.allowed.path().join("proj");
+            std::fs::create_dir_all(&dir).unwrap();
+            let canonical = dir.canonicalize().unwrap();
+            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+            let (status, resp) = req(
+                app,
+                "POST",
+                "/api/projects",
+                Some(body.to_string()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
+            assert_eq!(resp["path"].as_str(), Some(canonical.to_string_lossy().as_ref()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn project_add_without_whitelist_is_unchanged() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let app = app_with_roots(Vec::new());
+            let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
+            let (status, _resp) = req(
+                app,
+                "POST",
+                "/api/projects",
+                Some(body.to_string()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "空白名单时注册不受范围约束");
+        })
+        .await;
+    }
+
+    /// 两个互不为邻的 tempdir 树：`allowed/`（有子目录）与 `outside/`。
+    struct Trees {
+        allowed: tempfile::TempDir,
+        outside: tempfile::TempDir,
+    }
+
+    fn two_trees() -> Trees {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(allowed.path().join("sub")).unwrap();
+        Trees { allowed, outside }
+    }
+
+    #[tokio::test]
+    async fn browse_dirs_rejects_root_outside_allowed_roots() {
+        let t = two_trees();
+        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let uri = format!(
+            "/api/fs/browse-dirs?root={}",
+            urlencoding_encode(t.outside.path().to_str().unwrap())
+        );
+        let (status, body) = req(app, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("超出允许范围"), "got: {msg}");
+        assert!(
+            !msg.contains(t.outside.path().to_str().unwrap()),
+            "resolved path must not leak: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_dirs_accepts_root_inside_allowed_roots() {
+        let t = two_trees();
+        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let uri = format!(
+            "/api/fs/browse-dirs?root={}",
+            urlencoding_encode(t.allowed.path().to_str().unwrap())
+        );
+        let (status, body) = req(app, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(names.contains(&"sub"), "entries: {body}");
+    }
+
+    #[tokio::test]
+    async fn browse_dirs_without_whitelist_keeps_explicit_root_working() {
+        let t = two_trees();
+        let app = app_with_roots(Vec::new());
+        let uri = format!(
+            "/api/fs/browse-dirs?root={}",
+            urlencoding_encode(t.outside.path().to_str().unwrap())
+        );
+        let (status, _body) = req(app, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "空白名单 = 未启用约束");
+    }
+
+    fn urlencoding_encode(s: &str) -> String {
+        // 最小 percent-encode：只编码查询串里非法的字符（测试路径均为
+        // tempdir 生成的安全 ASCII）。
+        s.replace(' ', "%20")
     }
 }

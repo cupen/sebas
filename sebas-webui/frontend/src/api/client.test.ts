@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, parseBackendHint, withQuery } from './client.js'
+import { api, ApiError, NetworkError, parseBackendHint, withQuery } from './client.js'
 
 const fetchMock = vi.fn()
 
@@ -129,5 +129,29 @@ describe('withQuery (add-webui-picker-workdir-start)', () => {
     const url = fetchMock.mock.calls[0][0] as string
     expect(url.startsWith('/api/fs/browse-dirs?')).toBe(true)
     expect(url).toContain('root=X%3A%5Cw')
+  })
+})
+
+describe('network-level failures', () => {
+  it('wraps a fetch TypeError into a distinguishable NetworkError', async () => {
+    // add-webui-allowed-roots D6：服务进程死亡时 fetch 抛 TypeError（无
+    // HTTP 响应），client 统一转成 NetworkError，视图据此区分「后端拒绝」
+    // 与「进程没了」。
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const err = await api.sessions().catch((e) => e)
+    expect(err).toBeInstanceOf(NetworkError)
+    expect((err as Error).name).toBe('NetworkError')
+    expect(err).not.toBeInstanceOf(ApiError)
+  })
+
+  it('keeps ApiError for HTTP error responses (no conflation)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(503, { error: 'backend down' }))
+
+    const err = await api.sessions().catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(503)
   })
 })

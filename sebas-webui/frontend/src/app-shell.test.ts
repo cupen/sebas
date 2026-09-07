@@ -236,3 +236,27 @@ describe('deep-link reachability', () => {
     expect(src).toContain('navigate(`/sessions/')
   })
 })
+
+describe('global disconnect banner (add-webui-allowed-roots D6)', () => {
+  it('shows the banner while /ws is down and clears it on reconnect', async () => {
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('.ws-banner')).toBeNull()
+
+    window.dispatchEvent(
+      new CustomEvent('sebas:ws-state', { detail: { connected: false } }),
+    )
+    await el.updateComplete
+    const banner = el.shadowRoot!.querySelector<HTMLElement>('.ws-banner')
+    expect(banner).toBeTruthy()
+    expect(banner?.textContent ?? '').toContain('与服务器的连接已断开')
+    expect(banner?.getAttribute('role')).toBe('alert')
+
+    // 重连成功：横幅消失（sebas:refetch 刷新由既有钩子负责）。
+    window.dispatchEvent(
+      new CustomEvent('sebas:ws-state', { detail: { connected: true } }),
+    )
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.ws-banner')).toBeNull()
+    el.remove()
+  })
+})

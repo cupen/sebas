@@ -278,6 +278,10 @@ pub async fn run(
             Some(dir) => Some(std::path::PathBuf::from(dir)),
             None => std::env::current_dir().ok(),
         };
+        // add-webui-allowed-roots：白名单由纯函数组装——未配置 = 空表
+        // （不启用）；配置了 = 配置项 + 默认根自动入列。
+        let webui_allowed_roots =
+            crate::config::webui_allowed_roots(&cfg.watchdog.webui, webui_work_root.as_deref());
         let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
@@ -301,6 +305,7 @@ pub async fn run(
                 None,
                 auth,
                 webui_work_root,
+                webui_allowed_roots,
             )
             .await;
         });

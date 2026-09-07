@@ -19,4 +19,8 @@ const eagerHost = {
 
 export const sharedWs = new WsClient(eagerHost, {
   onReconnect: () => window.dispatchEvent(new CustomEvent('sebas:refetch')),
+  // add-webui-allowed-roots D6：连接状态变化广播给 app-shell，渲染全局
+  // 断线横幅（重连成功即消失）。
+  onStateChange: (connected) =>
+    window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected } })),
 })

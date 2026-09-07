@@ -221,6 +221,18 @@ describe('sebas-workbench-composer', () => {
     expect(callout?.textContent ?? '').toContain('core not connected')
   })
 
+
+  it('gates submit when the summary poll itself fails (server unreachable)', async () => {
+    // add-webui-allowed-roots D6：summary 请求失败 = 服务不可达，与
+    // reachability.ok=false 同款禁用提交门（轮询恢复后自动解除）。
+    ;(api.summary as ReturnType<typeof vi.fn>).mockRejectedValue(new TypeError('Failed to fetch'))
+    const el = await mount({ projectDir: null })
+    const textarea = el.shadowRoot?.querySelector('wa-textarea')
+    expect(textarea?.hasAttribute('disabled')).toBe(true)
+    const callout = el.shadowRoot?.querySelector<HTMLElement>('.callout-warning')
+    expect(callout?.textContent ?? '').toContain('无法获取服务状态')
+  })
+
   it('shows a model dropdown from the latest session and forwards the model', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({

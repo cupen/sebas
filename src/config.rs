@@ -369,6 +369,12 @@ pub struct WatchdogWebUiConfig {
     /// 一律拒绝（见 webui_cmd 的安全门）。
     #[serde(default = "default_webui_auth")]
     pub auth: bool,
+    /// 项目管理可选目录白名单（add-webui-allowed-roots）。空/缺省 = 不启用
+    /// 范围约束（browse-dirs 显式 root 与项目注册保持现状）；配置后两者
+    /// 都必须落在白名单目录之一内。支持 `~` 展开；相对路径按进程 cwd 解析
+    /// 并记录告警。默认根（work_dir / cwd 回退）自动并入白名单。
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
 }
 
 impl Default for WatchdogWebUiConfig {
@@ -378,8 +384,31 @@ impl Default for WatchdogWebUiConfig {
             host: default_webui_host(),
             port: default_webui_port(),
             auth: default_webui_auth(),
+            allowed_roots: Vec::new(),
         }
     }
+}
+
+/// 组装 browse-dirs / 项目注册的白名单（add-webui-allowed-roots）。
+///
+/// `allowed_roots` 未配置（空）→ 返回空表 = 不启用范围约束，行为与
+/// 引入白名单前完全一致；配置了 → 返回配置项 + 服务端默认根（work_dir /
+/// cwd 回退）自动入列，保证「不带 root」的既有语义不受启用影响。
+pub fn webui_allowed_roots(
+    cfg: &WatchdogWebUiConfig,
+    work_root: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    if cfg.allowed_roots.is_empty() {
+        return Vec::new();
+    }
+    let mut roots: Vec<std::path::PathBuf> =
+        cfg.allowed_roots.iter().map(std::path::PathBuf::from).collect();
+    if let Some(root) = work_root {
+        if !roots.contains(&root.to_path_buf()) {
+            roots.push(root.to_path_buf());
+        }
+    }
+    roots
 }
 
 fn default_webui_enabled() -> bool {
@@ -618,6 +647,9 @@ impl Config {
             }
         }
         self.media.download_dir = expand_tilde(&self.media.download_dir);
+        for root in &mut self.watchdog.webui.allowed_roots {
+            *root = expand_tilde(root);
+        }
         if let Some(ref f) = self.log.file {
             self.log.file = Some(expand_tilde(f));
         }
@@ -708,6 +740,62 @@ mod tests {
         assert!(!cfg.watchdog.core.enabled, "core 应默认停用");
         assert!(!cfg.watchdog.router.enabled, "router 应默认停用");
         assert!(!cfg.feishu.enabled(), "无凭证时 feishu 应视为未启用");
+        assert!(
+            cfg.watchdog.webui.allowed_roots.is_empty(),
+            "allowed_roots 缺省 = 未启用范围约束"
+        );
+    }
+
+    #[test]
+    fn webui_allowed_roots_parse_and_expand_tilde() {
+        // add-webui-allowed-roots：白名单解析 + `~` 展开（with_expanded_paths
+        // 经由 Config::parse 的既有展开管线生效）。
+        let cfg = Config::parse(
+            r#"
+[watchdog.webui]
+allowed_roots = ["~/work", "/srv/projects"]
+"#,
+        )
+        .expect("allowed_roots 应可解析");
+        let roots = &cfg.watchdog.webui.allowed_roots;
+        assert_eq!(roots.len(), 2);
+        assert!(
+            !roots[0].starts_with("~"),
+            "~ 必须已展开: {}",
+            roots[0]
+        );
+        assert_eq!(roots[1], "/srv/projects");
+    }
+
+    #[test]
+    fn webui_allowed_roots_empty_config_disables_enforcement() {
+        // 未配置 allowed_roots → 空表 = 不启用范围约束（冒烟抓到的回归：
+        // 默认根无条件入列会让白名单永远非空、强制生效）。
+        let cfg = WatchdogWebUiConfig::default();
+        assert!(webui_allowed_roots(&cfg, Some(std::path::Path::new("/any/work"))).is_empty());
+        assert!(webui_allowed_roots(&cfg, None).is_empty());
+    }
+
+    #[test]
+    fn webui_allowed_roots_configured_merges_default_root_once() {
+        let mut cfg = WatchdogWebUiConfig::default();
+        cfg.allowed_roots = vec!["/srv/projects".into()];
+        let roots = webui_allowed_roots(
+            &cfg,
+            Some(std::path::Path::new("/srv/projects")),
+        );
+        // 默认根与配置项重合 → 不重复。
+        assert_eq!(roots, vec![std::path::PathBuf::from("/srv/projects")]);
+
+        let roots = webui_allowed_roots(&cfg, Some(std::path::Path::new("/srv/work")));
+        // 默认根不同 → 追加到尾部（「不带 root」语义不受启用影响）。
+        assert_eq!(
+            roots,
+            vec![
+                std::path::PathBuf::from("/srv/projects"),
+                std::path::PathBuf::from("/srv/work"),
+            ]
+        );
     }
 
     #[test]

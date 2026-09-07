@@ -51,6 +51,12 @@ export type WsEventHandler = (event: WsEvent) => void
 export interface WsClientOptions {
   /** Called after a dropped connection has been re-established. */
   onReconnect?: () => void
+  /**
+   * Connection-state transitions (add-webui-allowed-roots D6): `true` on
+   * open, `false` on an unintended close (user-driven closes are silent).
+   * The shell listens to render the global disconnect banner.
+   */
+  onStateChange?: (connected: boolean) => void
   /** Base backoff in ms; doubles per failed attempt up to `maxBackoffMs`. */
   backoffMs?: number
   maxBackoffMs?: number
@@ -67,12 +73,14 @@ export class WsClient implements ReactiveController {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private closedByUser = false
   private readonly onReconnect?: () => void
+  private readonly onStateChange?: (connected: boolean) => void
   private readonly socketFactory: (url: string) => WebSocket
 
   constructor(host: ReactiveControllerHost, options: WsClientOptions = {}) {
     this.backoffMs = options.backoffMs ?? 500
     this.maxBackoffMs = options.maxBackoffMs ?? 15_000
     this.onReconnect = options.onReconnect
+    this.onStateChange = options.onStateChange
     this.socketFactory = options.socketFactory ?? ((url) => new WebSocket(url))
     host.addController(this)
   }
@@ -106,6 +114,7 @@ export class WsClient implements ReactiveController {
     socket.onopen = () => {
       const wasRetry = this.attempts > 0
       this.attempts = 0
+      this.onStateChange?.(true)
       if (wasRetry) this.onReconnect?.()
     }
 
@@ -127,6 +136,7 @@ export class WsClient implements ReactiveController {
     socket.onclose = () => {
       this.socket = null
       if (this.closedByUser) return
+      this.onStateChange?.(false)
       this.scheduleReconnect()
     }
 

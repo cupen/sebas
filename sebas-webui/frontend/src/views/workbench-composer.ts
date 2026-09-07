@@ -365,10 +365,11 @@ export class SebasWorkbenchComposer extends LitElement {
         this.nativeAvailability = null
       }
     } catch {
-      /* If summary itself fails, leave reachability null so the operator
-       * can still try to submit (the server-side call will give a more
-       * accurate error than a stale gate). */
-      this.unreachable = null
+      /* add-webui-allowed-roots D6：summary 请求本身失败（服务进程死亡 /
+       * 网络故障）与 reachability.ok = false 同款对待——进入不可达态禁用
+       * 提交门，如实呈现而不是放行一次注定失败的提交。轮询恢复后自动
+       * 解除。 */
+      this.unreachable = { ok: false, cause: '无法获取服务状态（服务可能未运行）' }
       this.nativeAvailability = null
     }
   }
