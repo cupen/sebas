@@ -306,6 +306,18 @@ export class ApiError extends Error {
 }
 
 /**
+ * 网络级失败（add-webui-allowed-roots D6）：请求根本没拿到 HTTP 响应——
+ * 服务进程死了、连接被拒、DNS 失败——fetch 抛 TypeError。统一包装成
+ * `NetworkError`，让视图能区分「后端拒绝（ApiError）」与「进程没了」。
+ */
+export class NetworkError extends Error {
+  constructor(message = '无法连接服务器（服务可能未运行）') {
+    super(message)
+    this.name = 'NetworkError'
+  }
+}
+
+/**
  * Global handler fired whenever an API call gets a 401 while webui 登录鉴权
  * is enabled — the shell registers it to flip to the login view (e.g. when a
  * session expires mid-use). Login/logout calls bypass it.
@@ -350,6 +362,19 @@ function isAuthExempt(path: string): boolean {
   )
 }
 
+/**
+ * fetch 的唯一包装点：网络级失败（TypeError，无 HTTP 响应）转成
+ * `NetworkError`；HTTP 响应（含 4xx/5xx）原样返回，由 `unwrap` 归一。
+ */
+async function doFetch(path: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(path, init)
+  } catch (e) {
+    if (e instanceof TypeError) throw new NetworkError()
+    throw e
+  }
+}
+
 async function unwrap<T>(resp: Response, path?: string): Promise<T> {
   if (resp.ok) return (await resp.json()) as T
   if (resp.status === 401 && onUnauthorized && path && !isAuthExempt(path)) onUnauthorized()
@@ -364,7 +389,7 @@ async function unwrap<T>(resp: Response, path?: string): Promise<T> {
 }
 
 async function get<T>(path: string): Promise<T> {
-  return unwrap<T>(await fetch(path, { headers: { accept: 'application/json' } }), path)
+  return unwrap<T>(await doFetch(path, { headers: { accept: 'application/json' } }), path)
 }
 
 function csrfHeaders(): Record<string, string> {
@@ -389,7 +414,7 @@ export function withQuery(path: string, params: Record<string, string | null | u
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
   return unwrap<T>(
-    await fetch(path, {
+    await doFetch(path, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -404,7 +429,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 
 async function put<T>(path: string, body?: unknown): Promise<T> {
   return unwrap<T>(
-    await fetch(path, {
+    await doFetch(path, {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -419,7 +444,7 @@ async function put<T>(path: string, body?: unknown): Promise<T> {
 
 async function del<T>(path: string): Promise<T> {
   return unwrap<T>(
-    await fetch(path, {
+    await doFetch(path, {
       method: 'DELETE',
       headers: { accept: 'application/json', ...csrfHeaders() },
     }),
@@ -434,7 +459,7 @@ const projects = {
     post<Project>('/api/projects', { path }),
   remove: async (path: string) =>
     unwrapText(
-      await fetch(`/api/projects/${encodeURIComponent(path)}/remove`, {
+      await doFetch(`/api/projects/${encodeURIComponent(path)}/remove`, {
         method: 'POST',
         headers: { ...csrfHeaders() },
       }),

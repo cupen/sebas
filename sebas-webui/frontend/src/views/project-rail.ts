@@ -148,6 +148,17 @@ export class SebasProjectRail extends LitElement {
     .group-head .group-count { margin-left: auto; font-variant-numeric: tabular-nums; background: var(--sebas-surface-3); border-radius: var(--sebas-radius-full); padding: 0 7px; font-size: 0.62rem; }
     .group-head:focus-visible { outline: var(--sebas-focus-ring); outline-offset: 1px; }
     .error { padding: 8px 12px; color: var(--sebas-status-failed); font-size: 0.78rem; }
+    .error .retry-btn {
+      margin-left: 4px;
+      padding: 1px 8px;
+      border: 1px solid currentColor;
+      border-radius: var(--sebas-radius-md);
+      background: none;
+      color: inherit;
+      font: inherit;
+      font-size: 0.72rem;
+      cursor: pointer;
+    }
   `
 
   connectedCallback(): void {
@@ -370,7 +381,7 @@ export class SebasProjectRail extends LitElement {
         <span>Projects</span>
         <button class="add-btn" aria-label="Add project" title="添加项目" @click=${this.openAddDialog}>+</button>
       </div>
-      ${this.error ? html`<div class="error">${this.error}</div>` : nothing}
+      ${this.error ? html`<div class="error">${this.error} <button class="retry-btn" @click=${() => void this.refresh()}>重试</button></div>` : nothing}
       ${this.projects.length === 0 ? html`<div class="empty">尚未注册项目</div>` : html`<ul>${this.projects.map((p, i) => this.renderRow(p, i))}</ul>`}
       ${this.renderInbox()}
       ${this.renderHistory()}

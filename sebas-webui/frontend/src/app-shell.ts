@@ -56,6 +56,12 @@ export class SebasApp extends LitElement {
   @state() private selectedPath: string | null = null
   /** Whether the centered settings modal is open (sidebar entry toggles it). */
   @state() private settingsOpen = false
+  /**
+   * `/ws` 断线中（add-webui-allowed-roots D6）：共享 WS 客户端经
+   * `sebas:ws-state` 广播连接状态，顶部横幅提示操作者当前视图可能冻结，
+   * 重连成功即消失并触发 `sebas:refetch` 刷新。
+   */
+  @state() private wsDown = false
 
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
@@ -180,6 +186,28 @@ export class SebasApp extends LitElement {
       min-height: 0;
       display: flex;
       flex-direction: column;
+      position: relative; /* 断线横幅的定位上下文 */
+    }
+    /* 全局断线横幅（add-webui-allowed-roots D6）：骑在出口区顶部，不占
+       布局流——断线期间视图本就可能冻结，横幅不应把内容顶来顶去。 */
+    .ws-banner {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: var(--sebas-status-warn, #b45309);
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    .ws-banner svg {
+      flex: 0 0 auto;
     }
     .outlet {
       /* 满幅工作台：workbench 类路由（/ 与 /sessions/:key）直接铺满
@@ -291,10 +319,16 @@ export class SebasApp extends LitElement {
     }
     window.addEventListener('popstate', this.onNavigateBound)
     document.addEventListener('click', this.onClick)
+    // add-webui-allowed-roots D6：WS 连接状态 → 全局断线横幅。
+    window.addEventListener('sebas:ws-state', this.onWsState)
     // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。
     setUnauthorizedHandler(() => this.showLogin())
     this.onNavigate()
     void this.checkAuth()
+  }
+
+  private onWsState = (e: Event): void => {
+    this.wsDown = (e as CustomEvent<{ connected: boolean }>).detail?.connected === false
   }
 
   /** 探明服务端鉴权状态，决定渲染登录页还是工作台。 */
@@ -336,6 +370,7 @@ export class SebasApp extends LitElement {
   disconnectedCallback(): void {
     window.removeEventListener('popstate', this.onNavigateBound)
     document.removeEventListener('click', this.onClick)
+    window.removeEventListener('sebas:ws-state', this.onWsState)
     super.disconnectedCallback()
   }
 
@@ -430,7 +465,14 @@ export class SebasApp extends LitElement {
       </nav>
       <main
         @open-settings=${() => (this.settingsOpen = true)}
-      ><div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div></main>
+      >
+        ${this.wsDown
+          ? html`<div class="ws-banner" role="alert">
+              ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
+            </div>`
+          : nothing}
+        <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>
+      </main>
       <sebas-settings-modal
         ?open=${this.settingsOpen}
         @close=${() => (this.settingsOpen = false)}

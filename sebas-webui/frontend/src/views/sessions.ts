@@ -269,6 +269,7 @@ export class SebasSessions extends LitElement {
       return html`
         <div class="callout callout-error" role="alert">
           ${icon('alert')}<span>Failed to load: ${this.error}</span>
+          <button class="retry-btn" @click=${() => this.refetch()}>重试</button>
         </div>
       `
     if (!this.data) return this.renderLoading()

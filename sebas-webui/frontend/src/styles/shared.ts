@@ -256,6 +256,26 @@ export const viewStyles = css`
     background: var(--sebas-status-failed-bg);
     border-color: var(--sebas-status-failed-border);
   }
+  /* 数据加载失败的内联重试（add-webui-allowed-roots D6）：右推小按钮。 */
+  .callout .retry-btn {
+    margin-left: auto;
+    flex: 0 0 auto;
+    padding: 3px 12px;
+    border: 1px solid currentColor;
+    border-radius: var(--sebas-radius-md);
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .callout .retry-btn:hover {
+    background: rgba(127, 127, 127, 0.15);
+  }
+  .callout .retry-btn:focus-visible {
+    outline: var(--sebas-focus-ring);
+    outline-offset: 2px;
+  }
   .callout-warn,
   .callout-warning {
     color: var(--sebas-status-working);

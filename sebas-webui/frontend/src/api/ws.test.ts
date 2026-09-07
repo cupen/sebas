@@ -155,4 +155,33 @@ describe('WsClient', () => {
     expect(FakeSocket.instances).toHaveLength(1)
     expect(FakeSocket.instances[0]!.url).toBe('ws://localhost:3000/ws')
   })
+
+  it('reports connection-state transitions (open → true, drop → false)', () => {
+    // add-webui-allowed-roots D6：shell 依赖 onStateChange 渲染断线横幅。
+    const states: boolean[] = []
+    const client = new WsClient(fakeHost(), {
+      backoffMs: 100,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+      onStateChange: (connected) => states.push(connected),
+    })
+    client.hostConnected()
+    FakeSocket.instances[0]!.open()
+    FakeSocket.instances[0]!.drop()
+    vi.advanceTimersByTime(60_000)
+    FakeSocket.instances[1]!.open()
+    expect(states).toEqual([true, false, true])
+  })
+
+  it('does not report a state change for a user-driven close', () => {
+    const states: boolean[] = []
+    const client = new WsClient(fakeHost(), {
+      backoffMs: 100,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+      onStateChange: (connected) => states.push(connected),
+    })
+    client.hostConnected()
+    FakeSocket.instances[0]!.open()
+    client.hostDisconnected()
+    expect(states).toEqual([true])
+  })
 })
