@@ -100,6 +100,26 @@ def testsuite_acceptance(c, case=None):
         raise SystemExit(1)
 
 
+def _testsuite_webui_spec_structure(c):
+    """Spec-structure gate (converge-webui-e2e-tree): every test() must live
+    inside a test.describe(). A top-level bare `test(` (column 0) means a new
+    case bypassed the functional tree — refuse to run and point at the file."""
+    import glob as _glob
+
+    offenders = []
+    for path in sorted(_glob.glob("tests/testsuite-webui/tests/*.spec.ts")):
+        with open(path, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                if line.startswith("test("):
+                    offenders.append(f"{path}:{lineno}")
+    if offenders:
+        print("❌ spec structure violation — top-level bare test() outside test.describe():")
+        for o in offenders:
+            print(f"   {o}")
+        print("   Wrap the case in the functional tree: describe('<大功能>', () => describe('<子功能>', ...))")
+        raise SystemExit(1)
+
+
 def _testsuite_webui_preflight(c):
     """pnpm + Playwright chromium preflight; installs what is missing."""
     result = c.run("pnpm --version", hide=True, warn=True)
@@ -122,6 +142,9 @@ def _testsuite_webui_preflight(c):
 @task(help={"case": "Run a single webui journey (spec file stem: first-paint, auth, ...)"})
 def testsuite_webui(c, case=None):
     """Build + run the browser-level webui suite (testsuite-webui, Playwright, sandboxed)."""
+    # Spec-structure gate first: refuse tree-bypassing cases before any build.
+    _testsuite_webui_spec_structure(c)
+
     # Frontend dist is baked into the binary at build time — rebuild it when
     # the frontend sources are newer than the last dist build.
     dist_index = "sebas-webui/frontend/dist/index.html"
@@ -192,13 +215,15 @@ def _sandbox_bin(name):
 
 
 def _cfg_path(path):
-    """Path as written into config.toml. msys/cygwin Python produces POSIX
-    paths a native .exe cannot parse, so convert via cygpath when present."""
+    """Path as written into config.toml. TOML basic strings treat `\` as an
+    escape, so separators must come out as forward slashes; msys/cygwin Python
+    additionally produces POSIX paths a native .exe cannot parse, so convert
+    via cygpath when present."""
     if sys.platform.startswith(("msys", "cygwin")) and shutil.which("cygpath"):
         out = subprocess.run(["cygpath", "-m", path], capture_output=True, text=True)
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
-    return path
+    return path.replace("\\", "/")
 
 
 def _sandbox_env(work):
