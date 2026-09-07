@@ -215,7 +215,7 @@ def _sandbox_bin(name):
 
 
 def _cfg_path(path):
-    """Path as written into config.toml. TOML basic strings treat `\` as an
+    r"""Path as written into config.toml. TOML basic strings treat `\` as an
     escape, so separators must come out as forward slashes; msys/cygwin Python
     additionally produces POSIX paths a native .exe cannot parse, so convert
     via cygpath when present."""

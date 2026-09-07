@@ -2,6 +2,8 @@
  * Journey 3.4 — permission review cards (spec: 拒绝路径 / 单次允许路径 /
  * 会话级允许).
  *
+ * 功能：审批卡片旅程 / 子功能：拒绝路径、单次允许路径、会话级允许
+ *
  * The "perm" trigger makes fake-claude call Bash("rm -rf /") through the
  * hook_callback gate. The gated request reaches the browser as a WS
  * permission.requested frame and renders as a review card — so the card
@@ -14,7 +16,7 @@
 import { expect, test } from '@playwright/test'
 import { createSession, ErrorCollector, ReviewCards, SessionDetailPage, waitStatus } from './helpers/index'
 
-test.describe('permission cards', () => {
+test.describe('审批卡片旅程', () => {
   let collector: ErrorCollector
 
   test.beforeEach(({ page }) => {
@@ -33,61 +35,67 @@ test.describe('permission cards', () => {
     return { detail, cards }
   }
 
-  test('deny path — refusal semantics, turn completes', async ({ page }) => {
-    const { detail, cards } = await openAndTriggerPerm(page)
+  test.describe('拒绝路径', () => {
+    test('deny path — refusal semantics, turn completes', async ({ page }) => {
+      const { detail, cards } = await openAndTriggerPerm(page)
 
-    // Card appears with the gated call's semantics: Bash + the command args.
-    await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-    await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
-    await expect(cards.card().locator('pre.args')).toContainText('rm -rf /')
+      // Card appears with the gated call's semantics: Bash + the command args.
+      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
+      await expect(cards.card().locator('.head .tool')).toHaveText('Bash')
+      await expect(cards.card().locator('pre.args')).toContainText('rm -rf /')
 
-    await cards.deny().click()
+      await cards.deny().click()
 
-    // Card resolved and removed; the transcript records the denial.
-    await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
-    await expect(detail.turnWith('denied by fake').first()).toBeVisible({ timeout: 15_000 })
-    await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      // Card resolved and removed; the transcript records the denial.
+      await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
+      await expect(detail.turnWith('denied by fake').first()).toBeVisible({ timeout: 15_000 })
+      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
 
-    expect(collector.clean()).toEqual([])
+      expect(collector.clean()).toEqual([])
+    })
   })
 
-  test('allow-once path — allowed semantics, turn completes', async ({ page }) => {
-    const { detail, cards } = await openAndTriggerPerm(page)
+  test.describe('单次允许路径', () => {
+    test('allow-once path — allowed semantics, turn completes', async ({ page }) => {
+      const { detail, cards } = await openAndTriggerPerm(page)
 
-    await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-    await cards.allowOnce().click()
+      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
+      await cards.allowOnce().click()
 
-    await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
-    await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
-    await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
+      await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
+      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
 
-    expect(collector.clean()).toEqual([])
+      expect(collector.clean()).toEqual([])
+    })
   })
 
-  test('allow-session path — observed product gap: the follow-up call is gated again', async ({ page }) => {
-    // ⚠️ REAL product finding (recorded in design.md 实现期发现 1): the
-    // WebUI `answer_permission` path sends the ACP PermissionReply but never
-    // calls `SessionAllowlist::grant_all` — that registration lives only on
-    // the feishu card-click path (inbound.rs). So from the WebUI, "allow
-    // session" does NOT persist: an identical follow-up tool call in the
-    // same session is gated again. We assert that observed, stable behavior.
-    const { detail, cards } = await openAndTriggerPerm(page)
+  test.describe('会话级允许', () => {
+    test('allow-session path — observed product gap: the follow-up call is gated again', async ({ page }) => {
+      // ⚠️ REAL product finding (recorded in design.md 实现期发现 1): the
+      // WebUI `answer_permission` path sends the ACP PermissionReply but never
+      // calls `SessionAllowlist::grant_all` — that registration lives only on
+      // the feishu card-click path (inbound.rs). So from the WebUI, "allow
+      // session" does NOT persist: an identical follow-up tool call in the
+      // same session is gated again. We assert that observed, stable behavior.
+      const { detail, cards } = await openAndTriggerPerm(page)
 
-    // First call: allow for session.
-    await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-    await cards.allowSession().click()
-    await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
-    await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
+      // First call: allow for session.
+      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
+      await cards.allowSession().click()
+      await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
+      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
 
-    // Second identical call in the SAME session: since the WebUI path never
-    // registered grant_all, it is gated again (a new review card appears).
-    await detail.sendFollowUp('perm')
-    await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
+      // Second identical call in the SAME session: since the WebUI path never
+      // registered grant_all, it is gated again (a new review card appears).
+      await detail.sendFollowUp('perm')
+      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
 
-    // Resolve it so the turn finishes and the suite stays deterministic.
-    await cards.allowOnce().click()
-    await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
+      // Resolve it so the turn finishes and the suite stays deterministic.
+      await cards.allowOnce().click()
+      await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
 
-    expect(collector.clean()).toEqual([])
+      expect(collector.clean()).toEqual([])
+    })
   })
 })

@@ -157,28 +157,56 @@
 > 入口 `invoke testsuite-webui`（`tests/testsuite-webui/`，独立 pnpm 包）；后端为一次性沙箱
 > （`sebas core --router --debug --webui` + fake-claude 桩），chromium headless。
 
-| 旅程 | spec 文件 | 对应 requirement 场景 |
-|---|---|---|
-| 首屏结构与 reachability 如实显示 | `first-paint.spec.ts` | testsuite-webui-browser「首屏与 reachability」 |
-| 会话回合往返 + 重载恢复 | `session-roundtrip.spec.ts` | 「首回合往返」「重载恢复」 |
-| 流式分批渲染（无固定 sleep） | `streaming.spec.ts` | 「流式分批渲染」 |
-| 审批卡片 deny / allow-once / allow-session | `permission.spec.ts` | 「拒绝路径」「单次允许路径」「会话级允许」 |
-| 非终态拒绝与崩溃的诚实呈现 | `errors.spec.ts` | 「错误呈现」 |
-| 项目经 folder-picker 增删 | `projects.spec.ts` | 「项目增删」 |
-| close / archive / 深链 / 退役路径 / 模型诚实缺省 | `session-mgmt.spec.ts` | 「close 与 archive」「深链与退役路径」「模型面诚实缺省」 |
-| 鉴权闭环（错误凭据/登录/登出/深链重定向） | `auth.spec.ts`（`playwright.auth.config.ts`） | 「登录闭环」 |
-| 同会话两轮连续问答（按序追加、双 Done、重载不丢） | `dialog.spec.ts`（二期 4.1） | 二期「agent 对话核心功能覆盖」 |
-| 输入守卫（空/空白不建回合）与特殊字符长文本往返 | `dialog.spec.ts`（二期 4.2） | 同上 |
-| 双会话 switch 互切不串（列表点击 + 深链直达） | `sessions.spec.ts`（二期 2.1） | 二期「会话管理核心功能覆盖」 |
-| archive 写保护 400 + restore 诚实语义（History 消失 + 如实 404） | `sessions.spec.ts`（二期 2.2） | 同上（restore 不复活会话，见实施期发现 5） |
-| 无模型会话 set_model 终态拒绝如实呈现 + settings provider 只读 | `models.spec.ts`（二期 3.2 fallback C） | 二期「模型管理核心功能覆盖」（正向切换待驱动模型面立项，见实施期发现 6） |
-| 项目非法/重复拒绝（400/409）与移除持久化 | `projects.spec.ts`（二期 1.1） | 二期「项目管理核心功能覆盖」 |
-| 项目排序持久化与分支呈现（git/非 git） | `projects.spec.ts`（二期 1.2） | 同上 |
-| Services/About/Env 只读分区与 API 对账 | `settings.spec.ts`（三期 S1–S3） | 三期「设置面只读呈现覆盖」 |
-| agent-defaults 读呈现 + 沙箱写 503 诚实外显 | `settings.spec.ts`（三期 S4） | 三期「设置面写操作诚实降级覆盖」（写持久化待 control-secret 沙箱） |
-| provider 新建/编辑/删除/探测 503 内联错误且列表不变 | `settings.spec.ts`（三期 S5） | 同上 |
-| folder-picker 树展开点选回填、提交落栏 | `projects.spec.ts`（三期 P1） | 三期「项目选择器交互覆盖」 |
-| 空路径禁用提交；非法路径内联错误、框不关、注册表不变 | `projects.spec.ts`（三期 P2） | 同上 |
+树形账本（converge-webui-e2e-tree）：大功能 = spec 顶层 `test.describe`（对应
+requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；锚点格式
+`<requirement>「<scenario>」`，与 `openspec/specs/testsuite-webui-browser/spec.md`
+的 scenario 名逐字对应。
+
+| 大功能 | 子功能 | 用例名 | spec 文件 | 锚点 |
+|---|---|---|---|---|
+| 工作台首屏 | 首屏结构与 reachability | renders rail, composer and honest reachability | `first-paint.spec.ts` | 工作台、项目与会话管理面旅程「首屏与 reachability」 |
+| 鉴权闭环 | 深链重定向 | deep link under auth redirects to the login page | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| 鉴权闭环 | 登录与登出 | session cookie survives reload until logout, then the gate returns | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| 鉴权闭环 | 登录与登出 | wrong credentials rejected, admin/admin enters, logout returns | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| agent 对话覆盖 | 首回合往返与重载恢复 | composer submit → reply → done → reload restores | `session-roundtrip.spec.ts` | agent 对话覆盖「首回合往返」、会话核心旅程「重载恢复」 |
+| agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」 |
+| agent 对话覆盖 | 多轮连续 | 4.1 two consecutive rounds append in order and survive reload | `dialog.spec.ts` | agent 对话覆盖「同会话多轮连续」 |
+| agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
+| agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
+| agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: not-found presentation, no fake success | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
+| 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
+| 审批卡片旅程 | 会话级允许 | allow-session path — observed product gap: the follow-up call is gated again | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
+| 项目管理覆盖 | 增删 | add via project dialog appears in rail; removed project disappears | `projects.spec.ts` | 项目管理覆盖「项目增删」 |
+| 项目管理覆盖 | 异常拒绝 | 1.1 illegal path 400, duplicate 409, removal persists across reload | `projects.spec.ts` | 项目管理覆盖「项目异常拒绝」 |
+| 项目管理覆盖 | 排序与持久化 | 1.2 reorder persists; git branch shows, plain dir shows none | `projects.spec.ts` | 项目管理覆盖「项目排序与分支呈现」 |
+| 项目管理覆盖 | 选择器交互 | P1 tree expand, click-select fills path, submit lands in rail | `projects.spec.ts` | 项目管理覆盖「folder-picker 树展开点选回填」 |
+| 项目管理覆盖 | 选择器交互 | P2 empty path disables submit; missing path errors inline, dialog stays | `projects.spec.ts` | 项目管理覆盖「选择器空路径与非法路径」 |
+| 会话管理 | close 与 archive | close removes the session from the active list | `session-mgmt.spec.ts` | 会话管理覆盖「close 与 archive」 |
+| 会话管理 | close 与 archive | archive hides from list, shows in History | `session-mgmt.spec.ts` | 会话管理覆盖「close 与 archive」 |
+| 会话管理 | 深链与退役路径 | deep link renders the session via SPA fallback; /settings redirects to / | `session-mgmt.spec.ts` | 会话管理覆盖「深链与退役路径」 |
+| 会话管理 | 模型面诚实缺省 | model honest absence — no selector, switch attempt keeps model absent | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」 |
+| 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
+| 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
+| 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
+| 模型管理覆盖 | settings provider 只读 | 3.2 settings provider list matches API, zero probe traffic | `models.spec.ts` | 模型管理覆盖「settings provider 只读」 |
+| 设置面 ¹ | 只读呈现 | S1 services cards match /api/router truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 写降级 | S4 defaults read parity; sandbox write fails honestly | `settings.spec.ts` | 设置面写操作诚实降级覆盖「写降级失败外显且状态不变」¹ |
+| 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
+| 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
+
+> ¹ 设置面（S1–S4）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
+> scenario（该 change 尚未同步进主 spec，主 spec 暂无设置面 requirement）；S5a/S5b 的
+> provider 写 503 语义已由主 spec `模型管理覆盖`「settings provider 只读」吸收，故锚到
+> 主 spec。会话核心旅程的「首回合往返」「流式分批渲染」与 `agent 对话覆盖` 同名
+> scenario 文本相同（工作台旅程的「项目增删」「close 与 archive」「深链与退役路径」
+> 同理），经上表 tree 侧行同源锚定。harness 级 scenario（沙箱装配：启动即隔离 /
+> 成功退出清理 / 失败保留现场；一键入口：一键运行 / 单旅程过滤 / 渐进补用例不改入口 /
+> 顶层裸 test 拒绝）由入口机制承担、鉴权「免登录直达」由全部主 config 用例隐式承担，
+> 均不设单用例行。
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
