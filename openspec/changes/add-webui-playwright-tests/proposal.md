@@ -15,15 +15,15 @@ webui 的浏览器级 UI 渲染是验收账本里显式的豁免面：vitest 只
 
 ### New Capabilities
 
-- `webui-browser-e2e`: 浏览器级 e2e 套件的行为要求——沙箱装配边界（绝不触碰真实实例与端口 9797）、旅程覆盖面、断言稳定性、退出清理、invoke 入口。
+- `testsuite-webui-browser`: 浏览器级 e2e 套件的行为要求——沙箱装配边界（绝不触碰真实实例与端口 9797）、旅程覆盖面、断言稳定性、退出清理、invoke 入口。
 
 ### Modified Capabilities
 
-（无——acceptance-suite 矩阵按既有"账本同步"规则补一行，是执行其现有 requirement，不改其行为）
+（无——testsuite-acceptance 矩阵按既有"账本同步"规则补一行，是执行其现有 requirement，不改其行为）
 
 ## Impact
 
-- 新增 `tests/webui-e2e/`、`scripts/webui_e2e_server.sh`、`tasks.py` 新任务；`tests/acceptance/COVERAGE.md` 增加 webui-browser-e2e 行。
+- 新增 `tests/webui-e2e/`、`scripts/webui_e2e_server.sh`、`tasks.py` 新任务；`tests/acceptance/COVERAGE.md` 增加 testsuite-webui-browser 行。
 - 依赖：`@playwright/test` + chromium（本地 devDependency，不进 Rust 构建链）。
 - 零生产代码改动、零 API 变更。
 

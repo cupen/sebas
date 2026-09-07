@@ -162,7 +162,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Process-level e2e sandbox (process-e2e-suite).
+// Process-level e2e sandbox (testsuite-process-e2e).
 //
 // Each `Sandbox` is a fully isolated throwaway instance: config file + every
 // default-overriding env var live inside the sandbox dir, the webui binds a

@@ -1,4 +1,4 @@
-# webui-browser-e2e Specification（增量）
+# testsuite-webui-browser Specification（增量）
 
 ## Purpose
 

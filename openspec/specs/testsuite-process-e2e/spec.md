@@ -1,4 +1,4 @@
-# process-e2e-suite Specification
+# testsuite-process-e2e Specification
 
 ## Purpose
 

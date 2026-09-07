@@ -34,7 +34,7 @@ pnpm --dir tests/webui-e2e exec playwright test
 | `session-mgmt.spec.ts` | close / archive / 深链 SPA fallback / `/settings` 重定向 / 模型面诚实缺省 |
 | `auth.spec.ts` | 仅 auth-on 形态：错误凭据拒绝、admin/admin 登录、登出、深链重定向登录页 |
 
-能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `webui-browser-e2e` 一节。
+能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 
 ## 调试开关
 

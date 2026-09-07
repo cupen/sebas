@@ -1,4 +1,4 @@
-# acceptance-suite Specification
+# testsuite-acceptance Specification
 
 ## Purpose
 
@@ -55,7 +55,7 @@
 
 ### Requirement: 旅程用例形态
 
-验收用例 SHALL 是多步旅程级场景：以真实二进制（沙箱拓扑）经进程间真实边界（HTTP、核心通道、文件系统）串联多个能力，断言面向操作员可见结果。套件 MUST NOT 在进程级孤立重测单元层已覆盖的单点契约；无旅程命中的能力簇才新增用例。沙箱隔离、平台门控、显式超时、失败保留现场 MUST 遵循 `process-e2e-suite` 能力的同一约定。
+验收用例 SHALL 是多步旅程级场景：以真实二进制（沙箱拓扑）经进程间真实边界（HTTP、核心通道、文件系统）串联多个能力，断言面向操作员可见结果。套件 MUST NOT 在进程级孤立重测单元层已覆盖的单点契约；无旅程命中的能力簇才新增用例。沙箱隔离、平台门控、显式超时、失败保留现场 MUST 遵循 `testsuite-process-e2e` 能力的同一约定。
 
 #### Scenario: 一条旅程跨多个能力
 
@@ -69,7 +69,7 @@
 
 ### Requirement: 一键入口与诊断
 
-套件 SHALL 提供单条命令入口 `invoke accept`：构建工作区二进制后运行全部验收用例，退出码如实反映结果；`--case <用例名>` SHALL 透传为过滤器以手动单跑。用例失败时 MUST 保留沙箱目录与日志并打印路径（同 `process-e2e-suite` 约定）。
+套件 SHALL 提供单条命令入口 `invoke accept`：构建工作区二进制后运行全部验收用例，退出码如实反映结果；`--case <用例名>` SHALL 透传为过滤器以手动单跑。用例失败时 MUST 保留沙箱目录与日志并打印路径（同 `testsuite-process-e2e` 约定）。
 
 #### Scenario: 一键全量验收
 
@@ -92,7 +92,7 @@ native 内核链路 SHALL 先经 spike 验证沙箱内 `SEBAS_AGENT_ROUTER_URL �
 
 ### Requirement: 套件运行预算
 
-全套验收用例 MUST 以显式超时为界，单用例与全套总时长 SHOULD 有预算上限（单用例 ≤30s、全套 ≤5 分钟量级）；用例 MUST 以 `#[ignore]` 标注不进默认 `cargo test`，平台门控遵循 `process-e2e-suite` 约定。
+全套验收用例 MUST 以显式超时为界，单用例与全套总时长 SHOULD 有预算上限（单用例 ≤30s、全套 ≤5 分钟量级）；用例 MUST 以 `#[ignore]` 标注不进默认 `cargo test`，平台门控遵循 `testsuite-process-e2e` 约定。
 
 #### Scenario: 默认路径不受扰
 

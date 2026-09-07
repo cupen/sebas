@@ -37,7 +37,7 @@ Non-goals：见 proposal（watchdog 两进程形态、CI、非 chromium、模型
 ### D5. 账本同步与入口
 
 - `invoke webui-e2e`（tasks.py）：`cargo build --bin sebas --bin fake-claude`（build.rs 自动保 dist 新鲜）→ 装 playwright 依赖（缺则 `pnpm install` + `playwright install chromium`，预检并给出清晰报错）→ 跑双 config → 失败保留现场。支持 `--case` 过滤单个旅程（透传 playwright 文件过滤）。
-- 按 acceptance-suite 的账本同步规则，`tests/acceptance/COVERAGE.md` 增加 `webui-browser-e2e` 行（非核心簇）；webui 能力矩阵中被浏览器旅程命中的"浏览器级 UI 渲染"豁免条目转为引用本套件证据。
+- 按 testsuite-acceptance 的账本同步规则，`tests/acceptance/COVERAGE.md` 增加 `testsuite-webui-browser` 行（非核心簇）；webui 能力矩阵中被浏览器旅程命中的"浏览器级 UI 渲染"豁免条目转为引用本套件证据。
 
 ### D6. 平台适配：Linux 主 + CI，Windows best-effort
 

@@ -26,7 +26,7 @@
 ## 4. 入口与账本
 
 - [x] 4.1 tasks.py 加 `invoke webui-e2e`（`cargo build --bin sebas --bin fake-claude` → pnpm/浏览器依赖预检与安装 → 跑主 config + auth config → 失败保留现场输出路径）与 `--case` 单旅程过滤；验证：仓库根 `invoke webui-e2e` 一键全绿；`invoke webui-e2e --case auth` 仅跑鉴权 spec 且清理行为一致
-- [x] 4.2 `tests/acceptance/COVERAGE.md` 增加 `webui-browser-e2e` 行（非核心簇、含证据引用），webui 能力行中"浏览器级 UI 渲染"豁免条目转为引用本套件旅程；验证：矩阵行完整、无空白条目
+- [x] 4.2 `tests/acceptance/COVERAGE.md` 增加 `testsuite-webui-browser` 行（非核心簇、含证据引用），webui 能力行中"浏览器级 UI 渲染"豁免条目转为引用本套件旅程；验证：矩阵行完整、无空白条目
 
 ## 5. 收尾
 

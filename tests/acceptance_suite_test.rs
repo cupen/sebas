@@ -1,4 +1,4 @@
-//! Acceptance suite (acceptance-suite): multi-step, journey-level cases that
+//! Acceptance suite (testsuite-acceptance): multi-step, journey-level cases that
 //! cross several capabilities over real process boundaries. Sandbox rules are
 //! the same as `core_flow_e2e_test` (support::Sandbox): everything inside a
 //! throwaway dir, probed ports, no operator instance touched.
