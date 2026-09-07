@@ -301,8 +301,17 @@ fn render_response(
                 RpcControlResponse::Accepted {
                     operation_id,
                     status,
+                    startup_failure,
                 } => {
                     println!("accepted operation={operation_id} status={status}");
+                    // fail-fast-on-startup-errors D6 / task 2.4：failed-startup
+                    // 时触发者从单一入口看到失败原因（无失败时字段缺席）。
+                    if let Some(sf) = startup_failure {
+                        println!(
+                            "startup_failure: service={} count={} at={} last_stderr={}",
+                            sf.service, sf.count, sf.at, sf.last_stderr
+                        );
+                    }
                 }
             RpcControlResponse::Rejected { code, message } => {
                 eprintln!("rejected code={code} message={message}");
@@ -892,6 +901,20 @@ mod tests {
                 RpcControlResponse::Accepted {
                     operation_id: "op_42".into(),
                     status: "Running".into(),
+                    startup_failure: None,
+                },
+            ),
+            (
+                "accepted-with-startup-failure",
+                RpcControlResponse::Accepted {
+                    operation_id: "op_43".into(),
+                    status: "Running".into(),
+                    startup_failure: Some(sebas::watchdog::control_rpc::RpcStartupFailure {
+                        service: "core".into(),
+                        count: 3,
+                        last_stderr: "spawn failed: no such file".into(),
+                        at: "2026-09-07T00:00:00Z".into(),
+                    }),
                 },
             ),
             (
@@ -920,6 +943,7 @@ mod tests {
                         status: "Running".into(),
                         desired: "Enabled".into(),
                         uptime_secs: Some(120),
+                        startup_failure: None,
                     }],
                 },
             ),
@@ -934,10 +958,12 @@ mod tests {
         }
 
         // Spot-check field casing/structure for `accepted` since that's the
-        // most machine-consumed variant.
+        // most machine-consumed variant. startup_failure = None 时字段整体
+        // 省略（skip_serializing_if）：旧报文 wire 形状保持不变。
         let json = serde_json::to_string(&RpcControlResponse::Accepted {
             operation_id: "op_x".into(),
             status: "Running".into(),
+            startup_failure: None,
         })
         .unwrap();
         assert!(
@@ -946,6 +972,19 @@ mod tests {
         );
         assert!(json.contains("\"operation_id\":\"op_x\""));
         assert!(json.contains("\"status\":\"Running\""));
+        assert!(
+            !json.contains("startup_failure"),
+            "无失败时 startup_failure 必须省略: {json}"
+        );
+        // 带 startup_failure 的形状：字段名 + 四元组逐字固定（D6 契约）。
+        let json = serde_json::to_string(
+            &cases[1].1,
+        )
+        .unwrap();
+        assert!(json.contains("\"startup_failure\":{\"service\":\"core\""), "{json}");
+        assert!(json.contains("\"count\":3"), "{json}");
+        assert!(json.contains("\"last_stderr\":\"spawn failed: no such file\""), "{json}");
+        assert!(json.contains("\"at\":\"2026-09-07T00:00:00Z\""), "{json}");
     }
 
     #[test]

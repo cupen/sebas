@@ -9,9 +9,9 @@
 use crate::error::Result;
 use crate::watchdog::EXIT_BIND_FAILED;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use tracing::{info, warn};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tracing::{error, info, warn};
 
 /// 崩溃计数窗口：超过该间隔未崩溃则计数重置。
 const CRASH_WINDOW: Duration = Duration::from_secs(3600);
@@ -25,6 +25,11 @@ pub const RESTART_DELAY: Duration = Duration::from_secs(1);
 const SPAWN_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// 优雅停止宽限期：SIGTERM → 宽限 → SIGKILL。
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// spawn 失败计数窗口（fail-fast-on-startup-errors D7）：与 crash 窗口同为
+/// 1 h——距上次失败超过窗口即重置计数，瞬态故障不累积成终态。
+pub const SPAWN_FAILURE_WINDOW: Duration = Duration::from_secs(3600);
+/// 连续 spawn 失败的默认上限（`[watchdog] max_spawn_failures` 可配）。
+pub const DEFAULT_MAX_SPAWN_FAILURES: u32 = 3;
 
 // ─── 身份与状态 ────────────────────────────────────────────
 
@@ -63,12 +68,50 @@ pub enum ServiceState {
     /// 服务因 bind 失败等外部原因进入降级态，不自动重试；
     /// 等待 Restart 命令复位后重新 spawn。
     Degraded,
+    /// fail-fast-on-startup-errors：连续 spawn 失败达到上限的终态。服务
+    /// 不再重试、监督 task 结束；watchdog 整体以 EX_TEMPFAIL (75) 退出。
+    /// 只有 Restart 命令（新 watchdog 生命周期）能离开该态。
+    FailedStartup,
+}
+
+/// 一次（累计的）spawn 失败记录：`sebas ctl status` 的 `startup_failure`
+/// 字段数据源（fail-fast-on-startup-errors D6）。窗口内每次失败都更新，
+/// 成功 spawn/ready 后清空。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupFailureInfo {
+    /// 本窗口内连续失败次数（终态时 == 上限）。
+    pub count: u32,
+    /// 最近一次失败的 stderr 摘要（spawn 错误消息 / 退出分类）。
+    pub last_stderr: String,
+    /// 最近一次失败的 Unix 秒时间戳（ISO 化留给展示层）。
+    pub at_unix: i64,
+}
+
+/// 服务达到 `failed-startup` 终态时经 watch 通道上报给 watchdog 主循环的
+/// 事件（任务 2.1/2.3：watchdog 收到后 shutdown 并以 75 退出）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupFailureEvent {
+    pub service: ServiceName,
+    pub info: StartupFailureInfo,
+}
+
+/// 启动失败事件的共享通道形状：`None` = 无终态失败。
+pub type StartupFailureTx = watch::Sender<Option<StartupFailureEvent>>;
+pub type StartupFailureRx = watch::Receiver<Option<StartupFailureEvent>>;
+
+/// 当前时刻的 Unix 秒（失败记录时间戳）。
+pub(crate) fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 复用 control 面的期望态命名，避免两套词汇。
 pub use crate::watchdog::control::DesiredState;
 
-/// 单服务快照。`started_at` 供 uptime 计算。
+/// 单服务快照。`started_at` 供 uptime 计算；`startup_failure` 是窗口内
+/// 最近一次 spawn 失败的累计记录（无失败 = None）。
 #[derive(Debug, Clone)]
 pub struct ServiceSnapshot {
     pub name: ServiceName,
@@ -76,6 +119,7 @@ pub struct ServiceSnapshot {
     pub desired: DesiredState,
     pub pid: Option<u32>,
     pub started_at: Option<Instant>,
+    pub startup_failure: Option<StartupFailureInfo>,
 }
 
 // ─── 崩溃退避（纯状态机，同步单测） ─────────────────────────
@@ -157,6 +201,69 @@ impl CrashPolicy {
     }
 }
 
+// ─── spawn 失败上限（纯状态机，同步单测） ───────────────────
+
+/// 连续 spawn 失败的计数策略（fail-fast-on-startup-errors 2.1，D1/D7）。
+/// 与 [`CrashPolicy`] 不同：达到上限不是冷却，而是**终态**——调用方（监督
+/// task）必须停止重试并触发 watchdog 退出。
+#[derive(Debug)]
+pub struct SpawnFailurePolicy {
+    window: Duration,
+    max: u32,
+    count: u32,
+    last_failure: Option<Instant>,
+}
+
+/// 登记一次 spawn 失败后的决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnFailureDecision {
+    /// 未达上限：按 1 s 退避重试（窗口内每次失败都写结构化日志 + 可见）。
+    Retry,
+    /// 连续失败达到上限：服务进入 `failed-startup` 终态，watchdog 以 75 退出。
+    Terminal,
+}
+
+impl SpawnFailurePolicy {
+    pub fn new(window: Duration, max: u32) -> Self {
+        // 上限至少为 1：0 会让第一次失败就直接终态（且除零语义无意义）。
+        let max = max.max(1);
+        Self {
+            window,
+            max,
+            count: 0,
+            last_failure: None,
+        }
+    }
+
+    /// 登记一次失败。距上次失败超过窗口则计数先重置（D7b）。
+    pub fn register_failure(&mut self) -> SpawnFailureDecision {
+        let now = Instant::now();
+        if let Some(last) = self.last_failure
+            && now.duration_since(last) > self.window
+        {
+            self.count = 0;
+        }
+        self.count += 1;
+        self.last_failure = Some(now);
+        if self.count >= self.max {
+            SpawnFailureDecision::Terminal
+        } else {
+            SpawnFailureDecision::Retry
+        }
+    }
+
+    /// 成功 spawn（无 readiness 门）/ ready（有门）后重置（D7a）。
+    pub fn reset(&mut self) {
+        self.count = 0;
+        self.last_failure = None;
+    }
+
+    /// 当前连续失败计数。
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+}
+
 // ─── 命令与服务句柄 ────────────────────────────────────────
 
 /// 对监督 task 的命令。
@@ -179,6 +286,9 @@ pub struct ServiceHandle {
     pub name: ServiceName,
     tx: mpsc::Sender<ServiceCommand>,
     snapshot: Arc<Mutex<ServiceSnapshot>>,
+    /// 终态启动失败事件的接收端（克隆共享同一 watch 通道）。`changed()`
+    /// 返回后读 `borrow()` 即得 `Some(StartupFailureEvent)`。
+    startup_failures: StartupFailureRx,
 }
 
 impl ServiceHandle {
@@ -193,6 +303,11 @@ impl ServiceHandle {
     /// 测试/内部用：直接读共享快照指针。
     pub fn shared_snapshot(&self) -> Arc<Mutex<ServiceSnapshot>> {
         self.snapshot.clone()
+    }
+
+    /// 终态启动失败事件的接收端（watchdog 主循环 select 用）。
+    pub fn startup_failures(&self) -> StartupFailureRx {
+        self.startup_failures.clone()
     }
 }
 
@@ -242,6 +357,11 @@ pub struct ServiceSpec {
     pub spawn_retry_delay: Duration,
     /// core：NewBinaryNotReady 自动回滚钩子。
     pub on_unready_after_upgrade: Option<UnreadyAfterUpgradeHook>,
+    /// 连续 spawn 失败上限（fail-fast-on-startup-errors D1，默认 3）。
+    pub max_spawn_failures: u32,
+    /// 终态启动失败事件的上报通道（watchdog 主循环据此退出 75）。`None` =
+    /// 单测形态，只置快照状态不上报。
+    pub startup_failure_tx: Option<StartupFailureTx>,
 }
 
 impl ServiceSpec {
@@ -254,6 +374,8 @@ impl ServiceSpec {
             restart_delay: RESTART_DELAY,
             spawn_retry_delay: SPAWN_RETRY_DELAY,
             on_unready_after_upgrade: None,
+            max_spawn_failures: DEFAULT_MAX_SPAWN_FAILURES,
+            startup_failure_tx: None,
         }
     }
 }
@@ -274,19 +396,22 @@ enum Exit {
 pub fn start_supervision(spec: ServiceSpec) -> (ServiceHandle, tokio::task::JoinHandle<()>) {
     let name = spec.name;
     let (tx, rx) = mpsc::channel(16);
+    let (fail_tx, fail_rx) = watch::channel(None);
     let snapshot = Arc::new(Mutex::new(ServiceSnapshot {
         name,
         state: ServiceState::Starting,
         desired: spec.desired,
         pid: None,
         started_at: None,
+        startup_failure: None,
     }));
     let handle = ServiceHandle {
         name,
         tx,
         snapshot: snapshot.clone(),
+        startup_failures: fail_rx,
     };
-    let task = tokio::spawn(supervise(spec, rx, snapshot));
+    let task = tokio::spawn(supervise(spec, rx, snapshot, fail_tx));
     (handle, task)
 }
 
@@ -294,16 +419,54 @@ async fn set_state(snapshot: &Mutex<ServiceSnapshot>, state: ServiceState) {
     snapshot.lock().await.state = state;
 }
 
+/// 把一次 spawn 失败写进快照（`sebas ctl status` 的 startup_failure 数据源，
+/// spec「spawn failure within limit still logged」：未达上限也必须可见）。
+async fn record_failure(snapshot: &Mutex<ServiceSnapshot>, count: u32, cause: &str) -> StartupFailureInfo {
+    let info = StartupFailureInfo {
+        count,
+        last_stderr: cause.to_string(),
+        at_unix: now_unix_secs(),
+    };
+    snapshot.lock().await.startup_failure = Some(info.clone());
+    info
+}
+
+/// 进入 `failed-startup` 终态：置状态、上报事件、日志。监督 task 随即结束。
+async fn enter_failed_startup(
+    snapshot: &Mutex<ServiceSnapshot>,
+    fail_tx: Option<&StartupFailureTx>,
+    service: ServiceName,
+    info: StartupFailureInfo,
+) {
+    error!(
+        service = service.as_str(),
+        count = info.count,
+        last_error = %info.last_stderr,
+        "spawn failures reached the limit; entering failed-startup (terminal), watchdog exits 75"
+    );
+    set_state(snapshot, ServiceState::FailedStartup).await;
+    if let Some(tx) = fail_tx {
+        let _ = tx.send(Some(StartupFailureEvent {
+            service,
+            info: info.clone(),
+        }));
+    }
+}
+
+/// 监督 task 主循环。fail_tx 在终态失败时发送 `Some(event)`。
 async fn supervise(
     spec: ServiceSpec,
     mut cmd_rx: mpsc::Receiver<ServiceCommand>,
     snapshot: Arc<Mutex<ServiceSnapshot>>,
+    fail_tx: watch::Sender<Option<StartupFailureEvent>>,
 ) {
     let name = spec.name;
     let mut desired = spec.desired;
     let mut policy = spec.crash;
     // core：下一次 spawn 是否为升级产生的新二进制。
     let mut just_performed_update = false;
+    // 连续 spawn 失败计数（fail-fast-on-startup-errors 2.1）。
+    let mut spawn_policy = SpawnFailurePolicy::new(SPAWN_FAILURE_WINDOW, spec.max_spawn_failures);
 
     info!(service = name.as_str(), "supervision task started");
 
@@ -346,19 +509,48 @@ async fn supervise(
             }
         }
 
-        // spawn 一次 incarnation。失败重试，监督 task 绝不退出。
+        // spawn 一次 incarnation。fail-fast-on-startup-errors：窗口内连续
+        // 失败按 1 s 退避重试（每次写结构化日志 + 快照可见），达到上限进入
+        // `failed-startup` 终态并让 watchdog 退出 75，不再无限重试。
         let instance = match spec.spawner.spawn().await {
             Ok(instance) => instance,
             Err(e) => {
-                warn!(service = name.as_str(), "spawn failed: {e}, will retry");
-                set_state(&snapshot, ServiceState::Restarting).await;
-                tokio::time::sleep(spec.spawn_retry_delay).await;
-                continue;
+                let cause = e.to_string();
+                match spawn_policy.register_failure() {
+                    SpawnFailureDecision::Retry => {
+                        warn!(
+                            service = name.as_str(),
+                            count = spawn_policy.count(),
+                            limit = spec.max_spawn_failures,
+                            "spawn failed: {cause}, will retry"
+                        );
+                        record_failure(&snapshot, spawn_policy.count(), &cause).await;
+                        set_state(&snapshot, ServiceState::Restarting).await;
+                        tokio::time::sleep(spec.spawn_retry_delay).await;
+                        continue;
+                    }
+                    SpawnFailureDecision::Terminal => {
+                        let info = record_failure(&snapshot, spawn_policy.count(), &cause).await;
+                        enter_failed_startup(&snapshot, Some(&fail_tx), name, info).await;
+                        return;
+                    }
+                }
             }
         };
 
+        // 成功 spawn。无 readiness 门的服务 spawn 即 Running（ready 等价），
+        // 失败计数就此清零（D7a）；有门的等服务发 ready 再清。
+        if instance.readiness.is_none() {
+            spawn_policy.reset();
+            snapshot.lock().await.startup_failure = None;
+        }
+
         let mut child = instance.child;
         let mut readiness = instance.readiness;
+        // 启动是否已被确认（无门服务 spawn 即确认；有门服务等 ready 信号）。
+        // 只有「启动未确认」的退出才计入 failed-startup 计数器——已确认后
+        // 的退出是运行期崩溃，走既有 crash backoff（永不放弃）。
+        let mut startup_confirmed = readiness.is_none();
         let pid = child.pid();
         {
             let mut snap = snapshot.lock().await;
@@ -418,7 +610,11 @@ async fn supervise(
                     }
                 }, if readiness.is_some() => {
                     received_ready = true;
+                    startup_confirmed = true;
                     readiness = None;
+                    // 达到 ready = 启动成功：spawn 失败计数清零（D7a）。
+                    spawn_policy.reset();
+                    snapshot.lock().await.startup_failure = None;
                     set_state(&snapshot, ServiceState::Running).await;
                     info!(service = name.as_str(), pid = %pid_str(pid), "child ready");
                 }
@@ -460,7 +656,7 @@ async fn supervise(
                 just_performed_update = false;
 
                 // 退出码 75 = bind 失败（如端口占用）→ 标记 Degraded，
-                // 不自动重试，等 Restart 命令。
+                // 不自动重试，等 Restart 命令。（既有降级语义，不变。）
                 if code == Some(EXIT_BIND_FAILED) {
                     warn!(
                         service = name.as_str(),
@@ -468,6 +664,28 @@ async fn supervise(
                     );
                     set_state(&snapshot, ServiceState::Degraded).await;
                     continue;
+                }
+
+                // fail-fast-on-startup-errors（spec「early-fatal counts toward
+                // startup-failure limit」）：启动未确认（未 ready / 无门服务
+                // 刚 spawn 即退）的 early-fatal 退出与 spawn 失败同等待遇，
+                // 计入终态计数器；达到上限同样终态化。
+                if !startup_confirmed {
+                    let cause = format!(
+                        "child exited before ready (code {code_str}, ready=false)",
+                        code_str = code_str(code)
+                    );
+                    match spawn_policy.register_failure() {
+                        SpawnFailureDecision::Retry => {
+                            record_failure(&snapshot, spawn_policy.count(), &cause).await;
+                        }
+                        SpawnFailureDecision::Terminal => {
+                            let info =
+                                record_failure(&snapshot, spawn_policy.count(), &cause).await;
+                            enter_failed_startup(&snapshot, Some(&fail_tx), name, info).await;
+                            return;
+                        }
+                    }
                 }
 
                 set_state(&snapshot, ServiceState::Restarting).await;
@@ -489,7 +707,6 @@ async fn supervise(
 
 /// 真实子进程：包装 tokio Child，实现 ManagedChild。
 pub struct ProcessChild(pub tokio::process::Child);
-
 #[async_trait::async_trait]
 impl ManagedChild for ProcessChild {
     fn pid(&self) -> Option<u32> {
@@ -521,6 +738,15 @@ impl ManagedChild for ProcessChild {
 }
 
 // ─── tests ─────────────────────────────────────────────────
+
+/// `Option` 值在日志里输出裸数字（未知输出 `-`），不输出 `Some(1234)`。
+fn pid_str(pid: Option<u32>) -> String {
+    pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into())
+}
+
+fn code_str(code: Option<i32>) -> String {
+    code.map(|c| c.to_string()).unwrap_or_else(|| "-".into())
+}
 
 #[cfg(test)]
 mod tests {
@@ -703,11 +929,225 @@ mod tests {
             fail: true,
             exit_code: 1,
         });
-        let (handle, task) = start_supervision(fast_spec(spawner.clone(), DesiredState::Enabled));
+        let mut spec = fast_spec(spawner.clone(), DesiredState::Enabled);
+        // 上限调高：本用例只验证「限内重试不退出监督 task」。
+        spec.max_spawn_failures = 100;
+        let (handle, task) = start_supervision(spec);
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(
             spawner.spawns.load(Ordering::SeqCst) >= 2,
             "spawn 失败必须重试而非退出监督 task"
+        );
+        assert!(handle.send(ServiceCommand::Shutdown).await);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    // ── fail-fast-on-startup-errors 2.1：连续 spawn 失败的终态化 ──
+
+    #[tokio::test]
+    async fn spawn_failure_hits_limit_and_enters_failed_startup() {
+        let spawner = Arc::new(FakeSpawner {
+            spawns: AtomicUsize::new(0),
+            auto_exit_ms: 0,
+            fail: true,
+            exit_code: 1,
+        });
+        let mut spec = fast_spec(spawner.clone(), DesiredState::Enabled);
+        spec.max_spawn_failures = 3;
+        let (handle, task) = start_supervision(spec);
+        let mut failures = handle.startup_failures();
+
+        // 恰好 3 次尝试后进入终态（1/2 次重试，第 3 次终止）。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if handle.snapshot().await.state == ServiceState::FailedStartup {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "3 次连续 spawn 失败必须进入 failed-startup 终态"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            spawner.spawns.load(Ordering::SeqCst),
+            3,
+            "达到上限后不得再重试"
+        );
+        // 终态事件经 watch 通道上报（watchdog 主循环据此退出 75）。
+        failures.changed().await.expect("failure channel open");
+        let event = failures.borrow().clone();
+        let event = event.expect("terminal failure event must be Some");
+        assert_eq!(event.service, ServiceName::WebUi);
+        assert_eq!(event.info.count, 3);
+        assert!(
+            event.info.last_stderr.contains("fake spawn failure"),
+            "event carries the stderr summary: {event:?}"
+        );
+        // 快照带失败记录（ctl status 的数据源）。
+        let snap = handle.snapshot().await;
+        let sf = snap.startup_failure.expect("startup_failure recorded");
+        assert_eq!(sf.count, 3);
+        // 终态后监督 task 已结束：再等也不会有新 spawn。
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(spawner.spawns.load(Ordering::SeqCst), 3);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_limit_is_configurable() {
+        // N=1：一次失败即终态（D1 备选边界，spec R2 要求可配）。
+        let spawner = Arc::new(FakeSpawner {
+            spawns: AtomicUsize::new(0),
+            auto_exit_ms: 0,
+            fail: true,
+            exit_code: 1,
+        });
+        let mut spec = fast_spec(spawner.clone(), DesiredState::Enabled);
+        spec.max_spawn_failures = 1;
+        let (handle, _task) = start_supervision(spec);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while handle.snapshot().await.state != ServiceState::FailedStartup {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "N=1 时一次失败必须终态"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(spawner.spawns.load(Ordering::SeqCst), 1);
+
+        // N=10：3 次失败仍在重试（未达上限不终态）。
+        let spawner10 = Arc::new(FakeSpawner {
+            spawns: AtomicUsize::new(0),
+            auto_exit_ms: 0,
+            fail: true,
+            exit_code: 1,
+        });
+        let mut spec10 = fast_spec(spawner10.clone(), DesiredState::Enabled);
+        spec10.max_spawn_failures = 10;
+        let (handle10, task10) = start_supervision(spec10);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let spawns = spawner10.spawns.load(Ordering::SeqCst);
+        assert!(
+            (3..10).contains(&spawns),
+            "N=10 时 3 次失败应仍在重试（实际 {spawns} 次）"
+        );
+        assert_ne!(handle10.snapshot().await.state, ServiceState::FailedStartup);
+        assert!(handle10.send(ServiceCommand::Shutdown).await);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task10).await;
+    }
+
+    #[tokio::test]
+    async fn ready_resets_the_spawn_failure_counter() {
+        // 失败 2 次 → 成功 ready（ready 后 5ms 退出）→ 再失败 2 次：每次成功
+        // ready 都清零计数，永远不到上限（D7a）。
+        struct FlakyThenReady {
+            spawns: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl ServiceSpawner for FlakyThenReady {
+            async fn spawn(&self) -> Result<SpawnedInstance> {
+                let n = self.spawns.fetch_add(1, Ordering::SeqCst);
+                if n % 4 < 2 {
+                    // 每轮前两次失败。
+                    return Err(SebasError::Upgrade("flaky".into()));
+                }
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let (exit_tx, exited) = tokio::sync::watch::channel(false);
+                let sig_tx = exit_tx.clone();
+                tokio::spawn(async move {
+                    let _ = ready_tx.send(());
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let _ = sig_tx.send(true);
+                });
+                Ok(SpawnedInstance {
+                    child: Box::new(FakeChild {
+                        pid: 7,
+                        exited,
+                        exit_triggered: exit_tx,
+                        exit_code: 1,
+                    }),
+                    readiness: Some(ready_rx),
+                })
+            }
+        }
+        let spawner = Arc::new(FlakyThenReady {
+            spawns: AtomicUsize::new(0),
+        });
+        let mut spec = fast_spec(spawner.clone(), DesiredState::Enabled);
+        spec.max_spawn_failures = 3;
+        let (handle, task) = start_supervision(spec);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let spawns = spawner.spawns.load(Ordering::SeqCst);
+        assert!(spawns >= 6, "ready 后计数重置，应持续重试: {spawns}");
+        assert_ne!(
+            handle.snapshot().await.state,
+            ServiceState::FailedStartup,
+            "ready 之间的失败组不得累积成终态"
+        );
+        assert!(handle.send(ServiceCommand::Shutdown).await);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
+    async fn early_fatal_before_ready_counts_toward_the_limit() {
+        // 有 readiness 门的 child 每次以非 75 退出且从未 ready → 与 spawn
+        // 失败同等待遇，第 3 次进入终态（spec「early-fatal counts」场景）。
+        struct EarlyFatal;
+        #[async_trait::async_trait]
+        impl ServiceSpawner for EarlyFatal {
+            async fn spawn(&self) -> Result<SpawnedInstance> {
+                let (exit_tx, exited) = tokio::sync::watch::channel(false);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let _ = exit_tx.send(true);
+                });
+                Ok(SpawnedInstance {
+                    child: Box::new(FakeChild {
+                        pid: 9,
+                        exited,
+                        exit_triggered: tokio::sync::watch::channel(false).0,
+                        exit_code: 1, // 非 75
+                    }),
+                    readiness: Some(oneshot::channel().1), // 发送端即弃，ready 永不到达
+                })
+            }
+        }
+        let mut spec = fast_spec(Arc::new(EarlyFatal), DesiredState::Enabled);
+        spec.max_spawn_failures = 3;
+        let (handle, task) = start_supervision(spec);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while handle.snapshot().await.state != ServiceState::FailedStartup {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "early-fatal 退出 3 次必须进入 failed-startup 终态"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let sf = handle
+            .snapshot()
+            .await
+            .startup_failure
+            .expect("early-fatal recorded");
+        assert!(sf.last_stderr.contains("before ready"), "{sf:?}");
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
+    async fn post_ready_crash_never_enters_failed_startup() {
+        // ready 之后的退出是运行期崩溃：走既有 crash backoff（冷却续跑），
+        // 绝不进入 failed-startup。
+        let spawner = FakeSpawner::auto(1); // spawn 后 1ms 即退；readiness None → spawn 即确认
+        let mut spec = fast_spec(spawner.clone(), DesiredState::Enabled);
+        spec.max_spawn_failures = 2; // 刻意很小
+        let (handle, task) = start_supervision(spec);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let spawns = spawner.spawns.load(Ordering::SeqCst);
+        assert!(spawns > 3, "运行期崩溃持续监督: {spawns}");
+        assert_ne!(
+            handle.snapshot().await.state,
+            ServiceState::FailedStartup,
+            "已确认启动的崩溃不得计入 failed-startup"
         );
         assert!(handle.send(ServiceCommand::Shutdown).await);
         let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
@@ -838,13 +1278,4 @@ mod tests {
         assert!(handle.send(ServiceCommand::Shutdown).await);
         let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
     }
-}
-
-/// `Option` 值在日志里输出裸数字（未知输出 `-`），不输出 `Some(1234)`。
-fn pid_str(pid: Option<u32>) -> String {
-    pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into())
-}
-
-fn code_str(code: Option<i32>) -> String {
-    code.map(|c| c.to_string()).unwrap_or_else(|| "-".into())
 }

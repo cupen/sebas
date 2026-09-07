@@ -17,15 +17,21 @@ use crate::watchdog::confirmation::{ConfirmationError, ConfirmationService};
 use crate::watchdog::control::{
     Actor, ControlRequest, ControlResponse, ControlService, DesiredState, UpdateKind, UpdateTarget,
 };
-use crate::watchdog::control_rpc::{RpcControlResponse, RpcServiceStatus};
+use crate::watchdog::control_rpc::{RpcControlResponse, RpcServiceStatus, RpcStartupFailure};
 use crate::watchdog::services::ServiceManager;
-use crate::watchdog::supervisor::ServiceName;
-use crate::watchdog::supervisor::ServiceState;
+use crate::watchdog::supervisor::{ServiceName, ServiceState, StartupFailureInfo};
 use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+/// Unix 秒 → ISO 8601（RFC3339，UTC）。
+fn iso_from_unix(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| format!("{secs}"))
+}
 
 /// Outcome of running an operation to completion.
 #[derive(Debug, Clone)]
@@ -74,8 +80,7 @@ pub struct ControlExecutor {
     /// Pending dangerous actions awaiting confirmation, keyed by the opaque
     /// grant token. The `(Actor, ControlRequest)` is the canonical action
     /// truth — the client only ever carries the token.
-    pending: Arc<Mutex<HashMap<String, PendingControl>>>,
-}
+    pending: Arc<Mutex<HashMap<String, PendingControl>>>,}
 
 /// A dangerous action held until its confirmation token is redeemed.
 #[derive(Debug, Clone)]
@@ -298,6 +303,7 @@ impl ControlExecutor {
                 RpcControlResponse::Accepted {
                     operation_id: op_id,
                     status: "Canceled".into(),
+                    startup_failure: None,
                 }
             }
             Err(ConfirmationError::AlreadyRedeemed) => RpcControlResponse::Rejected {
@@ -532,6 +538,7 @@ impl ControlExecutor {
             status: "running".into(),
             desired: "enabled".into(),
             uptime_secs: None,
+            startup_failure: None,
         }];
         for snap in self.services.all_snapshots().await {
             let status = match snap.state {
@@ -541,17 +548,25 @@ impl ControlExecutor {
                 ServiceState::Stopped => "stopped",
                 ServiceState::Disabled => "disabled",
                 ServiceState::Degraded => "degraded",
+                ServiceState::FailedStartup => "failed-startup",
             };
             let desired = match snap.desired {
                 DesiredState::Enabled => "enabled",
                 DesiredState::Disabled => "disabled",
             };
             let uptime_secs = snap.started_at.map(|t| t.elapsed().as_secs());
+            let startup_failure = snap.startup_failure.as_ref().map(|sf| RpcStartupFailure {
+                service: snap.name.as_str().into(),
+                count: sf.count,
+                last_stderr: sf.last_stderr.clone(),
+                at: iso_from_unix(sf.at_unix),
+            });
             services.push(RpcServiceStatus {
                 name: snap.name.as_str().into(),
                 status: status.into(),
                 desired: desired.into(),
                 uptime_secs,
+                startup_failure,
             });
         }
         services.push(RpcServiceStatus {
@@ -559,9 +574,36 @@ impl ControlExecutor {
             status: updater_status.into(),
             desired: "enabled".into(),
             uptime_secs: None,
+            startup_failure: None,
         });
 
         RpcControlResponse::Services { services }
+    }
+
+    /// The most recent startup failure across managed services
+    /// (fail-fast-on-startup-errors D6 / task 2.4): `sebas ctl status` 把它
+    /// 作为 `Accepted.startup_failure` 暴露。窗口内的瞬态失败也可见
+    /// （spec「spawn failure within limit still logged」），无失败 → None。
+    pub async fn startup_failure(&self) -> Option<RpcStartupFailure> {
+        let mut candidates: Vec<(ServiceName, StartupFailureInfo)> = self
+            .services
+            .all_snapshots()
+            .await
+            .into_iter()
+            .filter_map(|snap| {
+                snap.startup_failure
+                    .map(|info| (snap.name, info))
+            })
+            .collect();
+        // 终态优先，其次最近发生。
+        candidates.sort_by_key(|(_, info)| std::cmp::Reverse(info.at_unix));
+        let (service, info) = candidates.into_iter().next()?;
+        Some(RpcStartupFailure {
+            service: service.as_str().into(),
+            count: info.count,
+            last_stderr: info.last_stderr,
+            at: iso_from_unix(info.at_unix),
+        })
     }
 
     /// Return the current status of a single managed service, or an empty

@@ -16,14 +16,15 @@ use crate::watchdog::control::{ControlService, DesiredState};
 use crate::watchdog::executor::ControlExecutor;
 use crate::watchdog::services::ServiceManager;
 use crate::watchdog::supervisor::{
-    ProcessChild, ServiceName, ServiceSpawner, ServiceSpec, SpawnedInstance,
+    ProcessChild, ServiceName, ServiceSpawner, ServiceSpec, SpawnedInstance, StartupFailureInfo,
+    StartupFailureTx,
 };
 use crate::watchdog::updater::SubprocessUpdaterRunner;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 /// 版本号
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -248,7 +249,7 @@ async fn spawn_aux_process(
 }
 
 /// core 专属：升级后新二进制未就绪时的自动回滚（spec「New-binary
-/// auto-rollback」）。失败只记日志，监督循环继续。
+/// auto-rollback」）。回滚触发写结构化日志（含前/后二进制路径）。
 async fn rollback_to_previous(config: &WatchdogConfig) -> Result<()> {
     let data_dir = upgrade::data_dir(config);
     if !data_dir.join("rollback").join("sebas").exists() {
@@ -256,7 +257,11 @@ async fn rollback_to_previous(config: &WatchdogConfig) -> Result<()> {
             "没有可回滚的版本（rollback/sebas 不存在）".into(),
         ));
     }
-    info!("rollback started, data_dir={}", data_dir.display());
+    info!(
+        "rollback started: current={} backup={}",
+        data_dir.join("current").display(),
+        data_dir.join("rollback").join("sebas").display()
+    );
     upgrade::try_lock(&data_dir)?;
     let result = upgrade::rollback(&data_dir);
     upgrade::unlock(&data_dir);
@@ -265,15 +270,53 @@ async fn rollback_to_previous(config: &WatchdogConfig) -> Result<()> {
     Ok(())
 }
 
-/// 装配监督 task 用的回滚钩子（捕获 config 副本）。
-fn rollback_hook(config: WatchdogConfig) -> super::watchdog::supervisor::UnreadyAfterUpgradeHook {
+/// core 专属：升级后新二进制未就绪时的自动回滚（spec「New-binary
+/// auto-rollback」，fail-fast-on-startup-errors D4 改写）。回滚失败不再
+/// silently continue：记录 `failed-startup` 终态 + 上报事件，watchdog 以
+/// EX_TEMPFAIL (75) 退出。回滚触发本身也写结构化日志与时间线事件。
+fn rollback_hook(
+    config: WatchdogConfig,
+    services: ServiceManager,
+    control: Arc<Mutex<ControlService>>,
+    fail_tx: StartupFailureTx,
+) -> super::watchdog::supervisor::UnreadyAfterUpgradeHook {
+    use crate::watchdog::supervisor::StartupFailureEvent;
     Arc::new(move || {
         let cfg = config.clone();
+        let services = services.clone();
+        let control = control.clone();
+        let fail_tx = fail_tx.clone();
         Box::pin(async move {
-            if let Err(e) = rollback_to_previous(&cfg).await {
-                warn!("auto rollback failed: {e}, watchdog keeps running");
-            } else {
-                info!("auto rollback ok, running previous version");
+            // 回滚触发事件：前/后二进制路径进时间线，ctl status 可见。
+            let data_dir = upgrade::data_dir(&cfg);
+            control.lock().await.record_observation(format!(
+                "rollback triggered: current -> {} (from {})",
+                data_dir.join("rollback").join("sebas").display(),
+                data_dir.join("current").display(),
+            ));
+            match rollback_to_previous(&cfg).await {
+                Ok(()) => {
+                    info!("auto rollback ok, running previous version");
+                    control
+                        .lock()
+                        .await
+                        .record_observation("rollback completed; restarting previous version".to_string());
+                }
+                Err(e) => {
+                    let cause = format!("rollback failed: {e}");
+                    error!("{cause}; entering failed-startup, watchdog exits 75");
+                    services
+                        .record_startup_failure(ServiceName::Core, &cause)
+                        .await;
+                    let _ = fail_tx.send(Some(StartupFailureEvent {
+                        service: ServiceName::Core,
+                        info: StartupFailureInfo {
+                            count: 1,
+                            last_stderr: cause,
+                            at_unix: crate::watchdog::supervisor::now_unix_secs(),
+                        },
+                    }));
+                }
             }
         })
     })
@@ -282,6 +325,9 @@ fn rollback_hook(config: WatchdogConfig) -> super::watchdog::supervisor::Unready
 // ─── 装配 ──────────────────────────────────────────────────
 
 /// 运行 watchdog 模式：ServiceManager + control RPC + 各服务监督 task。
+/// fail-fast-on-startup-errors：任一受管服务进入 `failed-startup` 终态
+/// （连续 spawn 失败达上限 / rollback 失败）→ shutdown 全部子进程并以
+/// EX_TEMPFAIL (75) 退出（经返回 Err → main 统一出口打 startup-failure 摘要）。
 pub async fn run_watchdog(
     config: WatchdogConfig,
     config_path: String,
@@ -300,6 +346,17 @@ pub async fn run_watchdog(
         config_path.clone(),
         services.clone(),
     );
+
+    // 终态启动失败事件通道：监督 task / rollback 钩子 → watchdog 主循环。
+    let (fail_tx, mut fail_rx) =
+        tokio::sync::watch::channel(None::<supervisor::StartupFailureEvent>);
+
+    // 辅助：把上限与失败上报通道接进每个 spec（任务 2.1）。
+    let spec_with_fail_fast = |mut spec: ServiceSpec| {
+        spec.max_spawn_failures = config.max_spawn_failures.max(1);
+        spec.startup_failure_tx = Some(fail_tx.clone());
+        spec
+    };
 
     // control RPC（唯一命令面）。
     let socket_path = control_rpc::default_socket_path();
@@ -324,7 +381,7 @@ pub async fn run_watchdog(
     // core session channel 的共享密钥：core 与 webui 子进程各注入一份
     // （SEBAS_CORE_SECRET），socket 之外还叠加同 uid 校验（spec 的双因子）。
     let core_secret = create_control_secret();
-    let mut core_spec = ServiceSpec::new(
+    let mut core_spec = spec_with_fail_fast(ServiceSpec::new(
         ServiceName::Core,
         Arc::new(CoreSpawner {
             config_path: config_path.clone(),
@@ -332,14 +389,19 @@ pub async fn run_watchdog(
             core_secret: core_secret.clone(),
         }),
         DesiredState::Enabled,
-    );
-    core_spec.on_unready_after_upgrade = Some(rollback_hook(config.clone()));
+    ));
+    core_spec.on_unready_after_upgrade = Some(rollback_hook(
+        config.clone(),
+        services.clone(),
+        control.clone(),
+        fail_tx.clone(),
+    ));
     services.register(core_spec, config.core.enabled);
 
     // webui：config 开关（默认开）。始终注册进 ServiceManager：即使初值停用，
     // 服务页也能看到并重新启用。
     services.register(
-        ServiceSpec::new(
+        spec_with_fail_fast(ServiceSpec::new(
             ServiceName::WebUi,
             Arc::new(WebUiSpawner {
                 config_path: config_path.clone(),
@@ -347,7 +409,7 @@ pub async fn run_watchdog(
                 core_secret: core_secret.clone(),
             }),
             DesiredState::Enabled,
-        ),
+        )),
         config.webui.enabled,
     );
 
@@ -364,7 +426,7 @@ pub async fn run_watchdog(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(crate::core_channel::default_socket_path);
     services.register(
-        ServiceSpec::new(
+        spec_with_fail_fast(ServiceSpec::new(
             ServiceName::Router,
             Arc::new(RouterSpawner {
                 config_path: config_path.clone(),
@@ -374,7 +436,7 @@ pub async fn run_watchdog(
                 debug,
             }),
             DesiredState::Enabled,
-        ),
+        )),
         config.router.enabled || debug,
     );
 
@@ -382,7 +444,7 @@ pub async fn run_watchdog(
     // 显式给出时以显式值为准。飞书部署由此自动获得 im 服务。
     let im_enabled = config.im.enabled.unwrap_or(im_enabled_default);
     services.register(
-        ServiceSpec::new(
+        spec_with_fail_fast(ServiceSpec::new(
             ServiceName::Im,
             Arc::new(ImSpawner {
                 config_path: config_path.clone(),
@@ -390,7 +452,7 @@ pub async fn run_watchdog(
                 core_secret: core_secret.clone(),
             }),
             DesiredState::Enabled,
-        ),
+        )),
         im_enabled,
     );
 
@@ -411,12 +473,37 @@ pub async fn run_watchdog(
             std::future::pending::<()>().await;
         }
     };
+    // 终态启动失败等待：watch 通道值变为 Some(event) 即返回。
+    let startup_failure = async {
+        loop {
+            if fail_rx.changed().await.is_err() {
+                // 全部发送端已丢弃（不可能：主循环持有 fail_tx 的克隆）；
+                // 停泊以免 select 空转。
+                std::future::pending::<()>().await;
+            }
+            if let Some(event) = fail_rx.borrow().clone() {
+                break event;
+            }
+        }
+    };
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("watchdog got SIGINT, stopping all children");
         }
         _ = sigterm => {
             tracing::info!("watchdog got SIGTERM, stopping all children");
+        }
+        event = startup_failure => {
+            let cause = format!(
+                "managed service '{}' failed to start after {} consecutive startup failures: {}",
+                event.service.as_str(),
+                event.info.count,
+                event.info.last_stderr
+            );
+            error!("{cause}; shutting down, exiting with 75");
+            services.shutdown_all().await;
+            return Err(SebasError::Upgrade(cause));
         }
     }
     services.shutdown_all().await;
@@ -451,6 +538,7 @@ mod tests {
             webui: Default::default(),
             router: WatchdogRouterConfig::default(),
             im: Default::default(),
+            max_spawn_failures: crate::watchdog::supervisor::DEFAULT_MAX_SPAWN_FAILURES,
         }
     }
 

@@ -245,6 +245,19 @@ fn unavailable(cause: String) -> SessionRejection {
     SessionRejection::Unavailable { cause }
 }
 
+/// fail-fast-on-startup-errors（core-session-channel spec delta / task 2.4）：
+/// core 不可达时，若 `SEBAS_STARTUP_ERROR_FILE` 里有最近一次启动失败的摘要
+/// （core 的「最近一次启动尝试失败」闩锁，ready 后自清除），把它并进 cause
+/// ——webui 的 degradation banner / `/api/summary.reachability.cause` 由此
+/// 显示 "core startup failed: <可读原因>"，而不是一句模糊的 socket absent。
+/// core 正常恢复（ready 清除闩锁 + 通道 Connected）后 banner 自然消失。
+fn enrich_with_startup_summary(cause: &str) -> String {
+    match crate::startup_failure::read_env_summary() {
+        Some(summary) => format!("core startup failed: {summary}"),
+        None => cause.to_string(),
+    }
+}
+
 
 /// Connect, mapping error kinds onto their distinct causes (6.3).
 async fn connect(
@@ -453,7 +466,7 @@ impl SessionBackend for CoreChannelBackend {
         match &*self.status.lock().unwrap() {
             ConnStatus::Connected => Reachability::Reachable,
             ConnStatus::Failed { cause } => Reachability::Unreachable {
-                cause: cause.clone(),
+                cause: enrich_with_startup_summary(cause),
             },
         }
     }
@@ -491,15 +504,13 @@ impl SessionBackend for CoreChannelBackend {
     }
 
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        match self
-            .request(&CoreChannelRequest::ApprovalAnswer {
+        matches!(
+            self.request(&CoreChannelRequest::ApprovalAnswer {
                 request_id: request_id.to_string(),
                 decision,
             })
-            .await
-        {
-            Ok(CoreChannelResponse::Ok) => true,
-            _ => false,
-        }
+            .await,
+            Ok(CoreChannelResponse::Ok)
+        )
     }
 }

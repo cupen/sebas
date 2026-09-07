@@ -219,6 +219,23 @@ impl ServiceManager {
         Some(snap)
     }
 
+    /// 直接记录一条启动失败（fail-fast-on-startup-errors：rollback 失败等
+    /// 发生在监督 task 之外的路径）。写进该服务的共享快照，`sebas ctl
+    /// status` 随即可见；服务状态置 `FailedStartup` 终态。
+    pub async fn record_startup_failure(&self, name: ServiceName, cause: &str) {
+        let Some(handle) = self.entry(name) else {
+            return;
+        };
+        let shared = handle.shared_snapshot();
+        let mut snap = shared.lock().await;
+        snap.state = ServiceState::FailedStartup;
+        snap.startup_failure = Some(crate::watchdog::supervisor::StartupFailureInfo {
+            count: 1,
+            last_stderr: cause.to_string(),
+            at_unix: crate::watchdog::supervisor::now_unix_secs(),
+        });
+    }
+
     /// 全部服务快照（固定顺序 core → webui → router）。
     pub async fn all_snapshots(&self) -> Vec<ServiceSnapshot> {
         let mut out = Vec::new();
@@ -254,7 +271,15 @@ impl ServiceManager {
                 .all_snapshots()
                 .await
                 .into_iter()
-                .all(|s| matches!(s.state, ServiceState::Stopped | ServiceState::Disabled | ServiceState::Degraded));
+                .all(|s| {
+                    matches!(
+                        s.state,
+                        ServiceState::Stopped
+                            | ServiceState::Disabled
+                            | ServiceState::Degraded
+                            | ServiceState::FailedStartup
+                    )
+                });
             if settled || std::time::Instant::now() >= deadline {
                 break;
             }

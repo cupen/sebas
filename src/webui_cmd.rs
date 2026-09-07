@@ -95,7 +95,7 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
     }
 
     auth::store_credentials(&path, &auth::Credentials::new(&username, &password))
-        .map_err(|e| SebasError::Config(e))?;
+        .map_err(SebasError::Config)?;
 
     match existing {
         Some(_) => println!("WebUI 密码已更新：用户 {}（{}）", username, path.display()),
@@ -115,20 +115,20 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
 /// 2. 返回共享 [`AuthHandle`]。
 pub fn bootstrap_auth() -> Arc<AuthHandle> {
     let path = auth::default_auth_file();
-    if auth::load_credentials(&path).ok().flatten().is_none() {
-        if let (Ok(user), Ok(pass)) = (
+    if auth::load_credentials(&path).ok().flatten().is_none()
+        && let (Ok(user), Ok(pass)) = (
             std::env::var("SEBAS_WEBUI_USER"),
             std::env::var("SEBAS_WEBUI_PASSWORD"),
-        ) {
-            if !user.is_empty() && !pass.is_empty() {
-                if pass.chars().count() < 8 {
-                    warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
-                }
-                match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {
-                    Ok(()) => info!("webui auth bootstrapped from env for user {user} ({})", path.display()),
-                    Err(e) => warn!("webui auth bootstrap failed: {e}"),
-                }
-            }
+        )
+        && !user.is_empty()
+        && !pass.is_empty()
+    {
+        if pass.chars().count() < 8 {
+            warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
+        }
+        match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {
+            Ok(()) => info!("webui auth bootstrapped from env for user {user} ({})", path.display()),
+            Err(e) => warn!("webui auth bootstrap failed: {e}"),
         }
     }
     Arc::new(AuthHandle::open(path))
@@ -322,6 +322,7 @@ impl ControlRpcAdminAdapter {
             Ok(RpcControlResponse::Accepted {
                 operation_id,
                 status,
+                ..
             }) => Ok(AdminMutationResult {
                 operation_id,
                 status,
@@ -343,6 +344,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
             Ok(RpcControlResponse::Accepted {
                 operation_id,
                 status,
+                ..
             }) => {
                 let operation = AdminOperation {
                     operation_id,
@@ -554,6 +556,8 @@ auth = {auth}
     }
 
     #[tokio::test]
+    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
+    #[allow(clippy::await_holding_lock)]
     async fn non_loopback_refused_when_switch_off_even_with_credentials() {
         let _env = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -567,13 +571,14 @@ auth = {auth}
         let _auth_file = set_auth_file(dir.path());
         let err = run(WebUiArgs::new(config.to_string_lossy().into_owned()))
             .await
-            .err()
-            .expect("开关关闭 + 非 loopback 必须配置错误退出");
+            .expect_err("开关关闭 + 非 loopback 必须配置错误退出");
         let msg = err.to_string();
         assert!(msg.contains("非 loopback"), "{msg}");
     }
 
     #[tokio::test]
+    // 同上：env 锁有意横跨 await。
+    #[allow(clippy::await_holding_lock)]
     async fn non_loopback_refused_when_switch_on_but_no_credentials() {
         let _env = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -581,8 +586,7 @@ auth = {auth}
         let _auth_file = set_auth_file(dir.path());
         let err = run(WebUiArgs::new(config.to_string_lossy().into_owned()))
             .await
-            .err()
-            .expect("开关开 + 无凭据 + 非 loopback 必须配置错误退出");
+            .expect_err("开关开 + 无凭据 + 非 loopback 必须配置错误退出");
         let msg = err.to_string();
         assert!(msg.contains("非 loopback"), "{msg}");
     }

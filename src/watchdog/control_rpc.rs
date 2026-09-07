@@ -96,6 +96,11 @@ pub enum RpcControlResponse {
     Accepted {
         operation_id: String,
         status: String,
+        /// fail-fast-on-startup-errors D6 / task 2.4：存在启动失败（含窗口内
+        /// 瞬态失败）时携带摘要；`skip_serializing_if` 保证无失败时 wire 形状
+        /// 与旧版本完全一致（新增字段向后兼容）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        startup_failure: Option<RpcStartupFailure>,
     },
     Rejected {
         code: String,
@@ -120,12 +125,29 @@ pub enum RpcControlResponse {
     },
 }
 
+/// 启动失败摘要（D6）：`sebas ctl status` 的 `startup_failure` 字段形状。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RpcStartupFailure {
+    /// 服务名（"core" / "webui" / "router" / "im"）。
+    pub service: String,
+    /// 本窗口内连续失败次数。
+    pub count: u32,
+    /// 最近一次失败的 stderr 摘要。
+    pub last_stderr: String,
+    /// 最近一次失败时间（ISO 8601 / RFC3339）。
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RpcServiceStatus {
     pub name: String,
     pub status: String,
     pub desired: String,
     pub uptime_secs: Option<u64>,
+    /// fail-fast-on-startup-errors：该服务窗口内最近一次 spawn 失败的摘要
+    /// （无失败 = None，序列化时省略——旧报文形状保持不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_failure: Option<RpcStartupFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,12 +279,22 @@ async fn handle_envelope(
 
     match envelope.request {
         RpcControlRequest::Status => {
-            accept_control_request(
+            // fail-fast-on-startup-errors task 2.4：status 快照附带最近的
+            // 启动失败摘要（无失败 = None，wire 形状不变）。
+            let mut response = accept_control_request(
                 executor.control().clone(),
                 envelope.actor,
                 ControlRequest::Status,
             )
-            .await
+            .await;
+            if let RpcControlResponse::Accepted {
+                ref mut startup_failure,
+                ..
+            } = response
+            {
+                *startup_failure = executor.startup_failure().await;
+            }
+            response
         }
         RpcControlRequest::EventsSince { seq } => {
             let control = executor.control().lock().await;
@@ -433,6 +465,7 @@ async fn accept_control_request(
         } => RpcControlResponse::Accepted {
             operation_id,
             status: format!("{status:?}"),
+            startup_failure: None,
         },
         ControlResponse::Rejected { code, message } => RpcControlResponse::Rejected {
             code: format!("{code:?}"),
@@ -450,6 +483,7 @@ impl From<ControlResponse> for RpcControlResponse {
             } => RpcControlResponse::Accepted {
                 operation_id,
                 status: format!("{status:?}"),
+                startup_failure: None,
             },
             ControlResponse::Rejected { code, message } => RpcControlResponse::Rejected {
                 code: format!("{code:?}"),

@@ -125,13 +125,13 @@ impl ControlService {
         actor: Actor,
         request: ControlRequest,
     ) -> ControlResponse {
-        if let Some(op_id) = self.idempotent_ops.get(idempotency_key) {
-            if let Some(record) = self.operations.get(op_id) {
-                return ControlResponse::Accepted {
-                    operation_id: op_id.clone(),
-                    status: record.status,
-                };
-            }
+        if let Some(op_id) = self.idempotent_ops.get(idempotency_key)
+            && let Some(record) = self.operations.get(op_id)
+        {
+            return ControlResponse::Accepted {
+                operation_id: op_id.clone(),
+                status: record.status,
+            };
         }
         let response = self.accept(actor, request);
         if let ControlResponse::Accepted {
@@ -145,13 +145,13 @@ impl ControlService {
     }
 
     pub fn accept(&mut self, actor: Actor, request: ControlRequest) -> ControlResponse {
-        if is_exclusive(&request) {
-            if self.running_exclusive.is_some() {
-                return ControlResponse::Rejected {
-                    code: ErrorCode::Busy,
-                    message: "another exclusive control operation is running".into(),
-                };
-            }
+        if is_exclusive(&request)
+            && self.running_exclusive.is_some()
+        {
+            return ControlResponse::Rejected {
+                code: ErrorCode::Busy,
+                message: "another exclusive control operation is running".into(),
+            };
         }
 
         let operation_id = self.next_operation_id();
@@ -218,6 +218,17 @@ impl ControlService {
     pub fn record_canceled(&mut self, operation_id: &str, message: impl Into<String>) {
         self.timeline
             .push(operation_id, ControlEventKind::Canceled, message);
+    }
+
+    /// Record a timeline-only observation event (fail-fast-on-startup-errors:
+    /// 「rollback 触发/完成」等监督观察，`sebas ctl events` / ctl status 时间线
+    /// 可见）。没有对应的 operation record —— 纯审计事件。
+    pub fn record_observation(&mut self, message: impl Into<String>) {
+        self.timeline.push(
+            format!("obs_{}", self.next_operation),
+            ControlEventKind::Progress,
+            message,
+        );
     }
 
     pub fn events_since(&self, seq: u64) -> Vec<ControlEvent> {

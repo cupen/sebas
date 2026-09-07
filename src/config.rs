@@ -321,7 +321,7 @@ fn default_log_level() -> String {
     "info".into()
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WatchdogConfig {
     #[serde(default)]
     pub core: WatchdogCoreConfig,
@@ -335,6 +335,30 @@ pub struct WatchdogConfig {
     pub router: WatchdogRouterConfig,
     #[serde(default)]
     pub im: WatchdogImConfig,
+    /// 受管服务连续 spawn 失败上限（fail-fast-on-startup-errors D1）：同一
+    /// 服务连续 spawn 失败（或 ready 前 early-fatal 退出）达到该值 → 服务进入
+    /// `failed-startup` 终态、watchdog 以 EX_TEMPFAIL (75) 退出，不再无限重试。
+    /// 默认 3；`WatchdogConfig::default()` 与 TOML 缺省共用同一来源。
+    #[serde(default = "default_max_spawn_failures")]
+    pub max_spawn_failures: u32,
+}
+
+impl Default for WatchdogConfig {
+    fn default() -> Self {
+        Self {
+            core: Default::default(),
+            upgrade: Default::default(),
+            storage: Default::default(),
+            webui: Default::default(),
+            router: Default::default(),
+            im: Default::default(),
+            max_spawn_failures: default_max_spawn_failures(),
+        }
+    }
+}
+
+fn default_max_spawn_failures() -> u32 {
+    3
 }
 
 /// watchdog 模式下 core 子进程（飞书 bot + ACP）的开关。
@@ -403,10 +427,10 @@ pub fn webui_allowed_roots(
     }
     let mut roots: Vec<std::path::PathBuf> =
         cfg.allowed_roots.iter().map(std::path::PathBuf::from).collect();
-    if let Some(root) = work_root {
-        if !roots.contains(&root.to_path_buf()) {
-            roots.push(root.to_path_buf());
-        }
+    if let Some(root) = work_root
+        && !roots.contains(&root.to_path_buf())
+    {
+        roots.push(root.to_path_buf());
     }
     roots
 }
@@ -778,8 +802,10 @@ allowed_roots = ["~/work", "/srv/projects"]
 
     #[test]
     fn webui_allowed_roots_configured_merges_default_root_once() {
-        let mut cfg = WatchdogWebUiConfig::default();
-        cfg.allowed_roots = vec!["/srv/projects".into()];
+        let cfg = WatchdogWebUiConfig {
+            allowed_roots: vec!["/srv/projects".into()],
+            ..Default::default()
+        };
         let roots = webui_allowed_roots(
             &cfg,
             Some(std::path::Path::new("/srv/projects")),
