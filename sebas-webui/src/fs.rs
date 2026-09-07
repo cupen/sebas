@@ -362,18 +362,17 @@ mod tests {
         );
 
         // symlink 指向树外：真实目标参与比较 → 拒绝；roots 里的 symlink
-        // 同样解析为真实根后比较 → 命中。
-        let link = dir.path().join("link");
+        // 同样解析为真实根后比较 → 命中。（非 unix 无 symlink，整段门控。）
         #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-        #[cfg(unix)]
-        assert!(!within_allowed_roots(&link, &roots));
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            assert!(!within_allowed_roots(&link, &roots));
 
-        let root_link = dir.path().join("root_link");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(dir.path(), &root_link).unwrap();
-        #[cfg(unix)]
-        assert!(within_allowed_roots(&sub, &[root_link]));
+            let root_link = dir.path().join("root_link");
+            std::os::unix::fs::symlink(dir.path(), &root_link).unwrap();
+            assert!(within_allowed_roots(&sub, &[root_link]));
+        }
 
         // 任一侧不存在 → fail-closed。
         assert!(!within_allowed_roots(&dir.path().join("__ghost__"), &roots));

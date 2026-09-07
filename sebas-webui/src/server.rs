@@ -592,6 +592,8 @@ mod agent_defaults_tests {
     }
 
     #[tokio::test]
+    // env 锁有意横跨整个测试（含 await）：env 是进程全局的，测试内串行。
+    #[allow(clippy::await_holding_lock)]
     async fn get_and_put_proxied_with_bearer() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("SEBAS_CONTROL_SECRET", "sec- defaults-x"); }
@@ -616,6 +618,8 @@ mod agent_defaults_tests {
     }
 
     #[tokio::test]
+    // 同上：env 锁有意横跨 await。
+    #[allow(clippy::await_holding_lock)]
     async fn put_without_secret_is_503() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("SEBAS_CONTROL_SECRET"); }

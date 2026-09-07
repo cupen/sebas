@@ -330,8 +330,11 @@ pub fn update_project_branch(conn: &mut Connection, path: &str, branch: Option<&
 
 // ---- Session map ----
 
+/// session_map 行形状（chat_id, thread_id, session_id, last_active_unix, project_dir）。
+pub type SessionMapRow = (String, Option<String>, String, i64, Option<String>);
+
 /// 加载会话映射 (用于恢复)。
-pub fn load_session_map(conn: &mut Connection) -> Result<Vec<(String, Option<String>, String, i64, Option<String>)>, String> {
+pub fn load_session_map(conn: &mut Connection) -> Result<Vec<SessionMapRow>, String> {
     let mut stmt = conn
         .prepare("SELECT chat_id, thread_id, session_id, last_active_unix, project_dir FROM session_map")
         .map_err(|e| format!("准备 session_map 查询失败: {e}"))?;
@@ -358,7 +361,7 @@ pub fn load_session_map(conn: &mut Connection) -> Result<Vec<(String, Option<Str
 /// 保存会话映射 (全量替换)。
 pub fn save_session_map(
     conn: &mut Connection,
-    entries: &[(String, Option<String>, String, i64, Option<String>)],
+    entries: &[SessionMapRow],
 ) -> Result<(), String> {
     let tx = conn
         .transaction()
@@ -400,14 +403,14 @@ impl Repo {
     /// 加载 PersistedState。
     pub async fn load_persisted_state(handle: &StateHandle) -> Result<sebas_dispatch::state_store::PersistedState, String> {
         handle
-            .exec(|conn| load_persisted_state(conn))
+            .exec(load_persisted_state)
             .await
     }
 
     /// 加载 settings。
     pub async fn load_settings(handle: &StateHandle) -> Result<Option<sebas_feishu::cards::CardConfig>, String> {
         handle
-            .exec(|conn| load_settings(conn))
+            .exec(load_settings)
             .await
     }
 
@@ -422,7 +425,7 @@ impl Repo {
     /// 加载所有项目。
     pub async fn load_projects(handle: &StateHandle) -> Result<Vec<ProjectRow>, String> {
         handle
-            .exec(|conn| load_projects(conn))
+            .exec(load_projects)
             .await
     }
 

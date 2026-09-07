@@ -35,7 +35,7 @@ pub async fn resolve(
     }
     let total = resp.content_length();
     if let Some(n) = total
-        && n as u64 > cap
+        && n > cap
     {
         return Err(format!("附件超过大小上限（{n} > {cap} 字节），已拒绝"));
     }

@@ -284,7 +284,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             let card = ChannelCard {
                 title: title.into(),
                 theme: theme.into(),
-                elements: vec![ChannelElement::Markdown { content: note.into() }],
+                elements: vec![ChannelElement::Markdown { content: note }],
                 turn: None,
             };
             self.update_card(&msg_id, &card).await;
@@ -452,9 +452,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     fn card_config(&self) -> sebas_dispatch::CardConfig {
         // 渲染旋钮（截断/折叠/thinking）来自 [card] 配置；im 侧持有
         // （配置归属 spec）。当前用缺省 + 主题色；settings 域接管后随域刷新。
-        let mut cfg = sebas_dispatch::CardConfig::default();
-        cfg.theme_color = self.theme_color.clone();
-        cfg
+        sebas_dispatch::CardConfig {
+            theme_color: self.theme_color.clone(),
+            ..Default::default()
+        }
     }
 
     /// 出站 flush：组装中立卡 → 飞书 JSON → 新发或 PATCH。
@@ -629,10 +630,10 @@ fn same_chat(a: &str, b: &str) -> bool {
 
 /// wire 上 URL-safe 编码的会话 key → ChannelKey（webui routes 口径的逆）。
 fn decode_wire_key(encoded: &str) -> ChannelKey {
-    if let Ok(raw) = urlencoding::decode(encoded) {
-        if let Some((channel, reference)) = raw.split_once('\0') {
-            return ChannelKey::new(channel, reference);
-        }
+    if let Ok(raw) = urlencoding::decode(encoded)
+        && let Some((channel, reference)) = raw.split_once('\0')
+    {
+        return ChannelKey::new(channel, reference);
     }
     ChannelKey::new("feishu", encoded)
 }
@@ -665,6 +666,8 @@ mod tests {
         closes: AtomicUsize,
         approvals: Mutex<Vec<String>>,
         turns: Mutex<HashMap<String, Vec<TurnEntry>>>,
+        // 只写不读：保留事件管道形状供后续用例扩展。
+        #[allow(dead_code)]
         events: (tokio::sync::mpsc::Sender<SessionEvent>, tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>),
     }
 
@@ -726,8 +729,6 @@ mod tests {
             Ok(())
         }
     }
-
-    async fn broadcast_of(_tx: tokio::sync::mpsc::Sender<SessionEvent>) {}
 
     struct FakeControl;
     #[async_trait]

@@ -24,10 +24,13 @@ use tokio::sync::{mpsc, oneshot};
 /// 写者命令: 闭包 `FnOnce(&mut Connection) -> R + Send`, 结果通过 oneshot 返回。
 type Cmd = Box<dyn FnOnce(&mut Connection) -> Result<Box<dyn std::any::Any + Send>, String> + Send>;
 
+/// 单条写命令的执行结果（动态擦除，调用方 downcast）。
+type CmdOutcome = Result<Box<dyn std::any::Any + Send>, String>;
+
 /// 异步句柄, 克隆后多消费者共享同一写者线程。
 #[derive(Clone)]
 pub struct StateHandle {
-    tx: mpsc::Sender<(Cmd, oneshot::Sender<Result<Box<dyn std::any::Any + Send>, String>>)>,
+    tx: mpsc::Sender<(Cmd, oneshot::Sender<CmdOutcome>)>,
 }
 
 impl StateHandle {

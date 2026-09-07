@@ -110,56 +110,6 @@ fn unique_stamp() -> u128 {
     (t << 16) | (n & 0xFFFF)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn creates_unique_paths_and_cleans_up() {
-        let a = TestDir::new("self", "alpha");
-        let b = TestDir::new("self", "beta");
-        assert_ne!(
-            a.path(),
-            b.path(),
-            "unique stamps must produce distinct paths"
-        );
-        assert!(a.path().exists());
-        assert!(b.path().exists());
-        let pa = a.path().to_path_buf();
-        let pb = b.path().to_path_buf();
-        drop(a);
-        drop(b);
-        assert!(!pa.exists(), "alpha dir must be removed on drop");
-        assert!(!pb.exists(), "beta dir must be removed on drop");
-    }
-
-    #[test]
-    fn keep_survives_drop() {
-        let mut d = TestDir::new("self", "keep");
-        d.keep();
-        let p = d.path().to_path_buf();
-        drop(d);
-        assert!(p.exists(), "keep() must prevent cleanup");
-        // Tidy up so the test itself is hermetic.
-        std::fs::remove_dir_all(&p).unwrap();
-    }
-
-    #[test]
-    fn path_lives_under_target_tests() {
-        let d = TestDir::new("self", "layout");
-        let path = d.path();
-        assert!(
-            path.components().any(|c| c.as_os_str() == "tests"),
-            "TestDir path must include a `tests/` segment under target/: {}",
-            path.display()
-        );
-        assert!(
-            path.to_string_lossy().contains("target"),
-            "TestDir path must be under `target/`: {}",
-            path.display()
-        );
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Process-level e2e sandbox (testsuite-process-e2e).
@@ -584,12 +534,12 @@ pub async fn wait_router_addr(sb: &Sandbox) -> String {
             let log = std::fs::read_to_string(&log_path).ok()?;
             for line in log.lines().rev() {
                 let line = strip_ansi(line);
-                if line.contains("router started") {
-                    if let Some(idx) = line.find("addr=") {
-                        let addr = line[idx + 5..].split_whitespace().next()?;
-                        if addr.parse::<std::net::SocketAddr>().is_ok() {
-                            return Some(format!("http://{addr}"));
-                        }
+                if line.contains("router started")
+                    && let Some(idx) = line.find("addr=")
+                {
+                    let addr = line[idx + 5..].split_whitespace().next()?;
+                    if addr.parse::<std::net::SocketAddr>().is_ok() {
+                        return Some(format!("http://{addr}"));
                     }
                 }
             }
@@ -639,3 +589,53 @@ pub async fn post_json(
     Ok((status, json))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creates_unique_paths_and_cleans_up() {
+        let a = TestDir::new("self", "alpha");
+        let b = TestDir::new("self", "beta");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "unique stamps must produce distinct paths"
+        );
+        assert!(a.path().exists());
+        assert!(b.path().exists());
+        let pa = a.path().to_path_buf();
+        let pb = b.path().to_path_buf();
+        drop(a);
+        drop(b);
+        assert!(!pa.exists(), "alpha dir must be removed on drop");
+        assert!(!pb.exists(), "beta dir must be removed on drop");
+    }
+
+    #[test]
+    fn keep_survives_drop() {
+        let mut d = TestDir::new("self", "keep");
+        d.keep();
+        let p = d.path().to_path_buf();
+        drop(d);
+        assert!(p.exists(), "keep() must prevent cleanup");
+        // Tidy up so the test itself is hermetic.
+        std::fs::remove_dir_all(&p).unwrap();
+    }
+
+    #[test]
+    fn path_lives_under_target_tests() {
+        let d = TestDir::new("self", "layout");
+        let path = d.path();
+        assert!(
+            path.components().any(|c| c.as_os_str() == "tests"),
+            "TestDir path must include a `tests/` segment under target/: {}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().contains("target"),
+            "TestDir path must be under `target/`: {}",
+            path.display()
+        );
+    }
+}

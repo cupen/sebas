@@ -393,12 +393,12 @@ async fn handle_probe(
             // 把官方返回的 model 列表写回 `models` 目录字段（best-effort：
             // 写失败只记日志，不影响结果卡展示）。preset 派生条目的 models
             // 跟随代码，不落盘（结果卡展示 + 设默认 model 不受影响）。
-            if let Some(mut item) = forms.preset.store.get(name).await {
-                if item.get("preset").and_then(Value::as_str).is_none() {
-                    item.insert("models".into(), Value::String(models.join(",")));
-                    if let Err(e) = forms.preset.store.update(item).await {
-                        tracing::warn!(name, error = %e, "failed to write probe results to models dir");
-                    }
+            if let Some(mut item) = forms.preset.store.get(name).await
+                && item.get("preset").and_then(Value::as_str).is_none()
+            {
+                item.insert("models".into(), Value::String(models.join(",")));
+                if let Err(e) = forms.preset.store.update(item).await {
+                    tracing::warn!(name, error = %e, "failed to write probe results to models dir");
                 }
             }
             build_probe_result_card(name, base_kind, &probe_url, &models)

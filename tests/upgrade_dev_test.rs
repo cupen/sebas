@@ -29,6 +29,7 @@ use std::sync::{Mutex, OnceLock};
 /// 串行化所有会触碰进程内全局 `UPGRADE_LOCKED` 的 `run` 调用。
 static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 async fn run_serial(args: UpdateArgs) -> Result<(), String> {
     let _guard = SERIAL.get_or_init(|| Mutex::new(())).lock().unwrap();
     run(args).await.map_err(|e| e.to_string())

@@ -202,10 +202,10 @@ fn backup_before(
                 if path == Path::new(&backup_path) {
                     continue;
                 }
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("sebas.db.backup-") {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && name.starts_with("sebas.db.backup-")
+                {
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }

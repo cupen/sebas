@@ -264,12 +264,11 @@ fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
 }
 
 fn shellexpand_dir(path: &str) -> PathBuf {
-    let expanded = if let Some(rest) = path.strip_prefix("~/")
+    if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
     {
         PathBuf::from(home).join(rest)
     } else {
         PathBuf::from(path)
-    };
-    expanded
+    }
 }

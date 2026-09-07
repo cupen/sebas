@@ -600,8 +600,8 @@ fn parse_models_list(item: &serde_json::Map<String, serde_json::Value>) -> Vec<S
     }
 }
 
-/// 按 preset 物化 base_url/models 的旧「显式覆盖」分支已随跟随代码语义移除
-/// （见 `resolve_providers`：覆盖即配置错误）。
+// 按 preset 物化 base_url/models 的旧「显式覆盖」分支已随跟随代码语义移除
+// （见 `resolve_providers`：覆盖即配置错误）。
 
 impl RouterConfig {
     /// 解析顺序对齐 root house style（src/config.rs）：

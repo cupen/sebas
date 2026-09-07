@@ -587,12 +587,12 @@ async fn dispatch(
         } => {
             // 5.5: canonicalize + stat BEFORE any spawn; no existence
             // disclosure in the rejection message.
-            if let Some(dir) = &project_dir {
-                if !usable_project_dir(dir) {
-                    return CoreChannelResponse::Rejected {
-                        rejection: SessionRejection::UnusableProjectDir,
-                    };
-                }
+            if let Some(dir) = &project_dir
+                && !usable_project_dir(dir)
+            {
+                return CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::UnusableProjectDir,
+                };
             }
             let project_dir = project_dir.map(|dir| {
                 std::fs::canonicalize(&dir)
@@ -618,12 +618,12 @@ async fn dispatch(
             // 上送、记在 mapping 上，首条消息触发 spawn 时生效
             // （add-composer-agent-binding：composer 建 0-turn 会话是常态
             // 路径，hint 不上线则用户在创建模式选的 agent 被静默丢弃）。
-            if let Some(dir) = &project_dir {
-                if !usable_project_dir(dir) {
-                    return CoreChannelResponse::Rejected {
-                        rejection: SessionRejection::UnusableProjectDir,
-                    };
-                }
+            if let Some(dir) = &project_dir
+                && !usable_project_dir(dir)
+            {
+                return CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::UnusableProjectDir,
+                };
             }
             let project_dir = project_dir.map(|dir| {
                 std::fs::canonicalize(&dir)
@@ -795,8 +795,7 @@ async fn compose_attachments(
         }
     }
     let mut m = message;
-    m.push_str("
-");
+    m.push('\n');
     m.push_str(&markers.join("
 "));
     Ok(m)
@@ -859,6 +858,7 @@ async fn project_mutation(
 /// - `{"op":"put","name":"...","item":{...}}` → upsert provider
 /// - `{"op":"delete","name":"..."}` → 删除 + 写墓碑
 /// - `{"op":"save","state":{PersistedState 形状}}` → 全量替换
+///
 /// 全部经 RMW（读 → 改 → save_persisted_state），与 router 卡片写路径同语义。
 async fn providers_mutation(
     engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),

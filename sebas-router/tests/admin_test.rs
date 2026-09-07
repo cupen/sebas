@@ -558,7 +558,7 @@ async fn put_defaults(
 #[tokio::test]
 async fn agent_defaults_round_trip() {
     let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let url = |p: &str| format!("http://{}/admin/defaults", gw.addr);
+    let url = |_p: &str| format!("http://{}/admin/defaults", gw.addr);
     let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
 
     // 初始未设置。

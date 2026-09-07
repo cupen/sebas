@@ -73,7 +73,7 @@ owner_id = "ou_x"
 path = "/bin/cat"
 idle_kill_secs = 60
 "#;
-    let err = Config::parse(&toml)
+    let err = Config::parse(toml)
         .expect_err("legacy [acp.claude] must be rejected at parse time")
         .to_string();
     assert!(err.contains("acp.claude"), "error names the offending table: {err}");

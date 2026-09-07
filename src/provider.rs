@@ -966,6 +966,8 @@ listen = "127.0.0.1:0"
     /// 仍然可用（不为 None，用户能 add）。直接验证 `forms.preset.store.list()`
     /// 是空 vec、且表单 form_name 没坏。
     #[tokio::test]
+    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
+    #[allow(clippy::await_holding_lock)]
     async fn build_form_after_self_heal_uses_empty_seed() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -998,6 +1000,8 @@ listen = "127.0.0.1:0"
     /// `Some(forms)`，seed 来自 config.toml（不走 self-heal 分支）。这条
     /// 测试锁定「正常路径不受影响」。
     #[tokio::test]
+    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
+    #[allow(clippy::await_holding_lock)]
     async fn build_form_missing_overlay_still_works() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -1031,6 +1035,8 @@ listen = "127.0.0.1:0"
     /// **不再**迁移到 state.json 后删除。本测试断言新语义：providers.json
     /// 保留在原位、内容不变。
     #[tokio::test]
+    // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
+    #[allow(clippy::await_holding_lock)]
     async fn build_form_valid_overlay_does_not_backup() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();

@@ -15,9 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// 话题失效提示文案（Q8→F1 熔断）：发一次提示并终止会话，不重试、不重发。
-/// 群聊/p2p 通用，不提「开新话题」。
-
+// 话题失效提示文案（Q8→F1 熔断）：发一次提示并终止会话，不重试、不重发。
+// 群聊/p2p 通用，不提「开新话题」。
 
 /// `[acp.agents.<kind>] idle_kill_secs` → 事件泵 idle 超时（sebas-9pz ②）。
 /// 配置 > 0 时启用（生产默认 172800/48h 照常生效）；0 = 不过期。
