@@ -64,13 +64,34 @@
 
 ## 2. 通道与监督簇补缺到 ≥90%（占位：§1 复核后按真实缺口填写，当前条目为模板）
 
-- [ ] 2.1 对照复核清单，为"通道与监督"簇中未命中且未豁免的 requirement 补证据：已有单元/集成完整覆盖的引用既有测试；无旅程命中的簇新增进程级用例（挂在 `tests/testsuite_e2e_test.rs` 或 `tests/testsuite_acceptance_test.rs`，遵循既有沙箱与 `#[ignore]` 约定）；运行 `invoke testsuite-e2e`（或 `invoke testsuite-acceptance --case <新用例>`）验证（验证：新用例全绿；簇百分比 ≥90% 且每簇至少一条套件内旅程用例）
-- [ ] 2.2 无法在沙箱验证的 requirement 转豁免：在矩阵注明 cause 与替代验证手段，不计入分母；运行 `openspec validate --changes --strict`（验证：豁免条目均带 cause；无"未命中且未豁免"残留于本簇）
+- [x] 2.1 对照复核清单，为"通道与监督"簇中未命中且未豁免的 requirement 补证据：已有单元/集成完整覆盖的引用既有测试；无旅程命中的簇新增进程级用例（挂在 `tests/testsuite_e2e_test.rs` 或 `tests/testsuite_acceptance_test.rs`，遵循既有沙箱与 `#[ignore]` 约定）；运行 `invoke testsuite-e2e`（或 `invoke testsuite-acceptance --case <新用例>`）验证（验证：新用例全绿；簇百分比 ≥90% 且每簇至少一条套件内旅程用例）
+
+  复核结果：⑤ 簇 30 条 requirement 全部有命中证据（三期已补掉大头），无未命中且未
+  豁免残留，无需新增用例；簇内套件内旅程 = E `no_secret_assembly_end_to_end` /
+  `secret_rotation_self_heal_across_core_restart` / `watchdog_supervised_core_recovery`。
+  `invoke testsuite-e2e` 11/11 绿。
+- [x] 2.2 无法在沙箱验证的 requirement 转豁免：在矩阵注明 cause 与替代验证手段，不计入分母；运行 `openspec validate --changes --strict`（验证：豁免条目均带 cause；无"未命中且未豁免"残留于本簇）
+
+  转豁免 1 条：watchdog「连续 3 次 spawn fail → 整体退出 75」进程级注入（cause：真实
+  二进制下 `current_exe()` spawn 系统调用无法注入失败；替代验证：supervisor fake
+  spawner 单测 + `startup_failure_*` e2e 75 契约），见 COVERAGE.md 豁免清单。
+  `openspec validate --changes --strict` 通过。
 
 ## 3. 其余四簇补缺到 ≥90%（占位：同 §2，复核后填写）
 
-- [ ] 3.1 agent workbench / 会话管理两簇：同规则补证据或补用例；运行对应套件验证（验证：两簇 ≥90%，新增用例全绿）
-- [ ] 3.2 项目管理 / models 管理两簇：同规则补证据或补用例；运行对应套件验证（验证：两簇 ≥90%，新增用例全绿）
+- [x] 3.1 agent workbench / 会话管理两簇：同规则补证据或补用例；运行对应套件验证（验证：两簇 ≥90%，新增用例全绿）
+
+  ③ 24/24（projects_branch 缺口由 browser `projects.spec.ts` 1.2 收口；三个漏行
+  requirement 由前端 `workbench-composer.test.ts` + `agent_backend.rs` 单测命中）、
+  ① 13/13；无新增用例。`invoke testsuite-acceptance` 6/6 绿
+  （`workbench_aggregate_journey`、`session_lifecycle_journey` 等）。
+- [x] 3.2 项目管理 / models 管理两簇：同规则补证据或补用例；运行对应套件验证（验证：两簇 ≥90%，新增用例全绿）
+
+  ④ 13/13（+1 webui projects 面，由 `session_endpoints_test` degraded 用例 +
+  browser `deployment.spec.ts` 命中）、② 20/20（+1 豁免不计分母；两个漏行由
+  `config.rs` preset 单测 + `admin_test::agent_defaults_*` 命中）；无新增用例。
+  `invoke testsuite-acceptance`（provider_governance / projects_session）与
+  `invoke testsuite-webui`（41 its：34+3+4）全绿。
 
 ## 4. 账本收口
 
