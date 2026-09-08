@@ -203,7 +203,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claud
 
 ## 架构
 
-进程拓扑、IPC 语义与 crate 职责的完整描述见 [docs/architecture.md](docs/architecture.md)；术语以 [openspec/glossary.md](openspec/glossary.md) 为准。
+进程拓扑、三套 IPC 通道与子命令入口的完整描述见 [docs/architecture/process-ipc-subcommands.md](docs/architecture/process-ipc-subcommands.md)；术语以 [openspec/glossary.md](openspec/glossary.md) 为准。
 
 ```
    网页工作台          飞书客户端         未来 IM / 客户端
