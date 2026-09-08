@@ -2,7 +2,7 @@
 
 ## Purpose
 
-以能力×旅程矩阵为账本的全功能验收套件：对全部能力（30 个、247 条 requirement）维护"关键功能是否被验收命中"的全局账；核心功能集（agent workbench 相关、项目管理、会话管理、models 管理）命中 ≥80% 为唯一硬指标，其余能力矩阵可见不设门槛，测不了的面以豁免清单明示，并提供一键复跑入口。
+以能力×旅程矩阵为账本的全功能验收套件：对全部能力（30 个、247 条 requirement）维护"关键功能是否被验收命中"的全局账；核心功能集（五簇：agent workbench 相关、项目管理、会话管理、models 管理、通道与监督）命中 ≥90% 为唯一硬指标，其余能力矩阵可见不设门槛，测不了的面以豁免清单明示，并提供一键复跑入口。
 
 ## Requirements
 
@@ -22,12 +22,12 @@
 
 ### Requirement: 覆盖通过标准
 
-验收覆盖采用两级度量。**核心功能集**（界定见"核心功能集界定"）的命中 SHALL ≥80%，为套件通过的唯一硬指标；其余能力在矩阵中 SHALL 全量可见（命中证据、豁免 cause 或缺口标注），不设数字门槛。覆盖面按 requirement/旅程级命中计：一条 requirement 被任一测试层（验收用例、集成、单元测试）完整命中即计入，以代码行覆盖率为度量被明确排除。核心功能集的每一簇 SHALL 至少有一条套件内旅程用例命中，不得全靠引用既有单元测试凑数。豁免面（飞书传输、浏览器级 UI、真实模型语义）不计入分母，豁免 MUST 注明 cause 与替代验证手段。达标复核 SHALL 显式执行并记录数字。
+验收覆盖采用两级度量。**核心功能集**（界定见"核心功能集界定"）的命中 SHALL ≥90%，为套件通过的唯一硬指标；其余能力在矩阵中 SHALL 全量可见（命中证据、豁免 cause 或缺口标注），不设数字门槛。覆盖面按 requirement/旅程级命中计：一条 requirement 被任一测试层（验收用例、集成、单元测试）完整命中即计入，以代码行覆盖率为度量被明确排除。核心功能集的每一簇 SHALL 至少有一条套件内旅程用例命中，不得全靠引用既有单元测试凑数。豁免面（飞书传输、浏览器级 UI、真实模型语义）不计入分母，豁免 MUST 注明 cause 与替代验证手段。达标复核 SHALL 显式执行并记录数字。
 
 #### Scenario: 核心集达标复核
 
 - **WHEN** 收尾复核运行
-- **THEN** 核心四簇分别给出 requirement 总数、命中数与百分比，全部 ≥80% 且每簇至少一条套件内旅程用例，记录通过
+- **THEN** 核心五簇分别给出 requirement 总数、命中数与百分比，全部 ≥90% 且每簇至少一条套件内旅程用例，记录通过
 
 #### Scenario: 非核心能力不挡通过
 
@@ -41,12 +41,12 @@
 
 ### Requirement: 核心功能集界定
 
-套件 SHALL 在矩阵中显式标注核心功能集，共四簇：agent workbench 相关（agent-workbench、permission-flow）、项目管理（project-session-actions 及 state-store/projects、webui projects 面）、会话管理（session-lifecycle、session-persistence、acp-session-mapping）、models 管理（acp-model-selection、router-model-aliases、provider-management）。核心集的增删 MUST 是显式变更：矩阵标注与变更说明同步更新，不得静默调整。
+套件 SHALL 在矩阵中显式标注核心功能集，共五簇：agent workbench 相关（agent-workbench、permission-flow）、项目管理（project-session-actions 及 state-store/projects、webui projects 面）、会话管理（session-lifecycle、session-persistence、acp-session-mapping）、models 管理（acp-model-selection、router-model-aliases、provider-management）、通道与监督（core-session-channel、watchdog）。核心集的增删 MUST 是显式变更：矩阵标注与变更说明同步更新，不得静默调整。
 
 #### Scenario: 核心行有标注
 
 - **WHEN** 审阅验收矩阵
-- **THEN** 四簇对应的条目带"核心"标注，80% 复核仅统计这些条目
+- **THEN** 五簇对应的条目带"核心"标注，90% 复核仅统计这些条目
 
 #### Scenario: 边界调整留痕
 

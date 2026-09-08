@@ -108,7 +108,7 @@
 - [x] 5.1 跑 `openspec status --change raise-core-coverage-to-90 --json` 验证四个 artifact 全部 `done`（验证：isPlanningComplete: true）
 
   输出：proposal/specs/design/tasks 全部 `status: "done"`，`isPlanningComplete: true`。
-- [ ] 5.2 archive 时同步修正 `openspec/specs/testsuite-acceptance/spec.md` Purpose 段的旧 80% 表述为 90% 五簇口径，并全仓 grep 清理同类旧口径残留（如 COVERAGE.md 的"长期方向 ≥90%，非门槛"等与新门槛矛盾的表述，逐条改写或删除）；（验证：主 spec Purpose 与 requirement 数字一致；`grep -rn "80%" openspec/specs/testsuite-acceptance/ tests/acceptance/COVERAGE.md` 无旧口径残留）
+- [x] 5.2 archive 时同步修正 `openspec/specs/testsuite-acceptance/spec.md` Purpose 段的旧 80% 表述为 90% 五簇口径，并全仓 grep 清理同类旧口径残留（如 COVERAGE.md 的"长期方向 ≥90%，非门槛"等与新门槛矛盾的表述，逐条改写或删除）；（验证：主 spec Purpose 与 requirement 数字一致；`grep -rn "80%" openspec/specs/testsuite-acceptance/ tests/acceptance/COVERAGE.md` 无旧口径残留）
 
   （编排方 archive 时执行；COVERAGE.md 侧的旧口径段（统计段旧表述）已在本期复核
   改写中一并清理，主 spec Purpose 留待 archive 同步。）
