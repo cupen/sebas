@@ -212,7 +212,9 @@ export class SettingsModal {
   }
 
   /** Switch to a settings section by its nav label; waits for load to settle. */
-  async openSection(label: 'Models' | 'Services' | 'Appearance' | 'Env' | 'About'): Promise<void> {
+  async openSection(
+    label: 'Settings' | 'Models' | 'Services' | 'Appearance' | 'Env' | 'About',
+  ): Promise<void> {
     await this.panel.locator('.nav-item', { hasText: label }).click()
     await expect(
       this.panel.locator('.nav-item', { hasText: label }),

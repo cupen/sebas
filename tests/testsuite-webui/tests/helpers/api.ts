@@ -188,7 +188,7 @@ export interface AgentDefaults {
   model: string | null
 }
 
-/** Read-only router surface backing the settings Services section. */
+/** Router gateway card backing the settings Models section (listen/debug/auth). */
 export async function getRouterInfo(request: APIRequestContext): Promise<RouterInfo> {
   const d = (await (await request.get('/api/router')).json()) as { router: RouterInfo }
   return d.router
@@ -197,6 +197,29 @@ export async function getRouterInfo(request: APIRequestContext): Promise<RouterI
 /** Build metadata backing the settings About section. */
 export async function getAbout(request: APIRequestContext): Promise<AboutInfo> {
   return (await request.get('/api/about')).json() as Promise<AboutInfo>
+}
+
+export interface AdminServiceRow {
+  name: string
+  status: string
+  desired: string
+  uptime_secs: number | null
+}
+
+export interface AdminServicesTruth {
+  adapter_ok: boolean
+  services: AdminServiceRow[]
+}
+
+/**
+ * Watchdog managed-service surface backing the settings Services section
+ * (fix-settings-menu-and-services-semantics §1: response is the truth source —
+ * the sandbox assembly is a variable, never enumerate concrete services).
+ */
+export async function getAdminServices(
+  request: APIRequestContext,
+): Promise<AdminServicesTruth> {
+  return (await request.get('/api/admin/services')).json() as Promise<AdminServicesTruth>
 }
 
 /** New-session defaults (sandbox truth is null/null without a control secret). */

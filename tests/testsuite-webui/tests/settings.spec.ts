@@ -1,23 +1,32 @@
 /**
- * Journey S.x — settings surface (phase-3 tasks S1–S5).
+ * Journey S.x — settings surface (phase-3 tasks S1–S6, new IA
+ * fix-settings-menu-and-services-semantics).
  *
  * 功能：设置面 / 子功能：只读呈现、写降级
  *
- * Read-only sections (Services/About/Env) are reconciled against their JSON
- * API truth with contains-assertions (never literals: listen addrs and
- * uptime move with the sandbox). The sandbox has no SEBAS_CONTROL_SECRET,
- * so every router mutation deterministically answers 503 — the contract
- * under test is honest degradation: the failure surfaces inline
- * (`.callout-error`), server-side lists/defaults stay unchanged, and the
- * dialogs remain interactive. Write persistence is explicitly NOT asserted
- * (needs a control-secret sandbox shape, separate item).
+ * New IA: default section Settings (overview shell), Services reads the
+ * watchdog managed-service surface (/api/admin/services, response-driven —
+ * the sandbox assembly is a variable, never enumerate concrete services),
+ * Models carries the Router gateway card (/api/router listen/debug/auth).
+ * Read-only sections are reconciled against their JSON API truth with
+ * contains-assertions (never literals: listen addrs and uptime move with
+ * the sandbox). The sandbox has no SEBAS_CONTROL_SECRET, so every router
+ * mutation deterministically answers 503 — the contract under test is
+ * honest degradation: the failure surfaces inline (`.callout-error`),
+ * server-side lists/defaults stay unchanged, and the dialogs remain
+ * interactive. Write persistence is explicitly NOT asserted (needs a
+ * control-secret sandbox shape, separate item). The sandbox is bare core
+ * (no watchdog adapter), so /api/admin/services answers
+ * `{adapter_ok: false, services: []}` — S1 pins the response-driven
+ * reconciliation (empty-truth branch) and S6 pins the no-adapter banner +
+ * disabled restart.
  */
 import { expect, test } from '@playwright/test'
 import {
   ErrorCollector,
   getAbout,
+  getAdminServices,
   getAgentDefaults,
-  getRouterInfo,
   listRouterProviders,
   resetState,
   SettingsModal,
@@ -31,30 +40,40 @@ test.describe('设置面', () => {
   })
 
   test.describe('只读呈现', () => {
-    test('S1 services cards match /api/router truth', async ({ page }) => {
+    test('S1 services rows match /api/admin/services truth (response-driven)', async ({
+      page,
+    }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
-      const truth = await getRouterInfo(page.request)
+      const truth = await getAdminServices(page.request)
       await page.goto('/')
       await settings.openViaComposer()
       await settings.openSection('Services')
 
-      const cards = settings.panel.locator('.service-card')
-      await expect(cards.first()).toBeVisible({ timeout: 10_000 })
-      // Router card: listen addr comes from the API, never a literal.
-      await expect(cards.nth(0).locator('.service-desc')).toContainText(truth.listen ?? '—')
-      await expect(cards.nth(0).locator('.service-status')).toContainText('Running')
-      // Routing card: count/auth/debug mirror the API truth.
-      await expect(cards.nth(1).locator('.service-desc')).toContainText(
-        `${truth.provider_count} provider(s)`,
-      )
-      await expect(cards.nth(1).locator('.service-desc')).toContainText(
-        `auth ${truth.has_auth ? 'configured' : 'none'} · debug ${truth.debug ? 'on' : 'off'}`,
-      )
-      await expect(cards.nth(1).locator('.service-status')).toContainText(
-        truth.provider_count > 0 ? 'Configured' : 'Idle',
-      )
+      if (!truth.adapter_ok) {
+        // Bare-core sandbox: honest degradation — banner, zero rows.
+        await expect(settings.panel.locator('.services-banner')).toContainText(
+          '无 watchdog 控制面',
+          { timeout: 10_000 },
+        )
+        await expect(settings.panel.locator('.service-card')).toHaveCount(0)
+      } else {
+        // Watchdog assembly: two-way reconciliation — every rendered row
+        // name is inside the response set, every response row is rendered.
+        const cards = settings.panel.locator('.service-card')
+        await expect(cards.first()).toBeVisible({ timeout: 10_000 })
+        expect(await cards.count()).toBe(truth.services.length)
+        for (const svc of truth.services) {
+          await expect(cards.filter({ hasText: svc.name }).first()).toBeVisible()
+        }
+        const names = new Set(truth.services.map((s) => s.name))
+        for (const id of await settings.panel
+          .locator('.service-card .service-id')
+          .allTextContents()) {
+          expect(names.has(id.trim())).toBe(true)
+        }
+      }
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -102,6 +121,41 @@ test.describe('设置面', () => {
 
       expect(collector.clean()).toEqual([])
     })
+
+    test('S6 bare core degrades: no-adapter banner, no rows, restart disabled', async ({
+      page,
+    }) => {
+      const settings = new SettingsModal(page)
+
+      await resetState(page.request)
+      // Pin the precondition: the suite sandbox is bare core (no watchdog).
+      const truth = await getAdminServices(page.request)
+      expect(truth.adapter_ok).toBe(false)
+      await page.goto('/')
+      await settings.openViaComposer()
+
+      // Services: banner, zero rows, zero row actions.
+      await settings.openSection('Services')
+      await expect(settings.panel.locator('.services-banner')).toContainText(
+        '无 watchdog 控制面',
+        { timeout: 10_000 },
+      )
+      await expect(settings.panel.locator('.service-card')).toHaveCount(0)
+      await expect(settings.panel.locator('.service-actions button')).toHaveCount(0)
+
+      // Back to the Settings overview: the probe has now run, so the
+      // restart-all action is disabled with the honest tooltip while the
+      // adapter-independent reset stays enabled.
+      await settings.openSection('Settings')
+      const restart = settings.panel.locator('wa-button', { hasText: '全部进程重启' })
+      await expect(restart).toHaveAttribute('disabled', '', { timeout: 10_000 })
+      await expect(restart).toHaveAttribute('title', '无 watchdog 控制面')
+      const reset = settings.panel.locator('wa-button', { hasText: '重置 Settings' })
+      await expect(reset).not.toHaveAttribute('disabled', '')
+      await settings.close()
+
+      expect(collector.clean()).toEqual([])
+    })
   })
 
   test.describe('写降级', () => {
@@ -113,6 +167,8 @@ test.describe('设置面', () => {
       expect(before).toEqual({ provider: null, model: null })
       await page.goto('/')
       await settings.openViaComposer()
+      // New IA default section is Settings — defaults live under Models.
+      await settings.openSection('Models')
 
       // Toolbar mirrors the null truth (span only — wa-button internals also
       // carry .label slots, so scope structurally).
@@ -161,6 +217,8 @@ test.describe('设置面', () => {
       const providersBefore = await listRouterProviders(page.request)
       await page.goto('/')
       await settings.openViaComposer()
+      // New IA default section is Settings — provider management lives under Models.
+      await settings.openSection('Models')
 
       // Empty name is rejected client-side with zero network traffic.
       let postCalls = 0
@@ -218,6 +276,8 @@ test.describe('设置面', () => {
       expect(providersBefore.length).toBeGreaterThan(0)
       await page.goto('/')
       await settings.openViaComposer()
+      // New IA default section is Settings — provider management lives under Models.
+      await settings.openSection('Models')
       await expect(settings.panel.locator('.provider-row').first()).toBeVisible({
         timeout: 10_000,
       })

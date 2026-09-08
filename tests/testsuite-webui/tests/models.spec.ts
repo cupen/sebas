@@ -85,6 +85,8 @@ test.describe('模型管理覆盖', () => {
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaComposer()
+      // New IA default section is Settings — the provider list lives under Models.
+      await settings.openSection('Models')
 
       // Count the API truth first.
       const apiResp = await page.request.get('/router/api/providers')
