@@ -1,21 +1,28 @@
 /**
  * Settings modal (IA v2)：侧栏底部 Settings 入口打开的居中弹窗，对齐预览
  * 原型 preview-app.ts 的 settings-dialog 布局——暗色面板、左侧分区导航、
- * 右侧内容区、右上关闭按钮。分区由 `section` 属性驱动：
+ * 右侧内容区、右上关闭按钮。分区由 `section` 属性驱动
+ * （fix-settings-menu-and-services-semantics：缺省首项 `settings`，顺序
+ * settings → services → models → appearance → env → about）：
  *
- *   - models   → provider 列表（/api/router 的 providers：名称 + base URL）
- *   - services → Router 服务状态（listen / debug / auth）
+ *   - settings   → 弹窗壳/总览：工作区根目录、default agent kind、
+ *                  default provider/model 三个只读项 + 「全部进程重启」
+ *                  「重置 Settings」两个高危动作（wa-dialog 二次确认）
+ *   - services   → watchdog 受管子进程（GET /api/admin/services：name /
+ *                  desired / actual / uptime + /api/admin/events 最近错误；
+ *                  enable/disable/restart 动作；无 adapter 时诚实呈现
+ *                  「无 watchdog 控制面」横幅且不渲染动作按钮）
+ *   - models     → provider 路由网关总览（/api/router 的 listen / debug /
+ *                  auth）+ provider 管理列表
  *   - appearance → 主题三态（system / dark / light；切换与持久化在 theme.ts）
- *   - env      → 环境变量名清单（后端无 env 端点，值一律如实标注
- *                "managed by core config"，绝不编造）
- *   - about    → /api/about 的真实数据（version / rustc / uptime /
- *                router listen / provider count）
+ *   - env        → 环境变量名清单（后端无 env 端点，值一律如实标注
+ *                  "managed by core config"，绝不编造）
+ *   - about      → /api/about 的真实数据（version / rustc / uptime /
+ *                  router listen / provider count）
  *
- * 预览原型里的 'ui' 分区换成这里的 appearance（有了真实的可切换项）；
- * 'network' 分区不迁移。
- *
- * 关闭交互：关闭按钮 / Esc / 点击遮罩 → `open` 置 false 并冒泡 `close`
- * 事件，宿主（app-shell）据此同步状态。
+ * 上次停留分区记忆在 localStorage `lastSettingsSection`（非法值回退
+ * `settings`）。关闭交互：关闭按钮 / Esc / 点击遮罩 → `open` 置 false 并
+ * 冒泡 `close` 事件，宿主（app-shell）据此同步状态。
  */
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
@@ -23,6 +30,8 @@ import { customElement, property, state } from 'lit/decorators.js'
 import {
   api,
   type About,
+  type AdminEvent,
+  type AdminService,
   type RouterInfo,
   type RouterProviderAdmin,
   type ProviderPreset,
@@ -42,28 +51,76 @@ import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /**
- * 设置弹窗分区。Models 与 Services 都来自 /api/router（是可用的唯一
- * 后端数据面），appearance 由 theme.ts 承担，Env/About 由本组件直渲染
- * （数据源见文件头注释）。预览原型中的 'network' 分区不迁移——没有
- * 真实的可切换项。
+ * 设置弹窗分区。`settings` 是弹窗壳/总览（含高危动作入口）；Services 以
+ * watchdog 受管子进程为唯一数据源（/api/admin/services），/api/router 的
+ * listen/debug/auth 归 Models 顶部的「Router 路由网关」总览卡——两个语义
+ * 彻底解耦（fix-settings-menu-and-services-semantics D2）。
  */
-export type SettingsSection = 'models' | 'services' | 'appearance' | 'env' | 'about'
+export type SettingsSection =
+  | 'settings'
+  | 'services'
+  | 'models'
+  | 'appearance'
+  | 'env'
+  | 'about'
 
-/** 分区导航的静态元数据（icon 名见 components/icons.ts）。 */
+/** 上次停留分区的 localStorage 键（D5：单键、仅本地、无服务端同步）。 */
+const LAST_SECTION_KEY = 'lastSettingsSection'
+
+/**
+ * 受管服务的对外显示名（D7：内部字符串保持 ServiceName 枚举一致的小写
+ * 原名——`service_from_str("feishu")` 是 None——只在显示层做 i18n 映射）。
+ */
+const SERVICE_DISPLAY_NAME: Record<string, string> = {
+  im: '飞书 IM',
+}
+
+/** 分区导航的静态元数据（icon 名见 components/icons.ts）。顺序即规约。 */
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string }> = [
-  { id: 'models', label: 'Models', icon: 'zap' },
+  { id: 'settings', label: 'Settings', icon: 'settings' },
   { id: 'services', label: 'Services', icon: 'shield' },
+  { id: 'models', label: 'Models', icon: 'zap' },
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'env', label: 'Environment', icon: 'inbox' },
   { id: 'about', label: 'About', icon: 'about' },
 ]
 
 const SECTION_DESC: Record<SettingsSection, string> = {
-  models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
+  settings: 'Workspace overview and maintenance actions.',
   services: 'Background services that run alongside sebas.',
+  models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
   appearance: 'How the console looks. Your choice is saved in this browser.',
   env: 'Environment variables the sebas processes read at startup. The API does not expose values.',
   about: 'Runtime build information.',
+}
+
+/** 读取上次停留分区；缺值/非法值一律回退 null（调用方保持缺省 settings）。 */
+function readLastSection(): SettingsSection | null {
+  try {
+    const raw = localStorage.getItem(LAST_SECTION_KEY)
+    return SECTIONS.some((s) => s.id === raw) ? (raw as SettingsSection) : null
+  } catch {
+    return null
+  }
+}
+
+function writeLastSection(id: SettingsSection): void {
+  try {
+    localStorage.setItem(LAST_SECTION_KEY, id)
+  } catch {
+    // localStorage 不可用（隐私模式等）则静默跳过——记忆是锦上添花。
+  }
+}
+
+/** 秒数 → 紧凑时长（watchdog 的 uptime_secs；null = 尚未拉起过）。 */
+function formatUptimeSecs(secs: number | null): string {
+  if (secs === null) return '—'
+  const d = Math.floor(secs / 86400)
+  const h = Math.floor((secs % 86400) / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h ${m}m`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
 }
 
 /** Appearance 分区的主题三态（mode 语义见 theme.ts）。 */
@@ -97,17 +154,40 @@ export class SebasSettingsModal extends LitElement {
   @property({ type: Boolean, reflect: true })
   open = false
 
-  /** 当前分区；缺省 models。 */
+  /** 当前分区；缺省 settings（弹窗壳/总览），re-open 时按记忆恢复。 */
   @property({ type: String })
-  section: SettingsSection = 'models'
+  section: SettingsSection = 'settings'
 
   /** /api/about 响应（About 分区）；懒加载，切到该分区时拉取。 */
   @state() private aboutData: About | null = null
   @state() private aboutError = ''
   @state() private aboutLoading = false
-  /** /api/router 响应（Models/Services 分区共享）；懒加载，切到时拉取。 */
+  /** /api/router 响应（Models 分区的「Router 路由网关」总览卡）；懒加载。 */
   @state() private router: RouterInfo | null = null
   @state() private routerError = ''
+  /**
+   * watchdog 受管子进程面（Services 分区，/api/admin/services）。null =
+   * 尚未加载；`adapterOk` 为 false 时（无 watchdog 控制面）services 为
+   * 空表且动作按钮不渲染。
+   */
+  @state() private services: AdminService[] | null = null
+  @state() private adapterOk: boolean | null = null
+  @state() private servicesError = ''
+  /** /api/admin/events 的最近错误（kind 含 error/fail）；无则不渲染。 */
+  @state() private serviceEvents: AdminEvent[] = []
+  /** Services 行动作的内联结果（success/error 各一种呈现）。 */
+  @state() private serviceAction: { ok: boolean; text: string } | null = null
+  @state() private serviceBusy: string | null = null
+  /** 行动作二次确认目标（disable/restart；null = 关闭）。 */
+  @state() private confirmTarget: { kind: 'disable' | 'restart'; name: string } | null = null
+  /** 高危动作（Settings 分区）确认与结果状态。 */
+  @state() private restartAllOpen = false
+  @state() private resetSettingsOpen = false
+  @state() private settingsActionResult: { ok: boolean; text: string } | null = null
+  @state() private settingsBusy = false
+  /** Settings 总览：工作区根目录（/api/fs/browse-dirs 的服务端解析根）。 */
+  @state() private overviewRoot: string | null = null
+  @state() private rootCopied = false
   /** provider 管理面（/router/api/providers + /router/api/presets）。 */
   @state() private adminProviders: RouterProviderAdmin[] | null = null
   @state() private adminError = ''
@@ -462,6 +542,85 @@ export class SebasSettingsModal extends LitElement {
     .service-card .service-status .dot.off {
       background: var(--sebas-text-faint);
     }
+    /* Services 行：内部名（与 /api/admin/services 对账用的稳定锚点）、
+     * 动作钮与最近错误列表。 */
+    .service-card .service-name .service-id {
+      margin-left: 6px;
+      font-family: var(--sebas-font-mono);
+      font-size: 0.7rem;
+      font-weight: 400;
+      color: var(--sebas-text-faint);
+    }
+    .service-card .service-actions {
+      flex: 0 0 auto;
+      display: flex;
+      gap: 4px;
+    }
+    .service-sub {
+      font-size: 0.72rem;
+      color: var(--sebas-text-faint);
+    }
+    .service-errors {
+      margin-top: var(--sebas-space-2);
+      padding: var(--sebas-space-2) var(--sebas-space-3);
+      background: var(--sebas-surface-2);
+      border: 1px dashed var(--sebas-border);
+      border-radius: var(--sebas-radius-lg);
+      font-size: 0.78rem;
+    }
+    .service-errors-title {
+      font-weight: 600;
+      color: var(--sebas-status-failed, #f87171);
+      margin-bottom: 4px;
+    }
+    .service-error-row {
+      display: flex;
+      gap: var(--sebas-space-2);
+      padding: 1px 0;
+      overflow-wrap: anywhere;
+    }
+    .service-error-kind {
+      flex: 0 0 auto;
+      font-family: var(--sebas-font-mono);
+      color: var(--sebas-text-faint);
+    }
+    .service-error-msg {
+      color: var(--sebas-text-dim);
+    }
+    /* Models 分区顶部的路由网关卡（从 Services 迁来的 listen/debug/auth）。 */
+    .gateway-card {
+      margin-bottom: var(--sebas-space-4);
+    }
+    /* Settings 总览的维护动作区。 */
+    .danger-zone {
+      margin-top: var(--sebas-space-5);
+      padding-top: var(--sebas-space-3);
+      border-top: 1px solid var(--sebas-border);
+    }
+    .danger-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--sebas-text-dim);
+      margin-bottom: var(--sebas-space-2);
+    }
+    .danger-actions {
+      display: flex;
+      gap: var(--sebas-space-2);
+    }
+    .linkish {
+      padding: 0;
+      border: none;
+      background: none;
+      font: inherit;
+      color: var(--sebas-accent);
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .linkish:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
+    }
     /* Appearance 分区：主题三态选项。swatch 的颜色是刻意的硬编码——
      * 它展示的是两套调色板本身，必须不随当前主题变化。 */
     .theme-options {
@@ -654,12 +813,29 @@ export class SebasSettingsModal extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // About 分区懒加载：切到 about 时拉一次（失败可重试——下次切换再取）。
     if (changed.has('section') && this.section === 'about') this.loadAbout()
-    // Models/Services 分区共享 router 数据，懒加载一次。
-    if (changed.has('section') && (this.section === 'models' || this.section === 'services')) {
+    // Models 分区的 router 总览卡数据，懒加载一次。
+    if (changed.has('section') && this.section === 'models') {
       this.loadGateway()
     }
     // provider 管理面：每次切到 models 都刷新（增删改后重新进入也新鲜）。
     if (changed.has('section') && this.section === 'models') this.loadProviders()
+    // Services 分区：受管子进程 + 最近错误（每次切入都刷新，动作后重取）。
+    if (changed.has('section') && this.section === 'services') this.loadServices()
+    // Settings 总览：工作区根目录 / defaults / adapter 探测。
+    if (changed.has('section') && this.section === 'settings') this.loadOverview()
+  }
+
+  /**
+   * 分区记忆（D5）：打开时按 localStorage 恢复上次分区（非法值回退缺省
+   * `settings`）；打开期间每次切换都写回。仅在 `open` 翻真/分区变化时
+   * 触发，读写都容忍 storage 不可用。
+   */
+  protected updated(changed: PropertyValues): void {
+    if (changed.has('open') && this.open) {
+      const saved = readLastSection()
+      if (saved && saved !== this.section) this.section = saved
+    }
+    if (changed.has('section') && this.open) writeLastSection(this.section)
   }
 
   private onKeydown = (e: KeyboardEvent): void => {
@@ -699,6 +875,138 @@ export class SebasSettingsModal extends LitElement {
       .catch((e) => {
         this.routerError = String(e)
       })
+  }
+
+  /**
+   * Services 分区数据（fix-settings-menu-and-services-semantics 1.2）：真源
+   * 是 /api/admin/services（watchdog 受管子进程），错误事件来自
+   * /api/admin/events。401/403 照常上抛（登录页接管），其余失败按
+   * 「无 watchdog 控制面」退化呈现。
+   */
+  private loadServices(): void {
+    this.servicesError = ''
+    api
+      .adminServicesSafe()
+      .then((d) => {
+        this.adapterOk = d.adapter_ok
+        this.services = d.services
+      })
+      .catch((e) => {
+        this.servicesError = e instanceof ApiError ? e.message : String(e)
+        this.services = []
+        this.adapterOk = false
+      })
+    api
+      .adminEventsSafe()
+      .then((d) => {
+        this.serviceEvents = d.events.filter((ev) => {
+          const k = ev.kind.toLowerCase()
+          return k.includes('error') || k.includes('fail')
+        })
+      })
+      .catch(() => {
+        this.serviceEvents = []
+      })
+  }
+
+  /** Settings 总览（task 2.2）：只读项全部来自既有端点，绝不编造。 */
+  private loadOverview(): void {
+    api
+      .adminServicesSafe()
+      .then((d) => {
+        this.adapterOk = d.adapter_ok
+      })
+      .catch(() => {
+        this.adapterOk = false
+      })
+    api
+      .agentDefaults()
+      .then((d) => {
+        this.defaults = d
+      })
+      .catch(() => {
+        this.defaults = null
+      })
+    // 工作区根目录：browse-dirs 不带 path 时服务端回显其解析出的默认
+    // 工作根（默认 agent kind 的 work_dir / cwd），这是「既有 API」里
+    // 唯一诚实携带该值的端点（/api/summary 无 work-dir 字段）。
+    api
+      .fsBrowseDirs('')
+      .then((d) => {
+        this.overviewRoot = d.path
+      })
+      .catch(() => {
+        this.overviewRoot = null
+      })
+  }
+
+  // ---- Services 行动作（enable / disable / restart） ----
+
+  /** 行动作执行：成功后重取列表；失败（含 503）内联呈现且不刷新。 */
+  private async runServiceAction(kind: 'enable' | 'disable' | 'restart', name: string): Promise<void> {
+    if (this.serviceBusy) return
+    this.serviceBusy = name
+    this.serviceAction = null
+    try {
+      const r =
+        kind === 'enable'
+          ? await api.enableService(name)
+          : kind === 'disable'
+            ? await api.disableService(name)
+            : await api.restartService(name)
+      this.serviceAction = { ok: true, text: `${name}: ${r.message || `${kind} accepted`}` }
+      this.loadServices()
+    } catch (err) {
+      this.serviceAction = {
+        ok: false,
+        text: err instanceof ApiError ? err.message : String(err),
+      }
+    } finally {
+      this.serviceBusy = null
+    }
+  }
+
+  private copyRoot(): void {
+    if (!this.overviewRoot) return
+    // jsdom/旧浏览器可能没有 clipboard——复制失败不阻塞总览渲染。
+    void navigator.clipboard?.writeText(this.overviewRoot).then(
+      () => {
+        this.rootCopied = true
+        window.setTimeout(() => (this.rootCopied = false), 1500)
+      },
+      () => {},
+    )
+  }
+
+  /** 高危动作一：全部进程重启（watchdog restart-core 路径）。 */
+  private async restartAllProcesses(): Promise<void> {
+    if (this.settingsBusy) return
+    this.settingsBusy = true
+    this.settingsActionResult = null
+    try {
+      const r = await api.adminRestart()
+      this.settingsActionResult = { ok: true, text: r.message || 'restart accepted' }
+    } catch (err) {
+      this.settingsActionResult = {
+        ok: false,
+        text: err instanceof ApiError ? err.message : String(err),
+      }
+    } finally {
+      this.settingsBusy = false
+      this.restartAllOpen = false
+    }
+  }
+
+  /** 高危动作二：重置 Settings（清空分区记忆并回到缺省 settings）。 */
+  private resetSettings(): void {
+    try {
+      localStorage.removeItem(LAST_SECTION_KEY)
+    } catch {
+      // storage 不可用则本来就无记忆可清。
+    }
+    this.section = 'settings'
+    this.settingsActionResult = { ok: true, text: 'Settings reset — back to defaults.' }
+    this.resetSettingsOpen = false
   }
 
   /** provider 管理面数据：admin 列表 + 内置 preset 表（跟随代码的只读值）。 */
@@ -903,19 +1211,25 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  // 分区渲染：models/services 共享 /api/router 数据（provider 列表 /
-  // Router 服务状态），env/about 由本组件直渲染（数据源见文件头注释）。
+  // 分区渲染：settings 为总览壳；services 读 watchdog 受管子进程面；
+  // models 顶部承载 /api/router 的路由网关总览；env/about 直渲染
+  // （数据源见文件头注释）。
   private renderSection(section: SettingsSection) {
     switch (section) {
-      case 'models':
+      case 'settings':
         return html`
           ${this.renderSectionHead(section)}
-          ${this.renderModels()}
+          ${this.renderSettings()}
         `
       case 'services':
         return html`
           ${this.renderSectionHead(section)}
           ${this.renderServices()}
+        `
+      case 'models':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderModels()}
         `
       case 'appearance':
         return html`
@@ -956,7 +1270,8 @@ export class SebasSettingsModal extends LitElement {
     }
   }
 
-  /** Models：provider 管理页（列表 + 新增/编辑/删除/探测）。 */
+  /** Models：路由网关总览卡（/api/router 的 listen / debug / auth，task 1.3）
+   *  + provider 管理页（列表 + 新增/编辑/删除/探测）。 */
   private renderModels() {
     if (this.routerError)
       return html`
@@ -964,8 +1279,28 @@ export class SebasSettingsModal extends LitElement {
           ${icon('alert')}<span>Failed to load: ${this.routerError}</span>
         </div>
       `
+    // 「Router 路由网关」总览卡（fix-settings-menu-and-services-semantics
+    // D2：listen / debug / auth 从 Services 分区迁来，provider 路由事实
+    // 归 Models 语义）。
+    const gateway =
+      this.router === null
+        ? html`<div class="panel panel-pad gateway-card">
+            <div class="skel-row"><div class="skel skel-line" style="width:40%"></div></div>
+            <div class="skel-row"><div class="skel skel-line" style="width:60%"></div></div>
+          </div>`
+        : html`<div class="readonly-urls gateway-card">
+            <div class="readonly-title">Router 路由网关</div>
+            <div class="readonly-row"><span>Listen</span><code>${this.router.listen ?? '—'}</code></div>
+            <div class="readonly-row">
+              <span>Debug</span><code>${this.router.debug ? 'on' : 'off'}</code>
+            </div>
+            <div class="readonly-row">
+              <span>Auth</span><code>${this.router.has_auth ? 'configured' : 'none'}</code>
+            </div>
+          </div>`
     const providers = this.adminProviders
     return html`
+      ${gateway}
       <div class="provider-toolbar">
         <wa-button variant="brand" appearance="filled" @click=${() => this.openCreatePreset()}>
           ＋ New (preset)
@@ -1072,15 +1407,104 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** Services：Router 后台服务状态（listen / debug / auth）。 */
+  /**
+   * Settings 总览壳（task 2.2/2.3）：三个只读项 + 两个高危动作。只读项的
+   * 数据全部来自既有端点，缺值如实显示 '—'；高危动作在无 watchdog 控制
+   * 面时 disabled + tooltip（spec「高危动作二次确认」）。
+   */
+  private renderSettings() {
+    const adapterOk = this.adapterOk === true
+    const adapterKnown = this.adapterOk !== null
+    return html`
+      <dl class="about-list">
+        <div class="kv">
+          <dt>Workspace root</dt>
+          <dd>
+            ${this.overviewRoot ?? '—'}
+            ${this.overviewRoot
+              ? html`<button
+                  class="row-action"
+                  title="Copy workspace root"
+                  @click=${() => this.copyRoot()}
+                >
+                  ${this.rootCopied ? '✓' : '⧉'}
+                </button>`
+              : nothing}
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Default agent kind</dt>
+          <dd>acp <span class="service-sub">(default kind for new sessions)</span></dd>
+        </div>
+        <div class="kv">
+          <dt>Default provider / model</dt>
+          <dd>
+            ${this.defaults?.provider
+              ? html`<button
+                  class="linkish"
+                  title="Open the Models section"
+                  @click=${() => (this.section = 'models')}
+                >
+                  ${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}
+                </button>`
+              : '— (set one in Models)'}
+          </dd>
+        </div>
+      </dl>
+
+      ${this.settingsActionResult
+        ? html`<div
+            class="callout ${this.settingsActionResult.ok ? '' : 'callout-error'}"
+            role=${this.settingsActionResult.ok ? 'status' : 'alert'}
+          >
+            ${this.settingsActionResult.text}
+          </div>`
+        : nothing}
+
+      <div class="danger-zone">
+        <div class="danger-title">Maintenance</div>
+        <div class="danger-actions">
+          <wa-button
+            variant="danger"
+            appearance="outlined"
+            ?disabled=${this.settingsBusy || (adapterKnown && !adapterOk)}
+            title=${adapterKnown && !adapterOk ? '无 watchdog 控制面' : 'Restart every managed service'}
+            @click=${() => {
+              this.settingsActionResult = null
+              this.restartAllOpen = true
+            }}
+          >
+            全部进程重启
+          </wa-button>
+          <wa-button
+            appearance="outlined"
+            ?disabled=${this.settingsBusy}
+            title="Clear the remembered settings section in this browser"
+            @click=${() => {
+              this.settingsActionResult = null
+              this.resetSettingsOpen = true
+            }}
+          >
+            重置 Settings
+          </wa-button>
+        </div>
+      </div>
+    `
+  }
+
+  /**
+   * Services：watchdog 受管子进程面（task 1.2）。唯一数据源是
+   * /api/admin/services；无 adapter（裸 core）时显示「无 watchdog 控制面」
+   * 横幅、列表为空、enable/disable/restart 按钮不渲染（spec 退化 scenario）。
+   */
   private renderServices() {
-    if (this.routerError)
+    if (this.servicesError)
       return html`
         <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.routerError}</span>
+          ${icon('alert')}<span>Failed to load: ${this.servicesError}</span>
         </div>
       `
-    if (!this.router)
+    if (this.services === null)
       return html`
         <div class="panel panel-pad">
           ${[0, 1].map(
@@ -1093,25 +1517,86 @@ export class SebasSettingsModal extends LitElement {
           )}
         </div>
       `
-    const g = this.router
-    const auth = g.has_auth ? 'configured' : 'none'
+    if (this.adapterOk !== true)
+      return html`
+        <div class="callout services-banner" role="status">
+          无 watchdog 控制面 — 受管服务列表不可用。启用请运行 <code>sebas run</code>（watchdog
+          形态）后再打开此页。
+        </div>
+      `
+    return html`
+      ${this.serviceAction
+        ? html`<div
+            class="callout ${this.serviceAction.ok ? '' : 'callout-error'}"
+            role=${this.serviceAction.ok ? 'status' : 'alert'}
+          >
+            ${this.serviceAction.text}
+          </div>`
+        : nothing}
+      ${this.services.map((s) => this.renderServiceRow(s))}
+      ${this.serviceEvents.length > 0
+        ? html`
+            <div class="service-errors">
+              <div class="service-errors-title">Recent errors</div>
+              ${this.serviceEvents
+                .slice(-3)
+                .reverse()
+                .map(
+                  (ev) => html`
+                    <div class="service-error-row">
+                      <span class="service-error-kind">${ev.kind}</span>
+                      <span class="service-error-msg">${ev.message}</span>
+                    </div>
+                  `,
+                )}
+            </div>
+          `
+        : nothing}
+    `
+  }
+
+  /** 单个受管服务行：name（含 im→飞书 IM 映射）/ desired / actual / uptime。 */
+  private renderServiceRow(s: AdminService) {
+    const running = s.status === 'running'
     return html`
       <div class="service-card">
         <div class="service-info">
-          <div class="service-name">Router</div>
-          <div class="service-desc">ACP router — listens on ${g.listen ?? '—'}</div>
+          <div class="service-name">
+            ${SERVICE_DISPLAY_NAME[s.name] ?? s.name}
+            <span class="service-id">${s.name}</span>
+          </div>
+          <div class="service-desc">
+            desired ${s.desired} · status ${s.status} · up ${formatUptimeSecs(s.uptime_secs)}
+          </div>
         </div>
         <div class="service-status">
-          <span class="dot on"></span> Running
+          <span class="dot ${running ? 'on' : 'off'}"></span>${s.status}
         </div>
-      </div>
-      <div class="service-card">
-        <div class="service-info">
-          <div class="service-name">Provider routing</div>
-          <div class="service-desc">${g.provider_count} provider(s) · auth ${auth} · debug ${g.debug ? 'on' : 'off'}</div>
-        </div>
-        <div class="service-status">
-          <span class="dot on"></span> ${g.provider_count > 0 ? 'Configured' : 'Idle'}
+        <div class="service-actions">
+          <button
+            class="row-action"
+            title="Enable service"
+            ?disabled=${this.serviceBusy !== null}
+            @click=${() => void this.runServiceAction('enable', s.name)}
+          >
+            ▶
+          </button>
+          <button
+            class="row-action"
+            title="Disable service"
+            ?disabled=${this.serviceBusy !== null}
+            @click=${() => (this.confirmTarget = { kind: 'disable', name: s.name })}
+          >
+            ■
+          </button>
+          <button
+            class="row-action"
+            title="Restart service"
+            ?disabled=${this.serviceBusy !== null}
+            @click=${() => (this.confirmTarget = { kind: 'restart', name: s.name })}
+          >
+            ⟳
+          </button>
         </div>
       </div>
     `
@@ -1230,9 +1715,11 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** provider 管理的对话框群：编辑器 + 删除确认（挂在 settings 面板外层）。 */
+  /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认 +
+   *  Settings 高危动作二次确认（全部挂在 settings 面板外层）。 */
   private renderProviderDialogs() {
     return html`
+      ${this.renderActionConfirmDialogs()}
       <wa-dialog
         label=${this.editorLabel()}
         ?open=${this.editor !== null}
@@ -1318,6 +1805,85 @@ export class SebasSettingsModal extends LitElement {
           @click=${() => void this.confirmSetDefault()}
         >
           ${this.busy ? 'Saving…' : 'Set default'}
+        </wa-button>
+      </wa-dialog>
+    `
+  }
+
+  /**
+   * 二次确认对话框群（D4）：
+   *  - Services 行动作 disable/restart：文案含受影响进程名与「不可撤销」；
+   *  - Settings 高危动作「全部进程重启」「重置 Settings」。
+   * 全部复用既有 wa-dialog 模式，不引入新 modal 框架。
+   */
+  private renderActionConfirmDialogs() {
+    return html`
+      <wa-dialog
+        label=${this.confirmTarget
+          ? `${this.confirmTarget.kind === 'disable' ? 'Disable' : 'Restart'} service`
+          : 'Service action'}
+        ?open=${this.confirmTarget !== null}
+        @wa-hide=${() => (this.confirmTarget = null)}
+      >
+        <p class="dialog-text">
+          ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'} managed service
+          <strong>${this.confirmTarget?.name ?? ''}</strong>? This takes effect immediately and
+          cannot be undone（不可撤销）; in-flight work on that process is interrupted.
+        </p>
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.confirmTarget = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${this.serviceBusy !== null}
+          @click=${() => {
+            const t = this.confirmTarget
+            if (!t) return
+            this.confirmTarget = null
+            void this.runServiceAction(t.kind, t.name)
+          }}
+        >
+          ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'}
+        </wa-button>
+      </wa-dialog>
+
+      <wa-dialog
+        label="全部进程重启"
+        ?open=${this.restartAllOpen}
+        @wa-hide=${() => (this.restartAllOpen = false)}
+      >
+        <p class="dialog-text">
+          Restart every managed service via the watchdog? 进行中的会话会被中断，此操作不可撤销
+          （不可撤销）。The WebUI itself stays up.
+        </p>
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.restartAllOpen = false)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${this.settingsBusy}
+          @click=${() => void this.restartAllProcesses()}
+        >
+          ${this.settingsBusy ? 'Restarting…' : 'Restart all'}
+        </wa-button>
+      </wa-dialog>
+
+      <wa-dialog
+        label="重置 Settings"
+        ?open=${this.resetSettingsOpen}
+        @wa-hide=${() => (this.resetSettingsOpen = false)}
+      >
+        <p class="dialog-text">
+          Clear the remembered settings section（lastSettingsSection）in this browser and return
+          to the default Settings tab? This cannot be undone.
+        </p>
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.resetSettingsOpen = false)}>
+          Cancel
+        </wa-button>
+        <wa-button slot="footer" variant="danger" @click=${() => this.resetSettings()}>
+          Reset
         </wa-button>
       </wa-dialog>
     `

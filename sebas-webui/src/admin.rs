@@ -59,6 +59,12 @@ pub trait AdminAdapter: Send + Sync {
     async fn service_set(&self, service: &str, desired: &str)
         -> Result<AdminMutationResult, String>;
 
+    /// Restart one managed service via the watchdog supervision loop
+    /// （fix-settings-menu-and-services-semantics D3：Settings→Services 的
+    /// per-process restart 动作；core 不走这里——升级/回滚语义用
+    /// [`AdminAdapter::restart_core`]）。
+    async fn service_restart(&self, service: &str) -> Result<AdminMutationResult, String>;
+
     /// Get the list of managed services and their status.
     async fn services(&self) -> Result<Vec<AdminService>, String>;
 }
@@ -228,6 +234,22 @@ async fn service_set_action(
 ) -> (StatusCode, Json<serde_json::Value>) {
     match &state.adapter {
         Some(adapter) => match adapter.service_set(service, desired).await {
+            Ok(result) => mutation_json(&result),
+            Err(e) => mutation_error(e),
+        },
+        None => no_adapter_error(),
+    }
+}
+
+/// POST /admin/services/{service}/restart — restart one managed service
+/// through the watchdog supervision loop. core is rejected at the control
+/// RPC layer (升级/回滚语义归 /admin/restart)。
+pub async fn admin_service_restart(
+    State(state): State<AdminState>,
+    Path(service): Path<String>,
+) -> impl IntoResponse {
+    match &state.adapter {
+        Some(adapter) => match adapter.service_restart(&service).await {
             Ok(result) => mutation_json(&result),
             Err(e) => mutation_error(e),
         },
@@ -615,6 +637,10 @@ pub fn build_api_admin_router(state: AdminState) -> Router {
             "/api/admin/services/{service}/disable",
             post(admin_service_disable),
         )
+        .route(
+            "/api/admin/services/{service}/restart",
+            post(admin_service_restart),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_mutation_guard,
@@ -790,6 +816,17 @@ mod tests {
             })
         }
 
+        async fn service_restart(&self, service: &str) -> Result<AdminMutationResult, String> {
+            if self.fail {
+                return Err("fake failure".into());
+            }
+            Ok(AdminMutationResult {
+                operation_id: format!("op_service_restart_{service}"),
+                status: "accepted".into(),
+                message: format!("{service} restart requested"),
+            })
+        }
+
         async fn services(&self) -> Result<Vec<AdminService>, String> {
             if self.fail {
                 return Err("fake failure".into());
@@ -928,6 +965,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn service_restart_route_accepts_post() {
+        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let (status, v) = api_json(
+            app,
+            "POST",
+            "/api/admin/services/router/restart",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {v}");
+        assert_eq!(v["operation_id"], "op_service_restart_router");
+
+        // Without adapter: honest 503 (Services 分区据此呈现退化)。
+        let app = build_api_admin_router(test_state(None));
+        let (status, v) = api_json(
+            app,
+            "POST",
+            "/api/admin/services/router/restart",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(v["error"].as_str().unwrap().contains("control plane not connected"));
     }
 
     // ── No-adapter tests ───────────────────────────────────────────────────

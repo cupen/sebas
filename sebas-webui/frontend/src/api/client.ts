@@ -246,6 +246,13 @@ export interface AdminService {
   uptime_secs: number | null
 }
 
+/** Admin mutation result（/api/admin/services/{name}/enable|disable|restart）。 */
+export interface AdminMutationResult {
+  operation_id: string
+  status: string
+  message: string
+}
+
 /**
  * Execution-backend hint sent with `POST /api/sessions`. `"native"` spawns the
  * built-in kernel; `"acp"` (the default) spawns the configured default
@@ -549,6 +556,27 @@ export const api = {
   adminEvents: () => get<{ adapter_ok: boolean; events: AdminEvent[] }>('/api/admin/events'),
   adminServices: () =>
     get<{ adapter_ok: boolean; services: AdminService[] }>('/api/admin/services'),
+  adminEventsSafe: async (): Promise<{ adapter_ok: boolean; events: AdminEvent[] }> => {
+    try {
+      return await api.adminEvents()
+    } catch (e) {
+      // 401/403 照常上抛（登录页接管 / 明示拒绝）；503、网络级失败等一切
+      // 其余形态按「无 watchdog 控制面」诚实退化（fix-settings-menu-and-
+      // services-semantics 1.1）。
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) throw e
+      return { adapter_ok: false, events: [] }
+    }
+  },
+  adminServicesSafe: async (): Promise<{ adapter_ok: boolean; services: AdminService[] }> => {
+    try {
+      return await api.adminServices()
+    } catch (e) {
+      // 同上：非鉴权失败一律呈现为 adapter_ok: false + 空表（spec「无
+      // watchdog adapter 退化」），不让 Services 分区死在错误上。
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) throw e
+      return { adapter_ok: false, services: [] }
+    }
+  },
 
   // Admin mutations + auth
   adminUpdate: () => post<{ operation_id: string; message: string }>('/api/admin/update'),
@@ -560,6 +588,25 @@ export const api = {
     post<{ operation_id: string; message: string }>('/api/admin/rollback'),
   adminRestart: () =>
     post<{ operation_id: string; message: string }>('/api/admin/restart'),
+  /** Per-service enable/disable（ServiceSet RPC，选择持久化）。
+   * 503 = 无 watchdog 控制面；401/403 = 鉴权/CSRF 拒绝，调用方区分呈现。 */
+  enableService: (name: string) =>
+    post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/enable`),
+  disableService: (name: string) =>
+    post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/disable`),
+  /**
+   * Per-service restart（fix-settings-menu-and-services-semantics D3）。
+   * core 走既有 restart-core 路径（spec「restart 操作」）；其余受管服务走
+   * watchdog 监督循环的 ServiceRestart。两个端点的 wire 形状同为
+   * mutation_json 的 {status:"accepted", operation_id, message}。
+   */
+  restartService: async (name: string): Promise<AdminMutationResult> => {
+    if (name === 'core') {
+      const r = await api.adminRestart()
+      return { operation_id: r.operation_id, status: 'accepted', message: r.message }
+    }
+    return post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/restart`)
+  },
   adminLogin: async (password: string) => {
     const res = await post<{ status: string; csrf_token?: string }>('/api/admin/login', {
       password,

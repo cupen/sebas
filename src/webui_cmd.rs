@@ -403,6 +403,19 @@ impl AdminAdapter for ControlRpcAdminAdapter {
         .await
     }
 
+    async fn service_restart(&self, service: &str) -> std::result::Result<AdminMutationResult, String> {
+        // 走 watchdog 监督循环既有的 ServiceRestart（/router restart 同源）；
+        // core 在 RPC 层被拒（升级/回滚语义归 RestartCore），前端对 core
+        // 直接走 /api/admin/restart，不会发到这里。
+        self.submit(
+            RpcControlRequest::ServiceRestart {
+                service: service.into(),
+            },
+            format!("service {service} restart accepted"),
+        )
+        .await
+    }
+
     async fn update(
         &self,
         dev: bool,
