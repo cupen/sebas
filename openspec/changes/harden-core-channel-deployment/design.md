@@ -24,14 +24,14 @@
 **D3 自动武装无 opt-out 开关。**
 通道是本机 IPC、0600、双因子（secret + unix uid 校验），常开运维成本为零；加开关只会复制 webui auth 开关那类"关掉即裸奔/误解配"的分支。embed 形态（`core --webui`）同样武装——detached router 的状态订阅仍依赖它。
 
-**D4 readiness 打点后移 + bind 失败复用 75 退出码。**
-core 的 ready 行从"服务就绪"挪到"通道 bind 完成"之后；bind 失败以 `EXIT_BIND_FAILED`(75) 退出，supervisor 既有分类直接把 core 标 Degraded（与 webui bind 失败同语义），监督代码零改动。备选：ready 照旧、watchdog 周期探测 socket（深度健康检查）——更有普适性但引入探测协议与密钥分发问题，列为后续方向。
+**D4 readiness 打点后移 + bind 失败复用 75 退出码（工作量比标题小）。**
+core 的 ready 行从"服务就绪"挪到"通道 bind 完成"之后；bind 失败以 `EXIT_BIND_FAILED`(75) 退出，supervisor 既有分类直接把 core 标 Degraded（与 webui bind 失败同语义），监督代码零改动。实测减负：`bind_channel_socket` 已对 live 占用返回硬错误（server.rs），`exit_startup_failure` 统一出口已存在且 75 等价声明已写死（startup_failure.rs）——缺的只是"把 bind 从 spawned task 提前到主路径，失败走统一出口"，约 20 行。备选：ready 照旧、watchdog 周期探测 socket（深度健康检查）——更有普适性但引入探测协议与密钥分发问题，列为后续方向。
 
 **D5 graceful exit 不删 secret 文件。**
 socket 文件是"core 死了"的权威信号（优雅退出删 socket → 客户端报 `socket absent`）；残留 secret 文件无害——socket 不在时客户端根本走不到握手。少一个清理步骤就少一种残留状态。
 
-**D6 全局横幅数据源：app-shell 自持 `/api/summary` 轮询。**
-与 composer 的 reachability 轮询同间隔；不走 /ws 推送（reachability 入事件流是更大的接口改动，列为后续优化）。文案与交互对齐现有 ws-banner（全局、`role=alert`、恢复即消失）。
+**D6 全局横幅数据源：app-shell 自持 `/api/summary` 轮询（先 cause，后 kind）。**
+与 composer 的 reachability 轮询同间隔；不走 /ws 推送（reachability 入事件流是更大的接口改动，列为后续优化）。文案与交互对齐现有 ws-banner（全局、`role=alert`、恢复即消失）。排序：本 change 先按 `ok=false + cause` 全串渲染（cover-A 合流前唯一可用判别器）；cover-A 的 `kind` 字段落地后，文案选择切到 kind（startup_failed / disconnected 分文案），cause 保持原文渲染——本 change 不预写 kind 分支，只留出"判别器可替换"的实现位置。
 
 **D7 项目注册降级标记：201 响应体新增 `degraded: {cause}` 字段。**
 老前端忽略新字段，无破坏；两者皆失败的 503 语义不变。
@@ -46,10 +46,12 @@ socket 文件是"core 死了"的权威信号（优雅退出删 socket → 客户
 
 ## Migration Plan
 
-1. core 自动武装 + secret 文件写入（含 config 解析）；
-2. 客户端发现 + 重读（webui / im / router 订阅侧）；
-3. readiness 时序 + bind 失败 75；
-4. webui 横幅 + 降级标记；
+按风险顺序推进（行为变化最大的先行），每步独立可回滚：
+
+1. core 自动武装 + secret 文件写入（含 config 解析）——回归面最大，先行；
+2. bind 提前到主路径 + 失败走 75 统一出口（含 config 解析）；
+3. 客户端发现 + 重读（webui / im / router 订阅侧）；
+4. webui 横幅 + 降级标记（先 cause 口径，kind 切分支留给 cover-A）；
 5. 测试套件（进程 e2e 三旅程、浏览器 detached 旅程）与 AGENTS.md 简化。
 
 回滚：还原二进制即可；env 注入路径全程保留，watchdog 既有部署行为不变。残留 secret 文件无害，可随手删。

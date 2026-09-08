@@ -18,7 +18,7 @@ The WebUI crate SHALL access sessions through a backend abstraction rather than 
 #### Scenario: startup-failure banner via fake-claude sandbox
 
 - **WHEN** 沙箱 backend core 启动时配置错误退出 75（`SEBAS_STARTUP_ERROR_FILE=<tmp>` 写入 `startup-failure: bad config`）、webui 仍连接该 socket
-- **THEN** webui banner SHALL 显示 `core startup failed: bad config`；`GET /api/summary.reachability.kind` SHALL 为 `startup_failed`，`cause` SHALL 等于 `bad config`
+- **THEN** webui banner SHALL 显示 `core startup failed: bad config` 全串（cause 即该全串，与已落地的 enrich 行为一致）；`GET /api/summary.reachability.kind` SHALL 为 `startup_failed`
 
 #### Scenario: runtime disconnect banner distinguishes from startup failure
 
@@ -34,6 +34,11 @@ The WebUI crate SHALL access sessions through a backend abstraction rather than 
 
 - **WHEN** fake-claude 触发 gated tool call、操作员点 deny
 - **THEN** webui POST `/api/permissions/{rid}/answer` with deny；core 转发 ApprovalAnswer 到 acp 子进程；子进程以 denied 工具结果呈现；回合 Done
+
+#### Scenario: approval_answer end-to-end (detached topology)
+
+- **WHEN** 同一流程跑在双进程沙箱（独立 core + 独立 webui，harden 5.4 的可复用 harness）：fake-claude 触发 gated tool call → channel ApprovalRequested 帧跨进程到达 webui → review-card → answer → ApprovalAnswer 回 core → acp 子进程继续
+- **THEN** allow / deny 各一条旅程全绿；单进程形态的同名用例保持全绿（两种拓扑不互相代替）。本 scenario 阻塞于 `wire-webui-sebas-agent-e2e` 任务 1.3（审批通道接线）+ harden 5.4 harness 落地，见 tasks B 批
 
 #### Scenario: approval_answer rejects unknown request_id
 

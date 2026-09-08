@@ -24,27 +24,27 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 - **THEN** 客户端收到 mutation 帧（带 domain + payload）；滞后 SHALL 走 lag-disconnect 路径
 
 ### Requirement: Channel client reachability distinguishes startup failure
-`CoreChannelBackend::connect` SHALL 区分两类不可达情形：(a) **socket 不存在**（core 从未启动，errno=ENOENT 或 ENOENT 形态）→ 报告 `Reachability::StartupFailed { cause: "<可读摘要>" }`，cause 优先取 `SEBAS_STARTUP_ERROR_FILE`（若存在）首行；fallback 为 `core session channel socket not found`；(b) **socket 在但 secret 拒或 peer uid 不匹配** → 报告 `Reachability::AuthRejected { cause }`；(c) **socket 在、握手成功、之后断连** → 报告 `Reachability::Disconnected { cause }`。三类 SHALL NOT 互相混淆——webui 必须能在 banner 上分别显示 "core startup failed" / "core auth rejected" / "core disconnected"，不允许统一显示 "core is not connected"。
+`reachability()`（channel client 侧）SHALL 区分三类不可达并经 `Reachability` 枚举显式表达：(a) **socket 不存在**（core 从未启动或启动失败退出，errno=ENOENT 形态）→ `Reachability::StartupFailed { cause }`；(b) **socket 在但握手被拒**（secret 错误）→ `Reachability::AuthRejected { cause }`；(c) **握手成功后断连** → `Reachability::Disconnected { cause }`。其中 `Reachability` 三变体 + `kind` 字段是本 change 新增（fail-fast 只落地了 cause 字符串富化，未做三态枚举——owner 归属见本 change design D3）。cause 富化沿用已落地的无条件 enrich（client.rs `enrich_with_startup_summary`）：闩锁文件存在时 cause 形如 `core startup failed: <原因>`（前缀由后端拼，前端原文渲染）；`kind` 字段是前端区分文案的机器可读依据。三类 SHALL NOT 互相混淆——webui 不允许统一显示 "core is not connected"。
 
 #### Scenario: socket-not-found reports startup failure with SEBAS_STARTUP_ERROR_FILE
 
 - **WHEN** channel socket 路径不存在、且 `SEBAS_STARTUP_ERROR_FILE` 指向的文件含 `startup-failure: <原因>` 一行
-- **THEN** `Reachability::StartupFailed { cause }` 返回；cause 内容 SHALL 等于该文件首行（去除前后空白）
+- **THEN** `Reachability::StartupFailed { cause }` 返回；cause SHALL 为 `core startup failed: <原因>` 全串（与已落地的 enrich 行为一致）；`kind` SHALL 为 `startup_failed`
 
 #### Scenario: socket-not-found fallback cause
 
 - **WHEN** channel socket 路径不存在、`SEBAS_STARTUP_ERROR_FILE` 未设置或文件不存在
-- **THEN** `Reachability::StartupFailed { cause }` 返回；cause SHALL 为 `core session channel socket not found at <path>`
+- **THEN** `Reachability::StartupFailed { cause }` 返回；cause SHALL 为 `core session channel socket not found at <path>`；`kind` SHALL 为 `startup_failed`
 
 #### Scenario: handshake auth failure reports AuthRejected
 
 - **WHEN** channel socket 在、客户端发握手但 secret 错误
-- **THEN** `Reachability::AuthRejected { cause: "core rejected channel handshake" }` 返回；客户端 SHALL NOT 自动重试 secret 错误
+- **THEN** `Reachability::AuthRejected { cause: "core rejected channel handshake" }` 返回；`kind` SHALL 为 `auth_rejected`；客户端 SHALL NOT 用同一 secret 无限重试——env 未设时 SHALL 重读 secret 文件后至多再试一次（core 重启换钥自愈，见 Secret file discovery 规约），之后仍失败则保持 AuthRejected
 
 #### Scenario: post-handshake disconnect reports Disconnected
 
 - **WHEN** 客户端已握手成功、之后 socket read 返回 0 / EOF
-- **THEN** `Reachability::Disconnected { cause }` 返回；客户端 SHALL 触发重连（按已有规约）
+- **THEN** `Reachability::Disconnected { cause }` 返回；`kind` SHALL 为 `disconnected`；客户端 SHALL 触发重连（按已有规约）
 
 ### Requirement: ensure_message IM 投递语义
 `EnsureMessage` SHALL 走 IM 投递语义：未知 key 按入站文本历史语义自动建会话（dormant 占位或 active 新建由 core 内部策略决定）、dormant 会话懒复活；已知 active key 等价 `Message`。与 `Message` 的差别 SHALL 仅在服务端跳过存在性预检——webui 的"未知即拒绝"语义 SHALL NOT 受影响（webui 不应直接发 `EnsureMessage`）。channel 单测 SHALL 覆盖：(a) 未知 key 时 core 自动创建并返回；(b) dormant key 复活成功；(c) `Message` 在未知 key 上得到 typed rejection `UnknownSession`。
@@ -81,7 +81,7 @@ The core SHALL expose the channel on a Unix domain socket created with owner-onl
 
 #### Scenario: cross_uid_rejected_live_process
 
-- **WHEN** 跨 uid 进程（不是 `setuid` 模拟而是真正 fork + setuid 到不同账户）尝试连接 core socket 并发请求
+- **WHEN** 跨 uid 进程（fork 子进程后 `setuid` 到不同账户——不是同进程改 uid，而是真实跨进程凭证）尝试连接 core socket 并发请求
 - **THEN** 连接被拒绝；服务端 SHALL 在日志写 peer-uid 不匹配记录（`warn!("core channel: peer uid mismatch; closing")`）；不进入 request 处理
 
 #### Scenario: stale socket file is reclaimed
@@ -91,7 +91,7 @@ The core SHALL expose the channel on a Unix domain socket created with owner-onl
 - **THEN** the core removes the stale file and binds a fresh socket
 
 ### Requirement: Honest degradation when the core is unreachable
-When the channel cannot be reached — socket absent, connection refused, secret rejected, or the connection dropped — a client SHALL surface that condition with its cause and SHALL NOT present stale data as current, report a mutation as succeeded, or offer a control whose request cannot be delivered. A client SHALL reconnect on its own and resume with a fresh snapshot when the core returns. **补充**：当 socket 不存在且 `SEBAS_STARTUP_ERROR_FILE` 存在时，webui SHALL 读取该文件首行作为 cause，呈现 "core startup failed: <可读原因>" banner；不为空字符串或空 cause 时 SHALL 区分三类不可达（startup-failed / auth-rejected / disconnected）。
+When the channel cannot be reached — socket absent, connection refused, secret rejected, or the connection dropped — a client SHALL surface that condition with its cause and SHALL NOT present stale data as current, report a mutation as succeeded, or offer a control whose request cannot be delivered. A client SHALL reconnect on its own and resume with a fresh snapshot when the core returns. **补充**：cause 富化沿用已落地的无条件 enrich（`reachability()` 全失败分支并入闩锁摘要，不限于 ENOENT 分支——闩锁 ready 自清除，stale 读已防住）；三类不可达的机器区分走 `kind` 字段（startup_failed / auth_rejected / disconnected），cause 保持人类可读全串。
 
 #### Scenario: core down is stated, not hidden
 
@@ -114,4 +114,4 @@ When the channel cannot be reached — socket absent, connection refused, secret
 #### Scenario: startup-failure banner distinguished from runtime disconnect
 
 - **WHEN** core 在 ready 之前 fatal 并以 75 退出（socket 不存在、`SEBAS_STARTUP_ERROR_FILE` 存在含 `startup-failure: <原因>`）
-- **THEN** webui degradation banner SHALL 显示 "core startup failed: <原因>"；`/api/summary.reachability.ok` 为 false 且 cause 字段 SHALL 等于 `SEBAS_STARTUP_ERROR_FILE` 首行（不含「core startup failed」字面量，由前端拼接）；runtime disconnect 走 banner "core is not connected" 区分路径
+- **THEN** webui degradation banner SHALL 显示 `core startup failed: <原因>` 全串（cause 即该全串，前端原文渲染不二次拼接）；`/api/summary.reachability.ok` 为 false、`kind` SHALL 为 `startup_failed`；runtime disconnect 走 `kind: disconnected` + banner "core is not connected" 区分路径
