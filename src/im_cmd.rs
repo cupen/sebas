@@ -172,12 +172,16 @@ pub async fn run(args: ImArgs) -> Result<()> {
         ));
     }
 
-    // harden-core-channel-deployment D2: same env → secret-file discovery
-    // as the standalone webui (the backend warns when both are missing).
-    let secret_file = crate::core_channel::secret_file_path(
+    // harden-core-channel-deployment（2.2/D2）：im 与 webui / router 订阅同用
+    // 一套 secret 解析——env 优先，缺失时按同一份 config 发现 secret 文件
+    // （core 自动武装落盘）；两者皆缺省时保持既有 warn 姿态（ChannelSecret
+    // 内部 warn 一次并以空 secret 尝试），不崩溃、不静默。
+    let secret_file = crate::config::core_secret_file_path(
         cfg.watchdog.core.secret_file.as_deref(),
         std::path::Path::new(&args.config),
     );
+    let channel_secret =
+        crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
     let control_secret = std::env::var("SEBAS_CONTROL_SECRET").unwrap_or_default();
     if control_secret.is_empty() {
         warn!("SEBAS_CONTROL_SECRET not set: control commands (/upgrade etc.) will report unavailable");
@@ -217,9 +221,9 @@ pub async fn run(args: ImArgs) -> Result<()> {
 
     // 会话端口 + 控制端口 + 前端。
     let port = ChannelPort {
-        backend: crate::core_channel::client::CoreChannelBackend::new_with_discovery(
+        backend: crate::core_channel::client::CoreChannelBackend::with_secret(
             crate::core_channel::socket_path(&cfg),
-            secret_file,
+            channel_secret,
         ),
     };
     let control = WatchdogControl {

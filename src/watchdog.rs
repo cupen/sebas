@@ -144,17 +144,17 @@ struct WebUiSpawner {
 #[async_trait::async_trait]
 impl ServiceSpawner for WebUiSpawner {
     async fn spawn(&self) -> Result<SpawnedInstance> {
-    spawn_aux_process(
-        &self.config_path,
-        &self.control_secret,
-        Some(&self.core_secret),
-        None,
-        None,
-        &["webui"],
-        "webui",
-    )
-    .await
-}
+        spawn_aux_process(
+            &self.config_path,
+            &self.control_secret,
+            Some(&self.core_secret),
+            None,
+            &["webui"],
+            "webui",
+            &[],
+        )
+        .await
+    }
 }
 
 /// im 子进程：`current_exe() im --config <path>`（extract-im-service）。
@@ -167,17 +167,17 @@ struct ImSpawner {
 #[async_trait::async_trait]
 impl ServiceSpawner for ImSpawner {
     async fn spawn(&self) -> Result<SpawnedInstance> {
-    spawn_aux_process(
-        &self.config_path,
-        &self.control_secret,
-        Some(&self.core_secret),
-        None,
-        None,
-        &["im"],
-        "im",
-    )
-    .await
-}
+        spawn_aux_process(
+            &self.config_path,
+            &self.control_secret,
+            Some(&self.core_secret),
+            None,
+            &["im"],
+            "im",
+            &[],
+        )
+        .await
+    }
 }
 
 /// router 子进程：`current_exe() router --config <path> [--debug]`。
@@ -186,10 +186,6 @@ struct RouterSpawner {
     control_secret: String,
     core_secret: String,
     core_socket: String,
-    /// 与 core 同一份 `-c` config 解析出的 secret 文件路径（harden-core-
-    /// channel-deployment D2）：router crate 不 thread config 路径，经
-    /// `SEBAS_CORE_SECRET_FILE` pin 给它。
-    core_secret_file: String,
     debug: bool,
 }
 
@@ -200,17 +196,20 @@ impl ServiceSpawner for RouterSpawner {
         if self.debug {
             args.push("--debug");
         }
-    spawn_aux_process(
-        &self.config_path,
-        &self.control_secret,
-        Some(&self.core_secret),
-        Some(&self.core_socket),
-        Some(&self.core_secret_file),
-        &args,
-        "router",
-    )
-    .await
-}
+        // harden-core-channel-deployment 2.2：router 订阅侧按 D2 从 config
+        // 目录发现 secret 文件；`SEBAS_ROUTER_CONFIG` 与 `--config` 同值，
+        // 顺带修正 hot-reload 的 config_source 缺省（否则指向 ~/.sebas）。
+        spawn_aux_process(
+            &self.config_path,
+            &self.control_secret,
+            Some(&self.core_secret),
+            Some(&self.core_socket),
+            &args,
+            "router",
+            &[("SEBAS_ROUTER_CONFIG", self.config_path.as_str())],
+        )
+        .await
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -219,9 +218,9 @@ async fn spawn_aux_process(
     control_secret: &str,
     core_secret: Option<&str>,
     core_socket: Option<&str>,
-    core_secret_file: Option<&str>,
     args: &[&str],
     label: &str,
+    extra_env: &[(&str, &str)],
 ) -> Result<SpawnedInstance> {
     let exe = std::env::current_exe()
         .map_err(|e| SebasError::Upgrade(format!("无法确定 {label} 子进程路径: {e}")))?;
@@ -242,11 +241,8 @@ async fn spawn_aux_process(
     if let Some(core_socket) = core_socket {
         cmd.env("SEBAS_CORE_SOCKET", core_socket);
     }
-    // harden-core-channel-deployment D2: router crate 不解析 `-c` config，
-    // secret 文件路径由 watchdog 按同一规则算好 pin 给它（core 重启换钥后
-    // 文件内容变、路径不变，订阅重连时重读即自愈）。
-    if let Some(core_secret_file) = core_secret_file {
-        cmd.env("SEBAS_CORE_SECRET_FILE", core_secret_file);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
     }
     cmd.stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -439,13 +435,6 @@ pub async fn run_watchdog(
         .filter(|p| !p.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(crate::core_channel::default_socket_path);
-    // harden-core-channel-deployment D1/D2: router 子进程的 secret 文件
-    // 路径与 core 按同一份 `-c` config、同一规则解析（显式键 > 缺省推导），
-    // 经 SEBAS_CORE_SECRET_FILE pin 给它。
-    let core_secret_file = crate::core_channel::secret_file_path(
-        config.core.secret_file.as_deref(),
-        std::path::Path::new(&config_path),
-    );
     services.register(
         spec_with_fail_fast(ServiceSpec::new(
             ServiceName::Router,
@@ -454,7 +443,6 @@ pub async fn run_watchdog(
                 control_secret: secret.clone(),
                 core_secret: core_secret.clone(),
                 core_socket: core_channel_path.display().to_string(),
-                core_secret_file: core_secret_file.display().to_string(),
                 debug,
             }),
             DesiredState::Enabled,

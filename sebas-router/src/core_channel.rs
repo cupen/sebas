@@ -10,10 +10,46 @@
 //! 配置, 由 `ReloadStatus` 记录不可用状态供 `/admin/stats` 暴露。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
 use crate::server::AppState;
+
+/// 握手 secret 解析（harden-core-channel-deployment 2.2，design D2）：
+/// `SEBAS_CORE_SECRET` env 优先（watchdog 注入路径不变）；缺失时读取
+/// secret 文件——路径由 `SEBAS_ROUTER_CONFIG`（router 子进程由 watchdog
+/// 注入为其 `--config` 同值）所在目录下的 `core.secret`，与 core 自动武装
+/// 落盘位置一致。两者皆缺省 → warn 一次 + 空 secret（握手将被拒，诚实
+/// 降级，不静默）。每次连接尝试重新解析：core 重启换钥后重连天然自愈。
+fn channel_secret() -> String {
+    static MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+    if let Ok(s) = std::env::var("SEBAS_CORE_SECRET")
+        && !s.is_empty()
+    {
+        return s;
+    }
+    let file = std::env::var("SEBAS_ROUTER_CONFIG").ok().map(|cfg_path| {
+        let cfg = Path::new(&cfg_path);
+        let dir = cfg
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        dir.join("core.secret")
+    });
+    match file.as_deref().map(std::fs::read_to_string) {
+        Some(Ok(content)) => content.trim().to_string(),
+        _ => {
+            if !MISSING_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "核心通道 secret 未找到（SEBAS_CORE_SECRET 未设置且 secret 文件缺失）: \
+                     以空 secret 尝试连接，握手将被拒绝"
+                );
+            }
+            String::new()
+        }
+    }
+}
 
 /// 核心通道 socket 路径, 由 `SEBAS_CORE_SOCKET` 环境变量指定。
 /// 未设置时返回 `None` (通道不可用, 走文件监听)。
@@ -23,29 +59,6 @@ pub(crate) fn socket_path() -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(raw))
-}
-
-/// 握手 secret 解析 (harden-core-channel-deployment D2): `SEBAS_CORE_SECRET`
-/// env 优先 (watchdog 注入, 零开销); 缺失时读 secret 文件 (watchdog 经
-/// `SEBAS_CORE_SECRET_FILE` 把与 core 同一份 `-c` config 解析出的路径 pin
-/// 给 router 子进程) —— core 重启换钥后订阅循环在退避重连时天然拿到新钥。
-/// 两者皆缺省返回空串 (不断言、不崩溃; 握手失败走既有的重连退避)。
-pub(crate) fn channel_secret() -> String {
-    if let Ok(v) = std::env::var("SEBAS_CORE_SECRET")
-        && !v.is_empty()
-    {
-        return v;
-    }
-    if let Ok(p) = std::env::var("SEBAS_CORE_SECRET_FILE")
-        && !p.is_empty()
-        && let Ok(raw) = std::fs::read_to_string(&p)
-    {
-        let secret = raw.trim().to_string();
-        if !secret.is_empty() {
-            return secret;
-        }
-    }
-    String::new()
 }
 
 /// 启动核心通道订阅循环 (tokio task)。
@@ -155,7 +168,7 @@ async fn channel_request(
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
-    // 握手: 带解析出的 secret (env 优先, 否则 secret 文件)。
+    // 握手: secret 经 D2 解析（env → secret 文件，见 `channel_secret`）。
     let secret = channel_secret();
     let hs = serde_json::json!({"secret": secret});
     let mut line = serde_json::to_string(&hs).map_err(|e| format!("handshake serialize failed: {e}"))?;
@@ -263,7 +276,8 @@ async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
-    // 握手: 带解析出的 secret (env 优先, 否则 secret 文件)。
+    // 握手: secret 经 D2 解析（env → secret 文件，见 `channel_secret`）；
+    // 订阅是长连接，重连时重读文件 → core 重启换钥自愈。
     let secret = channel_secret();
     let hs = serde_json::json!({"secret": secret});
     let mut line = serde_json::to_string(&hs).map_err(|e| format!("handshake serialize failed: {e}"))?;

@@ -87,10 +87,9 @@ pub fn bind_channel_socket(path: &Path) -> Result<IpcListener> {
 /// core's composite session seam (acp + native kernel; design D1 of
 /// wire-webui-sebas-agent-e2e) — session mutations are applied through it so
 /// detached and in-process share one dispatch. `router` backs the router-
-/// level state-store domains. `secret` is the handshake secret (watchdog-
-/// injected env value or the core's minted file secret — harden-core-channel-
-/// deployment auto-arm); empty disables the secret check only for peers
-/// that send an empty secret — the uid check still applies.
+/// level state-store domains. `secret` is the value of `SEBAS_CORE_SECRET`
+/// injected by the watchdog (empty disables the secret check only for peers
+/// that send an empty secret — the uid check still applies).
 pub async fn serve(
     backend: Arc<dyn SessionBackend>,
     router: DispatchHandle,
@@ -98,22 +97,22 @@ pub async fn serve(
     secret: String,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    // harden-core-channel-deployment 1.3: bind failure is a hard startup
-    // failure (caller maps it to exit 75) — never a silently channel-less
-    // "healthy" process.
+    // fail-fast-on-startup-errors / harden-core-channel-deployment 1.3：bind
+    // 在主路径完成（run.rs 的 readiness 由此保证 bind 先于 ready）。测试与
+    // 既有调用方仍经由本函数自行 bind。
     let listener = bind_channel_socket(&path)?;
-    serve_with_listener(backend, router, path, listener, secret, shutdown).await
+    serve_bound(backend, router, path, secret, listener, shutdown).await
 }
 
-/// Serve on an already-bound listener. Lets the core bind synchronously
-/// during startup (before its readiness signal) while the accept loop still
-/// runs as a background task.
-pub async fn serve_with_listener(
+/// Serve over a **pre-bound** listener: the caller (run.rs auto-arm path) owns
+/// the bind so readiness can be sequenced after it, and bind failures abort
+/// startup before any ready signal is sent (D4).
+pub async fn serve_bound(
     backend: Arc<dyn SessionBackend>,
     router: DispatchHandle,
     path: PathBuf,
-    listener: IpcListener,
     secret: String,
+    listener: IpcListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     info!(
@@ -1035,14 +1034,7 @@ mod tests {
             #[cfg(unix)]
             assert!(path.exists());
             // The listener is alive; a second bind must NOT steal it.
-            // harden-core-channel-deployment 1.3: the error names the live
-            // holder — run() maps exactly this failure to exit 75 (never a
-            // channel-less "healthy" process).
-            let err = bind_channel_socket(&path).expect_err("live socket must refuse rebind");
-            assert!(
-                err.to_string().contains("already served by a live process"),
-                "bind conflict must name the live holder, got: {err}"
-            );
+            assert!(bind_channel_socket(&path).is_err(), "live socket must refuse rebind");
         }
         // Listener dropped → socket file is stale → second bind reclaims it.
         let _l2 = bind_channel_socket(&path).expect("stale socket reclaimed");

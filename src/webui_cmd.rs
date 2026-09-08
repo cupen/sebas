@@ -192,17 +192,18 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     // The session backend: a client of the core session channel. The core
     // child owns the sessions; this process only renders and forwards.
-    // harden-core-channel-deployment D2: the secret resolves env → secret
-    // file (same `-c` config) → empty-with-warn. The old hard gate
-    // ("no env, no webui") died with channel auto-arm: a manually started
-    // webui now discovers the core's minted secret on its own.
-    let secret_file = crate::core_channel::secret_file_path(
+    // harden-core-channel-deployment（2.2/D2）：secret 不再是启动门槛——
+    // env 优先，缺失时按同一份 config 发现 secret 文件（core 自动武装落盘）；
+    // 两者皆缺省时 warn 一次并以空 secret 尝试（握手被拒 → reachability
+    // 如实上报 `secret rejected`），不再 ready 前退出 75：旧 core（无自动
+    // 武装）下行为同今天（socket absent），诚实性不变差，新装配则开箱即用。
+    let secret_file = crate::config::core_secret_file_path(
         cfg.watchdog.core.secret_file.as_deref(),
         std::path::Path::new(&args.config),
     );
-    let backend = crate::core_channel::client::CoreChannelBackend::new_with_discovery(
+    let backend = crate::core_channel::client::CoreChannelBackend::with_secret(
         crate::core_channel::socket_path(&cfg),
-        secret_file,
+        crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file)),
     );
 
     // Bind to the configured port. Fails if the port is already in use

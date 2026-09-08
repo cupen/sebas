@@ -374,12 +374,37 @@ pub struct WatchdogCoreConfig {
     /// （或 per-uid 临时目录回退）。
     #[serde(default)]
     pub channel_path: Option<String>,
-    /// core session channel 握手 secret 的落盘路径
-    /// （harden-core-channel-deployment D1）：显式值优先；缺省 →
-    /// `<config 文件所在目录>/core.secret`（见
-    /// `core_channel::secret::secret_file_path`）。
+    /// core session channel 的握手 secret 文件路径（harden-core-channel-deployment
+    /// D1）。空/缺省 → `<config 文件所在目录>/core.secret`。core 自动武装时把
+    /// 本次启动的 secret 原子写入该文件（0600），无 env 注入的通道客户端
+    /// （standalone webui / im / router 订阅）按 env → 文件顺序发现密钥。
     #[serde(default)]
     pub secret_file: Option<String>,
+}
+
+/// 解析 core session channel 的 secret 文件路径（D1 纯函数）：
+/// `[watchdog.core] secret_file` 显式键优先（`~` 由 with_expanded_paths 展开）；
+/// 缺省推导为 `<config 文件所在目录>/core.secret`。双进程（core 与客户端）
+/// 读同一份 `-c` config，路径天然一致；沙箱用自己的 config，隔离天然成立。
+pub fn core_secret_file_path(secret_file: Option<&str>, config_path: &std::path::Path) -> std::path::PathBuf {
+    match secret_file {
+        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(expand_tilde(p)),
+        _ => {
+            let dir = config_path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            dir.join("core.secret")
+        }
+    }
+}
+
+impl WatchdogCoreConfig {
+    /// 以已知 config 文件路径解析 secret 文件位置（`core_secret_file_path`
+    /// 的方法形态，调用方不必拆字段）。
+    pub fn secret_file_path(&self, config_path: &std::path::Path) -> std::path::PathBuf {
+        core_secret_file_path(self.secret_file.as_deref(), config_path)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -668,6 +693,9 @@ impl Config {
 
     fn with_expanded_paths(mut self) -> Self {
         self.dispatch.state_file = expand_tilde(&self.dispatch.state_file);
+        if let Some(ref f) = self.watchdog.core.secret_file {
+            self.watchdog.core.secret_file = Some(expand_tilde(f));
+        }
         for agent in self.acp.agents.values_mut() {
             if let AgentConfig::Claude(c) = agent {
                 c.sessions_dir = expand_tilde(&c.sessions_dir);
@@ -774,6 +802,51 @@ mod tests {
             cfg.watchdog.webui.allowed_roots.is_empty(),
             "allowed_roots 缺省 = 未启用范围约束"
         );
+        assert!(
+            cfg.watchdog.core.secret_file.is_none(),
+            "secret_file 缺省 = None（由 core_secret_file_path 推导）"
+        );
+    }
+
+    #[test]
+    fn secret_file_path_explicit_key_wins() {
+        // harden-core-channel-deployment 1.1：`[watchdog.core] secret_file`
+        // 显式键优先于缺省推导。
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let explicit = dir.path().join("keys/channel.key");
+        let cfg = Config::parse(&format!(
+            "[watchdog.core]\nsecret_file = \"{}\"\n",
+            explicit.display()
+        ))
+        .expect("secret_file 键应可解析");
+        assert_eq!(
+            cfg.watchdog.core.secret_file_path(&config_path),
+            explicit,
+            "显式键必须原样（已展开）生效"
+        );
+    }
+
+    #[test]
+    fn secret_file_path_defaults_to_config_dir() {
+        // 缺省推导 = `<config 文件所在目录>/core.secret`——沙箱用自己目录下的
+        // config，secret 文件随之隔离，绝不落进真实 ~/.sebas（D1）。
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nested").join("config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let cfg = Config::parse("").expect("空配置应可解析");
+        assert_eq!(
+            cfg.watchdog.core.secret_file_path(&config_path),
+            dir.path().join("nested").join("core.secret"),
+            "缺省 secret 文件必须与 config 文件同目录"
+        );
+        // 空/空白字符串视同未配置（与 channel_path 的空值语义一致）。
+        let cfg_blank = Config::parse("[watchdog.core]\nsecret_file = \"\"\n").unwrap();
+        assert_eq!(
+            cfg_blank.watchdog.core.secret_file_path(&config_path),
+            dir.path().join("nested").join("core.secret"),
+            "空字符串 secret_file 回退缺省推导"
+        );
     }
 
     #[test]
@@ -795,25 +868,6 @@ allowed_roots = ["~/work", "/srv/projects"]
             roots[0]
         );
         assert_eq!(roots[1], "/srv/projects");
-    }
-
-    #[test]
-    fn core_secret_file_defaults_to_none_and_parses_explicit() {
-        // harden-core-channel-deployment 1.1：缺省无显式键（走 <config 目录>/
-        // core.secret 推导）；显式键按字面解析。
-        let cfg = Config::parse("").expect("空配置应可解析");
-        assert!(cfg.watchdog.core.secret_file.is_none());
-        let cfg = Config::parse(
-            r#"
-[watchdog.core]
-secret_file = "/etc/sebas/x.secret"
-"#,
-        )
-        .expect("secret_file 应可解析");
-        assert_eq!(
-            cfg.watchdog.core.secret_file.as_deref(),
-            Some("/etc/sebas/x.secret")
-        );
     }
 
     #[test]

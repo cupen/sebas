@@ -13,6 +13,7 @@
 use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
 };
+use super::secret::ChannelSecret;
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
@@ -37,17 +38,10 @@ enum ConnStatus {
 
 pub struct CoreChannelBackend {
     path: PathBuf,
-    /// Current handshake secret. Fixed when constructed with [`Self::new`]
-    /// or when the env pins it; otherwise refreshed from the secret file
-    /// before every connection (harden-core-channel-deployment D2).
-    secret: std::sync::Mutex<String>,
-    /// Secret file for discovery; `None` = fixed-secret mode.
-    secret_file: Option<PathBuf>,
-    /// True when `SEBAS_CORE_SECRET` was set at construction: the env value
-    /// is cached and the file is never read on the hot path.
-    env_pinned: bool,
-    /// Both-missing warn is emitted once per process (spec: warn, not silent).
-    warned: std::sync::atomic::AtomicBool,
+    /// 握手 secret 的动态来源（harden-core-channel-deployment 2.1，D2）：
+    /// env 缓存或 secret 文件发现；每次连接前经 `current()` 解析，core 重启
+    /// 换钥后重连天然拿到新钥。
+    secret: ChannelSecret,
     events: broadcast::Sender<SessionEvent>,
     /// wire-webui-sebas-agent-e2e: native approval notices relayed by the
     /// channel; consumed by the same review-card feed as the in-process backend.
@@ -75,98 +69,29 @@ impl CoreChannelBackend {
     }
 
     pub fn new(path: PathBuf, secret: String) -> Arc<Self> {
-        Self::spawn_with(path, Some(secret), None)
+        Self::with_secret(path, ChannelSecret::static_value(secret))
     }
 
-    /// Discovery mode (harden-core-channel-deployment D2): `SEBAS_CORE_SECRET`
-    /// env wins and is cached; otherwise the secret file is read before every
-    /// connection, so a core restart that mints a new key heals running
-    /// clients without intervention. Both missing → one warn, then empty-
-    /// secret attempts (never silent, never a crash).
-    pub fn new_with_discovery(path: PathBuf, secret_file: PathBuf) -> Arc<Self> {
-        Self::spawn_with(path, None, Some(secret_file))
-    }
-
-    fn spawn_with(path: PathBuf, fixed_secret: Option<String>, secret_file: Option<PathBuf>) -> Arc<Self> {
-        use std::sync::atomic::AtomicBool;
-        // Fixed-secret mode keeps its value verbatim (unit tests, explicit
-        // wiring). Discovery mode resolves env → file → empty, caching the
-        // env value when it pins the secret.
-        let (initial, env_pinned) = match &fixed_secret {
-            Some(s) => (s.clone(), false),
-            None => {
-                let probe = secret_file.as_deref().unwrap_or(Path::new(""));
-                (
-                    super::secret::resolve_secret(probe),
-                    super::secret::env_pins_secret(),
-                )
-            }
-        };
+    /// 动态 secret 来源形态（D2）：env 已缓存或每次连接前读 secret 文件。
+    /// standalone webui / im 走此构造；`new` 保留给常量 secret 的调用方。
+    pub fn with_secret(path: PathBuf, secret: ChannelSecret) -> Arc<Self> {
+        let (events, _) = broadcast::channel(256);
+        let (notices, _) = broadcast::channel(64);
         let backend = Arc::new(Self {
             path,
-            secret: std::sync::Mutex::new(initial),
-            secret_file,
-            env_pinned,
-            warned: AtomicBool::new(false),
-            events: {
-                let (events, _) = broadcast::channel(256);
-                events
-            },
-            notices: {
-                let (notices, _) = broadcast::channel(64);
-                notices
-            },
+            secret,
+            events,
+            notices,
             status: std::sync::Mutex::new(ConnStatus::Failed {
                 cause: "尚未连接 core".into(),
             }),
         });
-        if fixed_secret.is_none() && backend.current_secret().is_empty() {
-            backend.warn_undiscoverable_once();
-        }
         // Subscription forwarder: reconnects with backoff for the lifetime
         // of the process (6.2). Started eagerly so the SSE stream comes up
         // with the dashboard.
         let for_forwarder = backend.clone();
         tokio::spawn(async move { for_forwarder.run_forwarder().await });
         backend
-    }
-
-    /// The secret for the next connection: cached env/fixed value, or a
-    /// fresh read of the secret file (D2 — a rotated file key is picked up
-    /// on reconnect with no notification mechanism).
-    fn current_secret(&self) -> String {
-        if self.env_pinned {
-            return self.secret.lock().unwrap().clone();
-        }
-        if let Some(ref file) = self.secret_file
-            && let Some(fresh) = super::secret::read_secret_file(file)
-        {
-            *self.secret.lock().unwrap() = fresh.clone();
-            return fresh;
-        }
-        if self.secret_file.is_some() {
-            self.warn_undiscoverable_once();
-        }
-        self.secret.lock().unwrap().clone()
-    }
-
-    /// Spec scenario "env 与文件皆缺省时启动告警": warn once per process,
-    /// keep trying with an empty secret (no crash, no silence).
-    fn warn_undiscoverable_once(&self) {
-        use std::sync::atomic::Ordering;
-        if self.warned.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let where_ = self
-            .secret_file
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        tracing::warn!(
-            "核心通道 secret 未找到（{} 未设置且 secret 文件缺失：{}）：以空 secret 尝试连接 core",
-            super::secret::SECRET_ENV,
-            where_,
-        );
     }
 
     fn set_status(&self, status: ConnStatus) {
@@ -203,7 +128,8 @@ impl CoreChannelBackend {
         &self,
         req: &CoreChannelRequest,
     ) -> std::result::Result<CoreChannelResponse, SessionRejection> {
-        let (mut writer, mut reader) = self.dial().await?;
+        let (mut writer, mut reader) = connect(&self.path).await?;
+        handshake(&mut writer, &mut reader, &self.secret.current()).await?;
 
         let json = serde_json::to_string(req)
             .map_err(|e| unavailable(format!("serialize failed: {e}")))?;
@@ -261,8 +187,13 @@ impl CoreChannelBackend {
     /// One streaming attempt: returns when the connection drops. Resets the
     /// caller's backoff via the shared flag when a fresh snapshot arrives.
     async fn stream_once(&self) -> std::result::Result<(), String> {
-        let (mut writer, mut reader) = self
-            .dial()
+        let (mut writer, mut reader) = connect(&self.path)
+            .await
+            .map_err(|r| match r {
+                SessionRejection::Unavailable { cause } => cause,
+                other => format!("{other:?}"),
+            })?;
+        handshake(&mut writer, &mut reader, &self.secret.current())
             .await
             .map_err(|r| match r {
                 SessionRejection::Unavailable { cause } => cause,
@@ -322,53 +253,6 @@ impl CoreChannelBackend {
 
 fn unavailable(cause: String) -> SessionRejection {
     SessionRejection::Unavailable { cause }
-}
-
-fn is_secret_rejected(r: &SessionRejection) -> bool {
-    matches!(r, SessionRejection::Unavailable { cause } if cause == "secret rejected")
-}
-
-impl CoreChannelBackend {
-    /// Connect + handshake with the current secret, retrying once on a fresh
-    /// connection when a file-discovered secret is rejected: the core may
-    /// have rotated the file between our resolve and our handshake (D2).
-    async fn dial(
-        &self,
-    ) -> std::result::Result<
-        (
-            WriteHalf,
-            BufReader<ReadHalf>,
-        ),
-        SessionRejection,
-    > {
-        let secret = self.current_secret();
-        match self.dial_with(&secret).await {
-            Ok(v) => Ok(v),
-            Err(e) if !self.env_pinned && is_secret_rejected(&e) => {
-                let fresh = self.current_secret();
-                if fresh != secret {
-                    return self.dial_with(&fresh).await;
-                }
-                Err(e)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn dial_with(
-        &self,
-        secret: &str,
-    ) -> std::result::Result<
-        (
-            WriteHalf,
-            BufReader<ReadHalf>,
-        ),
-        SessionRejection,
-    > {
-        let (mut writer, mut reader) = connect(&self.path).await?;
-        handshake(&mut writer, &mut reader, secret).await?;
-        Ok((writer, reader))
-    }
 }
 
 /// fail-fast-on-startup-errors（core-session-channel spec delta / task 2.4）：

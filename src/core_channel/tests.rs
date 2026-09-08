@@ -1060,3 +1060,200 @@ async fn ensure_message_attachments_are_validated() {
     let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
     assert!(matches!(resp, CoreChannelResponse::Ok), "good attachment accepted, got {resp:?}");
 }
+
+// ── harden-core-channel-deployment: auto-arm (1.2) + client discovery (2.1) ──
+
+/// SEBAS_CORE_SECRET env 并行测试隔离：arm 路径在构造期读 env，guard 持
+/// `secret_env_test_lock` 到 drop——与 `secret::tests` 的 EnvGuard 共用同一
+/// 把锁，防两个模块的并行用例互相踩 env。
+struct CoreSecretEnv {
+    name: &'static str,
+    prev: Option<String>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl CoreSecretEnv {
+    fn set(value: &str) -> Self {
+        Self::arm(value, false)
+    }
+    fn unset() -> Self {
+        Self::arm("", true)
+    }
+    fn arm(value: &str, remove: bool) -> Self {
+        let name = "SEBAS_CORE_SECRET";
+        let lock = super::secret::secret_env_test_lock().lock().unwrap();
+        let prev = std::env::var(name).ok();
+        // edition 2024：set/remove 为 unsafe（多线程下 UB 风险）——测试进程
+        // 内由共享锁串行化。
+        unsafe {
+            if remove {
+                std::env::remove_var(name);
+            } else {
+                std::env::set_var(name, value);
+            }
+        }
+        Self { name, prev, _lock: lock }
+    }
+}
+
+impl Drop for CoreSecretEnv {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.name, v),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+}
+
+/// 沙箱 config：channel_path 指进沙箱（绝不落真实 XDG_RUNTIME_DIR）。
+fn arm_config(dir: &StdPath) -> (crate::config::Config, std::path::PathBuf) {
+    let config_path = dir.join("config.toml");
+    let raw = format!(
+        "[watchdog.core]\nchannel_path = \"{}\"\n",
+        dir.join("core.sock").display()
+    );
+    let cfg = crate::config::Config::parse(&raw).expect("sandbox arm config parses");
+    (cfg, config_path)
+}
+
+async fn arm_for_test(
+    dir: &StdPath,
+) -> crate::run::ArmedChannel {
+    let (cfg, config_path) = arm_config(dir);
+    let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(router.clone()),
+    );
+    let _keep = _out_rx;
+    crate::run::arm_core_channel(&cfg, &config_path, backend, &router)
+        .await
+        .expect("arm succeeds in sandbox")
+}
+
+/// 1.2 自动武装：无 env 启动 → socket 与 secret 文件同现、0600、内容可完成
+/// 握手（客户端走文件发现）。
+#[tokio::test]
+async fn auto_arm_without_env_writes_secret_file_and_completes_handshake() {
+        let _env = CoreSecretEnv::unset();
+    let dir = tempfile::tempdir().unwrap();
+    let armed = arm_for_test(dir.path()).await;
+    let secret_file = dir.path().join("core.secret");
+
+    assert_eq!(armed.secret_file, secret_file, "default path = config dir/core.secret");
+    assert!(dir.path().join("core.sock").exists(), "socket bound before arm returns");
+    assert!(secret_file.exists(), "secret file written at arm time");
+    let content = std::fs::read_to_string(&secret_file).unwrap();
+    assert_eq!(content, armed.secret, "file carries this boot's secret");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&secret_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "secret file must be 0600");
+    }
+
+    // 内容可完成握手：client 走 Discover(secret 文件) 建连成功。
+    let backend = CoreChannelBackend::with_secret(
+        dir.path().join("core.sock"),
+        crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file.clone())),
+    );
+    assert!(backend.snapshot().await.is_empty(), "handshake with discovered secret works");
+    assert_eq!(backend.reachability().await, Reachability::Reachable);
+
+    // 清理 accept 循环。
+    let _ = armed.shutdown.send(true);
+    wait_channel_gone(&dir.path().join("core.sock")).await;
+}
+
+/// 1.2 自动武装：env 提供时 env 优先且文件内容一致（迟启动客户端可发现）。
+#[tokio::test]
+async fn auto_arm_with_env_uses_env_value_and_writes_matching_file() {
+        let _env = CoreSecretEnv::set("env-secret-wins");
+    let dir = tempfile::tempdir().unwrap();
+    let armed = arm_for_test(dir.path()).await;
+
+    assert_eq!(armed.secret, "env-secret-wins", "env must win");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("core.secret")).unwrap(),
+        "env-secret-wins",
+        "file content must match the env secret"
+    );
+    let _ = armed.shutdown.send(true);
+    wait_channel_gone(&dir.path().join("core.sock")).await;
+}
+
+/// 1.3 bind 失败硬失败：路径被存活 listener 占用 → arm 返回特定错误
+/// （run.rs 据此在 ready 之前以 75 退出，不产生无通道的“健康”进程）。
+#[tokio::test]
+async fn arm_fails_hard_when_socket_path_is_taken_by_live_listener() {
+        let _env = CoreSecretEnv::unset();
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let _squatter = crate::core_channel::server::bind_channel_socket(&sock).expect("occupy path");
+
+    let (cfg, config_path) = arm_config(dir.path());
+    let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(router.clone()),
+    );
+    let _keep = _out_rx;
+    let err = crate::run::arm_core_channel(&cfg, &config_path, backend, &router)
+        .await
+        .expect_err("live occupant must fail the arm");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("bind 失败") && msg.contains("already served"),
+        "error must name the bind failure cause: {msg}"
+    );
+}
+
+/// 2.1 客户端文件发现 + 换钥自愈：core 重启换钥（新 secret 覆写文件）后，
+/// 不重建的 client 经重连重读文件恢复可达。
+#[tokio::test]
+async fn client_discovers_secret_from_file_and_heals_key_rotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret_file = dir.path().join("core.secret");
+    std::fs::write(&secret_file, "rotation-key-1").unwrap();
+
+    let core = start_core(dir.path()).await; // server 用常量 SECRET= "test-core-secret"
+    // 文件发现路径：env 缺省（测试进程不保证，但 Discover 只在 env 空时读文件
+    // ——这里直接以 Discover 构造并写匹配常量的文件）。
+    std::fs::write(&secret_file, SECRET).unwrap();
+    let backend = CoreChannelBackend::with_secret(
+        core.path.clone(),
+        crate::core_channel::secret::ChannelSecret::Discover(Some(secret_file.clone())),
+    );
+    let key = backend.spawn("before rotation".into(), None).await.expect("handshake via file");
+    assert_eq!(backend.snapshot().await.len(), 1);
+
+    // core 重启（换钥）：文件覆写为新钥，同一 client 实例自愈。
+    let _ = core.close_tx.send(true);
+    wait_channel_gone(&core.path).await;
+    std::fs::write(&secret_file, "rotation-key-2").unwrap();
+    let path2 = core.path.clone();
+    let (_router2, _rx2) = DispatchHandle::new(SessionMap::new());
+    let router2 = _router2.clone();
+    let (_close2, close2_rx) = tokio::sync::watch::channel(false);
+    let backend2: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(router2.clone()),
+    );
+    tokio::spawn(async move {
+        let _ = server::serve(backend2, router2, path2.clone(), "rotation-key-2".into(), close2_rx).await;
+    });
+    wait_channel_ready(&core.path).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    loop {
+        let _ = backend.snapshot().await; // trigger reconnect
+        if backend.reachability().await == Reachability::Reachable {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "client must re-read the rotated secret and reconnect"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let _ = key;
+}

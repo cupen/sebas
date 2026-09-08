@@ -2816,6 +2816,7 @@ dependencies = [
  "clap",
  "dirs 7.0.0",
  "futures-util",
+ "getrandom 0.4.3",
  "hex",
  "libc",
  "openlark",

@@ -1,115 +1,53 @@
-//! Core session channel secret file (harden-core-channel-deployment D1/D2/D5).
+//! Core session channel secret: shared-secret discovery for clients and the
+//! atomic secret file written by the auto-arming core
+//! (harden-core-channel-deployment, design D1/D2/D5).
 //!
-//! The core always arms its session channel (no opt-out): the handshake
-//! secret comes from `SEBAS_CORE_SECRET` when the watchdog injected one,
-//! otherwise the core mints a random secret at startup and publishes it via
-//! the secret file so independently-started clients (standalone webui, im,
-//! router) can discover it. Resolution order everywhere (core + clients):
-//! env → secret file → empty (clients warn once and keep trying).
+//! Resolution order for every channel client (standalone webui, im, router
+//! subscription): `SEBAS_CORE_SECRET` env wins (cached at construction, zero
+//! per-connect cost); otherwise the secret file is read before **every**
+//! connect attempt, so a core restart that rotates the key is healed by the
+//! client's reconnect backoff alone — no notification channel needed. When
+//! both are missing the client warns once and attempts an empty-secret
+//! handshake (honest, not silent; the server closes it and the UI reports
+//! `secret rejected`).
 //!
-//! - Default path: `<config file dir>/core.secret`, overrideable with
-//!   `[watchdog.core] secret_file` (explicit TOML wins) or the
-//!   `SEBAS_CORE_SECRET_FILE` env pinned by the watchdog for children whose
-//!   own `-c` derivation is unavailable (the router crate).
-//! - Writes are atomic (tmp + rename); unix mode 0600. Graceful exit keeps
-//!   the file: a stale secret is harmless because clients never get past the
-//!   handshake while the socket is absent (D5).
+//! File lifecycle (D5): the core writes the secret file atomically
+//! (tmp + rename, 0600 on unix) at arm time and deliberately does NOT remove
+//! it on graceful exit — the socket file is the authoritative "core is dead"
+//! signal, and a leftover secret file is harmless (clients cannot reach a
+//! handshake without a live socket).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Env carrying the watchdog-injected handshake secret (env-first, unchanged).
-pub const SECRET_ENV: &str = "SEBAS_CORE_SECRET";
-/// Env pinning the secret file path (set by the watchdog for supervised
-/// children; honored when the TOML key is absent).
-pub const SECRET_FILE_ENV: &str = "SEBAS_CORE_SECRET_FILE";
-/// Default file name next to the config file (D1).
+/// Default secret file name, resolved next to the config file (D1).
 pub const SECRET_FILE_NAME: &str = "core.secret";
 
-/// Resolve the secret file path: explicit `[watchdog.core] secret_file`
-/// wins, then `SEBAS_CORE_SECRET_FILE`, then `<config dir>/core.secret`.
-/// A config path without a parent dir (bare file name) falls back to the
-/// process working directory.
-pub fn secret_file_path(explicit: Option<&str>, config_path: &Path) -> PathBuf {
-    if let Some(p) = explicit
-        && !p.is_empty()
-    {
-        return PathBuf::from(p);
-    }
-    if let Ok(p) = std::env::var(SECRET_FILE_ENV)
-        && !p.is_empty()
-    {
-        return PathBuf::from(p);
-    }
-    let dir = config_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(SECRET_FILE_NAME)
+/// Warn-once flag shared by every discovery in this process: missing secret
+/// is a startup-visible condition, not a per-reconnect log flood.
+static MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Test-only: serialize `SEBAS_CORE_SECRET` mutations across the crate's test
+/// modules (parallel `#[tokio::test]`s share one process and one environ).
+#[cfg(test)]
+pub(crate) fn secret_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
 }
 
-/// Mint a fresh handshake secret: 32 bytes of OS entropy, hex-encoded.
-/// Falls back to a hashed pid+time+counter mix only when OS entropy is
-/// unavailable (e.g. `/dev/urandom` unreadable) — still unique per boot,
-/// and the real boundary stays uid + 0600 (D1 risk note).
-pub fn generate_secret() -> String {
+/// Generate a random handshake secret (32 bytes of OS CSPRNG, hex-encoded).
+/// Used by the core when `SEBAS_CORE_SECRET` is absent — the watchdog-injected
+/// env path keeps priority and is unchanged.
+pub fn generate() -> String {
     let mut buf = [0u8; 32];
-    if read_os_entropy(&mut buf) {
-        return hex_encode(&buf);
-    }
-    // Fallback: unique-per-boot mix (never empty, never constant).
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut h = DefaultHasher::new();
-    std::process::id().hash(&mut h);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut h);
-    COUNTER
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .hash(&mut h);
-    std::thread::current().id().hash(&mut h);
-    format!("fb-{:016x}{:016x}", h.finish(), {
-        let mut h2 = DefaultHasher::new();
-        buf.hash(&mut h2);
-        h2.finish()
-    })
+    getrandom::fill(&mut buf).expect("OS CSPRNG unavailable");
+    hex::encode(buf)
 }
 
-#[cfg(unix)]
-fn read_os_entropy(buf: &mut [u8]) -> bool {
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(buf).map(|_| ()))
-        .is_ok()
-        && buf.iter().any(|b| *b != 0)
-}
-
-#[cfg(not(unix))]
-fn read_os_entropy(_buf: &mut [u8]) -> bool {
-    false
-}
-
-fn hex_encode(buf: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(buf.len() * 2);
-    for b in buf {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
-}
-
-/// Atomically publish the secret (tmp + rename). Creates the parent dir;
-/// unix pins the file to 0600 (before and after the rename, so neither the
-/// tmp nor the final path is ever group-readable).
+/// Atomically write `secret` to `path`: write a tmp sibling, set 0600 (unix),
+/// rename over the target. A crash mid-write never leaves a torn file.
 pub fn write_secret_file(path: &Path, secret: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("secret.tmp");
@@ -119,121 +57,169 @@ pub fn write_secret_file(path: &Path, secret: &str) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(&tmp, path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Where a channel client gets its handshake secret from (D2).
+pub enum ChannelSecret {
+    /// `SEBAS_CORE_SECRET` was set at construction: cached, zero cost, and
+    /// the watchdog deployment path keeps today's exact semantics.
+    Static(String),
+    /// No usable env: read the secret file before every connect attempt.
+    Discover(Option<PathBuf>),
+}
+
+impl ChannelSecret {
+    /// env 非空 → Static（缓存）；否则 Discover(文件路径)。
+    /// `file` 为 `None` 表示调用方没有可用的 config 推导（缺省为空表发现）。
+    pub fn from_env_or_file(file: Option<PathBuf>) -> Self {
+        match std::env::var("SEBAS_CORE_SECRET") {
+            Ok(s) if !s.is_empty() => Self::Static(s),
+            _ => Self::Discover(file),
+        }
     }
-    Ok(())
-}
 
-/// Read a published secret: trimmed, empty/missing → None.
-pub fn read_secret_file(path: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let secret = raw.trim().to_string();
-    (!secret.is_empty()).then_some(secret)
-}
-
-/// Resolve the handshake secret: `SEBAS_CORE_SECRET` env first (non-empty),
-/// else the secret file, else empty string (callers warn, never crash).
-pub fn resolve_secret(secret_file: &Path) -> String {
-    if let Ok(v) = std::env::var(SECRET_ENV)
-        && !v.is_empty()
-    {
-        return v;
+    /// 构造期常量（既有调用方与测试的直通形态）。
+    pub fn static_value(v: String) -> Self {
+        Self::Static(v)
     }
-    read_secret_file(secret_file).unwrap_or_default()
-}
 
-/// Whether the env currently pins the secret (clients cache it, zero file
-/// reads on the hot path; file mode re-reads before every connection).
-pub fn env_pins_secret() -> bool {
-    std::env::var(SECRET_ENV)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    /// 当前应使用的握手 secret。Discover 每次调用重读文件——`secret
+    /// rejected` / 断线重连路径天然拿到 core 重启后的新钥（D2）。
+    pub fn current(&self) -> String {
+        match self {
+            Self::Static(s) => s.clone(),
+            Self::Discover(file) => match file.as_deref().map(std::fs::read_to_string) {
+                Some(Ok(content)) => content.trim().to_string(),
+                _ => {
+                    if !MISSING_WARNED.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            "核心通道 secret 未找到（SEBAS_CORE_SECRET 未设置且 secret 文件缺失）: \
+                             以空 secret 尝试连接，握手将被拒绝；请确认与 core 使用同一份 config"
+                        );
+                    }
+                    String::new()
+                }
+            },
+        }
+    }
 }
-
-/// Process-wide serializer for tests that mutate `SEBAS_CORE_SECRET` /
-/// `SEBAS_CORE_SECRET_FILE`: env is process-global, so every test that
-/// touches it (here, `run::core_secret_tests`, client discovery tests)
-/// must hold this lock.
-#[cfg(test)]
-pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn explicit_key_beats_default() {
-        let p = secret_file_path(Some("/etc/sebas/x.secret"), Path::new("/cfg/config.toml"));
-        assert_eq!(p, PathBuf::from("/etc/sebas/x.secret"));
+    struct EnvGuard {
+        name: &'static str,
+        prev: Option<std::env::VarError>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    // 同进程并行测试都在读写 SEBAS_CORE_SECRET：guard 持锁到 drop，串行化
+    //（锁与 core_channel::tests 共用同一把，见 secret_env_test_lock）。
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let lock = super::secret_env_test_lock().lock().unwrap();
+            let prev = std::env::var(name).err();
+            unsafe { std::env::set_var(name, value) };
+            Self { name, prev, _lock: lock }
+        }
+        fn unset(name: &'static str) -> Self {
+            let lock = super::secret_env_test_lock().lock().unwrap();
+            let prev = std::env::var(name).err();
+            unsafe { std::env::remove_var(name) };
+            Self { name, prev, _lock: lock }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(std::env::VarError::NotPresent) | None => unsafe {
+                    std::env::remove_var(self.name)
+                },
+                _ => {}
+            }
+        }
     }
 
     #[test]
-    fn default_derives_from_config_dir() {
-        let _env = ENV_TEST_LOCK.lock().unwrap();
-        // SAFETY: ENV_TEST_LOCK 已持有，无并发 env 访问。
-        unsafe { std::env::remove_var(SECRET_FILE_ENV) };
-        let p = secret_file_path(None, Path::new("/cfg/sub/config.toml"));
-        assert_eq!(p, PathBuf::from("/cfg/sub/core.secret"));
-        let p = secret_file_path(Some(""), Path::new("/cfg/config.toml"));
-        assert_eq!(p, PathBuf::from("/cfg/core.secret"));
-    }
-
-    #[test]
-    fn bare_config_name_falls_back_to_cwd() {
-        let _env = ENV_TEST_LOCK.lock().unwrap();
-        // SAFETY: ENV_TEST_LOCK 已持有。
-        unsafe { std::env::remove_var(SECRET_FILE_ENV) };
-        let p = secret_file_path(None, Path::new("config.toml"));
-        assert_eq!(p, PathBuf::from("./core.secret"));
-    }
-
-    #[test]
-    fn generated_secrets_are_unique_and_hex() {
-        let a = generate_secret();
-        let b = generate_secret();
-        assert!(!a.is_empty() && !b.is_empty());
-        assert_ne!(a, b, "two mints must differ");
+    fn generate_is_random_hex_and_long_enough() {
+        let a = generate();
+        let b = generate();
+        assert_eq!(a.len(), 64, "32 bytes hex");
+        assert_ne!(a, b, "consecutive secrets must differ");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    #[cfg(unix)]
-    fn write_is_atomic_with_mode_0600_and_read_roundtrips() {
-        use std::os::unix::fs::PermissionsExt;
+    fn secret_file_write_is_atomic_and_0600() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("core.secret");
-        write_secret_file(&path, "s3cr3t-value").unwrap();
-        assert!(!dir.path().join("core.secret.tmp").exists());
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(read_secret_file(&path).as_deref(), Some("s3cr3t-value"));
-        // Overwrite replaces atomically with the new value.
+        write_secret_file(&path, "s3cret").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "s3cret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "secret file must be 0600");
+        }
+        // Overwrite (rotation) leaves no tmp sibling behind.
         write_secret_file(&path, "rotated").unwrap();
-        assert_eq!(read_secret_file(&path).as_deref(), Some("rotated"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rotated");
+        assert!(
+            !path.with_extension("secret.tmp").exists(),
+            "tmp file must be renamed away, never left behind"
+        );
     }
 
     #[test]
-    fn resolve_prefers_env_over_file() {
-        let _env = ENV_TEST_LOCK.lock().unwrap();
-        // SAFETY: ENV_TEST_LOCK 已持有；结束前恢复。
-        unsafe {
-            std::env::set_var(SECRET_ENV, "from-env");
-        }
+    fn discovery_env_wins_and_is_cached() {
+        let _g = EnvGuard::set("SEBAS_CORE_SECRET", "from-env");
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("core.secret");
-        write_secret_file(&path, "from-file").unwrap();
-        assert_eq!(resolve_secret(&path), "from-env");
-        unsafe {
-            std::env::remove_var(SECRET_ENV);
-        }
-        assert_eq!(resolve_secret(&path), "from-file");
-        assert_eq!(resolve_secret(&dir.path().join("missing.secret")), "");
-        unsafe {
-            std::env::remove_var(SECRET_ENV);
-        }
+        let file = dir.path().join("core.secret");
+        std::fs::write(&file, "from-file").unwrap();
+        let cs = ChannelSecret::from_env_or_file(Some(file));
+        assert_eq!(cs.current(), "from-env", "env must win over the file");
+    }
+
+    #[test]
+    fn discovery_reads_file_fresh_each_time() {
+        let _g = EnvGuard::unset("SEBAS_CORE_SECRET");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("core.secret");
+        std::fs::write(&file, "key-one").unwrap();
+        let cs = ChannelSecret::from_env_or_file(Some(file.clone()));
+        assert_eq!(cs.current(), "key-one");
+        // core 重启换钥：覆写文件后同一 client 实例立刻读到新钥（D2 自愈）。
+        std::fs::write(&file, "key-two").unwrap();
+        assert_eq!(cs.current(), "key-two", "rotation must be picked up");
+    }
+
+    #[test]
+    fn discovery_both_missing_warns_once_and_uses_empty() {
+        let _g = EnvGuard::unset("SEBAS_CORE_SECRET");
+        let cs = ChannelSecret::from_env_or_file(Some(PathBuf::from(
+            "/definitely/not/here/core.secret",
+        )));
+        MISSING_WARNED.store(false, Ordering::Relaxed);
+        assert_eq!(cs.current(), "");
+        assert_eq!(
+            cs.current(),
+            "",
+            "empty attempt stays stable across reconnects"
+        );
+        // warn-once 语义不在此断言（tracing 断言成本高）；MISSING_WARNED 的
+        // swap 行为由下一次 from_env_or_file 调用重置。
+        MISSING_WARNED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn discovery_trims_whitespace() {
+        let _g = EnvGuard::unset("SEBAS_CORE_SECRET");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("core.secret");
+        std::fs::write(&file, "  padded-key\n").unwrap();
+        let cs = ChannelSecret::from_env_or_file(Some(file));
+        assert_eq!(cs.current(), "padded-key");
     }
 }
