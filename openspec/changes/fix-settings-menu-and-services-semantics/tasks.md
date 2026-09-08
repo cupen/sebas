@@ -51,6 +51,6 @@
 
 ## 5. 验收：账本闭环
 
-- [ ] 5.1 跑 `openspec status --change fix-settings-menu-and-services-semantics --json` 验证四个 artifact 全部 `done`（验证：proposal/specs/design/tasks 状态均为 done；isPlanningComplete: true）
-- [ ] 5.2 跑 `openspec validate --changes --strict` 无报错（验证：delta 字段完整、scenario 全 SHALL/MUST）
-- [ ] 5.3 在 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 段落末尾追加 `Settings 语义修正（fix-settings-menu-and-services-semantics）` 一行指向本期 commit hash 与本 tasks（验证：账本自身可追溯）
+- [x] 5.1 跑 `openspec status --change fix-settings-menu-and-services-semantics --json` 验证四个 artifact 全部 `done`（验证：proposal/specs/design/tasks 状态均为 done；isPlanningComplete: true）——2026-09-08 实测：proposal/specs/design/tasks 四 artifact 均 `status: "done"`，`isPlanningComplete: true`（`isComplete: true`），勾选
+- [x] 5.2 跑 `openspec validate --changes --strict` 无报错（验证：delta 字段完整、scenario 全 SHALL/MUST）——2026-09-08 实测：`Totals: 5 passed, 0 failed`，本 change `✓ change/fix-settings-menu-and-services-semantics` 在列，勾选
+- [x] 5.3 在 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 段落末尾追加 `Settings 语义修正（fix-settings-menu-and-services-semantics）` 一行指向本期 commit hash 与本 tasks（验证：账本自身可追溯）——2026-09-08 实测：实施 commit `93bdfdc`（4.4 blocker 测试侧修复 + 全量 3 连绿 35/35）已先落，账本行指向该 hash 与本 tasks，勾选

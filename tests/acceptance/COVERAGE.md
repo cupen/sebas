@@ -219,6 +219,10 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
 
+> Settings 语义修正（fix-settings-menu-and-services-semantics）：实施 commit
+> `93bdfdc`（projects 增删断言对齐 dashboard basename 渲染、解除 §4.4 blocker 后
+> 全量 3 连绿 35/35）；实施清单 `openspec/changes/fix-settings-menu-and-services-semantics/tasks.md`。
+
 ## 豁免清单（cause + 替代验证）
 
 | 面 | cause | 替代验证 |
