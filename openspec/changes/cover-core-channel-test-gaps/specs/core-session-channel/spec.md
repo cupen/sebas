@@ -115,3 +115,13 @@ When the channel cannot be reached — socket absent, connection refused, secret
 
 - **WHEN** core 在 ready 之前 fatal 并以 75 退出（socket 不存在、`SEBAS_STARTUP_ERROR_FILE` 存在含 `startup-failure: <原因>`）
 - **THEN** webui degradation banner SHALL 显示 `core startup failed: <原因>` 全串（cause 即该全串，前端原文渲染不二次拼接）；`/api/summary.reachability.ok` 为 false、`kind` SHALL 为 `startup_failed`；runtime disconnect 走 `kind: disconnected` + banner "core is not connected" 区分路径
+
+#### Scenario: core startup failure surfaces in banner
+
+- **WHEN** core 在 ready 之前 fatal 并以 75 退出
+- **THEN** webui degradation banner SHALL 显示 "core startup failed: <原因>"；`/api/summary.reachability.ok` 为 false 且 cause 字段包含 startup failure 的可读摘要
+
+#### Scenario: core healthy after retry does not retain banner
+
+- **WHEN** watchdog 重启 core 后 core 进入 ready（属运行期崩溃退避场景，不是 startup failure）
+- **THEN** degradation banner 消失、reachability 恢复 true——本规约不影响运行期恢复路径

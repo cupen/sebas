@@ -59,3 +59,8 @@ The WebUI crate SHALL access sessions through a backend abstraction rather than 
 
 - **WHEN** live fork + setuid 到不同账户进程尝试连接 core socket 并发 Snapshot 请求
 - **THEN** 连接被拒；服务端日志写 peer-uid mismatch；不进入 Snapshot 处理路径
+
+#### Scenario: backend push renders faithfully
+
+- **WHEN** backend 推送 spawn-failure 事件
+- **THEN** 前端立即渲染该事件为 transcript 内显错误，不等待 Removed 事件；会话状态 SHALL 在 backend 推送 Removed 之前已经标记为 spawn-failed
