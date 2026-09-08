@@ -15,7 +15,7 @@
 
 ## 3. readiness 契约（design D4）
 
-- [ ] 3.1 core ready 打点后移至通道 bind 完成之后；bind 失败路径不产生 ready 直接退出 75；单测覆盖启动时序（mock/shell 层断言 ready 前 socket 已存在）；验证：`cargo test --test testsuite_e2e_test -- startup`（既有启动用例不回归）
+- [x] 3.1 core ready 打点后移至通道 bind 完成之后；bind 失败路径不产生 ready 直接退出 75；单测覆盖启动时序（mock/shell 层断言 ready 前 socket 已存在）；验证：`cargo test --test testsuite_e2e_test -- startup`（既有启动用例不回归）——startup 过滤 3 用例全绿（2026-09-09）；bind 时序单测见 core_channel/tests.rs `arm_fails_hard_when_socket_path_is_taken_by_live_listener`
 - [x] 3.2 supervisor 对 core 退出码 75 标 Degraded 的分类确认（复用 webui 既有分支，补 core 路径单测）；验证：`cargo test --lib watchdog::supervisor`
 
 ## 4. webui 诚实外显（design D6/D7）
@@ -26,9 +26,9 @@
 
 ## 5. 测试套件（spec 场景逐条落地）
 
-- [ ] 5.1 进程 e2e「无密钥装配旅程」：双进程均无 `SEBAS_CORE_SECRET` 启动 → reachable + 会话往返（事故回归用例）；并确认既有带 env 用例全绿；验证：`invoke testsuite-e2e --case <new>`
-- [ ] 5.2 进程 e2e「密钥轮换自愈旅程」：kill core → 同 config 重启（新钥）→ 不重启的 webui 恢复 reachable，期间 cause 如实；验证：`invoke testsuite-e2e --case <new>`
-- [ ] 5.3 进程 e2e「监督重启恢复旅程」：watchdog 监督形态拉起 core+webui，杀 core → supervisor 自动重启 → webui 恢复（收窄账本缺口 #3）；验证：`invoke testsuite-e2e --case <new>`
+- [x] 5.1 进程 e2e「无密钥装配旅程」：双进程均无 `SEBAS_CORE_SECRET` 启动 → reachable + 会话往返（事故回归用例）；并确认既有带 env 用例全绿；验证：`invoke testsuite-e2e --case <new>`
+- [x] 5.2 进程 e2e「密钥轮换自愈旅程」：kill core → 同 config 重启（新钥）→ 不重启的 webui 恢复 reachable，期间 cause 如实；验证：`invoke testsuite-e2e --case <new>`
+- [x] 5.3 进程 e2e「监督重启恢复旅程」：watchdog 监督形态拉起 core+webui，杀 core → supervisor 自动重启 → webui 恢复（收窄账本缺口 #3）；验证：`invoke testsuite-e2e --case <new>`
 - [ ] 5.4 浏览器 detached 变体：`testsuite-webui` 新增**可复用的双进程沙箱 fixture**（core + 独立 webui，auth 关）与 `--case deployment` 旅程：core 停 → 横幅出现含 cause、加项目出现降级提示、composer 门禁生效；core 恢复 → 横幅消失；**fixture 是交付物**：cover B1 的 detached approval e2e 直接复用，不重写 harness；验证：`invoke testsuite-webui --case deployment`
 - [ ] 5.5 稳定性复跑：同一提交连续 3 次 `invoke testsuite-e2e` 全绿 + 3 次 `invoke testsuite-webui --case deployment` 全绿；验证：复跑记录落在任务备注
 

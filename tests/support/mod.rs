@@ -136,21 +136,14 @@ pub struct SandboxDir {
 
 impl SandboxDir {
     fn new(test_name: &str, sub: &str) -> Arc<Self> {
-        // Short leaf (`<pid>-<n>-<sub>`): the channel socket path must fit
-        // the unix `sun_path` budget (108 bytes incl. NUL) even from
-        // long worktree checkouts — a nanos-stamp leaf overflows it and the
-        // core bind fails with a misleading startup-failure. Uniqueness:
-        // pid across processes, counter within one process.
-        static CTR: AtomicU64 = AtomicU64::new(0);
-        let n = CTR.fetch_add(1, Ordering::Relaxed);
-        let leaf = format!("{}-{n}-{sub}", std::process::id());
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stamp = unique_stamp();
         let path = manifest
             .join("target")
             .join("tests")
             .join("sebas")
             .join(test_name)
-            .join(leaf);
+            .join(format!("{stamp}-{sub}"));
         std::fs::create_dir_all(&path)
             .unwrap_or_else(|e| panic!("create sandbox dir {}: {e}", path.display()));
         Arc::new(Self {
@@ -187,15 +180,17 @@ pub struct Sandbox {
     pub path: PathBuf,
     pub config_path: PathBuf,
     pub webui_port: u16,
+    /// Absolute path of the channel socket for test-side fs assertions.
+    /// The CONFIG carries the relative name `core-channel.sock` — every
+    /// sandbox child runs with cwd = sandbox dir, so the socket path is
+    /// independent of the checkout depth (sun_path caps unix socket paths
+    /// at 108 bytes; deep `target/tests/…` trees overflow it).
     pub channel_path: PathBuf,
     pub state_file: PathBuf,
     pub core_log: PathBuf,
     pub webui_log: PathBuf,
     /// The one fake secret shared by core and (matching) webui processes.
     pub core_secret: String,
-    /// Short XDG dir for watchdog runs (control socket; created on demand
-    /// by [`Self::spawn_watchdog`], removed on drop).
-    xdg_dir: Option<PathBuf>,
     /// Holds the drop guard (kept alive for the sandbox's whole life).
     _dir: Arc<SandboxDir>,
 }
@@ -225,6 +220,9 @@ impl Sandbox {
 
         // TOML basic strings reject bare backslashes — normalize to `/`
         // (Windows accepts forward slashes everywhere we touch files).
+        // channel_path is RELATIVE: children run with cwd = sandbox dir, so
+        // the unix socket never depends on the checkout depth (sun_path
+        // caps paths at 108 bytes — deep target/tests trees overflow).
         let toml = format!(
             r#"[feishu]
 enabled = false
@@ -242,7 +240,7 @@ state_file = "{}"
 download_dir = "{}"
 
 [watchdog.core]
-channel_path = "{}"
+channel_path = "core-channel.sock"
 
 [watchdog.webui]
 enabled = true
@@ -263,7 +261,6 @@ usage_file = "{}"
             forward_slash(&path.join("work")),
             forward_slash(&state_file),
             forward_slash(&path.join("downloads")),
-            forward_slash(&channel_path),
             forward_slash(&providers),
             forward_slash(&usage),
         );
@@ -279,16 +276,16 @@ usage_file = "{}"
             core_log,
             webui_log,
             core_secret: "sandbox-secret".into(),
-            xdg_dir: None,
             _dir: dir,
         }
     }
 
     /// Env overrides every default that would otherwise fall back to the
-    /// operator's real `~/.sebas` (AGENTS.md sandbox rule 1).
-    fn envs(&self, secret: &str) -> Vec<(&'static str, String)> {
-        vec![
-            ("SEBAS_CORE_SECRET", secret.to_string()),
+    /// operator's real `~/.sebas` (AGENTS.md sandbox rule 1). `None` omits
+    /// `SEBAS_CORE_SECRET` entirely — the no-secret assembly journeys
+    /// (auto-arm + secret-file discovery) need a genuinely unset env.
+    fn envs(&self, secret: Option<&str>) -> Vec<(&'static str, String)> {
+        let mut envs = vec![
             ("SEBAS_STATE_DB", forward_slash(&self.path.join("sebas.db"))),
             ("SEBAS_STATE_FILE", forward_slash(&self.path.join("state.json"))),
             (
@@ -297,7 +294,11 @@ usage_file = "{}"
             ),
             // Keep log files plain ASCII so assertions can match them.
             ("NO_COLOR", "1".to_string()),
-        ]
+        ];
+        if let Some(secret) = secret {
+            envs.push(("SEBAS_CORE_SECRET", secret.to_string()));
+        }
+        envs
     }
 
     /// Spawn an arbitrary subcommand with the sandbox env + extra env vars
@@ -311,27 +312,28 @@ usage_file = "{}"
         extra: &[(&str, &str)],
         log: &Path,
     ) -> tokio::process::Child {
-        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"));
-        cmd.args(args)
-            .envs(self.envs(secret))
-            .envs(extra.iter().copied());
-        self.spawn_with(cmd, log)
+        self.spawn_opt(args, Some(secret), extra, log)
     }
 
-    /// Same as [`Self::spawn`] but WITHOUT `SEBAS_CORE_SECRET` in the child
-    /// env (harden-core-channel-deployment §5: no-secret assembly). The core
-    /// auto-arms with a minted secret published to the secret file; clients
-    /// discover it from the same `-c` config (env → file → empty-with-warn).
-    pub fn spawn_bare(&self, args: &[&str], extra: &[(&str, &str)], log: &Path) -> tokio::process::Child {
-        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"));
-        cmd.args(args)
-            .envs(self.envs(""))
-            .env_remove("SEBAS_CORE_SECRET")
-            .envs(extra.iter().copied());
-        self.spawn_with(cmd, log)
+    /// Same as [`spawn`](Self::spawn) but without `SEBAS_CORE_SECRET` in the
+    /// environment (harden-core-channel-deployment 5.1/5.2: the core then
+    /// auto-arms from a generated key, clients discover it from the file).
+    pub fn spawn_no_secret(
+        &self,
+        args: &[&str],
+        extra: &[(&str, &str)],
+        log: &Path,
+    ) -> tokio::process::Child {
+        self.spawn_opt(args, None, extra, log)
     }
 
-    fn spawn_with(&self, mut cmd: tokio::process::Command, log: &Path) -> tokio::process::Child {
+    fn spawn_opt(
+        &self,
+        args: &[&str],
+        secret: Option<&str>,
+        extra: &[(&str, &str)],
+        log: &Path,
+    ) -> tokio::process::Child {
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -340,11 +342,16 @@ usage_file = "{}"
         let log_err = log_file
             .try_clone()
             .unwrap_or_else(|e| panic!("clone log handle: {e}"));
-        cmd.stdout(Stdio::from(log_file))
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
+            .args(args)
+            .current_dir(&self.path)
+            .envs(self.envs(secret))
+            .envs(extra.iter().copied())
+            .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
             .kill_on_drop(true)
             .spawn()
-            .unwrap_or_else(|e| panic!("spawn sebas: {e}"))
+            .unwrap_or_else(|e| panic!("spawn sebas {args:?}: {e}"))
     }
 
     /// Core: `sebas run -c <config> --router --debug` (detached: no --webui;
@@ -370,6 +377,62 @@ usage_file = "{}"
         )
     }
 
+    /// Core with NO `SEBAS_CORE_SECRET`: the auto-arm path generates the
+    /// key, writes the secret file and binds the channel (5.1/5.2).
+    pub fn spawn_core_no_secret(&self) -> tokio::process::Child {
+        self.spawn_no_secret(
+            &[
+                "core",
+                "-c",
+                &forward_slash(&self.config_path),
+                "--router",
+                "--debug",
+            ],
+            &[],
+            &self.core_log,
+        )
+    }
+
+    /// Standalone webui with NO `SEBAS_CORE_SECRET`: the client discovers
+    /// the key from the secret file at connect time (5.1/5.2).
+    pub fn spawn_webui_no_secret(&self) -> tokio::process::Child {
+        self.spawn_no_secret(
+            &["webui", "-c", &forward_slash(&self.config_path)],
+            &[],
+            &self.webui_log,
+        )
+    }
+
+    /// Where the core writes the generated channel key (config dir, D1).
+    pub fn secret_file(&self) -> PathBuf {
+        self.path.join("core.secret")
+    }
+
+    /// Watchdog-supervised form affordance (5.3): `[watchdog.core] enabled
+    /// = true` so `sebas run` spawns the core child, plus `[storage]
+    /// data_dir` pinned inside the sandbox so upgrade/rollback state never
+    /// touches the host's shared XDG dirs. Must run before spawn.
+    pub fn enable_supervised_core(&self) {
+        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
+        let patched = toml
+            .replace(
+                "[watchdog.core]",
+                "[watchdog.core]\nenabled = true",
+            )
+            .replace(
+                "[router]",
+                &format!(
+                    "[storage]\ndata_dir = \"{}\"\n\n[router]",
+                    forward_slash(&self.path.join("storage"))
+                ),
+            );
+        assert!(
+            patched != toml && patched.contains("enabled = true") && patched.contains("[storage]"),
+            "[watchdog.core]/[router] sections not found in config"
+        );
+        std::fs::write(&self.config_path, patched).expect("write config");
+    }
+
     /// Core with the router but WITHOUT `--debug` (downstream auth enforced;
     /// no built-in test provider). For auth-rejection journeys.
     pub fn spawn_core_router_auth(&self) -> tokio::process::Child {
@@ -393,107 +456,6 @@ usage_file = "{}"
         )
     }
 
-    /// No-secret assembly (harden-core-channel-deployment §5.1/§5.2): core
-    /// and standalone webui started with NO `SEBAS_CORE_SECRET` in env. The
-    /// core mints a fresh secret per boot and publishes it to the secret
-    /// file; the webui discovers it from the same `-c` config.
-    pub fn spawn_core_no_secret(&self) -> tokio::process::Child {
-        self.spawn_bare(
-            &[
-                "core",
-                "-c",
-                &forward_slash(&self.config_path),
-                "--router",
-                "--debug",
-            ],
-            &[],
-            &self.core_log,
-        )
-    }
-
-    pub fn spawn_webui_no_secret(&self) -> tokio::process::Child {
-        self.spawn_bare(
-            &["webui", "-c", &forward_slash(&self.config_path)],
-            &[],
-            &self.webui_log,
-        )
-    }
-
-    /// Resolved secret-file path for this sandbox's config (D1 default:
-    /// `<config dir>/core.secret`; mirrors
-    /// `sebas::core_channel::secret_file_path` so the test asserts on the
-    /// same path the core publishes and the webui reads).
-    pub fn secret_file_path(&self) -> PathBuf {
-        sebas::core_channel::secret_file_path(None, &self.config_path)
-    }
-
-    /// Watchdog-supervised assembly (harden-core-channel-deployment §5.3):
-    /// `sebas run -c <config>` supervises core + webui children (both from
-    /// the sandbox config; the watchdog mints and injects its own channel
-    /// secret). `HOME` is redirected into the sandbox (services persist
-    /// file) and `XDG_RUNTIME_DIR` into a short tmp dir: the control socket
-    /// default (`$XDG_RUNTIME_DIR/sebas/control.sock`) must neither collide
-    /// with the operator's real one (`serve` removes a pre-existing file!)
-    /// nor overflow the unix `sun_path` budget from a long checkout path.
-    pub fn spawn_watchdog(&mut self) -> tokio::process::Child {
-        let xdg = std::env::temp_dir().join(format!(
-            "sebas-wd-{}-{}",
-            std::process::id(),
-            self.webui_port
-        ));
-        std::fs::create_dir_all(&xdg).expect("mkdir sandbox xdg dir");
-        let home = forward_slash(&self.path);
-        let xdg_s = forward_slash(&xdg);
-        self.xdg_dir = Some(xdg);
-        self.spawn(
-            &["run", "-c", &forward_slash(&self.config_path)],
-            &self.core_secret,
-            &[("HOME", &home), ("XDG_RUNTIME_DIR", &xdg_s)],
-            &self.core_log,
-        )
-    }
-
-    /// SIGKILL the `run` watchdog, then any leftover process whose cmdline
-    /// references this sandbox dir (linux-only; `kill_on_drop` reaps only
-    /// `run` itself — supervised grandchildren would orphan). Scoped to our
-    /// own sandbox path — the operator's instance and other sandboxes never
-    /// match.
-    #[cfg(target_os = "linux")]
-    pub async fn reap_watchdog(&self, run: &mut tokio::process::Child) {
-        let _ = run.kill().await;
-        let _ = run.wait().await;
-        let marker = self.path.to_string_lossy().into_owned();
-        let own = std::process::id();
-        let hint = self.path.clone();
-        wait_for(
-            "supervised tree to exit",
-            Duration::from_secs(10),
-            &hint,
-            move || {
-                let marker = marker.clone();
-                Box::pin(async move {
-                    let mut left = 0;
-                    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-                        let pid: u32 = match entry.file_name().to_string_lossy().parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if pid == own {
-                            continue;
-                        }
-                        let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-                        if String::from_utf8_lossy(&cmd).contains(&marker) {
-                            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-                            left += 1;
-                        }
-                    }
-                    (left == 0).then_some(())
-                })
-            },
-        )
-        .await;
-    }
-
     pub fn webui_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.webui_port)
     }
@@ -507,16 +469,6 @@ usage_file = "{}"
             &format!("[router]\nauth_token = \"{token}\""),
         );
         assert_ne!(toml, patched, "[router] section not found in config");
-        std::fs::write(&self.config_path, patched).expect("write config");
-    }
-
-    /// Opt the sandbox config into watchdog-supervised core
-    /// (`[watchdog.core] enabled = true`; the default is off — only the
-    /// webui is supervised by default). Must be called before spawn.
-    pub fn set_core_supervised(&self) {
-        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
-        let patched = toml.replace("[watchdog.core]", "[watchdog.core]\nenabled = true");
-        assert_ne!(toml, patched, "[watchdog.core] section not found in config");
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
@@ -545,7 +497,8 @@ usage_file = "{}"
                 "--webui-port",
                 &dashboard_port.to_string(),
             ])
-            .envs(self.envs(&self.core_secret))
+            .current_dir(&self.path)
+            .envs(self.envs(Some(&self.core_secret)))
             .envs(extra.iter().copied())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
@@ -553,14 +506,6 @@ usage_file = "{}"
             .spawn()
             .unwrap_or_else(|e| panic!("spawn sebas in-process webui: {e}"));
         (child, dashboard_port)
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        if let Some(xdg) = self.xdg_dir.take() {
-            let _ = std::fs::remove_dir_all(xdg);
-        }
     }
 }
 
@@ -738,92 +683,6 @@ pub async fn post_json(
         .await
         .map_err(|e| format!("body of {url}: {e}"))?;
     Ok((status, json))
-}
-
-/// Wait until the secret file exists with non-empty content; returns it.
-pub async fn wait_secret_file(sb: &Sandbox) -> String {
-    let path = sb.secret_file_path();
-    let hint = sb.path.clone();
-    wait_for(
-        "secret file to be published",
-        Duration::from_secs(15),
-        &hint,
-        move || {
-            let path = path.clone();
-            Box::pin(async move {
-                let raw = std::fs::read_to_string(&path).ok()?;
-                (!raw.trim().is_empty()).then(|| raw.trim().to_string())
-            })
-        },
-    )
-    .await
-}
-
-/// Find the supervised `sebas core` child of a `sebas run` watchdog pid by
-/// scanning /proc cmdlines (linux-only; §5.3 supervision journey). Returns
-/// the core child pid, or panics with a log hint after the bound.
-#[cfg(target_os = "linux")]
-pub async fn wait_supervised_core_pid(sb: &Sandbox, run_pid: u32) -> u32 {
-    let hint = sb.path.clone();
-    wait_for(
-        "supervised core child pid",
-        Duration::from_secs(15),
-        &hint,
-        move || {
-            Box::pin(async move { supervised_core_pid(run_pid) })
-        },
-    )
-    .await
-}
-
-/// One poll pass of [`wait_supervised_core_pid`]: a process whose cmdline
-/// argv contains `core` and whose parent is `run_pid`.
-#[cfg(target_os = "linux")]
-fn supervised_core_pid(run_pid: u32) -> Option<u32> {
-    let procs = std::fs::read_dir("/proc").ok()?;
-    for entry in procs.flatten() {
-        let pid: u32 = match entry.file_name().to_string_lossy().parse() {
-            Ok(p) => p,
-            // /proc also holds non-pid entries (sys, bus, self, ...) —
-            // skip them (a `?` here would abort the whole scan).
-            Err(_) => continue,
-        };
-        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let parts: Vec<&str> = cmdline
-            .split(|b| *b == 0)
-            .filter_map(|s| std::str::from_utf8(s).ok())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if pid == run_pid {
-            continue;
-        }
-        if !parts.iter().any(|p| *p == "core") {
-            continue;
-        }
-        // A process may exit between the cmdline and stat reads — skip it,
-        // never abort the scan.
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        // stat: `pid (comm) state ppid ...` — comm may contain spaces/parens,
-        // so split after the last ')'.
-        let after = match stat.rsplit_once(')') {
-            Some((_, a)) => a,
-            None => continue,
-        };
-        let ppid: u32 = match after.split_whitespace().nth(1).and_then(|s| s.parse().ok()) {
-            Some(p) => p,
-            None => continue,
-        };
-        if ppid == run_pid {
-            return Some(pid);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

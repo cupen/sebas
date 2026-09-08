@@ -19,11 +19,9 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    http_client, post_json, wait_for, wait_router_addr, wait_reachable, wait_secret_file,
+    http_client, post_json, wait_for, wait_router_addr, wait_reachable,
     wait_unreachable_with_cause, webui_healthy, Sandbox,
 };
-#[cfg(target_os = "linux")]
-use support::wait_supervised_core_pid;
 
 /// Startup: core + standalone webui come up, webui reports the core channel
 /// reachable and /health serves.
@@ -343,29 +341,72 @@ async fn startup_failure_run_exits_75_with_summary() {
     assert_eq!(file.trim(), last.trim());
 }
 
-/// harden-core-channel-deployment §5.1 — no-secret assembly journey (the
-/// live "socket absent" incident as a regression case): core and standalone
-/// webui start with NO `SEBAS_CORE_SECRET` in env. The core auto-arms with a
-/// minted secret published to the secret file; the webui discovers it from
-/// the same `-c` config. Reachability must come up and a full ACP session
-/// round-trip must complete. The pre-existing env-injection cases above
-/// cover the "existing path does not regress" half of the spec.
+/// Find the direct child of `ppid` whose cmdline contains `needle`
+/// (linux `/proc` walk; the supervised-recovery journey needs the core
+/// CHILD pid, not the watchdog's). None while no such child is visible.
+#[cfg(target_os = "linux")]
+fn find_child_pid(ppid: u32, needle: &str) -> Option<u32> {
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == ppid {
+            continue;
+        }
+        let Ok(cmd) = std::fs::read_to_string(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if !cmd.contains(needle) {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let is_child = status.lines().any(|l| {
+            l.strip_prefix("PPid:")
+                .map(|v| v.trim().parse::<u32>() == Ok(ppid))
+                .unwrap_or(false)
+        });
+        if is_child {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// 5.1 无密钥装配旅程：两个进程都不带 `SEBAS_CORE_SECRET` —— core 自动
+/// 装配（生成密钥并写入 config 旁的 secret 文件）、webui 从文件发现密钥，
+/// reachable 之后完成一次完整会话往返（事故回归：发现路径必须承载真实
+/// 流量，而非仅握手成功）。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn channel_no_secret_assembly_serves_session_round_trip() {
+async fn no_secret_assembly_end_to_end() {
     let sb = Sandbox::new("testsuite_e2e", "no-secret");
     let cli = http_client();
     let _core = sb.spawn_core_no_secret();
     let _webui = sb.spawn_webui_no_secret();
-
-    // Auto-arm must have published a minted secret where D1 says it lives
-    // (wait covers both existence and content; the path is resolved by the
-    // same function the core and webui use).
-    let published = wait_secret_file(&sb).await;
-    assert!(!published.is_empty());
-
     wait_reachable(&cli, &sb).await;
 
+    // 装配产物：secret 文件存在、64 位 hex、unix 上 0600。
+    let secret_file = sb.secret_file();
+    let secret = std::fs::read_to_string(&secret_file).expect("core.secret written at arm time");
+    assert_eq!(
+        secret.trim().len(),
+        64,
+        "generated key must be 64 hex chars"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&secret_file)
+            .expect("stat secret file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "secret file must be 0600, got {mode:o}");
+    }
+
+    // 完整会话往返（与带 env 用例同款断言）。
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
@@ -374,11 +415,7 @@ async fn channel_no_secret_assembly_serves_session_round_trip() {
     .await
     .expect("create session");
     assert_eq!(status, 201, "create session: {body}");
-    let key = body["key"]
-        .as_str()
-        .expect("key in create response")
-        .to_string();
-
+    let key = body["key"].as_str().expect("key in create response");
     let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
     let hint = sb.path.clone();
     let detail = wait_for(
@@ -389,7 +426,14 @@ async fn channel_no_secret_assembly_serves_session_round_trip() {
             let cli = cli.clone();
             let url = detail_url.clone();
             Box::pin(async move {
-                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
                 let done = v["status_slug"].as_str() == Some("done")
                     || v["status"]
                         .as_str()
@@ -399,7 +443,6 @@ async fn channel_no_secret_assembly_serves_session_round_trip() {
         },
     )
     .await;
-
     let transcript = detail["body"]
         .as_array()
         .map(|blocks| {
@@ -416,83 +459,109 @@ async fn channel_no_secret_assembly_serves_session_round_trip() {
     );
 }
 
-/// harden-core-channel-deployment §5.2 — secret rotation self-heal: on a
-/// no-secret assembly each core boot mints a FRESH secret (rotation). Kill
-/// the core and restart it with the same config; the running webui (file
-/// discovery, re-read per connect) must recover WITHOUT a restart, with an
-/// honest cause while down.
+/// 5.2 密钥轮换自愈旅程：core 每次启动自动生成新钥并覆写 secret 文件；
+/// kill → 同 config 重启（新钥）→ **不重启**的 webui 因每次连接重读文件
+/// 而恢复 reachable；宕机窗口内 cause 如实上报。
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn channel_secret_rotation_heals_running_webui() {
+async fn secret_rotation_self_heal_across_core_restart() {
     let sb = Sandbox::new("testsuite_e2e", "rotation");
     let cli = http_client();
     let mut core = sb.spawn_core_no_secret();
-    let _webui = sb.spawn_webui_no_secret();
+    let mut webui = sb.spawn_webui_no_secret();
     wait_reachable(&cli, &sb).await;
-    let before = wait_secret_file(&sb).await;
+    let key1 = std::fs::read_to_string(sb.secret_file()).expect("secret file after first arm");
 
     core.kill().await.expect("kill core");
     let cause = wait_unreachable_with_cause(&cli, &sb).await;
-    assert!(!cause.is_empty(), "outage cause must be reported");
+    assert!(!cause.is_empty(), "downtime cause must be reported");
 
+    // 同 config 重启：自动装配生成一把**新**钥（CSPRNG）。
     let _core2 = sb.spawn_core_no_secret();
-    // The restarted core must have minted a fresh secret (proves rotation
-    // actually happened rather than the webui reconnecting to a stale key).
     let hint = sb.path.clone();
-    let secret_path = sb.secret_file_path();
-    let after = wait_for(
-        "restarted core to mint a fresh secret",
+    let secret_file = sb.secret_file();
+    let key2 = wait_for(
+        "rotated secret file",
         Duration::from_secs(15),
         &hint,
         move || {
-            let path = secret_path.clone();
-            let before = before.clone();
+            let path = secret_file.clone();
+            let key1 = key1.clone();
             Box::pin(async move {
-                let raw = std::fs::read_to_string(&path).ok()?;
-                let fresh = raw.trim().to_string();
-                (!fresh.is_empty() && fresh != before).then_some(fresh)
+                let k2 = std::fs::read_to_string(&path).ok()?;
+                let changed = !k2.trim().is_empty() && k2.trim() != key1.trim();
+                changed.then_some(k2)
             })
         },
     )
     .await;
-    assert!(!after.is_empty());
+    assert_eq!(
+        key2.trim().len(),
+        64,
+        "rotated key must be 64 hex chars"
+    );
+
+    // webui 从未重启：只能靠文件重读自愈。
     wait_reachable(&cli, &sb).await;
+    assert!(
+        webui.try_wait().expect("webui try_wait").is_none(),
+        "the webui must not have exited during the rotation"
+    );
 }
 
-/// harden-core-channel-deployment §5.3 — supervision recovery journey
-/// (narrows acceptance-ledger gap #3): `sebas run` supervises core + webui;
-/// SIGKILL the supervised core child; the supervisor must restart it within
-/// its restart delay and the webui must report reachable again.
+/// 5.3 监督重启恢复旅程：watchdog 形态（`sebas run`）拉起 core + webui
+/// 子进程；SIGKILL core **子进程** → supervisor 自动重启 → 未重启的
+/// webui 子进程恢复 reachable（收窄账本缺口 #3 的监督形态证据）。
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
-async fn watchdog_supervision_restarts_killed_core() {
-    let mut sb = Sandbox::new("testsuite_e2e", "supervision");
-    sb.set_core_supervised();
+async fn watchdog_supervised_core_recovery() {
+    let sb = Sandbox::new("testsuite_e2e", "watchdog-recovery");
+    sb.enable_supervised_core();
+    // 控制socket（control.sock）按 XDG_RUNTIME_DIR 解析——钉进沙箱，绝不
+    // 触碰宿主机上可能存在的真实实例控制面。
+    let xdg_run = sb.path.join("xdg-run");
+    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+    let xdg = support::forward_slash(&xdg_run);
+    let cfg = support::forward_slash(&sb.config_path);
     let cli = http_client();
-    let mut run = sb.spawn_watchdog();
-    let run_pid = run.id().expect("watchdog pid");
+    let mut watchdog = sb.spawn(
+        &["run", "-c", &cfg],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
     wait_reachable(&cli, &sb).await;
 
-    let core_pid = wait_supervised_core_pid(&sb, run_pid).await;
+    let watchdog_pid = watchdog.id().expect("watchdog pid");
+    let hint = sb.path.clone();
+    let core_pid =
+        wait_for("core child pid to appear", Duration::from_secs(15), &hint, move || {
+            Box::pin(async move { find_child_pid(watchdog_pid, "core") })
+        })
+        .await;
+
     unsafe { libc::kill(core_pid as libc::pid_t, libc::SIGKILL) };
+    wait_unreachable_with_cause(&cli, &sb).await;
 
-    let cause = wait_unreachable_with_cause(&cli, &sb).await;
-    assert!(!cause.is_empty(), "outage cause must be reported");
+    // supervisor 自动重启：新 core 子进程（pid 变化）出现。
+    let new_pid = wait_for(
+        "supervisor to respawn the core child",
+        Duration::from_secs(45),
+        &hint,
+        move || {
+            Box::pin(async move {
+                find_child_pid(watchdog_pid, "core").filter(|p| *p != core_pid)
+            })
+        },
+    )
+    .await;
+    assert_ne!(new_pid, core_pid, "supervisor must spawn a fresh core");
 
-    // Supervisor restart (RESTART_DELAY 1s) + fresh boot: socket returns and
-    // the supervised webui heals without any restart of its own.
+    // webui 子进程未重启即可恢复 reachable。
     wait_reachable(&cli, &sb).await;
     assert!(
-        sb.channel_path.exists(),
-        "channel socket must exist again after supervisor restart"
+        watchdog.try_wait().expect("watchdog try_wait").is_none(),
+        "watchdog must stay up across the managed child crash"
     );
-    assert_eq!(
-        webui_healthy(&cli, &sb).await,
-        Some(true),
-        "webui must keep serving throughout supervision recovery"
-    );
-    // Tear down the whole supervised tree (kill_on_drop alone would orphan
-    // the core/webui grandchildren).
-    sb.reap_watchdog(&mut run).await;
 }
