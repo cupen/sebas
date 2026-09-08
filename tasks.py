@@ -86,6 +86,27 @@ def testsuite_e2e(c, case=None):
         raise SystemExit(1)
 
 
+@task(help={"case": "Run a single real-agent journey by name (cargo test filter: real_opencode / real_claude)"})
+def testsuite_real_agents(c, case=None):
+    """Build the workspace and run the real-backend agent journeys (real_agent_e2e).
+
+    Unlike testsuite-e2e these drive REAL agent CLIs (opencode acp, claude) and
+    cost real LLM tokens (10-120s per turn); backends that are missing or not
+    authenticated self-skip with a printed reason. Serialized
+    (--test-threads=1) to keep the one-scene-per-journey sandbox predictable.
+    """
+    print("Building workspace (sebas + fake-claude) ...")
+    result = c.run("cargo build", echo=True)
+    if result.failed:
+        raise SystemExit(1)
+    test_filter = f"{case} " if case else ""
+    cmd = f"cargo test --test real_agent_e2e_test {test_filter}-- --ignored --test-threads=1".replace("  ", " ")
+    result = c.run(cmd, echo=True)
+    if result.failed:
+        print("real-agent suite FAILED; kept scene dirs are printed above (or under target/tests/)")
+        raise SystemExit(1)
+
+
 @task(help={"case": "Run a single acceptance journey by name (cargo test filter)"})
 def testsuite_acceptance(c, case=None):
     """Build the workspace and run the acceptance suite (journey-level)."""
