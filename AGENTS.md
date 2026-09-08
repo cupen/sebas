@@ -66,21 +66,26 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `[acp.claude] sessions_dir` / `work_dir`,
      `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
      (port ≠ 9797, e.g. 9877) all set inside it;
-   - env: `SEBAS_CORE_SECRET=<fake>` (mimics the watchdog's injection; its
-     presence arms the core session channel and webui client), plus three
-     files that otherwise default into the real `~/.sebas` — all mandatory:
-     `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db` — the easy one to
-     miss: without it the sandbox opens the real DB even with everything else
-     sandboxed), `SEBAS_STATE_FILE` (default `~/.sebas/state.json`), and
-     `SEBAS_ROUTER_PROVIDER_OVERLAY` (default `~/.sebas/providers.json`).
+   - env: three files that otherwise default into the real `~/.sebas` —
+     all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db` —
+     the easy one to miss: without it the sandbox opens the real DB even
+     with everything else sandboxed), `SEBAS_STATE_FILE` (default
+     `~/.sebas/state.json`), and `SEBAS_ROUTER_PROVIDER_OVERLAY` (default
+     `~/.sebas/providers.json`). No `SEBAS_CORE_SECRET` needed: the core
+     auto-arms and mints a secret published to `<config dir>/core.secret`
+     (0600), and the standalone webui discovers it from the same `-c`
+     config (an explicit env still wins — that is how the watchdog injects
+     its own secret into supervised children).
 
-2. Run the two halves exactly as the watchdog would:
+2. Run the two halves (no secret env on either — this is the no-secret
+   assembly the `channel_no_secret_*` e2e pins):
 
    ```bash
-   SEBAS_CORE_SECRET=fake SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
+   SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
      SEBAS_ROUTER_PROVIDER_OVERLAY=… \
      target/debug/sebas core -c /tmp/sebas-itest/config.toml         # core
-   SEBAS_CORE_SECRET=fake \
+   SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
+     SEBAS_ROUTER_PROVIDER_OVERLAY=… \
      target/debug/sebas webui -c /tmp/sebas-itest/config.toml        # webui
    ```
 
@@ -146,12 +151,15 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
    ```bash
    cargo build
-   SEBAS_CORE_SECRET=fake SEBAS_STATE_DB="<SB>/sebas.db" \
+   SEBAS_STATE_DB="<SB>/sebas.db" \
      SEBAS_STATE_FILE="<SB>/state.json" \
      SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
      target/debug/sebas core -c "<SB>/config.toml" \
      --router --debug --webui --webui-port 9877 > "<SB>/core.log" 2>&1
    ```
+
+   No `SEBAS_CORE_SECRET` — the core mints one and publishes
+   `<SB>/core.secret` (assert it exists); the webui half discovers it.
 
    The built-in router binds a random port — read it from the log line
    `router started (core --router) … addr=127.0.0.1:<port>`.
