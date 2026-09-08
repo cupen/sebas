@@ -153,6 +153,36 @@ describe('sebas-project-rail (sidebar tree)', () => {
     expect((dialog as any).open).toBe(true)
     el.remove()
   })
+
+  it('shows an inline degraded notice when the add falls back to the local registry', async () => {
+    apiMock.projects.add.mockResolvedValue({
+      path: '/home/me/gamma',
+      name: 'gamma',
+      added_at: 2,
+      degraded: { cause: 'socket absent' },
+    })
+    const el = await mount()
+    const rail = el as unknown as { addPath: string; submitAddProject: () => Promise<void> }
+    rail.addPath = '/home/me/gamma'
+    await rail.submitAddProject()
+    await el.updateComplete
+    const notice = el.shadowRoot!.querySelector<HTMLElement>('.degraded-notice')
+    expect(notice).toBeTruthy()
+    expect(notice?.textContent ?? '').toContain('核心不可达，已写入本地注册表')
+    expect(notice?.textContent ?? '').toContain('socket absent')
+    el.remove()
+  })
+
+  it('shows no degraded notice when the state store accepts the add', async () => {
+    apiMock.projects.add.mockResolvedValue({ path: '/home/me/gamma', name: 'gamma', added_at: 2 })
+    const el = await mount()
+    const rail = el as unknown as { addPath: string; submitAddProject: () => Promise<void> }
+    rail.addPath = '/home/me/gamma'
+    await rail.submitAddProject()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.degraded-notice')).toBeNull()
+    el.remove()
+  })
 })
 
 describe('inbox group', () => {

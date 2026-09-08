@@ -36,6 +36,13 @@ export const ROUTES: RouteDef[] = [
   { id: 'session-detail', pattern: '/sessions/:key' },
 ]
 
+/**
+ * harden-core-channel-deployment D6: the shell polls the same
+ * `/api/summary` reachability the composer gates on, at the same interval,
+ * so the global banner and the composer gate never disagree for long.
+ */
+export const CORE_REACHABILITY_POLL_MS = 5_000
+
 @customElement('sebas-app')
 export class SebasApp extends LitElement {
   @state() private routeId: string = 'dashboard'
@@ -62,6 +69,15 @@ export class SebasApp extends LitElement {
    * 重连成功即消失并触发 `sebas:refetch` 刷新。
    */
   @state() private wsDown = false
+  /**
+   * harden-core-channel-deployment D6/4.1: global "core unreachable" state,
+   * polled from `/api/summary` independently of the composer. Discriminator
+   * is `reachability.ok === false` with the full `cause` string rendered —
+   * no `kind` branches (kind arrives with a later change; this stays the
+   * single replaceable decision point). Null = reachable or unknown.
+   */
+  @state() private coreUnreachable: { cause: string } | null = null
+  private coreReachabilityTimer: number | undefined = undefined
 
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
@@ -209,6 +225,28 @@ export class SebasApp extends LitElement {
     .ws-banner svg {
       flex: 0 0 auto;
     }
+    /* harden-core-channel-deployment 4.1: same global tier as the WS
+       banner (absolute, above the outlet, never shifts layout), distinct
+       severity color so the two outage kinds stay visually apart. */
+    .core-banner {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: var(--sebas-status-failed, #b91c1c);
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    .core-banner svg {
+      flex: 0 0 auto;
+    }
     .outlet {
       /* 满幅工作台：workbench 类路由（/ 与 /sessions/:key）直接铺满
          出口区（去掉居中窄栏），滚动交给视图内部（turn-stream）。 */
@@ -325,6 +363,30 @@ export class SebasApp extends LitElement {
     setUnauthorizedHandler(() => this.showLogin())
     this.onNavigate()
     void this.checkAuth()
+    void this.loadCoreReachability()
+    this.coreReachabilityTimer = window.setInterval(() => {
+      void this.loadCoreReachability()
+    }, CORE_REACHABILITY_POLL_MS)
+  }
+
+  /**
+   * harden-core-channel-deployment 4.1: `ok === false` shows the banner
+   * with the reported cause; anything else clears it (recovery needs no
+   * reload). A failed fetch leaves the last state untouched — transport
+   * outages already surface via the WS banner, so this stays strictly the
+   * core-reachability signal and never double-reports.
+   */
+  private async loadCoreReachability(): Promise<void> {
+    try {
+      const data = await api.summary()
+      if (data.reachability && data.reachability.ok === false) {
+        this.coreUnreachable = { cause: data.reachability.cause ?? 'core not connected' }
+      } else {
+        this.coreUnreachable = null
+      }
+    } catch {
+      // Ignore: keep the last known state (see above).
+    }
   }
 
   private onWsState = (e: Event): void => {
@@ -371,6 +433,10 @@ export class SebasApp extends LitElement {
     window.removeEventListener('popstate', this.onNavigateBound)
     document.removeEventListener('click', this.onClick)
     window.removeEventListener('sebas:ws-state', this.onWsState)
+    if (this.coreReachabilityTimer !== undefined) {
+      window.clearInterval(this.coreReachabilityTimer)
+      this.coreReachabilityTimer = undefined
+    }
     super.disconnectedCallback()
   }
 
@@ -469,6 +535,11 @@ export class SebasApp extends LitElement {
         ${this.wsDown
           ? html`<div class="ws-banner" role="alert">
               ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
+            </div>`
+          : nothing}
+        ${this.coreUnreachable
+          ? html`<div class="core-banner" role="alert">
+              ${icon('alert', 14)}<span>核心不可达：${this.coreUnreachable.cause}（浏览不受影响，可提交的操作将被门禁）</span>
             </div>`
           : nothing}
         <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>

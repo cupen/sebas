@@ -607,6 +607,12 @@ export interface Project {
   added_at: number
   branch?: string | null
   branch_at?: number
+  /**
+   * harden-core-channel-deployment D7: present only when the registry write
+   * fell back to the local file because the core state store was
+   * unreachable. Absent on the healthy state-store path and on 503s.
+   */
+  degraded?: { cause: string }
 }
 
 export interface ProjectBranchInfo {

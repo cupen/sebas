@@ -39,6 +39,13 @@ export class SebasProjectRail extends LitElement {
   @state() private addDialogOpen = false
   @state() private addPath = ''
   @state() private addError: string | null = null
+  /**
+   * harden-core-channel-deployment 4.3: last add fell back to the local
+   * registry while the core was unreachable — shown inline until the next
+   * add attempt so the operator learns it at registration time, not at
+   * first-session time.
+   */
+  @state() private degradedNotice: string | null = null
 
   private fetchSeq = 0
   private unsubscribe?: () => void
@@ -141,6 +148,9 @@ export class SebasProjectRail extends LitElement {
     .group-head .group-count { margin-left: auto; font-variant-numeric: tabular-nums; background: var(--sebas-surface-3); border-radius: var(--sebas-radius-full); padding: 0 7px; font-size: 0.62rem; }
     .group-head:focus-visible { outline: var(--sebas-focus-ring); outline-offset: 1px; }
     .error { padding: 8px 12px; color: var(--sebas-status-failed); font-size: 0.78rem; }
+    /* harden-core-channel-deployment 4.3: degraded-registration notice —
+       warn tier (not failed): the project did land, only via fallback. */
+    .degraded-notice { padding: 8px 12px; color: var(--sebas-status-warn, #b45309); font-size: 0.78rem; }
     .error .retry-btn {
       margin-left: 4px;
       padding: 1px 8px;
@@ -269,6 +279,7 @@ export class SebasProjectRail extends LitElement {
     this.addDialogOpen = true
     this.addPath = ''
     this.addError = null
+    this.degradedNotice = null
     const picker = this.shadowRoot?.querySelector('.folder-picker') as any
     if (picker?.reset) void picker.reset()
   }
@@ -279,6 +290,9 @@ export class SebasProjectRail extends LitElement {
     if (!path) { this.addError = '请输入路径'; return }
     try {
       const p = await api.projects.add(path)
+      this.degradedNotice = p.degraded?.cause
+        ? `核心不可达，已写入本地注册表（${p.degraded.cause}）`
+        : null
       this.closeAddDialog()
       await this.refresh()
       this.onSelect(p.path)
@@ -368,6 +382,7 @@ export class SebasProjectRail extends LitElement {
         <button class="add-btn" aria-label="Add project" title="添加项目" @click=${this.openAddDialog}>+</button>
       </div>
       ${this.error ? html`<div class="error">${this.error} <button class="retry-btn" @click=${() => void this.refresh()}>重试</button></div>` : nothing}
+      ${this.degradedNotice ? html`<div class="degraded-notice" role="status">${this.degradedNotice}</div>` : nothing}
       ${this.projects.length === 0 ? html`<div class="empty">尚未注册项目</div>` : html`<ul>${this.projects.map((p, i) => this.renderRow(p, i))}</ul>`}
       ${this.renderInbox()}
       ${this.renderHistory()}
