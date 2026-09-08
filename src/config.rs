@@ -374,6 +374,12 @@ pub struct WatchdogCoreConfig {
     /// （或 per-uid 临时目录回退）。
     #[serde(default)]
     pub channel_path: Option<String>,
+    /// core session channel 握手 secret 的落盘路径
+    /// （harden-core-channel-deployment D1）：显式值优先；缺省 →
+    /// `<config 文件所在目录>/core.secret`（见
+    /// `core_channel::secret::secret_file_path`）。
+    #[serde(default)]
+    pub secret_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -789,6 +795,25 @@ allowed_roots = ["~/work", "/srv/projects"]
             roots[0]
         );
         assert_eq!(roots[1], "/srv/projects");
+    }
+
+    #[test]
+    fn core_secret_file_defaults_to_none_and_parses_explicit() {
+        // harden-core-channel-deployment 1.1：缺省无显式键（走 <config 目录>/
+        // core.secret 推导）；显式键按字面解析。
+        let cfg = Config::parse("").expect("空配置应可解析");
+        assert!(cfg.watchdog.core.secret_file.is_none());
+        let cfg = Config::parse(
+            r#"
+[watchdog.core]
+secret_file = "/etc/sebas/x.secret"
+"#,
+        )
+        .expect("secret_file 应可解析");
+        assert_eq!(
+            cfg.watchdog.core.secret_file.as_deref(),
+            Some("/etc/sebas/x.secret")
+        );
     }
 
     #[test]

@@ -7,8 +7,10 @@
 
 pub mod client;
 pub mod protocol;
+pub mod secret;
 pub mod server;
 
+pub use secret::secret_file_path;
 pub use server::{default_socket_path, socket_path};
 
 #[cfg(test)]
