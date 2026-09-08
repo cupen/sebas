@@ -34,5 +34,6 @@
 ## 5. 验收：账本闭环（A 批合流时执行；B 批合流时复核 B2.3 即可，不重做全量）
 
 - [x] 5.1 跑 `openspec status --change cover-core-channel-test-gaps --json` 验证四个 artifact 全部 `done`（验证：proposal/specs/design/tasks 状态均为 done；isPlanningComplete: true）
-- [ ] 5.2 A 批：跑 `cargo test --workspace` + `invoke testsuite-webui --case permission`（基线确认）全绿；cross-uid 单测按 CI-only 非门禁处理（design D5），不挡绿。B 批：跑 `invoke testsuite-webui` 全量 3 连绿；若与 harden 合流时的共享 3 连绿之间产品代码无变更，可复用彼次结果并注记（验证：稳定性门槛一致；本期新 case 就位）
-- [ ] 5.3 在 `tests/acceptance/COVERAGE.md` 段落末尾追加 `cover-core-channel-test-gaps` 一行指向本期 commit hash 与本 tasks（验证：账本自身可追溯）
+- [x] 5.2 A 批：跑 `cargo test --workspace` + `invoke testsuite-webui --case permission`（基线确认）全绿；cross-uid 单测按 CI-only 非门禁处理（design D5），不挡绿。B 批：跑 `invoke testsuite-webui` 全量 3 连绿；若与 harden 合流时的共享 3 连绿之间产品代码无变更，可复用彼次结果并注记（验证：稳定性门槛一致；本期新 case 就位）
+  - 注（2026-09-08）：A 批 `cargo test --workspace` 全绿（104 个测试二进制 ok）+ permission case 3/3 绿；B 批因产品代码有变更（session_backend/api/client/agent_backend + tasks.py 沙箱）不可复用 harden 的 3 连绿，已实跑 `invoke testsuite-webui` 全量 3 次全部 exit 0（34 主套件 + 3 auth + 4 detached；detached 首例首试由 retry 吸收，见 B1.2 注），另加第 4 次确认跑 exit 0。
+- [x] 5.3 在 `tests/acceptance/COVERAGE.md` 段落末尾追加 `cover-core-channel-test-gaps` 一行指向本期 commit hash 与本 tasks（验证：账本自身可追溯）

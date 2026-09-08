@@ -222,6 +222,13 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > observed product gap：generic-ACP 驱动不产 `Finished`（会话停留 working）且 agent 级
 > non-terminal Error 在 webui 无渲染面——用例按可观测契约断言（无假成功），缺口待后续。
 
+> cover-core-channel-test-gaps 实施账（2026-09-08）：A 批 commit `049672e`（reachability
+> 三态 + kind、State 三件 contract、ensure_message/cross-uid；`tests/state_channel_contract_test.rs`）；
+> B 批 commit `24ec929`（detached 审批旅程 `approval-detached.spec.ts` + 模型面两例
+> `models.spec.ts` + 沙箱 `[acp.agents.fakeacp]`）；实施清单
+> `openspec/changes/cover-core-channel-test-gaps/tasks.md`。全套件 `invoke testsuite-webui`
+> 3 连绿（exit 0：34 + 3 + 4，detached 首例首试由 retry 吸收）。
+
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（该 change 尚未同步进主 spec，主 spec 暂无设置面 requirement）；S5a/S5b 的
 > provider 写 503 语义已由主 spec `模型管理覆盖`「settings provider 只读」吸收，故锚到
