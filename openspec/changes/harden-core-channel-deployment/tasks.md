@@ -11,7 +11,7 @@
 ## 2. 客户端 secret 发现（design D2）
 
 - [x] 2.1 `CoreChannelBackend` secret 动态解析：env 缓存 → 每次连接前读 secret 文件 → 皆缺省输出一次 warn 并以空 secret 尝试；`secret rejected` / 断线重连时重读文件；单测：文件发现连接成功、换钥后重连自愈、双缺省 warn；验证：`cargo test --lib core_channel::client`
-- [ ] 2.2 im 与 router 订阅侧接入同一解析函数（替换裸 `env::var`），保持既有 env 行为不变；验证：`cargo test`（im_cmd / router 订阅相关既有用例全绿）
+- [x] 2.2 im 与 router 订阅侧接入同一解析函数（替换裸 `env::var`），保持既有 env 行为不变；验证：`cargo test`（im_cmd / router 订阅相关既有用例全绿）——实现核验：`im_cmd.rs`/`webui_cmd.rs` 走 `ChannelSecret::from_env_or_file`，router `channel_secret()` env→`SEBAS_ROUTER_CONFIG` 同目录 core.secret，watchdog 注入该 env；`cargo test -p sebas-router --lib` 114 passed（2026-09-09 验收勾选，实现在 694c2a5）
 
 ## 3. readiness 契约（design D4）
 
