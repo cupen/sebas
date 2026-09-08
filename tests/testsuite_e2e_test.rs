@@ -19,9 +19,11 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    http_client, post_json, wait_for, wait_router_addr, wait_reachable,
+    http_client, post_json, wait_for, wait_router_addr, wait_reachable, wait_secret_file,
     wait_unreachable_with_cause, webui_healthy, Sandbox,
 };
+#[cfg(target_os = "linux")]
+use support::wait_supervised_core_pid;
 
 /// Startup: core + standalone webui come up, webui reports the core channel
 /// reachable and /health serves.
@@ -339,4 +341,158 @@ async fn startup_failure_run_exits_75_with_summary() {
     );
     let file = std::fs::read_to_string(&error_file).expect("startup error file written");
     assert_eq!(file.trim(), last.trim());
+}
+
+/// harden-core-channel-deployment §5.1 — no-secret assembly journey (the
+/// live "socket absent" incident as a regression case): core and standalone
+/// webui start with NO `SEBAS_CORE_SECRET` in env. The core auto-arms with a
+/// minted secret published to the secret file; the webui discovers it from
+/// the same `-c` config. Reachability must come up and a full ACP session
+/// round-trip must complete. The pre-existing env-injection cases above
+/// cover the "existing path does not regress" half of the spec.
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn channel_no_secret_assembly_serves_session_round_trip() {
+    let sb = Sandbox::new("testsuite_e2e", "no-secret");
+    let cli = http_client();
+    let _core = sb.spawn_core_no_secret();
+    let _webui = sb.spawn_webui_no_secret();
+
+    // Auto-arm must have published a minted secret where D1 says it lives
+    // (wait covers both existence and content; the path is resolved by the
+    // same function the core and webui use).
+    let published = wait_secret_file(&sb).await;
+    assert!(!published.is_empty());
+
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "backend": "acp" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"]
+        .as_str()
+        .expect("key in create response")
+        .to_string();
+
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+    let detail = wait_for(
+        "no-secret session turn to reach Done",
+        Duration::from_secs(25),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            Box::pin(async move {
+                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let done = v["status_slug"].as_str() == Some("done")
+                    || v["status"]
+                        .as_str()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                done.then_some(v)
+            })
+        },
+    )
+    .await;
+
+    let transcript = detail["body"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    assert!(
+        transcript.contains("hello") && transcript.contains("world"),
+        "turn transcript must carry fake-claude's reply, got: {transcript:?}"
+    );
+}
+
+/// harden-core-channel-deployment §5.2 — secret rotation self-heal: on a
+/// no-secret assembly each core boot mints a FRESH secret (rotation). Kill
+/// the core and restart it with the same config; the running webui (file
+/// discovery, re-read per connect) must recover WITHOUT a restart, with an
+/// honest cause while down.
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn channel_secret_rotation_heals_running_webui() {
+    let sb = Sandbox::new("testsuite_e2e", "rotation");
+    let cli = http_client();
+    let mut core = sb.spawn_core_no_secret();
+    let _webui = sb.spawn_webui_no_secret();
+    wait_reachable(&cli, &sb).await;
+    let before = wait_secret_file(&sb).await;
+
+    core.kill().await.expect("kill core");
+    let cause = wait_unreachable_with_cause(&cli, &sb).await;
+    assert!(!cause.is_empty(), "outage cause must be reported");
+
+    let _core2 = sb.spawn_core_no_secret();
+    // The restarted core must have minted a fresh secret (proves rotation
+    // actually happened rather than the webui reconnecting to a stale key).
+    let hint = sb.path.clone();
+    let secret_path = sb.secret_file_path();
+    let after = wait_for(
+        "restarted core to mint a fresh secret",
+        Duration::from_secs(15),
+        &hint,
+        move || {
+            let path = secret_path.clone();
+            let before = before.clone();
+            Box::pin(async move {
+                let raw = std::fs::read_to_string(&path).ok()?;
+                let fresh = raw.trim().to_string();
+                (!fresh.is_empty() && fresh != before).then_some(fresh)
+            })
+        },
+    )
+    .await;
+    assert!(!after.is_empty());
+    wait_reachable(&cli, &sb).await;
+}
+
+/// harden-core-channel-deployment §5.3 — supervision recovery journey
+/// (narrows acceptance-ledger gap #3): `sebas run` supervises core + webui;
+/// SIGKILL the supervised core child; the supervisor must restart it within
+/// its restart delay and the webui must report reachable again.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn watchdog_supervision_restarts_killed_core() {
+    let mut sb = Sandbox::new("testsuite_e2e", "supervision");
+    sb.set_core_supervised();
+    let cli = http_client();
+    let mut run = sb.spawn_watchdog();
+    let run_pid = run.id().expect("watchdog pid");
+    wait_reachable(&cli, &sb).await;
+
+    let core_pid = wait_supervised_core_pid(&sb, run_pid).await;
+    unsafe { libc::kill(core_pid as libc::pid_t, libc::SIGKILL) };
+
+    let cause = wait_unreachable_with_cause(&cli, &sb).await;
+    assert!(!cause.is_empty(), "outage cause must be reported");
+
+    // Supervisor restart (RESTART_DELAY 1s) + fresh boot: socket returns and
+    // the supervised webui heals without any restart of its own.
+    wait_reachable(&cli, &sb).await;
+    assert!(
+        sb.channel_path.exists(),
+        "channel socket must exist again after supervisor restart"
+    );
+    assert_eq!(
+        webui_healthy(&cli, &sb).await,
+        Some(true),
+        "webui must keep serving throughout supervision recovery"
+    );
+    // Tear down the whole supervised tree (kill_on_drop alone would orphan
+    // the core/webui grandchildren).
+    sb.reap_watchdog(&mut run).await;
 }
