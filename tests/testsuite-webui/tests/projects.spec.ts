@@ -60,10 +60,12 @@ test.describe('项目管理覆盖', () => {
         })
         .toBe(true)
       await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 10_000 })
-      // 工作台头部显示项目完整路径（title 提供悬浮全文），而非 basename。
-      await expect(page.locator('sebas-dashboard .project-header .path')).toHaveText(projectName, {
-        timeout: 10_000,
-      })
+      // 工作台头部 .path 渲染项目 basename（产品刻意行为：dashboard.ts 只放
+      // basename，完整路径放 title 悬浮属性——与 204a901 收紧项目 rail 一致）；
+      // 用例据此断言 basename 文本 + title 携带完整路径以锚定路径身份。
+      const headerPath = page.locator('sebas-dashboard .project-header .path')
+      await expect(headerPath).toHaveText(projectName, { timeout: 10_000 })
+      await expect(headerPath).toHaveAttribute('title', scene, { timeout: 10_000 })
 
       // Remove via the API surface; the rail reflects it on reload.
       await removeProject(page.request, scene)
