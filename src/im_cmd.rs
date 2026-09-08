@@ -172,10 +172,12 @@ pub async fn run(args: ImArgs) -> Result<()> {
         ));
     }
 
-    let core_secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
-    if core_secret.is_empty() {
-        warn!("SEBAS_CORE_SECRET not set: cannot connect to core session channel; features will degrade");
-    }
+    // harden-core-channel-deployment D2: same env → secret-file discovery
+    // as the standalone webui (the backend warns when both are missing).
+    let secret_file = crate::core_channel::secret_file_path(
+        cfg.watchdog.core.secret_file.as_deref(),
+        std::path::Path::new(&args.config),
+    );
     let control_secret = std::env::var("SEBAS_CONTROL_SECRET").unwrap_or_default();
     if control_secret.is_empty() {
         warn!("SEBAS_CONTROL_SECRET not set: control commands (/upgrade etc.) will report unavailable");
@@ -215,9 +217,9 @@ pub async fn run(args: ImArgs) -> Result<()> {
 
     // 会话端口 + 控制端口 + 前端。
     let port = ChannelPort {
-        backend: crate::core_channel::client::CoreChannelBackend::new(
+        backend: crate::core_channel::client::CoreChannelBackend::new_with_discovery(
             crate::core_channel::socket_path(&cfg),
-            core_secret,
+            secret_file,
         ),
     };
     let control = WatchdogControl {
