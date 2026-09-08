@@ -30,10 +30,10 @@
 - [x] 5.2 进程 e2e「密钥轮换自愈旅程」：kill core → 同 config 重启（新钥）→ 不重启的 webui 恢复 reachable，期间 cause 如实；验证：`invoke testsuite-e2e --case <new>`
 - [x] 5.3 进程 e2e「监督重启恢复旅程」：watchdog 监督形态拉起 core+webui，杀 core → supervisor 自动重启 → webui 恢复（收窄账本缺口 #3）；验证：`invoke testsuite-e2e --case <new>`
 - [x] 5.4 浏览器 detached 变体：`testsuite-webui` 新增**可复用的双进程沙箱 fixture**（core + 独立 webui，auth 关）与 `--case deployment` 旅程：core 停 → 横幅出现含 cause、加项目出现降级提示、composer 门禁生效；core 恢复 → 横幅消失；**fixture 是交付物**：cover B1 的 detached approval e2e 直接复用，不重写 harness；验证：`invoke testsuite-webui --case deployment`——全绿（10.2s，2026-09-09）；主套件 32 passed 回归确认；fixture = tests/testsuite-webui/tests/helpers/detached.ts（stopCore/startCore/isCoreAlive/waitForCoreReachability/detachedSceneDir），harness 经 TESTSUITE_MODE=detached（tasks.py，core+独立 webui、无 SEBAS_CORE_SECRET、pids.json 发布）
-- [ ] 5.5 稳定性复跑：同一提交连续 3 次 `invoke testsuite-e2e` 全绿 + 3 次 `invoke testsuite-webui --case deployment` 全绿；验证：复跑记录落在任务备注
+- [x] 5.5 稳定性复跑：同一提交连续 3 次 `invoke testsuite-e2e` 全绿 + 3 次 `invoke testsuite-webui --case deployment` 全绿；验证：复跑记录落在任务备注——同一提交（5.4 commit 后工作树）连续 3 次 `invoke testsuite-e2e` 全绿（11 passed；2.02s / 2.01s / 2.00s）+ 连续 3 次 `invoke testsuite-webui --case deployment` 全绿（1 passed；10.7s × 3），2026-09-09
 
 ## 6. 文档与账本
 
-- [ ] 6.1 AGENTS.md 沙箱配方简化：退役 `SEBAS_CORE_SECRET=fake` 注入仪式（env 三件套中仅保留与通道无关项），保留 `channel_path` 显式要求；验证：按新配方从零手跑一次沙箱可达
-- [ ] 6.2 COVERAGE.md 更新：缺口 #3 标注收窄证据（5.3 旅程）、core-session-channel / webui / testsuite 各行补新旅程证据；验证：矩阵无空白条目
-- [ ] 6.3 fail-fast 回归重跑：本 change 动了 `run.rs` 武装门与 bind 路径，fail-fast 的 `startup_failure_core/run` e2e 重跑一次（rebase 验证，非重做）；若 COVERAGE 缺口 3 的"进程级注入不可达"注记因 spawn 路径变化部分失效，同步改写注记；验证：`invoke testsuite-e2e --case startup_failure` 全绿
+- [x] 6.1 AGENTS.md 沙箱配方简化：退役 `SEBAS_CORE_SECRET=fake` 注入仪式（env 三件套中仅保留与通道无关项），保留 `channel_path` 显式要求；验证：按新配方从零手跑一次沙箱可达——`/tmp/sebas-verify` 从零按新配方手跑：core 以 `source="generated"` 自动装配（core.secret 与 socket 均 0600）、/health ok、reachability.ok=true、fake-claude 会话往返 done；SIGTERM 优雅退出移除 socket；沙箱目录删除、端口释放（2026-09-09）
+- [x] 6.2 COVERAGE.md 更新：缺口 #3 标注收窄证据（5.3 旅程）、core-session-channel / webui / testsuite 各行补新旅程证据；验证：矩阵无空白条目——core-session-channel/webui/watchdog 三行补旅程证据、浏览器树新增「部署韧性」行（deployment.spec.ts）、缺口 #3 收窄改写（监督恢复旅程落地，仅 spawn-fail 注入保留单元面）、缺口 #1 注明 fixture 可复用、变更账本新增本 change 行（2026-09-09）
+- [x] 6.3 fail-fast 回归重跑：本 change 动了 `run.rs` 武装门与 bind 路径，fail-fast 的 `startup_failure_core/run` e2e 重跑一次（rebase 验证，非重做）；若 COVERAGE 缺口 3 的"进程级注入不可达"注记因 spawn 路径变化部分失效，同步改写注记；验证：`invoke testsuite-e2e --case startup_failure` 全绿——startup_failure_core/run 均 ok（2 passed，2026-09-09）；spawner `current_exe()` 派生路径未被本 change 改动，缺口 3 的 spawn-fail 注入注记仍成立，已同步改写为收窄后表述（监督恢复旅程有据、注入子路径保留单元面）

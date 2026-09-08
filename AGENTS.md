@@ -66,19 +66,17 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `[acp.claude] sessions_dir` / `work_dir`,
      `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
      (port ≠ 9797, e.g. 9877) all set inside it;
-   - env: three files that otherwise default into the real `~/.sebas` —
-     all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db` —
-     the easy one to miss: without it the sandbox opens the real DB even
+   - env: three files that would otherwise default into the real `~/.sebas`
+     — all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db`
+     — the easy one to miss: without it the sandbox opens the real DB even
      with everything else sandboxed), `SEBAS_STATE_FILE` (default
      `~/.sebas/state.json`), and `SEBAS_ROUTER_PROVIDER_OVERLAY` (default
-     `~/.sebas/providers.json`). No `SEBAS_CORE_SECRET` needed: the core
-     auto-arms and mints a secret published to `<config dir>/core.secret`
-     (0600), and the standalone webui discovers it from the same `-c`
-     config (an explicit env still wins — that is how the watchdog injects
-     its own secret into supervised children).
+     `~/.sebas/providers.json`). Do **not** set `SEBAS_CORE_SECRET`: the core
+     auto-arms (generates a key, writes it to `<config dir>/core.secret`,
+     0600) and clients discover it from that file on every connect attempt —
+     the env var is only for explicitly simulating a wrong-secret refusal.
 
-2. Run the two halves (no secret env on either — this is the no-secret
-   assembly the `channel_no_secret_*` e2e pins):
+2. Run the two halves exactly as the watchdog would:
 
    ```bash
    SEBAS_STATE_DB=… SEBAS_STATE_FILE=… \
@@ -147,7 +145,8 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
    usage_file = "<SB>/router-usage.jsonl"
    ```
 
-2. Start the core in debug mode:
+2. Start the core in debug mode (no `SEBAS_CORE_SECRET` — auto-arm writes
+   the generated key to `<SB>/core.secret` and clients discover it):
 
    ```bash
    cargo build
@@ -157,9 +156,6 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
      target/debug/sebas core -c "<SB>/config.toml" \
      --router --debug --webui --webui-port 9877 > "<SB>/core.log" 2>&1
    ```
-
-   No `SEBAS_CORE_SECRET` — the core mints one and publishes
-   `<SB>/core.secret` (assert it exists); the webui half discovers it.
 
    The built-in router binds a random port — read it from the log line
    `router started (core --router) … addr=127.0.0.1:<port>`.
@@ -190,7 +186,8 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 Verifiable: route surface; channel/socket lifecycle (present while running,
 removed on graceful exit); webui↔core connect/reconnect (`reachability` in
 `/api/summary` flips `ok`/`cause`); spawn/message round-trips; typed
-rejections; wrong-secret refusal. With the fake-claude stub as the ACP agent,
+rejections; wrong-secret refusal (set `SEBAS_CORE_SECRET` explicitly on one
+side only). With the fake-claude stub as the ACP agent,
 a full session turn completes end-to-end — against synthetic answers, not a
 real model. **Not** verifiable without the operator's provider credentials: a
 REAL ACP child completing a turn — without the stub, sessions spawn then the
