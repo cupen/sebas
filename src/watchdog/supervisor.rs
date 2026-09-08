@@ -1206,6 +1206,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn core_bind_failed_before_ready_marks_degraded_not_failed_startup() {
+        // harden-core-channel-deployment 3.2：core 的通道 bind 失败（ready
+        // 之前以 75 退出）复用 bind-failed 同一分支 → Degraded，而不是 fail-fast 终态，
+        // 也不进入无限重启。readiness 门 + ServiceName::Core 还原 core 路径。
+        let spawner = FakeSpawner::bind_failed();
+        struct GatedBindFailed {
+            inner: Arc<FakeSpawner>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceSpawner for GatedBindFailed {
+            async fn spawn(&self) -> Result<SpawnedInstance> {
+                let mut inst = self.inner.spawn().await?;
+                // 发送端即弃：ready 永不到达（bind 失败先于 ready）。
+                inst.readiness = Some(oneshot::channel().1);
+                Ok(inst)
+            }
+        }
+        let spawner: Arc<dyn ServiceSpawner> = Arc::new(GatedBindFailed { inner: spawner });
+        let mut spec = fast_spec(spawner, DesiredState::Enabled);
+        spec.name = ServiceName::Core;
+        let (handle, task) = start_supervision(spec);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let snap = handle.snapshot().await;
+        assert_eq!(
+            snap.state,
+            ServiceState::Degraded,
+            "core 在 ready 前以 75 退出应标记 Degraded（而非 failed-startup 终态）"
+        );
+        assert!(handle.send(ServiceCommand::Shutdown).await);
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
     async fn restart_clears_degraded() {
         let spawner = FakeSpawner::bind_failed();
         let (handle, task) = start_supervision(fast_spec(spawner.clone(), DesiredState::Enabled));
