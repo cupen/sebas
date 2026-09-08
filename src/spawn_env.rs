@@ -1570,6 +1570,10 @@ api_key_env = "ANTHROPIC_API_KEY"
     /// auth 的合法状态。
     #[tokio::test]
     async fn router_with_empty_auth_token_still_constructs_url() {
+        // parse 会读 `SEBAS_ROUTER_PROVIDER_OVERLAY`（env 优先于 config 缺省）：
+        // 先持锁清 env，避免并发 overlay 用例的临时 overlay 混入本例的 parse。
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_overlay_env();
         let raw = r#"
 [router]
 listen = "127.0.0.1:8787"
