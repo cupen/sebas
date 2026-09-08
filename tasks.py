@@ -9,8 +9,8 @@ Usage:
     invoke --help                   # list all tasks
 """
 
-import os
 import json
+import os
 import shutil
 import signal
 import subprocess
@@ -176,16 +176,21 @@ def testsuite_webui(c, case=None):
 
     suite_dir = "tests/testsuite-webui"
     if case:
-        # --case auth runs the auth-on form; --case deployment runs the
-        # detached dual-process journey; anything else filters the main suite.
+        # --case auth runs the auth-on form; --case deployment the detached
+        # dual-process form (core + standalone webui, no shared-secret env);
+        # anything else filters the main suite.
         if case == "auth":
             cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
         elif case == "deployment":
-            cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.deployment.config.ts"
+            cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
         else:
             cmd = f"pnpm --dir {suite_dir} exec playwright test {case}"
     else:
-        cmd = f"pnpm --dir {suite_dir} exec playwright test && pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
+        cmd = (
+            f"pnpm --dir {suite_dir} exec playwright test"
+            f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
+            f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
+        )
     result = c.run(cmd, echo=True)
     if result.failed:
         print(
@@ -230,13 +235,15 @@ def _cfg_path(path):
     return path.replace("\\", "/")
 
 
-def _sandbox_env(work):
+def _sandbox_env(work, secret=True):
     """Full env isolation: every default that would fall back to the real
-    ~/.sebas is redirected into the throwaway dir."""
+    ~/.sebas is redirected into the throwaway dir. `secret=False` (detached
+    dual-process mode) omits SEBAS_CORE_SECRET entirely — the core then
+    auto-arms from a generated key file and clients discover it (D2/D3,
+    harden-core-channel-deployment 5.4)."""
     env = dict(os.environ)
     env.update(
         {
-            "SEBAS_CORE_SECRET": "fake",
             "SEBAS_STATE_DB": os.path.join(work, "sebas.db"),
             "SEBAS_STATE_FILE": os.path.join(work, "state.json"),
             "SEBAS_ROUTER_PROVIDER_OVERLAY": os.path.join(work, "providers.json"),
@@ -244,28 +251,27 @@ def _sandbox_env(work):
             "SEBAS_PROJECTS_PATH": os.path.join(work, "projects.json"),
         }
     )
+    if secret:
+        env["SEBAS_CORE_SECRET"] = "fake"
+    else:
+        env.pop("SEBAS_CORE_SECRET", None)
     return env
 
 
-def _write_sandbox_config(work, fake_bin, auth_on, detached_webui_port=None):
+def _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=False, port=None):
     """config.toml following the AGENTS.md debug recipe.
 
-    detached_webui_port (harden-core-channel-deployment §5.4): dual-process
-    form — the standalone webui is supervised on this port instead of the
-    in-process `--webui` flag (lets the core die independently of the webui
-    so deployment-state journeys can kill it).
-    """
+    `[watchdog.webui] enabled` decides the topology: false (default) = the
+    bare core owns the webui via `--webui-port`; true = the standalone
+    `sebas webui` serves it from host/port in this section (the detached
+    dual-process form, harden-core-channel-deployment 5.4)."""
     cfg = _cfg_path(work)
     fake = _cfg_path(os.path.abspath(fake_bin))
     auth_toml = "true" if auth_on else "false"
-    if detached_webui_port is None:
-        webui_toml = "enabled = false"
+    if webui_enabled:
+        webui_toml = f'enabled = true\nhost = "127.0.0.1"\nport = {port}'
     else:
-        webui_toml = (
-            "enabled = true\n"
-            'host = "127.0.0.1"\n'
-            f"port = {detached_webui_port}"
-        )
+        webui_toml = "enabled = false"
     text = f"""[feishu]
 enabled = false
 
@@ -309,11 +315,18 @@ def _health_ok(url):
         return False
 
 
-def _run_webui_sandbox(port, auth_on, keep, reuse, human):
+def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     """Assemble a throwaway backend and block until signalled; then clean up.
     Mirrors the retired bash harness semantics (ports, env names, pointer and
-    marker contracts) so Playwright configs and the reporter keep working."""
-    sebas_bin = _sandbox_bin("sebas")
+    marker contracts) so Playwright configs and the reporter keep working.
+
+    `detached=True` is the dual-process topology (harden-core-channel-deployment
+    5.4): the core runs WITHOUT `--webui` and a standalone `sebas webui` serves
+    the dashboard — no SEBAS_CORE_SECRET anywhere (auto-arm + secret-file
+    discovery). The two pids are published at `<scene>/pids.json` so the
+    Playwright fixture (tests/helpers/detached.ts) can stop/start the core
+    mid-journey; teardown kills whatever pids the file lists last."""
+    sebas_bin = os.path.abspath(_sandbox_bin("sebas"))
     fake_bin = _sandbox_bin("fake-claude")
     for path in (sebas_bin, fake_bin):
         if not (os.path.isfile(path) and os.access(path, os.X_OK)):
@@ -352,7 +365,7 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human):
         os.makedirs(os.path.join(work, sub), exist_ok=True)
     with open(scene_file, "w") as f:
         f.write(work)
-    _write_sandbox_config(work, fake_bin, auth_on)
+    _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port)
 
     if auth_on:
         result = subprocess.run(
@@ -366,29 +379,62 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human):
 
     log_path = os.path.join(work, "core.log")
     log = open(log_path, "w")
-    proc = subprocess.Popen(
-        [
-            sebas_bin, "core", "-c", os.path.join(work, "config.toml"),
-            "--router", "--debug", "--webui", "--webui-port", str(port),
-        ],
-        env=_sandbox_env(work),
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
+    webui_log = None
+    core_proc = None
+    if detached:
+        webui_log_path = os.path.join(work, "webui.log")
+        webui_log = open(webui_log_path, "w")
+        env = _sandbox_env(work, secret=False)
+        core_proc = subprocess.Popen(
+            [sebas_bin, "core", "-c", os.path.join(work, "config.toml"), "--router", "--debug"],
+            env=env,
+            cwd=work,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        proc = subprocess.Popen(
+            [sebas_bin, "webui", "-c", os.path.join(work, "config.toml")],
+            env=env,
+            cwd=work,
+            stdout=webui_log,
+            stderr=subprocess.STDOUT,
+        )
+        with open(os.path.join(work, "pids.json"), "w") as f:
+            json.dump({"core": core_proc.pid, "webui": proc.pid}, f)
+    else:
+        proc = subprocess.Popen(
+            [
+                sebas_bin, "core", "-c", os.path.join(work, "config.toml"),
+                "--router", "--debug", "--webui", "--webui-port", str(port),
+            ],
+            env=_sandbox_env(work),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
 
     def _log_tail(n=30):
-        try:
-            with open(log_path) as f:
-                return "".join(f.readlines()[-n:])
-        except OSError:
-            return ""
+        tail = ""
+        for p in (log_path, os.path.join(work, "webui.log") if detached else None):
+            if not p:
+                continue
+            try:
+                with open(p) as f:
+                    tail += "".join(f.readlines()[-n:])
+            except OSError:
+                pass
+        return tail
+
+    def _any_dead():
+        if proc.poll() is not None:
+            return True
+        return detached and core_proc.poll() is not None
 
     # Readiness poll; a dead child during startup is an immediate error.
     for _ in range(120):
         if _health_ok(health_url):
             break
-        if proc.poll() is not None:
-            print("error: sebas core exited during startup; log:", flush=True)
+        if _any_dead():
+            print("error: sebas process exited during startup; log:", flush=True)
             print(_log_tail(), flush=True)
             raise SystemExit(1)
         time.sleep(0.5)
@@ -399,24 +445,42 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human):
         raise SystemExit(1)
     print(f"[testsuite] sandbox ready on port {port} (dir: {work})", flush=True)
     if human:
+        topology = "detached 双进程（core + 独立 webui，无 SEBAS_CORE_SECRET）" if detached else "单进程 core --webui"
         if auth_on:
-            print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权开启，admin / admin）", flush=True)
+            print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权开启，admin / admin；{topology}）", flush=True)
         else:
-            print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权关闭，免登录）", flush=True)
+            print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权关闭，免登录；{topology}）", flush=True)
         print(f"### 日志与状态均在 {work}（core.log）；Ctrl-C 退出并清理", flush=True)
 
     while proc.poll() is None and not stop.is_set():
         stop.wait(0.5)
 
-    # Teardown: SIGTERM the backend, then keep-or-clean (the reporter owns the
-    # authoritative decision via `.tests-failed`; this is the fallback path).
-    if proc.poll() is None:
-        proc.terminate()
+    # Teardown: SIGTERM the backend(s) — including any core the Playwright
+    # fixture started (pids.json always lists the CURRENT core pid) — then
+    # keep-or-clean (the reporter owns the authoritative decision via
+    # `.tests-failed`; this is the fallback path).
+    for child in ([proc, core_proc] if detached else [proc]):
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+    if detached:
         try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            with open(os.path.join(work, "pids.json")) as f:
+                for pid in json.load(f).values():
+                    if not isinstance(pid, int):
+                        continue
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+        except (OSError, ValueError):
+            pass
     log.close()
+    if webui_log is not None:
+        webui_log.close()
     failed_marker = os.path.exists(os.path.join(work, ".tests-failed"))
     if failed_marker or keep:
         print(f"[testsuite] sandbox scene kept at: {work} (core.log inside)", flush=True)
@@ -427,218 +491,6 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human):
         except OSError:
             pass
         print(f"[testsuite] sandbox cleaned: {work}", flush=True)
-
-
-def _free_port():
-    import socket
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-_TESTSUITE_DETACHED_PORT = 9897
-
-
-def _spawn_dual_child(sebas_bin, args, env, log_path):
-    log = open(log_path, "w")
-    proc = subprocess.Popen(
-        [sebas_bin, *args],
-        env=env,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    return proc, log
-
-
-def _run_dual_sandbox(port, keep, reuse, human=False):
-    """Dual-process sandbox (harden-core-channel-deployment §5.4 fixture):
-    a real `sebas core` plus a STANDALONE `sebas webui` on `port`, sharing
-    one throwaway config (same channel socket + secret discovery as the
-    watchdog's detached topology).
-
-    Reusable beyond the deployment journey: later detached e2es (approval
-    flow) drive the same assembly. The scene dir publishes `proc.json`
-    (core/webui spawn command + env + pids) so specs can kill and respawn
-    the core from inside the browser journey; journey-specific assertions
-    live in the specs, never here.
-    """
-    sebas_bin = _sandbox_bin("sebas")
-    fake_bin = _sandbox_bin("fake-claude")
-    for path in (sebas_bin, fake_bin):
-        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
-            print(f"error: {path} missing, run: cargo build --bin sebas --bin fake-claude")
-            raise SystemExit(1)
-
-    scene_file = os.environ.get(
-        "TESTSUITE_SCENE_FILE", os.path.join(tempfile.gettempdir(), f"sebas-testsuite-webui-scene-{port}")
-    )
-    health_url = f"http://127.0.0.1:{port}/health"
-    summary_url = f"http://127.0.0.1:{port}/api/summary"
-    stop = threading.Event()
-
-    def _on_signal(signum, frame):
-        stop.set()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
-
-    if reuse:
-        try:
-            with open(scene_file) as f:
-                kept = f.read().strip()
-        except OSError:
-            kept = ""
-        if kept and _health_ok(health_url):
-            print(f"[testsuite] reusing existing dual sandbox on port {port} (dir: {kept})", flush=True)
-            while not stop.is_set():
-                stop.wait(1.0)
-            return
-
-    work = tempfile.mkdtemp(prefix="sbtestsuite-dual.")
-    for sub in ("media", "acp", "work"):
-        os.makedirs(os.path.join(work, sub), exist_ok=True)
-    with open(scene_file, "w") as f:
-        f.write(work)
-    _write_sandbox_config(work, fake_bin, False, detached_webui_port=port)
-
-    env = _sandbox_env(work)
-    cfg = os.path.join(work, "config.toml")
-    core_cmd = [sebas_bin, "core", "-c", cfg, "--router", "--debug"]
-    webui_cmd = [sebas_bin, "webui", "-c", cfg]
-    core, core_log = _spawn_dual_child(sebas_bin, core_cmd[1:], env, os.path.join(work, "core.log"))
-    webui, webui_log = _spawn_dual_child(sebas_bin, webui_cmd[1:], env, os.path.join(work, "webui.log"))
-
-    def _procs():
-        return (("core", core), ("webui", webui))
-
-    def _log_tail(path, n=30):
-        try:
-            with open(path) as f:
-                return "".join(f.readlines()[-n:])
-        except OSError:
-            return ""
-
-    def _teardown():
-        # The journey may have respawned the core from the spec (proc.json
-        # tracks the current pid) — reap that one too, not just our original
-        # child handle.
-        try:
-            with open(os.path.join(work, "proc.json")) as f:
-                current_core = int(json.load(f).get("core_pid") or 0)
-        except (OSError, ValueError):
-            current_core = 0
-        for _name, proc in _procs():
-            if proc.poll() is None:
-                proc.terminate()
-        try:
-            if current_core and current_core != core.pid:
-                os.kill(current_core, signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            pass
-        deadline = time.time() + 10
-        for _name, proc in _procs():
-            try:
-                proc.wait(timeout=max(0, deadline - time.time()))
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        if current_core and current_core != core.pid:
-            deadline = time.time() + 10
-            while time.time() < deadline:
-                try:
-                    os.kill(current_core, 0)
-                except (OSError, ProcessLookupError):
-                    break
-                time.sleep(0.2)
-            else:
-                try:
-                    os.kill(current_core, signal.SIGKILL)
-                except (OSError, ProcessLookupError):
-                    pass
-        core_log.close()
-        webui_log.close()
-
-    # Readiness: webui serving AND the core channel reachable (both journeys
-    # start from a connected assembly). A child dying during startup is an
-    # immediate error.
-    ready = False
-    for _ in range(120):
-        if core.poll() is not None or webui.poll() is not None:
-            print("error: dual sandbox child exited during startup; logs:", flush=True)
-            print(_log_tail(os.path.join(work, "core.log")), flush=True)
-            print(_log_tail(os.path.join(work, "webui.log")), flush=True)
-            _teardown()
-            raise SystemExit(1)
-        if _health_ok(health_url):
-            try:
-                with urllib.request.urlopen(summary_url, timeout=3) as r:
-                    import json as _json
-
-                    summary = _json.load(r)
-                if (summary.get("reachability") or {}).get("ok") is True:
-                    ready = True
-                    break
-            except Exception:
-                pass
-        time.sleep(0.5)
-    if not ready:
-        print("error: dual sandbox not reachable after 60s; logs:", flush=True)
-        print(_log_tail(os.path.join(work, "core.log")), flush=True)
-        print(_log_tail(os.path.join(work, "webui.log")), flush=True)
-        _teardown()
-        raise SystemExit(1)
-
-    with open(os.path.join(work, "proc.json"), "w") as f:
-        # Absolute binary path: specs respawn the core with their own cwd
-        # (tests/testsuite-webui), where the relative build path would not
-        # resolve. The config path is already absolute (mkdtemp).
-        core_cmd_abs = [os.path.abspath(core_cmd[0]), *core_cmd[1:]]
-        webui_cmd_abs = [os.path.abspath(webui_cmd[0]), *webui_cmd[1:]]
-        json.dump(
-            {
-                "core_cmd": core_cmd_abs,
-                "core_env": env,
-                "core_pid": core.pid,
-                "webui_cmd": webui_cmd_abs,
-                "webui_pid": webui.pid,
-            },
-            f,
-        )
-    print(f"[testsuite] dual sandbox ready on port {port} (dir: {work})", flush=True)
-    if human:
-        print(f"### dual webui 沙箱就绪：http://127.0.0.1:{port}/  （core + 独立 webui）", flush=True)
-        print(f"### 日志与状态均在 {work}（core.log / webui.log / proc.json）；Ctrl-C 退出并清理", flush=True)
-
-    # The journey intentionally kills the core mid-run (banner/degraded
-    # assertions) and respawns it from the spec — a dead core must NOT take
-    # the harness down. Only a dead webui (which the journey cannot revive)
-    # or the stop signal ends the assembly.
-    core_gone_reported = False
-    while not stop.is_set():
-        if webui.poll() is not None:
-            print("error: dual sandbox webui exited unexpectedly; logs:", flush=True)
-            print(_log_tail(os.path.join(work, "webui.log")), flush=True)
-            _teardown()
-            raise SystemExit(1)
-        if core.poll() is not None and not core_gone_reported:
-            core_gone_reported = True
-            print("[testsuite] dual sandbox core exited (journey kill or crash?) — webui keeps serving", flush=True)
-        if core.poll() is None and core_gone_reported:
-            core_gone_reported = False
-            print("[testsuite] dual sandbox core back (respawned by journey?)", flush=True)
-        stop.wait(0.5)
-
-    _teardown()
-    failed_marker = os.path.exists(os.path.join(work, ".tests-failed"))
-    if failed_marker or keep:
-        print(f"[testsuite] dual sandbox scene kept at: {work} (core.log inside)", flush=True)
-    else:
-        shutil.rmtree(work, ignore_errors=True)
-        try:
-            os.remove(scene_file)
-        except OSError:
-            pass
-        print(f"[testsuite] dual sandbox cleaned: {work}", flush=True)
 
 
 @task(
@@ -661,31 +513,25 @@ def testsuite_webui_sandbox(c, port=None, auth=False, keep=False):
 
 @task
 def testsuite_webui_server(c):
-    """Blocking sandbox server for Playwright's webServer.command (ports 9899/9898)."""
+    """Blocking sandbox server for Playwright's webServer command (ports 9899/9898/9897).
+
+    TESTSUITE_MODE=detached selects the dual-process topology (core without
+    --webui + standalone `sebas webui`, NO SEBAS_CORE_SECRET — auto-arm and
+    secret-file discovery, harden-core-channel-deployment 5.4); the default
+    is the single-process `core --webui` form."""
     auth_on = os.environ.get("TESTSUITE_AUTH", "0") == "1"
-    default_port = _TESTSUITE_AUTH_PORT if auth_on else _TESTSUITE_PORT
+    detached = os.environ.get("TESTSUITE_MODE", "") == "detached"
+    if detached:
+        default_port = 9897
+    else:
+        default_port = _TESTSUITE_AUTH_PORT if auth_on else _TESTSUITE_PORT
     _run_webui_sandbox(
         port=int(os.environ.get("TESTSUITE_PORT", default_port)),
         auth_on=auth_on,
         keep=os.environ.get("TESTSUITE_KEEP", "0") == "1",
         reuse=os.environ.get("TESTSUITE_REUSE", "0") == "1",
         human=os.environ.get("TESTSUITE_HUMAN", "0") == "1",
-    )
-
-
-@task
-def testsuite_webui_server_detached(c):
-    """Blocking DUAL-process sandbox for Playwright's webServer.command.
-
-    Backs the deployment journey (`invoke testsuite-webui --case deployment`,
-    port 9897): core + standalone webui sharing one throwaway config. Later
-    detached e2es (approval flow) reuse this server unchanged.
-    """
-    _run_dual_sandbox(
-        port=int(os.environ.get("TESTSUITE_PORT", _TESTSUITE_DETACHED_PORT)),
-        keep=os.environ.get("TESTSUITE_KEEP", "0") == "1",
-        reuse=os.environ.get("TESTSUITE_REUSE", "0") == "1",
-        human=os.environ.get("TESTSUITE_HUMAN", "0") == "1",
+        detached=detached,
     )
 
 

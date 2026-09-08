@@ -29,7 +29,7 @@
 - [x] 5.1 进程 e2e「无密钥装配旅程」：双进程均无 `SEBAS_CORE_SECRET` 启动 → reachable + 会话往返（事故回归用例）；并确认既有带 env 用例全绿；验证：`invoke testsuite-e2e --case <new>`
 - [x] 5.2 进程 e2e「密钥轮换自愈旅程」：kill core → 同 config 重启（新钥）→ 不重启的 webui 恢复 reachable，期间 cause 如实；验证：`invoke testsuite-e2e --case <new>`
 - [x] 5.3 进程 e2e「监督重启恢复旅程」：watchdog 监督形态拉起 core+webui，杀 core → supervisor 自动重启 → webui 恢复（收窄账本缺口 #3）；验证：`invoke testsuite-e2e --case <new>`
-- [ ] 5.4 浏览器 detached 变体：`testsuite-webui` 新增**可复用的双进程沙箱 fixture**（core + 独立 webui，auth 关）与 `--case deployment` 旅程：core 停 → 横幅出现含 cause、加项目出现降级提示、composer 门禁生效；core 恢复 → 横幅消失；**fixture 是交付物**：cover B1 的 detached approval e2e 直接复用，不重写 harness；验证：`invoke testsuite-webui --case deployment`
+- [x] 5.4 浏览器 detached 变体：`testsuite-webui` 新增**可复用的双进程沙箱 fixture**（core + 独立 webui，auth 关）与 `--case deployment` 旅程：core 停 → 横幅出现含 cause、加项目出现降级提示、composer 门禁生效；core 恢复 → 横幅消失；**fixture 是交付物**：cover B1 的 detached approval e2e 直接复用，不重写 harness；验证：`invoke testsuite-webui --case deployment`——全绿（10.2s，2026-09-09）；主套件 32 passed 回归确认；fixture = tests/testsuite-webui/tests/helpers/detached.ts（stopCore/startCore/isCoreAlive/waitForCoreReachability/detachedSceneDir），harness 经 TESTSUITE_MODE=detached（tasks.py，core+独立 webui、无 SEBAS_CORE_SECRET、pids.json 发布）
 - [ ] 5.5 稳定性复跑：同一提交连续 3 次 `invoke testsuite-e2e` 全绿 + 3 次 `invoke testsuite-webui --case deployment` 全绿；验证：复跑记录落在任务备注
 
 ## 6. 文档与账本

@@ -48,6 +48,11 @@ export class ErrorCollector {
       // failed resource load; the journeys assert the honest UI presentation
       // (inline error, unchanged lists), not network silence.
       if (text.includes('503') && /\/router\/api\/|\/api\/agent-defaults/.test(url)) return
+      // Deliberate core-outage windows (deployment journey, detached
+      // topology): core-proxied reads answer 502 while the channel is down
+      // by design — the journey asserts the honest UI (banner / gating /
+      // degraded hint), not network silence.
+      if (text.includes('502') && /\/api\//.test(url)) return
       // Intentional rejection probe (phase-3 P2): registering a missing path
       // answers 400 and chromium logs it; the journey asserts the inline
       // dialog error and the untouched registry.

@@ -1,51 +1,83 @@
 /**
- * Dual-process sandbox fixture (harden-core-channel-deployment §5.4).
+ * Reusable dual-process (detached) sandbox fixture — harden-core-channel-deployment
+ * task 5.4 and a DELIVERABLE for the sibling change cover-core-channel-test-gaps:
+ * the B1 detached-approval journey reuses this fixture instead of rewriting
+ * the harness.
  *
- * Generic process control for the detached assembly (`invoke
- * testsuite-webui-server-detached`: real `sebas core` + standalone
- * `sebas webui`, one throwaway config). The harness publishes `proc.json`
- * in the scene dir (spawn command + env + pids); these helpers drive the
- * core lifecycle from inside a browser journey. DELIVERABLE: later detached
- * e2es (approval flow) reuse this module unchanged — journey-specific
- * assertions stay in the specs, never here.
+ * Topology (assembled by `invoke testsuite-webui-server` with
+ * TESTSUITE_MODE=detached, tasks.py): a core process WITHOUT `--webui`
+ * (`sebas core -c <scene>/config.toml --router --debug`) plus a standalone
+ * `sebas webui -c <scene>/config.toml` serving the dashboard. NO
+ * SEBAS_CORE_SECRET is set anywhere: the core auto-arms (generates the key,
+ * writes `<scene>/core.secret`) and clients discover the key from that file
+ * on every connect attempt — so restarting the core with a fresh key
+ * self-heals on the untouched webui side.
+ *
+ * Scene contract published by the harness:
+ * - TESTSUITE_SCENE_FILE → the throwaway scene dir (config.toml, logs,
+ *   state files inside);
+ * - `<scene>/pids.json` → `{"core": pid, "webui": pid}`, updated whenever
+ *   `startCore()` spawns a fresh core, so teardown always kills the live set.
  */
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import type { APIRequestContext } from '@playwright/test'
-import { getSummary } from './api'
-import { sceneDir } from './scene'
 
-export interface DualProc {
-  coreCmd: string[]
-  coreEnv: Record<string, string>
-  corePid: number
-  webuiPid: number
+export const DETACHED_SCENE_FILE =
+  process.env.TESTSUITE_SCENE_FILE ?? path.join(os.tmpdir(), 'sebas-testsuite-webui-scene-9897')
+
+/** The throwaway scene dir (throws honestly if the harness didn't publish one). */
+export function detachedSceneDir(): string {
+  const scene = fs.readFileSync(DETACHED_SCENE_FILE, 'utf8').trim()
+  if (!scene || !fs.existsSync(scene)) {
+    throw new Error(`detached scene dir not found via TESTSUITE_SCENE_FILE=${DETACHED_SCENE_FILE}`)
+  }
+  return scene
 }
 
-interface ProcFile {
-  core_cmd: string[]
-  core_env: Record<string, string>
-  core_pid: number
-  webui_cmd: string[]
-  webui_pid: number
+/** Repo-built sebas binary (the same one the harness assembled). */
+export function sebasBin(): string {
+  const suffix = process.platform === 'win32' ? '.exe' : ''
+  return path.resolve(import.meta.dirname, '../../../..', 'target', 'debug', `sebas${suffix}`)
 }
 
-function procFile(): string {
-  return path.join(sceneDir(), 'proc.json')
+/**
+ * Env for a core (or any channel client) spawned against the scene: every
+ * default that would fall back to the real `~/.sebas` is redirected into
+ * the scene (SAME set the harness injects — SEBAS_PROJECTS_PATH /
+ * SEBAS_WEBUI_AUTH_FILE / SEBAS_HOME included: the projects registry
+ * defaults to `~/.sebas/projects.json`), and SEBAS_CORE_SECRET is REMOVED
+ * so the auto-arm + discovery path is exercised, never the env shortcut.
+ */
+export function detachedCoreEnv(scene: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  delete env.SEBAS_CORE_SECRET
+  env.SEBAS_HOME = scene
+  env.SEBAS_STATE_DB = path.join(scene, 'sebas.db')
+  env.SEBAS_STATE_FILE = path.join(scene, 'state.json')
+  env.SEBAS_ROUTER_PROVIDER_OVERLAY = path.join(scene, 'providers.json')
+  env.SEBAS_PROJECTS_PATH = path.join(scene, 'projects.json')
+  env.SEBAS_WEBUI_AUTH_FILE = path.join(scene, 'webui-auth.json')
+  return env
 }
 
-/** Spawn record published by the harness (throws honestly when absent). */
-export function readDualProc(): DualProc {
-  const raw = fs.readFileSync(procFile(), 'utf8')
-  const d = JSON.parse(raw) as ProcFile
-  return { coreCmd: d.core_cmd, coreEnv: d.core_env, corePid: d.core_pid, webuiPid: d.webui_pid }
+interface ScenePids {
+  core?: number | null
+  webui?: number | null
 }
 
-function writeCorePid(pid: number): void {
-  const d = JSON.parse(fs.readFileSync(procFile(), 'utf8')) as ProcFile
-  d.core_pid = pid
-  fs.writeFileSync(procFile(), JSON.stringify(d))
+function readPids(scene: string): ScenePids {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(scene, 'pids.json'), 'utf8')) as ScenePids
+  } catch {
+    return {}
+  }
+}
+
+function writePids(scene: string, pids: ScenePids): void {
+  fs.writeFileSync(path.join(scene, 'pids.json'), JSON.stringify(pids))
 }
 
 function alive(pid: number): boolean {
@@ -57,69 +89,120 @@ function alive(pid: number): boolean {
   }
 }
 
-/** Poll until `probe` returns non-null (bounded; throws with context on timeout). */
-async function poll<T>(
-  what: string,
-  timeoutMs: number,
-  probe: () => Promise<T | null>,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const v = await probe()
-    if (v !== null) return v
-    if (Date.now() >= deadline) throw new Error(`timeout waiting for ${what}`)
-    await new Promise((r) => setTimeout(r, 250))
+/**
+ * Truly dead = signal delivery fails (ESRCH) or — linux only — the process
+ * is a zombie. Zombies matter here: the harness parent never reaps its core
+ * child, so after SIGTERM `kill(pid, 0)` keeps succeeding on the zombie and
+ * a naive wait would time out.
+ */
+export function isPidDead(pid: number): boolean {
+  if (!alive(pid)) {
+    return true
   }
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const state = stat.slice(stat.lastIndexOf(')') + 2).trim().split(' ')[0]
+      return state === 'Z'
+    } catch {
+      // /proc unreadable → fall through to the signal-based verdict.
+    }
+  }
+  return false
 }
 
-/** `/api/summary` reachability ok (the assembly starts connected). */
-export async function waitReachable(request: APIRequestContext, timeoutMs = 30_000) {
-  return poll('core reachability ok', timeoutMs, async () => {
-    const s = await getSummary(request)
-    return s.reachability.ok ? s : null
-  })
-}
-
-/** Reachability flipped false with a non-empty cause; returns the cause. */
-export async function waitUnreachable(request: APIRequestContext, timeoutMs = 20_000) {
-  return poll('reachability flip to unreachable with cause', timeoutMs, async () => {
-    const s = await getSummary(request).catch(() => null)
-    if (s && !s.reachability.ok && s.reachability.cause) return s.reachability.cause
-    return null
-  })
-}
-
-/** SIGKILL the core child (supervisor-crash path from the webui's view). */
-export async function killCore(timeoutMs = 10_000): Promise<void> {
-  const { corePid } = readDualProc()
-  if (!alive(corePid)) throw new Error(`core pid ${corePid} already dead before killCore`)
-  process.kill(corePid, 'SIGKILL')
-  await poll(`core pid ${corePid} to exit`, timeoutMs, async () =>
-    alive(corePid) ? null : true,
-  )
+/** Whether the scene currently tracks a live (non-zombie) core process. */
+export function isCoreAlive(scene: string): boolean {
+  const pid = readPids(scene).core
+  return pid !== null && pid !== undefined && !isPidDead(pid)
 }
 
 /**
- * Respawn the core with the harness-recorded command + env (same config, so
- * the same channel socket and secret discovery apply). Updates `proc.json`.
+ * Stop the current core (SIGTERM — graceful exit removes the channel socket
+ * and DUMPS state but keeps the secret file, design D5) and wait until the
+ * pid is gone. Escalates to SIGKILL if the graceful exit does not complete
+ * in time (the next start reclaims a stale socket file). Idempotent: a dead
+ * core is a no-op.
  */
-export async function startCore(timeoutMs = 30_000): Promise<number> {
-  const { coreCmd, coreEnv } = readDualProc()
-  const log = fs.openSync(path.join(sceneDir(), 'core-restarted.log'), 'a')
-  const child = spawn(coreCmd[0], coreCmd.slice(1), {
-    env: coreEnv,
-    detached: true,
+export async function stopCore(scene: string, timeoutMs = 20_000): Promise<void> {
+  const pid = readPids(scene).core
+  if (pid === null || pid === undefined || isPidDead(pid)) {
+    writePids(scene, { ...readPids(scene), core: null })
+    return
+  }
+  process.kill(pid, 'SIGTERM')
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (isPidDead(pid)) {
+      writePids(scene, { ...readPids(scene), core: null })
+      return
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // Already gone between the check and the kill.
+  }
+  const hardDeadline = Date.now() + 5_000
+  while (Date.now() < hardDeadline && !isPidDead(pid)) {
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  writePids(scene, { ...readPids(scene), core: null })
+}
+
+/**
+ * Start a fresh core against the scene (cwd = scene so the config's relative
+ * channel path resolves) and publish its pid. Resolves once the process is
+ * running — pair with `waitForCoreReachability` for service-level readiness.
+ */
+export function startCore(scene: string): ChildProcess {
+  const log = fs.openSync(path.join(scene, 'core.log'), 'a')
+  const child = spawn(sebasBin(), ['core', '-c', path.join(scene, 'config.toml'), '--router', '--debug'], {
+    cwd: scene,
+    env: detachedCoreEnv(scene),
     stdio: ['ignore', log, log],
-    windowsHide: true,
   })
-  child.unref()
-  if (child.pid === undefined) throw new Error('respawned core has no pid')
-  writeCorePid(child.pid)
-  const pid = child.pid
-  // The old socket file may linger from the kill; the respawned core must
-  // own the channel before the journey proceeds.
-  await poll(`respawned core pid ${pid} to stay alive`, timeoutMs, async () =>
-    alive(pid) ? true : null,
-  )
-  return pid
+  child.on('error', (e) => {
+    throw new Error(`failed to spawn core from scene ${scene}: ${e.message}`)
+  })
+  writePids(scene, { ...readPids(scene), core: child.pid ?? null })
+  return child
+}
+
+/** The pid of the currently tracked core (null when none is running). */
+export function corePid(scene: string): number | null {
+  return readPids(scene).core ?? null
+}
+
+export async function reachabilityOk(request: APIRequestContext): Promise<boolean | null> {
+  try {
+    const r = (await (await request.get('/api/summary')).json()) as {
+      reachability?: { ok?: boolean }
+    }
+    return r.reachability?.ok !== false
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Poll the webui `/api/summary` until the core channel reports the wanted
+ * state (frontend polls on a 5s cadence, so give it room).
+ */
+export async function waitForCoreReachability(
+  request: APIRequestContext,
+  ok: boolean,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if ((await reachabilityOk(request)) === ok) {
+      return
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`core reachability did not become ok=${ok} within ${timeoutMs}ms`)
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
 }

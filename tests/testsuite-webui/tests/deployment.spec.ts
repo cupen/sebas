@@ -1,81 +1,101 @@
 /**
- * Journey 5.4 — detached deployment state (spec: 部署态旅程).
+ * Journey — deployment resilience of the core session channel
+ * (harden-core-channel-deployment 5.4, design D6/D7).
  *
- * 功能：部署态可达性诚实呈现 / 子功能：不可达横幅、降级提示、恢复
+ * 功能：部署韧性 / 子功能：核心停启期间的诚实外显与恢复
  *
- * Runs on the DETACHED dual-process assembly (core + standalone webui,
- * playwright.deployment.config.ts): kill the core → the global
- * "核心不可达" banner appears with the reported cause, adding a project
- * lands degraded with its notice and the composer gate engages; respawn the
- * core → the banner and the gate disappear with no page reload. Process
- * control comes from the reusable helpers/detached fixture; only the
- * journey assertions live here.
+ * Runs against the DETACHED dual-process topology (playwright.detached.config.ts):
+ * core + standalone webui with NO SEBAS_CORE_SECRET — auto-arm + secret-file
+ * discovery. The journey stops the core mid-flight and asserts the browser
+ * turns honest WITHOUT any reload: the global "核心不可达" banner appears with
+ * the reported cause, the composer gates submission, and a project added
+ * during the outage lands in the local registry with the degradation hint;
+ * after the core comes back (fresh generated key, same config) the banner is
+ * gone on the next reachability poll.
  */
-import fs from 'node:fs'
-import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import {
-  killCore,
+  AppShell,
+  ErrorCollector,
   ProjectRail,
-  removeProject,
-  resetState,
-  sceneDir,
-  startCore,
-  waitReachable,
-  waitUnreachable,
   Workbench,
+  detachedSceneDir,
+  isCoreAlive,
+  reachabilityOk,
+  startCore,
+  stopCore,
+  waitForCoreReachability,
 } from './helpers/index'
 
-test.describe('部署态', () => {
-  test.describe('核心不可达与恢复', () => {
-    test('core 停止 → 横幅/降级/门禁呈现；core 恢复 → 消失', async ({ page, request }) => {
-      // Deterministic base on the connected assembly.
-      await resetState(request)
-      const start = await waitReachable(request)
-      expect(start.reachability.ok).toBe(true)
+test.describe('部署韧性', () => {
+  let collector: ErrorCollector
+
+  test.beforeEach(({ page }) => {
+    collector = new ErrorCollector(page)
+  })
+
+  test.describe('核心通道停启', () => {
+    test('core 停 → 横幅含 cause、composer 门禁、加项目降级提示；core 恢复 → 横幅消失', async ({
+      page,
+    }) => {
+      const scene = detachedSceneDir()
+      const shell = new AppShell(page)
+      const rail = new ProjectRail(page)
+      const workbench = new Workbench(page)
 
       await page.goto('/')
-      const banner = page.locator('sebas-app .core-banner[role="alert"]')
-      await expect(banner).toBeHidden()
-      const workbench = new Workbench(page)
-      await expect(workbench.composer).toBeVisible()
-      await expect(workbench.reachabilityWarning).toBeHidden()
+      await expect(shell.brand).toBeVisible()
+      // Retry self-healing: a previous attempt (or teardown race) may have
+      // left the scene's core stopped — restore the healthy baseline first,
+      // so the flip below is always exercised from reachable.
+      if ((await reachabilityOk(page.request)) !== true) {
+        if (!isCoreAlive(scene)) {
+          startCore(scene)
+        }
+        await waitForCoreReachability(page.request, true, 45_000)
+      }
+      // 起点健康：无核心横幅，composer 可提交。
+      await expect(page.locator('[data-testid="core-unreachable-banner"]')).toHaveCount(0)
+      await expect(workbench.composerTextarea).toBeEnabled()
 
-      // Kill the core: the webui keeps serving, reachability flips with cause.
-      await killCore()
-      const cause = await waitUnreachable(request)
-      expect(cause.length).toBeGreaterThan(0)
+      // ── core 停止（SIGTERM 优雅退出：socket 移除，密钥文件保留）────────
+      await stopCore(scene)
 
-      // Global banner appears with the reported cause (poll-driven, no reload).
-      await expect(banner).toContainText('核心不可达：', { timeout: 15_000 })
-      const bannerText = (await banner.textContent()) ?? ''
-      expect(bannerText.length).toBeGreaterThan('核心不可达：'.length)
+      // 全局横幅出现且携带 reachability 上报的 cause（前端 5s 轮询节奏）。
+      const banner = page.locator('[data-testid="core-unreachable-banner"]')
+      await expect(banner).toBeVisible({ timeout: 15_000 })
+      await expect(banner).toHaveAttribute('role', 'alert')
+      await expect(banner).toContainText('核心不可达：')
+      await expect(banner).toContainText('会话与项目面暂不可用')
 
-      // Degraded project add: lands locally with its notice …
-      const scene = sceneDir()
-      const projDir = path.join(scene, 'deploy-proj')
-      fs.mkdirSync(projDir, { recursive: true })
-      const rail = new ProjectRail(page)
-      await expect(rail.host).toBeVisible()
+      // composer 门禁：输入与发送键随不可达禁用，就地展示 cause。
+      await expect(workbench.composerTextarea).toBeDisabled({ timeout: 15_000 })
+      await expect(workbench.sendButton).toBeDisabled()
+      await expect(workbench.composer).toContainText('core not connected')
+
+      // 加项目：注册成功（本地注册表降级）并就地提示，而非静默。
       await rail.openAddDialog()
-      await rail.addProjectByPath(projDir)
-      const notice = rail.host.locator('.degraded-notice[role="status"]')
-      await expect(notice).toContainText('核心不可达，已写入本地注册表', {
-        timeout: 10_000,
+      await rail.addProjectByPath(scene)
+      // 先等项目落栏（= add 之后的 refresh 已完成），再要降级提示——
+      // hint 在 refresh 完成后立即置位，两者同帧可达。
+      const projectName = scene.split(/[\\/]/).filter(Boolean).pop()!
+      await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 15_000 })
+      const hint = page.locator('[data-testid="project-degraded-hint"]')
+      await expect(hint).toBeVisible({ timeout: 15_000 })
+      await expect(hint).toContainText('核心不可达')
+      await expect(hint).toContainText('已写入本地注册表')
+
+      // ── core 恢复（同 config 重启：自动装配生成新钥，webui 文件发现自愈）──
+      startCore(scene)
+      await waitForCoreReachability(page.request, true, 45_000)
+
+      // 无需刷新页面：横幅在下一次可达性轮询后消失，composer 解禁。
+      await expect(page.locator('[data-testid="core-unreachable-banner"]')).toHaveCount(0, {
+        timeout: 15_000,
       })
-      // … and the composer gate engages while unreachable.
-      await expect(workbench.reachabilityWarning).toBeVisible({ timeout: 15_000 })
+      await expect(workbench.composerTextarea).toBeEnabled({ timeout: 15_000 })
 
-      // Respawn the core: banner and gate disappear with no page reload.
-      await startCore()
-      await waitReachable(request, 60_000)
-      await expect(banner).toBeHidden({ timeout: 15_000 })
-      await expect(workbench.reachabilityWarning).toBeHidden({ timeout: 15_000 })
-
-      await removeProject(request, projDir)
-      // NOTE: no collector.clean() assertion — killing the backend
-      // mid-session provokes transport noise the journey intentionally
-      // exercises; error-silence is covered by the single-process suite.
+      expect(collector.clean()).toEqual([])
     })
   })
 })
