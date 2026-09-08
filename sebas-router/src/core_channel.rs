@@ -25,6 +25,29 @@ pub(crate) fn socket_path() -> Option<PathBuf> {
     Some(PathBuf::from(raw))
 }
 
+/// 握手 secret 解析 (harden-core-channel-deployment D2): `SEBAS_CORE_SECRET`
+/// env 优先 (watchdog 注入, 零开销); 缺失时读 secret 文件 (watchdog 经
+/// `SEBAS_CORE_SECRET_FILE` 把与 core 同一份 `-c` config 解析出的路径 pin
+/// 给 router 子进程) —— core 重启换钥后订阅循环在退避重连时天然拿到新钥。
+/// 两者皆缺省返回空串 (不断言、不崩溃; 握手失败走既有的重连退避)。
+pub(crate) fn channel_secret() -> String {
+    if let Ok(v) = std::env::var("SEBAS_CORE_SECRET")
+        && !v.is_empty()
+    {
+        return v;
+    }
+    if let Ok(p) = std::env::var("SEBAS_CORE_SECRET_FILE")
+        && !p.is_empty()
+        && let Ok(raw) = std::fs::read_to_string(&p)
+    {
+        let secret = raw.trim().to_string();
+        if !secret.is_empty() {
+            return secret;
+        }
+    }
+    String::new()
+}
+
 /// 启动核心通道订阅循环 (tokio task)。
 /// 当 socket 路径可用时, 连接并订阅状态变更; 不可用时静默返回。
 pub fn spawn_subscriber(state: AppState) {
@@ -132,8 +155,8 @@ async fn channel_request(
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
-    // 握手: 带 `SEBAS_CORE_SECRET` (watchdog 注入, 与 core/webui 同密钥)。
-    let secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
+    // 握手: 带解析出的 secret (env 优先, 否则 secret 文件)。
+    let secret = channel_secret();
     let hs = serde_json::json!({"secret": secret});
     let mut line = serde_json::to_string(&hs).map_err(|e| format!("handshake serialize failed: {e}"))?;
     line.push('\n');
@@ -240,8 +263,8 @@ async fn subscribe_once(state: &AppState, path: &Path) -> Result<(), String> {
     let (reader, mut writer) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(reader);
 
-    // 握手: 带 `SEBAS_CORE_SECRET` (watchdog 注入, 与 core/webui 同密钥)。
-    let secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
+    // 握手: 带解析出的 secret (env 优先, 否则 secret 文件)。
+    let secret = channel_secret();
     let hs = serde_json::json!({"secret": secret});
     let mut line = serde_json::to_string(&hs).map_err(|e| format!("handshake serialize failed: {e}"))?;
     line.push('\n');
