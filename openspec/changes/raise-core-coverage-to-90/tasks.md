@@ -105,6 +105,20 @@
 
 ## 5. 验收：账本闭环
 
-- [ ] 5.1 跑 `openspec status --change raise-core-coverage-to-90 --json` 验证四个 artifact 全部 `done`（验证：isPlanningComplete: true）
+- [x] 5.1 跑 `openspec status --change raise-core-coverage-to-90 --json` 验证四个 artifact 全部 `done`（验证：isPlanningComplete: true）
+
+  输出：proposal/specs/design/tasks 全部 `status: "done"`，`isPlanningComplete: true`。
 - [ ] 5.2 archive 时同步修正 `openspec/specs/testsuite-acceptance/spec.md` Purpose 段的旧 80% 表述为 90% 五簇口径，并全仓 grep 清理同类旧口径残留（如 COVERAGE.md 的"长期方向 ≥90%，非门槛"等与新门槛矛盾的表述，逐条改写或删除）；（验证：主 spec Purpose 与 requirement 数字一致；`grep -rn "80%" openspec/specs/testsuite-acceptance/ tests/acceptance/COVERAGE.md` 无旧口径残留）
-- [ ] 5.3 终审回归：`cargo test --workspace` + `invoke testsuite-e2e` + `invoke testsuite-acceptance` 全绿（验证：补测未破坏既有通过面）
+
+  （编排方 archive 时执行；COVERAGE.md 侧的旧口径段（统计段旧表述）已在本期复核
+  改写中一并清理，主 spec Purpose 留待 archive 同步。）
+- [x] 5.3 终审回归：`cargo test --workspace` + `invoke testsuite-e2e` + `invoke testsuite-acceptance` 全绿（验证：补测未破坏既有通过面）
+
+  `cargo test --workspace`：1263 passed / 0 failed / 22 ignored；`cargo clippy
+  --workspace -- -D warnings` 干净；`invoke testsuite-e2e` 11/11；`invoke
+  testsuite-acceptance` 6/6；`invoke testsuite-webui` 41 例（34 主 + 3 auth +
+  4 detached，1 例首试 flaky 由 retry 吸收，exit 0）。
+  实施期发现并修复一处**既有**并发测试竞态（与本 change 补测无关，终审回归暴露）：
+  `spawn_env::tests::router_with_empty_auth_token_still_constructs_url` parse 期间
+  读到并发 overlay 用例设置的 `SEBAS_ROUTER_PROVIDER_OVERLAY` 且未持 `ENV_LOCK`
+  → 按本文件惯例持锁清 env 修复，lib 三连跑稳定 255 passed。
