@@ -657,35 +657,42 @@ pub async fn projects_add(
     {
         return api_error(StatusCode::CONFLICT, format!("项目已注册: {path}"));
     }
-    // backend 可用 → 状态库；不可用 → 文件注册表（降级）。
-    // harden-core-channel-deployment：降级路径的 201 响应携带
-    // `degraded: {cause}`（状态库写入失败的原因），前端据此如实提示
-    // "核心不可达，已写入本地注册表"；状态库路径不带该标记。
-    let state_result = state
+    // backend 可用 → 状态库（响应不带 degraded）；不可用 → 文件注册表降级，
+    // 响应携带 `degraded: {cause}`（harden-core-channel-deployment 4.2/D7：
+    // 老前端忽略新字段，无破坏；两者皆失败的 503 语义不变）。cause 取
+    // reachability 的如实上报。
+    let mut degraded: Option<serde_json::Value> = None;
+    if state
         .backend
         .state_mutate(
             "projects",
             json!({ "op": "add", "path": canonical.clone(), "name": name.clone() }),
         )
-        .await;
-    let degraded_cause = state_result.as_ref().err().map(|e| e.to_string());
-    if state_result.is_ok() || crate::projects::add(&canonical).is_ok() {
-        // 返回新条目（从列表反查，保证与数据源一致）。
-        let mut entry = projects_from_backend(&state)
-            .await
-            .into_iter()
-            .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()));
-        let mut entry = entry.take().unwrap_or_else(|| json!({ "path": canonical, "name": name }));
-        if let Some(cause) = degraded_cause {
-            entry["degraded"] = json!({ "cause": cause });
-        } else if let Some(obj) = entry.as_object_mut() {
-            // 状态库路径绝不带降级标记（旧文件注册表条目无该字段，此为防御）。
-            obj.remove("degraded");
+        .await
+        .is_err()
+    {
+        // 状态库路径失败：先探因（核心不可达？），再落本地注册表。
+        let cause = match state.backend.reachability().await {
+            crate::session_backend::Reachability::Unreachable { cause } => cause,
+            crate::session_backend::Reachability::Reachable => "状态库写入失败".into(),
+        };
+        if crate::projects::add(&canonical).is_ok() {
+            degraded = Some(json!({ "cause": cause }));
+        } else {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "无法注册项目（状态库与本地均失败）");
         }
-        (StatusCode::CREATED, Json(entry)).into_response()
-    } else {
-        api_error(StatusCode::SERVICE_UNAVAILABLE, "无法注册项目（状态库与本地均失败）")
     }
+    // 返回新条目（从列表反查，保证与数据源一致）。
+    let entry = projects_from_backend(&state)
+        .await
+        .into_iter()
+        .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()))
+        .unwrap_or_else(|| json!({ "path": canonical, "name": name }));
+    let mut entry = entry;
+    if let Some(d) = degraded {
+        entry["degraded"] = d;
+    }
+    (StatusCode::CREATED, Json(entry)).into_response()
 }
 
 /// POST /api/projects/{path}/remove — unregister a project（状态库优先）。
@@ -1021,156 +1028,5 @@ pub async fn answer_permission(
         Json(json!({ "status": "delivered" })).into_response()
     } else {
         api_error(StatusCode::NOT_FOUND, "no pending permission request with that id")
-    }
-}
-
-#[cfg(test)]
-mod api_endpoints_tests {
-    //! harden-core-channel-deployment 4.2：`POST /api/projects` 降级标记。
-    use super::*;
-    use crate::agent_kinds::ConfigAgentKindProvider;
-    use crate::auth::AuthHandle;
-    use crate::models::RouterInfo;
-    use crate::server::WebUiState;
-    use crate::session_backend::FakeBackend;
-    use std::sync::Arc;
-
-    /// 注册表 env 串行锁（projects::test_env_lock）+ 结束后恢复调用方 env。
-    struct RegistryEnv {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl RegistryEnv {
-        fn point_at(path: &std::path::Path) -> Self {
-            let guard = crate::projects::test_env_lock();
-            // SAFETY: projects 注册表锁已持有，无并发 env 访问。
-            let prev = unsafe {
-                let prev = std::env::var_os("SEBAS_PROJECTS_PATH");
-                std::env::set_var("SEBAS_PROJECTS_PATH", path);
-                prev
-            };
-            Self {
-                _guard: guard,
-                prev,
-            }
-        }
-    }
-
-    impl Drop for RegistryEnv {
-        fn drop(&mut self) {
-            // SAFETY: 锁仍被持有。
-            unsafe {
-                match self.prev.take() {
-                    Some(p) => std::env::set_var("SEBAS_PROJECTS_PATH", p),
-                    None => std::env::remove_var("SEBAS_PROJECTS_PATH"),
-                }
-            }
-        }
-    }
-
-    fn state_with(backend: Arc<FakeBackend>) -> WebUiState {
-        WebUiState {
-            backend,
-            router: RouterInfo::default(),
-            started_at: std::time::Instant::now(),
-            card_config: sebas_feishu::cards::CardConfig::default(),
-            agent_kinds: Arc::new(ConfigAgentKindProvider::new(vec![])),
-            archive_retention_days: 30,
-            auth: Arc::new(AuthHandle::disabled()),
-            work_root: None,
-            allowed_roots: vec![],
-        }
-    }
-
-    async fn read_json(resp: Response) -> (StatusCode, serde_json::Value) {
-        let status = resp.status();
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body readable");
-        let json: serde_json::Value =
-            serde_json::from_slice(&body).expect("body is JSON");
-        (status, json)
-    }
-
-    /// 状态库不可用 → 本地降级：201 且带 `degraded: {cause}`，项目照常落栏。
-    #[tokio::test]
-    async fn projects_add_marks_degraded_when_state_store_unreachable() {
-        let dir = tempfile::tempdir().unwrap();
-        let _env = RegistryEnv::point_at(&dir.path().join("projects.json"));
-        let project = dir.path().join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-
-        // FakeBackend 默认 state_mutate 失败 = 核心通道不可达。
-        let backend = Arc::new(FakeBackend::new());
-        let (status, body) = read_json(
-            projects_add(
-                State(state_with(backend)),
-                Json(json!({ "path": project.to_string_lossy() })),
-            )
-            .await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "降级路径仍 201: {body}");
-        let cause = body
-            .get("degraded")
-            .and_then(|d| d.get("cause"))
-            .and_then(|c| c.as_str())
-            .expect("降级响应必须携带 degraded.cause");
-        assert!(!cause.is_empty(), "cause 不得为空: {body}");
-        // 项目确实落栏（本地注册表）。
-        let listed = crate::projects::list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].path, body["path"].as_str().unwrap());
-    }
-
-    /// 状态库可用 → 201 且无降级标记。
-    #[tokio::test]
-    async fn projects_add_without_marker_when_state_store_healthy() {
-        let dir = tempfile::tempdir().unwrap();
-        let _env = RegistryEnv::point_at(&dir.path().join("projects.json"));
-        let project = dir.path().join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-
-        let backend = Arc::new(FakeBackend::new());
-        backend.set_state_mutate_ok(true);
-        // 状态库快照为空（无重复），写入走状态库路径。
-        backend.set_state_domain("projects", Some(json!({ "projects": [] })));
-        let (status, body) = read_json(
-            projects_add(
-                State(state_with(backend)),
-                Json(json!({ "path": project.to_string_lossy() })),
-            )
-            .await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "状态库路径 201: {body}");
-        assert!(
-            body.get("degraded").is_none(),
-            "状态库可用时不得带降级标记: {body}"
-        );
-    }
-
-    /// 两者皆失败 → 既有 503 不变。
-    #[tokio::test]
-    async fn projects_add_still_503_when_both_stores_fail() {
-        let dir = tempfile::tempdir().unwrap();
-        // 注册表路径落在一个普通文件之下 → 本地写入必败。
-        let blocker = dir.path().join("blocker");
-        std::fs::write(&blocker, b"x").unwrap();
-        let _env = RegistryEnv::point_at(&blocker.join("projects.json"));
-        let project = dir.path().join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-
-        let backend = Arc::new(FakeBackend::new());
-        let (status, body) = read_json(
-            projects_add(
-                State(state_with(backend)),
-                Json(json!({ "path": project.to_string_lossy() })),
-            )
-            .await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "双失败仍 503: {body}");
     }
 }

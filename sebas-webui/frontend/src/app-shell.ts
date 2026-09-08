@@ -36,13 +36,6 @@ export const ROUTES: RouteDef[] = [
   { id: 'session-detail', pattern: '/sessions/:key' },
 ]
 
-/**
- * harden-core-channel-deployment D6: the shell polls the same
- * `/api/summary` reachability the composer gates on, at the same interval,
- * so the global banner and the composer gate never disagree for long.
- */
-export const CORE_REACHABILITY_POLL_MS = 5_000
-
 @customElement('sebas-app')
 export class SebasApp extends LitElement {
   @state() private routeId: string = 'dashboard'
@@ -70,14 +63,16 @@ export class SebasApp extends LitElement {
    */
   @state() private wsDown = false
   /**
-   * harden-core-channel-deployment D6/4.1: global "core unreachable" state,
-   * polled from `/api/summary` independently of the composer. Discriminator
-   * is `reachability.ok === false` with the full `cause` string rendered —
-   * no `kind` branches (kind arrives with a later change; this stays the
-   * single replaceable decision point). Null = reachable or unknown.
+   * 全局「核心不可达」横幅（harden-core-channel-deployment 4.1/D6）：自持
+   * `/api/summary` 轮询（与 composer 的 reachability 同间隔），`ok=false`
+   * 时以 `role=alert` 呈现 cause 原文，恢复即消失。与 ws-banner 同层（骑在
+   * 出口区顶部、不阻塞浏览），判别器当前是 `ok+cause`——cover-A 的 `kind`
+   * 字段落地后在此替换文案选择，cause 保持原文渲染。
    */
-  @state() private coreUnreachable: { cause: string } | null = null
-  private coreReachabilityTimer: number | undefined = undefined
+  @state() private coreUnreachableCause: string | null = null
+
+  private static readonly CORE_REACHABILITY_POLL_MS = 5_000
+  private corePollTimer: number | undefined = undefined
 
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
@@ -225,27 +220,13 @@ export class SebasApp extends LitElement {
     .ws-banner svg {
       flex: 0 0 auto;
     }
-    /* harden-core-channel-deployment 4.1: same global tier as the WS
-       banner (absolute, above the outlet, never shifts layout), distinct
-       severity color so the two outage kinds stay visually apart. */
-    .core-banner {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 10;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      padding: 6px 12px;
-      background: var(--sebas-status-failed, #b91c1c);
-      color: #fff;
-      font-size: 0.8rem;
-      font-weight: 500;
+    .core-banner.stacked {
+      top: 30px;
     }
-    .core-banner svg {
-      flex: 0 0 auto;
+    /* 全局「核心不可达」横幅（4.1）：与 ws-banner 同款定位；两者同时在场
+       （ws 断线 + core 不可达）时纵向堆叠，互不遮挡。 */
+    .core-banner {
+      background: var(--sebas-status-failed, #b91c1c);
     }
     .outlet {
       /* 满幅工作台：workbench 类路由（/ 与 /sessions/:key）直接铺满
@@ -359,33 +340,28 @@ export class SebasApp extends LitElement {
     document.addEventListener('click', this.onClick)
     // add-webui-allowed-roots D6：WS 连接状态 → 全局断线横幅。
     window.addEventListener('sebas:ws-state', this.onWsState)
+    // harden-core-channel-deployment 4.1：全局核心可达性轮询（与 composer
+    // 的 WORKBENCH_REACHABILITY_POLL_MS 同间隔）。
+    this.corePollTimer = window.setInterval(
+      () => void this.pollCoreReachability(),
+      SebasApp.CORE_REACHABILITY_POLL_MS,
+    )
+    void this.pollCoreReachability()
     // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。
     setUnauthorizedHandler(() => this.showLogin())
     this.onNavigate()
     void this.checkAuth()
-    void this.loadCoreReachability()
-    this.coreReachabilityTimer = window.setInterval(() => {
-      void this.loadCoreReachability()
-    }, CORE_REACHABILITY_POLL_MS)
   }
 
-  /**
-   * harden-core-channel-deployment 4.1: `ok === false` shows the banner
-   * with the reported cause; anything else clears it (recovery needs no
-   * reload). A failed fetch leaves the last state untouched — transport
-   * outages already surface via the WS banner, so this stays strictly the
-   * core-reachability signal and never double-reports.
-   */
-  private async loadCoreReachability(): Promise<void> {
+  private async pollCoreReachability(): Promise<void> {
     try {
-      const data = await api.summary()
-      if (data.reachability && data.reachability.ok === false) {
-        this.coreUnreachable = { cause: data.reachability.cause ?? 'core not connected' }
-      } else {
-        this.coreUnreachable = null
-      }
+      const summary = await api.summary()
+      const ok = summary.reachability?.ok !== false
+      this.coreUnreachableCause = ok
+        ? null
+        : (summary.reachability?.cause ?? 'core not connected')
     } catch {
-      // Ignore: keep the last known state (see above).
+      // summary 本身失败（webui 重启窗口等）不推翻既有状态：下一轮重试。
     }
   }
 
@@ -433,9 +409,9 @@ export class SebasApp extends LitElement {
     window.removeEventListener('popstate', this.onNavigateBound)
     document.removeEventListener('click', this.onClick)
     window.removeEventListener('sebas:ws-state', this.onWsState)
-    if (this.coreReachabilityTimer !== undefined) {
-      window.clearInterval(this.coreReachabilityTimer)
-      this.coreReachabilityTimer = undefined
+    if (this.corePollTimer !== undefined) {
+      window.clearInterval(this.corePollTimer)
+      this.corePollTimer = undefined
     }
     super.disconnectedCallback()
   }
@@ -537,9 +513,9 @@ export class SebasApp extends LitElement {
               ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
             </div>`
           : nothing}
-        ${this.coreUnreachable
-          ? html`<div class="core-banner" role="alert">
-              ${icon('alert', 14)}<span>核心不可达：${this.coreUnreachable.cause}（浏览不受影响，可提交的操作将被门禁）</span>
+        ${this.coreUnreachableCause !== null
+          ? html`<div class="ws-banner core-banner${this.wsDown ? ' stacked' : ''}" role="alert" data-testid="core-unreachable-banner">
+              ${icon('alert', 14)}<span>核心不可达：${this.coreUnreachableCause}（会话与项目面暂不可用，页面浏览不受影响）</span>
             </div>`
           : nothing}
         <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>

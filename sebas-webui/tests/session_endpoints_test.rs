@@ -1282,3 +1282,193 @@ async fn web_and_feishu_sessions_are_peers_in_one_snapshot() {
     let (_, summary) = get_json(&app, "/api/summary").await;
     assert_eq!(summary["total_sessions"], 2);
 }
+
+// ---- harden-core-channel-deployment 4.2: degraded marker on project add ----
+
+/// A SessionBackend whose state store always fails and whose reachability
+/// reports a cause — simulates the detached webui with the core down.
+struct CoreDownBackend;
+
+#[async_trait::async_trait]
+impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
+    async fn snapshot(&self) -> Vec<sebas_dispatch::SessionInfo> {
+        Vec::new()
+    }
+    async fn focused(&self) -> Option<ChannelKey> {
+        None
+    }
+    async fn set_focus(&self, _key: Option<ChannelKey>) {}
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<sebas_dispatch::SessionEvent> {
+        tokio::sync::broadcast::channel(1).0.subscribe()
+    }
+    async fn spawn(
+        &self,
+        _prompt: String,
+        _project_dir: Option<String>,
+    ) -> Result<ChannelKey, sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "socket absent".into(),
+        })
+    }
+    async fn message(
+        &self,
+        _key: ChannelKey,
+        _message: String,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "socket absent".into(),
+        })
+    }
+    async fn close(
+        &self,
+        _key: ChannelKey,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "socket absent".into(),
+        })
+    }
+    async fn turns(
+        &self,
+        _key: ChannelKey,
+        _from: u64,
+    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "socket absent".into(),
+        })
+    }
+    async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
+        sebas_webui::session_backend::Reachability::Unreachable {
+            cause: "socket absent".into(),
+        }
+    }
+}
+
+fn core_down_app() -> axum::Router {
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(CoreDownBackend);
+    build_router(backend, RouterInfo::default(), CardConfig::default())
+}
+
+/// A SessionBackend whose state store always succeeds — the "core healthy"
+/// control for the degraded-marker contract.
+struct StateStoreOkBackend;
+
+#[async_trait::async_trait]
+impl sebas_webui::session_backend::SessionBackend for StateStoreOkBackend {
+    async fn snapshot(&self) -> Vec<sebas_dispatch::SessionInfo> {
+        Vec::new()
+    }
+    async fn focused(&self) -> Option<ChannelKey> {
+        None
+    }
+    async fn set_focus(&self, _key: Option<ChannelKey>) {}
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<sebas_dispatch::SessionEvent> {
+        tokio::sync::broadcast::channel(1).0.subscribe()
+    }
+    async fn spawn(
+        &self,
+        _prompt: String,
+        _project_dir: Option<String>,
+    ) -> Result<ChannelKey, sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "no sessions".into(),
+        })
+    }
+    async fn message(
+        &self,
+        _key: ChannelKey,
+        _message: String,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "no sessions".into(),
+        })
+    }
+    async fn close(
+        &self,
+        _key: ChannelKey,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "no sessions".into(),
+        })
+    }
+    async fn turns(
+        &self,
+        _key: ChannelKey,
+        _from: u64,
+    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "no sessions".into(),
+        })
+    }
+    async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
+        sebas_webui::session_backend::Reachability::Reachable
+    }
+    async fn state_mutate(&self, _domain: &str, _payload: serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 核心不可达时注册项目：201 + `degraded.cause`（本地注册表路径）。
+#[tokio::test]
+async fn projects_add_degraded_when_core_unreachable() {
+    let _env = isolated_projects().await;
+    let app = core_down_app();
+    let dir = std::env::temp_dir().join("projects-test-degraded-add");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "degraded local add still 201");
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(
+        body["degraded"]["cause"].as_str(),
+        Some("socket absent"),
+        "degraded marker must carry the honest cause: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 核心正常（状态库可用）时注册项目：响应不带 degraded 标记。
+#[tokio::test]
+async fn projects_add_status_store_path_has_no_degraded_marker() {
+    let _env = isolated_projects().await;
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(StateStoreOkBackend);
+    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+    let dir = std::env::temp_dir().join("projects-test-no-degraded");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert!(
+        body.get("degraded").is_none(),
+        "status-store path must not carry a degraded marker: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

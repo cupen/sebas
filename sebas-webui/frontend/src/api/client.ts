@@ -462,8 +462,11 @@ async function del<T>(path: string): Promise<T> {
 // Project registry namespace — defined first so `api.projects` can re-export it below.
 const projects = {
   list: () => get<{ projects: Project[] }>('/api/projects'),
+  // harden-core-channel-deployment 4.2/D7：本地降级路径的响应携带
+  // `degraded: {cause}`（状态库路径无此字段）——前端据此就地提示
+  // 「核心不可达，已写入本地注册表」。
   add: (path: string) =>
-    post<Project>('/api/projects', { path }),
+    post<Project & { degraded?: { cause: string } }>('/api/projects', { path }),
   remove: async (path: string) =>
     unwrapText(
       await doFetch(`/api/projects/${encodeURIComponent(path)}/remove`, {

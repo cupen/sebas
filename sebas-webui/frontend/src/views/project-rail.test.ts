@@ -230,3 +230,54 @@ describe('history group (archived sessions)', () => {
     el.remove()
   })
 })
+describe('project registration degraded hint (harden-core-channel-deployment 4.3)', () => {
+  it('shows the honest degraded hint when the core is unreachable and the add lands in the local registry', async () => {
+    apiMock.projects.add.mockResolvedValue({
+      ...projects[0],
+      degraded: { cause: 'socket absent' },
+    } as any)
+    const el = await mount()
+    expect(el.shadowRoot!.querySelector('[data-testid="project-degraded-hint"]')).toBeNull()
+
+    // Drive the same submit path the dialog's Add button uses.
+    ;(el as any).addPath = '/home/me/alpha'
+    await (el as any).submitAddProject()
+    await el.updateComplete
+
+    const hint = el.shadowRoot!.querySelector<HTMLElement>(
+      '[data-testid="project-degraded-hint"]',
+    )
+    expect(hint).toBeTruthy()
+    expect(hint!.textContent).toContain('核心不可达')
+    expect(hint!.textContent).toContain('已写入本地注册表')
+    el.remove()
+  })
+
+  it('shows no hint for a healthy (status-store) registration, and a later refresh clears a stale hint', async () => {
+    apiMock.projects.add.mockResolvedValue({ ...projects[0] } as any)
+    const el = await mount()
+    ;(el as any).addPath = '/home/me/alpha'
+    await (el as any).submitAddProject()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="project-degraded-hint"]')).toBeNull()
+    el.remove()
+  })
+
+  it('clears the degraded hint once the core recovers (refresh-driven)', async () => {
+    apiMock.projects.add.mockResolvedValue({
+      ...projects[0],
+      degraded: { cause: 'socket absent' },
+    } as any)
+    const el = await mount()
+    ;(el as any).addPath = '/home/me/alpha'
+    await (el as any).submitAddProject()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="project-degraded-hint"]')).toBeTruthy()
+
+    // core 恢复 → 任一次成功 refresh（ws refetch / 重试）即清除降级态。
+    await el.refresh()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="project-degraded-hint"]')).toBeNull()
+    el.remove()
+  })
+})

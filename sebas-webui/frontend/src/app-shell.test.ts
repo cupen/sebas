@@ -16,25 +16,36 @@ const apiMocks = vi.hoisted(() => ({
   summary: vi.fn(),
   sessions: vi.fn(),
   settings: vi.fn(),
+  authMe: vi.fn(),
   projectsList: vi.fn(),
   projectsBranch: vi.fn(),
   projectsAdd: vi.fn(),
   projectsReorder: vi.fn(),
 }))
 
-vi.mock('../api/client.js', () => ({
-  api: {
-    summary: apiMocks.summary,
-    sessions: apiMocks.sessions,
-    settings: apiMocks.settings,
-    projects: {
-      list: apiMocks.projectsList,
-      branch: apiMocks.projectsBranch,
-      add: apiMocks.projectsAdd,
-      reorder: apiMocks.projectsReorder,
+// 注意路径：本文件位于 src/，client 模块是 './api/client.js'（'../api/…'
+// 会解析到不存在的 frontend/api/，mock 静默失效）。真实模块的其余导出
+// （setUnauthorizedHandler 等）保持原样，只接管 api 的方法。
+vi.mock('./api/client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api/client.js')>()
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      summary: apiMocks.summary,
+      sessions: apiMocks.sessions,
+      settings: apiMocks.settings,
+      authMe: apiMocks.authMe,
+      projects: {
+        ...(actual.api as { projects?: Record<string, unknown> }).projects,
+        list: apiMocks.projectsList,
+        branch: apiMocks.projectsBranch,
+        add: apiMocks.projectsAdd,
+        reorder: apiMocks.projectsReorder,
+      },
     },
-  },
-}))
+  }
+})
 
 vi.mock('../api/shared-ws.js', () => ({
   sharedWs: { subscribe: () => () => {} },
@@ -95,6 +106,7 @@ beforeEach(() => {
     },
     router: { listen: null, provider_count: 0, debug: false, has_auth: false, providers: [] },
   })
+  apiMocks.authMe.mockResolvedValue({ enabled: false, authenticated: false })
   apiMocks.projectsList.mockResolvedValue({ projects: [projectFixture] })
   apiMocks.projectsBranch.mockRejectedValue(new Error('not fetched in this test'))
 })
@@ -324,6 +336,68 @@ describe('global disconnect banner (add-webui-allowed-roots D6)', () => {
     )
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('.ws-banner')).toBeNull()
+    el.remove()
+  })
+})
+
+
+describe('global core-unreachable banner (harden-core-channel-deployment 4.1)', () => {
+  it('shows the banner with the reported cause while the core is unreachable, without blocking browsing', async () => {
+    apiMocks.summary.mockResolvedValue({
+      active_count: 0,
+      recent_sessions: [],
+      reachability: { ok: false, cause: 'socket absent' },
+    })
+    const el = await mountShell()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    const banner = el.shadowRoot!.querySelector<HTMLElement>(
+      '[data-testid="core-unreachable-banner"]',
+    )
+    expect(banner).toBeTruthy()
+    expect(banner?.getAttribute('role')).toBe('alert')
+    expect(banner?.textContent ?? '').toContain('核心不可达')
+    expect(banner?.textContent ?? '').toContain('socket absent')
+    // 浏览不受影响：工作台照常渲染。
+    expect(el.shadowRoot!.querySelector('.outlet sebas-dashboard')).toBeTruthy()
+    el.remove()
+  })
+
+  it('clears the banner on the next successful reachability poll, without a page reload', async () => {
+    apiMocks.summary.mockResolvedValueOnce({
+      active_count: 0,
+      recent_sessions: [],
+      reachability: { ok: false, cause: 'connection refused' },
+    })
+    const el = await mountShell()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="core-unreachable-banner"]'),
+    ).toBeTruthy()
+
+    apiMocks.summary.mockResolvedValue({
+      active_count: 0,
+      recent_sessions: [],
+      reachability: { ok: true },
+    })
+    ;(el as any).pollCoreReachability()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="core-unreachable-banner"]'),
+    ).toBeNull()
+    el.remove()
+  })
+
+  it('shows no banner while the core is reachable', async () => {
+    const el = await mountShell()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="core-unreachable-banner"]'),
+    ).toBeNull()
     el.remove()
   })
 })

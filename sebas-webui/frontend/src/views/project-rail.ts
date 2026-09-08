@@ -34,18 +34,17 @@ export class SebasProjectRail extends LitElement {
   @state() private dragIndex: number | null = null
   @state() private dragOverIndex: number | null = null
   @state() private error: string | null = null
+  /**
+   * 项目注册降级提示（harden-core-channel-deployment 4.3/D7）：核心不可达时
+   * 注册落本地注册表，就地提示如实文案；core 恢复后由任一次成功 refresh
+   * （ws refetch / 重试）清除。
+   */
+  @state() private degradedHint: string | null = null
 
   // Add project dialog state
   @state() private addDialogOpen = false
   @state() private addPath = ''
   @state() private addError: string | null = null
-  /**
-   * harden-core-channel-deployment 4.3: last add fell back to the local
-   * registry while the core was unreachable — shown inline until the next
-   * add attempt so the operator learns it at registration time, not at
-   * first-session time.
-   */
-  @state() private degradedNotice: string | null = null
 
   private fetchSeq = 0
   private unsubscribe?: () => void
@@ -72,6 +71,16 @@ export class SebasProjectRail extends LitElement {
     .section-label .add-btn:hover { filter: brightness(1.15); }
     .section-label .add-btn:focus-visible { outline: var(--sebas-focus-ring); outline-offset: 1px; }
     ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+    .degraded-hint {
+      margin: 2px 8px 4px;
+      padding: 5px 8px;
+      border-radius: var(--sebas-radius-sm);
+      background: var(--sebas-status-failed-bg);
+      border: 1px solid var(--sebas-status-failed-border);
+      color: var(--sebas-status-failed);
+      font-size: 0.72rem;
+      line-height: 1.35;
+    }
     .row {
       position: relative; display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto;
@@ -148,9 +157,6 @@ export class SebasProjectRail extends LitElement {
     .group-head .group-count { margin-left: auto; font-variant-numeric: tabular-nums; background: var(--sebas-surface-3); border-radius: var(--sebas-radius-full); padding: 0 7px; font-size: 0.62rem; }
     .group-head:focus-visible { outline: var(--sebas-focus-ring); outline-offset: 1px; }
     .error { padding: 8px 12px; color: var(--sebas-status-failed); font-size: 0.78rem; }
-    /* harden-core-channel-deployment 4.3: degraded-registration notice —
-       warn tier (not failed): the project did land, only via fallback. */
-    .degraded-notice { padding: 8px 12px; color: var(--sebas-status-warn, #b45309); font-size: 0.78rem; }
     .error .retry-btn {
       margin-left: 4px;
       padding: 1px 8px;
@@ -184,6 +190,7 @@ export class SebasProjectRail extends LitElement {
       if (seq !== this.fetchSeq) return
       this.projects = projects
       this.error = null
+      this.degradedHint = null
       for (const p of projects) {
         if (!this.branchByPath[p.path]) void this.loadBranch(p.path)
       }
@@ -279,7 +286,6 @@ export class SebasProjectRail extends LitElement {
     this.addDialogOpen = true
     this.addPath = ''
     this.addError = null
-    this.degradedNotice = null
     const picker = this.shadowRoot?.querySelector('.folder-picker') as any
     if (picker?.reset) void picker.reset()
   }
@@ -290,11 +296,11 @@ export class SebasProjectRail extends LitElement {
     if (!path) { this.addError = '请输入路径'; return }
     try {
       const p = await api.projects.add(path)
-      this.degradedNotice = p.degraded?.cause
-        ? `核心不可达，已写入本地注册表（${p.degraded.cause}）`
-        : null
       this.closeAddDialog()
       await this.refresh()
+      // 降级标记就地呈现（refresh 已清 hint，add 的响应说了算）：核心不可达
+      // 时项目仍落栏（本地注册表），但操作者不再直到新建会话才得知。
+      this.degradedHint = p.degraded?.cause ? `核心不可达（${p.degraded.cause}），已写入本地注册表` : null
       this.onSelect(p.path)
     } catch (e) { this.addError = e instanceof Error ? e.message : String(e) }
   }
@@ -382,7 +388,7 @@ export class SebasProjectRail extends LitElement {
         <button class="add-btn" aria-label="Add project" title="添加项目" @click=${this.openAddDialog}>+</button>
       </div>
       ${this.error ? html`<div class="error">${this.error} <button class="retry-btn" @click=${() => void this.refresh()}>重试</button></div>` : nothing}
-      ${this.degradedNotice ? html`<div class="degraded-notice" role="status">${this.degradedNotice}</div>` : nothing}
+      ${this.degradedHint ? html`<div class="degraded-hint" role="status" data-testid="project-degraded-hint">${this.degradedHint}</div>` : nothing}
       ${this.projects.length === 0 ? html`<div class="empty">尚未注册项目</div>` : html`<ul>${this.projects.map((p, i) => this.renderRow(p, i))}</ul>`}
       ${this.renderInbox()}
       ${this.renderHistory()}
