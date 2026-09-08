@@ -95,7 +95,13 @@
 
 ## 4. 账本收口
 
-- [ ] 4.1 `tests/acceptance/COVERAGE.md` 追加本 change 索引行与五簇终审数字；缺口清单收口（余量全部转豁免或标注）；运行 `openspec validate --changes --strict`（验证：五簇终审数字全部 ≥90% 且落账）
+- [x] 4.1 `tests/acceptance/COVERAGE.md` 追加本 change 索引行与五簇终审数字；缺口清单收口（余量全部转豁免或标注）；运行 `openspec validate --changes --strict`（验证：五簇终审数字全部 ≥90% 且落账）
+
+  终审数字落账（统计段 2026-09-08 复核表）：① 13/13、② 20/20、③ 24/24、④ 13/13、
+  ⑤ 30/30，合计 100/100 = 100%，每簇 ≥1 条套件内旅程 ✓；变更账本已加本 change
+  索引行（基数三期 merge hash）。缺口清单收口：3 条历史缺口收口、1 条转豁免、
+  replay-debug 保旅程级注记；requirement 级未命中且未豁免 = 0。
+  `openspec validate --changes --strict` 通过。
 
 ## 5. 验收：账本闭环
 
