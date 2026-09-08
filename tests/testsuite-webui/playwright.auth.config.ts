@@ -1,7 +1,11 @@
 import os from 'node:os'
 import path from 'node:path'
 import { defineConfig, devices } from '@playwright/test'
-import { REPO_ROOT } from './playwright.config'
+
+// Local REPO_ROOT on purpose: importing it from ./playwright.config would
+// execute that module's TESTSUITE_SCENE_FILE default (port 9899) as a side
+// effect and pin the wrong scene pointer for this assembly.
+const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
 
 /**
  * Auth-on form of the suite (task 3.8): same harness, TESTSUITE_AUTH=1 → the

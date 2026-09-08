@@ -13,8 +13,11 @@ export const WEBUI_PORT = 9899
 
 export default defineConfig({
   testDir: './tests',
-  // auth.spec.ts runs under playwright.auth.config.ts (auth-on form, port 9898).
-  testIgnore: /auth\.spec\.ts/,
+  // auth.spec.ts runs under playwright.auth.config.ts (auth-on form, port 9898);
+  // deployment.spec.ts runs under playwright.deployment.config.ts (detached
+  // dual-process form, port 9897) — the single-process assembly cannot
+  // exhibit "core dead, webui alive" states.
+  testIgnore: [/auth\.spec\.ts/, /deployment\.spec\.ts/],
   timeout: 30_000,
   retries: 1,
   workers: 1,
