@@ -610,6 +610,9 @@ pub struct FakeBackend {
     /// （wire-webui-sebas-agent-e2e 3.1）可注入的逐执行体可用性（route 层
     /// 测试用）。`None` = 后端不区分执行体（summary 透传 null）。
     execution_bodies: std::sync::Mutex<Option<Vec<ExecutionBodyStatus>>>,
+    /// harden-core-channel-deployment 4.2（端点测试用）：`state_mutate` 是否
+    /// 成功。默认 false（真源不可达 → 降级路径）；置 true 模拟状态库可用。
+    state_mutate_ok: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -636,6 +639,7 @@ impl FakeBackend {
             next_spawn: std::sync::atomic::AtomicU64::new(1),
             state_domains: std::sync::Mutex::new(HashMap::new()),
             execution_bodies: std::sync::Mutex::new(None),
+            state_mutate_ok: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -687,6 +691,13 @@ impl FakeBackend {
         self.reachable
             .store(reachable, std::sync::atomic::Ordering::SeqCst);
         *self.unreachable_cause.lock().unwrap() = Some(cause.to_string());
+    }
+
+    /// harden-core-channel-deployment 4.2：翻转 `state_mutate` 的成败（端点
+    /// 测试降级标记用）。默认 false = 真源不可达。
+    pub fn set_state_mutate_ok(&self, ok: bool) {
+        self.state_mutate_ok
+            .store(ok, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// （wire-webui-sebas-agent-e2e 3.1）注入逐执行体可用性，summary 原样
@@ -845,6 +856,17 @@ impl SessionBackend for FakeBackend {
             .get(domain)
             .cloned()
             .flatten()
+    }
+
+    async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        let _ = (domain, payload);
+        if self
+            .state_mutate_ok
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        Err("state store 不可用".into())
     }
 
     async fn reachability(&self) -> Reachability {

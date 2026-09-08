@@ -52,6 +52,29 @@ async fn start_core(dir: &StdPath) -> TestCore {
     start_core_with_map(dir, SessionMap::new()).await
 }
 
+/// 以指定握手 secret 启动 server（密钥轮换测试：同 socket 路径先后用不同钥）。
+async fn start_core_with_secret(dir: &StdPath, secret: &str) -> TestCore {
+    let (router, out_rx) = DispatchHandle::new(SessionMap::new());
+    let path = dir.join("core.sock");
+    let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+    let serve_path = path.clone();
+    let serve_router = router.clone();
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
+        sebas_webui::session_backend::InProcessBackend::new(serve_router.clone()),
+    );
+    let secret = secret.to_string();
+    tokio::spawn(async move {
+        let _ = server::serve(backend, serve_router, serve_path, secret, close_rx).await;
+    });
+    wait_channel_ready(&path).await;
+    TestCore {
+        path,
+        close_tx,
+        handle: router,
+        _out_rx: out_rx,
+    }
+}
+
 async fn start_core_with_map(dir: &StdPath, map: SessionMap) -> TestCore {
     let (router, out_rx) = DispatchHandle::new(map);
     let path = dir.join("core.sock");
@@ -545,6 +568,144 @@ async fn lagging_subscriber_is_disconnected_and_can_resnapshot() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 3000, "fresh client re-snapshots cleanly");
+}
+
+// ── harden-core-channel-deployment 2.1: secret 文件发现 ─────────────────
+// env 是进程全局的：以下用例持 channel secret 共享锁（与 secret.rs /
+// run::core_secret_tests 同一把），跨 await 持有经 allow 豁免（webui_cmd
+// auth_gate_tests 同款模式）。
+
+/// 无 env 时经 secret 文件完成握手（独立 webui 的发现路径）。
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn discovery_client_connects_via_secret_file() {
+    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
+    // SAFETY: 共享锁已持有。
+    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let secret_file = dir.path().join("core.secret");
+    std::fs::write(&secret_file, "file-discovered-secret").unwrap();
+    let core = start_core_with_secret(dir.path(), "file-discovered-secret").await;
+    let backend =
+        CoreChannelBackend::new_with_discovery(core.path.clone(), secret_file);
+
+    assert!(backend.snapshot().await.is_empty());
+    assert_eq!(backend.reachability().await, Reachability::Reachable);
+    let key = backend
+        .spawn("via file discovery".into(), None)
+        .await
+        .expect("spawn over discovered secret");
+    assert_eq!(backend.snapshot().await.len(), 1);
+    backend.close(key).await.expect("close");
+}
+
+/// env 仍优先：文件内容错误时 env 值照样握手成功（watchdog 路径零变化）。
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn discovery_env_still_wins_over_file() {
+    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
+    // SAFETY: 共享锁已持有；用例结束前恢复。
+    unsafe { std::env::set_var("SEBAS_CORE_SECRET", SECRET) };
+
+    let dir = tempfile::tempdir().unwrap();
+    let secret_file = dir.path().join("core.secret");
+    std::fs::write(&secret_file, "stale-or-foreign-value").unwrap();
+    let core = start_core(dir.path()).await;
+    let backend =
+        CoreChannelBackend::new_with_discovery(core.path.clone(), secret_file);
+    // forwarder 是后台任务：给它一个退避周期完成首次握手（直接断言会与
+    // "尚未连接 core" 初始态竞速）。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if backend.reachability().await == Reachability::Reachable {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "env-pinned discovery client must become reachable"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
+}
+
+/// core 重启换钥（文件被覆写）后，运行中的客户端不重建即自愈；中断期间
+/// cause 如实（socket 缺失或 secret 不匹配）。
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn discovery_client_heals_after_secret_rotation() {
+    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
+    // SAFETY: 共享锁已持有。
+    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let secret_file = dir.path().join("core.secret");
+    std::fs::write(&secret_file, "rotation-secret-A").unwrap();
+    let core = start_core_with_secret(dir.path(), "rotation-secret-A").await;
+    let backend =
+        CoreChannelBackend::new_with_discovery(core.path.clone(), secret_file.clone());
+    // 先可达一次（forwarder 与 one-shot 双路径都拿到 A）。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if backend.reachability().await == Reachability::Reachable {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "discovery client must become reachable"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // 杀掉 core（graceful：socket 消失），换钥重启（同路径、新文件内容）。
+    let _ = core.close_tx.send(true);
+    wait_channel_gone(&core.path).await;
+    let _ = backend.snapshot().await; // 触发一次失败刷新
+    match backend.reachability().await {
+        Reachability::Unreachable { cause } => assert!(!cause.is_empty()),
+        Reachability::Reachable => panic!("dead core must not report reachable"),
+    }
+    std::fs::write(&secret_file, "rotation-secret-B").unwrap();
+    drop(core);
+    let core2 = start_core_with_secret(dir.path(), "rotation-secret-B").await;
+
+    // 同一客户端实例在重连退避内恢复（文件重读拿到 B，无需重建）。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let snap_ok = backend.snapshot().await.is_empty();
+        if backend.reachability().await == Reachability::Reachable && snap_ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "client must heal after secret rotation"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = core2;
+}
+
+/// env 与文件皆缺省：构造不崩溃、warn 后以空 secret 尝试（不静默）。
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn discovery_without_env_or_file_keeps_trying() {
+    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
+    // SAFETY: 共享锁已持有。
+    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CoreChannelBackend::new_with_discovery(
+        dir.path().join("missing.sock"),
+        dir.path().join("missing.secret"),
+    );
+    // 无 server：快照空、不可达且 cause 非空（尝试真实发生过，而非静默）。
+    assert!(backend.snapshot().await.is_empty());
+    match backend.reachability().await {
+        Reachability::Unreachable { cause } => assert!(!cause.is_empty()),
+        Reachability::Reachable => panic!("absent socket must not report reachable"),
+    }
 }
 
 // ── 6.3: distinct unreachable causes ────────────────────────────────────────
