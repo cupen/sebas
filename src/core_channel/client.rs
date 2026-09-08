@@ -7,8 +7,10 @@
 //! - `subscribe` runs a dedicated streaming connection in a background task
 //!   that reconnects with backoff and emits `Resync` after every fresh
 //!   snapshot, so views converge without a client restart (6.2).
-//! - Unreachable states are reported with their cause (6.3): `socket absent`,
-//!   `connection refused`, `secret rejected`, `connection dropped`.
+//! - Unreachable states are reported with their cause (6.3) and — since
+//!   cover-core-channel-test-gaps A1.1 — their distinct kind:
+//!   `startup failed` (socket absent), `auth rejected` (handshake refused),
+//!   `disconnected` (refused connect, post-handshake drop, timeout).
 
 use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
@@ -30,10 +32,24 @@ use tokio::sync::broadcast;
 /// Per-request timeout: a hung core must not wedge the WebUI forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which of the three unreachable states a failed connection attempt produced
+/// (A1.1, design D1). The kind is latched next to the cause so
+/// [`CoreChannelBackend::reachability`] can map it onto the `Reachability`
+/// variants without re-deriving it from cause strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailKind {
+    /// Socket absent — the core never came up (or its startup failed).
+    StartupFailed,
+    /// Handshake rejected — the secret did not match.
+    AuthRejected,
+    /// Everything else: refused connect, post-handshake drop, timeout.
+    Disconnected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnStatus {
     Connected,
-    Failed { cause: String },
+    Failed { kind: FailKind, cause: String },
 }
 
 pub struct CoreChannelBackend {
@@ -83,6 +99,7 @@ impl CoreChannelBackend {
             events,
             notices,
             status: std::sync::Mutex::new(ConnStatus::Failed {
+                kind: FailKind::StartupFailed,
                 cause: "尚未连接 core".into(),
             }),
         });
@@ -98,27 +115,34 @@ impl CoreChannelBackend {
         *self.status.lock().unwrap() = status;
     }
 
+    /// Latch a failed connection attempt at the failure point and turn it
+    /// into the caller-facing typed rejection.
+    fn fail(&self, kind: FailKind, cause: impl Into<String>) -> SessionRejection {
+        let cause = cause.into();
+        self.set_status(ConnStatus::Failed { kind, cause: cause.clone() });
+        unavailable(cause)
+    }
+
     /// One one-shot request: connect → handshake → ack → request → response.
+    /// All failure latching happens inside (or below) `request_inner`; only
+    /// the outer timeout latches here (the inner future is gone by then).
     async fn request(
         &self,
         req: &CoreChannelRequest,
     ) -> std::result::Result<CoreChannelResponse, SessionRejection> {
         match tokio::time::timeout(REQUEST_TIMEOUT, self.request_inner(req)).await {
             Ok(r) => {
-                match &r {
-                    Ok(_) => self.set_status(ConnStatus::Connected),
-                    Err(SessionRejection::Unavailable { cause }) => {
-                        self.set_status(ConnStatus::Failed {
-                            cause: cause.clone(),
-                        })
-                    }
-                    Err(_) => {}
+                if r.is_ok() {
+                    self.set_status(ConnStatus::Connected);
                 }
                 r
             }
             Err(_) => {
                 let cause = "请求超时".to_string();
-                self.set_status(ConnStatus::Failed { cause: cause.clone() });
+                self.set_status(ConnStatus::Failed {
+                    kind: FailKind::Disconnected,
+                    cause: cause.clone(),
+                });
                 Err(SessionRejection::Unavailable { cause })
             }
         }
@@ -128,57 +152,90 @@ impl CoreChannelBackend {
         &self,
         req: &CoreChannelRequest,
     ) -> std::result::Result<CoreChannelResponse, SessionRejection> {
-        let (mut writer, mut reader) = connect(&self.path).await?;
-        handshake(&mut writer, &mut reader, &self.secret.current()).await?;
+        let (mut writer, mut reader) = self.connect().await?;
+        self.handshake(&mut writer, &mut reader).await?;
 
         let json = serde_json::to_string(req)
-            .map_err(|e| unavailable(format!("serialize failed: {e}")))?;
+            .map_err(|e| self.fail(FailKind::Disconnected, format!("serialize failed: {e}")))?;
         writer
             .write_all(json.as_bytes())
             .await
-            .map_err(|e| unavailable(format!("write failed: {e}")))?;
+            .map_err(|e| self.fail(FailKind::Disconnected, format!("write failed: {e}")))?;
         writer
             .write_all(b"\n")
             .await
-            .map_err(|e| unavailable(format!("write failed: {e}")))?;
+            .map_err(|e| self.fail(FailKind::Disconnected, format!("write failed: {e}")))?;
         writer
             .flush()
             .await
-            .map_err(|e| unavailable(format!("write failed: {e}")))?;
+            .map_err(|e| self.fail(FailKind::Disconnected, format!("write failed: {e}")))?;
 
         let mut line = String::new();
         reader
             .read_line(&mut line)
             .await
-            .map_err(|e| unavailable(format!("read failed: {e}")))?;
+            .map_err(|e| self.fail(FailKind::Disconnected, format!("read failed: {e}")))?;
         if line.trim().is_empty() {
-            self.set_status(ConnStatus::Failed {
-                cause: "connection dropped".into(),
-            });
-            return Err(unavailable("connection dropped".into()));
+            return Err(self.fail(FailKind::Disconnected, "connection dropped"));
         }
-        serde_json::from_str::<CoreChannelResponse>(line.trim())
-            .map_err(|e| unavailable(format!("parse response failed: {e}")))
+        serde_json::from_str::<CoreChannelResponse>(line.trim()).map_err(|e| {
+            self.fail(FailKind::Disconnected, format!("parse response failed: {e}"))
+        })
+    }
+
+    /// Connect against this backend's socket path, latching the failure kind
+    /// on error: ENOENT = the core never came up (StartupFailed), everything
+    /// else (refused socket file, I/O) is a runtime disconnect.
+    async fn connect(
+        &self,
+    ) -> std::result::Result<(WriteHalf, BufReader<ReadHalf>), SessionRejection> {
+        match connect(&self.path).await {
+            Ok(pair) => Ok(pair),
+            Err((kind, cause)) => {
+                self.set_status(ConnStatus::Failed { kind, cause: cause.clone() });
+                Err(unavailable(cause))
+            }
+        }
+    }
+
+    /// Send the handshake and wait for the ack, latching AuthRejected on
+    /// failure (EOF or bad ack = the secret was rejected; 5.3 server side
+    /// closes). A rejected secret is never retried as-is: the next attempt
+    /// re-resolves [`self.secret`] (`ChannelSecret::current`), so a rotated
+    /// secret file heals on the following connect.
+    async fn handshake(
+        &self,
+        writer: &mut WriteHalf,
+        reader: &mut BufReader<ReadHalf>,
+    ) -> std::result::Result<(), SessionRejection> {
+        match handshake(writer, reader, &self.secret.current()).await {
+            Ok(()) => Ok(()),
+            Err(cause) => {
+                self.set_status(ConnStatus::Failed {
+                    kind: FailKind::AuthRejected,
+                    cause: cause.clone(),
+                });
+                Err(unavailable(cause))
+            }
+        }
     }
 
     /// The streaming connection loop (6.2): connect, subscribe, forward
-    /// events; on any failure set the status, sleep with backoff, retry.
+    /// events; on any failure sleep with backoff, retry. Failure latching
+    /// happens inside `stream_once` at each failure point (connect/handshake
+    /// latch their own kinds); this loop never overwrites them.
     async fn run_forwarder(self: Arc<Self>) {
         let mut backoff = Duration::from_secs(1);
         loop {
+            // Failure latching happened inside stream_once at each failure
+            // point; the outcome itself only drives the retry cadence.
             let outcome = tokio::time::timeout(
                 Duration::from_secs(3600),
                 self.stream_once(),
             )
             .await
             .unwrap_or(Err("subscription timed out".into()));
-            match outcome {
-                // Clean server close (core shutting down): retry after backoff.
-                Ok(()) => {}
-                Err(cause) => {
-                    self.set_status(ConnStatus::Failed { cause });
-                }
-            }
+            let _ = outcome;
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(15));
         }
@@ -186,34 +243,43 @@ impl CoreChannelBackend {
 
     /// One streaming attempt: returns when the connection drops. Resets the
     /// caller's backoff via the shared flag when a fresh snapshot arrives.
+    /// Every failure path latches its (kind, cause) status before returning.
     async fn stream_once(&self) -> std::result::Result<(), String> {
-        let (mut writer, mut reader) = connect(&self.path)
-            .await
-            .map_err(|r| match r {
-                SessionRejection::Unavailable { cause } => cause,
-                other => format!("{other:?}"),
-            })?;
+        let (mut writer, mut reader) = connect(&self.path).await.map_err(|(kind, cause)| {
+            self.set_status(ConnStatus::Failed { kind, cause: cause.clone() });
+            cause
+        })?;
         handshake(&mut writer, &mut reader, &self.secret.current())
             .await
-            .map_err(|r| match r {
-                SessionRejection::Unavailable { cause } => cause,
-                other => format!("{other:?}"),
+            .inspect_err(|cause| {
+                self.set_status(ConnStatus::Failed {
+                    kind: FailKind::AuthRejected,
+                    cause: cause.clone(),
+                });
             })?;
 
-        let sub = serde_json::to_string(&CoreChannelRequest::Subscribe)
-            .map_err(|e| format!("serialize failed: {e}"))?;
+        let sub = serde_json::to_string(&CoreChannelRequest::Subscribe).map_err(|e| {
+            let cause = format!("serialize failed: {e}");
+            self.set_status(ConnStatus::Failed {
+                kind: FailKind::Disconnected,
+                cause: cause.clone(),
+            });
+            cause
+        })?;
+        let write_sub = |e| {
+            let cause = format!("subscribe write failed: {e}");
+            self.set_status(ConnStatus::Failed {
+                kind: FailKind::Disconnected,
+                cause: cause.clone(),
+            });
+            cause
+        };
         writer
             .write_all(sub.as_bytes())
             .await
-            .map_err(|e| format!("subscribe write failed: {e}"))?;
-        writer
-            .write_all(b"\n")
-            .await
-            .map_err(|e| format!("subscribe write failed: {e}"))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| format!("subscribe write failed: {e}"))?;
+            .map_err(write_sub)?;
+        writer.write_all(b"\n").await.map_err(write_sub)?;
+        writer.flush().await.map_err(write_sub)?;
 
         let mut line = String::new();
         loop {
@@ -221,12 +287,33 @@ impl CoreChannelBackend {
             let n = reader
                 .read_line(&mut line)
                 .await
-                .map_err(|e| format!("stream read failed: {e}"))?;
+                .map_err(|e| {
+                    let cause = format!("stream read failed: {e}");
+                    self.set_status(ConnStatus::Failed {
+                        kind: FailKind::Disconnected,
+                        cause: cause.clone(),
+                    });
+                    cause
+                })?;
             if n == 0 {
-                return Err("connection dropped".into());
+                let cause = "connection dropped".to_string();
+                self.set_status(ConnStatus::Failed {
+                    kind: FailKind::Disconnected,
+                    cause: cause.clone(),
+                });
+                return Err(cause);
             }
-            let frame: SessionStreamFrame = serde_json::from_str(line.trim())
-                .map_err(|e| format!("parse frame failed: {e}"))?;
+            let frame: SessionStreamFrame = match serde_json::from_str(line.trim()) {
+                Ok(f) => f,
+                Err(e) => {
+                    let cause = format!("parse frame failed: {e}");
+                    self.set_status(ConnStatus::Failed {
+                        kind: FailKind::Disconnected,
+                        cause: cause.clone(),
+                    });
+                    return Err(cause);
+                }
+            };
             match frame {
                 SessionStreamFrame::Snapshot { .. } => {
                     // Fresh snapshot from the (re)connect: tell subscribers
@@ -261,6 +348,8 @@ fn unavailable(cause: String) -> SessionRejection {
 /// ——webui 的 degradation banner / `/api/summary.reachability.cause` 由此
 /// 显示 "core startup failed: <可读原因>"，而不是一句模糊的 socket absent。
 /// core 正常恢复（ready 清除闩锁 + 通道 Connected）后 banner 自然消失。
+/// D2（cover-core-channel-test-gaps）：无条件 enrich 沿用不收窄——kind 与
+/// cause 正交，三类不可达都保留本富化。
 fn enrich_with_startup_summary(cause: &str) -> String {
     match crate::startup_failure::read_env_summary() {
         Some(summary) => format!("core startup failed: {summary}"),
@@ -268,64 +357,70 @@ fn enrich_with_startup_summary(cause: &str) -> String {
     }
 }
 
-
-/// Connect, mapping error kinds onto their distinct causes (6.3).
+/// Connect, mapping error kinds onto their distinct cause + failure kind
+/// (6.3; A1.1 adds the kind discrimination):
+/// - ENOENT (socket absent) → StartupFailed with the path-naming fallback
+///   cause (spec scenario "socket-not-found fallback cause");
+/// - everything else (refused socket file, I/O) → Disconnected.
 async fn connect(
     path: &Path,
-) -> std::result::Result<
-    (
-        WriteHalf,
-        BufReader<ReadHalf>,
-    ),
-    SessionRejection,
-> {
+) -> std::result::Result<(WriteHalf, BufReader<ReadHalf>), (FailKind, String)> {
     match sebas_ipc::connect(path).await {
         Ok(stream) => {
             let (r, w) = sebas_ipc::split(stream);
             Ok((w, BufReader::new(r)))
         }
         Err(e) => {
-            let cause = match e.kind() {
-                std::io::ErrorKind::NotFound => "socket absent",
-                std::io::ErrorKind::ConnectionRefused => "connection refused",
-                _ => "connect failed",
-            };
-            Err(unavailable(cause.to_string()))
+            match e.kind() {
+                std::io::ErrorKind::NotFound => Err((
+                    FailKind::StartupFailed,
+                    format!(
+                        "core session channel socket not found at {}",
+                        path.display()
+                    ),
+                )),
+                std::io::ErrorKind::ConnectionRefused => {
+                    Err((FailKind::Disconnected, "connection refused".into()))
+                }
+                _ => Err((FailKind::Disconnected, "connect failed".into())),
+            }
         }
     }
 }
 
 /// Send the handshake line and wait for the ack. EOF or a bad ack after the
-/// handshake = the secret was rejected (5.3 server side closes).
+/// handshake = the secret was rejected (5.3 server side closes) — the caller
+/// latches `FailKind::AuthRejected` around this. Cause wording is the spec's
+/// "core rejected channel handshake" (A1.2 scenario).
 async fn handshake(
     writer: &mut WriteHalf,
     reader: &mut BufReader<ReadHalf>,
     secret: &str,
-) -> std::result::Result<(), SessionRejection> {
+) -> std::result::Result<(), String> {
     let hs = serde_json::to_string(&ChannelHandshake {
         secret: secret.to_string(),
     })
-    .map_err(|e| unavailable(format!("serialize failed: {e}")))?;
+    .map_err(|e| format!("serialize failed: {e}"))?;
     writer
         .write_all(hs.as_bytes())
         .await
-        .map_err(|e| unavailable(format!("handshake write failed: {e}")))?;
+        .map_err(|e| format!("handshake write failed: {e}"))?;
     writer
         .write_all(b"\n")
         .await
-        .map_err(|e| unavailable(format!("handshake write failed: {e}")))?;
+        .map_err(|e| format!("handshake write failed: {e}"))?;
     writer
         .flush()
         .await
-        .map_err(|e| unavailable(format!("handshake write failed: {e}")))?;
+        .map_err(|e| format!("handshake write failed: {e}"))?;
 
     let mut line = String::new();
     reader
         .read_line(&mut line)
         .await
-        .map_err(|_| unavailable("secret rejected".into()))?;
+        .map_err(|_| "core rejected channel handshake".to_string())?;
     if line.trim().is_empty() {
-        return Err(unavailable("secret rejected".into()));
+        return Err("core rejected channel handshake".into());
     }
     #[derive(serde::Deserialize)]
     struct Ack {
@@ -333,7 +428,7 @@ async fn handshake(
     }
     match serde_json::from_str::<Ack>(line.trim()) {
         Ok(ack) if ack.handshake == "ok" => Ok(()),
-        _ => Err(unavailable("secret rejected".into())),
+        _ => Err("core rejected channel handshake".into()),
     }
 }
 
@@ -475,9 +570,16 @@ impl SessionBackend for CoreChannelBackend {
     async fn reachability(&self) -> Reachability {
         match &*self.status.lock().unwrap() {
             ConnStatus::Connected => Reachability::Reachable,
-            ConnStatus::Failed { cause } => Reachability::Unreachable {
-                cause: enrich_with_startup_summary(cause),
-            },
+            ConnStatus::Failed { kind, cause } => {
+                // D2: the unconditional fail-fast enrich stays on every
+                // unreachable branch; the kind rides alongside it.
+                let cause = enrich_with_startup_summary(cause);
+                match kind {
+                    FailKind::StartupFailed => Reachability::StartupFailed { cause },
+                    FailKind::AuthRejected => Reachability::AuthRejected { cause },
+                    FailKind::Disconnected => Reachability::Disconnected { cause },
+                }
+            }
         }
     }
 

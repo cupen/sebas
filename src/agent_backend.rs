@@ -542,7 +542,9 @@ impl SessionBackend for NativeAgentBackend {
 
     async fn reachability(&self) -> Reachability {
         match &self.unavailable_cause {
-            Some(cause) => Reachability::Unreachable { cause: cause.clone() },
+            // A1.1: this seam only knows "the agent is unavailable right now"
+            // — the generic runtime-down shape of the three-way enum.
+            Some(cause) => Reachability::Disconnected { cause: cause.clone() },
             None => Reachability::Reachable,
         }
     }
@@ -816,34 +818,25 @@ impl SessionBackend for DualSessionBackend {
     }
 
     async fn execution_bodies(&self) -> Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>> {
-        let acp = match self.acp.reachability().await {
+        // A1.1：三类不可达对逐体上报同义——body 不可用，cause 原样透传。
+        let to_body = |name: &str, r: Reachability| match r {
             Reachability::Reachable => sebas_webui::session_backend::ExecutionBodyStatus {
-                name: "acp".into(),
+                name: name.into(),
                 ok: true,
                 cause: None,
             },
-            Reachability::Unreachable { cause } => {
+            Reachability::StartupFailed { cause }
+            | Reachability::AuthRejected { cause }
+            | Reachability::Disconnected { cause } => {
                 sebas_webui::session_backend::ExecutionBodyStatus {
-                    name: "acp".into(),
+                    name: name.into(),
                     ok: false,
                     cause: Some(cause),
                 }
             }
         };
-        let native = match self.native.reachability().await {
-            Reachability::Reachable => sebas_webui::session_backend::ExecutionBodyStatus {
-                name: "native".into(),
-                ok: true,
-                cause: None,
-            },
-            Reachability::Unreachable { cause } => {
-                sebas_webui::session_backend::ExecutionBodyStatus {
-                    name: "native".into(),
-                    ok: false,
-                    cause: Some(cause),
-                }
-            }
-        };
+        let acp = to_body("acp", self.acp.reachability().await);
+        let native = to_body("native", self.native.reachability().await);
         Some(vec![acp, native])
     }
 

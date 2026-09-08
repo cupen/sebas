@@ -1,8 +1,9 @@
 //! Integration-style tests for the core session channel (binary crate lib):
 //! server handshake/rejections (5.1–5.6), backend round-trips (6.1),
-//! and reconnect convergence (6.2). Peer-uid cross-uid rejection (5.2) and
-//! the not-connected UI states (7.3) need a real second uid / live processes
-//! and are covered by the change's manual verification (8.5/8.3).
+//! and reconnect convergence (6.2). The not-connected UI states (7.3) need
+//! live browser flows and stay with the webui suites; the cross-uid
+//! rejection (5.2) is covered live by `cross_uid_rejected_live_process`
+//! (A2.3, CI-only `#[ignore]` — needs root).
 
 use crate::core_channel::client::CoreChannelBackend;
 use crate::core_channel::protocol::{
@@ -50,29 +51,6 @@ impl Drop for TestCore {
 
 async fn start_core(dir: &StdPath) -> TestCore {
     start_core_with_map(dir, SessionMap::new()).await
-}
-
-/// 以指定握手 secret 启动 server（密钥轮换测试：同 socket 路径先后用不同钥）。
-async fn start_core_with_secret(dir: &StdPath, secret: &str) -> TestCore {
-    let (router, out_rx) = DispatchHandle::new(SessionMap::new());
-    let path = dir.join("core.sock");
-    let (close_tx, close_rx) = tokio::sync::watch::channel(false);
-    let serve_path = path.clone();
-    let serve_router = router.clone();
-    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
-        sebas_webui::session_backend::InProcessBackend::new(serve_router.clone()),
-    );
-    let secret = secret.to_string();
-    tokio::spawn(async move {
-        let _ = server::serve(backend, serve_router, serve_path, secret, close_rx).await;
-    });
-    wait_channel_ready(&path).await;
-    TestCore {
-        path,
-        close_tx,
-        handle: router,
-        _out_rx: out_rx,
-    }
 }
 
 async fn start_core_with_map(dir: &StdPath, map: SessionMap) -> TestCore {
@@ -456,11 +434,15 @@ async fn client_converges_after_server_restart() {
     #[cfg(unix)]
     assert!(!core.path.exists(), "socket must be removed on shutdown");
 
-    // While the core is down, reachability reports unreachable with a cause.
+    // While the core is down (graceful exit removed the socket → ENOENT),
+    // reachability reports the startup-failed state with a cause.
     let _ = backend.snapshot().await; // trigger a failure refresh
     assert!(
-        matches!(backend.reachability().await, Reachability::Unreachable { .. }),
-        "down core must report unreachable"
+        matches!(
+            backend.reachability().await,
+            Reachability::StartupFailed { .. }
+        ),
+        "down core must report startup_failed after a graceful shutdown"
     );
 
     // Restart the server on the same path (stale socket already removed).
@@ -570,166 +552,35 @@ async fn lagging_subscriber_is_disconnected_and_can_resnapshot() {
     assert_eq!(snap.len(), 3000, "fresh client re-snapshots cleanly");
 }
 
-// ── harden-core-channel-deployment 2.1: secret 文件发现 ─────────────────
-// env 是进程全局的：以下用例持 channel secret 共享锁（与 secret.rs /
-// run::core_secret_tests 同一把），跨 await 持有经 allow 豁免（webui_cmd
-// auth_gate_tests 同款模式）。
+// ── 6.3: distinct unreachable causes (A1.2 rewrote for the three-way enum) ──
 
-/// 无 env 时经 secret 文件完成握手（独立 webui 的发现路径）。
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn discovery_client_connects_via_secret_file() {
-    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
-    // SAFETY: 共享锁已持有。
-    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
-
-    let dir = tempfile::tempdir().unwrap();
-    let secret_file = dir.path().join("core.secret");
-    std::fs::write(&secret_file, "file-discovered-secret").unwrap();
-    let core = start_core_with_secret(dir.path(), "file-discovered-secret").await;
-    let backend =
-        CoreChannelBackend::new_with_discovery(core.path.clone(), secret_file);
-
-    assert!(backend.snapshot().await.is_empty());
-    assert_eq!(backend.reachability().await, Reachability::Reachable);
-    let key = backend
-        .spawn("via file discovery".into(), None)
-        .await
-        .expect("spawn over discovered secret");
-    assert_eq!(backend.snapshot().await.len(), 1);
-    backend.close(key).await.expect("close");
-}
-
-/// env 仍优先：文件内容错误时 env 值照样握手成功（watchdog 路径零变化）。
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn discovery_env_still_wins_over_file() {
-    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
-    // SAFETY: 共享锁已持有；用例结束前恢复。
-    unsafe { std::env::set_var("SEBAS_CORE_SECRET", SECRET) };
-
-    let dir = tempfile::tempdir().unwrap();
-    let secret_file = dir.path().join("core.secret");
-    std::fs::write(&secret_file, "stale-or-foreign-value").unwrap();
-    let core = start_core(dir.path()).await;
-    let backend =
-        CoreChannelBackend::new_with_discovery(core.path.clone(), secret_file);
-    // forwarder 是后台任务：给它一个退避周期完成首次握手（直接断言会与
-    // "尚未连接 core" 初始态竞速）。
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if backend.reachability().await == Reachability::Reachable {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "env-pinned discovery client must become reachable"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
-}
-
-/// core 重启换钥（文件被覆写）后，运行中的客户端不重建即自愈；中断期间
-/// cause 如实（socket 缺失或 secret 不匹配）。
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn discovery_client_heals_after_secret_rotation() {
-    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
-    // SAFETY: 共享锁已持有。
-    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
-
-    let dir = tempfile::tempdir().unwrap();
-    let secret_file = dir.path().join("core.secret");
-    std::fs::write(&secret_file, "rotation-secret-A").unwrap();
-    let core = start_core_with_secret(dir.path(), "rotation-secret-A").await;
-    let backend =
-        CoreChannelBackend::new_with_discovery(core.path.clone(), secret_file.clone());
-    // 先可达一次（forwarder 与 one-shot 双路径都拿到 A）。
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if backend.reachability().await == Reachability::Reachable {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "discovery client must become reachable"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // 杀掉 core（graceful：socket 消失），换钥重启（同路径、新文件内容）。
-    let _ = core.close_tx.send(true);
-    wait_channel_gone(&core.path).await;
-    let _ = backend.snapshot().await; // 触发一次失败刷新
-    match backend.reachability().await {
-        Reachability::Unreachable { cause } => assert!(!cause.is_empty()),
-        Reachability::Reachable => panic!("dead core must not report reachable"),
-    }
-    std::fs::write(&secret_file, "rotation-secret-B").unwrap();
-    drop(core);
-    let core2 = start_core_with_secret(dir.path(), "rotation-secret-B").await;
-
-    // 同一客户端实例在重连退避内恢复（文件重读拿到 B，无需重建）。
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let snap_ok = backend.snapshot().await.is_empty();
-        if backend.reachability().await == Reachability::Reachable && snap_ok {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "client must heal after secret rotation"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let _ = core2;
-}
-
-/// env 与文件皆缺省：构造不崩溃、warn 后以空 secret 尝试（不静默）。
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn discovery_without_env_or_file_keeps_trying() {
-    let _env = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
-    // SAFETY: 共享锁已持有。
-    unsafe { std::env::remove_var("SEBAS_CORE_SECRET") };
-
-    let dir = tempfile::tempdir().unwrap();
-    let backend = CoreChannelBackend::new_with_discovery(
-        dir.path().join("missing.sock"),
-        dir.path().join("missing.secret"),
-    );
-    // 无 server：快照空、不可达且 cause 非空（尝试真实发生过，而非静默）。
-    assert!(backend.snapshot().await.is_empty());
-    match backend.reachability().await {
-        Reachability::Unreachable { cause } => assert!(!cause.is_empty()),
-        Reachability::Reachable => panic!("absent socket must not report reachable"),
-    }
-}
-
-// ── 6.3: distinct unreachable causes ────────────────────────────────────────
-
-/// socket 不存在 → "socket absent"；无服务监听的路径 → "connection refused"。
+/// socket 不存在 → `StartupFailed`，fallback cause 带上 socket 路径
+/// （spec scenario "socket-not-found fallback cause"）。闩锁文件在场时的
+/// enrich 全串与握手拒绝/断连两态分别由 A1.2 的三个专项单测覆盖——三态
+/// 已是枚举变体，不再可能互相混淆。
 #[tokio::test]
 async fn unreachable_causes_are_distinct() {
-    // Absent socket.
+    // Absent socket; hold the startup-error env lock so an ambient latch
+    // file cannot rewrite the cause through the unconditional enrich.
+    let _env = StartupErrorFile::unset();
     let dir = tempfile::tempdir().unwrap();
-    let backend = CoreChannelBackend::new(dir.path().join("missing.sock"), SECRET.into());
+    let path = dir.path().join("missing.sock");
+    let backend = CoreChannelBackend::new(path.clone(), SECRET.into());
     let err = backend.spawn("x".into(), None).await.unwrap_err();
     match err {
         SessionRejection::Unavailable { cause } => {
-            assert_eq!(cause, "socket absent", "cause must name the absence");
+            assert_eq!(
+                cause,
+                format!("core session channel socket not found at {}", path.display()),
+                "cause must name the absence"
+            );
         }
         other => panic!("expected Unavailable, got {other:?}"),
     }
-
-    // Refused: a bound-but-not-serving socket file would be reclaimed by a
-    // real server; the honest equivalent is a closed peer — approximate with
-    // a socket whose server stopped between connect and handshake is hard to
-    // orchestrate; the unit-reachable causes (secret rejected / dropped) are
-    // asserted at the server level above (5.3 tests) and by 8.5 manually.
-    let _ = std::path::Path::new("/nonexistent").exists();
+    assert!(matches!(
+        backend.reachability().await,
+        Reachability::StartupFailed { .. }
+    ));
 }
 
 // ── 4.2/5.4: state subscription stream ──────────────────────────────────────
@@ -1256,4 +1107,463 @@ async fn client_discovers_secret_from_file_and_heals_key_rotation() {
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
     let _ = key;
+}
+
+// ── cover-core-channel-test-gaps A1.2: reachability three-state ─────────────
+
+/// SEBAS_STARTUP_ERROR_FILE 进程级隔离：enrich（client.rs）在**任何**不可达
+/// 断言时都会读该 env（D2 无条件富化不收窄）——设置/清除它的用例与做精确
+/// cause 断言的用例共用这把锁串行，防并行 #[tokio::test] 互相踩 env。
+static STARTUP_ERROR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 持有期内把 SEBAS_STARTUP_ERROR_FILE 指向沙箱文件（或清掉），drop 时还原。
+struct StartupErrorFile {
+    _dir: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl StartupErrorFile {
+    /// env → 新沙箱文件，内容为 `contents`。
+    fn set(contents: &str) -> Self {
+        let lock = STARTUP_ERROR_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup-error");
+        std::fs::write(&path, contents).unwrap();
+        let name = crate::startup_failure::SUMMARY_FILE_ENV;
+        let prev = std::env::var_os(name);
+        // edition 2024：多线程下 set/remove env 是 unsafe；由锁串行化。
+        unsafe { std::env::set_var(name, &path) };
+        Self { _dir: dir, prev, _lock: lock }
+    }
+
+    /// env 清除（还原 prev）。
+    fn unset() -> Self {
+        let lock = STARTUP_ERROR_ENV_LOCK.lock().unwrap();
+        let name = crate::startup_failure::SUMMARY_FILE_ENV;
+        let prev = std::env::var_os(name);
+        unsafe { std::env::remove_var(name) };
+        Self {
+            _dir: tempfile::tempdir().unwrap(),
+            prev,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for StartupErrorFile {
+    fn drop(&mut self) {
+        let name = crate::startup_failure::SUMMARY_FILE_ENV;
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// (a) socket 不存在 + `SEBAS_STARTUP_ERROR_FILE` 含闩锁摘要 →
+/// `StartupFailed { cause: "core startup failed: <原因>" }`（enrich 全串，
+/// 前端原文渲染）。
+#[tokio::test]
+async fn reachability_startup_failed_with_env_file() {
+    let _env = StartupErrorFile::set("startup-failure: bad config\n");
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CoreChannelBackend::new(dir.path().join("missing.sock"), SECRET.into());
+
+    let _ = backend.snapshot().await; // trigger the failure + status latch
+    match backend.reachability().await {
+        Reachability::StartupFailed { cause } => {
+            assert_eq!(cause, "core startup failed: bad config");
+        }
+        other => panic!("expected StartupFailed, got {other:?}"),
+    }
+}
+
+/// (a-fallback) socket 不存在、无闩锁文件 → `StartupFailed` 且 cause 为
+/// 带路径的 fallback（"core session channel socket not found at <path>"）。
+#[tokio::test]
+async fn reachability_startup_failed_fallback() {
+    let _env = StartupErrorFile::unset();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.sock");
+    let backend = CoreChannelBackend::new(path.clone(), SECRET.into());
+
+    let _ = backend.snapshot().await;
+    match backend.reachability().await {
+        Reachability::StartupFailed { cause } => {
+            assert_eq!(
+                cause,
+                format!("core session channel socket not found at {}", path.display())
+            );
+        }
+        other => panic!("expected StartupFailed, got {other:?}"),
+    }
+}
+
+/// (b) socket 在、secret 错 → `AuthRejected { cause: "core rejected channel
+/// handshake" }`；重试语义（spec 已修正版）：同 secret 不无限重试——一次
+/// 请求内只有一次握手，失败立即以 AuthRejected 返回；env 未设的文件发现
+/// 客户端在**下一次尝试前**重读 secret 文件，文件换成正确钥后再试一次即
+/// 恢复（core 重启换钥自愈的最小形态）。
+#[tokio::test]
+async fn reachability_auth_rejected_after_handshake() {
+    // Exact-cause assertion: hold the startup-error env lock so a parallel
+    // latch-file test cannot rewrite the cause via the unconditional enrich.
+    let _env = StartupErrorFile::unset();
+    let dir = tempfile::tempdir().unwrap();
+    let secret_file = dir.path().join("core.secret");
+    std::fs::write(&secret_file, "wrong-key").unwrap();
+    let core = start_core(dir.path()).await; // server secret = SECRET
+    let backend = CoreChannelBackend::with_secret(
+        core.path.clone(),
+        crate::core_channel::secret::ChannelSecret::Discover(Some(secret_file.clone())),
+    );
+
+    // 错钥被拒：一个请求 = 一次握手，失败即刻报告，不内部重试风暴。
+    let err = backend.spawn("x".into(), None).await.unwrap_err();
+    match err {
+        SessionRejection::Unavailable { cause } => {
+            assert_eq!(cause, "core rejected channel handshake");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+    assert_eq!(
+        backend.reachability().await,
+        Reachability::AuthRejected {
+            cause: "core rejected channel handshake".into()
+        }
+    );
+
+    // 文件换正确钥（env 未设 → Discover 每次连接前重读文件），同一 client
+    // 实例至多再试一次即恢复，而不是继续用失败过的旧钥。
+    std::fs::write(&secret_file, SECRET).unwrap();
+    let key = backend.spawn("after re-read".into(), None).await.expect("one more try succeeds");
+    assert_eq!(backend.reachability().await, Reachability::Reachable);
+    let _ = key;
+}
+
+/// (c) 握手成功后、请求得到应答前对端断连（ack 后直接关闭）→
+/// `Disconnected { cause: "connection dropped" }`——与 (a)/(b) 三态互斥。
+#[tokio::test]
+async fn reachability_disconnected_after_connected() {
+    // Exact-cause assertion: hold the startup-error env lock (see the auth
+    // test) — the kind must stay Disconnected and the cause verbatim.
+    let _env = StartupErrorFile::unset();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("core.sock");
+    let listener = server::bind_channel_socket(&path).expect("bind fake listener");
+    // Fake peer: accept loop — every connection gets a successful handshake
+    // ack, then (after consuming the request line) is dropped without
+    // answering, so the client's read hits post-handshake EOF.
+    tokio::spawn(async move {
+        for _ in 0..16 {
+            let stream = match tokio::time::timeout(Duration::from_secs(10), sebas_ipc::accept(&listener)).await {
+                Ok(Ok(s)) => s,
+                _ => return,
+            };
+            let (r, mut w) = sebas_ipc::split(stream);
+            let mut reader = BufReader::new(r);
+            let mut line = String::new();
+            use tokio::io::AsyncWriteExt;
+            // Best-effort handshake read (probe connections may send nothing).
+            let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line)).await;
+            let _ = w.write_all(b"{\"handshake\":\"ok\"}\n").await;
+            let _ = w.flush().await;
+            // Consume the request line (best effort) so the client's write
+            // lands before the drop — its read then sees the EOF.
+            let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line)).await;
+            let _ = w.shutdown().await;
+            drop((reader, w)); // post-handshake disconnect
+        }
+    });
+    wait_channel_ready(&path).await;
+
+    let backend = CoreChannelBackend::new(path.clone(), SECRET.into());
+    let err = backend.spawn("x".into(), None).await.unwrap_err();
+    match err {
+        SessionRejection::Unavailable { cause } => {
+            assert_eq!(cause, "connection dropped");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+    assert_eq!(
+        backend.reachability().await,
+        Reachability::Disconnected {
+            cause: "connection dropped".into()
+        }
+    );
+}
+// ── cover-core-channel-test-gaps A2.2: ensure_message / Message 语义 ────────
+
+/// 未知 key 上的 EnsureMessage 自动建会话并返回 Ok；后续 Snapshot 包含该
+/// 会话（spec scenario: "unknown key auto-creates session via EnsureMessage"）。
+#[tokio::test]
+async fn ensure_message_unknown_key_auto_creates() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let chat = ChannelKey::feishu("oc_a2_ensure_new", None);
+    backend
+        .ensure_message(chat.clone(), "hi".into())
+        .await
+        .expect("unknown key auto-creates");
+
+    let snap = backend.snapshot().await;
+    assert_eq!(snap.len(), 1, "exactly one session created: {snap:?}");
+    assert!(snap[0].key.contains("oc_a2_ensure_new"));
+    assert_eq!(snap[0].status, "spawning");
+}
+
+/// dormant 会话经 EnsureMessage 懒复活：Ok + 快照状态从 dormant 变为
+/// spawning（spec scenario: "dormant session resumes via EnsureMessage"；
+/// 复活在事件流上是 Dormant→Spawning 的 Updated——引擎没有独立 Revived 帧）。
+#[tokio::test]
+async fn ensure_message_dormant_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let chat = ChannelKey::feishu("oc_a2_dormant", None);
+    core.handle
+        .map
+        .insert(
+            chat.clone(),
+            sebas_dispatch::state::Mapping::dormant("s-a2-dormant", 1),
+        )
+        .await
+        .unwrap();
+    let before = backend.snapshot().await;
+    assert_eq!(before[0].status, "dormant", "fixture starts dormant: {before:?}");
+
+    backend
+        .ensure_message(chat.clone(), "wake up".into())
+        .await
+        .expect("dormant resumes");
+
+    let after = backend.snapshot().await;
+    assert_eq!(after.len(), 1, "same session, resumed in place: {after:?}");
+    assert_eq!(after[0].status, "spawning", "dormant claimed → spawning: {after:?}");
+}
+
+/// Message 在未知 key 上保持 typed rejection（UnknownSession），且不创建
+/// 任何会话——webui「未知即拒绝」语义不受 ensure 语义影响（spec scenario:
+/// "Message on unknown key is rejected"；extract-im-service 2.1 回归）。
+#[tokio::test]
+async fn message_unknown_key_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let bogus = ChannelKey::feishu("oc_a2_unknown", None);
+    assert_eq!(
+        backend.message(bogus.clone(), "hi".into()).await,
+        Err(SessionRejection::UnknownSession {
+            key: serde_json::to_string(&bogus).unwrap()
+        })
+    );
+    assert!(
+        backend.snapshot().await.is_empty(),
+        "no session may be created by a rejected Message"
+    );
+}
+
+// ── cover-core-channel-test-gaps A2.3: cross-uid rejection, live process ────
+
+/// Fork-safe child body: switch to `uid`, connect to the channel socket, send
+/// a correctly-secred handshake and expect the server to close without any
+/// ack byte (peer-uid mismatch rejection). Pure libc syscalls only — no
+/// allocation, no locks, no Rust runtime services (the child of fork() in a
+/// multithreaded process may only do async-signal-safe work).
+/// Exit codes: 0 = rejected as expected; 2 = setuid failed; 3 = connect
+/// failed; 4 = server ACKED a foreign-uid handshake (the bug this test guards).
+unsafe fn cross_uid_child_body(path_bytes: &[u8], handshake: &[u8], uid: u32) -> i32 {
+    // Edition 2024: an `unsafe fn` body is not an implicit unsafe block.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        if libc::setuid(uid) != 0 {
+            return 2;
+        }
+        // setuid 报告成功还不够：确认 real/effective 都已切过去（诊断
+        // "server acked" 到底是 uid 没切成还是检查缺失）。
+        if libc::getuid() != uid || libc::geteuid() != uid {
+            return 5;
+        }
+        let sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if sock < 0 {
+            return 3;
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let len = path_bytes.len().min(addr.sun_path.len() - 1);
+        std::ptr::copy_nonoverlapping(
+            path_bytes.as_ptr(),
+            addr.sun_path.as_mut_ptr().cast(),
+            len,
+        );
+        let addr_len =
+            std::mem::size_of::<libc::sa_family_t>() + len;
+        if libc::connect(
+            sock,
+            (&addr as *const libc::sockaddr_un).cast(),
+            addr_len as libc::socklen_t,
+        ) != 0
+        {
+            libc::close(sock);
+            return 3;
+        }
+        // The handshake carries the CORRECT secret: if the server still closes
+        // without an ack, the rejection came from the peer-uid check alone.
+        let mut written = 0usize;
+        while written < handshake.len() {
+            let n = libc::write(
+                sock,
+                handshake[written..].as_ptr().cast(),
+                handshake.len() - written,
+            );
+            if n <= 0 {
+                // Server already closed on the uid mismatch — that is a reject.
+                libc::close(sock);
+                return 0;
+            }
+            written += n as usize;
+        }
+    let mut ack = [0u8; 32];
+    let n = libc::read(sock, ack.as_mut_ptr().cast(), ack.len());
+    libc::close(sock);
+    // n == 0（干净 EOF）或 n == -1（ECONNRESET：服务端带着未读数据 close，
+    // 内核对端回 RST）都等于「无 ack，被拒」；只有 n > 0 才是握手 ack。
+    if n <= 0 {
+        0
+    } else {
+        4
+    }
+}
+}
+
+/// 真实跨 uid 进程的 peer-uid 拒绝（5.2 / design D5，**CI-only 非门禁**）：
+/// fork 子进程后 `setuid` 到 nobody/daemon（不是同进程改 uid，是真实跨进程
+/// 凭证），携正确 secret 握手——服务端必须因 uid 不匹配直接关闭连接、不给
+/// ack、不进入 request 处理。非 root 下 `setuid` 必败，测试自身提前跳过；
+/// 本地开发账户直接 `#[ignore]`，CI runner 默认 root 时以
+/// `cargo test -p sebas -- --ignored cross_uid` 运行。
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "needs root (forks a child that setuid()s to an unprivileged account) — CI-only, design D5"]
+async fn cross_uid_rejected_live_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+
+    // 非 root：setuid 注定失败——如实跳过（非门禁），不报错。
+    if unsafe { libc::getuid() } != 0 {
+        eprintln!(
+            "[skip] cross_uid_rejected_live_process needs root to setuid a child (uid={})",
+            unsafe { libc::getuid() }
+        );
+        return;
+    }
+
+    // 解析现成非特权账户：nobody → daemon → 65534。
+    let target_uid = {
+        let nobody = std::ffi::CString::new("nobody").unwrap();
+        let pw = unsafe { libc::getpwnam(nobody.as_ptr()) };
+        if !pw.is_null() {
+            unsafe { (*pw).pw_uid }
+        } else {
+            let daemon = std::ffi::CString::new("daemon").unwrap();
+            let pw = unsafe { libc::getpwnam(daemon.as_ptr()) };
+            if !pw.is_null() {
+                unsafe { (*pw).pw_uid }
+            } else {
+                65534
+            }
+        }
+    };
+    assert_ne!(target_uid, unsafe { libc::getuid() }, "child must run as a DIFFERENT uid");
+
+    // 生产通道是 0600 + 私有目录——那层由文件系统先把外部 uid 挡在
+    // connect 之前（EACCES），服务端的 peer-uid 检查永远看不到连接。为了
+    // 在本用例里真实 exercising 服务端检查（design D5 的意图），测试场景把
+    // socket 放宽到 0666、目录放宽到 0755——仅测试文件，生产绑定不变。
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &core.path,
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .expect("relax socket perms");
+        std::fs::set_permissions(
+            dir.path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("relax scene dir perms");
+    }
+
+    // fork 前把路径与握手行放进栈上定长缓冲（子进程零分配）。
+    let path_bytes = {
+        let p = core.path.to_string_lossy();
+        let mut buf = [0u8; 96];
+        let bytes = p.as_bytes();
+        assert!(
+            bytes.len() < 92,
+            "channel path must fit sun_path (sandbox scenes use short paths)"
+        );
+        buf[..bytes.len()].copy_from_slice(bytes);
+        (buf, bytes.len())
+    };
+    let handshake = {
+        let line = format!("{{\"secret\":\"{SECRET}\"}}\n");
+        let mut buf = [0u8; 128];
+        buf[..line.len()].copy_from_slice(line.as_bytes());
+        (buf, line.len())
+    };
+
+    let child_pid = unsafe { libc::fork() };
+    assert!(child_pid >= 0, "fork failed");
+    if child_pid == 0 {
+        let code = unsafe {
+            cross_uid_child_body(
+                &path_bytes.0[..path_bytes.1],
+                &handshake.0[..handshake.1],
+                target_uid,
+            )
+        };
+        unsafe { libc::_exit(code) };
+    }
+
+    // waitpid 会阻塞当前线程——`#[tokio::test]` 默认 current-thread runtime，
+    // 直接在这里等会把唯一线程饿死：通道 server 任务（accept 子进程连接→
+    // 关闭）永远得不到调度，子进程 read 等不到 EOF，父子互锁。放到
+    // blocking 池里等，runtime 线程保持空闲去跑 server 任务。
+    let status = tokio::task::spawn_blocking(move || {
+        let mut status: libc::c_int = 0;
+        let wait = unsafe { libc::waitpid(child_pid, &mut status, 0) };
+        assert_eq!(wait, child_pid, "waitpid on the forked child");
+        status
+    })
+    .await
+    .expect("waitpid task joins");
+    assert!(
+        libc::WIFEXITED(status),
+        "child exited normally, status={status}"
+    );
+    let code = libc::WEXITSTATUS(status);
+    match code {
+        0 => {}
+        2 => panic!("child setuid failed even under root (uid {target_uid})"),
+        3 => panic!("child could not connect to the channel socket"),
+        4 => panic!("server ACKED a foreign-uid handshake — peer-uid check missing!"),
+        5 => panic!("child setuid reported success but uids did not switch"),
+        other => panic!("unexpected child exit code {other}"),
+    }
+
+    // 拒绝不进入 request 处理：合法客户端的快照仍是空的、core 侧映射为空。
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+    assert!(backend.snapshot().await.is_empty(), "no request was processed");
+    assert!(
+        core.handle.map.snapshot_all().await.is_empty(),
+        "core map untouched by the foreign-uid connection"
+    );
 }

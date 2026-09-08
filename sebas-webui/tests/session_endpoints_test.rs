@@ -1337,7 +1337,7 @@ impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
         })
     }
     async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
-        sebas_webui::session_backend::Reachability::Unreachable {
+        sebas_webui::session_backend::Reachability::Disconnected {
             cause: "socket absent".into(),
         }
     }
@@ -1346,6 +1346,115 @@ impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
 fn core_down_app() -> axum::Router {
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(CoreDownBackend);
     build_router(backend, RouterInfo::default(), CardConfig::default())
+}
+
+// ---- cover-core-channel-test-gaps A1.1: reachability kind discriminator ----
+
+/// A SessionBackend reporting one fixed reachability value — drives the
+/// `/api/summary` `reachability.kind` coverage across all three unreachable
+/// variants (design D1: the frontend keys its banner wording off `kind`).
+struct FixedReachabilityBackend(sebas_webui::session_backend::Reachability);
+
+#[async_trait::async_trait]
+impl sebas_webui::session_backend::SessionBackend for FixedReachabilityBackend {
+    async fn snapshot(&self) -> Vec<sebas_dispatch::SessionInfo> {
+        Vec::new()
+    }
+    async fn focused(&self) -> Option<ChannelKey> {
+        None
+    }
+    async fn set_focus(&self, _key: Option<ChannelKey>) {}
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<sebas_dispatch::SessionEvent> {
+        tokio::sync::broadcast::channel(1).0.subscribe()
+    }
+    async fn spawn(
+        &self,
+        _prompt: String,
+        _project_dir: Option<String>,
+    ) -> Result<ChannelKey, sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "unreachable".into(),
+        })
+    }
+    async fn message(
+        &self,
+        _key: ChannelKey,
+        _message: String,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "unreachable".into(),
+        })
+    }
+    async fn close(
+        &self,
+        _key: ChannelKey,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "unreachable".into(),
+        })
+    }
+    async fn turns(
+        &self,
+        _key: ChannelKey,
+        _from: u64,
+    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection> {
+        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
+            cause: "unreachable".into(),
+        })
+    }
+    async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
+        self.0.clone()
+    }
+}
+
+/// A1.1 验收：`/api/summary.reachability` 对三类不可达输出各自 snake_case
+/// `kind`（startup_failed | auth_rejected | disconnected）+ 原样 cause；
+/// reachable 分支不带 kind。
+#[tokio::test]
+async fn summary_reachability_kind_covers_three_unreachable_variants() {
+    use sebas_webui::session_backend::Reachability;
+    let cases = [
+        (
+            Reachability::StartupFailed {
+                cause: "core startup failed: bad config".into(),
+            },
+            "startup_failed",
+        ),
+        (
+            Reachability::AuthRejected {
+                cause: "core rejected channel handshake".into(),
+            },
+            "auth_rejected",
+        ),
+        (
+            Reachability::Disconnected {
+                cause: "connection dropped".into(),
+            },
+            "disconnected",
+        ),
+    ];
+    for (reachability, kind) in cases {
+        let backend: Arc<dyn sebas_webui::SessionBackend> =
+            Arc::new(FixedReachabilityBackend(reachability));
+        let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+        let (status, summary) = get_json(&app, "/api/summary").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(summary["reachability"]["ok"], false);
+        assert_eq!(summary["reachability"]["kind"], kind, "summary: {summary}");
+        assert!(
+            summary["reachability"]["cause"].is_string(),
+            "unreachable branches keep the verbatim cause: {summary}"
+        );
+    }
+
+    // Reachable: ok=true without kind/cause (wire shape unchanged).
+    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(FixedReachabilityBackend(
+        Reachability::Reachable,
+    ));
+    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+    let (_, summary) = get_json(&app, "/api/summary").await;
+    assert_eq!(summary["reachability"]["ok"], true);
+    assert!(summary["reachability"].get("kind").is_none());
 }
 
 /// A SessionBackend whose state store always succeeds — the "core healthy"

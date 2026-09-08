@@ -4,14 +4,16 @@
 
 ## A1. Reachability 三态化 + API kind 字段（owner: 本 change，design D3）
 
-- [ ] A1.1 在 `sebas-webui/src/session_backend.rs` 的 `Reachability` enum 增三变体（`StartupFailed { cause } | AuthRejected { cause } | Disconnected { cause }`，替代现有 `Unreachable { cause }`）；在 `sebas-webui/src/api.rs` `reachability_payload` 输出 `kind`（snake_case 字符串：`startup_failed | auth_rejected | disconnected`）；cause 保持已落地的无条件 enrich 全串（不改 fail-fast 行为，只加 kind）；运行 `cargo test -p sebas-webui` 验证现有 webui 单测不破坏（验证：所有 backend 单测通过；`/api/summary` 路由测试覆盖 kind 字段三取值）
-- [ ] A1.2 在 `src/core_channel/tests.rs` 新增 4 个单测：`reachability_startup_failed_with_env_file`、`reachability_startup_failed_fallback`、`reachability_auth_rejected_after_handshake`、`reachability_disconnected_after_connected`；其中 auth-rejected 用例同时断言"同 secret 不无限重试、env 未设时重读文件再试一次"（spec 已修正的重试语义）；运行 `cargo test -p sebas`（验证：4 个新单测全绿；既有 `client_converges_after_server_restart` 仍通过）
+- [x] A1.1 在 `sebas-webui/src/session_backend.rs` 的 `Reachability` enum 增三变体（`StartupFailed { cause } | AuthRejected { cause } | Disconnected { cause }`，替代现有 `Unreachable { cause }`）；在 `sebas-webui/src/api.rs` `reachability_payload` 输出 `kind`（snake_case 字符串：`startup_failed | auth_rejected | disconnected`）；cause 保持已落地的无条件 enrich 全串（不改 fail-fast 行为，只加 kind）；运行 `cargo test -p sebas-webui` 验证现有 webui 单测不破坏（验证：所有 backend 单测通过；`/api/summary` 路由测试覆盖 kind 字段三取值）
+- [x] A1.2 在 `src/core_channel/tests.rs` 新增 4 个单测：`reachability_startup_failed_with_env_file`、`reachability_startup_failed_fallback`、`reachability_auth_rejected_after_handshake`、`reachability_disconnected_after_connected`；其中 auth-rejected 用例同时断言"同 secret 不无限重试、env 未设时重读文件再试一次"（spec 已修正的重试语义）；运行 `cargo test -p sebas`（验证：4 个新单测全绿；既有 `client_converges_after_server_restart` 仍通过）
 
 ## A2. State 三件 + ensure_message + cross-uid
 
-- [ ] A2.1 在 `src/core_channel/tests.rs` 新增 State 三件 contract test：`state_snapshot_returns_current`、`state_mutation_applies_change`、`state_mutation_rejected_does_not_silently_swallow`、`state_subscribe_delivers_mutations_after_snapshot`；channel 服务端注入 fake state-store engine（接口匹配）；运行 `cargo test -p sebas`（验证：4 个单测全绿；测试运行时间不显著增加）
-- [ ] A2.2 在 `src/core_channel/tests.rs` 新增 `ensure_message_unknown_key_auto_creates`、`ensure_message_dormant_resumes`、`message_unknown_key_rejected` 三个单测；`Message` 在未知 key 上跑回归（验证已有 typed rejection 行为不变）；运行 `cargo test -p sebas`（验证：3 个新单测全绿）
-- [ ] A2.3 在 `src/core_channel/tests.rs` 新增 `cross_uid_rejected_live_process` 单测：`#[cfg(unix)]` 守卫、`#[ignore]` 标记（需 root）；测试代码 fork 子进程后 `setuid` 到 nobody/daemon 再发 Snapshot 请求（真实跨进程凭证，非同进程改 uid）；CI runner 默认 root 时跑 `cargo test -- --ignored`，本地无 root 跳过；**CI-only 非门禁**（design D5）；运行 `cargo test -p sebas -- --ignored cross_uid`（验证：在 root 下单测通过；非 root 下 #[ignore] 不报错）
+- [x] A2.1 在 `src/core_channel/tests.rs` 新增 State 三件 contract test：`state_snapshot_returns_current`、`state_mutation_applies_change`、`state_mutation_rejected_does_not_silently_swallow`、`state_subscribe_delivers_mutations_after_snapshot`；channel 服务端注入 fake state-store engine（接口匹配）；运行 `cargo test -p sebas`（验证：4 个单测全绿；测试运行时间不显著增加）
+  - 注（2026-09-08）：四个用例落位在 `tests/state_channel_contract_test.rs`（独立进程集成测试）而非 `src/core_channel/tests.rs`——`state_store::ENGINE` 是每进程一次的 OnceLock，lib 单测进程一旦注入 fake engine 会污染 provider/spawn_env 等依赖「engine 未初始化走文件回退」的并行用例（`tests/state_subscription_test.rs` 文件头注释已记录同一约束）。用例名、断言与 fake-engine 注入（design D7）保持任务原文。
+- [x] A2.2 在 `src/core_channel/tests.rs` 新增 `ensure_message_unknown_key_auto_creates`、`ensure_message_dormant_resumes`、`message_unknown_key_rejected` 三个单测；`Message` 在未知 key 上跑回归（验证已有 typed rejection 行为不变）；运行 `cargo test -p sebas`（验证：3 个新单测全绿）
+- [x] A2.3 在 `src/core_channel/tests.rs` 新增 `cross_uid_rejected_live_process` 单测：`#[cfg(unix)]` 守卫、`#[ignore]` 标记（需 root）；测试代码 fork 子进程后 `setuid` 到 nobody/daemon 再发 Snapshot 请求（真实跨进程凭证，非同进程改 uid）；CI runner 默认 root 时跑 `cargo test -- --ignored`，本地无 root 跳过；**CI-only 非门禁**（design D5）；运行 `cargo test -p sebas -- --ignored cross_uid`（验证：在 root 下单测通过；非 root 下 #[ignore] 不报错）
+  - 注（2026-09-08）：本机以 root 实测通过（`sudo <testbin> --ignored cross_uid` → ok）；非 root（uid 1000）下同命令走 `[skip]` 早退路径不报错。为让连接到达服务端 peer-uid 检查，测试场景把 socket/目录放宽为 0666/0755（生产 0600 绑定不变——0600 下文件系统层已先于服务端检查拒绝外部 uid）。
 
 ## B1. approval_answer detached e2e（阻塞：wire-webui 1.3 + harden 5.4 harness；design D4）
 

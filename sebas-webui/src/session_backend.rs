@@ -19,13 +19,27 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 /// Whether the backend can currently reach the session authority (the core),
 /// and if not, why — rendered verbatim so degradation is honest.
+///
+/// cover-core-channel-test-gaps A1.1（design D1）：不可达拆成三变体而非单一
+/// `Unreachable`——枚举逼着每个消费点穷举三态，前端/`/api/summary` 据此输出
+/// 机器可读的 `reachability.kind`（startup_failed | auth_rejected |
+/// disconnected），banner 文案按 kind 区分，不靠 cause 文案字符串匹配。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reachability {
     /// The core is reachable; session controls are live.
     Reachable,
-    /// The core cannot be reached; the board renders the cause and the
-    /// composer stays disabled.
-    Unreachable { cause: String },
+    /// The core never came up: the channel socket is absent (core never
+    /// started or its startup attempt failed). cause keeps the fail-fast
+    /// enriched full string (`core startup failed: <原因>` when the latch
+    /// file has one).
+    StartupFailed { cause: String },
+    /// The socket is there but the channel handshake was rejected (secret
+    /// mismatch). The client does not retry the same secret forever — it
+    /// re-reads the secret source before the next attempt.
+    AuthRejected { cause: String },
+    /// The connection worked (or the socket existed) but the core is gone
+    /// now: refused connect, post-handshake drop, or a timed-out request.
+    Disconnected { cause: String },
 }
 
 /// Typed rejection for a session mutation (spec: rejections name the reason;
@@ -879,7 +893,10 @@ impl SessionBackend for FakeBackend {
                 .unwrap()
                 .clone()
                 .unwrap_or_else(|| "核心不可达".into());
-            Reachability::Unreachable { cause }
+            // The fake models the generic runtime-down shape (A1.1: the
+            // startup-failed / auth-rejected discrimination lives in the
+            // channel backend; route tests only need an unreachable state).
+            Reachability::Disconnected { cause }
         }
     }
 
@@ -970,7 +987,7 @@ mod tests {
         backend.set_reachable(false, "socket absent");
         assert_eq!(
             backend.reachability().await,
-            Reachability::Unreachable {
+            Reachability::Disconnected {
                 cause: "socket absent".into()
             }
         );

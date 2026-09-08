@@ -88,11 +88,22 @@ pub async fn summary(State(state): State<WebUiState>) -> Response {
 }
 
 /// Serialize the reachability report for the composer gate. Only the
-/// "unreachable" branch carries a cause — reachable is just `{}`.
+/// unreachable branches carry a cause plus the machine-readable `kind`
+/// discriminator (cover-core-channel-test-gaps A1.1, design D1: the frontend
+/// picks its banner wording from `kind`, never from cause string matching);
+/// reachable is just `{}`.
 fn reachability_payload(r: &Reachability) -> serde_json::Value {
     match r {
         Reachability::Reachable => json!({ "ok": true }),
-        Reachability::Unreachable { cause } => json!({ "ok": false, "cause": cause }),
+        Reachability::StartupFailed { cause } => {
+            json!({ "ok": false, "kind": "startup_failed", "cause": cause })
+        }
+        Reachability::AuthRejected { cause } => {
+            json!({ "ok": false, "kind": "auth_rejected", "cause": cause })
+        }
+        Reachability::Disconnected { cause } => {
+            json!({ "ok": false, "kind": "disconnected", "cause": cause })
+        }
     }
 }
 
@@ -672,9 +683,13 @@ pub async fn projects_add(
         .is_err()
     {
         // 状态库路径失败：先探因（核心不可达？），再落本地注册表。
+        // A1.1：三类不可达的 cause 都如实透传（kind 判别由 payload 层承担，
+        // 这里只需要人类可读原因）。
         let cause = match state.backend.reachability().await {
-            crate::session_backend::Reachability::Unreachable { cause } => cause,
             crate::session_backend::Reachability::Reachable => "状态库写入失败".into(),
+            crate::session_backend::Reachability::StartupFailed { cause }
+            | crate::session_backend::Reachability::AuthRejected { cause }
+            | crate::session_backend::Reachability::Disconnected { cause } => cause,
         };
         if crate::projects::add(&canonical).is_ok() {
             degraded = Some(json!({ "cause": cause }));
