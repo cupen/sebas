@@ -24,7 +24,7 @@ pnpm --dir tests/testsuite-webui exec playwright test
 ## 旅程与账本
 
 树形账本，与 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节同源
-（同为 33 行）：大功能 = spec 顶层 `test.describe`（对应 requirement），子功能 =
+（同为 35 行）：大功能 = spec 顶层 `test.describe`（对应 requirement），子功能 =
 二层 `test.describe`，锚点格式 `<requirement>「<scenario>」`，对应
 `openspec/specs/testsuite-webui-browser/spec.md` 的 scenario 名。
 
@@ -41,6 +41,7 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
 | agent 对话覆盖 | 错误诚实呈现 | crash — honest death: not-found presentation, no fake success | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors） |
 | 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
 | 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
 | 审批卡片旅程 | 会话级允许 | allow-session path — observed product gap: the follow-up call is gated again | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
@@ -57,17 +58,22 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
 | 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
 | 模型管理覆盖 | settings provider 只读 | 3.2 settings provider list matches API, zero probe traffic | `models.spec.ts` | 模型管理覆盖「settings provider 只读」 |
-| 设置面 ¹ | 只读呈现 | S1 services cards match /api/router truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S6 bare core degrades: no-adapter banner, no rows, restart disabled | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 写降级 | S4 defaults read parity; sandbox write fails honestly | `settings.spec.ts` | 设置面写操作诚实降级覆盖「写降级失败外显且状态不变」¹ |
 | 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 
-> ¹ 设置面（S1–S4）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
+> ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（尚未同步进主 spec）；S5a/S5b 锚到主 spec `模型管理覆盖`「settings provider
 > 只读」（provider 写 503 语义已由该 scenario 吸收）。harness 级 scenario（沙箱装配、
 > 一键入口）与鉴权「免登录直达」（全部主 config 用例隐式承担）不设单用例行。
+>
+> Settings 语义修正（fix-settings-menu-and-services-semantics，spec 改动 `1e4a807`）：
+> S1 改写为 `/api/admin/services` 响应驱动、S6 新增裸 core 退化覆盖；实施清单见
+> `openspec/changes/fix-settings-menu-and-services-semantics/tasks.md` §4。
 
 能力矩阵账本见 `tests/acceptance/COVERAGE.md` 的 `testsuite-webui-browser` 一节。
 

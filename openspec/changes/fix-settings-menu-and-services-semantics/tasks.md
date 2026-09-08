@@ -22,10 +22,24 @@
 
 ## 4. Playwright 与账本同步
 
-- [ ] 4.1 在 `tests/testsuite-webui/tests/settings.spec.ts` 修改 S5 条款断言：Services 分区列出的行名集合 SHALL 与 `/api/admin/services` 响应一致（响应即真源，不枚举具体服务——沙箱装配是变量；只断言"每一行名都在响应集合内、响应集合内每一行都被渲染"）；运行 `invoke testsuite-webui --case settings` 验证全绿（验证：S1/S2/S3/S4 不变、S5 断言改写后通过）
-- [ ] 4.2 在 `tests/testsuite-webui/tests/settings.spec.ts` 新增 S6 条款：裸 core 形态（沙箱无 watchdog）下 Services 分区显示「无 watchdog 控制面」横幅、按钮 disabled；验证（验证：S6 单独 1 次全绿）
-- [ ] 4.3 更新 `tests/testsuite-webui/README.md` 与 `tests/acceptance/COVERAGE.md`：把本期 change hash 与本 tasks 路径记入 `testsuite-webui-browser` 段；运行 `openspec validate --changes` 验证 delta 通过（验证：validate 2 passed 0 failed）
-- [ ] 4.4 跑 `invoke testsuite-webui` 全量 3 连绿；it 基数更新为 34（converge 收敛时 33 + 本期 S6 新增 1；S5 改写不增数）；COVERAGE 的"行数等于 it 总数"校验按 34 执行（验证：与既有三期验收一致的稳定性门槛；本 change 涉及用例全绿）
+- [x] 4.1 在 `tests/testsuite-webui/tests/settings.spec.ts` 修改 S5 条款断言：Services 分区列出的行名集合 SHALL 与 `/api/admin/services` 响应一致（响应即真源，不枚举具体服务——沙箱装配是变量；只断言"每一行名都在响应集合内、响应集合内每一行都被渲染"）；运行 `invoke testsuite-webui --case settings` 验证全绿（验证：S1/S2/S3/S4 不变、S5 断言改写后通过）——2026-09-08 落地说明：tasks 的 "S5" 实为文件内的 S1 用例（`S1 services rows match /api/admin/services truth`，双向对账；编号漂移在此记录）；S2/S3/S4 断言不变（S4/S5a/S5b 仅追加 `openSection('Models')` 导航以适配缺省 Settings 首项；`models.spec.ts` 3.2 同理）；`invoke testsuite-webui --case settings` 7 passed（`1e4a807`），勾选
+- [x] 4.2 在 `tests/testsuite-webui/tests/settings.spec.ts` 新增 S6 条款：裸 core 形态（沙箱无 watchdog）下 Services 分区显示「无 watchdog 控制面」横幅、按钮 disabled；验证（验证：S6 单独 1 次全绿）——2026-09-08 实测：S6 断言横幅 + 零行 + 零行动作 + Settings 总览「全部进程重启」disabled/tooltip（重置 Settings 保持可用），随 --case settings 7 passed 通过（`1e4a807`），勾选
+- [x] 4.3 更新 `tests/testsuite-webui/README.md` 与 `tests/acceptance/COVERAGE.md`：把本期 change hash 与本 tasks 路径记入 `testsuite-webui-browser` 段；运行 `openspec validate --changes` 验证 delta 通过（验证：validate 2 passed 0 failed）——2026-09-08：两账本已记 `1e4a807` + tasks §4；另补 README 漏记的 errors spawn 行（与 COVERAGE 对齐）；`openspec validate --changes` 实测 6 passed 0 failed（树上共 6 个 change，本 change 通过；tasks 预期的 "2 passed" 为立项时基数，现如实记录）
+- [ ] 4.4 跑 `invoke testsuite-webui` 全量 3 连绿；it 基数更新为 34（converge 收敛时 33 + 本期 S6 新增 1；S5 改写不增数）；COVERAGE 的"行数等于 it 总数"校验按 34 执行（验证：与既有三期验收一致的稳定性门槛；本 change 涉及用例全绿）——2026-09-08 BLOCKED（非本 change 回归）：全量 run1 31 passed + `projects 增删`  deterministically red（full + 独立 --case projects 共 4 连败）；本 change 全部 7 个 settings 用例 + models 3.2 全绿。基数实测：改前树上已 34 its（非 33），本期 +S6 后 35；两账本已按 35 对齐。详见 BLOCKER 备注（tasks 末尾）。
+
+## BLOCKER（2026-09-08，§4.4 门槛外失败，与本 change 无关）
+
+- `tests/testsuite-webui/tests/projects.spec.ts:64`（项目管理覆盖「增删」）期望
+  `sebas-dashboard .project-header .path` 文本为完整沙箱路径，但已提交的产品代码
+  `sebas-webui/frontend/src/views/dashboard.ts:327-333` 确定性只渲染 basename
+  （完整路径仅放 `title` 悬浮）。双方均为已提交代码，本分支未动这两处。
+- 原文失败：`Error: expect(locator).toHaveText(expected) failed / Locator:
+  locator('sebas-dashboard .project-header .path') / Expected:
+  "/tmp/sbtestsuite.k_gf2e5r" / Received: "sbtestsuite.k_gf2e5r" / Timeout:
+  10000ms`
+- 按授权（产品文件 believed correct、非本 scope 不改产品/他人用例）未做任何修改，
+  留给所属方修（产品改 header 或用例改断言二选一）。本 change 的 §4.4 全绿门槛待其
+  修复后重跑 3x。
 
 ## 5. 验收：账本闭环
 

@@ -192,14 +192,21 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
 | 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
 | 模型管理覆盖 | settings provider 只读 | 3.2 settings provider list matches API, zero probe traffic | `models.spec.ts` | 模型管理覆盖「settings provider 只读」 |
-| 设置面 ¹ | 只读呈现 | S1 services cards match /api/router truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S6 bare core degrades: no-adapter banner, no rows, restart disabled | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 写降级 | S4 defaults read parity; sandbox write fails honestly | `settings.spec.ts` | 设置面写操作诚实降级覆盖「写降级失败外显且状态不变」¹ |
 | 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 
-> ¹ 设置面（S1–S4）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
+> Settings 语义修正（fix-settings-menu-and-services-semantics，spec 改动 `1e4a807`）：
+> S1 改写为 `/api/admin/services` 响应驱动（响应即真源，不枚举具体服务）、S6 新增裸
+> core 退化覆盖（横幅 + 零行 + 重启 disabled）；实施清单见
+> `openspec/changes/fix-settings-menu-and-services-semantics/tasks.md` §4；本表 35 行 =
+> 全套件 `it` 总数 35（含新增 S6）。
+
+> ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（该 change 尚未同步进主 spec，主 spec 暂无设置面 requirement）；S5a/S5b 的
 > provider 写 503 语义已由主 spec `模型管理覆盖`「settings provider 只读」吸收，故锚到
 > 主 spec。会话核心旅程的「首回合往返」「流式分批渲染」与 `agent 对话覆盖` 同名
