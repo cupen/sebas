@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 sebas_router::debug::enable_debug_test_provider(c);
             }
             if let Err(e) =
-                sebas::run::run(cfg, raw, router_cfg, run.webui, run.webui_port, run.webui_host)
+                sebas::run::run(cfg, raw, router_cfg, run.webui, run.webui_port, run.webui_host, &run.config)
                     .await
             {
                 // ready 之后 run() 常驻到信号；返回 Err 一律按启动失败处理

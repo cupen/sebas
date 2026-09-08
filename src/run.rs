@@ -58,11 +58,13 @@ pub async fn run(
     webui: bool,
     webui_port: u16,
     webui_host: String,
+    config_path: &str,
 ) -> Result<()> {
-    // 在 watchdog 下运行时初始化 IPC
-    if crate::ipc::is_under_watchdog() {
-        init_watchdog_ipc().await;
-    }
+    // harden-core-channel-deployment 3.1: readiness is emitted only after
+    // the session channel is bound (see the channel block below) — the old
+    // "ready first, channel maybe" order is what hid the unarmed-channel
+    // class from the supervisor. Nothing is signaled here anymore.
+    // (`config_path` locates the secret-file default; see channel block.)
 
     // openlark 0.19 uses reqwest 0.13, whose Rustls connector consults the
     // process-wide provider. Our reqwest 0.12 clients use ring explicitly;
@@ -317,38 +319,59 @@ pub async fn run(
         info!("webui dashboard starting on http://{webui_host}:{webui_port}");
     }
 
-    // Core session channel (5.9): the watchdog injects `SEBAS_CORE_SECRET`
-    // into the core child (and the standalone WebUI), so its presence marks
-    // "this process is the core under the watchdog" — the bare `sebas core`
-    // keeps no socket, matching the client-side gate in webui_cmd.rs. `serve`
-    // owns the socket lifecycle (bind, reclaim stale, remove on shutdown).
-    // Session mutations are delegated to the composite backend (design D1),
-    // so detached WebUI and `core --webui` see identical behavior.
-    let channel_shutdown = if !std::env::var("SEBAS_CORE_SECRET").unwrap_or_default().is_empty() {
-        let core_secret = std::env::var("SEBAS_CORE_SECRET").unwrap_or_default();
-        let channel_path = crate::core_channel::socket_path(&cfg);
-        info!(path = %channel_path.display(), "core session channel listening");
-        let channel_router = router.clone();
-        let channel_backend = webui_backend.clone();
-        let (close_tx, close_rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            match crate::core_channel::server::serve(
-                channel_backend,
-                channel_router,
-                channel_path,
-                core_secret,
-                close_rx,
-            )
-            .await
-            {
-                Ok(()) => info!("core session channel closed"),
-                Err(e) => warn!(?e, "core session channel server exited"),
-            }
-        });
-        Some(close_tx)
-    } else {
-        None
-    };
+    // Core session channel (harden-core-channel-deployment 1.2/1.3/3.1):
+    // always armed, no opt-out. The handshake secret is the watchdog-
+    // injected `SEBAS_CORE_SECRET` when present (existing deployments are
+    // untouched); otherwise the core mints a random secret and publishes
+    // it via the secret file so independently-started clients can discover
+    // it (design D1/D3). The socket is bound synchronously here — BEFORE
+    // the watchdog readiness signal — so ready implies armed; a bind
+    // failure returns Err and the process exits 75 via the startup-failure
+    // path (never a channel-less "healthy" process). Graceful shutdown
+    // removes the socket but keeps the secret file (D5).
+    let secret_file = crate::core_channel::secret_file_path(
+        cfg.watchdog.core.secret_file.as_deref(),
+        std::path::Path::new(config_path),
+    );
+    // Returns (handshake_secret, minted_fresh): env wins when present,
+    // otherwise a random secret is minted and published (unit-tested below).
+    let (core_secret, _minted) = resolve_core_secret(&secret_file)?;
+    let channel_path = crate::core_channel::socket_path(&cfg);
+    let channel_listener =
+        crate::core_channel::server::bind_channel_socket(&channel_path).map_err(|e| {
+            crate::error::SebasError::Config(format!(
+                "core session channel bind 失败 {}: {e}",
+                channel_path.display()
+            ))
+        })?;
+    info!(path = %channel_path.display(), "core session channel listening");
+    let channel_router = router.clone();
+    let channel_backend = webui_backend.clone();
+    let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+    let serve_secret = core_secret.clone();
+    let serve_path = channel_path.clone();
+    tokio::spawn(async move {
+        match crate::core_channel::server::serve_with_listener(
+            channel_backend,
+            channel_router,
+            serve_path,
+            channel_listener,
+            serve_secret,
+            close_rx,
+        )
+        .await
+        {
+            Ok(()) => info!("core session channel closed"),
+            Err(e) => warn!(?e, "core session channel server exited"),
+        }
+    });
+    let channel_shutdown = Some(close_tx);
+
+    // Readiness comes after the channel bind (3.1): under the watchdog the
+    // supervisor now observes ready only on an armed core.
+    if crate::ipc::is_under_watchdog() {
+        init_watchdog_ipc().await;
+    }
 
     // Run the long-connection event loop inline in a `tokio::select!` so the
     // feishu 未启用时进程只等关闭信号（sebas-2ty）；WS 生命周期由 adapter
@@ -477,9 +500,36 @@ pub(crate) fn build_router_info(
     }
 }
 
+/// Core channel handshake secret decision (harden-core-channel-deployment
+/// 1.2): `SEBAS_CORE_SECRET` env wins when non-empty (watchdog path,
+/// unchanged); otherwise mint a random secret. Either way the winning value
+/// is published to the secret file so late-starting clients can discover it.
+/// Returns `(secret, minted_fresh)`. A minted secret that cannot be
+/// published is a startup failure (clients could never discover it); an env
+/// secret that cannot be published only warns (the watchdog-injected path
+/// still handshakes — file discovery is a best-effort bonus there).
+fn resolve_core_secret(
+    secret_file: &std::path::Path,
+) -> crate::error::Result<(String, bool)> {
+    if let Some(env_secret) = std::env::var("SEBAS_CORE_SECRET").ok().filter(|v| !v.is_empty()) {
+        if let Err(e) = crate::core_channel::secret::write_secret_file(secret_file, &env_secret) {
+            warn!(path = %secret_file.display(), ?e, "core channel: failed to publish env secret to secret file");
+        }
+        return Ok((env_secret, false));
+    }
+    let minted = crate::core_channel::secret::generate_secret();
+    crate::core_channel::secret::write_secret_file(secret_file, &minted).map_err(|e| {
+        crate::error::SebasError::Config(format!(
+            "core session channel secret 文件 {} 不可写: {e}",
+            secret_file.display()
+        ))
+    })?;
+    info!(path = %secret_file.display(), "core session channel minted a fresh secret (no SEBAS_CORE_SECRET in env)");
+    Ok((minted, true))
+}
+
 /// 回退到 settings.json 读取, 再回退到 TOML `[card]`。
-fn fallback_settings(cfg: &Config) -> sebas_dispatch::CardConfig {
-    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
+fn fallback_settings(cfg: &Config) -> sebas_dispatch::CardConfig {    match sebas_dispatch::settings::load_settings(&sebas_dispatch::settings::settings_path()) {
         Ok(Some(s)) => s,
         Ok(None) => {
             serde_json::from_value(serde_json::to_value(&cfg.card).expect("card config serializes"))
@@ -564,5 +614,81 @@ mod router_info_tests {
         assert_eq!(info.listen, None);
         assert_eq!(info.provider_count, 0);
         assert!(info.providers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod core_secret_tests {
+    //! harden-core-channel-deployment 1.2: env 优先 / 无 env 现场生成 +
+    //! 落盘（0600、内容即握手 secret）。
+    use super::resolve_core_secret;
+
+    /// env 是进程全局的：用 channel secret 模块的共享锁串行化（与
+    /// secret.rs / client discovery 测试同一把锁）。
+    struct EnvGuard {
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: 共享锁由调用方持有，无并发 env 访问。
+            unsafe {
+                match self.saved.take() {
+                    Some(v) => std::env::set_var("SEBAS_CORE_SECRET", v),
+                    None => std::env::remove_var("SEBAS_CORE_SECRET"),
+                }
+            }
+        }
+    }
+
+    fn hold_env(value: Option<&str>) -> (std::sync::MutexGuard<'static, ()>, EnvGuard) {
+        let guard = crate::core_channel::secret::ENV_TEST_LOCK.lock().unwrap();
+        // SAFETY: 共享锁已持有。
+        let saved = unsafe {
+            let saved = std::env::var_os("SEBAS_CORE_SECRET");
+            match value {
+                Some(v) => std::env::set_var("SEBAS_CORE_SECRET", v),
+                None => std::env::remove_var("SEBAS_CORE_SECRET"),
+            }
+            saved
+        };
+        (guard, EnvGuard { saved })
+    }
+
+    #[test]
+    fn no_env_mints_and_publishes_a_usable_secret() {
+        let (_lock, _env) = hold_env(None);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("core.secret");
+        let (secret, minted) = resolve_core_secret(&file).expect("mint");
+        assert!(minted);
+        assert!(!secret.is_empty());
+        // 文件内容即本次握手 secret，且 0600。
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            secret,
+            "secret 文件内容必须与握手 secret 一致"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn env_wins_and_is_still_published() {
+        let (_lock, _env) = hold_env(Some("watchdog-injected"));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("core.secret");
+        let (secret, minted) = resolve_core_secret(&file).expect("env");
+        assert!(!minted);
+        assert_eq!(secret, "watchdog-injected");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "watchdog-injected",
+            "env 值仍须落盘供迟启动组件发现"
+        );
     }
 }
