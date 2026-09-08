@@ -192,20 +192,17 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
 
     // The session backend: a client of the core session channel. The core
     // child owns the sessions; this process only renders and forwards.
-    // fail-fast-on-startup-errors（cli-service spec scenario）：watchdog
-    // secret 缺失时 standalone webui 的全部会话面必然不可用——在 ready 之前
-    // 按启动失败退出（75），不假装健康地起一个空壳面板。
-    let core_secret = std::env::var("SEBAS_CORE_SECRET").ok().unwrap_or_default();
-    if core_secret.is_empty() {
-        return Err(SebasError::Config(
-            "SEBAS_CORE_SECRET 未设置：standalone webui 是 core session channel 的客户端，\
-             没有共享密钥无法连接 core（watchdog 会为子进程注入该变量；手动运行时请显式设置）"
-                .into(),
-        ));
-    }
-    let backend = crate::core_channel::client::CoreChannelBackend::new(
+    // harden-core-channel-deployment D2: the secret resolves env → secret
+    // file (same `-c` config) → empty-with-warn. The old hard gate
+    // ("no env, no webui") died with channel auto-arm: a manually started
+    // webui now discovers the core's minted secret on its own.
+    let secret_file = crate::core_channel::secret_file_path(
+        cfg.watchdog.core.secret_file.as_deref(),
+        std::path::Path::new(&args.config),
+    );
+    let backend = crate::core_channel::client::CoreChannelBackend::new_with_discovery(
         crate::core_channel::socket_path(&cfg),
-        core_secret,
+        secret_file,
     );
 
     // Bind to the configured port. Fails if the port is already in use
