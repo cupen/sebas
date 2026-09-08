@@ -130,7 +130,7 @@
 | agent-driver | ✅ | sebas-webui `agent_kinds_test`、src `agent_backend` 内联测试 |
 | channels | ✅ | sebas-channels crate 测试 |
 | cli-service | ✅ | `config_test`、`config_env_test`、`daemon_path_repro_test`、src `cli` 内联测试；E: startup_failure（fail-fast-on-startup-errors：garbage config → 退出码 75 + stderr 末行 `startup-failure:` 摘要 + `SEBAS_STARTUP_ERROR_FILE`，core 与 run 双形态，`testsuite_e2e_test`）|
-| core-session-channel | ✅ | src `core_channel/tests.rs`（协议往返/双路由/密钥；harden-core-channel-deployment：自动装配时序/密钥文件 0600/轮换自愈/bind 失败拒绝重绑）；E: startup/reachability/wrong-secret/restart + startup_failure 75 契约 + no_secret_assembly（无 env 自动装配 + 0600 密钥文件 + 会话往返）/ secret_rotation_self_heal（kill→同 config 新钥重启→不重启的 webui 自愈）/ watchdog_supervised_core_recovery（监督形态杀 core 子进程→自动重启→webui 恢复）（`testsuite_e2e_test`）|
+| core-session-channel | ✅ | src `core_channel/tests.rs`（协议往返/双路由/密钥；harden-core-channel-deployment：自动装配时序/密钥文件 0600/轮换自愈/bind 失败拒绝重绑；cover-core-channel-test-gaps A1/A2：reachability 三态 startup_failed/auth_rejected/disconnected 各自单测含闩锁 enrich 与 secret 文件重试语义、ensure_message 自动建会话/dormant 复活、message 未知 key typed rejection、cross_uid_rejected_live_process 真实 fork+setuid 跨 uid 拒绝（`#[ignore]` CI-only，root 实测通过））；`tests/state_channel_contract_test.rs`（cover A2.1：fake state-store engine 注入的 StateSnapshot/StateMutation/StateSubscribe 三件 contract，含 mutation 拒绝不静默吞错与订阅 Changed 帧）；E: startup/reachability/wrong-secret/restart + startup_failure 75 契约 + no_secret_assembly（无 env 自动装配 + 0600 密钥文件 + 会话往返）/ secret_rotation_self_heal（kill→同 config 新钥重启→不重启的 webui 自愈）/ watchdog_supervised_core_recovery（监督形态杀 core 子进程→自动重启→webui 恢复）（`testsuite_e2e_test`）|
 | feishu-bridge | 🚫+✅ | 真实 WS/HTTP 传输豁免（需真实凭据）；进程内注入面 ✅（`feishu_native_webui_test`、ws_loop 内联测试）|
 | feishu-cards | ✅+🚫 | 卡模型/流式节流/轮转 ✅（`card_stream_e2e_test`、sebas-feishu 内联）；飞书端渲染 🚫 豁免 |
 | feishu-option | ✅ | `feishu_native_webui_test`、config 测试 |
@@ -203,12 +203,24 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 部署韧性 | 核心通道停启 | core 停 → 横幅含 cause、composer 门禁、加项目降级提示；core 恢复 → 横幅消失 | `deployment.spec.ts` | webui「全局核心可达性横幅」「项目注册降级如实提示」（harden-core-channel-deployment，detached 双进程形态）⁵ |
+| 审批卡片旅程（detached） | detached 审批闭环 | allow path — ApprovalRequested 跨进程到达 review-card，allow 后 transcript 记录允许语义 | `approval-detached.spec.ts` | webui「approval_answer end-to-end (detached topology)」（cover-core-channel-test-gaps B1.2，detached 双进程形态）⁶ |
+| 审批卡片旅程（detached） | detached 审批闭环 | deny path — deny 后 transcript 记录拒绝语义，回合完成 | `approval-detached.spec.ts` | webui「approval_answer rejects unknown request_id」⁶（cover B1.2，detached） |
+| 审批卡片旅程（detached） | unknown rid | POST /api/permissions/{rid}/answer with an unknown rid → 404 typed rejection | `approval-detached.spec.ts` | webui「approval_answer rejects unknown request_id」（cover B1.2，detached）⁶ |
+| 模型管理覆盖 | 有模型面的正向切换（acp:fakeacp） | set_session_model happy path — POST ok-model → ModelChanged → current_model 同步 + 选择器呈现 | `models.spec.ts` | webui「set_session_model happy-path via webui」（cover-core-channel-test-gaps B2.2）⁶ |
+| 模型管理覆盖 | 有模型面的正向切换（acp:fakeacp） | set_session_model rejects unknown model — typed rejection 到达但 webui 无内联错误面（observed product gap），会话存活、current_model 不变 | `models.spec.ts` | webui「set_session_model rejects unknown model」（cover B2.2）⁶ |
 
 > Settings 语义修正（fix-settings-menu-and-services-semantics，spec 改动 `1e4a807`）：
 > S1 改写为 `/api/admin/services` 响应驱动（响应即真源，不枚举具体服务）、S6 新增裸
 > core 退化覆盖（横幅 + 零行 + 重启 disabled）；实施清单见
 > `openspec/changes/fix-settings-menu-and-services-semantics/tasks.md` §4；本表 35 行 =
 > 全套件 `it` 总数 35（含新增 S6）。
+
+> ⁶ cover-core-channel-test-gaps（2026-09-08）：detached 审批三例 + 模型面两例；
+> detached spec（`approval-detached.spec.ts`）由 `playwright.detached.config.ts` 专属承担
+> （主 config testIgnore 反向排除）；沙箱 harness 新增 `[acp.agents.fakeacp]`（generic-ACP
+> 驱动 + `sebas-acp` 的 fake-acp-agent，通告 bad-model/ok-model 且拒绝 bad-model）。
+> observed product gap：generic-ACP 驱动不产 `Finished`（会话停留 working）且 agent 级
+> non-terminal Error 在 webui 无渲染面——用例按可观测契约断言（无假成功），缺口待后续。
 
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（该 change 尚未同步进主 spec，主 spec 暂无设置面 requirement）；S5a/S5b 的

@@ -168,21 +168,30 @@ def testsuite_webui(c, case=None):
     else:
         print("frontend dist up to date")
 
-    print("Building workspace (sebas + fake-claude) ...")
-    if c.run("cargo build --bin sebas --bin fake-claude", echo=True).failed:
+    print("Building workspace (sebas + fakes) ...")
+    if (
+        c.run(
+            "cargo build -p sebas -p sebas-acp --bin sebas --bin fake-claude --bin fake-acp-agent",
+            echo=True,
+        ).failed
+    ):
         raise SystemExit(1)
 
     _testsuite_webui_preflight(c)
 
     suite_dir = "tests/testsuite-webui"
     if case:
-        # --case auth runs the auth-on form; --case deployment the detached
-        # dual-process form (core + standalone webui, no shared-secret env);
-        # anything else filters the main suite.
+        # --case auth runs the auth-on form; --case deployment or
+        # --case approval-detached the detached dual-process topology
+        # (core + standalone webui, no shared-secret env); anything else
+        # filters the main suite.
         if case == "auth":
             cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
-        elif case == "deployment":
-            cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
+        elif case in ("deployment", "approval-detached"):
+            cmd = (
+                f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
+                f" {case}"
+            )
         else:
             cmd = f"pnpm --dir {suite_dir} exec playwright test {case}"
     else:
@@ -258,20 +267,35 @@ def _sandbox_env(work, secret=True):
     return env
 
 
-def _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=False, port=None):
+def _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=False, port=None, fake_acp_bin=None):
     """config.toml following the AGENTS.md debug recipe.
 
     `[watchdog.webui] enabled` decides the topology: false (default) = the
     bare core owns the webui via `--webui-port`; true = the standalone
     `sebas webui` serves it from host/port in this section (the detached
-    dual-process form, harden-core-channel-deployment 5.4)."""
+    dual-process form, harden-core-channel-deployment 5.4).
+
+    `[acp.agents.fakeacp]` wires the generic-ACP fake (sebas-acp's
+    fake-acp-agent) as an extra agent kind so model-selection journeys
+    (cover-core-channel-test-gaps B2.2) can drive configOptions reflection:
+    it advertises `bad-model`/`ok-model` (initial = first) and rejects `set_config_option` for
+    `bad-model` (typed rejection; the claude driver/fake remain model-less —
+    that terminal-teardown contract is pinned by the existing models.spec 3.2)."""
     cfg = _cfg_path(work)
     fake = _cfg_path(os.path.abspath(fake_bin))
+    fake_acp = _cfg_path(os.path.abspath(fake_acp_bin)) if fake_acp_bin else None
     auth_toml = "true" if auth_on else "false"
     if webui_enabled:
         webui_toml = f'enabled = true\nhost = "127.0.0.1"\nport = {port}'
     else:
         webui_toml = "enabled = false"
+    fakeacp_toml = ""
+    if fake_acp:
+        fakeacp_toml = f"""
+[acp.agents.fakeacp]
+driver = "acp"
+command = ["{fake_acp}", "--journal", "{cfg}/fakeacp-journal.jsonl", "--model-options", "bad-model,ok-model", "--reject-model", "bad-model"]
+"""
     text = f"""[feishu]
 enabled = false
 
@@ -280,7 +304,7 @@ driver = "claude"
 path = "{fake}"
 sessions_dir = "{cfg}/claude-sessions"
 work_dir = "{cfg}/work"
-
+{fakeacp_toml}
 [dispatch]
 state_file = "{cfg}/sessions.json"
 
@@ -328,9 +352,13 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     mid-journey; teardown kills whatever pids the file lists last."""
     sebas_bin = os.path.abspath(_sandbox_bin("sebas"))
     fake_bin = _sandbox_bin("fake-claude")
-    for path in (sebas_bin, fake_bin):
+    fake_acp_bin = _sandbox_bin("fake-acp-agent")
+    for path in (sebas_bin, fake_bin, fake_acp_bin):
         if not (os.path.isfile(path) and os.access(path, os.X_OK)):
-            print(f"error: {path} missing, run: cargo build --bin sebas --bin fake-claude")
+            print(
+                f"error: {path} missing, run: cargo build -p sebas -p sebas-acp"
+                " --bin sebas --bin fake-claude --bin fake-acp-agent"
+            )
             raise SystemExit(1)
 
     scene_file = os.environ.get(
@@ -365,7 +393,7 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
         os.makedirs(os.path.join(work, sub), exist_ok=True)
     with open(scene_file, "w") as f:
         f.write(work)
-    _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port)
+    _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port, fake_acp_bin=fake_acp_bin)
 
     if auth_on:
         result = subprocess.run(

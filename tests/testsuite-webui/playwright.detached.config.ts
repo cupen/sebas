@@ -18,9 +18,10 @@ export const WEBUI_PORT = 9897
 
 export default defineConfig({
   testDir: './tests',
-  // Only the deployment journey runs against this topology — stopping the
-  // core would be lethal to the shared single-process suite.
-  testMatch: /deployment\.spec\.ts/,
+  // Detached-topology journeys: the deployment resilience journey (harden
+  // 5.4) and the detached approval loop (cover-core-channel-test-gaps B1.2).
+  // Their core stop/start would be lethal to the shared single-process suite.
+  testMatch: /deployment\.spec\.ts|approval-detached\.spec\.ts/,
   timeout: 60_000,
   retries: 1,
   workers: 1,
