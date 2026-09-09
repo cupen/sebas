@@ -14,8 +14,10 @@ the watchdog control plane.
 The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and
 `GET /assets/*` for its built styles, scripts, and fonts. Any other
 browser-facing GET (for example `/sessions/{key}`) resolves through the SPA
-fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about`
-canonicalise to `/` — those surfaces live in the Settings modal now. The JSON
+fallback, and the retired IA-v1 paths `/settings` and `/about`
+canonicalise to `/` — those surfaces live in the Settings modal now. The
+IA-v1 `/gateway` path is deleted outright (no route, no redirect): like
+`/admin/*` it falls back to the workbench as an unknown path. The JSON
 API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with
 optional `prompt` field), `GET
 /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST
