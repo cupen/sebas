@@ -925,6 +925,17 @@ app_secret = "s"
         );
         assert!(only_secret.is_err(), "只配 app_secret 必须报错");
 
+        // 半配置与开关状态正交：enabled = false 也不豁免（feishu-option
+        // delta：无论 enabled 为缺省、false 还是 true 均拒启）。
+        let half_off = Config::parse(
+            r#"
+[feishu]
+enabled = false
+app_id = "cli_a1b2"
+"#,
+        );
+        assert!(half_off.is_err(), "enabled=false 不豁免半配置");
+
         // 同时配置 = 启用。
         let both = Config::parse(
             r#"
