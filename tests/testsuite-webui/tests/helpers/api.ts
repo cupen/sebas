@@ -239,12 +239,8 @@ export async function authMe(request: APIRequestContext): Promise<AuthInfo> {
   return (await request.get('/api/auth/me')).json() as Promise<AuthInfo>
 }
 
-export async function authLogin(
-  request: APIRequestContext,
-  username: string,
-  password: string,
-): Promise<number> {
-  const resp = await request.post('/api/auth/login', { data: { username, password } })
+export async function authLogin(request: APIRequestContext, secret: string): Promise<number> {
+  const resp = await request.post('/api/auth/login', { data: { secret } })
   return resp.status()
 }
 

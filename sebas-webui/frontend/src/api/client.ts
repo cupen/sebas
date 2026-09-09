@@ -491,10 +491,11 @@ export const api = {
   about: () => get<About>('/api/about'),
   agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
 
-  // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie）
+  // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie。
+  // 登录为单字段形态：secret 可以是登录 token 或账户密码，服务端自动识别。）
   authMe: () => get<AuthInfo>('/api/auth/me'),
-  authLogin: (username: string, password: string) =>
-    post<{ status: string; username: string }>('/api/auth/login', { username, password }),
+  authLogin: (secret: string) =>
+    post<{ status: string; username: string }>('/api/auth/login', { secret }),
   authLogout: () => post<{ status: string }>('/api/auth/logout'),
 
   // Session mutations
