@@ -1,8 +1,10 @@
+# state-store Specification
+
 ## Purpose
 
 Owns the SQLite-backed domain state of sebas: where the database lives, how schema versioning and automatic migration behave, who may write, which state methods the core channel exposes, and the durability and unavailability contracts that replace the former per-file JSON semantics.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Database location and single-writer ownership
 

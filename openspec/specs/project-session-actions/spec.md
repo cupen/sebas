@@ -1,3 +1,5 @@
+# project-session-actions Specification
+
 ## Purpose
 
 Defines the directory-picker project registration, zero-prompt session creation, session archiving with retention expiry, and the History/Inbox split in the workbench sidebar — completing the project and session action surface that the initial workbench implementation left as gaps.

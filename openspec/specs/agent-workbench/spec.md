@@ -1,3 +1,5 @@
+# agent-workbench Specification
+
 ## Purpose
 Defines the project-centric agent workbench: how a project is registered and
 persisted, how sessions are attributed to projects, how the turn stream marks
