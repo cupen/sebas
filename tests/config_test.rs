@@ -185,6 +185,32 @@ path = "definitely-not-a-real-binary-sebas-test"
     );
 }
 
+/// feishu 可选（sebas-2ty）回归：[feishu] 段存在且凭据为**显式空串**（仓库
+/// 自带 config 的写法）必须解析成功并视为未接入——旧版把 app_id 当必填，
+/// 启动即报 "feishu.app_id is required"。
+#[test]
+fn feishu_section_with_empty_credentials_is_optional() {
+    let toml = r#"
+[feishu]
+app_id = ""
+app_secret = ""
+"#;
+    let cfg = Config::parse(toml).expect("显式空串凭据 = 不接入飞书，必须可解析");
+    assert!(!cfg.feishu.is_enabled(), "空串凭据应视为未启用");
+}
+
+/// 仓库自带的 config.toml.example 与用户实际 config/config.toml 同构
+/// （feishu 凭据空串），作为真实工件兜底，防必填校验回归。
+#[test]
+fn shipped_config_example_parses_without_feishu_required() {
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
+    let raw = std::fs::read_to_string(&example).expect("config.toml.example 应随仓库存在");
+    let cfg = Config::parse(&raw).expect("仓库自带示例配置必须可解析（feishu 可选）");
+    if cfg.feishu.app_id.is_empty() && cfg.feishu.app_secret.is_empty() {
+        assert!(!cfg.feishu.is_enabled(), "空凭据示例应视为未接入飞书");
+    }
+}
+
 #[test]
 fn validate_runtime_rejects_unwritable_dir() {
     let dir = std::env::temp_dir().join(format!("sebas-vr-ro-{}", std::process::id()));
