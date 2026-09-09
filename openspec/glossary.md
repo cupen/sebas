@@ -122,8 +122,3 @@ openspec change 流程(见归档惯例),完成后须同步全文引用并过
 - **家族补缀约定**:`-core` 核心状态机、`-driver` 驱动/子进程生命周期、
   `-option` 配置开关、`-reactions` 渠道交互反馈、`-lifecycle` 生命周期、
   `-persistence` 持久化、`-service` 独立进程/服务面、`-commands` 命令面。
-
-**遗留偏离(尚未改名)**:以下目录名与上述规则不符,处于过渡期,逐批对齐
-后移除本条:`workbench`(原 `agent-workbench`;consolidate 已并入
-project-session-actions/webui/projects,命名现符合 `-workbench` 补缀、
-无前缀族归属)、`state-store`(顶层领域,保留原名)。
