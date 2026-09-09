@@ -15,7 +15,7 @@ The system SHALL define an `AgentDriver` trait that abstracts driving one third-
 - **WHEN** Claude Code streams a result carrying `cache_read_input_tokens`
 - **THEN** the Claude driver emits an `AcpEvent::UsageUpdate` carrying that count, which a generic ACP driver does not emit for agents that lack it
 
-#### Scenario: ACP driver delegates lifecycle to the runtime layer
+#### Scenario: ACP driver spawns a native ACP agent
 
 - **WHEN** an agent is configured with `driver = "acp"` and a `command` such as `gemini --acp`
-- **THEN** the ACP driver resolves the kind to the ACP subprocess runtime, which spawns that command, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s per the `acp-driver` capability
+- **THEN** the ACP driver resolves the kind to the ACP subprocess runtime (`acp-driver`), which spawns that command, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
