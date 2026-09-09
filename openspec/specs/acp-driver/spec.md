@@ -1,7 +1,7 @@
 # acp-driver Specification
 
 ## Purpose
-Owns the lifecycle of one Claude Code subprocess per sebas session: spawn, resume, streaming event pump, interrupt-and-heal, hang detection with escalating kill, and a guaranteed single terminal event on death. Provides a stable `AcpCommand` / `AcpEvent` vocabulary to the router so the engine underneath (currently `cc-agent-sdk` over stream-json + control protocol) can be replaced without changing the router contract.
+Owns the **ACP subprocess runtime layer** — the lifecycle of one ACP child per sebas session: spawn, resume, streaming event pump, interrupt-and-heal, hang detection with escalating kill, and a guaranteed single terminal event on death. Serves the `agent-driver` abstraction layer's `AcpDriver` implementation and the router with a stable `AcpCommand` / `AcpEvent` vocabulary, so the engine underneath (currently `cc-agent-sdk` over stream-json + control protocol) can be replaced without changing the router contract. Driver-kind resolution, the open kind registry, and cross-driver permission routing belong to `agent-driver`, not here.
 
 ## Requirements
 
