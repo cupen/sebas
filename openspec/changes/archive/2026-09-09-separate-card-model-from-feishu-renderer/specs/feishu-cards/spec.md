@@ -1,3 +1,34 @@
+## ADDED Requirements
+
+### Requirement: Feishu card layout details
+
+Where the neutral presentation content contract leaves layout to the renderer, the Feishu adapter SHALL render the card top-to-bottom as: header (title derived from the first non-empty line of the user prompt, truncated to 40 chars), quote block containing the user prompt, divider, body elements, and footer showing `{model} · in: {input} out: {output} · ctx: {total_input}` when usage is known, otherwise `msg_id: {session_id}`. Emoji affordances (`💭 思考`, `🤔 折腾中`, `✅ 已完成`, `📎 接上条，内容继续`, `❌`) and the truncation note `（已折叠 N 字）` are Feishu-renderer vocabulary rendered on top of the neutral contract's folding/budget markers.
+
+#### Scenario: usage footer
+
+- **WHEN** a turn finishes with a usage event carrying input=10, output=25, total_input=12 for model `claude-x`
+- **THEN** the card footer renders `claude-x · in: 10 out: 25 · ctx: 12`
+
+#### Scenario: title truncation
+
+- **WHEN** the user prompt's first non-empty line is 80 characters
+- **THEN** the card header title shows only the first 40 characters
+
+#### Scenario: finished panel rename
+
+- **WHEN** a turn transitions to terminal-finished per the neutral content contract
+- **THEN** the collapsible working panel's header text becomes `✅ 已完成`
+
+#### Scenario: rotation continuation note
+
+- **WHEN** a turn's content reaches the rotation threshold in the neutral content contract
+- **THEN** the new continuation card opens with the `📎 接上条，内容继续` note
+
+#### Scenario: thinking folded with emoji affordance
+
+- **WHEN** thinking is shown per the neutral content contract
+- **THEN** the body renders a collapsed `💭 思考` panel holding the thinking text, separate from the output text
+
 ## REMOVED Requirements
 
 ### Requirement: Per-turn card model
@@ -109,31 +140,3 @@ The Feishu adapter SHALL render the neutral outbound presentation model (channel
 - **WHEN** im 服务持续运行而 core 进程重启
 - **THEN** 卡片状态机的归属始终在 im，重启后 im 以新快照重建会话视图，不出现双写卡片状态
 
-### Requirement: Feishu card layout details
-
-Where the neutral presentation content contract leaves layout to the renderer, the Feishu adapter SHALL render the card top-to-bottom as: header (title derived from the first non-empty line of the user prompt, truncated to 40 chars), quote block containing the user prompt, divider, body elements, and footer showing `{model} · in: {input} out: {output} · ctx: {total_input}` when usage is known, otherwise `msg_id: {session_id}`. Emoji affordances (`💭 思考`, `🤔 折腾中`, `✅ 已完成`, `📎 接上条，内容继续`, `❌`) and the truncation note `（已折叠 N 字）` are Feishu-renderer vocabulary rendered on top of the neutral contract's folding/budget markers.
-
-#### Scenario: usage footer
-
-- **WHEN** a turn finishes with a usage event carrying input=10, output=25, total_input=12 for model `claude-x`
-- **THEN** the card footer renders `claude-x · in: 10 out: 25 · ctx: 12`
-
-#### Scenario: title truncation
-
-- **WHEN** the user prompt's first non-empty line is 80 characters
-- **THEN** the card header title shows only the first 40 characters
-
-#### Scenario: finished panel rename
-
-- **WHEN** a turn transitions to terminal-finished per the neutral content contract
-- **THEN** the collapsible working panel's header text becomes `✅ 已完成`
-
-#### Scenario: rotation continuation note
-
-- **WHEN** a turn's content reaches the rotation threshold in the neutral content contract
-- **THEN** the new continuation card opens with the `📎 接上条，内容继续` note
-
-#### Scenario: thinking folded with emoji affordance
-
-- **WHEN** thinking is shown per the neutral content contract
-- **THEN** the body renders a collapsed `💭 思考` panel holding the thinking text, separate from the output text
