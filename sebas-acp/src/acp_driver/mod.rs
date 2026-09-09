@@ -308,6 +308,13 @@ impl AgentDriver for AcpDriver {
                                     ))
                                     .block_task()
                                     .await?;
+                                    // prompt 响应即 turn 边界：不发 Finished 会话
+                                    // 永远停在 working（与 claude 驱动同词汇表）。
+                                    let _ = connect_evt_tx
+                                        .send(AcpEvent::Finished {
+                                            session_id: final_routing.clone(),
+                                        })
+                                        .await;
                                 }
                                 Some(AcpCommand::SetModel { model_id, .. }) => {
                                     match set_model(

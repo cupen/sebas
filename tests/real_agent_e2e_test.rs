@@ -34,19 +34,13 @@
 //! overridden. A real sebas crash-panic would leave the scene dir behind for
 //! debugging (path printed on drop).
 //!
-//! Known product gap (observed, asserted honestly — no fake success): the
-//! generic ACP driver (`sebas-acp/src/acp_driver`) drops the `PromptRequest`
-//! result and never emits `AcpEvent::Finished`, so `acp:<slug>` sessions
-//! never reach the DONE phase — the turn content completes and lands in the
-//! transcript, but the status stays "working" (pre-documented in the
-//! archived cover-core-channel-test-gaps B2.1/B2.2 notes; the agent-driver
-//! spec's "Both drivers present the same vocabulary" scenario says they
-//! should). The opencode journey therefore asserts the real round-trip
-//! (sentinel reply in the transcript) and gives Done a bounded grace window:
-//! if it arrives (driver fixed), it is asserted; if not, the journey prints
-//! a labeled product-gap notice and stays green. The claude journey
-//! hard-asserts Done — its dedicated driver does emit `Finished` (proven by
-//! the fake-claude suite).
+//! Turn completion: both drivers emit `Finished` (the generic ACP driver
+//! used to drop the PromptRequest result and leave `acp:<slug>` sessions in
+//! the working phase — fixed in sebas-acp/src/acp_driver; see archived
+//! cover-core-channel-test-gaps B2.1/B2.2 notes and the agent-driver spec's
+//! "Both drivers present the same vocabulary" scenario). Both journeys
+//! therefore hard-assert the DONE phase after the reply text lands; the
+//! bounded grace window just tolerates the reply→Done race.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -447,10 +441,7 @@ fn claude_logged_in() -> Option<bool> {
 /// backend. `backend` is the session hint (`"acp"` → default kind claude,
 /// `"acp:opencode"` → the generic-ACP opencode agent).
 ///
-/// `hard_assert_done`: the claude driver emits `Finished` (Done expected);
-/// the generic-ACP driver currently never does (product gap — see the file
-/// doc), so the opencode run only prints the labeled notice.
-async fn first_message_roundtrip(backend: &str, sub: &str, hard_assert_done: bool) {
+async fn first_message_roundtrip(backend: &str, sub: &str) {
     let scene = Scene::new(sub);
     let cli = http_client();
     let mut core = scene.spawn_core();
@@ -511,24 +502,14 @@ async fn first_message_roundtrip(backend: &str, sub: &str, hard_assert_done: boo
         transcript.len()
     );
 
-    // Turn completion: Done is asserted when it arrives; per-backend policy
-    // differs (see doc / hard_assert_done).
-    if wait_done(&cli, &scene, &key, DONE_GRACE).await {
-        eprintln!("[real-agent] {backend}: turn reached Done");
-    } else if hard_assert_done {
+    // Turn completion: Done is part of the same-vocabulary contract.
+    if !wait_done(&cli, &scene, &key, DONE_GRACE).await {
         panic!(
             "{backend}: turn never reached Done within {DONE_GRACE:?} after the reply; \
              transcript: {transcript:?}"
         );
-    } else {
-        eprintln!(
-            "[observed product gap] {backend}: turn content completed but Done never arrived — \
-             the generic ACP driver (sebas-acp/src/acp_driver) drops the PromptRequest result \
-             and never emits AcpEvent::Finished, so acp:<slug> sessions stay in the working \
-             phase (agent-driver spec 'same vocabulary' scenario); the dedicated claude driver \
-             does emit Finished. See archived cover-core-channel-test-gaps B2.1/B2.2 notes."
-        );
     }
+    eprintln!("[real-agent] {backend}: turn reached Done");
 
     // 会话管理: close; assert accepted and the session leaves the active list.
     let close = cli
@@ -586,7 +567,7 @@ async fn real_opencode_first_message_roundtrip() {
         );
         return;
     }
-    first_message_roundtrip("acp:opencode", "opencode", false).await;
+    first_message_roundtrip("acp:opencode", "opencode").await;
 }
 
 /// claude journey (#[ignore], opt-in): real `claude` CLI via the dedicated
@@ -604,7 +585,7 @@ async fn real_claude_first_message_roundtrip() {
         return;
     }
     match claude_logged_in() {
-        Some(true) => first_message_roundtrip("acp", "claude", true).await,
+        Some(true) => first_message_roundtrip("acp", "claude").await,
         Some(false) => {
             eprintln!(
                 "[skip] real_claude_first_message_roundtrip: claude CLI not logged in — \
