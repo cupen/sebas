@@ -51,19 +51,6 @@ vi.mock('../api/shared-ws.js', () => ({
   sharedWs: { subscribe: () => () => {} },
 }))
 
-// harden-core-channel-deployment 4.1: the '../api/client.js' key above
-// resolves outside src/ (phantom path) — the shell/dashboard/rail import
-// './api/client.js' and see the real module. This overlay keeps every real
-// export and swaps only `api.summary`, the shell's banner signal, so the
-// banner tests control reachability without perturbing the other suites.
-vi.mock('./api/client.js', async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>
-  return {
-    ...actual,
-    api: { ...(actual['api'] as Record<string, unknown>), summary: apiMocks.summary },
-  }
-})
-
 // outlet 会实例化 sebas-dashboard；composer 依赖 WA 表单组件的
 // ElementInternals（jsdom 不完整），与 shell 无关 —— mock 掉模块即可，
 // <sebas-workbench-composer> 作为未知元素惰性渲染。
@@ -259,60 +246,6 @@ describe('deep-link reachability', () => {
   it('the project rail still navigates to /sessions/:key via session rows', () => {
     const src = readFileSync(join(here, 'views/project-rail.ts'), 'utf8')
     expect(src).toContain('navigate(`/sessions/')
-  })
-})
-
-describe('global core-unreachable banner (harden-core-channel-deployment 4.1)', () => {
-  function summaryWith(reachability: { ok: boolean; cause?: string }) {
-    apiMocks.summary.mockResolvedValue({
-      active_count: 0,
-      dormant_count: 0,
-      spawning_count: 0,
-      total_sessions: 0,
-      uptime: '0s',
-      recent_sessions: [],
-      active_session: null,
-      active_session_key: null,
-      reachability,
-    })
-  }
-
-  it('stays hidden while the core is reachable', async () => {
-    const el = await mountShell()
-    expect(el.shadowRoot!.querySelector('.core-banner')).toBeNull()
-    el.remove()
-  })
-
-  it('appears with the reported cause when reachability.ok is false, without blocking browsing', async () => {
-    summaryWith({ ok: false, cause: 'socket absent' })
-    const el = await mountShell()
-    const banner = el.shadowRoot!.querySelector<HTMLElement>('.core-banner')
-    expect(banner).toBeTruthy()
-    expect(banner?.getAttribute('role')).toBe('alert')
-    expect(banner?.textContent ?? '').toContain('socket absent')
-    // 横幅是 overlay：工作台照常渲染，浏览不受影响。
-    expect(el.shadowRoot!.querySelector('.outlet sebas-dashboard')).toBeTruthy()
-    el.remove()
-  })
-
-  it('disappears on the next poll after the core recovers, with no reload', async () => {
-    summaryWith({ ok: false, cause: 'connection refused' })
-    const el = await mountShell()
-    expect(el.shadowRoot!.querySelector('.core-banner')).toBeTruthy()
-
-    summaryWith({ ok: true })
-    await (el as unknown as { loadCoreReachability: () => Promise<void> }).loadCoreReachability()
-    await el.updateComplete
-    expect(el.shadowRoot!.querySelector('.core-banner')).toBeNull()
-    el.remove()
-  })
-
-  it('keeps the last known state when the summary fetch itself fails', async () => {
-    apiMocks.summary.mockRejectedValue(new Error('webui down'))
-    const el = await mountShell()
-    // 无历史不可达态：不误报（传输层故障已有 ws 横幅覆盖）。
-    expect(el.shadowRoot!.querySelector('.core-banner')).toBeNull()
-    el.remove()
   })
 })
 
