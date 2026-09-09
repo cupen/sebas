@@ -241,19 +241,34 @@ authentication switch is enabled and login credentials exist (see
 - **THEN** `sebas webui` exits with a configuration error rather than
   binding
 
-### Requirement: 鉴权开关（auth）
+### Requirement: 鉴权开关（auth）与凭据自动引导
 
 WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。
-开关为 `true` 时，登录鉴权行为不变：凭据文件存在即启用鉴权门，`/api/*`、
-`/router/api/*`、`/ws` 需要有效会话。开关为 `false` 时，即使凭据文件存在，
-SHALL 对所有路由（含静态资源）完全放行，不要求登录；`GET /api/auth/me`
-SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui-passwd`
-在开关关闭时仍可管理凭据（为重新启用做准备），但不产生任何强制登录效果。
+开关为 `true` 时，鉴权门 SHALL 恒在：凭据文件缺失时按优先级自动引导——
+`SEBAS_WEBUI_TOKEN`（单字段登录密钥，SHA-256 摘要落盘）→
+`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`（密码注入）→ 自动生成随机
+密码并以醒目日志打印一次（用户名 `admin`，仅落 PBKDF2 哈希）；引导后
+`/api/*`、`/router/api/*`、`/ws` 需要有效会话。开关为 `false` 时，即使
+凭据文件存在，SHALL 对所有路由（含静态资源）完全放行，不要求登录且不
+触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染
+登录页）。`sebas webui-passwd` 在开关关闭时仍可管理凭据（为重新启用做
+准备），改密 SHALL 保留已引导的 token 摘要，但不产生任何强制登录效果。
 
-#### Scenario: 默认打开
+#### Scenario: 默认打开且凭据存在
 
 - **WHEN** 配置未写 `auth` 且凭据文件存在
 - **THEN** 未带会话的 `/api/summary` 请求返回 401，行为与无开关时一致
+
+#### Scenario: 默认打开且凭据缺失自动生成
+
+- **WHEN** 配置未写 `auth`、凭据文件不存在、且未设凭据环境变量
+- **THEN** 首次启动自动生成随机凭据（用户名 `admin`），密码打印到日志一次
+- **AND** 未带会话的 `/api/summary` 请求返回 401（登录门开箱即用）
+
+#### Scenario: token 环境变量注入
+
+- **WHEN** 凭据文件不存在且 `SEBAS_WEBUI_TOKEN` 非空
+- **THEN** 该 token 以 SHA-256 摘要写入凭据文件，单字段登录可用
 
 #### Scenario: 测试环境关闭
 
@@ -266,12 +281,40 @@ SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui
 - **WHEN** 开关从 `false` 改回 `true` 并重启 webui
 - **THEN** 已存在的凭据立即恢复强制登录，无需重建凭据文件
 
+### Requirement: 单字段登录（token 或密码）
+
+`POST /api/auth/login` SHALL 接受单字段 `{"secret"}`（登录 token 或账户
+密码，服务端自动识别），并保持兼容旧格式 `{"username", "password"}`。
+成功即建立会话 cookie；失败统一 401，限速策略不变（按来源 IP）。
+
+#### Scenario: token 登录
+
+- **WHEN** `SEBAS_WEBUI_TOKEN` 引导的 token 通过 `{"secret"}` 提交
+- **THEN** 登录成功并返回会话 cookie，响应携带服务端账户名
+
+#### Scenario: 密码单字段登录
+
+- **WHEN** 引导生成的随机密码通过 `{"secret"}` 提交
+- **THEN** 登录成功（密码与 token 由服务端自动识别，无需用户名字段）
+
+#### Scenario: 旧格式保持兼容
+
+- **WHEN** `{"username", "password"}` 提交到 `/api/auth/login`
+- **THEN** 行为与单字段形态一致（校验通过即建立会话）
+
+#### Scenario: 登录页单字段
+
+- **WHEN** 前端渲染登录门
+- **THEN** 登录表单只有一个凭据输入框（密码或 token 通吃），401 就地
+  提示「凭据错误」
+
 ### Requirement: 非 loopback bind 与开关联动
 
 当 `watchdog.webui.host` 非 loopback 时，webui SHALL 仅在
-`auth = true`（或缺省）且登录凭据存在时才允许绑定启动；否则 SHALL 以配置
-错误拒绝启动。开关关闭时无论凭据是否存在，SHALL 拒绝非 loopback bind
-（防止误关开关叠加公网暴露）。
+`auth = true`（或缺省）且登录凭据存在时才允许绑定启动；凭据缺失时先经
+自动引导（见「鉴权开关（auth）与凭据自动引导」），引导后凭据即存在，
+因此该状态下 SHALL 放行启动。开关关闭时无论凭据是否存在，SHALL 拒绝
+非 loopback bind（防止误关开关叠加公网暴露）。
 
 #### Scenario: 开关关闭拒绝公网 bind
 
@@ -281,7 +324,7 @@ SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui
 #### Scenario: 开关打开且凭据存在允许公网 bind
 
 - **WHEN** 配置设置 `auth = true`（或缺省）、`host = "0.0.0.0"`，
-  且凭据文件存在
+  且凭据文件存在（含自动引导生成）
 - **THEN** `sebas webui` 正常绑定并在日志中提示已启用登录鉴权
 
 ### Requirement: Optional admin authentication
