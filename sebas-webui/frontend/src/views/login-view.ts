@@ -3,7 +3,10 @@
  *
  * Shell 在 `/api/auth/me` 返回 `authenticated: false` 时渲染本组件替代整个
  * 工作台。提交 → `api.authLogin` → 成功后冒泡 `login-success`（携带用户名），
- * shell 据此挂回工作台。401（密码错）就地显示错误文案，429 显示限速提示。
+ * shell 据此挂回工作台。401（凭据错）就地显示错误文案，429 显示限速提示。
+ *
+ * 单字段形态：一个输入框同时接受登录 token（SEBAS_WEBUI_TOKEN 注入）或
+ * 账户密码，服务端自动识别；界面不再区分两个字段。
  */
 
 import { LitElement, css, html } from 'lit'
@@ -12,10 +15,9 @@ import { ApiError, api } from '../api/client.js'
 
 @customElement('sebas-login')
 export class SebasLogin extends LitElement {
-  /** 服务端配置的账户名提示（登录页可预填用户名；null = 不预填）。 */
+  /** 服务端配置的账户名提示（仅在密码登录的界面提示里出现；null = 无）。 */
   @property() hintUsername: string | null = null
-  @state() private username = ''
-  @state() private password = ''
+  @state() private secret = ''
   @state() private error: string | null = null
   @state() private busy = false
 
@@ -140,7 +142,6 @@ export class SebasLogin extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback()
-    if (this.hintUsername) this.username = this.hintUsername
   }
 
   private async submit(e: Event): Promise<void> {
@@ -149,10 +150,10 @@ export class SebasLogin extends LitElement {
     this.busy = true
     this.error = null
     try {
-      await api.authLogin(this.username.trim(), this.password)
+      const res = await api.authLogin(this.secret)
       this.dispatchEvent(
         new CustomEvent('login-success', {
-          detail: { username: this.username.trim() },
+          detail: { username: res.username },
           bubbles: true,
           composed: true,
         }),
@@ -160,7 +161,7 @@ export class SebasLogin extends LitElement {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 429) this.error = '尝试次数过多，请稍后再试'
-        else if (err.status === 401) this.error = '用户名或密码错误'
+        else if (err.status === 401) this.error = '凭据错误'
         else this.error = `登录失败（HTTP ${err.status}）：${err.message}`
       } else {
         this.error = '网络连接失败，请检查服务是否可用'
@@ -180,24 +181,14 @@ export class SebasLogin extends LitElement {
         <p class="title">登录以继续</p>
         <form @submit=${this.submit}>
           <label>
-            用户名
+            ${this.hintUsername ? `密码（${this.hintUsername}）或 Token` : '密码或 Token'}
             <input
-              name="username"
-              autocomplete="username"
-              required
-              .value=${this.username}
-              @input=${(e: Event) => (this.username = (e.target as HTMLInputElement).value)}
-            />
-          </label>
-          <label>
-            密码
-            <input
-              name="password"
+              name="secret"
               type="password"
               autocomplete="current-password"
               required
-              .value=${this.password}
-              @input=${(e: Event) => (this.password = (e.target as HTMLInputElement).value)}
+              .value=${this.secret}
+              @input=${(e: Event) => (this.secret = (e.target as HTMLInputElement).value)}
             />
           </label>
           <p class="error" role="alert">${this.error ?? ''}</p>

@@ -65,7 +65,9 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `[dispatch] state_file`, `[media] download_dir`,
      `[acp.claude] sessions_dir` / `work_dir`,
      `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
-     (port ≠ 9797, e.g. 9877) all set inside it;
+     (port ≠ 9797, e.g. 9877) all set inside it — include `auth = false`
+     (or a sandbox-local `SEBAS_WEBUI_AUTH_FILE`), otherwise the default-on
+     auth switch auto-generates credentials into the real `~/.sebas`;
    - env: three files that would otherwise default into the real `~/.sebas`
      — all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db`
      — the easy one to miss: without it the sandbox opens the real DB even
@@ -133,6 +135,8 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
    [watchdog.webui]
    enabled = false          # bare core owns the webui via --webui-port
+   auth = false             # default-on auth would auto-generate credentials
+                            # into the real ~/.sebas on first bootstrap
 
    # router validate requires ≥1 provider with a base_url — the debug `test`
    # provider is injected only AFTER parse, so it cannot satisfy validate.

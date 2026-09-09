@@ -1,19 +1,23 @@
-//! WebUI 登录鉴权：单账户「用户名 / 密码」。
+//! WebUI 登录鉴权：单账户「用户名 / 密码」+ 可选「登录 token」。
 //!
 //! # 凭据存储
 //!
 //! 凭据落盘为 JSON（默认 `~/.sebas/webui-auth.json`，`SEBAS_WEBUI_AUTH_FILE`
 //! 覆盖）：密码绝不存明文，只存 PBKDF2-HMAC-SHA256（随机盐 + 迭代次数，
-//! 迭代次数一并入库以便将来上调）。
+//! 迭代次数一并入库以便将来上调）。token（`SEBAS_WEBUI_TOKEN` 注入的
+//! 高熵单字段登录密钥）只存 SHA-256 摘要——token 本身按高熵密钥对待，
+//! 无需慢 KDF，直接常量时间比对摘要即可。
 //!
 //! # 生命周期
 //!
-//! - 初始化 / 修改：`sebas webui-passwd` 重写凭据文件；运行中的 webui 进程
-//!   通过 mtime 探测热重载，改密后无需重启。
-//! - 引导：`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` 环境变量在凭据文件
-//!   缺失时自动建户（容器/公网部署用）。
-//! - 未配置凭据 = 鉴权关闭（本地 loopback 开发零摩擦）；而**非 loopback
-//!   bind 只有在凭据存在时才被放行**（见 `webui_cmd`），保证公网部署必带鉴权。
+//! - 初始化 / 修改：`sebas webui-passwd` 重写凭据文件（已有 token 保留）；
+//!   运行中的 webui 进程通过 mtime 探测热重载，改密后无需重启。
+//! - 引导（凭据文件缺失时，按优先级）：`SEBAS_WEBUI_TOKEN` 注入 token；
+//!   `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` 注入密码（容器/公网部署）；
+//!   两者皆缺 → 自动生成随机密码并打印到日志（默认开箱即要求登录）。
+//! - 未配置凭据 = 鉴权关闭（仅剩 `auth = false` 与测试接线两条路径）；
+//!   **非 loopback bind 只有在凭据存在时才被放行**（见 `webui_cmd`），
+//!   保证公网部署必带鉴权。
 //!
 //! 会话与限速复用 [`crate::admin_auth::SessionStore`]（24h 不活动 TTL、
 //! per-IP 登录限速）。
@@ -88,6 +92,22 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
     buf
 }
 
+/// 生成人可抄写的随机密码（三段大写字符组，`XXXXX-XXXXX-XXXXX`，
+/// 15 字符 ≈ 71 bit 熵）。仅用于凭据自动引导——打印一次到日志后服务端
+/// 只留哈希。
+pub fn generate_random_password() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // 去易混淆 I/L/O/0/1
+    let bytes = random_bytes(15);
+    let mut out = String::with_capacity(17);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && i % 5 == 0 {
+            out.push('-');
+        }
+        out.push(ALPHABET[(*b as usize) % ALPHABET.len()] as char);
+    }
+    out
+}
+
 /// 已加载的凭据（内存态）。
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -95,10 +115,13 @@ pub struct Credentials {
     pub iterations: u32,
     pub salt: Vec<u8>,
     pub hash: Vec<u8>,
+    /// 可选登录 token 的 SHA-256 摘要（`SEBAS_WEBUI_TOKEN` 引导注入；
+    /// `webui-passwd` 改密时保留）。None = 未配置 token 登录。
+    pub token_hash: Option<[u8; 32]>,
 }
 
 impl Credentials {
-    /// 从明文密码建凭据（随机盐，默认迭代次数）。
+    /// 从明文密码建凭据（随机盐，默认迭代次数；无 token）。
     pub fn new(username: &str, password: &str) -> Self {
         Self::with_iterations(username, password, PBKDF2_ITERATIONS)
     }
@@ -112,6 +135,7 @@ impl Credentials {
             iterations,
             salt,
             hash: hash.to_vec(),
+            token_hash: None,
         }
     }
 
@@ -127,6 +151,26 @@ impl Credentials {
         let username_ok = constant_time_eq(self.username.as_bytes(), username.as_bytes());
         username_ok && password_ok
     }
+
+    /// 校验单字段登录密钥（token 或密码，服务端自动识别）：
+    /// 先比对 token 摘要，未命中再走 PBKDF2 密码验证。
+    pub fn verify_secret(&self, secret: &str) -> bool {
+        if let Some(token_hash) = self.token_hash {
+            let digest = sha256(secret.as_bytes());
+            if constant_time_eq(&digest, &token_hash) {
+                return true;
+            }
+        }
+        self.verify(&self.username, secret)
+    }
+}
+
+/// SHA-256 摘要（token 摘要用；密码走 PBKDF2）。
+fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
 // ─── 凭据文件（JSON 落盘） ─────────────────────────────────────────────────
@@ -138,6 +182,9 @@ struct CredentialsFile {
     iterations: u32,
     salt_hex: String,
     hash_hex: String,
+    /// 可选：登录 token 的 SHA-256 摘要（hex）。旧文件缺该键 = 无 token。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_hash_hex: Option<String>,
     created_at_unix: u64,
     updated_at_unix: u64,
 }
@@ -150,6 +197,7 @@ impl CredentialsFile {
             iterations: c.iterations,
             salt_hex: hex::encode(&c.salt),
             hash_hex: hex::encode(&c.hash),
+            token_hash_hex: c.token_hash.map(|h| hex::encode(h)),
             created_at_unix,
             updated_at_unix: now_unix(),
         }
@@ -164,11 +212,20 @@ impl CredentialsFile {
         if salt.is_empty() || hash.is_empty() || self.username.is_empty() {
             return None;
         }
+        let token_hash = match &self.token_hash_hex {
+            Some(h) => {
+                let raw = hex::decode(h).ok()?;
+                let arr: [u8; 32] = raw.try_into().ok()?;
+                Some(arr)
+            }
+            None => None,
+        };
         Some(Credentials {
             username: self.username.clone(),
             iterations: self.iterations,
             salt,
             hash,
+            token_hash,
         })
     }
 }
@@ -270,6 +327,7 @@ impl AuthHandle {
                     iterations: 1,
                     salt: vec![0],
                     hash: vec![0],
+                    token_hash: None,
                 })
             }
         };
@@ -328,6 +386,30 @@ impl AuthHandle {
             return Err(LoginError::RateLimited);
         }
         if !credentials.verify(username, password) {
+            return Err(LoginError::Invalid);
+        }
+        self.session_store.reset_rate_limit(client_ip).await;
+        let (session_id, _csrf) = self.session_store.create().await;
+        Ok(session_id)
+    }
+
+    /// 单字段登录（token 或密码，服务端自动识别）。会话记账用账户名，
+    /// 与密码登录同源。
+    pub async fn login_secret(&self, client_ip: &str, secret: &str) -> Result<String, LoginError> {
+        self.reload_if_changed();
+        let credentials = self
+            .inner
+            .read()
+            .expect("auth lock")
+            .credentials
+            .clone();
+        let Some(credentials) = credentials else {
+            return Err(LoginError::Disabled);
+        };
+        if !self.session_store.check_rate_limit(client_ip).await {
+            return Err(LoginError::RateLimited);
+        }
+        if !credentials.verify_secret(secret) {
             return Err(LoginError::Invalid);
         }
         self.session_store.reset_rate_limit(client_ip).await;
@@ -452,6 +534,81 @@ mod tests {
         let path = dir.path().join("webui-auth.json");
         std::fs::write(&path, "{not json").unwrap();
         assert!(load_credentials(&path).is_err(), "损坏文件必须报错而非视为未配置");
+    }
+
+    #[test]
+    fn token_secret_round_trip_and_verify() {
+        // 独立密码与 token（真实引导形态：密码 ≠ token 也允许相同）。
+        let mut c = Credentials::with_iterations("admin", "password8", 1000);
+        // 未配 token：verify_secret 退化为密码校验。
+        assert!(c.verify_secret("password8"));
+        assert!(!c.verify_secret("tok-1234567890"));
+
+        use sha2::Digest;
+        c.token_hash = Some(sha2::Sha256::digest(b"tok-1234567890").into());
+        assert!(c.verify_secret("tok-1234567890"), "token 命中");
+        assert!(c.verify_secret("password8"), "密码仍命中");
+        assert!(!c.verify_secret("wrong"));
+
+        // 文件往返：token_hash_hex 落盘重载后仍可校验。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("webui-auth.json");
+        store_credentials(&path, &c).unwrap();
+        let loaded = load_credentials(&path).unwrap().unwrap();
+        assert!(loaded.verify_secret("tok-1234567890"));
+        assert!(!loaded.verify_secret("nope"));
+
+        // 旧格式文件（无 token_hash_hex 键）→ token_hash = None，密码登录不受影响。
+        let legacy = format!(
+            r#"{{"version":1,"username":"old","iterations":1000,"salt_hex":"{}","hash_hex":"{}","created_at_unix":0,"updated_at_unix":0}}"#,
+            hex::encode(c.salt),
+            hex::encode(&c.hash)
+        );
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(&legacy_path, legacy).unwrap();
+        let loaded = load_credentials(&legacy_path).unwrap().unwrap();
+        assert!(loaded.token_hash.is_none());
+        // 注意：salt/hash 来自 c 但用户名改为 old —— verify 用户名不匹配，
+        // 只验证文件解析；密码正确性用同 username 校验（old + password8）。
+        assert!(loaded.verify("old", "password8"));
+        assert!(!loaded.verify_secret("tok-1234567890"), "legacy 无 token");
+    }
+
+    #[test]
+    fn generate_random_password_shape() {
+        for _ in 0..8 {
+            let pw = generate_random_password();
+            assert_eq!(pw.len(), 17, "15 字符 + 2 连字符：{pw}");
+            assert_eq!(pw.matches('-').count(), 2);
+            assert!(
+                pw.chars().all(|ch| ch == '-' || ch.is_ascii_alphanumeric()),
+                "{pw}"
+            );
+        }
+        assert_ne!(generate_random_password(), generate_random_password());
+    }
+
+    #[tokio::test]
+    async fn auth_handle_login_secret_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("webui-auth.json");
+        let handle = AuthHandle::open(path.clone());
+        assert_eq!(
+            handle.login_secret("1.2.3.4", "whatever").await,
+            Err(LoginError::Disabled)
+        );
+
+        let mut c = Credentials::with_iterations("admin", "pw-secret", 1000);
+        use sha2::Digest;
+        c.token_hash = Some(sha2::Sha256::digest(b"my-token").into());
+        store_credentials(&path, &c).unwrap();
+
+        assert!(handle.login_secret("1.2.3.4", "my-token").await.is_ok());
+        assert!(handle.login_secret("1.2.3.4", "pw-secret").await.is_ok());
+        assert_eq!(
+            handle.login_secret("1.2.3.4", "nope").await,
+            Err(LoginError::Invalid)
+        );
     }
 
     #[tokio::test]

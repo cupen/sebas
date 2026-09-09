@@ -345,12 +345,17 @@ pub async fn auth_me(State(state): State<WebUiState>, headers: axum::http::Heade
     .into_response()
 }
 
-/// POST /api/auth/login — `{ username, password }` → 会话 cookie。
-/// 限速按来源 IP（SessionStore），失败统一 401（不区分用户名/密码错误）。
+/// POST /api/auth/login — 单字段 `{ secret }`（token 或密码，服务端自动
+/// 识别）或旧格式 `{ username, password }` → 会话 cookie。
+/// 限速按来源 IP（SessionStore），失败统一 401（不区分凭据类型/对错）。
 #[derive(Deserialize)]
 pub struct AuthLoginForm {
-    pub username: String,
-    pub password: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 pub async fn auth_login(
@@ -359,11 +364,27 @@ pub async fn auth_login(
     Json(form): Json<AuthLoginForm>,
 ) -> Response {
     let client_ip = addr.ip().to_string();
-    match state
-        .auth
-        .login(&client_ip, &form.username, &form.password)
-        .await
+    let (display_name, login) = if let Some(secret) = form.secret.as_deref() {
+        let login = state.auth.login_secret(&client_ip, secret).await;
+        (
+            login.as_ref().ok().and_then(|_| state.auth.username()).unwrap_or_else(|| "admin".into()),
+            login,
+        )
+    } else if let (Some(username), Some(password)) =
+        (form.username.as_deref(), form.password.as_deref())
     {
+        let username = username.to_string();
+        (
+            username.clone(),
+            state.auth.login(&client_ip, &username, password).await,
+        )
+    } else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "login requires {\"secret\"} or {\"username\", \"password\"}.",
+        );
+    };
+    match login {
         Ok(session_id) => {
             let cookie = format!(
                 "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
@@ -373,7 +394,7 @@ pub async fn auth_login(
             (
                 StatusCode::OK,
                 [(axum::http::header::SET_COOKIE, cookie)],
-                Json(json!({ "status": "ok", "username": form.username })),
+                Json(json!({ "status": "ok", "username": display_name })),
             )
                 .into_response()
         }

@@ -26,7 +26,7 @@ test.describe('鉴权闭环', () => {
 
       // Seed a session via the API. `request` is a standalone API context —
       // its auth cookie never reaches the browser, which stays logged out.
-      expect(await authLogin(request, 'admin', 'admin')).toBe(200)
+      expect(await authLogin(request, 'admin')).toBe(200)
       const key = await createSession(request, { prompt: 'deep link authed' })
 
       // Logged-out browser hitting the deep path: login gate, not the session.
@@ -46,7 +46,7 @@ test.describe('鉴权闭环', () => {
 
       await page.goto('/')
       await expect(login.host).toBeVisible()
-      await login.login('admin', 'admin')
+      await login.login('admin')
       await expect(page.locator('sebas-dashboard')).toBeVisible({ timeout: 15_000 })
 
       // Reload: the session cookie keeps the workbench up — no gate re-prompt.
@@ -72,13 +72,13 @@ test.describe('鉴权闭环', () => {
       await page.goto('/')
       await expect(login.host).toBeVisible()
 
-      // Wrong password: rejected in place, no workbench.
-      await login.login('admin', 'wrong')
-      await expect(login.error).toHaveText('用户名或密码错误')
+      // Wrong secret: rejected in place, no workbench.
+      await login.login('wrong-secret')
+      await expect(login.error).toHaveText('凭据错误')
       await expect(page.locator('sebas-dashboard')).toHaveCount(0)
 
       // Correct credentials: into the workbench.
-      await login.login('admin', 'admin')
+      await login.login('admin')
       await expect(page.locator('sebas-app nav .brand .name')).toBeVisible({ timeout: 15_000 })
       await expect(page.locator('sebas-dashboard')).toBeVisible()
 
