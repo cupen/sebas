@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-09
+goal: webui 主控部署形态与双通道共享状态从 feishu-option 拆出为独立 deploy-mode capability
