@@ -27,6 +27,15 @@ use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
+/// Claude Code 模型 env 覆盖集的 4 个 `ANTHROPIC_MODEL` 键 + 1 个
+/// `CLAUDE_CODE_SUBAGENT_MODEL` 键（openspec/changes/acp-claude-model-env-cover）。
+///
+/// 档位语义：provider 的 `models`（强→弱）经 `sebas_router::models::map_to_env`
+/// 映射成 OPUS/SONNET/HAIKU 三档；`CLAUDE_CODE_SUBAGENT_MODEL` 回退到最弱档
+/// （= HAIKU 值）。provider 未配 models → 不强制覆盖，claude 用自己发现。
+const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
+
+
 /// 从 `~/.sebas/providers.json`（legacy overlay）或 `~/.sebas/state.json`
 /// （openspec/specs/provider-management/spec.md 合并后的统一持久化文件）读单个 provider 的原始
 /// Item（含 `default_model`）。文件不存在 / JSON 坏 / 名字不在 overrides
@@ -397,12 +406,94 @@ fn build_direct_from_router_config(
     )
 }
 
+/// 给 claude code 子进程的模型 cover env（openspec/changes/acp-claude-model-env-cover）。
+///
+/// 由 provider 的 `models`（强→弱）经 `sebas_router::models::map_to_env` 导出
+/// 4 个 `ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` 值，
+/// 再加 `CLAUDE_CODE_SUBAGENT_MODEL = 最弱档`（= HAIKU 值），总共 5 个键。
+/// `models` 为空 → 返回空 Vec，不强制覆盖（模式 Router 或裸 Off 也据此
+/// 不盖模型 env，语义见 spec 的 "Transparency across provider modes"）。
+///
+/// 覆盖语义：SDK 最终用 `Command::envs` 增量合并，同键时 extra_env 里的值
+/// 会压掉父进程残留（`claude/driver.rs:166-167,213` + cc-agent-sdk
+/// `build_env`），符合 spec 的 "Override beats inherited values"。
+fn model_cover_env(models: &[String]) -> Vec<(String, String)> {
+    if models.is_empty() {
+        return Vec::new();
+    }
+    let env = sebas_router::models::map_to_env(models);
+    let mut out: Vec<(String, String)> = env
+        .to_env_map()
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    // SUBAGENT 档位目前回退到最弱模型（haiku 值）；T0/T1/T2 标注落地后
+    // 这里换成"按能力标注"的查询。
+    if let Some(haiku) = env.haiku {
+        out.push((CLAUDE_SUBAGENT_MODEL_ENV.to_string(), haiku));
+    }
+    out
+}
+
+/// 取本 spawn 用到的 provider 的模型列表（预设物化后的强→弱 `models`）。
+///
+/// `provider` 是调用方（`resolve_spawn_overrides`）依 mode/default_selection
+/// 折叠后的 `Direct` provider 名。与 `compute_provider_resolution` 读取同一处
+/// overlay / router_cfg，保持 cover 值和端点 env 的来源一致。
+///
+/// `None` 情形：模式非 Direct（Router/Off 空默认）或 `Direct`/`Off` 但无
+/// `default_selection`/`mode.provider`（precise: state 缺 provider）→不盖。
+fn effective_provider_models(
+    state: &ProviderRuntimeState,
+    router_cfg: Option<&RouterConfig>,
+) -> Option<Vec<String>> {
+    // 与 compute_provider_resolution 的「Off + default_selection → 隐式
+    // Direct」折叠保持同一选择；无 provider 则不盖。
+    let provider = match &state.mode {
+        ProviderMode::Direct { provider } => provider.clone(),
+        ProviderMode::Off => state
+            .default_selection
+            .as_ref()
+            .map(|d| d.provider.clone())?,
+        ProviderMode::Router => return None,
+    };
+    // 用户通过 bot / `/provider` 编辑的条目带 `models`（custom）或
+    // `preset` 名（preset 派生需代码物化）；overlay 缺项时回退到 router
+    // config seed 的 `ProviderConfig.models`。两者都没有 → 不盖。
+    if let Some(item) = read_overlay_item(&provider) {
+        let preset_models: Option<Vec<String>> = item
+            .get("preset")
+            .and_then(Value::as_str)
+            .and_then(|pn| {
+                sebas_router::config::presets()
+                    .iter()
+                    .find(|p| p.name == pn)
+                    .map(|p| p.models.iter().map(|s| s.to_string()).collect())
+            });
+        let custom_models: Vec<String> = item
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|a: &Vec<Value>| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let models = if !custom_models.is_empty() { custom_models } else { preset_models.unwrap_or_default() };
+        if !models.is_empty() {
+            return Some(models);
+        }
+    }
+    router_cfg
+        .and_then(|cfg| cfg.providers.get(&provider))
+        .map(|p| p.models.clone())
+        .filter(|m| !m.is_empty())
+}
+
 /// 给 agent 进程的额外 env vars + 额外 CLI args。
 ///
-/// 设计（openspec/specs/provider-management/spec.md）：
-/// - `extra_env` 来自 driver 的 `resolve_env`（已按 `ProviderMode` 翻译）。
-///   `Error` 变体下 driver 已经把 `SEBAS_PROVIDER_ERROR=<reason>` 放进来
-///   ——  这是 in-band signal，spawn wrapper（`session_boot`）看到它就 abort。
+/// 设计（openspec/specs/provider-management/spec.md + acp-claude-model-env-cover）：
+/// - `extra_env` 来自 driver 的 `resolve_env`（已按 `ProviderMode` 翻译），
+///   再追加 [`model_cover_env`] 生成的 5 个模型键（Direct/Off-with-default 时
+///   生效；Router 与裸 Off 不强制覆盖）。`Error` 变体下 driver 已经把
+///   `SEBAS_PROVIDER_ERROR=<reason>` 放进来——这是 in-band signal，spawn wrapper
+///   看到就 abort。
 /// - `extra_args` 来自 driver 的 `resolve_args` ∪ `--model <name>`（仅在
 ///   `default_model` 非空时附加）。`Error` 变体下两者都空，因为根本没
 ///   解析出 provider 模型。
@@ -420,7 +511,10 @@ pub fn resolve_spawn_overrides(
             "spawn aborted: provider config error: {reason}"
         );
     }
-    let env = driver.resolve_env(&resolution);
+    let mut env = driver.resolve_env(&resolution);
+    if let Some(models) = effective_provider_models(state, router_cfg) {
+        env.extend(model_cover_env(&models));
+    }
     let mut args = driver.resolve_args(&resolution);
     if let Some(model) = default_model {
         args.push("--model".to_string());
@@ -1597,5 +1691,178 @@ base_url_anthropic = "https://api.anthropic.com"
             }
             other => panic!("expected Router, got {other:?}"),
         }
+    }
+
+    // ---- acp-claude-model-env-cover: model cover env （openspec/changes/acp-claude-model-env-cover）----
+
+    #[test]
+    fn model_cover_env_single_model_flattens_all_tiers() {
+        let env = model_cover_env(&["deepseek-v4-pro[1m]".to_string()]);
+        let map: std::collections::HashMap<String, String> = env.into_iter().collect();
+        assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map.len(), 5);
+    }
+
+    #[test]
+    fn model_cover_env_multi_model_maps_strong_to_weak_and_subagent() {
+        let env = model_cover_env(&[
+            "deepseek-v4-pro[1m]".to_string(),
+            "deepseek-v4-flash".to_string(),
+        ]);
+        let map: std::collections::HashMap<String, String> = env.into_iter().collect();
+        assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(map["ANTHROPIC_DEFAULT_SONNET_MODEL"], "deepseek-v4-flash");
+        assert_eq!(map["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-v4-flash");
+        // 当前档位策略：SUBAGENT = 最弱档 = HAIKU 值。
+        assert_eq!(map["CLAUDE_CODE_SUBAGENT_MODEL"], "deepseek-v4-flash");
+        assert_eq!(map.len(), 5);
+    }
+
+    #[test]
+    fn model_cover_env_empty_yields_no_injection() {
+        let env = model_cover_env(&[]);
+        assert!(env.is_empty(), "无 models 时不应强制覆盖，child 走自己的发现");
+    }
+
+    #[test]
+    fn effective_provider_models_router_returns_none() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_overlay_env();
+        let state = direct_state("deepseek"); // placeholder; Router mode is the real case
+        let state = ProviderRuntimeState {
+            mode: ProviderMode::Router,
+            default_selection: state.default_selection,
+        };
+        // Router 模式：模型 cover 不适用（透传是 router 的本分）。
+        assert_eq!(effective_provider_models(&state, None), None);
+    }
+
+    #[test]
+    fn effective_provider_models_bare_off_returns_none() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_overlay_env();
+        let state = off_state();
+        assert_eq!(effective_provider_models(&state, None), None);
+    }
+
+    #[test]
+    fn effective_provider_models_direct_preset_reads_table() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_overlay(
+            dir.path(),
+            r#"{
+                "providers": {
+                    "deepseek": {
+                        "preset": "deepseek",
+                        "api_key_env": "DEEPSEEK_API_KEY"
+                    }
+                }
+            }"#,
+        );
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test"); }
+        let state = direct_state("deepseek");
+        let models = effective_provider_models(&state, None);
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY"); }
+        assert_eq!(models, Some(vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]));
+    }
+
+    #[test]
+    fn effective_provider_models_direct_custom_reads_item_models() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_overlay(
+            dir.path(),
+            r#"{
+                "providers": {
+                    "weird": {
+                        "base_url_anthropic": "https://example.test/anthropic",
+                        "api_key": "sk-test",
+                        "models": ["fast", "slow"]
+                    }
+                }
+            }"#,
+        );
+        let state = direct_state("weird");
+        let models = effective_provider_models(&state, None);
+        assert_eq!(models, Some(vec!["fast".to_string(), "slow".to_string()]));
+    }
+
+    #[test]
+    fn resolve_spawn_overrides_router_mode_injects_no_model_cover() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_overlay_env();
+        let cfg = test_router("127.0.0.1:8787", vec!["sk-gw".to_string()]);
+        let state = router_state();
+        let (env, _args) = resolve_spawn_overrides(&driver(), &state, Some(&cfg));
+        assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL" && true));
+        assert!(
+            !env.iter().any(|(k, _)| k == "ANTHROPIC_MODEL"
+                || k == "ANTHROPIC_DEFAULT_OPUS_MODEL"
+                || k == "ANTHROPIC_DEFAULT_SONNET_MODEL"
+                || k == "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+                || k == "CLAUDE_CODE_SUBAGENT_MODEL"),
+            "Router 模式不应注入任何模型覆盖键；got env = {env:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_overrides_bare_off_injects_no_model_cover() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_overlay_env();
+        let state = off_state();
+        let (env, _args) = resolve_spawn_overrides(&driver(), &state, None);
+        assert!(env.is_empty(), "裸 Off 不注入任何 env（含模型 cover）；got env = {env:?}");
+    }
+
+    /// acp-claude-model-env-cover 端到端：Direct + overlay 含 preset →
+    /// spawn env 带全部 5 个模型键，且 extra_env 里的值优先（subprocess 覆盖）。
+    #[test]
+    fn resolve_spawn_overrides_direct_preset_injects_5_key_model_cover() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_overlay(
+            dir.path(),
+            r#"{
+                "providers": {
+                    "deepseek": {
+                        "preset": "deepseek",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                        "default_model": "deepseek-reasoner"
+                    }
+                }
+            }"#,
+        );
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-test"); }
+        let state = direct_state("deepseek");
+        let (env, _args) = resolve_spawn_overrides(&driver(), &state, None);
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY"); }
+        // preset deepseek = ["deepseek-chat", "deepseek-reasoner"]
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-chat"));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_DEFAULT_OPUS_MODEL" && v == "deepseek-chat"));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_DEFAULT_SONNET_MODEL" && v == "deepseek-reasoner"));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_DEFAULT_HAIKU_MODEL" && v == "deepseek-reasoner"));
+        assert!(env.iter().any(|(k, v)| k == "CLAUDE_CODE_SUBAGENT_MODEL" && v == "deepseek-reasoner"));
+        // 端点 env 不受影响。
+        assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
+        assert!(env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
+    }
+
+    /// OS env 里有残留 `ANTHROPIC_MODEL` 时，extra_env 里值覆盖（SDK .envs 语义）。
+    #[test]
+    fn model_cover_overrides_inherited_value_semantics() {
+        let env = model_cover_env(&["deepseek-v4-pro[1m]".to_string()]);
+        // 模拟 SDK `.envs(&env)` 在残留 env 之上合并：残留的 `ANTHROPIC_MODEL=stale`
+        // 必须由 extra_env 里的 `ANTHROPIC_MODEL=deepseek-v4-pro[1m]` 覆盖。这里
+        // 断言：extra_env 里至少存在一个 `ANTHROPIC_MODEL` 键且其值是推导值。
+        let stale = ("ANTHROPIC_MODEL".to_string(), "stale".to_string());
+        assert!(env.iter().any(|(k, _)| *k == stale.0));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == "deepseek-v4-pro[1m]"));
+        assert!(!env.iter().any(|(k, v)| k == "ANTHROPIC_MODEL" && v == &stale.1));
     }
 }
