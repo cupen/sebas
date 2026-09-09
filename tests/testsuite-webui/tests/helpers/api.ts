@@ -188,7 +188,7 @@ export interface AgentDefaults {
   model: string | null
 }
 
-/** Router gateway card backing the settings Models section (listen/debug/auth). */
+/** Router overview card backing the settings Models section (listen/debug/auth). */
 export async function getRouterInfo(request: APIRequestContext): Promise<RouterInfo> {
   const d = (await (await request.get('/api/router')).json()) as { router: RouterInfo }
   return d.router

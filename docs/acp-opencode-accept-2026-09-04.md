@@ -118,7 +118,7 @@ EOF
 printf '{"providers":{}}' > /tmp/sebas-acp-accept/providers.json
 printf '{}' > /tmp/sebas-acp-accept/state.json
 SEBAS_CORE_SECRET=fake SEBAS_STATE_FILE=/tmp/sebas-acp-accept/state.json \
-  SEBAS_GATEWAY_PROVIDER_OVERLAY=/tmp/sebas-acp-accept/providers.json \
+  SEBAS_ROUTER_PROVIDER_OVERLAY=/tmp/sebas-acp-accept/providers.json \
   SEBAS_AGENT_PROVIDER_API_KEY=fake-key \
   target/debug/sebas run -c /tmp/sebas-acp-accept/config.toml --webui --webui-port 9879
 # 建会话（带免费模型以避免 big-pickle 挂起）：

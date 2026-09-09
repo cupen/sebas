@@ -7,7 +7,7 @@
  * New IA: default section Settings (overview shell), Services reads the
  * watchdog managed-service surface (/api/admin/services, response-driven —
  * the sandbox assembly is a variable, never enumerate concrete services),
- * Models carries the Router gateway card (/api/router listen/debug/auth).
+ * Models carries the Router overview card (/api/router listen/debug/auth).
  * Read-only sections are reconciled against their JSON API truth with
  * contains-assertions (never literals: listen addrs and uptime move with
  * the sandbox). The sandbox has no SEBAS_CONTROL_SECRET, so every router

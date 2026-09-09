@@ -8,11 +8,10 @@ pub const CORE_SUBCOMMAND: &str = "core";
 
 /// The watchdog-daemon subcommand (`sebas run`). The systemd unit in
 /// `service` bakes this into `ExecStart` (the supervisor is the thing systemd
-/// actually runs). `watchdog` survives as a hidden clap alias so
-/// already-installed units keep booting across the rename.
+/// actually runs).
 pub const RUN_SUBCOMMAND: &str = "run";
 
-/// The model-router subcommand (`sebas router`; hidden alias `gateway`).
+/// The model-router subcommand (`sebas router`).
 pub const ROUTER_SUBCOMMAND: &str = "router";
 
 pub mod config;

@@ -36,7 +36,7 @@
 
 **决策**:bare `/v1/*` 挂载 + 协议嗅探(Anthropic 客户端必带 `anthropic-version` header,以此仲裁碰撞路径),辅以显式前缀 `/anthropic/v1/*`、`/openai/v1/*`;**纯透传**——不做协议转换,provider 协议面与请求协议不一致时返回明确错误;model 提取靠 body 缓冲重放 + 路径参数回退;`[[gateway.keys]]` 简化移除,下游只做 Bearer/x-api-key 匹配。
 
-**后果**:单端口同时服务 `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` 两类客户端;agent 模式下 gateway 对 Claude Code 永远暴露 Anthropic 协议面(OpenAI 路径表仅服务外部直连客户端,见 `sebas-gateway/src/proto.rs` 警告)。注:per-key 限流后来在演进中回归为 token-bucket 形态,现行契约见 `openspec/specs/gateway-auth-rate-limit/`。
+**后果**:单端口同时服务 `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` 两类客户端;agent 模式下 gateway 对 Claude Code 永远暴露 Anthropic 协议面(OpenAI 路径表仅服务外部直连客户端,见 `sebas-gateway/src/proto.rs` 警告)。注:per-key 限流后来在演进中回归为 token-bucket 形态,现行契约见 `openspec/specs/router-auth-rate-limit/`（原名 gateway-auth-rate-limit，rename-cli-surface 改名）。
 
 **原文**:`docs/superpowers/specs/2026-08-06-gateway-design.md` §4.1/§4.2(git 历史)
 

@@ -29,13 +29,9 @@ export default defineConfig(({ mode }) => {
           target: backend,
           changeOrigin: false,
         },
-        // Gateway BFF mutation surface (POST/PUT/DELETE only; reads stay on
-        // /api/gateway). The backend's loopback-origin guard accepts the vite
-        // dev origin — both are 127.0.0.1.
-        '/gateway': {
-          target: backend,
-          changeOrigin: false,
-        },
+        // Router BFF mutation surface (POST/PUT/DELETE only; reads stay on
+        // /api/router). The loopback-origin guard accepts the vite dev
+        // origin — both are 127.0.0.1.
         '/ws': {
           target: wsBackend,
           ws: true,

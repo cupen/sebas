@@ -355,7 +355,7 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('Models section renders the Router gateway card plus the provider list', async () => {
+  it('Models section renders the Router overview card plus the provider list', async () => {
     const el = await mount()
     await goto(el, 2)
     expect(el.section).toBe('models')

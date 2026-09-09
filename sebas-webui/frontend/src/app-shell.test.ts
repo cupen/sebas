@@ -212,12 +212,24 @@ describe('routes after IA v2', () => {
     expect(m?.params['key']).toBe('oc_abc%00')
   })
 
-  it('redirects retired paths (/settings /gateway /about) to /', () => {
-    for (const path of ['/settings', '/gateway', '/about']) {
+  it('redirects retired paths (/settings /about) to /', () => {
+    for (const path of ['/settings', '/about']) {
       expect(redirectFor(path)).toBe('/')
       // 退役路径不再有路由定义。
       expect(matchRoute(ROUTES, path)).toBeNull()
     }
+  })
+
+  it('the IA-v1 /gateway path is deleted outright: no route, no redirect — falls back to the workbench', async () => {
+    expect(matchRoute(ROUTES, '/gateway')).toBeNull()
+    expect(redirectFor('/gateway')).toBeNull()
+    window.history.pushState({}, '', '/gateway')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    const el = await mountShell()
+    // 未知路径 → workbench fallback，地址栏不动。
+    expect(el.shadowRoot!.querySelector('.outlet sebas-dashboard')).toBeTruthy()
+    expect(window.location.pathname).toBe('/gateway')
+    el.remove()
   })
 
   it('admin is deleted outright: no route, no redirect — falls back to the workbench', async () => {

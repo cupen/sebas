@@ -42,9 +42,10 @@ The CLI SHALL provide subcommands: `service`, `service --install/--uninstall`, `
 - **WHEN** the user runs `sebas status --secret ...`
 - **THEN** the command behaves as `sebas control status`
 
-#### Scenario: pre-rename subcommand aliases rejected
+#### Scenario: unknown subcommand rejected
 
-- **WHEN** the user runs `sebas gateway ...` or `sebas watchdog ...`
+- **WHEN** the user runs `sebas <command>` with a command that is not in the
+  subcommand tree and not a documented shorthand alias (`ctl`/`status`/`services`)
 - **THEN** the CLI reports an unknown subcommand and exits nonzero without
   starting any service
 

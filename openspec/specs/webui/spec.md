@@ -14,8 +14,10 @@ the watchdog control plane.
 The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and
 `GET /assets/*` for its built styles, scripts, and fonts. Any other
 browser-facing GET (for example `/sessions/{key}`) resolves through the SPA
-fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about`
-canonicalise to `/` — those surfaces live in the Settings modal now. The JSON
+fallback, and the retired IA-v1 paths `/settings` and `/about`
+canonicalise to `/` — those surfaces live in the Settings modal now. The
+IA-v1 `/gateway` path is deleted outright (no route, no redirect): like
+`/admin/*` it falls back to the workbench as an unknown path. The JSON
 API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with
 optional `prompt` field), `GET
 /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST
@@ -647,12 +649,12 @@ duplicate, 400 validation, 503 unavailable) in the page.
 
 ### Requirement: Provider status parity across deployment forms
 
-The WebUI's provider-derived surfaces (`GET /api/settings` 的 gateway 段、
-`GET /api/gateway`、`GET /api/about` 的 provider 计数，及 composer 的
+The WebUI's provider-derived surfaces (`GET /api/settings` 的 router 段、
+`GET /api/router`、`GET /api/about` 的 provider 计数，及 composer 的
 provider 标签）SHALL 在 `run --webui` 与 `sebas webui` 两种部署形态下，对同一
 配置呈现一致且真实的 provider 状态。detached 形态 SHALL NOT 以空占位
-（`GatewayInfo` 缺省值）作为最终数据源：provider 列表 SHALL 来自 webui 可达的
-provider 真源（状态库），gateway 静态事实（listen、debug、has_auth）SHALL
+（`RouterInfo` 缺省值）作为最终数据源：provider 列表 SHALL 来自 webui 可达的
+provider 真源（状态库），router 静态事实（listen、debug、has_auth）SHALL
 来自配置解析。当 provider 真源不可用时，响应 SHALL 如实标注不可用，而不是
 报告"未配置 provider"。
 
@@ -665,14 +667,14 @@ provider 真源（状态库），gateway 静态事实（listen、debug、has_aut
 
 #### Scenario: detached 反映运行期 provider 变更
 
-- **WHEN** 操作员经 gateway admin API 新增或改名 provider 后刷新 detached
+- **WHEN** 操作员经 router admin API 新增或改名 provider 后刷新 detached
   WebUI 的 settings
 - **THEN** 响应中的 provider 集合反映该变更，无需重启 webui 进程
 
 #### Scenario: provider 真源不可用时如实上报
 
 - **WHEN** detached webui 无法从状态库读取 provider 数据
-- **THEN** `/api/settings` 的 gateway 段携带可辨识的"不可用"指示，而不是把空
+- **THEN** `/api/settings` 的 router 段携带可辨识的"不可用"指示，而不是把空
   集合冒充"未配置"
 
 ### Requirement: Honest session rejection causes

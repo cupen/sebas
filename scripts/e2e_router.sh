@@ -10,7 +10,7 @@
 #
 # 退出码：0 成功（含全 SKIP 路径——这是验证脚本而非 CI 门禁）；非 0 失败。
 #
-# 用法：./scripts/e2e_gateway.sh [--keep-tmp]
+# 用法：./scripts/e2e_router.sh [--keep-tmp]
 #   --keep-tmp  调试：保留临时目录与 router.log（默认清理）。
 #
 # 设计要点：
@@ -23,7 +23,7 @@ set -euo pipefail
 # ---- 路径与常量 ----
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$REPO_ROOT/target/debug/sebas"
-GATEWAY_KEY="sk-gw-e2e-${RANDOM}"
+ROUTER_KEY="sk-gw-e2e-${RANDOM}"
 TMPDIR="$(mktemp -d -t sebas-router-e2e.XXXXXX)"
 CONFIG="$TMPDIR/router.toml"
 USAGE_FILE="$TMPDIR/router-usage.jsonl"
@@ -40,11 +40,11 @@ OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
 DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"
 
 # ---- 清理：杀 router 进程 + 删临时目录。trap 覆盖所有退出路径。 ----
-GATEWAY_PID=""
+ROUTER_PID=""
 cleanup() {
-  if [[ -n "$GATEWAY_PID" ]] && kill -0 "$GATEWAY_PID" 2>/dev/null; then
-    kill "$GATEWAY_PID" 2>/dev/null || true
-    wait "$GATEWAY_PID" 2>/dev/null || true
+  if [[ -n "$ROUTER_PID" ]] && kill -0 "$ROUTER_PID" 2>/dev/null; then
+    kill "$ROUTER_PID" 2>/dev/null || true
+    wait "$ROUTER_PID" 2>/dev/null || true
   fi
   if [[ "$KEEP_TMP" -eq 1 ]]; then
     echo "  (keep-tmp) 临时目录保留于 $TMPDIR"
@@ -99,14 +99,14 @@ write_provider() { # write_provider <name> <protocol> <real_base> <env_var> <rea
   fi
   echo
 }
-export GATEWAY_KEY USAGE_FILE PORT
+export ROUTER_KEY USAGE_FILE PORT
 {
   echo "[router]"
   echo "listen = \"127.0.0.1:${PORT}\""
   echo "usage_file = \"$USAGE_FILE\""
   echo
   echo "[[router.keys]]"
-  echo "key = \"$GATEWAY_KEY\""
+  echo "key = \"$ROUTER_KEY\""
   echo "name = \"e2e\""
   echo "rpm = 600"
   echo "daily_token_quota = 100_000_000"
@@ -130,17 +130,17 @@ export GATEWAY_KEY USAGE_FILE PORT
 # ---- 3. 起 router ----
 echo "[3/7] 启动 sebas router"
 "$BIN" router --config "$CONFIG" >"$LOG_FILE" 2>&1 &
-GATEWAY_PID=$!
+ROUTER_PID=$!
 ready=0
 for _ in $(seq 1 50); do
   if curl -sS --max-time 1 "$BASE/healthz" >/dev/null 2>&1; then ready=1; break; fi
-  kill -0 "$GATEWAY_PID" 2>/dev/null || { echo "error: router 进程已退出"; cat "$LOG_FILE"; exit 1; }
+  kill -0 "$ROUTER_PID" 2>/dev/null || { echo "error: router 进程已退出"; cat "$LOG_FILE"; exit 1; }
   sleep 0.2
 done
 if [[ $ready -ne 1 ]]; then
   echo "error: router 在 10s 内未就绪"; cat "$LOG_FILE"; exit 1
 fi
-echo "  router 就绪 (PID $GATEWAY_PID, listen $BASE)"
+echo "  router 就绪 (PID $ROUTER_PID, listen $BASE)"
 
 # ---- 4. /healthz ----
 echo "[4/7] GET /healthz（免鉴权）"
@@ -154,7 +154,7 @@ smoke_code="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
   -X POST "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
-  -H "x-api-key: $GATEWAY_KEY" \
+  -H "x-api-key: $ROUTER_KEY" \
   -d '{"model":"smoke-test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}')"
 echo "  smoke → HTTP $smoke_code (期望 502)"
 [[ "$smoke_code" == "502" ]] || { echo "error: smoke 应返回 502（不可达上游），实际 $smoke_code"; exit 1; }
@@ -171,7 +171,7 @@ run_anthropic_sse() {
     -X POST "$BASE/v1/messages" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -H "x-api-key: $GATEWAY_KEY" \
+    -H "x-api-key: $ROUTER_KEY" \
     -d "{\"model\":\"$ANTHROPIC_MODEL\",\"max_tokens\":16,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just: ok\"}]}")"
   echo "  anthropic → HTTP $s"
   if [[ "$s" == "200" ]] && grep -q '^event: message_start' "$out" && grep -q '^event: content_block_delta' "$out"; then
@@ -189,7 +189,7 @@ run_openai_sse() {
   s="$(curl -sS --max-time 60 -N -o "$out" -w '%{http_code}' \
     -X POST "$BASE/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $GATEWAY_KEY" \
+    -H "Authorization: Bearer $ROUTER_KEY" \
     -d "{\"model\":\"$OPENAI_MODEL\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just: ok\"}]}")"
   echo "  openai → HTTP $s"
   if [[ "$s" == "200" ]] && grep -q '^data: ' "$out"; then
@@ -208,7 +208,7 @@ run_deepseek_sse() {
     -X POST "$BASE/v1/messages" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -H "x-api-key: $GATEWAY_KEY" \
+    -H "x-api-key: $ROUTER_KEY" \
     -d "{\"model\":\"$DEEPSEEK_MODEL\",\"max_tokens\":16,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just: ok\"}]}")"
   echo "  deepseek → HTTP $s"
   if [[ "$s" == "200" ]] && grep -q '^event: message_start' "$out" && grep -q '^event: content_block_delta' "$out"; then

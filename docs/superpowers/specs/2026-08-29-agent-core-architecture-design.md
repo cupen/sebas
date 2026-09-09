@@ -4,6 +4,7 @@
 > 状态：调研 + 设计蓝图（纯文档，未实现；对应 openspec change `add-agent-core-architecture`，`skip_specs`——行为规格将由后续实现 change 从本文派生）
 > 作者：DeepSeek Harness（与 cupen 协作）
 > 修订 2026-09-01：crate 定名 **sebas-agent**（沿 sebas-* crate 惯例，"agent-core" 保留为能力域名）；D3 修订为 **gateway 可选**——agent 可直连 provider（见 §6 / §7.2 / §10）。
+> 注（2026-09-09）：本文为历史设计快照，原文未回改——文中的 gateway 即现行 router（rename-cli-surface 改名，`sebas gateway`/`src/gateway_cmd.rs` 等已不存在）。
 > 修订 2026-09-02：DSH 与 Codex 均已开源，§3/§4 证据升级为源码对照（S10/S11），§3 两条裁决修正（CX-1/CX-3）、§11 路线图拆分细化、新增 §12 修订台账（openspec change `sebas-agent-next`）。
 
 ## 0. 摘要
