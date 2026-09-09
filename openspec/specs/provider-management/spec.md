@@ -161,7 +161,7 @@ Probing failure renders a red error card with the reason.
 
 ### Requirement: Off mode resolution
 
-With mode `Off` and no default selection, the spawn SHALL pass no provider endpoint env vars (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / OpenAI equivalents) — the ACP child uses its own discovered endpoint configuration. Model cover env SHALL follow the `claude-env-cover` contract: with a default selection present the spawn SHALL behave exactly as implicit `Direct` mode for the selected provider, including the `--model` flag and the model cover env; without a default selection no cover variable is forced.
+With mode `Off` and no default selection, the spawn SHALL pass no provider endpoint env vars (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / OpenAI equivalents) — the ACP child uses its own discovered endpoint configuration. Model cover env SHALL follow the `acp-claude-env` contract: with a default selection present the spawn SHALL behave exactly as implicit `Direct` mode for the selected provider, including the `--model` flag and the model cover env; without a default selection no cover variable is forced.
 
 #### Scenario: bare off mode
 

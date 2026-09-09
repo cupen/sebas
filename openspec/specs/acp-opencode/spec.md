@@ -1,4 +1,4 @@
-# opencode-agent Specification
+# acp-opencode Specification
 
 ## Purpose
 Makes opencode (sst/opencode, `opencode acp` subcommand) a supported agent kind in sebas: users configure it under `[acp.agents.opencode]` with the generic ACP driver and get the full session surface (prompt, streaming text/tool deltas, permission round-trip, resume) without any code change. It also anchors the ACP resume capability: opencode's ACP `loadSession` support is the first real consumer of the generic `session/load` path in `acp-driver`.

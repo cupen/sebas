@@ -108,7 +108,8 @@ openspec change 流程(见归档惯例),完成后须同步全文引用并过
 - **`acp-*`**:外部 ACP 子进程(经 Agent Client Protocol 驱动的 agent,
   Claude Code、opencode 等)族。`acp-driver` ACP 协议/子进程运行时、
   `acp-session-mapping` 会话映射、`acp-model-selection` 模型选择、
-  `acp-claude-env`(原 `claude-env-cover`)Claude 子进程模型环境变量注入。
+  `acp-claude-env`(原 `claude-env-cover`)Claude 子进程模型环境变量注入、
+  `acp-opencode`(原 `opencode-agent`)opencode agent 接入。
 - **`feishu-*`**:飞书渠道专属实现。`feishu-bridge` 适配器、
   `feishu-cards` 飞书卡片渲染、`feishu-reactions` 飞书 reactions、
   `feishu-option` 飞书配置开关。非飞书专属的呈现/交互模型归 `channels` /
@@ -123,7 +124,6 @@ openspec change 流程(见归档惯例),完成后须同步全文引用并过
   `-persistence` 持久化、`-service` 独立进程/服务面、`-commands` 命令面。
 
 **遗留偏离(尚未改名)**:以下目录名与上述规则不符,处于过渡期,逐批对齐
-后移除本条:`workbench`(原 agent-workbench,consolidate 已并入
-project-session-actions/webui/projects,保留现状)、`claude-env-cover`(应为
-`acp-claude-env`)、`opencode-agent`(应为 `acp-opencode`)、
-`state-store`(顶层领域,保留原名)。
+后移除本条:`workbench`(原 `agent-workbench`;consolidate 已并入
+project-session-actions/webui/projects,命名现符合 `-workbench` 补缀、
+无前缀族归属)、`state-store`(顶层领域,保留原名)。

@@ -1,4 +1,4 @@
-# claude-env-cover Specification
+# acp-claude-env Specification
 
 ## Purpose
 

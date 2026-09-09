@@ -128,7 +128,7 @@ The system SHALL emit exactly one terminal `AcpEvent::Error{terminal: true}` whe
 
 ### Requirement: Provider-driven environment injection
 
-The system SHALL merge `extra_env` (e.g. `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and the model cover set from `claude-env-cover`) into the child process environment at spawn. Entries the resolution marks as cover variables SHALL override any OS-inherited value; all other entries SHALL merge on top of the OS environment. The same injection SHALL apply to both fresh spawns and resumes.
+The system SHALL merge `extra_env` (e.g. `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and the model cover set from `acp-claude-env`) into the child process environment at spawn. Entries the resolution marks as cover variables SHALL override any OS-inherited value; all other entries SHALL merge on top of the OS environment. The same injection SHALL apply to both fresh spawns and resumes.
 
 #### Scenario: Direct mode injects Anthropic env
 
