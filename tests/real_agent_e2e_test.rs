@@ -57,6 +57,19 @@ use std::time::Instant;
 const PROMPT: &str = "用一句话介绍你自己，然后原样输出:SEBAS_E2E_OK";
 const SENTINEL: &str = "SEBAS_E2E_OK";
 
+/// Env-var auth for the claude CLI (no OAuth login needed): sebas's claude
+/// driver injects `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` into the
+/// subprocess when a provider is resolved — and a provider is only resolved
+/// when one has been selected (default provider/model) BEFORE the agent
+/// spawns. The journey sets it via `PUT /api/agent-defaults`.
+const ANTHROPIC_TOKEN_ENV: &str = "SEBAS_E2E_ANTHROPIC_AUTH_TOKEN";
+const ANTHROPIC_BASE_URL_ENV: &str = "SEBAS_E2E_ANTHROPIC_BASE_URL";
+const ANTHROPIC_MODEL_ENV: &str = "SEBAS_E2E_ANTHROPIC_MODEL";
+/// Defaults target BigModel's documented Anthropic-compatible endpoint
+/// (claude-code-over-GLM setup); both are overridable per environment.
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://open.bigmodel.cn/api/anthropic";
+const DEFAULT_ANTHROPIC_MODEL: &str = "glm-4.6";
+
 /// Real LLM latency budget for the first turn (10–120 s typical).
 const TURN_BUDGET: Duration = Duration::from_secs(240);
 /// Grace window for the DONE phase after the reply text has landed.
@@ -207,7 +220,7 @@ enabled = false
 [provider.e2e-dummy]
 api_key = "sk-real-agent-e2e-dummy"
 base_url_anthropic = "https://api.anthropic.com"
-
+{e2e_claude_provider}
 [router]
 provider_overlay = "{overlay}"
 usage_file = "{usage}"
@@ -218,6 +231,11 @@ usage_file = "{usage}"
             downloads = fs_string(&path.join("downloads")),
             overlay = fs_string(&path.join("providers.json")),
             usage = fs_string(&path.join("router-usage.jsonl")),
+            // Written ONLY when the token env var is set: router validate
+            // rejects an api_key_env pointing at an unset variable, which
+            // would kill the core at startup even though this provider is
+            // never dialed by the opencode journey.
+            e2e_claude_provider = e2e_claude_provider_stanza(),
         );
         std::fs::write(&config_path, &toml)
             .unwrap_or_else(|e| panic!("write config {}: {e}", config_path.display()));
@@ -244,9 +262,27 @@ usage_file = "{usage}"
                 fs_string(&self.path.join("providers.json")),
             ),
             ("SEBAS_CORE_SECRET", "real-agent-e2e-secret".to_string()),
+            // Router admin-plane auth (webui RouterClient bearer + embedded
+            // router check): PUT /api/agent-defaults and sibling mutations
+            // 503 without it.
+            (
+                "SEBAS_CONTROL_SECRET",
+                "real-agent-e2e-control-secret".to_string(),
+            ),
             ("XDG_RUNTIME_DIR", fs_string(&self.path.join("xdg-run"))),
             ("NO_COLOR", "1".to_string()),
         ]
+    }
+
+    /// Extra vars forwarded verbatim when set: `[provider.e2e-claude]`
+    /// resolves its auth token from the core's env (`api_key_env`), so the
+    /// var must reach the core child for the claude env-token path.
+    fn passthrough_envs(&self) -> Vec<(&'static str, String)> {
+        let mut v = Vec::new();
+        if let Ok(tok) = std::env::var(ANTHROPIC_TOKEN_ENV) {
+            v.push((ANTHROPIC_TOKEN_ENV, tok));
+        }
+        v
     }
 
     /// Bare core owning an in-process webui (AGENTS.md sandbox recipe):
@@ -274,6 +310,7 @@ usage_file = "{usage}"
             ])
             .current_dir(&self.path)
             .envs(self.envs())
+            .envs(self.passthrough_envs())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .kill_on_drop(true)
@@ -289,6 +326,37 @@ usage_file = "{usage}"
 // ---------------------------------------------------------------------------
 // HTTP helpers (same shapes as tests/support/mod.rs, self-contained).
 // ---------------------------------------------------------------------------
+
+/// Base URL for the e2e-claude provider (env override > BigModel default).
+fn anthropic_base_url() -> String {
+    std::env::var(ANTHROPIC_BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_ANTHROPIC_BASE_URL.into())
+}
+
+/// Model id for the e2e-claude provider (env override > BigModel default).
+fn anthropic_model() -> String {
+    std::env::var(ANTHROPIC_MODEL_ENV).unwrap_or_else(|_| DEFAULT_ANTHROPIC_MODEL.into())
+}
+
+/// The `[provider.e2e-claude]` stanza, present only when the token env var is
+/// set: router validate rejects an `api_key_env` pointing at an unset
+/// variable, and an unconditional stanza would kill the core at startup even
+/// though this provider is never dialed by the opencode journey. No secret
+/// lands in the file — `api_key_env` names the variable, the core reads its
+/// value from its own environment.
+fn e2e_claude_provider_stanza() -> String {
+    match std::env::var(ANTHROPIC_TOKEN_ENV) {
+        Ok(tok) if !tok.is_empty() => format!(
+            "\n# Env-token auth for the claude journey: api_key_env is read from the \
+             CORE's environment at spawn-resolution time. `models` feeds the \
+             agent-defaults catalog check.\n[provider.e2e-claude]\napi_key_env = \
+             \"SEBAS_E2E_ANTHROPIC_AUTH_TOKEN\"\nbase_url_anthropic = \"{}\"\nmodels = \
+             [\"{}\"]\n",
+            anthropic_base_url(),
+            anthropic_model()
+        ),
+        _ => String::new(),
+    }
+}
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -442,6 +510,19 @@ fn claude_logged_in() -> Option<bool> {
 /// `"acp:opencode"` → the generic-ACP opencode agent).
 ///
 async fn first_message_roundtrip(backend: &str, sub: &str) {
+    provider_selected_first_message_roundtrip(backend, sub, None).await;
+}
+
+/// `select_defaults` = Some((provider, model)) runs the "model first, agent
+/// second" step: PUT /api/agent-defaults so the spawn resolves
+/// `ProviderResolution::Direct` and the claude subprocess is armed with
+/// `ANTHROPIC_*` env (no OAuth needed). None = spawn with the driver's own
+/// default auth (Off resolution).
+async fn provider_selected_first_message_roundtrip(
+    backend: &str,
+    sub: &str,
+    select_defaults: Option<(&'static str, String)>,
+) {
     let scene = Scene::new(sub);
     let cli = http_client();
     let mut core = scene.spawn_core();
@@ -483,6 +564,21 @@ async fn first_message_roundtrip(backend: &str, sub: &str) {
         }),
     )
     .await;
+    // "Model first, agent second": env-token auth only arms the claude
+    // subprocess when a provider/model has been selected before the spawn.
+    if let Some((provider, model)) = &select_defaults {
+        let resp = cli
+            .put(format!("{}/api/agent-defaults", scene.url()))
+            .json(&serde_json::json!({ "provider": provider, "model": model }))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("PUT /api/agent-defaults: {e}"));
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        assert_eq!(status, 200, "set agent defaults: {body}");
+        eprintln!("[real-agent] {backend}: defaults selected → {provider}/{model}");
+    }
+
     assert_eq!(status, 201, "create session: {resp}");
     let key = resp["key"]
         .as_str()
@@ -571,8 +667,13 @@ async fn real_opencode_first_message_roundtrip() {
 }
 
 /// claude journey (#[ignore], opt-in): real `claude` CLI via the dedicated
-/// Claude driver. Skips honestly until the user logs in — zero code changes
-/// needed afterwards.
+/// Claude driver. Two auth paths, checked in order:
+/// 1. env-token (`SEBAS_E2E_ANTHROPIC_AUTH_TOKEN` set): the journey selects
+///    the `e2e-claude` provider as default (model first, agent second) and
+///    sebas arms the claude subprocess with `ANTHROPIC_BASE_URL` +
+///    `ANTHROPIC_AUTH_TOKEN` — no claude login needed.
+/// 2. OAuth: claude's own login state under `$HOME`.
+/// Neither available → skip with the exact remedy.
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "real-agent e2e: costs real LLM tokens (10-120s/turn); run with -- --ignored --test-threads=1 or invoke testsuite-real-agents"]
@@ -584,15 +685,33 @@ async fn real_claude_first_message_roundtrip() {
         );
         return;
     }
-    match claude_logged_in() {
-        Some(true) => first_message_roundtrip("acp", "claude").await,
-        Some(false) => {
+    let env_token = std::env::var(ANTHROPIC_TOKEN_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+    match (env_token.is_some(), claude_logged_in()) {
+        (true, _) => {
+            eprintln!(
+                "[real-agent] claude: env-token auth via {ANTHROPIC_TOKEN_ENV} — \
+                 selecting provider/model before spawn"
+            );
+            provider_selected_first_message_roundtrip(
+                "acp",
+                "claude",
+                Some(("e2e-claude", anthropic_model())),
+            )
+            .await
+        }
+        (false, Some(true)) => first_message_roundtrip("acp", "claude").await,
+        (false, Some(false)) => {
             eprintln!(
                 "[skip] real_claude_first_message_roundtrip: claude CLI not logged in — \
-                 run `claude` → /login; journey ready (zero code changes needed)"
+                 either set {ANTHROPIC_TOKEN_ENV} (any Anthropic-compatible token; \
+                 optional {ANTHROPIC_BASE_URL_ENV}, default {DEFAULT_ANTHROPIC_BASE_URL}; \
+                 optional {ANTHROPIC_MODEL_ENV}, default {DEFAULT_ANTHROPIC_MODEL}) \
+                 or run `claude` → /login; journey ready (zero code changes needed)"
             );
         }
-        None => {
+        (false, None) => {
             eprintln!(
                 "[skip] real_claude_first_message_roundtrip: cannot determine claude login \
                  state (`claude auth status` failed or unexpected JSON); journey ready"
