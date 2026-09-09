@@ -50,8 +50,8 @@
   项目列表、会话侧栏(按项目目录或聊天来源分组)、时间线与输入区、
   inbox(操作者离开期间到达的 turn 流)。(agent-workbench;webui/projects)
 - **卡片(card)**:对用户的流式富文本呈现,含思考/工具面板、交互元素
-  (按钮/表单)、预算与轮转。本 change 后 = **中立呈现模型**由通道适配器
-  渲染成各自渠道的形态(飞书 = card schema 2.0 JSON)。(feishu-cards;channels)
+  (按钮/表单)、预算与轮转。当前为**中立呈现模型**,由通道适配器渲染成
+  各自渠道的形态(飞书 = card schema 2.0 JSON)。(channels;feishu-cards)
 - **主控(webui 主控形态)**:部署形态——watchdog 默认只启动 webui,
   core/飞书按需启用。(feishu-option)
 
@@ -87,3 +87,37 @@
 - **im 服务**：独立 IM 服务进程（`sebas im`，`sebas-im` crate）——IM 适配器
   宿主与交互面（卡片/命令/表单/reactions/媒体），经核心会话通道观察并驱动
   会话；core 是纯会话核心，不注册任何 IM 适配器（extract-im-service）。
+
+## capability 目录命名规则
+
+`openspec/specs/` 下的 capability 目录名须能自解释归属。命名为全小写
+kebab-case、单数名词短语（无动词短语、无目录嵌套——`webui/projects` 是
+待展平的遗留）。capability 与源码 crate 名无关,capability 目录只表达规范
+边界,改名用 openspec change 流程(见归档惯例),完成后须同步全文引用并过
+`openspec validate`。
+
+- **`agent-*`**:原生内核(native kernel,`sebas-agent`)族。`agent-core`
+  内核、`agent-driver` 内核驱动接口、`agent-bench` 基准、`agent-workbench`
+  (即 `workbench`)工作台页面。不承载外部 ACP 子进程。
+- **`acp-*`**:外部 ACP 子进程(经 Agent Client Protocol 驱动的 agent,
+  Claude Code、opencode 等)族。`acp-driver` ACP 协议/子进程运行时、
+  `acp-session-mapping` 会话映射、`acp-model-selection` 模型选择、
+  `acp-claude-env`(原 `claude-env-cover`)Claude 子进程模型环境变量注入。
+- **`feishu-*`**:飞书渠道专属实现。`feishu-bridge` 适配器、
+  `feishu-cards` 飞书卡片渲染、`feishu-reactions` 飞书 reactions、
+  `feishu-option` 飞书配置开关。非飞书专属的呈现/交互模型归 `channels` /
+  `cards` 等中立 capability。
+- **`testsuite-*`**:测试套件 spec,补缀 `<领域>-<层级>`(如
+  `testsuite-webui-browser`、`testsuite-acceptance`、`testsuite-process-e2e`)。
+- **无前缀**:跨族中立或顶层领域——`channels`、`im-service`、`cli-service`、
+  `state-store`、`session-*`、`watchdog`、`webui`、`dispatch-commands`(会话
+  分发命令面,不设 dispatch-* 前缀族)。
+- **家族补缀约定**:`-core` 核心状态机、`-driver` 驱动/子进程生命周期、
+  `-option` 配置开关、`-reactions` 渠道交互反馈、`-lifecycle` 生命周期、
+  `-persistence` 持久化、`-service` 独立进程/服务面、`-commands` 命令面。
+
+**遗留偏离(尚未改名)**:以下目录名与上述规则不符,处于过渡期,逐批对齐
+后移除本条:`agent-workbench`(应为 `workbench`)、`claude-env-cover`(应为
+`acp-claude-env`)、`opencode-agent`(应为 `acp-opencode`)、
+`project-session-actions`(将并入 workbench 后归档)、
+`webui/projects`(应展平)、`state-store`(顶层领域,保留原名)。
