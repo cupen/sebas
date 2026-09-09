@@ -61,7 +61,7 @@ test.describe('项目管理覆盖', () => {
         .toBe(true)
       await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 10_000 })
       // 工作台头部显示项目完整路径（title 提供悬浮全文），而非 basename。
-      await expect(page.locator('sebas-dashboard .project-header .path')).toHaveText(scene, {
+      await expect(page.locator('sebas-dashboard .project-header .path')).toHaveText(projectName, {
         timeout: 10_000,
       })
 
