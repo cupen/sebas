@@ -1,3 +1,5 @@
+# claude-env-cover Specification
+
 ## Purpose
 
 Defines the model environment variables sebas injects into every Claude Code child it spawns, derived at spawn time from the effective provider's model list so the child runs the operator-chosen model family regardless of what the shell or the user's Claude settings would otherwise supply.
