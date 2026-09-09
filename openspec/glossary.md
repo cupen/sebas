@@ -56,7 +56,7 @@
   各自渠道的形态(飞书 = card schema 2.0 JSON,见 `feishu-cards`)。
   (channels;feishu-cards)
 - **主控(webui 主控形态)**:部署形态——watchdog 默认只启动 webui,
-  core/飞书按需启用。(feishu-option)
+  core/飞书按需启用。(deploy-mode)
 
 ## 通道抽象(decouple-feishu-channel 引入)
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-飞书接入作为 sebas 的可选功能：显式开关、接入判定，以及「webui 为主控端、飞书为辅助入口」的部署形态下，双通道共享同一会话状态的行为面。
+飞书接入作为 sebas 的可选功能：显式开关 `[feishu] enabled`、接入判定，以及凭据半配置与 env 覆盖的配置校验矩阵。部署形态与多通道共享会话状态见 `deploy-mode` capability。
 
 ## Requirements
 
@@ -14,7 +14,7 @@ sebas SHALL 提供飞书接入的显式开关节 `[feishu] enabled`。`enabled` 
 
 - **WHEN** 配置 `[feishu] enabled = false`（或缺失且凭据双空）
 - **THEN** feishu 适配器不注册、im 服务不建立飞书 WebSocket 连接、不做 token 获取、不出站请求飞书 API
-- **AND** watchdog 默认只启动 webui 服务，core 停用
+- **AND** watchdog 默认只启动 webui 服务，core 停用（见 `deploy-mode`）
 
 #### Scenario: 显式开启但凭据不完整
 
@@ -42,36 +42,3 @@ sebas SHALL 提供飞书接入的显式开关节 `[feishu] enabled`。`enabled` 
 - **THEN** 覆盖后凭据双非空，按隐式判定接入飞书
 - **WHEN** env 仅提供其一（另一字段无论 TOML 还是 env 均为空）
 - **THEN** 同样构成半配置，配置校验报错并拒绝启动
-
-### Requirement: webui 主控部署形态
-
-watchdog 默认 SHALL 将 webui 注册为主控服务（`[watchdog.webui] enabled` 默认 `true`），而 core（会话核心）SHALL 默认停用（`[watchdog.core] enabled` 默认 `false`）。im 服务（飞书 bot 宿主）SHALL 默认跟随 `[feishu]` 启用判定（飞书启用即拉起，停用即不拉起），并可经 `[watchdog.im]` 显式覆盖。webui 与 im 进程都是 core session channel 的客户端，跨 core 重启保持存活。二者是核心的两个通道（`web` 与 `feishu`），通过通道抽象与核心交互。
-
-#### Scenario: 默认部署只起 webui
-
-- **WHEN** 无显式配置覆盖 watchdog 默认值且飞书未启用
-- **THEN** `sebas run`（watchdog 守护）只拉起 webui 服务，core 与 router 均不启动
-
-#### Scenario: 飞书启用时 im 服务默认拉起
-
-- **WHEN** 配置启用飞书且无 `[watchdog.im]` 覆盖
-- **THEN** `sebas run` 拉起 im 服务（其内注册飞书适配器），webui 与 im 跨 core 重启保持存活
-
-#### Scenario: 通过 webui 服务页启用 core
-
-- **WHEN** 操作者在 webui 服务页将 core 设为启用
-- **THEN** watchdog 拉起 core（会话核心），webui 与 im 通过 core session channel 继续显示同一会话状态
-
-### Requirement: 双通道共享会话状态
-
-当 feishu 与 webui 同时启用时，两者 SHALL 汇聚到同一会话权威：webui 会话（`web-*` 前缀）与飞书会话（`oc_*` / `ou_*` chat_id）在同一个快照中可见，任何一侧创建/变更/移除的会话 SHALL 通过共享状态对另一侧可见。共享会话状态 SHALL 通过通道抽象与 `ChannelKey` 表达；`web-*` 与 `oc_*` 分别是 `web` 与 `feishu` 两个通道的 key，不由核心特判前缀。
-
-#### Scenario: 飞书会话出现在 webui 列表
-
-- **WHEN** 一条飞书消息创建了一个会话
-- **THEN** 该会话在 webui 的 `GET /api/sessions` 中可见，且不落入任何项目的 inbox 分组语义
-
-#### Scenario: webui 会话对飞书不可操作
-
-- **WHEN** webui 会话（`web-*` 或 `agent-*` 前缀）已创建
-- **THEN** 飞书侧不渲染其卡片，也不接收其出站事件（飞书无此会话的回复目标）
