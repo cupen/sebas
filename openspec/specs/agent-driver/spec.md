@@ -8,7 +8,7 @@
 
 ### Requirement: AgentDriver abstraction with two implementations
 
-The system SHALL define an `AgentDriver` trait that abstracts driving one third-party coding-agent subprocess: `spawn(config)` producing a session handle that streams `AcpEvent`s, accepts `AcpCommand`s, and cancels on demand. The system SHALL provide two implementations: a `ClaudeDriver` that keeps driving Claude Code through `cc-agent-sdk`, and an `AcpDriver` that spawns a native ACP agent (e.g. `gemini --acp`) and speaks the Agent Client Protocol v1 through the `agent-client-protocol` crate. Both implementations SHALL emit the same `AcpEvent`/`AcpCommand` vocabulary, so downstream consumers need no driver-specific branches.
+The system SHALL define an `AgentDriver` trait that abstracts driving one third-party coding-agent subprocess: `spawn(config)` producing a session handle that streams `AcpEvent`s, accepts `AcpCommand`s, and cancels on demand. The trait is the **abstraction/policy layer**: it owns which driver a configured agent kind resolves to, the open kind registry, cross-driver permission routing, and honest reachability reporting (below) — it does NOT own the per-session subprocess lifecycle or the ACP protocol details, which belong to the `acp-driver` capability (the runtime layer for ACP children). The system SHALL provide two implementations: a `ClaudeDriver` that keeps driving Claude Code through `cc-agent-sdk`, and an `AcpDriver` that drives a native ACP agent through the ACP subprocess runtime (`acp-driver`). Both implementations SHALL emit the same `AcpEvent`/`AcpCommand` vocabulary, so downstream consumers need no driver-specific branches.
 
 #### Scenario: Both drivers present the same vocabulary
 
@@ -24,7 +24,7 @@ The system SHALL define an `AgentDriver` trait that abstracts driving one third-
 #### Scenario: ACP driver spawns a native ACP agent
 
 - **WHEN** an agent is configured with `driver = "acp"` and a `command` such as `gemini --acp`
-- **THEN** the ACP driver spawns that command as a subprocess, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
+- **THEN** the ACP driver resolves the kind to the ACP subprocess runtime (`acp-driver`), which spawns that command, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
 
 ### Requirement: Open agent registry keyed by kind, not a closed enum
 
