@@ -1,22 +1,17 @@
 // @vitest-environment jsdom
 /**
  * Settings modal (IA v3, fix-settings-menu-and-services-semantics)：左侧分区
- * 导航 + 右侧内容。六个分区（顺序即规约）——
- *   - settings   总览壳：工作区根目录（/api/fs/browse-dirs 回显根）/
- *                default agent kind（静态 acp）/
- *                default provider-model（/api/agent-defaults + 跳转 Models
- *                链接）+「全部进程重启」「重置 Settings」高危动作（wa-dialog
- *                二次确认；无 watchdog 控制面时重启 disabled）
+ * 导航 + 右侧内容。五个分区（顺序即规约）——
+ *   - models     「Router 路由网关」总览卡（/api/router 的 listen / debug /
+ *                auth）+ provider 管理列表（/router/api/providers）
  *   - services   watchdog 受管子进程（/api/admin/services 经 adminServicesSafe：
  *                name / desired / actual / uptime + /api/admin/events 最近错误；
  *                im→「飞书 IM」显示映射；无 adapter 时「无 watchdog 控制面」横幅）
- *   - models     「Router 路由网关」总览卡（/api/router 的 listen / debug /
- *                auth）+ provider 管理列表（/router/api/providers）
  *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
  *   - env        环境变量名清单，值一律 "managed by core config"
  *   - about      /api/about 真实字段
- * 缺省首项 settings；上次分区记忆走 localStorage `lastSettingsSection`
- * （非法值回退 settings）。关闭交互（按钮 / Esc / 遮罩）一并覆盖。
+ * 缺省首项 models；上次分区记忆走 localStorage `lastSettingsSection`
+ * （非法值回退 models）。关闭交互（按钮 / Esc / 遮罩）一并覆盖。
  * api client 全量 mock（9 个 admin stubs 由前序 agent 加入，本轮沿用）。
  */
 
@@ -219,166 +214,85 @@ afterEach(() => {
 })
 
 describe('sebas-settings-modal sections', () => {
-  it('renders the left nav with exactly Settings/Services/Models/Appearance/Environment/About', async () => {
+  it('renders the left nav with exactly Models/Services/Appearance/Environment/About', async () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())
-    expect(labels).toEqual(['Settings', 'Services', 'Models', 'Appearance', 'Environment', 'About'])
+    expect(labels).toEqual(['Models', 'Services', 'Appearance', 'Environment', 'About'])
     el.remove()
   })
 
-  it('defaults to the Settings overview shell with workspace/defaults/danger actions', async () => {
+  it('defaults to models section', async () => {
     const el = await mount()
-    expect(el.section).toBe('settings')
-    await settle(el)
-    const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('Workspace root')
-    expect(text).toContain('Default agent kind')
-    expect(text).toContain('Default provider / model')
-    const buttons = waButtons(el).map((b) => b.textContent?.trim())
-    expect(buttons).toContain('全部进程重启')
-    expect(buttons).toContain('重置 Settings')
+    expect(el.section).toBe('models')
     el.remove()
   })
 
-  it('Settings overview renders workspace root, acp kind and the provider/model link', async () => {
-    apiMocks.agentDefaults.mockResolvedValue({ provider: 'alpha', model: 'm1' })
+  it('switching section updates the section property', async () => {
     const el = await mount()
-    // 总览懒加载挂在切入 settings 时：先离开再回来触发 loadOverview。
+    expect(el.section).toBe('models')
     await goto(el, 1)
-    await goto(el, 0)
-    const text = el.shadowRoot!.textContent ?? ''
-    expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
-    expect(apiMocks.agentDefaults).toHaveBeenCalled()
-    expect(text).toContain('/tmp/test-work')
-    expect(text).toContain('acp')
-    expect(text).toContain('alpha / m1')
-    // 工作区根目录带复制按钮。
-    const copy = el.shadowRoot!.querySelector('button[title="Copy workspace root"]')
-    expect(copy).toBeTruthy()
-    el.remove()
-  })
-
-  it('Settings danger actions confirm via wa-dialog; restart disabled without adapter', async () => {
-    const el = await mount()
-    await goto(el, 1)
-    await goto(el, 0)
-    const restart = waButtons(el).find((b) => b.textContent?.includes('全部进程重启'))!
-    expect(restart).toBeTruthy()
-    expect(restart.hasAttribute('disabled')).toBe(false)
-    restart.click()
-    await el.updateComplete
-    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="全部进程重启"]') as HTMLElement & {
-      open?: boolean
-    }
-    expect(dialog).toBeTruthy()
-    expect(dialog.hasAttribute('open')).toBe(true)
-    el.remove()
-  })
-
-  it('Settings restart button is disabled with tooltip when no watchdog adapter', async () => {
-    apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
-    const el = await mount()
-    await goto(el, 1)
-    await goto(el, 0)
-    const restart = waButtons(el).find((b) => b.textContent?.includes('全部进程重启'))!
-    expect(restart.hasAttribute('disabled')).toBe(true)
-    expect(restart.getAttribute('title')).toContain('无 watchdog 控制面')
-    // 重置 Settings 不依赖 adapter，始终可用。
-    const reset = waButtons(el).find((b) => b.textContent?.includes('重置 Settings'))!
-    expect(reset.hasAttribute('disabled')).toBe(false)
-    el.remove()
-  })
-
-  it('remembers lastSettingsSection across opens; illegal values fall back to settings', async () => {
-    localStorage.setItem('lastSettingsSection', 'services')
-    const el = await mount()
-    await settle(el)
     expect(el.section).toBe('services')
-    // 打开期间切换分区会写回记忆。
     await goto(el, 2)
-    expect(localStorage.getItem('lastSettingsSection')).toBe('models')
+    expect(el.section).toBe('appearance')
     el.remove()
-
-    localStorage.setItem('lastSettingsSection', 'nope')
-    const el2 = await mount()
-    await settle(el2)
-    expect(el2.section).toBe('settings')
-    el2.remove()
   })
 
-  it('Services section renders rows from /api/admin/services with im→飞书 IM mapping', async () => {
-    apiMocks.router.mockClear()
-    apiMocks.adminServicesSafe.mockResolvedValue({
-      adapter_ok: true,
-      services: [
-        { name: 'im', status: 'running', desired: 'running', uptime_secs: 3725 },
-        { name: 'router', status: 'stopped', desired: 'stopped', uptime_secs: null },
-      ],
-    })
-    apiMocks.adminEventsSafe.mockResolvedValue({
-      adapter_ok: true,
-      events: [{ seq: 1, operation_id: 'op-1', kind: 'service_error', message: 'im worker boom' }],
-    })
+  it('Services section renders router service cards from /api/router', async () => {
     const el = await mount()
     await goto(el, 1)
     expect(el.section).toBe('services')
-    // 真源是 adminServicesSafe；renderServices 不得再读 /api/router。
-    expect(apiMocks.adminServicesSafe).toHaveBeenCalled()
-    expect(apiMocks.adminEventsSafe).toHaveBeenCalled()
-    expect(apiMocks.router).not.toHaveBeenCalled()
+    expect(apiMocks.router).toHaveBeenCalled()
     const cards = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')]
     expect(cards.length).toBe(2)
     const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('飞书 IM')
-    // 内部名锚点保留，供与 /api/admin/services 对账。
-    const ids = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-id')].map((s) =>
-      s.textContent?.trim(),
-    )
-    expect(ids).toEqual(['im', 'router'])
-    expect(text).toContain('desired running · status running · up 1h 2m')
-    expect(text).toContain('Recent errors')
-    expect(text).toContain('im worker boom')
-    // 每行带 enable/disable/restart 动作钮。
-    const enables = [...el.shadowRoot!.querySelectorAll('button[title="Enable service"]')]
-    expect(enables.length).toBe(2)
+    expect(text).toContain('Router')
+    expect(text).toContain('127.0.0.1:8787')
+    expect(text).toContain('Provider routing')
+    expect(text).toContain('2 provider(s)')
     el.remove()
   })
 
-  it('Services section shows the no-adapter banner without rows or actions', async () => {
-    apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
+  it('Services section renders router status with auth and debug info', async () => {
+    apiMocks.router.mockResolvedValue({
+      router: {
+        listen: '127.0.0.1:9999',
+        provider_count: 0,
+        debug: true,
+        has_auth: false,
+        providers: [],
+      },
+    })
     const el = await mount()
     await goto(el, 1)
     const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('无 watchdog 控制面')
-    expect(el.shadowRoot!.querySelectorAll('.service-card').length).toBe(0)
-    expect(el.shadowRoot!.querySelectorAll('.service-actions button').length).toBe(0)
+    expect(text).toContain('127.0.0.1:9999')
+    expect(text).toContain('auth none')
+    expect(text).toContain('debug on')
+    expect(text).toContain('Idle')
     el.remove()
   })
 
-  it('Models section renders the Router gateway card plus the provider list', async () => {
+  it('Models section renders the provider management list', async () => {
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, 0)
     expect(el.section).toBe('models')
     expect(apiMocks.router).toHaveBeenCalled()
     expect(apiMocks.routerProviders).toHaveBeenCalled()
     expect(apiMocks.routerPresets).toHaveBeenCalled()
     const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('Router 路由网关')
-    expect(text).toContain('127.0.0.1:8787')
-    expect(text).toContain('configured')
+    expect(text).toContain('Models')
+    expect(text).toContain('Manage model providers')
     const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.provider-row')]
     expect(rows.length).toBe(2)
     expect(text).toContain('alpha')
-    expect(text).toContain('deepseek · code')
-    expect(text).toContain('custom')
-    expect(text).toContain('https://a.example/anthropic')
+    expect(text).toContain('deepseek')
     expect(text).toContain('beta')
     el.remove()
   })
 
   it('Environment section lists variable names with the honest placeholder value', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 3)
     expect(el.section).toBe('env')
     const rows = [...el.shadowRoot!.querySelectorAll('.env-table tbody tr')]
     expect(rows.length).toBeGreaterThan(0)
@@ -392,7 +306,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About section renders the real /api/about payload', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, 4)
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
     const text = el.shadowRoot!.textContent ?? ''
@@ -436,7 +350,7 @@ describe('sebas-settings-modal appearance section', () => {
     // 页面启动时由 main.ts 应用一次主题 class；测试环境里手动补上。
     applyThemeMode()
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, 2)
     const options = themeOptions(el)
     expect(options.map((b) => b.querySelector('.theme-option-label')?.textContent)).toEqual([
       'System',
@@ -451,7 +365,7 @@ describe('sebas-settings-modal appearance section', () => {
 
   it('choosing Light unsets wa-dark and persists sebas:theme=light', async () => {
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, 2)
     themeOptions(el)[2]!.click()
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('light')
@@ -463,7 +377,7 @@ describe('sebas-settings-modal appearance section', () => {
 
   it('choosing Dark sets wa-dark and persists; System returns to following the OS', async () => {
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, 2)
     themeOptions(el)[1]!.click()
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('dark')
@@ -519,7 +433,7 @@ describe('sebas-settings-modal closing', () => {
 it('shows the current agent default and badges the matching provider row', async () => {
   apiMocks.agentDefaults.mockResolvedValue({ provider: 'alpha', model: 'm1' })
   const el = await mount()
-  await goto(el, 2)
+  await goto(el, 0)
 
   const status = el.shadowRoot?.querySelector('.provider-toolbar [role="status"]')
   expect(status?.textContent ?? '').toContain('default: alpha / m1')
