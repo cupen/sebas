@@ -41,7 +41,7 @@ sebas agent-kinds list -c <config>
   feishu 路径的命令解析。**已在 add-opencode-acp 内修复**：`web_send_message` 补命令解析，
   `/cancel` → `session/cancel` 通知；`/status` `/cost` `/compact` 同接线；无活跃会话明确回复。
 - **凭据**：opencode 用其自身登录态（`auth.json`），不经 sebas 的 provider 注入。
-  sebas 的 `extra_env`（Direct/Gateway 模式）对 opencode 不注入 `OPENAI_BASE_URL` 等。
+  sebas 的 `extra_env`（Direct/Router 模式）对 opencode 不注入 `OPENAI_BASE_URL` 等。
 - **进程生命周期**：opencode acp 在 stdin 关闭时退出；sebas kill 会话即关闭 stdin。
 - **首 token 延迟**：opencode 以 `cwd` 建上下文索引（`opencode.db` 可能上百 MB）；
   大型 cwd 下首 token 明显变慢，非挂死（沙箱实测：全仓库 cwd 数十秒，`/tmp` 秒回）。

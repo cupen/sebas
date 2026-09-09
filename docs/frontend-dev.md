@@ -1,7 +1,7 @@
 # 前端联调（Vite 热更新 + Rust 后端）
 
 开发 WebUI 前端时不必每次 `cargo build`——Vite dev server 提供秒级热更新，
-后端表面（JSON API / WebSocket / 健康检查 / Gateway BFF）由代理转发到本机
+后端表面（JSON API / WebSocket / 健康检查 / Router BFF）由代理转发到本机
 Rust 进程，浏览器全程同源，与生产嵌入形态路径一致。
 
 ## 启动

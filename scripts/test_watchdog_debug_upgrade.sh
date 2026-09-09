@@ -98,7 +98,7 @@ echo
 echo "### TEST B: real dev update (cargo build + install + restart core)"
 request update --dev
 echo "router after dev-update (must still be up):"
-curl -s -o /dev/null -w '  router GET / -> %{http_code}\n' http://127.0.0.1:8787/ 2>&1 || echo "  GATEWAY DOWN"
+curl -s -o /dev/null -w '  router GET / -> %{http_code}\n' http://127.0.0.1:8787/ 2>&1 || echo "  ROUTER DOWN"
 echo
 
 echo "### TEST C: rollback dry-run (expect accepted, no restart)"
