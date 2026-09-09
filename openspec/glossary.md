@@ -51,8 +51,10 @@
   inbox(操作者离开期间到达的 turn 流)。capability 目录为 `workbench`。
   (workbench;webui)
 - **卡片(card)**:对用户的流式富文本呈现,含思考/工具面板、交互元素
-  (按钮/表单)、预算与轮转。当前为**中立呈现模型**,由通道适配器渲染成
-  各自渠道的形态(飞书 = card schema 2.0 JSON)。(channels;feishu-cards)
+  (按钮/表单)、预算与轮转。当前为**中立呈现模型**,内容契约(per-turn
+  实例、流式合并、预算/轮换、生命周期)在 `channels`,由通道适配器渲染成
+  各自渠道的形态(飞书 = card schema 2.0 JSON,见 `feishu-cards`)。
+  (channels;feishu-cards)
 - **主控(webui 主控形态)**:部署形态——watchdog 默认只启动 webui,
   core/飞书按需启用。(feishu-option)
 

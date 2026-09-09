@@ -35,7 +35,7 @@ im 服务 SHALL 维护自己的适配器注册表（复用 `channels` 中立抽�
 
 ### Requirement: IM 交互状态机随迁
 
-卡片状态机（每会话单卡片、流式合并、预算与轮换）、权限审批卡、acknowledgment/阶段 reactions、命令解析、provider/settings 表单 UI SHALL 全部由 im 服务持有与执行，其行为规格分别遵循 `feishu-cards`、`permission-flow`、`dispatch-commands`、`provider-management` capability。im SHALL 把交互蒸馏为核心通道请求（会话消息、审批决定、状态库变更），SHALL NOT 本地实现任何会话语义。
+卡片状态机（每会话单卡片、流式合并、预算与轮换——中立契约遵循 `channels`「Neutral presentation content contract」，飞书渲染遵循 `feishu-cards`）、权限审批卡、acknowledgment/阶段 reactions、命令解析、provider/settings 表单 UI SHALL 全部由 im 服务持有与执行，其行为规格分别遵循 `channels`、`feishu-cards`、`permission-flow`、`dispatch-commands`、`provider-management` capability。im SHALL 把交互蒸馏为核心通道请求（会话消息、审批决定、状态库变更），SHALL NOT 本地实现任何会话语义。
 
 #### Scenario: 权限按钮点击走通道回传
 
