@@ -2,13 +2,13 @@
 
 ## Purpose
 
-把 sebas 的三方 coding-agent 接入从 Claude Code 单实现抽象成驱动层：`AgentDriver` trait + 两类实现——Claude 专用驱动（保留 `cc-agent-sdk`，换取 Claude 专有能力如 token 用量计数）与通用 ACP 驱动（用 `agent-client-protocol` v1 驱动任意原生 ACP agent）。下游 router/飞书/webui 只消费统一的 `AcpEvent`/`AcpCommand` 防腐层词表，因此逐个新增三方 agent 只改配置、不改代码。权限往返跨驱动统一进入 webui 审查卡。
+把 sebas 的 agent 接入从单一实现抽象成**驱动抽象/策略层**：`AgentDriver` trait + 按 kind 解析的实现选择，统一 `AcpEvent`/`AcpCommand` 防腐层词表、开放 kind 注册、跨驱动权限路由（webui 审查卡）与可达性上报。具体 ACP 子进程的 spawn/resume/事件泵/中断恢复等**运行时层**归 `acp-driver` capability 所有——本 capability 是「接什么 agent、暴露什么词表」，不承载单个子进程的生命周期实现。下游 router/飞书/webui 只消费统一词表，逐个新增 agent 只改配置。
 
 ## Requirements
 
 ### Requirement: AgentDriver abstraction with two implementations
 
-The system SHALL define an `AgentDriver` trait that abstracts driving one third-party coding-agent subprocess: `spawn(config)` producing a session handle that streams `AcpEvent`s, accepts `AcpCommand`s, and cancels on demand. The system SHALL provide two implementations: a `ClaudeDriver` that keeps driving Claude Code through `cc-agent-sdk`, and an `AcpDriver` that spawns a native ACP agent (e.g. `gemini --acp`) and speaks the Agent Client Protocol v1 through the `agent-client-protocol` crate. Both implementations SHALL emit the same `AcpEvent`/`AcpCommand` vocabulary, so downstream consumers need no driver-specific branches.
+The system SHALL define an `AgentDriver` trait that abstracts driving one third-party coding-agent subprocess: `spawn(config)` producing a session handle that streams `AcpEvent`s, accepts `AcpCommand`s, and cancels on demand. The trait is the **abstraction/policy layer**: it owns which driver a configured agent kind resolves to, the open kind registry, cross-driver permission routing, and honest reachability reporting (below) — it does NOT own the per-session subprocess lifecycle or the ACP protocol details, which belong to the `acp-driver` capability (the runtime layer for ACP children). The system SHALL provide two implementations: a `ClaudeDriver` that keeps driving Claude Code through `cc-agent-sdk`, and an `AcpDriver` that drives a native ACP agent through the ACP subprocess runtime (`acp-driver`). Both implementations SHALL emit the same `AcpEvent`/`AcpCommand` vocabulary, so downstream consumers need no driver-specific branches.
 
 #### Scenario: Both drivers present the same vocabulary
 
@@ -24,7 +24,7 @@ The system SHALL define an `AgentDriver` trait that abstracts driving one third-
 #### Scenario: ACP driver spawns a native ACP agent
 
 - **WHEN** an agent is configured with `driver = "acp"` and a `command` such as `gemini --acp`
-- **THEN** the ACP driver spawns that command as a subprocess, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
+- **THEN** the ACP driver resolves the kind to the ACP subprocess runtime (`acp-driver`), which spawns that command, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
 
 ### Requirement: Open agent registry keyed by kind, not a closed enum
 

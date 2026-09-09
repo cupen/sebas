@@ -1,13 +1,13 @@
 # acp-driver Specification
 
 ## Purpose
-Owns the lifecycle of one Claude Code subprocess per sebas session: spawn, resume, streaming event pump, interrupt-and-heal, hang detection with escalating kill, and a guaranteed single terminal event on death. Provides a stable `AcpCommand` / `AcpEvent` vocabulary to the router so the engine underneath (currently `cc-agent-sdk` over stream-json + control protocol) can be replaced without changing the router contract.
+Owns the **ACP subprocess runtime layer** — the lifecycle of one ACP child per sebas session: spawn, resume, streaming event pump, interrupt-and-heal, hang detection with escalating kill, and a guaranteed single terminal event on death. Serves the `agent-driver` abstraction layer's `AcpDriver` implementation and the router with a stable `AcpCommand` / `AcpEvent` vocabulary, so the engine underneath (currently `cc-agent-sdk` over stream-json + control protocol) can be replaced without changing the router contract. Driver-kind resolution, the open kind registry, and cross-driver permission routing belong to `agent-driver`, not here.
 
 ## Requirements
 
 ### Requirement: One subprocess per session
 
-The system SHALL spawn exactly one Claude Code child process per sebas session. The sebas routing id SHALL be the same value as the Claude conversation id.
+The system SHALL spawn exactly one Claude Code child process per sebas session — the ACP subprocess runtime layer owned by this capability, which the `agent-driver` abstraction layer's `AcpDriver` implementation and the router consume. The sebas routing id SHALL be the same value as the Claude conversation id. Driver-kind resolution (which driver a configured agent resolves to), the open kind registry, and cross-driver permission routing belong to `agent-driver`, not here.
 
 #### Scenario: Fresh spawn mints a new id
 
@@ -21,6 +21,11 @@ The system SHALL spawn exactly one Claude Code child process per sebas session. 
 - **THEN** the child is launched with `--resume <id>` only
 - **AND** `--session-id` is NOT passed (the real CLI rejects that combination)
 - **AND** the routing id remains the resumed conversation id
+
+#### Scenario: Runtime serves any driver kind
+
+- **WHEN** the abstraction layer resolves an agent kind to the ACP driver
+- **THEN** the runtime owns spawn, resume, streaming, and cancellation for that kind's child per the requirements below
 
 ### Requirement: Startup handshake with timeout
 

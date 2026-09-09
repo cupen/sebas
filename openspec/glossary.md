@@ -41,7 +41,9 @@
   之后为中立的 **`ChannelKey`**(见下)。(session-lifecycle;channels)
 - **执行体(execution body,又称内核/kernel)**:会话背后的执行内核,两种:
   - **ACP 桥(ACP bridge)**:经 Agent Client Protocol 驱动外部 agent
-    (Claude Code 等),是默认执行体。
+    (Claude Code 等),是默认执行体。分两层:驱动抽象/策略层(`agent-driver`
+    —kind 注册、词表、权限路由)与 ACP 子进程运行时层(`acp-driver`—单
+    子进程 spawn/resume/事件泵)。(agent-driver;acp-driver)
   - **原生内核(native kernel,sebas-agent crate)**:自研 agent 内核
     (turn loop、工具集、policy engine、权限审批)。(feishu-bridge;agent-core)
 - **项目(project)**:host 上的一个目录路径,通常是 git 仓库根;工作台的
