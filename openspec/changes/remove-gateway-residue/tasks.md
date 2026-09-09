@@ -25,4 +25,4 @@
 ## 4. 收尾
 
 - [x] 4.1 运行相关质量门禁确认无行为改动：cargo test（router/dispatch/webui 单测相关）、已删除脚本无 invoke 依赖
-- [ ] 4.2 提交流程遵循仓库约定（conventional commit 单句），feat 分支
+- [x] 4.2 提交流程遵循仓库约定（conventional commit 单句），feat 分支
