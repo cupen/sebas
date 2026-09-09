@@ -94,8 +94,12 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
         warn!("webui password is shorter than 8 chars, weak; use a strong password for public deploys");
     }
 
-    auth::store_credentials(&path, &auth::Credentials::new(&username, &password))
-        .map_err(SebasError::Config)?;
+    // 改密保留已注入的登录 token（token 由 env 引导管理，不经 passwd 覆写）。
+    let mut credentials = auth::Credentials::new(&username, &password);
+    if let Some(existing) = &existing {
+        credentials.token_hash = existing.token_hash;
+    }
+    auth::store_credentials(&path, &credentials).map_err(SebasError::Config)?;
 
     match existing {
         Some(_) => println!("WebUI 密码已更新：用户 {}（{}）", username, path.display()),
@@ -109,26 +113,81 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
     Ok(())
 }
 
-/// webui 启动前的鉴权引导：
-/// 1. 凭据文件缺失且 `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` 都在 →
-///    自动建户（容器/公网部署）。
-/// 2. 返回共享 [`AuthHandle`]。
+/// webui 启动前的鉴权引导（开关打开 + 凭据文件缺失时，按优先级）：
+/// 1. `SEBAS_WEBUI_TOKEN` → 注入单字段登录密钥（SHA-256 落盘）。
+/// 2. `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` → 注入密码（容器/公网部署）。
+/// 3. 两者皆缺 → 自动生成随机密码（默认开箱即要求登录；Jupyter 风格，
+///    密码打印一次到日志，服务端只留 PBKDF2 哈希）。
+///
+/// 返回共享 [`AuthHandle`]。任何一步落盘失败都只 warn（登录门以文件实况
+/// 为准，不因引导失败拒启）。
 pub fn bootstrap_auth() -> Arc<AuthHandle> {
+    const DEFAULT_BOOTSTRAP_USER: &str = "admin";
     let path = auth::default_auth_file();
-    if auth::load_credentials(&path).ok().flatten().is_none()
-        && let (Ok(user), Ok(pass)) = (
+    if auth::load_credentials(&path).ok().flatten().is_none() {
+        let bootstrapped = if let Ok(token) = std::env::var("SEBAS_WEBUI_TOKEN")
+            && !token.trim().is_empty()
+        {
+            let mut credentials = auth::Credentials::new(DEFAULT_BOOTSTRAP_USER, token.trim());
+            use sha2::Digest;
+            credentials.token_hash = Some(sha2::Sha256::digest(token.trim().as_bytes()).into());
+            match auth::store_credentials(&path, &credentials) {
+                Ok(()) => {
+                    info!(
+                        "webui auth bootstrapped from SEBAS_WEBUI_TOKEN ({})",
+                        path.display()
+                    );
+                    true
+                }
+                Err(e) => {
+                    warn!("webui auth bootstrap (token) failed: {e}");
+                    false
+                }
+            }
+        } else if let (Ok(user), Ok(pass)) = (
             std::env::var("SEBAS_WEBUI_USER"),
             std::env::var("SEBAS_WEBUI_PASSWORD"),
-        )
-        && !user.is_empty()
-        && !pass.is_empty()
-    {
-        if pass.chars().count() < 8 {
-            warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
-        }
-        match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {
-            Ok(()) => info!("webui auth bootstrapped from env for user {user} ({})", path.display()),
-            Err(e) => warn!("webui auth bootstrap failed: {e}"),
+        ) && !user.is_empty()
+            && !pass.is_empty()
+        {
+            if pass.chars().count() < 8 {
+                warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
+            }
+            match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {
+                Ok(()) => {
+                    info!("webui auth bootstrapped from env for user {user} ({})", path.display());
+                    true
+                }
+                Err(e) => {
+                    warn!("webui auth bootstrap failed: {e}");
+                    false
+                }
+            }
+        } else {
+            let password = auth::generate_random_password();
+            match auth::store_credentials(
+                &path,
+                &auth::Credentials::new(DEFAULT_BOOTSTRAP_USER, &password),
+            ) {
+                Ok(()) => {
+                    eprintln!(
+                        "\n  webui 首次启动：已自动生成登录凭据（auth 默认开启）\n\n    用户名: {DEFAULT_BOOTSTRAP_USER}\n    密码:   {password}\n\n  已写入 {}，可用 `sebas webui-passwd` 修改，或设 SEBAS_WEBUI_TOKEN / SEBAS_WEBUI_PASSWORD 自带凭据。\n",
+                        path.display()
+                    );
+                    warn!(
+                        "auto-generated bootstrap credentials for user {DEFAULT_BOOTSTRAP_USER} written to {} (password printed once above)",
+                        path.display()
+                    );
+                    true
+                }
+                Err(e) => {
+                    warn!("webui auto-bootstrap failed: {e}");
+                    false
+                }
+            }
+        };
+        if !bootstrapped {
+            warn!("webui auth switch is on but no credentials could be provisioned; routes stay open until a credentials file appears");
         }
     }
     Arc::new(AuthHandle::open(path))
@@ -149,8 +208,8 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .ok_or_else(|| SebasError::Config("watchdog.webui.enabled is false".into()))?;
 
     // 登录鉴权：开关关闭（测试/联调）→ 注入 disabled 态，全路由免登录；
-    // 开关打开（默认）→ 凭据文件缺失时可用 SEBAS_WEBUI_USER/SEBAS_WEBUI_PASSWORD
-    // env 引导（容器部署），之后全部 /api 与 /ws 需要登录。
+    // 开关打开（默认）→ 引导凭据（SEBAS_WEBUI_TOKEN → SEBAS_WEBUI_USER/
+    // SEBAS_WEBUI_PASSWORD → 自动生成随机密码），之后全部 /api 与 /ws 需要登录。
     let auth = if cfg.watchdog.webui.auth {
         bootstrap_auth()
     } else {
@@ -587,20 +646,10 @@ auth = {auth}
         assert!(msg.contains("非 loopback"), "{msg}");
     }
 
-    #[tokio::test]
-    // 同上：env 锁有意横跨 await。
-    #[allow(clippy::await_holding_lock)]
-    async fn non_loopback_refused_when_switch_on_but_no_credentials() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let config = write_config(dir.path(), "0.0.0.0", true);
-        let _auth_file = set_auth_file(dir.path());
-        let err = run(WebUiArgs::new(config.to_string_lossy().into_owned()))
-            .await
-            .expect_err("开关开 + 无凭据 + 非 loopback 必须配置错误退出");
-        let msg = err.to_string();
-        assert!(msg.contains("非 loopback"), "{msg}");
-    }
+    // 「开关打开 + 凭据缺失 + 非 loopback」的旧拒绝场景已随自动引导移除：
+    // bootstrap_auth 现在总能让凭据存在（token env → 密码 env → 随机生成），
+    // 该状态下启动放行而非退出；引导行为本身由
+    // `bootstrap_prefers_token_then_password_then_random` 覆盖。
 
     #[test]
     fn loopback_starts_with_switch_off() {
@@ -614,5 +663,54 @@ auth = {auth}
         let cfg = crate::config::Config::parse(&raw).unwrap();
         assert!(!cfg.watchdog.webui.auth);
         assert!(WebUiEndpoint::from_config(&cfg.watchdog.webui).unwrap().is_loopback());
+    }
+
+    /// bootstrap_auth 的 env 全局性同样需要互斥（SEBAS_WEBUI_TOKEN 与
+    /// SEBAS_WEBUI_AUTH_FILE 都是进程级）。
+    #[test]
+    // env 锁横跨整个测试体。
+    #[allow(clippy::await_holding_lock)]
+    fn bootstrap_prefers_token_then_password_then_random() {
+        use sebas_webui::auth::load_credentials;
+
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _auth_file = set_auth_file(dir.path());
+
+        // 1) 无任何 env → 自动生成：凭据文件出现，admin 可登录。
+        let handle = bootstrap_auth();
+        assert!(handle.enabled(), "无凭据时应自动生成而不是保持关闭");
+        assert_eq!(handle.username().as_deref(), Some("admin"));
+        std::fs::remove_file(dir.path().join("webui-auth.json")).unwrap();
+
+        // 2) 仅 TOKEN → verify_secret 命中 token。
+        // SAFETY: ENV_LOCK 已持有，无并发 env 访问。
+        unsafe { std::env::set_var("SEBAS_WEBUI_TOKEN", "tok-abc-123456") };
+        let handle = bootstrap_auth();
+        assert!(handle.enabled());
+        let credentials = load_credentials(&dir.path().join("webui-auth.json"))
+            .unwrap()
+            .unwrap();
+        assert!(credentials.verify_secret("tok-abc-123456"));
+        assert!(!credentials.verify_secret("other"));
+        // 顺手断言热重载后 login_secret 也通（与落盘凭据同一句柄语义）。
+        std::fs::remove_file(dir.path().join("webui-auth.json")).unwrap();
+
+        // 3) USER/PASSWORD → 密码注入；TOKEN 存在时 TOKEN 优先（空值除外）。
+        unsafe { std::env::set_var("SEBAS_WEBUI_TOKEN", "") };
+        unsafe { std::env::set_var("SEBAS_WEBUI_USER", "admin") };
+        unsafe { std::env::set_var("SEBAS_WEBUI_PASSWORD", "password8") };
+        let handle = bootstrap_auth();
+        let credentials = load_credentials(&dir.path().join("webui-auth.json"))
+            .unwrap()
+            .unwrap();
+        assert!(credentials.verify("admin", "password8"));
+        assert!(credentials.token_hash.is_none(), "纯密码引导不写 token");
+        drop(handle);
+
+        // 清理本测注入的全部 env。
+        unsafe { std::env::remove_var("SEBAS_WEBUI_TOKEN") };
+        unsafe { std::env::remove_var("SEBAS_WEBUI_USER") };
+        unsafe { std::env::remove_var("SEBAS_WEBUI_PASSWORD") };
     }
 }

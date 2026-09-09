@@ -246,6 +246,9 @@ channel_path = "core-channel.sock"
 enabled = true
 host = "127.0.0.1"
 port = {webui_port}
+# auth 默认 true 且缺失凭据时会自动生成（写进真实 ~/.sebas）；API 断言
+# 沙箱一律免登录，显式关闭（webui 鉴权旅程由 testsuite-webui 专测）。
+auth = false
 
 # router validate requires >=1 provider with a base_url; the debug `test`
 # provider is injected only after parse. This dummy never dials anything
