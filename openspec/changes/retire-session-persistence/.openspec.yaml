@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-09
+goal: session-persistence 语义拆归 provider-management + state-store 后退役
