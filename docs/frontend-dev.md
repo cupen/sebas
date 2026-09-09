@@ -17,7 +17,7 @@ cd sebas-webui/frontend && pnpm dev
 ```
 
 浏览器打开 Vite 输出的地址即可。`sebas-webui/frontend/vite.config.ts` 已配置代理：
-`/api`、`/router/api`、`/ws`（WebSocket）、`/health` → `127.0.0.1:9797`（退役 SPA 路径 `/gateway` 仍归一化到 `/`）。
+`/api`、`/router/api`、`/ws`（WebSocket）、`/health` → `127.0.0.1:9797`（IA-v1 的 `/gateway` 路径已彻底移除，不再归一化）。
 前端代码全部使用相对路径请求，因此无需任何环境变量或代码改动。
 
 ## 注意事项

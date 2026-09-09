@@ -7,14 +7,15 @@ rename-cli-surface 与 fix-spec-gateway-residue 之后，代码面已全面改�
 - **文档**（docs/、README.md、.github/workflows/ci.yml、scripts/ 头部注释、config/config.toml.example）：把引用已删除命令/env/配置节/crate 的 `gateway` 死引用改写为现行 `router` 术语（命令 `sebas router`、配置节 `[router]`/`[watchdog.router]`、env `SEBAS_ROUTER_*`、crate `sebas-router`）。
 - **脚本 scripts/**：死脚本 `e2e_gateway_admin.sh`、`rewrite.sh` 删除（没有任何 invoke 任务或文档引用，主体是已删除的 `sebas gateway` 命令，无法简单翻新）；`refresh_api_specs.sh`、`check_coverage.sh`、`e2e_router.sh`、`test_watchdog_debug_upgrade.sh` 内的 crate 路径/术语/环境变量残留同步修正。
 - **注释**（src/lib.rs、sebas-webui 前端/router_client 等处）仅剩的 `gateway` 措辞顺手改 `router`。
+- **webui 退役路径**（实施追加，用户指示 2026-09-09）：IA-v1 的 `/gateway` 路径彻底删除——前端 `RETIRED_REDIRECTS` 条目与 vite 代理条目一并移除，不重定向、不兼容，按未知路径走 workbench fallback（与 `/admin/*` 同待遇）。
 
 ## Non-goals
 
-- 不动拟真保留词：HTTP 语义 `502 Bad Gateway`（router proxy/admin、5 个 router 测试、router_client、gateway_bff_test 等）；配置示例 `my-gateway.example` 纯拟真；webui 退役 IA-v1 路径 `/gateway` 的重定向/归一化行为（现行设计）；`sebas-gateway` 的历史说明（README 目录树、docs/design-history ADR）。
+- 不动拟真保留词：HTTP 语义 `502 Bad Gateway`（router proxy/admin、5 个 router 测试、router_client、gateway_bff_test 等）；配置示例 `my-gateway.example` 纯拟真；`sebas-gateway` 的历史说明（README 目录树、docs/design-history ADR）。（实施中用户指示收回了一项：webui 退役 IA-v1 路径 `/gateway` 不再保留，见 What Changes。）
 - 不动 `sebas-dispatch` 的 `/gateway` 会话命令别名：它是 webui/IM 命令词（与 CLI 别名不同层），语义现行且被 `parses_router_actions` 附近注释与既有约定维系，改名需跨前后端协同，超出本 change 范围。
 - 不改 openspec/specs 的需求语义（主 spec 已无现行术语残留，只有"pre-rename 值应被拒"的需求语句——保留，那是护栏）。
 - 不动 openspec/changes/archive/** 历史快照。
-- 不新增/删除行为面、不改运行时逻辑。
+- 不新增/删除行为面、不改运行时逻辑（例外：上述 webui `/gateway` 退役路径的删除——用户指示）。
 
 ## Capabilities
 
@@ -25,6 +26,7 @@ rename-cli-surface 与 fix-spec-gateway-residue 之后，代码面已全面改�
 ### Modified Capabilities
 
 - `cli-service`: 移除"用户运行 `sebas gateway` 报错"的**需求段**——子命令树层面不再定义、不再测试该拒绝路径，旧命令词不再出现在任何现行规范语句中（历史迁移测试归属降低，避免与"gateway 已成自由词"的现状矛盾）。
+- `webui`: 退役路径 `/gateway` 从"canonical 化到 `/`"改为**彻底删除**——无路由、无重定向，作为未知路径落入 SPA workbench fallback；`/settings`、`/about` 的 canonical 化保留不变。
 
 ## Impact
 
@@ -32,6 +34,7 @@ rename-cli-surface 与 fix-spec-gateway-residue 之后，代码面已全面改�
 - 脚本：scripts/{e2e_gateway_admin.sh,rewrite.sh} 删除；scripts/{refresh_api_specs.sh,check_coverage.sh,e2e_router.sh,test_watchdog_debug_upgrade.sh} 术语修正。
 - CI：.github/workflows/ci.yml 注释修正。
 - 注释：src/lib.rs、sebas-webui 前端/router_client.rs 等注释措辞。
+- 前端：sebas-webui/frontend 的 router.ts（`RETIRED_REDIRECTS` 删 `/gateway`）、vite.config.ts（删代理条目）、app-shell.test.ts（退役路径用例改 `/settings` `/about`，新增 `/gateway` 未知路径 fallback 用例）。
 - 配置：config/config.toml.example（保留 `my-gateway` 示例，仅改描述性注释）。
-- specs：openspec/specs/cli-service/spec.md（删一个需求段）；实施中追加 openspec/specs/webui/spec.md 的现行术语措辞修正（`/api/gateway`→`/api/router` 等，无行为变化）。
-- 无运行时代码逻辑改动。
+- specs：openspec/specs/cli-service/spec.md（删一个需求段）；openspec/specs/webui/spec.md——现行术语措辞修正（`/api/gateway`→`/api/router` 等，无行为变化）+ MODIFIED delta `HTTP route surface`（`/gateway` 退役路径删除，用户指示）。
+- Rust 代码无改动；运行时代码改动仅限上述前端路由表与 vite 代理配置。

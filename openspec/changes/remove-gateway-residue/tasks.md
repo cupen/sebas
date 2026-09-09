@@ -26,3 +26,9 @@
 
 - [x] 4.1 运行相关质量门禁确认无行为改动：cargo test（router/dispatch/webui 单测相关）、已删除脚本无 invoke 依赖
 - [x] 4.2 提交流程遵循仓库约定（conventional commit 单句），feat 分支
+
+## 5. 追加（用户指示 2026-09-09）：webui `/gateway` 路径彻底移除
+
+- [x] 5.1 前端：router.ts `RETIRED_REDIRECTS` 删 `/gateway`（注释同步）、vite.config.ts 删代理条目、app-shell.test.ts 退役路径用例改 `/settings` `/about` 并新增 `/gateway` 未知路径 fallback 用例
+- [x] 5.2 docs/frontend-dev.md 归一化说明改"已彻底移除"；新增 spec delta `specs/webui/spec.md`（MODIFIED `HTTP route surface`，19 个场景全文照抄 + `/gateway` 移除表述）
+- [x] 5.3 proposal/design 同步（What Changes/Non-goals/Capabilities/Impact、Goals/D2 表/D3 决策）；`openspec validate` 通过；前端 vitest 15 文件 149 用例全绿

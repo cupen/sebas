@@ -30,13 +30,8 @@ export default defineConfig(({ mode }) => {
           changeOrigin: false,
         },
         // Router BFF mutation surface (POST/PUT/DELETE only; reads stay on
-        // /api/router). Retired IA-v1 path /gateway is proxied too (the backend
-        // normalizes it to /). The loopback-origin guard accepts the vite dev
+        // /api/router). The loopback-origin guard accepts the vite dev
         // origin — both are 127.0.0.1.
-        '/gateway': {
-          target: backend,
-          changeOrigin: false,
-        },
         '/ws': {
           target: wsBackend,
           ws: true,
