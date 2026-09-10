@@ -191,11 +191,26 @@ impl FeishuEnvelope {
                 pick("/action/value/session_id", "/action/session_id").unwrap_or_default();
             let request_id = pick("/action/value/request_id", "/action/request_id");
             let decision = pick("/action/value/decision", "/action/decision");
-            // Form-container submissions carry `action.form_value`; plain
-            // button clicks never do. Discriminate on the key's presence so
-            // even an all-optional empty submission routes as a form.
-            let has_form_value = self.event.pointer("/action/form_value").is_some();
-            if has_form_value {
+            // Discriminate form submissions from plain button clicks. The
+            // official schema-2.0 wire ALWAYS carries `action.form_value` —
+            // an empty object for plain buttons outside form containers — so
+            // keying on presence alone misroutes EVERY click into the form
+            // path, where unwired payloads are dropped silently (permission
+            // buttons died exactly this way). A click is a form submission
+            // only when our own payload marks it (`value.form`, set on every
+            // form submit button and select_static on_change) or Feishu
+            // delivered non-empty collected values.
+            let marked_as_form = self
+                .event
+                .pointer("/action/value/form")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|f| !f.is_empty());
+            let has_form_value = self
+                .event
+                .pointer("/action/form_value")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|m| !m.is_empty());
+            if marked_as_form || has_form_value {
                 let form_value = self
                     .event
                     .pointer("/action/form_value")

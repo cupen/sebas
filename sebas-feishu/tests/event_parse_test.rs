@@ -1,4 +1,5 @@
 use sebas_feishu::events::{FeishuEnvelope, FeishuIn, SessionKey};
+use serde_json::Value;
 
 #[test]
 fn parses_text_message_event() {
@@ -378,9 +379,86 @@ fn parses_form_container_submission_to_formcb() {
     assert_eq!(message_id.as_deref(), Some("om_form"));
 }
 
-/// Discriminator regression: routing keys off the *presence* of
-/// `action.form_value`, so an all-optional empty submission still parses as
-/// a form instead of silently becoming a ButtonCb.
+/// THE permission-button regression: the official schema-2.0 wire always
+/// carries `action.form_value`, and it is an EMPTY OBJECT for plain buttons
+/// outside form containers (upstream openlark fixture, 卡片回传交互回调
+/// docs). Keying on the key's presence misrouted every plain click into the
+/// form path where it was dropped silently — "本次允许" did nothing. A
+/// plain button (no `value.form` marker, empty `form_value`) MUST parse as
+/// ButtonCb.
+#[test]
+fn plain_button_with_empty_form_value_routes_as_buttoncb() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": {
+            "event_type": "card.action.trigger",
+            "event_id": "evt_1",
+            "app_id": "cli_x"
+        },
+        "event": {
+            "operator": { "open_id": "ou_user", "tenant_key": "tk" },
+            "action": {
+                "value": {
+                    "session_id": "sess_42",
+                    "request_id": "req_42",
+                    "decision": "allow_session"
+                },
+                "tag": "button",
+                "timezone": "8",
+                "name": "btn",
+                "form_value": {},
+                "input_value": "",
+                "option": "",
+                "options": [],
+                "checked": false
+            },
+            "host": "im_message",
+            "context": {
+                "open_message_id": "om_perm",
+                "open_chat_id": "oc_real"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env
+        .into_event("")
+        .expect("plain button click must not be dropped");
+    let FeishuIn::ButtonCb { key, action, .. } = evt else {
+        panic!("expected ButtonCb for plain button with empty form_value, got {evt:?}");
+    };
+    assert_eq!(key.chat_id, "oc_real");
+    assert_eq!(action.session_id, "sess_42");
+    assert_eq!(action.request_id.as_deref(), Some("req_42"));
+    assert_eq!(action.decision.as_deref(), Some("allow_session"));
+}
+
+/// Belt for wire drift: if Feishu delivers collected form values without our
+/// `value.form` marker (or a marker-less component submits from inside a
+/// form container), non-empty `form_value` still routes as a form.
+#[test]
+fn non_empty_form_value_without_marker_routes_as_formcb() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "card.action.trigger" },
+        "event": {
+            "chat_id": "oc_form",
+            "action": {
+                "value": { "custom": "payload" },
+                "form_value": { "field": "filled" }
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env.into_event("").expect("form submission parses");
+    let FeishuIn::FormCb { form_value, .. } = evt else {
+        panic!("expected FormCb for non-empty form_value, got {evt:?}");
+    };
+    assert_eq!(form_value.get("field").and_then(Value::as_str), Some("filled"));
+}
+
+/// Form submit buttons carry our own `value.form` marker, so an all-optional
+/// empty `form_value` still routes as a form (the marker, not presence of the
+/// `form_value` key, discriminates).
 #[test]
 fn empty_form_value_object_still_routes_as_formcb() {
     let raw = serde_json::json!({

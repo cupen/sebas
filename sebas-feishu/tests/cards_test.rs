@@ -584,3 +584,21 @@ fn collapsible_panel_serializes_v2_shape() {
     assert!(s.contains("\"elements\":["));
     assert!(s.contains("long output"));
 }
+
+/// Feishu card 2.0 types column_set.flex_mode as a STRING ("none"|"stretch"|
+/// "flow"); serializing the neutral bool directly produced
+/// `"flex_mode": false`, which made the API reject every column_set card with
+/// 230099/200621 ("unknown type flex_mode ... bool") — /help never rendered.
+#[test]
+fn help_card_serializes_flex_mode_as_official_string() {
+    let card = render_help_card("session", "blue");
+    let json = serde_json::to_string(&card).unwrap();
+    assert!(
+        json.contains(r#""flex_mode":"none""#),
+        "expected flex_mode serialized as the official string, got: {json}"
+    );
+    assert!(
+        !json.contains(r#""flex_mode":false"#),
+        "flex_mode must never serialize as a bool: {json}"
+    );
+}

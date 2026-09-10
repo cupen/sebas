@@ -367,9 +367,15 @@ impl Serialize for CardElement {
                 horizontal_spacing,
                 columns,
             } => {
+                // Feishu card 2.0 types column_set.flex_mode as a STRING
+                // ("none" | "stretch" | "flow"); serializing the neutral bool
+                // directly made the API reject every column_set card with
+                // 230099/200621 "unknown type flex_mode ... bool" — /help
+                // never rendered. false (equal-width columns) maps to "none".
+                let flex_mode_str = if *flex_mode { "stretch" } else { "none" };
                 let mut s = ser.serialize_struct("CardElement", 3)?;
                 s.serialize_field("tag", "column_set")?;
-                s.serialize_field("flex_mode", flex_mode)?;
+                s.serialize_field("flex_mode", flex_mode_str)?;
                 if let Some(spacing) = horizontal_spacing {
                     s.serialize_field("horizontal_spacing", spacing)?;
                 }

@@ -122,7 +122,7 @@ impl DispatchHandle {
         let routed = match &self.provider_forms {
             Some(forms) => {
                 if let Some(form) = forms.dispatch(form_name) {
-                    let out = form.handle(key, &value, &form_value, message_id).await;
+                    let out = form.handle(key.clone(), &value, &form_value, message_id).await;
                     self.emit(out).await;
                     true
                 } else {
@@ -132,7 +132,35 @@ impl DispatchHandle {
             None => false,
         };
         if !routed {
-            tracing::debug!("form callback for unwired form; ignored");
+            // Wire drift must never swallow a click silently: a form-routed
+            // payload carrying ACP button markers (session_id/request_id)
+            // re-enters the button path so permission replies still land;
+            // anything else is surfaced at WARN (not debug) so routing gaps
+            // stay visible at default log levels.
+            let acp_button_payload =
+                value.get("session_id").is_some() || value.get("request_id").is_some();
+            if acp_button_payload {
+                tracing::warn!(?value, "form-routed callback carries ACP button payload; retrying as button");
+                let action = ChannelAction {
+                    session_id: value
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    request_id: value
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    decision: value
+                        .get("decision")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    value,
+                };
+                self.on_button(key, action).await;
+                return;
+            }
+            tracing::warn!(?form_name, "form callback for unwired form; ignored");
         }
     }
 

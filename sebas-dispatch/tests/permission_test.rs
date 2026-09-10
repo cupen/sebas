@@ -191,6 +191,62 @@ async fn button_callback_emits_permission_reply() {
     }
 }
 
+/// Defense in depth: a form-routed callback that carries ACP button markers
+/// (session_id/request_id) must fall through to the button path instead of
+/// being ignored as an "unwired form" — a click must never vanish silently.
+#[tokio::test]
+async fn unwired_form_callback_with_acp_markers_falls_back_to_button_path() {
+    let map = SessionMap::new();
+    let key = ChannelKey::feishu("oc_x", None);
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+    router
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_fake".into(),
+            "Bash".into(),
+            serde_json::json!({"cmd": "ls"}),
+        )
+        .await;
+
+    router
+        .dispatch(ChannelEvent::FormCb {
+            key,
+            value: serde_json::json!({
+                "session_id": "s1",
+                "request_id": "r1",
+                "decision": "allow_once"
+            }),
+            form_value: Default::default(),
+            card_ref: Some("om_fake".into()),
+        })
+        .await;
+
+    let out = loop {
+        let got = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(got, Out::SendAcp { .. }) {
+            break got;
+        }
+    };
+    match out {
+        Out::SendAcp {
+            session_id,
+            cmd: AcpCommand::PermissionReply { request_id: rid, decision, .. },
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(rid, "r1");
+            assert!(matches!(decision, Decision::AllowOnce));
+        }
+        other => panic!("expected SendAcp PermissionReply, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn button_callback_on_dead_session_emits_help_card() {
     let map = SessionMap::new();
