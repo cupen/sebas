@@ -536,8 +536,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UpdaterRunner for NoopRunner {
-        async fn run(&self, _plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<()> {
-            Ok(())
+        async fn run(&self, _plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<crate::watchdog::updater::UpdateOutcome> {
+            Ok(crate::watchdog::updater::UpdateOutcome::Installed)
         }
     }
 

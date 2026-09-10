@@ -32,7 +32,7 @@ static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 #[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 async fn run_serial(args: UpdateArgs) -> Result<(), String> {
     let _guard = SERIAL.get_or_init(|| Mutex::new(())).lock().unwrap();
-    run(args).await.map_err(|e| e.to_string())
+    run(args).await.map(|_installed| ()).map_err(|e| e.to_string())
 }
 
 /// 在 `dir` 下写一个最小 sebas 配置：一个假 Feishu credential 满足

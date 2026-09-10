@@ -170,7 +170,11 @@ async fn handle_spawn_resume_without_feishu(
         }
     };
     if !resumed {
+        // session-lifecycle spec：rejected resume falls back to fresh AND the
+        // user is informed the old conversation is gone。进 transcript（同款
+        // fail_spawn/spawn-failed 模式），由 IM/webui 渲染，不只落日志。
         info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
+        router.notify_resume_fell_back(&key, &session_id).await;
     }
     router.seed_card(session_id.clone(), prompt.clone()).await;
     let idle_timeout = idle_timeout_from(cfg, &kind);

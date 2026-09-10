@@ -36,6 +36,15 @@ impl CoreSessionPort for ChannelPort {
     async fn snapshot(&self) -> Vec<SessionInfo> {
         self.backend.snapshot().await
     }
+    async fn unreachable_cause(&self) -> Option<String> {
+        use sebas_webui::session_backend::Reachability;
+        match self.backend.reachability().await {
+            Reachability::Reachable => None,
+            Reachability::StartupFailed { cause } | Reachability::AuthRejected { cause } | Reachability::Disconnected { cause } => {
+                Some(cause)
+            }
+        }
+    }
     async fn ensure_message(
         &self,
         key: ChannelKey,

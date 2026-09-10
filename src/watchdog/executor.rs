@@ -422,12 +422,19 @@ impl ControlExecutor {
                             .await
                             .mark_error(&operation_id, format!("{label} failed: {error}"));
                     }
-                    Ok(()) => {
+                    Ok(outcome) => {
                         if plan.dry_run {
                             self.control
                                 .lock()
                                 .await
                                 .mark_done(&operation_id, format!("{label} dry-run completed"));
+                        } else if outcome == crate::watchdog::updater::UpdateOutcome::UpToDate {
+                            // up-to-date short-circuit：无安装即无重启（watchdog
+                            // spec：no download, install, or restart）。
+                            self.control
+                                .lock()
+                                .await
+                                .mark_done(&operation_id, format!("{label} completed (already up to date; core not restarted)"));
                         } else {
                             // 升级/回滚落地：重启 core 并标记 is_upgrade，
                             // 交给 readiness 门 + 自动回滚钩子兜底。
@@ -668,6 +675,8 @@ fn confirmation_message(request: &ControlRequest) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::watchdog::updater::UpdateOutcome;
+
     use super::*;
     use crate::watchdog::control::{ErrorCode, OperationStatus};
     use crate::watchdog::services::service_from_str;
@@ -684,7 +693,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UpdaterRunner for FakeRunner {
-        async fn run(&self, plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<()> {
+        async fn run(&self, plan: &UpdatePlan, _watchdog: &WatchdogConfig) -> Result<UpdateOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.seen_dev.lock().unwrap().push(plan.dev);
             if self.panic {
@@ -693,7 +702,7 @@ mod tests {
             if self.fail {
                 return Err(SebasError::Upgrade("fake failure".into()));
             }
-            Ok(())
+            Ok(UpdateOutcome::Installed)
         }
     }
 
@@ -925,9 +934,9 @@ mod tests {
 
         #[async_trait::async_trait]
         impl UpdaterRunner for RollbackSpy {
-            async fn run(&self, plan: &UpdatePlan, _w: &WatchdogConfig) -> Result<()> {
+            async fn run(&self, plan: &UpdatePlan, _w: &WatchdogConfig) -> Result<UpdateOutcome> {
                 self.saw_rollback.lock().unwrap().push(plan.rollback);
-                Ok(())
+                Ok(UpdateOutcome::Installed)
             }
         }
 
@@ -952,9 +961,9 @@ mod tests {
 
         #[async_trait::async_trait]
         impl UpdaterRunner for Blocking {
-            async fn run(&self, _plan: &UpdatePlan, _w: &WatchdogConfig) -> Result<()> {
+            async fn run(&self, _plan: &UpdatePlan, _w: &WatchdogConfig) -> Result<UpdateOutcome> {
                 self.gate.notified().await;
-                Ok(())
+                Ok(UpdateOutcome::Installed)
             }
         }
 

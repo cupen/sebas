@@ -52,6 +52,29 @@ pub enum Cmd {
     /// Report reachability of the configured third-party agents.
     #[command(name = "agent-kinds")]
     AgentKinds(AgentKindsArgs),
+    /// Run the sebas-agent capability benchmark (agent-bench spec).
+    #[command(name = "agent-bench")]
+    AgentBench(AgentBenchArgs),
+}
+
+/// `sebas agent-bench` — scripted-client capability benchmark.
+#[derive(Parser)]
+pub struct AgentBenchArgs {
+    /// Run only the smoke subset (error_recovery + static_processing).
+    #[arg(long)]
+    pub smoke: bool,
+    /// Print each tool call/result as it runs.
+    #[arg(long)]
+    pub debug: bool,
+    /// Run twice and assert identical event-key sequences.
+    #[arg(long)]
+    pub replay: bool,
+    /// Record per-task event traces to this JSONL file.
+    #[arg(long)]
+    pub record: Option<String>,
+    /// Comma-separated task-id filter (default: all tasks).
+    #[arg(long, value_delimiter = ',')]
+    pub tasks: Vec<String>,
 }
 
 /// Core mode — the long-lived sebas core service.

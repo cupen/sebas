@@ -18,9 +18,23 @@ pub struct UpdatePlan {
     pub project_dir: Option<PathBuf>,
 }
 
+/// updater 一次执行的结果。`UpToDate`（release 无新版）不该重启 core——
+/// 重启只会无谓杀掉活跃会话（watchdog spec「up-to-date short-circuit: no
+/// download, install, or restart」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// 安装了新版本（或回滚落地）——需要重启 core 生效。
+    Installed,
+    /// 无事发生（已是最新版 / dry-run）——不重启。
+    UpToDate,
+}
+
+/// `sebas update`「已是最新版」的退出码（executor 据此跳过 core 重启）。
+pub const EXIT_UP_TO_DATE: i32 = 3;
+
 #[async_trait::async_trait]
 pub trait UpdaterRunner: Send + Sync {
-    async fn run(&self, plan: &UpdatePlan, watchdog: &WatchdogConfig) -> Result<()>;
+    async fn run(&self, plan: &UpdatePlan, watchdog: &WatchdogConfig) -> Result<UpdateOutcome>;
 }
 
 #[derive(Debug, Default)]
@@ -28,7 +42,7 @@ pub struct SubprocessUpdaterRunner;
 
 #[async_trait::async_trait]
 impl UpdaterRunner for SubprocessUpdaterRunner {
-    async fn run(&self, plan: &UpdatePlan, watchdog: &WatchdogConfig) -> Result<()> {
+    async fn run(&self, plan: &UpdatePlan, watchdog: &WatchdogConfig) -> Result<UpdateOutcome> {
         let exe = std::env::current_exe()
             .map_err(|e| SebasError::Upgrade(format!("获取 updater 路径失败: {e}")))?;
         let mut cmd = Command::new(exe);
@@ -73,9 +87,13 @@ impl UpdaterRunner for SubprocessUpdaterRunner {
         };
 
         if !status.success() {
+            // 3 = up-to-date：不是失败，executor 据此跳过 core 重启。
+            if status.code() == Some(EXIT_UP_TO_DATE) {
+                return Ok(UpdateOutcome::UpToDate);
+            }
             return Err(SebasError::Upgrade(format!("updater 退出码: {status}")));
         }
-        Ok(())
+        Ok(UpdateOutcome::Installed)
     }
 }
 
@@ -99,25 +117,25 @@ async fn terminate_then_kill(child: &mut tokio::process::Child) {
     }
 }
 
-pub async fn run_one_shot(plan: UpdatePlan) -> Result<()> {
+pub async fn run_one_shot(plan: UpdatePlan) -> Result<UpdateOutcome> {
     let raw = std::fs::read_to_string(&plan.config_path).unwrap_or_default();
     let cfg = crate::config::Config::parse(&raw)?;
     run_one_shot_with_config(plan, &cfg.watchdog).await
 }
 
-pub async fn run_one_shot_with_config(plan: UpdatePlan, watchdog: &WatchdogConfig) -> Result<()> {
+pub async fn run_one_shot_with_config(plan: UpdatePlan, watchdog: &WatchdogConfig) -> Result<UpdateOutcome> {
     let data_dir = upgrade::data_dir(watchdog);
     if plan.rollback {
         if plan.dry_run {
             println!("would rollback using data_dir={}", data_dir.display());
-            return Ok(());
+            return Ok(UpdateOutcome::UpToDate);
         }
         upgrade::try_lock(&data_dir)?;
         let result = upgrade::rollback(&data_dir);
         upgrade::unlock(&data_dir);
         result?;
         println!("rollback installed; restart required");
-        return Ok(());
+        return Ok(UpdateOutcome::Installed);
     }
 
     upgrade::try_lock(&data_dir)?;
@@ -130,19 +148,19 @@ pub async fn run_one_shot_with_config(plan: UpdatePlan, watchdog: &WatchdogConfi
     result
 }
 
-async fn update_release(watchdog: &WatchdogConfig, data_dir: &Path, dry_run: bool) -> Result<()> {
+async fn update_release(watchdog: &WatchdogConfig, data_dir: &Path, dry_run: bool) -> Result<UpdateOutcome> {
     let repo = &watchdog.upgrade.github_repo;
     let current = upgrade::current_version_raw();
     println!("checking latest release from {repo} (current {current})");
     let Some(release) = upgrade::check_latest(repo, &current).await? else {
         println!("already up to date");
-        return Ok(());
+        return Ok(UpdateOutcome::UpToDate);
     };
 
     println!("latest release: {}", release.version);
     if dry_run {
         println!("would download {}", release.download_url);
-        return Ok(());
+        return Ok(UpdateOutcome::UpToDate);
     }
 
     let tmp_dir = data_dir.join("downloads");
@@ -151,10 +169,10 @@ async fn update_release(watchdog: &WatchdogConfig, data_dir: &Path, dry_run: boo
     upgrade::install_version(&tmp, &release.version, data_dir)?;
     let _ = std::fs::remove_file(&tmp);
     println!("installed {}; restart required", release.version);
-    Ok(())
+    Ok(UpdateOutcome::Installed)
 }
 
-async fn update_dev(data_dir: &Path, project_dir: Option<&PathBuf>, dry_run: bool) -> Result<()> {
+async fn update_dev(data_dir: &Path, project_dir: Option<&PathBuf>, dry_run: bool) -> Result<UpdateOutcome> {
     let project_dir = project_dir.cloned().unwrap_or(
         std::env::current_dir()
             .map_err(|e| SebasError::Upgrade(format!("获取当前目录失败: {e}")))?,
@@ -169,14 +187,14 @@ async fn update_dev(data_dir: &Path, project_dir: Option<&PathBuf>, dry_run: boo
             )));
         }
         println!("would run cargo build --release");
-        return Ok(());
+        return Ok(UpdateOutcome::UpToDate);
     }
 
     let binary = upgrade::compile_dev(&project_dir).await?;
     let version = format!("dev-{}", upgrade::current_version_raw());
     upgrade::install_version(&binary, &version, data_dir)?;
     println!("installed {version}; restart required");
-    Ok(())
+    Ok(UpdateOutcome::Installed)
 }
 
 // ─── Readiness Policy ─────────────────────────────────────

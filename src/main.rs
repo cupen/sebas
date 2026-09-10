@@ -121,9 +121,24 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
             }
             Ok(())
         }
+        Cmd::AgentBench(args) => {
+            let record = args.record.as_deref().map(std::path::Path::new);
+            let out = sebas_agent::bench::run(args.smoke, &args.tasks, record, args.debug, args.replay).await;
+            print!("{}", out.dashboard());
+            let failed = out.results.iter().any(|r| !r.passed);
+            if failed {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::Update(args) => {
-            if let Err(e) = sebas::update::run(args.into()).await {
-                startup_failure_exit(&e);
+            let installed = match sebas::update::run(args.into()).await {
+                Ok(v) => v,
+                Err(e) => startup_failure_exit(&e),
+            };
+            if !installed {
+                // up-to-date：以专用退出码上报（executor 跳过 core 重启）。
+                std::process::exit(sebas::watchdog::updater::EXIT_UP_TO_DATE);
             }
             Ok(())
         }

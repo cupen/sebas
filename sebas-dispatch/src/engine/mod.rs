@@ -1027,6 +1027,21 @@ impl DispatchHandle {
         }
     }
 
+    /// session-lifecycle spec：rejected resume falls back to fresh AND the user
+    /// is informed the old conversation is gone。把提示写进该会话 transcript 并
+    /// 发布 Updated（同款 fail_spawn 模式，由 IM/webui 渲染），不只落日志。
+    pub async fn notify_resume_fell_back(&self, key: &ChannelKey, session_id: &str) {
+        self.transcript_push(
+            session_id,
+            TurnEntry::error(
+                0,
+                "旧会话已失效（agent 拒绝恢复），已为你开启全新会话。".to_string(),
+            ),
+        )
+        .await;
+        self.publish_updated(key).await;
+    }
+
     /// Start a new session from the WebUI (no Feishu card operations).
     /// Uses `Out::WebSpawn` which the dispatcher handles without sending
     /// cards to Feishu. Returns the SessionKey for the new session.

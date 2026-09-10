@@ -419,16 +419,21 @@ impl CcDriver {
                     // intercepts before the channel); never expected here.
                     tracing::debug!("ignoring unexpected PermissionReply on session channel");
                 }
-                Sel::Cmd(Some(AcpCommand::SetModel { .. })) => {
+                Sel::Cmd(Some(AcpCommand::SetModel { model_id, .. })) => {
                     // 模型选择是 ACP 原生能力（`session/set_config_option`），
-                    // Claude 专用驱动不支持。显式报错而不是静默丢弃，调用方
-                    // 会把它呈现给用户（acp-driver spec "Unsupported agent
-                    // reports explicit error"）。
-                    self.terminal(
-                        "set model 需要支持 configOptions 的 ACP 会话；当前驱动（Claude 专用）不支持",
-                    )
-                    .await;
-                    return;
+                    // Claude 专用驱动不支持。发非终态 Error 并保活会话（acp-driver
+                    // spec "Unsupported agent reports explicit error" + acp-model-selection：
+                    // 失败后当前模型不变、会话不被销毁）。
+                    let _ = self
+                        .evt_tx
+                        .send(AcpEvent::Error {
+                            session_id: self.session_id.clone(),
+                            message: format!(
+                                "set model {model_id:?} 需要支持 configOptions 的 ACP 会话；当前驱动（Claude 专用）不支持，模型未变"
+                            ),
+                            terminal: false,
+                        })
+                        .await;
                 }
                 Sel::Msg(Some(Ok(m))) => {
                     // Any real message from the child counts as activity:
@@ -575,7 +580,11 @@ fn permission_hook(
             let HookInput::PreToolUse(pre) = input else {
                 return allow_output("non-PreToolUse hook passthrough");
             };
-            let request_id = tool_use_id.unwrap_or_else(|| format!("req-{}", uuid::Uuid::new_v4()));
+            // request_id 以 `claude:` 前缀命名空间化，与 agent-driver spec「request_id
+            // as `<kind-slug>:<raw-id>`」一致，避免与通用 ACP 驱动的同名 raw id 在
+            // 共享 perm_cards/待决映射里冲突。
+            let raw_id = tool_use_id.unwrap_or_else(|| format!("req-{}", uuid::Uuid::new_v4()));
+            let request_id = format!("claude:{raw_id}");
             let (tx, rx) = oneshot::channel();
             pending.lock().await.insert(request_id.clone(), tx);
             // Suspend hang detection while the user decides (openspec/specs/acp-driver/spec.md:

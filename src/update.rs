@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::watchdog::updater::{UpdatePlan, run_one_shot};
+use crate::watchdog::updater::{UpdateOutcome, UpdatePlan, run_one_shot};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -11,13 +11,16 @@ pub struct UpdateArgs {
     pub project_dir: Option<PathBuf>,
 }
 
-pub async fn run(args: UpdateArgs) -> Result<()> {
-    run_one_shot(UpdatePlan {
+/// `Ok(true)` = 有安装/回滚落地；`Ok(false)` = up-to-date（进程以
+/// `EXIT_UP_TO_DATE` 退出，watchdog executor 据此跳过 core 重启）。
+pub async fn run(args: UpdateArgs) -> Result<bool> {
+    let outcome = run_one_shot(UpdatePlan {
         config_path: args.config,
         dev: args.dev,
         dry_run: args.dry_run,
         rollback: args.rollback,
         project_dir: args.project_dir,
     })
-    .await
+    .await?;
+    Ok(outcome == UpdateOutcome::Installed)
 }
