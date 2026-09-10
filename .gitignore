@@ -3,6 +3,7 @@ target/
 Cargo.lock.bak
 config.toml
 .xkeeper.toml
+.zcode/
 
 
 # Beads / Dolt files (added by bd init)
