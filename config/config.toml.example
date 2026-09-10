@@ -1,7 +1,4 @@
-# 飞书机器人接入（可选）。凭据只配其一会启动报错。
-# enabled 缺省 = 隐式判定「app_id/app_secret 双非空」。
 [feishu]
-# enabled = true
 app_id = ""
 app_secret = ""
 # owner_id = "ou_xxx"        # 单用户鉴权；留空 = 不过滤发送者（启动时 warn）
@@ -12,9 +9,6 @@ app_secret = ""
 #   driver = "acp"     → 任意支持 Agent Client Protocol v1 的 CLI（opencode/gemini…）
 [acp.agents.claude]
 driver = "claude"
-path = "claude"       # 支持 PATH 查找
-args = []
-# sessions_dir / work_dir / startup_timeout_secs / idle_kill_secs 均有默认值
 
 # [acp.agents.opencode]
 # driver = "acp"
