@@ -271,13 +271,22 @@ pub async fn run(
         let backend = webui_backend.clone();
         let router_info = build_router_info(router_cfg.as_ref());
         // 创建会话下拉的可达 agent 列表：从 `cfg.acp.agents` 提取 (slug, argv)。
-        let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = cfg
-            .acp
-            .agents
-            .keys()
-            .map(|slug| sebas_webui::agent_kinds::AgentKindSource {
-                slug: slug.clone(),
-                command: cfg.acp.command_for(slug).unwrap_or_default(),
+        // 排序确定性（workbench-agent-wire-fix）：HashMap 迭代序随机，「首个
+        // 可达 agent」预选不能在进程间漂移——default kind 最先，其余字典序。
+        let mut agent_slugs: Vec<&String> = cfg.acp.agents.keys().collect();
+        agent_slugs.sort();
+        let default_kind = cfg.acp.default_kind().to_string();
+        agent_slugs.sort_by_key(|s| s.as_str() != default_kind.as_str());
+        let agent_kinds: Vec<sebas_webui::agent_kinds::AgentKindSource> = agent_slugs
+            .into_iter()
+            .map(|slug| {
+                let driver = cfg.acp.driver_tag_of(slug);
+                sebas_webui::agent_kinds::AgentKindSource {
+                    slug: slug.clone(),
+                    command: cfg.acp.command_for(slug).unwrap_or_default(),
+                    driver,
+                    display: cfg.acp.display_for(slug),
+                }
             })
             .collect();
         // add-webui-picker-workdir-start：browse-dirs 的服务端默认浏览根 =

@@ -79,6 +79,8 @@ pub trait StateStoreEngine: Send + Sync {
     async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String>;
     /// Remove a project by path.
     async fn remove_project(&self, path: &str) -> Result<bool, String>;
+    /// 记录项目级默认 agent（workbench-agent-wire-fix 2.6）。按稳定 id 定位。
+    async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String>;
 }
 
 /// 全局状态存储引擎 (add-state-store)。

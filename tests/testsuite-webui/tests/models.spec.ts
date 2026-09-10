@@ -96,7 +96,7 @@ test.describe('模型管理覆盖', () => {
       await resetState(page.request)
       const key = await createSession(page.request, {
         prompt: 'model-switch',
-        backend: 'acp:fakeacp',
+        agent: 'fakeacp',
       })
       // The generic-ACP turn completes its echo response but the session
       // stays `working` (pre-existing: that driver emits no Finished event).
@@ -142,7 +142,7 @@ test.describe('模型管理覆盖', () => {
       await resetState(page.request)
       const key = await createSession(page.request, {
         prompt: 'model-reject',
-        backend: 'acp:fakeacp',
+        agent: 'fakeacp',
       })
       // Same pre-existing no-Finished trait: the model surface appears once
       // session/new lands.

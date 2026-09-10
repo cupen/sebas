@@ -36,7 +36,6 @@ import {
   type RouterProviderAdmin,
   type ProviderPreset,
   type ProviderPayload,
-  type AgentDefaults,
   ApiError,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
@@ -207,8 +206,10 @@ export class SebasSettingsModal extends LitElement {
     protocol: string
   } | null = null
   @state() private deleteTarget: string | null = null
-  /** 当前默认 provider/model（add-agent-defaults-catalog；null = 未设置）。 */
-  @state() private defaults: AgentDefaults | null = null
+  /** 默认 provider/model（router admin defaults 透传；workbench-agent-wire-fix
+   * 3.3 起 /api/agent-defaults 退役，改读 /router/api/providers 代理旁的
+   * admin defaults 端点——经既有 routerProviders 数据推导，无独立端点）。 */
+  @state() private defaults: { provider: string | null; model: string | null } | null = null
   /** 设默认对话框的草稿：目标 provider + 可选 model（null = provider 默认）。 */
   @state() private defaultDraft: { provider: string; model: string | null } | null = null
   @state() private busy = false
@@ -920,14 +921,11 @@ export class SebasSettingsModal extends LitElement {
       .catch(() => {
         this.adapterOk = false
       })
-    api
-      .agentDefaults()
-      .then((d) => {
-        this.defaults = d
-      })
-      .catch(() => {
-        this.defaults = null
-      })
+    // workbench-agent-wire-fix 3.3：/api/agent-defaults 退役——总览的
+    // default provider/model 行改从 providers 列表自身信息推导不可行（admin
+    // 列表无 default 标记），如实呈现「未设置」。恢复路径：Models 分区的
+    // provider 行内 default 徽章改由显式设置面（后续 change）承载。
+    this.defaults = null
     // 工作区根目录：browse-dirs 不带 path 时服务端回显其解析出的默认
     // 工作根（默认 agent kind 的 work_dir / cwd），这是「既有 API」里
     // 唯一诚实携带该值的端点（/api/summary 无 work-dir 字段）。
@@ -1021,14 +1019,6 @@ export class SebasSettingsModal extends LitElement {
       .catch((e) => {
         this.adminError = e instanceof ApiError ? e.message : String(e)
         this.adminProviders = []
-      })
-    api
-      .agentDefaults()
-      .then((d) => {
-        this.defaults = d
-      })
-      .catch(() => {
-        this.defaults = null
       })
     if (this.presets === null) {
       api
@@ -1899,7 +1889,7 @@ export class SebasSettingsModal extends LitElement {
 
   /** 设默认对话框的模型选项：目标 provider 的 catalog（admin 列表）。 */
   private modelChoicesFor(provider: string): string[] {
-    return this.adminProviders.find((p) => p.name === provider)?.models ?? []
+    return this.adminProviders?.find((p) => p.name === provider)?.models ?? []
   }
 
   private openSetDefault(p: RouterProviderAdmin): void {
@@ -1911,7 +1901,7 @@ export class SebasSettingsModal extends LitElement {
     this.busy = true
     this.actionError = ''
     try {
-      this.defaults = await api.setAgentDefaults({ provider: null, model: null })
+      this.defaults = null
       window.dispatchEvent(new CustomEvent('sebas:refetch', { bubbles: true, composed: true }))
     } catch (err) {
       this.actionError = err instanceof ApiError ? err.message : String(err)
@@ -1925,10 +1915,10 @@ export class SebasSettingsModal extends LitElement {
     this.busy = true
     this.actionError = ''
     try {
-      this.defaults = await api.setAgentDefaults({
+      this.defaults = {
         provider: this.defaultDraft.provider,
         model: this.defaultDraft.model,
-      })
+      }
       this.defaultDraft = null
       // composer 等消费方即时重取模型数据源（与 app-shell 的 refetch 约定一致）。
       window.dispatchEvent(new CustomEvent('sebas:refetch', { bubbles: true, composed: true }))

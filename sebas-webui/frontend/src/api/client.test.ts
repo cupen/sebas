@@ -59,27 +59,27 @@ describe('api wire shapes', () => {
     expect((err as ApiError).status).toBe(404)
   })
 
-  it('createSession forwards prompt, project_dir and the backend hint', async () => {
+  it('createSession forwards prompt, project_id and the agent id (D2 wire)', async () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(okResponse({ key: 'oc_k' }))
 
-    await api.createSession('do things', '/tmp/proj', 'native')
+    await api.createSession({ prompt: 'do things', projectId: 'proj-abc123def456', agent: 'native' })
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/sessions')
     expect(JSON.parse(String(init.body))).toEqual({
       prompt: 'do things',
-      project_dir: '/tmp/proj',
-      backend: 'native',
+      project_id: 'proj-abc123def456',
+      agent: 'native',
       model: null,
     })
 
-    await api.createSession('inbox task', null)
+    await api.createSession({ prompt: 'inbox task', agent: 'claudecode' })
     const [, init2] = fetchMock.mock.calls[1] as [string, RequestInit]
     expect(JSON.parse(String(init2.body))).toEqual({
       prompt: 'inbox task',
-      project_dir: null,
-      backend: null,
+      project_id: null,
+      agent: 'claudecode',
       model: null,
     })
   })

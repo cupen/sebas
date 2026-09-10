@@ -105,7 +105,7 @@ export class SebasFolderPicker extends LitElement {
       this.loaded = true
       tree.innerHTML = ''
       for (const entry of resp.entries) {
-        tree.append(this.makeItem(joinChildPath(resp.path, entry.name), entry.name, entry.has_subdirs))
+        tree.append(this.makeItem(joinChildPath(resp.path, entry.name), entry.name, entry.has_subdirs ?? false))
       }
     } catch {
       tree.innerHTML = `<div class="empty-msg">无法加载目录</div>`
@@ -137,7 +137,7 @@ export class SebasFolderPicker extends LitElement {
       this.expandError = null
       if (resp.entries.length === 0) return false
       for (const entry of resp.entries) {
-        item.append(this.makeItem(joinChildPath(path, entry.name), entry.name, entry.has_subdirs))
+        item.append(this.makeItem(joinChildPath(path, entry.name), entry.name, entry.has_subdirs ?? false))
       }
       return true
     } catch (e) {

@@ -74,7 +74,7 @@ async fn create_session_broadcasts_over_websocket() {
     let http = reqwest::Client::new();
     let resp = http
         .post(format!("{base}/api/sessions"))
-        .json(&serde_json::json!({ "prompt": "hello" }))
+        .json(&serde_json::json!({ "prompt": "hello", "agent": "claude" }))
         .send()
         .await
         .expect("create request failed");
@@ -110,7 +110,7 @@ async fn one_client_disconnecting_does_not_starve_others() {
     let http = reqwest::Client::new();
     let resp = http
         .post(format!("{base}/api/sessions"))
-        .json(&serde_json::json!({ "prompt": "doomed" }))
+        .json(&serde_json::json!({ "prompt": "doomed", "agent": "claude" }))
         .send()
         .await
         .unwrap();

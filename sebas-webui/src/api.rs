@@ -197,9 +197,11 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         "available_models": info.available_models,
         // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
         "agent_kind": info.agent_kind,
-        // （wire-webui-sebas-agent-e2e D4）会话所属执行体（acp/native）；
-        // null = 未打标（旧快照兼容）。
-        "backend": info.backend,
+        // 绑定的项目，按稳定 id（workbench-agent-wire-fix 2.5）；null = inbox。
+        "project_id": info
+            .project_dir
+            .as_deref()
+            .map(crate::projects::project_id_for),
     });
     Json(data).into_response()
 }
@@ -314,12 +316,26 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
-/// GET /api/agent-kinds — the reachable third-party agent kinds for the
-/// create-session dropdown, plus their failure causes when unreachable. The
-/// client lists only `reachable` kinds alongside the built-in `native` entry.
+/// GET /api/agents — the agent catalog（workbench-agent-wire-fix 3.2），
+/// agent 可用性的唯一真源：每个配置的 agent 一行（id/display/reachable/
+/// cause?/version?）+ 内置内核 `"native"` 一行（可用性来自执行体自身的
+/// 凭据上报，与 ACP 的 binary 探测语义不同源，如实区分）。`driver` 是
+/// 配置层概念，不在响应中出现。
 pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
-    let kinds = state.agent_kinds.agent_kinds().await;
-    Json(json!({ "kinds": kinds })).into_response()
+    let mut agents = state.agent_kinds.agent_kinds().await;
+    let native = state
+        .backend
+        .execution_bodies()
+        .await
+        .and_then(|bodies| bodies.into_iter().find(|b| b.name == "native"));
+    agents.push(crate::agent_kinds::AgentKindInfo {
+        id: "native".into(),
+        display: "Native Kernel".into(),
+        reachable: native.as_ref().map(|n| n.ok).unwrap_or(false),
+        cause: native.and_then(|n| n.cause),
+        version: None,
+    });
+    Json(json!({ "agents": agents })).into_response()
 }
 
 // ---- Auth endpoints（webui 登录鉴权，见 `auth` 模块） ----
@@ -437,15 +453,17 @@ pub struct CreateSessionRequest {
     pub prompt: Option<String>,
     /// Optional project directory for the new session's working dir. When
     /// omitted (or null), the session is bound to the workbench inbox
-    /// (`project_dir = None`). The backend may reject a non-directory
-    /// path with `UnusableProjectDir` — the client surfaces that verbatim.
+    /// Project to bind, referenced by its stable id (`proj-<12hex>`,
+    /// workbench-agent-wire-fix D2). `None` = inbox (no project). The raw
+    /// directory path is resolved server-side from the registry — the path
+    /// is never a wire identifier.
     #[serde(default)]
-    pub project_dir: Option<String>,
-    /// Optional execution-backend hint (composite seams route on it, e.g.
-    /// `"acp"` for the Claude Code bridge vs `"native"` for the built-in
-    /// agent). Single-backend seams ignore it.
-    #[serde(default)]
-    pub backend: Option<String>,
+    pub project_id: Option<String>,
+    /// 必填：目标 agent id——`[acp.agents.*]` 配置键名（如 `claudecode`、
+    /// `codex`）或保留值 `"native"`（内置内核）。旧 `backend` 字段与
+    /// driver 名不再是合法 wire（会话创建后 agent 不可变，故创建时必须
+    /// 显式选定）。
+    pub agent: String,
     /// Optional model id for the new session (add-acp-model-selection D3):
     /// applied after the session is established, before the first prompt.
     /// Only agents that expose a `model` config option honor it; for others
@@ -474,14 +492,35 @@ pub async fn create_session(
     State(state): State<WebUiState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Response {
+    // wire 词汇（workbench-agent-wire-fix D2）：agent 必填且只认 agent id
+    // （配置键名 / "native"）；旧 `backend` 字段显式拒绝，帮助调用方迁移。
+    if req.agent.is_empty() || req.agent.contains(':') {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "agent 字段必填，且必须是配置的 agent id 或 \"native\"",
+        );
+    }
+    // project_id → 内部工作目录路径（path 不是 wire 标识，解析发生在服务端）。
+    let project_dir = match &req.project_id {
+        Some(id) => match projects_from_backend(&state)
+            .await
+            .into_iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            .and_then(|p| p.get("path").and_then(|v| v.as_str()).map(str::to_string))
+        {
+            Some(dir) => Some(dir),
+            None => return api_error(StatusCode::BAD_REQUEST, "未知 project_id: {id}"),
+        },
+        None => None,
+    };
     let prompt = req.prompt.unwrap_or_default();
     // 0-turn 占位（P2）：无 prompt 时只建行、不 spawn 子进程、不把空串当
-    // prompt 发给 agent（opencode 收到 `session/prompt ""` 会挂起）。kind/
-    // model/project_dir 记在 mapping 上，首条消息到达时才 spawn。
+    // prompt 发给 agent（opencode 收到 `session/prompt ""` 会挂起）。agent/
+    // model/project 记在 mapping 上，首条消息到达时才 spawn。
     let key = if prompt.trim().is_empty() {
         match state
             .backend
-            .create_placeholder(req.project_dir.clone(), req.backend.clone(), req.model.clone())
+            .create_placeholder(project_dir.clone(), &req.agent, req.model.clone())
             .await
         {
             Ok(k) => k,
@@ -490,7 +529,7 @@ pub async fn create_session(
     } else {
         match state
             .backend
-            .spawn_with(prompt, req.project_dir, req.backend.as_deref(), req.model)
+            .spawn_with(prompt, project_dir.clone(), &req.agent, req.model)
             .await
         {
             Ok(k) => k,
@@ -498,6 +537,14 @@ pub async fn create_session(
         }
     };
     state.backend.set_focus(Some(key.clone())).await;
+    // 2.6：项目级默认 agent——该项目下最近一次创建会话所用的 agent，
+    // 下次在该项目创建会话时 composer 预选它。状态库优先，文件注册表回退。
+    if let Some(id) = &req.project_id {
+        let payload = json!({ "op": "set_default_agent", "id": id, "agent": req.agent });
+        if state.backend.state_mutate("projects", payload).await.is_err() {
+            crate::projects::set_default_agent(id, &req.agent);
+        }
+    }
     let encoded = encode_session_key(&key);
     (StatusCode::CREATED, Json(json!({ "key": encoded }))).into_response()
 }
@@ -626,18 +673,35 @@ pub async fn browse_dirs(
 /// 本地文件注册表（webui 进程独占视图，spec 未约束其降级语义）。
 /// 返回 JSON 数组（ProjectRow / ProjectEntry 形状，前端兼容）。
 async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
-    if let Some(v) = state.backend.state_snapshot("projects").await {
-        return v
-            .get("projects")
+    let mut projects = if let Some(v) = state.backend.state_snapshot("projects").await {
+        v.get("projects")
             .and_then(serde_json::Value::as_array)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+    } else {
+        // 回退：webui 本地文件注册表（list() 自带 id 回填）。
+        return crate::projects::list()
+            .into_iter()
+            .map(|e| serde_json::to_value(&e).unwrap_or_default())
+            .collect();
+    };
+    // 稳定 id 回填（workbench-agent-wire-fix 2.4）：迁移 2 之前的行 id 为
+    // 空——id 是 path 的确定性哈希，按需计算即可，无需写回。
+    for p in projects.iter_mut() {
+        let needs_id = p
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::is_empty)
+            .unwrap_or(true);
+        let path = p.get("path").and_then(|v| v.as_str()).map(str::to_string);
+        if needs_id
+            && let Some(path) = path
+            && let Some(obj) = p.as_object_mut()
+        {
+            obj.insert("id".into(), json!(crate::projects::project_id_for(&path)));
+        }
     }
-    // 回退：webui 本地文件注册表。
-    crate::projects::list()
-        .into_iter()
-        .map(|e| serde_json::to_value(&e).unwrap_or_default())
-        .collect()
+    projects
 }
 
 /// GET /api/projects — list all registered projects（状态库优先，文件回退）。
@@ -731,33 +795,43 @@ pub async fn projects_add(
     (StatusCode::CREATED, Json(entry)).into_response()
 }
 
-/// POST /api/projects/{path}/remove — unregister a project（状态库优先）。
+/// POST /api/projects/{id}/remove — unregister a project（状态库优先）。
+/// 路径参数是稳定项目 id（workbench-agent-wire-fix 2.5）：先解析 id →
+/// 内部 path（状态库以 path 为键），再走既有删除。
 pub async fn projects_remove(
     State(state): State<WebUiState>,
-    Path(path): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    let decoded = match urlencoding::decode(&path) {
+    let id = match urlencoding::decode(&id) {
         Ok(d) => d.into_owned(),
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid path encoding"),
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
+    };
+    let Some(path) = projects_from_backend(&state)
+        .await
+        .into_iter()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        .and_then(|p| p.get("path").and_then(|v| v.as_str()).map(str::to_string))
+    else {
+        return api_error(StatusCode::NOT_FOUND, "project not found");
     };
     // 先试状态库；失败（不存在或不可达）再试文件。
     match state
         .backend
-        .state_mutate("projects", json!({ "op": "remove", "path": decoded.clone() }))
+        .state_mutate("projects", json!({ "op": "remove", "path": path }))
         .await
     {
         Ok(()) => Json(json!({ "status": "removed" })).into_response(),
         Err(e) => {
             if e.contains("不存在") {
                 // 状态库没有 → 试文件注册表。
-                match crate::projects::remove(&decoded) {
+                match crate::projects::remove_by_id(&id) {
                     Ok(true) => Json(json!({ "status": "removed" })).into_response(),
                     Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
                     Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "remove failed"),
                 }
             } else {
                 // 状态库不可达 → 回退文件。
-                match crate::projects::remove(&decoded) {
+                match crate::projects::remove_by_id(&id) {
                     Ok(true) => Json(json!({ "status": "removed" })).into_response(),
                     Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
                     Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, e),
@@ -769,9 +843,10 @@ pub async fn projects_remove(
 
 #[derive(Deserialize)]
 pub struct ReorderRequest {
-    /// Ordered list of canonical project paths; entries not listed are
-    /// appended at the end (preserving their relative add-time order).
-    pub paths: Vec<String>,
+    /// Ordered list of stable project ids (workbench-agent-wire-fix 2.5);
+    /// entries not listed are appended at the end (preserving their
+    /// relative add-time order).
+    pub ids: Vec<String>,
 }
 
 /// POST /api/projects/reorder — persist the user's rail ordering（状态库优先）。
@@ -779,28 +854,28 @@ pub async fn projects_reorder(
     State(state): State<WebUiState>,
     Json(req): Json<ReorderRequest>,
 ) -> Response {
-    // 读当前列表 → 按新顺序重排（未知路径落地为 add_time 顺序尾部）→ save。
+    // 读当前列表 → 按新顺序重排（未知 id 落地为 add_time 顺序尾部）→ save。
     let mut projects = projects_from_backend(&state).await;
-    let mut by_path: std::collections::HashMap<String, serde_json::Value> =
+    let mut by_id: std::collections::HashMap<String, serde_json::Value> =
         projects.drain(..).map(|p| {
-            let path = p
-                .get("path")
+            let id = p
+                .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            (path, p)
+            (id, p)
         }).collect();
-    let mut next: Vec<serde_json::Value> = Vec::with_capacity(req.paths.len());
+    let mut next: Vec<serde_json::Value> = Vec::with_capacity(req.ids.len());
     let mut seen = std::collections::HashSet::new();
-    for path in &req.paths {
-        if seen.insert(path.clone())
-            && let Some(entry) = by_path.remove(path)
+    for id in &req.ids {
+        if seen.insert(id.clone())
+            && let Some(entry) = by_id.remove(id)
         {
             next.push(entry);
         }
     }
     // 未提及的项目追加尾部（按 added_at 稳定）。
-    let mut tail: Vec<(i64, serde_json::Value)> = by_path
+    let mut tail: Vec<(i64, serde_json::Value)> = by_id
         .into_values()
         .map(|v| {
             let t = v
@@ -838,24 +913,29 @@ pub async fn projects_reorder(
     }
 }
 
-/// GET /api/projects/{path}/branch — current git branch (TTL-cached server-side)。
+/// GET /api/projects/{id}/branch — current git branch (TTL-cached server-side)。
 /// Git 探测是本地文件系统操作；backend 不可达时列表来自文件回退，语义一致。
+/// 路径参数是稳定项目 id（workbench-agent-wire-fix 2.5）。
 pub async fn projects_branch(
     State(state): State<WebUiState>,
-    Path(path): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    let decoded = match urlencoding::decode(&path) {
+    let id = match urlencoding::decode(&id) {
         Ok(d) => d.into_owned(),
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid path encoding"),
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
     };
     let projects = projects_from_backend(&state).await;
     let entry = projects
         .iter()
-        .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(decoded.as_str()));
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
     let Some(entry) = entry else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
-    let accessible = crate::projects::is_accessible(&decoded);
+    let Some(project_path) = entry.get("path").and_then(|v| v.as_str()).map(str::to_string)
+    else {
+        return api_error(StatusCode::NOT_FOUND, "project not found");
+    };
+    let accessible = crate::projects::is_accessible(&project_path);
     // TTL 缓存：branch_at 距今 < 30s 用缓存。
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -866,12 +946,12 @@ pub async fn projects_branch(
     let branch = if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some() {
         cached_branch
     } else {
-        let fresh = crate::projects::probe_git_branch(std::path::Path::new(&decoded));
+        let fresh = crate::projects::probe_git_branch(std::path::Path::new(&project_path));
         // 简化：返回探测值，不强制写回（分支缓存不是共享真源）。
         fresh
     };
     Json(json!({
-        "path": decoded,
+        "project_id": id,
         "branch": branch,
         "accessible": accessible,
     }))

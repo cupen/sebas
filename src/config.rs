@@ -45,6 +45,9 @@ pub enum AgentConfig {
         startup_timeout_secs: u64,
         #[serde(default = "default_idle_kill")]
         idle_kill_secs: u64,
+        /// 产品展示名（可选，仅用于 UI 呈现；缺省 = agent 键名本身）。
+        #[serde(default)]
+        display: Option<String>,
     },
 }
 
@@ -128,6 +131,10 @@ pub struct AcpClaudeConfig {
     pub path: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// 产品展示名（workbench-agent-wire-fix 3.1，可选）：仅用于 UI 呈现，
+    /// 不是 wire 标识；缺省由 driver 推导（"Claude Code"）。
+    #[serde(default)]
+    pub display: Option<String>,
     #[serde(default = "default_sessions_dir")]
     pub sessions_dir: String,
     #[serde(default)]
@@ -143,6 +150,7 @@ impl Default for AcpClaudeConfig {
         Self {
             path: default_claude_path(),
             args: vec![],
+            display: None,
             sessions_dir: default_sessions_dir(),
             work_dir: None,
             startup_timeout_secs: default_startup_timeout(),
@@ -196,6 +204,25 @@ impl AcpConfig {
             }
             AgentConfig::Acp { command, .. } => command.clone(),
         })
+    }
+
+    /// 静态 launch 策略标签（配置层概念，不上 wire；workbench-agent-wire-fix
+    /// D3/A）：`"claude"` 或 `"acp"`。未知 kind 返回空串。
+    pub fn driver_tag_of(&self, kind: &str) -> String {
+        match self.agents.get(kind) {
+            Some(AgentConfig::Claude(_)) => "claude".to_string(),
+            Some(AgentConfig::Acp { .. }) => "acp".to_string(),
+            None => String::new(),
+        }
+    }
+
+    /// 产品展示名（可选 display 字段；缺省 None 由 catalog 层按 driver 推导）。
+    pub fn display_for(&self, kind: &str) -> Option<String> {
+        match self.agents.get(kind) {
+            Some(AgentConfig::Claude(c)) => c.display.clone(),
+            Some(AgentConfig::Acp { display, .. }) => display.clone(),
+            None => None,
+        }
     }
 
     /// The configured work directory for an agent kind (Claude only for now).

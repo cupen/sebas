@@ -24,12 +24,13 @@ use tracing::info;
 
 /// 当前二进制已知的最高 schema 版本。
 /// 每次新增迁移时 +1。
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 /// 迁移链: 顺序数组, 索引 = 版本号 - 1。
 /// 迁移 1 = 建表 (无历史数据)。
 pub const MIGRATIONS: &[fn(&Transaction<'_>) -> SqlResult<()>] = &[
     migration_1_create_tables,
+    migration_2_project_identity,
 ];
 
 /// 迁移 1: 创建所有初始表。
@@ -88,6 +89,26 @@ fn migration_1_create_tables(tx: &Transaction<'_>) -> SqlResult<()> {
 
     // 提升版本号 (迁移 1 → version 1)
     tx.pragma_update(None, "user_version", 1i64)?;
+    Ok(())
+}
+
+/// 迁移 2 (workbench-agent-wire-fix 2.4)：projects 表加稳定 id 与
+/// 项目级默认 agent 列。id（`proj-<12hex>`）对既有行按 path 回填——
+/// SQLite 无表达式默认值，分三步：加列 → UPDATE 回填 → 此后由应用层
+/// 写入。default_agent 为 NULL（操作员尚未在该项目下建过会话）。
+fn migration_2_project_identity(tx: &Transaction<'_>) -> SqlResult<()> {
+    // id 的回填不在 SQL 里做：`proj-<12hex>` 是 path 的 SHA-256 前缀
+    // （sebas_webui::projects::project_id_for），表达式方言不保证可用。
+    // 迁移只加列；应用层首次读取（projects 列表/行转换）时用同一算法
+    // 回填并持久化。NULL 不参与 UNIQUE 约束，索引安全。
+    tx.execute_batch(
+        "
+        ALTER TABLE projects ADD COLUMN id TEXT;
+        ALTER TABLE projects ADD COLUMN default_agent TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_id ON projects(id);
+        ",
+    )?;
+    tx.pragma_update(None, "user_version", 2i64)?;
     Ok(())
 }
 

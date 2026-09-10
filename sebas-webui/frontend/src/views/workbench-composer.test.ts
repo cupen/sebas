@@ -51,7 +51,7 @@ vi.mock('../api/client.js', () => ({
     settings: vi.fn(),
     sessions: vi.fn(),
     createSession: vi.fn(),
-    agentKinds: vi.fn(),
+    agents: vi.fn(),
     sendMessage: vi.fn(),
     setSessionModel: vi.fn(),
     agentDefaults: vi.fn(),
@@ -104,7 +104,9 @@ const summaryNativeAvailable: Summary = {
 
 async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   const el = document.createElement('sebas-workbench-composer') as SebasWorkbenchComposer
+  if (initial.projectId !== undefined) el.projectId = initial.projectId
   if (initial.projectDir !== undefined) el.projectDir = initial.projectDir
+  if (initial.projectDefaultAgent !== undefined) el.projectDefaultAgent = initial.projectDefaultAgent
   if (initial.providerLabel !== undefined) el.providerLabel = initial.providerLabel
   if (initial.sessionKey !== undefined) el.sessionKey = initial.sessionKey
   if (initial.agentKind !== undefined) el.agentKind = initial.agentKind
@@ -142,11 +144,12 @@ beforeEach(() => {
       providers: [],
     },
   })
-  ;(api.agentKinds as ReturnType<typeof vi.fn>).mockResolvedValue({
-    kinds: [
-      { name: 'claude', slug: 'claude', reachable: true, version: 'v1' },
-      { name: 'gemini', slug: 'gemini', reachable: true, version: 'v2' },
-      { name: 'codex', slug: 'codex', reachable: false, cause: 'command not found' },
+  ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+    agents: [
+      { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
+      { id: 'gemini', display: 'Gemini', reachable: true, version: 'v2' },
+      { id: 'codex', display: 'Codex', reachable: false, cause: 'command not found' },
+      { id: 'native', display: 'Native Kernel', reachable: true },
     ],
   })
   ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -239,7 +242,7 @@ describe('sebas-workbench-composer', () => {
     ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(api.createSession).toHaveBeenCalledWith('use this model', null, 'acp', 'pro-model')
+    expect(api.createSession).toHaveBeenCalledWith({ prompt: 'use this model', projectId: null, agent: expect.any(String), model: 'pro-model' })
   })
 
   it('hides the model dropdown when no session exposes available_models', async () => {
@@ -276,7 +279,7 @@ describe('sebas-workbench-composer', () => {
     expect(sel).toBeNull()
   })
 
-  it('submit calls createSession with project_dir null when projectDir prop is null', async () => {
+  it('submit calls createSession with project_id null when projectId prop is null', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_inbox' })
     const el = await mount({ projectDir: null })
@@ -301,15 +304,20 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('hello agent', null, 'acp', null)
+    expect(api.createSession).toHaveBeenCalledWith({
+      prompt: 'hello agent',
+      projectId: null,
+      agent: 'claude', // 预选 = 首个可达 agent（mock catalog 的第一项）
+      model: null,
+    })
     expect(created).toHaveBeenCalledTimes(1)
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_inbox')
   })
 
-  it('submit calls createSession with project_dir=<path> when projectDir prop is set', async () => {
+  it('submit calls createSession with project_id=<id> when projectId prop is set', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_proj' })
-    const el = await mount({ projectDir: '/home/me/code/sebas' })
+    const el = await mount({ projectId: 'proj-sebas', projectDir: '/home/me/code/sebas' })
 
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & {
       value: string
@@ -326,7 +334,12 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('work on this', '/home/me/code/sebas', 'acp', null)
+    expect(api.createSession).toHaveBeenCalledWith({
+      prompt: 'work on this',
+      projectId: 'proj-sebas',
+      agent: 'claude',
+      model: null,
+    })
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_proj')
     // Binding caption shows the trailing path segment.
     expect(el.shadowRoot?.textContent ?? '').toContain('sebas')
@@ -341,7 +354,7 @@ describe('sebas-workbench-composer', () => {
     expect(api.createSession).not.toHaveBeenCalled()
   })
 
-  it('forwards the backend selected in the drop-down (default acp)', async () => {
+  it('forwards the agent selected in the drop-down (default = first reachable)', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_native' })
     const el = await mount({ projectDir: null })
@@ -351,12 +364,12 @@ describe('sebas-workbench-composer', () => {
     ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
     await el.updateComplete
 
-    // Flip the execution-backend drop-down to native (5.2).
-    const select = el.shadowRoot?.querySelector('wa-select') as unknown as
+    // Flip the agent drop-down to native.
+    const select = el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]') as unknown as
       | (HTMLElement & { value: string; disabled: boolean })
       | null
     expect(select).toBeTruthy()
-    expect(select!.value).toBe('acp')
+    expect(select!.value).toBe('claude')
     select!.value = 'native'
     select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
     await el.updateComplete
@@ -367,10 +380,15 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('run natively', null, 'native', null)
+    expect(api.createSession).toHaveBeenCalledWith({
+      prompt: 'run natively',
+      projectId: null,
+      agent: 'native',
+      model: null,
+    })
   })
 
-  it('lists only reachable agent kinds and forwards the selected acp:<slug> hint', async () => {
+  it('lists reachable agents and forwards the selected agent id (D2 wire)', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_gemini' })
     const el = await mount({ projectDir: null })
@@ -380,10 +398,12 @@ describe('sebas-workbench-composer', () => {
       el.shadowRoot?.querySelectorAll('wa-option') ?? [],
     ) as HTMLElement[]
     const values = options.map((o) => o.getAttribute('value'))
-    expect(values).toContain('acp:claude')
-    expect(values).toContain('acp:gemini')
-    expect(values).not.toContain('acp:codex')
+    expect(values).toContain('claude')
+    expect(values).toContain('gemini')
     expect(values).toContain('native')
+    // 不可达 agent 仍在列表（disabled + cause），但值就是 agent id——
+    // 没有 acp: 前缀（D2：wire 词汇 = agent id）。
+    expect(values).toContain('codex')
 
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
     ta.value = 'use gemini'
@@ -393,7 +413,7 @@ describe('sebas-workbench-composer', () => {
     const select = el.shadowRoot?.querySelector('wa-select') as unknown as
       | (HTMLElement & { value: string })
       | null
-    select!.value = 'acp:gemini'
+    select!.value = 'gemini'
     select!.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
     await el.updateComplete
 
@@ -403,7 +423,12 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
 
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('use gemini', null, 'acp:gemini', null)
+    expect(api.createSession).toHaveBeenCalledWith({
+      prompt: 'use gemini',
+      projectId: null,
+      agent: 'gemini',
+      model: null,
+    })
   })
 
   it('error path surfaces inline and preserves text', async () => {
@@ -452,7 +477,12 @@ describe('sebas-workbench-composer', () => {
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(api.createSession).toHaveBeenCalledTimes(1)
-    expect(api.createSession).toHaveBeenCalledWith('enter to send', null, 'acp', null)
+    expect(api.createSession).toHaveBeenCalledWith({
+      prompt: 'enter to send',
+      projectId: null,
+      agent: 'claude',
+      model: null,
+    })
   })
 
   it('Enter is a no-op while reachability is unreachable', async () => {
@@ -499,26 +529,28 @@ describe('sebas-workbench-composer', () => {
       expect(sent).toHaveBeenCalledTimes(1)
     })
 
-    it('renders the agent as small read-only text — no backend select anywhere', async () => {
+    it('renders the agent as small read-only text — no agent select anywhere', async () => {
       ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
       const el = await mount(focus)
 
-      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Execution backend"]')).toBeNull()
+      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]')).toBeNull()
       const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
         (n) => n.textContent ?? '',
       )
-      expect(labels).toContain('claude')
+      // 跟随模式 agent 标签 = catalog display（workbench-agent-wire-fix 3.1：
+      // kind slug 'claude' → display 'Claude Code'）。
+      expect(labels).toContain('Claude Code')
       // 创建模式才有的绑定/供应商提示在跟随模式下不渲染。
       expect(el.shadowRoot?.querySelector('.binding')).toBeNull()
     })
 
-    it('agent kind null falls back to the default-kind label', async () => {
+    it('agent kind null falls back to the default-agent label', async () => {
       ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
       const el = await mount({ ...focus, agentKind: null })
       const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
         (n) => n.textContent ?? '',
       )
-      expect(labels).toContain('acp · default')
+      expect(labels).toContain('default agent')
     })
 
     it('model dropdown lists the focused session models and switches via setSessionModel', async () => {
@@ -543,7 +575,7 @@ describe('sebas-workbench-composer', () => {
       ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
       ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_new' })
       const el = await mount(focus)
-      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Execution backend"]')).toBeNull()
+      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]')).toBeNull()
 
       const chip = () => el.shadowRoot?.querySelector('.mode-chip') as HTMLElement
       chip().click()
@@ -551,7 +583,7 @@ describe('sebas-workbench-composer', () => {
 
       // 创建模式：agent 下拉回来了，chips 变为取消。
       const backend = el.shadowRoot?.querySelector(
-        'wa-select[aria-label="Execution backend"]',
+        'wa-select[aria-label="Agent"]',
       ) as unknown as HTMLElement & { value: string }
       expect(backend).toBeTruthy()
       expect(chip().textContent?.trim()).toBe('cancel')
@@ -563,12 +595,17 @@ describe('sebas-workbench-composer', () => {
       ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
       await new Promise((r) => setTimeout(r, 0))
       await el.updateComplete
-      expect(api.createSession).toHaveBeenCalledWith('brand new session', null, 'acp', null)
+      expect(api.createSession).toHaveBeenCalledWith({
+        prompt: 'brand new session',
+        projectId: null,
+        agent: 'claude',
+        model: null,
+      })
       expect(api.sendMessage).not.toHaveBeenCalled()
 
       chip().click()
       await el.updateComplete
-      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Execution backend"]')).toBeNull()
+      expect(el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]')).toBeNull()
     })
   })
 
@@ -576,8 +613,13 @@ describe('sebas-workbench-composer', () => {
 
   // ── wire-webui-sebas-agent-e2e 4.1：后端下拉按执行体可用性渲染 ───────────
 
-  it('renders the native option disabled with its cause when the native body is unavailable', async () => {
-    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeUnavailable)
+  it('renders the native option disabled with its cause when the catalog reports native unreachable', async () => {
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
+        { id: 'native', display: 'Native Kernel', reachable: false, cause: 'no provider credentials' },
+      ],
+    })
     const el = await mount({ projectDir: null })
 
     const native = el.shadowRoot?.querySelector(
@@ -588,13 +630,18 @@ describe('sebas-workbench-composer', () => {
     expect(native?.textContent ?? '').toContain('unavailable')
     expect(native?.textContent ?? '').toContain('no provider credentials')
     // acp 侧不受 native 状态影响。
-    const acp = el.shadowRoot?.querySelector('wa-option[value="acp"]') as HTMLElement | null
-    expect(acp).toBeTruthy()
-    expect(acp!.hasAttribute('disabled')).toBe(false)
+    const claude = el.shadowRoot?.querySelector('wa-option[value="claude"]') as HTMLElement | null
+    expect(claude).toBeTruthy()
+    expect(claude!.hasAttribute('disabled')).toBe(false)
   })
 
-  it('keeps the native option selectable when the native body reports available', async () => {
-    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeAvailable)
+  it('keeps the native option selectable when the catalog reports native reachable', async () => {
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
+        { id: 'native', display: 'Native Kernel', reachable: true },
+      ],
+    })
     const el = await mount({ projectDir: null })
 
     const native = el.shadowRoot?.querySelector(
@@ -605,14 +652,24 @@ describe('sebas-workbench-composer', () => {
     expect(native?.textContent ?? '').not.toContain('unavailable')
   })
 
-  it('re-enables the native option on the next poll without remounting', async () => {
-    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeUnavailable)
+  it('re-enables the native option when the next catalog poll reports reachable', async () => {
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
+        { id: 'native', display: 'Native Kernel', reachable: false, cause: 'no provider credentials' },
+      ],
+    })
     const el = await mount({ projectDir: null })
     let native = el.shadowRoot?.querySelector('wa-option[value="native"]') as HTMLElement | null
     expect(native?.hasAttribute('disabled')).toBe(true)
 
     // core 恢复（凭据注入）：下一次轮询拉到 ok → 禁选解除，无需重挂载。
-    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryNativeAvailable)
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [
+        { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
+        { id: 'native', display: 'Native Kernel', reachable: true },
+      ],
+    })
     await (el as unknown as { loadReachability(): Promise<void> }).loadReachability()
     await el.updateComplete
     native = el.shadowRoot?.querySelector('wa-option[value="native"]') as HTMLElement | null
@@ -647,7 +704,9 @@ describe('sebas-workbench-composer', () => {
 
 // ── add-agent-defaults-catalog：创建模式选择器的 catalog 数据源 ───────────
 
-it('creation mode offers the catalog of the defaults provider before any session', async () => {
+it('creation mode states model unavailability honestly without any session model surface', async () => {
+  // workbench-agent-wire-fix 3.3：/api/agent-defaults 退役，无会话模型面
+  // 时创建模式的模型选择如实呈现不可用（模型下发给 4.x change 接管）。
   ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
   ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
     recent_sessions: [],
@@ -657,15 +716,6 @@ it('creation mode offers the catalog of the defaults provider before any session
     total_sessions: 0,
     active_session_key: null,
   } as never)
-  ;(api.agentDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
-    provider: 'glm',
-    model: 'm2',
-  })
-  ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
-    providers: [
-      { name: 'glm', models: ['m1', 'm2'], api_key_configured: true },
-    ],
-  })
 
   const el = await mount({
     sessionKey: 'web%00web-1',
@@ -679,17 +729,10 @@ it('creation mode offers the catalog of the defaults provider before any session
   await new Promise((r) => setTimeout(r, 0))
   await el.updateComplete
 
-  const sel = el.shadowRoot?.querySelector(
-    'wa-select[aria-label="Model"]',
-  ) as unknown as HTMLSelectElement & { value: string }
-  expect(sel).toBeTruthy()
-  const options = [...el.shadowRoot!.querySelectorAll('wa-option')].map((o) =>
-    o.getAttribute('value'),
-  )
-  expect(options).toContain('m1')
-  expect(options).toContain('m2')
-  // defaults.model 命中 catalog 时预选它。
-  expect(sel.value).toBe('m2')
+  const sel = el.shadowRoot?.querySelector('wa-select[aria-label="Model"]')
+  expect(sel).toBeNull()
+  const hint = el.shadowRoot?.querySelector('[role="status"]')
+  expect(hint?.textContent ?? '').toContain('no model catalog')
 })
 
 it('creation mode states catalog unavailability honestly when nothing is available', async () => {

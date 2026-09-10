@@ -42,7 +42,10 @@ pub(crate) fn build_session_rows(
             let derived =
                 SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""));
             SessionRow {
-                project_dir: info.project_dir.clone(),
+                project_id: info
+                    .project_dir
+                    .as_deref()
+                    .map(crate::projects::project_id_for),
                 prompt_preview: info.user_prompt.clone(),
                 current_model: info.current_model.clone(),
                 available_models: info.available_models.clone(),
@@ -94,8 +97,11 @@ pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
         "current_model": info.current_model,
         "available_models": info.available_models,
         "agent_kind": info.agent_kind,
-        // （wire-webui-sebas-agent-e2e D4）会话所属执行体；null = 未打标。
-        "backend": info.backend,
+        // 绑定项目的稳定 id（workbench-agent-wire-fix 2.5）；null = inbox。
+        "project_id": info
+            .project_dir
+            .as_deref()
+            .map(crate::projects::project_id_for),
     })
 }
 
@@ -271,32 +277,6 @@ pub async fn router_api_alias_delete(
         return err_503_no_secret();
     }
     match client.delete_alias(&alias).await {
-        Ok(v) => axum::Json(v).into_response(),
-        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
-    }
-}
-
-/// GET /api/agent-defaults：默认 provider/model 只读代理（composer 选择器
-/// 的 pre-session catalog 数据源，add-agent-defaults-catalog）。
-pub async fn agent_defaults_get(State(state): State<WebUiState>) -> axum::response::Response {
-    let client = router_client_of(&state);
-    match client.agent_defaults().await {
-        Ok(v) => axum::Json(v).into_response(),
-        Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
-    }
-}
-
-/// PUT /api/agent-defaults：设置默认 provider/model。router mutation 姿态
-/// 与 provider CRUD 一致：无 listen/无控制秘密 → 503。
-pub async fn agent_defaults_put(
-    State(state): State<WebUiState>,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> axum::response::Response {
-    let client = router_client_of(&state);
-    if !mutation_available(&client, &state) {
-        return err_503_no_secret();
-    }
-    match client.set_agent_defaults(&body).await {
         Ok(v) => axum::Json(v).into_response(),
         Err(e) => (e.status, axum::Json(serde_json::json!({"error": e.message}))).into_response(),
     }

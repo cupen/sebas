@@ -10,9 +10,10 @@
  *
  * Creation mode (no focused session, or the operator pressed the "new
  * session" chip): submit spawns a session bound to the selected project (or
- * the inbox) with the execution backend + model picked in the toolbar — the
- * only place an agent can be chosen, because after spawn the binding is
- * immutable.
+ * the inbox) with the agent picked in the toolbar — the only place an agent
+ * can be chosen, because after spawn the binding is immutable
+ * (workbench-agent-wire-fix: agent 必填、取自 /api/agents 唯一真源、创建后
+ * 不可变；项目 default_agent 预选)。
  *
  * Reaches the agent-core reachability report from /api/summary to gate
  * submit when the core is offline (a submit would only bounce), re-polled
@@ -23,7 +24,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type BackendHint } from '../api/client.js'
+import { api, type AgentKindInfo,  } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
@@ -36,11 +37,14 @@ const WORKBENCH_REACHABILITY_POLL_MS = 5_000
 @customElement('sebas-workbench-composer')
 export class SebasWorkbenchComposer extends LitElement {
   /**
-   * Currently-selected project path. When non-null, the new session is
-   * bound to that directory; when null, the session is "inbox" and the
-   * `project_dir` field is omitted on the wire.
+   * 选中项目的稳定 id（workbench-agent-wire-fix 2.5）；null = inbox，
+   * 创建请求省略 project_id。路径标识符不再上 wire。
    */
+  @property({ attribute: false }) projectId: string | null = null
+  /** 选中项目的展示路径片段（binding 提示用；仅 UI 文案，非标识符）。 */
   @property({ attribute: false }) projectDir: string | null = null
+  /** 项目级默认 agent（该项目最近一次创建会话所用；D5 预选用）。 */
+  @property({ attribute: false }) projectDefaultAgent: string | null = null
   /**
    * Read-only label like "anthropic / claude-sonnet-4-5". May be null
    * while loading.
@@ -64,10 +68,14 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private text = ''
   @state() private sending = false
   @state() private error: string | null = null
-  /** Execution-backend hint forwarded with the spawn request (creation). */
-  @state() private backend: BackendHint = 'acp'
-  /** Reachable third-party agent kinds for the create-session dropdown. */
-  @state() private kinds: AgentKindInfo[] = []
+  /**
+   * 创建模式选定的 agent id（workbench-agent-wire-fix D2）：必填——词汇表
+   * 是 /api/agents 的 id 列（配置键名或 "native"），无隐式默认；未选择时
+   * 提交门禁禁用。会话创建后 agent 不可变。
+   */
+  @state() private agent = ''
+  /** Agent catalog（/api/agents；唯一可用性真源，含 native 行）。 */
+  @state() private agents: AgentKindInfo[] = []
   /** 创建会话时请求的模型 id（add-acp-model-selection）；仅当数据源（最近
    *  会话的可用模型列表）非空时显示下拉。 */
   @state() private model: string | null = null
@@ -78,13 +86,6 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private catalogUnavailable = false
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
-  /**
-   * wire-webui-sebas-agent-e2e: per-execution-body reachability from
-   * `/api/summary.execution_bodies`. `native.ok=false` → 后端下拉中 "native"
-   * 选项渲染为 disabled + cause（spec：不可用的执行体不应让操作员提交到
-   * 才能发现的失败）。
-   */
-  @state() private nativeAvailability: { ok: boolean; cause?: string } | null = null
   /** 中程切换聚焦会话模型时的在途标记（add-acp-model-selection 语义）。 */
   @state() private modelSwitching = false
   /**
@@ -253,7 +254,7 @@ export class SebasWorkbenchComposer extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     void this.loadReachability()
-    void this.loadKinds()
+    void this.loadAgents()
     void this.loadModelOptions()
     // defaults/catalog 变更（管理页 set/clear）即时反映到选择器。
     window.addEventListener('sebas:refetch', this.reloadModelsBound)
@@ -279,6 +280,10 @@ export class SebasWorkbenchComposer extends LitElement {
     if (changed.has('sessionKey')) this.createRequested = false
     // 进入创建模式时重取模型数据源——defaults/catalog 可能刚在管理页设置过。
     if (changed.has('createRequested') && this.createRequested) void this.loadModelOptions()
+    // 项目切换（D5）：预选该项目记住的 default_agent；无记录保持现选。
+    if (changed.has('projectDefaultAgent') && this.projectDefaultAgent) {
+      this.agent = this.projectDefaultAgent
+    }
   }
 
   /**
@@ -308,38 +313,29 @@ export class SebasWorkbenchComposer extends LitElement {
     } catch {
       // sessions 不可达不代表 catalog 不可达——继续尝试 defaults。
     }
-    // 第二优先（add-agent-defaults-catalog）：defaults 指向 provider 的
-    // catalog——任何会话存在之前选择器就有可用模型。
-    try {
-      const defaults = await api.agentDefaults()
-      if (defaults.provider) {
-        const { providers } = await api.routerProviders()
-        const match = providers.find((p) => p.name === defaults.provider)
-        const catalog = Array.isArray(match?.models) ? (match as { models: string[] }).models : []
-        if (catalog.length > 0) {
-          this.modelOptions = catalog
-          this.model =
-            defaults.model && catalog.includes(defaults.model) ? defaults.model : catalog[0]
-          this.catalogUnavailable = false
-          return
-        }
-      }
-    } catch {
-      // router 不可达 → 落到不可用提示。
-    }
+    // 第二优先（add-agent-defaults-catalog 遗产，workbench-agent-wire-fix
+    // 3.3 退役 /api/agent-defaults 后）：无会话模型面时的兜底数据源不再
+    // 存在——模型是 agent catalog 之外的正交维度，catalog 未就位前如实
+    // 显示不可用（4.x change 会把创建时模型下发接上）。
+    void 0
     // 兜底：显式不可用（而非空列表/伪造选项）。
     this.modelOptions = []
     this.model = null
     this.catalogUnavailable = true
   }
 
-  private async loadKinds(): Promise<void> {
+  private async loadAgents(): Promise<void> {
     try {
-      const data = await api.agentKinds()
-      this.kinds = data.kinds.filter((k) => k.reachable)
+      const data = await api.agents()
+      this.agents = data.agents
+      // 预选（D5 兜底）：保持现选；无现选时取首个可达 agent。
+      if (!this.agent || !this.agents.some((a) => a.id === this.agent)) {
+        this.agent = data.agents.find((a) => a.reachable)?.id ?? ''
+      }
     } catch {
-      // agent-kinds is advisory; a failure leaves the dropdown at default/native.
-      this.kinds = []
+      // catalog 不可达：下拉如实降级（禁用 + 提示），绝不伪造选项。
+      this.agents = []
+      this.agent = ''
     }
   }
 
@@ -351,26 +347,16 @@ export class SebasWorkbenchComposer extends LitElement {
       } else {
         this.unreachable = null
       }
-      // wire-webui-sebas-agent-e2e：双执行体的逐体可用性。native 不可用时把后
-      // 端下拉中的 "native" 选项渲染为 disabled + cause（spec：不可用执行体
-      // 不应让操作员提交后才看到失败）；acp 不受 native 状态影响，整体
-      // 提交门禁只看 reachability（core 可达性）。
-      const bodies = data.execution_bodies
-      const native = bodies?.find((b) => b.name === 'native')
-      if (native) {
-        this.nativeAvailability = native.ok
-          ? { ok: true }
-          : { ok: false, cause: native.cause ?? 'native backend unavailable' }
-      } else {
-        this.nativeAvailability = null
-      }
+      // 逐 agent 可用性归 /api/agents（workbench-agent-wire-fix 3.2），
+      // summary 只承担 core 可达性门禁。
+      void data
+      void this.loadAgents()
     } catch {
       /* add-webui-allowed-roots D6：summary 请求本身失败（服务进程死亡 /
        * 网络故障）与 reachability.ok = false 同款对待——进入不可达态禁用
        * 提交门，如实呈现而不是放行一次注定失败的提交。轮询恢复后自动
        * 解除。 */
       this.unreachable = { ok: false, cause: '无法获取服务状态（服务可能未运行）' }
-      this.nativeAvailability = null
     }
   }
 
@@ -412,7 +398,12 @@ export class SebasWorkbenchComposer extends LitElement {
     this.sending = true
     this.error = null
     try {
-      const { key } = await api.createSession(prompt, this.projectDir, this.backend, this.model)
+      const { key } = await api.createSession({
+        prompt,
+        projectId: this.projectId,
+        agent: this.agent,
+        model: this.model,
+      })
       this.text = ''
       this.dispatchEvent(
         new CustomEvent<{ key: string }>('composer-created', {
@@ -454,10 +445,10 @@ export class SebasWorkbenchComposer extends LitElement {
    */
   private agentLabel(): string {
     if (this.agentKind) {
-      const k = this.kinds.find((x) => x.slug === this.agentKind)
-      return k?.name ?? this.agentKind
+      const a = this.agents.find((x) => x.id === this.agentKind)
+      return a?.display ?? this.agentKind
     }
-    return 'acp · default'
+    return this.agents.find((x) => x.id === 'native' && false)?.display ?? 'default agent'
   }
 
   private renderBinding() {
@@ -556,25 +547,25 @@ export class SebasWorkbenchComposer extends LitElement {
               ? nothing
               : html`<wa-select
                   class="backend-select"
-                  aria-label="Execution backend"
-                  value=${this.backend}
+                  aria-label="Agent"
+                  value=${this.agent}
                   ?disabled=${disabled}
                   @change=${(e: Event) => {
-                    const value = (e.target as HTMLInputElement).value
-                    if (value === 'acp' || value === 'native' || value.startsWith('acp:')) {
-                      this.backend = value as BackendHint
-                    }
+                    this.agent = (e.target as HTMLInputElement).value
                   }}
                 >
-                  <wa-option value="acp">acp · default kind</wa-option>
-                  ${this.kinds.map(
-                    (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
+                  ${this.agents.length === 0
+                    ? html`<wa-option value="" disabled>agent catalog 不可用</wa-option>`
+                    : nothing}
+                  ${this.agents.map((a) =>
+                    a.id === 'native' && !a.reachable
+                      ? html`<wa-option value=${a.id} disabled
+                          >${a.display} (unavailable: ${a.cause ?? 'unreachable'})</wa-option
+                        >`
+                      : html`<wa-option value=${a.id} ?disabled=${!a.reachable}
+                          >${a.reachable ? a.display : `${a.display} (unavailable: ${a.cause ?? ''})`}</wa-option
+                        >`,
                   )}
-                  ${this.nativeAvailability && !this.nativeAvailability.ok
-                    ? html`<wa-option value="native" disabled
-                        >native · built-in kernel (unavailable: ${this.nativeAvailability.cause ?? 'no provider credentials'})</wa-option
-                      >`
-                    : html`<wa-option value="native">native</wa-option>`}
                 </wa-select>`}
             ${this.sessionKey !== null
               ? html`<button

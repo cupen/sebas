@@ -9,15 +9,20 @@
 use async_trait::async_trait;
 use serde::Serialize;
 
-/// One configured agent kind as the outside world sees it.
+/// One agent in the catalog (`GET /api/agents`, workbench-agent-wire-fix
+/// 3.1/3.2) — the single availability source for the frontend. The shape is
+/// driver-free by contract: the driver is a configuration-layer concept and
+/// never appears on the wire.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentKindInfo {
-    /// Display name (currently the kind slug — no separate display name is
-    /// configured).
-    pub name: String,
-    /// The open kind slug; the webui builds the `acp:<slug>` backend hint from it.
-    pub slug: String,
-    /// Whether the agent's binary is present and can report a version.
+    /// The agent id on the wire: the `[acp.agents.*]` config key, or the
+    /// reserved `"native"` for the built-in kernel.
+    pub id: String,
+    /// Product display name (config `display` field, derived from the driver
+    /// when absent). Presentation only — never a wire identifier.
+    pub display: String,
+    /// Whether the agent can serve new sessions right now (binary probe for
+    /// ACP agents; credential check for the native kernel).
     pub reachable: bool,
     /// Failure cause when unreachable (e.g. `"command not found"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,11 +32,28 @@ pub struct AgentKindInfo {
     pub version: Option<String>,
 }
 
-/// A configured agent kind to probe: its open slug and full launch argv.
+/// A configured agent to probe: its id, full launch argv, driver tag
+/// (configuration-layer only, used to derive the display fallback) and the
+/// optional explicit display name.
 #[derive(Debug, Clone)]
 pub struct AgentKindSource {
     pub slug: String,
     pub command: Vec<String>,
+    /// 静态 launch 策略标签（配置层；不上 wire）：`"claude"` → display 兜底
+    /// "Claude Code"，其余 → 键名本身。
+    pub driver: String,
+    pub display: Option<String>,
+}
+
+impl AgentKindSource {
+    /// Display 兜底推导（D3）：显式配置优先；`claude` 驱动 → "Claude Code"；
+    /// 其余 → agent id 本身。
+    fn fallback_display(&self) -> String {
+        match self.driver.as_str() {
+            "claude" => "Claude Code".to_string(),
+            _ => self.slug.clone(),
+        }
+    }
 }
 
 /// Probe one agent kind: presence via PATH/executable-bit check (the same
@@ -39,11 +61,17 @@ pub struct AgentKindSource {
 /// builtin, not a standalone binary, so we scan PATH directly), version via
 /// `<exe> --version`. Pure-ish (no config knowledge); the binary crate
 /// supplies the argv from `cfg.acp.agents`.
-pub async fn discover_agent(slug: &str, command: &[String]) -> AgentKindInfo {
+pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
+    let slug = source.slug.as_str();
+    let display = source
+        .display
+        .clone()
+        .unwrap_or_else(|| source.fallback_display());
+    let command = source.command.as_slice();
     let Some(exe) = command.first().filter(|e| !e.is_empty()) else {
         return AgentKindInfo {
-            name: slug.to_string(),
-            slug: slug.to_string(),
+            id: slug.to_string(),
+            display,
             reachable: false,
             cause: Some("empty command".to_string()),
             version: None,
@@ -52,8 +80,8 @@ pub async fn discover_agent(slug: &str, command: &[String]) -> AgentKindInfo {
 
     if !binary_reachable(exe) {
         return AgentKindInfo {
-            name: slug.to_string(),
-            slug: slug.to_string(),
+            id: slug.to_string(),
+            display,
             reachable: false,
             cause: Some("command not found".to_string()),
             version: None,
@@ -80,8 +108,8 @@ pub async fn discover_agent(slug: &str, command: &[String]) -> AgentKindInfo {
         .filter(|s| !s.is_empty());
 
     AgentKindInfo {
-        name: slug.to_string(),
-        slug: slug.to_string(),
+        id: slug.to_string(),
+        display,
         reachable: true,
         cause: None,
         version,
@@ -122,7 +150,7 @@ fn binary_reachable(exe: &str) -> bool {
 pub async fn discover_all(sources: &[AgentKindSource]) -> Vec<AgentKindInfo> {
     let mut out = Vec::with_capacity(sources.len());
     for src in sources {
-        out.push(discover_agent(&src.slug, &src.command).await);
+        out.push(discover_agent(src).await);
     }
     out
 }
@@ -158,12 +186,21 @@ mod tests {
 
     /// 缺二进制时必须诚实报告 `reachable=false` + `cause="command not found"`
     /// （不 panic、不把错误当成功）。
+    fn source(slug: &str, command: &[&str]) -> AgentKindSource {
+        AgentKindSource {
+            slug: slug.to_string(),
+            command: command.iter().map(|c| c.to_string()).collect(),
+            driver: "acp".to_string(),
+            display: None,
+        }
+    }
+
     #[tokio::test]
     async fn missing_binary_reports_command_not_found() {
-        let info = discover_agent(
+        let info = discover_agent(&source(
             "gemini",
-            &["sebas-nonexistent-binary-xyz-12345".to_string()],
-        )
+            &["sebas-nonexistent-binary-xyz-12345"],
+        ))
         .await;
         assert!(!info.reachable);
         assert_eq!(info.cause.as_deref(), Some("command not found"));
@@ -173,15 +210,30 @@ mod tests {
     /// 空 command（缺 argv[0]）报告 `empty command`，同样是不可达而非 panic。
     #[tokio::test]
     async fn empty_command_reports_empty_cause() {
-        let info = discover_agent("broken", &[]).await;
+        let info = discover_agent(&source("broken", &[])).await;
         assert!(!info.reachable);
         assert_eq!(info.cause.as_deref(), Some("empty command"));
+    }
+
+    /// workbench-agent-wire-fix 3.1：display 兜底——显式配置优先；
+    /// `claude` 驱动 → "Claude Code"；其余 → agent id 本身。
+    #[tokio::test]
+    async fn display_falls_back_by_driver() {
+        let mut src = source("myclaude", &["definitely-not-on-path-xyz"]);
+        src.driver = "claude".to_string();
+        assert_eq!(discover_agent(&src).await.display, "Claude Code");
+
+        let mut src = source("codex", &["definitely-not-on-path-xyz"]);
+        src.display = Some("Codex CLI".to_string());
+        assert_eq!(discover_agent(&src).await.display, "Codex CLI");
+
+        assert_eq!(discover_agent(&source("codex", &[])).await.display, "codex");
     }
 
     /// 一个必然存在的二进制（`sh`）应报告 reachable。
     #[tokio::test]
     async fn present_binary_reports_reachable() {
-        let info = discover_agent("shell", &["sh".to_string()]).await;
+        let info = discover_agent(&source("shell", &["sh"])).await;
         assert!(info.reachable, "sh should be on PATH: {info:?}");
         assert!(info.cause.is_none());
     }
@@ -191,7 +243,7 @@ mod tests {
     /// 二进制缺失时该测试自动跳过（不入失败），CI 无 opencode 也绿。
     #[tokio::test]
     async fn opencode_acp_probe_is_compatible() {
-        let info = discover_agent("opencode", &["opencode".into(), "acp".into()]).await;
+        let info = discover_agent(&source("opencode", &["opencode", "acp"])).await;
         if !info.reachable {
             eprintln!("opencode not on PATH; skipping opencode probe assertion");
             return;

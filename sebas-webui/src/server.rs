@@ -210,11 +210,7 @@ fn build_router_full(
         .route("/router/api/presets", get(routes::router_api_presets))
         .route("/router/api/providers", get(routes::router_api_providers_list))
         .route("/api/about", get(api::about))
-        .route("/api/agent-kinds", get(api::agent_kinds))
-        .route(
-            "/api/agent-defaults",
-            get(routes::agent_defaults_get),
-        )
+        .route("/api/agents", get(api::agent_kinds))
         .route("/api/auth/me", get(api::auth_me))
         .route("/api/auth/login", post(api::auth_login))
         .route("/api/auth/logout", post(api::auth_logout))
@@ -227,8 +223,8 @@ fn build_router_full(
         .route("/api/sessions/{key}/archive", post(api::archive_session))
         .route("/api/sessions/{key}/restore", post(api::restore_session))
         .route("/api/projects/reorder", post(api::projects_reorder))
-        .route("/api/projects/{path}/remove", post(api::projects_remove))
-        .route("/api/projects/{path}/branch", get(api::projects_branch))
+        .route("/api/projects/{id}/remove", post(api::projects_remove))
+        .route("/api/projects/{id}/branch", get(api::projects_branch))
         .route("/ws", get(api::ws_handler))
         .with_state(state.clone());
 
@@ -258,10 +254,6 @@ fn build_router_full(
                 .delete(routes::router_api_alias_delete),
         )
         .route("/router/api/reload", post(routes::router_api_reload))
-        .route(
-            "/api/agent-defaults",
-            axum::routing::put(routes::agent_defaults_put),
-        )
         .layer(axum::middleware::from_fn(routes::router_mutation_guard))
         .with_state(state.clone());
 
@@ -513,59 +505,27 @@ mod health_dup_tests {
 }
 
 #[cfg(test)]
-mod agent_defaults_tests {
-    //! add-agent-defaults-catalog 2.1 路由层验收：GET/PUT /api/agent-defaults
-    //! 经 BFF 代理 router admin（bearer 注入），无控制秘密时 PUT 503。
+mod agent_defaults_removed_tests {
+    //! workbench-agent-wire-fix 3.3：/api/agent-defaults 端点退役——
+    //! GET/PUT 一律 404（默认 provider/model 走 router admin providers 面，
+    //! 默认 agent 按项目记忆）。用 404 路由层断言钉住退役。
     use super::*;
     use crate::models::RouterInfo;
     use crate::session_backend::FakeBackend;
     use axum::body::Body;
     use axum::extract::ConnectInfo;
-    use http_body_util::BodyExt;
     use sebas_feishu::cards::CardConfig;
-    use serde_json::Value;
     use std::net::{IpAddr, SocketAddr};
     use tower::ServiceExt;
-
-    /// 进程 env 串行锁：RouterClient 构造期读 SEBAS_CONTROL_SECRET。
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn test_addr() -> SocketAddr {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
     }
 
-    /// mock router admin：GET 回固定默认，PUT 回显载荷与 bearer。
-    async fn mock_admin() -> (String, tokio::task::JoinHandle<()>) {
-        let app = axum::Router::new()
-            .route(
-                "/admin/defaults",
-                axum::routing::get(|| async {
-                    axum::Json(serde_json::json!({"provider": "glm", "model": "m2"}))
-                })
-                .put(|h: axum::http::HeaderMap, body: String| async move {
-                    let auth = h
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("none")
-                        .to_string();
-                    let mut v: serde_json::Value = serde_json::from_str(&body).unwrap();
-                    v["auth"] = Value::String(auth);
-                    axum::Json(v)
-                }),
-            )
-            .with_state(());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("{addr}"), handle)
-    }
-
-    fn app_with_listen(listen: &str) -> Router {
+    fn app() -> Router {
         build_router_with_auth(
             Arc::new(FakeBackend::new()),
-            RouterInfo { listen: Some(listen.to_string()), ..RouterInfo::default() },
+            RouterInfo { listen: None, ..RouterInfo::default() },
             CardConfig::default(),
             None,
             Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
@@ -574,7 +534,7 @@ mod agent_defaults_tests {
         )
     }
 
-    async fn req(app: Router, method: &str, uri: &str, body: Option<String>) -> (StatusCode, Value) {
+    async fn req(app: Router, method: &str, uri: &str, body: Option<String>) -> StatusCode {
         let mut builder = Request::builder()
             .method(method)
             .uri(uri)
@@ -586,54 +546,21 @@ mod agent_defaults_tests {
         let req = builder
             .body(Body::from(body.unwrap_or_default()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        resp_status(app.oneshot(req).await.unwrap()).await
+    }
+
+    async fn resp_status(resp: axum::response::Response) -> StatusCode {
+        resp.status()
     }
 
     #[tokio::test]
-    // env 锁有意横跨整个测试（含 await）：env 是进程全局的，测试内串行。
-    #[allow(clippy::await_holding_lock)]
-    async fn get_and_put_proxied_with_bearer() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("SEBAS_CONTROL_SECRET", "sec- defaults-x"); }
-        let (addr, _h) = mock_admin().await;
-        let app = app_with_listen(&addr);
-
-        let (status, body) = req(app.clone(), "GET", "/api/agent-defaults", None).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["provider"], "glm");
-
-        let (status, body) = req(
-            app,
-            "PUT",
-            "/api/agent-defaults",
-            Some(r#"{"provider":"glm","model":"m2"}"#.into()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["provider"], "glm");
-        assert_eq!(body["auth"], "Bearer sec- defaults-x", "bearer 必须注入");
-        unsafe { std::env::remove_var("SEBAS_CONTROL_SECRET"); }
-    }
-
-    #[tokio::test]
-    // 同上：env 锁有意横跨 await。
-    #[allow(clippy::await_holding_lock)]
-    async fn put_without_secret_is_503() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("SEBAS_CONTROL_SECRET"); }
-        let (addr, _h) = mock_admin().await;
-        let app = app_with_listen(&addr);
-        let (status, body) = req(
-            app,
-            "PUT",
-            "/api/agent-defaults",
-            Some(r#"{"provider":"glm"}"#.into()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    async fn agent_defaults_endpoint_is_gone() {
+        let app = app();
+        assert_eq!(req(app.clone(), "GET", "/api/agent-defaults", None).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            req(app, "PUT", "/api/agent-defaults", Some(r#"{"provider":"glm"}"#.into())).await,
+            StatusCode::NOT_FOUND
+        );
     }
 }
 

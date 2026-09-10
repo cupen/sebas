@@ -206,16 +206,16 @@ pub trait SessionBackend: Send + Sync {
         false
     }
 
-    /// Create a session, optionally pinning the execution backend. The
-    /// default ignores the hint (single-backend seams); composite seams
-    /// route on it. `model`（add-acp-model-selection）是创建时请求的模型 id：
-    /// 会话建立后、首个 prompt 前应用（失败报非致命错误、会话仍可对话）。
-    /// 默认实现忽略 model（单后端 seams 无模型选择面）。
+    /// Create a session pinned to `agent`（workbench-agent-wire-fix D2：
+    /// `[acp.agents.*]` 配置键名或 `"native"`；必填，无隐式默认）。`model`
+    /// （add-acp-model-selection）是创建时请求的模型 id：会话建立后、首个
+    /// prompt 前应用（失败报非致命错误、会话仍可对话）。默认实现忽略
+    /// agent/model（单后端 seams 无选择面，落到自身唯一执行体）。
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
-        _backend: Option<&str>,
+        _agent: &str,
         _model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
@@ -239,15 +239,15 @@ pub trait SessionBackend: Send + Sync {
 
     /// Create a 0-turn placeholder session without spawning an agent child
     /// (P2 fix: an empty prompt must not be sent to the agent — opencode
-    /// hangs on `session/prompt ""`). `backend` is the same execution-backend
-    /// hint as [`SessionBackend::spawn_with`] (`"acp:<slug>"` etc.), and
-    /// `model` the requested model id; both are remembered for the first
-    /// message's spawn. The default falls back to `spawn("", …)` for backends
-    /// without placeholder support (keeps the old callable surface honest).
+    /// hangs on `session/prompt ""`). `agent` is the same agent id as
+    /// [`SessionBackend::spawn_with`]（必填），and `model` the requested
+    /// model id; both are remembered for the first message's spawn. The
+    /// default falls back to `spawn("", …)` for backends without placeholder
+    /// support (keeps the old callable surface honest).
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
-        _backend: Option<String>,
+        _agent: &str,
         _model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(String::new(), project_dir).await
@@ -256,15 +256,11 @@ pub trait SessionBackend: Send + Sync {
 
 // ─── In-process implementation (task 2.2) ──────────────────────────────────
 
-/// Parse a webui backend hint into the requested ACP agent kind slug.
-/// `"acp:<slug>"` → `Some(slug)`; a bare `"acp"` (or anything else, including
-/// `"native"` which the composite seam handles before it reaches here) →
-/// `None`, meaning the configured default kind.
-fn parse_acp_kind(backend: &str) -> Option<String> {
-    backend
-        .strip_prefix("acp:")
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
+/// The agent id IS the kind（workbench-agent-wire-fix D2）：wire 直接携带
+/// `[acp.agents.*]` 配置键名——无 driver 前缀、无命名空间。`"native"` 到
+/// 不了这里（复合后端先行路由）。
+fn agent_kind_of(agent: &str) -> String {
+    agent.to_string()
 }
 
 /// projects 域 mutation 分发（与 core channel 服务端同款）：payload 用
@@ -311,6 +307,18 @@ async fn project_mutation(
                 .cloned()
                 .unwrap_or_default();
             engine.save_projects(projects).await
+        }
+        // workbench-agent-wire-fix 2.6：项目级默认 agent（按稳定 id）。
+        "set_default_agent" => {
+            let id = payload
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "set_default_agent: 缺少 id 字段".to_string())?;
+            let agent = payload
+                .get("agent")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "set_default_agent: 缺少 agent 字段".to_string())?;
+            engine.set_project_default_agent(id, agent).await
         }
         other => Err(format!("projects: 未知 op '{other}'")),
     }
@@ -430,19 +438,21 @@ impl SessionBackend for InProcessBackend {
         Ok(self.router.web_spawn(prompt, project_dir, None, None).await)
     }
 
-    /// Parse a backend hint (`"native"` handled by the composite seam;
-    /// `"acp"` / `"acp:<slug>"` arrive here) into the requested agent kind,
-    /// then spawn through the router with that kind pinned and the requested
-    /// model id threaded to the spawn out（D3：建会话后、首 prompt 前应用）。
+    /// Spawn through the router with the agent kind pinned（D2：agent id 即
+    /// kind）and the requested model id threaded to the spawn out（D3：建会
+    /// 话后、首 prompt 前应用）。
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
-        backend: Option<&str>,
+        agent: &str,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        let kind = backend.and_then(parse_acp_kind);
-        Ok(self.router.web_spawn(prompt, project_dir, kind, model).await)
+        let kind = agent_kind_of(agent);
+        Ok(self
+            .router
+            .web_spawn(prompt, project_dir, Some(kind), model)
+            .await)
     }
 
     /// 0-turn placeholder: create the session row without spawning an agent
@@ -451,13 +461,13 @@ impl SessionBackend for InProcessBackend {
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
-        backend: Option<String>,
+        agent: &str,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        let kind = backend.as_deref().and_then(parse_acp_kind);
+        let kind = agent_kind_of(agent);
         Ok(self
             .router
-            .web_create_placeholder(project_dir, kind, model)
+            .web_create_placeholder(project_dir, Some(kind), model)
             .await)
     }
 

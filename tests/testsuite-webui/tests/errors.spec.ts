@@ -106,7 +106,7 @@ test.describe('agent 对话覆盖', () => {
       // 触发器：未知 agent kind → acp 驱动拒绝 spawn。
       const key = await createSession(request, {
         prompt: 'spawnfail probe',
-        backend: 'acp:missing-agent',
+        agent: 'missing-agent',
       })
 
       // API 真源：会话收敛到 spawn-failed（Failed），带 error 元素的
