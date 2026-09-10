@@ -41,7 +41,7 @@
 
 ### Requirement: 核心功能集界定
 
-套件 SHALL 在矩阵中显式标注核心功能集，共五簇：agent workbench 相关（workbench、permission-flow）、项目管理（workbench 项目面、state-store/projects）、会话管理（session-lifecycle、acp-session-mapping）、models 管理（acp-model-selection、router-model-aliases、provider-management）、通道与监督（core-session-channel、watchdog）。核心集的增删 MUST 是显式变更：矩阵标注与变更说明同步更新，不得静默调整。
+套件 SHALL 在矩阵中显式标注核心功能集，共五簇：agent workbench 相关（agent-workbench、permission-flow）、项目管理（project-session-actions 及 state-store/projects、webui projects 面）、会话管理（session-lifecycle、session-persistence、acp-session-mapping）、models 管理（acp-model-selection、router-model-aliases、provider-management）、通道与监督（core-session-channel、watchdog）。核心集的增删 MUST 是显式变更：矩阵标注与变更说明同步更新，不得静默调整。
 
 #### Scenario: 核心行有标注
 

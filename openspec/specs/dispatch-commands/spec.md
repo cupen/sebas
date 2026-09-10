@@ -40,7 +40,7 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 
 ### Requirement: Session-forwarded commands
 
-`/status`, `/cost`, `/compact`, and `/cancel` SHALL be forwarded to the mapped live session: the first three as prompt text to the session; `/cancel` as a cancel instruction. When no live session is mapped (including while a spawn is in flight), these commands SHALL produce no user-visible response (the help fallback is currently a silent no-op in the dispatch layer). `/compact` SHALL additionally send a progress card that updates live until the operation finishes.
+`/status`, `/cost`, `/compact`, and `/cancel` SHALL be forwarded to the mapped live session: the first three as prompt text to the session; `/cancel` as a cancel instruction. When no live session is mapped (including while a spawn is in flight), the command SHALL NOT be forwarded; instead the user SHALL receive an explicit plain-text notice that there is no active session (with a `/new` hint) — no silent no-op. `/compact` SHALL additionally send a progress card that updates live until the operation finishes (engine path; the IM frontend forwards it as a message without a progress card).
 
 #### Scenario: /cost with a live session
 
@@ -53,10 +53,11 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 - **THEN** a progress card is sent before the command is forwarded
 - **AND** the card's elapsed-time display updates periodically until the operation completes
 
-#### Scenario: /status with no session is silent
+#### Scenario: /status with no session reports explicitly
 
 - **WHEN** the user sends `/status` with no mapped session
-- **THEN** no card or message is sent to the chat
+- **THEN** a plain-text notice is sent stating there is no active session
+  (with a `/new` hint), and nothing is forwarded
 
 ### Requirement: /new spawns a fresh session
 
@@ -102,7 +103,7 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 
 ### Requirement: /settings read and write
 
-`/settings` with no arguments SHALL list all supported keys with current values and the settings file path. `/settings <key>` SHALL show one key's value. `/settings <key> <value>` SHALL validate the value (enumerations and numeric ranges per key; `theme_color` accepts any string) and, on success, persist to the settings file and apply to the live configuration atomically; invalid values SHALL be rejected with an explanatory message and not applied. Replies SHALL be plain text.
+`/settings` has two deployment surfaces. The in-process engine path: no arguments lists all supported keys with current values and the settings file path; `/settings <key>` shows one key's value; `/settings <key> <value>` validates the value (enumerations and numeric ranges per key; `theme_color` accepts any string) and persists to the settings file, applying to the live configuration atomically. The IM-frontend path (post extract-im-service): reads go through the state store `settings` domain snapshot (rendered as JSON) and writes go through `StateMutation` — the file path is not shown and validation errors surface from the state store. Both paths reply in plain text and never apply invalid values.
 
 #### Scenario: Invalid value rejected
 
@@ -126,11 +127,11 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 #### Scenario: /help sends an interactive card
 
 - **WHEN** the user sends `/help`
-- **THEN** an interactive help card is sent with command groups; tapping a group updates the card in place and tapping a command issues it
+- **THEN** an interactive help card is sent with command groups; tapping a group updates the card in place and tapping a command issues it (engine path; the IM frontend renders a static help card whose buttons are not wired)
 
 ### Requirement: Passthrough commands
 
-`/model <text>` and `/goal <text>` SHALL be forwarded verbatim (full original line) as prompts to the session, not interpreted locally. `/cd <path>`, `/switch <n>`, and `/resume <sid>` are parsed but currently have no routing: they fall to the help fallback, which sends nothing — producing no user-visible effect.
+`/model <text>` and `/goal <text>` SHALL be forwarded verbatim (full original line) as prompts to the session, not interpreted locally. `/cd <path>`, `/switch <n>`, and `/resume <sid>` are parsed but have no routing yet: they SHALL reply with an explicit plain-text "暂未支持" notice (naming the command and the available alternatives `/new` and `/sessions`) rather than silently doing nothing.
 
 #### Scenario: /model forwards as prompt
 

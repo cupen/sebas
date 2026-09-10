@@ -116,7 +116,7 @@ A database that cannot be opened due to corruption SHALL block the affected star
 
 ### Requirement: Runtime state boundaries for persisted session state
 
-The state store SHALL NOT persist the permission allowlist, outstanding permission cards, card states, or in-flight spawn placeholders — these SHALL be reconstructed or re-prompted after a restart. The agent session map SHALL be persisted in the state store and written per mutation, rather than only at daemon shutdown, so an unclean core termination loses at most the mutations committed after the last successful response.
+The state store SHALL NOT persist the permission allowlist, outstanding permission cards, card states, or in-flight spawn placeholders — these SHALL be reconstructed or re-prompted after a restart. The agent session map is currently persisted by the core as a shutdown-only JSON snapshot to `[dispatch] state_file` (see `session-lifecycle`「Restart recovery with corruption tolerance」, the authoritative behavior source); the state store's `session_map` table is a reserved placeholder and does not yet carry sessions. Migrating the session map into the state store is a deferred design step (see the `add-state-store` change runbook): it SHALL be implemented when the session-mapping change lands, using a table shaped to the mapping structure (`ChannelKey` → DTO with `acp_session_id` / `current_model` / `pending_kind`).
 
 #### Scenario: Allowlist survives no restart
 
@@ -130,5 +130,5 @@ The state store SHALL NOT persist the permission allowlist, outstanding permissi
 
 #### Scenario: Session map survives unclean exit
 
-- **WHEN** core is killed while sessions are active
-- **THEN** the session map at next start reflects the last committed state, not the last graceful shutdown
+- **WHEN** core is terminated without a graceful shutdown (e.g. SIGKILL)
+- **THEN** the session map at next start reflects the snapshot written at the last graceful shutdown, not any in-flight mutations since then (per-mutation durability is a deferred migration, not yet implemented)

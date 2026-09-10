@@ -179,13 +179,13 @@ The Feishu WebSocket ingress and egress SHALL be exposed as an adapter implement
 
 ### Requirement: Inbound media resolves to a usable attachment
 
-The feishu adapter SHALL parse inbound image/file/audio messages into media events that the im service resolves into locally usable attachments: the payload SHALL be downloaded to the configured media directory (size-capped, streamed to disk), and the event presented onward SHALL carry the local file reference (path + mime type + file name) instead of the raw Feishu `file_key`. The agent-visible prompt SHALL carry the image content itself (per the execution body's ingestion path), not only a textual marker.
+The feishu adapter SHALL parse inbound image/file/audio messages into media events that the im service resolves into locally usable attachments: the payload SHALL be downloaded to the configured media directory (size-capped) and the event presented onward carries the local file reference instead of the raw Feishu `file_key`. **Deferred**：把图片升级为 model-visible content（native Image block / ACP image content block）与 mime 识别、wire `file_key` 解析目前未实现——当前投递形态是「`[图片已接收: …]` 文本标记 + 本地路径附件」，完整媒体内容链路见 beads `sebas-03s`（P1 媒体链路）。
 
-#### Scenario: image message reaches the model as content
+#### Scenario: image message reaches the session as a path attachment
 
 - **WHEN** an inbound image message passes the gates and media download succeeds
-- **THEN** the session request carries the downloaded file's local path and mime type
-- **AND** the execution body receives the image as model-visible content (native Image block; ACP image content block when the agent negotiates the capability)
+- **THEN** the session request carries the downloaded file's local path as a text-delivered attachment marker
+- **AND** upgrade to model-visible image content is a tracked deferral (sebas-03s), not yet implemented
 
 #### Scenario: media download failure is honest
 

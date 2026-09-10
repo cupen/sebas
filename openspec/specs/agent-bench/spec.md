@@ -45,7 +45,7 @@ The benchmark SHALL include at least one task whose fixture commands fail early 
 
 ### Requirement: Tree dashboard
 
-The system SHALL print, at the end of a run, a tree view of the results — tasks grouped by bucket (web-tooling, patching-large-files, sub-agent) with each task's pass/fail, score, and budget flags — using the same layout as the printed assertion report, with no separate reporting UI. The dashboard SHALL be deterministic in ordering (fixed task order, alphabetical within a bucket).
+The system SHALL print, at the end of a run, a tree view of the results — tasks grouped by bucket (core, web-tooling, apply_patch, subagent) with each task's pass/fail and budget flag — using the same layout as the printed assertion report, with no separate reporting UI. The dashboard SHALL be deterministic in ordering (fixed task order, alphabetical within a bucket).
 
 #### Scenario: Tree view groups tasks by bucket
 

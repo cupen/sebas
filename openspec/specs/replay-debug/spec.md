@@ -10,11 +10,13 @@ side-effect boundary that makes replay safe to run without a live bot.
 
 ### Requirement: Inbound recording
 
-`sebas core --dump-inbound <dir>` SHALL record every raw inbound WS frame to
-one JSON file per frame, named `{unix_nanos}-{pid}.json`, written before
-parsing. The dump directory is created lazily on startup; if creation fails
-the service logs a warning and continues with recording disabled. Recording
-is enabled only by the CLI flag — there is no config key.
+`sebas im --dump-inbound <dir>` (the flag moved off `sebas core` with
+extract-im-service; the core binary has no Feishu ingress) SHALL record
+every raw inbound Feishu WS frame to one JSON file per frame, named
+`{unix_nanos}-{pid}.json`, written before parsing. The dump directory is
+created at startup; if creation fails the service logs a warning and
+continues with recording disabled. Recording is enabled only by the CLI
+flag — there is no config key.
 
 #### Scenario: frames recorded verbatim
 
@@ -59,17 +61,19 @@ a hard error. The run prints the count of successfully dispatched frames.
 
 ### Requirement: Replay routing fidelity
 
-Replay SHALL drive the exact same parse-and-dispatch path as the live WS
-loop (both delegate to one shared frame handler), into a fresh
-`DispatchHandle` with an empty session map — no prior session state is
-restored, so every replay run starts from blank state and re-creates
-whatever the frames imply.
+Replay SHALL dispatch the same neutral `ChannelEvent` shape the live
+Feishu adapter emits, into a fresh `DispatchHandle` with an empty session
+map — no prior session state is restored, so every replay run starts from
+blank state and re-creates whatever the frames imply. Replay parses the
+captured events directly (gates were applied at capture time); raw
+pre-neutralization envelope dumps no longer parse and are skipped with a
+warning.
 
-#### Scenario: same path as live
+#### Scenario: same event shape as live
 
-- **WHEN** a captured owner text frame is replayed
-- **THEN** the router emits the same `Out` instructions (ack reaction, ACP
-  spawn) that the live path would emit for that frame
+- **WHEN** a captured owner text event is replayed
+- **THEN** the router dispatches the same neutral `ChannelEvent` the live
+  adapter produced, and exercises the same engine routing for it
 
 #### Scenario: blank slate per run
 
@@ -77,32 +81,31 @@ whatever the frames imply.
 - **THEN** each run begins with an empty session map; the second run is not
   affected by the first
 
-### Requirement: Replay filter divergence
+### Requirement: Replay applies no channel gates
 
-Replay SHALL run chat-type-agnostic: the handler's allowed-chat-types list
-and bot-name mention filter are empty during replay, so every captured
-frame passes those gates regardless of the config that produced it. This is
-the only behavioral divergence from the live loop, which applies the
-configured filters.
+Replay SHALL apply no channel gates (chat-type filter, mention gating,
+dedup): captured events already passed the adapter's gates at capture time,
+and the neutral `ChannelEvent` carries no gate-relevant metadata. A captured
+event is dispatched unconditionally.
 
-#### Scenario: group frame replays without mention
+#### Scenario: group frame replays without gates
 
-- **WHEN** a captured group message without an @mention is replayed
-- **THEN** it is dispatched (not filtered), whereas the live loop with a
-  configured bot name would have dropped it
+- **WHEN** a captured group message is replayed
+- **THEN** it is dispatched regardless of any chat-type or mention
+  configuration (those gates ran at capture time)
 
-### Requirement: Event deduplication during replay
+### Requirement: Replay applies no deduplication
 
-Replay SHALL deduplicate by `event_id` using the same seen-set mechanism as
-the live loop (capacity 4096 with wholesale clear on overflow). The set is
-per-invocation: duplicate frames within one run are skipped, and re-running
-replay processes the same events again.
+Replay SHALL NOT deduplicate: the neutral `ChannelEvent` carries no
+`event_id`, and dedup is a live-adapter concern (4096-capacity seen-set)
+that ran before capture. A dump directory containing the same event twice
+dispatches both occurrences; producing a dump without duplicates is the
+recorder operator's responsibility.
 
-#### Scenario: duplicate frame skipped
+#### Scenario: duplicate frames both dispatched
 
-- **WHEN** a dump directory contains the same event_id twice
-- **THEN** the second occurrence is not dispatched and the printed count
-  reflects one dispatch
+- **WHEN** a dump directory contains the same event twice
+- **THEN** both are dispatched and the printed count reflects two dispatches
 
 ### Requirement: Side-effect boundary
 

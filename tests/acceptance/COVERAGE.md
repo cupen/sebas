@@ -92,7 +92,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | Off 模式解析 | ✅ | src 内联测试 |
 | | 直连模式 env 翻译 | ✅ | src 内联测试；J: native（SEBAS_AGENT_PROVIDER_* 直连 stub）|
 | | 模型旗标优先级 | ✅ | src 内联测试 |
-| | Router 模式 env 翻译 | ✅ | src `agent_backend` 内联测试 |
+| | Gateway 模式 env 翻译 | ✅ | src `agent_backend` 内联测试 |
 | | Provider 错误中止 | ✅ | src 内联测试 |
 | | Provider 卡片反映 store 可用性 | ✅ | sebas-router `admin_test` |
 | | Preset 数据跟随代码表 | ✅ | sebas-router `config.rs` 内联（`preset_fills_all_slots_and_models_from_code_table`、`preset_explicit_url_or_models_override_errors`、`preset_alias_reuses_table_defaults`、`preset_explicit_api_key_skips_default_env`）|

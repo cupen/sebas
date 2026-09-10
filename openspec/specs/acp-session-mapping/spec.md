@@ -23,16 +23,16 @@ The system SHALL record, for each ACP-backed session, a mapping from the sebas r
 
 ### Requirement: Missing mapping falls back honestly
 
-When a session record has no ACP session id (legacy records, agents without a distinct id, or a lost mapping), a resume attempt SHALL fall back to a fresh session with a new routing id and report `resumed = false`, exactly as if the load had been rejected. It MUST NOT fabricate a mapping or guess an id.
+When a session record has no ACP session id (legacy records, agents without a distinct id, or a lost mapping), the generic ACP driver SHALL attempt `session/load` with the routing id as the load target — the historical fallback for records whose conversation id *is* the routing id — and on rejection SHALL fall back to a fresh session with a new routing id and report `resumed = false`. It MUST NOT fabricate a mapping. The dedicated Claude driver never consults mappings (its conversation id is the routing id by construction).
 
-#### Scenario: Resume with no mapping starts fresh
+#### Scenario: Resume with no mapping loads by routing id, rejection starts fresh
 
 - **WHEN** a session with no recorded ACP session id is resumed
-- **THEN** a fresh session starts with a new routing id
-- **AND** `resumed` is `false` so the caller can inform the user the old conversation is gone
+- **THEN** the driver first attempts `session/load` with the routing id
+- **AND** if the agent rejects the load, a fresh session starts with a new routing id and `resumed` is `false` so the caller can inform the user the old conversation is gone
 
 #### Scenario: Load failure keeps the old mapping intact
 
 - **WHEN** a resume attempts to load a conversation and the agent rejects it
 - **THEN** the session falls back to fresh with a new routing id
-- **AND** the original routing-id ↔ ACP-id mapping is left unchanged in storage (the old conversation is still addressable by future loads)
+- **AND** the original routing-id ↔ ACP-id mapping is archived in storage (preserved for inspection; no resume path re-addresses it by default)

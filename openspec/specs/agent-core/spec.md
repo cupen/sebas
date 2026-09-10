@@ -8,7 +8,7 @@ Extends the sebas-agent kernel (Phase 1a: per-session turn loops, six-tool set, 
 
 ### Requirement: Policy-gated tool execution
 
-The system SHALL check every tool execution against a policy before it runs. The policy SHALL default to deny when no rule matches and no approval answerer is reachable (fail-closed). Writes and networked operations SHALL be governed by a configurable policy; read-only operations on the session workdir SHALL be allowed by default. The exact-session allowlist SHALL be consulted before any interactive approval: an exact `(tool, args)` match runs silently, a partial signature match transitions to approval and, when approved for the session, upgrades to the allowlist.
+The system SHALL check every tool execution against a policy before it runs. The policy SHALL default to deny when no rule matches and no approval answerer is reachable (fail-closed). Writes and networked operations SHALL be governed by a configurable policy; read-only operations on the session workdir SHALL be allowed by default. The exact-session allowlist SHALL be consulted before any interactive approval: an exact `(tool, args)` match runs silently, a partial signature match transitions to approval and, when approved for the session, upgrades to the allowlist.（configurable 目前指 Rust API 层的 `PolicyConfig`；面向用户的 config/env 配置面属 deferred。）
 
 #### Scenario: First networked write is denied without approval
 
@@ -134,16 +134,16 @@ The system SHALL declare capability gates truthfully: `read_image` SHALL be pres
 
 ### Requirement: Approval-first webui surface and event vocabulary
 
-The system SHALL support the webui as the first approval answerer: it SHALL emit `PermissionRequest` events for policy-gated calls and SHALL define the decision vocabulary that drives the webui review card as the approval seam (permission decision requests) — the `PermissionRequest` event plus a stable `permission_decision` result outcome. The kernel SHALL NOT render UI itself.
+The system SHALL support the webui as the first approval answerer: it SHALL emit `PermissionRequest` events for policy-gated calls and SHALL define the decision vocabulary that drives the webui review card as the approval seam (permission decision requests) — the `PermissionRequest` event plus a stable policy-decision result outcome (emitted as the `ToolPolicy` event with outcome `allowed_once | allowed_session | escalated | denied | unavailable`). The kernel SHALL NOT render UI itself.
 
 #### Scenario: The approval decision is a distinct event outcome
 
 - **WHEN** a gated call is answered through the webui seam
-- **THEN** the kernel ends the permission flow with a stable `permission_decision` outcome, distinct from a normal tool finish
+- **THEN** the kernel ends the permission flow with a stable policy-decision outcome (the `ToolPolicy` event), distinct from a normal tool finish
 
 ### Requirement: Long-running background work isolation
 
-The system SHALL execute long-running background work (network fetches, multipart uploads) in a dedicated long-running-worktime pool, NOT in the agent-loop execution pool, so agent-loop progress is never blocked by slow background work.
+The system SHALL execute long-running background work (network fetches, multipart uploads) in a dedicated long-running-worktime pool, NOT in the agent-loop execution pool, so agent-loop progress is never blocked by slow background work. **Deferred**：dedicated pool 未实现——网络抓取目前内联在工具执行路径上（异步，不阻塞其它并发工具；wall-clock 与取消语义不变）。
 
 #### Scenario: Slow network task does not stall the loop
 

@@ -14,17 +14,18 @@ the watchdog control plane.
 The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and
 `GET /assets/*` for its built styles, scripts, and fonts. Any other
 browser-facing GET (for example `/sessions/{key}`) resolves through the SPA
-fallback, and the retired IA-v1 paths `/settings` and `/about`
-canonicalise to `/` — those surfaces live in the Settings modal now. The
-IA-v1 `/gateway` path is deleted outright (no route, no redirect): like
-`/admin/*` it falls back to the workbench as an unknown path. The JSON
+fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about`
+canonicalise to `/` — those surfaces live in the Settings modal now. The JSON
 API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with
 optional `prompt` field), `GET
 /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST
 /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `GET
 /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`,
-`GET /api/router`, `GET /api/about`, `GET /api/agent-defaults` and `PUT
-/api/agent-defaults` (the default provider and model new sessions start with,
+`GET /api/router`, `GET /api/about`, `GET /api/agent-defaults`, `PUT
+/api/agent-defaults`, `POST /api/sessions/{key}/model` (mid-session model
+switch), `GET /api/agent-kinds` (create-form dropdown source),
+`GET/POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`,
+`GET /router/api/presets` (read-only preset table), (the default provider and model new sessions start with,
 read and set through the router admin defaults surface), the project APIs
 `GET /api/projects` and `POST /api/projects` (register), `POST
 /api/projects/reorder`, `POST /api/projects/{path}/remove`, `GET
@@ -329,18 +330,21 @@ WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。
 
 ### Requirement: Optional admin authentication
 
-Admin authentication SHALL be enabled only when `SEBAS_WEBUI_PASSWORD` is
-set: unauthenticated admin routes redirect to `/admin/login`; a successful
-login sets an HttpOnly, SameSite=Lax session cookie scoped to `/admin` with
-a 24 h inactivity TTL. Login attempts are rate-limited to 5 per 30 s. When
-no password is configured, admin reads are served without authentication.
-The non-admin pages and session APIs have no authentication.
+The `/api/admin/*` control-plane surface SHALL require its own admin session
+(a separate cookie from the main login) when `SEBAS_CONTROL_SECRET` is
+configured: unauthenticated admin API requests get a JSON 401 (the HTML
+`/admin/*` pages are retired; unauthenticated page paths fall through the
+SPA fallback). A successful admin login sets an HttpOnly, SameSite=Lax
+cookie with a 24 h TTL, and login attempts are rate-limited to 5 per 30 s.
+When no control secret is configured, admin reads are loopback-only and
+mutations report the control plane as disconnected. The main session APIs
+are governed by the「鉴权开关（auth）与凭据自动引导」requirement, not this one.
 
-#### Scenario: password-gated admin
+#### Scenario: password-gated admin API
 
-- **WHEN** `SEBAS_WEBUI_PASSWORD` is set and an unauthenticated request
-  hits `/admin/status`
-- **THEN** the response redirects to `/admin/login`
+- **WHEN** the admin credential is set and an unauthenticated request hits
+  `/api/admin/status`
+- **THEN** the response is a JSON 401 (not a redirect)
 
 #### Scenario: login lockout
 
@@ -377,23 +381,14 @@ path for mutations.
 
 ### Requirement: Session dashboard and focus semantics
 
-The cross-project session list SHALL render one row per known session (encoded
-key, chat and thread ids, session id, status, phase, relative last-active),
-active-first, and SHALL be reachable from the workbench rather than from
-primary navigation. The session list SHALL exclude archived sessions — those
-are served by `GET /api/archive`. Visiting a session's detail page or posting
-`/switch` SHALL
-set the webui-side focused session — a display pointer only that never changes
-message routing — and `switch` returns the redirect target or 404 for an
-unknown key. Switching the displayed project SHALL NOT alter the focused
-session pointer.
+The cross-project session list SHALL render one row per known session (encoded key, chat and thread ids, session id, status, phase, relative last-active), active-first, and SHALL be reachable from the workbench rather than from primary navigation. The session list SHALL exclude archived sessions — those are served by `GET /api/archive`. Visiting a session's detail page or posting `/switch` SHALL set the webui-side focused session — a display pointer only that never changes message routing — and `switch` returns the redirect target or 404 for an unknown key. Switching the displayed project SHALL NOT alter the focused session pointer.
+
+The focused-session pointer SHALL be the single source of truth for the workbench composer's follow-up vs creation mode: with a focused session the composer targets that session; without one the composer is in creation mode. Any path that focuses a session (switch endpoint, deep-link visit, placeholder creation) SHALL leave the composer able to submit a follow-up message to that session without further operator action.
 
 #### Scenario: focus is cosmetic
 
-- **WHEN** the user focuses session B in the WebUI while session A is
-  active
-- **THEN** subsequent Feishu messages still route per the router's own
-  session mapping, unchanged
+- **WHEN** the user focuses session B in the WebUI while session A is active
+- **THEN** subsequent Feishu messages still route per the router's own session mapping, unchanged
 
 #### Scenario: switch unknown key
 
@@ -409,6 +404,11 @@ session pointer.
 
 - **WHEN** a session is archived
 - **THEN** it is no longer returned by `GET /api/sessions` and appears only in the `GET /api/archive` response
+
+#### Scenario: focusing enables immediate follow-up
+
+- **WHEN** a session becomes focused through any supported path
+- **THEN** the workbench composer's next submission is delivered to that session as a follow-up message
 
 ### Requirement: Web session close
 
@@ -508,12 +508,12 @@ The WebUI crate SHALL access sessions through a backend abstraction rather than 
 
 #### Scenario: set_session_model happy-path via webui
 
-- **WHEN** 沙箱 fake-claude 启动带 `configOptions.model` 多 model、用户 PUT `/api/sessions/{key}/model` with `{model_id: "<另一 model>"}`
+- **WHEN** 沙箱 fake-claude 启动带 `configOptions.model` 多 model、用户 POST `/api/sessions/{key}/model` with `{model_id: "<另一 model>"}`
 - **THEN** 后端走 channel SetSessionModel；acp 子进程回 `ModelChanged` 事件；webui snapshot 同步 `current_model`；前端 UI 显示新 model selected
 
 #### Scenario: set_session_model rejects unknown model
 
-- **WHEN** 用户 PUT `/api/sessions/{key}/model` with `{model_id: "<不存在的 model>"}`
+- **WHEN** 用户 POST `/api/sessions/{key}/model` with `{model_id: "<不存在的 model>"}`
 - **THEN** 后端走 channel SetSessionModel；acp 子进程回 `Error`（typed rejection）；webui 端呈现内联错误；session state 不变
 
 #### Scenario: cross_uid rejection covers live process
@@ -527,7 +527,7 @@ The WebUI crate SHALL access sessions through a backend abstraction rather than 
 - **THEN** 前端立即渲染该事件为 transcript 内显错误，不等待 Removed 事件；会话状态 SHALL 在 backend 推送 Removed 之前已经标记为 spawn-failed
 
 ### Requirement: Admin actions via control plane
-Admin mutations SHALL proxy to the watchdog over the control RPC using the `SEBAS_CONTROL_SECRET`, attributed to a local CLI actor — which executes directly without a confirmation round-trip. **补充**：Actions 在原有 update (release)、update dry-run、update dev、rollback、restart core 之外，新增「Services 分区内的 enable/disable/restart」三类——enable/disable 经 `POST /api/admin/services/{name}/enable|disable` 走 `ServiceSet` RPC；restart per-process 经既有 watchdog 监督循环（每个受管服务都有 restart 入口）。**补充**：裸 core 形态下所有 admin mutations SHALL 返回 503 "control plane not connected"，Services 分区 SHALL 据此呈现退化。
+Admin mutations SHALL proxy to the watchdog over the control RPC using the `SEBAS_CONTROL_SECRET`, attributed to a local CLI actor — which executes directly without a confirmation round-trip. **补充**：Actions 在原有 update (release)、update dry-run、update dev、rollback、restart core 之外，新增「Services 分区内的 enable/disable/restart」三类——enable/disable 经 `POST /api/admin/services/{name}/enable|disable` 走 `ServiceSet` RPC（仅对辅助服务 webui/router/im 开放；core 恒启动，无 enable/disable 入口）；restart per-process 经既有 watchdog 监督循环（每个受管服务都有 restart 入口）。**补充**：裸 core 形态下所有 admin mutations SHALL 返回 503 "control plane not connected"，Services 分区 SHALL 据此呈现退化。
 
 #### Scenario: restart via admin
 
@@ -692,12 +692,12 @@ duplicate, 400 validation, 503 unavailable) in the page.
 
 ### Requirement: Provider status parity across deployment forms
 
-The WebUI's provider-derived surfaces (`GET /api/settings` 的 router 段、
-`GET /api/router`、`GET /api/about` 的 provider 计数，及 composer 的
+The WebUI's provider-derived surfaces (`GET /api/settings` 的 gateway 段、
+`GET /api/gateway`、`GET /api/about` 的 provider 计数，及 composer 的
 provider 标签）SHALL 在 `run --webui` 与 `sebas webui` 两种部署形态下，对同一
 配置呈现一致且真实的 provider 状态。detached 形态 SHALL NOT 以空占位
-（`RouterInfo` 缺省值）作为最终数据源：provider 列表 SHALL 来自 webui 可达的
-provider 真源（状态库），router 静态事实（listen、debug、has_auth）SHALL
+（`GatewayInfo` 缺省值）作为最终数据源：provider 列表 SHALL 来自 webui 可达的
+provider 真源（状态库），gateway 静态事实（listen、debug、has_auth）SHALL
 来自配置解析。当 provider 真源不可用时，响应 SHALL 如实标注不可用，而不是
 报告"未配置 provider"。
 
@@ -710,14 +710,14 @@ provider 真源（状态库），router 静态事实（listen、debug、has_auth
 
 #### Scenario: detached 反映运行期 provider 变更
 
-- **WHEN** 操作员经 router admin API 新增或改名 provider 后刷新 detached
+- **WHEN** 操作员经 gateway admin API 新增或改名 provider 后刷新 detached
   WebUI 的 settings
 - **THEN** 响应中的 provider 集合反映该变更，无需重启 webui 进程
 
 #### Scenario: provider 真源不可用时如实上报
 
 - **WHEN** detached webui 无法从状态库读取 provider 数据
-- **THEN** `/api/settings` 的 router 段携带可辨识的"不可用"指示，而不是把空
+- **THEN** `/api/settings` 的 gateway 段携带可辨识的"不可用"指示，而不是把空
   集合冒充"未配置"
 
 ### Requirement: Honest session rejection causes
@@ -780,7 +780,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 - **THEN** 弹出确认对话框，描述动作影响与不可撤销性；确认后调用相应后端接口并内联呈现 success/error；无 watchdog adapter 时按钮全灰且 tooltip 标注「无 watchdog 控制面」
 
 ### Requirement: Services 分区数据源
-Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）。无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。Models 分区顶部 SHALL 呈现 provider 路由网关总览（来自既有 `/api/router`：listen / debug / auth 三行），与 Services 分区在产品语义上彻底解耦。
+Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）。core 为恒启动服务：其行 SHALL 仅呈现状态与 restart 入口，SHALL NOT 渲染 enable/disable 按钮（enable-core-by-default）。无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。Models 分区顶部 SHALL 呈现 provider 路由网关总览（来自既有 `/api/router`：listen / debug / auth 三行），与 Services 分区在产品语义上彻底解耦。
 
 #### Scenario: Services 渲染受管子进程
 
@@ -799,8 +799,8 @@ Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `G
 
 #### Scenario: disable 成功
 
-- **WHEN** 操作员对 `core` 点击 disable（前提：confirm 弹窗已确认）
-- **THEN** 前端 POST `/api/admin/services/core/disable` 收到 200；列表行刷新
+- **WHEN** 操作员对辅助服务（如 `router`）点击 disable（前提：confirm 弹窗已确认）
+- **THEN** 前端 POST `/api/admin/services/router/disable` 收到 200；列表行刷新；core 行不渲染 enable/disable 按钮
 
 #### Scenario: restart 操作
 
@@ -839,3 +839,22 @@ app-shell SHALL 提供全局"核心不可达"横幅：当 `/api/summary` 的 `re
 
 - **WHEN** 核心通道正常时注册项目
 - **THEN** 响应无降级标记，UI 仅呈现常规成功路径
+
+### Requirement: Creation-time model applies to ACP sessions
+
+The `model` field of `POST /api/sessions` SHALL be honored for ACP-backend sessions: when present, the backend SHALL deliver it to the spawned ACP child as the session's model configuration before the first prompt runs, so the first turn already uses the chosen model. For agents that expose no model configuration surface, the field SHALL remain a silent no-op (the session uses its default model and no model UI is shown), consistent with existing behavior. A model id the agent rejects SHALL surface as a typed error on the session rather than a silent fallback.
+
+#### Scenario: chosen model applies from the first turn
+
+- **WHEN** the operator creates an ACP session with a `model` the agent supports
+- **THEN** the session's first turn runs with that model, and the session's `current_model` afterwards reflects it
+
+#### Scenario: agent without a model surface ignores the field
+
+- **WHEN** the operator creates an ACP session with a `model` against an agent that exposes no model configuration
+- **THEN** the session spawns with the agent's default model and no error is raised
+
+#### Scenario: rejected model is a typed error
+
+- **WHEN** the operator creates an ACP session with a `model` the agent rejects
+- **THEN** the session surfaces a typed rejection and does not silently fall back to the default model

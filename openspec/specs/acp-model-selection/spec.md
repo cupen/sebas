@@ -38,7 +38,7 @@ The system SHALL implement model switching on an ACP session by issuing the stan
 
 ### Requirement: Model selection survives into the session lifecycle
 
-A model chosen at session creation SHALL be applied to that session; a model chosen mid-session SHALL apply to subsequent turns. The model SHALL be part of the session's descriptive snapshot where the webui reads it. The spawn-time model cover env (`acp-claude-env`) SHALL establish the session's starting model on the Claude child; a runtime switch through `session/set_config_option` (or the Claude-equivalent model switch) SHALL take effect from the moment it succeeds and SHALL NOT be reverted by the spawn-time env on later turns.
+A model chosen at session creation SHALL be applied to that session; a model chosen mid-session SHALL apply to subsequent turns. The model SHALL be part of the session's descriptive snapshot where the webui reads it. The spawn-time model cover env (`claude-env-cover`) SHALL establish the session's starting model on the Claude child; a runtime switch through `session/set_config_option` (or the Claude-equivalent model switch) SHALL take effect from the moment it succeeds and SHALL NOT be reverted by the spawn-time env on later turns.
 
 #### Scenario: Create-with-model applies at spawn
 

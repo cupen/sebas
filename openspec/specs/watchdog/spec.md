@@ -9,8 +9,7 @@ lifecycle, and bare-core degraded mode.
 ## Requirements
 
 ### Requirement: Core child supervision
-
-The watchdog SHALL spawn the core as `current_exe() core --config <path>` — the same binary, core subcommand, and the watchdog's own config — with piped stdio, `kill_on_drop`, and env `SEBAS_IPC=1` plus a per-instance `SEBAS_CONTROL_SECRET`. The core signals readiness over the pipe; a child exit is classified and the watchdog loops to respawn after a fixed 1000 ms delay. Spawn failures (missing binary, no stdio) SHALL be retried with the 1 s backoff up to N consecutive failures (default 3, configurable via `[watchdog] max_spawn_failures`), then SHALL enter the `failed-startup` terminal state; each failure SHALL write a structured error log and surface through the existing reporting paths (systemd unit status, `sebas ctl status`, Feishu boot notifications when enabled). A core exit before ready due to an early-fatal line SHALL count toward the same `failed-startup` counter; a startup failure of the new binary after a ready-after-rollback SHALL NOT count toward it (handled by the New-binary auto-rollback rules). Stopping the core uses SIGTERM with a 5 s grace period, then SIGKILL.
+The watchdog SHALL spawn the core as `current_exe() core --config <path>` — the same binary, core subcommand, and the watchdog's own config — with piped stdin/stdout (stderr inherited into the watchdog's own stream), `kill_on_drop`, and env `SEBAS_IPC=1` plus a per-instance `SEBAS_CONTROL_SECRET`. The core signals readiness over the pipe; a child exit is classified and the watchdog loops to respawn after a fixed 1000 ms delay. **修改**：spawn failures (missing binary, no stdio) 在 N 次（默认 3，可由 `[watchdog] max_spawn_failures` 配置）连续失败后 SHALL 进入 `failed-startup` 终态——该 service 状态置 `failed-startup`、watchdog 进程 SHALL 以 EX_TEMPFAIL (75) 退出、`sebas ctl status` SHALL 报告失败原因摘要（最近一次 stderr line + 失败计数）。N 次以内 SHALL 按固定 5 s 退避（`SPAWN_RETRY_DELAY`）重试，但每次失败 SHALL 写入结构化错误日志（含失败原因摘要）且 SHALL 经既有上报通道（systemd unit 状态、`sebas ctl status`）让触发者即时可见。Stopping the core uses SIGTERM with a 5 s grace period, then SIGKILL。**新增**：core 在 ready 之前退出（非 75 退出码；75 走 Degraded 而非计数器）同样计入 `failed-startup` 终态计数器；新二进制 ready-after-rollback 后再启动失败不计入本计数器（按 New-binary auto-rollback 既有规约处理）。
 
 #### Scenario: core exit respawns
 
@@ -61,7 +60,7 @@ exits due to a crashing child.
   restarted per their own counters
 
 ### Requirement: New-binary auto-rollback
-When an upgrade (non-dry-run, non-rollback) just completed and the freshly started core exits BEFORE reporting ready, the watchdog SHALL classify the exit as new-binary-not-ready and automatically roll back to the previous version — without counting the exit against the crash counter. If no rollback backup exists or the rollback itself fails, the watchdog SHALL enter the `failed-startup` terminal state, exit with EX_TEMPFAIL (75), and `sebas ctl status` SHALL report the failure summary ("rollback failed: <reason>") — the watchdog SHALL NOT silently continue. The rollback trigger itself SHALL write a structured log (including the before/after binary paths), and the operator SHALL see a "rollback triggered" event via `sebas ctl status`.
+When an upgrade (non-dry-run, non-rollback) just completed and the freshly started core exits BEFORE reporting ready, the watchdog SHALL classify the exit as new-binary-not-ready and automatically roll back to the previous version — without counting the exit against the crash counter. **修改**：If no rollback backup exists or the rollback itself fails, the watchdog **SHALL** 进入 `failed-startup` 终态、watchdog 进程以 EX_TEMPFAIL (75) 退出、`sebas ctl status` SHALL 报告失败原因摘要（"rollback failed: <原因>"）——不再 silently continue。**新增**：rollback 触发本身 SHALL 写入结构化日志（包含前/后二进制路径），触发者经 `sebas ctl events` SHALL 看到「rollback 触发」事件。
 
 #### Scenario: unready binary rolled back
 
@@ -81,7 +80,7 @@ When an upgrade (non-dry-run, non-rollback) just completed and the freshly start
 #### Scenario: rollback event is logged
 
 - **WHEN** watchdog 触发 auto-rollback
-- **THEN** 写入结构化日志含前/后二进制路径与触发原因；`sebas ctl status` SHALL 看到「rollback 触发」事件
+- **THEN** 写入结构化日志含前/后二进制路径与触发原因；`sebas ctl events` SHALL 看到「rollback 触发」事件
 
 ### Requirement: Control RPC transport and authentication
 
@@ -112,9 +111,12 @@ invalidates outstanding clients.
 The RPC SHALL serve: `Status`, `EventsSince`, `Update`, `Rollback`,
 `RestartCore`, `ServiceStatus`, `ServiceStatusFor`, `ServiceSet`,
 `ServiceRestart`, `Confirm`, and `Cancel`. `ServiceSet` and
-`ServiceRestart` SHALL act on the auxiliary managed services (webui,
-router, im) as specified in the Service lifecycle requirement; requests
-naming the core service SHALL be rejected with an actionable error.
+`ServiceRestart` SHALL act on the managed services (webui, router, im) as
+specified in the Service lifecycle requirement. For the core service,
+`ServiceSet` and `ServiceRestart` SHALL be rejected for every actor with an
+actionable error pointing to `RestartCore`（enable-core-by-default：core 恒启动，
+无启停入口——config 层与 `services.json` 覆盖层同样被忽略，webui 服务页对 core
+仅提供 restart）.
 `Confirm` and `Cancel` SHALL be accepted only from a Feishu actor with a
 `chat_id`; any other actor gets `unauthorized`.
 
@@ -123,11 +125,11 @@ naming the core service SHALL be rejected with an actionable error.
 - **WHEN** a client sends `ServiceSet { service: "webui", desired: "off" }`
 - **THEN** the response is `Accepted` and the WebUI child stops
 
-#### Scenario: service set rejected
+#### Scenario: service set on core rejected
 
-- **WHEN** a client sends `ServiceSet { service: "core", desired: "off" }`
+- **WHEN** any actor sends `ServiceSet { service: "core", desired: "off" }`
 - **THEN** the response is `Rejected` with an actionable message pointing
-  to `RestartCore` (core lifecycle is supervised, not user-toggled)
+  to `RestartCore` (core 恒启动：lifecycle supervised, no enable path)
 
 #### Scenario: cli cannot confirm
 
@@ -270,10 +272,11 @@ confirmed dangerous-action path).
 - **WHEN** the core child crashes and is restarted by the watchdog
 - **THEN** the WebUI child process is untouched
 
-#### Scenario: webui disabled by default
+#### Scenario: webui enabled by default
 
 - **WHEN** the config has no `[watchdog.webui]` section
-- **THEN** the watchdog spawns no WebUI child
+- **THEN** the watchdog spawns the WebUI child (webui 是 watchdog 唯一默认
+  启动的服务，enable-core-by-default 后 core 亦恒启）
 
 #### Scenario: crashed webui is restarted
 
@@ -308,7 +311,7 @@ confirmed dangerous-action path).
   to `RestartCore`
 
 ### Requirement: Managed service table
-The watchdog SHALL supervise all child processes through one declarative table of managed services — core, webui, router, and im — where each entry declares its spawn specification (argv, env), its desired state (from config or `ServiceSet`), and its restart policy. **补充**：受管服务名在 RPC/REST 接口与 control RPC 中 SHALL 统一使用 `core` / `webui` / `router` / `im` 四个字符串（产品对外 IM 即「飞书」，但内部字符串 SHALL 为 `im` 以与 `ServiceName::Im` 枚举对齐）；webui 前端 SHALL 通过 `service_from_str("im")` 识别，禁止使用 `feishu` 作为内部名。监督循环 SHALL 维持对全部 entry 的均匀处理（spawn / 退出分类 / 重启决策），New-binary auto-rollback 仍是 core 专属。config 中 disabled 的服务 SHALL 无子进程被拉起、状态报告为 `disabled`。core 子进程的 pipe 协议 SHALL 仅承载 readiness 握手（含 early fatal-error 行），控制操作不再经 pipe，control RPC socket 是唯一命令面。
+The watchdog SHALL supervise all child processes through one declarative table of managed services — core, webui, router, and im — where each entry declares its spawn specification (argv, env), its desired state (from config or `ServiceSet`), and its restart policy. **补充**：受管服务名在 RPC/REST 接口与 control RPC 中 SHALL 统一使用 `core` / `webui` / `router` / `im` 四个字符串（产品对外 IM 即「飞书」，但内部字符串 SHALL 为 `im` 以与 `ServiceName::Im` 枚举对齐）；webui 前端 SHALL 通过 `service_from_str("im")` 识别，禁止使用 `feishu` 作为内部名。监督循环 SHALL 维持对全部 entry 的均匀处理（spawn / 退出分类 / 重启决策），New-binary auto-rollback 仍是 core 专属。config 中 disabled 的服务 SHALL 无子进程被拉起、状态报告为 `disabled`。core 子进程的 pipe 协议 SHALL 仅承载 readiness 握手（单一 `Ready` 帧，无错误行——失败经退出码分类），控制操作不再经 pipe，control RPC socket 是唯一命令面。**补充（enable-core-by-default）**：core 为恒启 entry——无 `[watchdog.core] enabled` 开关，watchdog SHALL 无条件拉起 core 并监督之；`ServiceSet`/`ServiceRestart` 命名 core SHALL 一律拒绝（指向 `RestartCore`），config 层与 `services.json` 覆盖层对 core SHALL 被忽略（历史 `core` 覆盖告警后弃用）。
 
 #### Scenario: router managed when enabled
 
@@ -319,6 +322,11 @@ The watchdog SHALL supervise all child processes through one declarative table o
 
 - **WHEN** the watchdog config enables IM management (explicitly or via the feishu-enablement default)
 - **THEN** the watchdog spawns `sebas im --config <path>` with the control secret and `ServiceStatus` includes a real im entry
+
+#### Scenario: core managed unconditionally
+
+- **WHEN** the watchdog runs (any config, any services.json override)
+- **THEN** the watchdog spawns and supervises the core child, and `ServiceStatus` includes a real core entry
 
 #### Scenario: disabled service reports disabled
 

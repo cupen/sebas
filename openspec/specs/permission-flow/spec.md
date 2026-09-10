@@ -24,7 +24,7 @@ The system SHALL surface every Claude PreToolUse hook invocation as a permission
 
 ### Requirement: Three decision outcomes
 
-The system SHALL support three user decisions on a permission card: `Allow once`, `Allow session`, and `Deny`. Each decision maps to a distinct hook output and a distinct post-click card state.
+The system SHALL support three user decisions on a Feishu permission card: `Allow once`, `Allow session`, and `Deny`. This capability owns the Feishu-side rendering and the per-chat allowlist for the hook-driven path; the cross-driver decision vocabulary (including `escalate`) and `request_id` namespacing are governed by `agent-driver`. Each decision maps to a distinct hook output and a distinct post-click card state.
 
 #### Scenario: Allow once approves this call only
 

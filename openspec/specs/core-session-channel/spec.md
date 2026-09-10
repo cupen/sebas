@@ -1,5 +1,3 @@
-# core-session-channel Specification
-
 ## Purpose
 
 Define the channel between the sebas core — the sole owner of session state and

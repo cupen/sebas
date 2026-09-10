@@ -35,7 +35,7 @@ im 服务 SHALL 维护自己的适配器注册表（复用 `channels` 中立抽�
 
 ### Requirement: IM 交互状态机随迁
 
-卡片状态机（每会话单卡片、流式合并、预算与轮换——中立契约遵循 `channels`「Neutral presentation content contract」，飞书渲染遵循 `feishu-cards`）、权限审批卡、acknowledgment/阶段 reactions、命令解析、provider/settings 表单 UI SHALL 全部由 im 服务持有与执行，其行为规格分别遵循 `channels`、`feishu-cards`、`permission-flow`、`dispatch-commands`、`provider-management` capability。im SHALL 把交互蒸馏为核心通道请求（会话消息、审批决定、状态库变更），SHALL NOT 本地实现任何会话语义。
+卡片状态机（每会话单卡片、流式合并、预算与轮换——中立契约遵循 `channels`「Neutral presentation content contract」，飞书渲染遵循 `feishu-cards`）、权限审批卡、acknowledgment/阶段 reactions、命令解析、provider/settings 表单 UI SHALL 全部由 im 服务持有与执行，其行为规格分别遵循 `channels`、`feishu-cards`、`permission-flow`、`dispatch-commands`、`provider-management` capability。阶段 reaction 的渲染 SHALL 由 im 前端基于从核心会话通道观察到的 `SessionInfo.phase` 变化驱动（seed→working→terminal 相位机、同 emoji 不重发、旧 reaction 尽力移除的 swap 语义，见 `feishu-reactions`）；core SHALL NOT 为 IM 通道渲染 reaction 或发送聊天向卡片。im SHALL 把交互蒸馏为核心通道请求（会话消息、审批决定、状态库变更），SHALL NOT 本地实现任何会话语义。**Deferred**：`[card]` 的截断/折叠/thinking 旋钮目前未被 im 卡片机消费（仅 `theme_color` 生效，其余走默认值）；设置域接管后随域刷新。
 
 #### Scenario: 权限按钮点击走通道回传
 
@@ -46,6 +46,11 @@ im 服务 SHALL 维护自己的适配器注册表（复用 `channels` 中立抽�
 
 - **WHEN** 用户提交 provider 表单
 - **THEN** im 经通道状态库接口（StateMutation）持久化，反馈卡片如实回报成功或失败
+
+#### Scenario: 相位变化触发 reaction
+
+- **WHEN** im 前端观察到某会话的 `SessionInfo.phase` 由 seed 变为 working
+- **THEN** im 在该会话的卡片消息上应用 `OnIt` reaction（同 emoji 不重复发 API）
 
 ### Requirement: 媒体解析与图片上传
 
@@ -92,3 +97,12 @@ IM 适配器配置（`[feishu]`）、渲染配置（`[card]`）、媒体配置�
 
 - **WHEN** 配置含完整 `[feishu]` 凭据但部署只运行 core
 - **THEN** core 不建立飞书连接、不校验飞书 token，也不报配置错误
+
+### Requirement: IM 前端渲染会话级 reaction
+
+IM 服务的前端 SHALL 从核心会话通道的 `SessionInfo.phase` 推导并渲染会话级 reaction，遵循 `feishu-reactions` 的相位机、swap 与目标选择契约。core 进程 SHALL NOT 持有或发射 IM 向的 reaction 指令。
+
+#### Scenario: 重启后由快照恢复相位
+
+- **WHEN** core 重启且 im 服务持续运行
+- **THEN** im 从重连后的会话快照重新取得各会话相位，并据此对齐卡片 reaction

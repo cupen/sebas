@@ -14,12 +14,12 @@ emitted.
 Reactions SHALL use Feishu `emoji_type` tokens rather than raw Unicode
 emoji: `Get` (👌 acknowledgment), `OnIt` (🚧 working), `DONE` (✅ finished),
 `CrossMark` (❌ failed) — the Feishu API rejects raw Unicode emoji with
-error 231001. The in-flight back-pressure reaction uses the literal raw
-token `⏳` as an exception.
+error 231001. Phase reactions are emitted by the IM service's frontend as it
+observes the core's session phase (see `im-service`), not by the core process.
 
 #### Scenario: token vocabulary
 
-- **WHEN** the router emits any phase reaction
+- **WHEN** the IM service applies a phase reaction
 - **THEN** the react API call carries a Feishu `emoji_type` token
   (`Get`/`OnIt`/`DONE`), not a Unicode character
 
@@ -30,13 +30,16 @@ a one-shot `Get` (👌) acknowledgment reaction on that user message before
 processing begins. Acknowledgment reactions are tracked per message id,
 separately from the session's phase-reaction tracker, and are removed
 (best-effort) before the first phase reaction is applied to the same
-message.
+message. The IM service's frontend SHALL apply this ack; the core process
+SHALL NOT emit an ack reaction for IM channels. **Deferred**：per-message
+ack 在 im 前端尚未实现（`record_ack`/`take_ack` 已就绪、无调用方）——当前
+用户消息上无即时 ack，相位 reaction 直接落在会话卡片上；启用属小改动。
 
 #### Scenario: text message acknowledged
 
 - **WHEN** the user sends a text message to an active chat
-- **THEN** the bot reacts `Get` on that message before the turn's streaming
-  begins
+- **THEN** the IM service reacts `Get` on that message before the turn's
+  streaming begins
 
 #### Scenario: ack removed before phase swap
 
@@ -51,7 +54,9 @@ The session's reaction phase SHALL start at seed (`Get`). Streaming events
 seed → working (`OnIt`) exactly once; once working, further streaming events
 do not change the reaction. `Finished` transitions to `DONE` (✅) regardless
 of the current phase. Permission requests and usage updates never change the
-reaction. There is no transition back to seed.
+reaction. There is no transition back to seed. The core reports the phase via
+the session snapshot (`SessionInfo.phase`); the IM service's frontend SHALL
+drive the reaction from phase changes it observes.
 
 #### Scenario: seed to working once
 
@@ -91,27 +96,29 @@ proceeds); failure to add the new reaction propagates as an error.
 
 ### Requirement: Target message selection
 
-Phase reactions SHALL target the user's triggering message when known
-(`input_msg_id`), falling back to the session's root card (`root_msg_id`)
-for sessions spawned without a triggering user message (e.g. `/new`,
-WebUI-created, replay). When neither exists, the reaction is silently
-skipped (debug log). Targeting the user message keeps the reaction immune to
-card message-id churn.
+Phase reactions SHALL target the session's root card message
+(`card_msg_id`); when no card message id is known, the reaction is silently
+skipped. (Rationale: the IM frontend renders the card it owns; targeting the
+card is the deployment reality after extract-im-service.)
 
 #### Scenario: user message preferred
 
-- **WHEN** a session with a known input message finishes a turn
-- **THEN** the `DONE` reaction lands on the user's message, not the card
+- **WHEN** a session spawned from a user message finishes a turn and has a rendered card
+- **THEN** the phase reaction is applied to the session's card message (the IM-owned presentation), not by the core process
+
+#### Scenario: card target
+
+- **WHEN** a session with a rendered card finishes a turn
+- **THEN** the `DONE` reaction lands on that card message
 
 #### Scenario: no target skipped
 
-- **WHEN** an `Out::React` is emitted for a session with neither input nor
-  root message id
+- **WHEN** a phase change is observed for a session with no card message id
 - **THEN** no reaction API call is made and no error surfaces
 
 ### Requirement: Terminal states
 
-A finished turn SHALL emit the `DONE` (✅) reaction on the target message. A
+A finished turn SHALL emit the `DONE` (✅) reaction on the card. A
 terminal error SHALL NOT emit a `FAILED` reaction — the failure is surfaced
 by the ❌ row on the card, and the reaction state machine's `CrossMark`
 terminal is defined but never dispatched.
@@ -119,7 +126,7 @@ terminal is defined but never dispatched.
 #### Scenario: finished emits done
 
 - **WHEN** a turn completes successfully
-- **THEN** a `DONE` reaction is applied to the user's message
+- **THEN** a `DONE` reaction is applied to the session's card
 
 #### Scenario: terminal error emits no reaction
 
@@ -137,34 +144,3 @@ a reaction transition.
 
 - **WHEN** a permission request arrives while the phase is working
 - **THEN** the `OnIt` reaction stays in place through the wait
-
-### Requirement: In-flight back-pressure reaction
-
-When a user message arrives while a turn is still streaming, the router
-SHALL emit the literal `⏳` reaction on that message as back-pressure
-feedback, without creating a card or forwarding the message to the session.
-
-#### Scenario: queue reaction
-
-- **WHEN** the user sends a second message mid-turn
-- **THEN** that message receives the `⏳` reaction and is enqueued for the
-  next turn
-
-### Requirement: Emission cadence
-
-Phase reactions for streaming turns SHALL be emitted by the same debounced
-pump as card updates (a pending reaction fires on the next pump tick);
-immediate terminal events bypass the queue and reset any pending reaction.
-
-#### Scenario: working reaction after merged flush
-
-- **WHEN** five text deltas merge into one card flush
-- **THEN** the `OnIt` reaction accompanies that flushed update rather than
-  firing per delta
-
-#### Scenario: immediate terminal skips queue
-
-- **WHEN** a terminal event arrives while a `WORKING` reaction is still
-  pending on the pump
-- **THEN** the pending reaction is discarded and the terminal handling
-  proceeds without emitting it

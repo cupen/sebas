@@ -34,15 +34,25 @@ material. `GET /healthz` is exempt from authentication.
 
 ### Requirement: Open router when unconfigured
 
-When no `auth_token` is configured (or the router runs in `--debug` mode),
-the router SHALL skip authentication entirely and serve requests without a
-key; such requests are attributed to the shared `anonymous` identity.
+When the router runs in `--debug` mode, authentication SHALL be skipped
+entirely. When no `auth_token` is configured and the listen address is
+loopback, keyless requests SHALL also be served without a key; on a
+non-loopback listen with no configured tokens, keyless requests SHALL be
+rejected with 401 — an unauthenticated public bind is treated as a
+misconfiguration. Keyless requests that pass are attributed to the shared
+`anonymous` identity.
 
-#### Scenario: no auth_token configured
+#### Scenario: no auth_token configured on loopback
 
-- **WHEN** the router config has no `auth_token` and a keyless request
-  arrives
+- **WHEN** the router config has no `auth_token`, the listen address is
+  loopback, and a keyless request arrives
 - **THEN** the request proceeds to routing and rate limiting without a 401
+
+#### Scenario: no auth_token on non-loopback rejects keyless requests
+
+- **WHEN** the router config has no `auth_token`, the listen address is
+  non-loopback (e.g. `0.0.0.0`), and a keyless request arrives
+- **THEN** the request is rejected with 401
 
 ### Requirement: Per-key token-bucket rate limiting
 
@@ -151,9 +161,11 @@ with the response status.
 
 ### Requirement: Access log
 
-Every request (including `/healthz`) SHALL emit one nginx-style access log
-line via `tracing` at target `router::access`, on response-body completion
-or client disconnect:
+Every proxied request (the access-log layer wraps the proxy surface, not
+the separately-mounted `/admin/*` and `/metrics` routes; `/healthz` is
+whitelisted past auth/rate-limit but still logged) SHALL emit one
+nginx-style access log line via `tracing` at target `router::access`, on
+response-body completion or client disconnect:
 
 `{ip} - [{ts}] "{METHOD} {path}" {model}@{provider} {status} {bytes}
 {latency}ms`
@@ -165,8 +177,8 @@ logged. Output goes to stdout; there is no file writer or rotation.
 #### Scenario: rejected request logged
 
 - **WHEN** a request fails authentication with 401
-- **THEN** the access log line shows status 401 with `-@-` for model and
-  provider
+- **THEN** the access log line shows status 401 with a single `-` for the
+  model@provider field (both unknowns collapse to one dash)
 
 #### Scenario: routed request logged
 

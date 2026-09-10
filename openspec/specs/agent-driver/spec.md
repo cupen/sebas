@@ -2,18 +2,18 @@
 
 ## Purpose
 
-把 sebas 的 agent 接入从单一实现抽象成**驱动抽象/策略层**：`AgentDriver` trait + 按 kind 解析的实现选择，统一 `AcpEvent`/`AcpCommand` 防腐层词表、开放 kind 注册、跨驱动权限路由（webui 审查卡）与可达性上报。具体 ACP 子进程的 spawn/resume/事件泵/中断恢复等**运行时层**归 `acp-driver` capability 所有——本 capability 是「接什么 agent、暴露什么词表」，不承载单个子进程的生命周期实现。下游 router/飞书/webui 只消费统一词表，逐个新增 agent 只改配置。
+把 sebas 的三方 coding-agent 接入从 Claude Code 单实现抽象成驱动层：`AgentDriver` trait + 两类实现——Claude 专用驱动（保留 `cc-agent-sdk`，换取 Claude 专有能力如 token 用量计数）与通用 ACP 驱动（用 `agent-client-protocol` v1 驱动任意原生 ACP agent）。下游 router/飞书/webui 只消费统一的 `AcpEvent`/`AcpCommand` 防腐层词表，因此逐个新增三方 agent 只改配置、不改代码。权限往返跨驱动统一进入 webui 审查卡。
 
 ## Requirements
 
 ### Requirement: AgentDriver abstraction with two implementations
 
-The system SHALL define an `AgentDriver` trait that abstracts driving one third-party coding-agent subprocess: `spawn(config)` producing a session handle that streams `AcpEvent`s, accepts `AcpCommand`s, and cancels on demand. The trait is the **abstraction/policy layer**: it owns which driver a configured agent kind resolves to, the open kind registry, cross-driver permission routing, and honest reachability reporting (below) — it does NOT own the per-session subprocess lifecycle or the ACP protocol details, which belong to the `acp-driver` capability (the runtime layer for ACP children). The system SHALL provide two implementations: a `ClaudeDriver` that keeps driving Claude Code through `cc-agent-sdk`, and an `AcpDriver` that drives a native ACP agent through the ACP subprocess runtime (`acp-driver`). Both implementations SHALL emit the same `AcpEvent`/`AcpCommand` vocabulary, so downstream consumers need no driver-specific branches.
+The system SHALL define an `AgentDriver` trait that abstracts driving one third-party coding-agent subprocess: `spawn(config)` producing a session handle that streams `AcpEvent`s, accepts `AcpCommand`s, and cancels on demand. The system SHALL provide two implementations: a `ClaudeDriver` that keeps driving Claude Code through `cc-agent-sdk`, and an `AcpDriver` that spawns a native ACP agent (e.g. `gemini --acp`) and speaks the Agent Client Protocol v1 through the `agent-client-protocol` crate. Both implementations SHALL emit the same `AcpEvent`/`AcpCommand` vocabulary, so downstream consumers need no driver-specific branches.
 
 #### Scenario: Both drivers present the same vocabulary
 
 - **WHEN** the router consumes events from either the Claude driver or the ACP driver
-- **THEN** it observes only `AcpEvent` variants (`TextDelta`/`ThinkingDelta`/`ToolStart`/`ToolProgress`/`ToolEnd`/`PermissionRequest`/`Finished`/`Error`/`UsageUpdate`)
+- **THEN** it observes only `AcpEvent` variants (`TextDelta`/`ThinkingDelta`/`ToolStart`/`ToolProgress`/`ToolEnd`/`PermissionRequest`/`Finished`/`Error`/`UsageUpdate`/`ModelChanged`)
 - **AND** no `agent-client-protocol` or `cc-agent-sdk` type leaks past the driver module boundary
 
 #### Scenario: Claude driver preserves usage accounting
@@ -24,7 +24,7 @@ The system SHALL define an `AgentDriver` trait that abstracts driving one third-
 #### Scenario: ACP driver spawns a native ACP agent
 
 - **WHEN** an agent is configured with `driver = "acp"` and a `command` such as `gemini --acp`
-- **THEN** the ACP driver resolves the kind to the ACP subprocess runtime (`acp-driver`), which spawns that command, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
+- **THEN** the ACP driver spawns that command as a subprocess, negotiates ACP v1 `initialize`, and streams its `session/update` events translated into `AcpEvent`s
 
 ### Requirement: Open agent registry keyed by kind, not a closed enum
 
@@ -60,14 +60,20 @@ Configurations using the legacy `[acp.claude]` table SHALL be rejected at parse 
 
 ### Requirement: Cross-driver permission routing through the webui review card
 
-The system SHALL route permission requests from every driver through the same downstream channel, so a permission request raised by either the Claude driver or the ACP driver SHALL be addressable through the webui review card with the same `allow_once` / `allow_session` / `deny` / `escalate` decision vocabulary. The system SHALL names, in the `PermissionRequest` the driver emits, the `request_id` as `<kind-slug>:<raw-id>` so ids from different drivers cannot collide, and SHALL decode it back to the raw id when delivering the answer to the owning driver.
+The system SHALL route permission requests from every driver through the same downstream channel, so a permission request raised by either the Claude driver or the ACP driver SHALL be addressable through the webui review card. The full decision vocabulary is `allow_once` / `allow_session` / `deny` / `escalate`. The `escalate` decision (a one-shot allow carrying the operator's reason) is meaningful only for the native kernel; when the owning execution body is an ACP driver, an `escalate` decision SHALL be delivered as `allow_once` and the downgrade SHALL be logged. The system SHALL name, in the `PermissionRequest` the driver emits, the `request_id` as `<kind-slug>:<raw-id>` so ids from different drivers cannot collide, and SHALL decode it back to the raw id when delivering the answer to the owning driver.
 
 #### Scenario: Permission round-trip works for an ACP agent
 
 - **WHEN** a native-ACP agent raises a permission request for a tool the policy gates
-- **THEN** the webui shows the review card with the same four actions
+- **THEN** the webui shows the review card
 - **AND** the chosen decision is delivered to the ACP driver, which answers the ACP permission with the mapped `PermissionOption.kind`
 - **AND** the request id carries the kind slug so it is unambiguous across sessions
+
+#### Scenario: escalate falls back to allow-once for an ACP agent
+
+- **WHEN** the operator answers `escalate` on a permission request whose owning execution body is an ACP driver
+- **THEN** the decision delivered to that ACP driver is `allow_once` (ACP has no escalate equivalent)
+- **AND** the downgrade is logged
 
 #### Scenario: Claude permission reaches the webui (gap fix)
 

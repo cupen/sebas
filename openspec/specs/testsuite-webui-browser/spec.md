@@ -113,7 +113,7 @@
 
 ### Requirement: 一键入口与稳定性
 
-`invoke testsuite-webui` SHALL 是套件唯一入口：构建（含 dist 自动重建）→ 装配沙箱 → 运行全部用例 → 清理；支持按名过滤单个旅程；后续补充用例 SHALL 经既有过滤机制运行、无需新增入口。断言 SHALL 基于状态轮询而非固定 sleep（web-first + 轮询，禁固定 sleep）；同一提交重复运行 SHALL 稳定收敛（多次全绿为收尾门槛），清理与保留现场行为一致。spec 文件 SHALL 维持两层 `test.describe` 结构——顶层对应大功能（与 requirement 一致）、二层对应子功能（与 COVERAGE 一致）；`invoke testsuite-webui` 入口 preflight SHALL 拒绝任何在 spec 文件顶层直接出现 `test(...)` 而未包在 `test.describe` 内的写法，避免新加用例时绕开功能树收敛。
+`invoke testsuite-webui` SHALL 是套件唯一入口：构建（含 dist 自动重建）→ 装配沙箱 → 运行全部用例 → 清理；支持按名过滤单个旅程；后续补充用例 SHALL 经既有过滤机制运行、无需新增入口。断言 SHALL 基于状态轮询而非固定 sleep（web-first + 轮询，禁固定 sleep）；同一提交重复运行 SHALL 稳定收敛（多次全绿为收尾门槛），清理与保留现场行为一致。**新增**：spec 文件 SHALL 维持两层 `test.describe` 结构——顶层对应大功能（与 requirement 一致）、二层对应子功能（与 COVERAGE 一致）；`invoke testsuite-webui` 入口 preflight SHALL 拒绝任何在 spec 文件顶层直接出现 `test(...)` 而未包在 `test.describe` 内的写法，避免新加用例时绕开功能树收敛。
 
 #### Scenario: 一键运行
 
