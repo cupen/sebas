@@ -197,7 +197,7 @@ impl CredentialsFile {
             iterations: c.iterations,
             salt_hex: hex::encode(&c.salt),
             hash_hex: hex::encode(&c.hash),
-            token_hash_hex: c.token_hash.map(|h| hex::encode(h)),
+            token_hash_hex: c.token_hash.map(hex::encode),
             created_at_unix,
             updated_at_unix: now_unix(),
         }
