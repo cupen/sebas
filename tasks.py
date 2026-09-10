@@ -25,6 +25,44 @@ PROJECT = "sebas"
 IMAGE = f"ghcr.io/cupen/{PROJECT}"
 
 
+def _cleanup_stale_sandboxes():
+    """Remove leftover sbtestsuite.* dirs from crashed/aborted runs.
+
+    Scans tempfile.gettempdir() for dirs named sbtestsuite.*, checks if the
+    recorded PIDs (pids.json) are still alive, and removes the dir if not.
+    This is the safety net for SIGKILL / hard-crashed test processes that
+    never reached their teardown code. Safe to call before/after any suite.
+    """
+    tmp = tempfile.gettempdir()
+    removed = []
+    for name in os.listdir(tmp):
+        if not name.startswith("sbtestsuite."):
+            continue
+        d = os.path.join(tmp, name)
+        if not os.path.isdir(d):
+            continue
+        pids_file = os.path.join(d, "pids.json")
+        alive = False
+        try:
+            with open(pids_file) as f:
+                for pid in json.load(f).values():
+                    if isinstance(pid, int):
+                        try:
+                            os.kill(pid, 0)
+                            alive = True
+                            break
+                        except ProcessLookupError:
+                            pass
+        except (OSError, ValueError, PermissionError):
+            pass
+        if not alive:
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d)
+    if removed:
+        print(f"[cleanup] removed {len(removed)} stale sandbox dirs", flush=True)
+
+
+
 @task(
     help={
         "tag": "Image tag (default: latest)",
@@ -74,16 +112,20 @@ def clean(c):
 @task(help={"case": "Run a single testsuite-e2e case by name (cargo test filter)"})
 def testsuite_e2e(c, case=None):
     """Build the workspace and run the process-level core-flow suite (testsuite-e2e)."""
-    print("Building workspace (sebas + fake-claude) ...")
-    result = c.run("cargo build", echo=True)
-    if result.failed:
-        raise SystemExit(1)
-    test_filter = f"{case} " if case else ""
-    cmd = f"cargo test --test testsuite_e2e_test {test_filter}-- --ignored".replace("  ", " ")
-    result = c.run(cmd, echo=True)
-    if result.failed:
-        print("e2e suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
-        raise SystemExit(1)
+    _cleanup_stale_sandboxes()
+    try:
+        print("Building workspace (sebas + fake-claude) ...")
+        result = c.run("cargo build", echo=True)
+        if result.failed:
+            raise SystemExit(1)
+        test_filter = f"{case} " if case else ""
+        cmd = f"cargo test --test testsuite_e2e_test {test_filter}-- --ignored".replace("  ", " ")
+        result = c.run(cmd, echo=True)
+        if result.failed:
+            print("e2e suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
+            raise SystemExit(1)
+    finally:
+        _cleanup_stale_sandboxes()
 
 
 @task(help={"case": "Run a single real-agent journey by name (cargo test filter: real_opencode / real_claude)"})
@@ -110,16 +152,20 @@ def testsuite_real_agents(c, case=None):
 @task(help={"case": "Run a single acceptance journey by name (cargo test filter)"})
 def testsuite_acceptance(c, case=None):
     """Build the workspace and run the acceptance suite (journey-level)."""
-    print("Building workspace (sebas + fake-claude) ...")
-    result = c.run("cargo build", echo=True)
-    if result.failed:
-        raise SystemExit(1)
-    test_filter = f"{case} " if case else ""
-    cmd = f"cargo test --test testsuite_acceptance_test {test_filter}-- --ignored".replace("  ", " ")
-    result = c.run(cmd, echo=True)
-    if result.failed:
-        print("acceptance suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
-        raise SystemExit(1)
+    _cleanup_stale_sandboxes()
+    try:
+        print("Building workspace (sebas + fake-claude) ...")
+        result = c.run("cargo build", echo=True)
+        if result.failed:
+            raise SystemExit(1)
+        test_filter = f"{case} " if case else ""
+        cmd = f"cargo test --test testsuite_acceptance_test {test_filter}-- --ignored".replace("  ", " ")
+        result = c.run(cmd, echo=True)
+        if result.failed:
+            print("acceptance suite FAILED; kept sandbox dirs are printed above (or under target/tests/)")
+            raise SystemExit(1)
+    finally:
+        _cleanup_stale_sandboxes()
 
 
 def _testsuite_webui_spec_structure(c):
@@ -164,70 +210,75 @@ def _testsuite_webui_preflight(c):
 @task(help={"case": "Run a single webui journey (spec file stem: first-paint, auth, ...)"})
 def testsuite_webui(c, case=None):
     """Build + run the browser-level webui suite (testsuite-webui, Playwright, sandboxed)."""
-    # Spec-structure gate first: refuse tree-bypassing cases before any build.
-    _testsuite_webui_spec_structure(c)
+    _cleanup_stale_sandboxes()
+    try:
+        # Spec-structure gate first: refuse tree-bypassing cases before any build.
+        _testsuite_webui_spec_structure(c)
 
-    # Frontend dist is baked into the binary at build time — rebuild it when
-    # the frontend sources are newer than the last dist build.
-    dist_index = "sebas-webui/frontend/dist/index.html"
-    need_dist = not os.path.exists(dist_index)
-    if not need_dist:
-        dist_mtime = os.path.getmtime(dist_index)
-        src_root = "sebas-webui/frontend/src"
-        for root, _dirs, files in os.walk(src_root):
-            for f in files:
-                if f.endswith((".ts", ".css", ".html")):
-                    if os.path.getmtime(os.path.join(root, f)) > dist_mtime:
-                        need_dist = True
-                        break
-            if need_dist:
-                break
-    if need_dist:
-        print("Building frontend dist (sources newer than dist) ...")
-        if c.run("pnpm run --dir sebas-webui/frontend build", echo=True).failed:
-            raise SystemExit(1)
-    else:
-        print("frontend dist up to date")
-
-    print("Building workspace (sebas + fakes) ...")
-    if (
-        c.run(
-            "cargo build -p sebas -p sebas-acp --bin sebas --bin fake-claude --bin fake-acp-agent",
-            echo=True,
-        ).failed
-    ):
-        raise SystemExit(1)
-
-    _testsuite_webui_preflight(c)
-
-    suite_dir = "tests/testsuite-webui"
-    if case:
-        # --case auth runs the auth-on form; --case deployment or
-        # --case approval-detached the detached dual-process topology
-        # (core + standalone webui, no shared-secret env); anything else
-        # filters the main suite.
-        if case == "auth":
-            cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
-        elif case in ("deployment", "approval-detached"):
-            cmd = (
-                f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
-                f" {case}"
-            )
+        # Frontend dist is baked into the binary at build time — rebuild it when
+        # the frontend sources are newer than the last dist build.
+        dist_index = "sebas-webui/frontend/dist/index.html"
+        need_dist = not os.path.exists(dist_index)
+        if not need_dist:
+            dist_mtime = os.path.getmtime(dist_index)
+            src_root = "sebas-webui/frontend/src"
+            for root, _dirs, files in os.walk(src_root):
+                for f in files:
+                    if f.endswith((".ts", ".css", ".html")):
+                        if os.path.getmtime(os.path.join(root, f)) > dist_mtime:
+                            need_dist = True
+                            break
+                if need_dist:
+                    break
+        if need_dist:
+            print("Building frontend dist (sources newer than dist) ...")
+            if c.run("pnpm run --dir sebas-webui/frontend build", echo=True).failed:
+                raise SystemExit(1)
         else:
-            cmd = f"pnpm --dir {suite_dir} exec playwright test {case}"
-    else:
-        cmd = (
-            f"pnpm --dir {suite_dir} exec playwright test"
-            f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
-            f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
-        )
-    result = c.run(cmd, echo=True)
-    if result.failed:
-        print(
-            "testsuite-webui FAILED — sandbox scene kept for debugging (path printed above)."
-        )
-        print("Reuse it interactively: TESTSUITE_REUSE=1 TESTSUITE_KEEP=1 invoke testsuite-webui --case <name>")
-        raise SystemExit(1)
+            print("frontend dist up to date")
+
+        print("Building workspace (sebas + fakes) ...")
+        if (
+            c.run(
+                "cargo build -p sebas -p sebas-acp --bin sebas --bin fake-claude --bin fake-acp-agent",
+                echo=True,
+            ).failed
+        ):
+            raise SystemExit(1)
+
+        _testsuite_webui_preflight(c)
+
+        suite_dir = "tests/testsuite-webui"
+        if case:
+            # --case auth runs the auth-on form; --case deployment or
+            # --case approval-detached the detached dual-process topology
+            # (core + standalone webui, no shared-secret env); anything else
+            # filters the main suite.
+            if case == "auth":
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
+            elif case in ("deployment", "approval-detached"):
+                cmd = (
+                    f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
+                    f" {case}"
+                )
+            else:
+                cmd = f"pnpm --dir {suite_dir} exec playwright test {case}"
+        else:
+            cmd = (
+                f"pnpm --dir {suite_dir} exec playwright test"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
+            )
+        result = c.run(cmd, echo=True)
+        if result.failed:
+            print(
+                "testsuite-webui FAILED — sandbox scene kept for debugging (path printed above)."
+            )
+            print("Reuse it interactively: TESTSUITE_REUSE=1 TESTSUITE_KEEP=1 invoke testsuite-webui --case <name>")
+            raise SystemExit(1)
+    finally:
+        _cleanup_stale_sandboxes()
+
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +425,7 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     sebas_bin = os.path.abspath(_sandbox_bin("sebas"))
     fake_bin = _sandbox_bin("fake-claude")
     fake_acp_bin = _sandbox_bin("fake-acp-agent")
+    _cleanup_stale_sandboxes()
     for path in (sebas_bin, fake_bin, fake_acp_bin):
         if not (os.path.isfile(path) and os.access(path, os.X_OK)):
             print(
@@ -551,13 +603,16 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
 )
 def testsuite_webui_sandbox(c, port=None, auth=False, keep=False):
     """Run a throwaway webui backend for GUI testing (foreground, Ctrl-C to stop)."""
-    _run_webui_sandbox(
-        port=int(port) if port else _TESTSUITE_HUMAN_PORT,
-        auth_on=bool(auth),
-        keep=bool(keep),
-        reuse=bool(os.environ.get("TESTSUITE_REUSE")),
-        human=True,
-    )
+    try:
+        _run_webui_sandbox(
+            port=int(port) if port else _TESTSUITE_HUMAN_PORT,
+            auth_on=bool(auth),
+            keep=bool(keep),
+            reuse=bool(os.environ.get("TESTSUITE_REUSE")),
+            human=True,
+        )
+    finally:
+        _cleanup_stale_sandboxes()
 
 
 @task
@@ -574,14 +629,17 @@ def testsuite_webui_server(c):
         default_port = 9897
     else:
         default_port = _TESTSUITE_AUTH_PORT if auth_on else _TESTSUITE_PORT
-    _run_webui_sandbox(
-        port=int(os.environ.get("TESTSUITE_PORT", default_port)),
-        auth_on=auth_on,
-        keep=os.environ.get("TESTSUITE_KEEP", "0") == "1",
-        reuse=os.environ.get("TESTSUITE_REUSE", "0") == "1",
-        human=os.environ.get("TESTSUITE_HUMAN", "0") == "1",
-        detached=detached,
-    )
+    try:
+        _run_webui_sandbox(
+            port=int(os.environ.get("TESTSUITE_PORT", default_port)),
+            auth_on=auth_on,
+            keep=os.environ.get("TESTSUITE_KEEP", "0") == "1",
+            reuse=os.environ.get("TESTSUITE_REUSE", "0") == "1",
+            human=os.environ.get("TESTSUITE_HUMAN", "0") == "1",
+            detached=detached,
+        )
+    finally:
+        _cleanup_stale_sandboxes()
 
 
 @task(
