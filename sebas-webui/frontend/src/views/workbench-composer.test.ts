@@ -19,56 +19,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SebasWorkbenchComposer } from './workbench-composer.js'
 import type { Summary } from '../api/client.js'
+import {
+  elementInternalsPolyfillInvoked,
+  installWaDomPolyfills,
+} from '../test-support/wa-polyfills.js'
 
-// ---- ElementInternals polyfill ----------------------------------------
-// Wrap attachInternals so WA's willUpdate doesn't blow up. The stubbed
-// methods are no-ops (or trivial getters) — we only care about letting
-// the WA element reach a stable state so the composer template renders.
-// jsdom's `ElementInternals` lacks `setFormValue`/`setValidity`/etc.,
-// so we always wrap (the original is preserved on the prototype's
-// __wrapped__ flag and called as the base for delegation).
-
-const NOOP_INTERNALS_METHODS = [
-  'setFormValue',
-  'setValidity',
-  'reportValidity',
-  'checkValidity',
-  'formStateRestoreCallback',
-  'formResetCallback',
-  'formDisabledCallback',
-] as const
-
-const proto = HTMLElement.prototype as unknown as {
-  attachInternals?: (this: HTMLElement) => unknown
-  __sebasWrappedAttachInternals?: boolean
-}
-let polyfillInstalled = false
-if (!proto.__sebasWrappedAttachInternals) {
-  const origAttach = proto.attachInternals
-  proto.attachInternals = function (this: HTMLElement): unknown {
-    let base: object = {}
-    try {
-      const r = origAttach?.call(this)
-      if (r && typeof r === 'object') base = r as object
-    } catch {
-      /* non-custom-element or shim rejected */
-    }
-    const internals: Record<string, unknown> = Object.create(base)
-    for (const name of NOOP_INTERNALS_METHODS) {
-      if (typeof internals[name] !== 'function') internals[name] = () => {}
-    }
-    if (!('validity' in internals)) {
-      internals.validity = { valid: true, valueMissing: false, customError: false }
-    }
-    if (!('willValidate' in internals)) internals.willValidate = false
-    if (!('labels' in internals)) internals.labels = []
-    if (!('form' in internals)) internals.form = null
-    if (!('validationMessage' in internals)) internals.validationMessage = ''
-    polyfillInstalled = true
-    return internals
-  }
-  proto.__sebasWrappedAttachInternals = true
-}
+// ---- WA 渲染垫片（共享）--------------------------------------------------
+// 包装 attachInternals 等 jsdom 缺失的 DOM API，让 WA 组件走到稳定状态以便
+// 模板渲染。实现见 test-support/wa-polyfills.ts（幂等安装）。
+installWaDomPolyfills()
 
 // jsdom does not implement ResizeObserver; WA's textarea reaches for it
 // in `updated` to track auto-resize. A no-op implementation is enough
@@ -202,7 +161,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = ''
-  if (!polyfillInstalled) {
+  if (!elementInternalsPolyfillInvoked()) {
     // Sanity-check: the polyfill must have been invoked at least once
     // (otherwise WA's form-associated internals still point at the raw
     // jsdom object and tests would silently lose their polyfill).

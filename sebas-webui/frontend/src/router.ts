@@ -47,13 +47,14 @@ export function matchRoute(routes: RouteDef[], path: string): RouteMatch | null 
 }
 
 /**
- * IA v2 退役路径：settings / about 并入侧栏设置弹窗与工作台，
+ * IA v2 退役路径：settings / router / about 并入侧栏设置弹窗与工作台，
  * 旧链接（收藏夹、历史记录）统一 canonical 回 `/`，而不是 404。
- * admin 与 IA-v1 的 `/gateway` 按决策彻底删除——不重定向、不兼容，
- * 当作未知路径交给 app-shell 的 fallback（渲染 workbench）。
+ * admin 按决策直接删除——`/admin/*` 不做重定向，当作未知路径交给
+ * app-shell 的 fallback（渲染 workbench）。
  */
 export const RETIRED_REDIRECTS: Readonly<Record<string, string>> = {
   '/settings': '/',
+  '/gateway': '/',
   '/about': '/',
 }
 

@@ -10,6 +10,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// ---- WA 渲染垫片（共享）--------------------------------------------------
+// outlet 会实例化 dashboard / project-rail 等视图，它们渲染 WA 表单关联组件
+// （wa-button 等）；jsdom 缺 setValidity / showModal / getAnimations 会抛未处理
+// rejection。共享实现见 test-support/wa-polyfills.ts。
+import { installWaDomPolyfills } from './test-support/wa-polyfills.js'
+
+installWaDomPolyfills()
+
 // ---- hoisted mocks（须先于被测模块的静态导入生效）----------------------
 
 const apiMocks = vi.hoisted(() => ({
@@ -212,24 +220,12 @@ describe('routes after IA v2', () => {
     expect(m?.params['key']).toBe('oc_abc%00')
   })
 
-  it('redirects retired paths (/settings /about) to /', () => {
-    for (const path of ['/settings', '/about']) {
+  it('redirects retired paths (/settings /gateway /about) to /', () => {
+    for (const path of ['/settings', '/gateway', '/about']) {
       expect(redirectFor(path)).toBe('/')
       // 退役路径不再有路由定义。
       expect(matchRoute(ROUTES, path)).toBeNull()
     }
-  })
-
-  it('the IA-v1 /gateway path is deleted outright: no route, no redirect — falls back to the workbench', async () => {
-    expect(matchRoute(ROUTES, '/gateway')).toBeNull()
-    expect(redirectFor('/gateway')).toBeNull()
-    window.history.pushState({}, '', '/gateway')
-    window.dispatchEvent(new PopStateEvent('popstate'))
-    const el = await mountShell()
-    // 未知路径 → workbench fallback，地址栏不动。
-    expect(el.shadowRoot!.querySelector('.outlet sebas-dashboard')).toBeTruthy()
-    expect(window.location.pathname).toBe('/gateway')
-    el.remove()
   })
 
   it('admin is deleted outright: no route, no redirect — falls back to the workbench', async () => {

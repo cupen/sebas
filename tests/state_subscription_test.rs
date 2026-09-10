@@ -91,6 +91,7 @@ static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 4.2 验收：mutation 提交后，StateSubscribe 订阅端收到对应 scope 的
 /// Changed 帧（快照帧之后）。
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 async fn mutation_delivers_change_notification_on_subscription() {
     let _guard = TEST_SERIAL.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -165,16 +166,13 @@ async fn mutation_delivers_change_notification_on_subscription() {
         match read {
             Ok(Ok(n)) if n > 0 => {
                 let frame: StateStreamFrame = serde_json::from_str(line.trim()).unwrap();
-                match frame {
-                    StateStreamFrame::Changed { scope } => {
-                        if scope == "settings" {
-                            saw_settings = true;
-                        }
-                        if scope == "projects" {
-                            saw_projects = true;
-                        }
+                if let StateStreamFrame::Changed { scope } = frame {
+                    if scope == "settings" {
+                        saw_settings = true;
                     }
-                    _ => {}
+                    if scope == "projects" {
+                        saw_projects = true;
+                    }
                 }
             }
             _ => break,
@@ -195,6 +193,7 @@ async fn mutation_delivers_change_notification_on_subscription() {
 /// 5.3 通道代理：providers / aliases 经 `StateMutation` 写入状态库，
 /// 随后的快照能读回（router admin 写路径的协议基础）。
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 async fn providers_and_aliases_mutation_round_trip_over_channel() {
     let _guard = TEST_SERIAL.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();

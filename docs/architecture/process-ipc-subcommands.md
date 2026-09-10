@@ -271,9 +271,10 @@ StateSnapshot / StateMutation）+ 两条持久流（`Subscribe` 会话流、
   硬编码 `"router"` 字面量（`src/watchdog.rs`；`WebUiSpawner`/`ImSpawner` 同样
   硬编码 `"webui"`/`"im"`）。改子命令名时这里没有常量保护。
 
-另注：`src/lib.rs` 中 `RUN_SUBCOMMAND`/`ROUTER_SUBCOMMAND` 的 doc 注释曾声称
-存在 `watchdog` / `gateway` 隐藏 clap 别名，与 `src/cli.rs` 不符（remove-gateway-residue
-已修正该注释；`src/cli.rs` 无任何隐藏别名，本文以 `cli.rs` 为准）。
+另注：`src/lib.rs` 中 `RUN_SUBCOMMAND`/`ROUTER_SUBCOMMAND` 的 doc 注释声称存在
+`watchdog` / `gateway` 隐藏 clap 别名——`src/cli.rs` 里**并不存在**这两个别名
+（旧版架构总览的同款说法因此作废）。代码注释与实现的出入留待
+follow-up 修正，本文以 `cli.rs` 为准。
 
 ### 3.5 workspace crate 速查
 

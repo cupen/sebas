@@ -22,6 +22,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// ---- WA 渲染垫片（共享）--------------------------------------------------
+// 本文件渲染 WA 表单/弹窗组件：jsdom 的 ElementInternals 缺 setValidity、
+// HTMLDialogElement 缺 showModal、Element 缺 getAnimations，都会抛未处理
+// rejection。共享实现见 test-support/wa-polyfills.ts。
+import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
+
+installWaDomPolyfills()
+
 // jsdom 这里不提供 localStorage（about:blank origin），沿用仓库的内存
 // polyfill 约定（见 transcript-view.test.ts）；Appearance 分区的主题
 // 持久化走真实 theme.ts，分区记忆走 `lastSettingsSection`，都需要它真实可读写。
@@ -375,7 +383,7 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('Models section renders the Router overview card plus the provider list', async () => {
+  it('Models section renders the Router gateway card plus the provider list', async () => {
     const el = await mount()
     await goto(el, 2)
     expect(el.section).toBe('models')

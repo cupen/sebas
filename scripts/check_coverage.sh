@@ -7,7 +7,7 @@
 # 阈值现状（2026-07-31，sebas-nya）：
 #   router/  ≥ 90%  —— spec 目标，已达到（当前 91.9%）
 #   cards.rs ≥ 90%  —— spec 目标，已达到（当前 95.5%）
-#   sebas-router/ ≥ 70% —— 棘轮下限（sebas-lva.10，Task 10 spec-diff 门禁）。
+#   gateway/ ≥ 70%  —— 棘轮下限（sebas-lva.10，Task 10 spec-diff 门禁）。
 #                      P0 期合同测试与单测覆盖核心路径；随 P1 全量 contract
 #                      测试（sebas-lva.12）补齐，上调至 spec §4.3 目标 80%+。
 #   整体     ≥ 65%  —— **棘轮下限**，非 spec 目标。spec §4.3 目标是 80%，

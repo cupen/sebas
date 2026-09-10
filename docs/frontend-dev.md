@@ -1,7 +1,7 @@
 # 前端联调（Vite 热更新 + Rust 后端）
 
 开发 WebUI 前端时不必每次 `cargo build`——Vite dev server 提供秒级热更新，
-后端表面（JSON API / WebSocket / 健康检查 / Router BFF）由代理转发到本机
+后端表面（JSON API / WebSocket / 健康检查 / Gateway BFF）由代理转发到本机
 Rust 进程，浏览器全程同源，与生产嵌入形态路径一致。
 
 ## 启动
@@ -17,7 +17,7 @@ cd sebas-webui/frontend && pnpm dev
 ```
 
 浏览器打开 Vite 输出的地址即可。`sebas-webui/frontend/vite.config.ts` 已配置代理：
-`/api`、`/router/api`、`/ws`（WebSocket）、`/health` → `127.0.0.1:9797`（IA-v1 的 `/gateway` 路径已彻底移除，不再归一化）。
+`/api`、`/router/api`、`/ws`（WebSocket）、`/health` → `127.0.0.1:9797`（退役 SPA 路径 `/gateway` 仍归一化到 `/`）。
 前端代码全部使用相对路径请求，因此无需任何环境变量或代码改动。
 
 ## 注意事项

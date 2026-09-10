@@ -12,54 +12,19 @@
  *   - other errors keep the card retryable with the failure surfaced
  *   - sessionKey filters frames and switching keys clears collected cards
  *
- * The ElementInternals polyfill is the same shim workbench-composer.test.ts
- * uses: jsdom's ElementInternals lacks setFormValue/setValidity, which the
- * Web Awesome form-associated components call during update.
+ * The ElementInternals polyfill is shared with the other WA-rendering tests
+ * (see test-support/wa-polyfills.ts): jsdom's ElementInternals lacks
+ * setFormValue/setValidity, which the Web Awesome form-associated components
+ * call during update.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SebasReviewCards } from './review-card.js'
+import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
 
-// ---- ElementInternals polyfill ----------------------------------------
+// ---- ElementInternals polyfill（共享垫片）--------------------------------
 
-const NOOP_INTERNALS_METHODS = [
-  'setFormValue',
-  'setValidity',
-  'reportValidity',
-  'checkValidity',
-  'formStateRestoreCallback',
-  'formResetCallback',
-  'formDisabledCallback',
-] as const
-
-const proto = HTMLElement.prototype as unknown as {
-  attachInternals?: (this: HTMLElement) => unknown
-  __sebasWrappedAttachInternals?: boolean
-}
-if (!proto.__sebasWrappedAttachInternals) {
-  const origAttach = proto.attachInternals
-  proto.attachInternals = function (this: HTMLElement): unknown {
-    let base: object = {}
-    try {
-      const r = origAttach?.call(this)
-      if (r && typeof r === 'object') base = r as object
-    } catch {
-      /* non-custom-element or shim rejected */
-    }
-    const internals: Record<string, unknown> = Object.create(base)
-    for (const name of NOOP_INTERNALS_METHODS) {
-      if (typeof internals[name] !== 'function') internals[name] = () => {}
-    }
-    if (!('validity' in internals)) {
-      internals.validity = { valid: true, valueMissing: false, customError: false }
-    }
-    if (!('willValidate' in internals)) internals.willValidate = false
-    if (!('labels' in internals)) internals.labels = []
-    if (!('form' in internals)) internals.form = null
-    return internals
-  }
-  proto.__sebasWrappedAttachInternals = true
-}
+installWaDomPolyfills()
 
 if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'undefined') {
   class StubResizeObserver {

@@ -20,7 +20,7 @@ sebas_deploy_home: "/home/{{ sebas_deploy_user }}"
 # — `service --install` rejects relative paths (validate_config in src/service.rs).
 sebas_config_path: "{{ sebas_deploy_home }}/.sebas/config.toml"
 
-# Where sebas keeps its mutable state (sessions DB, downloads, router usage
+# Where sebas keeps its mutable state (sessions DB, downloads, gateway usage
 # logs, acp.claude working dir). Passed into [watchdog.storage].data_dir.
 sebas_data_dir: "{{ sebas_deploy_home }}/.sebas"
 
@@ -60,7 +60,7 @@ sebas_artifact_file: ""
 # --- config extras --------------------------------------------------------
 
 # Extra TOML appended verbatim to the rendered config. Use for sections the
-# role does not own (router provider overlays, feishu creds, etc.). Empty by
+# role does not own (gateway provider overlays, feishu creds, etc.). Empty by
 # default — keep WebUI-only deploys minimal.
 sebas_config_extra: ""
 
