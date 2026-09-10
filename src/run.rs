@@ -315,6 +315,7 @@ pub async fn run(
                 auth,
                 webui_work_root,
                 webui_allowed_roots,
+                cfg.watchdog.webui.archive_retention_days,
             )
             .await;
         });

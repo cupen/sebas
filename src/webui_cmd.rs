@@ -329,6 +329,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         auth,
         webui_work_root,
         webui_allowed_roots,
+        cfg.watchdog.webui.archive_retention_days,
     )
     .await;
 

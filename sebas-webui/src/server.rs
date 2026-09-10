@@ -437,6 +437,7 @@ pub async fn run_with_admin_adapter_and_auth(
     auth: Arc<AuthHandle>,
     work_root: Option<std::path::PathBuf>,
     allowed_roots: Vec<std::path::PathBuf>,
+    archive_retention_days: u64,
 ) {
     run_full(
         backend,
@@ -445,7 +446,7 @@ pub async fn run_with_admin_adapter_and_auth(
         agent_kinds,
         listener,
         admin_adapter,
-        30,
+        archive_retention_days,
         auth,
         work_root,
         allowed_roots,

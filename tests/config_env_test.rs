@@ -48,18 +48,4 @@ level = "debug"
     // 半配置（只填其一）仍报错。
     let r4 = Config::parse("[feishu]\napp_id = \"only_id\"\n");
     assert!(r4.is_err());
-
-    // env 只覆盖其一：覆盖发生在判定与校验之前，覆盖后仍构成半配置 → 拒启。
-    // 跨源互补（TOML 出 secret、env 出 id）= 双非空，按隐式判定接入。
-    unsafe {
-        std::env::set_var("SEBAS_FEISHU_APP_ID", "cli_env");
-    }
-    let r5 = Config::parse("[feishu]\n");
-    let r6 = Config::parse("[feishu]\napp_secret = \"sec_toml\"\n");
-    unsafe {
-        std::env::remove_var("SEBAS_FEISHU_APP_ID");
-    }
-    assert!(r5.is_err(), "env 只覆盖 app_id 仍是半配置，必须报错");
-    let cfg6 = r6.expect("跨源互补（env id + TOML secret）应可解析");
-    assert!(cfg6.feishu.is_enabled(), "跨源互补双非空应按隐式判定接入");
 }

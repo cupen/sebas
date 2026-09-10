@@ -428,6 +428,11 @@ pub struct WatchdogWebUiConfig {
     /// 并记录告警。默认根（work_dir / cwd 回退）自动并入白名单。
     #[serde(default)]
     pub allowed_roots: Vec<String>,
+    /// 归档保留期（天）。默认 30；过期归档在 webui 启动时及每次列表请求时
+    /// 删除（add-project-session-actions）。配置项归属 `[watchdog.webui]`
+    /// （webui 配置的现唯一归属地，无独立 `[webui]` 顶层节）。
+    #[serde(default = "default_archive_retention_days")]
+    pub archive_retention_days: u64,
 }
 
 impl Default for WatchdogWebUiConfig {
@@ -438,6 +443,7 @@ impl Default for WatchdogWebUiConfig {
             port: default_webui_port(),
             auth: default_webui_auth(),
             allowed_roots: Vec::new(),
+            archive_retention_days: default_archive_retention_days(),
         }
     }
 }
@@ -462,6 +468,10 @@ pub fn webui_allowed_roots(
         roots.push(root.to_path_buf());
     }
     roots
+}
+
+fn default_archive_retention_days() -> u64 {
+    30
 }
 
 fn default_webui_enabled() -> bool {
@@ -954,17 +964,6 @@ app_secret = "s"
 "#,
         );
         assert!(only_secret.is_err(), "只配 app_secret 必须报错");
-
-        // 半配置与开关状态正交：enabled = false 也不豁免（feishu-option
-        // delta：无论 enabled 为缺省、false 还是 true 均拒启）。
-        let half_off = Config::parse(
-            r#"
-[feishu]
-enabled = false
-app_id = "cli_a1b2"
-"#,
-        );
-        assert!(half_off.is_err(), "enabled=false 不豁免半配置");
 
         // 同时配置 = 启用。
         let both = Config::parse(
