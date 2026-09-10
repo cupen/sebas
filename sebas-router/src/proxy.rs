@@ -549,14 +549,17 @@ fn settle_inner(
     error: Option<&str>,
 ) {
     // metrics 观测（Task 5.1）：settle 是全部完成路径的唯一汇点。
-    crate::metrics::Metrics::global().observe_request(
+    crate::metrics::Metrics::global().observe_request(crate::metrics::RequestObservation {
         provider,
-        model.unwrap_or_default(),
+        model: model.unwrap_or_default(),
+        protocol: proto.as_str(),
         status,
-        start.elapsed(),
-        info.input_tokens.unwrap_or(0),
-        info.output_tokens.unwrap_or(0),
-    );
+        latency: start.elapsed(),
+        input_tokens: info.input_tokens.unwrap_or(0),
+        output_tokens: info.output_tokens.unwrap_or(0),
+        cache_read_tokens: info.cache_read_tokens,
+        cache_creation_tokens: info.cache_creation_tokens,
+    });
     crate::metrics::Metrics::global().active_requests_leave();
     let rec = UsageRecord {
         ts: chrono::Utc::now().to_rfc3339(),

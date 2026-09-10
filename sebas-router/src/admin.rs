@@ -842,6 +842,12 @@ fn parse_alias_body(
     if alias.contains('/') {
         return Err(Box::new(err_400("alias 不能包含 '/'（保留给命名空间语法）")));
     }
+    // router-model-aliases spec：别名只精确匹配、不参与 glob——含 `*` 的别名会
+    // 被路由表当 glob 处理（routing.rs 对含 `*` 的 RouteGroup 做 glob 匹配），
+    // 直接拒掉。
+    if alias.contains('*') {
+        return Err(Box::new(err_400("alias 不能包含 '*'（别名只精确匹配，不支持 glob）")));
+    }
     let provider = body
         .get("provider")
         .and_then(Value::as_str)
@@ -1078,44 +1084,94 @@ async fn fetch_models(
 
 /// POST /admin/reload：手动重读 + 热替换。成功返回摘要，失败返回错误文本。
 async fn reload(State(state): State<AppState>) -> Response {
-    match reload_and_swap(&state) {
+    // router-admin-api spec：/admin/reload 经状态库（channel state methods）按需
+    // 重取配置——与写后 reload 同一条 channel-aware 管线（通道可用走快照投影，
+    // 不可用回退文件 overlay）。
+    match reload_after_write(&state).await {
         Ok(()) => Json(json!({"reloaded": true})).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"reloaded": false, "error": e})))
             .into_response(),
     }
 }
 
-/// GET /admin/stats：占位（5.3 实现 JSON 摘要；先返回最小可用结构）。
+/// GET /admin/stats：JSON 摘要供 webui 数字卡片渲染（router-metrics spec「JSON
+/// stats summary」：uptime、全局 totals（requests / input|output|cache tokens /
+/// rate-limited / upstream-errors）、per-provider 聚合（含平均延迟 ms）、末次
+/// reload 状态）。registry 是进程级快照，包含全部历史 provider——已删除
+/// provider 的残留计数保留（观测量，不因删除回零）。
 async fn stats(State(state): State<AppState>) -> Response {
     let core = state.core();
     let m = crate::metrics::Metrics::global();
-    // per-provider 聚合：从 registry 的 series 名解析（requests_total /
-    // upstream_errors / tokens）。registry 是进程级快照，包含全部历史
-    // provider——已删除 provider 的残留计数保留（观测量，不因删除回零）。
     let mut per_provider: BTreeMap<String, Value> = BTreeMap::new();
+    // per-provider 平均延迟的临时累加器：sum/count（秒）。
+    let mut lat_sum: BTreeMap<String, f64> = BTreeMap::new();
+    let mut lat_count: BTreeMap<String, f64> = BTreeMap::new();
+    // 全局 totals。
+    let mut total_requests = 0.0f64;
+    let mut total_rate_limited = 0.0f64;
+    let mut total_upstream_errors = 0.0f64;
+    let mut total_input = 0.0f64;
+    let mut total_output = 0.0f64;
+    let mut total_cache = 0.0f64;
+
     for (name, v) in m.snapshot() {
         let Some((labels, value)) = parse_series(&name, v) else {
             continue;
         };
+        let val = value.as_f64().unwrap_or(0.0);
+        if name.starts_with("router_requests_total") {
+            total_requests += val;
+        } else if name.starts_with("router_rate_limited_total") {
+            total_rate_limited += val;
+        } else if name.starts_with("router_upstream_errors_total") {
+            total_upstream_errors += val;
+        } else if name.starts_with("router_tokens_total") {
+            match labels.get("type").map(String::as_str) {
+                Some("input") => total_input += val,
+                Some("output") => total_output += val,
+                Some("cache_read") | Some("cache_creation") => total_cache += val,
+                _ => {}
+            }
+        }
         if let Some(p) = labels.get("provider") {
+            let p = p.clone();
             let e = per_provider.entry(p.clone()).or_insert_with(|| json!({"name": p}));
-            if name.starts_with("sebas_router_requests_total") {
-                e["requests"] = value;
-            } else if name.starts_with("sebas_router_upstream_errors_total") {
-                e["errors"] = value;
-            } else if name.starts_with("sebas_router_tokens_total") {
-                match labels.get("kind").map(String::as_str) {
-                    Some("input") => e["input_tokens"] = value,
-                    Some("output") => e["output_tokens"] = value,
+            if name.starts_with("router_requests_total") {
+                e["requests"] = json!((e["requests"].as_f64().unwrap_or(0.0) + val) as u64);
+            } else if name.starts_with("router_upstream_errors_total") {
+                e["errors"] = json!((e["errors"].as_f64().unwrap_or(0.0) + val) as u64);
+            } else if name.starts_with("router_tokens_total") {
+                match labels.get("type").map(String::as_str) {
+                    Some("input") => e["input_tokens"] = json!((e["input_tokens"].as_f64().unwrap_or(0.0) + val) as u64),
+                    Some("output") => e["output_tokens"] = json!((e["output_tokens"].as_f64().unwrap_or(0.0) + val) as u64),
                     _ => {}
                 }
+            } else if name.starts_with("router_request_duration_seconds_sum") {
+                *lat_sum.entry(p).or_insert(0.0) += val;
+            } else if name.starts_with("router_request_duration_seconds_count") {
+                *lat_count.entry(p).or_insert(0.0) += val;
             }
+        }
+    }
+    // per-provider 平均延迟（ms）= sum(s) / count * 1000。
+    for (p, entry) in per_provider.iter_mut() {
+        let (s, c) = (lat_sum.get(p).copied().unwrap_or(0.0), lat_count.get(p).copied().unwrap_or(0.0));
+        if c > 0.0 {
+            entry["avg_latency_ms"] = json!(((s / c) * 1000.0 * 100.0).round() / 100.0);
         }
     }
     let mut out = json!({
         "uptime_secs": m.uptime_secs(),
         "providers": core.cfg.providers.len(),
         "routes": core.cfg.routes.len(),
+        "totals": {
+            "requests": total_requests as u64,
+            "input_tokens": total_input as u64,
+            "output_tokens": total_output as u64,
+            "cache_tokens": total_cache as u64,
+            "rate_limited": total_rate_limited as u64,
+            "upstream_errors": total_upstream_errors as u64,
+        },
         "per_provider": per_provider.values().collect::<Vec<_>>(),
     });
     // 4.2：热重载状态（无失败时字段缺省——机器可读的「健康」信号）。
@@ -1137,8 +1193,8 @@ async fn stats(State(state): State<AppState>) -> Response {
 }
 
 /// 解析 series 名 → (labels, value)。非 sebas_router_* 前缀返回 None。
-fn parse_series(name: &str, v: u64) -> Option<(BTreeMap<String, String>, Value)> {
-    if !name.starts_with("sebas_router_") {
+fn parse_series(name: &str, v: f64) -> Option<(BTreeMap<String, String>, Value)> {
+    if !name.starts_with("router_") {
         return None;
     }
     let mut labels = BTreeMap::new();
@@ -1165,21 +1221,37 @@ async fn metrics() -> Response {
         if out.contains(&format!("# TYPE {base}")) {
             continue;
         }
-        let mtype = if base.contains("_duration_ms_bucket") || base.contains("_duration_ms_count") {
+        let mtype = if base.contains("_duration_seconds_bucket") {
+            // Prometheus 直方图：bucket 系列归并到 histogram 基名
             "histogram"
-        } else if base.contains("_active_requests") {
+        } else if base.contains("_active_requests") || base.contains("_start_time_seconds") {
             "gauge"
         } else {
             "counter"
         };
-        out.push_str(&format!("# TYPE {base} {mtype}\n"));
+        // 直方图基名（bucket/sum/count 共享一个 family 名）
+        let family = if let Some(stripped) = base.strip_suffix("_bucket") {
+            stripped
+        } else if let Some(stripped) = base.strip_suffix("_sum") {
+            stripped
+        } else if let Some(stripped) = base.strip_suffix("_count") {
+            stripped
+        } else {
+            base
+        };
+        if out.contains(&format!("# TYPE {family}")) {
+            continue;
+        }
+        out.push_str(&format!("# TYPE {family} {mtype}\n"));
     }
     for (name, v) in m.snapshot() {
         out.push_str(&format!("{name} {v}\n"));
     }
+    // router_start_time_seconds：进程启动时刻（gauge，unix 秒）。
+    out.push_str("# TYPE router_start_time_seconds gauge\n");
     out.push_str(&format!(
-        "sebas_router_uptime_seconds {}\n",
-        m.uptime_secs()
+        "router_start_time_seconds {}\n",
+        m.start_time_unix()
     ));
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],

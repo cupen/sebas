@@ -311,6 +311,25 @@ async fn alias_crud_round_trip() {
 }
 
 #[tokio::test]
+async fn alias_with_glob_star_rejected() {
+    // router-model-aliases spec：别名只精确匹配、不参与 glob。含 `*` 的别名
+    // 若被路由表 glob 匹配会破坏该契约——创建时必须 400。
+    let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
+    let base = format!("http://{}/admin/model-aliases", gw.addr);
+    let c = client();
+    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
+
+    let resp = auth(c.post(&base).header("content-type", "application/json")
+        .body(serde_json::to_string(&json!({
+        "alias": "fast*", "provider": "anthropic"
+    })).unwrap()))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400, "alias containing '*' must be rejected");
+}
+
+#[tokio::test]
 async fn reload_endpoint_reports() {
     let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
     let c = client();
@@ -523,18 +542,21 @@ api_key = "sk-alpha"
         .unwrap();
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
-    assert!(text.contains("# TYPE sebas_router_requests_total counter"), "HELP/TYPE 行: {text}");
+    assert!(text.contains("# TYPE router_requests_total counter"), "HELP/TYPE 行: {text}");
     assert!(
-        text.contains("sebas_router_requests_total{provider=\"alpha\""),
+        text.contains("router_requests_total{provider=\"alpha\""),
         "alpha series: {text}"
     );
+    // start_time gauge（router-metrics spec）。
+    assert!(text.contains("# TYPE router_start_time_seconds gauge"), "start_time TYPE: {text}");
+    assert!(text.contains("router_start_time_seconds "), "start_time series: {text}");
     // 无 bearer 非 loopback 判定不适用于本测试 client（loopback）——鉴权路径
     // 已由其它测试覆盖；这里验证文本合法性（每行 name value）。
     for line in text.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
         assert!(line.contains(' '), "series 行格式: {line}");
     }
 
-    // /admin/stats：alpha 聚合 requests=3。
+    // /admin/stats：alpha 聚合 requests=3 + 全局 totals + 平均延迟。
     let resp = c
         .get(format!("http://{}/admin/stats", gw.addr))
         .header("Authorization", "Bearer sec-test-123")
@@ -550,6 +572,12 @@ api_key = "sk-alpha"
         .unwrap_or_else(|| panic!("stats 无 alpha: {body}"));
     assert_eq!(alpha["requests"], 3, "alpha 聚合: {alpha}");
     assert!(body["uptime_secs"].is_u64(), "uptime: {body}");
+    let totals = &body["totals"];
+    assert_eq!(totals["requests"], 3, "全局 totals.requests: {body}");
+    assert!(totals["input_tokens"].is_number() && totals["cache_tokens"].is_number(), "tokens totals: {body}");
+    assert_eq!(totals["rate_limited"], 0, "rate_limited totals: {body}");
+    assert_eq!(totals["upstream_errors"], 0, "upstream_errors totals: {body}");
+    assert!(alpha["avg_latency_ms"].is_number(), "avg_latency_ms: {alpha}");
 }
 
 // -------------------- agent defaults（add-agent-defaults-catalog）--------------------
