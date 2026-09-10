@@ -261,12 +261,11 @@ impl FeishuClient {
             }
             attempt += 1;
             if attempt > 2 {
-                anyhow::bail!(
-                    "feishu api failed after {} retries: {} {}",
-                    attempt,
-                    resp.code,
-                    resp.msg
-                );
+                return Err(FeishuApiError {
+                    code: resp.code,
+                    msg: resp.msg,
+                }
+                .into());
             }
             tokens.force_refresh().await?;
         }

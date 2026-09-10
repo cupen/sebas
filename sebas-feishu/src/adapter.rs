@@ -572,6 +572,11 @@ fn should_filter_by_mention(bot_name: &str, evt: &FeishuIn) -> bool {
     if bot_name.is_empty() {
         return false;
     }
+    // feishu-bridge spec：媒体与卡片按钮/表单回调不含 mention，SHALL 永不被
+    // 本门禁丢弃——只对 Text 施加 @bot 门禁。
+    if !matches!(evt, FeishuIn::Text { .. }) {
+        return false;
+    }
     let mentioned = evt.mentions().iter().any(|m| {
         m.name
             .to_lowercase()
@@ -818,6 +823,44 @@ mod tests {
     /// neutral-event restoration — every FeishuIn variant maps to a
     /// ChannelEvent addressed by the composite feishu ChannelKey, with the
     /// reply target / callback payload / form values carried through.
+    #[test]
+    fn mention_gate_never_drops_media_or_callbacks() {
+        // feishu-bridge spec：媒体事件与按钮回调不含 mention，SHALL 永不被
+        // @bot 门禁丢弃（即便 bot_name 已配置且事件未提及任何人）。
+        let key = SessionKey {
+            chat_id: "oc_x".into(),
+            thread_id: None,
+        };
+        let media = FeishuIn::Media {
+            key: key.clone(),
+            files: vec!["om_img".into()],
+            caption: None,
+            reply_to: None,
+            chat_type: "group".into(),
+        };
+        let button = FeishuIn::ButtonCb {
+            key: key.clone(),
+            action: CardAction {
+                session_id: "ss_1".into(),
+                request_id: None,
+                decision: None,
+                value: serde_json::json!({}),
+            },
+            chat_type: "group".into(),
+        };
+        assert!(!should_filter_by_mention("sebas", &media));
+        assert!(!should_filter_by_mention("sebas", &button));
+        // Text 未 @bot 仍被过滤（门禁本体不变）。
+        let text = FeishuIn::Text {
+            key,
+            text: "hi".into(),
+            reply_to: None,
+            chat_type: "group".into(),
+            mentions: Vec::new(),
+        };
+        assert!(should_filter_by_mention("sebas", &text));
+    }
+
     #[test]
     fn every_inbound_variant_restores_to_a_neutral_event() {
         let key = SessionKey {

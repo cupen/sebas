@@ -51,6 +51,13 @@ pub trait CoreSessionPort: Send + Sync {
     /// 全量会话快照（/sessions 与视图重建的数据源）。
     async fn snapshot(&self) -> Vec<SessionInfo>;
 
+    /// 核心通道不可达原因；`None` = 可达。/sessions 在快照为空时据此区分
+    /// 「真的没有会话」与「核心不可达」——im-service spec「core 不可达时
+    /// 诚实降级」。默认 None（可达），兼容无通道探测的测试实现。
+    async fn unreachable_cause(&self) -> Option<String> {
+        None
+    }
+
     /// ensure 语义投递：未知 key 自动建会话、dormant 懒复活（2.1）。
     /// 附件（4.1）经服务端校验后以本地路径标记随文本投递。
     async fn ensure_message(

@@ -11,7 +11,7 @@ use sebas_dispatch::commands::{parse_command, Command};
 use sebas_dispatch::cards_ui;
 use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_feishu::adapter::{render_channel_card_frame, render_standalone_card};
-use sebas_feishu::client::{FeishuClient, TokenManager};
+use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
 use sebas_feishu::events::SessionKey;
 use crate::reactions::{ReactPlan, ReactionTracker};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
@@ -490,13 +490,25 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let framed = render_channel_card_frame(&card.turn.as_ref().unwrap().prompt, &card.turn.as_ref().unwrap().session_id, &card, None);
         let Ok(card_json) = serde_json::to_value(framed) else { return };
         let new_msg_id = match msg_id.as_deref() {
-            Some(mid) => {
-                if self.feishu.update_card(&self.http, &self.tokens, mid, card_json).await.is_ok() {
-                    Some(mid.to_string())
-                } else {
+            Some(mid) => match self.feishu.update_card(&self.http, &self.tokens, mid, card_json).await {
+                Ok(()) => Some(mid.to_string()),
+                Err(e) if e.downcast_ref::<FeishuApiError>().is_some_and(FeishuApiError::is_topic_invalid) => {
+                    // feishu-bridge spec「Invalid-topic errors force session close」：
+                    // 话题失效不可恢复——文本通知 + 幂等关会话，不重试该卡。
+                    warn!(msg_id = %mid, "topic invalid (230019/230071); closing session");
+                    self.send_text(
+                        key,
+                        "原话题已失效（可能已被删除或权限变更），本会话已结束。发送 /new 开始新会话。".into(),
+                    )
+                    .await;
+                    let _ = self.port.close(key.clone()).await;
                     None
                 }
-            }
+                Err(e) => {
+                    warn!(?e, "card update failed");
+                    None
+                }
+            },
             None => {
                 // 新卡：reply 到触发消息（线程聚合），话题内带 thread_id。
                 let root = self.reply_targets.read().await.get(&id).cloned();
@@ -506,6 +518,16 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                     .await
                 {
                     Ok(mid) => Some(mid),
+                    Err(e) if e.downcast_ref::<FeishuApiError>().is_some_and(FeishuApiError::is_topic_invalid) => {
+                        warn!("card send topic-invalid (230019/230071); closing session");
+                        self.send_text(
+                            key,
+                            "原话题已失效（可能已被删除或权限变更），本会话已结束。发送 /new 开始新会话。".into(),
+                        )
+                        .await;
+                        let _ = self.port.close(key.clone()).await;
+                        None
+                    }
                     Err(e) => {
                         warn!(?e, "card send failed");
                         None
@@ -557,6 +579,16 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     }
 
     async fn list_sessions(&self, key: &ChannelKey) {
+        // im-service spec「core 不可达时诚实降级」：快照为空时先区分
+        // 「真的没有会话」与「核心不可达」，绝不把不可达当空态呈现。
+        if let Some(cause) = self.port.unreachable_cause().await {
+            self.send_text(
+                key,
+                format!("核心不可达，无法获取会话列表：{cause}\n核心恢复后将自动重连。"),
+            )
+            .await;
+            return;
+        }
         let sessions = self.port.snapshot().await;
         let chat: Vec<&SessionInfo> = sessions
             .iter()
