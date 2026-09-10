@@ -1,9 +1,15 @@
 /**
  * Sidebar project tree (app-shell 左侧栏, IA v2 对齐预览原型 preview-app.ts)。
  *
- * 项目行右侧有「新建会话」+ 按钮，点击创建 0-turn placeholder 会话。
- * 会话行右侧有归档按钮。底部：Inbox 组 + History 组（归档会话，可恢复）。
+ * 项目行右侧有「新建会话」+ 按钮与「移除项目」按钮（hover 显现），点击
+ * 「+」创建 0-turn placeholder 会话（agent 取该项目 default_agent 或首个
+ * 可达 agent；创建后留在工作台路由，focus 由后端 set_focus 驱动 composer
+ * 进入跟随模式）。会话行右侧有归档与关闭按钮（inactive 直删 / active 需
+ * 确认）。底部：Inbox 组 + History 组（归档会话，可恢复）。
  * 添加项目通过 wa-dialog 弹窗，内嵌 <sebas-folder-picker> 目录树。
+ *
+ * wire（workbench-agent-wire-fix）：项目以稳定 id 引用（remove/branch/
+ * reorder），会话行带 project_id；path 不再是标识符。
  */
 
 import { LitElement, css, html, nothing } from 'lit'
@@ -16,6 +22,7 @@ import {
   type ProjectBranchInfo,
   type SessionRow,
   type ArchiveEntry,
+  type AgentKindInfo,
 } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import '../components/folder-picker.js'
@@ -26,6 +33,8 @@ export class SebasProjectRail extends LitElement {
 
   @state() private projects: Project[] = []
   @state() private sessions: SessionRow[] = []
+  /** Agent catalog（/api/agents）：「+」创建占位会话时的 agent 解析数据源。 */
+  @state() private agents: AgentKindInfo[] = []
   @state() private archivedSessions: ArchiveEntry[] = []
   @state() private expanded: Record<string, boolean> = {}
   @state() private historyOpen = false
@@ -46,9 +55,21 @@ export class SebasProjectRail extends LitElement {
   @state() private addPath = ''
   @state() private addError: string | null = null
 
+  // Remove project dialog state（workbench-agent-wire-fix 5.1）
+  @state() private removeTarget: Project | null = null
+  @state() private removeError: string | null = null
+  @state() private removing = false
+
   private fetchSeq = 0
   private unsubscribe?: () => void
   private refetchBound = (): void => { void this.refresh() }
+
+  private async loadAgents(): Promise<void> {
+    try {
+      const d = await api.agents()
+      this.agents = d.agents
+    } catch { this.agents = [] }
+  }
 
   static styles = css`
     :host { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -102,12 +123,16 @@ export class SebasProjectRail extends LitElement {
     .meta .count { background: var(--sebas-surface-2); border-radius: 999px; padding: 1px 7px; font-weight: 500; font-variant-numeric: tabular-nums; }
     .row.active .meta .count { background: var(--sebas-accent-strong); color: var(--sebas-accent-ink); }
     .wait-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sebas-status-working); display: inline-block; }
+    .row-actions {
+      display: flex; align-items: center; gap: 4px;
+    }
     .row-action {
       width: 20px; height: 20px; background: none; border: 1px solid var(--sebas-border);
       border-radius: var(--sebas-radius-sm); color: var(--sebas-text-faint); cursor: pointer;
       font-size: 13px; line-height: 1; display: grid; place-items: center; padding: 0; opacity: 0;
       transition: opacity var(--sebas-dur) var(--sebas-ease), color var(--sebas-dur) var(--sebas-ease), background var(--sebas-dur) var(--sebas-ease), border-color var(--sebas-dur) var(--sebas-ease);
     }
+    .row-remove:hover { color: var(--sebas-status-failed); background: var(--sebas-status-failed-bg); }
     .row:hover .row-action, .row:focus-within .row-action { opacity: 1; }
     .row:hover .row-action { color: var(--sebas-accent); border-color: var(--sebas-accent-border); }
     .row-action:hover { color: var(--sebas-accent); background: var(--sebas-accent-soft); }
@@ -173,6 +198,7 @@ export class SebasProjectRail extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     void this.refresh()
+    void this.loadAgents()
     this.unsubscribe = sharedWs.subscribe(this.refetchBound)
     window.addEventListener('sebas:refetch', this.refetchBound)
   }
@@ -192,7 +218,7 @@ export class SebasProjectRail extends LitElement {
       this.error = null
       this.degradedHint = null
       for (const p of projects) {
-        if (!this.branchByPath[p.path]) void this.loadBranch(p.path)
+        if (!this.branchByPath[p.id]) void this.loadBranch(p.id)
       }
     } catch (e) {
       if (seq !== this.fetchSeq) return
@@ -210,12 +236,10 @@ export class SebasProjectRail extends LitElement {
     } catch { /* ignore */ }
   }
 
-  private async loadBranch(path: string) {
+  private async loadBranch(id: string) {
     try {
-      const info = await api.projects.branch(path)
-      if (info.path in this.branchByPath || true) {
-        this.branchByPath = { ...this.branchByPath, [path]: info }
-      }
+      const info = await api.projects.branch(id)
+      this.branchByPath = { ...this.branchByPath, [id]: info }
     } catch { /* 404 = removed mid-flight */ }
   }
 
@@ -226,16 +250,86 @@ export class SebasProjectRail extends LitElement {
 
   private openSession(row: SessionRow) { navigate(`/sessions/${row.encoded_key}`) }
 
-  sessionsFor(path: string) { return this.sessions.filter((r) => r.project_dir === path) }
-  inboxSessions() { return this.sessions.filter((r) => r.project_dir === null) }
+  sessionsFor(id: string) { return this.sessions.filter((r) => r.project_id === id) }
+  inboxSessions() { return this.sessions.filter((r) => r.project_id === null) }
 
+  /**
+   * 「+」创建 0-turn 占位会话（workbench-agent-wire-fix D5/D6）：agent 取
+   * 项目 default_agent（该项目最近一次用过的 agent），无记录时取首个可达
+   * agent；创建后留在工作台路由——create_session 的 set_focus 会让 summary
+   * 的 active_session_key 驱动 composer 进入跟随模式，不再跳深链再跳回。
+   */
   private async createSession(e: Event, p: Project) {
     e.stopPropagation()
     this.onSelect(p.path)
     try {
-      const { key } = await api.createSession(null, p.path, null)
-      navigate(`/sessions/${key}`)
+      const agent = p.default_agent || this.firstReachableAgent()
+      if (!agent) {
+        this.error = '没有可用 agent（/api/agents 列表为空或全部不可达）'
+        return
+      }
+      await api.createSession({ projectId: p.id, agent })
+      navigate('/')
     } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
+  }
+
+  /** 首个可达 agent id（catalog 加载失败/全不可达时为空串）。 */
+  private firstReachableAgent(): string {
+    return this.agents.find((a) => a.reachable)?.id ?? ''
+  }
+
+  // ─── Remove project（5.1）────────────────────────────────────────
+  private openRemoveDialog(e: Event, p: Project) {
+    e.stopPropagation()
+    this.removeTarget = p
+    this.removeError = null
+  }
+  private closeRemoveDialog() { this.removeTarget = null; this.removeError = null }
+  private async confirmRemoveProject() {
+    const p = this.removeTarget
+    if (!p || this.removing) return
+    this.removing = true
+    this.removeError = null
+    try {
+      await api.projects.remove(p.id)
+      this.closeRemoveDialog()
+      void this.refresh()
+    } catch (err) {
+      this.removeError = err instanceof Error ? err.message : String(err)
+    } finally {
+      this.removing = false
+    }
+  }
+
+  // ─── Close session（5.2：inactive 直删 / active 需确认）────────────
+  @state() private closeTarget: SessionRow | null = null
+  @state() private closeError: string | null = null
+  private static readonly ACTIVE_SLUGS = new Set(['starting', 'queued', 'working'])
+
+  private async closeSession(e: Event, row: SessionRow) {
+    e.stopPropagation()
+    if (SebasProjectRail.ACTIVE_SLUGS.has(row.status_slug)) {
+      // active 会话误杀不可逆——先内联确认。
+      this.closeTarget = row
+      this.closeError = null
+      return
+    }
+    try {
+      await api.closeSession(row.encoded_key)
+      void this.refresh()
+    } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
+  }
+  private closeConfirmDialog() { this.closeTarget = null; this.closeError = null }
+  private async confirmCloseSession() {
+    const row = this.closeTarget
+    if (!row) return
+    try {
+      await api.closeSession(row.encoded_key)
+      this.closeConfirmDialog()
+      void this.refresh()
+    } catch (err) {
+      this.closeError = err instanceof Error ? err.message : String(err)
+    }
   }
 
   private async archiveSession(e: Event, encodedKey: string) {
@@ -275,7 +369,7 @@ export class SebasProjectRail extends LitElement {
     const next = [...this.projects]; const [moved] = next.splice(from, 1); next.splice(dropIndex, 0, moved)
     this.projects = next
     try {
-      const { projects } = await api.projects.reorder(next.map((p) => p.path))
+      const { projects } = await api.projects.reorder(next.map((p) => p.id))
       this.projects = projects
     } catch (err) { this.error = err instanceof Error ? err.message : String(err); void this.refresh() }
   }
@@ -305,10 +399,10 @@ export class SebasProjectRail extends LitElement {
     } catch (e) { this.addError = e instanceof Error ? e.message : String(e) }
   }
 
-  private countsFor(path: string): { count: number; waiting: boolean } {
+  private countsFor(id: string): { count: number; waiting: boolean } {
     let count = 0; let waiting = false
     for (const r of this.sessions) {
-      if (r.project_dir !== path) continue
+      if (r.project_id !== id) continue
       count += 1
       if (r.status_slug === 'queued' || r.status_slug === 'failed' || r.status_slug === 'starting') { waiting = true }
     }
@@ -324,6 +418,7 @@ export class SebasProjectRail extends LitElement {
         <span class="session-dot" data-status=${row.status_slug} aria-hidden="true"></span>
         <span class="session-name">${label}</span>
         <button class="session-archive-btn" title="Archive this session" aria-label="Archive ${label}" @click=${(e: Event) => this.archiveSession(e, row.encoded_key)}>${icon('inbox', 11)}</button>
+        <button class="session-archive-btn" title="Close (delete) this session" aria-label="Close ${label}" @click=${(e: Event) => this.closeSession(e, row)}>×</button>
       </li>`
   }
 
@@ -338,21 +433,24 @@ export class SebasProjectRail extends LitElement {
   }
 
   private renderRow(p: Project, index: number) {
-    const info = this.branchByPath[p.path]
+    const info = this.branchByPath[p.id]
     const branch = info?.branch ?? p.branch ?? null
     const accessible = info ? info.accessible : true
-    const { count, waiting } = this.countsFor(p.path)
+    const { count, waiting } = this.countsFor(p.id)
     const isActive = this.activePath === p.path
     const isExpanded = this.expanded[p.path] ?? false
     const dragging = this.dragIndex === index
     const dragOver = this.dragOverIndex === index && this.dragIndex !== null && this.dragIndex !== index
-    const projectSessions = this.sessionsFor(p.path)
+    const projectSessions = this.sessionsFor(p.id)
     return html`
       <li>
         <div class=${['row', isActive ? 'active' : '', accessible ? '' : 'unreachable', dragging ? 'dragging' : '', dragOver ? 'drag-over' : ''].filter(Boolean).join(' ')} draggable="true" aria-current=${isActive ? 'true' : 'false'} aria-expanded=${isExpanded ? 'true' : 'false'} @click=${() => this.onSelect(p.path)} @dragstart=${(e: DragEvent) => this.onDragStart(e, index)} @dragover=${(e: DragEvent) => this.onDragOver(e, index)} @dragleave=${() => this.onDragLeave(index)} @drop=${(e: DragEvent) => this.onDrop(e, index)} @dragend=${() => this.onDragEnd()}>
           <span class="name"><span>${p.name}</span>${waiting ? html`<span class="wait-dot" title="需要操作员介入" aria-label="需介入"></span>` : nothing}</span>
           <span class="meta">${branch ? html`<span class="branch">${branch}</span>` : nothing}${count > 0 ? html`<span class="count">${count}</span>` : nothing}</span>
-          <button class="row-action" title="New session in ${p.name}" aria-label="New session in ${p.name}" @click=${(e: Event) => this.createSession(e, p)}>+</button>
+          <span class="row-actions">
+            <button class="row-action" title="New session in ${p.name}" aria-label="New session in ${p.name}" @click=${(e: Event) => this.createSession(e, p)}>+</button>
+            <button class="row-action row-remove" title="Remove ${p.name}" aria-label="Remove ${p.name}" @click=${(e: Event) => this.openRemoveDialog(e, p)}>×</button>
+          </span>
         </div>
         ${isExpanded ? (projectSessions.length > 0 ? html`<ul class="sessions">${projectSessions.map((r) => this.renderSessionRow(r))}</ul>` : html`<div class="empty">该项目暂无会话</div>`) : nothing}
       </li>`
@@ -406,6 +504,34 @@ export class SebasProjectRail extends LitElement {
         </div>
         <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim()}>Add project</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeAddDialog()}>Cancel</wa-button>
+      </wa-dialog>
+
+      <wa-dialog label="Remove project" style="--width: 440px;" .open=${this.removeTarget !== null} @wa-hide=${() => this.closeRemoveDialog()}>
+        <div class="wa-stack" style="gap:var(--sebas-space-3);">
+          <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
+            移除项目 <b>${this.removeTarget?.name ?? ''}</b>？
+          </p>
+          <p style="font-size:0.8rem;color:var(--sebas-text-dim);margin:0;">
+            该项目下的存活会话不会被终止，将迁移到 Inbox 分组继续运行。此操作只解除注册，可重新添加。
+          </p>
+          ${this.removeError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;">${this.removeError}</div>` : nothing}
+        </div>
+        <wa-button slot="footer" variant="danger" ?loading=${this.removing} @click=${() => void this.confirmRemoveProject()}>移除</wa-button>
+        <wa-button slot="footer" appearance="plain" @click=${() => this.closeRemoveDialog()}>取消</wa-button>
+      </wa-dialog>
+
+      <wa-dialog label="Close session" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${() => this.closeConfirmDialog()}>
+        <div class="wa-stack" style="gap:var(--sebas-space-3);">
+          <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
+            关闭会话 <b>${this.closeTarget?.chat_id ?? ''}</b>？
+          </p>
+          <p style="font-size:0.8rem;color:var(--sebas-text-dim);margin:0;">
+            该会话的 agent 子进程正在运行，关闭会终止子进程并移除会话映射，不可撤销。
+          </p>
+          ${this.closeError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;">${this.closeError}</div>` : nothing}
+        </div>
+        <wa-button slot="footer" variant="danger" @click=${() => void this.confirmCloseSession()}>关闭会话</wa-button>
+        <wa-button slot="footer" appearance="plain" @click=${() => this.closeConfirmDialog()}>取消</wa-button>
       </wa-dialog>`
   }
 }

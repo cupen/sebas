@@ -22,8 +22,8 @@ export interface SessionRow {
   last_active: string
   last_active_unix: number
   is_active: boolean
-  /** Bound project directory. `null` = inbox (no project). */
-  project_dir: string | null
+  /** 绑定项目的稳定 id。`null` = inbox（无项目）。 */
+  project_id: string | null
   /** Short preview of the first user message, used as display label. */
   prompt_preview: string | null
   /** 当前生效的模型 id（ACP agent 的 configOptions）；null = 无模型选择面。 */
@@ -82,12 +82,6 @@ export interface RouterProviderAdmin {
   api_key_env: string | null
   api_key_configured: boolean
   models: string[]
-}
-
-/** /api/agent-defaults（新会话默认 provider/model；BFF 透传 router admin）。 */
-export interface AgentDefaults {
-  provider: string | null
-  model: string | null
 }
 
 /** /router/api/presets 的条目（内置 preset 表只读视图，跟随代码）。 */
@@ -211,10 +205,15 @@ export interface About {
   provider_count: number
 }
 
-/** One configured third-party agent kind, as reported by /api/agent-kinds. */
+/**
+ * One agent in the catalog (`GET /api/agents`，workbench-agent-wire-fix
+ * 3.1/3.2) — the single availability source. `id` is the wire vocabulary
+ * (`[acp.agents.*]` config key or the reserved `"native"`); `display` is
+ * presentation only. Driver concepts never appear here.
+ */
 export interface AgentKindInfo {
-  name: string
-  slug: string
+  id: string
+  display: string
   reachable: boolean
   cause?: string
   version?: string
@@ -467,18 +466,19 @@ const projects = {
   // 「核心不可达，已写入本地注册表」。
   add: (path: string) =>
     post<Project & { degraded?: { cause: string } }>('/api/projects', { path }),
-  remove: async (path: string) =>
+  /** 按稳定 id 移除项目（workbench-agent-wire-fix 2.5）。 */
+  remove: async (id: string) =>
     unwrapText(
-      await doFetch(`/api/projects/${encodeURIComponent(path)}/remove`, {
+      await doFetch(`/api/projects/${encodeURIComponent(id)}/remove`, {
         method: 'POST',
         headers: { ...csrfHeaders() },
       }),
-      `/api/projects/${encodeURIComponent(path)}/remove`,
+      `/api/projects/${encodeURIComponent(id)}/remove`,
     ),
-  reorder: (paths: string[]) =>
-    post<{ projects: Project[] }>('/api/projects/reorder', { paths }),
-  branch: (path: string) =>
-    get<ProjectBranchInfo>(`/api/projects/${encodeURIComponent(path)}/branch`),
+  reorder: (ids: string[]) =>
+    post<{ projects: Project[] }>('/api/projects/reorder', { ids }),
+  branch: (id: string) =>
+    get<ProjectBranchInfo>(`/api/projects/${encodeURIComponent(id)}/branch`),
 }
 
 export const api = {
@@ -489,7 +489,8 @@ export const api = {
   settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
   router: () => get<{ router: RouterInfo }>('/api/router'),
   about: () => get<About>('/api/about'),
-  agentKinds: () => get<{ kinds: AgentKindInfo[] }>('/api/agent-kinds'),
+  /** Agent catalog（唯一可用性真源；workbench-agent-wire-fix 3.2）。 */
+  agents: () => get<{ agents: AgentKindInfo[] }>('/api/agents'),
 
   // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie。
   // 登录为单字段形态：secret 可以是登录 token 或账户密码，服务端自动识别。）
@@ -499,17 +500,21 @@ export const api = {
   authLogout: () => post<{ status: string }>('/api/auth/logout'),
 
   // Session mutations
-  createSession: (
-    prompt?: string | null,
-    projectDir?: string | null,
-    backend?: string | null,
-    model?: string | null,
-  ) =>
+  /**
+   * Create a session（workbench-agent-wire-fix D2）：`agent` 必填（agent id
+   * 或 "native"）；项目以 `project_id` 引用。会话创建后 agent 不可变。
+   */
+  createSession: (opts: {
+    agent: string
+    prompt?: string | null
+    projectId?: string | null
+    model?: string | null
+  }) =>
     post<{ key: string }>('/api/sessions', {
-      prompt: prompt ?? null,
-      project_dir: projectDir ?? null,
-      backend: backend ?? null,
-      model: model ?? null,
+      prompt: opts.prompt ?? null,
+      project_id: opts.projectId ?? null,
+      agent: opts.agent,
+      model: opts.model ?? null,
     }),
   /** 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。 */
   setSessionModel: (encodedKey: string, modelId: string) =>
@@ -551,9 +556,6 @@ export const api = {
     post<{ models: string[]; applied: boolean }>(
       `/router/api/providers/${encodeURIComponent(name)}/probe?apply=true`,
     ),
-  agentDefaults: () => get<AgentDefaults>('/api/agent-defaults'),
-  setAgentDefaults: (payload: { provider: string | null; model?: string | null }) =>
-    put<AgentDefaults>('/api/agent-defaults', payload),
 
   // Admin reads
   adminStatus: () => get<AdminStatus>('/api/admin/status'),
@@ -653,8 +655,12 @@ export const api = {
 // ---- Project API ----
 
 export interface Project {
+  /** Stable wire id (`proj-<12hex>`); the raw path never travels the wire. */
+  id: string
   path: string
   name: string
+  /** 该项目最近一次创建会话所用 agent（composer 预选用）。 */
+  default_agent?: string | null
   added_at: number
   branch?: string | null
   branch_at?: number
@@ -667,7 +673,7 @@ export interface Project {
 }
 
 export interface ProjectBranchInfo {
-  path: string
+  project_id: string
   branch: string | null
   accessible: boolean
 }

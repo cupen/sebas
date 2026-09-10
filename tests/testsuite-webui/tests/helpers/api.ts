@@ -86,16 +86,15 @@ export async function getSession(
 
 export async function createSession(
   request: APIRequestContext,
-  opts: { prompt: string; projectDir?: string | null; backend?: string } = { prompt: 'hello' },
+  opts: { prompt: string; projectId?: string | null; agent?: string } = { prompt: 'hello' },
 ): Promise<string> {
   const resp = await request.post('/api/sessions', {
     data: {
       prompt: opts.prompt ?? null,
-      project_dir: opts.projectDir ?? null,
-      // `backend` rides through to the spawn: `acp` is the default driver,
-      // `acp:<slug>` pins a configured kind. fail-fast-on-startup-errors
-      // journeys pass an unknown slug to force a spawn failure inline.
-      backend: opts.backend ?? 'acp',
+      project_id: opts.projectId ?? null,
+      // agent 必填（workbench-agent-wire-fix D2）：沙箱默认 agent 是
+      // `claude`（fake-claude）；fail-fast journeys 传未知 id 强制内显失败。
+      agent: opts.agent ?? 'claude',
     },
   })
   if (!resp.ok()) throw new Error(`createSession failed: HTTP ${resp.status()}`)
@@ -113,9 +112,11 @@ export async function sendMessage(
 }
 
 export async function listProjects(request: APIRequestContext): Promise<
-  { path: string; name: string }[]
+  { id: string; path: string; name: string; default_agent?: string | null }[]
 > {
-  const d = (await (await request.get('/api/projects')).json()) as { projects: { path: string; name: string }[] }
+  const d = (await (await request.get('/api/projects')).json()) as {
+    projects: { id: string; path: string; name: string; default_agent?: string | null }[]
+  }
   return d.projects
 }
 
@@ -133,29 +134,29 @@ export async function addProjectRaw(
   return { status: resp.status(), body: await resp.text() }
 }
 
-/** Reorder the project registry to the given canonical-path sequence. */
+/** Reorder the project registry to the given stable-id sequence. */
 export async function reorderProjects(
   request: APIRequestContext,
-  paths: string[],
+  ids: string[],
 ): Promise<void> {
-  const resp = await request.post('/api/projects/reorder', { data: { paths } })
+  const resp = await request.post('/api/projects/reorder', { data: { ids } })
   if (!resp.ok()) throw new Error(`reorderProjects failed: HTTP ${resp.status()}`)
 }
 
-/** Branch info for a registered project path (git → name, non-git → null). */
+/** Branch info for a registered project id (git → name, non-git → null). */
 export async function getBranch(
   request: APIRequestContext,
-  path: string,
+  id: string,
 ): Promise<{ status: number; branch: string | null }> {
-  const resp = await request.get(`/api/projects/${encodeURIComponent(path)}/branch`)
+  const resp = await request.get(`/api/projects/${encodeURIComponent(id)}/branch`)
   if (!resp.ok()) return { status: resp.status(), branch: null }
   const d = (await resp.json()) as { branch?: string | null }
   return { status: resp.status(), branch: d.branch ?? null }
 }
 
-export async function removeProject(request: APIRequestContext, path: string): Promise<void> {
+export async function removeProject(request: APIRequestContext, id: string): Promise<void> {
   const resp = await request.post(
-    `/api/projects/${encodeURIComponent(path)}/remove`,
+    `/api/projects/${encodeURIComponent(id)}/remove`,
   )
   if (!resp.ok()) throw new Error(`removeProject failed: HTTP ${resp.status()}`)
 }
@@ -181,11 +182,6 @@ export interface AboutInfo {
   rustc_version: string
   router_listen: string | null
   provider_count: number
-}
-
-export interface AgentDefaults {
-  provider: string | null
-  model: string | null
 }
 
 /** Router gateway card backing the settings Models section (listen/debug/auth). */
@@ -220,11 +216,6 @@ export async function getAdminServices(
   request: APIRequestContext,
 ): Promise<AdminServicesTruth> {
   return (await request.get('/api/admin/services')).json() as Promise<AdminServicesTruth>
-}
-
-/** New-session defaults (sandbox truth is null/null without a control secret). */
-export async function getAgentDefaults(request: APIRequestContext): Promise<AgentDefaults> {
-  return (await request.get('/api/agent-defaults')).json() as Promise<AgentDefaults>
 }
 
 /** Raw provider-admin list (sandbox: read-only works, mutations 503). */
@@ -296,6 +287,6 @@ export async function resetState(request: APIRequestContext): Promise<void> {
     await request.post(`${sessionPath(s.encoded_key)}/close`)
   }
   for (const p of await listProjects(request)) {
-    await removeProject(request, p.path)
+    await removeProject(request, p.id)
   }
 }

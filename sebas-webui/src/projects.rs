@@ -14,15 +14,36 @@ pub const BRANCH_TTL_SECS: u64 = 30;
 /// A single registered project.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectEntry {
+    /// Stable wire identifier (`proj-<12hex>`), deterministically derived
+    /// from the canonicalised path (workbench-agent-wire-fix D2). Survives
+    /// restarts and registry rebuilds; the wire never carries the raw path.
+    /// `#[serde(default)]` backfills entries persisted by an older registry.
+    #[serde(default)]
+    pub id: String,
     pub path: String,
     pub name: String,
     pub added_at: u64,
+    /// The agent id most recently used to create a session under this
+    /// project (project-level default agent, workbench-agent-wire-fix D5).
+    /// `None` = the operator has not created a session here yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
     /// Git branch read lazily; refreshed at most once per `BRANCH_TTL_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// Unix seconds of the last branch probe (0 = never).
     #[serde(default)]
     pub branch_at: u64,
+}
+
+/// Deterministic project id: `proj-` + first 12 hex of SHA-256 over the
+/// canonicalised path. Same path → same id across restarts and registry
+/// rebuilds; no allocator state to persist.
+pub fn project_id_for(canonical_path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(canonical_path.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("proj-{}", &hex[..12])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,10 +115,14 @@ fn save(projects: &[ProjectEntry]) -> Result<(), String> {
 
 pub fn list() -> Vec<ProjectEntry> {
     let mut projects = load();
-    // Backfill branch_at=0 for entries persisted by an older registry that
-    // did not track probe timestamps.
+    // Backfill for entries persisted by an older registry: `id` (older files
+    // predate the stable project id) and `branch_at` (no probe timestamps).
     let mut dirty = false;
     for p in &mut projects {
+        if p.id.is_empty() {
+            p.id = project_id_for(&p.path);
+            dirty = true;
+        }
         if p.branch_at == 0 && p.branch.is_some() {
             p.branch_at = 1;
             dirty = true;
@@ -135,9 +160,11 @@ pub fn add(path: &str) -> Result<ProjectEntry, String> {
         .unwrap_or_default()
         .as_secs();
     let entry = ProjectEntry {
+        id: project_id_for(&canonical_str),
         path: canonical_str,
         name,
         added_at,
+        default_agent: None,
         branch: None,
         branch_at: 0,
     };
@@ -146,21 +173,28 @@ pub fn add(path: &str) -> Result<ProjectEntry, String> {
     Ok(entry)
 }
 
-/// Remove a project by path. Returns `Ok(true)` if removed, `Ok(false)` if not found.
-pub fn remove(path: &str) -> Result<bool, String> {
-    // 与 add 同一规范形判等（verbatim 前缀会让比较永假，remove 静默丢失）。
-    let canonical = match crate::fs::canonicalize_plain(Path::new(path)) {
-        Ok(c) => PathBuf::from(c),
-        Err(_) => return Ok(false),
-    };
+/// Remove a project by its stable id. Returns `Ok(true)` if removed,
+/// `Ok(false)` if the id is unknown.
+pub fn remove_by_id(id: &str) -> Result<bool, String> {
     let mut projects = load();
     let before = projects.len();
-    projects.retain(|p| Path::new(&p.path) != canonical);
+    projects.retain(|p| p.id != id);
     if projects.len() == before {
         return Ok(false);
     }
     save(&projects)?;
     Ok(true)
+}
+
+/// Record the agent most recently used under a project (project-level
+/// default agent, D5). Best-effort: an unknown id or write failure is not a
+/// session-creation failure.
+pub fn set_default_agent(id: &str, agent: &str) {
+    let mut projects = load();
+    if let Some(p) = projects.iter_mut().find(|p| p.id == id) {
+        p.default_agent = Some(agent.to_string());
+        let _ = save(&projects);
+    }
 }
 
 /// Reorder the registry to match the provided sequence of canonical paths.
@@ -309,7 +343,7 @@ mod tests {
     #[test] fn unparseable_file_returns_empty() { with_test_env(|| { std::fs::write(test_registry_path(), "bad").unwrap(); assert!(list().is_empty()); }); }
     #[test] fn add_and_list() { with_test_env(|| { let dir = TEST_DIR.path().join("p"); std::fs::create_dir_all(&dir).unwrap(); let e = add(&dir.to_string_lossy()).unwrap(); assert_eq!(e.name, "p"); assert_eq!(list().len(), 1); }); }
     #[test] fn duplicate_add_rejected() { with_test_env(|| { let dir = TEST_DIR.path().join("d"); std::fs::create_dir_all(&dir).unwrap(); let s = dir.to_string_lossy(); add(&s).unwrap(); assert!(add(&s).is_err()); }); }
-    #[test] fn remove_project() { with_test_env(|| { let dir = TEST_DIR.path().join("r"); std::fs::create_dir_all(&dir).unwrap(); let s = dir.to_string_lossy(); add(&s).unwrap(); assert!(remove(&s).unwrap()); assert!(list().is_empty()); }); }
+    #[test] fn remove_project() { with_test_env(|| { let dir = TEST_DIR.path().join("r"); std::fs::create_dir_all(&dir).unwrap(); let s = dir.to_string_lossy(); let added = add(&s).unwrap(); assert!(remove_by_id(&added.id).unwrap()); assert!(list().is_empty()); }); }
     #[test] fn add_nonexistent_rejected() { with_test_env(|| { assert!(add("/bogus").is_err()); }); }
     #[test] fn add_file_rejected() { with_test_env(|| { let f = TEST_DIR.path().join("f.txt"); std::fs::write(&f, "x").unwrap(); assert!(add(&f.to_string_lossy()).is_err()); }); }
     #[test] fn persists_across_reload() { with_test_env(|| { let dir = TEST_DIR.path().join("p2"); std::fs::create_dir_all(&dir).unwrap(); add(&dir.to_string_lossy()).unwrap(); drop(list()); assert_eq!(list().len(), 1); }); }

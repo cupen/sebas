@@ -5,22 +5,20 @@
  * 功能：模型管理覆盖 / 子功能：无模型诚实缺省、settings provider 只读、
  * 有模型面的正向切换与 typed rejection
  *
- * ## 与既有「无效 model → 会话终态 teardown」用例的区分条件（B2.2 要求先写清）
+ * ## 两条拒绝路径的区分（B2.2 要求先写清；7f1d7c9 后 SetModel 一律非终态）
  *
  * 判别器是 **agent 是否通告模型面（configOptions.model）**，两者不共享会话、
  * 不共享后端，互不为 flake：
  * - 3.2（默认 claude 会话）：claude 驱动不暴露 configOptions、模型面为空 →
- *   SetModel 得到驱动的 TERMINAL 错误 → 会话被拆除（teardown）。该契约由
- *   下方「无模型诚实缺省」组的既有用例钉住，保持不变。
- * - 本组新增用例（`acp:fakeacp` 会话）：沙箱通过
+ *   SetModel 得到驱动的 NON-terminal 错误 → 会话存活、模型不变（7f1d7c9 起
+ *   不再 teardown）。
+ * - 本组新增用例（`fakeacp` agent 会话）：沙箱通过
  *   `[acp.agents.fakeacp]`（generic-ACP 驱动 + fake-acp-agent）通告
  *   `ok-model`/`bad-model` 两个模型 id（初值 = 列表首位 bad-model），
  *   并对 `bad-model` 的 set_config_option 回 RPC 错误：
  *   - `ok-model` POST → agent 接受 → ModelChanged → current_model 同步；
- *   - `bad-model` POST → agent typed rejection（non-terminal Error 在 webui
- *     暂无渲染面，observed product gap）→ 会话存活、current_model 不变。
- * 两组分别命中「同步 / teardown」两个互斥契约，任何一组失败都不会表现为
- * 另一组的 flake。
+ *   - `bad-model` POST → agent typed rejection → 会话存活、current_model 不变。
+ * 两条路径共同契约：拒绝不销毁会话、不伪造成功。
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -42,7 +40,7 @@ test.describe('模型管理覆盖', () => {
   })
 
   test.describe('无模型诚实缺省', () => {
-    test('3.2 set_model on a model-less session fails terminally and honestly', async ({
+    test('3.2 set_model on a model-less session fails non-terminally and honestly', async ({
       page,
     }) => {
       const detail = new SessionDetailPage(page)
@@ -56,32 +54,25 @@ test.describe('模型管理覆盖', () => {
       // No picker anywhere (D4 presentation, re-pinned here as the pre-state).
       await expect(detail.modelPick).toHaveCount(0)
 
-      // The webui delivers the command (HTTP 200), but the Claude driver
-      // answers SetModel with a TERMINAL error (driver.rs:422-431) — the
-      // session is torn down, exactly like the crash journey. The honest
-      // contract is: no fake success, the death is presented as-is.
+      // The webui delivers the command (HTTP 200). The Claude driver answers
+      // SetModel with a NON-terminal error (7f1d7c9): the session survives,
+      // the model is unchanged, and no fake success is recorded.
       const resp = await page.request.post(`/api/sessions/${key}/model`, {
         data: { model_id: 'no-such-model-3.2' },
       })
       expect(resp.ok()).toBe(true)
 
-      // Row leaves the live list; the API agrees it is gone.
+      // Session survives the rejected switch: still listed, detail resolvable.
       await expect
-        .poll(
-          async () =>
-            (await listSessions(page.request)).some((r) => r.encoded_key === key),
-          { timeout: 10_000, intervals: [200] },
+        .poll(async () =>
+          (await listSessions(page.request)).some((r) => r.encoded_key === key),
         )
-        .toBe(false)
+        .toBe(true)
       const after = await getSession(page.request, key)
-      expect(after.status).toBe(404)
-      expect(after.detail).toBeNull()
-
-      // The open detail refetches over live WS and presents the death honestly.
-      await expect(detail.errorCallout).toContainText('Session not found', {
-        timeout: 20_000,
-      })
-      await expect(detail.backToWorkbench).toBeVisible()
+      expect(after.status).toBe(200)
+      // Honest absence: no fabricated model surface after the rejection.
+      expect(after.detail?.current_model).toBeNull()
+      expect(after.detail?.available_models ?? []).toEqual([])
 
       expect(collector.clean()).toEqual([])
     })
@@ -96,7 +87,7 @@ test.describe('模型管理覆盖', () => {
       await resetState(page.request)
       const key = await createSession(page.request, {
         prompt: 'model-switch',
-        backend: 'acp:fakeacp',
+        agent: 'fakeacp',
       })
       // The generic-ACP turn completes its echo response but the session
       // stays `working` (pre-existing: that driver emits no Finished event).
@@ -142,7 +133,7 @@ test.describe('模型管理覆盖', () => {
       await resetState(page.request)
       const key = await createSession(page.request, {
         prompt: 'model-reject',
-        backend: 'acp:fakeacp',
+        agent: 'fakeacp',
       })
       // Same pre-existing no-Finished trait: the model surface appears once
       // session/new lands.
@@ -225,4 +216,25 @@ test.describe('模型管理覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
   })
+
+  test.describe('agent 不可变的锁定提示（workbench-agent-wire-fix）', () => {
+    test('detail head shows the bound agent with the lock affordance', async ({ page }) => {
+      const detail = new SessionDetailPage(page)
+
+      await resetState(page.request)
+      const key = await createSession(page.request, { prompt: 'lock check' })
+      await waitStatus(page.request, key, ['done'])
+      await page.goto(`/sessions/${key}`)
+      await expect(detail.host).toBeVisible()
+
+      // Agent 不可变的 UI 承诺：🔒 + tooltip（spec scenario "UI communicates
+      // immutability"）；不渲染任何 agent 切换控件。
+      const lock = page.locator('sebas-session-detail [data-testid="agent-lock"]')
+      await expect(lock).toContainText('🔒')
+      await expect(lock).toHaveAttribute('title', /immutable — chosen when the session was created/)
+
+      expect(collector.clean()).toEqual([])
+    })
+  })
+
 })

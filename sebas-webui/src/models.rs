@@ -139,10 +139,9 @@ pub struct SessionRow {
     /// True if this session is the WebUI's currently focused one. The
     /// template renders an "active" indicator and gates the Switch button.
     pub is_active: bool,
-    /// Working directory for the project (set when spawned via WebUI as a
-    /// project). `None` for Feishu-originated sessions or sessions without
-    /// a project dir. The agent page renders a 📁 icon when present.
-    pub project_dir: Option<String>,
+    /// 绑定项目的稳定 id（`proj-<12hex>`，workbench-agent-wire-fix 2.5）。
+    /// `None` = inbox（飞书来源或未绑项目）。原始 path 不是 wire 标识。
+    pub project_id: Option<String>,
     /// A short preview of the session's first user message, used by the
     /// agent sidebar as a display label when no project_dir is set.
     pub prompt_preview: Option<String>,

@@ -462,14 +462,17 @@ impl SessionBackend for CoreChannelBackend {
         prompt: String,
         project_dir: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        self.spawn_with(prompt, project_dir, None, None).await
+        // 通道帧的 agent 必填（workbench-agent-wire-fix D2）：无 agent 的
+        // 调用方（feishu 默认路径）语义是「配置的默认 kind」，此处无法解析
+        // 配置——由服务端按空 agent 拒绝，调用方应改用 spawn_with 显式传。
+        self.spawn_with(prompt, project_dir, "", None).await
     }
 
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
-        backend: Option<&str>,
+        agent: &str,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
@@ -477,7 +480,7 @@ impl SessionBackend for CoreChannelBackend {
                 prompt,
                 project_dir,
                 model,
-                backend: backend.map(str::to_owned),
+                agent: agent.to_string(),
             })
             .await?
         {
@@ -501,20 +504,20 @@ impl SessionBackend for CoreChannelBackend {
     /// 0-turn placeholder (P2 fix): create the session row over the wire
     /// without an agent child — the trait default would fall back to
     /// `spawn("")`, putting the empty prompt on the wire exactly the bug this
-    /// fixes. The execution-backend hint rides along
-    /// （add-composer-agent-binding：composer 建 0-turn 会话是常态路径，
-    /// hint 不上线则用户在创建模式选的 agent 会被静默丢弃）。
+    /// fixes. The agent id rides along（workbench-agent-wire-fix D2：
+    /// composer 建 0-turn 会话是常态路径，agent 不上线则用户选的 agent 会被
+    /// 静默丢弃）。
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
-        backend: Option<String>,
+        agent: &str,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::CreatePlaceholder {
                 project_dir,
                 model,
-                backend,
+                agent: agent.to_string(),
             })
             .await?
         {

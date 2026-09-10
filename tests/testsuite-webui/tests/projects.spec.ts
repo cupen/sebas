@@ -14,7 +14,7 @@
 import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { expect, test } from '@playwright/test'
+import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
   addProject,
   addProjectRaw,
@@ -27,6 +27,17 @@ import {
   resetState,
   sceneDir,
 } from './helpers/index'
+
+// workbench-agent-wire-fix 2.5: the wire identifies projects by stable id;
+// resolve a path → id through the list endpoint.
+async function projectIdOf(
+  request: APIRequestContext,
+  path: string,
+): Promise<string> {
+  const p = (await listProjects(request)).find((x) => x.path === path)
+  if (!p) throw new Error(`projectIdOf: project not registered: ${path}`)
+  return p.id
+}
 
 test.describe('项目管理覆盖', () => {
   let collector: ErrorCollector
@@ -68,7 +79,7 @@ test.describe('项目管理覆盖', () => {
       await expect(headerPath).toHaveAttribute('title', scene, { timeout: 10_000 })
 
       // Remove via the API surface; the rail reflects it on reload.
-      await removeProject(page.request, scene)
+      await removeProject(page.request, await projectIdOf(page.request, scene))
       await expect
         .poll(async () => (await listProjects(page.request)).some((p) => p.path === scene), {
           timeout: 10_000,
@@ -111,7 +122,7 @@ test.describe('项目管理覆盖', () => {
       await expect(rail.projectRow(name)).toHaveCount(1, { timeout: 10_000 })
 
       // Removal persists: gone from the API and still gone after reload.
-      await removeProject(page.request, dir)
+      await removeProject(page.request, await projectIdOf(page.request, dir))
       await expect
         .poll(async () => (await listProjects(page.request)).some((p) => p.path === dir), {
           timeout: 10_000,
@@ -181,7 +192,8 @@ test.describe('项目管理覆盖', () => {
       const reversed = [...dirs].reverse()
       const wantPaths = [...reversed, gitDir, plainDir]
       const wantOrder = [...names].reverse().concat([gitName, plainName])
-      await reorderProjects(page.request, wantPaths)
+      const wantIds = await Promise.all(wantPaths.map((p) => projectIdOf(page.request, p)))
+      await reorderProjects(page.request, wantIds)
       await expect
         .poll(async () => (await listProjects(page.request)).map((p) => p.path), {
           timeout: 10_000,
@@ -197,10 +209,10 @@ test.describe('项目管理覆盖', () => {
         .toEqual(wantOrder)
 
       // Branch: API truth first (contains, never literal main/master).
-      const git = await getBranch(page.request, gitDir)
+      const git = await getBranch(page.request, await projectIdOf(page.request, gitDir))
       expect(git.status).toBe(200)
       expect(git.branch).toContain(gitBranch)
-      const plain = await getBranch(page.request, plainDir)
+      const plain = await getBranch(page.request, await projectIdOf(page.request, plainDir))
       expect(plain.branch).toBeNull()
 
       // Rail rendering: git row carries the branch label, plain row has none.
@@ -294,7 +306,7 @@ test.describe('项目管理覆盖', () => {
       await expect(rail.projectRow(`pick-child-${t}`)).toBeVisible({ timeout: 10_000 })
 
       // Cleanup: unregister and remove the fixture dirs.
-      await removeProject(page.request, child)
+      await removeProject(page.request, await projectIdOf(page.request, child))
       fs.rmSync(parent, { recursive: true, force: true })
 
       expect(collector.clean()).toEqual([])

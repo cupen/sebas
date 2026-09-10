@@ -600,7 +600,7 @@ async fn dispatch(
             prompt,
             project_dir,
             model,
-            backend: hint,
+            agent,
         } => {
             // 5.5: canonicalize + stat BEFORE any spawn; no existence
             // disclosure in the rejection message.
@@ -617,10 +617,7 @@ async fn dispatch(
                     .display()
                     .to_string()
             });
-            match backend
-                .spawn_with(prompt, project_dir, hint.as_deref(), model)
-                .await
-            {
+            match backend.spawn_with(prompt, project_dir, &agent, model).await {
                 Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
@@ -628,7 +625,7 @@ async fn dispatch(
         CoreChannelRequest::CreatePlaceholder {
             project_dir,
             model,
-            backend: hint,
+            agent,
         } => {
             // 0-turn 占位（P2 修复）：只建行、不 spawn 子进程——空 prompt 绝
             // 不上送 agent。project_dir 校验与 Spawn 同款；执行体 hint 随帧
@@ -648,10 +645,7 @@ async fn dispatch(
                     .display()
                     .to_string()
             });
-            match backend
-                .create_placeholder(project_dir, hint, model)
-                .await
-            {
+            match backend.create_placeholder(project_dir, &agent, model).await {
                 Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
@@ -865,6 +859,18 @@ async fn project_mutation(
                 .cloned()
                 .unwrap_or_default();
             engine.save_projects(projects).await
+        }
+        // workbench-agent-wire-fix 2.6：项目级默认 agent（按稳定 id）。
+        "set_default_agent" => {
+            let id = payload
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "set_default_agent: 缺少 id 字段".to_string())?;
+            let agent = payload
+                .get("agent")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "set_default_agent: 缺少 agent 字段".to_string())?;
+            engine.set_project_default_agent(id, agent).await
         }
         other => Err(format!("projects: 未知 op '{other}'")),
     }

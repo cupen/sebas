@@ -27,10 +27,10 @@ impl AgentKindProvider for CannedProvider {
     }
 }
 
-fn info(slug: &str, reachable: bool, cause: Option<&str>, version: Option<&str>) -> AgentKindInfo {
+fn info(id: &str, reachable: bool, cause: Option<&str>, version: Option<&str>) -> AgentKindInfo {
     AgentKindInfo {
-        name: slug.to_string(),
-        slug: slug.to_string(),
+        id: id.to_string(),
+        display: id.to_string(),
         reachable,
         cause: cause.map(str::to_string),
         version: version.map(str::to_string),
@@ -64,34 +64,46 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn agent_kinds_returns_canned_kinds_with_optional_fields() {
+async fn agents_catalog_returns_canned_agents_with_optional_fields() {
     let app = app_with(vec![
         info("claude", true, None, Some("claude v2.1.0")),
         info("gemini", false, Some("command not found"), None),
     ])
     .await;
 
-    let (status, v) = get_json(&app, "/api/agent-kinds").await;
+    let (status, v) = get_json(&app, "/api/agents").await;
     assert_eq!(status, StatusCode::OK);
-    let kinds = v["kinds"].as_array().expect("kinds array missing");
-    assert_eq!(kinds.len(), 2);
+    let agents = v["agents"].as_array().expect("agents array missing");
+    // 2 个配置 agent + 1 行内置 native（catalog 是唯一真源，3.2）。
+    assert_eq!(agents.len(), 3);
+    let native = agents.iter().find(|a| a["id"] == "native").expect("native row");
+    assert_eq!(native["display"], "Native Kernel");
 
-    assert_eq!(kinds[0]["slug"], "claude");
-    assert_eq!(kinds[0]["name"], "claude");
-    assert_eq!(kinds[0]["reachable"], true);
-    assert_eq!(kinds[0]["version"], "claude v2.1.0");
-    assert!(kinds[0].get("cause").is_none(), "reachable kind must omit cause");
+    let claude = agents.iter().find(|a| a["id"] == "claude").expect("claude row");
+    let gemini = agents.iter().find(|a| a["id"] == "gemini").expect("gemini row");
+    let (claude, gemini) = (claude, gemini);
 
-    assert_eq!(kinds[1]["slug"], "gemini");
-    assert_eq!(kinds[1]["reachable"], false);
-    assert_eq!(kinds[1]["cause"], "command not found");
-    assert!(kinds[1].get("version").is_none(), "unreachable kind must omit version");
+    assert_eq!(claude["id"], "claude");
+    assert_eq!(claude["display"], "claude");
+    assert_eq!(claude["reachable"], true);
+    assert_eq!(claude["version"], "claude v2.1.0");
+    assert!(claude.get("cause").is_none(), "reachable agent must omit cause");
+    // driver 是配置层概念，不上 wire（workbench-agent-wire-fix D3）。
+    assert!(claude.get("driver").is_none(), "driver must not leak");
+    assert!(claude.get("slug").is_none(), "slug is retired vocabulary");
+
+    assert_eq!(gemini["id"], "gemini");
+    assert_eq!(gemini["reachable"], false);
+    assert_eq!(gemini["cause"], "command not found");
+    assert!(gemini.get("version").is_none(), "unreachable agent must omit version");
 }
 
 #[tokio::test]
-async fn agent_kinds_empty_when_no_provider_entries() {
+async fn agents_catalog_still_lists_native_when_no_provider_entries() {
     let app = app_with(vec![]).await;
-    let (status, v) = get_json(&app, "/api/agent-kinds").await;
+    let (status, v) = get_json(&app, "/api/agents").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["kinds"].as_array().unwrap().len(), 0);
+    let agents = v["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "native row is always present");
+    assert_eq!(agents[0]["id"], "native");
 }

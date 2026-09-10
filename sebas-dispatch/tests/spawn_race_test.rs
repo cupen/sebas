@@ -153,6 +153,12 @@ fn web_key(id: &str) -> ChannelKey {
 
 /// P2: 0-turn 占位（`begin_spawn_with` 记住 kind/model）首条消息应触发
 /// `Out::WebSpawn` 且携带 pending kind/model —— 不发空 prompt、不排队。
+///
+/// workbench-agent-wire-fix D1：占位身份是显式 `awaiting_first_prompt`
+/// 标记，被 route_text 的 SpawnNew **一次性消费**（消费后到达的文本在
+/// spawn-in-flight 窗口内排队，绝不二次 spawn）。因此本测试分两相：
+/// 相 1 验证路由判据；相 2 用全新占位走生产路径（`web_send_message`
+/// 内部恰好 route_text 一次）验证 WebSpawn 携带 kind/model。
 #[tokio::test]
 async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
     let map = SessionMap::new();
@@ -165,17 +171,26 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
         .unwrap();
     assert!(matches!(outcome, sebas_dispatch::state::BeginSpawn::Fresh));
 
-    // First message: route_text must yield SpawnNew (not Enqueued) and the
-    // router must emit Out::WebSpawn with the remembered kind/model.
+    // 相 1：路由判据 —— 占位首条消息必须 SpawnNew（不排队），且标记被
+    // 消费（spawn-in-flight 窗口内的第二条消息改走 Enqueued）。
     let route = map.route_text(key.clone(), "hello".into()).await.unwrap();
     assert!(
         matches!(route, TextRoute::SpawnNew),
         "placeholder first message must spawn, not enqueue"
     );
+    let second = map.route_text(key.clone(), "race".into()).await.unwrap();
+    assert!(
+        matches!(second, TextRoute::Enqueued),
+        "message racing the spawn must queue, not double-spawn"
+    );
 
-    router
-        .web_send_message(key.clone(), "hello".into())
-        .await;
+    // 相 2：生产发射路径 —— 全新占位 + web_send_message（内部一次
+    // route_text）必须发出 WebSpawn 且携带记住的 kind/model。
+    let key2 = web_key("zero-turn-emit");
+    map.begin_spawn_with(key2.clone(), Some("opencode".into()), Some("m-free".into()))
+        .await
+        .unwrap();
+    router.web_send_message(key2.clone(), "hello".into()).await;
     let out = tokio::time::timeout(Duration::from_millis(300), out_rx.recv())
         .await
         .expect("WebSpawn must be emitted")
@@ -188,7 +203,7 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
             kind,
             model,
         } => {
-            assert_eq!(k, key);
+            assert_eq!(k, key2);
             assert_eq!(prompt, "hello");
             assert_eq!(project_dir, None);
             assert_eq!(kind.as_deref(), Some("opencode"));
@@ -220,7 +235,10 @@ async fn placeholder_replaces_active_and_keeps_pending_kind() {
     let mut m = map.get(&key).await.unwrap();
     assert_eq!(m.pending_kind.as_deref(), Some("opencode"));
     // 读回后 clearing: route_text 消费 placeholder 时翻转为普通 Spawning。
-    m.state = MappingState::Spawning { pending: Vec::new() };
+    m.state = MappingState::Spawning {
+        pending: Vec::new(),
+        awaiting_first_prompt: true,
+    };
     map.insert(key.clone(), m).await.unwrap();
     let route = map.route_text(key.clone(), "fresh".into()).await.unwrap();
     assert!(
@@ -271,4 +289,74 @@ async fn fail_spawn_surfaces_error_inline_and_keeps_session_visible() {
         }
     }
     assert!(!saw_removed, "spawn failure must not publish Removed");
+}
+
+/// workbench-agent-wire-fix D1：占位标记（与 kind/model 解耦）——
+/// kind/model 全空的 0-turn 占位，首条消息也必须 SpawnNew。
+/// 这是「输入框发不出消息」根因的回归锁：旧判据
+/// `pending_kind.is_some() || pending_model.is_some()` 对默认 agent 的
+/// 占位恒为 false，首条消息被误排队且无人 drain。
+#[tokio::test]
+async fn placeholder_without_kind_or_model_still_spawns_on_first_message() {
+    let map = SessionMap::new();
+    let key = web_key("bare-placeholder");
+
+    // 占位创建：kind/model 均为 None（默认 agent 路径，rail「+」同款）。
+    map.begin_spawn_with(key.clone(), None, None).await.unwrap();
+
+    let route = map.route_text(key.clone(), "hello".into()).await.unwrap();
+    assert!(
+        matches!(route, TextRoute::SpawnNew),
+        "placeholder identity is the explicit marker, not the optional kind/model fields"
+    );
+}
+
+/// workbench-agent-wire-fix spec「placeholder marker survives restart」：
+/// 0-turn 占位落盘后重启（restore），仍以占位身份出现，首条消息照常
+/// SpawnNew；普通 spawn-in-flight 条目依旧不入盘。
+#[tokio::test]
+async fn placeholder_marker_survives_dump_restore_round_trip() {
+    let map = SessionMap::new();
+    let ph = web_key("ph-roundtrip");
+    let in_flight = web_key("inflight-roundtrip");
+    let active_key = ChannelKey::feishu("oc_rt", None);
+
+    // 占位（带 kind/model/project_dir 的完整形状）。
+    map.begin_spawn_with(ph.clone(), Some("codex".into()), Some("m1".into()))
+        .await
+        .unwrap();
+    map.set_project_dir(&ph, Some("/tmp/wf".into())).await;
+    // 普通 spawn-in-flight（首条消息已触发 spawn）——不入盘。
+    map.route_text(in_flight.clone(), "go".into()).await.unwrap();
+    // Active 对照组。
+    map.insert(active_key.clone(), Mapping::active("s-rt"))
+        .await
+        .unwrap();
+
+    let json = map.dump_json().await.unwrap();
+    assert!(
+        json.contains("ph-roundtrip") && !json.contains("inflight-roundtrip"),
+        "placeholder persists; in-flight spawn stays filtered"
+    );
+
+    let restored = SessionMap::restore_json(&json).unwrap();
+    let m = restored.get(&ph).await.expect("placeholder restored");
+    match &m.state {
+        MappingState::Spawning { awaiting_first_prompt, .. } => {
+            assert!(awaiting_first_prompt, "placeholder identity survives restart");
+        }
+        other => panic!("expected Spawning placeholder, got {other:?}"),
+    }
+    assert_eq!(m.pending_kind.as_deref(), Some("codex"));
+    assert_eq!(m.pending_model.as_deref(), Some("m1"));
+    assert_eq!(m.project_dir.as_deref(), Some("/tmp/wf"));
+
+    // 重启后的首条消息照常触发 spawn。
+    let route = restored.route_text(ph.clone(), "hello".into()).await.unwrap();
+    assert!(matches!(route, TextRoute::SpawnNew));
+
+    // 对照组：active 条目照常回 Dormant；in-flight 条目不存在。
+    let a = restored.get(&active_key).await.expect("active restored");
+    assert!(matches!(a.state, MappingState::Dormant { .. }));
+    assert!(restored.get(&in_flight).await.is_none(), "in-flight spawn is not persisted");
 }

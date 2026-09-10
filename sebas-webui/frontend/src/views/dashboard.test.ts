@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
   settings: vi.fn(),
   session: vi.fn(),
   projectsBranch: vi.fn(),
+  projectsList: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -25,7 +26,7 @@ vi.mock('../api/client.js', () => ({
     sessions: apiMocks.sessions,
     settings: apiMocks.settings,
     session: apiMocks.session,
-    projects: { branch: apiMocks.projectsBranch },
+    projects: { branch: apiMocks.projectsBranch, list: apiMocks.projectsList },
   },
 }))
 
@@ -52,7 +53,7 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     last_active: '2m ago',
     last_active_unix: 1000,
     is_active: false,
-    project_dir: '/home/me/sebas',
+    project_id: 'proj-sebas',
     prompt_preview: null,
     current_model: null,
     available_models: null,
@@ -133,6 +134,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   apiMocks.summary.mockResolvedValue(summaryBase)
   apiMocks.session.mockResolvedValue(detailFixture())
+  // dashboard 用 projects.list 把 selectedPath 解析成稳定 id 来分组会话行。
+  apiMocks.projectsList.mockResolvedValue({
+    projects: [{ id: 'proj-sebas', path: '/home/me/sebas', name: 'sebas', added_at: 0 }],
+  })
   apiMocks.sessions.mockResolvedValue({
     recent_sessions: [
       row({}),
@@ -156,7 +161,7 @@ beforeEach(() => {
     },
   })
   apiMocks.projectsBranch.mockResolvedValue({
-    path: '/home/me/sebas',
+    project_id: 'proj-sebas',
     branch: 'feat/webui',
     accessible: true,
   })
@@ -296,7 +301,7 @@ describe('provider label sourcing (fix-webui-detached-status)', () => {
     apiMocks.session.mockResolvedValue(detailFixture())
     apiMocks.sessions.mockResolvedValue({ recent_sessions: [] })
     apiMocks.projectsBranch.mockResolvedValue({
-      path: '/home/me/sebas',
+      project_id: 'proj-sebas',
       branch: 'feat/webui',
       accessible: true,
     })

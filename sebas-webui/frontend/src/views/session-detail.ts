@@ -446,8 +446,11 @@ export class SebasSessionDetail extends LitElement {
                 : nothing}
               <!-- add-composer-agent-binding：agent 建会话时定死——只读展示
                    （null = 默认 kind）。 -->
-              <span class="mono" title="This session's agent is fixed — chosen when it was created"
-                >${d.agent_kind ?? 'acp · default'}</span
+              <span
+                class="mono"
+                data-testid="agent-lock"
+                title="Agent is immutable — chosen when the session was created"
+                >🔒 ${d.agent_kind ?? 'default agent'}</span
               >
               <span>last active ${d.last_active}</span>
               ${d.available_models && d.available_models.length > 0

@@ -156,6 +156,21 @@ impl sebas_dispatch::state_store::StateStoreEngine for FakeStateEngineImpl {
         g.retain(|p| p.get("path").and_then(|v| v.as_str()) != Some(path));
         Ok(g.len() != before)
     }
+    async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String> {
+        let mut g = self.inner.projects.lock().unwrap();
+        let mut updated = false;
+        for p in g.iter_mut() {
+            if p.get("id").and_then(|v| v.as_str()) == Some(id) {
+                p["default_agent"] = serde_json::json!(agent);
+                updated = true;
+            }
+        }
+        if updated {
+            Ok(())
+        } else {
+            Err(format!("set_default_agent: project '{id}' 不存在"))
+        }
+    }
 }
 
 /// StateSnapshot 返回 engine 持有的当前快照（spec scenario:

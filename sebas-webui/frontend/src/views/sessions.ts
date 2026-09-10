@@ -5,7 +5,7 @@
 
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
-import { api, ApiError, type AgentKindInfo, type BackendHint, type SessionList } from '../api/client.js'
+import { api, ApiError, type AgentKindInfo, type SessionList } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
@@ -22,7 +22,7 @@ export class SebasSessions extends LitElement {
   @state() private data: SessionList | null = null
   @state() private error = ''
   @state() private prompt = ''
-  @state() private backend: BackendHint = 'acp'
+  @state() private agent = ''
   @state() private kinds: AgentKindInfo[] = []
   @state() private creating = false
   @state() private closeTarget: string | null = null
@@ -184,9 +184,13 @@ export class SebasSessions extends LitElement {
 
   private loadKinds(): void {
     api
-      .agentKinds()
+      .agents()
       .then((d) => {
-        this.kinds = d.kinds.filter((k) => k.reachable)
+        this.kinds = d.agents
+        // 缺省预选第一个可达项（D5 兜底：此处无项目上下文）。
+        if (!this.agent) {
+          this.agent = d.agents.find((k) => k.reachable)?.id ?? ''
+        }
       })
       .catch(() => {
         this.kinds = []
@@ -216,7 +220,7 @@ export class SebasSessions extends LitElement {
     if (!this.prompt.trim() || this.creating) return
     this.creating = true
     try {
-      const { key } = await api.createSession(this.prompt.trim(), null, this.backend)
+      const { key } = await api.createSession({ prompt: this.prompt.trim(), agent: this.agent })
       this.prompt = ''
       navigate(`/sessions/${key}`)
     } catch (err) {
@@ -300,20 +304,18 @@ export class SebasSessions extends LitElement {
           ></wa-input>
           <wa-select
             class="backend-select"
-            aria-label="Execution backend"
-            value=${this.backend}
+            aria-label="Agent"
+            value=${this.agent}
+            ?disabled=${!this.agent && this.kinds.length === 0}
             @change=${(e: Event) => {
-              const value = (e.target as HTMLInputElement).value
-              if (value === 'acp' || value === 'native' || value.startsWith('acp:')) {
-                this.backend = value as BackendHint
-              }
+              this.agent = (e.target as HTMLInputElement).value
             }}
           >
-            <wa-option value="acp">acp · default kind</wa-option>
             ${this.kinds.map(
-              (k) => html`<wa-option value=${`acp:${k.slug}`}>acp · ${k.name}</wa-option>`,
+              (k) => html`<wa-option value=${k.id} ?disabled=${!k.reachable}
+                >${k.reachable ? k.display : `${k.display}（unavailable: ${k.cause ?? 'unreachable'}）`}</wa-option
+              >`,
             )}
-            <wa-option value="native">native · built-in kernel</wa-option>
           </wa-select>
           <wa-button variant="brand" appearance="accent" ?loading=${this.creating} type="submit"
             >New session</wa-button

@@ -12,6 +12,7 @@ use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::{Mapping, SessionMap};
 use sebas_webui::build_router;
 use sebas_webui::models::RouterInfo;
+use sebas_webui::projects;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -380,6 +381,30 @@ async fn isolated_projects() -> ProjectsEnvGuard {
     ProjectsEnvGuard { _lock: lock, prev, path }
 }
 
+/// Add 后从列表反查稳定项目 id（workbench-agent-wire-fix 2.5 测试助手）。
+async fn project_id_after_add(app: &axum::Router, path: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    body["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"].as_str() == Some(path))
+        .and_then(|p| p["id"].as_str())
+        .unwrap_or_else(|| panic!("project id not found for {path}"))
+        .to_string()
+}
+
 #[tokio::test]
 async fn projects_list_empty() {
     let _env = isolated_projects().await;
@@ -520,14 +545,30 @@ async fn projects_remove_project() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    // Remove.
-    let encoded = urlencoding::encode(&path_str);
+    // Remove（workbench-agent-wire-fix 2.5：按稳定 id）。
+    let listed: serde_json::Value = serde_json::from_str(
+        &body_string(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/projects")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await,
+    )
+    .unwrap();
+    let id = listed["projects"][0]["id"].as_str().expect("project id");
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/projects/{encoded}/remove"))
+                .uri(format!("/api/projects/{id}/remove"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -618,8 +659,37 @@ async fn projects_reorder_persists_user_order() {
         assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
-    // Reverse via the API.
-    let reversed: Vec<String> = paths.iter().rev().cloned().collect();
+    // Reverse via the API（按稳定 id）。
+    let listed_before: Vec<(String, String)> = {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        body["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["id"].as_str().unwrap().to_string(),
+                    p["path"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let by_path: std::collections::HashMap<String, String> = listed_before
+        .iter()
+        .map(|(id, path)| (path.clone(), id.clone()))
+        .collect();
+    let reversed: Vec<String> = paths.iter().rev().map(|p| by_path[p].clone()).collect();
     let resp = app
         .clone()
         .oneshot(
@@ -627,7 +697,7 @@ async fn projects_reorder_persists_user_order() {
                 .method("POST")
                 .uri("/api/projects/reorder")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "paths": reversed }).to_string()))
+                .body(Body::from(serde_json::json!({ "ids": reversed }).to_string()))
                 .unwrap(),
         )
         .await
@@ -639,7 +709,7 @@ async fn projects_reorder_persists_user_order() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p["path"].as_str().unwrap().to_string())
+        .map(|p| p["id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(listed, reversed);
 
@@ -660,7 +730,7 @@ async fn projects_reorder_persists_user_order() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p["path"].as_str().unwrap().to_string())
+        .map(|p| p["id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(listed, reversed);
 
@@ -692,12 +762,12 @@ async fn projects_branch_returns_null_for_non_git_dir() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let encoded = urlencoding::encode(&path_str);
+    let id = project_id_after_add(&app, &path_str).await;
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/projects/{encoded}/branch"))
+                .uri(format!("/api/projects/{id}/branch"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -736,12 +806,12 @@ async fn projects_branch_detects_git_head() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let encoded = urlencoding::encode(&path_str);
+    let id = project_id_after_add(&app, &path_str).await;
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/projects/{encoded}/branch"))
+                .uri(format!("/api/projects/{id}/branch"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -776,6 +846,27 @@ async fn projects_branch_404_for_unregistered_path() {
 #[tokio::test]
 async fn create_session_with_project_dir_binds_to_path() {
     let (router, _rx, app) = fixture().await;
+    let _env = isolated_projects().await;
+
+    // 注册项目（新 wire 用 project_id 引用，path 只在注册时出现一次）。
+    let dir = std::env::temp_dir().join("sebas-webui-bind-proj");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "path": &path_str }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let project_id = project_id_after_add(&app, &path_str).await;
 
     let resp = app
         .clone()
@@ -785,7 +876,12 @@ async fn create_session_with_project_dir_binds_to_path() {
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"prompt":"hello","project_dir":"/tmp/some-webui-test"}"#,
+                    serde_json::json!({
+                        "prompt": "hello",
+                        "project_id": project_id,
+                        "agent": "claude",
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -796,7 +892,8 @@ async fn create_session_with_project_dir_binds_to_path() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let key_str = v["key"].as_str().expect("key string").to_string();
 
-    // The newly-spawned session's mapping records the project_dir. Web-spawned
+    // The newly-spawned session's mapping records the project dir (resolved
+    // server-side from the project id). Web-spawned
     // keys come from `ChannelKey::web_new()` (channel "web", reference
     // "web-{nanos}-{seq}") and live as a Spawning placeholder until the
     // dispatcher promotes them — so identify by a reference starting with
@@ -806,7 +903,11 @@ async fn create_session_with_project_dir_binds_to_path() {
         .iter()
         .find(|i| i.channel == "web" && i.key.starts_with("web-") && i.status == "spawning")
         .expect("new web-spawned session info present");
-    assert_eq!(new_info.project_dir.as_deref(), Some("/tmp/some-webui-test"));
+    assert_eq!(
+        new_info.project_dir.as_deref(),
+        Some(path_str.as_str()),
+        "project_id must resolve to the registered directory"
+    );
 
     // The encoded key round-trips back to the same ChannelKey web_spawn
     // produced: channel "web" + a "web-*" reference.
@@ -850,7 +951,7 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
                 .uri("/api/sessions")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"prompt":"hello","model":"pro-model","backend":"acp:opencode"}"#,
+                    r#"{"prompt":"hello","model":"pro-model","agent":"opencode"}"#,
                 ))
                 .unwrap(),
         )
@@ -987,10 +1088,21 @@ async fn spawn_and_drive_project_session(
     acp_session_id: &str,
     content: &str,
 ) -> (String, ChannelKey) {
+    // 新 wire（workbench-agent-wire-fix 2.5）：注册项目拿稳定 id，会话以
+    // project_id 引用；服务端解析回 path 记入 mapping。
+    let post = post_json(app, "/api/projects", serde_json::json!({ "path": project_dir })).await;
+    assert!(
+        post.status() == StatusCode::CREATED || post.status() == StatusCode::CONFLICT,
+        "project register must be 201 (or 409 when the test pre-registered it)"
+    );
     let resp = post_json(
         app,
         "/api/sessions",
-        serde_json::json!({ "prompt": prompt, "project_dir": project_dir }),
+        serde_json::json!({
+            "prompt": prompt,
+            "project_id": projects::project_id_for(project_dir),
+            "agent": "claude",
+        }),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED, "spawn must return 201");
@@ -1063,6 +1175,7 @@ fn assert_detail_untouched(before: &serde_json::Value, after: &serde_json::Value
 /// transcript, mapping and rendered detail are untouched.
 #[tokio::test]
 async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() {
+    let _env = isolated_projects().await;
     let (router, _rx, app) = fixture().await;
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();
@@ -1127,8 +1240,14 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
     let row_b = row_for(&encoded_b);
     assert_eq!(row_a["status"], "active");
     assert_eq!(row_b["status"], "active");
-    assert_eq!(row_a["project_dir"].as_str(), Some(path_a.as_str()));
-    assert_eq!(row_b["project_dir"].as_str(), Some(path_b.as_str()));
+    assert_eq!(
+        row_a["project_id"].as_str(),
+        Some(projects::project_id_for(&path_a).as_str())
+    );
+    assert_eq!(
+        row_b["project_id"].as_str(),
+        Some(projects::project_id_for(&path_b).as_str())
+    );
 
     // A is untouched while B ran: same turns, same mapping (project_dir and
     // last_active_unix included), same rendered detail.
@@ -1187,10 +1306,12 @@ async fn removing_project_keeps_its_session_running_and_reachable() {
         "live session carries prompt + content"
     );
 
-    // Remove the project from the registry; the session itself is untouched.
+    // Remove the project from the registry（按稳定 id）; the session itself
+    // is untouched.
+    let project_id = projects::project_id_for(&path);
     let resp = post_json(
         &app,
-        &format!("/api/projects/{}/remove", urlencoding::encode(&path)),
+        &format!("/api/projects/{project_id}/remove"),
         serde_json::json!({}),
     )
     .await;
@@ -1226,7 +1347,10 @@ async fn removing_project_keeps_its_session_running_and_reachable() {
         .find(|r| r["encoded_key"] == encoded)
         .expect("session still listed after project removal");
     assert_eq!(row["status"], "active");
-    assert_eq!(row["project_dir"].as_str(), Some(path.as_str()));
+    assert_eq!(
+        row["project_id"].as_str(),
+        Some(projects::project_id_for(&path).as_str())
+    );
 
     // The board stays reachable (in-process backend) and still counts the
     // session: the three fixture sessions plus this one.

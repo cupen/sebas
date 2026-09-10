@@ -676,18 +676,21 @@ impl DualSessionBackend {
         key.channel_str() == "feishu" && key.reference.starts_with("agent-")
     }
 
-    /// fix-webui-detached-status：显式 `backend` 提示只认已知集合——缺省
-    /// （旧客户端）与 `acp`/`acp:<slug>` 落 ACP，`native` 落原生内核，其余
-    /// 是调用方错误，typed rejection 且不建会话（不再静默回退 ACP）。
-    /// slug 是否可解析由 ACP 侧的 agent kinds 把关，这里只看前缀形式。
-    fn validate_backend_hint(backend: Option<&str>) -> Result<(), SessionRejection> {
-        match backend {
-            None | Some("native") | Some("acp") => Ok(()),
-            Some(hint) if hint.starts_with("acp:") => Ok(()),
-            Some(hint) => Err(SessionRejection::BackendUnavailable {
-                backend: hint.to_string(),
-                cause: "unknown backend hint".into(),
-            }),
+    /// workbench-agent-wire-fix D2：wire 只认 agent id——`[acp.agents.*]`
+    /// 配置键名（非空、不含命名空间分隔符）或保留值 `"native"`。旧词汇
+    /// （`acp`/`acp:<slug>`/缺省）一律 typed rejection；id 是否已配置由
+    /// ACP 侧的 agent kinds 把关，这里只看词汇形式。
+    fn validate_agent_id(agent: &str) -> Result<(), SessionRejection> {
+        let legacy = agent == "acp" || agent.starts_with("acp:");
+        let valid = !legacy
+            && (agent == "native" || (!agent.is_empty() && !agent.contains(':')));
+        if valid {
+            Ok(())
+        } else {
+            Err(SessionRejection::BackendUnavailable {
+                backend: agent.to_string(),
+                cause: "agent 必须是配置的 agent id 或 \"native\"（旧 backend 词汇已退役）".into(),
+            })
         }
     }
 
@@ -742,27 +745,26 @@ impl SessionBackend for DualSessionBackend {
         &self,
         prompt: String,
         project_dir: Option<String>,
-        backend: Option<&str>,
-        _model: Option<String>,
+        agent: &str,
+        model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        Self::validate_backend_hint(backend)?;
-        match backend {
-            Some("native") => {
-                let key = self.native.spawn(prompt, project_dir).await?;
-                // wire-webui-sebas-agent-e2e 4.2：创建时选定的模型对 native
-                // 会话同样生效——走会话级 override 缝（作用于后续 turn 并
-                // 反映在快照 current_model 上），不再被静默丢弃。会话刚由
-                // 本调用建成，set 理论不会失败；万一失败也不否定已建成的
-                // 会话。
-                if let Some(m) = _model {
-                    let _ = self.native.set_session_model(key.clone(), m).await;
-                }
-                Ok(key)
+        Self::validate_agent_id(agent)?;
+        if agent == "native" {
+            let key = self.native.spawn(prompt, project_dir).await?;
+            // wire-webui-sebas-agent-e2e 4.2：创建时选定的模型对 native
+            // 会话同样生效——走会话级 override 缝（作用于后续 turn 并
+            // 反映在快照 current_model 上），不再被静默丢弃。会话刚由
+            // 本调用建成，set 理论不会失败；万一失败也不否定已建成的
+            // 会话。
+            if let Some(m) = model {
+                let _ = self.native.set_session_model(key.clone(), m).await;
             }
-            // `acp` / `acp:<slug>` route to the ACP backend, which parses the
-            // slug and pins the kind. The model id (add-acp-model-selection)
-            // is threaded into the spawn.
-            _ => self.acp.spawn_with(prompt, project_dir, backend, _model).await,
+            Ok(key)
+        }
+        // agent id 即 kind（D2）：ACP 侧按配置键名钉住 kind。模型 id
+        // （add-acp-model-selection）随 spawn 透传。
+        else {
+            self.acp.spawn_with(prompt, project_dir, agent, model).await
         }
     }
 
@@ -771,20 +773,19 @@ impl SessionBackend for DualSessionBackend {
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
-        backend: Option<String>,
+        agent: &str,
         model: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
-        Self::validate_backend_hint(backend.as_deref())?;
-        match backend.as_deref() {
-            Some("native") => {
-                let key = self.native.spawn(String::new(), project_dir).await?;
-                // 与 spawn_with 同缝：占位会话记住创建时选定的模型（4.2）。
-                if let Some(m) = model {
-                    let _ = self.native.set_session_model(key.clone(), m).await;
-                }
-                Ok(key)
+        Self::validate_agent_id(agent)?;
+        if agent == "native" {
+            let key = self.native.spawn(String::new(), project_dir).await?;
+            // 与 spawn_with 同缝：占位会话记住创建时选定的模型（4.2）。
+            if let Some(m) = model {
+                let _ = self.native.set_session_model(key.clone(), m).await;
             }
-            _ => self.acp.create_placeholder(project_dir, backend, model).await,
+            Ok(key)
+        } else {
+            self.acp.create_placeholder(project_dir, agent, model).await
         }
     }
 
@@ -964,7 +965,7 @@ mod tests {
         // backend hint = native → key 前缀 agent-；创建时选定的模型随 spawn
         // 生效于会话级 override（4.2：选中生效于快照）。
         let key = dual
-            .spawn_with("go".into(), None, Some("native"), Some("m-spawn".into()))
+            .spawn_with("go".into(), None, "native", Some("m-spawn".into()))
             .await
             .expect("spawn native");
         assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);
@@ -980,7 +981,12 @@ mod tests {
             "spawn-time model must land in the session snapshot"
         );
         // 默认（无 hint）→ acp 路径：agent 前缀之外的 key。
-        let acp_key = dual.spawn_with("hi".into(), None, None, None).await.expect("spawn acp");
+        // D2：agent 必填——"claude" 在测试配置中不存在，但词汇合法；路由
+        // 到 acp 侧（key 非 native 前缀即为断言点）。
+        let acp_key = dual
+            .spawn_with("hi".into(), None, "claude", None)
+            .await
+            .expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
     }
 
@@ -999,7 +1005,7 @@ mod tests {
         // 让 set_model 走内核空闲期路径（turn 中收下、下一 turn 才生效）。
         let ws = tempfile::tempdir().unwrap();
         let key = dual
-            .spawn_with("go".into(), Some(ws.path().to_string_lossy().into()), Some("native"), None)
+            .spawn_with("go".into(), Some(ws.path().to_string_lossy().into()), "native", None)
             .await
             .expect("spawn native");
         let mut notices = dual.permission_requests().expect("dual has notices");
@@ -1048,24 +1054,25 @@ mod tests {
         assert_eq!(dual.snapshot().await.len(), 1, "no session may be created");
     }
 
-    // fix-webui-detached-status 1.2：未知执行体提示 typed rejection 且不建会话。
+    // workbench-agent-wire-fix D2：wire 词汇收紧后，旧 backend 值与非法
+    // agent id 一律 typed rejection 且不建会话。
     #[tokio::test]
-    async fn unknown_backend_hint_rejects_without_session() {
+    async fn invalid_agent_values_reject_without_session() {
         let acp: Arc<dyn SessionBackend> =
             Arc::new(sebas_webui::session_backend::InProcessBackend::new(
                 make_router().await,
             ));
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
 
-        for hint in ["warp-drive", "Native", "acpx", "claude"] {
+        // 词汇形式非法：driver 命名空间残留（acp:*）、空串。
+        for agent in ["acp", "acp:claude", ""] {
             let err = dual
-                .spawn_with("hi".into(), None, Some(hint), None)
+                .spawn_with("hi".into(), None, agent, None)
                 .await
-                .expect_err("unknown hint must reject");
+                .expect_err("legacy/empty agent value must reject");
             match &err {
-                SessionRejection::BackendUnavailable { backend, cause } => {
-                    assert_eq!(backend, hint);
-                    assert!(cause.contains("unknown backend hint"), "{cause}");
+                SessionRejection::BackendUnavailable { backend, .. } => {
+                    assert_eq!(backend, agent);
                 }
                 other => panic!("expected BackendUnavailable, got {other:?}"),
             }
@@ -1076,16 +1083,16 @@ mod tests {
         }
         // 占位创建同受校验；且全程未产生任何会话。
         assert!(dual
-            .create_placeholder(None, Some("warp-drive".into()), None)
+            .create_placeholder(None, "acp:claude", None)
             .await
             .is_err());
         assert!(dual.snapshot().await.is_empty(), "no session may be created");
 
-        // 显式 acp / acp:<slug> / 缺省依旧放行（路由到 acp）。
-        for hint in [None, Some("acp"), Some("acp:claude")] {
-            dual.spawn_with("hi".into(), None, hint, None)
+        // 合法 agent id（含大小写敏感的普通 id、native）放行路由。
+        for agent in ["claude", "native"] {
+            dual.spawn_with("hi".into(), None, agent, None)
                 .await
-                .unwrap_or_else(|e| panic!("hint {hint:?} must route to acp: {e}"));
+                .unwrap_or_else(|e| panic!("agent {agent:?} must route: {e}"));
         }
     }
 
@@ -1106,7 +1113,7 @@ mod tests {
         let dual = DualSessionBackend::new(acp, native);
 
         let err = dual
-            .spawn_with("hi".into(), None, Some("native"), None)
+            .spawn_with("hi".into(), None, "native", None)
             .await
             .expect_err("native without credentials must reject");
         let text = err.to_string();

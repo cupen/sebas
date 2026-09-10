@@ -249,17 +249,14 @@ describe('sebas-settings-modal sections', () => {
   })
 
   it('Settings overview renders workspace root, acp kind and the provider/model link', async () => {
-    apiMocks.agentDefaults.mockResolvedValue({ provider: 'alpha', model: 'm1' })
     const el = await mount()
     // 总览懒加载挂在切入 settings 时：先离开再回来触发 loadOverview。
     await goto(el, 1)
     await goto(el, 0)
     const text = el.shadowRoot!.textContent ?? ''
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
-    expect(apiMocks.agentDefaults).toHaveBeenCalled()
     expect(text).toContain('/tmp/test-work')
     expect(text).toContain('acp')
-    expect(text).toContain('alpha / m1')
     // 工作区根目录带复制按钮。
     const copy = el.shadowRoot!.querySelector('button[title="Copy workspace root"]')
     expect(copy).toBeTruthy()
@@ -544,16 +541,15 @@ describe('sebas-settings-modal closing', () => {
 })
 
 
-it('shows the current agent default and badges the matching provider row', async () => {
-  apiMocks.agentDefaults.mockResolvedValue({ provider: 'alpha', model: 'm1' })
+it('states honestly that no global default is set (agent-defaults retired)', async () => {
+  // workbench-agent-wire-fix 3.3：/api/agent-defaults 端点退役——总览与
+  // provider 列表不再渲染全局 default 徽章（默认 agent 改为项目级记忆）。
+
   const el = await mount()
   await goto(el, 2)
 
   const status = el.shadowRoot?.querySelector('.provider-toolbar [role="status"]')
-  expect(status?.textContent ?? '').toContain('default: alpha / m1')
-  const badge = el.shadowRoot?.querySelector('.provider-badge.default')
-  expect(badge).toBeTruthy()
-  const row = badge?.closest('.provider-row')
-  expect(row?.textContent ?? '').toContain('alpha')
+  expect(status?.textContent ?? '').toContain('no default set')
+  expect(el.shadowRoot?.querySelector('.provider-badge.default')).toBeNull()
   el.remove()
 })

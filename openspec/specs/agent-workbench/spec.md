@@ -127,6 +127,8 @@ The composer SHALL deliver every accepted submission to the core over the sessio
 
 The composer's mode (follow-up vs creation) SHALL be derived from the webui-side focused-session pointer: a focused session puts the composer in follow-up mode targeting that session; no focused session (or an explicit "new session" request) puts it in creation mode. Focusing a session — via the `/api/sessions/{key}/switch` endpoint or by visiting the session's deep-link page — SHALL update the pointer so that a subsequent composer submission follows the focused session rather than spawning a new one.
 
+In creation mode the composer SHALL require an explicit agent choice drawn from `/api/agents`; there is no implicit or "null" agent. The selector SHALL preselect the current project's remembered default agent when one exists.
+
 #### Scenario: composer drives in either configuration
 
 - **WHEN** the workbench runs detached or in-process and the core is reachable
@@ -156,6 +158,11 @@ The composer's mode (follow-up vs creation) SHALL be derived from the webui-side
 
 - **WHEN** no session is focused (fresh workbench, or the focused session was just closed)
 - **THEN** the composer renders creation mode, and a submission spawns a new session bound to the selected project or inbox
+
+#### Scenario: creation mode requires an explicit agent
+
+- **WHEN** the composer is in creation mode and the operator has not chosen an agent
+- **THEN** the submit control is disabled until an agent is chosen from the `/api/agents` list
 
 ### Requirement: Session origin is visible
 
@@ -387,12 +394,12 @@ without requiring a session to be created first.
 
 ### Requirement: Rail project removal entry
 
-Each project row in the workbench rail SHALL expose a remove action (hover-revealed, consistent with the existing row-action affordance). Triggering it SHALL open a confirmation dialog that names the project and states that live sessions under it keep running and migrate to the Inbox. Confirming SHALL call `POST /api/projects/{path}/remove` and remove the row from the rail without a page reload; the dialog SHALL present the typed error inline when the backend rejects the removal. Cancelling SHALL leave the registry untouched.
+Each project row in the workbench rail SHALL expose a remove action (hover-revealed, consistent with the existing row-action affordance). Triggering it SHALL open a confirmation dialog that names the project and states that live sessions under it keep running and migrate to the Inbox. Confirming SHALL call `POST /api/projects/{id}/remove` and remove the row from the rail without a page reload; the dialog SHALL present the typed error inline when the backend rejects the removal. Cancelling SHALL leave the registry untouched.
 
 #### Scenario: remove a project from the rail
 
 - **WHEN** the operator clicks the remove button on a project row and confirms the dialog
-- **THEN** `POST /api/projects/{path}/remove` is called, the project disappears from the rail, and no page reload is required
+- **THEN** `POST /api/projects/{id}/remove` is called, the project disappears from the rail, and no page reload is required
 
 #### Scenario: live sessions survive project removal
 
@@ -441,3 +448,67 @@ After the operator creates a 0-turn placeholder session (rail `+` button), the w
 
 - **WHEN** a placeholder session has just been created and focused
 - **THEN** the composer renders its follow-up mode (read-only agent label, no execution-backend dropdown) for that session
+
+### Requirement: Session agent binding is immutable
+
+A session SHALL record the agent it was created with, and that binding SHALL NOT change for the lifetime of the session. Any API or channel request that attempts to re-target an existing session to a different agent SHALL be rejected with a typed rejection. Models within the bound agent MAY be changed mid-session via the existing model endpoint; agents themselves are not interchangeable because different agents cannot resume each other's conversation state.
+
+#### Scenario: agent is locked at creation
+
+- **WHEN** a session is created with `agent = "claudecode"`
+- **THEN** every subsequent turn for that session runs on `claudecode`, and no request can re-target it to another agent
+
+#### Scenario: attempt to change agent is rejected
+
+- **WHEN** a client sends a request that would change an existing session's agent
+- **THEN** the backend rejects it with a typed rejection (4xx) and the session continues on its original agent
+
+#### Scenario: model may change, agent may not
+
+- **WHEN** the operator changes the model on a session bound to `claudecode`
+- **THEN** the model change applies to subsequent turns, and the session's agent remains `claudecode`
+
+#### Scenario: UI communicates immutability
+
+- **WHEN** a session is displayed in the workbench or detail view
+- **THEN** the bound agent is shown as read-only with a lock affordance and tooltip stating it was chosen at creation, and no agent-switch control is rendered
+
+### Requirement: Composer submissions always deliver
+
+A composer submission that the UI reports as accepted SHALL be delivered to the agent — the system SHALL NOT acknowledge a message and then leave the session without a spawned child. A placeholder session awaiting its first prompt SHALL be identified by an explicit marker, not inferred from optional fields; the first message on such a session SHALL trigger spawn and SHALL NOT be enqueued without a consumer.
+
+#### Scenario: first message on a placeholder spawns the child
+
+- **WHEN** a placeholder session created with any valid `agent` value receives its first composer message
+- **THEN** the message spawns the agent child and the session transitions to working, regardless of which agent id was chosen
+
+#### Scenario: accepted means delivered
+
+- **WHEN** `POST /api/sessions/{key}/message` returns 200
+- **THEN** the message is either already delivered to a live child, queued on a live spawn that will drain it, or the response was not 200; no code path acknowledges a message that will never be processed
+
+#### Scenario: placeholder marker survives restart
+
+- **WHEN** the daemon restarts after a placeholder session was created
+- **THEN** the restored mapping still identifies the session as awaiting its first prompt, and the first post-restart message spawns the child
+
+### Requirement: Project-level default agent
+
+Each project SHALL remember the agent most recently used to create a session under it. When the operator focuses that project and the composer is in creation mode, the agent selector SHALL preselect that remembered agent. The default is stored in the project registry and survives a restart.
+
+#### Scenario: default agent follows last use
+
+- **WHEN** the operator creates a session in project A with `agent = "codex"` and later returns to project A in creation mode
+- **THEN** the agent selector preselects `codex`
+
+#### Scenario: different projects remember different agents
+
+- **WHEN** project A was last used with `codex` and project B with `claudecode`
+- **THEN** switching to project A preselects `codex` and switching to project B preselects `claudecode`
+
+#### Scenario: first visit falls back honestly
+
+- **WHEN** a project has no recorded default agent
+- **THEN** the selector preselects the first reachable agent and marks no project default as chosen
+
+## MODIFIED Requirements

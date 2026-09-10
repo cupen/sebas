@@ -243,8 +243,12 @@ pub fn save_settings(conn: &mut Connection, cfg: &sebas_feishu::cards::CardConfi
 /// 项目条目 (JSON 兼容形状, 与 `sebas_webui::projects::ProjectEntry` 对应)。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
+    /// 稳定项目 id（`proj-<12hex>`；workbench-agent-wire-fix 2.4）。
+    /// 迁移 2 之前的行读取时为 None，由应用层按 path 回填。
+    pub id: Option<String>,
     pub path: String,
     pub name: String,
+    pub default_agent: Option<String>,
     pub branch: Option<String>,
     pub branch_at: i64,
     pub added_at: i64,
@@ -254,18 +258,20 @@ pub struct ProjectRow {
 /// 加载所有项目。
 pub fn load_projects(conn: &mut Connection) -> Result<Vec<ProjectRow>, String> {
     let mut stmt = conn
-        .prepare("SELECT path, name, branch, branch_at, added_at, sort_order FROM projects ORDER BY sort_order, added_at")
+        .prepare("SELECT id, path, name, default_agent, branch, branch_at, added_at, sort_order FROM projects ORDER BY sort_order, added_at")
         .map_err(|e| format!("准备 projects 查询失败: {e}"))?;
 
     let rows = stmt
         .query_map([], |row| {
             Ok(ProjectRow {
-                path: row.get(0)?,
-                name: row.get(1)?,
-                branch: row.get(2)?,
-                branch_at: row.get(3)?,
-                added_at: row.get(4)?,
-                sort_order: row.get(5)?,
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                default_agent: row.get(3)?,
+                branch: row.get(4)?,
+                branch_at: row.get(5)?,
+                added_at: row.get(6)?,
+                sort_order: row.get(7)?,
             })
         })
         .map_err(|e| format!("查询 projects 失败: {e}"))?;
@@ -288,8 +294,8 @@ pub fn save_projects(conn: &mut Connection, projects: &[ProjectRow]) -> Result<(
 
     for p in projects {
         tx.execute(
-            "INSERT INTO projects (path, name, branch, branch_at, added_at, sort_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![p.path, p.name, p.branch, p.branch_at, p.added_at, p.sort_order],
+            "INSERT INTO projects (id, path, name, default_agent, branch, branch_at, added_at, sort_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![p.id, p.path, p.name, p.default_agent, p.branch, p.branch_at, p.added_at, p.sort_order],
         )
         .map_err(|e| format!("写入 project {} 失败: {e}", p.path))?;
     }
@@ -307,6 +313,16 @@ pub fn add_project(conn: &mut Connection, path: &str, name: &str, added_at: i64)
         params![path, name, added_at],
     )
     .map_err(|e| format!("添加项目 {path} 失败: {e}"))?;
+    Ok(())
+}
+
+/// 记录项目级默认 agent（workbench-agent-wire-fix 2.6），按稳定 id 定位。
+pub fn set_project_default_agent(conn: &mut Connection, id: &str, agent: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE projects SET default_agent = ?2 WHERE id = ?1",
+        params![id, agent],
+    )
+    .map_err(|e| format!("更新项目 {id} 默认 agent 失败: {e}"))?;
     Ok(())
 }
 
@@ -437,6 +453,12 @@ impl Repo {
     }
 
     /// 添加项目。
+    pub async fn set_project_default_agent(handle: &StateHandle, id: String, agent: String) -> Result<(), String> {
+        handle
+            .exec(move |conn| set_project_default_agent(conn, &id, &agent))
+            .await
+    }
+
     pub async fn add_project(handle: &StateHandle, path: String, name: String, added_at: i64) -> Result<(), String> {
         handle
             .exec(move |conn| add_project(conn, &path, &name, added_at))

@@ -69,11 +69,10 @@ pub enum CoreChannelRequest {
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
-        /// （wire-webui-sebas-agent-e2e）执行体提示：`"native"` = 原生内核，
-        /// `"acp"`/None = ACP 桥，`"acp:<slug>"` = 指定 ACP agent kind
-        /// （add-composer-agent-binding：slug 经复合后端钉进 mapping）。
-        #[serde(default)]
-        backend: Option<String>,
+        /// 目标 agent id（workbench-agent-wire-fix D2）：`[acp.agents.*]`
+        /// 配置键名或保留值 `"native"`。driver 名与 `acp:` 前缀不再是合法
+        /// 值——agent 是 wire 上唯一的执行体词汇。
+        agent: String,
     },
     /// Create a 0-turn placeholder session WITHOUT spawning an agent child
     /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
@@ -86,10 +85,10 @@ pub enum CoreChannelRequest {
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
-        /// 执行体提示，语义与 `Spawn.backend` 一致。旧帧无此字段 →
-        /// serde default（None = 默认执行体）。
-        #[serde(default)]
-        backend: Option<String>,
+        /// 目标 agent id，语义与 `Spawn.agent` 一致（workbench-agent-wire-fix
+        /// D2）。占位帧必须携带——composer 建 0-turn 会话是常态路径，agent
+        /// 不上线则用户选的 agent 被静默丢弃。
+        agent: String,
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
@@ -271,12 +270,12 @@ mod tests {
                 prompt: "hello".into(),
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
-                backend: Some("acp:claude".into()),
+                agent: "claudecode".into(),
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
-                backend: None,
+                agent: "claudecode".into(),
             },
             CoreChannelRequest::SetSessionModel {
                 key: key.clone(),
@@ -423,16 +422,10 @@ mod tests {
     #[test]
     fn legacy_wire_shapes_still_deserialize() {
         let legacy_spawn = r#"{"cmd":"spawn","prompt":"hi","project_dir":null,"model":null}"#;
-        let req: CoreChannelRequest = serde_json::from_str(legacy_spawn).unwrap();
-        assert_eq!(
-            req,
-            CoreChannelRequest::Spawn {
-                prompt: "hi".into(),
-                project_dir: None,
-                model: None,
-                backend: None,
-            }
-        );
+        // 旧帧（backend 词汇）不再可读——wire 收紧是本 change 的 BREAKING 面
+        // （workbench-agent-wire-fix D2）：legacy Spawn 反序列化必须失败。
+        let req: Result<CoreChannelRequest, _> = serde_json::from_str(legacy_spawn);
+        assert!(req.is_err(), "legacy backend frame must be rejected");
         // 快照条目的旧格式（无 backend/current_model 字段）同样可反序列化。
         let legacy_info = r#"{"channel":"feishu","key":"oc_1","session_id":null,"status":"active","last_active_unix":0}"#;
         let info: SessionInfo = serde_json::from_str(legacy_info).unwrap();

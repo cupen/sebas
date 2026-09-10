@@ -56,7 +56,22 @@ export class ProjectRail {
       .locator('li.session-item:not(.archived)', { hasText: sessionIdShort })
       .first()
     await row.hover()
-    await row.locator('.session-archive-btn').click()
+    // workbench-agent-wire-fix 5.2：行内现在有 archive + close 两颗按钮，
+    // 以 title 精确锚定（共用 .session-archive-btn 外观类）。
+    await row.locator('button[title="Archive this session"]').click()
+  }
+
+  /**
+   * Close (delete) a session row by its displayed id (workbench-agent-wire-fix
+   * 5.2). Inactive sessions close immediately; active ones raise the inline
+   * confirm dialog — callers that need the dialog handle it themselves.
+   */
+  async closeSession(sessionIdShort: string): Promise<void> {
+    const row = this.host
+      .locator('li.session-item:not(.archived)', { hasText: sessionIdShort })
+      .first()
+    await row.hover()
+    await row.locator('button[title="Close (delete) this session"]').click()
   }
 
   /**

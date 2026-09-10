@@ -23,7 +23,15 @@ pub async fn run(args: ListArgs) -> Result<()> {
     let mut kinds: Vec<AgentKindInfo> = Vec::new();
     for slug in cfg.acp.agents.keys() {
         let command = cfg.acp.command_for(slug).unwrap_or_default();
-        kinds.push(discover_agent(slug, &command).await);
+        kinds.push(
+            discover_agent(&sebas_webui::agent_kinds::AgentKindSource {
+                slug: slug.clone(),
+                command,
+                driver: cfg.acp.driver_tag_of(slug),
+                display: cfg.acp.display_for(slug),
+            })
+            .await,
+        );
     }
 
     if args.json {
@@ -47,7 +55,7 @@ pub fn format_table(kinds: &[AgentKindInfo]) -> Vec<String> {
         .map(|k| {
             format!(
                 "{} {} {} {}",
-                k.slug,
+                k.id,
                 k.reachable,
                 k.version.as_deref().unwrap_or("-"),
                 k.cause.as_deref().unwrap_or("-"),
@@ -63,10 +71,12 @@ mod tests {
     /// 缺二进制时诚实报告 `reachable=false` + `cause="command not found"`。
     #[tokio::test]
     async fn missing_binary_reports_command_not_found() {
-        let info = discover_agent(
-            "gemini",
-            &["sebas-nonexistent-binary-xyz-12345".to_string()],
-        )
+        let info = discover_agent(&sebas_webui::agent_kinds::AgentKindSource {
+            slug: "gemini".into(),
+            command: vec!["sebas-nonexistent-binary-xyz-12345".into()],
+            driver: "acp".into(),
+            display: None,
+        })
         .await;
         assert!(!info.reachable);
         assert_eq!(info.cause.as_deref(), Some("command not found"));
@@ -78,15 +88,15 @@ mod tests {
     fn format_table_renders_slug_reachability_version_cause() {
         let kinds = vec![
             AgentKindInfo {
-                name: "claude".into(),
-                slug: "claude".into(),
+                id: "claude".into(),
+                display: "Claude Code".into(),
                 reachable: true,
                 cause: None,
                 version: Some("claude v1.2.3".into()),
             },
             AgentKindInfo {
-                name: "gemini".into(),
-                slug: "gemini".into(),
+                id: "gemini".into(),
+                display: "gemini".into(),
                 reachable: false,
                 cause: Some("command not found".into()),
                 version: None,

@@ -208,7 +208,7 @@ async fn create_session_returns_201_with_key() {
         &app,
         "POST",
         "/api/sessions",
-        Some(r#"{"prompt": "hello"}"#.into()),
+        Some(r#"{"prompt": "hello", "agent": "claude"}"#.into()),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "body: {v}");

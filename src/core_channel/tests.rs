@@ -352,11 +352,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(
-            Some("/tmp".into()),
-            Some("acp:opencode".into()),
-            Some("m-free".into()),
-        )
+        .create_placeholder(Some("/tmp".into()), "opencode", Some("m-free".into()))
         .await
         .expect("placeholder created");
 
@@ -390,7 +386,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     // 不可用 project_dir → 与 Spawn 同款校验拒绝。
     assert_eq!(
         backend
-            .create_placeholder(Some("/nonexistent-sebas-p2".into()), None, None)
+            .create_placeholder(Some("/nonexistent-sebas-p2".into()), "opencode", None)
             .await,
         Err(SessionRejection::UnusableProjectDir)
     );
@@ -413,6 +409,35 @@ async fn create_placeholder_wires_a_zero_turn_session() {
             // 首条消息按占位记住的 kind spawn（add-composer-agent-binding）。
             assert_eq!(kind.as_deref(), Some("opencode"));
             assert_eq!(model.as_deref(), Some("m-free"));
+        }
+        other => panic!("expected Out::WebSpawn, got {other:?}"),
+    }
+}
+
+/// workbench-agent-wire-fix 根因回归锁（沙箱实证场景）：kind/model 全空的
+/// 0-turn 占位（rail「+」与 composer 默认路径的同款 wire），首条消息必须
+/// 触发 SpawnNew → Out::WebSpawn。旧 route_text 判据
+/// `pending_kind.is_some() || pending_model.is_some()` 对这种占位恒为
+/// false，消息被 Enqueued 且无人 drain——输入框「发了没响应」的根因。
+#[tokio::test]
+async fn placeholder_without_kind_or_model_spawns_on_first_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let key = backend
+        .create_placeholder(Some("/tmp".into()), "claudecode", None)
+        .await
+        .expect("placeholder created");
+
+    backend
+        .message(key.clone(), "hello".into())
+        .await
+        .expect("message accepted");
+    match core._out_rx.try_recv().expect("WebSpawn emitted") {
+        sebas_dispatch::Out::WebSpawn { key: k, prompt, .. } => {
+            assert_eq!(k, key);
+            assert_eq!(prompt, "hello");
         }
         other => panic!("expected Out::WebSpawn, got {other:?}"),
     }

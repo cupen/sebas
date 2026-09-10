@@ -29,7 +29,18 @@ pub struct QueuedTurn {
 /// 错误。`SpawnFailed` 同样不入盘。
 #[derive(Debug, Clone)]
 pub enum MappingState {
-    Spawning { pending: Vec<String> },
+    /// 占位/spawn-in-flight。`awaiting_first_prompt` 标记 0-turn 占位（webui
+    /// 经 `web_create_placeholder` 显式创建、还没有首条消息）：它的首条消息
+    /// 走 SpawnNew 触发真实 spawn（workbench-agent-wire-fix D1）。普通
+    /// spawn-in-flight（首条消息已触发 spawn、子进程还在启动）为 false——
+    /// 期间到达的后续文本进 `pending`，activate 后 drain，绝不二次 spawn。
+    /// 占位身份必须是显式标记：此前用 `pending_kind/model 非空` 推断占位，
+    /// 而默认 agent 的占位两个候选字段都是 None，首条消息被误判成
+    /// spawn-in-flight 永久排队（根因修复）。
+    Spawning {
+        pending: Vec<String>,
+        awaiting_first_prompt: bool,
+    },
     Active { session_id: String },
     Dormant { session_id: String },
     /// spawn 失败终态。`session_id` 是 transcript 寻址用的合成 id（"failed-N"），
@@ -117,6 +128,7 @@ impl Mapping {
         Self {
             state: MappingState::Spawning {
                 pending: Vec::new(),
+                awaiting_first_prompt: false,
             },
             last_active_unix: crate::engine::now_unix(),
             project_dir: None,
@@ -132,10 +144,12 @@ impl Mapping {
     /// (no prompt yet): remember the requested kind/model so the first message
     /// spawns the right agent (0-turn 会话修复，P2）。普通 spawn 流程直接
     /// 消费时这些字段保持 None（走默认 kind / agent 默认模型）。
+    /// `awaiting_first_prompt = true` 是占位身份本身（D1）。
     pub fn spawning_with(kind: Option<String>, model: Option<String>) -> Self {
         Self {
             state: MappingState::Spawning {
                 pending: Vec::new(),
+                awaiting_first_prompt: true,
             },
             last_active_unix: crate::engine::now_unix(),
             project_dir: None,
@@ -303,6 +317,7 @@ impl SessionMap {
                         let old = session_id.clone();
                         m.state = MappingState::Spawning {
                             pending: Vec::new(),
+                            awaiting_first_prompt: false,
                         };
                         Ok(TextRoute::Resume(old))
                     }
@@ -312,20 +327,26 @@ impl SessionMap {
                         // 原 transcript 下作为历史，视图随新会话推进）。
                         m.state = MappingState::Spawning {
                             pending: Vec::new(),
+                            awaiting_first_prompt: false,
                         };
                         Ok(TextRoute::SpawnNew)
                     }
-                    MappingState::Spawning { pending } => {
-                        if m.pending_kind.is_some() || m.pending_model.is_some() {
-                            // A 0-turn placeholder (created with no prompt)
-                            // awaits its first message: flip it to a plain
-                            // spawning placeholder (the pending kind/model are
-                            // consumed by the SpawnNew caller) and hand the
-                            // message to the spawn path (P2 fix). Without
-                            // this, the first message would be queued and no
-                            // child would ever spawn.
+                    MappingState::Spawning {
+                        pending,
+                        awaiting_first_prompt,
+                    } => {
+                        if *awaiting_first_prompt {
+                            // A 0-turn placeholder awaits its first message:
+                            // consume the marker and hand the message to the
+                            // spawn path (workbench-agent-wire-fix D1). The
+                            // marker — not the optional kind/model fields —
+                            // is the placeholder's identity; a placeholder
+                            // created without an explicit kind/model used to
+                            // lose that inference here and its first message
+                            // was queued with nothing to ever drain it.
                             m.state = MappingState::Spawning {
                                 pending: Vec::new(),
+                                awaiting_first_prompt: false,
                             };
                             Ok(TextRoute::SpawnNew)
                         } else if pending.len() < MAX_PENDING {
@@ -425,7 +446,7 @@ impl SessionMap {
                 // 保持不动——本次 activate 携带的是新会话的 id）。
                 std::mem::swap(&mut m.state, &mut next);
                 let pending = match next {
-                    MappingState::Spawning { pending } => pending,
+                    MappingState::Spawning { pending, .. } => pending,
                     MappingState::Active { .. }
                     | MappingState::Dormant { .. }
                     | MappingState::SpawnFailed { .. } => Vec::new(),
@@ -638,7 +659,17 @@ impl SessionMap {
         let g = self.inner.read().await;
         let mut out = serde_json::Map::new();
         for (k, m) in g.iter() {
-            if let Some(sid) = m.persisted_id() {
+            // 0-turn 占位没有 routing id，但占位身份必须活过重启
+            // （workbench-agent-wire-fix spec：placeholder marker survives
+            // restart）——以空 session_id + awaiting_first_prompt=true 落盘。
+            let is_placeholder = matches!(
+                &m.state,
+                MappingState::Spawning {
+                    awaiting_first_prompt: true,
+                    ..
+                }
+            );
+            if let Some(sid) = m.persisted_id().or(is_placeholder.then_some("")) {
                 // `serde_json::Map` keys are strings; the ChannelKey's own
                 // serde produces an object, so we stringify that object as the
                 // map key (self-consistent with `restore_json`'s parser).
@@ -650,6 +681,9 @@ impl SessionMap {
                     acp_session_id: m.acp_session_id.clone(),
                     current_model: m.current_model.clone(),
                     pending_kind: m.pending_kind.clone(),
+                    pending_model: m.pending_model.clone(),
+                    project_dir: m.project_dir.clone(),
+                    awaiting_first_prompt: is_placeholder,
                 };
                 out.insert(
                     key_str,
@@ -683,7 +717,13 @@ impl SessionMap {
                 serde_json::from_value(v).map_err(|e| {
                     serde_json::Error::custom(format!("bad entry for {key_str:?}: {e}"))
                 })?;
-            let mut m = Mapping::dormant(dto.session_id, dto.last_active_unix);
+            let mut m = if dto.awaiting_first_prompt && dto.session_id.is_empty() {
+                // 0-turn 占位（workbench-agent-wire-fix D1）：重启后仍是等待
+                // 首条消息的占位，首条消息照常触发 spawn。
+                Mapping::spawning_with(dto.pending_kind.clone(), dto.pending_model.clone())
+            } else {
+                Mapping::dormant(dto.session_id, dto.last_active_unix)
+            };
             // Legacy records (no `acp_session_id` field) restore as
             // `None` — a later resume falls back to fresh (D4).
             m.acp_session_id = dto.acp_session_id;
@@ -692,6 +732,8 @@ impl SessionMap {
             // 创建时绑定的执行后端 kind（add-composer-agent-binding）；
             // 旧文件无该字段 → None → UI 显示默认 kind。
             m.pending_kind = dto.pending_kind;
+            m.pending_model = dto.pending_model;
+            m.project_dir = dto.project_dir;
             map.insert(key, m);
         }
         Ok(Self {
@@ -730,9 +772,13 @@ impl Default for SessionMap {
 
 /// Legacy on-disk shape, extended with the real ACP session id
 /// (acp-session-mapping D3; the `add-state-store` SQLite sessions table takes
-/// this same column later — review R1).
+/// this same column later — review R1) and with the 0-turn placeholder
+/// marker (workbench-agent-wire-fix D1: a placeholder survives a restart so
+/// its first post-restart message still spawns the child).
 #[derive(Serialize, Deserialize)]
 struct MappingDto {
+    /// Live routing id; the empty string marks a 0-turn placeholder
+    /// (`awaiting_first_prompt = true`, no child has ever existed).
     session_id: String,
     last_active_unix: i64,
     /// The agent's real ACP session id (native-ACP agents). `#[serde(default)]`
@@ -747,6 +793,19 @@ struct MappingDto {
     /// 默认 kind）。`#[serde(default)]` 兼容旧文件。
     #[serde(default)]
     pending_kind: Option<String>,
+    /// 创建时请求的模型 id（0-turn 占位记住，首条消息触发 spawn 时消费）。
+    /// `#[serde(default)]` 兼容旧文件。
+    #[serde(default)]
+    pending_model: Option<String>,
+    /// 该项目记住的默认会话目录（0-turn 占位的 project_dir，spawn 时用）。
+    /// `#[serde(default)]` 兼容旧文件。
+    #[serde(default)]
+    project_dir: Option<String>,
+    /// 0-turn 占位标记（workbench-agent-wire-fix D1）。`true` + 空
+    /// `session_id` = 重启后仍是等待首条消息的占位。`#[serde(default)]`
+    /// 兼容旧文件（旧记录一律视为非占位）。
+    #[serde(default)]
+    awaiting_first_prompt: bool,
 }
 
 #[cfg(test)]

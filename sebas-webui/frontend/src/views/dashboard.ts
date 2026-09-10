@@ -13,7 +13,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
 import { navigate } from '../router.js'
@@ -260,6 +260,14 @@ export class SebasDashboard extends LitElement {
 
   private refetch = (): void => {
     api
+      .projects.list()
+      .then((d) => {
+        this.projects = d.projects
+      })
+      .catch(() => {
+        /* 分组降级：列表不可得时保持旧值 */
+      })
+    api
       .summary()
       .then((d) => {
         this.data = d
@@ -285,7 +293,7 @@ export class SebasDashboard extends LitElement {
       .then((s) => {
         // fix-webui-detached-status：真源不可用（providers_available=false）
         // 如实呈现"状态不可用"，与"真的没配 provider"区分开。
-        if (s.router?.providers_available === false) {
+        if ((s.router as unknown as { providers_available?: boolean })?.providers_available === false) {
           this.providerLabel = 'provider status unavailable'
         } else {
           const first = s.router?.providers?.[0]
@@ -396,8 +404,15 @@ export class SebasDashboard extends LitElement {
 
   private rowsForSelected(): SessionRow[] {
     if (this.selectedPath === null) return []
-    return this.allRows.filter((r) => r.project_dir === this.selectedPath)
+    return this.allRows.filter((r) => r.project_id === this.selectedProjectId)
   }
+
+  /** 选中项目的稳定 id（workbench-agent-wire-fix 2.5）：会话行以它分组。 */
+  private get selectedProjectId(): string | null {
+    return this.projects.find((p) => p.path === this.selectedPath)?.id ?? null
+  }
+
+  private projects: Project[] = []
 
   /**
    * Inline turn stream data: fetch the focused session's detail (same
@@ -474,14 +489,15 @@ export class SebasDashboard extends LitElement {
 
   /** 懒加载选中项目的分支（project-header 的 mono pill 用），选中即取，失败不渲染。 */
   private loadSelectedBranch(): void {
+    const id = this.selectedProjectId
     const path = this.selectedPath
     this.selectedBranch = null
-    if (path === null) return
+    if (id === null || path === null) return
     api.projects
-      .branch(path)
+      .branch(id)
       .then((info) => {
         // 选中项中途切换时丢弃过期响应，避免显示上一个项目的分支
-        if (this.selectedPath === info.path) this.selectedBranch = info.branch
+        if (this.selectedPath === path) this.selectedBranch = info.branch
       })
       .catch(() => {
         /* 分支信息不可得时保持无 pill */

@@ -79,6 +79,16 @@ impl StateStoreEngine for DbStateEngine {
         Ok(())
     }
 
+    async fn set_project_default_agent(&self, id: &str, agent: &str) -> Result<(), String> {
+        let id = id.to_string();
+        let agent = agent.to_string();
+        self.handle
+            .exec(move |conn| crate::sebas_state::repo::set_project_default_agent(conn, &id, &agent))
+            .await?;
+        sebas_dispatch::state_store::notify_change("projects");
+        Ok(())
+    }
+
     async fn add_project(&self, path: &str, name: &str, added_at: i64) -> Result<(), String> {
         let p = path.to_string();
         let n = name.to_string();

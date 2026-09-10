@@ -26,7 +26,6 @@ import {
   ErrorCollector,
   getAbout,
   getAdminServices,
-  getAgentDefaults,
   listRouterProviders,
   resetState,
   SettingsModal,
@@ -163,8 +162,10 @@ test.describe('设置面', () => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
-      const before = await getAgentDefaults(page.request)
-      expect(before).toEqual({ provider: null, model: null })
+      // workbench-agent-wire-fix 3.3：/api/agent-defaults 端点退役——读回
+      // 404，诚实性改由 UI 的「no default set」与写降级路径共同承担。
+      const gone = await page.request.get('/api/agent-defaults')
+      expect(gone.status()).toBe(404)
       await page.goto('/')
       await settings.openViaComposer()
       // New IA default section is Settings — defaults live under Models.
@@ -194,17 +195,16 @@ test.describe('设置面', () => {
           .or(dialog.locator('wa-select[label="Default model"]')),
       ).toBeVisible()
 
-      // Save hits the 503 mutation wall: inline error, truth unchanged,
-      // dialog stays interactive (cancellable, not torn down).
+      // workbench-agent-wire-fix 3.3：全局默认无服务端持久化面（端点已退
+      // 录）。Save 只更新本地呈现（toolbar 反映新默认），wire 上无请求——
+      // 默认 agent 的持久化由项目级 default_agent 承载。
       await dialog.locator('wa-button').filter({ hasText: 'Set default' }).click()
-      await expect(settings.panel.locator('.callout-error[role="alert"]')).toBeVisible({
-        timeout: 10_000,
-      })
-      expect(await getAgentDefaults(page.request)).toEqual({ provider: null, model: null })
       await expect(
         settings.panel.locator('.provider-toolbar span.label'),
-      ).toHaveText('no default set')
-      await dialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      ).toHaveText(`default: ${providerName!.split(' ')[0]}`, { timeout: 10_000 })
+      expect((await page.request.get('/api/agent-defaults')).status()).toBe(404)
+      // 确认即收（defaultDraft 清空 = dialog 关闭）；无需再点 Cancel。
+      await expect(dialog).toBeHidden({ timeout: 10_000 })
       await settings.close()
 
       expect(collector.clean()).toEqual([])

@@ -16,8 +16,8 @@ vi.mock('../api/client.js')
 const apiMock = vi.mocked(api)
 
 const projects: Project[] = [
-  { path: '/home/me/alpha', name: 'alpha', added_at: 0 },
-  { path: '/home/me/beta', name: 'beta', added_at: 1 },
+  { id: 'proj-alpha', path: '/home/me/alpha', name: 'alpha', added_at: 0 },
+  { id: 'proj-beta', path: '/home/me/beta', name: 'beta', added_at: 1 },
 ]
 
 let seq = 0
@@ -36,17 +36,20 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     last_active: '2m ago',
     last_active_unix: 1000 + seq,
     is_active: false,
-    project_dir: null,
+    project_id: null,
     prompt_preview: null,
+    current_model: null,
+    available_models: null,
+    agent_kind: null,
     ...overrides,
   }
 }
 
 const sessionRows: SessionRow[] = [
-  row({ project_dir: '/home/me/alpha', status: 'working', status_slug: 'working' }),
-  row({ project_dir: '/home/me/alpha', status: 'done', status_slug: 'done' }),
-  row({ project_dir: null, status: 'working', status_slug: 'working' }),
-  row({ project_dir: null, status: 'queued', status_slug: 'queued' }),
+  row({ project_id: 'proj-alpha', status: 'working', status_slug: 'working' }),
+  row({ project_id: 'proj-alpha', status: 'done', status_slug: 'done' }),
+  row({ project_id: null, status: 'working', status_slug: 'working' }),
+  row({ project_id: null, status: 'queued', status_slug: 'queued' }),
 ]
 
 async function mount(): Promise<SebasProjectRail> {
@@ -136,7 +139,7 @@ describe('sebas-project-rail (sidebar tree)', () => {
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
 
-    expect(apiMock.projects.reorder).toHaveBeenCalledWith(['/home/me/beta', '/home/me/alpha'])
+    expect(apiMock.projects.reorder).toHaveBeenCalledWith(['proj-beta', 'proj-alpha'])
     expect(rows()[0]!.textContent).toContain('beta')
     el.remove()
   })
