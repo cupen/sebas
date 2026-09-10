@@ -11,10 +11,10 @@ sebas-acp = { path = "../sebas-acp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 鉴权：PBKDF2-HMAC-SHA256 密码哈希 + OS CSPRNG（盐 / 会话 token）。
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 getrandom = "0.4"
-dirs = "6"
+dirs = "7"
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.8", features = ["ws"] }
@@ -27,7 +27,7 @@ urlencoding = "2"
 dunce = "1"
 async-trait = "0.1"
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rust-embed = { version = "8.12.0", features = ["interpolate-folder-path"] }
 futures-util = "0.3.34"
 

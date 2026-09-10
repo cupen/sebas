@@ -8,7 +8,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.40", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
 # Post-ACP engine: claude stream-json + control protocol client.

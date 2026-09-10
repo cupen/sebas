@@ -7,22 +7,22 @@ edition = "2024"
 sebas-ipc = { path = "../sebas-ipc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-thiserror = "1"
+toml = "1.1"
+thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 futures-util = "0.3"
 futures-core = "0.3"
 http-body-util = "0.1"
 chrono = "0.4"
-dirs = "5"
+dirs = "7"
 notify = "8.2.0"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 axum = "0.8"
 serde_json = "1"
