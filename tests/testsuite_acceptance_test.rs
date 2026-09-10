@@ -82,7 +82,7 @@ async fn session_lifecycle_journey() {
     let key = create_session(
         &cli,
         &sb,
-        serde_json::json!({ "prompt": "hello", "backend": "acp" }),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
     )
     .await;
     let first = wait_turn_done(&cli, &sb, &key).await;
@@ -293,7 +293,7 @@ async fn native_agent_turn_via_router_journey() {
     let (status, resp) = post_json(
         &cli,
         &create_url,
-        serde_json::json!({ "prompt": "hello", "backend": "native" }),
+        serde_json::json!({ "prompt": "hello", "agent": "native" }),
     )
     .await
     .expect("create native session");
@@ -380,14 +380,19 @@ async fn projects_session_journey() {
         "registered project must be listed: {projects}"
     );
 
-    // Create a session bound to the project dir.
+    // Create a session bound to the project — wire 是稳定 id（不是路径），
+    // 注册响应即新条目（带回填的 id）。
+    let project_id = add_resp["id"]
+        .as_str()
+        .expect("registered project entry carries an id")
+        .to_string();
     let key = create_session(
         &cli,
         &sb,
         serde_json::json!({
             "prompt": "hello",
-            "backend": "acp",
-            "project_dir": project_dir.to_string_lossy()
+            "agent": "claude",
+            "project_id": project_id
         }),
     )
     .await;
@@ -407,8 +412,9 @@ async fn workbench_aggregate_journey() {
     support::wait_reachable(&cli, &sb).await;
 
     // Composer agent dropdown has data (fake-claude registered in config).
+    // wire 改名（workbench-agent-wire-fix 3.2）：端点为 /api/agents。
     let kinds = cli
-        .get(format!("{}/api/agent-kinds", sb.webui_url()))
+        .get(format!("{}/api/agents", sb.webui_url()))
         .send()
         .await
         .expect("agent kinds")
@@ -421,7 +427,7 @@ async fn workbench_aggregate_journey() {
     );
 
     // 0-turn placeholder create → listed.
-    let key = create_session(&cli, &sb, serde_json::json!({ "backend": "acp" })).await;
+    let key = create_session(&cli, &sb, serde_json::json!({ "agent": "claude" })).await;
     let rows = cli
         .get(format!("{}/api/sessions", sb.webui_url()))
         .send()

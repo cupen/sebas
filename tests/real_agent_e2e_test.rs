@@ -6,13 +6,13 @@
 //! Two journeys, same shape:
 //!
 //! - `real_opencode_first_message_roundtrip` — `opencode acp` (opencode's
-//!   native Agent Client Protocol server), backend hint `acp:opencode`.
+//!   native Agent Client Protocol server), agent id `opencode`.
 //!   Requires the `opencode` CLI on PATH with its own authentication
 //!   (`~/.local/share/opencode/auth.json`); otherwise it skips with a
 //!   one-line reason (same early-return pattern as the cross_uid `[skip]`).
 //! - `real_claude_first_message_roundtrip` — the dedicated Claude driver
 //!   spawning the real `claude` CLI (Claude Agent SDK, uses claude's own
-//!   login), backend hint `acp`. Requires `claude` on PATH AND
+//!   login), agent id `claude`. Requires `claude` on PATH AND
 //!   `claude auth status` → `loggedIn: true`; otherwise it skips with
 //!   "claude CLI not logged in — run `claude` → /login; journey ready".
 //!   The moment the user logs in, the journey runs with zero code changes.
@@ -506,11 +506,11 @@ fn claude_logged_in() -> Option<bool> {
 // ---------------------------------------------------------------------------
 
 /// 项目管理 → 会话管理 + agent 通信 → 会话管理 (close), against one real
-/// backend. `backend` is the session hint (`"acp"` → default kind claude,
-/// `"acp:opencode"` → the generic-ACP opencode agent).
+/// backend. `agent` is the wire agent id（`[acp.agents.*]` 配置键名）：
+/// `"claude"` 走专用 claude 驱动，`"opencode"` 走通用 ACP 驱动。
 ///
-async fn first_message_roundtrip(backend: &str, sub: &str) {
-    provider_selected_first_message_roundtrip(backend, sub, None).await;
+async fn first_message_roundtrip(agent: &str, sub: &str) {
+    provider_selected_first_message_roundtrip(agent, sub, None).await;
 }
 
 /// `select_defaults` = Some((provider, model)) runs the "model first, agent
@@ -519,7 +519,7 @@ async fn first_message_roundtrip(backend: &str, sub: &str) {
 /// `ANTHROPIC_*` env (no OAuth needed). None = spawn with the driver's own
 /// default auth (Off resolution).
 async fn provider_selected_first_message_roundtrip(
-    backend: &str,
+    agent: &str,
     sub: &str,
     select_defaults: Option<(&'static str, String)>,
 ) {
@@ -554,13 +554,17 @@ async fn provider_selected_first_message_roundtrip(
     );
 
     // 会话管理 + agent 通信: first prompt → real agent → real model reply.
+    // wire 是稳定项目 id（不是路径），注册响应即新条目（带回填的 id）。
+    let project_id = add_resp["id"]
+        .as_str()
+        .expect("registered project entry carries an id");
     let (status, resp) = post_json(
         &cli,
         &format!("{}/api/sessions", scene.url()),
         serde_json::json!({
             "prompt": PROMPT,
-            "backend": backend,
-            "project_dir": fs_string(&canonical),
+            "agent": agent,
+            "project_id": project_id,
         }),
     )
     .await;
@@ -576,7 +580,7 @@ async fn provider_selected_first_message_roundtrip(
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
         assert_eq!(status, 200, "set agent defaults: {body}");
-        eprintln!("[real-agent] {backend}: defaults selected → {provider}/{model}");
+        eprintln!("[real-agent] {agent}: defaults selected → {provider}/{model}");
     }
 
     assert_eq!(status, 201, "create session: {resp}");
@@ -594,18 +598,18 @@ async fn provider_selected_first_message_roundtrip(
         "real model reply must carry the sentinel, got: {transcript:?}"
     );
     eprintln!(
-        "[real-agent] {backend}: first model reply landed after {latency:?} (transcript {} chars)",
+        "[real-agent] {agent}: first model reply landed after {latency:?} (transcript {} chars)",
         transcript.len()
     );
 
     // Turn completion: Done is part of the same-vocabulary contract.
     if !wait_done(&cli, &scene, &key, DONE_GRACE).await {
         panic!(
-            "{backend}: turn never reached Done within {DONE_GRACE:?} after the reply; \
+            "{agent}: turn never reached Done within {DONE_GRACE:?} after the reply; \
              transcript: {transcript:?}"
         );
     }
-    eprintln!("[real-agent] {backend}: turn reached Done");
+    eprintln!("[real-agent] {agent}: turn reached Done");
 
     // 会话管理: close; assert accepted and the session leaves the active list.
     let close = cli
@@ -663,7 +667,7 @@ async fn real_opencode_first_message_roundtrip() {
         );
         return;
     }
-    first_message_roundtrip("acp:opencode", "opencode").await;
+    first_message_roundtrip("opencode", "opencode").await;
 }
 
 /// claude journey (#[ignore], opt-in): real `claude` CLI via the dedicated
@@ -695,13 +699,13 @@ async fn real_claude_first_message_roundtrip() {
                  selecting provider/model before spawn"
             );
             provider_selected_first_message_roundtrip(
-                "acp",
+                "claude",
                 "claude",
                 Some(("e2e-claude", anthropic_model())),
             )
             .await
         }
-        (false, Some(true)) => first_message_roundtrip("acp", "claude").await,
+        (false, Some(true)) => first_message_roundtrip("claude", "claude").await,
         (false, Some(false)) => {
             eprintln!(
                 "[skip] real_claude_first_message_roundtrip: claude CLI not logged in — \

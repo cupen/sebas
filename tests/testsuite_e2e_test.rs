@@ -69,7 +69,7 @@ async fn session_round_trip_via_webui_http() {
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "backend": "acp" }),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
@@ -410,7 +410,7 @@ async fn no_secret_assembly_end_to_end() {
     let (status, body) = post_json(
         &cli,
         &format!("{}/api/sessions", sb.webui_url()),
-        serde_json::json!({ "prompt": "hello", "backend": "acp" }),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
     )
     .await
     .expect("create session");
