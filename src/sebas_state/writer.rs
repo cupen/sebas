@@ -95,10 +95,25 @@ impl StateWriter {
                 };
 
                 // 执行迁移
-                if let Err(e) = crate::sebas_state::migration::run_migrations(&mut conn, &db_path) {
-                    tracing::error!(path = %db_path.display(), error = %e, "state writer migration failed");
-                    let _ = ready_tx.send(Err(format!("迁移失败: {e}")));
-                    return;
+                match crate::sebas_state::migration::run_migrations(&mut conn, &db_path) {
+                    Err(e) => {
+                        tracing::error!(path = %db_path.display(), error = %e, "state writer migration failed");
+                        let _ = ready_tx.send(Err(format!("迁移失败: {e}")));
+                        return;
+                    }
+                    Ok(crate::sebas_state::migration::MigrationOutcome::TooNew {
+                        db_version,
+                        binary_version,
+                    }) => {
+                        // 数据库版本高于本二进制: 不得静默读写, 启动失败 (spec「Newer database is refused」)
+                        tracing::error!(path = %db_path.display(), db_version, binary_version, "state store newer than binary; refusing to start");
+                        let _ = ready_tx.send(Err(format!(
+                            "状态库版本过新 (db v{db_version} > 本二进制 v{binary_version}), 拒绝启动: {}",
+                            db_path.display()
+                        )));
+                        return;
+                    }
+                    Ok(_) => {}
                 }
 
                 tracing::info!(path = %db_path.display(), "state writer ready");
@@ -158,6 +173,20 @@ mod tests {
     use super::*;
     use crate::sebas_state::db;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn writer_refuses_newer_database_at_startup() {
+        // state-store spec「Newer database is refused」: db user_version 高于
+        // 本二进制版本时, start 必须报错而非静默读写 (C1 修复断言)。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("toonew.db");
+        {
+            let conn = db::open(&path).unwrap();
+            db::set_user_version(&conn, crate::sebas_state::migration::CURRENT_VERSION + 1).unwrap();
+        }
+        let err = StateWriter::start(path.clone()).err().expect("too-new db must abort startup");
+        assert!(err.contains("版本过新"), "unexpected error: {err}");
+    }
 
     #[tokio::test]
     async fn writer_executes_commands() {

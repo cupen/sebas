@@ -30,3 +30,4 @@ logs/
 node_modules/
 sebas-webui/frontend/dist/
 gui-test-screenshots
+config/core.secret

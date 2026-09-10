@@ -61,15 +61,17 @@ args = []
 # "claude-*" = ["anthropic"]
 # "deepseek-*" = ["deepseek", "ark"]
 
-# watchdog 托管的服务开关。不写 = webui 开、core/router 关；
-# 在 WebUI 服务页启停会持久化到 ~/.sebas/services.json，优先于此处。
+# watchdog 托管的服务开关。不写 = core 恒启动、webui 开、router 关；
+# 在 WebUI 服务页启停（core 除外）会持久化到 ~/.sebas/services.json，优先于此处。
 # [watchdog.webui]     # 默认启用；端口冲突自动降级 degraded
 # host = "127.0.0.1"
 # port = 9797
 # auth = true          # false = 全路由免登录（仅测试用，非 loopback 拒绝启动）
 #
-# [watchdog.core]      # core 子进程 = 飞书 bot + ACP
-# enabled = true
+# core 恒启动（会话核心，无开关）。[watchdog.core] 只配置通道路径：
+# [watchdog.core]
+# channel_path = "~/.sebas/core.sock"   # 缺省 XDG_RUNTIME_DIR/sebas/core.sock
+# secret_file = "~/.sebas/core.secret"  # 缺省 <config 目录>/core.secret
 #
 # [watchdog.router]    # router 受管子进程；watchdog --debug 强制启用
 # enabled = true

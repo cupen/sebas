@@ -7,8 +7,9 @@
 ## 进程角色(单一二进制,子命令决定人格)
 
 - **core(core 进程)**:`sebas core` 的长驻服务本体。会话状态的**单一权威**、
-  唯一 spawn ACP 子进程的进程;持有会话映射、core session channel socket,
-  按配置承载通道适配器(飞书 WS 等)。(architecture.md §1)
+  唯一 spawn ACP 子进程的进程;持有会话映射、core session channel socket。
+  core 是纯会话核心——IM 适配器宿主是独立的 `sebas im` 服务,core 不注册任何
+  IM 适配器(extract-im-service)。(architecture.md §1)
 - **run(watchdog 守护)**:唯一拉起其他进程的角色,入口命令 `sebas run`;
   按配置监督 core / webui /
   router / im 子进程(重启/退避/升级)。(architecture.md §2)
@@ -17,7 +18,8 @@
 - **router(模型路由)**:provider 透传代理进程,入口命令 `sebas router`,
   对外提供 OpenAI/Anthropic 兼容 API。
 - **dispatch(sebas-dispatch crate,会话分发)**:core 进程内的领域层——会话映射、
-  入站事件 dispatch、slash 命令解析、权限处理、出站呈现编排。不是独立进程。
+  入站事件 dispatch、slash 命令解析、权限处理、出站 Out 指令编排(会话执行向;
+  IM 呈现/reaction 由 sebas-im 前端负责)。不是独立进程。
   (原名 sebas-router;rename-cli-surface 改名)
 
 ### 三义消解(重要)
@@ -27,6 +29,20 @@
    双协议 provider 代理);
 2. **`sebas-dispatch` crate**(原名 sebas-router)= core 进程内的会话分发领域层;
 3. **前端 `router.ts`** = SPA 的 URL 路由,与以上两者无关。
+
+「escalate」二义:
+1. **审批 escalate** = native 内核 gated-call 的"带理由的一次性放行"决策
+   (`ApprovalAnswer::Escalate { reason }`);ACP 路径无等价物,降级为
+   `allow_once`(见 unify-permission-approval-vocabulary);
+2. **挂起检测的 kill ladder**(acp-driver)= `interrupt()×3 → disconnect
+   (≈SIGTERM) → drop (≈SIGKILL)` 的阶梯,与审批决策无关。
+
+「ACP」二义:
+1. **历史 `claude-acp-bridge`**:Claude 私有转码桥,ADR-1(08-06)弃用并删除,
+   **不再存在**;
+2. **现行 `agent-client-protocol` 标准**(crate v2,`sebas-acp` 依赖):驱动原生
+   ACP 第三方 agent(gemini/copilot/opencode 等)。
+   ADR-1 弃的是 (1) 而非 ACP 标准本身——两件事共用同一缩写,读史时才像反转。
 
 ## 领域概念
 

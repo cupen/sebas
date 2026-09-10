@@ -161,6 +161,26 @@ fn parse_rollback() {
 }
 
 #[test]
+fn parse_upgrade_accepts_bare_dry_run_alias() {
+    // dispatch-commands spec「Upgrade flag normalization」: bare `dry-run` is an
+    // alias of `--dry-run` (matches the `dev`→`--dev` alias).
+    assert_eq!(
+        parse_command("/upgrade dry-run"),
+        Command::Upgrade {
+            dev: false,
+            dry_run: true,
+        }
+    );
+    assert_eq!(
+        parse_command("/upgrade dev dry-run"),
+        Command::Upgrade {
+            dev: true,
+            dry_run: true,
+        }
+    );
+}
+
+#[test]
 fn parse_upgrade_accepts_bare_dev() {
     assert_eq!(
         parse_command("/upgrade dev"),

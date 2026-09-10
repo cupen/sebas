@@ -11,8 +11,6 @@ pub use crate::watchdog::events::{
 pub enum ControlRequest {
     Status,
     RestartCore,
-    StopCore,
-    StartCore,
     Update {
         kind: UpdateKind,
         dry_run: bool,
@@ -276,8 +274,6 @@ fn is_exclusive(request: &ControlRequest) -> bool {
     matches!(
         request,
         ControlRequest::RestartCore
-            | ControlRequest::StopCore
-            | ControlRequest::StartCore
             | ControlRequest::Update { .. }
             | ControlRequest::Rollback { .. }
     )

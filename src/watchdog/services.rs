@@ -152,6 +152,29 @@ impl ServiceManager {
         );
     }
 
+    /// 注册恒启动服务（core，enable-core-by-default）：忽略 config 层与
+    /// services.json 覆盖层，期望态恒为 Enabled。历史 `core: off` 覆盖会打
+    /// 一条 deprecation warn 后被忽略。
+    pub fn register_core(&self, mut spec: ServiceSpec) {
+        debug_assert_eq!(spec.name, ServiceName::Core);
+        let name = spec.name;
+        if Self::read_persisted(&self.persist_path).contains_key(&name) {
+            warn!(
+                "services.json has an override for 'core' but core is always started; override ignored"
+            );
+        }
+        spec.desired = DesiredState::Enabled;
+        let (handle, _task) = crate::watchdog::supervisor::start_supervision(spec);
+        self.services.lock().unwrap().insert(
+            name,
+            ManagedEntry {
+                handle,
+                config_enabled: true,
+                file_desired: None,
+            },
+        );
+    }
+
     fn entry(&self, name: ServiceName) -> Option<ServiceHandle> {
         self.services
             .lock()
@@ -497,6 +520,29 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, ServiceOpError::UnknownService("router".into()));
+    }
+
+    #[tokio::test]
+    async fn register_core_ignores_persisted_off_override() {
+        // enable-core-by-default：services.json 里的历史 `core: off` 覆盖被
+        // 忽略——core 期望态恒 Enabled，不会被持久化层停用。
+        let path = tmp_path("core-always-on");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, r#"{"core":"off"}"#).unwrap();
+
+        let mgr = ServiceManager::new(path.clone());
+        mgr.register_core(fast_spec(ServiceName::Core));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let snap = mgr.snapshot(ServiceName::Core).await.unwrap();
+        assert_eq!(snap.desired, DesiredState::Enabled, "core 期望态恒 Enabled");
+        assert_ne!(
+            snap.state,
+            ServiceState::Disabled,
+            "core 不得因 services.json 覆盖而停用"
+        );
+        mgr.shutdown_all().await;
+        let _ = std::fs::remove_file(&path);
     }
 
     // 保留的 webui 助手测试。

@@ -411,27 +411,23 @@ usage_file = "{}"
         self.path.join("core.secret")
     }
 
-    /// Watchdog-supervised form affordance (5.3): `[watchdog.core] enabled
-    /// = true` so `sebas run` spawns the core child, plus `[storage]
-    /// data_dir` pinned inside the sandbox so upgrade/rollback state never
-    /// touches the host's shared XDG dirs. Must run before spawn.
+    /// Watchdog-supervised form affordance (5.3): pins `[storage] data_dir`
+    /// inside the sandbox so upgrade/rollback state never touches the host's
+    /// shared XDG dirs. core needs no config toggle — since
+    /// enable-core-by-default `sebas run` always spawns the core child. Must
+    /// run before spawn.
     pub fn enable_supervised_core(&self) {
         let toml = std::fs::read_to_string(&self.config_path).expect("read config");
-        let patched = toml
-            .replace(
-                "[watchdog.core]",
-                "[watchdog.core]\nenabled = true",
-            )
-            .replace(
-                "[router]",
-                &format!(
-                    "[storage]\ndata_dir = \"{}\"\n\n[router]",
-                    forward_slash(&self.path.join("storage"))
-                ),
-            );
+        let patched = toml.replace(
+            "[router]",
+            &format!(
+                "[storage]\ndata_dir = \"{}\"\n\n[router]",
+                forward_slash(&self.path.join("storage"))
+            ),
+        );
         assert!(
-            patched != toml && patched.contains("enabled = true") && patched.contains("[storage]"),
-            "[watchdog.core]/[router] sections not found in config"
+            patched != toml && patched.contains("[storage]"),
+            "[router] section not found in config"
         );
         std::fs::write(&self.config_path, patched).expect("write config");
     }

@@ -92,17 +92,18 @@ stdout 就是它的输出流，读端关闭会导致 EPIPE 刷屏甚至卡死子
 
 ### 1.3 默认启动策略（收编自旧文档的正确结论）
 
-**仅 WebUI 默认启用；core 与 router 默认停用；im 跟随飞书。**
-（serde default 与回退逻辑实测于 `src/config.rs`）：
+**core 恒启动（无开关）；WebUI 默认启用；router 默认停用；im 跟随飞书。**
+（serde default 与回退逻辑实测于 `src/config.rs`；enable-core-by-default）：
 
 | 服务 | 配置键 | 默认 | 出处 |
 |---|---|---|---|
-| core | `[watchdog.core] enabled` | **关**（`bool` 缺省 false） | `src/config.rs::WatchdogCoreConfig`（"默认关：feishu 是可选项"） |
-| webui | `[watchdog.webui] enabled` | **开**（`src/config.rs::default_webui_enabled` → `true`；host `127.0.0.1`，port `9797`） | watchdog 唯一默认启动的服务 |
+| core | 无（`[watchdog.core]` 只剩 `channel_path` / `secret_file`） | **恒启动**（不可停用）；旧的 `enabled` 键被忽略并告警 | `src/watchdog.rs::run_watchdog`（`services.register_core`）+ `src/config.rs::warn_deprecated_watchdog_keys` |
+| webui | `[watchdog.webui] enabled` | **开**（`src/config.rs::default_webui_enabled` → `true`；host `127.0.0.1`，port `9797`） | `src/config.rs::WatchdogWebUiConfig` |
 | router | `[watchdog.router] enabled` | **关**；`sebas run --debug` 强制开（`config.router.enabled \|\| debug`） | `src/config.rs::WatchdogRouterConfig` + `src/watchdog.rs::run_watchdog` |
 | im | `[watchdog.im] enabled` | **随 feishu**：显式值优先，缺省 = `cfg.feishu.is_enabled()`（显式 `[feishu] enabled`，缺省回退 app_id+app_secret 双非空） | `src/config.rs::WatchdogImConfig` / `FeishuConfig::is_enabled` + `src/main.rs`（`Cmd::Run` 分支传 `im_enabled_default`） |
 
-期望态三层合成（`src/watchdog/services.rs`，`register` / `initial_desired`）：
+期望态三层合成（`src/watchdog/services.rs`，`register` / `initial_desired`）——
+**仅适用于可开关的 webui / router / im**：
 
 ```
 config 默认（config.toml [watchdog.*].enabled）
@@ -110,8 +111,10 @@ config 默认（config.toml [watchdog.*].enabled）
         → 运行时 ServiceSet（未 persist 时仅本 watchdog 生命周期内有效）
 ```
 
-四个服务**始终注册**进 `ServiceManager`（`services.register(spec, config.*.enabled)`，
-`src/watchdog.rs::run_watchdog`）：初值停用的服务也会出现在服务页，可随时启用。
+core 例外：`register_core` 忽略 config 与 `services.json` 覆盖层，期望态恒为
+`Enabled`（services.json 里的历史 `core` 覆盖被忽略并告警）。四个服务**始终注册**
+进 `ServiceManager`（`src/watchdog.rs::run_watchdog`）：可开关服务初值停用时也会
+出现在服务页，可随时启用。
 
 ### 1.4 生命周期与退出语义
 

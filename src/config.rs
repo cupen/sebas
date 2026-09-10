@@ -361,14 +361,12 @@ fn default_max_spawn_failures() -> u32 {
     3
 }
 
-/// watchdog 模式下 core 子进程（飞书 bot + ACP）的开关。
-/// 默认关：feishu 是可选项，`sebas watchdog` 默认只启动 WebUI；
-/// 需要飞书 bot 时在 WebUI 服务页启用（选择持久化到 services.json），
-/// 或在此显式 `enabled = true`。
+/// watchdog 模式下 core 子进程（会话核心 + ACP）的路径配置。
+/// core 恒启动（enable-core-by-default）：无 `enabled` 开关，watchdog
+/// 无条件拉起并监督；旧的 `enabled` 键被忽略并告警（见
+/// `warn_deprecated_watchdog_keys`）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WatchdogCoreConfig {
-    #[serde(default)]
-    pub enabled: bool,
     /// core session channel 的 Unix socket 路径（openspec/changes/
     /// add-core-session-channel）。空/缺省 → `$XDG_RUNTIME_DIR/sebas/core.sock`
     /// （或 per-uid 临时目录回退）。
@@ -559,6 +557,20 @@ fn deprecated_watchdog_upgrade_hits(raw: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// `[watchdog.core] enabled` 是否出现在原始 TOML（enable-core-by-default：
+/// core 恒启动，该键已删除）。
+fn deprecated_watchdog_core_enabled_hit(raw: &str) -> bool {
+    let Ok(value) = raw.parse::<toml::Table>() else {
+        return false;
+    };
+    value
+        .get("watchdog")
+        .and_then(|v| v.as_table())
+        .and_then(|w| w.get("core"))
+        .and_then(|v| v.as_table())
+        .is_some_and(|c| c.contains_key("enabled"))
+}
+
 fn warn_deprecated_watchdog_keys(raw: &str) {
     let hit = deprecated_watchdog_upgrade_hits(raw);
     if !hit.is_empty() {
@@ -566,6 +578,13 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
             "config [watchdog.upgrade] has deprecated fields ({}): they no longer work, remove them from the config",
             hit.join(", ")
         );
+    }
+    if deprecated_watchdog_core_enabled_hit(raw) {
+        // parse 发生在 tracing 初始化之前（watchdog 在 parse 后才 init），
+        // tracing::warn 会被静默丢弃——deprecation 提示同时走 stderr，确保可见。
+        let msg = "config [watchdog.core] enabled is deprecated and ignored: core is always started; remove the key";
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
     }
 }
 
@@ -790,12 +809,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn webui_enabled_by_default_and_core_disabled() {
-        // watchdog 默认服务面 = 仅 WebUI（sebas-2ty）：webui 默认开，
-        // core（飞书 bot）与 router 默认关，由 WebUI 服务页按需启停。
+    fn webui_enabled_by_default_and_router_disabled() {
+        // watchdog 默认服务面（enable-core-by-default）：core 恒启动（无
+        // enabled 开关），webui 默认开，router 默认关。
         let cfg = Config::parse("").expect("空配置应可解析（feishu 可选）");
         assert!(cfg.watchdog.webui.enabled, "webui 应默认启用");
-        assert!(!cfg.watchdog.core.enabled, "core 应默认停用");
         assert!(!cfg.watchdog.router.enabled, "router 应默认停用");
         assert!(!cfg.feishu.enabled(), "无凭证时 feishu 应视为未启用");
         assert!(
@@ -806,6 +824,18 @@ mod tests {
             cfg.watchdog.core.secret_file.is_none(),
             "secret_file 缺省 = None（由 core_secret_file_path 推导）"
         );
+    }
+
+    #[test]
+    fn deprecated_core_enabled_key_is_ignored() {
+        // enable-core-by-default：旧 `[watchdog.core] enabled` 键照常解析
+        // （不报错），且不影响 core 恒启动语义。
+        let cfg = Config::parse("[watchdog.core]\nenabled = false\n")
+            .expect("旧 enabled 键应被忽略而非报错");
+        assert!(deprecated_watchdog_core_enabled_hit("[watchdog.core]\nenabled = false\n"));
+        assert!(!deprecated_watchdog_core_enabled_hit("[watchdog.core]\nchannel_path = \"/x\"\n"));
+        // 旧键不再能关掉 core：结构里没有 enabled 字段可读，恒启动由 watchdog 保证。
+        let _ = cfg;
     }
 
     #[test]

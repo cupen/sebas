@@ -384,10 +384,9 @@ pub async fn run_watchdog(
         socket_path.display()
     );
 
-    // core：readiness 门 + 新二进制未就绪自动回滚。
-    // 默认停用（feishu 可选，sebas-2ty）：`sebas watchdog` 默认只启动 WebUI，
-    // core（飞书 bot）由 WebUI 服务页启用，或配置 [watchdog.core] enabled = true。
-    // persist 文件（services.json）里的选择优先于这里的 config 初值。
+    // core：恒启动 + readiness 门 + 新二进制未就绪自动回滚。
+    // enable-core-by-default：core 是会话核心，无 config 开关、无持久化覆盖
+    // ——watchdog 无条件拉起（ServiceManager 对 core 忽略 config/覆盖层）。
     // core session channel 的共享密钥：core 与 webui 子进程各注入一份
     // （SEBAS_CORE_SECRET），socket 之外还叠加同 uid 校验（spec 的双因子）。
     let core_secret = create_control_secret();
@@ -406,7 +405,7 @@ pub async fn run_watchdog(
         control.clone(),
         fail_tx.clone(),
     ));
-    services.register(core_spec, config.core.enabled);
+    services.register_core(core_spec);
 
     // webui：config 开关（默认开）。始终注册进 ServiceManager：即使初值停用，
     // 服务页也能看到并重新启用。

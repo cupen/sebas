@@ -1559,6 +1559,9 @@ export class SebasSettingsModal extends LitElement {
   /** 单个受管服务行：name（含 im→飞书 IM 映射）/ desired / actual / uptime。 */
   private renderServiceRow(s: AdminService) {
     const running = s.status === 'running'
+    // core 恒启动（enable-core-by-default）：不渲染 enable/disable，只留
+    // restart（走 restart-core 确认路径）。
+    const alwaysOn = s.name === 'core'
     return html`
       <div class="service-card">
         <div class="service-info">
@@ -1574,22 +1577,26 @@ export class SebasSettingsModal extends LitElement {
           <span class="dot ${running ? 'on' : 'off'}"></span>${s.status}
         </div>
         <div class="service-actions">
-          <button
-            class="row-action"
-            title="Enable service"
-            ?disabled=${this.serviceBusy !== null}
-            @click=${() => void this.runServiceAction('enable', s.name)}
-          >
-            ▶
-          </button>
-          <button
-            class="row-action"
-            title="Disable service"
-            ?disabled=${this.serviceBusy !== null}
-            @click=${() => (this.confirmTarget = { kind: 'disable', name: s.name })}
-          >
-            ■
-          </button>
+          ${alwaysOn
+            ? ''
+            : html`
+                <button
+                  class="row-action"
+                  title="Enable service"
+                  ?disabled=${this.serviceBusy !== null}
+                  @click=${() => void this.runServiceAction('enable', s.name)}
+                >
+                  ▶
+                </button>
+                <button
+                  class="row-action"
+                  title="Disable service"
+                  ?disabled=${this.serviceBusy !== null}
+                  @click=${() => (this.confirmTarget = { kind: 'disable', name: s.name })}
+                >
+                  ■
+                </button>
+              `}
           <button
             class="row-action"
             title="Restart service"

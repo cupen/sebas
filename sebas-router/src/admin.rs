@@ -487,6 +487,12 @@ async fn update_provider(
     let Some(item) = body.as_object() else {
         return err_400("body 必须是对象");
     };
+    // 未知 provider → 404（router-admin-api spec：updating an unknown name yields
+    // 404；不得静默 upsert）。存在性以合并后的内核配置为准（含状态库投影的
+    // overlay 与已生效的墓碑移除）。
+    if !state.core().cfg.providers.contains_key(&name) {
+        return err_404(&format!("provider '{name}' 不存在"));
+    }
     // 合并旧值：空/缺 api_key → 保留旧条目的 key 材料。
     let merged: Map<String, Value> = {
         let root = match read_overlay_raw(&path) {
@@ -509,9 +515,23 @@ async fn update_provider(
                 }
                 m
             }
-            // 不在 overlay（None）或条目非对象：当作全新条目处理——未知
-            // 与否留给 swap 校验。
-            _ => item.clone(),
+            // 不在 overlay（None）或条目非对象：该 provider 来自 config seed 或
+            // 状态库——以合并后的内核 seed 项补连接字段（含 api_key），保证
+            // 空 api_key 不丢已存 key。
+            _ => {
+                let mut m = Map::new();
+                if let Some(seed) = state.core().cfg.providers.get(&name) {
+                    insert_seed_connection_fields(&mut m, seed);
+                }
+                for (k, v) in item {
+                    let keep_old = k == "api_key"
+                        && v.as_str().map(str::is_empty).unwrap_or(true);
+                    if !keep_old {
+                        m.insert(k.clone(), v.clone());
+                    }
+                }
+                m
+            }
         }
     };
     if let Err(e) = config::validate_provider_entry(&name, &merged) {
@@ -685,7 +705,7 @@ async fn create_alias(State(state): State<AppState>, Json(body): Json<Value>) ->
         Err(resp) => return *resp,
     };
     let path = overlay_path(&state);
-    if alias_exists(&path, &alias) {
+    if alias_exists(&state, &alias) {
         return err_409(&format!("别名 '{alias}' 已存在"));
     }
     let entry_value = entry.clone();
@@ -732,7 +752,7 @@ async fn update_alias(
         Err(resp) => return *resp,
     };
     let path = overlay_path(&state);
-    if !alias_exists(&path, &alias) {
+    if !alias_exists(&state, &alias) {
         return err_404(&format!("别名 '{alias}' 不存在"));
     }
     let entry_value = entry.clone();
@@ -774,7 +794,7 @@ async fn delete_alias(
     axum::extract::Path(alias): axum::extract::Path<String>,
 ) -> Response {
     let path = overlay_path(&state);
-    if !alias_exists(&path, &alias) {
+    if !alias_exists(&state, &alias) {
         return err_404(&format!("别名 '{alias}' 不存在"));
     }
     let alias2 = alias.clone();
@@ -841,15 +861,10 @@ fn parse_alias_body(
     Ok((alias, Value::Object(entry)))
 }
 
-fn alias_exists(path: &std::path::Path, alias: &str) -> bool {
-    read_overlay_raw(path)
-        .ok()
-        .and_then(|r| {
-            r.get("model_aliases")
-                .and_then(Value::as_object)
-                .map(|m| m.contains_key(alias))
-        })
-        .unwrap_or(false)
+fn alias_exists(state: &AppState, alias: &str) -> bool {
+    // 存在性以合并后的内核配置为准（状态库投影 + overlay），而非仅 overlay 文件——
+    // 文件在 channel 模式下可能为滞后副本（router-admin-api spec：重名 409 / 未知 404）。
+    state.core().cfg.model_aliases.contains_key(alias)
 }
 
 // -------------------- probe / reload / stats / metrics --------------------

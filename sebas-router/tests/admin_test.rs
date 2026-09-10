@@ -216,6 +216,28 @@ async fn provider_crud_round_trip() {
 }
 
 #[tokio::test]
+async fn put_unknown_provider_is_404_not_upsert() {
+    // router-admin-api spec：updating an unknown name yields 404（此前
+    // update_provider 对未知名静默 upsert 200）。回归：PUT 未知名 → 404 且
+    // 不产生该条目。
+    let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
+    let base = format!("http://{}/admin/providers", gw.addr);
+    let c = client();
+    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
+
+    let resp = auth(c.put(format!("{base}/ghost")).header("content-type", "application/json")
+        .body(serde_json::to_string(&json!({
+        "name": "ghost", "preset": "deepseek", "api_key": "sk-x"
+    })).unwrap()))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404, "update unknown provider must be 404, not upsert");
+    let raw = std::fs::read_to_string(&overlay).unwrap_or_default();
+    assert!(!raw.contains("\"ghost\""), "unknown provider must not be persisted: {raw}");
+}
+
+#[tokio::test]
 async fn alias_crud_round_trip() {
     let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
     let base = format!("http://{}/admin/model-aliases", gw.addr);

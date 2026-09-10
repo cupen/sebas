@@ -486,16 +486,6 @@ impl ControlExecutor {
                 label: "rollback",
             },
             ControlRequest::RestartCore => Execution::RestartCore { is_upgrade: false },
-            ControlRequest::StopCore => Execution::ServiceSet {
-                name: ServiceName::Core,
-                desired: DesiredState::Disabled,
-                persist: false,
-            },
-            ControlRequest::StartCore => Execution::ServiceSet {
-                name: ServiceName::Core,
-                desired: DesiredState::Enabled,
-                persist: false,
-            },
             ControlRequest::ServiceSet {
                 service,
                 desired,

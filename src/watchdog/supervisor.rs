@@ -995,6 +995,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn core_spawn_failure_hits_limit_and_enters_failed_startup() {
+        // enable-core-by-default 2.1：core 恒启动，其 spawn 连败同样进入
+        // failed-startup 终态并上报 core 事件（watchdog 主循环据此退出 75）。
+        let spawner = Arc::new(FakeSpawner {
+            spawns: AtomicUsize::new(0),
+            auto_exit_ms: 0,
+            fail: true,
+            exit_code: 1,
+        });
+        let mut spec = fast_spec(spawner, DesiredState::Enabled);
+        spec.name = ServiceName::Core;
+        spec.max_spawn_failures = 3;
+        let (handle, task) = start_supervision(spec);
+        let mut failures = handle.startup_failures();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while handle.snapshot().await.state != ServiceState::FailedStartup {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "core 连续 spawn 失败 3 次必须进入 failed-startup 终态"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        failures.changed().await.expect("failure channel open");
+        let event = failures.borrow().clone().expect("terminal event must be Some");
+        assert_eq!(event.service, ServiceName::Core);
+        assert!(handle.snapshot().await.startup_failure.is_some());
+        let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
+    }
+
+    #[tokio::test]
     async fn spawn_failure_limit_is_configurable() {
         // N=1：一次失败即终态（D1 备选边界，spec R2 要求可配）。
         let spawner = Arc::new(FakeSpawner {

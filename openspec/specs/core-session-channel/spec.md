@@ -34,7 +34,7 @@ independent authority.
   value on the next snapshot or event
 
 ### Requirement: Channel transport and authentication
-The core SHALL expose the channel on a Unix domain socket created with owner-only permissions (0600) at a configurable path defaulting to `~/.sebas/core.sock`. Every connection SHALL be authenticated by both peer credentials — the connecting uid MUST equal the core's own uid — and a shared secret supplied out of band, in the same posture as the watchdog control RPC. A connection failing either check SHALL be rejected and closed without processing any request. The channel SHALL NOT be exposed over TCP. **补充**：peer-uid 与 secret 鉴权 SHALL 经由真实跨 uid 进程（不仅同 uid 单测）验证——本期单测覆盖 `cross_uid_rejected` 路径。
+The core SHALL expose the channel on a Unix domain socket created with owner-only permissions (0600) at a configurable path defaulting to `$XDG_RUNTIME_DIR/sebas/core.sock` (falling back to a per-uid temporary directory when `XDG_RUNTIME_DIR` is unset). Every connection SHALL be authenticated by both peer credentials — the connecting uid MUST equal the core's own uid — and a shared secret supplied out of band, in the same posture as the watchdog control RPC. A connection failing either check SHALL be rejected and closed without processing any request. The channel SHALL NOT be exposed over TCP. **补充**：peer-uid 与 secret 鉴权 SHALL 经由真实跨 uid 进程（不仅同 uid 单测）验证——本期单测覆盖 `cross_uid_rejected` 路径。
 
 #### Scenario: foreign uid rejected
 
@@ -117,66 +117,8 @@ reason and no message delivered.
 
 #### Scenario: unusable project directory rejected
 
--### Requirement: Session drive methods
-
-The channel SHALL provide methods to create a session with a prompt, an
-optional project directory, and an optional execution-body hint (`native` for
-the native agent kernel, `acp` for the ACP bridge), send a message to an
-existing session, and close a session. Each SHALL return either the resulting
-`ChannelKey` or a typed rejection naming the reason. A create request carrying
-a project directory SHALL have that path canonicalized and verified to be an
-existing directory before any child is spawned, and SHALL be rejected
-otherwise. Spawned sessions SHALL be registered under the requesting client's
-channel (e.g. `web` for the WebUI). The core SHALL route the session's
-execution according to the hint — `native` sessions run inside the core's
-native kernel, `acp` sessions spawn an ACP child — and a request without a
-hint SHALL default to `acp`, preserving behavior for existing clients.
-
-#### Scenario: create spawns a real session
-
-- **WHEN** a client requests session creation with a prompt
-- **THEN** the core spawns a real session under the client's channel, returns
-  its `ChannelKey`, and subscribers observe the new session
-
-#### Scenario: native hint routes to the native kernel
-
-- **WHEN** a create request carries `backend = "native"` with a usable project
-  directory
-- **THEN** the session executes in the native kernel, appears in the snapshot
-  with the native execution body, and no ACP child is spawned for it
-
-#### Scenario: missing hint defaults to ACP
-
-- **WHEN** a create request from an older client carries no execution-body
-  hint
-- **THEN** the session is spawned on the ACP bridge exactly as before the hint
-  existed
-
-#### Scenario: native execution body unavailable is a typed rejection
-
-- **WHEN** a create request carries `backend = "native"` and the native kernel
-  cannot serve sessions (for example, no provider credentials configured)
-- **THEN** the response is a typed rejection naming that cause and no session
-  is created
-
-#### Scenario: unusable project directory rejected
-
 - **WHEN** a create request names a path that is not an existing directory
 - **THEN** the request is rejected with a reason and no child is spawned
-
-#### Scenario: message to unknown session rejected
-
-- **WHEN** a message or close request names a `ChannelKey` the core does not
-  know
-- **THEN** the response is a typed rejection and nothing is mutated
-
- **WHEN** a create request names a path that is not an existing directory
-- **THEN** the request is rejected with a reason and no child is spawned
-
-#### Scenario: message to unknown session rejected
-
-- **WHEN** a message or close request names a `ChannelKey` the core does not know
-- **THEN** the response is a typed rejection and nothing is mutated
 
 #### Scenario: IM 前端对未知 key 的文本自动建会话
 
@@ -495,7 +437,7 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 #### Scenario: dormant session resumes via EnsureMessage
 
 - **WHEN** 客户端发 `EnsureMessage { key: <dormant>, message: "hi" }`
-- **THEN** core 懒复活会话；客户端收到 `Ok`；订阅流推送 `Revived` 事件
+- **THEN** core 懒复活会话；客户端收到 `Ok`；订阅流推送 `Updated` 事件（无独立 `Revived` 帧）
 
 #### Scenario: Message on unknown key is rejected
 

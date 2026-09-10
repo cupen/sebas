@@ -344,6 +344,26 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
+  it('core row offers only restart — no enable/disable (always started)', async () => {
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [
+        { name: 'core', status: 'running', desired: 'running', uptime_secs: 60 },
+        { name: 'router', status: 'stopped', desired: 'stopped', uptime_secs: null },
+      ],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+    const el = await mount()
+    await goto(el, 1)
+    const cards = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')]
+    const coreCard = cards.find((c) => c.querySelector('.service-id')?.textContent === 'core')!
+    expect(coreCard).toBeTruthy()
+    expect(coreCard.querySelector('button[title="Enable service"]')).toBeNull()
+    expect(coreCard.querySelector('button[title="Disable service"]')).toBeNull()
+    expect(coreCard.querySelector('button[title="Restart service"]')).not.toBeNull()
+    el.remove()
+  })
+
   it('Services section shows the no-adapter banner without rows or actions', async () => {
     apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
     const el = await mount()

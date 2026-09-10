@@ -118,7 +118,11 @@ pub fn parse_command(input: &str) -> Command {
             let args: Vec<_> = arg.split_whitespace().collect();
             let normalized: Vec<&str> = args
                 .iter()
-                .map(|a| if *a == "dev" { "--dev" } else { *a })
+                .map(|a| match *a {
+                    "dev" => "--dev",
+                    "dry-run" => "--dry-run",
+                    other => other,
+                })
                 .collect();
             if normalized
                 .iter()

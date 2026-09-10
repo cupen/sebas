@@ -350,21 +350,18 @@ async fn handle_envelope(
         RpcControlRequest::ServiceStatusFor { service } => {
             executor.service_status_for(&service).await
         }
-        // 受管服务期望态：core 也允许启停（sebas-2ty：feishu 可选，core 由
-        // WebUI 服务页控制），但飞书 actor 例外——core 停止后确认卡片无法
-        // 送达（dead-man's switch），core 的启停只走 CLI/WebUI 控制面。
-        // webui/router 照旧走 executor 的 ServiceSet（含 persist 落盘）。
+        // 受管服务期望态：core 恒启动（enable-core-by-default），不接受任何
+        // actor 的启停——一律拒绝并指向 RestartCore。webui/router/im 照旧走
+        // executor 的 ServiceSet（含 persist 落盘）。
         RpcControlRequest::ServiceSet {
             service,
             desired,
             persist,
         } => {
-            if service_from_str(&service) == Some(ServiceName::Core)
-                && matches!(envelope.actor, RpcActor::Feishu { .. })
-            {
+            if service_from_str(&service) == Some(ServiceName::Core) {
                 return RpcControlResponse::Rejected {
                     code: "invalid_request".into(),
-                    message: "core 的启停请通过 WebUI 服务页或 CLI 控制面（飞书渠道不支持）".into(),
+                    message: "core 恒启动，不接受启停；如需重启请用 restart_core".into(),
                 };
             }
             match service_set_request(&service, &desired, persist) {
@@ -771,10 +768,10 @@ mod tests {
         ));
     }
 
-    /// ServiceSet core：CLI/WebUI actor 直接执行（Accepted，落 operation）；
-    /// 飞书 actor 被拒（core 停止后确认卡片无法送达，dead-man's switch）。
+    /// ServiceSet core：core 恒启动（enable-core-by-default），任何 actor 的
+    /// 启停一律拒绝并指向 restart_core。
     #[tokio::test]
-    async fn service_set_core_executes_for_cli() {
+    async fn service_set_core_is_rejected_for_cli() {
         let response = handle_envelope(
             ControlEnvelope {
                 version: 1,
@@ -792,8 +789,11 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(response, RpcControlResponse::Accepted { .. }),
-            "CLI actor 的 core ServiceSet 应被接受，got {response:?}"
+            matches!(
+                response,
+                RpcControlResponse::Rejected { ref message, .. } if message.contains("restart_core")
+            ),
+            "CLI actor 的 core ServiceSet 应被拒绝，got {response:?}"
         );
     }
 
