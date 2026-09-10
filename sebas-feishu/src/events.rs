@@ -145,10 +145,20 @@ impl FeishuEnvelope {
     /// When `owner_id` is empty, the owner filter is skipped (single-user bots).
     pub fn into_event(self, owner_id: &str) -> Option<FeishuIn> {
         if !owner_id.is_empty() {
+            // 操作者位置随事件类型不同：消息事件在 /sender/sender_id/open_id，
+            // 卡片回传（card.action.trigger）没有 sender，操作者在
+            // /operator/open_id。只认消息位置时，owner_id 一旦配置，
+            // 每一次按钮/表单点击都会在这里被静默丢弃（回调无 sender，
+            // 判空 ≠ owner 恒成立）——权限按钮点击毫无反应正是这样。
             let sender_open_id = self
                 .event
                 .pointer("/sender/sender_id/open_id")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    self.event
+                        .pointer("/operator/open_id")
+                        .and_then(serde_json::Value::as_str)
+                })
                 .unwrap_or("");
             if sender_open_id != owner_id {
                 return None;

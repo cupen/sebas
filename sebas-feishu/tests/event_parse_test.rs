@@ -479,3 +479,65 @@ fn empty_form_value_object_still_routes_as_formcb() {
         other => panic!("expected FormCb, got {other:?}"),
     }
 }
+
+/// THE real-Feishu button killer: card.action.trigger has no `/sender` — the
+/// operator stands at `/operator/open_id` (official schema-2.0 callback wire).
+/// An owner filter keyed on the message-event sender location alone dropped
+/// EVERY card callback when owner_id was configured: permission/help/provider
+/// clicks vanished without even a WARN. The owner's own click MUST pass.
+#[test]
+fn card_callback_from_owner_operator_passes_owner_filter() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "card.action.trigger" },
+        "event": {
+            "operator": { "open_id": "ou_owner", "tenant_key": "tk" },
+            "action": {
+                "value": {
+                    "session_id": "sess_42",
+                    "request_id": "req_42",
+                    "decision": "allow_once"
+                },
+                "tag": "button",
+                "form_value": {}
+            },
+            "host": "im_message",
+            "context": {
+                "open_message_id": "om_perm",
+                "open_chat_id": "oc_real"
+            }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    let evt = env
+        .into_event("ou_owner")
+        .expect("owner's own card click must pass the owner filter");
+    let FeishuIn::ButtonCb { key, action, .. } = evt else {
+        panic!("expected ButtonCb, got {evt:?}");
+    };
+    assert_eq!(key.chat_id, "oc_real");
+    assert_eq!(action.session_id, "sess_42");
+    assert_eq!(action.decision.as_deref(), Some("allow_once"));
+}
+
+#[test]
+fn card_callback_from_non_owner_operator_is_filtered() {
+    let raw = serde_json::json!({
+        "schema": "2.0",
+        "header": { "event_type": "card.action.trigger" },
+        "event": {
+            "operator": { "open_id": "ou_stranger", "tenant_key": "tk" },
+            "action": {
+                "value": { "session_id": "sess_42", "decision": "deny" },
+                "tag": "button",
+                "form_value": {}
+            },
+            "context": { "open_chat_id": "oc_real" }
+        }
+    });
+    let env: FeishuEnvelope = serde_json::from_value(raw).unwrap();
+    assert!(
+        env.into_event("ou_owner").is_none(),
+        "a stranger's card click must still be dropped"
+    );
+}
