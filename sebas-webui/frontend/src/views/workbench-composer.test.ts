@@ -539,7 +539,7 @@ describe('sebas-workbench-composer', () => {
       )
       // 跟随模式 agent 标签 = catalog display（workbench-agent-wire-fix 3.1：
       // kind slug 'claude' → display 'Claude Code'）。
-      expect(labels).toContain('Claude Code')
+      expect(labels).toContain('🔒 Claude Code')
       // 创建模式才有的绑定/供应商提示在跟随模式下不渲染。
       expect(el.shadowRoot?.querySelector('.binding')).toBeNull()
     })
@@ -550,7 +550,7 @@ describe('sebas-workbench-composer', () => {
       const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
         (n) => n.textContent ?? '',
       )
-      expect(labels).toContain('default agent')
+      expect(labels).toContain('🔒 default agent')
     })
 
     it('model dropdown lists the focused session models and switches via setSessionModel', async () => {

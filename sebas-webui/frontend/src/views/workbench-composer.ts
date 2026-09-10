@@ -509,8 +509,9 @@ export class SebasWorkbenchComposer extends LitElement {
             ${follow
               ? html`<span
                   class="label"
-                  title="This session's agent is fixed — chosen when it was created"
-                  >${this.agentLabel()}</span
+                  data-testid="agent-lock"
+                  title="Agent is immutable — chosen when the session was created"
+                  >🔒 ${this.agentLabel()}</span
                 >`
               : html`
                   ${this.providerLabel
