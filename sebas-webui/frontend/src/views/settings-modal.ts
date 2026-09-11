@@ -1,28 +1,37 @@
 /**
- * Settings modal (IA v2)：侧栏底部 Settings 入口打开的居中弹窗，对齐预览
- * 原型 preview-app.ts 的 settings-dialog 布局——暗色面板、左侧分区导航、
- * 右侧内容区、右上关闭按钮。分区由 `section` 属性驱动
- * （fix-settings-menu-and-services-semantics：缺省首项 `settings`，顺序
- * settings → services → models → appearance → env → about）：
+ * Settings modal (IA v3, revamp-settings-nav-and-models-editor)：侧栏底部
+ * Settings 入口打开的居中弹窗——暗色面板、左侧分区导航、右侧内容区、
+ * 右上关闭按钮。分区由 `section` 属性驱动，顺序即规约：
  *
- *   - settings   → 弹窗壳/总览：工作区根目录、default agent kind、
- *                  default provider/model 三个只读项 + 「全部进程重启」
- *                  「重置 Settings」两个高危动作（wa-dialog 二次确认）
+ *   - generic    → 通用偏好与杂项：原 Env 分区的环境变量只读表（后端无
+ *                  env 端点，值一律如实标注 "managed by core config"）；
+ *                  为后续语言切换等偏好预留信息架构位置（i18n 另立变更）
+ *   - appearance → 主题三态（system / dark / light；切换与持久化在 theme.ts）
+ *   - ── 分隔线 ──
  *   - services   → watchdog 受管子进程（GET /api/admin/services：name /
  *                  desired / actual / uptime + /api/admin/events 最近错误；
  *                  enable/disable/restart 动作；无 adapter 时诚实呈现
  *                  「无 watchdog 控制面」横幅且不渲染动作按钮）
  *   - models     → provider 管理列表（redesign-provider-models-settings
  *                  3.4：router 运行状态归 Services，本分区不再呈现网关卡）
- *   - appearance → 主题三态（system / dark / light；切换与持久化在 theme.ts）
- *   - env        → 环境变量名清单（后端无 env 端点，值一律如实标注
- *                  "managed by core config"，绝不编造）
- *   - about      → /api/about 的真实数据（version / rustc / uptime /
- *                  router listen / provider count）
+ *   - ── 弹性留白 + 分隔线，压底 ──
+ *   - about      → INSTANCE 段在上（工作区根目录 + 复制、default agent
+ *                  kind、default provider/model + 跳转 Models——原 Settings
+ *                  总览的三只读项迁此），BUILD 段在下（/api/about）
  *
- * 上次停留分区记忆在 localStorage `lastSettingsSection`（非法值回退
- * `settings`）。关闭交互：关闭按钮 / Esc / 点击遮罩 → `open` 置 false 并
- * 冒泡 `close` 事件，宿主（app-shell）据此同步状态。
+ * 原 `Settings` 总览分区移除：其维护动作「全部进程重启」「重置 Settings」
+ * 一并删除（逐服务 restart 由 Services 承载，不做广播式入口）。
+ *
+ * provider 编辑器内的 fetch（revamp-settings-nav-and-models-editor，取代
+ * add-fetch-models 的行内 🔍 + 结果列表挑选流）：抓取按钮在编辑器 Models
+ * 区块标题旁（仅编辑既有 provider 且有可用 base URL 时渲染）；成功后整单
+ * 替换编辑器草稿模型列表（按 id 去重、同 id 保留人工 capability tags），
+ * 保存与否走普通编辑流；失败保留草稿并内联呈现净化原因。
+ *
+ * 上次停留分区记忆在 localStorage `lastSettingsSection`（缺值/非法值——含
+ * 旧值 `settings`/`env`——回退缺省 `generic`）。关闭交互：关闭按钮 / Esc /
+ * 点击遮罩 → `open` 置 false 并冒泡 `close` 事件，宿主（app-shell）据此
+ * 同步状态。
  *
  * 弹窗误关闭修复（redesign-provider-models-settings 2.1 / design D6）：
  * Web Awesome 的子控件（如 `<wa-select>`）收起列表框时会冒泡 composed
@@ -56,18 +65,16 @@ import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /**
- * 设置弹窗分区。`settings` 是弹窗壳/总览（含高危动作入口）；Services 以
- * watchdog 受管子进程为唯一数据源（/api/admin/services）；Models 只承载
- * provider 管理——router 运行状态（desired/actual/uptime）由 Services 呈现
- * （redesign-provider-models-settings 3.4/4.1，取代旧的「Models 顶部网关
- * 卡」约束）。
+ * 设置弹窗分区（revamp-settings-nav-and-models-editor 1.1）。顺序即规约：
+ * generic → appearance →〔分隔线〕services → models →〔弹性留白 + 分隔线，
+ * 压底〕about。`settings` 总览分区移除（只读项并入 About、维护动作删除）；
+ * `env` 并入 `generic`（分区 id 直接改名，旧记忆值按非法值回退）。
  */
 export type SettingsSection =
-  | 'settings'
+  | 'generic'
+  | 'appearance'
   | 'services'
   | 'models'
-  | 'appearance'
-  | 'env'
   | 'about'
 
 /** 上次停留分区的 localStorage 键（D5：单键、仅本地、无服务端同步）。 */
@@ -83,24 +90,26 @@ const SERVICE_DISPLAY_NAME: Record<string, string> = {
 
 /** 分区导航的静态元数据（icon 名见 components/icons.ts）。顺序即规约。 */
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string }> = [
-  { id: 'settings', label: 'Settings', icon: 'settings' },
+  { id: 'generic', label: 'Generic', icon: 'settings' },
+  { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'services', label: 'Services', icon: 'shield' },
   { id: 'models', label: 'Models', icon: 'zap' },
-  { id: 'appearance', label: 'Appearance', icon: 'sun' },
-  { id: 'env', label: 'Environment', icon: 'inbox' },
   { id: 'about', label: 'About', icon: 'about' },
 ]
 
+/** 在该分区项之前渲染一条组间分隔线（appearance|services 之间、about 上方）。 */
+const NAV_BREAKS: ReadonlySet<SettingsSection> = new Set(['services', 'about'])
+
 const SECTION_DESC: Record<SettingsSection, string> = {
-  settings: 'Workspace overview and maintenance actions.',
+  generic: 'General preferences and misc reference values. Language switching will live here later.',
+  appearance: 'How the console looks. Your choice is saved in this browser.',
   services: 'Background services that run alongside sebas.',
   models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
-  appearance: 'How the console looks. Your choice is saved in this browser.',
-  env: 'Environment variables the sebas processes read at startup. The API does not expose values.',
-  about: 'Runtime build information.',
+  about: 'What this instance is — its workspace, defaults, and the build it runs on.',
 }
 
-/** 读取上次停留分区；缺值/非法值一律回退 null（调用方保持缺省 settings）。 */
+/** 读取上次停留分区；缺值/非法值（含旧值 `settings`/`env`）一律回退 null
+ * （调用方保持缺省 `generic`）。 */
 function readLastSection(): SettingsSection | null {
   try {
     const raw = localStorage.getItem(LAST_SECTION_KEY)
@@ -161,9 +170,9 @@ export class SebasSettingsModal extends LitElement {
   @property({ type: Boolean, reflect: true })
   open = false
 
-  /** 当前分区；缺省 settings（弹窗壳/总览），re-open 时按记忆恢复。 */
+  /** 当前分区；缺省 generic（revamp…1.1），re-open 时按记忆恢复。 */
   @property({ type: String })
-  section: SettingsSection = 'settings'
+  section: SettingsSection = 'generic'
 
   /** /api/about 响应（About 分区）；懒加载，切到该分区时拉取。 */
   @state() private aboutData: About | null = null
@@ -184,12 +193,7 @@ export class SebasSettingsModal extends LitElement {
   @state() private serviceBusy: string | null = null
   /** 行动作二次确认目标（disable/restart；null = 关闭）。 */
   @state() private confirmTarget: { kind: 'disable' | 'restart'; name: string } | null = null
-  /** 高危动作（Settings 分区）确认与结果状态。 */
-  @state() private restartAllOpen = false
-  @state() private resetSettingsOpen = false
-  @state() private settingsActionResult: { ok: boolean; text: string } | null = null
-  @state() private settingsBusy = false
-  /** Settings 总览：工作区根目录（/api/fs/browse-dirs 的服务端解析根）。 */
+  /** About INSTANCE 段：工作区根目录（/api/fs/browse-dirs 的服务端解析根）。 */
   @state() private overviewRoot: string | null = null
   @state() private rootCopied = false
   /** provider 管理面（/router/api/providers + /router/api/presets）。 */
@@ -233,14 +237,13 @@ export class SebasSettingsModal extends LitElement {
   @state() private busy = false
   @state() private actionError = ''
   /**
-   * （add-fetch-models）抓取状态：pending = 请求在飞；ok = 上游返回的
-   * id 列表（只读呈现，挑选才写入）；error = 净化后的失败原因。失败
-   * 绝不渲染成空列表冒充「该 provider 没有模型」。
+   * （revamp…4.3）fetch 进程序（design D3）：pending = 请求在飞；error =
+   * 净化后的失败原因。成功不留独立痕迹——结果直接整单替换 `editor.models`
+   * （语义=与官方同步），保存与否走普通编辑流。失败绝不冒充空成功列表。
    */
-  @state() private fetchResult:
-    | { name: string; state: 'pending' }
-    | { name: string; state: 'ok'; models: string[] }
-    | { name: string; state: 'error'; reason: string }
+  @state() private fetchState:
+    | { state: 'pending' }
+    | { state: 'error'; reason: string }
     | null = null
   /** 当前主题三态（Appearance 分区）；初值来自 localStorage（theme.ts）。 */
   @state() private themeMode: ThemeMode = getThemeMode()
@@ -303,14 +306,15 @@ export class SebasSettingsModal extends LitElement {
       outline: var(--sebas-focus-ring);
       outline-offset: 2px;
     }
-    /* 预览原型同款左右布局：左 130px 分区导航，右内容区自滚动。 */
+    /* 预览原型同款左右布局：左 160px 分区导航（revamp…1.2：加宽加高），
+     * 右内容区自滚动。 */
     .layout {
       flex: 1;
       display: flex;
       min-height: 0;
     }
     .nav {
-      width: 132px;
+      width: 160px;
       flex: 0 0 auto;
       background: var(--sebas-surface-2);
       border-right: 1px solid var(--sebas-border);
@@ -323,9 +327,11 @@ export class SebasSettingsModal extends LitElement {
     .nav .nav-item {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 6px 12px;
-      font-size: 0.78rem;
+      gap: 8px;
+      flex: 0 0 auto;
+      height: 36px;
+      padding: 0 12px;
+      font-size: 0.875rem;
       font-weight: 500;
       font-family: inherit;
       color: var(--sebas-text-dim);
@@ -335,15 +341,18 @@ export class SebasSettingsModal extends LitElement {
       text-align: left;
       transition:
         background var(--sebas-dur) var(--sebas-ease),
-        color var(--sebas-dur) var(--sebas-ease);
+        color var(--sebas-dur) var(--sebas-ease),
+        box-shadow var(--sebas-dur) var(--sebas-ease);
     }
     .nav .nav-item:hover {
       background: var(--sebas-surface-3);
       color: var(--sebas-text-bright);
     }
+    /* 当前项左侧 accent 竖条（inset box-shadow 不挤占布局）。 */
     .nav .nav-item[aria-current='true'] {
       background: var(--sebas-accent-soft);
       color: var(--sebas-accent);
+      box-shadow: inset 2px 0 0 var(--sebas-accent);
     }
     .nav .nav-item svg {
       opacity: 0.7;
@@ -355,6 +364,17 @@ export class SebasSettingsModal extends LitElement {
     .nav .nav-item:focus-visible {
       outline: var(--sebas-focus-ring);
       outline-offset: -2px;
+    }
+    /* 组间分隔线（1px 低对比线，左右留白 12px）；.tail 另加 margin-top:
+     * auto 把 About 连同分隔线一起压到导航底部（design D5）。 */
+    .nav .nav-sep {
+      flex: 0 0 auto;
+      height: 1px;
+      margin: 6px 12px;
+      background: var(--sebas-border);
+    }
+    .nav .nav-sep.tail {
+      margin-top: auto;
     }
     .content {
       flex: 1;
@@ -515,42 +535,6 @@ export class SebasSettingsModal extends LitElement {
       outline: var(--sebas-focus-ring);
       outline-offset: 1px;
     }
-    .probe-note {
-      margin-top: 4px;
-      font-size: 0.72rem;
-      color: var(--sebas-text-faint);
-    }
-    /* 抓取结果列表（add-fetch-models 3.1）：只读呈现 + 每行一个挑选动作。 */
-    .fetch-result-list {
-      margin: 6px 0 0;
-      padding: 0;
-      list-style: none;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      max-height: 180px;
-      overflow-y: auto;
-    }
-    .fetch-result-list li {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: var(--sebas-space-3);
-      font-size: 0.78rem;
-      padding: 2px 4px;
-      border-radius: var(--sebas-radius-md);
-    }
-    .fetch-result-list li:hover {
-      background: var(--sebas-surface-2);
-    }
-    .fetch-result-list .fetched-id {
-      font-family: var(--sebas-mono, monospace);
-      overflow-wrap: anywhere;
-    }
-    .fetch-result-list .params-note {
-      font-size: 0.68rem;
-      color: var(--sebas-text-faint);
-    }
     /* 编辑器对话框内的表单栅格。 */
     .editor-grid {
       display: flex;
@@ -702,19 +686,27 @@ export class SebasSettingsModal extends LitElement {
       font-size: 0.72rem;
       color: var(--sebas-text-faint);
     }
+    /* 编辑器「Models」区块头（revamp…3.1/4.2）：标题 + 同排 fetch 按钮，
+     * 失败原因内联在该区块内（保留草稿、绝不冒充空成功列表）。 */
     .model-entries {
       display: flex;
       flex-direction: column;
       gap: var(--sebas-space-2);
+    }
+    .model-entries .entries-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
     .model-entries .entries-label {
       font-size: 0.78rem;
       font-weight: 600;
       color: var(--sebas-text-dim);
     }
-    .model-entries .entries-hint {
+    .model-entries .fetch-error {
       font-size: 0.72rem;
-      color: var(--sebas-text-faint);
+      color: var(--sebas-status-failed, #f87171);
+      overflow-wrap: anywhere;
     }
     .model-entry-row {
       display: flex;
@@ -739,21 +731,31 @@ export class SebasSettingsModal extends LitElement {
       accent-color: var(--sebas-accent, currentColor);
       cursor: pointer;
     }
-    /* Settings 总览的维护动作区。 */
-    .danger-zone {
-      margin-top: var(--sebas-space-5);
-      padding-top: var(--sebas-space-3);
-      border-top: 1px solid var(--sebas-border);
-    }
-    .danger-title {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--sebas-text-dim);
-      margin-bottom: var(--sebas-space-2);
-    }
-    .danger-actions {
+    /* 「＋」通栏按钮（revamp…3.1）：整行宽度的幽灵按钮，虚线边暗示可加行。 */
+    .model-entries .add-model {
+      width: 100%;
       display: flex;
-      gap: var(--sebas-space-2);
+      align-items: center;
+      justify-content: center;
+      padding: 5px 0;
+      border: 1px dashed var(--sebas-border);
+      border-radius: var(--sebas-radius-md);
+      background: none;
+      color: var(--sebas-text-dim);
+      font-size: 0.9rem;
+      line-height: 1.2;
+      cursor: pointer;
+      transition:
+        border-color var(--sebas-dur) var(--sebas-ease),
+        color var(--sebas-dur) var(--sebas-ease);
+    }
+    .model-entries .add-model:hover {
+      border-color: var(--sebas-accent-border);
+      color: var(--sebas-accent);
+    }
+    .model-entries .add-model:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 1px;
     }
     .linkish {
       padding: 0;
@@ -841,7 +843,8 @@ export class SebasSettingsModal extends LitElement {
       font-size: 0.78rem;
       color: var(--sebas-text-faint);
     }
-    /* Env 清单：变量名 + 用途 + 固定的 "managed by core config" 值。 */
+    /* Env 清单（Generic 分区承载）：变量名 + 用途 + 固定的
+     * "managed by core config" 值。 */
     .env-table {
       width: 100%;
       border-collapse: collapse;
@@ -880,7 +883,19 @@ export class SebasSettingsModal extends LitElement {
       color: var(--sebas-text-faint);
       white-space: nowrap;
     }
-    /* About 分区：/api/about 的真实字段。 */
+    /* About 分区：INSTANCE 段在上（原 Settings 总览三只读项）、BUILD 段
+     * （/api/about）在下的分段小标题。 */
+    .about-seg-title {
+      margin: var(--sebas-space-4) 0 var(--sebas-space-1);
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--sebas-text-faint);
+    }
+    .about-seg-title:first-child {
+      margin-top: 0;
+    }
     .about-list {
       margin: 0;
       padding: 0;
@@ -959,21 +974,24 @@ export class SebasSettingsModal extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues): void {
-    // About 分区懒加载：切到 about 时拉一次（失败可重试——下次切换再取）。
-    if (changed.has('section') && this.section === 'about') this.loadAbout()
+    // About 分区懒加载（revamp…2.2：INSTANCE + BUILD 两段）：切到 about 时
+    // 拉 /api/about（BUILD）与工作区根目录（INSTANCE；失败可重试——下次切
+    // 换再取）。
+    if (changed.has('section') && this.section === 'about') {
+      this.loadAbout()
+      this.loadOverview()
+    }
     // provider 管理面：每次切到 models 都刷新（增删改后重新进入也新鲜）。
     // redesign-provider-models-settings 3.4：Models 分区不再读 /api/router。
     if (changed.has('section') && this.section === 'models') this.loadProviders()
     // Services 分区：受管子进程 + 最近错误（每次切入都刷新，动作后重取）。
     if (changed.has('section') && this.section === 'services') this.loadServices()
-    // Settings 总览：工作区根目录 / defaults / adapter 探测。
-    if (changed.has('section') && this.section === 'settings') this.loadOverview()
   }
 
   /**
-   * 分区记忆（D5）：打开时按 localStorage 恢复上次分区（非法值回退缺省
-   * `settings`）；打开期间每次切换都写回。仅在 `open` 翻真/分区变化时
-   * 触发，读写都容忍 storage 不可用。
+   * 分区记忆（D5）：打开时按 localStorage 恢复上次分区（缺值/非法值——含
+   * 旧值 `settings`/`env`——回退缺省 `generic`）；打开期间每次切换都写回。
+   * 仅在 `open` 翻真/分区变化时触发，读写都容忍 storage 不可用。
    */
   protected updated(changed: PropertyValues): void {
     if (changed.has('open') && this.open) {
@@ -1042,20 +1060,14 @@ export class SebasSettingsModal extends LitElement {
       })
   }
 
-  /** Settings 总览（task 2.2）：只读项全部来自既有端点，绝不编造。 */
+  /**
+   * About INSTANCE 段加载（revamp…2.2，原 Settings 总览路径并入 About）：
+   * 只读项全部来自既有端点，绝不编造。adapter 探测随「全部进程重启」的
+   * 删除一并移除——Services 分区自己拉取并呈现同一事实。
+   */
   private loadOverview(): void {
-    api
-      .adminServicesSafe()
-      .then((d) => {
-        this.adapterOk = d.adapter_ok
-      })
-      .catch(() => {
-        this.adapterOk = false
-      })
-    // workbench-agent-wire-fix 3.3：/api/agent-defaults 退役——总览的
-    // default provider/model 行改从 providers 列表自身信息推导不可行（admin
-    // 列表无 default 标记），如实呈现「未设置」。恢复路径：Models 分区的
-    // provider 行内 default 徽章改由显式设置面（后续 change）承载。
+    // workbench-agent-wire-fix 3.3：/api/agent-defaults 退役——default
+    // provider/model 行如实呈现「未设置」（★ 设置的本地默认不跨弹窗存活）。
     this.defaults = null
     // 工作区根目录：browse-dirs 不带 path 时服务端回显其解析出的默认
     // 工作根（默认 agent kind 的 work_dir / cwd），这是「既有 API」里
@@ -1108,37 +1120,6 @@ export class SebasSettingsModal extends LitElement {
     )
   }
 
-  /** 高危动作一：全部进程重启（watchdog restart-core 路径）。 */
-  private async restartAllProcesses(): Promise<void> {
-    if (this.settingsBusy) return
-    this.settingsBusy = true
-    this.settingsActionResult = null
-    try {
-      const r = await api.adminRestart()
-      this.settingsActionResult = { ok: true, text: r.message || 'restart accepted' }
-    } catch (err) {
-      this.settingsActionResult = {
-        ok: false,
-        text: err instanceof ApiError ? err.message : String(err),
-      }
-    } finally {
-      this.settingsBusy = false
-      this.restartAllOpen = false
-    }
-  }
-
-  /** 高危动作二：重置 Settings（清空分区记忆并回到缺省 settings）。 */
-  private resetSettings(): void {
-    try {
-      localStorage.removeItem(LAST_SECTION_KEY)
-    } catch {
-      // storage 不可用则本来就无记忆可清。
-    }
-    this.section = 'settings'
-    this.settingsActionResult = { ok: true, text: 'Settings reset — back to defaults.' }
-    this.resetSettingsOpen = false
-  }
-
   /** provider 管理面数据：admin 列表 + 内置 preset 表（跟随代码的只读值）。 */
   private loadProviders(): void {
     this.adminError = ''
@@ -1179,7 +1160,7 @@ export class SebasSettingsModal extends LitElement {
 
   private openCreatePreset(): void {
     this.actionError = ''
-    this.fetchResult = null
+    this.fetchState = null
     this.editor = {
       mode: 'create-preset',
       name: '',
@@ -1198,7 +1179,7 @@ export class SebasSettingsModal extends LitElement {
 
   private openCreateCustom(): void {
     this.actionError = ''
-    this.fetchResult = null
+    this.fetchState = null
     this.editor = {
       mode: 'create-custom',
       name: '',
@@ -1217,7 +1198,7 @@ export class SebasSettingsModal extends LitElement {
 
   private openEdit(p: RouterProviderAdmin): void {
     this.actionError = ''
-    this.fetchResult = null
+    this.fetchState = null
     const map = p.model_map ?? {}
     this.editor = {
       mode: 'edit',
@@ -1378,68 +1359,56 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /**
-   * （add-fetch-models 3.1）抓取动作：调 core 的 providers 域抓取 op（只读
-   * GET，**不提交任何写请求**）。成功 → 结果列表（只读呈现）；失败 → 净化
-   * 原因（绝不渲染成空列表冒充「该 provider 没有模型」）。
+   * （revamp…4.2，design D3/D4）编辑器内抓取：调 core 的 providers 域抓取
+   * op（只读，**不提交任何写请求**）。成功 → 整单替换编辑器草稿的模型列表
+   * （按 id 去重；同 id 的既有条目保留人工 capability tags；Map 合并以抓取
+   * 顺序为骨架）；失败 → 保留草稿、内联呈现净化原因。保存与否由用户走普通
+   * 编辑流（fetch 置 modelsTouched，preset 派生的替换才会随保存提交）。
    */
-  private async fetchModels(name: string): Promise<void> {
-    if (this.busy) return
-    this.busy = true
+  private async fetchModelsIntoEditor(): Promise<void> {
+    const e = this.editor
+    if (!e || e.mode !== 'edit' || this.busy || this.fetchState?.state === 'pending') return
+    this.fetchState = { state: 'pending' }
     this.actionError = ''
-    this.fetchResult = { name, state: 'pending' }
     try {
-      const r = await api.fetchProviderModels(name)
-      this.fetchResult = { name, state: 'ok', models: r.models }
+      const r = await api.fetchProviderModels(e.name)
+      const tagsById = new Map(e.models.map((m) => [m.id, m.tags]))
+      const seen = new Set<string>()
+      const models: ProviderModelEntry[] = []
+      for (const id of r.models) {
+        if (seen.has(id)) continue
+        seen.add(id)
+        models.push({ id, tags: [...(tagsById.get(id) ?? [])] })
+      }
+      this.setEditor({ models, modelsTouched: true })
+      this.fetchState = null
     } catch (err) {
-      this.fetchResult = {
-        name,
+      this.fetchState = {
         state: 'error',
         reason: err instanceof ApiError ? err.message : String(err),
       }
-    } finally {
-      this.busy = false
     }
   }
 
   /**
-   * （add-fetch-models 3.2）挑选某个抓取结果 = 一次普通编辑（PUT
-   * /router/api/providers/{name}），抓取本身从不提交写请求：
-   * - 自定义 provider：id 以条目形态（`{id, tags: []}`，text 隐含）追加进
-   *   `models` 目录。
-   * - preset 派生 provider：挑选语义 = 写 `default_model`（与 /provider
-   *   卡片「使用 <model>」同一契约；条目目录的常规增删走编辑器）。
+   * （revamp…4.2 / design D4）编辑器 fetch 按钮的渲染条件：仅在编辑既有
+   * provider 且「有可用 base URL」时渲染——preset 派生用 presetDef 的
+   * code-table URL 判断；custom 用草稿任一槽位非空判断。新建模式（create-*）
+   * 没有已存储的 provider 可探测（probe op 按 name 寻址），不渲染。
    */
-  private async pickFetchedModel(p: RouterProviderAdmin, id: string): Promise<void> {
-    if (this.busy) return
-    this.busy = true
-    this.actionError = ''
-    try {
-      if (p.preset) {
-        await api.routerProviderUpdate(p.name, { preset: p.preset, default_model: id })
-      } else {
-        const models: ProviderModelEntry[] = p.models.some((m) => m.id === id)
-          ? p.models
-          : [...p.models, { id, tags: [] }]
-        await api.routerProviderUpdate(p.name, {
-          name: p.name,
-          base_url_anthropic: p.base_url_anthropic ?? undefined,
-          base_url_openai_chat: p.base_url_openai_chat ?? undefined,
-          base_url_openai_responses: p.base_url_openai_responses ?? undefined,
-          api_key_env: p.api_key_env ?? undefined,
-          default_model: p.default_model ?? undefined,
-          protocol: p.protocol ?? undefined,
-          model_map: p.model_map ?? undefined,
-          // 目录存条目数组（服务端也接受遗留字符串形态；条目无歧义）。
-          models,
-        })
-      }
-      this.fetchResult = null
-      await this.refreshProviders()
-    } catch (err) {
-      this.actionError = err instanceof ApiError ? err.message : String(err)
-    } finally {
-      this.busy = false
-    }
+  private canFetchInEditor(): boolean {
+    const e = this.editor
+    if (!e || e.mode !== 'edit') return false
+    const presetDef = this.presets?.find((p) => p.name === e.preset) ?? null
+    const hasUsableUrl =
+      e.preset && presetDef
+        ? !!(presetDef.base_url_anthropic ||
+            presetDef.base_url_openai_chat ||
+            presetDef.base_url_openai_responses)
+        : !!(e.baseUrlAnthropic.trim() ||
+            e.baseUrlOpenaiChat.trim() ||
+            e.baseUrlOpenaiResponses.trim())
+    return hasUsableUrl
   }
 
   private renderSectionHead(section: SettingsSection) {
@@ -1449,32 +1418,12 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  // 分区渲染：settings 为总览壳；services 读 watchdog 受管子进程面；
-  // models 顶部承载 /api/router 的路由网关总览；env/about 直渲染
-  // （数据源见文件头注释）。
+  // 分区渲染：generic 承载原 Env 只读表；services 读 watchdog 受管子进程
+  // 面；models 承载 provider 管理（router 运行状态归 Services，3.4）；
+  // about = INSTANCE（原 Settings 总览只读项）+ BUILD（/api/about）。
   private renderSection(section: SettingsSection) {
     switch (section) {
-      case 'settings':
-        return html`
-          ${this.renderSectionHead(section)}
-          ${this.renderSettings()}
-        `
-      case 'services':
-        return html`
-          ${this.renderSectionHead(section)}
-          ${this.renderServices()}
-        `
-      case 'models':
-        return html`
-          ${this.renderSectionHead(section)}
-          ${this.renderModels()}
-        `
-      case 'appearance':
-        return html`
-          ${this.renderSectionHead(section)}
-          ${this.renderAppearance()}
-        `
-      case 'env':
+      case 'generic':
         return html`
           ${this.renderSectionHead(section)}
           <div class="panel">
@@ -1500,6 +1449,21 @@ export class SebasSettingsModal extends LitElement {
             </table>
           </div>
         `
+      case 'services':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderServices()}
+        `
+      case 'models':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderModels()}
+        `
+      case 'appearance':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderAppearance()}
+        `
       case 'about':
         return html`
           ${this.renderSectionHead(section)}
@@ -1509,7 +1473,8 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /**
-   * Models：provider 管理页（列表 + 新增/编辑/删除/抓取）。router 运行
+   * Models：provider 管理页（列表 + 新增/编辑/删除）。抓取入口在编辑器
+   * 「Models」区块标题旁（revamp…4.2），provider 行不再带 🔍。router 运行
    * 状态（listen / debug / auth / desired / actual）不在此呈现——归
    * Services 分区（redesign-provider-models-settings 3.4 / spec「router
    * 状态只在 Services 呈现」）。
@@ -1547,11 +1512,6 @@ export class SebasSettingsModal extends LitElement {
       ${this.actionError
         ? html`<div class="callout callout-error" role="alert">${this.actionError}</div>`
         : nothing}
-      ${this.fetchResult === null
-        ? nothing
-        : this.renderFetchResult(
-            this.adminProviders?.find((p) => p.name === this.fetchResult?.name) ?? null,
-          )}
 
       ${providers === null
         ? html`
@@ -1567,69 +1527,6 @@ export class SebasSettingsModal extends LitElement {
                 : providers.map((p) => this.renderProviderRow(p))}
             </div>
           `}
-    `
-  }
-
-  /**
-   * 抓取结果呈现（add-fetch-models 3.1/3.3）：pending 提示；ok = 只读 id
-   * 列表 + 每行一个挑选动作（挑选 = 普通编辑，见 pickFetchedModel；参数
-   * 标注「本地解析/未知」——上游只给 id，绝不从 id 发明参数）；error =
-   * 净化原因，绝不渲染成空列表冒充「该 provider 没有模型」。
-   */
-  private renderFetchResult(p: RouterProviderAdmin | null) {
-    const fr = this.fetchResult
-    if (!fr) return nothing
-    if (fr.state === 'pending') {
-      return html`
-        <div class="callout" role="status">
-          <strong>${fr.name}</strong>: fetching model list…
-        </div>
-      `
-    }
-    if (fr.state === 'error') {
-      return html`
-        <div class="callout callout-error" role="alert">
-          <strong>${fr.name}</strong>: fetch failed — ${fr.reason}
-        </div>
-      `
-    }
-    if (fr.models.length === 0) {
-      return html`
-        <div class="callout" role="status">
-          <strong>${fr.name}</strong>: upstream served an empty model list.
-        </div>
-      `
-    }
-    return html`
-      <div class="callout" role="status">
-        <strong>${fr.name}</strong>: ${fr.models.length} models fetched (display only — nothing
-        saved until you pick one)
-        <ul class="fetch-result-list">
-          ${fr.models.map(
-            (id) => html`
-              <li>
-                <span class="fetched-id">${id}</span>
-                <span class="params-note">params: local table / unknown</span>
-                <button
-                  class="row-action"
-                  title="Add this model via an ordinary edit"
-                  data-testid="pick-fetched-model"
-                  ?disabled=${this.busy || p === null}
-                  @click=${() => {
-                    if (p) void this.pickFetchedModel(p, id)
-                  }}
-                >
-                  ＋
-                </button>
-              </li>
-            `,
-          )}
-        </ul>
-        <div class="probe-note">
-          ids only: context window and capabilities are resolved locally (unknown ids fall back to
-          the documented default).
-        </div>
-      </div>
     `
   }
 
@@ -1658,19 +1555,6 @@ export class SebasSettingsModal extends LitElement {
             >
               ★
             </button>
-            ${p.base_url_anthropic || p.base_url_openai_chat || p.base_url_openai_responses
-              ? html`
-                  <button
-                    class="row-action"
-                    title="Fetch model list from the provider's official base URL"
-                    data-testid="fetch-models"
-                    ?disabled=${this.busy}
-                    @click=${() => void this.fetchModels(p.name)}
-                  >
-                    🔍
-                  </button>
-                `
-              : nothing}
             <button class="row-action" title="Edit" @click=${() => this.openEdit(p)}>✎</button>
             <button
               class="row-action danger"
@@ -1695,91 +1579,6 @@ export class SebasSettingsModal extends LitElement {
               )}
             </div>`
           : nothing}
-      </div>
-    `
-  }
-
-  /**
-   * Settings 总览壳（task 2.2/2.3）：三个只读项 + 两个高危动作。只读项的
-   * 数据全部来自既有端点，缺值如实显示 '—'；高危动作在无 watchdog 控制
-   * 面时 disabled + tooltip（spec「高危动作二次确认」）。
-   */
-  private renderSettings() {
-    const adapterOk = this.adapterOk === true
-    const adapterKnown = this.adapterOk !== null
-    return html`
-      <dl class="about-list">
-        <div class="kv">
-          <dt>Workspace root</dt>
-          <dd>
-            ${this.overviewRoot ?? '—'}
-            ${this.overviewRoot
-              ? html`<button
-                  class="row-action"
-                  title="Copy workspace root"
-                  @click=${() => this.copyRoot()}
-                >
-                  ${this.rootCopied ? '✓' : '⧉'}
-                </button>`
-              : nothing}
-          </dd>
-        </div>
-        <div class="kv">
-          <dt>Default agent kind</dt>
-          <dd>acp <span class="service-sub">(default kind for new sessions)</span></dd>
-        </div>
-        <div class="kv">
-          <dt>Default provider / model</dt>
-          <dd>
-            ${this.defaults?.provider
-              ? html`<button
-                  class="linkish"
-                  title="Open the Models section"
-                  @click=${() => (this.section = 'models')}
-                >
-                  ${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}
-                </button>`
-              : '— (set one in Models)'}
-          </dd>
-        </div>
-      </dl>
-
-      ${this.settingsActionResult
-        ? html`<div
-            class="callout ${this.settingsActionResult.ok ? '' : 'callout-error'}"
-            role=${this.settingsActionResult.ok ? 'status' : 'alert'}
-          >
-            ${this.settingsActionResult.text}
-          </div>`
-        : nothing}
-
-      <div class="danger-zone">
-        <div class="danger-title">Maintenance</div>
-        <div class="danger-actions">
-          <wa-button
-            variant="danger"
-            appearance="outlined"
-            ?disabled=${this.settingsBusy || (adapterKnown && !adapterOk)}
-            title=${adapterKnown && !adapterOk ? '无 watchdog 控制面' : 'Restart every managed service'}
-            @click=${() => {
-              this.settingsActionResult = null
-              this.restartAllOpen = true
-            }}
-          >
-            全部进程重启
-          </wa-button>
-          <wa-button
-            appearance="outlined"
-            ?disabled=${this.settingsBusy}
-            title="Clear the remembered settings section in this browser"
-            @click=${() => {
-              this.settingsActionResult = null
-              this.resetSettingsOpen = true
-            }}
-          >
-            重置 Settings
-          </wa-button>
-        </div>
       </div>
     `
   }
@@ -1932,6 +1731,12 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
+  /**
+   * About（revamp…2.2）：INSTANCE 段在上——原 Settings 总览的三只读项
+   * （工作区根目录 + 复制、default agent kind、default provider/model +
+   * 跳转 Models）；BUILD 段在下——/api/about 的真实字段。缺值如实显示
+   * '—'，绝不编造。
+   */
   private renderAbout() {
     if (this.aboutError)
       return html`
@@ -1954,7 +1759,45 @@ export class SebasSettingsModal extends LitElement {
       `
     const a = this.aboutData
     return html`
-      <dl class="about-list">
+      <h3 class="about-seg-title">Instance</h3>
+      <dl class="about-list about-instance">
+        <div class="kv">
+          <dt>Workspace root</dt>
+          <dd>
+            ${this.overviewRoot ?? '—'}
+            ${this.overviewRoot
+              ? html`<button
+                  class="row-action"
+                  title="Copy workspace root"
+                  @click=${() => this.copyRoot()}
+                >
+                  ${this.rootCopied ? '✓' : '⧉'}
+                </button>`
+              : nothing}
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Default agent kind</dt>
+          <dd>acp <span class="service-sub">(default kind for new sessions)</span></dd>
+        </div>
+        <div class="kv">
+          <dt>Default provider / model</dt>
+          <dd>
+            ${this.defaults?.provider
+              ? html`<button
+                  class="linkish"
+                  title="Open the Models section"
+                  @click=${() => (this.section = 'models')}
+                >
+                  ${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}
+                </button>`
+              : '— (set one in Models)'}
+          </dd>
+        </div>
+      </dl>
+
+      <h3 class="about-seg-title">Build</h3>
+      <dl class="about-list about-build">
         <div class="kv">
           <dt>Version</dt>
           <dd><span class="version-chip">${a.version}</span></dd>
@@ -1995,7 +1838,13 @@ export class SebasSettingsModal extends LitElement {
           <div class="layout">
             <nav class="nav" aria-label="Settings sections">
               ${SECTIONS.map(
-                (s) => html`
+                (s, i) => html`
+                  ${i > 0 && NAV_BREAKS.has(s.id)
+                    ? html`<div
+                        class="nav-sep${s.id === 'about' ? ' tail' : ''}"
+                        role="separator"
+                      ></div>`
+                    : nothing}
                   <button
                     class="nav-item"
                     aria-current=${this.section === s.id ? 'true' : 'false'}
@@ -2026,10 +1875,10 @@ export class SebasSettingsModal extends LitElement {
     }
   }
 
-  /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认 +
-   *  Settings 高危动作二次确认（全部挂在 settings 面板外层；全部带
-   *  wa-hide 来源守卫——编辑器 / 设默认 / 删除 / 服务确认 / 全部重启 /
-   *  重置，共 6 处）。 */
+  /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认（全部
+   *  挂在 settings 面板外层；全部带 wa-hide 来源守卫——编辑器 / 设默认 /
+   *  删除 / 服务确认，共 4 处）。原 Settings 高危动作对话框（全部进程重启 /
+   *  重置 Settings）随分区删除一并移除（revamp…2.1）。 */
   private renderProviderDialogs() {
     return html`
       ${this.renderActionConfirmDialogs()}
@@ -2124,10 +1973,8 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /**
-   * 二次确认对话框群（D4）：
-   *  - Services 行动作 disable/restart：文案含受影响进程名与「不可撤销」；
-   *  - Settings 高危动作「全部进程重启」「重置 Settings」。
-   * 全部复用既有 wa-dialog 模式，不引入新 modal 框架。
+   * 二次确认对话框（D4）：Services 行动作 disable/restart——文案含受影响
+   * 进程名与「不可撤销」。复用既有 wa-dialog 模式，不引入新 modal 框架。
    */
   private renderActionConfirmDialogs() {
     return html`
@@ -2158,45 +2005,6 @@ export class SebasSettingsModal extends LitElement {
           }}
         >
           ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'}
-        </wa-button>
-      </wa-dialog>
-
-      <wa-dialog
-        label="全部进程重启"
-        ?open=${this.restartAllOpen}
-        @wa-hide=${this.guardedHide(() => (this.restartAllOpen = false))}
-      >
-        <p class="dialog-text">
-          Restart every managed service via the watchdog? 进行中的会话会被中断，此操作不可撤销
-          （不可撤销）。The WebUI itself stays up.
-        </p>
-        <wa-button slot="footer" appearance="plain" @click=${() => (this.restartAllOpen = false)}>
-          Cancel
-        </wa-button>
-        <wa-button
-          slot="footer"
-          variant="danger"
-          ?disabled=${this.settingsBusy}
-          @click=${() => void this.restartAllProcesses()}
-        >
-          ${this.settingsBusy ? 'Restarting…' : 'Restart all'}
-        </wa-button>
-      </wa-dialog>
-
-      <wa-dialog
-        label="重置 Settings"
-        ?open=${this.resetSettingsOpen}
-        @wa-hide=${this.guardedHide(() => (this.resetSettingsOpen = false))}
-      >
-        <p class="dialog-text">
-          Clear the remembered settings section（lastSettingsSection）in this browser and return
-          to the default Settings tab? This cannot be undone.
-        </p>
-        <wa-button slot="footer" appearance="plain" @click=${() => (this.resetSettingsOpen = false)}>
-          Cancel
-        </wa-button>
-        <wa-button slot="footer" variant="danger" @click=${() => this.resetSettings()}>
-          Reset
         </wa-button>
       </wa-dialog>
     `
@@ -2270,21 +2078,41 @@ export class SebasSettingsModal extends LitElement {
     else this.setEditor({ baseUrlOpenaiChat: v })
   }
 
-  /** 模型条目编辑器（3.1）：id + 能力勾选（text 隐含，vision/audio/video
-   *  显式；标记是展示用元数据，不影响路由）。 */
+  /**
+   * 模型条目编辑器（revamp…3.1/4.2）：id + 能力勾选（text 隐含，vision/
+   * audio/video 显式；标记是展示用元数据，不影响路由）。区块标题「Models」
+   * 旁是 fetch 按钮（仅编辑既有 provider 且有可用 base URL 时渲染，D4）；
+   * 抓取成功整单替换下方草稿列表；失败在区块内联呈现净化原因、草稿不动。
+   */
   private renderModelEntries(): TemplateResult {
     const e = this.editor!
-    const presetCreate = e.mode === 'create-preset'
+    const fetching = this.fetchState?.state === 'pending'
     return html`
       <div class="model-entries">
-        <span class="entries-label">Model entries</span>
-        ${presetCreate
-          ? html`<span class="entries-hint">
-              Leave empty to follow the preset's built-in catalog.
-            </span>`
-          : html`<span class="entries-hint">
-              First entry = the provider's default model. Tags are annotations only.
-            </span>`}
+        <div class="entries-head">
+          <span class="entries-label">Models</span>
+          ${this.canFetchInEditor()
+            ? html`
+                <button
+                  class="row-action"
+                  title="Fetch model list from the provider's official base URL"
+                  data-testid="fetch-models"
+                  ?disabled=${this.busy || fetching}
+                  @click=${() => void this.fetchModelsIntoEditor()}
+                >
+                  🔍
+                </button>
+                ${fetching
+                  ? html`<span class="entries-label" role="status">fetching…</span>`
+                  : nothing}
+              `
+            : nothing}
+          ${this.fetchState?.state === 'error'
+            ? html`<span class="fetch-error" role="alert">
+                fetch failed — ${this.fetchState.reason}
+              </span>`
+            : nothing}
+        </div>
         ${e.models.map(
           (m, i) => html`
             <div class="model-entry-row" data-testid="model-entry">
@@ -2323,13 +2151,13 @@ export class SebasSettingsModal extends LitElement {
           `,
         )}
         <button
-          class="row-action"
+          class="add-model"
           title="Add a model entry"
           data-testid="add-model-entry"
           ?disabled=${this.busy}
           @click=${() => this.addModelEntry()}
         >
-          ＋ Add model
+          ＋
         </button>
       </div>
     `

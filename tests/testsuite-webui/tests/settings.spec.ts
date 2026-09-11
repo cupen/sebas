@@ -1,15 +1,19 @@
 /**
- * Journey S.x — settings surface (phase-3 tasks S1–S6, new IA
- * fix-settings-menu-and-services-semantics; S5 rewritten for
- * make-core-own-provider-data 5.3 and again for
- * redesign-provider-models-settings 5.1).
+ * Journey S.x — settings surface (phase-3 tasks S1–S6; rewritten across
+ * fix-settings-menu-and-services-semantics, redesign-provider-models-settings,
+ * and revamp-settings-nav-and-models-editor).
  *
  * 功能：设置面 / 子功能：只读呈现、provider 管理旅程（core store 承载）
  *
- * New IA: default section Settings (overview shell), Services reads the
- * watchdog managed-service surface (/api/admin/services, response-driven —
- * the sandbox assembly is a variable, never enumerate concrete services).
- * Since redesign-provider-models-settings the Models section carries provider
+ * Since revamp-settings-nav-and-models-editor the sections are Generic →
+ * Appearance → Services → Models → About: the former Settings overview shell
+ * is gone (its three read-only items moved into About's INSTANCE segment,
+ * above BUILD = /api/about; its restart-all / reset maintenance actions are
+ * retired — per-service restart lives only in Services), and the former Env
+ * table lives under Generic. Services reads the watchdog managed-service
+ * surface (/api/admin/services, response-driven — the sandbox assembly is a
+ * variable, never enumerate concrete services). Since
+ * redesign-provider-models-settings the Models section carries provider
  * management ONLY (no /api/router gateway card); router runtime state lives
  * in Services. Read-only sections are reconciled against their JSON API truth
  * with contains-assertions (never literals: listen addrs and uptime move with
@@ -19,15 +23,13 @@
  * create/edit/delete persist for real (S5a/S5b). The minimal preset/custom
  * forms follow redesign-provider-models-settings: preset create needs only
  * the preset + key (instance name defaults to the preset name); custom create
- * needs name + one base URL + protocol. Since add-fetch-models the
- * probe/fetch entry is live for providers with a usable base URL (covered in
- * models.spec.ts); S5b pins the honest no-entry rendering for a provider
- * without any base URL (the router proxy stays retired). The sandbox is bare
- * core (no
- * watchdog adapter), so /api/admin/services answers
- * `{adapter_ok: false, services: []}` — S1 pins the response-driven
- * reconciliation (empty-truth branch) and S6 pins the no-adapter banner +
- * disabled restart.
+ * needs name + one base URL + protocol. The probe/fetch entry lives inside the
+ * provider editor (covered in models.spec.ts); S5b pins the honest no-entry
+ * rendering for a provider without any base URL (the router proxy stays
+ * retired). The sandbox is bare core (no watchdog adapter), so
+ * /api/admin/services answers `{adapter_ok: false, services: []}` — S1 pins
+ * the response-driven reconciliation (empty-truth branch) and S6 pins the
+ * no-adapter banner plus the retirement of the maintenance actions.
  */
 import { expect, test } from '@playwright/test'
 import {
@@ -86,7 +88,9 @@ test.describe('设置面', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('S2 about table matches /api/about truth', async ({ page }) => {
+    test('S2 about section shows INSTANCE segment above BUILD, both reconciled to API truth', async ({
+      page,
+    }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
@@ -95,9 +99,23 @@ test.describe('设置面', () => {
       await settings.openViaSidebar()
       await settings.openSection('About')
 
-      const list = settings.panel.locator('dl.about-list')
-      await expect(list).toBeVisible({ timeout: 10_000 })
-      const row = (label: string) => list.locator('.kv', { hasText: label }).locator('dd')
+      // INSTANCE 段在上（原 Settings 总览三只读项）：工作区根目录 + 复制、
+      // default agent kind、default provider/model。
+      const instance = settings.panel.locator('dl.about-list.about-instance')
+      await expect(instance).toBeVisible({ timeout: 10_000 })
+      await expect(instance).toContainText('Workspace root')
+      await expect(instance).toContainText('Default agent kind')
+      await expect(instance).toContainText('Default provider / model')
+      await expect(
+        instance.locator('button[title="Copy workspace root"]'),
+      ).toBeAttached()
+      // Fresh sandbox: no default set — honest absence, not a fabricated row.
+      await expect(instance).toContainText('— (set one in Models)')
+
+      // BUILD 段在下（/api/about 真实字段），对账 contains 断言。
+      const build = settings.panel.locator('dl.about-list.about-build')
+      await expect(build).toBeVisible({ timeout: 10_000 })
+      const row = (label: string) => build.locator('.kv', { hasText: label }).locator('dd')
       await expect(row('Version')).toContainText(truth.version)
       await expect(row('Providers')).toContainText(String(truth.provider_count))
       await expect(row('Router listen')).toContainText(truth.router_listen ?? '—')
@@ -105,18 +123,33 @@ test.describe('设置面', () => {
       // the row's attachment, not its visibility or value.
       await expect(row('Rust toolchain')).toBeAttached()
       await expect(row('Uptime')).not.toBeEmpty()
+
+      // DOM order pins the segment order: instance above build.
+      const lists = settings.panel.locator('dl.about-list')
+      await expect(lists).toHaveCount(2)
+      expect(
+        await lists
+          .nth(0)
+          .evaluate((el) => el.classList.contains('about-instance')),
+      ).toBe(true)
+      expect(
+        await lists
+          .nth(1)
+          .evaluate((el) => el.classList.contains('about-build')),
+      ).toBe(true)
       await settings.close()
 
       expect(collector.clean()).toEqual([])
     })
 
-    test('S3 env table renders placeholder semantics', async ({ page }) => {
+    test('S3 env table renders placeholder semantics under Generic', async ({ page }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      await settings.openSection('Env')
+      // revamp-settings-nav-and-models-editor：Env 表并入 Generic 分区。
+      await settings.openSection('Generic')
 
       const table = settings.panel.locator('table.env-table')
       await expect(table).toBeVisible({ timeout: 10_000 })
@@ -129,7 +162,7 @@ test.describe('设置面', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('S6 bare core degrades: no-adapter banner, no rows, restart disabled', async ({
+    test('S6 bare core degrades: no-adapter banner, no rows, no actions — and the retired maintenance actions stay gone', async ({
       page,
     }) => {
       const settings = new SettingsModal(page)
@@ -150,15 +183,18 @@ test.describe('设置面', () => {
       await expect(settings.panel.locator('.service-card')).toHaveCount(0)
       await expect(settings.panel.locator('.service-actions button')).toHaveCount(0)
 
-      // Back to the Settings overview: the probe has now run, so the
-      // restart-all action is disabled with the honest tooltip while the
-      // adapter-independent reset stays enabled.
-      await settings.openSection('Settings')
-      const restart = settings.panel.locator('wa-button', { hasText: '全部进程重启' })
-      await expect(restart).toHaveAttribute('disabled', '', { timeout: 10_000 })
-      await expect(restart).toHaveAttribute('title', '无 watchdog 控制面')
-      const reset = settings.panel.locator('wa-button', { hasText: '重置 Settings' })
-      await expect(reset).not.toHaveAttribute('disabled', '')
+      // revamp-settings-nav-and-models-editor: the former Settings overview's
+      // maintenance actions are retired everywhere — no restart-all, no reset,
+      // in any section (per-service restart lives only in Services).
+      for (const section of ['Generic', 'Appearance', 'Models', 'About'] as const) {
+        await settings.openSection(section)
+        await expect(
+          settings.panel.locator('wa-button', { hasText: '全部进程重启' }),
+        ).toHaveCount(0)
+        await expect(
+          settings.panel.locator('wa-button', { hasText: '重置 Settings' }),
+        ).toHaveCount(0)
+      }
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -183,7 +219,7 @@ test.describe('设置面', () => {
       expect(seeded.status()).toBe(201)
       await page.goto('/')
       await settings.openViaSidebar()
-      // New IA default section is Settings — defaults live under Models.
+      // Default section is Generic — defaults live under Models.
       await settings.openSection('Models')
 
       // Toolbar mirrors the null truth (span only — wa-button internals also
@@ -235,7 +271,7 @@ test.describe('设置面', () => {
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      // New IA default section is Settings — provider management lives under Models.
+      // Default section is Generic — provider management lives under Models.
       await settings.openSection('Models')
 
       // Empty custom create is rejected client-side with zero network traffic
@@ -334,7 +370,7 @@ test.describe('设置面', () => {
       expect(seeded.status()).toBe(201)
       await page.goto('/')
       await settings.openViaSidebar()
-      // New IA default section is Settings — provider management lives under Models.
+      // Default section is Generic — provider management lives under Models.
       await settings.openSection('Models')
       const seededRow = settings.panel.locator('.provider-row').filter({ hasText: seededName })
       await expect(seededRow).toBeVisible({ timeout: 10_000 })
@@ -351,9 +387,11 @@ test.describe('设置面', () => {
         .poll(async () => (await listRouterProviders(page.request)).includes(seededName))
         .toBe(false)
 
-      // add-fetch-models: the fetch entry exists only for providers with a
-      // usable base URL. A URL-less provider renders no entry at all (and the
-      // API answers a typed 400 — never a fabricated success).
+      // revamp-settings-nav-and-models-editor: the fetch entry lives inside
+      // the provider editor (next to the Models block heading) and exists
+      // only for providers with a usable base URL. A URL-less provider's
+      // editor renders no entry at all (and the API answers a typed 400 —
+      // never a fabricated success).
       await settings.close()
       const urllessName = `spec-nourl-${Date.now()}`
       const urlless = await page.request.post('/router/api/providers', {
@@ -366,7 +404,14 @@ test.describe('设置面', () => {
       await settings.openSection('Models')
       const urllessRow = settings.panel.locator('.provider-row').filter({ hasText: urllessName })
       await expect(urllessRow).toBeVisible({ timeout: 10_000 })
-      await expect(urllessRow.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
+      await urllessRow.locator('button[title="Edit"]').click()
+      const urllessEditor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+      await expect(urllessEditor.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
+      await expect(
+        urllessEditor.locator('button[data-testid="fetch-models"]'),
+      ).toHaveCount(0)
+      await urllessEditor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await expect(urllessEditor).toBeHidden({ timeout: 10_000 })
       const probe = await page.request.post(
         `/router/api/providers/${encodeURIComponent(urllessName)}/probe`,
       )

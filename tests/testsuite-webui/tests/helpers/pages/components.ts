@@ -291,9 +291,14 @@ export class SettingsModal {
     await expect(this.panel).toBeVisible()
   }
 
-  /** Switch to a settings section by its nav label; waits for load to settle. */
+  /**
+   * Switch to a settings section by its nav label; waits for load to settle.
+   * revamp-settings-nav-and-models-editor: sections are Generic → Appearance
+   * → Services → Models → About (the former Settings overview and Env sections
+   * are gone — Generic and About absorbed them).
+   */
   async openSection(
-    label: 'Settings' | 'Models' | 'Services' | 'Appearance' | 'Env' | 'About',
+    label: 'Generic' | 'Models' | 'Services' | 'Appearance' | 'About',
   ): Promise<void> {
     await this.panel.locator('.nav-item', { hasText: label }).click()
     await expect(

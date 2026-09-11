@@ -1,28 +1,32 @@
 // @vitest-environment jsdom
 /**
- * Settings modal (IA v3, fix-settings-menu-and-services-semantics +
- * redesign-provider-models-settings)：左侧分区导航 + 右侧内容。六个分区
- * （顺序即规约）——
- *   - settings   总览壳：工作区根目录（/api/fs/browse-dirs 回显根）/
- *                default agent kind（静态 acp）/
- *                default provider-model（跳转 Models 链接）+「全部进程重启」
- *                「重置 Settings」高危动作（wa-dialog 二次确认；无 watchdog
- *                控制面时重启 disabled）
+ * Settings modal (IA v3, revamp-settings-nav-and-models-editor)：左侧分区
+ * 导航 + 右侧内容。五个分区（顺序即规约）——
+ *   - generic    通用偏好与杂项：原 Env 分区的环境变量只读表（值一律
+ *                "managed by core config"）；语言切换仅预留信息架构位置
+ *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
  *   - services   watchdog 受管子进程（/api/admin/services 经 adminServicesSafe：
  *                name / desired / actual / uptime + /api/admin/events 最近错误；
  *                im→「飞书 IM」显示映射；无 adapter 时「无 watchdog 控制面」
  *                横幅而非空列表冒充——router 行的 desired/actual/uptime 只在
  *                此分区呈现）
  *   - models     provider 管理列表（/router/api/providers，条目携带能力
- *                标记）。redesign-provider-models-settings 3.4：不再渲染
- *                Router 网关卡、不再请求 /api/router
- *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
- *   - env        环境变量名清单，值一律 "managed by core config"
- *   - about      /api/about 真实字段
- * 缺省首项 settings；上次分区记忆走 localStorage `lastSettingsSection`
- * （非法值回退 settings）。关闭交互（按钮 / Esc / 遮罩）一并覆盖；子
- * `<wa-select>` 冒泡的 `wa-hide` 不得连带关闭对话框（2.1 来源守卫）。
- * api client 全量 mock（9 个 admin stubs 由前序 agent 加入，本轮沿用）。
+ *                标记；不再渲染 Router 网关卡、不再请求 /api/router）
+ *   - about      INSTANCE 段在上（原 Settings 总览三只读项：工作区根目录 +
+ *                复制、default agent kind、default provider/model + 跳转
+ *                Models），BUILD 段在下（/api/about 真实字段）
+ * 原 `Settings` 总览分区移除：「全部进程重启」「重置 Settings」两个高危
+ * 动作随之删除（任何分区都不得再出现入口）。
+ * 缺省首项 generic；上次分区记忆走 localStorage `lastSettingsSection`
+ * （缺值/非法值——含旧值 `settings`/`env`——回退 generic）。关闭交互
+ * （按钮 / Esc / 遮罩）一并覆盖；子 `<wa-select>` 冒泡的 `wa-hide` 不得
+ * 连带关闭对话框（来源守卫）。
+ * fetch 交互（revamp-settings-nav-and-models-editor，取代 add-fetch-models
+ * 的行内 🔍 + 结果列表挑选流）：入口在编辑器「Models」区块标题旁（仅编辑
+ * 既有 provider 且有可用 base URL 时渲染）；成功整单替换草稿列表（按 id
+ * 去重、同 id 保留人工 tags），保存与否走普通编辑流；失败保留草稿并内联
+ * 呈现净化原因。
+ * api client 全量 mock（含前序 agent 留下的 admin stubs，本轮沿用）。
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -61,8 +65,6 @@ const apiMocks = vi.hoisted(() => ({
   routerProviderUpdate: vi.fn(),
   routerProviderDelete: vi.fn(),
   fetchProviderModels: vi.fn(),
-  agentDefaults: vi.fn(),
-  setAgentDefaults: vi.fn(),
   adminServices: vi.fn(),
   adminEvents: vi.fn(),
   adminServicesSafe: vi.fn(),
@@ -70,7 +72,6 @@ const apiMocks = vi.hoisted(() => ({
   enableService: vi.fn(),
   disableService: vi.fn(),
   restartService: vi.fn(),
-  adminRestart: vi.fn(),
   fsBrowseDirs: vi.fn(),
 }))
 
@@ -91,8 +92,6 @@ vi.mock('../api/client.js', () => ({
     routerProviderUpdate: apiMocks.routerProviderUpdate,
     routerProviderDelete: apiMocks.routerProviderDelete,
     fetchProviderModels: apiMocks.fetchProviderModels,
-    agentDefaults: apiMocks.agentDefaults,
-    setAgentDefaults: apiMocks.setAgentDefaults,
     adminServices: apiMocks.adminServices,
     adminEvents: apiMocks.adminEvents,
     adminServicesSafe: apiMocks.adminServicesSafe,
@@ -100,7 +99,6 @@ vi.mock('../api/client.js', () => ({
     enableService: apiMocks.enableService,
     disableService: apiMocks.disableService,
     restartService: apiMocks.restartService,
-    adminRestart: apiMocks.adminRestart,
     fsBrowseDirs: apiMocks.fsBrowseDirs,
   },
 }))
@@ -154,21 +152,7 @@ beforeEach(() => {
       provider_count: 2,
       debug: false,
       has_auth: true,
-      providers: [
-        {
-          name: 'alpha',
-          preset: 'deepseek',
-          base_url_anthropic: 'https://a.example/anthropic',
-          base_url_openai_chat: 'https://a.example/v1',
-          base_url_openai_responses: null,
-        },
-        {
-          name: 'beta',
-          base_url_anthropic: null,
-          base_url_openai_chat: 'https://b.example/v1',
-          base_url_openai_responses: null,
-        },
-      ],
+      providers: [],
     },
   })
   apiMocks.routerProviders.mockResolvedValue({
@@ -198,7 +182,6 @@ beforeEach(() => {
       },
     ],
   })
-  apiMocks.agentDefaults.mockResolvedValue({ provider: null, model: null })
   apiMocks.adminServices.mockResolvedValue({ adapter_ok: true, services: [] })
   apiMocks.adminEvents.mockResolvedValue({ adapter_ok: true, events: [] })
   apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: true, services: [] })
@@ -206,7 +189,6 @@ beforeEach(() => {
   apiMocks.enableService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
   apiMocks.disableService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
   apiMocks.restartService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
-  apiMocks.adminRestart.mockResolvedValue({ operation_id: 'op-test', message: 'restart accepted' })
   apiMocks.fsBrowseDirs.mockResolvedValue({ path: '/tmp/test-work', entries: [] })
   apiMocks.routerPresets.mockResolvedValue({
     presets: [
@@ -237,88 +219,74 @@ afterEach(() => {
 })
 
 describe('sebas-settings-modal sections', () => {
-  it('renders the left nav with exactly Settings/Services/Models/Appearance/Environment/About', async () => {
+  it('renders the left nav with exactly Generic/Appearance/Services/Models/About', async () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())
-    expect(labels).toEqual(['Settings', 'Services', 'Models', 'Appearance', 'Environment', 'About'])
+    expect(labels).toEqual(['Generic', 'Appearance', 'Services', 'Models', 'About'])
     el.remove()
   })
 
-  it('defaults to the Settings overview shell with workspace/defaults/danger actions', async () => {
+  it('separates the nav into groups: a break before Services and a tail break pinning About to the bottom', async () => {
     const el = await mount()
-    expect(el.section).toBe('settings')
+    const nav = el.shadowRoot!.querySelector('.nav')!
+    const seps = [...nav.querySelectorAll<HTMLElement>('.nav-sep')]
+    expect(seps.length).toBe(2)
+    // About 上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 About 项。
+    const tail = seps.find((s) => s.classList.contains('tail'))!
+    expect(tail).toBeTruthy()
+    expect(tail.nextElementSibling?.classList.contains('nav-item')).toBe(true)
+    expect(tail.nextElementSibling?.textContent?.trim()).toBe('About')
+    // 另一条在 Services 项之前（appearance|services 组间线）。
+    const plain = seps.find((s) => !s.classList.contains('tail'))!
+    expect(plain.nextElementSibling?.textContent?.trim()).toBe('Services')
+    expect(plain.previousElementSibling?.textContent?.trim()).toBe('Appearance')
+    el.remove()
+  })
+
+  it('defaults to the Generic section rendering the env reference table', async () => {
+    const el = await mount()
+    expect(el.section).toBe('generic')
     await settle(el)
-    const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('Workspace root')
-    expect(text).toContain('Default agent kind')
-    expect(text).toContain('Default provider / model')
-    const buttons = waButtons(el).map((b) => b.textContent?.trim())
-    expect(buttons).toContain('全部进程重启')
-    expect(buttons).toContain('重置 Settings')
-    el.remove()
-  })
-
-  it('Settings overview renders workspace root, acp kind and the provider/model link', async () => {
-    const el = await mount()
-    // 总览懒加载挂在切入 settings 时：先离开再回来触发 loadOverview。
-    await goto(el, 1)
-    await goto(el, 0)
-    const text = el.shadowRoot!.textContent ?? ''
-    expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
-    expect(text).toContain('/tmp/test-work')
-    expect(text).toContain('acp')
-    // 工作区根目录带复制按钮。
-    const copy = el.shadowRoot!.querySelector('button[title="Copy workspace root"]')
-    expect(copy).toBeTruthy()
-    el.remove()
-  })
-
-  it('Settings danger actions confirm via wa-dialog; restart disabled without adapter', async () => {
-    const el = await mount()
-    await goto(el, 1)
-    await goto(el, 0)
-    const restart = waButtons(el).find((b) => b.textContent?.includes('全部进程重启'))!
-    expect(restart).toBeTruthy()
-    expect(restart.hasAttribute('disabled')).toBe(false)
-    restart.click()
-    await el.updateComplete
-    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="全部进程重启"]') as HTMLElement & {
-      open?: boolean
+    const rows = [...el.shadowRoot!.querySelectorAll('.env-table tbody tr')]
+    expect(rows.length).toBeGreaterThan(0)
+    expect(el.shadowRoot!.textContent).toContain('SEBAS_ROUTER_LISTEN')
+    // Every row's value is the "not exposed" marker — no fabricated data.
+    for (const row of rows) {
+      expect(row.querySelector('.value')?.textContent).toBe('managed by core config')
     }
-    expect(dialog).toBeTruthy()
-    expect(dialog.hasAttribute('open')).toBe(true)
     el.remove()
   })
 
-  it('Settings restart button is disabled with tooltip when no watchdog adapter', async () => {
-    apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
+  it('renders no maintenance actions anywhere (restart-all and reset retired)', async () => {
     const el = await mount()
-    await goto(el, 1)
-    await goto(el, 0)
-    const restart = waButtons(el).find((b) => b.textContent?.includes('全部进程重启'))!
-    expect(restart.hasAttribute('disabled')).toBe(true)
-    expect(restart.getAttribute('title')).toContain('无 watchdog 控制面')
-    // 重置 Settings 不依赖 adapter，始终可用。
-    const reset = waButtons(el).find((b) => b.textContent?.includes('重置 Settings'))!
-    expect(reset.hasAttribute('disabled')).toBe(false)
+    for (const index of [0, 1, 2, 3, 4]) {
+      await goto(el, index)
+      const buttons = waButtons(el).map((b) => b.textContent?.trim())
+      expect(buttons).not.toContain('全部进程重启')
+      expect(buttons).not.toContain('重置 Settings')
+      expect(el.shadowRoot!.querySelector('.danger-zone')).toBeNull()
+    }
     el.remove()
   })
 
-  it('remembers lastSettingsSection across opens; illegal values fall back to settings', async () => {
+  it('remembers lastSettingsSection; legacy settings/env values fall back to generic', async () => {
     localStorage.setItem('lastSettingsSection', 'services')
     const el = await mount()
     await settle(el)
     expect(el.section).toBe('services')
     // 打开期间切换分区会写回记忆。
-    await goto(el, 2)
+    await goto(el, 3)
     expect(localStorage.getItem('lastSettingsSection')).toBe('models')
     el.remove()
 
-    localStorage.setItem('lastSettingsSection', 'nope')
-    const el2 = await mount()
-    await settle(el2)
-    expect(el2.section).toBe('settings')
-    el2.remove()
+    // 本变更前的合法分区名（Settings 总览、Env）现在都是非法值 → 回退缺省。
+    for (const legacy of ['settings', 'env', 'nope']) {
+      localStorage.setItem('lastSettingsSection', legacy)
+      const el2 = await mount()
+      await settle(el2)
+      expect(el2.section).toBe('generic')
+      el2.remove()
+    }
   })
 
   it('Services section renders rows from /api/admin/services with im→飞书 IM mapping', async () => {
@@ -335,7 +303,7 @@ describe('sebas-settings-modal sections', () => {
       events: [{ seq: 1, operation_id: 'op-1', kind: 'service_error', message: 'im worker boom' }],
     })
     const el = await mount()
-    await goto(el, 1)
+    await goto(el, 2)
     expect(el.section).toBe('services')
     // 真源是 adminServicesSafe；renderServices 不得再读 /api/router。
     expect(apiMocks.adminServicesSafe).toHaveBeenCalled()
@@ -369,7 +337,7 @@ describe('sebas-settings-modal sections', () => {
     })
     apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
     const el = await mount()
-    await goto(el, 1)
+    await goto(el, 2)
     const cards = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')]
     const coreCard = cards.find((c) => c.querySelector('.service-id')?.textContent === 'core')!
     expect(coreCard).toBeTruthy()
@@ -382,7 +350,7 @@ describe('sebas-settings-modal sections', () => {
   it('Services section shows the no-adapter banner without rows or actions', async () => {
     apiMocks.adminServicesSafe.mockResolvedValue({ adapter_ok: false, services: [] })
     const el = await mount()
-    await goto(el, 1)
+    await goto(el, 2)
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).toContain('无 watchdog 控制面')
     expect(el.shadowRoot!.querySelectorAll('.service-card').length).toBe(0)
@@ -390,10 +358,26 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('Models section renders the provider list only — no gateway card, no /api/router', async () => {
+  it('Services section is the only place that renders router desired/actual/uptime (4.1)', async () => {
+    // 4.1：router 行在 Services 呈现 desired / actual / uptime；Models 分区
+    // 不出现任何 router 运行状态。adapter_ok:false 时横幅呈现而非空列表冒充
+    // （专属用例见下）。
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [{ name: 'router', status: 'running', desired: 'running', uptime_secs: 95 }],
+    })
+    const el = await mount()
+    await goto(el, 2)
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('router')
+    expect(text).toContain('desired running · status running · up 1m')
+    el.remove()
+  })
+
+  it('Models section renders the provider list only — no gateway card, no /api/router, no row-level fetch', async () => {
     const el = await mount()
     apiMocks.router.mockClear()
-    await goto(el, 2)
+    await goto(el, 3)
     expect(el.section).toBe('models')
     // 3.4：Models 渲染不再发起 /api/router 请求，也不出现网关卡。
     expect(apiMocks.router).not.toHaveBeenCalled()
@@ -412,49 +396,40 @@ describe('sebas-settings-modal sections', () => {
     // 列表呈现模型条目与能力标记（条目 = id + tags；text 隐含）。
     const chips = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.model-chip')]
     expect(chips.map((c) => (c.textContent ?? '').replace(/\s+/g, ''))).toContain('m2vision')
+    // revamp…4.1：provider 行不再带 🔍（入口移进编辑器）。
+    expect(el.shadowRoot!.querySelector('button[data-testid="fetch-models"]')).toBeNull()
     el.remove()
   })
 
-  it('Services section is the only place that renders router desired/actual/uptime (4.1)', async () => {
-    // 4.1：router 行在 Services 呈现 desired / actual / uptime；Models 分区
-    // 不出现任何 router 运行状态。adapter_ok:false 时横幅呈现而非空列表冒充
-    // （专属用例见下）。
-    apiMocks.adminServicesSafe.mockResolvedValue({
-      adapter_ok: true,
-      services: [{ name: 'router', status: 'running', desired: 'running', uptime_secs: 95 }],
-    })
-    const el = await mount()
-    await goto(el, 1)
-    const text = el.shadowRoot!.textContent ?? ''
-    expect(text).toContain('router')
-    expect(text).toContain('desired running · status running · up 1m')
-    el.remove()
-  })
-
-  it('Environment section lists variable names with the honest placeholder value', async () => {
+  it('About section shows INSTANCE (overview items) above BUILD (/api/about)', async () => {
     const el = await mount()
     await goto(el, 4)
-    expect(el.section).toBe('env')
-    const rows = [...el.shadowRoot!.querySelectorAll('.env-table tbody tr')]
-    expect(rows.length).toBeGreaterThan(0)
-    expect(el.shadowRoot!.textContent).toContain('SEBAS_ROUTER_LISTEN')
-    // Every row's value is the "not exposed" marker — no fabricated data.
-    for (const row of rows) {
-      expect(row.querySelector('.value')?.textContent).toBe('managed by core config')
-    }
-    el.remove()
-  })
-
-  it('About section renders the real /api/about payload', async () => {
-    const el = await mount()
-    await goto(el, 5)
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
+    expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
     const text = el.shadowRoot!.textContent ?? ''
+    // INSTANCE 段：原 Settings 总览三只读项。
+    expect(text).toContain('Instance')
+    expect(text).toContain('Workspace root')
+    expect(text).toContain('/tmp/test-work')
+    expect(text).toContain('Default agent kind')
+    expect(text).toContain('acp')
+    expect(text).toContain('Default provider / model')
+    expect(text).toContain('— (set one in Models)')
+    // BUILD 段：/api/about 真实字段。
+    expect(text).toContain('Build')
     expect(text).toContain('0.4.2')
     expect(text).toContain('3h 12m')
     expect(text).toContain('1.88')
     expect(text).toContain('127.0.0.1:8787')
+    // 两段dl分开：instance 在前、build 在后（DOM 顺序即呈现顺序）。
+    const lists = [...el.shadowRoot!.querySelectorAll('dl.about-list')]
+    expect(lists.length).toBe(2)
+    expect(lists[0]!.classList.contains('about-instance')).toBe(true)
+    expect(lists[1]!.classList.contains('about-build')).toBe(true)
+    // 工作区根目录带复制按钮。
+    const copy = el.shadowRoot!.querySelector('button[title="Copy workspace root"]')
+    expect(copy).toBeTruthy()
     el.remove()
   })
 
@@ -491,7 +466,7 @@ describe('sebas-settings-modal appearance section', () => {
     // 页面启动时由 main.ts 应用一次主题 class；测试环境里手动补上。
     applyThemeMode()
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, 1)
     const options = themeOptions(el)
     expect(options.map((b) => b.querySelector('.theme-option-label')?.textContent)).toEqual([
       'System',
@@ -506,7 +481,7 @@ describe('sebas-settings-modal appearance section', () => {
 
   it('choosing Light unsets wa-dark and persists sebas:theme=light', async () => {
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, 1)
     themeOptions(el)[2]!.click()
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('light')
@@ -518,7 +493,7 @@ describe('sebas-settings-modal appearance section', () => {
 
   it('choosing Dark sets wa-dark and persists; System returns to following the OS', async () => {
     const el = await mount()
-    await goto(el, 3)
+    await goto(el, 1)
     themeOptions(el)[1]!.click()
     await el.updateComplete
     expect(localStorage.getItem('sebas:theme')).toBe('dark')
@@ -570,13 +545,12 @@ describe('sebas-settings-modal closing', () => {
   })
 })
 
-
 it('states honestly that no global default is set (agent-defaults retired)', async () => {
-  // workbench-agent-wire-fix 3.3：/api/agent-defaults 端点退役——总览与
-  // provider 列表不再渲染全局 default 徽章（默认 agent 改为项目级记忆）。
+  // workbench-agent-wire-fix 3.3：/api/agent-defaults 端点退役——provider
+  // 列表不再渲染全局 default 徽章（默认 agent 改为项目级记忆）。
 
   const el = await mount()
-  await goto(el, 2)
+  await goto(el, 3)
 
   const status = el.shadowRoot?.querySelector('.provider-toolbar [role="status"]')
   expect(status?.textContent ?? '').toContain('no default set')
@@ -584,44 +558,202 @@ it('states honestly that no global default is set (agent-defaults retired)', asy
   el.remove()
 })
 
-describe('add-fetch-models：provider 抓取入口与挑选语义', () => {
-  /** 找指定 provider 行上的抓取按钮（🔍，data-testid=fetch-models）。 */
-  function fetchButtonFor(el: SebasSettingsModal, name: string): HTMLButtonElement | null {
+describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替换', () => {
+  /** Models 分区里指定 provider 的行。 */
+  function rowFor(el: SebasSettingsModal, name: string): HTMLElement {
     const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.provider-row')]
     const row = rows.find(
       (r) => r.querySelector('.provider-row-name')?.textContent?.trim() === name,
     )
-    return row?.querySelector<HTMLButtonElement>('button[data-testid="fetch-models"]') ?? null
+    expect(row).toBeTruthy()
+    return row!
   }
 
-  /** 抓取结果卡里的挑选按钮（＋，data-testid=pick-fetched-model）。 */
-  function pickButtons(el: SebasSettingsModal): HTMLButtonElement[] {
-    return [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>('button[data-testid="pick-fetched-model"]')]
+  /** 打开指定 provider 的编辑器（行内 ✎）。 */
+  async function openEditorFor(el: SebasSettingsModal, name: string): Promise<HTMLElement> {
+    await goto(el, 3)
+    rowFor(el, name).querySelector<HTMLButtonElement>('button[title="Edit"]')!.click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.provider-editor') as HTMLElement
+    expect(dialog).toBeTruthy()
+    return dialog
+  }
+
+  /** 新建（preset/custom）编辑器。 */
+  async function openCreateEditor(el: SebasSettingsModal, label: string): Promise<HTMLElement> {
+    await goto(el, 3)
+    waButtons(el)
+      .find((b) => b.textContent?.includes(label))!
+      .click()
+    await el.updateComplete
+    return el.shadowRoot!.querySelector('wa-dialog.provider-editor') as HTMLElement
+  }
+
+  function editorFetchButton(dialog: HTMLElement): HTMLButtonElement | null {
+    return dialog.querySelector<HTMLButtonElement>('button[data-testid="fetch-models"]')
+  }
+
+  function entryRows(dialog: HTMLElement): HTMLElement[] {
+    return [...dialog.querySelectorAll<HTMLElement>('[data-testid="model-entry"]')]
+  }
+
+  function entryIds(dialog: HTMLElement): string[] {
+    return entryRows(dialog).map(
+      (r) => (r.querySelector('wa-input') as unknown as { value: string }).value,
+    )
+  }
+
+  async function saveEditor(el: SebasSettingsModal): Promise<void> {
+    ;(
+      el.shadowRoot!.querySelector('wa-dialog.provider-editor wa-button[variant="brand"]') as HTMLElement
+    ).click()
+    await settle(el)
   }
 
   beforeEach(() => {
     apiMocks.fetchProviderModels.mockResolvedValue({ provider: 'beta', models: ['m-pro', 'm-flash'] })
+    apiMocks.routerProviderUpdate.mockResolvedValue({ updated: 'beta' })
   })
 
-  // 3.1 验收「两种模式都能触发」：custom（有 URL）与 preset 派生（行内
-  // 物化代码表 URL）都渲染抓取按钮且能发起抓取。
-  it('renders the fetch action for custom and preset-derived providers and both trigger', async () => {
+  // 4.1 验收：入口从 provider 行内挪进编辑器——行上无 🔍，编辑器（preset
+  // 派生与 custom 皆然）有，且点击即调 core 的抓取 op。
+  it('moves the fetch entry into the editor for preset and custom providers alike', async () => {
     const el = await mount()
-    await goto(el, 2)
+    await goto(el, 3)
     expect(apiMocks.fetchProviderModels).not.toHaveBeenCalled()
+    // 行内没有任何 fetch 按钮（含有可用 base URL 的 alpha/beta）。
+    expect(el.shadowRoot!.querySelector('button[data-testid="fetch-models"]')).toBeNull()
 
-    const betaFetch = fetchButtonFor(el, 'beta')
-    expect(betaFetch).toBeTruthy()
-    betaFetch!.click()
-    await settle(el)
-    expect(apiMocks.fetchProviderModels).toHaveBeenCalledWith('beta')
-    // 抓取结果列表呈现（ok 态）。
-    expect(pickButtons(el).length).toBe(2)
+    for (const name of ['beta', 'alpha']) {
+      const dialog = await openEditorFor(el, name)
+      const btn = editorFetchButton(dialog)
+      expect(btn).toBeTruthy()
+      btn!.click()
+      await settle(el)
+      expect(apiMocks.fetchProviderModels).toHaveBeenCalledWith(name)
+      // 关掉再开下一个。
+      ;(dialog.querySelector('wa-button[appearance="plain"]') as HTMLElement).click()
+      await el.updateComplete
+    }
     el.remove()
   })
 
-  // 3.1 验收「无可用 base url 不渲染入口」：三槽位全空 → 无 🔍 按钮。
-  it('hides the fetch action for a provider with no usable base URL', async () => {
+  // 4.2/D3 验收：成功 → 整单替换编辑器草稿列表；抓取零写请求；保存才落库。
+  it('replaces the editor draft wholesale; storage moves only through the normal save', async () => {
+    const el = await mount()
+    const dialog = await openEditorFor(el, 'beta')
+    expect(entryRows(dialog).length).toBe(0)
+
+    editorFetchButton(dialog)!.click()
+    await settle(el)
+
+    expect(apiMocks.fetchProviderModels).toHaveBeenCalledWith('beta')
+    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
+    expect(apiMocks.routerProviderCreate).not.toHaveBeenCalled()
+    expect(entryIds(dialog)).toEqual(['m-pro', 'm-flash'])
+
+    await saveEditor(el)
+    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledTimes(1)
+    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledWith('beta', {
+      protocol: 'auto',
+      base_url_anthropic: undefined,
+      base_url_openai_chat: 'https://b.example/v1',
+      base_url_openai_responses: undefined,
+      api_key_env: undefined,
+      default_model: undefined,
+      model_map: undefined,
+      models: [
+        { id: 'm-pro', tags: [] },
+        { id: 'm-flash', tags: [] },
+      ],
+    })
+    el.remove()
+  })
+
+  // 4.2 验收：同 id 保留人工 capability tags、按 id 去重（上游可能回重复）。
+  it('keeps manual capability tags for surviving ids and dedupes by id', async () => {
+    apiMocks.fetchProviderModels.mockResolvedValue({
+      provider: 'alpha',
+      models: ['m2', 'm3', 'm2'],
+    })
+    const el = await mount()
+    const dialog = await openEditorFor(el, 'alpha')
+    // alpha 存量目录：m1、m2(vision)。抓取后骨架 = m2、m3（重复 m2 折叠），
+    // m2 的人工 vision 保留。
+    expect(entryIds(dialog)).toEqual(['m1', 'm2'])
+
+    editorFetchButton(dialog)!.click()
+    await settle(el)
+
+    expect(entryIds(dialog)).toEqual(['m2', 'm3'])
+    const vision = entryRows(dialog)[0]!.querySelector(
+      'input[data-testid="tag-vision"]',
+    ) as HTMLInputElement
+    expect(vision.checked).toBe(true)
+
+    await saveEditor(el)
+    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledWith('alpha', {
+      protocol: 'auto',
+      preset: 'deepseek',
+      models: [
+        { id: 'm2', tags: ['vision'] },
+        { id: 'm3', tags: [] },
+      ],
+    })
+    el.remove()
+  })
+
+  // 4.3 验收：取消编辑器 = 丢弃抓取结果，存储不变。
+  it('cancelling the editor discards the fetch', async () => {
+    const el = await mount()
+    const dialog = await openEditorFor(el, 'beta')
+    editorFetchButton(dialog)!.click()
+    await settle(el)
+    expect(entryIds(dialog)).toEqual(['m-pro', 'm-flash'])
+
+    ;(dialog.querySelector('wa-button[appearance="plain"]') as HTMLElement).click()
+    await el.updateComplete
+    expect((el as unknown as { editor: unknown }).editor).toBeNull()
+    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
+
+    // 重开编辑器：草稿回到存量目录（空），不是抓取结果。
+    const dialog2 = await openEditorFor(el, 'beta')
+    expect(entryRows(dialog2).length).toBe(0)
+    el.remove()
+  })
+
+  // 3.3 验收（继承）：失败如实呈现净化原因、绝不冒充空成功列表；草稿不动。
+  it('keeps the draft and reports the sanitized reason on failure', async () => {
+    apiMocks.fetchProviderModels.mockRejectedValue(
+      new ApiError(502, "fetch_models: provider 'beta' 上游抓取失败: HTTP 401 Unauthorized"),
+    )
+    const el = await mount()
+    const dialog = await openEditorFor(el, 'beta')
+    // 先手工加一条，证明失败后草稿原样保留。
+    ;(dialog.querySelector('button[data-testid="add-model-entry"]') as HTMLButtonElement).click()
+    await el.updateComplete
+    const manual = entryRows(dialog)[0]!.querySelector('wa-input') as unknown as {
+      value: string
+      dispatchEvent: (e: Event) => boolean
+    }
+    manual.value = 'manual-1'
+    manual.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    await el.updateComplete
+
+    editorFetchButton(dialog)!.click()
+    await settle(el)
+
+    const err = dialog.querySelector('.fetch-error[role="alert"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('HTTP 401')
+    expect(entryIds(dialog)).toEqual(['manual-1'])
+    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  // spec「no base URL means no fetch entry」：三槽位全空的 provider，编辑器
+  // 不渲染 fetch 动作。
+  it('renders no fetch action in the editor for a provider without a usable base URL', async () => {
     apiMocks.routerProviders.mockResolvedValue({
       providers: [
         {
@@ -637,102 +769,49 @@ describe('add-fetch-models：provider 抓取入口与挑选语义', () => {
       ],
     })
     const el = await mount()
-    await goto(el, 2)
-    expect(fetchButtonFor(el, 'urlless')).toBeNull()
+    const dialog = await openEditorFor(el, 'urlless')
+    expect(editorFetchButton(dialog)).toBeNull()
     el.remove()
   })
 
-  // 3.2 验收「抓取本身不提交任何写请求，挑选后才提交」：抓取只调
-  // fetchProviderModels；挑选某个 id 才发一次 routerProviderUpdate（普通
-  // 编辑 PUT），payload 是完整的 custom 字段集 + models 追加该 id。
-  it('fetch submits no write; picking a fetched id issues one ordinary edit', async () => {
+  // D4 边界：新建模式没有已存储的 provider 可探测（probe op 按 name 寻址），
+  // 即便 presetDef 有 code-table URL 也不渲染 fetch 动作。
+  it('renders no fetch action in create editors', async () => {
     const el = await mount()
-    await goto(el, 2)
-    apiMocks.routerProviderUpdate.mockClear()
-    apiMocks.routerProviderUpdate.mockResolvedValue({ updated: 'beta' })
-
-    fetchButtonFor(el, 'beta')!.click()
-    await settle(el)
-    // 抓取本身零写请求。
-    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
-    expect(apiMocks.routerProviderCreate).not.toHaveBeenCalled()
-
-    // 挑选 m-pro → 普通编辑 PUT：models 追加该 id（条目形态，text 隐含），
-    // 其余字段无损回填。
-    pickButtons(el)[0]!.click()
-    await settle(el)
-    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledTimes(1)
-    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledWith('beta', {
-      name: 'beta',
-      base_url_anthropic: undefined,
-      base_url_openai_chat: 'https://b.example/v1',
-      base_url_openai_responses: undefined,
-      api_key_env: undefined,
-      default_model: undefined,
-      protocol: undefined,
-      model_map: undefined,
-      models: [{ id: 'm-pro', tags: [] }],
-    })
+    for (const label of ['New (preset)', 'New (custom)']) {
+      const dialog = await openCreateEditor(el, label)
+      expect(editorFetchButton(dialog)).toBeNull()
+      ;(dialog.querySelector('wa-button[appearance="plain"]') as HTMLElement).click()
+      await el.updateComplete
+    }
     el.remove()
   })
 
-  // 3.2 验收（preset 语义）：preset 派生 provider 的目录跟随代码表，挑选
-  // 走 default_model 编辑（与 /provider 卡片「使用 <model>」同一契约）。
-  it('picking on a preset-derived provider edits default_model, not the code-table catalog', async () => {
-    const el = await mount()
-    await goto(el, 2)
-    apiMocks.routerProviderUpdate.mockClear()
-    apiMocks.routerProviderUpdate.mockResolvedValue({ updated: 'alpha' })
-
-    fetchButtonFor(el, 'alpha')!.click()
-    await settle(el)
-    pickButtons(el)[0]!.click()
-    await settle(el)
-    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledWith('alpha', {
-      preset: 'deepseek',
-      default_model: 'm-pro',
-    })
-    el.remove()
-  })
-
-  // 3.3 验收：失败如实呈现净化原因，绝不渲染空结果列表冒充「没有模型」。
-  it('renders the sanitized failure instead of an empty list', async () => {
-    apiMocks.fetchProviderModels.mockRejectedValue(
-      new ApiError(502, "fetch_models: provider 'beta' 上游抓取失败: HTTP 401 Unauthorized"),
+  // 4.3 验收：fetch 在飞时按钮 disabled。
+  it('disables the fetch button while the request is in flight', async () => {
+    let release!: (v: { provider: string; models: string[] }) => void
+    apiMocks.fetchProviderModels.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve
+      }),
     )
     const el = await mount()
-    await goto(el, 2)
-    fetchButtonFor(el, 'beta')!.click()
+    const dialog = await openEditorFor(el, 'beta')
+    const btn = editorFetchButton(dialog)!
+    btn.click()
+    await el.updateComplete
+    expect(btn.disabled).toBe(true)
+    release({ provider: 'beta', models: ['m-pro'] })
     await settle(el)
-
-    const callout = el.shadowRoot!.querySelector('.callout-error')
-    expect(callout).toBeTruthy()
-    expect(callout!.textContent).toContain('HTTP 401')
-    // 失败 ≠ 空列表：不渲染结果列表、不渲染挑选按钮。
-    expect(el.shadowRoot!.querySelector('.fetch-result-list')).toBeNull()
-    expect(pickButtons(el).length).toBe(0)
-    el.remove()
-  })
-
-  // 3.3 验收（redesign-provider-models-settings）：表单重做后抓取入口仍
-  // 可达——预制派生与定制的行内 🔍 都能触发，机制与语义归 add-fetch-models，
-  // 本 change 未新增抓取语义（上方两条用例原样保留即为此证）。
-  it('3.3 keeps the fetch entry reachable for preset and custom providers after the form rework', async () => {
-    const el = await mount()
-    await goto(el, 2)
-    expect(fetchButtonFor(el, 'alpha')).toBeTruthy()
-    expect(fetchButtonFor(el, 'beta')).toBeTruthy()
-    fetchButtonFor(el, 'alpha')!.click()
-    await settle(el)
-    expect(apiMocks.fetchProviderModels).toHaveBeenCalledWith('alpha')
-    expect(pickButtons(el).length).toBe(2)
+    expect(btn.disabled).toBe(false)
+    expect(entryIds(dialog)).toEqual(['m-pro'])
     el.remove()
   })
 })
 
 describe('redesign-provider-models-settings 2.1：wa-hide 来源守卫', () => {
   async function openEditor(el: SebasSettingsModal): Promise<HTMLElement> {
-    await goto(el, 2)
+    await goto(el, 3)
     const newBtn = waButtons(el).find((b) => b.textContent?.includes('New (preset)'))!
     expect(newBtn).toBeTruthy()
     newBtn.click()
@@ -768,7 +847,7 @@ describe('redesign-provider-models-settings 2.1：wa-hide 来源守卫', () => {
 describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
   /** 打开预制编辑器并等它渲染。 */
   async function openPresetEditor(el: SebasSettingsModal): Promise<HTMLElement> {
-    await goto(el, 2)
+    await goto(el, 3)
     waButtons(el)
       .find((b) => b.textContent?.includes('New (preset)'))!
       .click()
@@ -850,11 +929,25 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
     expect(payload.models).toBeUndefined()
     el.remove()
   })
+
+  it('the entries block reads "Models" with a bare full-width ＋ and no hint copy', async () => {
+    const el = await mount()
+    const dialog = await openPresetEditor(el)
+    // revamp…3.1：区块标签改「Models」、两句提示语删除。
+    expect(dialog.querySelector('.model-entries .entries-label')?.textContent?.trim()).toBe('Models')
+    expect(dialog.querySelector('.entries-hint')).toBeNull()
+    // 「＋ Add model」改纯 ＋ 通栏按钮。
+    const add = dialog.querySelector('button[data-testid="add-model-entry"]') as HTMLButtonElement
+    expect(add).toBeTruthy()
+    expect(add.textContent?.trim()).toBe('＋')
+    expect(add.classList.contains('add-model')).toBe(true)
+    el.remove()
+  })
 })
 
 describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 折叠', () => {
   async function openCustomEditor(el: SebasSettingsModal): Promise<HTMLElement> {
-    await goto(el, 2)
+    await goto(el, 3)
     waButtons(el)
       .find((b) => b.textContent?.includes('New (custom)'))!
       .click()
