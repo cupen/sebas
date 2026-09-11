@@ -118,6 +118,29 @@ docker run -d --name sebas \
 
 ---
 
+## 远程执行节点（`sebas-node`，实验性）
+
+把 agent 会话放到主控以外的机器上执行。节点是**独立二进制**（第二个可分发产物，不含 core / webui / router / im 等主控角色），**出站** websocket 连回主控——节点无需任何入站端口。特性默认关闭（`[node_link] enabled = false`，`listen` 默认仅回环 `127.0.0.1:9878`）。
+
+```toml
+[node_link]
+enabled = true
+listen = "127.0.0.1:9878"
+```
+
+```bash
+sebas node-link -c ./config.toml token            # 签发一次性配对 token（打到 stdout）
+sebas-node --node-id dev-box \
+  --control-plane ws://<主控地址>:9878 \
+  --join-token <token> --state-dir /var/lib/sebas-node
+sebas node-link -c ./config.toml list             # 查看节点与在线态
+sebas node-link -c ./config.toml revoke dev-box   # 吊销（同 id 不能靠重新配对绕过）
+```
+
+动手前必须知道的三点：**节点侧 `wss://` 尚未实现**——TLS 由部署方的反代/VPN 终止，节点连本地代理的 `ws://`；**项目目录必须已在节点机上存在**——主控不创建、不 clone；**主控缺席时权限请求无限期 park**——`ask` 模式会话无法推进，节点没有本地放行也没有超时。完整说明见 [docs/remote-execution-node.md](docs/remote-execution-node.md)。
+
+---
+
 ## 接入飞书（可选）
 
 飞书只是 sebas 的一个可选通道，用于离开工位后远程遥控——不接入不影响网页工作台的任何功能。
@@ -222,6 +245,8 @@ sebas/
 ├── sebas-router/         # 路由引擎（会话映射、命令解析、权限状态机）
 ├── sebas-acp/            # ACP 桥：驱动 Claude Code 等外部 agent
 ├── sebas-agent/          # 原生 agent 内核（开发中）
+├── sebas-node/           # 执行节点：独立二进制 sebas-node（远程执行，不含主控角色）
+├── sebas-node-link/      # 主控 ↔ 节点共用的链路协议契约类型（两侧都可依赖的叶子 crate）
 ├── sebas-router/         # 模型路由：LLM provider 透传代理（Anthropic/OpenAI 双协议；原 sebas-gateway）
 ├── sebas-dispatch/       # 会话分发领域层（会话映射/命令/权限；原 sebas-router）
 ├── config/               # 配置文件示例
