@@ -1033,6 +1033,7 @@ mod tests {
             backend: None,
             usage: None,
             pending: Vec::new(),
+            remote: None,
         };
         fe.on_session_info(info.clone()).await;
         {

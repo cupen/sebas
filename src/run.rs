@@ -347,13 +347,96 @@ pub async fn run(
     // watchdog ready（D4/3.1）：bind 失败在 ready 之前返回 Err → main 统一
     // 出口以 75 退出，socket 生命周期（accept 循环、优雅退出删 socket 文件）
     // 仍归 [`crate::core_channel::server::serve_bound`] 所有。
+    // 节点注册表写者句柄（add-remote-execution-node 2.7）：必须在 arm_core_channel
+    // **之前**打开——通道要拿同一个句柄承载节点管理入口（签发 token / 列节点 /
+    // 吊销）。注册表是单写者文件，另开实例会与它互相覆盖。
+    let node_registry = if cfg.node_link.enabled {
+        Some(
+            crate::node_link::runtime::open_registry(
+                &cfg.node_link,
+                std::path::Path::new(&config_path),
+            )
+            .map_err(|e| crate::error::SebasError::Config(format!("节点注册表不可用：{e}")))?,
+        )
+    } else {
+        None
+    };
+
+    // 远端会话投影（add-remote-execution-node 5.1/5.3）：节点链路启用时才有——
+    // 没有节点就没有远端会话，硬放一个空投影只会让快照多一次无谓的合并。
+    let projection = node_registry
+        .as_ref()
+        .map(|_| crate::node_link::RemoteProjection::new());
+
     let armed_channel = arm_core_channel(
         &cfg,
         std::path::Path::new(&config_path),
         webui_backend.clone(),
         &router,
+        node_registry.clone(),
+        projection.clone(),
     )
     .await?;
+
+    // 执行节点入站链路（add-remote-execution-node D13）：由 core 托管，默认关
+    // （`[node_link] enabled = true` 才开）。bind 在 ready 之前完成，失败即启动
+    // 失败（75），不顶着"监听没起来"继续对外服务。
+    let armed_node_link = match &node_registry {
+        None => None,
+        Some(registry) => {
+            // 接入/断开都通知投影：接入即按节点的事实对账（重建视图并续传），
+            // 断开只把会话标成"暂时看不见"（**不终止**——执行事实在节点上）。
+            let observer = projection
+                .as_ref()
+                .map(|p| crate::node_link::ProjectionObserver::new(std::sync::Arc::clone(p)));
+            // 内置 router 的地址只有主控知道（随机端口）；把它与主控 router 的
+            // 下游凭据一并告知节点——节点因此**零 provider 凭据**也能出网（7.2）。
+            // 没启用内置 router 时是 None：节点配了 control-plane-router 会如实拒绝，
+            // 而不是猜一个地址去撞。
+            let router_endpoint = crate::node_link::server::RouterEndpoint {
+                url: router_cfg
+                    .as_ref()
+                    .map(|c| format!("http://{}", c.listen)),
+                token: router_cfg
+                    .as_ref()
+                    .and_then(|c| c.auth_token.first().cloned()),
+            };
+            let served = crate::node_link::runtime::serve_registry(
+                &cfg.node_link,
+                std::sync::Arc::clone(registry),
+                observer,
+                router_endpoint,
+            )
+            .await
+            .map_err(|e| {
+                crate::error::SebasError::Config(format!("节点链路监听失败：{e}"))
+            })?;
+            // 首配 token 在**通道与监听都已 bind 之后**才签发：否则通道 bind 失败时
+            // 操作者会先看到日志里的 token、却因启动失败而作废。签发不出来说明注册表
+            // 写不动，那是与 bind 失败同级的问题——如实启动失败，不静默降级。
+            match crate::node_link::runtime::issue_bootstrap_token(
+                registry,
+                cfg.node_link.bootstrap_token_ttl_secs,
+            )
+            .await
+            {
+                Ok(Some(token)) => tracing::warn!(
+                    "节点链路已开放（{}）。bootstrap 配对 token（只显示这一次，{} 秒内有效）：{}",
+                    served.listen,
+                    cfg.node_link.bootstrap_token_ttl_secs,
+                    token
+                ),
+                Ok(None) => tracing::info!("节点链路已开放（{}）", served.listen),
+                Err(e) => {
+                    return Err(crate::error::SebasError::Config(format!(
+                        "节点链路首配 token 签发失败：{e}"
+                    )));
+                }
+            }
+            Some(served)
+        }
+    };
+
     // 3.1（D4）：ready 打点后移——通道已 bind、secret 已落盘，此刻发 ready
     // 才满足「ready ⟹ 已武装」。裸 core（无 watchdog）此步为 no-op。
     if let Some(ipc) = watchdog_ipc.as_mut() {
@@ -416,6 +499,11 @@ pub async fn run(
     // （socket 不在时客户端根本走不到握手）。
     {
         let _ = armed_channel.shutdown.send(true);
+        // 节点链路随之收摊：停止接受新连接（已接入的节点会按退避重连，
+        // 这与「主控重启不影响远端执行」一致——节点侧的执行不因主控离开而终止）。
+        if let Some(node_link) = &armed_node_link {
+            node_link.close();
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
@@ -543,6 +631,12 @@ pub(crate) async fn arm_core_channel(
     config_path: &std::path::Path,
     backend: std::sync::Arc<dyn sebas_webui::session_backend::SessionBackend>,
     router: &sebas_dispatch::engine::DispatchHandle,
+    // 节点链路的注册表写者句柄（add-remote-execution-node 2.7）：通道据此承载
+    // 节点管理入口。`None` = 节点链路未启用（管理操作如实回 Disabled）。
+    node_registry: Option<std::sync::Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
+    // 远端会话投影（5.1）：`None` = 节点链路未启用。有了它，通道快照/订阅流里
+    // 才会出现跑在节点上的会话；没有它就与今日完全一致。
+    projection: Option<std::sync::Arc<crate::node_link::RemoteProjection>>,
 ) -> Result<ArmedChannel> {
     let channel_path = crate::core_channel::socket_path(cfg);
     // bind 先行（1.3/D4）：路径被存活进程占用 → 硬错误，调用方在 ready 之前
@@ -574,6 +668,8 @@ pub(crate) async fn arm_core_channel(
             channel_path,
             serve_secret,
             listener,
+            node_registry,
+            projection,
             close_rx,
         )
         .await

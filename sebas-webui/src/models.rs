@@ -19,6 +19,12 @@ pub enum SessionStatus {
     Done,
     Failed,
     Dormant,
+    /// （add-remote-execution-node 8.4）会话**在等人批**，不是在干活。
+    ///
+    /// 它由 `remote.parked_approvals > 0` 投影而来，不是 mapping 的原始状态：
+    /// 一个进程活着、有悬空审批的远端的会话，其底层 status 仍是 active——
+    /// 直接呈现 active 会让操作者以为它在跑。
+    Waiting,
 }
 
 impl SessionStatus {
@@ -56,6 +62,7 @@ impl SessionStatus {
             Self::Done => "Done",
             Self::Failed => "Failed",
             Self::Dormant => "Dormant",
+            Self::Waiting => "Waiting",
         }
     }
 
@@ -69,6 +76,7 @@ impl SessionStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Dormant => "dormant",
+            Self::Waiting => "waiting",
         }
     }
 
@@ -82,6 +90,22 @@ impl SessionStatus {
             Self::Done => "✓",
             Self::Failed => "✕",
             Self::Dormant => "·",
+            Self::Waiting => "⏸",
+        }
+    }
+
+    /// （add-remote-execution-node 8.4）把「有悬空审批」投影进状态词。
+    ///
+    /// 只把**非终态**改成 Waiting：一个已经 Done/Failed 的会话不该因为历史
+    /// 上留了一条没答的审批就看起来还在等人。底层 `status` 不变（active 计数
+    /// 照旧），变的是呈现。
+    pub fn with_parked_approvals(self, parked: u32) -> Self {
+        if parked == 0 {
+            return self;
+        }
+        match self {
+            Self::Done | Self::Failed => self,
+            _ => Self::Waiting,
         }
     }
 }
@@ -159,6 +183,10 @@ pub struct SessionRow {
     /// （workbench-turn-queue 7.4）待生效提交条数——Rail 关闭确认对话框
     /// 点名「将丢弃 N 条」的数据源。
     pub pending_count: usize,
+    /// （add-remote-execution-node 8.x）远端会话的节点/mode/悬空审批呈现信息。
+    /// 直接透传 core 的 [`sebas_dispatch::RemoteSessionView`]：`None` = 主控本机
+    /// 会话（节点维度对它不存在），**不伪造**一个 `online`。
+    pub remote: Option<sebas_dispatch::RemoteSessionView>,
 }
 
 /// Dashboard overview data.
@@ -272,6 +300,38 @@ mod tests {
         );
     }
 
+    /// add-remote-execution-node 8.4：悬空审批把非终态投影为 Waiting（在等人，
+    /// 不是在跑）；终态不因一条历史悬空审批而被改写；0 条不改变任何东西。
+    #[test]
+    fn parked_approvals_project_a_waiting_status() {
+        assert_eq!(
+            SessionStatus::Working.with_parked_approvals(2),
+            SessionStatus::Waiting
+        );
+        assert_eq!(
+            SessionStatus::Queued.with_parked_approvals(1),
+            SessionStatus::Waiting
+        );
+        assert_eq!(
+            SessionStatus::Starting.with_parked_approvals(1),
+            SessionStatus::Waiting
+        );
+        // 终态不被改写：会话已经结束了。
+        assert_eq!(
+            SessionStatus::Done.with_parked_approvals(1),
+            SessionStatus::Done
+        );
+        assert_eq!(
+            SessionStatus::Failed.with_parked_approvals(1),
+            SessionStatus::Failed
+        );
+        // 没有悬空审批 = 原状态。
+        assert_eq!(
+            SessionStatus::Working.with_parked_approvals(0),
+            SessionStatus::Working
+        );
+    }
+
     /// Both ends of an id survive truncation, and the result never exceeds
     /// the budget — the point of eliding the middle rather than the tail.
     #[test]
@@ -308,6 +368,7 @@ mod tests {
             SessionStatus::Done,
             SessionStatus::Failed,
             SessionStatus::Dormant,
+            SessionStatus::Waiting,
         ];
         let mut slugs: Vec<_> = all.iter().map(|s| s.slug()).collect();
         slugs.sort_unstable();

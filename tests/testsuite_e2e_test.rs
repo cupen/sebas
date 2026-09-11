@@ -23,6 +23,293 @@ use support::{
     wait_unreachable_with_cause, webui_healthy,
 };
 
+/// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次，读过就没了）。
+async fn wait_bootstrap_token(sb: &Sandbox) -> String {
+    let log = sb.core_log.clone();
+    let hint = sb.path.clone();
+    wait_for(
+        "core 打印一次性 bootstrap 配对 token",
+        Duration::from_secs(20),
+        &hint,
+        move || {
+            let log = log.clone();
+            Box::pin(async move {
+                let text = std::fs::read_to_string(&log).ok()?;
+                // 形如：… bootstrap 配对 token（只显示这一次，600 秒内有效）：<64hex>
+                text.split("有效）：")
+                    .nth(1)
+                    .and_then(|rest| {
+                        let token: String = rest
+                            .trim_start()
+                            .chars()
+                            .take_while(|c| c.is_ascii_hexdigit())
+                            .collect();
+                        (token.len() == 64).then_some(token)
+                    })
+            })
+        },
+    )
+    .await
+}
+
+/// 等某节点在**工作台可见的节点面**上进入给定状态（经 HTTP，不查内部结构）。
+async fn wait_node_status(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    node_id: &str,
+    want: &str,
+) {
+    let url = format!("{}/api/nodes", sb.webui_url());
+    let want = want.to_string();
+    let want_in_closure = want.clone();
+    let node_id = node_id.to_string();
+    let hint = sb.path.clone();
+    let got = wait_for(
+        &format!("节点 {node_id} 状态变为 {want}"),
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            let want = want_in_closure.clone();
+            let node_id = node_id.clone();
+            Box::pin(async move {
+                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let nodes = v.get("nodes")?.as_array()?.clone();
+                let found = nodes
+                    .iter()
+                    .find(|n| n.get("id").and_then(|i| i.as_str()) == Some(node_id.as_str()))?;
+                let status = found.get("status").and_then(|s| s.as_str())?;
+                (status == want).then_some(status.to_string())
+            })
+        },
+    )
+    .await;
+    assert_eq!(got, want);
+}
+
+/// 9.3 进程级 e2e：**core 与 node 是两个进程**。
+///
+/// 覆盖：一次性 bootstrap token 配对 → 节点在工作台可见 → 项目路径由**节点**判定
+/// → 杀节点后如实离线 → 节点带原凭据重启后免刷新恢复（core 没动）→ 杀主控重启后
+/// 节点自动重连并重新登记（主控视图重建，执行侧不受影响）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn remote_node_pairs_survives_node_and_core_restarts() {
+    let sb = Sandbox::new("testsuite_e2e", "remote-node");
+    sb.enable_node_link();
+    let node_work = sb.node_work_dir();
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 1) 配对：token 只打印一次，节点用它换长期凭据。
+    let token = wait_bootstrap_token(&sb).await;
+    let mut node = sb.spawn_node("itest-node", Some(&token));
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+
+    // 2) 远端项目注册：主控不 stat 这个路径，**节点**说了算。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({
+            "path": node_work.to_string_lossy(),
+            "node_id": "itest-node",
+        }),
+    )
+    .await
+    .expect("register remote project");
+    assert_eq!(status, 201, "远端项目注册应由节点校验通过: {body}");
+
+    // 3) 在**节点上**建会话并跑一轮：项目决定节点（d1），所以带上项目 id。
+    let project_id = body["id"].as_str().expect("project id").to_string();
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "prompt": "hello",
+            "agent": "echo",
+            "project_id": project_id,
+        }),
+    )
+    .await
+    .expect("create remote session");
+    assert_eq!(status, 201, "远端会话应建立成功: {body}");
+    let key = body["key"].as_str().expect("session key").to_string();
+
+    // 会话真的要落到节点上：投影把节点维度带到了工作台。
+    let row = wait_for(
+        "远端会话出现在工作台上并标注其节点",
+        Duration::from_secs(20),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = format!("{}/api/sessions", sb.webui_url());
+            let key = key.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                let key = key.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let rows = v.get("recent_sessions")?.as_array()?.clone();
+                    rows.into_iter().find(|r| {
+                        r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str())
+                    })
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        row["remote"]["node_id"].as_str(),
+        Some("itest-node"),
+        "远端行必须点名它跑在哪台机器上: {row}"
+    );
+
+    // 4) 一轮跑通：echo 执行体的应答经节点日志 → 事件流 → 工作台转写可见。
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let transcript = wait_for(
+        "远端会话的转写出现 echo 应答",
+        Duration::from_secs(20),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let text = v
+                        .get("entries")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    text.contains("echo: hello").then_some(text)
+                })
+            }
+        },
+    )
+    .await;
+    assert!(transcript.contains("echo: hello"), "{transcript}");
+
+    // 5) kill 主控重启：执行事实在节点上，重建视图后**对账补回**这一段。
+    core.kill().await.expect("kill core");
+    let _ = core.wait().await;
+    let mut core = sb.spawn_core();
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+    let recovered = wait_for(
+        "主控重启后对账补回远端会话的转写",
+        Duration::from_secs(30),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let text = v
+                        .get("entries")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    text.contains("echo: hello").then_some(text)
+                })
+            }
+        },
+    )
+    .await;
+    assert!(
+        recovered.contains("echo: hello"),
+        "主控重启后必须能从节点回拉出这轮事实（对账补齐）: {recovered}"
+    );
+
+    // 6) 悬空审批：`run:` 触发执行体里的受门控动作 → 节点停住、上报、等人批。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "run: echo gated" }),
+    )
+    .await
+    .expect("send gated prompt");
+    assert_eq!(status, 200, "{body}");
+
+    // 「等待 ≠ 运行中」（spec 8.4）：有悬空审批的会话必须呈现为 waiting。
+    let waiting = wait_for(
+        "悬空审批把远端会话呈现为等待",
+        Duration::from_secs(20),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = format!("{}/api/sessions", sb.webui_url());
+            let key = key.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                let key = key.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let rows = v.get("recent_sessions")?.as_array()?.clone();
+                    let row = rows
+                        .into_iter()
+                        .find(|r| r.get("encoded_key").and_then(|k| k.as_str()) == Some(key.as_str()))?;
+                    let parked = row.get("remote")?.get("parked_approvals")?.as_u64()?;
+                    (parked > 0).then_some(row)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(waiting["status_slug"].as_str(), Some("waiting"), "{waiting}");
+
+    // 7) 杀节点：如实离线（不是"已终止"，也不是继续假装在线）。
+    node.kill().await.expect("kill node");
+    let _ = node.wait().await;
+    wait_node_status(&cli, &sb, "itest-node", "offline").await;
+
+    // 8) 节点带**原凭据**重启（不给 token）：主控进程没动，应免刷新恢复，
+    //    且节点上那个会话还在（链路断了不等于会话没了）。
+    let mut node = sb.spawn_node("itest-node", None);
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+    wait_for(
+        "重启后的节点仍持有那个会话",
+        Duration::from_secs(30),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let text = v
+                        .get("entries")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    text.contains("echo: hello").then_some(text)
+                })
+            }
+        },
+    )
+    .await;
+
+    core.kill().await.ok();
+    node.kill().await.ok();
+}
+
+
 /// Startup: core + standalone webui come up, webui reports the core channel
 /// reachable and /health serves.
 #[tokio::test]

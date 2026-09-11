@@ -105,6 +105,8 @@ impl NativeSession {
             // wire-webui-sebas-agent-e2e D4：native 会话在快照/事件中自带执行体标。
             backend: Some("native".into()),
             pending: Vec::new(), // native 会话无 core 侧待执行栈
+            // 原生内核会话跑在主控本机，没有节点维度。
+            remote: None,
         }
     }
 }
@@ -618,6 +620,15 @@ impl SessionBackend for NativeAgentBackend {
 /// the optional backend hint (`"native"` → the built-in kernel; anything else
 /// → the Claude Code bridge); every other call routes on the key prefix
 /// (`agent-*` chat ids belong to native sessions).
+/// 节点参数里"真的在远端"的那个值（`None`/空/`local` = 本机）。
+///
+/// 与 `sebas_webui::session_backend` 的同名私有函数语义一致：本机标识是
+/// `projects::LOCAL_NODE_ID`，两边必须同一个词。
+fn remote_node_of(node: Option<&str>) -> Option<&str> {
+    node.map(str::trim)
+        .filter(|n| !n.is_empty() && *n != sebas_webui::projects::LOCAL_NODE_ID)
+}
+
 pub struct DualSessionBackend {
     pub acp: Arc<dyn SessionBackend>,
     pub native: Arc<NativeAgentBackend>,
@@ -815,7 +826,16 @@ impl SessionBackend for DualSessionBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        // 远端放置由 core 的节点链路负责（5.1）；这个复合后端只承载主控本机的
+        // 两种执行体。远端节点到这里说明调用路径走错了——如实拒绝，不悄悄在本机
+        // 建一个会话（那会让操作者以为任务跑在目标机器上）。
+        if let Some(remote) = remote_node_of(node.as_deref()) {
+            return Err(SessionRejection::Unavailable {
+                cause: format!("进程内后端不承载远端会话放置（节点 {remote}）"),
+            });
+        }
         Self::validate_agent_id(agent)?;
         if agent == "native" {
             let key = self.native.spawn(prompt, project_dir).await?;
@@ -832,7 +852,10 @@ impl SessionBackend for DualSessionBackend {
         // agent id 即 kind（D2）：ACP 侧按配置键名钉住 kind。模型 id
         // （add-acp-model-selection）随 spawn 透传。
         else {
-            self.acp.spawn_with(prompt, project_dir, agent, model).await
+            // 已经确认是本机会话，向下转发时节点参数就是 `None`。
+            self.acp
+                .spawn_with(prompt, project_dir, agent, model, None)
+                .await
         }
     }
 
@@ -843,7 +866,13 @@ impl SessionBackend for DualSessionBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        if let Some(remote) = remote_node_of(node.as_deref()) {
+            return Err(SessionRejection::Unavailable {
+                cause: format!("进程内后端不承载远端会话放置（节点 {remote}）"),
+            });
+        }
         Self::validate_agent_id(agent)?;
         if agent == "native" {
             let key = self.native.spawn(String::new(), project_dir).await?;
@@ -853,7 +882,9 @@ impl SessionBackend for DualSessionBackend {
             }
             Ok(key)
         } else {
-            self.acp.create_placeholder(project_dir, agent, model).await
+            self.acp
+                .create_placeholder(project_dir, agent, model, None)
+                .await
         }
     }
 
@@ -1048,7 +1079,7 @@ mod tests {
         // backend hint = native → key 前缀 agent-；创建时选定的模型随 spawn
         // 生效于会话级 override（4.2：选中生效于快照）。
         let key = dual
-            .spawn_with("go".into(), None, "native", Some("m-spawn".into()))
+            .spawn_with("go".into(), None, "native", Some("m-spawn".into()), None)
             .await
             .expect("spawn native");
         assert!(DualSessionBackend::is_native(&key), "{:?}", key.reference);
@@ -1067,7 +1098,7 @@ mod tests {
         // D2：agent 必填——"claude" 在测试配置中不存在，但词汇合法；路由
         // 到 acp 侧（key 非 native 前缀即为断言点）。
         let acp_key = dual
-            .spawn_with("hi".into(), None, "claude", None)
+            .spawn_with("hi".into(), None, "claude", None, None)
             .await
             .expect("spawn acp");
         assert!(!DualSessionBackend::is_native(&acp_key));
@@ -1091,6 +1122,7 @@ mod tests {
                 "go".into(),
                 Some(ws.path().to_string_lossy().into()),
                 "native",
+                None,
                 None,
             )
             .await
@@ -1153,7 +1185,7 @@ mod tests {
         // 词汇形式非法：driver 命名空间残留（acp:*）、空串。
         for agent in ["acp", "acp:claude", ""] {
             let err = dual
-                .spawn_with("hi".into(), None, agent, None)
+                .spawn_with("hi".into(), None, agent, None, None)
                 .await
                 .expect_err("legacy/empty agent value must reject");
             match &err {
@@ -1169,7 +1201,7 @@ mod tests {
         }
         // 占位创建同受校验；且全程未产生任何会话。
         assert!(
-            dual.create_placeholder(None, "acp:claude", None)
+            dual.create_placeholder(None, "acp:claude", None, None)
                 .await
                 .is_err()
         );
@@ -1180,7 +1212,7 @@ mod tests {
 
         // 合法 agent id（含大小写敏感的普通 id、native）放行路由。
         for agent in ["claude", "native"] {
-            dual.spawn_with("hi".into(), None, agent, None)
+            dual.spawn_with("hi".into(), None, agent, None, None)
                 .await
                 .unwrap_or_else(|e| panic!("agent {agent:?} must route: {e}"));
         }
@@ -1205,7 +1237,7 @@ mod tests {
         let dual = DualSessionBackend::new(acp, native);
 
         let err = dual
-            .spawn_with("hi".into(), None, "native", None)
+            .spawn_with("hi".into(), None, "native", None, None)
             .await
             .expect_err("native without credentials must reject");
         let text = err.to_string();

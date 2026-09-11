@@ -224,6 +224,8 @@ fn build_router_full(
         )
         .route("/api/about", get(api::about))
         .route("/api/agents", get(api::agent_kinds))
+        // add-remote-execution-node 8.2：执行节点可用性（本机恒在线 + core 注册表）。
+        .route("/api/nodes", get(api::nodes))
         .route("/api/auth/me", get(api::auth_me))
         .route("/api/auth/login", post(api::auth_login))
         .route("/api/auth/logout", post(api::auth_logout))

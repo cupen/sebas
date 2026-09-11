@@ -25,6 +25,7 @@ const apiMocks = vi.hoisted(() => ({
   projectsList: vi.fn(),
   closeSession: vi.fn(),
   archiveSession: vi.fn(),
+  nodes: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -36,6 +37,7 @@ vi.mock('../api/client.js', () => ({
     projects: { branch: apiMocks.projectsBranch, list: apiMocks.projectsList },
     closeSession: apiMocks.closeSession,
     archiveSession: apiMocks.archiveSession,
+    nodes: apiMocks.nodes,
   },
 }))
 
@@ -177,6 +179,10 @@ beforeEach(() => {
     project_id: 'proj-sebas',
     branch: 'feat/webui',
     accessible: true,
+  })
+  apiMocks.nodes.mockResolvedValue({
+    nodes: [{ id: 'local', status: 'online', local: true }],
+    remote_available: true,
   })
 })
 
@@ -458,5 +464,104 @@ describe('provider label sourcing (fix-webui-detached-status)', () => {
     expect(await labelFor({ providers_available: true, providers: [] })).toBe(
       'no provider configured',
     )
+  })
+})
+
+/**
+ * add-remote-execution-node 8.3/8.4/8.5：远端会话的期望态 vs 生效态、auto 的
+ * ungated 标记、悬空审批的「等待 ≠ 运行中」，以及节点标注与离线成因。
+ */
+describe('remote session presentation (add-remote-execution-node 8.3-8.5)', () => {
+  async function mountWithRemote(
+    remote: NonNullable<SessionDetail['remote']>,
+  ): Promise<SebasDashboard> {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), remote })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    return el
+  }
+
+  it('shows both modes and says the desired mode is not enforced when they differ', async () => {
+    const el = await mountWithRemote({
+      node_id: 'dev-box',
+      node_status: 'online',
+      desired_mode: 'ask',
+      effective_mode: 'edit',
+      parked_approvals: 0,
+    })
+    const mismatch = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="mode-mismatch"]')
+    expect(mismatch).toBeTruthy()
+    // 两个值都要显示，且必须说明「没生效」——只显示期望值就是撒谎。
+    expect(mismatch!.textContent).toContain('ask')
+    expect(mismatch!.textContent).toContain('edit')
+    expect(mismatch!.textContent).toContain('无法强制')
+    el.remove()
+  })
+
+  it('shows a single mode without a mismatch note when desired == effective', async () => {
+    const el = await mountWithRemote({
+      node_id: 'dev-box',
+      node_status: 'online',
+      desired_mode: 'ask',
+      effective_mode: 'ask',
+      parked_approvals: 0,
+    })
+    expect(el.shadowRoot!.querySelector('[data-testid="mode-mismatch"]')).toBeNull()
+    const mode = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-mode"]')
+    expect(mode!.textContent).toContain('ask')
+    el.remove()
+  })
+
+  it('marks an auto session as ungated so it is distinguishable from a gated one', async () => {
+    const el = await mountWithRemote({
+      node_id: 'dev-box',
+      node_status: 'online',
+      desired_mode: 'auto',
+      effective_mode: 'auto',
+      parked_approvals: 0,
+    })
+    const ungated = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-ungated"]')
+    expect(ungated).toBeTruthy()
+    expect(ungated!.textContent).toContain('ungated')
+    el.remove()
+  })
+
+  it('presents a parked session as waiting, not running, and surfaces the count', async () => {
+    // 底层 status 仍是 working（进程活着）；有悬空审批就必须读作等待。
+    const el = await mountWithRemote({
+      node_id: 'dev-box',
+      node_status: 'online',
+      desired_mode: 'ask',
+      effective_mode: 'ask',
+      parked_approvals: 2,
+    })
+    const head = el.shadowRoot!.querySelector<HTMLElement>('.session-head')
+    expect(head!.getAttribute('data-status')).toBe('waiting')
+    const banner = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="parked-approvals"]')
+    expect(banner).toBeTruthy()
+    expect(banner!.textContent).toContain('2')
+    expect(banner!.textContent).toContain('等待')
+    // 决定入口（review cards）可达。
+    expect(el.shadowRoot!.querySelector('sebas-review-cards')).toBeTruthy()
+    el.remove()
+  })
+
+  it('labels the session with its node and states the cause when the node is unreachable', async () => {
+    const el = await mountWithRemote({
+      node_id: 'dev-box',
+      node_status: 'offline',
+      node_cause: '链路断开（节点进程未重连）',
+      desired_mode: 'ask',
+      effective_mode: 'ask',
+      parked_approvals: 0,
+    })
+    const tag = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-head-node"]')
+    expect(tag).toBeTruthy()
+    expect(tag!.textContent).toContain('dev-box')
+    // 成因写在 title 上（如实陈述，不是笼统的「不可用」）。
+    expect(tag!.getAttribute('title')).toContain('链路断开')
+    el.remove()
   })
 })

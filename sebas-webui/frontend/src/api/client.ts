@@ -7,7 +7,14 @@
  * on `ApiError.status`.
  */
 
-export type StatusSlug = 'starting' | 'queued' | 'working' | 'done' | 'failed' | 'dormant'
+export type StatusSlug =
+  | 'starting'
+  | 'queued'
+  | 'working'
+  | 'waiting'
+  | 'done'
+  | 'failed'
+  | 'dormant'
 
 /**
  * 待生效提交的处置（workbench-turn-queue D1）：`staging` = 并入首条消息
@@ -26,6 +33,46 @@ export interface PendingSubmission {
   position: number
   disposition: PendingDisposition
   priority: boolean
+}
+
+/**
+ * （add-remote-execution-node 8.x）远端会话的呈现信息，逐字对应 core 的
+ * `RemoteSessionView`（冻结的 wire 契约）。`null`/缺省 = 主控本机会话——本机
+ * 没有「节点在线吗」这个维度，**不伪造**一个 `online`。
+ */
+export interface RemoteSessionView {
+  /** 会话所在执行节点的稳定标识。 */
+  node_id: string
+  /** `online` | `offline` | `terminated` | `gone`。 */
+  node_status: string
+  /** 离线/终止的成因（如实陈述；`terminated` 不等于「暂时联系不上」）。 */
+  node_cause?: string | null
+  /** 会话**期望**的 mode（`ask` / `edit` / `allow` / `auto`）。 */
+  desired_mode?: string | null
+  /** 执行体**实际强制**的 mode；与 desired 不同即「强制不了」，两个都要显示。 */
+  effective_mode?: string | null
+  /** 仍在等主控决定的悬空审批数；`> 0` = 在等人，不是在跑。 */
+  parked_approvals: number
+}
+
+/**
+ * （add-remote-execution-node 8.2）一个执行节点的可用性视图。真源是 core 的
+ * 节点注册表（`GET /api/nodes` 透传），`local: true` 表示主控本机——它永远
+ * 在线（否则你读不到这个响应）。
+ */
+export interface NodeInfo {
+  id: string
+  status: string
+  last_seen_unix?: number | null
+  created_unix?: number
+  local?: boolean
+}
+
+/** `GET /api/nodes` 的响应：`remote_available=false` = 注册表不可得（不是「没有节点」）。 */
+export interface NodesResponse {
+  nodes: NodeInfo[]
+  remote_available: boolean
+  cause?: string | null
 }
 
 export interface SessionRow {
@@ -55,6 +102,8 @@ export interface SessionRow {
   backend?: string | null
   /** （workbench-turn-queue 7.4）待生效提交条数（Rail 关闭确认文案用）。 */
   pending_count: number
+  /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
+  remote?: RemoteSessionView | null
 }
 
 export interface SessionSummary {
@@ -76,6 +125,8 @@ export interface SessionSummary {
   backend?: string | null
   /** （workbench-turn-queue 6.1）待生效提交全量视图（投递序）。 */
   pending: PendingSubmission[]
+  /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
+  remote?: RemoteSessionView | null
   /**
    * Focused session only（workbench-conversation-view 1.4）: the conversation
    * as one ordered entry sequence, same shape as the detail endpoint.
@@ -220,6 +271,8 @@ export interface SessionDetail {
   backend?: string | null
   /** （workbench-turn-queue 6.1）待生效提交全量视图（投递序）。 */
   pending: PendingSubmission[]
+  /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
+  remote?: RemoteSessionView | null
 }
 
 /**
@@ -532,8 +585,13 @@ const projects = {
   // harden-core-channel-deployment 4.2/D7：本地降级路径的响应携带
   // `degraded: {cause}`（状态库路径无此字段）——前端据此就地提示
   // 「核心不可达，已写入本地注册表」。
-  add: (path: string) =>
-    post<Project & { degraded?: { cause: string } }>('/api/projects', { path }),
+  // add-remote-execution-node 8.1：`nodeId` 非空 = 注册到指定执行节点；
+  // 缺省 = 本机节点（隐式，行为与既有注册一致）。远端路径由**该节点**判定。
+  add: (path: string, nodeId?: string | null) =>
+    post<Project & { degraded?: { cause: string } }>('/api/projects', {
+      path,
+      ...(nodeId ? { node_id: nodeId } : {}),
+    }),
   /** 按稳定 id 移除项目（workbench-agent-wire-fix 2.5）。 */
   remove: async (id: string) =>
     unwrapText(
@@ -559,6 +617,12 @@ export const api = {
   about: () => get<About>('/api/about'),
   /** Agent catalog（唯一可用性真源；workbench-agent-wire-fix 3.2）。 */
   agents: () => get<{ agents: AgentKindInfo[] }>('/api/agents'),
+  /**
+   * （add-remote-execution-node 8.2）执行节点可用性。本机节点恒在列且在线；
+   * 远端节点来自 core 注册表，`remote_available=false` 表示注册表不可得
+   * （与「没有远端节点」是两回事——前端不许混为一谈）。
+   */
+  nodes: () => get<NodesResponse>('/api/nodes'),
 
   // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie。
   // 登录为单字段形态：secret 可以是登录 token 或账户密码，服务端自动识别。）
@@ -759,6 +823,11 @@ export interface Project {
   id: string
   path: string
   name: string
+  /**
+   * （add-remote-execution-node 8.1）项目所在的执行节点。项目身份是
+   * `(节点, 路径)`：同一路径在两台机器上是两个项目。缺省/`local` = 主控本机。
+   */
+  node_id?: string
   /** 该项目最近一次创建会话所用 agent（composer 预选用）。 */
   default_agent?: string | null
   added_at: number

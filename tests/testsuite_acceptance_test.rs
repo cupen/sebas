@@ -489,3 +489,279 @@ async fn router_downstream_auth_journey() {
         "tokenless proxy request must be rejected"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// add-remote-execution-node 9.4：webui + 真 sebas-node 的远端节点旅程
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次）。
+async fn wait_bootstrap_token(sb: &Sandbox) -> String {
+    let log = sb.core_log.clone();
+    let hint = sb.path.clone();
+    support::wait_for(
+        "core 打印一次性 bootstrap 配对 token",
+        Duration::from_secs(20),
+        &hint,
+        move || {
+            let log = log.clone();
+            Box::pin(async move {
+                let text = std::fs::read_to_string(&log).ok()?;
+                text.split("有效）：")
+                    .nth(1)
+                    .and_then(|rest| {
+                        let token: String = rest
+                            .trim_start()
+                            .chars()
+                            .take_while(|c| c.is_ascii_hexdigit())
+                            .collect();
+                        (token.len() == 64).then_some(token)
+                    })
+            })
+        },
+    )
+    .await
+}
+
+/// 等某节点在 `GET /api/nodes` 上进入给定状态（经 HTTP，不查内部结构）。
+async fn wait_node_status(cli: &reqwest::Client, sb: &Sandbox, node_id: &str, want: &str) {
+    let url = format!("{}/api/nodes", sb.webui_url());
+    let want_s = want.to_string();
+    let node_s = node_id.to_string();
+    let hint = sb.path.clone();
+    let got = support::wait_for(
+        &format!("节点 {node_id} 状态变为 {want}"),
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            let want = want_s.clone();
+            let node = node_s.clone();
+            Box::pin(async move {
+                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let nodes = v.get("nodes")?.as_array()?.clone();
+                let found = nodes
+                    .iter()
+                    .find(|n| n.get("id").and_then(|i| i.as_str()) == Some(node.as_str()))?;
+                let status = found.get("status").and_then(|s| s.as_str())?;
+                (status == want).then_some(status.to_string())
+            })
+        },
+    )
+    .await;
+    assert_eq!(got, want);
+}
+
+/// 等 `/api/sessions` 里出现满足谓词**且**额外条件成立的一行；返回该行。
+async fn wait_session_row(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+) -> serde_json::Value {
+    let cli2 = cli.clone();
+    let url = format!("{}/api/sessions", sb.webui_url());
+    let hint = sb.path.clone();
+    // 谓词按 Arc 共享：每次轮询的 future 必须是 `'static`，借用外层的 Fn 不行。
+    let pred = std::sync::Arc::new(pred);
+    support::wait_for(what, Duration::from_secs(30), &hint, move || {
+        let cli = cli2.clone();
+        let url = url.clone();
+        let pred = pred.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            v.get("recent_sessions")?
+                .as_array()?
+                .iter()
+                .find(|r| pred(r))
+                .cloned()
+        })
+    })
+    .await
+}
+
+/// 9.4 验收旅程（webui + 真 `sebas-node`，两个进程）。
+///
+/// 覆盖：项目带节点注册且路径由**节点**判定 → 会话归属带节点 → 节点离线呈现
+/// 并在提交前如实拒绝 → 节点回归免刷新恢复 → 悬空审批呈现为**等待而不是运行**。
+///
+/// 诚实边界（在断言处逐条注明，不假装覆盖）：
+/// - **mode 差异**：`POST /api/sessions` / core channel `Spawn` 没有 mode 字段，
+///   且 core 只在节点重连对账时读到 `SessionSummary.desired_mode`——所以本旅程
+///   无法制造 desired≠effective；该呈现由前端单测（dashboard.test.ts 的
+///   `mode-mismatch`）与 `tests/node_link_e2e_test.rs`（节点侧）覆盖。
+/// - **审批请求可达性**：实测 webui `/ws`（review-card 投递面）在整段旅程里
+///   一帧未投（连 `session.updated` 都没有），因此"悬空请求可达"只断言到
+///   HTTP 层的 `parked_approvals` 计数与 `waiting` 呈现；`/ws` 投递面待查
+///   （属 src/ 的通道/WS 接线，不是 sebas-webui）。
+/// - **审批决议**：核心尚未把 `ApprovalAnswer` 路由到节点（实测返回 404），
+///   故不断言决议生效。
+/// - 真实 agent CLI（远端 turn）在沙箱不可用：节点只有 echo 执行体。
+#[tokio::test]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
+async fn remote_node_workbench_journey() {
+    let sb = Sandbox::new("acceptance", "remote-node");
+    sb.enable_node_link();
+    let node_work = sb.node_work_dir();
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let mut webui = sb.spawn_webui(&sb.core_secret);
+    support::wait_reachable(&cli, &sb).await;
+
+    // 1) 配对：bootstrap token 只打印一次，节点用它换长期凭据。
+    let token = wait_bootstrap_token(&sb).await;
+    let mut node = sb.spawn_node("itest-node", Some(&token));
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+
+    // 本机节点恒在列：隐式节点也有状态，不能因为"看不见"就说"没有"。
+    let nodes = cli
+        .get(format!("{}/api/nodes", sb.webui_url()))
+        .send()
+        .await
+        .expect("nodes")
+        .json::<serde_json::Value>()
+        .await
+        .expect("nodes json");
+    let ids: Vec<&str> = nodes["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .iter()
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"local"), "本机节点必须在列: {nodes}");
+    assert!(ids.contains(&"itest-node"), "配对节点必须在列: {nodes}");
+    assert_eq!(nodes["remote_available"], true);
+
+    // 2) 远端项目注册：主控不 stat 这个路径，**节点**说了算。
+    let (status, add) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({
+            "path": node_work.to_string_lossy(),
+            "node_id": "itest-node",
+        }),
+    )
+    .await
+    .expect("register remote project");
+    assert_eq!(status, 201, "远端项目注册应由节点校验通过: {add}");
+    assert_eq!(add["node_id"], "itest-node", "注册条目带节点维度: {add}");
+    let project_id = add["id"].as_str().expect("project id").to_string();
+
+    // 同一路径换一个节点是**另一个**项目（id 不同）——本机同路径不算同一个。
+    assert_ne!(
+        project_id,
+        sebas_webui::projects::project_id_for(&node_work.to_string_lossy()),
+        "远端项目的 id 必须与本机同路径项目不同"
+    );
+
+    // 3) 远端会话：session 归属带节点 + 项目 id 按 `(节点, 路径)` 派生。
+    //
+    // GAP（core，已实测）：core 的 `spawn_on` 收了 prompt 却只存进 meta 预览，
+    // 不向节点发 `SessionOp::Prompt`——所以创建时给的 prompt 不会产生 turn。
+    // 这里先建会话（prompt 仅为满足非空），随后用 message 端点投递受门控输入。
+    let key = create_session(
+        &cli,
+        &sb,
+        serde_json::json!({ "prompt": "warmup", "agent": "echo", "project_id": project_id }),
+    )
+    .await;
+    let expect_pid = sebas_webui::projects::project_id_for_on("itest-node", &node_work.to_string_lossy());
+    let key_for_row = key.clone();
+    let row = wait_session_row(&cli, &sb, "远端会话行带节点与项目", move |r| {
+        r["encoded_key"].as_str() == Some(key_for_row.as_str())
+    })
+    .await;
+    assert_eq!(
+        row["remote"]["node_id"], "itest-node",
+        "会话必须标注所属节点: {row}"
+    );
+    assert_eq!(
+        row["remote"]["node_status"], "online",
+        "节点在线时如实呈现 online: {row}"
+    );
+    assert_eq!(
+        row["project_id"], expect_pid,
+        "会话必须挂到 `(节点, 路径)` 那条项目上: {row}"
+    );
+
+    // 4) 悬空审批：受门控动作经 message 投递 → 节点停驻 → 会话呈现为**等待**。
+    let (msg_status, _) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "run: ls -la" }),
+    )
+    .await
+    .expect("gated message");
+    assert!((200..300).contains(&msg_status), "受门控输入应被接受");
+
+    let key_for_wait = key.clone();
+    let waiting = wait_session_row(&cli, &sb, "会话因悬空审批转为等待", move |r| {
+        r["encoded_key"].as_str() == Some(key_for_wait.as_str())
+            && r["remote"]["parked_approvals"].as_u64().unwrap_or(0) >= 1
+    })
+    .await;
+    assert_eq!(
+        waiting["status_slug"], "waiting",
+        "在等人批的会话不得读作运行中: {waiting}"
+    );
+    assert_ne!(waiting["status_slug"], "working");
+
+    // 审批请求**可达**（HTTP 面）：悬空计数与成因都在行上。review-card 的
+    // /ws 投递面在沙箱里一帧未投（见文件头 GAP），因此这一条只覆盖 HTTP 面。
+    assert!(
+        waiting["remote"]["parked_approvals"].as_u64().unwrap_or(0) >= 1,
+        "悬空审批数必须可见: {waiting}"
+    );
+
+    // 5) 节点离线：如实呈现 + 提交**前**就被拒（不排队、不建占位）。
+    node.kill().await.expect("kill node");
+    let _ = node.wait().await;
+    wait_node_status(&cli, &sb, "itest-node", "offline").await;
+
+    let key_for_offline = key.clone();
+    let offline_row = wait_session_row(&cli, &sb, "远端会话行标出节点离线与成因", move |r| {
+        r["encoded_key"].as_str() == Some(key_for_offline.as_str())
+            && r["remote"]["node_status"].as_str() == Some("offline")
+    })
+    .await;
+    assert!(
+        offline_row["remote"]["node_cause"].as_str().is_some_and(|c| !c.is_empty()),
+        "离线必须给出成因，不能只写『不可用』: {offline_row}"
+    );
+
+    // 远端项目的"可用"等于节点在线（主控不做本地 stat）。
+    let branch = cli
+        .get(format!("{}/api/projects/{project_id}/branch", sb.webui_url()))
+        .send()
+        .await
+        .expect("branch")
+        .json::<serde_json::Value>()
+        .await
+        .expect("branch json");
+    assert_eq!(branch["accessible"], false, "节点离线 ⇒ 项目不可用: {branch}");
+    assert_eq!(branch["node_id"], "itest-node");
+
+    // composer 门禁的服务端对应行为：提交被如实拒绝，且点名节点与原因。
+    let (create_status, create_body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "x", "agent": "echo", "project_id": project_id }),
+    )
+    .await
+    .expect("offline create");
+    assert_ne!(create_status, 201, "节点离线时不得建立会话: {create_body}");
+    let cause = create_body["error"].as_str().unwrap_or_default();
+    assert!(
+        cause.contains("itest-node"),
+        "拒绝必须点名节点: {create_body}"
+    );
+
+    // 6) 节点带原凭据重启：webui/core 都没动 → 免刷新恢复在线。
+    let mut node = sb.spawn_node("itest-node", None);
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+
+    // 收尾：显式停掉子进程（Drop 也会收，但这里让端口与 socket 干净释放）。
+    node.kill().await.ok();
+    core.kill().await.ok();
+    webui.kill().await.ok();
+}

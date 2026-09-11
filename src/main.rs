@@ -73,6 +73,26 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 Ok(())
             }
         },
+        Cmd::NodeLink(args) => {
+            let args = sebas::node_link_cmd::Args {
+                config: args.config,
+                cmd: match args.cmd {
+                    cli::NodeLinkCmd::Token { ttl } => {
+                        sebas::node_link_cmd::Cmd::Token { ttl_secs: ttl }
+                    }
+                    cli::NodeLinkCmd::List => sebas::node_link_cmd::Cmd::List,
+                    cli::NodeLinkCmd::Revoke { node_id } => {
+                        sebas::node_link_cmd::Cmd::Revoke { node_id }
+                    }
+                },
+            };
+            // 一次性管理命令（非服务）：失败按普通错误退出 1，不走启动失败 75。
+            if let Err(e) = sebas::node_link_cmd::run(args).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::Im(args) => {
             let args = sebas::im_cmd::ImArgs {
                 config: args.config,

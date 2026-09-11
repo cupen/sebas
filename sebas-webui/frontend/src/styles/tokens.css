@@ -54,6 +54,10 @@
   --sebas-status-working: #f2b04e;
   --sebas-status-working-bg: rgba(242, 176, 78, 0.11);
   --sebas-status-working-border: rgba(242, 176, 78, 0.32);
+  /* add-remote-execution-node 8.4：等待操作员决定（与 working 明确区分）。 */
+  --sebas-status-waiting: #c08cff;
+  --sebas-status-waiting-bg: rgba(192, 140, 255, 0.12);
+  --sebas-status-waiting-border: rgba(192, 140, 255, 0.34);
   --sebas-status-done: #46d189;
   --sebas-status-done-bg: rgba(70, 209, 137, 0.11);
   --sebas-status-done-border: rgba(70, 209, 137, 0.3);
@@ -142,6 +146,9 @@
   --sebas-status-working: #a85f08;
   --sebas-status-working-bg: rgba(168, 95, 8, 0.08);
   --sebas-status-working-border: rgba(168, 95, 8, 0.26);
+  --sebas-status-waiting: #7a3fd0;
+  --sebas-status-waiting-bg: rgba(122, 63, 208, 0.08);
+  --sebas-status-waiting-border: rgba(122, 63, 208, 0.26);
   --sebas-status-done: #178040;
   --sebas-status-done-bg: rgba(23, 128, 64, 0.08);
   --sebas-status-done-border: rgba(23, 128, 64, 0.26);

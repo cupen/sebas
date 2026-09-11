@@ -1,0 +1,35 @@
+[package]
+name = "sebas-node"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[[bin]]
+name = "sebas-node"
+path = "src/main.rs"
+
+# 依赖纪律（add-remote-execution-node D0）：本 crate 是**执行节点**的独立二进制，
+# 依赖图内不得出现主控角色（core / webui / router / im）的实现。允许依赖的只有
+# 中立叶子 crate（如 sebas-startup）与通用工具库。新增依赖前先确认它不把主控
+# 角色拖进来——任务 1.5 用 `cargo tree -p sebas-node` 机械核对。
+[dependencies]
+sebas-startup = { path = "../sebas-startup" }
+sebas-node-link = { path = "../sebas-node-link" }
+# 执行体侧能力（6.3）：纯 ACP 客户端 + Claude 驱动，**不含任何主控角色**
+# （D0）。它本身是叶子：不依赖 sebas / sebas-webui / sebas-router / sebas-im。
+sebas-acp = { path = "../sebas-acp" }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+dirs = "7"
+getrandom = "0.4"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+thiserror = "2"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+toml = "1.1"
+
+[dev-dependencies]
+tempfile = "3"

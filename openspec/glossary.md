@@ -4,7 +4,12 @@
 > 定义取自现有 specs 与 `docs/architecture.md`,语义变化时先改这里。
 > 引用方式:仓库根相对路径 `openspec/glossary.md`。
 
-## 进程角色(单一二进制,子命令决定人格)
+## 进程角色(主控是单一二进制,执行节点是第二个可分发产物)
+
+> **范围**:主控二进制 `sebas` 是**单一二进制、子命令决定人格**;执行节点
+> `sebas-node` 是**第二个可分发产物**——**独立二进制,不含任何主控角色**
+> (add-remote-execution-node D0)。下表前五项是主控二进制内的子命令/进程内
+> 领域层,末项是独立二进制;「单一二进制」只描述主控,不描述整个系统。
 
 - **core(core 进程)**:`sebas core` 的长驻服务本体。会话状态的**单一权威**、
   唯一 spawn ACP 子进程的进程;持有会话映射、core session channel socket。
@@ -21,6 +26,14 @@
   入站事件 dispatch、slash 命令解析、权限处理、出站 Out 指令编排(会话执行向;
   IM 呈现/reaction 由 sebas-im 前端负责)。不是独立进程。
   (原名 sebas-router;rename-cli-surface 改名)
+- **sebas-node(执行节点,execution node)**:**独立二进制**(第二个可分发产物,
+  add-remote-execution-node D0),在主控以外的机器上运行 agent 会话。**不含主控
+  角色**——core / webui / router / im 的实现与可运行入口都不在节点产物里(不是
+  「带过去但不运行」,是根本不带),节点机上也不需要安装主控。节点**出站**拨号主控
+  (反向连接:主控不必能反访节点,节点无需任何入站端口);持自己会话的**执行事实**
+  (子进程寿命、有序 turn 日志、审批悬空状态、节点本地 provider 凭据),会话身份与
+  期望态来自主控;权限审批**永不自裁**(无本地放行入口),主控不可达时无限期 park。
+  节点配置只有一个 `[node]` 段,不复用主控配置 schema。(execution-node)
 
 ### 三义消解(重要)
 
@@ -114,6 +127,7 @@
 | router(模型路由)vs dispatch(会话分发) | 前者是独立的 provider 代理进程(`sebas router`);后者是 core 进程内的领域层 crate(原 sebas-router) |
 | webui(进程)vs `web`(通道) | 前者是 dashboard 进程;后者是它在通道抽象里的注册名 |
 | sebas-agent vs ACP 桥 | 两种执行体:自研内核 vs 经 ACP 驱动的外部 agent |
+| sebas(主控)vs sebas-node(执行节点) | 前者是主控二进制(`core`/`webui`/`router`/`im` 等子命令);后者是**第二个可分发产物**、独立二进制,不含主控角色,只作为执行位出站连回主控 |
 | 项目 vs 工作台 | 项目是目录(组织单元);工作台是 webui 里呈现它的页面 |
 | 产品定位"工作台" vs 页面级"工作台" | 前者指 sebas 整体(README 定位用法:"自托管的 agent 工作台");后者专指 webui 的 `/agent` 页。上下文无法区分时优先按页面级理解 |
 | 会话 vs turn | 会话是持久载体;turn 是其中一次问答执行 |

@@ -13,7 +13,14 @@
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property } from 'lit/decorators.js'
 
-export type StatusSlug = 'starting' | 'queued' | 'working' | 'done' | 'failed' | 'dormant'
+export type StatusSlug =
+  | 'starting'
+  | 'queued'
+  | 'working'
+  | 'waiting'
+  | 'done'
+  | 'failed'
+  | 'dormant'
 
 @customElement('sebas-status-badge')
 export class SebasStatusBadge extends LitElement {
@@ -55,6 +62,16 @@ export class SebasStatusBadge extends LitElement {
       background: var(--sebas-status-working-bg);
       border-color: var(--sebas-status-working-border);
       color: var(--sebas-status-working);
+    }
+    /* 8.4：在等人批 ≠ 在干活。等待态用 signal 色，且**不带** working 的脉冲
+       ——脉冲会让它读起来像还在跑。 */
+    .badge[data-status='waiting'] {
+      background: var(--sebas-status-waiting-bg);
+      border-color: var(--sebas-status-waiting-border);
+      color: var(--sebas-status-waiting);
+    }
+    .badge[data-status='waiting'] .dot {
+      background: var(--sebas-status-waiting);
     }
     .badge[data-status='done'] {
       background: var(--sebas-status-done-bg);

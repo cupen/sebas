@@ -36,6 +36,11 @@ COPY sebas-channels ./sebas-channels
 COPY sebas-agent ./sebas-agent
 COPY sebas-ipc ./sebas-ipc
 COPY sebas-webui ./sebas-webui
+# sebas-startup / sebas-node 是 workspace 成员：cargo 解析 workspace 需要每个成员的
+# 清单存在，缺 COPY 会让构建在解析阶段失败。本镜像只产出主控 `sebas`；执行节点的
+# 独立产物见 add-remote-execution-node 任务 1.6。
+COPY sebas-startup ./sebas-startup
+COPY sebas-node ./sebas-node
 
 RUN cargo build --release --locked --bin sebas
 

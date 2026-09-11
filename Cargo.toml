@@ -6,7 +6,7 @@ rust-version = "1.90"
 
 [workspace]
 resolver = "2"
-members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "xtask", "sebas-agent", "sebas-channels"]
+members = ["sebas-im", "sebas-dispatch", "sebas-feishu", "sebas-acp", "sebas-router", "sebas-webui", "sebas-ipc", "sebas-startup", "sebas-node", "sebas-node-link", "xtask", "sebas-agent", "sebas-channels"]
 
 # Debug profile: 产物最小化
 [profile.dev]
@@ -24,6 +24,9 @@ debug = false
 
 
 [dependencies]
+# 与工作台 `routes::encode_session_key` 同一算法（urlencoded `channel\0reference`）：
+# 审批通知里的会话键必须与前端认的那张键逐字一致。
+urlencoding = "2"
 sebas-dispatch = { path = "sebas-dispatch" }
 sebas-im = { path = "sebas-im" }
 sebas-ipc = { path = "sebas-ipc" }
@@ -33,6 +36,9 @@ sebas-router = { path = "sebas-router" }
 sebas-webui = { path = "sebas-webui" }
 sebas-agent = { path = "sebas-agent" }
 sebas-channels = { path = "sebas-channels" }
+sebas-startup = { path = "sebas-startup" }
+# 链路契约类型：主控与执行节点两侧共用（add-remote-execution-node D0）。
+sebas-node-link = { path = "sebas-node-link" }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,6 +54,7 @@ chrono = "0.4"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 futures-util = "0.3"
+tokio-tungstenite = "0.24"
 async-trait = "0.1"
 
 # Feishu WebSocket long-connection inbound. v0.19.0+ adds `register_raw`
@@ -64,6 +71,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"
+# 端到端链路测试需要在同一个进程里同时驱动**真节点**与**真控制面**。
+# 只是 dev-dependency：不进入 `sebas` 的运行时依赖图，也不影响节点侧的依赖隔离
+# （隔离检查看的是 `cargo tree -p sebas-node`，方向相反）。
+sebas-node = { path = "sebas-node" }
 
 [[bin]]
 name = "sebas"

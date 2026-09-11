@@ -216,10 +216,10 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
         "agent_kind": info.agent_kind,
         // 绑定的项目，按稳定 id（workbench-agent-wire-fix 2.5）；null = inbox。
-        "project_id": info
-            .project_dir
-            .as_deref()
-            .map(crate::projects::project_id_for),
+        // 8.1：id 由 `(节点, 路径)` 派生（远端会话不属于本机同路径项目）。
+        "project_id": crate::projects::project_id_for_session(info),
+        // 8.2/8.3/8.4/8.5：节点/状态/成因/mode/悬空审批整块透传（null = 本机）。
+        "remote": info.remote,
         // workbench-turn-queue 6.1：待生效提交全量视图（投递序，staging 先于
         // turn；每条带稳定 id/文本/位置/处置/优先标记）。
         "pending": serde_json::to_value(&info.pending).unwrap_or_default(),
@@ -529,27 +529,44 @@ pub async fn create_session(
             "agent 字段必填，且必须是配置的 agent id 或 \"native\"",
         );
     }
-    // project_id → 内部工作目录路径（path 不是 wire 标识，解析发生在服务端）。
-    let project_dir = match &req.project_id {
-        Some(id) => match projects_from_backend(&state)
-            .await
-            .into_iter()
-            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-            .and_then(|p| p.get("path").and_then(|v| v.as_str()).map(str::to_string))
-        {
-            Some(dir) => Some(dir),
-            None => return api_error(StatusCode::BAD_REQUEST, "未知 project_id: {id}"),
-        },
-        None => None,
+    // project_id → 内部工作目录路径 + 所属执行节点（path/node 都不是 wire
+    // 标识，解析发生在服务端）。8.1：项目决定节点——选项目即选节点，本机项目
+    // 带 `"local"`（行为与今日逐字一致）；无项目会话 node = None，由核心落到
+    // 配置的默认执行节点。
+    let (project_dir, node) = match &req.project_id {
+        Some(id) => {
+            let entry = projects_from_backend(&state)
+                .await
+                .into_iter()
+                .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+            match entry {
+                Some(p) => {
+                    let Some(dir) = p.get("path").and_then(|v| v.as_str()).map(str::to_string)
+                    else {
+                        return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}"));
+                    };
+                    let node = p
+                        .get("node_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(crate::projects::LOCAL_NODE_ID)
+                        .to_string();
+                    (Some(dir), Some(node))
+                }
+                None => return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}")),
+            }
+        }
+        None => (None, None),
     };
     let prompt = req.prompt.unwrap_or_default();
     // 0-turn 占位（P2）：无 prompt 时只建行、不 spawn 子进程、不把空串当
     // prompt 发给 agent（opencode 收到 `session/prompt ""` 会挂起）。agent/
-    // model/project 记在 mapping 上，首条消息到达时才 spawn。
+    // model/project 记在 mapping 上，首条消息到达时才 spawn。远端节点上的
+    // 占位被如实拒绝（远端会话必须由首条真实输入建立）。
     let key = if prompt.trim().is_empty() {
         match state
             .backend
-            .create_placeholder(project_dir.clone(), &req.agent, req.model.clone())
+            .create_placeholder(project_dir.clone(), &req.agent, req.model.clone(), node.clone())
             .await
         {
             Ok(k) => k,
@@ -558,7 +575,7 @@ pub async fn create_session(
     } else {
         match state
             .backend
-            .spawn_with(prompt, project_dir.clone(), &req.agent, req.model)
+            .spawn_with(prompt, project_dir.clone(), &req.agent, req.model, node.clone())
             .await
         {
             Ok(k) => k,
@@ -759,6 +776,11 @@ pub async fn browse_dirs(
 /// 从 backend 读取项目列表（DB 引擎 / core 通道）。backend 不可达时回退
 /// 本地文件注册表（webui 进程独占视图，spec 未约束其降级语义）。
 /// 返回 JSON 数组（ProjectRow / ProjectEntry 形状，前端兼容）。
+///
+/// add-remote-execution-node 8.1：**远端项目只在文件注册表里**。core 状态库的
+/// `projects` 表（`ProjectRow`）没有节点列，`add_project(path,name,added_at)`
+/// 也接不住节点维度——远端条目写进去就等于丢节点。因此这里把文件注册表里
+/// **非本机**的条目并进列表（本机条目仍以状态库为准，避免复活已删除的项目）。
 async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
     let mut projects = if let Some(v) = state.backend.state_snapshot("projects").await {
         v.get("projects")
@@ -772,21 +794,44 @@ async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
             .map(|e| serde_json::to_value(&e).unwrap_or_default())
             .collect();
     };
-    // 稳定 id 回填（workbench-agent-wire-fix 2.4）：迁移 2 之前的行 id 为
-    // 空——id 是 path 的确定性哈希，按需计算即可，无需写回。
+    // 节点维度 + 稳定 id 回填（workbench-agent-wire-fix 2.4；8.1 起 id 按
+    // `(节点, 路径)` 派生）：旧行没有 node_id → 本机；id 空 → 按 node 重算。
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for p in projects.iter_mut() {
+        let node = p
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::projects::LOCAL_NODE_ID)
+            .to_string();
+        let path = p.get("path").and_then(|v| v.as_str()).map(str::to_string);
         let needs_id = p
             .get("id")
             .and_then(|v| v.as_str())
             .map(str::is_empty)
             .unwrap_or(true);
-        let path = p.get("path").and_then(|v| v.as_str()).map(str::to_string);
-        if needs_id
-            && let Some(path) = path
-            && let Some(obj) = p.as_object_mut()
-        {
-            obj.insert("id".into(), json!(crate::projects::project_id_for(&path)));
+        if let Some(obj) = p.as_object_mut() {
+            obj.entry("node_id")
+                .or_insert_with(|| json!(node.clone()));
+            if needs_id
+                && let Some(path) = path.as_deref()
+            {
+                obj.insert(
+                    "id".into(),
+                    json!(crate::projects::project_id_for_on(&node, path)),
+                );
+            }
         }
+        if let Some(path) = path {
+            seen.insert((node, path));
+        }
+    }
+    // 文件注册表里的远端条目并进来（状态库装不下节点维度）。
+    for entry in crate::projects::list() {
+        if entry.is_local() || seen.contains(&(entry.node_id.clone(), entry.path.clone())) {
+            continue;
+        }
+        projects.push(serde_json::to_value(&entry).unwrap_or_default());
     }
     projects
 }
@@ -798,6 +843,11 @@ pub async fn projects_list(State(state): State<WebUiState>) -> Response {
 }
 
 /// POST /api/projects — register a new project directory（状态库优先）。
+///
+/// add-remote-execution-node 8.1：body 可带 `node_id`。缺省 = 本机节点（隐式
+/// 注册，行为与既有注册完全一致）。带远端节点时，路径可用性由**那台节点**判定
+/// （经 `SessionBackend::check_node_path` → `SessionOp::CheckPath`），主控绝不做
+/// 本地 `stat`。
 pub async fn projects_add(
     State(state): State<WebUiState>,
     Json(body): Json<serde_json::Value>,
@@ -806,6 +856,15 @@ pub async fn projects_add(
         Some(p) => p,
         None => return api_error(StatusCode::BAD_REQUEST, "missing 'path' field"),
     };
+    let node_id = body
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::projects::LOCAL_NODE_ID);
+    if node_id != crate::projects::LOCAL_NODE_ID {
+        return projects_add_remote(&state, node_id, path).await;
+    }
     // 本地校验：路径必须存在且是目录（canonicalize 后注册 canonical 路径）。
     // 范围判定先行于存在性判定（add-webui-allowed-roots）：fail-closed，
     // 越界与无法解析同罪，避免借 400 文案差异探测白名单外目录的存在性；
@@ -835,11 +894,17 @@ pub async fn projects_add(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
-    // 重复检查：列表里已有 canonical 路径 → 409。
+    // 重复检查按 `(节点, 路径)`：同一路径在另一台机器上是另一个项目。
     if projects_from_backend(&state)
         .await
         .iter()
-        .any(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()))
+        .any(|p| {
+            p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
+                && p.get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(crate::projects::LOCAL_NODE_ID)
+                    == crate::projects::LOCAL_NODE_ID
+        })
     {
         return api_error(StatusCode::CONFLICT, format!("项目已注册: {path}"));
     }
@@ -875,11 +940,17 @@ pub async fn projects_add(
             );
         }
     }
-    // 返回新条目（从列表反查，保证与数据源一致）。
+    // 返回新条目（从列表反查，保证与数据源一致；按 `(节点, 路径)` 命中本机那条）。
     let entry = projects_from_backend(&state)
         .await
         .into_iter()
-        .find(|p| p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str()))
+        .find(|p| {
+            p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
+                && p.get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(crate::projects::LOCAL_NODE_ID)
+                    == crate::projects::LOCAL_NODE_ID
+        })
         .unwrap_or_else(|| json!({ "path": canonical, "name": name }));
     let mut entry = entry;
     if let Some(d) = degraded {
@@ -888,22 +959,156 @@ pub async fn projects_add(
     (StatusCode::CREATED, Json(entry)).into_response()
 }
 
+/// 远端项目注册（add-remote-execution-node 8.1）。
+///
+/// 顺序是刻意的：先确认节点**在线且已知**（不然「校验失败」会被误读成「路径不
+/// 对」），再请节点判定路径。节点判定不了（链路未接入 / 离线）时如实拒绝，绝不
+/// 回退本地 `stat`——那会把「主控上恰好同名」伪装成「节点上存在」。
+async fn projects_add_remote(state: &WebUiState, node_id: &str, path: &str) -> Response {
+    let path = path.trim();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "远端项目的路径不能为空");
+    }
+    // 未知节点：如实拒绝并点名（不把路径判定当作节点不存在的借口）。
+    match state.backend.nodes().await {
+        Ok(nodes) => match nodes.iter().find(|n| n.id == node_id) {
+            Some(n) if n.status == "online" => {}
+            Some(n) => {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "执行节点 {node_id} 当前不可用（{}），无法在该节点上校验或注册项目",
+                        n.status
+                    ),
+                );
+            }
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("未知执行节点: {node_id}"),
+                );
+            }
+        },
+        Err(cause) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                crate::projects::node_check_unavailable(node_id, path, &cause),
+            );
+        }
+    }
+    // 路径可用性由节点判定（`SessionOp::CheckPath`）。
+    match state.backend.check_node_path(node_id, path).await {
+        Ok(check) => {
+            if let Err(msg) = crate::projects::validate_remote_path(
+                node_id,
+                path,
+                crate::projects::NodePathCheck {
+                    exists: check.exists,
+                    is_dir: check.is_dir,
+                },
+            ) {
+                return api_error(StatusCode::BAD_REQUEST, msg);
+            }
+        }
+        Err(cause) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                crate::projects::node_check_unavailable(node_id, path, &cause),
+            );
+        }
+    }
+    // 重复检查按 `(节点, 路径)`。
+    if projects_from_backend(state).await.iter().any(|p| {
+        p.get("path").and_then(|v| v.as_str()) == Some(path)
+            && p.get("node_id").and_then(|v| v.as_str()) == Some(node_id)
+    }) {
+        return api_error(
+            StatusCode::CONFLICT,
+            format!("项目已注册: {node_id}:{path}"),
+        );
+    }
+    // 远端条目只能落 webui 文件注册表：core 状态库的 projects 表没有节点列
+    // （`add_project` 接不住 node_id），写进去会变成一条本机幻影项目。
+    match crate::projects::add_on(node_id, path) {
+        Ok(entry) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(&entry).unwrap_or_default()),
+        )
+            .into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// GET /api/nodes — 执行节点可用性（add-remote-execution-node 8.2）。
+///
+/// 本机节点**永远在列且在线**：它在回答这个请求，这就是它可达的证据。远端
+/// 节点来自 core 的注册表（`NodeLinkOp::ListNodes`）——`remote_available` 明确
+/// 区分「注册表可达但没节点」与「注册表不可得」，前端不许把后者说成前者。
+pub async fn nodes(State(state): State<WebUiState>) -> Response {
+    let mut nodes = vec![json!({
+        "id": crate::projects::LOCAL_NODE_ID,
+        "status": "online",
+        "created_unix": 0,
+        "local": true,
+    })];
+    let (remote_available, cause) = match state.backend.nodes().await {
+        Ok(list) => {
+            for n in list {
+                if n.id == crate::projects::LOCAL_NODE_ID {
+                    continue;
+                }
+                nodes.push(serde_json::to_value(&n).unwrap_or_default());
+            }
+            (true, serde_json::Value::Null)
+        }
+        Err(cause) => (false, json!(cause)),
+    };
+    Json(json!({
+        "nodes": nodes,
+        "remote_available": remote_available,
+        "cause": cause,
+    }))
+    .into_response()
+}
+
 /// POST /api/projects/{id}/remove — unregister a project（状态库优先）。
 /// 路径参数是稳定项目 id（workbench-agent-wire-fix 2.5）：先解析 id →
 /// 内部 path（状态库以 path 为键），再走既有删除。
+///
+/// 8.1：远端条目只存在于文件注册表，且**绝不能按 path 删状态库**——同路径的
+/// 本机项目会被顺手删掉（那正是 `(节点, 路径)` 要防的串味）。
 pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<String>) -> Response {
     let id = match urlencoding::decode(&id) {
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
     };
-    let Some(path) = projects_from_backend(&state)
+    let Some(entry) = projects_from_backend(&state)
         .await
         .into_iter()
         .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-        .and_then(|p| p.get("path").and_then(|v| v.as_str()).map(str::to_string))
     else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
+    let node = entry
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(crate::projects::LOCAL_NODE_ID)
+        .to_string();
+    let Some(path) = entry
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return api_error(StatusCode::NOT_FOUND, "project not found");
+    };
+    // 远端：只处理文件注册表。
+    if node != crate::projects::LOCAL_NODE_ID {
+        return match crate::projects::remove_by_id(&id) {
+            Ok(true) => Json(json!({ "status": "removed" })).into_response(),
+            Ok(false) => api_error(StatusCode::NOT_FOUND, "project not found"),
+            Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+    }
     // 先试状态库；失败（不存在或不可达）再试文件。
     match state
         .backend
@@ -983,14 +1188,41 @@ pub async fn projects_reorder(
         }
     }
     // 状态库优先；不可达时回退文件注册表 reorder。
+    //
+    // 8.1：只把**本机**条目发给状态库。core 的 projects 表没有节点列
+    // （`ProjectRow` / `add_project` 都装不下 node_id），把远端条目一起 save 会
+    // 把它们落成同路径的**本机**项目——一条凭空出现的本地条目。远端顺序改由
+    // 文件注册表承载（它本来就是远端条目的家）。
+    let local_entries: Vec<serde_json::Value> = next
+        .iter()
+        .filter(|v| {
+            v.get("node_id").and_then(|x| x.as_str()).unwrap_or(crate::projects::LOCAL_NODE_ID)
+                == crate::projects::LOCAL_NODE_ID
+        })
+        .cloned()
+        .collect();
+    let remote_ids: Vec<String> = next
+        .iter()
+        .filter(|v| {
+            v.get("node_id").and_then(|x| x.as_str()).unwrap_or(crate::projects::LOCAL_NODE_ID)
+                != crate::projects::LOCAL_NODE_ID
+        })
+        .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
+        .collect();
     let via_backend = state
         .backend
         .state_mutate(
             "projects",
-            json!({ "op": "save", "projects": next.clone() }),
+            json!({ "op": "save", "projects": local_entries.clone() }),
         )
         .await
         .is_ok();
+    if !remote_ids.is_empty() {
+        // 顺序落文件注册表；失败不改变响应（顺序是呈现细节，不静默改状态）。
+        if let Err(e) = crate::projects::reorder(&remote_ids) {
+            tracing::warn!(error = %e, "远端项目顺序落文件注册表失败");
+        }
+    }
     if via_backend {
         return Json(json!({ "projects": next })).into_response();
     }
@@ -1027,6 +1259,26 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
     else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
+    let node_id = entry
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(crate::projects::LOCAL_NODE_ID)
+        .to_string();
+    // 8.2：远端项目不做本地 git 探测（路径在那台机器上），其「可用」等于
+    // 「节点在线」——对本地路径 stat 一次只会得到一个与本机无关的 false。
+    if node_id != crate::projects::LOCAL_NODE_ID {
+        let accessible = matches!(
+            state.backend.nodes().await,
+            Ok(nodes) if nodes.iter().any(|n| n.id == node_id && n.status == "online")
+        );
+        return Json(json!({
+            "project_id": id,
+            "branch": serde_json::Value::Null,
+            "accessible": accessible,
+            "node_id": node_id,
+        }))
+        .into_response();
+    }
     let accessible = crate::projects::is_accessible(&project_path);
     // TTL 缓存：branch_at 距今 < 30s 用缓存。
     let now = std::time::SystemTime::now()

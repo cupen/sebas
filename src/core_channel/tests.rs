@@ -382,7 +382,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(Some("/tmp".into()), "opencode", Some("m-free".into()))
+        .create_placeholder(Some("/tmp".into()), "opencode", Some("m-free".into()), None)
         .await
         .expect("placeholder created");
 
@@ -416,7 +416,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     // 不可用 project_dir → 与 Spawn 同款校验拒绝。
     assert_eq!(
         backend
-            .create_placeholder(Some("/nonexistent-sebas-p2".into()), "opencode", None)
+            .create_placeholder(Some("/nonexistent-sebas-p2".into()), "opencode", None, None)
             .await,
         Err(SessionRejection::UnusableProjectDir)
     );
@@ -456,7 +456,7 @@ async fn placeholder_without_kind_or_model_spawns_on_first_message() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(Some("/tmp".into()), "claudecode", None)
+        .create_placeholder(Some("/tmp".into()), "claudecode", None, None)
         .await
         .expect("placeholder created");
 
@@ -1076,7 +1076,7 @@ async fn arm_for_test(dir: &StdPath) -> crate::run::ArmedChannel {
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
     let _keep = _out_rx;
-    crate::run::arm_core_channel(&cfg, &config_path, backend, &router)
+    crate::run::arm_core_channel(&cfg, &config_path, backend, &router, None, None)
         .await
         .expect("arm succeeds in sandbox")
 }
@@ -1159,7 +1159,7 @@ async fn arm_fails_hard_when_socket_path_is_taken_by_live_listener() {
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
     let _keep = _out_rx;
-    let err = crate::run::arm_core_channel(&cfg, &config_path, backend, &router)
+    let err = crate::run::arm_core_channel(&cfg, &config_path, backend, &router, None, None)
         .await
         .expect_err("live occupant must fail the arm");
     let msg = err.to_string();
