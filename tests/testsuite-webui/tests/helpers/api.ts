@@ -21,6 +21,10 @@ export interface SessionRow {
   project_dir: string | null
   available_models: string[] | null
   current_model: string | null
+  /** rail-declutter-unread：可见回复段数（未读徽标的服务端计数）。 */
+  msg_count?: number
+  /** rail-declutter-unread：首条用户消息预览（rail 行名数据源）。 */
+  prompt_preview?: string | null
 }
 
 export interface ConversationEntry {

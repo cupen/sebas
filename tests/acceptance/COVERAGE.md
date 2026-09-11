@@ -128,7 +128,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 项目注册表 webui 持有 | ✅ | state-store 测试；J: workbench |
 | | 会话归属 | ✅ | sebas-webui `session_endpoints_test` |
 | | 并发项目 | ✅ | state-store 并发测试；`session_endpoints_test::concurrent_project_sessions_run_simultaneously_and_leave_a_untouched` |
-| | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）；前端 `transcript-view.test.ts`（多 chunk 未读回合计一次、seam 不切开回合、mark-all-seen 写入并消隐、msg_count 随 payload 推进共享锚）；`unread-cursor.test.ts`（rail-declutter-unread D3：seam 与徽标共用游标、首访/清缓存不冒红点、单调写）|
+| | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）；前端 `transcript-view.test.ts`（多 chunk 未读回合计一次、seam 不切开回合、mark-all-seen 写入并消隐、msg_count 随 payload 推进共享锚）；`unread-cursor.test.ts`（rail-declutter-unread D3：seam 与徽标共用游标、首访/清缓存不冒红点、单调写）；browser `unread-badge.spec.ts`（跨层旅程：fake-claude 完整回复 → API `msg_count` 投影 +1 → 离焦会话徽标免刷新亮起「1」→ 聚焦清零且 localStorage `anchor_count` 推进到服务端当前值）|
 | | composer 只承诺进程能力 | ✅ | sebas-webui `agent_kinds_test`；J: workbench（agent-kinds）|
 | | 会话来源可见 | ✅ | sebas-webui 内联测试 |
 | | 项目视图真实工作副本上下文 | ✅ | browser `projects.spec.ts` 1.2（rail-declutter-unread D8 改写：分支探测链路 + 30s TTL 过期后 API 刷新仍断言；rail 不再显示分支名，可达性标记仍由探测驱动）|
@@ -141,7 +141,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 归档过期 | ✅ | src `archive.rs` 内联测试 |
 | | 执行体可用性如实呈现 | ✅ | 前端 `workbench-composer.test.ts`（native 不可用禁用+cause、可用可选、下次 poll 恢复无需重载）；browser `first-paint.spec.ts`（native option 在创建对话框内 disabled + unavailable，composer 不再承载 provider label）|
 | | 原生内核模型选择 | ✅ | src `agent_backend.rs`（`dual_set_session_model_routes_native_key_and_rejects_unknown`、spawn 期模型落快照 override）；前端 `workbench-composer.test.ts` 模型下拉/切换 |
-| | 会话前模型目录（backend catalog；interaction-polish 修订：目录选择移入创建对话框，loadModelCatalog 共用）| ✅ | 前端 `new-session-dialog.test.ts`（两级选择/预选/目录不可得诚实标注/不伪造 default）；`model-catalog.test.ts`（providers × models 展平、空目录不造假、loadModelCatalog 读取失败不抛）；browser `conversation.spec.ts`「the creation dialog offers provider → model from the Settings catalog」|
+| | 会话前模型目录（backend catalog；interaction-polish 修订：目录选择移入创建对话框，loadModelCatalog 共用）| ✅ | 前端 `new-session-dialog.test.ts`（两级选择/预选/目录不可得诚实标注/不伪造 default）；`model-catalog.test.ts`（providers × models 展平、空目录不造假、loadModelCatalog 读取失败不抛）；browser `conversation.spec.ts`「the creation dialog offers provider → model from the Settings catalog」+ `models.spec.ts`「a fetched-and-saved catalog reaches the creation dialog without a restart」（编辑器抓取→保存→同页免刷新可读的设置↔工作台接缝旅程，2026-09-11 补）|
 | | Rail project removal entry（审计补行；rail-declutter-unread D5 修订）| ✅ | `session_endpoints_test::projects_remove_project / projects_remove_unknown_returns_404 / projects_remove_blocked_while_live_sessions_exist`（有存活会话 409 typed rejection 带会话数、无会话放行）；browser `projects.spec.ts`「removed project disappears」+「… menu removal: blocked while live sessions exist」（… 菜单 → 移除弹窗就地预检 + 后端拒绝一致）；前端 `project-rail.test.ts`（预检文案/旧「迁移 Inbox」文案废除/拒绝内联）|
 | | Rail session close entry（turn-queue 修订；rail-declutter-unread 3.2 修订）| ✅ | 前端 `project-rail.test.ts`（close 移入会话行 `…` 菜单：inactive 直删/active 先确认/关闭 danger、点名丢弃 pending 条数/无 pending 省略、无行内直删按钮）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（close names the loss，经 `…` 菜单）|
 | | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test`（占位首条消息必须 SpawnNew、0-turn 占位同样 spawn、标记 dump/restore 存活）；J: workbench（占位会话）；browser `session-roundtrip.spec.ts` |
@@ -174,7 +174,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | project-session-actions | 目录选择器加项目 | ✅ | J: `projects_session_journey` |
 | | 无 prompt 新会话 | ✅ | J: `workbench_aggregate_journey` |
 | | 会话归档 | ✅ | sebas-webui `api_endpoints_test` |
-| | 历史组即归档（rail-declutter-unread 修订：倒序 + Inbox 移除）| ✅ | sebas-webui `api_endpoints_test`；前端 `project-rail.test.ts`（History 按 archived_at 降序渲染、Inbox 组不存在断言、无项目会话无 rail 展示位）|
+| | 历史组即归档（rail-declutter-unread 修订：倒序 + Inbox 移除）| ✅ | sebas-webui `api_endpoints_test`；前端 `project-rail.test.ts`（History 按 archived_at 降序渲染、Inbox 组不存在断言、无项目会话无 rail 展示位）；browser `session-mgmt.spec.ts`「History lists newly archived sessions newest-first」（两次归档间隔 >1s，倒序相对位置在真实 rail 中钉住）|
 | | 归档过期 | ✅ | src `archive.rs` 内联测试 |
 | | Project removal from the rail（rail-declutter-unread D5 修订）| ✅ | 见簇③「Rail project removal entry」同行证据|
 | | Session close from the rail（审计补行）| ✅ | sebas-dispatch `web_close_test`（active/dormant/spawning/unknown/focused 全语义）；`session_endpoints_test::close_active_session_drops_mapping_and_returns_200` 等 close 族；browser `session-mgmt.spec.ts`「close removes the session from the active list」|
@@ -310,17 +310,21 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | close 与 archive | archive hides from list, shows in History | `session-mgmt.spec.ts` | 会话管理覆盖「close 与 archive」 |
 | 会话管理 | 深链与退役路径 | deep link renders the session via SPA fallback; /settings redirects to / | `session-mgmt.spec.ts` | 会话管理覆盖「深链与退役路径」 |
 | 会话管理 | 模型面诚实缺省 | model honest absence — no selector, switch attempt keeps model absent | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」 |
+| 会话管理 | close 与 archive | History lists newly archived sessions newest-first (rail-declutter-unread D7) | `session-mgmt.spec.ts` | project-session-actions「History is sorted newest-first」（rail-declutter-unread） |
+| 未读徽标 | 真实回复点亮与聚焦清零 | a reply to an unfocused session lights the badge; focusing clears it and parks the anchor | `unread-badge.spec.ts` | session-unread-badge「new reply on an unfocused session」「focusing the session clears the badge」「first visit shows no unread」（rail-declutter-unread，跨层旅程：fake-claude 回复 → API `msg_count` 投影 → 徽标免刷新亮起 → 聚焦清零且锚落 localStorage） |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
 | 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
 | 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails non-terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | 3.2 providers are editable: model entries with capability tags persist; browsing stays probe-free | `models.spec.ts` | webui「Provider management page」（redesign-provider-models-settings）|
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | fetch lists the official ids without persisting; picking joins the catalog via an ordinary edit | `models.spec.ts` | webui「Fetch models from the provider's official base URL」 |
+| 模型管理覆盖 | settings provider 抓取 + 条目编辑 | a fetched-and-saved catalog reaches the creation dialog without a restart | `models.spec.ts` | webui「Fetch models…」+ agent-workbench「Model selector offers the backend catalog before any session」reflected-without-restart（revamp-settings-nav-and-models-editor；设置编辑器抓取→保存→创建对话框同页免刷新可读的接缝旅程） |
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | a provider without any usable base URL renders no fetch entry | `models.spec.ts` | webui「Fetch models from the provider's official base URL」 |
 | agent 绑定不可变 | 锁定提示 | detail head shows the bound agent with the lock affordance | `models.spec.ts` | agent-workbench「Session agent binding is immutable」 |
 | 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | webui「Services 分区与 router 状态归属」¹ |
 | 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S6 bare core degrades: no-adapter banner, no rows, restart disabled | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 分区导航 IA | nav order Generic→Appearance→Services→Models→About(pinned), default focus, memory, stale-value fallback | `settings.spec.ts` | webui「设置弹窗分区与缺省首项」：缺省聚焦 Generic 分区／历史记忆恢复上次分区／缺省聚焦 Settings 分区（旧值回退）／分区顺序与 About 压底（revamp-settings-nav-and-models-editor） |
 | 设置面 ¹ | 写降级 | S4 defaults read parity; set-default stays local, provider seeded via API | `settings.spec.ts` | provider-management「Set default provider and model from the page」¹ |
 | 设置面 ¹ | 写降级 | S5a create/edit journeys persist through the core store (minimal forms) | `settings.spec.ts` | webui「Provider management page」（core store 持久化）¹ |
 | 设置面 ¹ | 写降级 | S5b delete persists; fetch entry hidden without a base URL | `settings.spec.ts` | webui「Provider management page」+「Fetch models…」¹ |
@@ -364,12 +368,19 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > ¹ 设置面（S1–S4, S6）的锚点指向尚未归档的 change `expand-webui-e2e-settings` 的 delta
 > scenario（该 change 尚未同步进主 spec，主 spec 暂无设置面 requirement）；S5a/S5b 的
 > provider 写 503 语义已由主 spec `模型管理覆盖`「settings provider 只读」吸收，故锚到
-> 主 spec。会话核心旅程的「首回合往返」「流式分批渲染」与 `agent 对话覆盖` 同名
+> 主 spec；「分区导航 IA」行锚到工作树 change `revamp-settings-nav-and-models-editor`
+> 的 delta scenario。会话核心旅程的「首回合往返」「流式分批渲染」与 `agent 对话覆盖` 同名
 > scenario 文本相同（工作台旅程的「项目增删」「close 与 archive」「深链与退役路径」
 > 同理），经上表 tree 侧行同源锚定。harness 级 scenario（沙箱装配：启动即隔离 /
 > 成功退出清理 / 失败保留现场；一键入口：一键运行 / 单旅程过滤 / 渐进补用例不改入口 /
 > 顶层裸 test 拒绝）由入口机制承担、鉴权「免登录直达」由全部主 config 用例隐式承担，
 > 均不设单用例行。
+>
+> 旅程加固波（2026-09-11，交付终验前）：新增 4 例——未读徽标跨层旅程
+> （`unread-badge.spec.ts` 新 spec）、History 倒序浏览器旅程（`session-mgmt.spec.ts`）、
+> 设置分区导航 IA 旅程（`settings.spec.ts`）、编辑器抓取→保存→创建对话框接缝旅程
+> （`models.spec.ts`）。树形账本 53 行 = 全套件 `it` 总数 65（主 config 58 + auth 3 +
+> detached 4；较上期注记 +4，均入主 config）。
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
@@ -429,11 +440,13 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 5. **restore 不复活会话**（二期浏览器旅程发现）：`archive` 先 close（mapping + transcript 丢弃），`restore` 只删归档条目；恢复后详情页如实 404（`sessions.spec.ts` 2.2 已按此诚实语义断言）。与 project-session-actions「History 点击恢复可写」条文不一致，产品语义变更另立项。
 6. **无模型会话 set_model 是终态杀伤**（二期浏览器旅程发现）：webui 只投递（200 ok），Claude 驱动以终态 Error 应答 SetModel，会话被拆除（`models.spec.ts` 3.2 已按终态诚实断言）。正向模型切换需驱动模型面（configOptions 透出 + ModelChanged），待另立项。
 7. **sebas-agent 内联测试环境依赖**（fail-fast-on-startup-errors 实施期发现）：`cargo test -p sebas-agent` 在 Windows Git Bash 环境下 17 项失败（tools::bash / tools::search / loop_ 等，依赖 POSIX shell 语义）；清理树同样失败（71 passed / 17 failed 前后一致），与 change 无关，属环境缺口。同批发现 `card_stream_e2e_test` 在并行负载下偶发 5s deadline 超时（隔离运行稳定通过）。
+8. **rail 行名跟随最新 prompt，与「named by the first prompt」字面不符**（旅程加固波 2026-09-11 发现，只报告不修）：rail-declutter-unread delta 要求会话行以「首条用户消息」预览命名，但后端 `emit_turn_card`（sebas-dispatch `engine/mod.rs`）每轮开轮 `card_states.drop` + `seed_card`（新 prompt），`SessionInfo.user_prompt` → `SessionRow.prompt_preview` 投影因此携带**最新**一轮 prompt——首次跟发消息后行名即从首条漂移到最新。前端单测 mock 行数据、既有浏览器用例均为单消息会话，都探不到；`unread-badge.spec.ts` 跨层旅程首次踩中（已按「不依赖行名稳定」改写断言）。倾向视为产品语义决策（最新 prompt 作行名有其 UX 理由），若确认按 spec 字面收口需后端在首条消息后冻结 prompt_preview，另立项。
 
 ## 变更账本（core-set 增删与能力面变更说明）
 
 | 日期 | change | commit | 说明 |
 |---|---|---|---|
+| 2026-09-11 | 旅程加固波（交付终验前，工作树实施） | 未提交（feat/webui 工作树） | 对照三个已实现 change（rail-declutter-unread、workbench-interaction-polish、revamp-settings-nav-and-models-editor）盘点 Scenario→层覆盖缺口，补 4 条浏览器级旅程：未读徽标跨层旅程（`unread-badge.spec.ts` 新 spec：真实回复→API msg_count→徽标免刷新亮起→聚焦清零+锚落 localStorage，覆盖 session-unread-badge 三个此前仅组件单测的 scenario）；History 倒序浏览器旅程（D7，此前仅前端单测）；设置分区导航 IA 旅程（分区顺序/分隔线/About 压底/缺省聚焦/记忆/旧值回退，revamp 后仅沙箱目检）；编辑器抓取→保存→创建对话框免重启接缝旅程（设置↔工作台接缝，此前两半各测各的）。发现并记录实施期问题 #8（rail 行名跟随最新 prompt）。testsuite-webui 61→65（58+3+4）全绿。 |
 | 2026-09-11 | rail-declutter-unread（工作树实施） | 未提交（feat/webui 工作树） | rail 收敛 + 未读徽标：Inbox 分组移除（无项目会话不再进 rail，API 仍可达）；移除项目遇非归档会话改 typed rejection 409（废除「迁移 Inbox」承诺，`session_endpoints_test` 两例 + browser 旅程）；项目/会话行操作收敛 `…` 菜单（wa-dropdown）；会话行新增未读徽标（服务端 `msg_count` = 可见回复段口径，dispatch 引擎 `count_chat_messages` 派生 + native 后端 flush 处累计；浏览器 localStorage 游标 `unread-cursor.ts` 与 seam 同锚）；会话名改 prompt_preview（40 码点截断）；History 倒序；composer 创建强制选项目。浏览器用例改写 6 处（projects 1.2 分支呈现按 D8 改写）+ 新增 1 例（主 config 42→43）；全套件 3 配置 50 例全绿（46+3+4）。 |
 
 | 2026-09-11 | 五 change 归档复核（make-core-own-provider-data、add-fetch-models、redesign-provider-models-settings、workbench-turn-queue、workbench-conversation-view） | specs 同步在工作树（归档目录 `openspec/changes/archive/2026-09-11-*`） | 五簇 requirement 级全量重数：117/117 = 100%（豁免 1 条不计分母）。分母 100 → 117：五 change 新增 +7（① Pending submissions observable/manageable；② Core owns provider and model data、Model entries carry capability tags；③ Pending submissions stack、conversation render、single surface；⑤ Model list fetch over the channel）；上期基数后归档补入账 +10（③ agent-workbench +6：审计 `982b4cc` rail/placeholder 三条 + wire-fix `bad057e` 三条；④ +4：project-session-actions rail 三条 + state-store Runtime state boundaries）；router-admin-api REMOVED 4 条退役出账（非核心面）。证据行全面改写（router CRUD/探测/默认值证据迁到 webui BFF + core store + 通道契约面；turn-queue/conversation-view 新 scenario 落行）。本期两处真缺口当场补测收口：E `core_owned_provider_reaches_router_without_restart`（router 订阅 core provider 数据的进程级闭环，此前零覆盖）+ `project_default_agent_follows_last_use` 与前端预选单测。树形账本 41 → 49 行（conversation/pending-stack 新 spec）。实施清单见各归档 change `tasks.md`。 |

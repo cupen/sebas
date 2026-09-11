@@ -201,6 +201,68 @@ test.describe('设置面', () => {
     })
   })
 
+  test.describe('分区导航 IA', () => {
+    test('nav order Generic→Appearance→Services→Models→About(pinned), default focus, memory, stale-value fallback', async ({
+      page,
+    }) => {
+      const settings = new SettingsModal(page)
+
+      await resetState(page.request)
+      await page.goto('/')
+      await settings.openViaSidebar()
+
+      // revamp-settings-nav-and-models-editor：无历史记忆时缺省聚焦 Generic。
+      const navItem = (label: string) => settings.panel.locator('.nav-item', { hasText: label })
+      await expect(navItem('Generic')).toHaveAttribute('aria-current', 'true', {
+        timeout: 10_000,
+      })
+
+      // 分区顺序即规约：Generic → Appearance →〔分隔线〕Services → Models →
+      // 〔压底分隔线〕About。一次结构断言钉住顺序 + 两条组间分隔线 + About
+      // 的 tail 分隔线（弹性留白压底的载体）。
+      const signature = await settings.panel.locator('.nav').evaluate((nav) =>
+        Array.from(nav.children).map((el) => {
+          if (el.classList.contains('nav-sep')) {
+            return el.classList.contains('tail') ? 'sep-tail' : 'sep'
+          }
+          return (el.textContent ?? '').trim()
+        }),
+      )
+      expect(signature).toEqual([
+        'Generic',
+        'Appearance',
+        'sep',
+        'Services',
+        'Models',
+        'sep-tail',
+        'About',
+      ])
+
+      // 历史记忆：切到 Models 后关闭再打开，缺省直接回到 Models（无点击）。
+      await settings.openSection('Models')
+      await settings.close()
+      await settings.openViaSidebar()
+      await expect(navItem('Models')).toHaveAttribute('aria-current', 'true', {
+        timeout: 10_000,
+      })
+      await expect(navItem('Generic')).toHaveAttribute('aria-current', 'false')
+      await settings.close()
+
+      // 旧值回退：记忆值 `settings`（本变更前的合法分区名）按非法值处理，
+      // 重载后打开聚焦 Generic 而非报错或空白。
+      await page.evaluate(() => localStorage.setItem('lastSettingsSection', 'settings'))
+      await page.reload()
+      await settings.openViaSidebar()
+      await expect(navItem('Generic')).toHaveAttribute('aria-current', 'true', {
+        timeout: 10_000,
+      })
+      await expect(navItem('Models')).toHaveAttribute('aria-current', 'false')
+      await settings.close()
+
+      expect(collector.clean()).toEqual([])
+    })
+  })
+
   test.describe('写降级', () => {
     test('S4 defaults read parity; set-default stays local, provider seeded via API', async ({ page }) => {
       const settings = new SettingsModal(page)

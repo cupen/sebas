@@ -37,11 +37,13 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   getSession,
   listSessions,
   resetState,
   FocusedSession,
+  ProjectRail,
   SettingsModal,
   waitStatus,
 } from './helpers/index'
@@ -356,6 +358,88 @@ test.describe('模型管理覆盖', () => {
           { id: 'fetch-m-1', tags: [] },
           { id: 'fetch-m-2', tags: ['vision'] },
         ])
+      } finally {
+        await new Promise<void>((resolve) => upstream.close(() => resolve()))
+      }
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('a fetched-and-saved catalog reaches the creation dialog without a restart', async ({
+      page,
+    }) => {
+      const settings = new SettingsModal(page)
+      const rail = new ProjectRail(page)
+
+      // Node-local fake upstream (never a real provider host), same discipline
+      // as the editor-fetch journey above.
+      const upstreamModels = ['dlg-m-1', 'dlg-m-2']
+      const upstream = http.createServer((_req, res) => {
+        res.setHeader('content-type', 'application/json')
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: upstreamModels.map((id) => ({ id, object: 'model' })),
+          }),
+        )
+      })
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+      const port = (upstream.address() as AddressInfo).port
+
+      try {
+        await resetState(page.request)
+        const { name: projectName } = await ensureSceneProject(page.request)
+        // Re-run safety: the provider lives in the SHARED core store.
+        await page.request.delete('/router/api/providers/dialog-seam')
+        const created = await page.request.post('/router/api/providers', {
+          data: { name: 'dialog-seam', base_url_openai_chat: `http://127.0.0.1:${port}/v1` },
+        })
+        expect(created.ok()).toBe(true)
+
+        // The real Settings write path: editor fetch replaces the draft, save
+        // lands it in the core store.
+        await page.goto('/')
+        await settings.openViaSidebar()
+        await settings.openSection('Models')
+        const row = settings.panel.locator('.provider-row', { hasText: 'dialog-seam' })
+        await expect(row).toBeVisible({ timeout: 10_000 })
+        await row.locator('button[title="Edit"]').click()
+        const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+        await editor.locator('button[data-testid="fetch-models"]').click()
+        await expect(
+          editor.locator('[data-testid="model-entry"]').nth(0).locator('wa-input input'),
+        ).toHaveValue('dlg-m-1', { timeout: 10_000 })
+        await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+        await expect(editor).toBeHidden({ timeout: 10_000 })
+
+        // API truth: the fetched ids persisted through the ordinary save.
+        const resp = await page.request.get('/router/api/providers')
+        const body = (await resp.json()) as {
+          providers?: Array<{ name: string; models: Array<{ id: string }> }>
+        }
+        expect(body.providers?.find((p) => p.name === 'dialog-seam')?.models.map((m) => m.id)).toEqual(
+          upstreamModels,
+        )
+        await settings.close()
+
+        // The seam: WITHOUT any reload the creation dialog's catalog (same
+        // shared store) offers the fetched provider → models — the dialog
+        // reflects catalog changes live (spec: reflected without a restart).
+        await rail.expandProject(projectName)
+        await rail.openNewSessionDialog(projectName)
+        const dialog = rail.newSessionDialog()
+        const providerSelect = dialog.locator('[data-testid="dialog-provider-select"]')
+        await expect(providerSelect).toBeVisible({ timeout: 15_000 })
+        await expect(providerSelect).toContainText('dialog-seam')
+        await expect(dialog.locator('[data-testid="dialog-model-select"]')).toContainText(
+          'dlg-m-1',
+        )
+        await rail.cancelNewSessionDialog()
+
+        // Hygiene: drop the provider so later journeys' honest "no provider
+        // configured" assertions stay valid.
+        const removed = await page.request.delete('/router/api/providers/dialog-seam')
+        expect(removed.ok()).toBe(true)
       } finally {
         await new Promise<void>((resolve) => upstream.close(() => resolve()))
       }

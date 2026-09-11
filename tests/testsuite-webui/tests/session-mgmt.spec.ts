@@ -90,6 +90,52 @@ test.describe('会话管理', () => {
 
       expect(collector.clean()).toEqual([])
     })
+
+    test('History lists newly archived sessions newest-first (rail-declutter-unread D7)', async ({
+      page,
+    }) => {
+      test.setTimeout(60_000)
+      const rail = new ProjectRail(page)
+
+      await resetState(page.request)
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const t = Date.now()
+      const oldTag = `hist-old-${t}`
+      const newTag = `hist-new-${t}`
+      // Two completed turns → two archive candidates with distinct labels.
+      const keyOld = await createSession(page.request, { prompt: oldTag, projectId })
+      await waitStatus(page.request, keyOld, ['done'])
+      const keyNew = await createSession(page.request, { prompt: newTag, projectId })
+      await waitStatus(page.request, keyNew, ['done'])
+
+      await page.goto('/')
+      await expect(rail.host).toBeVisible()
+      await rail.expandProject(projectName)
+
+      // archived_at is unix SECONDS: the two archives must land in different
+      // seconds or the descending sort keeps insertion order and the newest-
+      // first assertion is unjudgeable.
+      await rail.archiveSession(oldTag)
+      await expect(rail.sessionItem(oldTag)).toHaveCount(0, { timeout: 10_000 })
+      await page.waitForTimeout(1200)
+      await rail.archiveSession(newTag)
+      await expect(rail.sessionItem(newTag)).toHaveCount(0, { timeout: 10_000 })
+
+      // History renders newest-first: the later-archived row sits ABOVE the
+      // earlier one (leftover archives from other journeys may exist between
+      // them — only the relative order of our own two rows is pinned).
+      await rail.expandHistory()
+      const labels = await rail.host
+        .locator('li.session-item.archived .session-name')
+        .allTextContents()
+      const oldIdx = labels.findIndex((l) => l.includes(oldTag))
+      const newIdx = labels.findIndex((l) => l.includes(newTag))
+      expect(oldIdx, `archived rows: ${JSON.stringify(labels)}`).toBeGreaterThanOrEqual(0)
+      expect(newIdx, `archived rows: ${JSON.stringify(labels)}`).toBeGreaterThanOrEqual(0)
+      expect(newIdx, `archived rows: ${JSON.stringify(labels)}`).toBeLessThan(oldIdx)
+
+      expect(collector.clean()).toEqual([])
+    })
   })
 
   test.describe('深链与退役路径', () => {
