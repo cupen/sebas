@@ -132,6 +132,39 @@ pub struct CloseReport {
     pub discarded_pending: usize,
 }
 
+/// 一个执行节点的管理面视图（add-remote-execution-node 8.x）。
+///
+/// 与 core 通道 `NodeLinkOp::ListNodes` 的 `NodeView` 同形（这是**唯一**的
+/// 可用性真源，webui 不另造一份）：`id` / `status` / `last_seen_unix` /
+/// `created_unix`。`local` 是本机条目专用的标记——本机节点不经过注册表
+/// （它是隐式的），但工作台必须能显示它。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInfo {
+    /// 稳定节点标识。
+    pub id: String,
+    /// `online` / `offline` / `revoked`。
+    pub status: String,
+    /// 最后一次成功握手时间（unix 秒）；本机节点为 `None`（无握手概念）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_unix: Option<i64>,
+    /// 首次配对时间（unix 秒）；本机节点为 0。
+    #[serde(default)]
+    pub created_unix: i64,
+    /// 是否为主控本机（隐式节点，永远在线——否则你读不到这个响应）。
+    #[serde(default)]
+    pub local: bool,
+}
+
+/// 节点侧路径判定结果（节点 `SessionOp::CheckPath { path }` 的应答形状：
+/// `SessionResult::PathChecked { exists, is_dir }`）。
+///
+/// 路径可用性由**项目命名的那台机器**判定，主控不替远端做本地 `stat`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathCheck {
+    pub exists: bool,
+    pub is_dir: bool,
+}
+
 /// （wire-webui-sebas-agent-e2e）单个执行体（acp / native）的可用性：
 /// composer 据此禁选并标注 cause。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +304,25 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// 已注册执行节点的可用性（add-remote-execution-node 8.x）。真源是 core 的
+    /// 节点注册表（`NodeLinkOp::ListNodes`），**不另造一份**。
+    ///
+    /// 默认诚实不可用：不承载注册表的后端不能假装知道远端节点状态。前端据此
+    /// 显示「节点状态不可得」，而不是把「看不见」说成「没有节点」。
+    async fn nodes(&self) -> Result<Vec<NodeInfo>, String> {
+        Err("此后端不承载节点注册表（节点可用性不可得）".into())
+    }
+
+    /// 请**节点自己**判定一个路径是否可用（`SessionOp::CheckPath { path }`
+    /// → `SessionResult::PathChecked { exists, is_dir }`）。远端项目注册前必须
+    /// 走这里：主控在这台机器上无从判断那台机器上的路径。
+    ///
+    /// 默认诚实不可用——绝不回退成本地 `stat`（那会把「主控上恰好同名」误当成
+    /// 「节点上存在」）。
+    async fn check_node_path(&self, _node_id: &str, _path: &str) -> Result<PathCheck, String> {
+        Err("此后端不能向节点发起路径校验".into())
+    }
+
     /// Live stream of gated tool calls awaiting a decision (the review-card
     /// feed). `None` = this backend has no permission interaction (its
     /// sessions never gate, or gating is surfaced elsewhere).
@@ -288,14 +340,19 @@ pub trait SessionBackend: Send + Sync {
     /// Create a session pinned to `agent`（workbench-agent-wire-fix D2：
     /// `[acp.agents.*]` 配置键名或 `"native"`；必填，无隐式默认）。`model`
     /// （add-acp-model-selection）是创建时请求的模型 id：会话建立后、首个
-    /// prompt 前应用（失败报非致命错误、会话仍可对话）。默认实现忽略
-    /// agent/model（单后端 seams 无选择面，落到自身唯一执行体）。
+    /// prompt 前应用（失败报非致命错误、会话仍可对话）。
+    ///
+    /// `node`（add-remote-execution-node 8.1）是项目所属执行节点：`Some(id)`
+    /// （本机项目为 `Some("local")`）请核心把会话放到该节点；`None` = 无项目
+    /// 会话（飞书来源），由核心落到配置的默认执行节点。默认实现忽略节点参数
+    /// 落到本地执行体——单后端 seams 没有远端放置面，如实降级由各实现负责。
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
         _agent: &str,
         _model: Option<String>,
+        _node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
     }
@@ -328,14 +385,16 @@ pub trait SessionBackend: Send + Sync {
     /// (P2 fix: an empty prompt must not be sent to the agent — opencode
     /// hangs on `session/prompt ""`). `agent` is the same agent id as
     /// [`SessionBackend::spawn_with`]（必填），and `model` the requested
-    /// model id; both are remembered for the first message's spawn. The
-    /// default falls back to `spawn("", …)` for backends without placeholder
-    /// support (keeps the old callable surface honest).
+    /// model id; both are remembered for the first message's spawn. `node`
+    /// the same execution-node dimension as `spawn_with`. The default falls
+    /// back to `spawn("", …)` for backends without placeholder support
+    /// (keeps the old callable surface honest).
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
         _agent: &str,
         _model: Option<String>,
+        _node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(String::new(), project_dir).await
     }
@@ -348,6 +407,14 @@ pub trait SessionBackend: Send + Sync {
 /// 不了这里（复合后端先行路由）。
 fn agent_kind_of(agent: &str) -> String {
     agent.to_string()
+}
+
+/// `Some(节点)` 且不是本机 → 远端节点 id；`None` / `"local"` / 空白 → `None`
+/// （本机放置，行为不变）。8.1：`"local"` 必须与本机同义，否则本机项目会被
+/// 当成远端项目而被拒。
+fn remote_node_of(node: Option<&str>) -> Option<&str> {
+    node.map(str::trim)
+        .filter(|n| !n.is_empty() && *n != crate::projects::LOCAL_NODE_ID)
 }
 
 /// 代码内置 preset 表的 JSON 形状（make-core-own-provider-data 1.3；与 core
@@ -504,15 +571,26 @@ impl SessionBackend for InProcessBackend {
     }
 
     /// Spawn through the router with the agent kind pinned（D2：agent id 即
-    /// kind）and the requested model id threaded to the spawn out（D3：建会
-    /// 话后、首 prompt 前应用）。
+    /// kind）and the requested model id threaded to the spawn out（D3：建会话
+    /// 后、首 prompt 前应用）。
+    ///
+    /// `node`（8.1）：进程内后端调的是 `DispatchHandle::web_spawn`，它没有
+    /// 节点维度（远端放置走 `CoreChannelRequest::Spawn { node }`）。远端节点
+    /// 在这里**如实拒绝**，绝不静默落到本机——静默本地执行会把「我以为跑在
+    /// 那台机器上」变成一条看不出来的谎。
     async fn spawn_with(
         &self,
         prompt: String,
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        if let Some(remote) = remote_node_of(node.as_deref()) {
+            return Err(SessionRejection::Unavailable {
+                cause: format!("进程内后端不承载远端会话放置（节点 {remote}）"),
+            });
+        }
         let kind = agent_kind_of(agent);
         Ok(self
             .router
@@ -522,13 +600,21 @@ impl SessionBackend for InProcessBackend {
 
     /// 0-turn placeholder: create the session row without spawning an agent
     /// child (P2 fix). The requested kind/model are remembered on the mapping
-    /// so the first message spawns the right agent.
+    /// so the first message spawns the right agent. 远端节点同上如实拒绝。
     async fn create_placeholder(
         &self,
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
+        if let Some(remote) = remote_node_of(node.as_deref()) {
+            return Err(SessionRejection::Unavailable {
+                cause: format!(
+                    "远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"
+                ),
+            });
+        }
         let kind = agent_kind_of(agent);
         Ok(self
             .router
@@ -757,6 +843,15 @@ pub struct FakeBackend {
     /// add-fetch-models（route 层测试用）：按 provider 名注入的抓取结果。
     /// 未注入的名字走 trait 默认（诚实不可用）。
     fetch_models_results: std::sync::Mutex<HashMap<String, Result<Vec<String>, String>>>,
+    /// add-remote-execution-node 8.x：可注入的节点注册表视图。`None` = 该后端
+    /// 不承载节点注册表（`nodes()` 如实回 Err，前端呈现「状态不可得」）。
+    nodes: std::sync::Mutex<Option<Vec<NodeInfo>>>,
+    /// add-remote-execution-node 8.1：按 `(节点, 路径)` 注入的节点侧判定结果。
+    /// 未注入的组合走默认（无法校验）。
+    path_checks: std::sync::Mutex<HashMap<(String, String), Result<PathCheck, String>>>,
+    /// add-remote-execution-node 8.1（route 层测试用）：最近一次
+    /// `spawn_with` / `create_placeholder` 收到的 `node`。`None` = 还没调用过。
+    last_spawn_node: std::sync::Mutex<Option<Option<String>>>,
 }
 
 #[derive(Default)]
@@ -785,6 +880,9 @@ impl FakeBackend {
             execution_bodies: std::sync::Mutex::new(None),
             state_mutate_ok: std::sync::atomic::AtomicBool::new(false),
             fetch_models_results: std::sync::Mutex::new(HashMap::new()),
+            nodes: std::sync::Mutex::new(None),
+            path_checks: std::sync::Mutex::new(HashMap::new()),
+            last_spawn_node: std::sync::Mutex::new(None),
         }
     }
 
@@ -851,6 +949,35 @@ impl FakeBackend {
             .lock()
             .expect("fetch models results lock")
             .insert(provider.to_string(), result);
+    }
+
+    /// add-remote-execution-node 8.x：注入节点注册表视图（route 层测试用）。
+    /// `Some(vec![])` = 注册表可达但一个节点都没注册（这是两回事，不能混）。
+    pub fn set_nodes(&self, nodes: Option<Vec<NodeInfo>>) {
+        *self.nodes.lock().expect("nodes lock") = nodes;
+    }
+
+    /// add-remote-execution-node 8.1：注入节点侧路径判定结果（route 层测试用）。
+    pub fn set_path_check(
+        &self,
+        node_id: &str,
+        path: &str,
+        result: Result<PathCheck, String>,
+    ) {
+        self.path_checks
+            .lock()
+            .expect("path checks lock")
+            .insert((node_id.to_string(), path.to_string()), result);
+    }
+
+    /// add-remote-execution-node 8.1：最近一次 spawn/placeholder 收到的 node
+    /// （route 层测试断言「项目的 node_id 确实传到了 trait 缝」）。
+    pub fn last_spawn_node(&self) -> Option<String> {
+        self.last_spawn_node
+            .lock()
+            .expect("last spawn node lock")
+            .clone()
+            .flatten()
     }
 
     /// （wire-webui-sebas-agent-e2e 3.1）注入逐执行体可用性，summary 原样
@@ -920,6 +1047,7 @@ impl SessionBackend for FakeBackend {
             usage: None,
             backend: None,
             pending: Vec::new(),
+            remote: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1065,6 +1193,59 @@ impl SessionBackend for FakeBackend {
             .expect("execution bodies lock")
             .clone()
     }
+
+    /// add-remote-execution-node 8.1：记录 node 便于 route 层断言「项目节点确实
+    /// 传到了缝上」，其余行为与 `spawn` 一致。
+    async fn spawn_with(
+        &self,
+        prompt: String,
+        project_dir: Option<String>,
+        _agent: &str,
+        _model: Option<String>,
+        node: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
+        self.spawn(prompt, project_dir).await
+    }
+
+    /// 远端 0-turn 占位如实拒绝（与 core 的远端路由同口径）：远端会话必须由
+    /// 一条真实的首条输入建立，占位行没有可对应的远端执行事实。
+    async fn create_placeholder(
+        &self,
+        project_dir: Option<String>,
+        _agent: &str,
+        _model: Option<String>,
+        node: Option<String>,
+    ) -> Result<ChannelKey, SessionRejection> {
+        *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
+        if let Some(remote) = remote_node_of(node.as_deref()) {
+            return Err(SessionRejection::Unavailable {
+                cause: format!(
+                    "远端会话不能建 0-turn 占位（节点 {remote}）：请直接发送第一条输入"
+                ),
+            });
+        }
+        self.spawn(String::new(), project_dir).await
+    }
+
+    /// add-remote-execution-node 8.x：注入的注册表视图；`None` = 未注入 →
+    /// 走 trait 默认（诚实不可用）。
+    async fn nodes(&self) -> Result<Vec<NodeInfo>, String> {
+        match self.nodes.lock().expect("nodes lock").clone() {
+            Some(nodes) => Ok(nodes),
+            None => Err("此后端不承载节点注册表（节点可用性不可得）".into()),
+        }
+    }
+
+    /// add-remote-execution-node 8.1：注入的节点侧判定；未注入如实拒绝。
+    async fn check_node_path(&self, node_id: &str, path: &str) -> Result<PathCheck, String> {
+        self.path_checks
+            .lock()
+            .expect("path checks lock")
+            .get(&(node_id.to_string(), path.to_string()))
+            .cloned()
+            .unwrap_or_else(|| Err("此后端不能向节点发起路径校验".into()))
+    }
 }
 
 #[cfg(test)]
@@ -1129,6 +1310,7 @@ mod tests {
                 usage: None,
                 backend: None,
                 pending: Vec::new(),
+                remote: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

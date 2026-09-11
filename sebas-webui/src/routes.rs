@@ -39,12 +39,19 @@ pub(crate) fn build_session_rows(
             let is_active = focused
                 .map(|a| a.channel.as_str() == info.channel && a.reference == info.key)
                 .unwrap_or(false);
-            let derived = SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""));
+            let derived = SessionStatus::derive(status, info.phase.as_deref().unwrap_or(""))
+                // 8.4：有悬空审批的会话**在等**，不是在跑——底层 status 仍是
+                // active，呈现必须是 Waiting。
+                .with_parked_approvals(
+                    info.remote
+                        .as_ref()
+                        .map(|r| r.parked_approvals)
+                        .unwrap_or(0),
+                );
             SessionRow {
-                project_id: info
-                    .project_dir
-                    .as_deref()
-                    .map(crate::projects::project_id_for),
+                // 8.1 会话归属项目按 `(节点, 路径)`：远端会话的 project_dir 若按
+                // 本机公式算 id，会挂到「本机同路径项目」下（或一个不存在的 id）。
+                project_id: crate::projects::project_id_for_session(info),
                 prompt_preview: info.user_prompt.clone(),
                 current_model: info.current_model.clone(),
                 available_models: info.available_models.clone(),
@@ -66,6 +73,7 @@ pub(crate) fn build_session_rows(
                 last_active: format_relative_time(info.last_active_unix),
                 last_active_unix: info.last_active_unix,
                 is_active,
+                remote: info.remote.clone(),
             }
         })
         .collect();
@@ -89,7 +97,13 @@ pub(crate) fn session_summary(
     info: &SessionInfo,
     entries: &[sebas_dispatch::TurnEntry],
 ) -> serde_json::Value {
-    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
+    let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
+        .with_parked_approvals(
+            info.remote
+                .as_ref()
+                .map(|r| r.parked_approvals)
+                .unwrap_or(0),
+        );
     let conversation: Vec<crate::models::ConversationEntryView> = entries
         .iter()
         .map(|e| crate::models::ConversationEntryView {
@@ -113,10 +127,10 @@ pub(crate) fn session_summary(
         "available_models": info.available_models,
         "agent_kind": info.agent_kind,
         // 绑定项目的稳定 id（workbench-agent-wire-fix 2.5）；null = inbox。
-        "project_id": info
-            .project_dir
-            .as_deref()
-            .map(crate::projects::project_id_for),
+        // 8.1：按 `(节点, 路径)` 派生——远端会话不属于本机同路径项目。
+        "project_id": crate::projects::project_id_for_session(info),
+        // 8.2/8.3/8.4/8.5：节点/状态/成因/mode/悬空审批整块透传（null = 本机）。
+        "remote": info.remote,
         // workbench-turn-queue 6.1：聚焦会话的待生效提交全量视图（投递序）。
         "pending": serde_json::to_value(&info.pending).unwrap_or_default(),
         // workbench-conversation-view 1.4：与 detail 同形状的有序条目序列。

@@ -23,9 +23,26 @@ import {
   type SessionRow,
   type ArchiveEntry,
   type AgentKindInfo,
+  type NodeInfo,
 } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import '../components/folder-picker.js'
+
+/** 节点可用性轮询周期（add-remote-execution-node 8.2）：节点回归后**免刷新**
+ * 恢复——项目行与「+」的可用态跟着真实状态翻转。 */
+const NODE_POLL_MS = 10_000
+
+/** 本机节点标识（与后端 projects::LOCAL_NODE_ID 同一词表）。 */
+const LOCAL_NODE = 'local'
+
+/** unix 秒 → 粗粒度相对时间（离线成因文案用；不引入日期库）。 */
+function relativeTime(unixSecs: number): string {
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs)
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
 
 @customElement('sebas-project-rail')
 export class SebasProjectRail extends LitElement {
@@ -44,6 +61,8 @@ export class SebasProjectRail extends LitElement {
   @state() private expanded: Record<string, boolean> = {}
   @state() private historyOpen = false
   @state() private inboxOpen = false
+  /** 8.4：等待组默认展开（它就是要你看见）。 */
+  @state() private waitingOpen = true
   @state() private branchByPath: Record<string, ProjectBranchInfo> = {}
   @state() private dragIndex: number | null = null
   @state() private dragOverIndex: number | null = null
@@ -59,6 +78,15 @@ export class SebasProjectRail extends LitElement {
   @state() private addDialogOpen = false
   @state() private addPath = ''
   @state() private addError: string | null = null
+  /** 注册对话框选定的执行节点（`''` = 本机，隐式；8.1）。 */
+  @state() private addNodeId = ''
+
+  // ─── 执行节点可用性（add-remote-execution-node 8.2/8.5）──────────────
+  /** `GET /api/nodes` 的节点列表（本机恒在列）。 */
+  @state() private nodes: NodeInfo[] = []
+  /** 远端注册表是否可得：`false` = 状态未知，**不**等于「没有远端节点」。 */
+  @state() private remoteNodesAvailable = true
+  @state() private nodesCause: string | null = null
 
   // Remove project dialog state（workbench-agent-wire-fix 5.1）
   @state() private removeTarget: Project | null = null
@@ -67,6 +95,8 @@ export class SebasProjectRail extends LitElement {
 
   private fetchSeq = 0
   private unsubscribe?: () => void
+  /** 节点可用性轮询定时器（8.2；disconnectedCallback 清理）。 */
+  private nodeTimer: number | undefined = undefined
   private refetchBound = (): void => { void this.refresh() }
 
   private async loadAgents(): Promise<void> {
@@ -128,6 +158,42 @@ export class SebasProjectRail extends LitElement {
     .meta .count { background: var(--sebas-surface-2); border-radius: 999px; padding: 1px 7px; font-weight: 500; font-variant-numeric: tabular-nums; }
     .row.active .meta .count { background: var(--sebas-accent-strong); color: var(--sebas-accent-ink); }
     .wait-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sebas-status-working); display: inline-block; }
+    /* 8.5：项目/会话行上的节点标注。本机也显示（spec：命名每个项目所在的
+       节点），但只有非在线态才带告警色。 */
+    .node-chip {
+      font-family: var(--sebas-font-mono); font-size: 0.66rem; font-weight: 500;
+      color: var(--sebas-text-faint); background: var(--sebas-surface-2);
+      border-radius: var(--sebas-radius-full); padding: 0 6px;
+      max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .node-chip[data-node-status='offline'],
+    .node-chip[data-node-status='revoked'],
+    .node-chip[data-node-status='unknown'] {
+      color: var(--sebas-status-failed);
+      background: var(--sebas-status-failed-bg);
+    }
+    .node-cause {
+      margin: 2px 10px 4px; padding: 3px 8px;
+      border-radius: var(--sebas-radius-sm);
+      background: var(--sebas-status-failed-bg);
+      border: 1px solid var(--sebas-status-failed-border);
+      color: var(--sebas-status-failed);
+      font-size: 0.7rem; line-height: 1.35;
+    }
+    .row.node-offline .name > span:first-child { color: var(--sebas-text-faint); }
+    .row-action:disabled { opacity: 0.3; cursor: not-allowed; }
+    .row:hover .row-action:disabled { color: var(--sebas-text-faint); border-color: var(--sebas-border); }
+    .session-node {
+      font-family: var(--sebas-font-mono); font-size: 0.62rem; color: var(--sebas-text-faint);
+      max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    li.session-item.waiting .session-name { color: var(--sebas-status-waiting); }
+    .wait-badge {
+      font-size: 0.62rem; font-weight: 600; letter-spacing: 0.02em;
+      color: var(--sebas-status-waiting); background: var(--sebas-status-waiting-bg);
+      border: 1px solid var(--sebas-status-waiting-border);
+      border-radius: var(--sebas-radius-full); padding: 0 6px; white-space: nowrap;
+    }
     .row-actions {
       display: flex; align-items: center; gap: 4px;
     }
@@ -155,6 +221,7 @@ export class SebasProjectRail extends LitElement {
     .session-dot[data-status='starting'] { background: var(--sebas-status-starting); }
     .session-dot[data-status='queued'] { background: var(--sebas-status-queued); }
     .session-dot[data-status='working'] { background: var(--sebas-status-working); }
+    .session-dot[data-status='waiting'] { background: var(--sebas-status-waiting); }
     .session-dot[data-status='done'] { background: var(--sebas-status-done); }
     .session-dot[data-status='failed'] { background: var(--sebas-status-failed); }
     .session-dot[data-status='dormant'] { background: var(--sebas-status-dormant); }
@@ -206,16 +273,37 @@ export class SebasProjectRail extends LitElement {
     void this.loadAgents()
     this.unsubscribe = sharedWs.subscribe(this.refetchBound)
     window.addEventListener('sebas:refetch', this.refetchBound)
+    // 8.2：节点离线/回归没有对应的会话事件，靠轮询让项目行与 composer 的
+    // 可用态**免刷新**翻转。
+    this.nodeTimer = window.setInterval(() => { void this.refresh() }, NODE_POLL_MS)
   }
 
   disconnectedCallback(): void {
     this.unsubscribe?.()
     window.removeEventListener('sebas:refetch', this.refetchBound)
+    if (this.nodeTimer !== undefined) {
+      window.clearInterval(this.nodeTimer)
+      this.nodeTimer = undefined
+    }
     super.disconnectedCallback()
   }
 
   async refresh() {
     const seq = ++this.fetchSeq
+    // 节点可用性先取（项目行的离线呈现依赖它）。取不到时如实降级为
+    // 「状态不可得」，绝不把「看不见」说成「离线」，更不说成「在线」。
+    try {
+      const d = await api.nodes()
+      if (seq !== this.fetchSeq) return
+      this.nodes = d?.nodes ?? []
+      this.remoteNodesAvailable = d?.remote_available !== false
+      this.nodesCause = d?.cause ?? null
+    } catch (e) {
+      if (seq !== this.fetchSeq) return
+      this.nodes = [{ id: LOCAL_NODE, status: 'online', local: true }]
+      this.remoteNodesAvailable = false
+      this.nodesCause = e instanceof Error ? e.message : String(e)
+    }
     try {
       const { projects } = await api.projects.list()
       if (seq !== this.fetchSeq) return
@@ -240,6 +328,40 @@ export class SebasProjectRail extends LitElement {
       if (seq !== this.fetchSeq) return
       this.archivedSessions = archived_sessions
     } catch { /* ignore */ }
+  }
+
+  /**
+   * 一个节点的可判定状态（8.2/8.5）。返回 `status` ∈ online | offline |
+   * revoked | unknown，以及不可用时的**成因**。
+   *
+   * `unknown` 是真实的一档：注册表不可得时我们不知道那台机器通不通，不能
+   * 说它离线，也不能默认它在线。本机节点例外——本机在回答这个页面。
+   */
+  private nodeStatus(nodeId: string | null | undefined): { status: string; cause: string | null } {
+    const id = nodeId || LOCAL_NODE
+    const found = this.nodes.find((n) => n.id === id)
+    if (found) {
+      if (found.status === 'online') return { status: 'online', cause: null }
+      if (found.status === 'revoked') return { status: 'revoked', cause: '节点凭据已被吊销' }
+      const seen = found.last_seen_unix
+      return {
+        status: found.status,
+        cause: seen ? `节点离线（上次在线 ${relativeTime(seen)}）` : '节点离线',
+      }
+    }
+    if (id === LOCAL_NODE) return { status: 'online', cause: null }
+    if (!this.remoteNodesAvailable) {
+      return {
+        status: 'unknown',
+        cause: `节点状态不可得${this.nodesCause ? `：${this.nodesCause}` : ''}`,
+      }
+    }
+    return { status: 'unknown', cause: `节点 ${id} 未注册` }
+  }
+
+  /** 项目是否注册在一个**可建会话**的节点上（online 才可）。 */
+  private nodeOnline(nodeId: string | null | undefined): boolean {
+    return this.nodeStatus(nodeId).status === 'online'
   }
 
   private async loadBranch(id: string) {
@@ -284,6 +406,12 @@ export class SebasProjectRail extends LitElement {
   private async createSession(e: Event, p: Project) {
     e.stopPropagation()
     this.onSelect(p.path)
+    // 8.2：节点不可用时不提交（提交只会 bounce）。成因就地说明，点名节点。
+    const st = this.nodeStatus(p.node_id)
+    if (st.status !== 'online') {
+      this.error = `无法在项目 ${p.name} 上新建会话：${st.cause ?? `节点 ${p.node_id ?? LOCAL_NODE} 不可用`}`
+      return
+    }
     try {
       const agent = p.default_agent || this.firstReachableAgent()
       if (!agent) {
@@ -405,6 +533,8 @@ export class SebasProjectRail extends LitElement {
     this.addDialogOpen = true
     this.addPath = ''
     this.addError = null
+    // 默认选本机（隐式注册的既有行为）。
+    this.addNodeId = ''
     const picker = this.shadowRoot?.querySelector('.folder-picker') as any
     if (picker?.reset) void picker.reset()
   }
@@ -413,8 +543,16 @@ export class SebasProjectRail extends LitElement {
   private async submitAddProject() {
     const path = this.addPath.trim()
     if (!path) { this.addError = '请输入路径'; return }
+    // 8.1：节点维度随注册一起走。选定非本机节点时，路径可用性由**该节点**
+    // 判定——后端拒绝会点名节点、路径与哪里不对，这里原样呈现。
+    const nodeId = this.addNodeId || null
+    if (nodeId && !this.nodeOnline(nodeId)) {
+      const st = this.nodeStatus(nodeId)
+      this.addError = `无法注册到节点 ${nodeId}：${st.cause ?? '节点不可用'}`
+      return
+    }
     try {
-      const p = await api.projects.add(path)
+      const p = await api.projects.add(path, nodeId)
       this.closeAddDialog()
       await this.refresh()
       // 降级标记就地呈现（refresh 已清 hint，add 的响应说了算）：核心不可达
@@ -429,9 +567,25 @@ export class SebasProjectRail extends LitElement {
     for (const r of this.sessions) {
       if (r.project_id !== id) continue
       count += 1
-      if (r.status_slug === 'queued' || r.status_slug === 'failed' || r.status_slug === 'starting') { waiting = true }
+      // 8.4：等待（含悬空审批）也需要操作员介入，与 queued/failed 同类。
+      if (
+        r.status_slug === 'queued' ||
+        r.status_slug === 'failed' ||
+        r.status_slug === 'starting' ||
+        r.status_slug === 'waiting' ||
+        (r.remote?.parked_approvals ?? 0) > 0
+      ) { waiting = true }
     }
     return { count, waiting }
+  }
+
+  /**
+   * 8.4：等待操作员决定（悬空审批 > 0）的会话。它们单独成组——「在等人」与
+   * 「在干活」必须是两个可分辨的集合，把等待埋在项目分组里就等于只有点开
+   * 才发现。
+   */
+  waitingSessions(): SessionRow[] {
+    return this.sessions.filter((r) => (r.remote?.parked_approvals ?? 0) > 0)
   }
 
   // ─── Renderers ──────────────────────────────────────────────────
@@ -439,10 +593,25 @@ export class SebasProjectRail extends LitElement {
     const label = row.session_id_short ?? row.chat_id
     // 当前标记由焦点指针驱动（3.2）：不再比较 location.pathname。
     const current = this.focusedKey === row.encoded_key
+    // 8.4：悬空审批 > 0 = 在等人，不是在跑（状态词由后端投影为 waiting，
+    // 这里再按 remote 兜一层，老报文/直接 mock 的 remote 也能正确标）。
+    const remote = row.remote ?? null
+    const waiting = (remote?.parked_approvals ?? 0) > 0 || row.status_slug === 'waiting'
+    // 8.5：会话标注所属节点；节点不可用时把成因写在 title 上。
+    const nodeId = remote?.node_id ?? null
+    const nodeLabel = nodeId ?? (row.project_id ? LOCAL_NODE : null)
+    const nodeOffline = remote != null && remote.node_status !== 'online'
+    const nodeTitle = nodeOffline
+      ? `节点 ${nodeId}：${remote?.node_cause ?? remote?.node_status ?? '不可用'}`
+      : nodeLabel
+        ? `执行节点 ${nodeLabel}`
+        : ''
     return html`
-      <li class="session-item ${current ? 'current' : ''}" title=${row.chat_id} aria-current=${current ? 'true' : 'false'} @click=${() => this.openSession(row)}>
-        <span class="session-dot" data-status=${row.status_slug} aria-hidden="true"></span>
+      <li class="session-item ${current ? 'current' : ''} ${waiting ? 'waiting' : ''} ${nodeOffline ? 'node-offline' : ''}" title=${remote?.node_cause ?? row.chat_id} aria-current=${current ? 'true' : 'false'} @click=${() => this.openSession(row)}>
+        <span class="session-dot" data-status=${waiting ? 'waiting' : row.status_slug} aria-hidden="true"></span>
         <span class="session-name">${label}</span>
+        ${nodeLabel ? html`<span class="session-node" data-testid="session-node" title=${nodeTitle}>${nodeOffline ? '⚠ ' : ''}${nodeLabel}</span>` : nothing}
+        ${waiting ? html`<span class="wait-badge" data-testid="session-waiting" title="等待操作员决定（悬空审批 ${remote?.parked_approvals ?? 0}）">等待${(remote?.parked_approvals ?? 0) > 0 ? ` ${remote!.parked_approvals}` : ''}</span>` : nothing}
         <button class="session-archive-btn" title="Archive this session" aria-label="Archive ${label}" @click=${(e: Event) => this.archiveSession(e, row.encoded_key)}>${icon('inbox', 11)}</button>
         <button class="session-archive-btn" title="Close (delete) this session" aria-label="Close ${label}" @click=${(e: Event) => this.closeSession(e, row)}>×</button>
       </li>`
@@ -467,18 +636,51 @@ export class SebasProjectRail extends LitElement {
     const dragging = this.dragIndex === index
     const dragOver = this.dragOverIndex === index && this.dragIndex !== null && this.dragIndex !== index
     const projectSessions = this.sessionsFor(p.id)
+    // 8.2/8.5：项目标注所属节点；节点不可用时阻止新建（composer/rail 同一门禁）
+    // 并把成因写出来，而不是等提交失败才说。
+    const st = this.nodeStatus(p.node_id)
+    const nodeLabel = p.node_id || LOCAL_NODE
+    const nodeOk = st.status === 'online'
+    const nodeTitle = nodeOk ? `执行节点 ${nodeLabel}` : `节点 ${nodeLabel}：${st.cause ?? st.status}`
     return html`
       <li>
-        <div class=${['row', isActive ? 'active' : '', accessible ? '' : 'unreachable', dragging ? 'dragging' : '', dragOver ? 'drag-over' : ''].filter(Boolean).join(' ')} draggable="true" aria-current=${isActive ? 'true' : 'false'} aria-expanded=${isExpanded ? 'true' : 'false'} @click=${() => this.onSelect(p.path)} @dragstart=${(e: DragEvent) => this.onDragStart(e, index)} @dragover=${(e: DragEvent) => this.onDragOver(e, index)} @dragleave=${() => this.onDragLeave(index)} @drop=${(e: DragEvent) => this.onDrop(e, index)} @dragend=${() => this.onDragEnd()}>
-          <span class="name"><span>${p.name}</span>${waiting ? html`<span class="wait-dot" title="需要操作员介入" aria-label="需介入"></span>` : nothing}</span>
+        <div class=${['row', isActive ? 'active' : '', accessible ? '' : 'unreachable', nodeOk ? '' : 'node-offline', dragging ? 'dragging' : '', dragOver ? 'drag-over' : ''].filter(Boolean).join(' ')} draggable="true" aria-current=${isActive ? 'true' : 'false'} aria-expanded=${isExpanded ? 'true' : 'false'} @click=${() => this.onSelect(p.path)} @dragstart=${(e: DragEvent) => this.onDragStart(e, index)} @dragover=${(e: DragEvent) => this.onDragOver(e, index)} @dragleave=${() => this.onDragLeave(index)} @drop=${(e: DragEvent) => this.onDrop(e, index)} @dragend=${() => this.onDragEnd()}>
+          <span class="name">
+            <span>${p.name}</span>
+            <span class="node-chip" data-testid="project-node" data-node-status=${st.status} title=${nodeTitle}>${nodeOk ? '' : '⚠ '}${nodeLabel}</span>
+            ${waiting ? html`<span class="wait-dot" title="需要操作员介入" aria-label="需介入"></span>` : nothing}
+          </span>
           <span class="meta">${branch ? html`<span class="branch">${branch}</span>` : nothing}${count > 0 ? html`<span class="count">${count}</span>` : nothing}</span>
           <span class="row-actions">
-            <button class="row-action" title="New session in ${p.name}" aria-label="New session in ${p.name}" @click=${(e: Event) => this.createSession(e, p)}>+</button>
+            <button
+              class="row-action"
+              title=${nodeOk ? `New session in ${p.name}` : `无法新建会话：${st.cause ?? `节点 ${nodeLabel} 不可用`}`}
+              aria-label="New session in ${p.name}"
+              ?disabled=${!nodeOk}
+              @click=${(e: Event) => this.createSession(e, p)}
+            >+</button>
             <button class="row-action row-remove" title="Remove ${p.name}" aria-label="Remove ${p.name}" @click=${(e: Event) => this.openRemoveDialog(e, p)}>×</button>
           </span>
         </div>
+        ${nodeOk ? nothing : html`<div class="node-cause" data-testid="project-node-cause">节点 ${nodeLabel} 不可用：${st.cause ?? st.status}</div>`}
         ${isExpanded ? (projectSessions.length > 0 ? html`<ul class="sessions">${projectSessions.map((r) => this.renderSessionRow(r))}</ul>` : html`<div class="empty">该项目暂无会话</div>`) : nothing}
       </li>`
+  }
+
+  /**
+   * 8.4：等待操作员决定的会话单独成组（跨项目）。它们本来也会出现在各自
+   * 项目的展开列表里，但「有人在等你」不该要求操作员逐个展开才发现。
+   */
+  private renderWaiting() {
+    const waiting = this.waitingSessions()
+    if (waiting.length === 0) return nothing
+    return html`
+      <div class="group-section waiting-group">
+        <div class="group-head" role="button" tabindex="0" aria-expanded=${this.waitingOpen ? 'true' : 'false'} @click=${() => (this.waitingOpen = !this.waitingOpen)} @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.waitingOpen = !this.waitingOpen } }}>
+          <span class="chevron ${this.waitingOpen ? 'open' : ''}" aria-hidden="true">▶</span><span>Waiting on you</span><span class="group-count">${waiting.length}</span>
+        </div>
+        ${this.waitingOpen ? html`<ul class="sessions">${waiting.map((r) => this.renderSessionRow(r))}</ul>` : nothing}
+      </div>`
   }
 
   private renderInbox() {
@@ -515,6 +717,7 @@ export class SebasProjectRail extends LitElement {
       ${this.error ? html`<div class="error">${this.error} <button class="retry-btn" @click=${() => void this.refresh()}>重试</button></div>` : nothing}
       ${this.degradedHint ? html`<div class="degraded-hint" role="status" data-testid="project-degraded-hint">${this.degradedHint}</div>` : nothing}
       ${this.projects.length === 0 ? html`<div class="empty">尚未注册项目</div>` : html`<ul>${this.projects.map((p, i) => this.renderRow(p, i))}</ul>`}
+      ${this.renderWaiting()}
       ${this.renderInbox()}
       ${this.renderHistory()}
 
@@ -527,6 +730,22 @@ export class SebasProjectRail extends LitElement {
           <wa-input label="Project path" placeholder="/absolute/path/to/repo" .value=${this.addPath} @input=${(e: any) => (this.addPath = e.target.value)}>
             <wa-icon slot="start" name="folder" aria-hidden="true"></wa-icon>
           </wa-input>
+          <!-- 8.1：节点维度。空值 = 本机隐式注册（既有行为）；选远端时路径由
+               那台节点判定。远端注册表不可得时如实说明，不假装没有远端节点。 -->
+          <wa-select
+            label="Execution node"
+            data-testid="add-node-select"
+            value=${this.addNodeId}
+            @change=${(e: any) => (this.addNodeId = e.target.value ?? '')}
+          >
+            <wa-option value="">local（本机，隐式）</wa-option>
+            ${this.nodes
+              .filter((n) => !n.local && n.id !== LOCAL_NODE)
+              .map((n) => html`<wa-option value=${n.id} ?disabled=${n.status !== 'online'}>${n.status === 'online' ? n.id : `${n.id}（${n.status}）`}</wa-option>`)}
+          </wa-select>
+          ${this.remoteNodesAvailable
+            ? nothing
+            : html`<p style="font-size:0.75rem;color:var(--sebas-text-faint);margin:0;">远端节点状态不可得${this.nodesCause ? `：${this.nodesCause}` : ''}</p>`}
           ${this.addError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;">${this.addError}</div>` : nothing}
         </div>
         <wa-button slot="footer" variant="brand" @click=${() => void this.submitAddProject()} ?disabled=${!this.addPath.trim()}>Add project</wa-button>

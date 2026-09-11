@@ -88,6 +88,11 @@ beforeEach(() => {
   mockOf(apiMock.sessions).mockResolvedValue(sessionList(sessionRows))
   // Mock archive list (empty by default).
   mockOf(apiMock.archiveList).mockResolvedValue({ archived_sessions: [] })
+  // add-remote-execution-node 8.2：节点可用性默认只有本机在线。
+  mockOf(apiMock.nodes).mockResolvedValue({
+    nodes: [{ id: 'local', status: 'online', local: true }],
+    remote_available: true,
+  })
 })
 
 afterEach(() => {
@@ -360,6 +365,163 @@ describe('rail close confirmation (workbench-turn-queue 7.4)', () => {
     closeBtn!.click()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')).toBeNull()
+    el.remove()
+  })
+})
+
+/**
+ * add-remote-execution-node 8.1/8.2/8.4/8.5：项目带节点维度注册、离线呈现与
+ * composer 阻止、免刷新恢复、等待分组。
+ */
+describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
+  const remoteNode = { id: 'dev-box', status: 'online', created_unix: 1 }
+  const localNode = { id: 'local', status: 'online', local: true }
+
+  it('registers a project against a named node', async () => {
+    mockOf(apiMock.nodes).mockResolvedValue({ nodes: [localNode, remoteNode], remote_available: true })
+    mockOf(apiMock.projects.add).mockResolvedValue({
+      id: 'proj-remote',
+      path: '/srv/repo',
+      name: 'repo',
+      node_id: 'dev-box',
+      added_at: 0,
+    } as any)
+    const el = await mount()
+    ;(el as any).addPath = '/srv/repo'
+    ;(el as any).addNodeId = 'dev-box'
+    await (el as any).submitAddProject()
+    await el.updateComplete
+    expect(apiMock.projects.add).toHaveBeenCalledWith('/srv/repo', 'dev-box')
+    el.remove()
+  })
+
+  it('registers without a node against the local node (implicit)', async () => {
+    mockOf(apiMock.projects.add).mockResolvedValue({ ...projects[0] } as any)
+    const el = await mount()
+    ;(el as any).addPath = '/home/me/alpha'
+    ;(el as any).addNodeId = ''
+    await (el as any).submitAddProject()
+    await el.updateComplete
+    // 缺省不带 node_id：本机隐式注册的既有行为不变。
+    expect(apiMock.projects.add).toHaveBeenCalledWith('/home/me/alpha', null)
+    el.remove()
+  })
+
+  it('renders the same path on two nodes as two distinct entries naming their nodes', async () => {
+    mockOf(apiMock.projects.list).mockResolvedValue({
+      projects: [
+        { id: 'proj-a', path: '/srv/repo', name: 'repo', added_at: 0, node_id: 'node-1' },
+        { id: 'proj-b', path: '/srv/repo', name: 'repo', added_at: 1, node_id: 'node-2' },
+      ],
+    })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [localNode, { id: 'node-1', status: 'online' }, { id: 'node-2', status: 'online' }],
+      remote_available: true,
+    })
+    const el = await mount()
+    const rows = [...el.shadowRoot!.querySelectorAll('.row')]
+    expect(rows).toHaveLength(2)
+    const nodeLabels = [...el.shadowRoot!.querySelectorAll('[data-testid="project-node"]')].map(
+      (n) => n.textContent?.trim(),
+    )
+    expect(nodeLabels).toContain('node-1')
+    expect(nodeLabels).toContain('node-2')
+    el.remove()
+  })
+
+  it('surfaces the node-side rejection naming the node and the path', async () => {
+    mockOf(apiMock.nodes).mockResolvedValue({ nodes: [localNode, remoteNode], remote_available: true })
+    mockOf(apiMock.projects.add).mockRejectedValue(
+      new Error('节点 dev-box 上路径不存在: /srv/repo'),
+    )
+    const el = await mount()
+    ;(el as any).addPath = '/srv/repo'
+    ;(el as any).addNodeId = 'dev-box'
+    await (el as any).submitAddProject()
+    await el.updateComplete
+    expect(el.shadowRoot!.textContent).toContain('节点 dev-box')
+    expect(el.shadowRoot!.textContent).toContain('/srv/repo')
+    el.remove()
+  })
+
+  it('marks an offline node project with its cause and blocks starting a session', async () => {
+    mockOf(apiMock.projects.list).mockResolvedValue({
+      projects: [{ id: 'proj-r', path: '/srv/repo', name: 'repo', added_at: 0, node_id: 'dev-box' }],
+    })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [localNode, { id: 'dev-box', status: 'offline', last_seen_unix: 1_700_000_000 }],
+      remote_available: true,
+    })
+    const el = await mount()
+
+    const cause = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="project-node-cause"]')
+    expect(cause).toBeTruthy()
+    expect(cause!.textContent).toContain('dev-box')
+    expect(cause!.textContent).toContain('离线')
+
+    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>('.row-action:not(.row-remove)')
+    expect(plus!.disabled).toBe(true)
+
+    // 直接走创建路径也被拦下（不提交，成因点名节点）。
+    await (el as any).createSession(new Event('click'), (el as any).projects[0])
+    expect(apiMock.createSession).not.toHaveBeenCalled()
+    expect(el.shadowRoot!.textContent).toContain('dev-box')
+    el.remove()
+  })
+
+  it('recovers without a page reload once the node is back (same element)', async () => {
+    mockOf(apiMock.projects.list).mockResolvedValue({
+      projects: [{ id: 'proj-r', path: '/srv/repo', name: 'repo', added_at: 0, node_id: 'dev-box' }],
+    })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [localNode, { id: 'dev-box', status: 'offline' }],
+      remote_available: true,
+    })
+    const el = await mount()
+    expect(el.shadowRoot!.querySelector('[data-testid="project-node-cause"]')).toBeTruthy()
+
+    // 节点回来（轮询会走同一条 refresh 路径——不重挂组件、不刷新页面）。
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [localNode, { id: 'dev-box', status: 'online' }],
+      remote_available: true,
+    })
+    await el.refresh()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="project-node-cause"]')).toBeNull()
+    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>('.row-action:not(.row-remove)')
+    expect(plus!.disabled).toBe(false)
+    el.remove()
+  })
+
+  it('groups sessions parked on an approval as waiting, distinguishable from working', async () => {
+    const waitingRow = row({
+      status: 'active',
+      status_slug: 'waiting',
+      status_label: 'Waiting',
+      project_id: 'proj-alpha',
+      remote: {
+        node_id: 'dev-box',
+        node_status: 'online',
+        parked_approvals: 2,
+      },
+    })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([sessionRows[0], waitingRow]))
+    mockOf(apiMock.nodes).mockResolvedValue({ nodes: [localNode, remoteNode], remote_available: true })
+    const el = await mount()
+
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
+    const waitingHead = heads.find((h) => h.textContent?.includes('Waiting on you'))
+    expect(waitingHead).toBeTruthy()
+    expect(waitingHead!.querySelector('.group-count')?.textContent).toBe('1')
+
+    const badge = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="session-waiting"]')
+    expect(badge).toBeTruthy()
+    expect(badge!.textContent).toContain('2')
+
+    const dots = [...el.shadowRoot!.querySelectorAll('.session-dot')].map((d) =>
+      d.getAttribute('data-status'),
+    )
+    expect(dots).toContain('waiting')
     el.remove()
   })
 })

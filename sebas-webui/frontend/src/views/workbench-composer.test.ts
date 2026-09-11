@@ -896,3 +896,42 @@ describe('native availability fixtures (wire-webui-sebas-agent-e2e 4.1)', () => 
     )
   })
 })
+
+/**
+ * add-remote-execution-node 8.2：项目节点不可用时 composer 在**提交前**就
+ * 阻止（提交只会 bounce），并把节点与成因说清楚。
+ */
+describe('execution node gate (add-remote-execution-node 8.2)', () => {
+  it('disables submit and states the node cause when the project node is unavailable', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    const el = await mount({ projectId: 'proj-r', projectDir: '/srv/repo' })
+    el.nodeBlocked = { nodeId: 'dev-box', status: 'offline', cause: '节点离线（上次在线 5m ago）' }
+    await el.updateComplete
+
+    const send = el.shadowRoot!.querySelector<HTMLButtonElement>('button.send-button')
+    expect(send!.disabled).toBe(true)
+    const textarea = el.shadowRoot!.querySelector('wa-textarea')
+    expect(textarea?.hasAttribute('disabled')).toBe(true)
+
+    const callout = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="node-blocked"]')
+    expect(callout).toBeTruthy()
+    expect(callout!.textContent).toContain('dev-box')
+    expect(callout!.textContent).toContain('节点离线')
+
+    // 提交被拦下：createSession 不会被调用。
+    ;(el as unknown as { submit: () => Promise<void> }).submit()
+    await el.updateComplete
+    expect(api.createSession).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  it('leaves submit enabled when the node is reachable', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    const el = await mount({ projectId: 'proj-r', projectDir: '/srv/repo' })
+    expect(el.nodeBlocked).toBeNull()
+    const send = el.shadowRoot!.querySelector<HTMLButtonElement>('button.send-button')
+    expect(send!.disabled).toBe(false)
+    expect(el.shadowRoot!.querySelector('[data-testid="node-blocked"]')).toBeNull()
+    el.remove()
+  })
+})

@@ -65,6 +65,13 @@ export class SebasWorkbenchComposer extends LitElement {
   @property({ attribute: false }) sessionModels: string[] = []
   /** Focused session's current model id. */
   @property({ attribute: false }) currentModel: string | null = null
+  /**
+   * （add-remote-execution-node 8.2）选中项目的执行节点不可用（离线/吊销/
+   * 状态不可得）时的门禁：非 null 即禁用提交并说明成因。`null` = 节点可用
+   * （本机项目恒为 null）。
+   */
+  @property({ attribute: false }) nodeBlocked: { nodeId: string; status: string; cause: string } | null =
+    null
 
   @state() private text = ''
   @state() private sending = false
@@ -394,7 +401,8 @@ export class SebasWorkbenchComposer extends LitElement {
   }
 
   private disabled(): boolean {
-    return this.sending || this.unreachable !== null
+    // 8.2：节点不可用 = 提交只会 bounce，门禁在前（与 core 不可达同一姿态）。
+    return this.sending || this.unreachable !== null || this.nodeBlocked !== null
   }
 
   private async submit(): Promise<void> {
@@ -514,6 +522,16 @@ export class SebasWorkbenchComposer extends LitElement {
         ? html`
             <div class="callout callout-warning" role="status">
               ${icon('alert')}<span>core not connected: ${this.unreachable.cause}</span>
+            </div>
+          `
+        : nothing}
+      ${this.nodeBlocked
+        ? html`
+            <div class="callout callout-warning" role="status" data-testid="node-blocked">
+              ${icon('alert')}<span
+                >执行节点 ${this.nodeBlocked.nodeId} 不可用（${this.nodeBlocked.status}）：${this.nodeBlocked.cause}
+                ——无法在该节点上新建会话。</span
+              >
             </div>
           `
         : nothing}

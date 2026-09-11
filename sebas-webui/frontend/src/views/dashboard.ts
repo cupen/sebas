@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
 import type { WsEvent } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
@@ -29,6 +29,12 @@ import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
+
+/** 本机节点标识（与后端 projects::LOCAL_NODE_ID 同一词表）。 */
+const LOCAL_NODE = 'local'
+
+/** 节点可用性轮询周期（8.2：节点回归/掉线免刷新反映到 composer 门禁）。 */
+const NODE_POLL_MS = 10_000
 
 @customElement('sebas-dashboard')
 export class SebasDashboard extends LitElement {
@@ -81,6 +87,11 @@ export class SebasDashboard extends LitElement {
   @state() private confirmClose = false
   private unsubscribe?: () => void
   /**
+   * 8.2：节点可用性轮询（节点上下线没有对应的会话事件）。composer 的节点门禁
+   * 因此**免刷新**恢复/收紧。disconnectedCallback 清理。
+   */
+  private nodeTimer: number | undefined = undefined
+  /**
    * 创建会话不再跳转（workbench-conversation-view 3.x：工作台是唯一对话面）
    * ——服务端 create 已 set_focus，就地重取让新会话的对话出现。
    */
@@ -104,6 +115,12 @@ export class SebasDashboard extends LitElement {
    */
   @state() private droppedPending: PendingSubmission[] | null = null
   @state() private droppedPendingFor: string | null = null
+
+  // ─── 执行节点可用性（add-remote-execution-node 8.2/8.5）─────────────────
+  @state() private nodes: NodeInfo[] = []
+  /** 远端注册表是否可得（false = 状态未知，≠「没有远端节点」）。 */
+  @state() private remoteNodesAvailable = true
+  @state() private nodesCause: string | null = null
 
   private onWsEvent = (ev: WsEvent): void => {
     if (ev.type === 'session.pending_dropped' && ev.session_id === this.data?.active_session_key) {
@@ -153,6 +170,55 @@ export class SebasDashboard extends LitElement {
       .project-header .path.muted {
         color: var(--sebas-text-faint);
         font-weight: 500;
+      }
+      /* 8.5：项目头部/会话头部的节点标注。 */
+      .node-chip {
+        font-family: var(--sebas-font-mono);
+        font-size: 0.72rem;
+        color: var(--sebas-text-faint);
+        background: var(--sebas-surface-2);
+        border-radius: var(--sebas-radius-full);
+        padding: 1px 8px;
+        white-space: nowrap;
+      }
+      .node-chip[data-node-status='offline'],
+      .node-chip[data-node-status='revoked'],
+      .node-chip[data-node-status='unknown'] {
+        color: var(--sebas-status-failed);
+        background: var(--sebas-status-failed-bg);
+      }
+      /* 8.3：mode 标签与 ungated 标记。 */
+      .session-head .node-tag[data-node-status='offline'],
+      .session-head .node-tag[data-node-status='revoked'],
+      .session-head .node-tag[data-node-status='gone'],
+      .session-head .node-tag[data-node-status='terminated'] {
+        color: var(--sebas-status-failed);
+      }
+      .mode-tag {
+        font-family: var(--sebas-font-mono);
+        font-size: 0.7rem;
+        color: var(--sebas-text-dim);
+        background: var(--sebas-surface-2);
+        border-radius: var(--sebas-radius-full);
+        padding: 0 7px;
+      }
+      .mode-tag b {
+        color: var(--sebas-status-failed);
+        font-weight: 600;
+      }
+      .ungated {
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: var(--sebas-status-failed);
+        background: var(--sebas-status-failed-bg);
+        border: 1px solid var(--sebas-status-failed-border);
+        border-radius: var(--sebas-radius-full);
+        padding: 0 7px;
+      }
+      .parked-banner {
+        margin: var(--sebas-space-2) var(--sebas-space-5) 0;
       }
       .branch-pill {
         font-family: var(--sebas-font-mono);
@@ -378,11 +444,16 @@ export class SebasDashboard extends LitElement {
       this.refetch()
     })
     window.addEventListener('sebas:refetch', this.refetch)
+    this.nodeTimer = window.setInterval(() => { void this.loadNodes() }, NODE_POLL_MS)
   }
 
   disconnectedCallback(): void {
     this.unsubscribe?.()
     window.removeEventListener('sebas:refetch', this.refetch)
+    if (this.nodeTimer !== undefined) {
+      window.clearInterval(this.nodeTimer)
+      this.nodeTimer = undefined
+    }
     super.disconnectedCallback()
   }
 
@@ -404,6 +475,7 @@ export class SebasDashboard extends LitElement {
   }
 
   private refetch = (): void => {
+    void this.loadNodes()
     api
       .projects.list()
       .then((d) => {
@@ -450,6 +522,59 @@ export class SebasDashboard extends LitElement {
       })
   }
 
+  /**
+   * 8.2：拉取节点可用性。`api.nodes` 缺失（老后端 / 测试替身）时如实降级为
+   * 「状态不可得」，**不**当成「没有远端节点」。
+   */
+  private async loadNodes(): Promise<void> {
+    const fn = (api as { nodes?: () => Promise<NodesResponse> }).nodes
+    if (typeof fn !== 'function') {
+      this.nodes = [{ id: LOCAL_NODE, status: 'online', local: true }]
+      this.remoteNodesAvailable = false
+      this.nodesCause = '此后端不提供节点可用性'
+      return
+    }
+    try {
+      const d = await fn()
+      this.nodes = d?.nodes ?? []
+      this.remoteNodesAvailable = d?.remote_available !== false
+      this.nodesCause = d?.cause ?? null
+    } catch (e) {
+      this.nodes = [{ id: LOCAL_NODE, status: 'online', local: true }]
+      this.remoteNodesAvailable = false
+      this.nodesCause = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  /** 一个节点的可判定状态（online | offline | revoked | unknown）+ 成因。 */
+  private nodeStatus(nodeId: string | null | undefined): { status: string; cause: string | null } {
+    const id = nodeId || LOCAL_NODE
+    const found = this.nodes.find((n) => n.id === id)
+    if (found) {
+      if (found.status === 'online') return { status: 'online', cause: null }
+      if (found.status === 'revoked') return { status: 'revoked', cause: '节点凭据已被吊销' }
+      return { status: found.status, cause: `节点离线${found.last_seen_unix ? `（上次在线 ${found.last_seen_unix}）` : ''}` }
+    }
+    if (id === LOCAL_NODE) return { status: 'online', cause: null }
+    if (!this.remoteNodesAvailable) {
+      return { status: 'unknown', cause: `节点状态不可得${this.nodesCause ? `：${this.nodesCause}` : ''}` }
+    }
+    return { status: 'unknown', cause: `节点 ${id} 未注册` }
+  }
+
+  /**
+   * 8.2：选中项目的节点门禁。非空 = composer 必须阻止提交并说明成因。
+   * 本机项目永不为空（本机在回答这个页面）。
+   */
+  private selectedNodeGate(): { nodeId: string; status: string; cause: string } | null {
+    const p = this.projects.find((x) => x.path === this.selectedPath)
+    if (!p) return null
+    const nodeId = p.node_id || LOCAL_NODE
+    const st = this.nodeStatus(nodeId)
+    if (st.status === 'online') return null
+    return { nodeId, status: st.status, cause: st.cause ?? st.status }
+  }
+
   private renderLoading() {
     return html`
       <div class="panel">
@@ -478,6 +603,8 @@ export class SebasDashboard extends LitElement {
     const rows = this.rowsForSelected()
     const hasActive = rows.some((r) => r.status_slug === 'working')
     const focusKey = this.effectiveFocusKey()
+    const nodeGate = this.selectedNodeGate()
+    const selectedNodeId = this.projects.find((x) => x.path === this.selectedPath)?.node_id || LOCAL_NODE
     const projectName = this.selectedPath
       ? (this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath)
       : null
@@ -486,6 +613,7 @@ export class SebasDashboard extends LitElement {
         ${projectName
           ? html`
               <span class="path" title=${this.selectedPath ?? ''}>${projectName}</span>
+              <span class="node-chip" data-testid="header-node" data-node-status=${nodeGate?.status ?? 'online'} title=${nodeGate ? `节点 ${nodeGate.nodeId} 不可用：${nodeGate.cause}` : `执行节点 ${selectedNodeId}`}>${nodeGate ? '⚠ ' : ''}${selectedNodeId}</span>
               ${this.selectedBranch
                 ? html`<span class="branch-pill">${this.selectedBranch}</span>`
                 : nothing}
@@ -544,6 +672,7 @@ export class SebasDashboard extends LitElement {
           .projectDir=${this.selectedPath}
           .providerLabel=${this.providerLabel}
           .sessionKey=${focusKey}
+          .nodeBlocked=${this.selectedNodeGate()}
           .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
           .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
           .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
@@ -610,6 +739,17 @@ export class SebasDashboard extends LitElement {
         ${d && d.encoded_key === key
           ? html`
               ${this.renderSessionHead(d)}
+              ${(d.remote?.parked_approvals ?? 0) > 0
+                ? html`<div
+                    class="callout callout-warning parked-banner"
+                    role="status"
+                    data-testid="parked-approvals"
+                  >
+                    ${icon('alert')}<span
+                      >等待操作员决定：<b>${d.remote!.parked_approvals}</b> 条悬空审批未决——该会话在等待，不在运行。决定入口就在下方。</span
+                    >
+                  </div>`
+                : nothing}
               <sebas-review-cards .sessionKey=${d.encoded_key}></sebas-review-cards>
               ${d.entries.length === 0
                 ? html`
@@ -655,12 +795,23 @@ export class SebasDashboard extends LitElement {
    * 才显示）+ Close/归档动作。
    */
   private renderSessionHead(d: SessionDetail) {
+    // 8.3/8.4/8.5：远端会话的节点、desired/effective mode、悬空审批。
+    const remote = d.remote ?? null
+    const nodeId = remote?.node_id ?? LOCAL_NODE
+    const nodeOffline = remote != null && remote.node_status !== 'online'
+    const desired = remote?.desired_mode ?? null
+    const effective = remote?.effective_mode ?? null
+    const parked = remote?.parked_approvals ?? 0
+    const waiting = parked > 0
+    // 执行体强制不了时两个值都显示并说明；绝不只显示期望值假装已生效。
+    const modeDiffers = !!desired && !!effective && desired !== effective
+    const ungated = effective === 'auto' || (desired === 'auto' && effective === null)
     return html`
-      <div class="session-head" data-status=${d.status_slug}>
+      <div class="session-head" data-status=${waiting ? 'waiting' : d.status_slug}>
         <sebas-status-badge
-          slug=${d.status_slug}
-          label=${d.status_label}
-          glyph=${d.status_glyph}
+          slug=${waiting ? 'waiting' : d.status_slug}
+          label=${waiting ? 'Waiting' : d.status_label}
+          glyph=${waiting ? '⏸' : d.status_glyph}
         ></sebas-status-badge>
         <div class="ident">
           <span class="chat"
@@ -678,6 +829,35 @@ export class SebasDashboard extends LitElement {
               title="Agent is immutable — chosen when the session was created"
               >🔒 ${d.agent_kind ?? 'default agent'}</span
             >
+            <!-- 8.5：所属执行节点；不可用时点名节点与成因。 -->
+            <span
+              class="mono node-tag"
+              data-testid="session-head-node"
+              data-node-status=${remote?.node_status ?? 'local'}
+              title=${nodeOffline
+                ? `节点 ${nodeId} 不可用：${remote?.node_cause ?? remote?.node_status ?? '不可用'}`
+                : `执行节点 ${nodeId}`}
+              >${nodeOffline ? '⚠ ' : ''}${nodeId}</span
+            >
+            <!-- 8.3：desired vs effective。不同 = 执行体无法强制，必须说出来；
+                 auto = ungated，与需要审批的会话视觉上分开。 -->
+            ${desired || effective
+              ? html`<span
+                  class="mode-tag"
+                  data-testid=${modeDiffers ? 'mode-mismatch' : 'session-mode'}
+                  data-mode=${effective ?? desired}
+                  title=${modeDiffers
+                    ? `期望 mode ${desired}，执行体实际强制 ${effective}`
+                    : `mode ${effective ?? desired}`}
+                >
+                  ${modeDiffers
+                    ? html`mode ${desired} → 实际 ${effective}<b>（执行体无法强制）</b>`
+                    : html`mode ${effective ?? desired}`}
+                </span>`
+              : nothing}
+            ${ungated
+              ? html`<span class="ungated" data-testid="session-ungated" title="auto：该机器交给 agent 自主执行，不产生审批">ungated</span>`
+              : nothing}
             <span>last active ${d.last_active}</span>
             ${d.available_models && d.available_models.length > 0
               ? html`<span class="model-pick">
