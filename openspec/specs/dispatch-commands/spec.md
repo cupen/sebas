@@ -103,7 +103,7 @@ Each command SHALL enforce its own argument contract: `/switch` requires a numer
 
 ### Requirement: /settings read and write
 
-`/settings` has two deployment surfaces. The in-process engine path: no arguments lists all supported keys with current values and the settings file path; `/settings <key>` shows one key's value; `/settings <key> <value>` validates the value (enumerations and numeric ranges per key; `theme_color` accepts any string) and persists to the settings file, applying to the live configuration atomically. The IM-frontend path (post extract-im-service): reads go through the state store `settings` domain snapshot (rendered as JSON) and writes go through `StateMutation` — the file path is not shown and validation errors surface from the state store. Both paths reply in plain text and never apply invalid values.
+`/settings` SHALL support two deployment surfaces. The in-process engine path: no arguments SHALL list all supported keys with current values and the settings file path; `/settings <key>` SHALL show one key's value; `/settings <key> <value>` SHALL validate the value (enumerations and numeric ranges per key; `theme_color` accepts any string) and persist to the settings file, applying to the live configuration atomically. The IM-frontend path (post extract-im-service): reads SHALL go through the state store `settings` domain snapshot (rendered as JSON) and writes SHALL go through `StateMutation` — the file path is not shown and validation errors surface from the state store. Both paths SHALL reply in plain text and SHALL never apply invalid values.
 
 #### Scenario: Invalid value rejected
 

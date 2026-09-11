@@ -11,11 +11,13 @@ the watchdog control plane.
 
 ### Requirement: HTTP route surface
 
-The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and `GET /assets/*` for its built styles, scripts, and fonts. Any other browser-facing GET (for example `/sessions/{key}`) resolves through the SPA fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about` canonicalise to `/` — those surfaces live in the Settings modal now. The JSON API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with optional `prompt` field and a required `agent` field naming the target agent), `GET /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `GET /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`, `GET /api/router`, `GET /api/about`, `POST /api/sessions/{key}/model` (mid-session model switch), the agent catalog `GET /api/agents` (each configured agent plus the built-in native kernel, with id, display name, reachability, optional cause and version), `GET /router/api/presets` (read-only preset table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, the project APIs `GET /api/projects` and `POST /api/projects` (register), `POST /api/projects/reorder`, `POST /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET /api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to the server's work directory — the configured work dir of the default agent kind, falling back to the WebUI process working directory; an explicit `root` query parameter overrides the default), `POST /api/sessions/{key}/archive` (archive a session), `POST /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive` (list archived sessions with expiry info), and `GET /ws` (WebSocket session stream). Project and session mutations are POST-only and carry the same posture as the existing session APIs. The router mutation cluster — POST/PUT/DELETE under `/router/api/*` (provider and model-alias CRUD, provider probe, defaults, reload) — is functional only when a control secret is configured; without it the mutations return 503. Router data is fetched live from the router admin API at request time (proxied server-side by the WebUI backend with the control secret), not from a startup snapshot. The JSON admin API `/api/admin/*` (status, events, services, login, logout, update, update/dry-run, update/dev, rollback, restart) is always mounted: without a control-plane adapter its reads report `adapter_ok: false` and its mutations return 503 (honest degradation). `GET /health` returns the literal `ok`. All browser assets the UI needs to render — styles, fonts, Web Awesome, markdown rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI SHALL NOT depend on an external CDN at render time. Navigation SHALL only link to routes this surface serves.
+The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and `GET /assets/*` for its built styles, scripts, and fonts. Any other browser-facing GET (for example `/sessions/{key}`) resolves through the SPA fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about` canonicalise to `/` — those surfaces live in the Settings modal now. The JSON API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with optional `prompt` field and a required `agent` field naming the target agent), `GET /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `POST /api/sessions/{key}/pending/{pending_id}/remove` (remove a not-yet-started submission), `POST /api/sessions/{key}/pending/{pending_id}/move` (reorder a not-yet-started submission within its own disposition group; body `to_index`), `GET /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`, `GET /api/router`, `GET /api/about`, `POST /api/sessions/{key}/model` (mid-session model switch), the agent catalog `GET /api/agents` (each configured agent plus the built-in native kernel, with id, display name, reachability, optional cause and version), `GET /router/api/presets` (read-only preset table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, the project APIs `GET /api/projects` and `POST /api/projects` (register), `POST /api/projects/reorder`, `POST /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET /api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to the server's work directory — the configured work dir of the default agent kind, falling back to the WebUI process working directory; an explicit `root` query parameter overrides the default), `POST /api/sessions/{key}/archive` (archive a session), `POST /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive` (list archived sessions with expiry info), and `GET /ws` (WebSocket session stream). Project and session mutations are POST-only and carry the same posture as the existing session APIs. The provider management cluster under `/router/api/*` (providers, model aliases, defaults, presets, model fetch) SHALL be fulfilled by the WebUI backend from the core-owned provider store over the core channel, never by proxying the router process; the route names are retained for compatibility. Without a reachable core these routes SHALL fail honestly (503) and SHALL NOT serve a stale snapshot. The JSON admin API `/api/admin/*` (status, events, services, login, logout, update, update/dry-run, update/dev, rollback, restart) is always mounted: without a control-plane adapter its reads report `adapter_ok: false` and its mutations return 503 (honest degradation). `GET /health` returns the literal `ok`. All browser assets the UI needs to render — styles, fonts, Web Awesome, markdown rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI SHALL NOT depend on an external CDN at render time. Navigation SHALL only link to routes this surface serves.
 
 `GET /api/fs/browse-dirs` SHALL honour a path round-trip contract: the `path` echoed in a listing response SHALL be accepted verbatim as the `path` of a subsequent request for that same directory, and request paths that mix `/` and `\` separators SHALL resolve to the same directory. The echoed path SHALL NOT carry a Windows verbatim (`\\?\`) prefix.
 
 Projects SHALL be identified on the wire by a stable `project_id` (`proj-<12hex>`, deterministically derived from the canonicalised path), not by the raw path string; the path itself SHALL NOT appear in session or project API request/response bodies as an identifier, though it may be included as display metadata.
+
+The session payloads the workbench observes — the focused session in `GET /api/summary` and `GET /api/sessions/{key}` — SHALL carry the session's pending submissions in delivery order, each with its stable id, text, position, disposition (`staging` | `turn`) and priority flag.
 
 #### Scenario: dashboard route
 
@@ -34,12 +36,12 @@ Projects SHALL be identified on the wire by a stable `project_id` (`proj-<12hex>
 
 #### Scenario: router data reflects live state
 
-- **WHEN** a provider is renamed through the router admin API and the browser then requests `GET /api/router`
+- **WHEN** a provider is renamed through the provider management surface and the browser then requests `GET /api/router`
 - **THEN** the response lists the new provider name without a WebUI restart
 
 #### Scenario: router mutations unavailable without secret
 
-- **WHEN** the WebUI runs without a control secret and a mutation is posted to `/router/api/providers`
+- **WHEN** the WebUI has no reachable core and a mutation is posted to `/router/api/providers`
 - **THEN** the response is 503
 
 #### Scenario: agents catalog lists configured agents and native
@@ -132,6 +134,27 @@ Projects SHALL be identified on the wire by a stable `project_id` (`proj-<12hex>
 - **WHEN** `allowed_roots` is absent or empty
 - **AND** `POST /api/projects` is called with an existing directory path
 - **THEN** the project registers as before (existence checks only)
+
+#### Scenario: pending submissions ride in the session payload
+
+- **WHEN** the browser requests a session payload while submissions are staged during spawn or queued behind a running turn
+- **THEN** the payload lists them in delivery order with id, text, position, disposition and priority
+
+#### Scenario: pending submission removal and reorder are served
+
+- **WHEN** `POST /api/sessions/{key}/pending/{pending_id}/remove` or `.../move` is called for a submission that has not started
+- **THEN** the request succeeds and a subsequent session payload reflects the new pending list
+
+#### Scenario: managing a started submission is a typed rejection
+
+- **WHEN** either pending endpoint is called for a submission whose turn already started
+- **THEN** the response is a 4xx typed rejection stating that it is already running, and the in-flight turn is unaffected
+
+#### Scenario: queue overflow is a visible rejection
+
+- **WHEN** `POST /api/sessions/{key}/message` is called while the session's spawn-window staging queue is at its cap
+- **THEN** the response is a 4xx rejection naming the cap, and the response does not report the submission as accepted
+
 ### Requirement: 降级与错误表现
 
 The WebUI frontend SHALL surface a visible global indicator when its live
@@ -332,7 +355,7 @@ path for mutations.
 
 ### Requirement: Session dashboard and focus semantics
 
-The cross-project session list SHALL render one row per known session (encoded key, chat and thread ids, session id, status, phase, relative last-active), active-first, and SHALL be reachable from the workbench rather than from primary navigation. The session list SHALL exclude archived sessions — those are served by `GET /api/archive`. Visiting a session's detail page or posting `/switch` SHALL set the webui-side focused session — a display pointer only that never changes message routing — and `switch` returns the redirect target or 404 for an unknown key. Switching the displayed project SHALL NOT alter the focused session pointer.
+The cross-project session list SHALL render one row per known session (encoded key, chat and thread ids, session id, status, phase, relative last-active), active-first, and SHALL be reachable from the workbench rather than from primary navigation. The session list SHALL exclude archived sessions — those are served by `GET /api/archive`. Selecting a session in the rail, opening its `/sessions/{key}` deep link, or posting `/switch` SHALL focus that session in place — a display pointer only that never changes message routing — and `switch` returns the redirect target or 404 for an unknown key. There SHALL be no separate per-session detail surface: the workbench renders the focused session. Switching the displayed project SHALL NOT alter the focused session pointer. The rail's current-session marker SHALL be derived from the focused-session pointer, not from the browser location.
 
 The focused-session pointer SHALL be the single source of truth for the workbench composer's follow-up vs creation mode: with a focused session the composer targets that session; without one the composer is in creation mode. Any path that focuses a session (switch endpoint, deep-link visit, placeholder creation) SHALL leave the composer able to submit a follow-up message to that session without further operator action.
 
@@ -345,6 +368,11 @@ The focused-session pointer SHALL be the single source of truth for the workbenc
 
 - **WHEN** `/api/sessions/{key}/switch` posts a key not in the map
 - **THEN** the response is 404
+
+#### Scenario: rail selection focuses in place
+
+- **WHEN** the operator selects a session in the rail
+- **THEN** that session becomes focused, the workbench renders its conversation in place, and the operator is not navigated to a separate detail page
 
 #### Scenario: project switch leaves focus alone
 
@@ -596,50 +624,105 @@ The WebUI config SHALL support an `archive_retention_days` field under the `[web
 
 ### Requirement: Provider management page
 
-The WebUI settings SHALL provide a provider management page backed by the
-router admin API (via the WebUI's `/router/api/providers*` proxy). It
-SHALL support: listing providers with name, preset-or-custom mark, base
-URL slots, and key-configured state; creating a provider either from a
-preset or as custom; editing an existing provider; deleting a provider;
-and probing models. Preset-derived providers SHALL present base URLs and
-models as read-only code-owned values (labeled as following the code
-table) with only the API key, default model, and protocol editable;
-custom providers SHALL present all three base URL slots and `api_key_env`
-as editable. Secret inputs SHALL never be pre-filled, and an empty secret
-submit SHALL preserve the stored key. Mutations SHALL go through the
-existing POST-only, origin-checked proxy and surface its errors (409
-duplicate, 400 validation, 503 unavailable) in the page.
+The WebUI settings SHALL provide a provider management page backed by the core-owned
+provider store (see `provider-management`), reached through the WebUI's
+`/router/api/providers*` surface. It SHALL support: listing providers with name,
+preset-or-custom mark, base URL slots, key-configured state, and each model entry's
+capability tags; creating a provider either from a preset or as custom; editing an
+existing provider; and deleting a provider. Fetching a provider's official model list is
+specified separately by the `Fetch models from the provider's official base URL`
+requirement, not here.
+
+The model list SHALL be a list of entries the operator may add to and remove from freely,
+each entry carrying an id and its capability tags (`text` implicit, with `vision`,
+`audio`, and `video` selectable). The list SHALL be editable for preset-derived and custom
+providers alike.
+
+Creating from a preset SHALL require only the preset choice, the API key, and optionally
+the model entries; the preset's base URLs SHALL render as read-only code-owned values.
+Creating a custom provider SHALL require the same inputs plus an instance name, a base URL,
+and a wire protocol. Every input beyond that minimum — the remaining base URL slots, the
+model rename map, and the preset's inherited `api_key_env` — SHALL live in an Advanced
+disclosure that is collapsed by default. `api_key_env` SHALL NOT be a user input field; a
+preset's env name remains only a fallback key source when no plaintext key is stored.
+
+Secret inputs SHALL never be pre-filled, and an empty secret submit SHALL preserve the
+stored key. Mutations SHALL surface their errors (duplicate, validation, unavailable) in
+the page. Choosing an option inside any select control of the provider editor SHALL NOT
+close the editor.
 
 #### Scenario: preset-derived provider shows read-only URLs
 
 - **WHEN** the user opens provider `glm` (preset-derived) for editing
-- **THEN** the base URL fields render the preset's code-owned values as
-  read-only with a follow-the-code indication, and only the API key,
-  default model, and protocol inputs are editable
+- **THEN** the base URL fields render the preset's code-owned values as read-only with a
+  follow-the-code indication, while the API key, default model, model entries, and their
+  capability tags remain editable
 
 #### Scenario: create from preset
 
-- **WHEN** the user creates provider `my-glm` from preset `glm` entering
-  only an API key
-- **THEN** the create request carries the preset selection and key but no
-  base URL or models fields, and the provider appears in the list
+- **WHEN** the user creates a provider from preset `glm` entering an API key and two model
+  entries
+- **THEN** the create request carries the preset selection, the key, and the model entries
+  with capability tags, but no base URL fields, and the provider appears in the list
 
 #### Scenario: custom provider full editing
 
-- **WHEN** the user creates a custom provider filling
-  `base_url_openai_chat` only
-- **THEN** the create succeeds and the edit form exposes all three slots
-  for later adjustment
+- **WHEN** the user creates a custom provider filling a single base URL
+- **THEN** the create succeeds and the edit form exposes all three slots — the two extras
+  under the Advanced disclosure — for later adjustment
 
 #### Scenario: probe from the page
 
-- **WHEN** the user clicks probe on a provider with an OpenAI-family slot
-- **THEN** the page shows the returned model list without leaving the page
+- **WHEN** the user runs a fetch on a provider with a usable base URL
+- **THEN** the page shows the returned model ids without leaving the page
 
 #### Scenario: delete reflects immediately
 
 - **WHEN** the user deletes provider `alpha` from the page
 - **THEN** the provider disappears from the list without a page reload
+
+#### Scenario: preset instance name defaults without input
+
+- **WHEN** the user creates from preset `glm` without opening the Advanced disclosure
+- **THEN** the provider is stored under the name `glm`, and renaming it is the only path to
+  a second instance of the same preset
+
+#### Scenario: custom provider minimal input
+
+- **WHEN** the user creates a custom provider entering an instance name, a base URL, and a
+  wire protocol
+- **THEN** the create succeeds without the operator opening the remaining URL slots or the
+  model rename map
+
+#### Scenario: advanced section collapsed by default
+
+- **WHEN** the provider editor opens in either mode
+- **THEN** the remaining base URL slots, the model rename map, and the inherited
+  `api_key_env` are behind a collapsed disclosure, and none of them is submitted as a
+  user-entered value unless the operator opens it
+
+#### Scenario: multiple model entries with capability tags
+
+- **WHEN** the user adds several model entries to a provider and marks one as `vision`
+- **THEN** the list preserves order, that entry carries `vision` alongside the implicit
+  `text`, and the others carry `text` alone
+
+#### Scenario: model list is editable for a preset-derived provider
+
+- **WHEN** the user adds a model entry to a preset-derived provider
+- **THEN** the entry is stored on that provider without altering the preset's code-table
+  data
+
+#### Scenario: selecting an option does not close the editor
+
+- **WHEN** the user picks a preset, a protocol, or a model option inside the provider
+  editor
+- **THEN** the editor stays open and the chosen value is retained
+
+#### Scenario: secret is preserved on empty submit
+
+- **WHEN** the user edits a provider and submits with the API key field left empty
+- **THEN** the stored key is unchanged and no key material was rendered
 
 ### Requirement: Provider status parity across deployment forms
 
@@ -730,39 +813,6 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 - **WHEN** 操作员点击「全部进程重启」或「重置 Settings」
 - **THEN** 弹出确认对话框，描述动作影响与不可撤销性；确认后调用相应后端接口并内联呈现 success/error；无 watchdog adapter 时按钮全灰且 tooltip 标注「无 watchdog 控制面」
 
-### Requirement: Services 分区数据源
-Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）。core 为恒启动服务：其行 SHALL 仅呈现状态与 restart 入口，SHALL NOT 渲染 enable/disable 按钮（enable-core-by-default）。无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。Models 分区顶部 SHALL 呈现 provider 路由网关总览（来自既有 `/api/router`：listen / debug / auth 三行），与 Services 分区在产品语义上彻底解耦。
-
-#### Scenario: Services 渲染受管子进程
-
-- **WHEN** watchdog 拉起 core/webui/router/im 四个进程，Services 分区聚焦
-- **THEN** 列表呈现 core / webui / router / im 四行及 desired / actual / uptime；im 在配置未启用时不出现该行
-
-#### Scenario: 无 watchdog adapter 退化
-
-- **WHEN** webui 在裸 core 形态下启动（无 SEBAS_CONTROL_SECRET）
-- **THEN** Services 分区显示「无 watchdog 控制面」横幅、列表为空、enable/disable/restart 按钮不渲染
-
-#### Scenario: enable 成功
-
-- **WHEN** 操作员对 `router` 点击 enable
-- **THEN** 前端 POST `/api/admin/services/router/enable` 收到 200；列表行刷新（desired 变 on）；若后端返回 503 则内联呈现错误且不刷新
-
-#### Scenario: disable 成功
-
-- **WHEN** 操作员对辅助服务（如 `router`）点击 disable（前提：confirm 弹窗已确认）
-- **THEN** 前端 POST `/api/admin/services/router/disable` 收到 200；列表行刷新；core 行不渲染 enable/disable 按钮
-
-#### Scenario: restart 操作
-
-- **WHEN** 操作员对 `core` 点击 restart
-- **THEN** 前端走 `Admin actions via control plane` 既有 restart-core 路径；成功后列表行 uptime 重置
-
-#### Scenario: Models 分区承载 router 总览
-
-- **WHEN** 操作员聚焦 Models 分区
-- **THEN** 主区顶部呈现 provider 路由网关卡片（listen / debug / auth 三行），下方为 provider 列表；不再包含 Services 标签
-
 ### Requirement: 全局核心可达性横幅
 
 app-shell SHALL 提供全局"核心不可达"横幅：当 `/api/summary` 的 `reachability.ok` 为 false 时展示，内容含 cause（如 `socket absent`），呈现层级与现有"与服务器的连接已断开"横幅一致（全局、role=alert）；可达性恢复后横幅 SHALL 消失。横幅 SHALL 不阻塞页面其余部分的浏览（与"webui 在 core 不可达时继续服务"的既有语义一致）。
@@ -809,3 +859,96 @@ The `model` field of `POST /api/sessions` SHALL be honored for ACP-backend sessi
 
 - **WHEN** the operator creates an ACP session with a `model` the agent rejects
 - **THEN** the session surfaces a typed rejection and does not silently fall back to the default model
+
+### Requirement: Fetch models from the provider's official base URL
+
+The WebUI provider surface SHALL offer a fetch action that retrieves the model ids the
+provider's official base URL currently serves. The action SHALL be available for
+preset-derived and custom providers alike, and SHALL be hidden for a provider with no
+usable base URL. Running it SHALL persist nothing: the returned ids are shown as a
+result list, and an id joins the provider's model list only when the operator picks it,
+which is an ordinary edit. Fetched models SHALL start with no capability tags beyond the
+implicit text capability, and their parameters SHALL be shown as locally resolved or
+unknown rather than inferred from the id. Failures SHALL be reported with the sanitized
+reason and SHALL NOT be presented as an empty successful list.
+
+#### Scenario: fetch lists the official model ids
+
+- **WHEN** the operator runs fetch on a preset-derived provider whose base URL serves a model list
+- **THEN** the result list shows the returned ids, and the provider's stored data is unchanged until the operator picks one
+
+#### Scenario: picking a fetched model edits the list
+
+- **WHEN** the operator picks a fetched id
+- **THEN** that id is added to the provider's model list with the implicit text capability and no invented parameters
+
+#### Scenario: no base URL means no fetch entry
+
+- **WHEN** a provider has no usable base URL
+- **THEN** the fetch action is not rendered for it
+
+#### Scenario: failure is reported honestly
+
+- **WHEN** the upstream fetch fails
+- **THEN** the surface shows the sanitized reason, and does not display an empty list as if the provider offered no models
+
+### Requirement: Services 分区与 router 状态归属
+Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）。core 为恒启动服务：其行 SHALL 仅呈现状态与 restart 入口，SHALL NOT 渲染 enable/disable 按钮（enable-core-by-default）。无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。router 的运行状态（desired / actual / uptime）SHALL 仅由本分区呈现；Models 分区 SHALL NOT 呈现 router 网关总览、listen / debug / auth 或任何 router 运行状态，provider 管理面与 router 运行状态在产品语义上分离。
+
+#### Scenario: Services 渲染受管子进程
+
+- **WHEN** watchdog 拉起 core/webui/router/im 四个进程，Services 分区聚焦
+- **THEN** 列表呈现 core / webui / router / im 四行及 desired / actual / uptime；im 在配置未启用时不出现该行
+
+#### Scenario: 无 watchdog adapter 退化
+
+- **WHEN** webui 在裸 core 形态下启动（无 SEBAS_CONTROL_SECRET）
+- **THEN** Services 分区显示「无 watchdog 控制面」横幅、列表为空、enable/disable/restart 按钮不渲染
+
+#### Scenario: enable 成功
+
+- **WHEN** 操作员对 `router` 点击 enable
+- **THEN** 前端 POST `/api/admin/services/router/enable` 收到 200；列表行刷新（desired 变 on）；若后端返回 503 则内联呈现错误且不刷新
+
+#### Scenario: disable 成功
+
+- **WHEN** 操作员对辅助服务（如 `router`）点击 disable（前提：confirm 弹窗已确认）
+- **THEN** 前端 POST `/api/admin/services/router/disable` 收到 200；列表行刷新；core 行不渲染 enable/disable 按钮
+
+#### Scenario: restart 操作
+
+- **WHEN** 操作员对 `core` 点击 restart
+- **THEN** 前端走 `Admin actions via control plane` 既有 restart-core 路径；成功后列表行 uptime 重置
+
+#### Scenario: router 状态只在 Services 呈现
+
+- **WHEN** 操作员分别聚焦 Models 与 Services 分区
+- **THEN** Models 分区只呈现 provider 列表与管理入口，不渲染 router 的 listen / debug / auth 或可达性；router 的 desired / actual / uptime 只在 Services 分区呈现，且该分区在无 watchdog adapter 时如实说明不可用
+
+### Requirement: Session payload carries the conversation
+
+The session payloads the workbench reads — `GET /api/sessions/{key}` and the
+focused session in `GET /api/summary` — SHALL carry the session's conversation as
+one ordered entry sequence. Each entry SHALL state its monotonic `position`, its
+`kind` (a submission by the operator, or content produced by the agent), its
+`element_type`, its content, and its timestamp. Submission entries SHALL be part
+of that sequence. The former single `user_prompt` field and the agent-output-only
+`body` field SHALL be retired: a client SHALL NOT have to reconstruct the
+operator's turns from a separate field, nor infer turn boundaries from timestamps.
+A session with no entries SHALL render an honest empty state rather than a failed
+payload.
+
+#### Scenario: both sides of the conversation are in the payload
+
+- **WHEN** the browser requests a session in which the operator submitted messages across several turns
+- **THEN** the payload carries one ordered entry sequence containing both the submissions and the agent's output, each entry stating kind and element_type
+
+#### Scenario: retired fields are gone
+
+- **WHEN** a session payload is returned
+- **THEN** it carries no single-prompt field and no agent-output-only list, and the conversation is available only as the ordered entry sequence
+
+#### Scenario: empty session is not an error
+
+- **WHEN** a session has no transcript entries yet
+- **THEN** the payload returns an empty entry sequence with a success status

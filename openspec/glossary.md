@@ -60,8 +60,26 @@
     (Claude Code 等),是默认执行体。
   - **原生内核(native kernel,sebas-agent crate)**:自研 agent 内核
     (turn loop、工具集、policy engine、权限审批)。(feishu-bridge;agent-core)
+- **pending submission(待生效提交)**:core 已接受、但尚未开始执行的文本
+  提交。两种处置(disposition):
+  - **staging(并入首条消息)**:会话尚不存在(spawn 窗口)期间接受的提交,
+    激活时与同批兄弟提交合并为**一条**首条 prompt;
+  - **queued turn(按序执行的待执行回合)**:某个 turn 在飞期间接受的提交,
+    将作为独立回合按投递序逐条执行。
+  每个 pending submission 携带 core 分配的 per-session 单调稳定 id、文本、
+  位置与优先标记(/btw);开轮(或激活合并)即离开待执行栈、落 transcript,
+  此后对它的移除/重排请求被类型化拒绝(AlreadyStarted)。
+  (workbench-turn-queue)
 - **项目(project)**:host 上的一个目录路径,通常是 git 仓库根;工作台的
   组织单元。每个 agent 会话至多归属一个项目分组。(agent-workbench)
+- **回合(turn,显示单位)**:对话视图中的一个**显示单位**(workbench-
+  conversation-view):一次操作者提交是一个回合(「你」气泡),其后到下一条
+  提交之前的全部 agent 产出(流式正文、thinking、工具调用)合并为**一个**
+  agent 回合(单个气泡;thinking 折叠、工具收进「used N tools」可展开组)。
+  回合是纯前端分组概念——core 的 transcript 仍是 chunk 级条目
+  (`kind`=prompt|content,`element_type`=markdown|thinking|tool|error),
+  客户端按 `kind == "prompt"` 切回合;未读 seam 也按回合计数,永不落在
+  回合内部。(agent-workbench;webui;core-session-channel)
 - **工作台(workbench)**:webui 中的项目导向 agent 工作区(`/agent` 页):
   项目列表、会话侧栏(按项目目录或聊天来源分组)、时间线与输入区、
   inbox(操作者离开期间到达的 turn 流)。(agent-workbench;webui/projects)
@@ -99,6 +117,8 @@
 | 项目 vs 工作台 | 项目是目录(组织单元);工作台是 webui 里呈现它的页面 |
 | 产品定位"工作台" vs 页面级"工作台" | 前者指 sebas 整体(README 定位用法:"自托管的 agent 工作台");后者专指 webui 的 `/agent` 页。上下文无法区分时优先按页面级理解 |
 | 会话 vs turn | 会话是持久载体;turn 是其中一次问答执行 |
+| turn(显示回合)vs transcript 条目 | 前者是 webui 对话视图的**显示单位**(一个提交或一整个 agent 回合气泡);后者是 core transcript 的 chunk 级**存储条目**(每条带 kind/element_type/position)。一个显示回合通常对应多条 transcript 条目 |
+| pending submission vs `SessionStatus::Queued` | 前者是 core 已接受、尚未开始执行的**提交**(staging/queued turn 两种处置,见上);后者是 webui 的**会话行状态词**(`models.rs` 的 `SessionStatus::Queued`)——active 会话子进程已存在但尚未产出任何内容。两者毫无关系,spec 行文说「排队中的提交」时永远指前者 |
 
 - **im 服务**：独立 IM 服务进程（`sebas im`，`sebas-im` crate）——IM 适配器
   宿主与交互面（卡片/命令/表单/reactions/媒体），经核心会话通道观察并驱动

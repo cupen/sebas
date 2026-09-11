@@ -60,10 +60,14 @@ The core SHALL expose the channel on a Unix domain socket created with owner-onl
 The channel SHALL provide a snapshot method returning every known session with
 the fields the WebUI renders — channel key (including the channel name and
 per-channel reference), session id, status, phase, last-active — plus the
-session's execution body and its current model when one is set, and a
-subscription method that streams session events for the life of the
-connection. A subscriber SHALL receive a snapshot first, then events, so that
-no event is missed between the two.
+session's execution body and its current model when one is set, plus the
+session's pending submissions (each with a stable id, its text, its position,
+its disposition, and whether it is priority), and a subscription method that
+streams session events for the life of the connection. A subscriber SHALL
+receive a snapshot first, then events, so that no event is missed between the
+two. The pending list SHALL reflect the core's current queue at snapshot time
+and SHALL be kept current by events as submissions are staged, enqueued,
+reordered, removed, combined at activation, or started.
 
 #### Scenario: snapshot precedes the stream
 
@@ -77,6 +81,13 @@ no event is missed between the two.
   a native-kernel session with a model selected
 - **THEN** each entry states its execution body, and the native entry states
   its current model
+
+#### Scenario: pending submissions are visible in the snapshot
+
+- **WHEN** a client snapshots a session that has submissions staged during a
+  spawn and submissions queued behind a streaming turn
+- **THEN** each entry lists its pending submissions with id, text, position,
+  disposition and priority, in delivery order
 
 #### Scenario: session change reaches subscribers
 
@@ -106,6 +117,13 @@ file references (path + mime type + file name), typically images — delivered
 alongside the text. The core SHALL verify each attachment's path exists before
 delivery; a request with a missing attachment SHALL be rejected with a typed
 reason and no message delivered.
+
+The channel SHALL additionally provide pending-submission management: remove a
+pending submission by id, and reorder a pending submission to a new position
+inside its own disposition group. Both SHALL be rejected with a typed reason
+when the id is unknown, when the submission has already started, or when the
+requested order would move a non-priority submission ahead of a priority one —
+never silently ignored.
 
 #### Scenario: create spawns a real session
 
@@ -151,6 +169,18 @@ reason and no message delivered.
 - **THEN** the core cancels that turn and the session stays usable for
   subsequent messages
 
+#### Scenario: removing a pending submission over the channel
+
+- **WHEN** a client removes a pending submission by id before it starts
+- **THEN** the core removes it from the queue, and subsequent snapshots and
+  events no longer list it
+
+#### Scenario: managing an already-started submission is rejected
+
+- **WHEN** a client removes or reorders a submission that has already started
+- **THEN** the response is a typed rejection stating that it is already running,
+  and the in-flight turn is unaffected
+
 ### Requirement: Turn content retrieval
 
 The channel SHALL provide a method returning the rendered turn content the core
@@ -158,12 +188,27 @@ holds for a given session, so a client can display an agent conversation it did
 not itself receive. The response SHALL carry a monotonic position so a client can
 request only what it has not yet seen.
 
+Each entry SHALL state its role in the conversation — a submission by the
+operator (`kind = "prompt"`) or content produced by the agent
+(`kind = "content"`) — and its render type (`element_type`): plain content
+(`markdown`), `thinking`, a tool invocation (`tool`), or an error (`error`).
+Submission entries SHALL be delivered as part of the content; a client SHALL NOT
+have to reconstruct the operator's turns from a separate field, and SHALL be able
+to tell a tool invocation apart from the agent's prose.
+
 #### Scenario: incremental turn fetch
 
 - **WHEN** a client requests turn content for a session with a position it has
   already seen
 - **THEN** the response contains only content after that position, with a new
   position to use next time
+
+#### Scenario: submission and tool entries are distinguishable
+
+- **WHEN** a client requests turn content for a session in which the operator
+  submitted a message and the agent replied with prose, thinking and a tool call
+- **THEN** the operator's submission arrives as its own entry, and the tool
+  invocation is distinguishable from the prose rather than looking identical to it
 
 ### Requirement: Honest degradation when the core is unreachable
 When the channel cannot be reached — socket absent, connection refused, secret rejected, or the connection dropped — a client SHALL surface that condition with its cause and SHALL NOT present stale data as current, report a mutation as succeeded, or offer a control whose request cannot be delivered. A client SHALL reconnect on its own and resume with a fresh snapshot when the core returns. **补充**：cause 富化沿用已落地的无条件 enrich（`reachability()` 全失败分支并入闩锁摘要，不限于 ENOENT 分支——闩锁 ready 自清除，stale 读已防住）；三类不可达的机器区分走 `kind` 字段（startup_failed / auth_rejected / disconnected），cause 保持人类可读全串。
@@ -379,7 +424,7 @@ core SHALL 在 `SEBAS_CORE_SECRET` 缺失或为空时仍武装核心会话通道
 - **THEN** 新 core 以 bind 失败退出码退出，supervisor 可据此标记 Degraded 而非无限重启
 
 ### Requirement: State store channel surface
-core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / subscribe 三类 RPC：`StateSnapshot { domain }` 返回该 domain 的当前快照，`StateMutation { domain, payload }` 应用变更，`StateSubscribe` 启动变更推送流；服务端 SHALL 把请求路由到 state-store engine 实例并以 `StateSnapshot / StateMutationOk` 帧回包。订阅流 SHALL 在首帧之后推送该 domain 的后续 mutation 帧，且 SHALL 在 mutation 失败时回 `Rejected { kind: ... }` typed rejection（不静默吞错）。三类 RPC SHALL 走与 session RPC 同样的 secret+peer-uid 鉴权。
+core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / subscribe 三类 RPC：`StateSnapshot { domain }` 返回该 domain 的当前快照，`StateMutation { domain, payload }` 应用变更，`StateSubscribe` 启动变更推送流；服务端 SHALL 把请求路由到 state-store engine 实例并以 `StateSnapshot / StateMutationOk` 帧回包。订阅流 SHALL 在首帧之后推送该 domain 的后续 mutation 帧，且 SHALL 在 mutation 失败时回 `Rejected { kind: ... }` typed rejection（不静默吞错）。三类 RPC SHALL 走与 session RPC 同样的 secret+peer-uid 鉴权。provider / model / alias 数据 SHALL 经 `providers` 与 `aliases` 域管理，默认 provider 与默认 model（defaults）SHALL 并入 `settings` 域；这些域 SHALL 是 provider 数据唯一的写入通道，core 以外的进程 SHALL NOT 经文件或其它路径直接改写该数据。
 
 #### Scenario: StateSnapshot returns current snapshot
 
@@ -400,6 +445,16 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 
 - **WHEN** 客户端先发 `StateSubscribe { domain }`、收到首帧 snapshot；服务端在订阅期间应用 mutation
 - **THEN** 客户端收到 mutation 帧（带 domain + payload）；滞后 SHALL 走 lag-disconnect 路径
+
+#### Scenario: provider management runs over the channel
+
+- **WHEN** WebUI 或飞书 `/provider` 卡片新建、改名、删除一个 provider，或设置默认 provider / 默认 model
+- **THEN** 变更经 `StateMutation` 落在 `providers` / `aliases` / `settings` 域，随后的 `StateSnapshot` 读到新值，且 router 经订阅在无重启下生效
+
+#### Scenario: defaults round-trip with provider data
+
+- **WHEN** 客户端经 `settings` 域写入默认 provider 与默认 model
+- **THEN** 该默认值与 provider 数据同库持久化，core 重启后仍可读，且不产生独立的 defaults 文件
 
 ### Requirement: Channel client reachability distinguishes startup failure
 `reachability()`（channel client 侧）SHALL 区分三类不可达并经 `Reachability` 枚举显式表达：(a) **socket 不存在**（core 从未启动或启动失败退出，errno=ENOENT 形态）→ `Reachability::StartupFailed { cause }`；(b) **socket 在但握手被拒**（secret 错误）→ `Reachability::AuthRejected { cause }`；(c) **握手成功后断连** → `Reachability::Disconnected { cause }`。其中 `Reachability` 三变体 + `kind` 字段是本 change 新增（fail-fast 只落地了 cause 字符串富化，未做三态枚举——owner 归属见本 change design D3）。cause 富化沿用已落地的无条件 enrich（client.rs `enrich_with_startup_summary`）：闩锁文件存在时 cause 形如 `core startup failed: <原因>`（前缀由后端拼，前端原文渲染）；`kind` 字段是前端区分文案的机器可读依据。三类 SHALL NOT 互相混淆——webui 不允许统一显示 "core is not connected"。
@@ -441,3 +496,41 @@ core session channel SHALL 暴露 state-store 引擎的 snapshot / mutation / su
 
 - **WHEN** 客户端发 `Message { key: <未知>, message: "hi" }`
 - **THEN** core 回 `Rejected { kind: UnknownSession }`；不创建任何会话
+
+### Requirement: Model list fetch over the channel
+
+core SHALL expose a model-list fetch on the provider state surface: given a provider
+name, it performs one read-only upstream `GET` against that provider's resolved base
+URL — `{base_url_openai_chat}/models` when set, else `{base_url_openai_responses}/models`,
+else `{base_url_anthropic}/v1/models` — authenticated with the provider's resolved key,
+and returns the discovered model id list. The fetch SHALL work for preset-derived and
+custom providers alike, resolving a preset's base URLs from the code table. It SHALL
+modify no provider field and SHALL persist nothing. A provider with no usable base URL
+SHALL be a typed rejection naming the reason; an upstream failure SHALL be a typed
+rejection carrying only a sanitized status or category, never key material or upstream
+body content. The call SHALL be bounded by a timeout and SHALL NOT retry in a storm.
+
+#### Scenario: fetch returns the upstream model ids
+
+- **WHEN** a client requests a model-list fetch for a provider whose chat-completions slot serves a model list
+- **THEN** the response carries the discovered ids and no key material
+
+#### Scenario: preset-derived provider is fetchable
+
+- **WHEN** a client requests a model-list fetch for a provider derived from a preset
+- **THEN** the fetch uses the preset's code-table base URL and succeeds without any stored URL on that provider
+
+#### Scenario: fetch persists nothing
+
+- **WHEN** a model-list fetch succeeds
+- **THEN** the provider's stored data is byte-for-byte unchanged, and only a later explicit edit may write a model list
+
+#### Scenario: upstream failure is typed and sanitized
+
+- **WHEN** the upstream returns an error status
+- **THEN** the client receives a typed rejection naming the status or category, with no key material and no upstream body echoed
+
+#### Scenario: provider without a usable base URL
+
+- **WHEN** a client requests a model-list fetch for a provider with no base URL slot
+- **THEN** the response is a typed rejection naming that reason, and no upstream call is made

@@ -101,7 +101,7 @@ The turn stream SHALL mark the boundary between turns the operator has already
 seen and those that arrived since, showing how many arrived and over what span.
 When a session has unseen turns, opening it SHALL position the stream at that
 boundary rather than at the newest turn. The seen-boundary SHALL be per-browser
-state and SHALL NOT be recorded server-side.
+state and SHALL NOT be recorded server-side. The boundary SHALL fall between two turns and SHALL count turns rather than transcript entries, so one agent turn rendered as a single bubble is never split across the seam.
 
 #### Scenario: opening a session with unseen turns
 
@@ -120,6 +120,12 @@ state and SHALL NOT be recorded server-side.
 - **WHEN** the operator opens the same session from a different browser
 - **THEN** that browser's own seen-boundary applies, and the server holds no
   record of either
+
+#### Scenario: the seam never splits a turn
+
+- **WHEN** the operator opens a session whose unseen turns include one long agent turn composed of streamed text, thinking and tool calls
+- **THEN** the boundary is drawn above that whole turn and no part of it appears on the seen side
+- **AND** the stated count is the number of turns below the boundary, not the number of transcript entries
 
 ### Requirement: Composer promises only what the process can do
 
@@ -363,21 +369,29 @@ bodies keep their existing model-selection behavior unchanged.
 
 ### Requirement: Model selector offers the backend catalog before any session
 
-The composer's model selector SHALL offer the backend catalog's models — the
-models of the default provider (as set in the agent defaults) — before any
-session exists, so the operator can pick a model for the first turn of a new
-session. When sessions exist, the selector SHALL keep its existing behavior
-(offering the `available_models` of the relevant session's execution body).
-When neither a backend catalog nor a session model list is available, the
+The composer's model selector SHALL offer the catalog the operator configured in
+Settings — every configured provider's model list, presented as two levels
+(provider, then model) — before any session exists, so the operator can pick a
+model for the first turn of a new session. The default selection SHALL follow
+the configured default provider and model. When a session exists, the selector SHALL offer that session's
+`available_models` instead, because a mid-session switch is valid only if the
+session's execution body accepts the chosen model.
+When neither a configured catalog nor a session model list is available, the
 selector SHALL state its unavailability honestly rather than offering an empty
-or fabricated list. Changes to the catalog or the default SHALL be reflected
-without requiring a session to be created first.
+or fabricated list. Changes to the configured catalog or the default SHALL be
+reflected without requiring a session to be created first. The selector SHALL
+NOT derive its options from another session's `available_models`.
 
 #### Scenario: selector populated before any session
 
 - **WHEN** a default provider with a models catalog is configured and the
   operator opens a fresh workbench with no sessions
 - **THEN** the model selector offers the catalog's models
+
+#### Scenario: provider and model are chosen in two levels
+
+- **WHEN** the operator opens a fresh workbench with two providers configured in Settings
+- **THEN** the selector first offers the providers, and choosing one offers that provider's models
 
 #### Scenario: existing sessions keep session-sourced options
 
@@ -418,7 +432,7 @@ Each project row in the workbench rail SHALL expose a remove action (hover-revea
 
 ### Requirement: Rail session close entry
 
-Each session row in the workbench rail (project groups and Inbox) SHALL expose a close action alongside the existing archive button, with the same semantics as `POST /api/sessions/{key}/close` (kill the child when active, drop the mapping). Closing SHALL require no confirmation for inactive (dormant/done/failed) sessions and SHALL require an inline confirmation for active (starting/queued/working) sessions. When the closed session was the focused one, the workbench SHALL return to the no-focus empty state.
+Each session row in the workbench rail (project groups and Inbox) SHALL expose a close action alongside the existing archive button, with the same semantics as `POST /api/sessions/{key}/close` (kill the child when active, drop the mapping). Closing SHALL require no confirmation for inactive (dormant/done/failed) sessions and SHALL require an inline confirmation for active (starting/queued/working) sessions. When the session being closed has pending submissions, the confirmation SHALL state how many will be discarded and never executed. When the closed session was the focused one, the workbench SHALL return to the no-focus empty state.
 
 #### Scenario: close a dormant session from the rail
 
@@ -429,6 +443,11 @@ Each session row in the workbench rail (project groups and Inbox) SHALL expose a
 
 - **WHEN** the operator clicks the close button on a session whose child is still running
 - **THEN** an inline confirmation is shown first, and only on confirm is the close request sent
+
+#### Scenario: closing with pending submissions names the loss
+
+- **WHEN** the operator clicks the close button on a session that has pending submissions
+- **THEN** the confirmation states how many pending submissions will be discarded, and closing removes them without delivering them to any later session
 
 #### Scenario: closing the focused session clears the stage
 
@@ -511,4 +530,104 @@ Each project SHALL remember the agent most recently used to create a session und
 - **WHEN** a project has no recorded default agent
 - **THEN** the selector preselects the first reachable agent and marks no project default as chosen
 
-## MODIFIED Requirements
+### Requirement: Pending submissions stack above the composer
+
+The workbench SHALL render the focused session's pending submissions directly above the composer input, in delivery order, without occupying transcript space. Each entry SHALL state its disposition: submissions staged during a spawn SHALL read as combining into the session's first message, and submissions queued behind a running turn SHALL read as waiting, with their position. A submission SHALL NOT appear in the transcript until it starts (or is combined at activation); at that moment it SHALL leave the stack and the transcript SHALL show it as a submission entry.
+
+The stack SHALL support removal of any entry and drag-reordering within the entry's own disposition group. Entries carrying priority (`/btw`) SHALL be rendered as priority and SHALL NOT be draggable, and no drag SHALL place a non-priority entry ahead of a priority one. Submitting while entries are pending SHALL append to the stack — it SHALL NOT replace, discard, or silently merge into an existing entry's text.
+
+When the session ends or is closed while entries are pending, those entries SHALL be reported as not executed in a single explicit notice naming them (the stack itself disappears with the session, so the notice is the record); the stack SHALL never shrink without an explanation.
+
+#### Scenario: stack renders pending submissions in order
+
+- **WHEN** the focused session has submissions staged during spawn and submissions queued behind a running turn
+- **THEN** the region above the composer lists them in delivery order, distinguishing "combining into the first message" from "waiting" with position
+
+#### Scenario: submitting appends instead of replacing
+
+- **WHEN** the operator submits a message while entries are already pending
+- **THEN** the new submission appears as an additional stack entry and no existing entry's text is altered
+
+#### Scenario: remove and reorder take effect
+
+- **WHEN** the operator removes a pending entry, or drags a non-priority entry to a new position in its group
+- **THEN** the stack reflects the change immediately and still reflects it after the next refresh
+
+#### Scenario: priority entries are pinned
+
+- **WHEN** the stack contains a `/btw` priority entry
+- **THEN** it is rendered as priority, cannot be dragged, and no drag can place another entry ahead of it
+
+#### Scenario: a started submission leaves the stack and enters the transcript
+
+- **WHEN** a pending submission starts its turn (or is combined at activation)
+- **THEN** it is removed from the stack and appears in the transcript as a submission entry, so the conversation shows what is actually running
+
+#### Scenario: pending entries are not silently dropped at session end
+
+- **WHEN** the focused session fails or is closed while entries are pending
+- **THEN** a notice names those entries as not executed, and the stack clears only together with that notice
+
+### Requirement: Workbench renders the focused session as a conversation
+
+The workbench SHALL render the focused session as a conversation between the
+operator and the agent, in transcript order: each submission the operator made
+SHALL appear as their own turn, and each agent turn SHALL appear as a single
+assistant bubble. One agent turn SHALL be composed of everything the agent
+produced for that turn — the streamed text concatenated in arrival order, its
+thinking, and its tool invocations — and SHALL NOT be rendered as a series of
+per-chunk bubbles. Thinking SHALL be folded inside the turn's bubble, and tool
+invocations SHALL be grouped inside the bubble as an expandable "used N tools"
+group rather than presented as ordinary prose. A submission SHALL appear in the
+conversation only when its turn starts.
+
+#### Scenario: both sides of the conversation are visible
+
+- **WHEN** the operator opens a session in which they submitted messages across several turns
+- **THEN** the workbench shows their submissions and the agent's replies in transcript order, each submission as the operator's own turn
+
+#### Scenario: one agent turn is one bubble
+
+- **WHEN** an agent turn arrives as many streamed text chunks plus thinking plus tool invocations
+- **THEN** the workbench renders one assistant bubble for that turn, with the text in order, thinking folded inside, and the tool invocations collected in one expandable group
+
+#### Scenario: tool invocations are not mistaken for prose
+
+- **WHEN** an agent turn invokes tools
+- **THEN** those invocations are rendered as the turn's tool group and are distinguishable from the turn's prose
+
+#### Scenario: a submission appears when its turn starts
+
+- **WHEN** a submission is accepted while the agent is still working
+- **THEN** it is not rendered as a started turn until its turn actually begins
+
+### Requirement: Workbench is the single conversation surface
+
+The workbench SHALL be the only conversation surface. Selecting a session in the
+rail SHALL focus it in place — the operator SHALL NOT be navigated away from the
+workbench to a separate detail page. The `/sessions/{key}` deep link SHALL keep
+resolving and SHALL render the same workbench with that session focused, so
+bookmarks and links keep working. The rail's current-session marker SHALL follow
+the focused-session pointer rather than the browser location. Every per-session
+action the retired detail page offered — close, archive, and the gated-call
+review cards — SHALL remain reachable from the workbench.
+
+#### Scenario: selecting a session keeps the operator in the workbench
+
+- **WHEN** the operator selects a session in the rail
+- **THEN** that session becomes the focused one and the workbench renders its conversation without a page change to a different surface
+
+#### Scenario: deep link renders the workbench
+
+- **WHEN** a bookmarked `/sessions/{key}` is opened
+- **THEN** the workbench renders with that session focused, rather than a separate detail page
+
+#### Scenario: the rail marker follows focus
+
+- **WHEN** the focused session changes through any supported path
+- **THEN** the rail marks the focused session as current regardless of the browser location
+
+#### Scenario: per-session actions stay reachable
+
+- **WHEN** the operator focuses a session whose child is running
+- **THEN** close, archive and that session's gated-call review cards are reachable from the workbench
