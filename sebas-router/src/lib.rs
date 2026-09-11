@@ -20,6 +20,7 @@ pub mod hot_reload;
 pub mod key_resolver;
 pub mod metrics;
 pub mod models;
+pub mod probe;
 pub mod proto;
 pub mod proxy;
 pub mod rate_limit;

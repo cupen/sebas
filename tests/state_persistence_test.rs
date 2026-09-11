@@ -133,3 +133,142 @@ fn providers_and_aliases_survive_writer_restart() {
         });
     }
 }
+
+// ---- make-core-own-provider-data 1.1/1.4：defaults 并入 settings 域 ----
+
+/// env 重定向锁：SEBAS_ROUTER_PROVIDER_OVERLAY 是全局变量，defaults.json
+/// 的定位派生自它，跨测试并发会撞。
+static OVERLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 1.1 验收：经 settings 域写入默认 provider/model 后，默认值与 provider
+/// 数据同库持久化（重启仍在），且不产生独立的 defaults 文件。
+#[test]
+fn defaults_round_trip_with_provider_data_and_no_defaults_file() {
+    let _g = OVERLAY_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let overlay = dir.path().join("providers.json");
+    std::fs::write(&overlay, r#"{"providers": {}, "deleted": []}"#).unwrap();
+    // SAFETY: OVERLAY_LOCK 全程持有。
+    unsafe {
+        std::env::set_var(
+            "SEBAS_ROUTER_PROVIDER_OVERLAY",
+            overlay.to_str().unwrap(),
+        );
+    }
+
+    let path = dir.path().join("defaults-domain.db");
+    let writer = StateWriter::start(path.clone()).unwrap();
+    let engine = sebas::sebas_state::engine::DbStateEngine::new(writer.handle().clone());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        // provider + defaults 同域提交（providers 域 put + settings 域
+        // set_defaults，两次 RMW 各自整事务落库）。
+        let mut state = engine.load_persisted_state().await;
+        state.providers.insert(
+            "deepseek".into(),
+            serde_json::json!({"preset": "deepseek", "api_key": "sk-x"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        engine
+            .save_persisted_state(state)
+            .await
+            .expect("save provider");
+        sebas_dispatch::state_store::settings_mutation(
+            &engine,
+            &serde_json::json!({"op": "set_defaults", "provider": "deepseek", "model": "deepseek-chat"}),
+        )
+        .await
+        .expect("set defaults via settings domain");
+    });
+    drop(writer);
+
+    // 重启：provider 数据与默认值都还在。
+    let writer = StateWriter::start(path).unwrap();
+    let engine = sebas::sebas_state::engine::DbStateEngine::new(writer.handle().clone());
+    rt.block_on(async {
+        let state = engine.load_persisted_state().await;
+        assert!(state.providers.contains_key("deepseek"), "provider must survive");
+        assert_eq!(
+            state.default_selection,
+            Some(sebas_dispatch::state_store::DefaultSelection::with_model(
+                "deepseek",
+                "deepseek-chat"
+            )),
+            "defaults must survive restart alongside provider data"
+        );
+    });
+    // 不产生独立的 defaults 文件（目录里只有我们预置的 providers.json 与 DB）。
+    let produced: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("defaults.json"))
+        .collect();
+    assert!(
+        produced.is_empty(),
+        "defaults 并入库后不得再产生 defaults 文件: {produced:?}"
+    );
+}
+
+/// 1.4 验收：有 defaults.json 时导入一次；再次启动不重复导入（库里的
+/// 后续变化不被 legacy 文件覆盖）。
+#[test]
+fn legacy_defaults_json_imports_exactly_once() {
+    let _g = OVERLAY_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let overlay = dir.path().join("providers.json");
+    std::fs::write(&overlay, r#"{"providers": {}, "deleted": []}"#).unwrap();
+    let defaults = dir.path().join("defaults.json");
+    std::fs::write(&defaults, r#"{"provider": "legacy", "model": "legacy-model"}"#).unwrap();
+    // SAFETY: OVERLAY_LOCK 全程持有。
+    unsafe {
+        std::env::set_var(
+            "SEBAS_ROUTER_PROVIDER_OVERLAY",
+            overlay.to_str().unwrap(),
+        );
+    }
+
+    let path = dir.path().join("import-once.db");
+    let writer = StateWriter::start(path.clone()).unwrap();
+    let engine = sebas::sebas_state::engine::DbStateEngine::new(writer.handle().clone());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        // 第一次启动：导入。
+        assert!(sebas::sebas_state::defaults_import::import_legacy_defaults_once(writer.handle())
+            .await
+            .unwrap());
+        let state = engine.load_persisted_state().await;
+        assert_eq!(
+            state.default_selection,
+            Some(sebas_dispatch::state_store::DefaultSelection::with_model(
+                "legacy",
+                "legacy-model"
+            ))
+        );
+
+        // 用户改了默认（库内新值）。
+        sebas_dispatch::state_store::settings_mutation(
+            &engine,
+            &serde_json::json!({"op": "set_defaults", "provider": "newpick"}),
+        )
+        .await
+        .unwrap();
+
+        // legacy 文件被改写（模拟旧二进制又写了一次）→ 再次启动不得回灌。
+        std::fs::write(&defaults, r#"{"provider": "rewritten", "model": null}"#).unwrap();
+        assert!(!sebas::sebas_state::defaults_import::import_legacy_defaults_once(
+            writer.handle()
+        )
+        .await
+        .unwrap());
+        let state = engine.load_persisted_state().await;
+        assert_eq!(
+            state.default_selection,
+            Some(sebas_dispatch::state_store::DefaultSelection::new("newpick")),
+            "标记在场后 legacy 文件不得覆盖库内选择"
+        );
+    });
+}

@@ -13,14 +13,13 @@
 //! - a lagging subscriber is dropped rather than delivered a gap.
 
 use super::protocol::{
-    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
-    StateStreamFrame,
+    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame, StateStreamFrame,
 };
 use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
-use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_dispatch::DispatchHandle;
+use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -203,10 +202,7 @@ fn peer_uid_ok(_stream: &IpcStream) -> bool {
 /// Read the handshake line and verify the secret (task 5.3). Absent line,
 /// unparseable line, empty-vs-required, or wrong secret → None (caller
 /// closes without answering).
-async fn read_handshake(
-    reader: &mut BufReader<ReadHalf>,
-    secret: &str,
-) -> Option<()> {
+async fn read_handshake(reader: &mut BufReader<ReadHalf>, secret: &str) -> Option<()> {
     let mut line = String::new();
     reader.read_line(&mut line).await.ok()?;
     if line.trim().is_empty() {
@@ -286,10 +282,7 @@ async fn handle_connection(
     }
 }
 
-async fn write_response(
-    writer: &mut WriteHalf,
-    resp: &CoreChannelResponse,
-) -> Result<()> {
+async fn write_response(writer: &mut WriteHalf, resp: &CoreChannelResponse) -> Result<()> {
     let json = serde_json::to_string(resp)
         .map_err(|e| SebasError::Upgrade(format!("core channel serialize failed: {e}")))?;
     writer.write_all(json.as_bytes()).await?;
@@ -316,10 +309,7 @@ async fn write_response(
 /// (`ApprovalRequested`) from its review-card feed. Approval frames are not
 /// replayed on reconnect — a gated call whose request cannot reach any
 /// client fails closed at the kernel (spec).
-async fn serve_subscription(
-    backend: Arc<dyn SessionBackend>,
-    mut writer: WriteHalf,
-) -> Result<()> {
+async fn serve_subscription(backend: Arc<dyn SessionBackend>, mut writer: WriteHalf) -> Result<()> {
     const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
     let mut events = backend.subscribe();
@@ -385,10 +375,7 @@ async fn recv_approval(
     }
 }
 
-async fn write_frame(
-    writer: &mut WriteHalf,
-    frame: &SessionStreamFrame,
-) -> Result<()> {
+async fn write_frame(writer: &mut WriteHalf, frame: &SessionStreamFrame) -> Result<()> {
     let json = serde_json::to_string(frame)
         .map_err(|e| SebasError::Upgrade(format!("core channel serialize failed: {e}")))?;
     writer.write_all(json.as_bytes()).await?;
@@ -399,10 +386,12 @@ async fn write_frame(
 
 /// 取单个域的快照 payload。与 `CoreChannelResponse::StateSnapshot` 共用，
 /// 也供状态订阅流的全域快照复用。
-async fn snapshot_domain(
-    router: &DispatchHandle,
-    domain: &str,
-) -> serde_json::Value {
+async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::Value {
+    // preset 表是只读代码数据（1.3），不依赖 state store——无论引擎是否
+    // 初始化都可读。
+    if domain == "presets" {
+        return preset_table_value();
+    }
     let Some(engine) = sebas_dispatch::state_store::engine() else {
         return serde_json::json!({"error": "state store 未初始化"});
     };
@@ -428,10 +417,31 @@ async fn snapshot_domain(
     }
 }
 
-/// 全域快照：providers / settings / projects / sessions。
+/// 代码内置 preset 表的 JSON 形状（与 router `/admin/presets` 的只读视图
+/// 同一 wire：name + 三槽位 + api_key_env + models）。core 是唯一管理者，
+/// 该表是只读数据，任何客户端经 `StateSnapshot { domain: "presets" }` 读取。
+/// models 是条目列表（id + 能力标记；redesign-provider-models-settings 1.2）。
+fn preset_table_value() -> serde_json::Value {
+    let out: Vec<serde_json::Value> = sebas_router::config::presets()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "base_url_anthropic": p.base_url_anthropic,
+                "base_url_openai_chat": p.base_url_openai_chat,
+                "base_url_openai_responses": p.base_url_openai_responses,
+                "api_key_env": p.api_key_env,
+                "models": p.models.iter().map(sebas_router::config::PresetModel::to_entry).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "presets": out })
+}
+
+/// 全域快照：providers / settings / projects / presets / sessions。
 async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
     let mut domains = serde_json::Map::new();
-    for domain in ["providers", "settings", "projects", "sessions"] {
+    for domain in ["providers", "settings", "projects", "presets", "sessions"] {
         domains.insert(domain.to_string(), snapshot_domain(router, domain).await);
     }
     serde_json::Value::Object(domains)
@@ -439,10 +449,7 @@ async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
 
 /// 4.2 状态订阅：先发全域快照，再持续转发变更通知（合并窗口 100ms，
 /// 一串提交合并为一帧）。广播无人订阅/关闭时，快照后保持连接等待。
-async fn serve_state_subscription(
-    router: DispatchHandle,
-    mut writer: WriteHalf,
-) -> Result<()> {
+async fn serve_state_subscription(router: DispatchHandle, mut writer: WriteHalf) -> Result<()> {
     use sebas_dispatch::state_store::StateChange;
     const MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -471,16 +478,11 @@ async fn serve_state_subscription(
                     }
                     StateChange::Reset => {
                         // 全域重置：输出一帧后重发快照。
-                        let reset = StateStreamFrame::Changed {
-                            scope: "*".into(),
-                        };
+                        let reset = StateStreamFrame::Changed { scope: "*".into() };
                         write_state_frame(&mut writer, &reset).await?;
                         let domains = state_snapshot_all(&router).await;
-                        write_state_frame(
-                            &mut writer,
-                            &StateStreamFrame::Snapshot { domains },
-                        )
-                        .await?;
+                        write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains })
+                            .await?;
                         continue;
                     }
                 }
@@ -489,11 +491,7 @@ async fn serve_state_subscription(
                 // 落后于 64 帧：语义等价于全域变更，重发快照。
                 warn!("state subscriber lagged; resending snapshot");
                 let domains = state_snapshot_all(&router).await;
-                write_state_frame(
-                    &mut writer,
-                    &StateStreamFrame::Snapshot { domains },
-                )
-                .await?;
+                write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains }).await?;
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => {
@@ -504,50 +502,39 @@ async fn serve_state_subscription(
         let window: std::result::Result<
             std::result::Result<(), SebasError>,
             tokio::time::error::Elapsed,
-        > = tokio::time::timeout(
-            MERGE_WINDOW,
-            async {
-                loop {
-                    match changes.recv().await {
-                        Ok(StateChange::Changed { scope }) => {
-                            if !pending.iter().any(|s| s == &scope) {
-                                pending.push(scope);
-                            }
-                        }
-                        Ok(StateChange::Reset) => {
-                            // 窗口内出现 Reset：立即输出已收集帧再按 Reset 处理。
-                            flush_pending(&mut writer, &mut pending).await?;
-                            let reset = StateStreamFrame::Changed {
-                                scope: "*".into(),
-                            };
-                            write_state_frame(&mut writer, &reset).await?;
-                            let domains = state_snapshot_all(&router).await;
-                            write_state_frame(
-                                &mut writer,
-                                &StateStreamFrame::Snapshot { domains },
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            warn!("state subscriber lagged; resending snapshot");
-                            flush_pending(&mut writer, &mut pending).await?;
-                            let domains = state_snapshot_all(&router).await;
-                            write_state_frame(
-                                &mut writer,
-                                &StateStreamFrame::Snapshot { domains },
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            flush_pending(&mut writer, &mut pending).await?;
-                            return Ok(());
+        > = tokio::time::timeout(MERGE_WINDOW, async {
+            loop {
+                match changes.recv().await {
+                    Ok(StateChange::Changed { scope }) => {
+                        if !pending.iter().any(|s| s == &scope) {
+                            pending.push(scope);
                         }
                     }
+                    Ok(StateChange::Reset) => {
+                        // 窗口内出现 Reset：立即输出已收集帧再按 Reset 处理。
+                        flush_pending(&mut writer, &mut pending).await?;
+                        let reset = StateStreamFrame::Changed { scope: "*".into() };
+                        write_state_frame(&mut writer, &reset).await?;
+                        let domains = state_snapshot_all(&router).await;
+                        write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains })
+                            .await?;
+                        return Ok(());
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        warn!("state subscriber lagged; resending snapshot");
+                        flush_pending(&mut writer, &mut pending).await?;
+                        let domains = state_snapshot_all(&router).await;
+                        write_state_frame(&mut writer, &StateStreamFrame::Snapshot { domains })
+                            .await?;
+                        return Ok(());
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        flush_pending(&mut writer, &mut pending).await?;
+                        return Ok(());
+                    }
                 }
-            },
-        )
+            }
+        })
         .await;
         match window {
             Ok(Ok(())) => {}
@@ -559,20 +546,14 @@ async fn serve_state_subscription(
     }
 }
 
-async fn flush_pending(
-    writer: &mut WriteHalf,
-    pending: &mut Vec<String>,
-) -> Result<()> {
+async fn flush_pending(writer: &mut WriteHalf, pending: &mut Vec<String>) -> Result<()> {
     for scope in pending.drain(..) {
         write_state_frame(writer, &StateStreamFrame::Changed { scope }).await?;
     }
     Ok(())
 }
 
-async fn write_state_frame(
-    writer: &mut WriteHalf,
-    frame: &StateStreamFrame,
-) -> Result<()> {
+async fn write_state_frame(writer: &mut WriteHalf, frame: &StateStreamFrame) -> Result<()> {
     let json = serde_json::to_string(frame)
         .map_err(|e| SebasError::Upgrade(format!("core channel serialize failed: {e}")))?;
     writer.write_all(json.as_bytes()).await?;
@@ -658,15 +639,17 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
-        CoreChannelRequest::Message { key, message, attachments } => {
+        CoreChannelRequest::Message {
+            key,
+            message,
+            attachments,
+        } => {
             // 5.6: unknown web/feishu key → typed rejection, nothing mutated.
             // Native keys are unknown to the router map — the native backend
             // rejects them itself.
             if !DualSessionBackend::is_native(&key) && !router.session_exists(&key).await {
                 return CoreChannelResponse::Rejected {
-                    rejection: SessionRejection::UnknownSession {
-                        key: key_str(&key),
-                    },
+                    rejection: SessionRejection::UnknownSession { key: key_str(&key) },
                 };
             }
             let message = match compose_attachments(message, attachments).await {
@@ -674,7 +657,7 @@ async fn dispatch(
                 Err(cause) => {
                     return CoreChannelResponse::Rejected {
                         rejection: SessionRejection::Unavailable { cause },
-                    }
+                    };
                 }
             };
             match backend.message(key, message).await {
@@ -682,7 +665,11 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
-        CoreChannelRequest::EnsureMessage { key, message, attachments } => {
+        CoreChannelRequest::EnsureMessage {
+            key,
+            message,
+            attachments,
+        } => {
             // extract-im-service 2.1：ensure 语义 —— 跳过存在性预检，路由交给
             // backend（InProcess 路径经 web_send_message 的 route_text：未知
             // key 自动建会话、dormant 懒复活、busy 排队；native key 仍由
@@ -692,7 +679,7 @@ async fn dispatch(
                 Err(cause) => {
                     return CoreChannelResponse::Rejected {
                         rejection: SessionRejection::Unavailable { cause },
-                    }
+                    };
                 }
             };
             match backend.message(key, message).await {
@@ -705,7 +692,25 @@ async fn dispatch(
             Err(rejection) => CoreChannelResponse::Rejected { rejection },
         },
         CoreChannelRequest::Close { key } => match backend.close(key).await {
-            Ok(()) => CoreChannelResponse::Ok,
+            Ok(report) => CoreChannelResponse::Closed {
+                discarded_pending: report.discarded_pending,
+            },
+            Err(rejection) => CoreChannelResponse::Rejected { rejection },
+        },
+        // workbench-turn-queue 4.2：pending 管理与 in-process 实现共用同一
+        // seam（backend 方法直调），typed rejection 原样透传。
+        CoreChannelRequest::RemovePending { key, pending_id } => {
+            match backend.remove_pending(key, pending_id).await {
+                Ok(pending) => CoreChannelResponse::PendingList { pending },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
+        CoreChannelRequest::MovePending {
+            key,
+            pending_id,
+            to_index,
+        } => match backend.move_pending(key, pending_id, to_index).await {
+            Ok(pending) => CoreChannelResponse::PendingList { pending },
             Err(rejection) => CoreChannelResponse::Rejected { rejection },
         },
         CoreChannelRequest::Turns { key, from } => match backend.turns(key, from).await {
@@ -753,19 +758,21 @@ async fn dispatch(
         CoreChannelRequest::StateMutation { domain, payload } => {
             match sebas_dispatch::state_store::engine() {
                 Some(engine) => {
+                    // 域分发统一在 sebas_dispatch::state_store（与 webui
+                    // InProcessBackend 共用同一实现，make-core-own-provider-data
+                    // 1.1/1.2：defaults 并入 settings 域 + 校验补齐）。
                     let result = match domain.as_str() {
                         "settings" => {
-                            let value = payload.get("value").cloned().unwrap_or(payload);
-                            engine.save_settings(value).await
+                            sebas_dispatch::state_store::settings_mutation(engine, &payload).await
                         }
                         "projects" => {
-                            project_mutation(engine, &payload).await
+                            sebas_dispatch::state_store::project_mutation(engine, &payload).await
                         }
                         "providers" => {
-                            providers_mutation(engine, &payload).await
+                            sebas_dispatch::state_store::providers_mutation(engine, &payload).await
                         }
                         "aliases" => {
-                            aliases_mutation(engine, &payload).await
+                            sebas_dispatch::state_store::aliases_mutation(engine, &payload).await
                         }
                         other => Err(format!("unknown domain: {other}")),
                     };
@@ -773,6 +780,27 @@ async fn dispatch(
                         Ok(()) => CoreChannelResponse::StateMutationOk,
                         Err(e) => CoreChannelResponse::Rejected {
                             rejection: SessionRejection::Unavailable { cause: e },
+                        },
+                    }
+                }
+                None => CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: "state store 未初始化".into(),
+                    },
+                },
+            }
+        }
+        CoreChannelRequest::FetchModels { provider } => {
+            // add-fetch-models：providers 域抓取 op 在 core 承载（D1）。只读
+            // GET，不写任何状态；typed rejection 携带净化后的 reason。
+            match sebas_dispatch::state_store::engine() {
+                Some(engine) => {
+                    match sebas_dispatch::state_store::providers_fetch_models(engine, &provider)
+                        .await
+                    {
+                        Ok(models) => CoreChannelResponse::Models { provider, models },
+                        Err(cause) => CoreChannelResponse::Rejected {
+                            rejection: SessionRejection::Unavailable { cause },
                         },
                     }
                 }
@@ -807,216 +835,15 @@ async fn compose_attachments(
     }
     let mut m = message;
     m.push('\n');
-    m.push_str(&markers.join("
-"));
+    m.push_str(&markers.join(
+        "
+",
+    ));
     Ok(m)
 }
 
 fn key_str(key: &ChannelKey) -> String {
     serde_json::to_string(key).unwrap_or_default()
-}
-
-/// projects 域 mutation 分发：payload 用 `op` 字段区分子操作。
-/// - `{"op": "add", "path": "...", "name": "..."}` → 新增（added_at 取当前时间）
-/// - `{"op": "remove", "path": "..."}` → 删除（不存在返回错误）
-/// - `{"op": "save", "projects": [...]}` → 全量替换
-async fn project_mutation(
-    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
-    payload: &serde_json::Value,
-) -> std::result::Result<(), String> {
-    let op = payload
-        .get("op")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("save");
-    match op {
-        "add" => {
-            let path = payload
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "add: 缺少 path 字段".to_string())?;
-            let name = payload
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "add: 缺少 name 字段".to_string())?;
-            let added_at = crate::sebas_state::db::unix_now();
-            engine.add_project(path, name, added_at).await
-        }
-        "remove" => {
-            let path = payload
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "remove: 缺少 path 字段".to_string())?;
-            match engine.remove_project(path).await {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(format!("remove: project '{path}' 不存在")),
-                Err(e) => Err(e),
-            }
-        }
-        "save" => {
-            let projects = payload
-                .get("projects")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            engine.save_projects(projects).await
-        }
-        // workbench-agent-wire-fix 2.6：项目级默认 agent（按稳定 id）。
-        "set_default_agent" => {
-            let id = payload
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "set_default_agent: 缺少 id 字段".to_string())?;
-            let agent = payload
-                .get("agent")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "set_default_agent: 缺少 agent 字段".to_string())?;
-            engine.set_project_default_agent(id, agent).await
-        }
-        other => Err(format!("projects: 未知 op '{other}'")),
-    }
-}
-
-/// providers 域 mutation 分发（5.3 admin 写路径通道代理）。
-/// payload `op` 子操作：
-/// - `{"op":"put","name":"...","item":{...}}` → upsert provider
-/// - `{"op":"delete","name":"..."}` → 删除 + 写墓碑
-/// - `{"op":"save","state":{PersistedState 形状}}` → 全量替换
-///
-/// 全部经 RMW（读 → 改 → save_persisted_state），与 router 卡片写路径同语义。
-async fn providers_mutation(
-    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
-    payload: &serde_json::Value,
-) -> std::result::Result<(), String> {
-    let op = payload
-        .get("op")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("save");
-    let mut state = engine.load_persisted_state().await;
-    match op {
-        "put" => {
-            let name = payload
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "put: 缺少 name 字段".to_string())?;
-            let item = payload
-                .get("item")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .ok_or_else(|| "put: 缺少 item 对象".to_string())?;
-            state.providers.insert(name.to_string(), item);
-            // 撤销同名墓碑（re-add）。
-            state.deleted.retain(|d| d != name);
-            engine
-                .save_persisted_state(state)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "delete" => {
-            let name = payload
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "delete: 缺少 name 字段".to_string())?;
-            let existed = state.providers.remove(name).is_some();
-            if !state.deleted.iter().any(|d| d == name) {
-                state.deleted.push(name.to_string());
-            }
-            if state.default_selection.as_ref().map(|d| d.provider.as_str()) == Some(name) {
-                state.default_selection = None;
-            }
-            if !existed {
-                return Err(format!("provider '{name}' 不存在"));
-            }
-            engine
-                .save_persisted_state(state)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "save" => {
-            let raw = payload
-                .get("state")
-                .cloned()
-                .ok_or_else(|| "save: 缺少 state 字段".to_string())?;
-            let incoming: sebas_dispatch::state_store::PersistedState =
-                serde_json::from_value(raw)
-                    .map_err(|e| format!("save: 非法 PersistedState: {e}"))?;
-            // 保留 mode/default_selection（admin 面不管运行时状态，只写 provider 数据）。
-            let mut merged = incoming;
-            merged.mode = state.mode.clone();
-            merged.default_selection = state.default_selection.clone();
-            engine
-                .save_persisted_state(merged)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        other => Err(format!("providers: 未知 op '{other}'")),
-    }
-}
-
-/// aliases 域 mutation 分发（5.3 admin 写路径通道代理）。
-/// payload `op` 子操作：
-/// - `{"op":"put","alias":"...","entry":{"provider":"...","upstream_model":"..."}}`
-/// - `{"op":"delete","alias":"..."}`
-/// - `{"op":"save","aliases":{alias: entry,...}}` → 全量替换
-async fn aliases_mutation(
-    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
-    payload: &serde_json::Value,
-) -> std::result::Result<(), String> {
-    let op = payload
-        .get("op")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("save");
-    let mut state = engine.load_persisted_state().await;
-    match op {
-        "put" => {
-            let alias = payload
-                .get("alias")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "put: 缺少 alias 字段".to_string())?;
-            let entry: sebas_dispatch::state_store::ModelAliasEntry = serde_json::from_value(
-                payload
-                    .get("entry")
-                    .cloned()
-                    .ok_or_else(|| "put: 缺少 entry 对象".to_string())?,
-            )
-            .map_err(|e| format!("put: entry 非法: {e}"))?;
-            state
-                .model_aliases
-                .insert(alias.to_string(), entry);
-            engine
-                .save_persisted_state(state)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "delete" => {
-            let alias = payload
-                .get("alias")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "delete: 缺少 alias 字段".to_string())?;
-            if state.model_aliases.remove(alias).is_none() {
-                return Err(format!("alias '{alias}' 不存在"));
-            }
-            engine
-                .save_persisted_state(state)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "save" => {
-            let raw = payload
-                .get("aliases")
-                .cloned()
-                .ok_or_else(|| "save: 缺少 aliases 字段".to_string())?;
-            let incoming: std::collections::BTreeMap<
-                String,
-                sebas_dispatch::state_store::ModelAliasEntry,
-            > = serde_json::from_value(raw).map_err(|e| format!("save: aliases 非法: {e}"))?;
-            state.model_aliases = incoming;
-            engine
-                .save_persisted_state(state)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        other => Err(format!("aliases: 未知 op '{other}'")),
-    }
 }
 
 /// 5.5: the directory must exist and be a directory. The rejection carries
@@ -1040,7 +867,10 @@ mod tests {
             #[cfg(unix)]
             assert!(path.exists());
             // The listener is alive; a second bind must NOT steal it.
-            assert!(bind_channel_socket(&path).is_err(), "live socket must refuse rebind");
+            assert!(
+                bind_channel_socket(&path).is_err(),
+                "live socket must refuse rebind"
+            );
         }
         // Listener dropped → socket file is stale → second bind reclaims it.
         let _l2 = bind_channel_socket(&path).expect("stale socket reclaimed");
@@ -1068,5 +898,65 @@ mod tests {
         let file = dir.path().join("f.txt");
         std::fs::write(&file, b"x").unwrap();
         assert!(!usable_project_dir(file.to_str().unwrap()));
+    }
+
+    // make-core-own-provider-data 1.3 验收：core 读到的 preset 表与
+    // `sebas_router::config::presets()` 逐项一致（只读代码表直出，无存储副本）。
+    #[tokio::test]
+    async fn presets_domain_serves_the_code_table() {
+        let (router, _rx) =
+            sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
+        let payload = snapshot_domain(&router, "presets").await;
+        let served = payload
+            .get("presets")
+            .and_then(serde_json::Value::as_array)
+            .expect("presets domain returns a presets array");
+        let code = sebas_router::config::presets();
+        assert_eq!(
+            served.len(),
+            code.len(),
+            "preset count follows the code table"
+        );
+        for (served, code) in served.iter().zip(code.iter()) {
+            assert_eq!(served["name"], code.name);
+            assert_eq!(served["api_key_env"], code.api_key_env);
+            assert_eq!(
+                served["base_url_anthropic"],
+                serde_json::json!(code.base_url_anthropic)
+            );
+            assert_eq!(
+                served["base_url_openai_chat"],
+                serde_json::json!(code.base_url_openai_chat)
+            );
+            assert_eq!(
+                served["base_url_openai_responses"],
+                serde_json::json!(code.base_url_openai_responses)
+            );
+            // 模型条目（id + 能力标记；redesign-provider-models-settings
+            // 1.2）：wire 形状 = 条目对象，id 列表与代码表逐项一致。
+            let ids: Vec<&str> = served["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .map(|m| {
+                    m.as_object()
+                        .expect("model entry object")
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("entry id")
+                })
+                .collect();
+            assert_eq!(
+                ids.as_slice(),
+                code.models
+                    .iter()
+                    .map(|m| m.id)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+            );
+        }
+        // 未设置 state store 时其余域报错，presets 域不受影响（纯代码表）。
+        let missing = snapshot_domain(&router, "providers").await;
+        assert!(missing.get("error").is_some());
     }
 }

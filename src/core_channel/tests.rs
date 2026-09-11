@@ -13,7 +13,9 @@ use crate::core_channel::server;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::state::SessionMap;
 use sebas_dispatch::{DispatchHandle, SessionEvent};
-use sebas_webui::session_backend::{PermissionDecision, Reachability, SessionBackend, SessionRejection};
+use sebas_webui::session_backend::{
+    PermissionDecision, Reachability, SessionBackend, SessionRejection,
+};
 use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,7 +146,10 @@ async fn missing_handshake_closes_connection_without_response() {
     w.write_all(b"\n").await.unwrap();
     let mut line = String::new();
     let n = reader.read_line(&mut line).await.unwrap();
-    assert_eq!(n, 0, "server must close without answering an unhandshaked client");
+    assert_eq!(
+        n, 0,
+        "server must close without answering an unhandshaked client"
+    );
 }
 
 /// 空密钥 / 错误密钥 → 连接被关闭（5.3）。
@@ -214,8 +219,13 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     );
 
     // Mutate AFTER the snapshot: every change must arrive as event frames.
-    let key = core.handle.web_spawn("racing prompt".into(), None, None, None).await;
-    core.handle.activate(&key, "s-live".into(), None, None).await;
+    let key = core
+        .handle
+        .web_spawn("racing prompt".into(), None, None, None)
+        .await;
+    core.handle
+        .activate(&key, "s-live".into(), None, None)
+        .await;
 
     let mut saw_created = false;
     let mut saw_updated = false;
@@ -236,13 +246,19 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
             _ => {}
         }
     }
-    assert!(saw_created, "Created event must follow the snapshot (no gap)");
+    assert!(
+        saw_created,
+        "Created event must follow the snapshot (no gap)"
+    );
     assert!(saw_updated, "activate must arrive as an Updated event");
 
     // The event state matches the authoritative snapshot: an idempotent
     // re-apply changes nothing (no visible duplicate).
     let snap = core.handle.session_info_snapshot().await;
-    assert!(snap.iter().any(|s| s.channel_key() == key && s.status == "active"));
+    assert!(
+        snap.iter()
+            .any(|s| s.channel_key() == key && s.status == "active")
+    );
 }
 
 // ── 6.1: backend round-trips ────────────────────────────────────────────────
@@ -277,9 +293,17 @@ async fn backend_methods_reach_the_right_handlers() {
     // (The spawned key is channel-neutral on the wire; the webui-trait client
     // sees it only in feishu shape, so drive the real ChannelKey from the
     // router's mapping directly.)
-    let (channel_key, _) = core.handle.map.snapshot_all().await.into_iter().next()
+    let (channel_key, _) = core
+        .handle
+        .map
+        .snapshot_all()
+        .await
+        .into_iter()
+        .next()
         .expect("spawned session mapped");
-    core.handle.activate(&channel_key, "s-live".into(), None, None).await;
+    core.handle
+        .activate(&channel_key, "s-live".into(), None, None)
+        .await;
     let snap = backend.snapshot().await;
     assert_eq!(snap[0].status, "active");
     assert_eq!(snap[0].session_id.as_deref(), Some("s-live"));
@@ -290,7 +314,10 @@ async fn backend_methods_reach_the_right_handlers() {
         .await
         .expect("message");
     // message via the core handle (channel-neutral key) → routes into the map.
-    core.handle.web_send_message(channel_key.clone(), "hello".into()).await;
+    let _ = core
+        .handle
+        .web_send_message(channel_key.clone(), "hello".into())
+        .await;
     // message to an unknown key → typed rejection, nothing mutated.
     // (The unknown key is channel-neutral on the wire, so it round-trips
     // byte-for-byte through the channel's structured `{channel,reference}`.)
@@ -303,9 +330,12 @@ async fn backend_methods_reach_the_right_handlers() {
     );
 
     // turns: seed content on the core, fetch via backend, incremental.
-    // Entries so far: spawn prompt (seed_card) + the composer message
-    // ("hello", recorded by web_send_message's Continue arm) + "chunk one".
-    core.handle.seed_card("s-live".into(), "the prompt".into()).await;
+    // workbench-turn-queue 2.2：prompt 一律在开轮时由 seed_card 写入（提交
+    // 即写已退役）。两次 web_send_message 各开一轮 → 两条 prompt 条目；
+    // 最后的 seed_card("the prompt") 是重入（幂等，不再追加）。
+    core.handle
+        .seed_card("s-live".into(), "the prompt".into())
+        .await;
     use sebas_acp::claude::session::AcpEvent;
     core.handle
         .apply_event(
@@ -317,8 +347,8 @@ async fn backend_methods_reach_the_right_handlers() {
         )
         .await;
     let all = backend.turns(key.clone(), 0).await.unwrap();
-    assert_eq!(all.len(), 4); // prompt + prompt (web_send_message) + prompt + delta
-    let tail = backend.turns(key.clone(), 3).await.unwrap();
+    assert_eq!(all.len(), 3); // prompt (turn 1) + prompt (turn 2) + delta
+    let tail = backend.turns(key.clone(), 2).await.unwrap();
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].content, "chunk one");
     // unknown key → rejection.
@@ -596,7 +626,10 @@ async fn unreachable_causes_are_distinct() {
         SessionRejection::Unavailable { cause } => {
             assert_eq!(
                 cause,
-                format!("core session channel socket not found at {}", path.display()),
+                format!(
+                    "core session channel socket not found at {}",
+                    path.display()
+                ),
                 "cause must name the absence"
             );
         }
@@ -682,8 +715,7 @@ async fn approval_answer_for_unknown_request_id_returns_typed_rejection() {
     .await
     .expect("wire roundtrip");
     let resp: CoreChannelResponse =
-        serde_json::from_str(&resp.expect("server returned a response"))
-            .expect("response decodes");
+        serde_json::from_str(&resp.expect("server returned a response")).expect("response decodes");
     match resp {
         CoreChannelResponse::Rejected { rejection } => match rejection {
             SessionRejection::Unavailable { cause } => {
@@ -706,7 +738,6 @@ async fn approval_answer_for_unknown_request_id_returns_typed_rejection() {
     );
 }
 
-
 /// （extract-im-service 2.1）EnsureMessage：未知 feishu key 自动建会话、
 /// 已知 key 等价 Message；`Message` 的「未知即拒绝」语义保持不变。
 #[tokio::test]
@@ -726,7 +757,11 @@ async fn ensure_message_spawns_unknown_key_and_message_still_rejects() {
         .await
         .expect("ensure on unknown key creates a session");
     let snap = backend.snapshot().await;
-    assert_eq!(snap.len(), 1, "ensure created exactly one session: {snap:?}");
+    assert_eq!(
+        snap.len(),
+        1,
+        "ensure created exactly one session: {snap:?}"
+    );
     assert_eq!(snap[0].channel, "feishu");
     assert!(snap[0].key.contains("oc_ensure_test"));
     assert_eq!(snap[0].status, "spawning");
@@ -752,7 +787,10 @@ async fn cancel_rejects_unknown_and_accepts_live_session() {
 
     // 未知 key → typed rejection。
     let bogus = ChannelKey::feishu("oc_cancel_unknown", None);
-    let err = backend.cancel(bogus.clone()).await.expect_err("unknown must reject");
+    let err = backend
+        .cancel(bogus.clone())
+        .await
+        .expect_err("unknown must reject");
     match err {
         SessionRejection::UnknownSession { .. } => {}
         other => panic!("expected UnknownSession, got {other:?}"),
@@ -760,15 +798,24 @@ async fn cancel_rejects_unknown_and_accepts_live_session() {
 
     // spawn + activate → 活跃会话；Cancel → Ok 且会话仍在快照中。
     let key = backend.spawn("work".into(), None).await.expect("spawn");
-    let (channel_key, _) = core.handle.map.snapshot_all().await.into_iter().next().unwrap();
+    let (channel_key, _) = core
+        .handle
+        .map
+        .snapshot_all()
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
     core.handle
         .activate(&channel_key, "s-cancel".into(), None, None)
         .await;
-    backend.cancel(key.clone()).await.expect("cancel live session");
+    backend
+        .cancel(key.clone())
+        .await
+        .expect("cancel live session");
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1, "cancel keeps the session: {snap:?}");
 }
-
 
 /// （extract-im-service 2.4）ACP 桥审批面经通道全环：ACP PermissionRequest →
 /// 订阅流 ApprovalRequested 帧（带 request_id + 会话 key）→ ApprovalAnswer
@@ -788,16 +835,27 @@ async fn acp_permission_request_streams_and_answer_routes_back() {
     let stream = sebas_ipc::connect(&core.path).await.unwrap();
     let (r, mut w) = sebas_ipc::split(stream);
     let mut reader = BufReader::new(r);
-    let hs = serde_json::to_string(&ChannelHandshake { secret: SECRET.into() }).unwrap();
+    let hs = serde_json::to_string(&ChannelHandshake {
+        secret: SECRET.into(),
+    })
+    .unwrap();
     w.write_all(hs.as_bytes()).await.unwrap();
-    w.write_all(b"
-").await.unwrap();
+    w.write_all(
+        b"
+",
+    )
+    .await
+    .unwrap();
     let mut ack = String::new();
     reader.read_line(&mut ack).await.unwrap();
     let sub = serde_json::to_string(&CoreChannelRequest::Subscribe).unwrap();
     w.write_all(sub.as_bytes()).await.unwrap();
-    w.write_all(b"
-").await.unwrap();
+    w.write_all(
+        b"
+",
+    )
+    .await
+    .unwrap();
     w.flush().await.unwrap();
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
@@ -807,8 +865,13 @@ async fn acp_permission_request_streams_and_answer_routes_back() {
     // 建会话并激活，然后合成一条 ACP PermissionRequest 走 router 应用路径
     // （apply_event_to_out 是 ACP 泵的真实入口，权限广播从这里发出）。
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
-    let key = backend.spawn("will need permission".into(), None).await.unwrap();
-    core.handle.activate(&key, "s-perm".into(), None, None).await;
+    let key = backend
+        .spawn("will need permission".into(), None)
+        .await
+        .unwrap();
+    core.handle
+        .activate(&key, "s-perm".into(), None, None)
+        .await;
     core.handle
         .apply_event_to_out(
             "s-perm".into(),
@@ -838,7 +901,10 @@ async fn acp_permission_request_streams_and_answer_routes_back() {
             break;
         }
     }
-    assert!(saw_approval, "ApprovalRequested frame must reach the subscriber");
+    assert!(
+        saw_approval,
+        "ApprovalRequested frame must reach the subscriber"
+    );
 
     // 决定回路由：ApprovalAnswer 走独立请求连接（订阅连接只推流不处理
     // 请求）→ Ok，且 Out::SendAcp{PermissionReply} 路由回 ACP 会话。
@@ -854,7 +920,10 @@ async fn acp_permission_request_streams_and_answer_routes_back() {
     .unwrap()
     .unwrap();
     let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
-    assert!(matches!(resp, CoreChannelResponse::Ok), "answer accepted, got {resp:?}");
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok),
+        "answer accepted, got {resp:?}"
+    );
 
     // Drain queued Out events briefly; the PermissionReply must be among them.
     let mut saw_reply = false;
@@ -875,7 +944,6 @@ async fn acp_permission_request_streams_and_answer_routes_back() {
     }
     assert!(saw_reply, "PermissionReply must reach the outbound queue");
 }
-
 
 /// （extract-im-service 4.1）附件面：路径不存在的附件 typed rejection；
 /// 存在的本地文件投递 Ok（标记组合后由执行体按路径消化）。
@@ -934,7 +1002,10 @@ async fn ensure_message_attachments_are_validated() {
     .unwrap()
     .unwrap();
     let resp: CoreChannelResponse = serde_json::from_str(&resp).unwrap();
-    assert!(matches!(resp, CoreChannelResponse::Ok), "good attachment accepted, got {resp:?}");
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok),
+        "good attachment accepted, got {resp:?}"
+    );
 }
 
 // ── harden-core-channel-deployment: auto-arm (1.2) + client discovery (2.1) ──
@@ -968,7 +1039,11 @@ impl CoreSecretEnv {
                 std::env::set_var(name, value);
             }
         }
-        Self { name, prev, _lock: lock }
+        Self {
+            name,
+            prev,
+            _lock: lock,
+        }
     }
 }
 
@@ -994,9 +1069,7 @@ fn arm_config(dir: &StdPath) -> (crate::config::Config, std::path::PathBuf) {
     (cfg, config_path)
 }
 
-async fn arm_for_test(
-    dir: &StdPath,
-) -> crate::run::ArmedChannel {
+async fn arm_for_test(dir: &StdPath) -> crate::run::ArmedChannel {
     let (cfg, config_path) = arm_config(dir);
     let (router, _out_rx) = DispatchHandle::new(SessionMap::new());
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
@@ -1012,20 +1085,29 @@ async fn arm_for_test(
 /// 握手（客户端走文件发现）。
 #[tokio::test]
 async fn auto_arm_without_env_writes_secret_file_and_completes_handshake() {
-        let _env = CoreSecretEnv::unset();
+    let _env = CoreSecretEnv::unset();
     let dir = tempfile::tempdir().unwrap();
     let armed = arm_for_test(dir.path()).await;
     let secret_file = dir.path().join("core.secret");
 
-    assert_eq!(armed.secret_file, secret_file, "default path = config dir/core.secret");
-    assert!(dir.path().join("core.sock").exists(), "socket bound before arm returns");
+    assert_eq!(
+        armed.secret_file, secret_file,
+        "default path = config dir/core.secret"
+    );
+    assert!(
+        dir.path().join("core.sock").exists(),
+        "socket bound before arm returns"
+    );
     assert!(secret_file.exists(), "secret file written at arm time");
     let content = std::fs::read_to_string(&secret_file).unwrap();
     assert_eq!(content, armed.secret, "file carries this boot's secret");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&secret_file).unwrap().permissions().mode();
+        let mode = std::fs::metadata(&secret_file)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "secret file must be 0600");
     }
 
@@ -1034,7 +1116,10 @@ async fn auto_arm_without_env_writes_secret_file_and_completes_handshake() {
         dir.path().join("core.sock"),
         crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file.clone())),
     );
-    assert!(backend.snapshot().await.is_empty(), "handshake with discovered secret works");
+    assert!(
+        backend.snapshot().await.is_empty(),
+        "handshake with discovered secret works"
+    );
     assert_eq!(backend.reachability().await, Reachability::Reachable);
 
     // 清理 accept 循环。
@@ -1045,7 +1130,7 @@ async fn auto_arm_without_env_writes_secret_file_and_completes_handshake() {
 /// 1.2 自动武装：env 提供时 env 优先且文件内容一致（迟启动客户端可发现）。
 #[tokio::test]
 async fn auto_arm_with_env_uses_env_value_and_writes_matching_file() {
-        let _env = CoreSecretEnv::set("env-secret-wins");
+    let _env = CoreSecretEnv::set("env-secret-wins");
     let dir = tempfile::tempdir().unwrap();
     let armed = arm_for_test(dir.path()).await;
 
@@ -1063,7 +1148,7 @@ async fn auto_arm_with_env_uses_env_value_and_writes_matching_file() {
 /// （run.rs 据此在 ready 之前以 75 退出，不产生无通道的“健康”进程）。
 #[tokio::test]
 async fn arm_fails_hard_when_socket_path_is_taken_by_live_listener() {
-        let _env = CoreSecretEnv::unset();
+    let _env = CoreSecretEnv::unset();
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("core.sock");
     let _squatter = crate::core_channel::server::bind_channel_socket(&sock).expect("occupy path");
@@ -1100,7 +1185,10 @@ async fn client_discovers_secret_from_file_and_heals_key_rotation() {
         core.path.clone(),
         crate::core_channel::secret::ChannelSecret::Discover(Some(secret_file.clone())),
     );
-    let key = backend.spawn("before rotation".into(), None).await.expect("handshake via file");
+    let key = backend
+        .spawn("before rotation".into(), None)
+        .await
+        .expect("handshake via file");
     assert_eq!(backend.snapshot().await.len(), 1);
 
     // core 重启（换钥）：文件覆写为新钥，同一 client 实例自愈。
@@ -1115,7 +1203,14 @@ async fn client_discovers_secret_from_file_and_heals_key_rotation() {
         sebas_webui::session_backend::InProcessBackend::new(router2.clone()),
     );
     tokio::spawn(async move {
-        let _ = server::serve(backend2, router2, path2.clone(), "rotation-key-2".into(), close2_rx).await;
+        let _ = server::serve(
+            backend2,
+            router2,
+            path2.clone(),
+            "rotation-key-2".into(),
+            close2_rx,
+        )
+        .await;
     });
     wait_channel_ready(&core.path).await;
 
@@ -1159,7 +1254,11 @@ impl StartupErrorFile {
         let prev = std::env::var_os(name);
         // edition 2024：多线程下 set/remove env 是 unsafe；由锁串行化。
         unsafe { std::env::set_var(name, &path) };
-        Self { _dir: dir, prev, _lock: lock }
+        Self {
+            _dir: dir,
+            prev,
+            _lock: lock,
+        }
     }
 
     /// env 清除（还原 prev）。
@@ -1220,7 +1319,10 @@ async fn reachability_startup_failed_fallback() {
         Reachability::StartupFailed { cause } => {
             assert_eq!(
                 cause,
-                format!("core session channel socket not found at {}", path.display())
+                format!(
+                    "core session channel socket not found at {}",
+                    path.display()
+                )
             );
         }
         other => panic!("expected StartupFailed, got {other:?}"),
@@ -1264,7 +1366,10 @@ async fn reachability_auth_rejected_after_handshake() {
     // 文件换正确钥（env 未设 → Discover 每次连接前重读文件），同一 client
     // 实例至多再试一次即恢复，而不是继续用失败过的旧钥。
     std::fs::write(&secret_file, SECRET).unwrap();
-    let key = backend.spawn("after re-read".into(), None).await.expect("one more try succeeds");
+    let key = backend
+        .spawn("after re-read".into(), None)
+        .await
+        .expect("one more try succeeds");
     assert_eq!(backend.reachability().await, Reachability::Reachable);
     let _ = key;
 }
@@ -1284,10 +1389,13 @@ async fn reachability_disconnected_after_connected() {
     // answering, so the client's read hits post-handshake EOF.
     tokio::spawn(async move {
         for _ in 0..16 {
-            let stream = match tokio::time::timeout(Duration::from_secs(10), sebas_ipc::accept(&listener)).await {
-                Ok(Ok(s)) => s,
-                _ => return,
-            };
+            let stream =
+                match tokio::time::timeout(Duration::from_secs(10), sebas_ipc::accept(&listener))
+                    .await
+                {
+                    Ok(Ok(s)) => s,
+                    _ => return,
+                };
             let (r, mut w) = sebas_ipc::split(stream);
             let mut reader = BufReader::new(r);
             let mut line = String::new();
@@ -1361,7 +1469,10 @@ async fn ensure_message_dormant_resumes() {
         .await
         .unwrap();
     let before = backend.snapshot().await;
-    assert_eq!(before[0].status, "dormant", "fixture starts dormant: {before:?}");
+    assert_eq!(
+        before[0].status, "dormant",
+        "fixture starts dormant: {before:?}"
+    );
 
     backend
         .ensure_message(chat.clone(), "wake up".into())
@@ -1370,7 +1481,10 @@ async fn ensure_message_dormant_resumes() {
 
     let after = backend.snapshot().await;
     assert_eq!(after.len(), 1, "same session, resumed in place: {after:?}");
-    assert_eq!(after[0].status, "spawning", "dormant claimed → spawning: {after:?}");
+    assert_eq!(
+        after[0].status, "spawning",
+        "dormant claimed → spawning: {after:?}"
+    );
 }
 
 /// Message 在未知 key 上保持 typed rejection（UnknownSession），且不创建
@@ -1423,13 +1537,8 @@ unsafe fn cross_uid_child_body(path_bytes: &[u8], handshake: &[u8], uid: u32) ->
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
         let len = path_bytes.len().min(addr.sun_path.len() - 1);
-        std::ptr::copy_nonoverlapping(
-            path_bytes.as_ptr(),
-            addr.sun_path.as_mut_ptr().cast(),
-            len,
-        );
-        let addr_len =
-            std::mem::size_of::<libc::sa_family_t>() + len;
+        std::ptr::copy_nonoverlapping(path_bytes.as_ptr(), addr.sun_path.as_mut_ptr().cast(), len);
+        let addr_len = std::mem::size_of::<libc::sa_family_t>() + len;
         if libc::connect(
             sock,
             (&addr as *const libc::sockaddr_un).cast(),
@@ -1455,17 +1564,13 @@ unsafe fn cross_uid_child_body(path_bytes: &[u8], handshake: &[u8], uid: u32) ->
             }
             written += n as usize;
         }
-    let mut ack = [0u8; 32];
-    let n = libc::read(sock, ack.as_mut_ptr().cast(), ack.len());
-    libc::close(sock);
-    // n == 0（干净 EOF）或 n == -1（ECONNRESET：服务端带着未读数据 close，
-    // 内核对端回 RST）都等于「无 ack，被拒」；只有 n > 0 才是握手 ack。
-    if n <= 0 {
-        0
-    } else {
-        4
+        let mut ack = [0u8; 32];
+        let n = libc::read(sock, ack.as_mut_ptr().cast(), ack.len());
+        libc::close(sock);
+        // n == 0（干净 EOF）或 n == -1（ECONNRESET：服务端带着未读数据 close，
+        // 内核对端回 RST）都等于「无 ack，被拒」；只有 n > 0 才是握手 ack。
+        if n <= 0 { 0 } else { 4 }
     }
-}
 }
 
 /// 真实跨 uid 进程的 peer-uid 拒绝（5.2 / design D5，**CI-only 非门禁**）：
@@ -1506,7 +1611,11 @@ async fn cross_uid_rejected_live_process() {
             }
         }
     };
-    assert_ne!(target_uid, unsafe { libc::getuid() }, "child must run as a DIFFERENT uid");
+    assert_ne!(
+        target_uid,
+        unsafe { libc::getuid() },
+        "child must run as a DIFFERENT uid"
+    );
 
     // 生产通道是 0600 + 私有目录——那层由文件系统先把外部 uid 挡在
     // connect 之前（EACCES），服务端的 peer-uid 检查永远看不到连接。为了
@@ -1514,16 +1623,10 @@ async fn cross_uid_rejected_live_process() {
     // socket 放宽到 0666、目录放宽到 0755——仅测试文件，生产绑定不变。
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            &core.path,
-            std::fs::Permissions::from_mode(0o666),
-        )
-        .expect("relax socket perms");
-        std::fs::set_permissions(
-            dir.path(),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .expect("relax scene dir perms");
+        std::fs::set_permissions(&core.path, std::fs::Permissions::from_mode(0o666))
+            .expect("relax socket perms");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("relax scene dir perms");
     }
 
     // fork 前把路径与握手行放进栈上定长缓冲（子进程零分配）。
@@ -1586,9 +1689,263 @@ async fn cross_uid_rejected_live_process() {
 
     // 拒绝不进入 request 处理：合法客户端的快照仍是空的、core 侧映射为空。
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
-    assert!(backend.snapshot().await.is_empty(), "no request was processed");
+    assert!(
+        backend.snapshot().await.is_empty(),
+        "no request was processed"
+    );
     assert!(
         core.handle.map.snapshot_all().await.is_empty(),
         "core map untouched by the foreign-uid connection"
     );
+}
+
+// ── workbench-turn-queue 4.1/4.2/4.3 ────────────────────────────────────────
+
+/// pending submission 随快照/事件可见（4.1）；remove/move 的 typed 拒绝在
+/// detached（通道）形态与 in-process 实现同一结果（4.2/4.3）。
+#[tokio::test]
+async fn pending_submissions_visible_and_manageable_over_the_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let key = ChannelKey::new("web", "web-pending");
+
+    // spawn 窗口：占位 + 1 条 staged（turn 队列 1 条 priority + 1 条普通）。
+    core.handle.map.begin_spawn(key.clone()).await.unwrap();
+    let _ = core
+        .handle
+        .map
+        .route_text(key.clone(), "staged entry".into())
+        .await
+        .unwrap();
+    let _ = core
+        .handle
+        .map
+        .route_text(key.clone(), "staged two".into())
+        .await
+        .unwrap();
+    let staged_id = core.handle.map.pending_submissions(&key).await[0].id;
+    let prio_id = core
+        .handle
+        .map
+        .enqueue_turn(
+            &key,
+            sebas_dispatch::state::QueuedTurn::new("prio", None, true),
+        )
+        .await;
+    let norm_id = core
+        .handle
+        .map
+        .enqueue_turn(
+            &key,
+            sebas_dispatch::state::QueuedTurn::new("norm", None, false),
+        )
+        .await;
+
+    // 4.1：快照携带 pending 全量视图（投递序 = staging 先于 turn）。
+    let snap = backend.snapshot().await;
+    let entry = snap
+        .iter()
+        .find(|s| s.channel == "web" && s.key == "web-pending")
+        .expect("session in snapshot");
+    assert_eq!(entry.pending.len(), 4);
+    assert_eq!(
+        entry.pending[0].disposition,
+        sebas_dispatch::PendingDisposition::Staging
+    );
+    assert_eq!(entry.pending[1].text, "staged two");
+    assert!(
+        entry.pending[2].priority,
+        "priority turn first in its group"
+    );
+    assert_eq!(entry.pending[2].position, 2);
+
+    // 4.2/4.3：detached 形态的 remove/move 与 in-process 同语义。
+    // 成功路径：返回操作后的全量 pending。
+    let after = backend
+        .remove_pending(key.clone(), norm_id)
+        .await
+        .expect("remove");
+    assert!(!after.iter().any(|p| p.id == norm_id));
+    let after = backend
+        .move_pending(key.clone(), staged_id, 1)
+        .await
+        .expect("staged group reorder");
+    assert_eq!(after[1].text, "staged entry");
+    assert_eq!(after[0].text, "staged two");
+    // 越优先：普通项插到优先项之前 → PriorityConflict（用一条活的普通
+    // 提交；norm_id 已被移除，对它再动是 Unknown——语义见上一组断言）。
+    let fresh_id = core
+        .handle
+        .map
+        .enqueue_turn(
+            &key,
+            sebas_dispatch::state::QueuedTurn::new("fresh", None, false),
+        )
+        .await;
+    assert_eq!(
+        backend.move_pending(key.clone(), fresh_id, 0).await,
+        Err(SessionRejection::PendingRejected {
+            reason: sebas_webui::session_backend::PendingReason::PriorityConflict
+        })
+    );
+    assert_eq!(
+        backend.move_pending(key.clone(), norm_id, 0).await,
+        Err(SessionRejection::PendingRejected {
+            reason: sebas_webui::session_backend::PendingReason::Unknown
+        })
+    );
+    // 未知 id → Unknown。
+    assert_eq!(
+        backend.remove_pending(key.clone(), 99_999).await,
+        Err(SessionRejection::PendingRejected {
+            reason: sebas_webui::session_backend::PendingReason::Unknown
+        })
+    );
+    // 已开始（pop 投递）→ AlreadyStarted。
+    core.handle.map.pop_next_turn(&key).await.expect("prio pop");
+    assert_eq!(
+        backend.remove_pending(key.clone(), prio_id).await,
+        Err(SessionRejection::PendingRejected {
+            reason: sebas_webui::session_backend::PendingReason::AlreadyStarted
+        })
+    );
+    assert_eq!(
+        backend.move_pending(key.clone(), prio_id, 0).await,
+        Err(SessionRejection::PendingRejected {
+            reason: sebas_webui::session_backend::PendingReason::AlreadyStarted
+        })
+    );
+
+    // 4.1：事件携带 pending——激活后把会话推到 WORKING，web 提交经共享
+    // submit_turn 入队并发布 Updated，全量 pending 随事件到达订阅端。
+    core.handle
+        .activate(&key, "s-live".into(), None, None)
+        .await;
+    core.handle.seed_card("s-live".into(), "seed".into()).await;
+    use sebas_acp::claude::session::AcpEvent;
+    core.handle
+        .apply_event(
+            "s-live",
+            &AcpEvent::TextDelta {
+                session_id: "s-live".into(),
+                delta: "streaming...".into(),
+            },
+        )
+        .await;
+    // 同 5.2 测试：等 forwarder 订阅就绪，避免事件落在订阅建立前。
+    let dl = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        assert!(
+            std::time::Instant::now() < dl,
+            "channel forwarder never became reachable"
+        );
+        if backend.reachability().await == Reachability::Reachable {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut events = backend.subscribe();
+    core.handle
+        .web_send_message(key.clone(), "second".into())
+        .await
+        .expect("accepted (queued)");
+    let mut saw_pending = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !saw_pending && std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await {
+            Ok(Ok(SessionEvent::Updated { session })) => {
+                saw_pending = session.pending.iter().any(|p| p.text == "second");
+            }
+            Ok(Ok(_)) => continue,
+            _ => {}
+        }
+    }
+    assert!(saw_pending, "Updated events carry the full pending list");
+}
+
+/// workbench-turn-queue 5.2：close 在移除映射**之前**发布 PendingDropped
+///（逐条标注未执行），响应携带 discarded_pending 计数；观察者按序收到
+/// PendingDropped → Removed。
+#[tokio::test]
+async fn close_reports_discarded_pending_and_notifies_observers() {
+    use sebas_acp::claude::session::AcpEvent;
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = start_core(dir.path()).await;
+    let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
+
+    let key = ChannelKey::new("web", "web-drop");
+    core.handle
+        .insert_mapping(key.clone(), "s-drop".into())
+        .await;
+    core.handle.seed_card("s-drop".into(), "run".into()).await;
+    core.handle
+        .apply_event(
+            "s-drop",
+            &AcpEvent::TextDelta {
+                session_id: "s-drop".into(),
+                delta: "working".into(),
+            },
+        )
+        .await;
+    let _ = core
+        .handle
+        .map
+        .enqueue_turn(
+            &key,
+            sebas_dispatch::state::QueuedTurn::new("dropped one", None, false),
+        )
+        .await;
+    let _ = core
+        .handle
+        .map
+        .enqueue_turn(
+            &key,
+            sebas_dispatch::state::QueuedTurn::new("dropped two", None, false),
+        )
+        .await;
+
+    // 等 forwarder 的订阅连接就绪（就绪前发布的事件不会被补发——广播不是
+    // 日志），否则 close 的标注帧会落在订阅建立之前。
+    let dl = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        assert!(
+            std::time::Instant::now() < dl,
+            "channel forwarder never became reachable"
+        );
+        if backend.reachability().await == Reachability::Reachable {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut events = backend.subscribe();
+    let report = backend.close(key.clone()).await.expect("close");
+    assert_eq!(
+        report.discarded_pending, 2,
+        "close must count what it dropped"
+    );
+
+    // 观察者按序收到 PendingDropped（携带两条文本）→ Removed。
+    let mut saw_dropped = None;
+    let mut saw_removed = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !(saw_dropped.is_some() && saw_removed) && std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await {
+            Ok(Ok(SessionEvent::PendingDropped { dropped, .. })) => {
+                let texts: Vec<String> = dropped.iter().map(|d| d.text.clone()).collect();
+                saw_dropped = Some(texts);
+            }
+            Ok(Ok(SessionEvent::Removed { .. })) => saw_removed = true,
+            Ok(Ok(_)) => continue,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        saw_dropped,
+        Some(vec!["dropped one".to_string(), "dropped two".to_string()]),
+        "observers must be told exactly which submissions were not executed"
+    );
+    assert!(saw_removed, "Removed follows the drop annotation");
 }

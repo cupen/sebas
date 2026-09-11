@@ -2,11 +2,13 @@
 //! second is queued and drained by activate(). Dump keeps the MappingDto shape (structured ChannelKey keys now).
 
 use sebas_channels::{ChannelEvent, ChannelKey};
-use sebas_dispatch::engine::{Out, DispatchHandle};
+use sebas_dispatch::engine::{DispatchHandle, Out};
 use sebas_dispatch::state::{Mapping, MappingState, SessionMap, TextRoute};
 use std::time::Duration;
 
-fn key() -> ChannelKey { ChannelKey::feishu("oc_race", None) }
+fn key() -> ChannelKey {
+    ChannelKey::feishu("oc_race", None)
+}
 
 #[tokio::test]
 async fn second_text_during_spawn_is_queued_not_spawned() {
@@ -14,7 +16,11 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
     let (router, mut out_rx) = DispatchHandle::new(map.clone());
 
     router
-        .dispatch(ChannelEvent::Text { key: key(), text: "msg1".into(), reply_target: None })
+        .dispatch(ChannelEvent::Text {
+            key: key(),
+            text: "msg1".into(),
+            reply_target: None,
+        })
         .await;
     let first = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
@@ -24,7 +30,11 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
 
     // Spawn still in flight (nobody called activate): the second text queues.
     router
-        .dispatch(ChannelEvent::Text { key: key(), text: "msg2".into(), reply_target: None })
+        .dispatch(ChannelEvent::Text {
+            key: key(),
+            text: "msg2".into(),
+            reply_target: None,
+        })
         .await;
     let second = tokio::time::timeout(Duration::from_millis(150), out_rx.recv()).await;
     assert!(
@@ -36,7 +46,11 @@ async fn second_text_during_spawn_is_queued_not_spawned() {
     assert_eq!(pending, vec!["msg2".to_string()]);
     // Now active: a third text continues the session.
     router
-        .dispatch(ChannelEvent::Text { key: key(), text: "msg3".into(), reply_target: None })
+        .dispatch(ChannelEvent::Text {
+            key: key(),
+            text: "msg3".into(),
+            reply_target: None,
+        })
         .await;
     // Per-turn flow: a fresh card is posted first, then the prompt is
     // forwarded to the session.
@@ -86,11 +100,22 @@ async fn fail_spawn_keeps_session_visible_as_spawn_failed() {
 
 #[tokio::test]
 async fn pending_queue_capped_at_16() {
+    // workbench-turn-queue 5.1：满队列不再静默吞掉——第 17 条起返回
+    // Overflow{cap}（携带上限、不顶掉已暂存条目），激活时合并 m1..m16。
     let map = SessionMap::new();
-    map.route_text(key(), "m0".into()).await.unwrap();
-    for i in 1..20 {
+    assert!(matches!(
+        map.route_text(key(), "m0".into()).await.unwrap(),
+        TextRoute::SpawnNew
+    ));
+    for i in 1..=16 {
         let r = map.route_text(key(), format!("m{i}")).await.unwrap();
         assert!(matches!(r, TextRoute::Enqueued));
+    }
+    for i in 17..20 {
+        match map.route_text(key(), format!("m{i}")).await.unwrap() {
+            TextRoute::Overflow { cap } => assert_eq!(cap, 16),
+            other => panic!("expected Overflow for m{i}, got {other:?}"),
+        }
     }
     let pending = map.activate(&key(), "s1".into(), None, None).await;
     assert_eq!(pending.len(), 16);
@@ -130,7 +155,11 @@ async fn rapid_double_new_emits_single_spawn() {
 
     for _ in 0..2 {
         router
-            .dispatch(ChannelEvent::Text { key: key(), text: "/new".into(), reply_target: None })
+            .dispatch(ChannelEvent::Text {
+                key: key(),
+                text: "/new".into(),
+                reply_target: None,
+            })
             .await;
     }
 
@@ -190,7 +219,7 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
     map.begin_spawn_with(key2.clone(), Some("opencode".into()), Some("m-free".into()))
         .await
         .unwrap();
-    router.web_send_message(key2.clone(), "hello".into()).await;
+    let _ = router.web_send_message(key2.clone(), "hello".into()).await;
     let out = tokio::time::timeout(Duration::from_millis(300), out_rx.recv())
         .await
         .expect("WebSpawn must be emitted")
@@ -264,24 +293,31 @@ async fn fail_spawn_surfaces_error_inline_and_keeps_session_visible() {
 
     // 会话仍在列表里，状态诚实标记 spawn-failed。
     let infos = router.session_info_snapshot().await;
-    let info = infos.iter().find(|i| i.key == key.reference).expect("session kept");
+    let info = infos
+        .iter()
+        .find(|i| i.key == key.reference)
+        .expect("session kept");
     assert_eq!(info.status, "spawn-failed");
     assert!(info.session_id.is_none());
 
-    // transcript 经合成 id 可读：一条带原因的 error 事件。
+    // transcript 经合成 id 可读：一条带原因的 error 事件（kind 归 agent 侧
+    // content，element_type 才是渲染类型——workbench-conversation-view 1.3）。
     let turns = router.session_turns(&key, 0).await.expect("turns readable");
-    let errors: Vec<_> = turns.iter().filter(|e| e.kind == "error").collect();
+    let errors: Vec<_> = turns.iter().filter(|e| e.element_type == "error").collect();
     assert_eq!(errors.len(), 1, "exactly one error entry: {turns:?}");
-    assert!(errors[0].element_type == "error");
+    assert!(errors[0].kind == "content");
     assert!(
-        errors[0].content.contains("spawn failed") && errors[0].content.contains("agent binary missing"),
+        errors[0].content.contains("spawn failed")
+            && errors[0].content.contains("agent binary missing"),
         "error carries the reason: {}",
         errors[0].content
     );
 
     // 事件流的首次呈现是 Updated（会话保持存在），不是 Removed。
     let mut events = router.subscribe_session_events();
-    router.fail_spawn(&key, "second failure must be a no-op").await;
+    router
+        .fail_spawn(&key, "second failure must be a no-op")
+        .await;
     let mut saw_removed = false;
     while let Ok(ev) = events.try_recv() {
         if matches!(ev, sebas_dispatch::SessionEvent::Removed { .. }) {
@@ -327,7 +363,9 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
         .unwrap();
     map.set_project_dir(&ph, Some("/tmp/wf".into())).await;
     // 普通 spawn-in-flight（首条消息已触发 spawn）——不入盘。
-    map.route_text(in_flight.clone(), "go".into()).await.unwrap();
+    map.route_text(in_flight.clone(), "go".into())
+        .await
+        .unwrap();
     // Active 对照组。
     map.insert(active_key.clone(), Mapping::active("s-rt"))
         .await
@@ -342,8 +380,14 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
     let restored = SessionMap::restore_json(&json).unwrap();
     let m = restored.get(&ph).await.expect("placeholder restored");
     match &m.state {
-        MappingState::Spawning { awaiting_first_prompt, .. } => {
-            assert!(awaiting_first_prompt, "placeholder identity survives restart");
+        MappingState::Spawning {
+            awaiting_first_prompt,
+            ..
+        } => {
+            assert!(
+                awaiting_first_prompt,
+                "placeholder identity survives restart"
+            );
         }
         other => panic!("expected Spawning placeholder, got {other:?}"),
     }
@@ -352,11 +396,17 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
     assert_eq!(m.project_dir.as_deref(), Some("/tmp/wf"));
 
     // 重启后的首条消息照常触发 spawn。
-    let route = restored.route_text(ph.clone(), "hello".into()).await.unwrap();
+    let route = restored
+        .route_text(ph.clone(), "hello".into())
+        .await
+        .unwrap();
     assert!(matches!(route, TextRoute::SpawnNew));
 
     // 对照组：active 条目照常回 Dormant；in-flight 条目不存在。
     let a = restored.get(&active_key).await.expect("active restored");
     assert!(matches!(a.state, MappingState::Dormant { .. }));
-    assert!(restored.get(&in_flight).await.is_none(), "in-flight spawn is not persisted");
+    assert!(
+        restored.get(&in_flight).await.is_none(),
+        "in-flight spawn is not persisted"
+    );
 }

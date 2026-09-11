@@ -30,14 +30,14 @@
 //! 容器**——所有交互（按钮 + select_static）走 button-callback / form-callback
 //! 路径，新 form 名统一在 `dispatch()` 中分发。
 
-use super::{Out, DispatchHandle};
+use super::{DispatchHandle, Out};
 use crate::crud::{CrudStore, Item};
 use crate::provider_state::{self, ProviderMode, ProviderRuntimeState};
 use crate::state_store::DefaultSelection;
+use sebas_channels::ChannelKey;
 use sebas_channels::card::{
     Behavior, ButtonSpec, ChannelCard, ChannelElement, CollapsiblePanel, RichText,
 };
-use sebas_channels::ChannelKey;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -326,18 +326,20 @@ async fn handle_create(
         .await
 }
 
-/// 「🔍 探测 model 列表」按钮（bead sebas-63f.7）：按 provider 的
-/// `base_url_openai` / `base_url_anthropic` 决定探测的端点，HTTP GET
-/// 拉一次，把成功 / 失败结果渲成一张新卡。
+/// 「🔍 探测 model 列表」按钮（bead sebas-63f.7；add-fetch-models 2.1 起探测
+/// 由 core 承载）：条目从 store 读出后走 core 的 providers 域抓取实现
+/// （`state_store::provider_fetch_target` + `sebas_router::probe::fetch_models`
+/// ——与 detached 形态的 channel op / webui seam 完全同一套解析与 HTTP），
+/// 把成功 / 失败结果渲成一张新卡。
 ///
-/// 探测成功（非空列表）时顺手把官方返回的完整 model 列表写回 provider 的
-/// `models` 目录字段（逗号分隔）——model 列表的权威来源是官方 `/models`
-/// 接口，手填只是探测不可用时的兜底。`default_model` 仍由用户在结果卡里
-/// 点「使用 <model>」显式回写。
+/// 抓取本身**不写任何字段**（op 从不 save）。成功（非空列表）时卡片仍按
+/// openspec/specs/provider-management/spec.md 语义把列表写回 provider 的
+/// `models` 目录字段（逗号分隔）——**仅自定义 provider** 的普通编辑步骤；
+/// preset 派生条目的 models 跟随代码，只读呈现（结果卡展示 + 设默认 model
+/// 不受影响）。`default_model` 由用户在结果卡里点「使用 <model>」显式回写。
 ///
-/// 探测是 best-effort：anthropic 协议没有 `/v1/models`，会得到错误卡（
-/// 提示用户手填）；openai 协议端点通常可用。失败 / 空列表都给一张单独
-/// 的卡，用户从卡里的按钮挑一个 model 回写。
+/// 失败（含无可用 base url、上游错误）渲红色错误卡：正文只有 core 回的
+/// 净化 reason（状态码/类别），绝无密钥——2.2。
 async fn handle_probe(
     handle: &DispatchHandle,
     key: &ChannelKey,
@@ -356,8 +358,11 @@ async fn handle_probe(
         return refresh_card(handle, key, _message_id).await;
     };
 
-    let (probe_url, base_kind) = match choose_probe_url(&item) {
-        Ok(t) => t,
+    // 结果卡的 URL 注脚（展示用；抓取动作本身由 core 抓取实现承载）。解析
+    // 失败即无可用 base url——不发上游请求，直接错误卡（spec：typed
+    // rejection naming that reason）。
+    let probe_url = match crate::state_store::provider_fetch_target(&item) {
+        Ok((url, _key)) => url,
         Err(reason) => {
             let card = build_probe_error_card(name, &reason);
             return Out::SendCard {
@@ -370,29 +375,18 @@ async fn handle_probe(
             };
         }
     };
-    let token = resolve_auth_token(&item);
 
-    // 探测是触发式的小请求，每次新建 `Client`：连接池复用不了，但避免了
-    // 把 reqwest 注入 DispatchHandle 的面重构（best-effort probe 不值得）。
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| {
-            tracing::warn!(error = %e, "failed to build reqwest client");
-            e
-        })
-        .ok();
-
-    let probe_result = match client {
-        Some(c) => probe_models(&c, &probe_url, token.as_deref()).await,
-        None => Err(anyhow::anyhow!("HTTP client 不可用")),
-    };
+    // core 抓取 op（卡片与 op 同在 core 进程；条目已从 store 读出，走同一
+    // 共享实现的按条目入口）：一次只读 GET（5s 超时、无重试），错误 = 净化
+    // 后的 typed rejection（状态码/类别）。
+    let probe_result = fetch_models_for_item(&item).await;
 
     let card = match probe_result {
         Ok(models) if !models.is_empty() => {
-            // 把官方返回的 model 列表写回 `models` 目录字段（best-effort：
-            // 写失败只记日志，不影响结果卡展示）。preset 派生条目的 models
-            // 跟随代码，不落盘（结果卡展示 + 设默认 model 不受影响）。
+            // 把官方返回的 model 列表写回 `models` 目录字段（best-effort 的
+            // 普通编辑：写失败只记日志，不影响结果卡展示）。preset 派生条目
+            // 的 models 跟随代码，不落盘（结果卡展示 + 设默认 model 不受
+            // 影响）。
             if let Some(mut item) = forms.preset.store.get(name).await
                 && item.get("preset").and_then(Value::as_str).is_none()
             {
@@ -401,13 +395,13 @@ async fn handle_probe(
                     tracing::warn!(name, error = %e, "failed to write probe results to models dir");
                 }
             }
-            build_probe_result_card(name, base_kind, &probe_url, &models)
+            build_probe_result_card(name, &probe_url, &models)
         }
         Ok(_) => {
-            // 200 但 `data` 缺 / 空 → 当成探测失败。
+            // 200 但 `data` 缺 / 空 → 当成探测失败（不渲染空列表冒充）。
             build_probe_error_card(name, "服务端未返回 model 列表")
         }
-        Err(e) => build_probe_error_card(name, &format!("{e}")),
+        Err(cause) => build_probe_error_card(name, &cause),
     };
     Out::SendCard {
         key: key.clone(),
@@ -479,7 +473,10 @@ async fn handle_protocol(
         .map(str::to_owned)
         .filter(|s| matches!(s.as_str(), "auto" | "anthropic" | "openai"));
     let Some(new_proto) = new_proto else {
-        tracing::warn!(name, "provider-set-protocol got invalid or missing protocol value, ignoring");
+        tracing::warn!(
+            name,
+            "provider-set-protocol got invalid or missing protocol value, ignoring"
+        );
         return refresh_card(handle, key, message_id).await;
     };
     let Some(forms) = &handle.provider_forms else {
@@ -502,7 +499,11 @@ async fn handle_protocol(
 // 卡片构建（每个 section 一个 helper）
 // ===========================================================================
 
-fn build_card(state: &ProviderRuntimeState, provider_names: &[String], items: &[Item]) -> ChannelCard {
+fn build_card(
+    state: &ProviderRuntimeState,
+    provider_names: &[String],
+    items: &[Item],
+) -> ChannelCard {
     let mut card = ChannelCard::new(CARD_TITLE, "blue");
     card.push_note("切换运行模式、设置默认 provider、增删 provider 条目。");
     card.push_divider();
@@ -573,9 +574,29 @@ fn render_mode_buttons(current: &ProviderMode) -> Vec<ChannelElement> {
     let direct_selected = matches!(current, ProviderMode::Direct { .. });
     let router_selected = matches!(current, ProviderMode::Router);
     vec![
-        button_from("Off", if off_selected { "primary" } else { "default" }, &mode_button_payload("off")),
-        button_from("Direct", if direct_selected { "primary" } else { "default" }, &mode_button_payload("direct")),
-        button_from("Router", if router_selected { "primary" } else { "default" }, &mode_button_payload("router")),
+        button_from(
+            "Off",
+            if off_selected { "primary" } else { "default" },
+            &mode_button_payload("off"),
+        ),
+        button_from(
+            "Direct",
+            if direct_selected {
+                "primary"
+            } else {
+                "default"
+            },
+            &mode_button_payload("direct"),
+        ),
+        button_from(
+            "Router",
+            if router_selected {
+                "primary"
+            } else {
+                "default"
+            },
+            &mode_button_payload("router"),
+        ),
     ]
 }
 
@@ -667,8 +688,16 @@ fn render_create_sub_section() -> Vec<ChannelElement> {
         ChannelElement::Markdown {
             content: "**新建 provider**".into(),
         },
-        button_from("＋ 新增（预设）", "primary", &json!({ "form": FORM_CREATE_PRESET })),
-        button_from("＋ 新增（自定义）", "default", &json!({ "form": FORM_CREATE_CUSTOM })),
+        button_from(
+            "＋ 新增（预设）",
+            "primary",
+            &json!({ "form": FORM_CREATE_PRESET }),
+        ),
+        button_from(
+            "＋ 新增（自定义）",
+            "default",
+            &json!({ "form": FORM_CREATE_CUSTOM }),
+        ),
     ]
 }
 
@@ -751,7 +780,11 @@ fn render_provider_row(
 
     elements.push(button_from("编辑", "default", &edit_value));
     elements.push(button_from("删除", "danger", &delete_value));
-    elements.push(button_from("设为默认（DIRECT）", "primary", &set_default_value));
+    elements.push(button_from(
+        "设为默认（DIRECT）",
+        "primary",
+        &set_default_value,
+    ));
 
     // header 一行摘要：`name · <默认 model>`，是 DIRECT 默认时加标记。
     // 保持单行——列表的可扫读性全靠这一行。
@@ -794,136 +827,37 @@ pub(crate) fn effective_field(item: &Item, field: &str) -> Option<String> {
         "base_url_anthropic" => p.base_url_anthropic.map(str::to_string),
         "base_url_openai_chat" => p.base_url_openai_chat.map(str::to_string),
         "base_url_openai_responses" => p.base_url_openai_responses.map(str::to_string),
-        "models" => Some(p.models.join(",")),
+        // 条目 id 视图（卡片表单的 models 字段是逗号分隔文本；能力标记不进
+        // 卡片——/provider 卡片 UI 布局按 redesign-provider-models-settings
+        // 的 non-goal 不动，落库形状由 store 归一化承担）。
+        "models" => Some(
+            p.models
+                .iter()
+                .map(|m| m.id)
+                .collect::<Vec<&str>>()
+                .join(","),
+        ),
         _ => None,
     }
 }
 
-/// 按 provider item 决定探测的目标 URL：
-/// 1. 优先 OpenAI chat 槽（条目字段或 preset 物化）：openai-compatible
-///    端点通常都暴露 `/models`，直接在 base 后追加 `/models`。
-/// 2. 否则 OpenAI responses 槽：同样追加 `/models`。
-/// 3. 否则 `base_url_anthropic`：best-effort 探测 `/v1/models`。
-/// 4. 全部缺失 → 错误：探测无意义。
-///
-/// 返回 `(完整 url, "openai" | "anthropic")`。
-fn choose_probe_url(item: &Item) -> Result<(String, &'static str), String> {
-    let openai = ["base_url_openai_chat", "base_url_openai_responses"]
-        .iter()
-        .find_map(|f| effective_field(item, f));
-    let anth = effective_field(item, "base_url_anthropic");
-    match (openai, anth) {
-        (Some(base), _) => {
-            let base = trim_trailing_slash(&base);
-            Ok((format!("{base}/models"), "openai"))
-        }
-        (None, Some(base)) => {
-            let base = trim_trailing_slash(&base);
-            Ok((format!("{base}/v1/models"), "anthropic"))
-        }
-        (None, None) => Err("未配置任何 base_url 槽位".into()),
-    }
-}
-
-/// 解析认证 token：先看 `api_key` 明文（极少用，preset 通常是 env），再回
-/// 退 `api_key_env` 的环境变量。两个都没 → `None`：探测时跳过
-/// Authorization 头（不少 openai-compatible 端点也允许匿名）。
-fn resolve_auth_token(item: &Item) -> Option<String> {
-    if let Some(s) = item.get("api_key").and_then(Value::as_str) {
-        let s = s.trim();
-        if !s.is_empty() {
-            return Some(s.to_string());
-        }
-    }
-    if let Some(var) = item.get("api_key_env").and_then(Value::as_str) {
-        let var = var.trim();
-        if !var.is_empty()
-            && let Ok(v) = std::env::var(var)
-        {
-            return Some(v);
-        }
-    }
-    None
-}
-
-/// 简单 string helper：去掉末尾 `/`，反复 normalize 到单一 url 拼接。
-fn trim_trailing_slash(s: &str) -> &str {
-    let mut end = s.len();
-    while end > 0 && s.as_bytes()[end - 1] == b'/' {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 /// 供表单「🔍 获取模型列表」按钮复用的取数入口（`crud::ModelFetcher` 的
-/// provider 实现）：按 item 的 base_url / api_key 调官方 `/models`，成功
-/// 返回 model id 列表，失败给单行原因。与详情面板的探测按钮共享同一套
-/// URL 选择与认证解析逻辑。
+/// provider 实现）：输入是**尚未入库**的表单值拼出的 item，故不能按名走
+/// store op；与 core 抓取 op 共用同一套解析（[`crate::state_store::
+/// provider_fetch_target`]：槽位优先级 + 密钥解析）与 HTTP 实现
+/// （`sebas_router::probe::fetch_models`：5s 超时、`data[].id`、错误净化）。
+/// 成功返回 model id 列表，失败给单行净化原因。
 pub async fn fetch_models_for_item(item: &Item) -> Result<Vec<String>, String> {
-    let (url, _kind) = choose_probe_url(item)?;
-    let token = resolve_auth_token(item);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client 不可用: {e}"))?;
-    probe_models(&client, &url, token.as_deref())
+    let (url, key) = crate::state_store::provider_fetch_target(item)?;
+    sebas_router::probe::fetch_models(&sebas_router::probe::fetch_client(), &url, key.as_deref())
         .await
-        .map_err(|e| e.to_string())
-}
-
-/// 实际探测：`GET <url>` 带可选 `Authorization: Bearer <token>`，5s 超时。
-/// 返回 `data[].id` 列表（openai-compatible 形状）；服务端返回任意其它
-/// 形状（缺 `data`、`data` 非数组等）→ 空 Vec（视作探测失败）。
-pub async fn probe_models(
-    client: &reqwest::Client,
-    url: &str,
-    auth_token: Option<&str>,
-) -> anyhow::Result<Vec<String>> {
-    let mut req = client.get(url);
-    if let Some(t) = auth_token {
-        req = req.bearer_auth(t);
-    }
-    let resp = req.send().await?;
-    let status = resp.status();
-    let body: Value = resp.error_for_status()?.json().await?;
-    if !status.is_success() {
-        anyhow::bail!("HTTP {}", status.as_u16());
-    }
-    let models = parse_openai_models_response(&body);
-    if models.is_empty() && !looks_like_openai_models_envelope(&body) {
-        // body 不像 openai-compatible 的 model 列表 envelope——避免把任意
-        // JSON 误判成空 model。这里依然返回空 Vec，让上层走错误分支。
-        tracing::debug!(?body, "model list response has no data field, returning empty vec");
-    }
-    Ok(models)
-}
-
-/// 解析 openai-compatible `/v1/models` 响应：`{"object": "list", "data": [{"id": "..."}]}`。
-/// 容错：缺 `data`、`data` 非数组、对象缺 `id` 字段 → 跳过该元素。
-pub fn parse_openai_models_response(body: &Value) -> Vec<String> {
-    let Some(arr) = body.get("data").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|v| v.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect()
-}
-
-/// 判断 body 是否像 openai `/v1/models` envelope。`data` 缺失时返回 false。
-fn looks_like_openai_models_envelope(body: &Value) -> bool {
-    body.get("data").map(|v| v.is_array()).unwrap_or(false)
 }
 
 /// 探测成功结果卡：标题 + URL + bullet list + 每个 model 一个「使用」按钮
-/// + 「← 返回」按钮。
-fn build_probe_result_card(
-    provider_name: &str,
-    base_kind: &str,
-    probe_url: &str,
-    models: &[String],
-) -> ChannelCard {
+/// + 「← 返回」按钮。正文只有 id 列表与 URL 注脚——绝无密钥材料。
+fn build_probe_result_card(provider_name: &str, probe_url: &str, models: &[String]) -> ChannelCard {
     let mut card = ChannelCard::new(format!("探测结果：{provider_name}"), "blue");
-    card.push_note(format!("base_url 类型：{base_kind} · {probe_url}"));
+    card.push_note(format!("抓取端点：{probe_url}"));
     card.push_divider();
 
     // bullet list 用 markdown 一次性给，比逐行 push_text 紧凑。
@@ -985,7 +919,11 @@ fn sorted_names(items: &[Item]) -> Vec<String> {
 
 /// 重新渲染主卡并通过 `UpdateCardByMsgId`（有原 message_id）或 `SendCard`
 /// （无原 message_id）发出去。
-async fn refresh_card(handle: &DispatchHandle, key: &ChannelKey, message_id: Option<String>) -> Out {
+async fn refresh_card(
+    handle: &DispatchHandle,
+    key: &ChannelKey,
+    message_id: Option<String>,
+) -> Out {
     let state = provider_state::load();
     let items = match &handle.provider_forms {
         Some(forms) => forms.preset.store.list().await,
@@ -1624,77 +1562,26 @@ mod tests {
         );
     }
 
-    /// parse_openai_models_response：从 openai-compatible envelope 抽 id。
+    /// 抓取 URL 槽位优先级（add-fetch-models 1.1 起 URL 选择/HTTP/解析收敛到
+    /// `sebas_router::probe` + `state_store::provider_fetch_target`，此处只测
+    /// 解析入口）：优先 base_url_openai_chat，回退 responses、anthropic。
     #[test]
-    fn parse_openai_models_response_extracts_ids_from_openai_shape() {
-        let body = json!({
-            "object": "list",
-            "data": [
-                {"id": "gpt-4o", "object": "model"},
-                {"id": "gpt-4o-mini", "object": "model"},
-            ]
-        });
-        assert_eq!(
-            parse_openai_models_response(&body),
-            vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
-        );
-    }
-
-    /// parse_openai_models_response：缺 `data` 字段 → 空 Vec（不要 panic）。
-    #[test]
-    fn parse_openai_models_response_handles_missing_data() {
-        let body = json!({"object": "list"});
-        assert!(parse_openai_models_response(&body).is_empty());
-
-        // data 存在但不是数组也容忍。
-        let body = json!({"data": "not-an-array"});
-        assert!(parse_openai_models_response(&body).is_empty());
-
-        // data 数组里元素不带 id → 跳过，不 panic。
-        let body = json!({"data": [{"object": "model"}]});
-        assert!(parse_openai_models_response(&body).is_empty());
-    }
-
-    /// trim_trailing_slash：去掉末尾一个或多个 `/`，但保留中间 / 不动。
-    #[test]
-    fn trim_trailing_slash_normalises_trailing_slashes() {
-        assert_eq!(
-            trim_trailing_slash("https://api.openai.com/v1/"),
-            "https://api.openai.com/v1"
-        );
-        assert_eq!(
-            trim_trailing_slash("https://api.openai.com/v1"),
-            "https://api.openai.com/v1"
-        );
-        assert_eq!(
-            trim_trailing_slash("https://api.openai.com/v1///"),
-            "https://api.openai.com/v1"
-        );
-        assert_eq!(trim_trailing_slash("/"), "");
-        assert_eq!(trim_trailing_slash(""), "");
-        assert_eq!(trim_trailing_slash("a/b"), "a/b");
-    }
-
-    /// choose_probe_url：优先 base_url_openai_chat，回退 base_url_anthropic。
-    #[test]
-    fn choose_probe_url_prefers_openai_then_anthropic() {
+    fn provider_fetch_target_prefers_openai_then_anthropic() {
         let mut item = Map::new();
         item.insert(
             "base_url_openai_chat".into(),
             Value::String("https://api.openai.com/v1".into()),
         );
-        let (url, kind) = choose_probe_url(&item).unwrap();
+        let (url, _key) = crate::state_store::provider_fetch_target(&item).unwrap();
         assert_eq!(url, "https://api.openai.com/v1/models");
-        assert_eq!(kind, "openai");
 
-        // 同时给两个：openai 胜出。
+        // 同时给两个：openai chat 胜出（单 URL 选择，失败不回退 anthropic）。
         item.insert(
             "base_url_anthropic".into(),
             Value::String("https://api.anthropic.com".into()),
         );
-        let (url, kind) = choose_probe_url(&item).unwrap();
+        let (url, _key) = crate::state_store::provider_fetch_target(&item).unwrap();
         assert_eq!(url, "https://api.openai.com/v1/models");
-        assert_eq!(kind, "openai");
 
         // 只有 anthropic：best-effort 探测 /v1/models。
         let mut item = Map::new();
@@ -1702,44 +1589,20 @@ mod tests {
             "base_url_anthropic".into(),
             Value::String("https://api.anthropic.com/".into()),
         );
-        let (url, kind) = choose_probe_url(&item).unwrap();
+        let (url, _key) = crate::state_store::provider_fetch_target(&item).unwrap();
         assert_eq!(url, "https://api.anthropic.com/v1/models");
-        assert_eq!(kind, "anthropic");
     }
 
-    /// choose_probe_url：两个 base_url 都没设 → 错误。
+    /// 抓取目标解析：两个 base_url 都没设 → 错误（不发上游请求）。
     #[test]
-    fn choose_probe_url_errors_when_no_base_url() {
+    fn provider_fetch_target_errors_when_no_base_url() {
         let item = Map::new();
-        assert!(choose_probe_url(&item).is_err());
+        assert!(crate::state_store::provider_fetch_target(&item).is_err());
 
         let mut item = Map::new();
         item.insert("base_url_openai_chat".into(), Value::String("".into()));
         item.insert("base_url_anthropic".into(), Value::String("".into()));
-        assert!(choose_probe_url(&item).is_err());
-    }
-
-    /// resolve_auth_token：api_key 明文 > api_key_env 解析 > None。
-    #[test]
-    fn resolve_auth_token_uses_api_key_then_env() {
-        let mut item = Map::new();
-        item.insert("api_key".into(), Value::String("sk-direct".into()));
-        assert_eq!(resolve_auth_token(&item).as_deref(), Some("sk-direct"));
-
-        // 仅 api_key 为空 → None。
-        item.insert("api_key".into(), Value::String("".into()));
-        assert!(resolve_auth_token(&item).is_none());
-
-        // api_key 空 + api_key_env 命中（设置环境变量再读）。
-        item.remove("api_key");
-        item.insert(
-            "api_key_env".into(),
-            Value::String("SEBAS_TEST_TOKEN_X".into()),
-        );
-        // 该 env 变量在测试环境一般不存在 → None。
-        let v = resolve_auth_token(&item);
-        // 不严格断言（CI 环境可能无意设置），只断言类型。
-        let _ = v;
+        assert!(crate::state_store::provider_fetch_target(&item).is_err());
     }
 
     /// dispatch 路径：FORM_PROBE_APPLY 把 `default_model` 写到 store。
@@ -1776,23 +1639,47 @@ mod tests {
         assert!(out.is_some(), "FORM_BACK 应被 provider_card 接管");
     }
 
-    /// dispatch 路径：probe 按钮路由存在（FORM_PROBE）。该测试会真的发起
-    /// HTTP 请求，但请求的 URL 用测试 provider 的虚假域名，会快速失败并
-    /// 走错误卡分支——结果是 SendCard（错误卡）。
+    /// dispatch 路径：probe 按钮路由存在（FORM_PROBE）。走本地 mock 上游
+    /// （add-fetch-models 起 card 探测改调 core 抓取 op，绝不外联真实
+    /// provider URL）：mock 可达 → 成功结果卡。
     #[tokio::test]
     async fn dispatch_route_for_probe_emits_card() {
+        // 最小 HTTP server：返回 openai-compatible models 列表。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let body = r#"{"object":"list","data":[{"id":"card-m1"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
         let dir = tempfile::tempdir().unwrap();
-        let (handle, _guard) = handle_with(dir.path(), vec![item("deepseek", Some("deepseek"))]);
+        let mut custom_item = item("card-probe", None);
+        custom_item.insert(
+            "base_url_openai_chat".into(),
+            Value::String(format!("http://{addr}/v1")),
+        );
+        let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
         let key = test_key();
 
-        let payload = json!({ "form": FORM_PROBE, "name": "deepseek" });
+        let payload = json!({ "form": FORM_PROBE, "name": "card-probe" });
         let out = dispatch(&handle, &key, &payload, &BTreeMap::new(), None).await;
         let out = out.expect("FORM_PROBE 应被 provider_card 接管");
-        // 探测会因为域名不存在而失败，但仍应返回一张卡（错误卡）。
-        assert!(
-            matches!(out, Out::SendCard { .. }),
-            "FORM_PROBE 应返回 Out::SendCard（即便探测失败也要把结果卡发出去）"
-        );
+        let Out::SendCard { card, .. } = &out else {
+            panic!("expected SendCard, got {out:?}");
+        };
+        let s = serde_json::to_string(card).unwrap();
+        assert!(s.contains("card-m1"), "成功结果卡列出 mock 返回的 id: {s}");
     }
 
     /// build_probe_error_card：reason 文本进入卡片正文（用户能看见原因）。
@@ -1804,21 +1691,6 @@ mod tests {
         assert!(s.contains("timeout after 5s"), "卡片正文含 reason: {s}");
         assert!(s.contains("请手填默认 model"), "卡片正文含兜底提示: {s}");
         assert!(s.contains(FORM_BACK), "卡片底部应有返回按钮: {s}");
-    }
-
-    /// parse_openai_models_response：anthropic 协议不返回 openai 形状
-    /// （`{models: [{name: ...}]}` 或裸数组）。降级到空 Vec 而不是 panic。
-    #[test]
-    fn parse_openai_models_response_tolerates_alternative_shapes() {
-        // 裸数组
-        let body = json!(["claude-opus-4", "claude-sonnet-4"]);
-        // 当前实现期望 openai `data:[{id}]` 形状 —— 裸数组 / `models:[{name}]`
-        // 都返回空 Vec（探测失败兜底）。这个测试锁定行为，避免日后被
-        // 偷改成不兼容。
-        let _ = parse_openai_models_response(&body);
-        let body = json!({"models": [{"name": "claude-opus-4"}]});
-        let _ = parse_openai_models_response(&body);
-        // 也断言不 panic（已经通过 "_ =" 隐式保证）。
     }
 
     /// openspec/specs/provider-management/spec.md：详情面板里的「协议」radio。选项 = auto /
@@ -2071,6 +1943,91 @@ mod tests {
         // 错误卡：标题红色 + reason 含 401
         assert!(card.contains("401"), "错误卡应含 HTTP 状态码: {card}");
         assert!(card.contains("探测失败"), "错误卡应有失败前缀: {card}");
+    }
+
+    /// add-fetch-models 2.2 验收：成功结果卡与失败错误卡都绝不携带密钥
+    /// 材料（明文 api_key、api_key_env 名、env 值均不出现在卡片文本）。
+    #[tokio::test]
+    async fn probe_cards_never_carry_key_material() {
+        // 失败场景：mock 401（reason 只含状态码）。
+        let fail_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fail_addr = fail_listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in fail_listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let body = r#"{"error":{"message":"upstream auth bomb"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        // 成功场景：mock 200。
+        let ok_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ok_addr = ok_listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in ok_listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let body = r#"{"object":"list","data":[{"id":"secret-check-m"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
+        for (name, base, expect_id) in [
+            ("key-leak-fail", format!("http://{fail_addr}/v1"), false),
+            ("key-leak-ok", format!("http://{ok_addr}/v1"), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut custom_item = item(name, None);
+            custom_item.insert("base_url_openai_chat".into(), Value::String(base));
+            custom_item.insert("api_key".into(), Value::String("sk-card-secret-77".into()));
+            custom_item.insert(
+                "api_key_env".into(),
+                Value::String("CARD_TEST_SECRET_ENV".into()),
+            );
+            let (handle, _guard) = handle_with(dir.path(), vec![custom_item]);
+            let key = test_key();
+
+            let payload = json!({ "form": FORM_PROBE, "name": name });
+            let out = dispatch(&handle, &key, &payload, &BTreeMap::new(), None)
+                .await
+                .expect("FORM_PROBE 路由存在");
+            let card = match out {
+                Out::SendCard { card, .. } => serde_json::to_string(&card).unwrap(),
+                _ => panic!("expected SendCard"),
+            };
+            assert!(
+                !card.contains("sk-card-secret-77"),
+                "卡片不含明文 key: {card}"
+            );
+            assert!(
+                !card.contains("CARD_TEST_SECRET_ENV"),
+                "卡片不含 env 名: {card}"
+            );
+            if expect_id {
+                assert!(card.contains("secret-check-m"), "成功卡列出 id: {card}");
+                assert!(!card.contains("Bearer"), "成功卡不含认证头痕迹: {card}");
+            } else {
+                assert!(card.contains("401"), "失败卡只显示净化状态码: {card}");
+                assert!(
+                    !card.contains("upstream auth bomb"),
+                    "失败卡不回显上游 body: {card}"
+                );
+            }
+        }
     }
 
     /// dispatch FORM_PROBE：探测成功时把官方返回的 model 列表写回 store 的

@@ -156,6 +156,9 @@ pub struct SessionRow {
     /// （wire-webui-sebas-agent-e2e D4）会话所属执行体（"acp"/"native"，
     /// 由复合后端打标）；`None` = 未打标。
     pub backend: Option<String>,
+    /// （workbench-turn-queue 7.4）待生效提交条数——Rail 关闭确认对话框
+    /// 点名「将丢弃 N 条」的数据源。
+    pub pending_count: usize,
 }
 
 /// Dashboard overview data.
@@ -208,14 +211,23 @@ pub struct CardConfigInfo {
     pub max_tool_output_chars: usize,
 }
 
-/// Card element for rendering in session detail.
+/// One conversation entry on the session payload（workbench-conversation-view
+/// 1.1，design D1/D2）：`GET /api/sessions/{key}` 与 summary 聚焦会话的
+/// 有序条目序列中的一条。`kind` 是「谁说的」（prompt = 操作员提交，content =
+/// agent 侧产出），`element_type` 是渲染类型（markdown/thinking/tool/error）；
+/// 两侧同序，客户端无需按时间戳重建顺序。
 #[derive(Debug, Clone, Serialize)]
-pub struct CardElementView {
-    pub element_type: &'static str,
+pub struct ConversationEntryView {
+    /// 0-based monotonic transcript position.
+    pub position: u64,
+    /// `"prompt"` | `"content"`.
+    pub kind: String,
+    /// `"markdown"` | `"thinking"` | `"tool"` | `"error"`.
+    pub element_type: String,
     pub content: String,
-    /// Unix seconds when the entry was appended; lets the client render a
-    /// flush-left timestamp next to each block (spec 4.1) and anchor the
-    /// seen-boundary seam to a stable identity (spec 4.4).
+    /// Unix seconds when the entry was appended. Anchors the client's
+    /// seen-boundary seam to a stable identity that doesn't change when an
+    /// earlier card refreshes in place.
     pub created_at_unix: u64,
 }
 
@@ -267,7 +279,10 @@ mod tests {
         use super::middle_truncate;
         // Short enough to pass through untouched.
         assert_eq!(middle_truncate("abc", 18), "abc");
-        assert_eq!(middle_truncate("012345678901234567", 18), "012345678901234567");
+        assert_eq!(
+            middle_truncate("012345678901234567", 18),
+            "012345678901234567"
+        );
 
         let long = "sess_01H2XABCDEFGHJKMNPQRSTVWXYZ";
         let out = middle_truncate(long, 18);

@@ -11,7 +11,7 @@ use crate::session_backend::SessionBackend;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -200,6 +200,15 @@ fn build_router_full(
         .route("/api/sessions/{key}/model", post(api::set_session_model))
         .route("/api/sessions/{key}/close", post(api::close_session))
         .route("/api/sessions/{key}/switch", post(api::switch_session))
+        // workbench-turn-queue 6.2：待生效提交的管理面（remove / move）。
+        .route(
+            "/api/sessions/{key}/pending/{pending_id}/remove",
+            post(api::pending_remove),
+        )
+        .route(
+            "/api/sessions/{key}/pending/{pending_id}/move",
+            post(api::pending_move),
+        )
         .route("/api/summary", get(api::summary))
         .route(
             "/api/permissions/{request_id}/answer",
@@ -208,13 +217,17 @@ fn build_router_full(
         .route("/api/settings", get(api::settings))
         .route("/api/router", get(api::router))
         .route("/router/api/presets", get(routes::router_api_presets))
-        .route("/router/api/providers", get(routes::router_api_providers_list))
+        .route("/router/api/defaults", get(routes::router_api_defaults))
+        .route(
+            "/router/api/providers",
+            get(routes::router_api_providers_list),
+        )
         .route("/api/about", get(api::about))
         .route("/api/agents", get(api::agent_kinds))
         .route("/api/auth/me", get(api::auth_me))
         .route("/api/auth/login", post(api::auth_login))
         .route("/api/auth/logout", post(api::auth_logout))
-.route(
+        .route(
             "/api/projects",
             get(api::projects_list).post(api::projects_add),
         )
@@ -341,10 +354,17 @@ async fn auth_guard(State(state): State<WebUiState>, req: Request<Body>, next: N
     // CSRF：浏览器发起的跨站写请求会带 Origin 头——与 Host 不一致即拒绝。
     // SameSite=Lax cookie 已挡掉绝大多数跨站携带，这里兜底非浏览器场景。
     if !is_safe_method(req.method().as_str())
-        && let Some(origin) = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok())
+        && let Some(origin) = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
     {
         let same_origin = origin_authority(origin)
-            .zip(req.headers().get(header::HOST).and_then(|h| h.to_str().ok()))
+            .zip(
+                req.headers()
+                    .get(header::HOST)
+                    .and_then(|h| h.to_str().ok()),
+            )
             .map(|(origin_host, host)| origin_host.eq_ignore_ascii_case(host))
             .unwrap_or(false);
         if !same_origin {
@@ -525,7 +545,10 @@ mod agent_defaults_removed_tests {
     fn app() -> Router {
         build_router_with_auth(
             Arc::new(FakeBackend::new()),
-            RouterInfo { listen: None, ..RouterInfo::default() },
+            RouterInfo {
+                listen: None,
+                ..RouterInfo::default()
+            },
             CardConfig::default(),
             None,
             Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
@@ -543,9 +566,7 @@ mod agent_defaults_removed_tests {
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
-        let req = builder
-            .body(Body::from(body.unwrap_or_default()))
-            .unwrap();
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
         resp_status(app.oneshot(req).await.unwrap()).await
     }
 
@@ -556,9 +577,18 @@ mod agent_defaults_removed_tests {
     #[tokio::test]
     async fn agent_defaults_endpoint_is_gone() {
         let app = app();
-        assert_eq!(req(app.clone(), "GET", "/api/agent-defaults", None).await, StatusCode::NOT_FOUND);
         assert_eq!(
-            req(app, "PUT", "/api/agent-defaults", Some(r#"{"provider":"glm"}"#.into())).await,
+            req(app.clone(), "GET", "/api/agent-defaults", None).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            req(
+                app,
+                "PUT",
+                "/api/agent-defaults",
+                Some(r#"{"provider":"glm"}"#.into())
+            )
+            .await,
             StatusCode::NOT_FOUND
         );
     }
@@ -577,10 +607,7 @@ mod summary_bodies_tests {
     use tower::ServiceExt;
 
     fn test_addr() -> std::net::SocketAddr {
-        std::net::SocketAddr::new(
-            std::net::IpAddr::from([127, 0, 0, 1]),
-            12345,
-        )
+        std::net::SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)
     }
 
     async fn get_summary(app: Router) -> (StatusCode, serde_json::Value) {
@@ -613,7 +640,11 @@ mod summary_bodies_tests {
                 cause: Some("no provider credentials".into()),
             },
         ]));
-        let app = build_router(Arc::new(backend), RouterInfo::default(), CardConfig::default());
+        let app = build_router(
+            Arc::new(backend),
+            RouterInfo::default(),
+            CardConfig::default(),
+        );
 
         let (status, body) = get_summary(app).await;
         assert_eq!(status, StatusCode::OK);
@@ -710,9 +741,7 @@ mod auth_guard_tests {
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
-        let req = builder
-            .body(Body::from(body.unwrap_or_default()))
-            .unwrap();
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -784,7 +813,10 @@ mod auth_guard_tests {
             .unwrap()
             .to_string();
         assert!(cookie.starts_with("sebas_webui_session="), "{cookie}");
-        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"), "{cookie}");
+        assert!(
+            cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"),
+            "{cookie}"
+        );
         let session = cookie.split(';').next().unwrap().trim().to_string();
 
         // 带 cookie 的 API 请求放行。
@@ -800,7 +832,15 @@ mod auth_guard_tests {
         assert_eq!(status, StatusCode::OK);
 
         // me 报告已认证。
-        let (_, body) = req(app.clone(), "GET", "/api/auth/me", Some(&session), None, None).await;
+        let (_, body) = req(
+            app.clone(),
+            "GET",
+            "/api/auth/me",
+            Some(&session),
+            None,
+            None,
+        )
+        .await;
         assert!(body.contains("\"authenticated\":true"), "{body}");
 
         // 注销 → 同 cookie 失效。
@@ -914,7 +954,11 @@ mod auth_guard_tests {
 
         // WS 不再被鉴权拦截（401 之外的状态码——升级本身会因缺参数失败）。
         let (status, _) = req(app.clone(), "GET", "/ws", None, None, None).await;
-        assert_ne!(status, StatusCode::UNAUTHORIZED, "开关关闭时 /ws 不做鉴权拦截");
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "开关关闭时 /ws 不做鉴权拦截"
+        );
 
         // me 报 enabled:false → 前端不渲染登录页。
         let (_, body) = req(app, "GET", "/api/auth/me", None, None, None).await;
@@ -971,9 +1015,7 @@ mod allowed_roots_tests {
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
-        let req = builder
-            .body(Body::from(body.unwrap_or_default()))
-            .unwrap();
+        let req = builder.body(Body::from(body.unwrap_or_default())).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1017,13 +1059,7 @@ mod allowed_roots_tests {
         let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
         // fail-closed：即使路径真实存在，越界也 400（先范围后存在性）。
         let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
-        let (status, resp) = req(
-            app,
-            "POST",
-            "/api/projects",
-            Some(body.to_string()),
-        )
-        .await;
+        let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let msg = resp["error"].as_str().unwrap_or_default();
         assert!(msg.contains("超出允许范围"), "got: {msg}");
@@ -1038,15 +1074,12 @@ mod allowed_roots_tests {
             std::fs::create_dir_all(&dir).unwrap();
             let canonical = dir.canonicalize().unwrap();
             let body = serde_json::json!({ "path": dir.to_str().unwrap() });
-            let (status, resp) = req(
-                app,
-                "POST",
-                "/api/projects",
-                Some(body.to_string()),
-            )
-            .await;
+            let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
-            assert_eq!(resp["path"].as_str(), Some(canonical.to_string_lossy().as_ref()));
+            assert_eq!(
+                resp["path"].as_str(),
+                Some(canonical.to_string_lossy().as_ref())
+            );
         })
         .await;
     }
@@ -1057,13 +1090,7 @@ mod allowed_roots_tests {
             let t = two_trees();
             let app = app_with_roots(Vec::new());
             let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
-            let (status, _resp) = req(
-                app,
-                "POST",
-                "/api/projects",
-                Some(body.to_string()),
-            )
-            .await;
+            let (status, _resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::CREATED, "空白名单时注册不受范围约束");
         })
         .await;

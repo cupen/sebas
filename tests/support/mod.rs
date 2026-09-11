@@ -110,7 +110,6 @@ fn unique_stamp() -> u128 {
     (t << 16) | (n & 0xFFFF)
 }
 
-
 // ---------------------------------------------------------------------------
 // Process-level e2e sandbox (testsuite-process-e2e).
 //
@@ -125,8 +124,8 @@ fn unique_stamp() -> u128 {
 // ---------------------------------------------------------------------------
 
 use std::process::Stdio;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub struct SandboxDir {
@@ -290,7 +289,10 @@ usage_file = "{}"
     fn envs(&self, secret: Option<&str>) -> Vec<(&'static str, String)> {
         let mut envs = vec![
             ("SEBAS_STATE_DB", forward_slash(&self.path.join("sebas.db"))),
-            ("SEBAS_STATE_FILE", forward_slash(&self.path.join("state.json"))),
+            (
+                "SEBAS_STATE_FILE",
+                forward_slash(&self.path.join("state.json")),
+            ),
             (
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 forward_slash(&self.path.join("providers.json")),
@@ -432,6 +434,40 @@ usage_file = "{}"
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
+    /// workbench-turn-queue：给 fake-claude 加 `--slow-ms`，让每个 turn 在
+    /// 内容帧之后、result 之前停留 `ms` 毫秒——WORKING 窗口因此确定性的长，
+    /// 忙中提交必然入队。必须在 spawn 之前调用。
+    pub fn slow_fake_agent(&self, ms: u64) {
+        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
+        let needle = "[acp.agents.claude]\n";
+        assert!(
+            toml.contains(needle),
+            "[acp.agents.claude] section not found in config"
+        );
+        let patched = toml.replace(
+            needle,
+            &format!("{needle}args = [\"--slow-ms\", \"{ms}\"]\n"),
+        );
+        assert_ne!(toml, patched, "slow-agent patch did not apply");
+        std::fs::write(&self.config_path, patched).expect("write config");
+    }
+
+    /// Pin the router's HTTP listener to a specific port inside the sandbox
+    /// config (the default `127.0.0.1:8787` is fixed — parallel e2e cases
+    /// would collide). Must run before spawn.
+    pub fn set_router_listen(&self, port: u16) {
+        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
+        let patched = toml.replace(
+            "[router]",
+            &format!("[router]\nlisten = \"127.0.0.1:{port}\""),
+        );
+        assert!(
+            patched != toml && patched.contains("[router]"),
+            "[router] section not found in config"
+        );
+        std::fs::write(&self.config_path, patched).expect("write config");
+    }
+
     /// Core with the router but WITHOUT `--debug` (downstream auth enforced;
     /// no built-in test provider). For auth-rejection journeys.
     pub fn spawn_core_router_auth(&self) -> tokio::process::Child {
@@ -463,10 +499,7 @@ usage_file = "{}"
     /// inserted into the `[router]` section). Must be called before spawn.
     pub fn set_router_auth_token(&self, token: &str) {
         let toml = std::fs::read_to_string(&self.config_path).expect("read config");
-        let patched = toml.replace(
-            "[router]",
-            &format!("[router]\nauth_token = \"{token}\""),
-        );
+        let patched = toml.replace("[router]", &format!("[router]\nauth_token = \"{token}\""));
         assert_ne!(toml, patched, "[router] section not found in config");
         std::fs::write(&self.config_path, patched).expect("write config");
     }
@@ -475,7 +508,10 @@ usage_file = "{}"
     /// --webui --webui-port <p>`. Returns the child and the dashboard port.
     /// Extra envs may pin the router port (`SEBAS_ROUTER_LISTEN`) so the
     /// native agent can be pointed at it via `SEBAS_AGENT_ROUTER_URL`.
-    pub fn spawn_core_inprocess_webui(&self, extra: &[(&str, &str)]) -> (tokio::process::Child, u16) {
+    pub fn spawn_core_inprocess_webui(
+        &self,
+        extra: &[(&str, &str)],
+    ) -> (tokio::process::Child, u16) {
         let dashboard_port = free_port();
         let log_file = std::fs::OpenOptions::new()
             .create(true)
@@ -573,16 +609,21 @@ pub async fn wait_reachable(cli: &reqwest::Client, sb: &Sandbox) {
     let cli = cli.clone();
     let url = format!("{}/api/summary", sb.webui_url());
     let hint = sb.path.clone();
-    wait_for("core reachability ok", Duration::from_secs(30), &hint, move || {
-        let cli = cli.clone();
-        let url = url.clone();
-        Box::pin(async move {
-            get_json(&cli, &url)
-                .await
-                .and_then(|v| v.get("reachability").cloned())
-                .filter(|r| r["ok"].as_bool() == Some(true))
-        })
-    })
+    wait_for(
+        "core reachability ok",
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = url.clone();
+            Box::pin(async move {
+                get_json(&cli, &url)
+                    .await
+                    .and_then(|v| v.get("reachability").cloned())
+                    .filter(|r| r["ok"].as_bool() == Some(true))
+            })
+        },
+    )
     .await;
 }
 
@@ -600,10 +641,7 @@ pub async fn wait_unreachable_with_cause(cli: &reqwest::Client, sb: &Sandbox) ->
             let cli = cli.clone();
             let url = url.clone();
             Box::pin(async move {
-                let r = get_json(&cli, &url)
-                    .await?
-                    .get("reachability")
-                    .cloned()?;
+                let r = get_json(&cli, &url).await?.get("reachability").cloned()?;
                 if r["ok"].as_bool() == Some(false) {
                     r["cause"]
                         .as_str()
@@ -623,24 +661,29 @@ pub async fn wait_unreachable_with_cause(cli: &reqwest::Client, sb: &Sandbox) ->
 pub async fn wait_router_addr(sb: &Sandbox) -> String {
     let log_path = sb.core_log.clone();
     let hint = sb.path.clone();
-    wait_for("router addr in core log", Duration::from_secs(15), &hint, move || {
-        let log_path = log_path.clone();
-        Box::pin(async move {
-            let log = std::fs::read_to_string(&log_path).ok()?;
-            for line in log.lines().rev() {
-                let line = strip_ansi(line);
-                if line.contains("router started")
-                    && let Some(idx) = line.find("addr=")
-                {
-                    let addr = line[idx + 5..].split_whitespace().next()?;
-                    if addr.parse::<std::net::SocketAddr>().is_ok() {
-                        return Some(format!("http://{addr}"));
+    wait_for(
+        "router addr in core log",
+        Duration::from_secs(15),
+        &hint,
+        move || {
+            let log_path = log_path.clone();
+            Box::pin(async move {
+                let log = std::fs::read_to_string(&log_path).ok()?;
+                for line in log.lines().rev() {
+                    let line = strip_ansi(line);
+                    if line.contains("router started")
+                        && let Some(idx) = line.find("addr=")
+                    {
+                        let addr = line[idx + 5..].split_whitespace().next()?;
+                        if addr.parse::<std::net::SocketAddr>().is_ok() {
+                            return Some(format!("http://{addr}"));
+                        }
                     }
                 }
-            }
-            None
-        })
-    })
+                None
+            })
+        },
+    )
     .await
 }
 
@@ -682,6 +725,82 @@ pub async fn post_json(
         .await
         .map_err(|e| format!("body of {url}: {e}"))?;
     Ok((status, json))
+}
+
+// ---- 本地假上游（anthropic 协议应答）------------------------------------------------
+
+/// Spawn a local stub upstream answering any request with a fixed
+/// anthropic-style message, recording the model it was asked for. Binds
+/// 127.0.0.1 on a probed free port and returns it — no external traffic.
+/// Shared by the acceptance journeys and the process-level e2e suite.
+pub async fn spawn_stub_upstream(asked_model: Arc<tokio::sync::Mutex<Option<String>>>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stub upstream");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                continue;
+            };
+            let asked = asked_model.clone();
+            tokio::spawn(async move {
+                // Read until end of headers, then exactly content-length bytes.
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let header_end = loop {
+                    if buf.len() >= chunk.len() * 4 {
+                        return; // runaway request; drop
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                        // ensure full body arrived too
+                        let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= pos + 4 + len {
+                            break pos + 4 + len;
+                        }
+                    }
+                };
+                let text = String::from_utf8_lossy(&buf[..header_end]);
+                if let Some(model_key) = find_json_string(&text, "\"model\":\"") {
+                    *asked.lock().await = Some(model_key);
+                }
+                let body = r#"{"id":"msg_stub","type":"message","role":"assistant","model":"stub-model","content":[{"type":"text","text":"stub reply"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Crude extractor for the first `"model":"…"` value in a JSON body —
+/// enough for the stub's recording purposes.
+fn find_json_string(text: &str, key_prefix: &str) -> Option<String> {
+    let start = text.find(key_prefix)? + key_prefix.len();
+    let rest = &text[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 #[cfg(test)]

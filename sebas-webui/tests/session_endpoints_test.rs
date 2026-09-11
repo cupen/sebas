@@ -7,9 +7,9 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use sebas_acp::claude::AcpEvent;
 use sebas_channels::ChannelKey;
-use sebas_feishu::cards::CardConfig;
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::{Mapping, SessionMap};
+use sebas_feishu::cards::CardConfig;
 use sebas_webui::build_router;
 use sebas_webui::models::RouterInfo;
 use sebas_webui::projects;
@@ -63,7 +63,8 @@ async fn switch_session_marks_active_and_returns_redirect() {
     let k2 = key("b");
     let encoded = encode(&k2);
 
-    let resp = app.clone()
+    let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -94,7 +95,8 @@ async fn switch_session_marks_active_and_returns_redirect() {
     );
 
     // And a subsequent /api/sessions list marks the row focused.
-    let resp2 = app.clone()
+    let resp2 = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/sessions")
@@ -320,12 +322,7 @@ async fn spa_fallback_serves_entry_for_client_routes() {
     for path in ["/", "/settings", "/sessions", "/admin/status"] {
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "GET {path} must serve SPA");
@@ -351,8 +348,7 @@ async fn spa_fallback_serves_entry_for_client_routes() {
 /// process-global env state; the guard below restores it even on panic.
 static PROJECTS_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-static PROJECTS_TEST_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static PROJECTS_TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct ProjectsEnvGuard {
     _lock: tokio::sync::MutexGuard<'static, ()>,
@@ -377,8 +373,14 @@ async fn isolated_projects() -> ProjectsEnvGuard {
     let n = PROJECTS_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("sebas-projects-test-{n}.json"));
     let prev = std::env::var("SEBAS_PROJECTS_PATH").ok();
-    unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", &path); }
-    ProjectsEnvGuard { _lock: lock, prev, path }
+    unsafe {
+        std::env::set_var("SEBAS_PROJECTS_PATH", &path);
+    }
+    ProjectsEnvGuard {
+        _lock: lock,
+        prev,
+        path,
+    }
 }
 
 /// Add 后从列表反查稳定项目 id（workbench-agent-wire-fix 2.5 测试助手）。
@@ -440,7 +442,9 @@ async fn projects_add_and_list() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -469,6 +473,112 @@ async fn projects_add_and_list() {
     assert_eq!(body["projects"].as_array().unwrap().len(), 1);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// workbench-agent-wire-fix「Project-level default agent」（随 2026-09-11
+/// 覆盖复核入账）：会话创建把所用 agent 记为该项目的 default_agent——
+/// 跟随最近一次使用、项目间互不串、没用过的项目如实无记录。写路径经
+/// create_session 的 state_mutate（此 fixture 无状态库引擎 → 文件注册表
+/// 回退支路）；composer 的预选反应由前端 workbench-composer 单测覆盖。
+#[tokio::test]
+async fn project_default_agent_follows_last_use() {
+    let _env = isolated_projects().await;
+    let (_router, _rx, app) = fixture().await;
+
+    let mk_dir = |name: &str| {
+        let dir = std::env::temp_dir().join(format!("projects-test-default-agent-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let dir_a = mk_dir("a");
+    let dir_b = mk_dir("b");
+    for dir in [&dir_a, &dir_b] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "path": dir.to_string_lossy() }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "add {dir:?}");
+    }
+    let id_a = project_id_after_add(&app, &dir_a.to_string_lossy()).await;
+    let id_b = project_id_after_add(&app, &dir_b.to_string_lossy()).await;
+
+    async fn create_in(
+        app: &axum::Router,
+        project_id: &str,
+        agent: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "project_id": project_id, "agent": agent })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        (status, body)
+    }
+    async fn defaults_of(app: &axum::Router, id: &str) -> Option<String> {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        body["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"].as_str() == Some(id))
+            .and_then(|p| p["default_agent"].as_str())
+            .map(str::to_string)
+    }
+
+    // A 用 claude 建会话 → A 记住 claude；B 未用 → 如实无记录。
+    let (status, body) = create_in(&app, &id_a, "claude").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(defaults_of(&app, &id_a).await.as_deref(), Some("claude"));
+    assert_eq!(defaults_of(&app, &id_b).await, None);
+
+    // 跟随最近一次使用：A 换 codex 后记忆被覆盖。
+    let (status, body) = create_in(&app, &id_a, "codex").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(defaults_of(&app, &id_a).await.as_deref(), Some("codex"));
+
+    // 项目间互不串：B 用 claude 不影响 A。
+    let (status, body) = create_in(&app, &id_b, "claude").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(defaults_of(&app, &id_b).await.as_deref(), Some("claude"));
+    assert_eq!(defaults_of(&app, &id_a).await.as_deref(), Some("codex"));
+
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
 }
 
 #[tokio::test]
@@ -512,7 +622,9 @@ async fn projects_add_file_rejected() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -538,7 +650,9 @@ async fn projects_remove_project() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -651,7 +765,9 @@ async fn projects_reorder_persists_user_order() {
                     .method("POST")
                     .uri("/api/projects")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::json!({ "path": paths.last().unwrap() }).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({ "path": paths.last().unwrap() }).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -697,7 +813,9 @@ async fn projects_reorder_persists_user_order() {
                 .method("POST")
                 .uri("/api/projects/reorder")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "ids": reversed }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "ids": reversed }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -755,7 +873,9 @@ async fn projects_branch_returns_null_for_non_git_dir() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": &path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": &path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -789,7 +909,11 @@ async fn projects_branch_detects_git_head() {
     let d = std::env::temp_dir().join("projects-test-branch-git");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join(".git")).unwrap();
-    std::fs::write(d.join(".git/HEAD"), "ref: refs/heads/feature/branch-cache\n").unwrap();
+    std::fs::write(
+        d.join(".git/HEAD"),
+        "ref: refs/heads/feature/branch-cache\n",
+    )
+    .unwrap();
     let path_str = d.to_string_lossy().to_string();
 
     let resp = app
@@ -799,7 +923,9 @@ async fn projects_branch_detects_git_head() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": &path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": &path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -834,12 +960,12 @@ async fn projects_branch_404_for_unregistered_path() {
         .clone()
         .oneshot(
             Request::builder()
-.uri("/api/projects/never-registered/branch")
-        .body(Body::empty())
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+                .uri("/api/projects/never-registered/branch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -860,7 +986,9 @@ async fn create_session_with_project_dir_binds_to_path() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": &path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": &path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -962,13 +1090,10 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
     let key_str = v["key"].as_str().expect("key string").to_string();
 
     // web_spawn 经 Out::WebSpawn 出站：断言 model 已透传。
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        rx.recv(),
-    )
-    .await
-    .expect("WebSpawn out within timeout")
-    .expect("out channel open");
+    let out = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("WebSpawn out within timeout")
+        .expect("out channel open");
     match out {
         sebas_dispatch::engine::Out::WebSpawn { model, prompt, .. } => {
             assert_eq!(prompt, "hello");
@@ -1090,7 +1215,12 @@ async fn spawn_and_drive_project_session(
 ) -> (String, ChannelKey) {
     // 新 wire（workbench-agent-wire-fix 2.5）：注册项目拿稳定 id，会话以
     // project_id 引用；服务端解析回 path 记入 mapping。
-    let post = post_json(app, "/api/projects", serde_json::json!({ "path": project_dir })).await;
+    let post = post_json(
+        app,
+        "/api/projects",
+        serde_json::json!({ "path": project_dir }),
+    )
+    .await;
     assert!(
         post.status() == StatusCode::CREATED || post.status() == StatusCode::CONFLICT,
         "project register must be 201 (or 409 when the test pre-registered it)"
@@ -1116,10 +1246,13 @@ async fn spawn_and_drive_project_session(
     };
     let key = decode_web_key(&encoded);
 
-    router.activate(&key, acp_session_id.to_string(), None, None).await;
+    router
+        .activate(&key, acp_session_id.to_string(), None, None)
+        .await;
 
-    // The prompt lands in the transcript (kind "prompt") but is filtered
-    // from the rendered detail body.
+    // The prompt lands in the transcript as a prompt-kind entry and now
+    // travels the detail payload too (workbench-conversation-view 1.1:
+    // the kind == "prompt" filter is gone).
     let resp = post_json(
         app,
         &format!("/api/sessions/{encoded}/message"),
@@ -1143,15 +1276,16 @@ async fn spawn_and_drive_project_session(
 }
 
 /// Assert the `after` detail carries the same stable state as `before`:
-/// transcript body byte-for-byte plus identity/status fields. `last_active`
-/// is a wall-clock relative string, so it is deliberately excluded; content
-/// immutability is covered by the turn-count comparison at the call site.
+/// conversation entries byte-for-byte plus identity/status fields.
+/// `last_active` is a wall-clock relative string, so it is deliberately
+/// excluded; content immutability is covered by the turn-count comparison
+/// at the call site.
 fn assert_detail_untouched(before: &serde_json::Value, after: &serde_json::Value) {
-    let body_before = serde_json::to_string(&before["body"]).unwrap();
-    let body_after = serde_json::to_string(&after["body"]).unwrap();
+    let entries_before = serde_json::to_string(&before["entries"]).unwrap();
+    let entries_after = serde_json::to_string(&after["entries"]).unwrap();
     assert_eq!(
-        body_before, body_after,
-        "detail transcript body must be byte-for-byte unchanged"
+        entries_before, entries_after,
+        "detail conversation entries must be byte-for-byte unchanged"
     );
     for field in [
         "channel",
@@ -1159,7 +1293,6 @@ fn assert_detail_untouched(before: &serde_json::Value, after: &serde_json::Value
         "session_id",
         "status",
         "status_slug",
-        "user_prompt",
         "encoded_key",
     ] {
         assert_eq!(
@@ -1196,9 +1329,21 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
     // Baseline of A before B exists: rendered detail, transcript, mapping.
     let (status, detail_before) = get_json(&app, &format!("/api/sessions/{encoded_a}")).await;
     assert_eq!(status, StatusCode::OK);
-    let body = detail_before["body"].as_array().expect("body array");
-    assert_eq!(body.len(), 1, "one rendered content block: {detail_before}");
-    assert_eq!(body[0]["content"], "A-content-1");
+    // workbench-conversation-view 1.1：两侧条目同序透出——prompt 在前、
+    // agent 输出在后。
+    let entries = detail_before["entries"].as_array().expect("entries array");
+    assert_eq!(
+        entries.len(),
+        2,
+        "prompt + content entries: {detail_before}"
+    );
+    assert_eq!(entries[0]["kind"], "prompt");
+    assert_eq!(entries[0]["content"], "work on A");
+    assert_eq!(entries[1]["kind"], "content");
+    assert_eq!(entries[1]["content"], "A-content-1");
+    // 退役字段绝不回流（workbench-conversation-view 1.2）。
+    assert!(detail_before.get("body").is_none());
+    assert!(detail_before.get("user_prompt").is_none());
     let turns_before = router.session_turns(&key_a, 0).await.unwrap();
     assert_eq!(turns_before.len(), 2, "prompt + content in A's transcript");
     let info_before = router
@@ -1265,6 +1410,52 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
     assert_eq!(info_before, info_after, "A's mapping must be untouched");
     let (_, detail_after) = get_json(&app, &format!("/api/sessions/{encoded_a}")).await;
     assert_detail_untouched(&detail_before, &detail_after);
+}
+
+/// workbench-conversation-view 1.4：`GET /api/summary` 的聚焦会话 payload 与
+/// detail 的条目序列同形状且内容一致——同一会话两侧给出一致的条目视图
+/// （position/kind/element_type/content 全等），且 summary 不携带退役字段。
+#[tokio::test]
+async fn summary_focused_session_matches_detail_entry_view() {
+    let _env = isolated_projects().await;
+    let (router, _rx, app) = fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = canonical_path_str(&dir);
+
+    let (encoded, _key) = spawn_and_drive_project_session(
+        &app,
+        &router,
+        "summary sync",
+        &path,
+        "acp-summary-sync",
+        "S-content-1",
+    )
+    .await;
+
+    let (_, detail) = get_json(&app, &format!("/api/sessions/{encoded}")).await;
+    // 读 detail 已把焦点设到该会话（display pointer）。
+    let (_, summary) = get_json(&app, "/api/summary").await;
+    let focused = summary["active_session"]
+        .as_object()
+        .expect("focused payload");
+    assert_eq!(
+        focused["encoded_key"].as_str(),
+        Some(encoded.as_str()),
+        "summary must describe the focused session: {summary}"
+    );
+    assert!(
+        focused.get("body").is_none() && focused.get("user_prompt").is_none(),
+        "retired fields must not reappear on the summary payload"
+    );
+    let summary_entries = focused["entries"].as_array().expect("summary entries");
+    let detail_entries = detail["entries"].as_array().expect("detail entries");
+    assert_eq!(
+        summary_entries, detail_entries,
+        "summary and detail must agree on the conversation entry view"
+    );
+    assert!(summary_entries.len() >= 2, "prompt + content present");
+    assert_eq!(summary_entries[0]["kind"], "prompt");
+    assert_eq!(summary_entries[0]["content"], "summary sync");
 }
 
 /// Task 6.2: removing a project leaves its sessions running and reachable.
@@ -1430,35 +1621,47 @@ impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
         _prompt: String,
         _project_dir: Option<String>,
     ) -> Result<ChannelKey, sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "socket absent".into(),
-        })
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "socket absent".into(),
+            },
+        )
     }
     async fn message(
         &self,
         _key: ChannelKey,
         _message: String,
     ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "socket absent".into(),
-        })
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "socket absent".into(),
+            },
+        )
     }
     async fn close(
         &self,
         _key: ChannelKey,
-    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "socket absent".into(),
-        })
+    ) -> Result<
+        sebas_webui::session_backend::CloseReport,
+        sebas_webui::session_backend::SessionRejection,
+    > {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "socket absent".into(),
+            },
+        )
     }
     async fn turns(
         &self,
         _key: ChannelKey,
         _from: u64,
-    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "socket absent".into(),
-        })
+    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection>
+    {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "socket absent".into(),
+            },
+        )
     }
     async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
         sebas_webui::session_backend::Reachability::Disconnected {
@@ -1496,35 +1699,47 @@ impl sebas_webui::session_backend::SessionBackend for FixedReachabilityBackend {
         _prompt: String,
         _project_dir: Option<String>,
     ) -> Result<ChannelKey, sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "unreachable".into(),
-        })
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "unreachable".into(),
+            },
+        )
     }
     async fn message(
         &self,
         _key: ChannelKey,
         _message: String,
     ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "unreachable".into(),
-        })
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "unreachable".into(),
+            },
+        )
     }
     async fn close(
         &self,
         _key: ChannelKey,
-    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "unreachable".into(),
-        })
+    ) -> Result<
+        sebas_webui::session_backend::CloseReport,
+        sebas_webui::session_backend::SessionRejection,
+    > {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "unreachable".into(),
+            },
+        )
     }
     async fn turns(
         &self,
         _key: ChannelKey,
         _from: u64,
-    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "unreachable".into(),
-        })
+    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection>
+    {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "unreachable".into(),
+            },
+        )
     }
     async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
         self.0.clone()
@@ -1572,9 +1787,8 @@ async fn summary_reachability_kind_covers_three_unreachable_variants() {
     }
 
     // Reachable: ok=true without kind/cause (wire shape unchanged).
-    let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(FixedReachabilityBackend(
-        Reachability::Reachable,
-    ));
+    let backend: Arc<dyn sebas_webui::SessionBackend> =
+        Arc::new(FixedReachabilityBackend(Reachability::Reachable));
     let app = build_router(backend, RouterInfo::default(), CardConfig::default());
     let (_, summary) = get_json(&app, "/api/summary").await;
     assert_eq!(summary["reachability"]["ok"], true);
@@ -1602,35 +1816,47 @@ impl sebas_webui::session_backend::SessionBackend for StateStoreOkBackend {
         _prompt: String,
         _project_dir: Option<String>,
     ) -> Result<ChannelKey, sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "no sessions".into(),
-        })
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "no sessions".into(),
+            },
+        )
     }
     async fn message(
         &self,
         _key: ChannelKey,
         _message: String,
     ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "no sessions".into(),
-        })
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "no sessions".into(),
+            },
+        )
     }
     async fn close(
         &self,
         _key: ChannelKey,
-    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "no sessions".into(),
-        })
+    ) -> Result<
+        sebas_webui::session_backend::CloseReport,
+        sebas_webui::session_backend::SessionRejection,
+    > {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "no sessions".into(),
+            },
+        )
     }
     async fn turns(
         &self,
         _key: ChannelKey,
         _from: u64,
-    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection> {
-        Err(sebas_webui::session_backend::SessionRejection::Unavailable {
-            cause: "no sessions".into(),
-        })
+    ) -> Result<Vec<sebas_dispatch::TurnEntry>, sebas_webui::session_backend::SessionRejection>
+    {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "no sessions".into(),
+            },
+        )
     }
     async fn reachability(&self) -> sebas_webui::session_backend::Reachability {
         sebas_webui::session_backend::Reachability::Reachable
@@ -1656,12 +1882,18 @@ async fn projects_add_degraded_when_core_unreachable() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED, "degraded local add still 201");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "degraded local add still 201"
+    );
     let body: serde_json::Value =
         serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
     assert_eq!(
@@ -1690,7 +1922,9 @@ async fn projects_add_status_store_path_has_no_degraded_marker() {
                 .method("POST")
                 .uri("/api/projects")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "path": path_str }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "path": path_str }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1704,4 +1938,275 @@ async fn projects_add_status_store_path_has_no_degraded_marker() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── workbench-turn-queue 5.1 / 6.1 / 6.2 ───────────────────────────────────
+
+async fn tq_post_empty(app: &axum::Router, uri: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_string(resp.into_body()).await)
+}
+
+async fn tq_post_json(app: &axum::Router, uri: &str, json: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri.to_string())
+                .header("content-type", "application/json")
+                .body(Body::from(json.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_string(resp.into_body()).await)
+}
+
+async fn tq_get(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let text = body_string(resp.into_body()).await;
+    let v = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    (status, v)
+}
+
+/// 把 s1 推到 WORKING（seed → TextDelta），随后的 web 提交必然入队。
+async fn make_working(router: &DispatchHandle) {
+    router.seed_card("s1".into(), "run".into()).await;
+    router
+        .dispatch_acp_event(AcpEvent::TextDelta {
+            session_id: "s1".into(),
+            delta: "streaming...".into(),
+        })
+        .await;
+}
+
+/// 6.1：会话 payload（detail + summary 聚焦会话）按投递序携带 pending
+///（id/文本/位置/处置/优先）。
+#[tokio::test]
+async fn session_payloads_carry_pending_submissions_in_delivery_order() {
+    let (router, _rx, app) = fixture().await;
+    let k4 = key("d");
+    router.map.begin_spawn(k4.clone()).await.unwrap();
+    let _ = router
+        .map
+        .route_text(k4.clone(), "staged one".into())
+        .await
+        .unwrap();
+    let _ = router
+        .map
+        .route_text(k4.clone(), "staged two".into())
+        .await
+        .unwrap();
+    let _ = router
+        .map
+        .enqueue_turn(
+            &k4,
+            sebas_dispatch::QueuedTurn::new("turn behind", None, true),
+        )
+        .await;
+
+    // GET detail（同时聚焦）→ payload.pending 三条、投递序、字段齐全。
+    let encoded = encode(&k4);
+    let (status, detail) = tq_get(&app, &format!("/api/sessions/{encoded}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let pending = detail["pending"].as_array().expect("pending array");
+    assert_eq!(pending.len(), 3);
+    assert_eq!(pending[0]["text"], "staged one");
+    assert_eq!(pending[0]["disposition"], "staging");
+    assert_eq!(pending[0]["position"], 0);
+    assert!(pending[0]["id"].is_u64());
+    assert_eq!(pending[2]["text"], "turn behind");
+    assert_eq!(pending[2]["disposition"], "turn");
+    assert_eq!(pending[2]["priority"], true);
+
+    // summary 的聚焦会话同样携带（6.1）。
+    let (_, summary) = tq_get(&app, "/api/summary").await;
+    let active = summary["active_session"]
+        .as_object()
+        .expect("focused session");
+    let pending = active["pending"].as_array().expect("pending array");
+    assert_eq!(pending.len(), 3);
+    assert_eq!(pending[1]["text"], "staged two");
+}
+
+/// 6.2：pending remove / move 端点——成功 + 三类类型化 4xx。
+#[tokio::test]
+async fn pending_remove_and_move_endpoints() {
+    let (router, _rx, app) = fixture().await;
+    make_working(&router).await;
+    let encoded = encode(&key("a"));
+
+    // 忙中提交两条：进入待执行栈（不写 transcript、不发 SendAcp）。
+    let (status, body) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/message"),
+        r#"{"message":"queued one"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/message"),
+        r#"{"message":"queued two"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // 一条优先提交直接入队（/btw 词汇只在 feishu 路径解析，web 侧经 map 注入）。
+    let prio_id = router
+        .map
+        .enqueue_turn(
+            &key("a"),
+            sebas_dispatch::QueuedTurn::new("btw entry", None, true),
+        )
+        .await;
+
+    let (_, detail) = tq_get(&app, &format!("/api/sessions/{encoded}")).await;
+    let pending = detail["pending"].as_array().expect("pending array");
+    assert_eq!(pending.len(), 3, "prio first, then FIFO: {pending:?}");
+    assert_eq!(pending[0]["text"], "btw entry");
+    let first_id = pending[1]["id"].as_u64().unwrap();
+    let second_id = pending[2]["id"].as_u64().unwrap();
+
+    // move：普通提交在非优先段内重排（second → 第 0 位会被拒；先成功后移）。
+    let (status, body) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/{first_id}/move"),
+        r#"{"to_index":2}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let moved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(moved["pending"][2]["id"], first_id);
+
+    // remove：成功并返回对账后的全量 pending。
+    let (status, body) = tq_post_empty(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/{second_id}/remove"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 未知 id → 404；越界 → 400；越优先 → 409；已开始 → 409。
+    let (status, _) = tq_post_empty(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/424242/remove"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/{prio_id}/move"),
+        r#"{"to_index":99}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = tq_get(&app, &format!("/api/sessions/{encoded}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let live_normal = body["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["priority"] == false)
+        .expect("a live normal submission")["id"]
+        .as_u64()
+        .unwrap();
+    let (status, _) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/{live_normal}/move"),
+        r#"{"to_index":0}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "越优先必须 409");
+    // 已开始：pop 投递后管理操作 → 409 AlreadyStarted。
+    let started = router.map.pop_next_turn(&key("a")).await.expect("pop");
+    let (status, body) = tq_post_empty(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/{}/remove", started.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, _) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/pending/{}/move", started.id),
+        r#"{"to_index":0}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// 5.1：staging 满 16 → 提交 409 且点名上限，已暂存条目不被顶掉。
+#[tokio::test]
+async fn message_overflow_is_a_visible_rejection() {
+    let (router, _rx, app) = fixture().await;
+    let k5 = key("e");
+    router.map.begin_spawn(k5.clone()).await.unwrap();
+    for i in 0..16 {
+        let r = router
+            .map
+            .route_text(k5.clone(), format!("m{i}"))
+            .await
+            .unwrap();
+        assert!(matches!(r, sebas_dispatch::state::TextRoute::Enqueued));
+    }
+    let encoded = encode(&k5);
+    let (status, body) = tq_post_json(
+        &app,
+        &format!("/api/sessions/{encoded}/message"),
+        r#"{"message":"over"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "第 17 条必须可见拒绝: {body}");
+    assert!(body.contains("16"), "错误要点名上限: {body}");
+    // 已暂存条目不被顶掉。
+    let (_, detail) = tq_get(&app, &format!("/api/sessions/{encoded}")).await;
+    assert_eq!(detail["pending"].as_array().unwrap().len(), 16);
+}
+
+/// 5.2：close 响应携带 discarded_pending（未执行提交不静默丢）。
+#[tokio::test]
+async fn close_response_names_discarded_pending_count() {
+    let (router, _rx, app) = fixture().await;
+    make_working(&router).await;
+    let _ = router
+        .map
+        .enqueue_turn(
+            &key("a"),
+            sebas_dispatch::QueuedTurn::new("d1", None, false),
+        )
+        .await;
+    let _ = router
+        .map
+        .enqueue_turn(
+            &key("a"),
+            sebas_dispatch::QueuedTurn::new("d2", None, false),
+        )
+        .await;
+    let encoded = encode(&key("a"));
+    let (status, body) = tq_post_empty(&app, &format!("/api/sessions/{encoded}/close")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["discarded_pending"], 2, "close 必须点名丢弃条数: {body}");
 }

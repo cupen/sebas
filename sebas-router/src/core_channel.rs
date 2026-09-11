@@ -233,27 +233,6 @@ pub(crate) async fn fetch_state_snapshot(
     Ok(parsed.payload)
 }
 
-/// 短连接 core `StateMutation{domain}`。成功 → Ok；被拒 → Err(成因)。
-pub(crate) async fn mutate_state(
-    path: &Path,
-    domain: &str,
-    payload: serde_json::Value,
-) -> Result<(), String> {
-    let req = serde_json::json!({"cmd": "state_mutation", "domain": domain, "payload": payload});
-    let resp = channel_request(path, &req).await?;
-    if resp.get("cmd").and_then(serde_json::Value::as_str) == Some("state_mutation_ok") {
-        return Ok(());
-    }
-    // Rejected：提取 cause（与 core channel 的 SessionRejection::Unavailable
-    // 形状一致：`{"cmd":"rejected", "rejection":{"cause":"..."}}`）。
-    let cause = resp
-        .get("rejection")
-        .and_then(|r| r.get("cause"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("state mutation rejected");
-    Err(cause.to_string())
-}
-
 /// 状态订阅流的 wire 帧 (与 core 侧 `StateStreamFrame` 对齐的 subset)。
 #[derive(Debug, Deserialize)]
 #[serde(tag = "frame", rename_all = "snake_case")]

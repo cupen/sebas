@@ -12,16 +12,12 @@ use std::time::Duration;
 
 mod support;
 
-use support::{http_client, post_json, wait_for, wait_router_addr, Sandbox};
+use support::{Sandbox, http_client, post_json, spawn_stub_upstream, wait_for, wait_router_addr};
 
 const TURN: Duration = Duration::from_secs(30);
 const STARTUP: Duration = Duration::from_secs(30);
 
-async fn create_session(
-    cli: &reqwest::Client,
-    sb: &Sandbox,
-    body: serde_json::Value,
-) -> String {
+async fn create_session(cli: &reqwest::Client, sb: &Sandbox, body: serde_json::Value) -> String {
     let (status, resp) = post_json(cli, &format!("{}/api/sessions", sb.webui_url()), body)
         .await
         .expect("create session");
@@ -54,7 +50,7 @@ async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, key: &str) -> Strin
         })
     })
     .await;
-    detail["body"]
+    detail["entries"]
         .as_array()
         .map(|blocks| {
             blocks
@@ -125,10 +121,15 @@ async fn session_lifecycle_journey() {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
-        let exited = wait_for("core graceful exit", Duration::from_secs(20), &hint, move || {
-            let exit = exit.clone();
-            Box::pin(async move { exit.lock().await.clone() })
-        })
+        let exited = wait_for(
+            "core graceful exit",
+            Duration::from_secs(20),
+            &hint,
+            move || {
+                let exit = exit.clone();
+                Box::pin(async move { exit.lock().await.clone() })
+            },
+        )
         .await;
         assert!(
             exited.contains("exit status: 0") || exited.contains("exit code: 0"),
@@ -248,7 +249,7 @@ async fn provider_governance_journey() {
 }
 
 /// Native-kernel journey (spike 1.2): `SEBAS_AGENT_PROVIDER_BASE_URL` pointed
-/// at a local stub provider; a `backend: "native"` spawn completes a full
+/// at a local stub provider; an `agent: "native"` spawn completes a full
 /// turn with no real credentials. (The `SEBAS_AGENT_ROUTER_URL` variant is
 /// the watchdog's production wiring — `run --router` binds a random port, so
 /// it cannot be pre-injected at process level; see COVERAGE.md notes.)
@@ -318,7 +319,7 @@ async fn native_agent_turn_via_router_journey() {
                 .json::<serde_json::Value>()
                 .await
                 .ok()?;
-            let body_text = v["body"].as_array().map(|b| {
+            let body_text = v["entries"].as_array().map(|b| {
                 b.iter()
                     .filter_map(|x| x["content"].as_str())
                     .collect::<Vec<_>>()
@@ -487,79 +488,4 @@ async fn router_downstream_auth_journey() {
         401,
         "tokenless proxy request must be rejected"
     );
-}
-
-/// Minimal local HTTP upstream for the provider-governance journey: answers
-/// every request with a fixed anthropic-style message JSON and records the
-/// `model` field of the last request body.
-async fn spawn_stub_upstream(
-    asked_model: Arc<tokio::sync::Mutex<Option<String>>>,
-) -> u16 {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stub upstream");
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                continue;
-            };
-            let asked = asked_model.clone();
-            tokio::spawn(async move {
-                // Read until end of headers, then exactly content-length bytes.
-                let mut buf: Vec<u8> = Vec::new();
-                let mut chunk = [0u8; 8192];
-                let header_end = loop {
-                    if buf.len() >= chunk.len() * 4 {
-                        return; // runaway request; drop
-                    }
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
-                        // ensure full body arrived too
-                        let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
-                        let len: usize = headers
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse().ok())
-                            .unwrap_or(0);
-                        if buf.len() >= pos + 4 + len {
-                            break pos + 4 + len;
-                        }
-                    }
-                };
-                let text = String::from_utf8_lossy(&buf[..header_end]);
-                if let Some(model_key) = find_json_string(&text, "\"model\":\"") {
-                    *asked.lock().await = Some(model_key);
-                }
-                let body = r#"{"id":"msg_stub","type":"message","role":"assistant","model":"stub-model","content":[{"type":"text","text":"stub reply"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.write_all(body.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    port
-}
-
-fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Crude extractor for the first `"model":"…"` value in a JSON body —
-/// enough for the stub's recording purposes.
-fn find_json_string(text: &str, key_prefix: &str) -> Option<String> {
-    let start = text.find(key_prefix)? + key_prefix.len();
-    let rest = &text[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
 }

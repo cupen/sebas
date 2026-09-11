@@ -26,11 +26,11 @@ pub enum ProviderMode {
     /// Default = Off（无路由配置时诚实降级）。
     #[default]
     Off,
-    Direct { provider: String },
+    Direct {
+        provider: String,
+    },
     Router,
 }
-
-
 
 /// 运行时持久化状态（mode + default_selection 的子集视图）。
 ///

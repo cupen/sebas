@@ -304,7 +304,13 @@ pub fn item_from_provider(name: &str, p: &sebas_router::config::ProviderConfig) 
             );
         }
         if !p.models.is_empty() {
-            m.insert("models".into(), Value::String(p.models.join(",")));
+            // 卡片表单的 models 字段是逗号分隔文本（条目 id 视图）；真正
+            // 落库经 store 归一化为条目对象（redesign-provider-models-settings
+            // 1.1）。
+            m.insert(
+                "models".into(),
+                Value::String(p.model_ids().join(",")),
+            );
         }
     }
     if let Some(key) = &p.api_key {

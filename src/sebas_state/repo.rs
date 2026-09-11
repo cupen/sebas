@@ -205,6 +205,83 @@ pub fn update_persisted_state(
     Ok(state)
 }
 
+// ---- Legacy defaults 一次性导入（make-core-own-provider-data 1.4）----
+
+/// 导入标记是否在场（`settings` 表 `defaults_imported` 行）。在场即不再读
+/// legacy defaults.json。
+pub fn defaults_import_done(conn: &mut Connection) -> Result<bool, String> {
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'defaults_imported'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(done.is_some())
+}
+
+/// 标记导入阶段完成（无值可导也落标记——阶段一次性，不每次启动重放）。
+pub fn mark_defaults_imported(conn: &mut Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('defaults_imported', '1')
+         ON CONFLICT(key) DO UPDATE SET value = '1'",
+        [],
+    )
+    .map_err(|e| format!("写入 defaults_imported 标记失败: {e}"))?;
+    Ok(())
+}
+
+/// 导入默认值 + 落标记，**同一事务**完成（与 provider 数据同库同事务的
+/// D3 语义）。已导入过 → Ok(false)，不覆盖库里的现值（用户后来的选择
+/// 优先于 legacy 文件）。
+pub fn import_defaults_once(
+    conn: &mut Connection,
+    selection: sebas_dispatch::state_store::DefaultSelection,
+) -> Result<bool, String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("导入事务开始失败: {e}"))?;
+    let done: Option<String> = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'defaults_imported'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if done.is_some() {
+        return Ok(false);
+    }
+    // RMW runtime_state：只改 default_selection，mode 原样保留。
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'runtime_state'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let mut row: RuntimeStateRow = existing
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    row.default_selection = Some(selection);
+    let runtime_json = serde_json::to_string(&row)
+        .map_err(|e| format!("序列化 runtime state 失败: {e}"))?;
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES ('runtime_state', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = ?1",
+        params![runtime_json],
+    )
+    .map_err(|e| format!("写入 runtime state 失败: {e}"))?;
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES ('defaults_imported', '1')
+         ON CONFLICT(key) DO UPDATE SET value = '1'",
+        [],
+    )
+    .map_err(|e| format!("写入 defaults_imported 标记失败: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("导入事务提交失败: {e}"))?;
+    Ok(true)
+}
+
 // ---- Settings ----
 
 /// 加载 settings (CardConfig), 从 `settings` 表 `key = 'card_config'`。
@@ -402,7 +479,7 @@ pub fn save_session_map(
 // ---- Runtime state wire type ----
 
 /// 运行时状态行 (mode + default_selection) 的 JSON 形状。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct RuntimeStateRow {
     #[serde(default)]
     mode: sebas_dispatch::provider_state::ProviderMode,

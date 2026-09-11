@@ -25,7 +25,6 @@ use sebas_acp::claude::{ClaudeCodeDriver, ProviderResolution};
 use sebas_router::config::RouterConfig;
 use sebas_dispatch::provider_state::{ProviderMode, ProviderRuntimeState};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 
 /// Claude Code 模型 env 覆盖集的 4 个 `ANTHROPIC_MODEL` 键 + 1 个
 /// `CLAUDE_CODE_SUBAGENT_MODEL` 键（openspec/changes/acp-claude-model-env-cover）。
@@ -36,40 +35,30 @@ use std::collections::HashMap;
 const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
 
-/// 从 `~/.sebas/providers.json`（legacy overlay）或 `~/.sebas/state.json`
-/// （openspec/specs/provider-management/spec.md 合并后的统一持久化文件）读单个 provider 的原始
-/// Item（含 `default_model`）。文件不存在 / JSON 坏 / 名字不在 overrides
-/// 里 / 已 tombstone → `None`（不报错，让上层决定 graceful fallback 到 `Off`）。
+/// 读单个 provider 的原始 Item（含 `default_model`）。make-core-own-provider-data
+/// 4.1：状态库是权威——`state_store::load()` 优先走 core 的 state store
+/// engine，**不再优先读 legacy `providers.json`**（旧文件会盖住库里的
+/// `default_model`，是 live correctness bug）。
 ///
-/// 优先读 legacy overlay（兼容旧用户）；overlay 不存在时回退到 unified
-/// `state.json`（新部署走 state_store 后，providers.json 已被迁移 + 删除）。
+/// 4.2 降级路径：state store 未初始化（engine 缺失，如 DB 初始化失败/测试
+/// 夹具）时 `state_store::load()` 自行回退读 state.json / providers.json
+/// 文件——该路径保留并如实上报来源（warn 一行，注明数据来自 legacy 文件
+/// 而非状态库）。文件不存在 / JSON 坏 / 名字不在 overrides 里 / 已
+/// tombstone → `None`（不报错，让上层决定 graceful fallback 到 `Off`）。
 ///
-/// `default_model` 只在 overlay item 上（router `ProviderConfig` 没有这字段，
-/// 故意不向 router 同步 —— sebas-63f.4 设计决定），所以必须从 overlay 读，
-/// 不能从 `router_cfg.providers` 拿。
+/// `default_model` 只在条目上（router `ProviderConfig` 没有这字段，故意不向
+/// router 同步 —— sebas-63f.4 设计决定），所以必须从这里读，不能从
+/// `router_cfg.providers` 拿。
 fn read_overlay_item(name: &str) -> Option<Map<String, Value>> {
-    // 优先：legacy overlay（state.json 统一前的旧路径）。
-    let overlay_path = crate::provider::overlay_path();
-    if overlay_path.exists() {
-        let raw = std::fs::read_to_string(&overlay_path).ok()?;
-        #[derive(serde::Deserialize)]
-        struct Overlay {
-            #[serde(default)]
-            providers: HashMap<String, Map<String, Value>>,
-            #[serde(default)]
-            deleted: Vec<String>,
-        }
-        let file: Overlay = serde_json::from_str(&raw).ok()?;
-        if file.deleted.iter().any(|d| d == name) {
-            return None;
-        }
-        if let Some(item) = file.providers.get(name).cloned() {
-            return Some(item);
-        }
-    }
-    // 回退：unified state.json（统一后的新路径；旧用户首次 load 时
-    // overlay 已被迁移 + 删除）。行为契约见 openspec/specs/provider-management/spec.md。
+    let store_live = sebas_dispatch::state_store::engine().is_some();
     let state = sebas_dispatch::state_store::load();
+    if !store_live {
+        // 4.2：无状态库时的文件降级读取——如实上报来源，不冒充权威。
+        tracing::warn!(
+            provider = %name,
+            "state store 未初始化：provider 数据来自 legacy 文件降级读取（state.json / providers.json），非状态库权威"
+        );
+    }
     if state.deleted.iter().any(|d| d == name) {
         return None;
     }
@@ -408,16 +397,17 @@ fn build_direct_from_router_config(
 
 /// 给 claude code 子进程的模型 cover env（openspec/changes/acp-claude-model-env-cover）。
 ///
-/// 由 provider 的 `models`（强→弱）经 `sebas_router::models::map_to_env` 导出
-/// 4 个 `ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` 值，
-/// 再加 `CLAUDE_CODE_SUBAGENT_MODEL = 最弱档`（= HAIKU 值），总共 5 个键。
+/// 由 provider 的 `models` 条目（强→弱）经 `sebas_router::models::map_to_env`
+/// 导出 4 个 `ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
+/// 值，再加 `CLAUDE_CODE_SUBAGENT_MODEL = 最弱档`（= HAIKU 值），总共 5 个键。
 /// `models` 为空 → 返回空 Vec，不强制覆盖（模式 Router 或裸 Off 也据此
 /// 不盖模型 env，语义见 spec 的 "Transparency across provider modes"）。
+/// env 映射按条目 id 解析——能力标记是纯元数据，不影响赋值（task 1.3）。
 ///
 /// 覆盖语义：SDK 最终用 `Command::envs` 增量合并，同键时 extra_env 里的值
 /// 会压掉父进程残留（`claude/driver.rs:166-167,213` + cc-agent-sdk
 /// `build_env`），符合 spec 的 "Override beats inherited values"。
-fn model_cover_env(models: &[String]) -> Vec<(String, String)> {
+fn model_cover_env(models: &[sebas_router::models::ModelEntry]) -> Vec<(String, String)> {
     if models.is_empty() {
         return Vec::new();
     }
@@ -446,7 +436,8 @@ fn model_cover_env(models: &[String]) -> Vec<(String, String)> {
 fn effective_provider_models(
     state: &ProviderRuntimeState,
     router_cfg: Option<&RouterConfig>,
-) -> Option<Vec<String>> {
+) -> Option<Vec<sebas_router::models::ModelEntry>> {
+    use sebas_router::models::ModelEntry;
     // 与 compute_provider_resolution 的「Off + default_selection → 隐式
     // Direct」折叠保持同一选择；无 provider 则不盖。
     let provider = match &state.mode {
@@ -457,33 +448,42 @@ fn effective_provider_models(
             .map(|d| d.provider.clone())?,
         ProviderMode::Router => return None,
     };
-    // 用户通过 bot / `/provider` 编辑的条目带 `models`（custom）或
-    // `preset` 名（preset 派生需代码物化）；overlay 缺项时回退到 router
-    // config seed 的 `ProviderConfig.models`。两者都没有 → 不盖。
+    // 用户通过 bot / `/provider` 或 WebUI 编辑的条目带 `models`（custom，
+    // 条目对象或遗留裸字符串）或 `preset` 名（preset 派生缺省物化代码表）；
+    // overlay 缺项时回退到 router config seed 的 `ProviderConfig.models`。
+    // 两者都没有 → 不盖。
     if let Some(item) = read_overlay_item(&provider) {
-        let preset_models: Option<Vec<String>> = item
+        let preset_models: Option<Vec<ModelEntry>> = item
             .get("preset")
             .and_then(Value::as_str)
             .and_then(|pn| {
                 sebas_router::config::presets()
                     .iter()
                     .find(|p| p.name == pn)
-                    .map(|p| p.models.iter().map(|s| s.to_string()).collect())
+                    .map(|p| p.models.iter().map(|m| m.to_entry()).collect())
             });
-        let custom_models: Vec<String> = item
-            .get("models")
-            .and_then(Value::as_array)
-            .map(|a: &Vec<Value>| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
-        let models = if !custom_models.is_empty() { custom_models } else { preset_models.unwrap_or_default() };
-        if !models.is_empty() {
+        // 条目对象（现行为）与裸字符串（遗留形态，task 1.1 兼容读取）都
+        // 接受；单个元素非法（含未知能力标记，task 1.4 拒绝语义）→ 整段
+        // 按无 models 处理，回落 preset 代码表 / router seed，绝不半渲染。
+        let custom_models: Vec<ModelEntry> = match item.get("models") {
+            Some(Value::Array(arr)) if !arr.is_empty() => arr
+                .iter()
+                .map(|el| serde_json::from_value::<ModelEntry>(el.clone()))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if !custom_models.is_empty() {
+            return Some(custom_models);
+        }
+        if let Some(models) = preset_models.filter(|m| !m.is_empty()) {
             return Some(models);
         }
     }
     router_cfg
         .and_then(|cfg| cfg.providers.get(&provider))
+        .filter(|p| !p.models.is_empty())
         .map(|p| p.models.clone())
-        .filter(|m| !m.is_empty())
 }
 
 /// 给 agent 进程的额外 env vars + 额外 CLI args。
@@ -1697,7 +1697,7 @@ base_url_anthropic = "https://api.anthropic.com"
 
     #[test]
     fn model_cover_env_single_model_flattens_all_tiers() {
-        let env = model_cover_env(&["deepseek-v4-pro[1m]".to_string()]);
+        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only("deepseek-v4-pro[1m]")]);
         let map: std::collections::HashMap<String, String> = env.into_iter().collect();
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
         assert_eq!(map["ANTHROPIC_DEFAULT_OPUS_MODEL"], "deepseek-v4-pro[1m]");
@@ -1710,8 +1710,8 @@ base_url_anthropic = "https://api.anthropic.com"
     #[test]
     fn model_cover_env_multi_model_maps_strong_to_weak_and_subagent() {
         let env = model_cover_env(&[
-            "deepseek-v4-pro[1m]".to_string(),
-            "deepseek-v4-flash".to_string(),
+            sebas_router::models::ModelEntry::text_only("deepseek-v4-pro[1m]"),
+            sebas_router::models::ModelEntry::text_only("deepseek-v4-flash"),
         ]);
         let map: std::collections::HashMap<String, String> = env.into_iter().collect();
         assert_eq!(map["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
@@ -1769,7 +1769,7 @@ base_url_anthropic = "https://api.anthropic.com"
         let state = direct_state("deepseek");
         let models = effective_provider_models(&state, None);
         unsafe { std::env::remove_var("DEEPSEEK_API_KEY"); }
-        assert_eq!(models, Some(vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]));
+        assert_eq!(models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()), Some(vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]));
     }
 
     #[test]
@@ -1790,7 +1790,7 @@ base_url_anthropic = "https://api.anthropic.com"
         );
         let state = direct_state("weird");
         let models = effective_provider_models(&state, None);
-        assert_eq!(models, Some(vec!["fast".to_string(), "slow".to_string()]));
+        assert_eq!(models.map(|m| m.iter().map(|e| e.id.clone()).collect::<Vec<_>>()), Some(vec!["fast".to_string(), "slow".to_string()]));
     }
 
     #[test]
@@ -1856,7 +1856,7 @@ base_url_anthropic = "https://api.anthropic.com"
     /// OS env 里有残留 `ANTHROPIC_MODEL` 时，extra_env 里值覆盖（SDK .envs 语义）。
     #[test]
     fn model_cover_overrides_inherited_value_semantics() {
-        let env = model_cover_env(&["deepseek-v4-pro[1m]".to_string()]);
+        let env = model_cover_env(&[sebas_router::models::ModelEntry::text_only("deepseek-v4-pro[1m]")]);
         // 模拟 SDK `.envs(&env)` 在残留 env 之上合并：残留的 `ANTHROPIC_MODEL=stale`
         // 必须由 extra_env 里的 `ANTHROPIC_MODEL=deepseek-v4-pro[1m]` 覆盖。这里
         // 断言：extra_env 里至少存在一个 `ANTHROPIC_MODEL` 键且其值是推导值。

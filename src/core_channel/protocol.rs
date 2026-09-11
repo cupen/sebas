@@ -26,7 +26,7 @@
 //!    than delivered a gap; the client re-snapshots on reconnect.
 
 use sebas_channels::ChannelKey;
-use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +116,15 @@ pub enum CoreChannelRequest {
     Cancel { key: ChannelKey },
     /// Close (kill) a session.
     Close { key: ChannelKey },
+    /// （workbench-turn-queue 4.2/D7）按 id 移除一个未开始的待生效提交。
+    RemovePending { key: ChannelKey, pending_id: u64 },
+    /// （workbench-turn-queue 4.2/D7）把一个未开始的提交重排到其处置组内
+    /// `to_index` 位置。
+    MovePending {
+        key: ChannelKey,
+        pending_id: u64,
+        to_index: usize,
+    },
     /// Fetch rendered transcript content at/after a monotonic position.
     Turns { key: ChannelKey, from: u64 },
     /// Mark the focused session.
@@ -127,7 +136,15 @@ pub enum CoreChannelRequest {
     /// Snapshot a domain of the core state store (add-state-store).
     StateSnapshot { domain: String },
     /// Mutate a domain of the core state store (add-state-store).
-    StateMutation { domain: String, payload: serde_json::Value },
+    StateMutation {
+        domain: String,
+        payload: serde_json::Value,
+    },
+    /// （add-fetch-models）providers 域抓取 op（D5：provider 域上的只读动作，
+    /// 不新增存储域）：按 provider 名解析 base url 与密钥，core 侧执行一次
+    /// 只读 GET 上游 `/models`，返回 id 列表。不写任何状态；失败回 typed
+    /// rejection（无可用 base url / 上游错误，均净化）。
+    FetchModels { provider: String },
     /// Subscribe to state change notifications (add-state-store).
     StateSubscribe,
     /// （wire-webui-sebas-agent-e2e）回填一个审批决定：request_id 来自订阅流
@@ -148,16 +165,33 @@ pub enum CoreChannelResponse {
     Spawned { key: ChannelKey },
     /// Message/close/focus accepted; nothing to return.
     Ok,
+    /// （workbench-turn-queue 5.2）close 的结果：`discarded_pending` = 随之
+    /// 丢弃的未执行待生效提交条数。
+    Closed { discarded_pending: usize },
+    /// （workbench-turn-queue 4.2）pending 管理操作成功：返回操作后的全量
+    /// pending 视图（客户端据此对账，design D8）。
+    PendingList { pending: Vec<PendingSubmission> },
     /// Turn-content result.
     Turns { entries: Vec<TurnEntry> },
     /// Focused-session result.
     Focused { key: Option<ChannelKey> },
     /// Typed rejection — names the reason; nothing was mutated.
-    Rejected { #[serde(flatten)] rejection: sebas_webui::session_backend::SessionRejection },
+    Rejected {
+        #[serde(flatten)]
+        rejection: sebas_webui::session_backend::SessionRejection,
+    },
     /// State snapshot result (add-state-store).
-    StateSnapshot { domain: String, payload: serde_json::Value },
+    StateSnapshot {
+        domain: String,
+        payload: serde_json::Value,
+    },
     /// State mutation accepted.
     StateMutationOk,
+    /// （add-fetch-models）抓取结果：上游 model id 列表（只读呈现，无落盘）。
+    Models {
+        provider: String,
+        models: Vec<String>,
+    },
 }
 
 /// One frame of the subscription stream (task 4.2): exactly one snapshot
@@ -166,12 +200,18 @@ pub enum CoreChannelResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum SessionStreamFrame {
-    Snapshot { sessions: Vec<SessionInfo> },
-    Event { event: SessionEvent },
+    Snapshot {
+        sessions: Vec<SessionInfo>,
+    },
+    Event {
+        event: SessionEvent,
+    },
     /// A gated tool call awaits an operator decision; answer via
     /// [`CoreChannelRequest::ApprovalAnswer`]. Not replayed on reconnect —
     /// a request with no reachable client fails closed at the kernel.
-    ApprovalRequested { notice: PermissionNotice },
+    ApprovalRequested {
+        notice: PermissionNotice,
+    },
 }
 
 /// One frame of the **state** subscription stream (add-state-store 4.2).
@@ -187,61 +227,61 @@ pub enum StateStreamFrame {
 }
 
 /// 4.2 验收：state 订阅流（快照帧 + 变更帧）serde 往返后与原值一致。
-    #[test]
-    fn state_stream_frame_round_trips() {
-        let frames = vec![
-            StateStreamFrame::Snapshot {
-                domains: serde_json::json!({
-                    "providers": {},
-                    "settings": null,
-                    "projects": [],
-                    "sessions": []
-                }),
-            },
-            StateStreamFrame::Changed {
-                scope: "providers".into(),
-            },
-            StateStreamFrame::Changed {
-                scope: "settings".into(),
-            },
-        ];
-        for f in &frames {
-            let json = serde_json::to_string(f).unwrap();
-            let back: StateStreamFrame = serde_json::from_str(&json).unwrap();
-            assert_eq!(&back, f, "round-trip mismatch for {json}");
-        }
-        // Wire shape carries the "frame" tag.
-        assert_eq!(
-            serde_json::to_value(&frames[0]).unwrap()["frame"],
-            "snapshot"
-        );
-        assert_eq!(
-            serde_json::to_value(&frames[1]).unwrap()["frame"],
-            "changed"
-        );
-        assert_eq!(
-            serde_json::to_value(&frames[1]).unwrap()["scope"],
-            "providers"
-        );
+#[test]
+fn state_stream_frame_round_trips() {
+    let frames = vec![
+        StateStreamFrame::Snapshot {
+            domains: serde_json::json!({
+                "providers": {},
+                "settings": null,
+                "projects": [],
+                "sessions": []
+            }),
+        },
+        StateStreamFrame::Changed {
+            scope: "providers".into(),
+        },
+        StateStreamFrame::Changed {
+            scope: "settings".into(),
+        },
+    ];
+    for f in &frames {
+        let json = serde_json::to_string(f).unwrap();
+        let back: StateStreamFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(&back, f, "round-trip mismatch for {json}");
     }
+    // Wire shape carries the "frame" tag.
+    assert_eq!(
+        serde_json::to_value(&frames[0]).unwrap()["frame"],
+        "snapshot"
+    );
+    assert_eq!(
+        serde_json::to_value(&frames[1]).unwrap()["frame"],
+        "changed"
+    );
+    assert_eq!(
+        serde_json::to_value(&frames[1]).unwrap()["scope"],
+        "providers"
+    );
+}
 
-    /// 4.2：StateChange wire 形状带 `cmd` tag（与通道请求同风格）。
-    #[test]
-    fn state_change_wire_shape() {
-        use sebas_dispatch::state_store::StateChange;
-        let changed = StateChange::Changed {
-            scope: "projects".into(),
-        };
-        let json = serde_json::to_value(&changed).unwrap();
-        assert_eq!(json["cmd"], "changed");
-        assert_eq!(json["scope"], "projects");
-        let back: StateChange = serde_json::from_value(json).unwrap();
-        assert_eq!(back, changed);
-    }
+/// 4.2：StateChange wire 形状带 `cmd` tag（与通道请求同风格）。
+#[test]
+fn state_change_wire_shape() {
+    use sebas_dispatch::state_store::StateChange;
+    let changed = StateChange::Changed {
+        scope: "projects".into(),
+    };
+    let json = serde_json::to_value(&changed).unwrap();
+    assert_eq!(json["cmd"], "changed");
+    assert_eq!(json["scope"], "projects");
+    let back: StateChange = serde_json::from_value(json).unwrap();
+    assert_eq!(back, changed);
+}
 
-    /// The handshake line sent by the client immediately after connecting,
-    /// before any request. Wrong/absent secret → the server closes the
-    /// connection without reading a request.
+/// The handshake line sent by the client immediately after connecting,
+/// before any request. Wrong/absent secret → the server closes the
+/// connection without reading a request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelHandshake {
     pub secret: String,
@@ -252,9 +292,7 @@ mod tests {
     use super::*;
     use sebas_webui::session_backend::SessionRejection;
 
-    fn roundtrip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(
-        v: &T,
-    ) {
+    fn roundtrip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(v: &T) {
         let json = serde_json::to_string(v).unwrap();
         let back: T = serde_json::from_str(&json).unwrap();
         assert_eq!(&back, v, "round-trip mismatch for {json}");
@@ -297,11 +335,22 @@ mod tests {
             },
             CoreChannelRequest::Cancel { key: key.clone() },
             CoreChannelRequest::Close { key: key.clone() },
+            CoreChannelRequest::RemovePending {
+                key: key.clone(),
+                pending_id: 7,
+            },
+            CoreChannelRequest::MovePending {
+                key: key.clone(),
+                pending_id: 7,
+                to_index: 1,
+            },
             CoreChannelRequest::Turns {
                 key: key.clone(),
                 from: 3,
             },
-            CoreChannelRequest::SetFocus { key: Some(key.clone()) },
+            CoreChannelRequest::SetFocus {
+                key: Some(key.clone()),
+            },
             CoreChannelRequest::SetFocus { key: None },
             CoreChannelRequest::Focused,
             CoreChannelRequest::Subscribe,
@@ -311,6 +360,9 @@ mod tests {
             CoreChannelRequest::StateMutation {
                 domain: "settings".into(),
                 payload: serde_json::json!({"key": "card_config", "value": {}}),
+            },
+            CoreChannelRequest::FetchModels {
+                provider: "deepseek".into(),
             },
             CoreChannelRequest::StateSubscribe,
             CoreChannelRequest::ApprovalAnswer {
@@ -326,10 +378,24 @@ mod tests {
             CoreChannelResponse::Snapshot { sessions: vec![] },
             CoreChannelResponse::Spawned { key: key.clone() },
             CoreChannelResponse::Ok,
+            CoreChannelResponse::Closed {
+                discarded_pending: 2,
+            },
+            CoreChannelResponse::PendingList {
+                pending: vec![PendingSubmission {
+                    id: 7,
+                    text: "queued".into(),
+                    position: 0,
+                    disposition: sebas_dispatch::PendingDisposition::Turn,
+                    priority: true,
+                }],
+            },
             CoreChannelResponse::Turns {
                 entries: vec![TurnEntry::prompt(0, "p"), TurnEntry::markdown(1, "m")],
             },
-            CoreChannelResponse::Focused { key: Some(key.clone()) },
+            CoreChannelResponse::Focused {
+                key: Some(key.clone()),
+            },
             CoreChannelResponse::Rejected {
                 rejection: SessionRejection::UnknownSession { key: "k".into() },
             },
@@ -347,6 +413,10 @@ mod tests {
                 payload: serde_json::json!({"providers": {}}),
             },
             CoreChannelResponse::StateMutationOk,
+            CoreChannelResponse::Models {
+                provider: "p".into(),
+                models: vec!["m1".into()],
+            },
         ];
         for r in &responses {
             roundtrip(r);
@@ -374,6 +444,7 @@ mod tests {
             agent_kind: None,
             usage: None,
             backend: Some("native".into()),
+            pending: Vec::new(),
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

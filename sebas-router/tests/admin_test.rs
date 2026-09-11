@@ -1,8 +1,9 @@
-//! Admin API 集成测试（change router-admin-api-and-model-aliases，task 3.x）。
+//! Admin API 集成测试（router-admin-api；make-core-own-provider-data 5.1）。
 //!
 //! 覆盖：鉴权（bearer / loopback fallback / 401 不回显）、admin 路由不被
-//! proxy fallback 吞、providers CRUD（脱敏/409/空 key 保留/墓碑/失败不写
-//! 文件）、model-aliases CRUD、reload。
+//! proxy fallback 吞、provider/alias/defaults/probe 变更面下线（全部 404
+//! 且不写任何文件，2.1/2.2）、只读面健在（presets / reload / stats /
+//! metrics / 外部热重载，2.4）。
 
 mod support;
 
@@ -119,7 +120,7 @@ fn tempfile_dir() -> std::path::PathBuf {
 async fn admin_401_without_bearer_when_secret_set() {
     let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
     let resp = client()
-        .get(format!("http://{}/admin/providers", gw.addr))
+        .get(format!("http://{}/admin/presets", gw.addr))
         .send()
         .await
         .expect("GET");
@@ -132,14 +133,14 @@ async fn admin_401_without_bearer_when_secret_set() {
 async fn admin_bearer_accepted_and_not_swallowed_by_proxy() {
     let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
     let resp = client()
-        .get(format!("http://{}/admin/providers", gw.addr))
+        .get(format!("http://{}/admin/presets", gw.addr))
         .header("Authorization", "Bearer sec-test-123")
         .send()
         .await
         .expect("GET");
     assert_eq!(resp.status(), 200, "admin 路由须答 200 而非 proxy 404");
     let body: Value = serde_json::from_str(&resp.text().await.expect("body")).expect("json");
-    assert!(body["providers"].is_array(), "body: {body}");
+    assert!(body["presets"].is_array(), "body: {body}");
 }
 
 #[tokio::test]
@@ -147,186 +148,99 @@ async fn admin_loopback_ok_without_secret() {
     let (gw, _overlay, _env) = start_admin_gw(None).await;
     // 测试 client 从 loopback 发起 → 无 secret 也放行。
     let resp = client()
-        .get(format!("http://{}/admin/providers", gw.addr))
+        .get(format!("http://{}/admin/presets", gw.addr))
         .send()
         .await
         .expect("GET");
     assert_eq!(resp.status(), 200, "loopback + 无 secret 须放行");
 }
 
+/// provider/alias/defaults/probe 变更面整体下线（make-core-own-provider-data
+/// 2.1）：任何方法（含 GET——「Provider CRUD endpoints」需求整体移除）都答
+/// 404（不是 503 桩，也不得落回 proxy fallback 被透传上游）。
 #[tokio::test]
-async fn provider_crud_round_trip() {
-    let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let base = format!("http://{}/admin/providers", gw.addr);
-    let c = client();
-    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
-
-    // 创建（preset deepseek）。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "name": "deepseek", "preset": "deepseek", "api_key": "sk-ds"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 201, "create");
-    // 重名 409。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "name": "deepseek", "preset": "deepseek"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 409, "duplicate 409");
-    // 无效（无 preset 无 URL）400 且文件不含该条目。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({"name": "bad"})).unwrap()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400, "invalid 400");
-    // 列表脱敏。
-    let resp = auth(c.get(&base)).send().await.unwrap();
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    let text = body.to_string();
-    assert!(!text.contains("sk-ds"), "列表不得含 key 材料: {text}");
-    // 更新：空 api_key 保留旧值。
-    let resp = auth(c.put(format!("{base}/deepseek")).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "name": "deepseek", "preset": "deepseek", "api_key": ""
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 200, "update");
-    let raw = std::fs::read_to_string(&overlay).unwrap();
-    assert!(raw.contains("sk-ds"), "空 key 提交须保留旧值: {raw}");
-    // 未知 provider 更新/删除 → 404（update 走合并→校验；delete 显式检查）。
-    let resp = auth(c.delete(format!("{base}/nonexistent")))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404, "delete unknown 404");
-    // 删除 config 种子 provider → 墓碑。
-    let resp = auth(c.delete(format!("{base}/openai"))).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "delete seed provider");
-    let raw = std::fs::read_to_string(&overlay).unwrap();
-    assert!(raw.contains("\"openai\""), "种子 provider 删除须写墓碑: {raw}");
-}
-
-#[tokio::test]
-async fn put_unknown_provider_is_404_not_upsert() {
-    // router-admin-api spec：updating an unknown name yields 404（此前
-    // update_provider 对未知名静默 upsert 200）。回归：PUT 未知名 → 404 且
-    // 不产生该条目。
-    let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let base = format!("http://{}/admin/providers", gw.addr);
-    let c = client();
-    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
-
-    let resp = auth(c.put(format!("{base}/ghost")).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "name": "ghost", "preset": "deepseek", "api_key": "sk-x"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 404, "update unknown provider must be 404, not upsert");
-    let raw = std::fs::read_to_string(&overlay).unwrap_or_default();
-    assert!(!raw.contains("\"ghost\""), "unknown provider must not be persisted: {raw}");
-}
-
-#[tokio::test]
-async fn alias_crud_round_trip() {
-    let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let base = format!("http://{}/admin/model-aliases", gw.addr);
-    let c = client();
-    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
-
-    // 创建合法别名。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "fast", "provider": "anthropic", "upstream_model": "claude-sonnet-4"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 201, "alias create: {}", resp.status());
-    // 未知 provider → 400。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "x", "provider": "ghost"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 400);
-    // 含 '/' → 400。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "a/b", "provider": "anthropic"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 400);
-    // 重名 → 409。
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "fast", "provider": "anthropic"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 409);
-    // 列表。
-    let resp = auth(c.get(&base)).send().await.unwrap();
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert!(body["model_aliases"]["fast"].is_object(), "body: {body}");
-    // 更新。
-    let resp = auth(c.put(format!("{base}/fast")).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "fast", "provider": "openai"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 200, "update: {}", resp.text().await.unwrap_or_default());
-    // 未知别名更新 → 404。
-    let resp = auth(c.put(format!("{base}/nope")).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "nope", "provider": "anthropic"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 404);
-    // 删除。
-    let resp = auth(c.delete(format!("{base}/fast"))).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let raw = std::fs::read_to_string(&overlay).unwrap();
-    let v: Value = serde_json::from_str(&raw).unwrap();
-    assert!(v["model_aliases"].as_object().is_none_or(|m| !m.contains_key("fast")));
-}
-
-#[tokio::test]
-async fn alias_with_glob_star_rejected() {
-    // router-model-aliases spec：别名只精确匹配、不参与 glob。含 `*` 的别名
-    // 若被路由表 glob 匹配会破坏该契约——创建时必须 400。
+async fn retired_provider_surface_answers_404() {
     let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let base = format!("http://{}/admin/model-aliases", gw.addr);
-    let c = client();
+    let base = format!("http://{}/admin", gw.addr);
     let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
+    let c = client();
 
-    let resp = auth(c.post(&base).header("content-type", "application/json")
-        .body(serde_json::to_string(&json!({
-        "alias": "fast*", "provider": "anthropic"
-    })).unwrap()))
-    .send()
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), 400, "alias containing '*' must be rejected");
+    for (method, url) in [
+        ("GET", "/providers"),
+        ("POST", "/providers"),
+        ("PUT", "/providers/deepseek"),
+        ("DELETE", "/providers/deepseek"),
+        ("POST", "/providers/deepseek/probe"),
+        ("POST", "/providers/deepseek/probe?apply=true"),
+        ("GET", "/model-aliases"),
+        ("POST", "/model-aliases"),
+        ("PUT", "/model-aliases/fast"),
+        ("DELETE", "/model-aliases/fast"),
+        ("GET", "/defaults"),
+        ("PUT", "/defaults"),
+    ] {
+        let resp = auth(match method {
+            "GET" => c.get(format!("{base}{url}")),
+            "POST" => c
+                .post(format!("{base}{url}"))
+                .header("content-type", "application/json")
+                .body(json!({"name": "x"}).to_string()),
+            "PUT" => c
+                .put(format!("{base}{url}"))
+                .header("content-type", "application/json")
+                .body(json!({"name": "x"}).to_string()),
+            "DELETE" => c.delete(format!("{base}{url}")),
+            other => panic!("unexpected method {other}"),
+        })
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 404, "{method} {url} must be gone");
+        let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        assert!(
+            body["error"].as_str().is_some_and(|e| e.contains("retired")),
+            "404 body must state retirement: {body}"
+        );
+    }
+}
+
+/// 2.2 验收：无 core 通道（SEBAS_CORE_SOCKET 未设置）时，任何管理操作都
+/// 不写文件——providers.json / defaults.json 从未被创建或改动。
+#[tokio::test]
+async fn admin_mutations_write_no_files_without_core_channel() {
+    let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
+    let base = format!("http://{}/admin", gw.addr);
+    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
+    let c = client();
+
+    let before = std::fs::read_to_string(&overlay).unwrap_or_default();
+    for req in [
+        c.post(format!("{base}/providers"))
+            .header("content-type", "application/json")
+            .body(json!({"name": "deepseek", "preset": "deepseek", "api_key": "sk-ds"}).to_string()),
+        c.put(format!("{base}/providers/openai"))
+            .header("content-type", "application/json")
+            .body(json!({"api_key": "sk-new"}).to_string()),
+        c.delete(format!("{base}/providers/openai")),
+        c.post(format!("{base}/providers/openai/probe?apply=true")),
+        c.post(format!("{base}/model-aliases"))
+            .header("content-type", "application/json")
+            .body(json!({"alias": "fast", "provider": "anthropic"}).to_string()),
+        c.delete(format!("{base}/model-aliases/fast")),
+        c.put(format!("{base}/defaults"))
+            .header("content-type", "application/json")
+            .body(json!({"provider": "anthropic"}).to_string()),
+    ] {
+        let resp = auth(req).send().await.unwrap();
+        assert_eq!(resp.status(), 404, "retired route must 404");
+    }
+    let after = std::fs::read_to_string(&overlay).unwrap_or_default();
+    assert_eq!(before, after, "overlay 文件不得被管理操作改动");
+    let defaults = overlay.with_file_name("defaults.json");
+    assert!(
+        !defaults.exists(),
+        "router 侧不得再有 defaults.json 写入点（2.3）"
+    );
 }
 
 #[tokio::test]
@@ -345,56 +259,25 @@ async fn reload_endpoint_reports() {
     assert!(body.get("reloaded").is_some(), "body: {body}");
 }
 
+/// probe 端点下线（make-core-own-provider-data：写回路径归 core；上游抓取
+/// 能力由 add-fetch-models 在 core 侧重做）→ 任何 probe 请求 404，且不发
+/// 起任何上游请求。
 #[tokio::test]
-async fn probe_lists_and_applies_models() {
-    use sebas_router::proto::WireProtocol;
-    use support::start_mock_upstream;
-
-    let mock = start_mock_upstream(WireProtocol::OpenAiChat).await;
-    let cfg = CFG_TMPL.replace(
-        "[provider.openai]",
-        // mocko 为自定义 provider（双 OpenAI 槽位同指 mock）；apply 写回
-        // models 落 overlay 条目（自定义 provider 允许 models 落盘）。
-        &format!(
-            "[provider.mocko]\nbase_url_openai_chat = \"{}/v1\"\nbase_url_openai_responses = \"{}/v1\"\napi_key = \"sk-mock\"\n\n[provider.openai]"
-        , mock.url, mock.url),
-    );
-    let dir = tempfile_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let overlay = dir.join("providers.json");
-    let cfg_path = dir.join("config.toml");
-    std::fs::write(&cfg_path, &cfg).unwrap();
-    let _env = set_envs(&overlay, Some("sec-test-123"), &cfg_path);
-    let gw = start_router(&cfg).await;
-
+async fn probe_endpoint_is_gone() {
+    let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
     let c = client();
-    let base = format!("http://{}/admin/providers/mocko/probe", gw.addr);
-    // 列表。
-    let resp = c
-        .post(&base)
-        .header("Authorization", "Bearer sec-test-123")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "probe: {}", resp.text().await.unwrap_or_default());
-    // apply=true 写回 models 字段。
-    let resp = c
-        .post(format!("{base}?apply=true"))
-        .header("Authorization", "Bearer sec-test-123")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "apply: {}", resp.text().await.unwrap_or_default());
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert!(body["models"].as_array().is_some_and(|a| !a.is_empty()), "body: {body}");
-    let raw = std::fs::read_to_string(&overlay).unwrap();
-    assert!(raw.contains("gpt-4"), "apply 须写回 models 列表: {raw}");
-    // 上游收到的请求带了 key（Authorization bearer）。
-    let reqs = mock.requests.lock().await;
-    let r = reqs.last().expect("mock 收到请求");
-    assert_eq!(r.path, "/v1/models");
-    let authz = r.headers.get("authorization").map(String::as_str);
-    assert_eq!(authz, Some("Bearer sk-mock"), "key 须注入上游请求");
+    for url in [
+        format!("http://{}/admin/providers/anthropic/probe", gw.addr),
+        format!("http://{}/admin/providers/anthropic/probe?apply=true", gw.addr),
+    ] {
+        let resp = c
+            .post(&url)
+            .header("Authorization", "Bearer sec-test-123")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "probe must be gone: {url}");
+    }
 }
 
 #[tokio::test]
@@ -580,89 +463,30 @@ api_key = "sk-alpha"
     assert!(alpha["avg_latency_ms"].is_number(), "avg_latency_ms: {alpha}");
 }
 
-// -------------------- agent defaults（add-agent-defaults-catalog）--------------------
+// -------------------- agent defaults（make-core-own-provider-data 2.3）--------------------
 
-/// PUT /admin/defaults 的小助手（reqwest 无 json feature，手动序列化）。
-/// provider 为空串 = 清除默认。
-async fn put_defaults(
-    gw: &support::TestRouter,
-    provider: &str,
-    model: Option<&str>,
-) -> reqwest::Response {
-    let body = serde_json::json!({
-        "provider": if provider.is_empty() { Value::Null } else { Value::String(provider.into()) },
-        "model": model.map(Value::from).unwrap_or(Value::Null),
-    });
-    client()
-        .put(format!("http://{}/admin/defaults", gw.addr))
-        .header("Authorization", "Bearer sec-test-123")
-        .header("content-type", "application/json")
-        .body(serde_json::to_string(&body).unwrap())
-        .send()
-        .await
-        .unwrap()
-}
-
-/// defaults 闭环：初始未设置 → 设置（校验 provider/model）→ 回读 → 清除。
-/// anthropic 是 CFG_TMPL 里的 preset 派生 provider，catalog 跟随代码表。
+/// defaults 面整体由 core 承担：router 的 /admin/defaults 读写都下线（404），
+/// 不再产生 defaults.json 写入点。
 #[tokio::test]
-async fn agent_defaults_round_trip() {
-    let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let url = |_p: &str| format!("http://{}/admin/defaults", gw.addr);
+async fn agent_defaults_surface_is_gone() {
+    let (gw, overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
+    let url = format!("http://{}/admin/defaults", gw.addr);
     let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
 
-    // 初始未设置。
-    let resp = auth(client().get(url(""))).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert!(body["provider"].is_null() && body["model"].is_null(), "{body}");
-
-    // 设置合法组合 → 200 回显，回读一致。
-    let resp = put_defaults(&gw, "anthropic", Some("claude-opus-4-20250514")).await;
-    assert_eq!(resp.status(), 200, "{:?}", resp.text().await.unwrap());
-    let resp = auth(client().get(url(""))).send().await.unwrap();
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert_eq!(body["provider"], "anthropic");
-    assert_eq!(body["model"], "claude-opus-4-20250514");
-
-    // 未知 provider → 400；不在 catalog 的 model → 400（均不落盘）。
-    let resp = put_defaults(&gw, "ghost", None).await;
-    assert_eq!(resp.status(), 400);
-    let resp = put_defaults(&gw, "anthropic", Some("gpt-4o")).await;
-    assert_eq!(resp.status(), 400);
-    let resp = auth(client().get(url(""))).send().await.unwrap();
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert_eq!(body["provider"], "anthropic", "失败写不得改动既有默认");
-
-    // 清除（provider 缺省 = 清除）→ 双 null，回读一致。
-    let resp = put_defaults(&gw, "", None).await;
-    assert_eq!(resp.status(), 200);
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert!(body["provider"].is_null());
-}
-
-/// 删除默认 provider 时联动清除 defaults（不残留悬空默认）。
-#[tokio::test]
-async fn agent_defaults_cleared_on_provider_delete() {
-    let (gw, _overlay, _env) = start_admin_gw(Some("sec-test-123")).await;
-    let auth = |r: reqwest::RequestBuilder| r.header("Authorization", "Bearer sec-test-123");
-
-    let resp = put_defaults(&gw, "anthropic", Some("claude-opus-4-20250514")).await;
-    assert_eq!(resp.status(), 200);
-
-    let resp = auth(client().delete(format!("http://{}/admin/providers/anthropic", gw.addr)))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let resp = auth(client().get(format!("http://{}/admin/defaults", gw.addr)))
-        .send()
-        .await
-        .unwrap();
-    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    let resp = auth(client().get(&url)).send().await.unwrap();
+    assert_eq!(resp.status(), 404, "GET defaults must be gone");
+    let resp = auth(
+        client()
+            .put(&url)
+            .header("content-type", "application/json")
+            .body(json!({"provider": "anthropic", "model": "claude-opus-4-20250514"}).to_string()),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404, "PUT defaults must be gone");
     assert!(
-        body["provider"].is_null(),
-        "删除默认 provider 后 defaults 必须被清除: {body}"
+        !overlay.with_file_name("defaults.json").exists(),
+        "router 侧不再产生 defaults.json"
     );
 }

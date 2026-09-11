@@ -42,14 +42,19 @@ async fn dump_uses_structured_channel_key_round_trip() {
     let m = SessionMap::new();
     let feishu = ChannelKey::feishu("oc_x", Some("t1"));
     let web = ChannelKey::new("web", "web-1");
-    m.insert(feishu.clone(), Mapping::active("s1")).await.unwrap();
+    m.insert(feishu.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
     m.insert(web.clone(), Mapping::active("s2")).await.unwrap();
 
     let json = m.dump_json().await.unwrap();
     // key 内容：`{"channel":"feishu","reference":"oc_x\u0000t1"}`（转义后）。
     assert!(json.contains("{\\\"channel\\\":\\\"feishu\\\""));
     assert!(json.contains("\\\"channel\\\":\\\"web\\\""));
-    assert!(json.contains("oc_x"), "reference survives in the key: {json}");
+    assert!(
+        json.contains("oc_x"),
+        "reference survives in the key: {json}"
+    );
     assert!(json.contains("web-1"), "web reference survives: {json}");
 
     let m2 = SessionMap::restore_json(&json).unwrap();
@@ -64,7 +69,10 @@ async fn restore_parses_legacy_thread_composite_key_as_feishu() {
     let json = r#"{"oc_x\u0000t1":{"session_id":"s-old","last_active_unix":1}}"#;
     let m = SessionMap::restore_json(json).unwrap();
     let k = ChannelKey::feishu("oc_x", Some("t1"));
-    let got = m.get(&k).await.expect("legacy composite key maps to feishu");
+    let got = m
+        .get(&k)
+        .await
+        .expect("legacy composite key maps to feishu");
     assert_eq!(got.session_id(), None);
     assert!(matches!(
         got.state,
@@ -98,7 +106,10 @@ async fn dormant_new_means_fresh_spawn_not_resume() {
     let m = SessionMap::restore_json(json).unwrap();
     let k = ChannelKey::feishu("oc_x", None);
     let r = m.begin_spawn(k.clone()).await.unwrap();
-    assert!(matches!(r, sebas_dispatch::state::BeginSpawn::ReplacedActive));
+    assert!(matches!(
+        r,
+        sebas_dispatch::state::BeginSpawn::ReplacedActive
+    ));
     let got = m.get(&k).await.unwrap();
     assert!(matches!(
         got.state,
@@ -134,10 +145,7 @@ async fn overflow_rejects() {
         .unwrap();
     }
     let r = m
-        .insert(
-            ChannelKey::feishu("oc_3", None),
-            Mapping::active("s_3"),
-        )
+        .insert(ChannelKey::feishu("oc_3", None), Mapping::active("s_3"))
         .await;
     assert!(r.is_err());
 }
@@ -155,33 +163,11 @@ async fn queue_fifo_by_default_priority_jumps_front() {
     let m = SessionMap::new();
     let k = ChannelKey::feishu("oc", None);
     let _ = m.insert(k.clone(), Mapping::active("s1")).await;
-    m.enqueue_turn(
-        &k,
-        QueuedTurn {
-            prompt: "first".into(),
-            reply_to: None,
-            priority: false,
-        },
-    )
-    .await;
-    m.enqueue_turn(
-        &k,
-        QueuedTurn {
-            prompt: "second".into(),
-            reply_to: None,
-            priority: false,
-        },
-    )
-    .await;
-    m.enqueue_turn(
-        &k,
-        QueuedTurn {
-            prompt: "btw".into(),
-            reply_to: None,
-            priority: true,
-        },
-    )
-    .await;
+    m.enqueue_turn(&k, QueuedTurn::new("first", None, false))
+        .await;
+    m.enqueue_turn(&k, QueuedTurn::new("second", None, false))
+        .await;
+    m.enqueue_turn(&k, QueuedTurn::new("btw", None, true)).await;
     assert_eq!(m.queue_len(&k).await, 3);
     assert_eq!(m.pop_next_turn(&k).await.unwrap().prompt, "btw"); // priority front
     assert_eq!(m.pop_next_turn(&k).await.unwrap().prompt, "first");
@@ -194,15 +180,8 @@ async fn pop_next_turn_cleans_up_empty_entry() {
     let m = SessionMap::new();
     let k = ChannelKey::feishu("oc", None);
     let _ = m.insert(k.clone(), Mapping::active("s1")).await;
-    m.enqueue_turn(
-        &k,
-        QueuedTurn {
-            prompt: "one".into(),
-            reply_to: None,
-            priority: false,
-        },
-    )
-    .await;
+    m.enqueue_turn(&k, QueuedTurn::new("one", None, false))
+        .await;
     assert_eq!(m.queue_len(&k).await, 1);
     let popped = m.pop_next_turn(&k).await;
     assert!(popped.is_some());
@@ -214,15 +193,8 @@ async fn remove_by_key_drops_mapping_and_queue() {
     let m = SessionMap::new();
     let k = ChannelKey::feishu("oc_orphan", None);
     m.insert(k.clone(), Mapping::spawning()).await.unwrap();
-    m.enqueue_turn(
-        &k,
-        QueuedTurn {
-            prompt: "queued".into(),
-            reply_to: None,
-            priority: false,
-        },
-    )
-    .await;
+    m.enqueue_turn(&k, QueuedTurn::new("queued", None, false))
+        .await;
     assert_eq!(m.queue_len(&k).await, 1);
 
     m.remove_by_key(&k).await;

@@ -19,8 +19,8 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    http_client, post_json, wait_for, wait_router_addr, wait_reachable,
-    wait_unreachable_with_cause, webui_healthy, Sandbox,
+    Sandbox, http_client, post_json, wait_for, wait_reachable, wait_router_addr,
+    wait_unreachable_with_cause, webui_healthy,
 };
 
 /// Startup: core + standalone webui come up, webui reports the core channel
@@ -36,21 +36,26 @@ async fn detached_startup_reports_reachability() {
     wait_reachable(&cli, &sb).await;
     let health_url = format!("{}/health", sb.webui_url());
     let hint = sb.path.clone();
-    let healthy = wait_for("webui /health ok", Duration::from_secs(10), &hint, move || {
-        let cli = cli.clone();
-        let url = health_url.clone();
-        Box::pin(async move {
-            cli.get(&url)
-                .send()
-                .await
-                .ok()?
-                .text()
-                .await
-                .ok()
-                .map(|b| b.trim() == "ok")
-                .filter(|ok| *ok)
-        })
-    })
+    let healthy = wait_for(
+        "webui /health ok",
+        Duration::from_secs(10),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = health_url.clone();
+            Box::pin(async move {
+                cli.get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .text()
+                    .await
+                    .ok()
+                    .map(|b| b.trim() == "ok")
+                    .filter(|ok| *ok)
+            })
+        },
+    )
     .await;
     assert!(healthy, "webui /health must report ok once serving");
 }
@@ -90,7 +95,14 @@ async fn session_round_trip_via_webui_http() {
             let cli = cli.clone();
             let url = detail_url.clone();
             Box::pin(async move {
-                let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                let v = cli
+                    .get(&url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
                 let done = v["status_slug"].as_str() == Some("done")
                     || v["status"]
                         .as_str()
@@ -101,7 +113,7 @@ async fn session_round_trip_via_webui_http() {
     )
     .await;
 
-    let transcript = detail["body"]
+    let transcript = detail["entries"]
         .as_array()
         .map(|blocks| {
             blocks
@@ -202,10 +214,15 @@ async fn graceful_exit_removes_channel_socket() {
 
     let socket = sb.channel_path.clone();
     let hint = sb.path.clone();
-    wait_for("channel socket to appear", Duration::from_secs(15), &hint, move || {
-        let socket = socket.clone();
-        Box::pin(async move { socket.exists().then_some(()) })
-    })
+    wait_for(
+        "channel socket to appear",
+        Duration::from_secs(15),
+        &hint,
+        move || {
+            let socket = socket.clone();
+            Box::pin(async move { socket.exists().then_some(()) })
+        },
+    )
     .await;
     // Give the affordance session time to register before the signal,
     // mirroring sigterm_cleanup_test's child-registration budget.
@@ -443,7 +460,7 @@ async fn no_secret_assembly_end_to_end() {
         },
     )
     .await;
-    let transcript = detail["body"]
+    let transcript = detail["entries"]
         .as_array()
         .map(|blocks| {
             blocks
@@ -495,11 +512,7 @@ async fn secret_rotation_self_heal_across_core_restart() {
         },
     )
     .await;
-    assert_eq!(
-        key2.trim().len(),
-        64,
-        "rotated key must be 64 hex chars"
-    );
+    assert_eq!(key2.trim().len(), 64, "rotated key must be 64 hex chars");
 
     // webui 从未重启：只能靠文件重读自愈。
     wait_reachable(&cli, &sb).await;
@@ -535,11 +548,13 @@ async fn watchdog_supervised_core_recovery() {
 
     let watchdog_pid = watchdog.id().expect("watchdog pid");
     let hint = sb.path.clone();
-    let core_pid =
-        wait_for("core child pid to appear", Duration::from_secs(15), &hint, move || {
-            Box::pin(async move { find_child_pid(watchdog_pid, "core") })
-        })
-        .await;
+    let core_pid = wait_for(
+        "core child pid to appear",
+        Duration::from_secs(15),
+        &hint,
+        move || Box::pin(async move { find_child_pid(watchdog_pid, "core") }),
+    )
+    .await;
 
     unsafe { libc::kill(core_pid as libc::pid_t, libc::SIGKILL) };
     wait_unreachable_with_cause(&cli, &sb).await;
@@ -550,9 +565,7 @@ async fn watchdog_supervised_core_recovery() {
         Duration::from_secs(45),
         &hint,
         move || {
-            Box::pin(async move {
-                find_child_pid(watchdog_pid, "core").filter(|p| *p != core_pid)
-            })
+            Box::pin(async move { find_child_pid(watchdog_pid, "core").filter(|p| *p != core_pid) })
         },
     )
     .await;
@@ -563,5 +576,384 @@ async fn watchdog_supervised_core_recovery() {
     assert!(
         watchdog.try_wait().expect("watchdog try_wait").is_none(),
         "watchdog must stay up across the managed child crash"
+    );
+}
+
+/// workbench-turn-queue 2.3/5.2 + workbench-conversation-view BREAKING 更新：
+/// 忙中提交的进程级时序与丢弃记账。fake-claude 经 `--slow-ms` 在内容帧与
+/// result 之间停留——WORKING 窗口确定性的长：
+/// 1. 忙中 POST message → 200 且 payload.pending 可见该提交（disposition
+///    turn），条目序列里在跑回合的 prompt 不变（提交没有切开在跑输出，
+///    也没有提前进 transcript——`kind="prompt"` 的最后一条仍是首提交）；
+/// 2. 在跑回合结束后排队回合自动开轮：条目序列出现排队提交的 prompt 条目；
+/// 3. close 带队列的会话 → 响应 `discarded_pending` 点名丢弃条数，会话移除。
+/// （「输出不被切开」的结构性保证由引擎级单测
+/// tests/continue_session_test.rs 断言；本用例证可观察面。）
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn turn_queue_timing_and_dropped_accounting() {
+    let sb = Sandbox::new("testsuite_e2e", "turn-queue");
+    // 慢档只取 400ms：driver 的 watchdog 每秒探测、1.5s 内须应答——更大的
+    // 同步 sleep 会让 fake-claude 无法应答探测而被判挂起（会话被终结）。
+    // 提交面用 "stream" 场景：5 帧 × 250ms 停顿，turn_active 窗口 ≈1.6s，
+    // 且帧间 stdin 可读（watchdog 探测可被应答）。
+    sb.slow_fake_agent(400);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 创建会话（首 prompt "stream" 触发流式场景）→ 等 WORKING 可见。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let hint = sb.path.clone();
+    wait_for(
+        "first turn content to stream",
+        Duration::from_secs(40),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let streamed = v["entries"].as_array().is_some_and(|b| !b.is_empty());
+                    streamed.then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 忙中提交 → 接受且入队：pending 携带该提交；条目序列里最后一条
+    // prompt 仍是首提交（排队提交未开轮、绝不提前进 transcript）。
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "queued while busy" }),
+    )
+    .await
+    .expect("submit while busy");
+    assert_eq!(status, 200, "busy-time submission must be accepted: {resp}");
+    let mid = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("detail mid-turn")
+        .json::<serde_json::Value>()
+        .await
+        .expect("detail json");
+    let pending = mid["pending"].as_array().expect("pending list mid-turn");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the busy-time submission rides in pending: {mid}"
+    );
+    assert_eq!(pending[0]["text"], "queued while busy");
+    assert_eq!(pending[0]["disposition"], "turn");
+    let prompts: Vec<&str> = mid["entries"]
+        .as_array()
+        .expect("entries mid-turn")
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("prompt"))
+        .filter_map(|e| e["content"].as_str())
+        .collect();
+    assert_eq!(
+        prompts.last().copied(),
+        Some("stream"),
+        "the running turn must be untouched by the submission: {mid}"
+    );
+    assert!(
+        !prompts.contains(&"queued while busy"),
+        "a queued submission must not appear as a started turn: {prompts:?}"
+    );
+
+    // 排队回合自动开轮并完成：条目序列出现排队提交的 prompt 条目。
+    wait_for(
+        "queued turn to run and settle",
+        Duration::from_secs(60),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let queued_started = v["entries"].as_array().is_some_and(|entries| {
+                        entries.iter().any(|e| {
+                            e["kind"].as_str() == Some("prompt")
+                                && e["content"].as_str() == Some("queued while busy")
+                        })
+                    });
+                    let done = queued_started && v["status_slug"].as_str() == Some("done");
+                    done.then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 时序断言：turn-1 的全部输出条目必须完整地排在 turn-2 输出之前——
+    // 忙中提交绝不切开在跑回合的输出（可观察面证据；结构性保证由
+    // tests/continue_session_test.rs 的引擎级单测承载）。
+    let final_detail = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("final detail")
+        .json::<serde_json::Value>()
+        .await
+        .expect("final json");
+    let contents: Vec<String> = final_detail["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .filter_map(|b| b["content"].as_str().map(str::to_string))
+        .collect();
+    let last_chunk = contents
+        .iter()
+        .rposition(|c| c.contains("chunk"))
+        .expect("turn-1 streamed chunks");
+    let first_hello = contents
+        .iter()
+        .position(|c| c.contains("hello"))
+        .expect("turn-2 reply");
+    assert!(
+        last_chunk < first_hello,
+        "turn-2 output must not interleave turn-1 output: {contents:?}"
+    );
+
+    // close 记账：再造一个带队列的会话并关闭 → discarded_pending: 1。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+    )
+    .await
+    .expect("create second session");
+    assert_eq!(status, 201, "{body}");
+    let key2 = body["key"].as_str().expect("key").to_string();
+    let detail2 = format!("{}/api/sessions/{key2}", sb.webui_url());
+    wait_for(
+        "second session content to stream",
+        Duration::from_secs(25),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail2.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    v["entries"]
+                        .as_array()
+                        .is_some_and(|b| !b.is_empty())
+                        .then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key2}/message", sb.webui_url()),
+        serde_json::json!({ "message": "will be dropped" }),
+    )
+    .await
+    .expect("queue for close");
+    assert_eq!(status, 200, "{resp}");
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key2}/close", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("close");
+    assert_eq!(status, 200, "close: {resp}");
+    assert_eq!(
+        resp["discarded_pending"].as_u64(),
+        Some(1),
+        "close must name the dropped submission count: {resp}"
+    );
+}
+
+/// make-core-own-provider-data 3.4 / router-admin-api「Configuration source」
+/// 「card-edited provider reaches router」+「External change hot reload」
+/// 「card edit hot-applies」：watchdog 形态下 router 以独立子进程运行
+/// （watchdog 注入 SEBAS_CORE_SOCKET/SEBAS_CORE_SECRET），订阅 core 通道。
+/// 经 webui BFF 写入 core 状态库的 provider 在 router 不重启、不写任何
+/// provider 文件的情况下变为可路由——router 只是 core 数据的只读消费者。
+/// （此前的全部测试要么用 spawn 前写好的 seed 文件，要么是 core/webui 单侧
+/// 闭环；router 的通道订阅投影 reload_from_channel 在任何层都无进程级覆盖。）
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn core_owned_provider_reaches_router_without_restart() {
+    let sb = Sandbox::new("testsuite_e2e", "provider-hotswap");
+    // 固定默认端口 8787 会让并行用例互踩——每例钉一个空闲端口。
+    let router_port = support::free_port();
+    sb.set_router_listen(router_port);
+
+    // 本地假上游（anthropic 协议应答，记录被问到的 model）——绝不连外网。
+    let asked = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let stub = support::spawn_stub_upstream(asked.clone()).await;
+
+    // watchdog 形态：`run --debug` 强制 router 子服务上线。
+    let xdg_run = sb.path.join("xdg-run");
+    std::fs::create_dir_all(&xdg_run).expect("mkdir xdg-run");
+    let xdg = support::forward_slash(&xdg_run);
+    let cfg = support::forward_slash(&sb.config_path);
+    let cli = http_client();
+    let mut watchdog = sb.spawn(
+        &["run", "-c", &cfg, "--debug"],
+        &sb.core_secret,
+        &[("XDG_RUNTIME_DIR", &xdg)],
+        &sb.core_log,
+    );
+    wait_reachable(&cli, &sb).await;
+    let watchdog_pid = watchdog.id().expect("watchdog pid");
+
+    // router 子进程出现并解析监听地址（子进程 stdout/stderr inherit → 日志）。
+    let hint = sb.path.clone();
+    let log = sb.core_log.clone();
+    let (router_pid, router_url) = wait_for(
+        "router child addr in log",
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let log = log.clone();
+            Box::pin(async move {
+                let pid = find_child_pid(watchdog_pid, "router")?;
+                let text = std::fs::read_to_string(&log).ok()?;
+                for line in text.lines().rev() {
+                    if line.contains("router listening")
+                        && let Some(idx) = line.find("addr=")
+                        && let Ok(addr) = line[idx + 5..]
+                            .split_whitespace()
+                            .next()?
+                            .parse::<std::net::SocketAddr>()
+                    {
+                        return Some((pid, format!("http://{addr}")));
+                    }
+                }
+                None
+            })
+        },
+    )
+    .await;
+    assert_eq!(
+        router_url,
+        format!("http://127.0.0.1:{router_port}"),
+        "router child must honor the pinned [router] listen"
+    );
+
+    // 经 webui BFF 建 provider：写入 core 状态库（core 是唯一写者）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/router/api/providers", sb.webui_url()),
+        serde_json::json!({
+            "name": "stub",
+            "protocol": "anthropic",
+            "base_url_anthropic": format!("http://127.0.0.1:{stub}"),
+            "api_key": "sk-stub-e2e"
+        }),
+    )
+    .await
+    .expect("create provider via webui BFF");
+    assert_eq!(status, 201, "provider create: {body}");
+
+    // 订阅驱动：不重启任何进程，router 按新 provider 路由（改变通知 →
+    // StateSnapshot 拉取 → 热交换）。轮询直到首次命中。
+    wait_for(
+        "router routes the core-stored provider",
+        Duration::from_secs(60),
+        &hint,
+        move || {
+            let cli = cli.clone();
+            let url = format!("{router_url}/v1/messages");
+            Box::pin(async move {
+                let Ok((status, body)) = post_json(
+                    &cli,
+                    &url,
+                    serde_json::json!({
+                        "model": "stub/stub-model",
+                        "max_tokens": 16,
+                        "messages": [{ "role": "user", "content": "hi" }]
+                    }),
+                )
+                .await
+                else {
+                    return None;
+                };
+                (status == 200 && body["id"] == "msg_stub").then_some(body)
+            })
+        },
+    )
+    .await;
+    assert_eq!(
+        asked.lock().await.as_deref(),
+        Some("stub-model"),
+        "upstream must receive the namespace-rest model id"
+    );
+
+    // router 只是只读消费者：provider 文件从未被写（core 状态库是唯一真源）。
+    assert!(
+        !sb.path.join("providers.json").exists(),
+        "no provider file may be written in the core-owned topology"
+    );
+    // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
+    // （cmdline 首参校验——find_child_pid 按 cmdline 子串匹配，先自证锚点）。
+    let pid_now = find_child_pid(watchdog_pid, "router");
+    assert_eq!(
+        pid_now,
+        Some(router_pid),
+        "router must not restart for a provider change to take effect"
+    );
+    if let Some(pid) = pid_now {
+        let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .expect("read router child cmdline");
+        let mut argv = cmd.split('\0');
+        let _exe = argv.next();
+        assert!(
+            argv.next() == Some("router"),
+            "matched child must be the router subprocess, got cmdline {cmd:?}"
+        );
+    }
+    assert!(
+        watchdog.try_wait().expect("watchdog try_wait").is_none(),
+        "watchdog must stay up"
     );
 }

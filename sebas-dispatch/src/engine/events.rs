@@ -62,6 +62,11 @@ pub struct SessionInfo {
     /// （缺字段 = 未打标，展示层回退到 agent_kind / 默认执行体）。
     #[serde(default)]
     pub backend: Option<String>,
+    /// （workbench-turn-queue D6）待生效提交全量视图（投递序，staging 先于
+    /// turn 队列）。快照与每次会话事件都携带；`#[serde(default)]` 兼容旧
+    /// 快照/旧事件。
+    #[serde(default)]
+    pub pending: Vec<crate::state::PendingSubmission>,
 }
 
 impl SessionInfo {
@@ -82,9 +87,14 @@ pub enum SessionEvent {
     Updated { session: SessionInfo },
     /// The mapping was removed (web close, terminal error, failed spawn).
     /// `channel`/`key` flatten the removed [`ChannelKey`].
-    Removed {
+    Removed { channel: String, key: String },
+    /// （workbench-turn-queue D5）会话终结/关闭时未执行的待生效提交——core
+    /// 在移除映射**之前**发出，携带被丢弃条目的 id + 文本，观察者据此给出
+    /// 「未执行」提示。丢弃绝不静默。
+    PendingDropped {
         channel: String,
         key: String,
+        dropped: Vec<crate::state::PendingSubmission>,
     },
     /// Emitted by channel clients (never by the router itself) after a
     /// reconnect: subscribers should re-snapshot because the client resumed
@@ -96,14 +106,14 @@ pub enum SessionEvent {
 /// One rendered block of a session's transcript, addressed by a monotonic
 /// position. `kind` distinguishes the user's prompt from agent/tool output;
 /// `element_type` tells the client how to render `content`
-/// (`"markdown"` | `"thinking"`).
+/// (`"markdown"` | `"thinking"` | `"tool"` | `"error"`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnEntry {
     /// 0-based monotonic position within the session's transcript.
     pub position: u64,
     /// `"prompt"` (user turn input) or `"content"` (agent/tool output).
     pub kind: String,
-    /// `"markdown"` | `"thinking"`.
+    /// `"markdown"` | `"thinking"` | `"tool"` | `"error"`.
     pub element_type: String,
     pub content: String,
     /// Unix seconds when this entry was appended. Lets the client render a
@@ -129,11 +139,19 @@ impl TurnEntry {
         Self::new(position, "content", "thinking", content)
     }
 
+    /// 工具调用条目（workbench-conversation-view 1.3，design D2）：内容仍是
+    /// 可读 markdown，但 `element_type = "tool"` 让客户端能把工具调用与正文
+    /// 区分开（收进「用了 N 个工具」可展开组），不再靠 emoji 前缀当契约。
+    pub fn tool(position: u64, content: impl Into<String>) -> Self {
+        Self::new(position, "content", "tool", content)
+    }
+
     /// spawn 失败等启动期错误条目（fail-fast-on-startup-errors 3.1）：
-    /// `kind = "error"` + `element_type = "error"`，前端据此渲染为带计数的
-    /// 错误气泡而非普通 markdown。
+    /// `kind = "content"`（core 产生，非操作员提交）+ `element_type = "error"`，
+    /// 前端据此渲染为带计数的错误气泡而非普通 markdown。（kind 词汇收敛为
+    /// prompt|content 两值是 workbench-conversation-view 的 delta 契约。）
     pub fn error(position: u64, content: impl Into<String>) -> Self {
-        Self::new(position, "error", "error", content)
+        Self::new(position, "content", "error", content)
     }
 
     fn new(position: u64, kind: &str, element_type: &str, content: impl Into<String>) -> Self {
@@ -182,6 +200,14 @@ mod tests {
             usage: None,
             // wire-webui-sebas-agent-e2e D4：执行体标签随快照/事件往返。
             backend: Some("native".into()),
+            // workbench-turn-queue D6：pending 视图随 SessionInfo 往返。
+            pending: vec![crate::state::PendingSubmission {
+                id: 7,
+                text: "queued behind the running turn".into(),
+                position: 0,
+                disposition: crate::state::PendingDisposition::Turn,
+                priority: false,
+            }],
         };
         let cases = vec![
             SessionEvent::Created {
@@ -191,6 +217,18 @@ mod tests {
             SessionEvent::Removed {
                 channel: "feishu".into(),
                 key: "oc_2".into(),
+            },
+            // workbench-turn-queue 5.2：丢弃标注随事件往返。
+            SessionEvent::PendingDropped {
+                channel: "web".into(),
+                key: "web-1".into(),
+                dropped: vec![crate::state::PendingSubmission {
+                    id: 3,
+                    text: "never ran".into(),
+                    position: 0,
+                    disposition: crate::state::PendingDisposition::Turn,
+                    priority: false,
+                }],
             },
             SessionEvent::Resync,
         ];
@@ -231,6 +269,7 @@ mod tests {
             agent_kind: None,
             usage: None,
             backend: None,
+            pending: Vec::new(),
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -240,12 +279,10 @@ mod tests {
     #[test]
     fn turn_entry_round_trips_through_serde() {
         let e = TurnEntry::prompt(3, "fix the bug");
-        let back: TurnEntry =
-            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        let back: TurnEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
     }
 }
-
 
 /// （extract-im-service 2.3）usage 字段 serde 兼容：旧形状（无 usage）仍反
 /// 序列化；带 usage 的形状完整往返。
@@ -266,6 +303,7 @@ fn session_info_usage_field_is_additive() {
         available_models: None,
         agent_kind: None,
         backend: None,
+        pending: Vec::new(),
         usage: Some(AppUsage {
             model: Some("claude-x".into()),
             total_input: 10,
@@ -280,4 +318,39 @@ fn session_info_usage_field_is_additive() {
     let legacy = r#"{"channel":"feishu","key":"oc_u","session_id":"s1","status":"active","phase":null,"user_prompt":null,"last_active_unix":1,"project_dir":null,"current_model":null,"available_models":null,"agent_kind":null}"#;
     let back: SessionInfo = serde_json::from_str(legacy).unwrap();
     assert_eq!(back.usage, None);
+    // workbench-turn-queue：无 pending 字段同样可读（默认空栈）。
+    assert_eq!(back.pending, Vec::new());
+}
+
+/// workbench-turn-queue 5.2：PendingDropped 携带被丢弃条目（id + 文本），
+/// wire 形状带 snake_case 的 type 标签。
+#[test]
+fn pending_dropped_event_carries_the_dropped_entries() {
+    let ev = SessionEvent::PendingDropped {
+        channel: "web".into(),
+        key: "web-drop".into(),
+        dropped: vec![
+            crate::state::PendingSubmission {
+                id: 1,
+                text: "one".into(),
+                position: 0,
+                disposition: crate::state::PendingDisposition::Staging,
+                priority: false,
+            },
+            crate::state::PendingSubmission {
+                id: 2,
+                text: "two".into(),
+                position: 1,
+                disposition: crate::state::PendingDisposition::Turn,
+                priority: true,
+            },
+        ],
+    };
+    let json = serde_json::to_value(&ev).unwrap();
+    assert_eq!(json["type"], "pending_dropped");
+    assert_eq!(json["dropped"][1]["text"], "two");
+    assert_eq!(json["dropped"][1]["disposition"], "turn");
+    assert_eq!(json["dropped"][1]["priority"], true);
+    let back: SessionEvent = serde_json::from_value(json).unwrap();
+    assert_eq!(back, ev);
 }
