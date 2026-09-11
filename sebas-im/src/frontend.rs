@@ -1087,12 +1087,12 @@ mod tests {
         let key = ChannelKey::feishu("oc_t", None);
 
         fe.on_button(
+            &key,
             "s1".into(),
             Some("toolu_1".into()),
             json!({"decision": "allow_once", "request_id": "toolu_1"}),
         )
         .await;
         assert_eq!(port.approvals.lock().await.len(), 1);
-        let _ = key;
     }
 }
