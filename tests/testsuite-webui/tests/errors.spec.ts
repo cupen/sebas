@@ -17,7 +17,7 @@ import {
   ErrorCollector,
   getSession,
   listSessions,
-  SessionDetailPage,
+  FocusedSession,
   Transcript,
   waitStatus,
 } from './helpers/index'
@@ -31,7 +31,7 @@ test.describe('agent 对话覆盖', () => {
 
   /** Open an idle session's detail page (live WS) and return the key. */
   async function openIdle(page: import('@playwright/test').Page) {
-    const detail = new SessionDetailPage(page)
+    const detail = new FocusedSession(page)
     const key = await createSession(page.request, { prompt: 'idle' })
     await waitStatus(page.request, key, ['done'])
     await page.goto(`/sessions/${key}`)
@@ -66,16 +66,17 @@ test.describe('agent 对话覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('crash — honest death: not-found presentation, no fake success', async ({ page }) => {
+    test('crash — honest death: unavailable note on the workbench, no fake success', async ({ page }) => {
       const { key, detail } = await openIdle(page)
 
       await detail.sendFollowUp('boom crash')
 
-      // The child dies mid-turn; the session mapping is torn down. The detail
-      // view refetches over the live WS connection and surfaces the 404
-      // honestly instead of showing a stale or successful session.
-      await expect(detail.errorCallout).toContainText('Session not found', { timeout: 20_000 })
-      await expect(detail.backToWorkbench).toBeVisible()
+      // The child dies mid-turn; the session mapping is torn down. The
+      // workbench (the only conversation surface — session-detail retired)
+      // refetches over the live WS connection and surfaces the loss honestly
+      // with its "Session unavailable" empty state instead of showing a
+      // stale or successful session.
+      await expect(detail.unavailableNote).toBeVisible({ timeout: 20_000 })
 
       // Row gone from the live list; the API agrees.
       await expect
@@ -101,7 +102,7 @@ test.describe('agent 对话覆盖', () => {
       page,
       request,
     }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       // 触发器：未知 agent kind → acp 驱动拒绝 spawn。
       const key = await createSession(request, {
@@ -113,7 +114,7 @@ test.describe('agent 对话覆盖', () => {
       // transcript（原因内显），且 detail 仍然 200（未被拆除）。
       const converged = await waitStatus(request, key, ['failed'], 60_000)
       expect(converged.status_slug).toBe('failed')
-      const errorBlocks = converged.body.filter((b) => b.element_type === 'error')
+      const errorBlocks = converged.entries.filter((b) => b.element_type === 'error')
       expect(errorBlocks.length).toBeGreaterThanOrEqual(1)
       expect(errorBlocks[0].content).toContain('spawn failed')
       expect(errorBlocks[0].content).toContain('missing-agent')
@@ -122,11 +123,11 @@ test.describe('agent 对话覆盖', () => {
       const rows = await listSessions(request)
       expect(rows.some((r) => r.encoded_key === key)).toBe(true)
 
-      // 浏览器呈现：详情页真实渲染（非 404 callout），transcript 内显错误
+      // 浏览器呈现：工作台聚焦渲染（唯一对话面），transcript 内显错误
       // 气泡，状态徽章为 failed。
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
-      await expect(detail.errorCallout).toHaveCount(0)
+      await expect(detail.unavailableNote).toHaveCount(0)
       const transcript = new Transcript(page)
       await expect(transcript.turnWith('spawn failed').first()).toBeVisible({
         timeout: 10_000,

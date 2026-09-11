@@ -53,11 +53,14 @@ test.describe('工作台首屏', () => {
 
       // Reachability, honest form: core connected (no warning banner) and the
       // native backend option disabled with its cause spelled out. The
-      // provider label shows the composite backend's honest degradation — the
-      // provider truth source (router state store) is not reachable from the
-      // detached webui seam, and the UI must say so instead of guessing.
+      // provider label shows the store-backed truth (make-core-own-provider-
+      // data 3.1: the state seam forwards to the live engine even in the
+      // embedded form): the sandbox store is reachable and starts empty, so
+      // the label reads "no provider configured" — not the stale
+      // "unavailable" wording that used to paper over the non-forwarding
+      // composite backend.
       await expect(workbench.reachabilityWarning).toBeHidden()
-      await expect(workbench.providerLabel()).toHaveText('provider status unavailable', {
+      await expect(workbench.providerLabel()).toHaveText('no provider configured', {
         timeout: 10_000,
       })
       await expect(workbench.nativeOption()).toBeDisabled()

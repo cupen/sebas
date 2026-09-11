@@ -22,12 +22,20 @@ export interface SessionRow {
   current_model: string | null
 }
 
+export interface ConversationEntry {
+  position: number
+  kind: string
+  element_type: string
+  content: string
+  created_at_unix: number
+}
+
 export interface SessionDetail {
   status_slug: StatusSlug
   status_label: string
-  user_prompt: string | null
   session_id: string | null
-  body: { element_type: string; content: string; created_at_unix: number }[]
+  /** workbench-conversation-view 1.1: one ordered entry sequence, both sides. */
+  entries: ConversationEntry[]
   encoded_key: string
   current_model: string | null
   available_models: string[] | null

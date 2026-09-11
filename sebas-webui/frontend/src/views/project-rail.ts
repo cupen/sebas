@@ -35,6 +35,11 @@ export class SebasProjectRail extends LitElement {
   @state() private sessions: SessionRow[] = []
   /** Agent catalog（/api/agents）：「+」创建占位会话时的 agent 解析数据源。 */
   @state() private agents: AgentKindInfo[] = []
+  /**
+   * 焦点会话指针（workbench-conversation-view 3.2）：/api/sessions 响应的
+   * `active_session_key`——rail 的「当前」标记看它，不看 location.pathname。
+   */
+  @state() private focusedKey: string | null = null
   @state() private archivedSessions: ArchiveEntry[] = []
   @state() private expanded: Record<string, boolean> = {}
   @state() private historyOpen = false
@@ -228,6 +233,7 @@ export class SebasProjectRail extends LitElement {
       const list = await api.sessions()
       if (seq !== this.fetchSeq) return
       this.sessions = list.recent_sessions
+      this.focusedKey = list.active_session_key
     } catch { /* ignore */ }
     try {
       const { archived_sessions } = await api.archiveList()
@@ -248,7 +254,23 @@ export class SebasProjectRail extends LitElement {
     this.dispatchEvent(new CustomEvent('rail-select', { detail: { path }, bubbles: true, composed: true }))
   }
 
-  private openSession(row: SessionRow) { navigate(`/sessions/${row.encoded_key}`) }
+  /**
+   * 点会话 = switch + 就地聚焦（workbench-conversation-view 3.1，design
+   * D6）：POST switch 设置服务端焦点指针后停在 `/`，dashboard 就地渲染该
+   * 会话——不再 navigate 到深链离开工作台。switch 404（会话恰好被关闭）
+   * 时只刷新列表，不导航。
+   */
+  private async openSession(row: SessionRow) {
+    try {
+      await api.switchSession(row.encoded_key)
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err)
+      void this.refresh()
+      return
+    }
+    this.focusedKey = row.encoded_key
+    if (location.pathname !== '/') navigate('/')
+  }
 
   sessionsFor(id: string) { return this.sessions.filter((r) => r.project_id === id) }
   inboxSessions() { return this.sessions.filter((r) => r.project_id === null) }
@@ -344,8 +366,11 @@ export class SebasProjectRail extends LitElement {
     e.stopPropagation()
     try {
       await api.restoreSession(encodedKey)
+      // 恢复后就地聚焦该会话（与点会话同一条 switch 路径），停在工作台。
+      await api.switchSession(encodedKey).catch(() => undefined)
+      this.focusedKey = encodedKey
       void this.refresh()
-      navigate(`/sessions/${encodedKey}`)
+      if (location.pathname !== '/') navigate('/')
     } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
   }
 
@@ -412,7 +437,8 @@ export class SebasProjectRail extends LitElement {
   // ─── Renderers ──────────────────────────────────────────────────
   private renderSessionRow(row: SessionRow) {
     const label = row.session_id_short ?? row.chat_id
-    const current = location.pathname === `/sessions/${row.encoded_key}`
+    // 当前标记由焦点指针驱动（3.2）：不再比较 location.pathname。
+    const current = this.focusedKey === row.encoded_key
     return html`
       <li class="session-item ${current ? 'current' : ''}" title=${row.chat_id} aria-current=${current ? 'true' : 'false'} @click=${() => this.openSession(row)}>
         <span class="session-dot" data-status=${row.status_slug} aria-hidden="true"></span>
@@ -423,9 +449,8 @@ export class SebasProjectRail extends LitElement {
   }
 
   private renderArchivedSessionRow(a: ArchiveEntry) {
-    const current = location.pathname === `/sessions/${a.session_key}`
     return html`
-      <li class="session-item archived ${current ? 'current' : ''}" title=${a.session_key} aria-current=${current ? 'true' : 'false'} @click=${(e: Event) => this.restoreSession(e, a.session_key)}>
+      <li class="session-item archived" title=${a.session_key} @click=${(e: Event) => this.restoreSession(e, a.session_key)}>
         <span class="session-dot done" aria-hidden="true"></span>
         <span class="session-name">${a.label}</span>
         <span class="archive-meta">${a.project_path.split('/').filter(Boolean).pop() ?? ''}</span>
@@ -480,6 +505,8 @@ export class SebasProjectRail extends LitElement {
   }
 
   render() {
+    // workbench-turn-queue 7.4：关闭确认对话框点名将被丢弃的待执行条数。
+    const closePendingCount = this.closeTarget?.pending_count ?? 0
     return html`
       <div class="section-label">
         <span>Projects</span>
@@ -528,6 +555,14 @@ export class SebasProjectRail extends LitElement {
           <p style="font-size:0.8rem;color:var(--sebas-text-dim);margin:0;">
             该会话的 agent 子进程正在运行，关闭会终止子进程并移除会话映射，不可撤销。
           </p>
+          ${closePendingCount > 0
+            ? html`<p
+                style="font-size:0.8rem;color:var(--sebas-status-failed);margin:0;"
+                data-testid="close-discards-pending"
+              >
+                将丢弃 <b>${closePendingCount}</b> 条待执行消息，它们不会被执行。
+              </p>`
+            : nothing}
           ${this.closeError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;">${this.closeError}</div>` : nothing}
         </div>
         <wa-button slot="footer" variant="danger" @click=${() => void this.confirmCloseSession()}>关闭会话</wa-button>

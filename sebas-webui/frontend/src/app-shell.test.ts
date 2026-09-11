@@ -214,9 +214,9 @@ describe('routes after IA v2', () => {
   it('keeps the workbench, the sessions table and session deep links', () => {
     expect(matchRoute(ROUTES, '/')?.id).toBe('dashboard')
     expect(matchRoute(ROUTES, '/sessions')?.id).toBe('sessions')
-    // key 保持 RAW（%00 NUL 回归）。
+    // key 保持 RAW（%00 NUL 回归）。深链渲染同一个工作台（3.4：无独立详情页）。
     const m = matchRoute(ROUTES, '/sessions/oc_abc%00')
-    expect(m?.id).toBe('session-detail')
+    expect(m?.id).toBe('session-deep-link')
     expect(m?.params['key']).toBe('oc_abc%00')
   })
 
@@ -250,10 +250,19 @@ describe('routes after IA v2', () => {
   })
 })
 
-describe('deep-link reachability', () => {
-  it('the project rail still navigates to /sessions/:key via session rows', () => {
+describe('deep-link reachability (workbench-conversation-view 3.1)', () => {
+  it('the project rail switches focus IN PLACE — it no longer navigates to deep links', () => {
     const src = readFileSync(join(here, 'views/project-rail.ts'), 'utf8')
-    expect(src).toContain('navigate(`/sessions/')
+    // 点会话 = POST switch + 停在工作台；深链导航已退役。
+    expect(src).toContain('api.switchSession')
+    expect(src).not.toContain('navigate(`/sessions/')
+  })
+
+  it('the shell routes /sessions/:key to the workbench with the deep-link key', () => {
+    const src = readFileSync(join(here, 'app-shell.ts'), 'utf8')
+    expect(src).toContain('session-deep-link')
+    expect(src).toContain('deepLinkKey')
+    expect(src).not.toContain('sebas-session-detail')
   })
 })
 

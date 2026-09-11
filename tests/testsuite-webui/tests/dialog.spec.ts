@@ -19,7 +19,7 @@ import {
   createSession,
   ErrorCollector,
   getSession,
-  SessionDetailPage,
+  FocusedSession,
   waitStatus,
 } from './helpers/index'
 
@@ -32,7 +32,7 @@ test.describe('agent 对话覆盖', () => {
 
   /** Open an idle session's detail page (live WS) and return key + page object. */
   async function openIdle(page: import('@playwright/test').Page, prompt: string) {
-    const detail = new SessionDetailPage(page)
+    const detail = new FocusedSession(page)
     const key = await createSession(page.request, { prompt })
     await waitStatus(page.request, key, ['done'])
     await page.goto(`/sessions/${key}`)
@@ -42,7 +42,7 @@ test.describe('agent 对话覆盖', () => {
 
   /** Wait for one full stub round (hello + world bubbles, status Done). */
   async function waitRound(
-    detail: SessionDetailPage,
+    detail: FocusedSession,
     opts: { bubblesTimeout?: number; doneTimeout?: number } = {},
   ) {
     await expect(detail.bubbles().filter({ hasText: 'hello' }).first()).toBeVisible({
@@ -60,7 +60,7 @@ test.describe('agent 对话覆盖', () => {
       const t = Date.now()
       const q1 = `first-q-${t}`
       const q2 = `second-q-${t}`
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       // Round 1 via API (deterministic, no navigation race), then open live detail.
       const key = await createSession(page.request, { prompt: q1 })
@@ -79,24 +79,34 @@ test.describe('agent 对话覆盖', () => {
         .toBeGreaterThan(round1Count)
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
 
-      // Order: hello/world#1 < hello/world#2.
-      const texts = await detail.bubbles().allTextContents()
-      const hellos: number[] = []
-      const worlds: number[] = []
-      texts.forEach((s, i) => {
-        if (s.includes('hello')) hellos.push(i)
-        if (s.includes('world')) worlds.push(i)
-      })
-      expect(hellos.length).toBeGreaterThanOrEqual(2)
-      expect(worlds.length).toBeGreaterThanOrEqual(2)
-      expect(hellos[0]).toBeLessThan(worlds[0])
-      expect(worlds[0]).toBeLessThan(hellos[1])
-      expect(hellos[1]).toBeLessThan(worlds[1])
+      // Order (workbench-conversation-view 2.1/2.3): each round's hello and
+      // world live in the SAME agent turn bubble; the operator's q2 turn
+      // sits BETWEEN the two agent turns — user, agent, user, agent.
+      const blocks = page.locator('sebas-dashboard sebas-transcript-view .turn-block')
+      await expect(blocks).toHaveCount(4)
+      const classes: string[] = []
+      const texts: string[] = []
+      for (let i = 0; i < 4; i++) {
+        classes.push((await blocks.nth(i).getAttribute('class')) ?? '')
+        texts.push((await blocks.nth(i).textContent()) ?? '')
+      }
+      expect(classes[0]).toContain('is-user')
+      expect(classes[1]).toContain('is-assistant')
+      expect(classes[2]).toContain('is-user')
+      expect(classes[3]).toContain('is-assistant')
+      expect(texts[0]).toContain(q1)
+      expect(texts[1]).toContain('hello')
+      expect(texts[1]).toContain('world')
+      expect(texts[2]).toContain(q2)
+      expect(texts[3]).toContain('hello')
+      expect(texts[3]).toContain('world')
 
-      // Reload: both rounds recover from persisted state, original prompt intact.
+      // Reload: both rounds recover from persisted state. The card quote
+      // shows the LATEST turn's prompt — since workbench-turn-queue 2.1/2.2
+      // the web path seeds each turn's prompt at turn start (same as feishu).
       await page.reload()
       await expect(detail.host).toBeVisible()
-      await expect(detail.promptQuote).toContainText(q1)
+      await expect(detail.userTurn(q2)).toBeVisible()
       await expect
         .poll(async () => detail.bubbles().count(), { timeout: 10_000, intervals: [250] })
         .toBeGreaterThan(round1Count)
@@ -126,7 +136,7 @@ test.describe('agent 对话覆盖', () => {
         .poll(async () => detail.bubbles().count(), { timeout: 5_000, intervals: [250] })
         .toBe(before)
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done')
-      await expect(detail.errorCallout).toHaveCount(0)
+      await expect(detail.unavailableNote).toHaveCount(0)
 
       // The session is still usable afterwards (count growth + Done prove the
       // probe round ran — probe text itself is not rendered, see file header).
@@ -173,12 +183,13 @@ test.describe('agent 对话覆盖', () => {
       // API snapshot agrees the transcript grew; assistant side still the fixture.
       const { detail: snap } = await getSession(page.request, key)
       expect(snap).not.toBeNull()
-      expect(snap!.body.length).toBeGreaterThan(0)
+      expect(snap!.entries.length).toBeGreaterThan(0)
 
-      // Reload: transcript + done persist, original prompt intact, no errors.
+      // Reload: transcript + done persist; the card quote carries the latest
+      // turn's prompt (the special payload itself — workbench-turn-queue 2.2).
       await page.reload()
       await expect(detail.host).toBeVisible()
-      await expect(detail.promptQuote).toContainText(`special-${t}`)
+      await expect(detail.userTurn(`中文问候🎉🔧 ${t}`)).toBeVisible()
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done')
 
       expect(collector.clean()).toEqual([])

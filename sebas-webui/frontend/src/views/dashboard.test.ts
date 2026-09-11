@@ -1,15 +1,20 @@
 // @vitest-environment jsdom
 /**
- * Workbench 主区（IA v2）：统计卡条与 "Recent sessions" 表已删除；保留
- * 项目头部（名称 + 分支 pill + `N sessions · ● active` meta）、聚焦会话
- * spotlight + **内联 turn-stream**（<sebas-transcript-view> 就地渲染聚焦
- * 会话）/ 预览原型空态、composer。api client 全量 mock；
- * workbench-composer 模块打桩（其 WA 表单依赖 jsdom 缺失的
- * ElementInternals，且不属于本测试面）。
+ * Workbench 主区（IA v2 + workbench-conversation-view）：工作台是唯一对话面
+ * ——聚焦会话头（状态徽章/chat id/agent 锁/模型选择/Close/归档）+ review
+ * cards + 内联对话（<sebas-transcript-view> 渲染 entries）/ 预览原型空态、
+ * composer。api client 全量 mock；workbench-composer 模块打桩（其 WA 表单
+ * 依赖 jsdom 缺失的 ElementInternals，且不属于本测试面）。
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionDetail, SessionRow, Summary } from '../api/client.js'
+import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
+
+// 会话头渲染 WA 表单关联组件（wa-button / wa-dialog / wa-select）——jsdom
+// 缺 ElementInternals/setValidity 等会以未处理 rejection 污染整轮退出码。
+// 共享垫片（幂等安装）见 test-support/wa-polyfills.ts。
+installWaDomPolyfills()
 
 const apiMocks = vi.hoisted(() => ({
   summary: vi.fn(),
@@ -18,6 +23,8 @@ const apiMocks = vi.hoisted(() => ({
   session: vi.fn(),
   projectsBranch: vi.fn(),
   projectsList: vi.fn(),
+  closeSession: vi.fn(),
+  archiveSession: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -27,6 +34,8 @@ vi.mock('../api/client.js', () => ({
     settings: apiMocks.settings,
     session: apiMocks.session,
     projects: { branch: apiMocks.projectsBranch, list: apiMocks.projectsList },
+    closeSession: apiMocks.closeSession,
+    archiveSession: apiMocks.archiveSession,
   },
 }))
 
@@ -58,6 +67,7 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     current_model: null,
     available_models: null,
     agent_kind: null,
+    pending_count: 0,
     ...overrides,
   }
 }
@@ -74,7 +84,7 @@ const summaryBase: Summary = {
   reachability: { ok: true },
 }
 
-/** Focused-session detail payload for the inline turn stream. */
+/** Focused-session detail payload: the conversation entry sequence. */
 function detailFixture(): SessionDetail {
   return {
     chat_id: 'chat-live',
@@ -84,10 +94,10 @@ function detailFixture(): SessionDetail {
     status_label: 'Working',
     status_slug: 'working',
     status_glyph: '●',
-    user_prompt: 'do the thing',
-    body: [
-      { element_type: 'markdown', content: 'first entry', created_at_unix: 1_700_000_000 },
-      { element_type: 'markdown', content: 'second entry', created_at_unix: 1_700_000_100 },
+    entries: [
+      { position: 0, kind: 'prompt', element_type: 'markdown', content: 'do the thing', created_at_unix: 1_700_000_000 },
+      { position: 1, kind: 'content', element_type: 'markdown', content: 'first entry', created_at_unix: 1_700_000_100 },
+      { position: 2, kind: 'content', element_type: 'markdown', content: 'second entry', created_at_unix: 1_700_000_200 },
     ],
     msg_id: null,
     last_active: 'just now',
@@ -95,6 +105,7 @@ function detailFixture(): SessionDetail {
     current_model: null,
     available_models: null,
     agent_kind: 'claude',
+    pending: [],
   }
 }
 
@@ -114,6 +125,7 @@ function focusedSummary(): Summary {
       current_model: null,
       available_models: null,
       agent_kind: 'claude',
+      pending: [],
     },
     active_session_key: 'oc_live%00',
   }
@@ -143,6 +155,7 @@ beforeEach(() => {
       row({}),
       row({ encoded_key: 'oc_y%00', chat_id: 'chat-y', status_slug: 'done', status: 'done' }),
     ],
+    active_session_key: null,
   })
   apiMocks.settings.mockResolvedValue({
     card_config: {
@@ -236,7 +249,7 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
-  it('renders the inline turn stream for the focused session on /', async () => {
+  it('renders the inline conversation for the focused session on /', async () => {
     apiMocks.summary.mockResolvedValue(focusedSummary())
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
@@ -252,8 +265,107 @@ describe('sebas-dashboard (workbench main area)', () => {
     }
     expect(transcript).toBeTruthy()
     expect(transcript.fill).toBe(true)
-    expect(transcript.entries).toHaveLength(2)
+    expect(transcript.entries).toHaveLength(3)
     expect(transcript.sessionKey).toBe('oc_live%00')
+    el.remove()
+  })
+
+  it('renders the migrated session head: badge, agent lock, model pick, close + archive (3.3)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      available_models: ['m1', 'm2'],
+      current_model: 'm1',
+      pending: [{ id: 1, text: 'x', position: 0, disposition: 'turn', priority: false }],
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const head = el.shadowRoot!.querySelector<HTMLElement>('.session-head')
+    expect(head).toBeTruthy()
+    expect(head!.getAttribute('data-status')).toBe('working')
+    expect(head!.querySelector('sebas-status-badge')).toBeTruthy()
+    expect(head!.textContent).toContain('chat-live')
+    expect(head!.querySelector('[data-testid="agent-lock"]')?.textContent).toContain('claude')
+    // 会话内模型选择：available_models 非空才显示。
+    const modelSelect = head!.querySelector('wa-select.model-select')
+    expect(modelSelect).toBeTruthy()
+    // Close/归档动作可达。
+    const buttons = [...head!.querySelectorAll('wa-button')].map((b) => b.textContent?.trim())
+    expect(buttons).toContain('Close')
+    expect(buttons).toContain('Archive')
+    // review cards 从工作台可达（3.3）。
+    expect(el.shadowRoot!.querySelector('sebas-review-cards')).toBeTruthy()
+    el.remove()
+  })
+
+  it('gives no session model dropdown when the agent exposes none', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.session-head wa-select.model-select')).toBeNull()
+    el.remove()
+  })
+
+  it('close confirmation names the discarded pending count (turn-queue semantics)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      pending: [{ id: 1, text: 'queued msg', position: 0, disposition: 'turn', priority: false }],
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    // 打开确认对话框。
+    const closeBtn = [...el.shadowRoot!.querySelectorAll('wa-button')].find((b) =>
+      b.textContent?.trim() === 'Close',
+    )
+    closeBtn!.click()
+    await el.updateComplete
+    const note = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="close-discards-pending"]')
+    expect(note?.textContent).toContain('1')
+  })
+
+  it('archives the focused session from the workbench and refetches (3.3)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.archiveSession.mockResolvedValue({ status: 'archived', entry: {} })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const archiveBtn = [...el.shadowRoot!.querySelectorAll('wa-button')].find((b) =>
+      b.textContent?.trim() === 'Archive',
+    )
+    archiveBtn!.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMocks.archiveSession).toHaveBeenCalledWith('oc_live%00')
+    el.remove()
+  })
+
+  it('renders the deep-linked session on /sessions/:key via deepLinkKey (3.4)', async () => {
+    // 深链：focus 指针尚未到达（summary 无聚焦），deepLinkKey 先顶上。
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    el.deepLinkKey = 'oc_live%00'
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_live%00')
+    expect(el.shadowRoot!.querySelector('.turn-stream-area')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.empty-stream')).toBeNull()
+    el.remove()
+  })
+
+  it('shows the honest empty conversation state for a session without entries', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), entries: [] })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const area = el.shadowRoot!.querySelector('div.turn-stream-area')
+    expect(area?.textContent).toContain('Nothing yet')
+    expect(area!.querySelector('sebas-transcript-view')).toBeNull()
     el.remove()
   })
 
@@ -299,7 +411,7 @@ describe('provider label sourcing (fix-webui-detached-status)', () => {
     vi.clearAllMocks()
     apiMocks.summary.mockResolvedValue(summaryBase)
     apiMocks.session.mockResolvedValue(detailFixture())
-    apiMocks.sessions.mockResolvedValue({ recent_sessions: [] })
+    apiMocks.sessions.mockResolvedValue({ recent_sessions: [], active_session_key: null })
     apiMocks.projectsBranch.mockResolvedValue({
       project_id: 'proj-sebas',
       branch: 'feat/webui',

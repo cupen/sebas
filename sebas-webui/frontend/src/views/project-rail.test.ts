@@ -13,6 +13,11 @@ import type { SebasProjectRail } from './project-rail.js'
 
 vi.mock('../api/client.js')
 
+// vi.auto-mock 把方法变成了 vi.fn，但类型仍是真实 client 的形状——
+// 统一经 `mockOf` 拿到可编排的 mock 类型，调用点保持与真 client 同形。
+const mockOf = <F>(fn: F): ReturnType<typeof vi.fn> & F =>
+  fn as unknown as ReturnType<typeof vi.fn> & F
+
 const apiMock = vi.mocked(api)
 
 const projects: Project[] = [
@@ -41,6 +46,7 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     current_model: null,
     available_models: null,
     agent_kind: null,
+    pending_count: 0,
     ...overrides,
   }
 }
@@ -66,13 +72,22 @@ async function mount(): Promise<SebasProjectRail> {
   return el
 }
 
+const sessionList = (rows: SessionRow[]) => ({
+  recent_sessions: rows,
+  active_count: rows.filter((r) => r.status === 'active').length,
+  dormant_count: 0,
+  spawning_count: 0,
+  total_sessions: rows.length,
+  active_session_key: null,
+})
+
 beforeEach(() => {
-  apiMock.projects.list.mockResolvedValue({ projects })
-  apiMock.projects.branch.mockRejectedValue(new Error('no branch lookup here'))
+  mockOf(apiMock.projects.list).mockResolvedValue({ projects })
+  mockOf(apiMock.projects.branch).mockRejectedValue(new Error('no branch lookup here'))
   // Mock sessions.
-  apiMock.sessions.mockResolvedValue({ recent_sessions: sessionRows as any })
+  mockOf(apiMock.sessions).mockResolvedValue(sessionList(sessionRows))
   // Mock archive list (empty by default).
-  apiMock.archiveList.mockResolvedValue({ archived_sessions: [] })
+  mockOf(apiMock.archiveList).mockResolvedValue({ archived_sessions: [] })
 })
 
 afterEach(() => {
@@ -114,20 +129,72 @@ describe('sebas-project-rail (sidebar tree)', () => {
     el.remove()
   })
 
-  it('navigates to /sessions/:key when a nested session row is clicked', async () => {
+  it('clicking a session switches focus IN PLACE and stays on the workbench (3.1)', async () => {
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/oc_1%00',
+      active_session_key: 'oc_1%00',
+    })
+    window.history.replaceState({}, '', '/')
     const el = await mount()
     ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
 
     const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
     first.click()
+    await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(window.location.pathname).toBe('/sessions/oc_1%00')
+    // switch 端点被调用；操作员不被导航走——留在工作台。
+    expect(apiMock.switchSession).toHaveBeenCalledWith('oc_1%00')
+    expect(window.location.pathname).toBe('/')
+    el.remove()
+  })
+
+  it('the current-session marker follows the focus pointer, not the location (3.2)', async () => {
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/oc_2%00',
+      active_session_key: 'oc_2%00',
+    })
+    // 浏览器位置在旧深链上，焦点指针却指向另一会话：标记必须看指针。
+    window.history.replaceState({}, '', '/sessions/oc_1%00')
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList(sessionRows),
+      active_session_key: 'oc_2%00',
+    })
+    const el = await mount()
+    await el.updateComplete
+    // 展开含 oc_2 的组（oc_1/oc_2 都是 proj-alpha 组 → 点第一行展开）。
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items[0]!.classList.contains('current')).toBe(false)
+    expect(items[1]!.classList.contains('current')).toBe(true)
+    expect(items[1]!.getAttribute('aria-current')).toBe('true')
+    el.remove()
+  })
+
+  it('marks the focused session current after an in-place switch (3.1+3.2)', async () => {
+    mockOf(apiMock.switchSession).mockResolvedValue({
+      status: 'switched',
+      redirect: '/sessions/oc_1%00',
+      active_session_key: 'oc_1%00',
+    })
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const first = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    first.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect((el as unknown as { focusedKey: string | null }).focusedKey).toBe('oc_1%00')
+    const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    expect(items[0]!.classList.contains('current')).toBe(true)
     el.remove()
   })
 
   it('keeps drag-to-reorder persistence via POST /api/projects/reorder', async () => {
-    apiMock.projects.reorder.mockResolvedValue({
+    mockOf(apiMock.projects.reorder).mockResolvedValue({
       projects: [projects[1], projects[0]],
     })
     const el = await mount()
@@ -145,7 +212,7 @@ describe('sebas-project-rail (sidebar tree)', () => {
   })
 
   it('opens add-project dialog when the + button is clicked', async () => {
-    apiMock.fsBrowse.mockResolvedValue({ path: '/home/me', entries: [{ name: 'alpha', is_dir: true }] })
+    mockOf(apiMock.fsBrowse).mockResolvedValue({ path: '/home/me', entries: [{ name: 'alpha', is_dir: true }] })
     const el = await mount()
     ;(el.shadowRoot!.querySelector('.section-label .add-btn') as HTMLElement).click()
     await el.updateComplete
@@ -167,7 +234,7 @@ describe('inbox group', () => {
     expect(head!.querySelector('.group-count')?.textContent).toBe('2')
     // Default collapsed.
     expect(el.shadowRoot!.querySelectorAll('.group-section li.session-item')).toHaveLength(0)
-    head!.click()
+    ;(head as HTMLElement).click()
     await el.updateComplete
     const items = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item')]
     expect(items).toHaveLength(2)
@@ -176,7 +243,7 @@ describe('inbox group', () => {
   })
 
   it('stays hidden entirely when every session is bound to a project', async () => {
-    apiMock.sessions.mockResolvedValue({ recent_sessions: [sessionRows[0]] as any })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([sessionRows[0]]))
     const el = await mount()
     expect(el.shadowRoot!.querySelector('.group-head')).toBeNull()
     el.remove()
@@ -185,7 +252,7 @@ describe('inbox group', () => {
 
 describe('history group (archived sessions)', () => {
   it('shows archived sessions from the archive API', async () => {
-    apiMock.archiveList.mockResolvedValue({
+    mockOf(apiMock.archiveList).mockResolvedValue({
       archived_sessions: [
         { session_key: 'oc_arch%00', project_path: '/home/me/alpha', label: 'Old session', archived_at: 1000, retention_deadline: 2000 },
       ],
@@ -195,7 +262,7 @@ describe('history group (archived sessions)', () => {
     const historyHead = heads.find((h) => h.textContent?.includes('History'))
     expect(historyHead).toBeTruthy()
     expect(historyHead!.querySelector('.group-count')?.textContent).toBe('1')
-    historyHead!.click()
+    ;(historyHead as HTMLElement).click()
     await el.updateComplete
     const items = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item')]
     expect(items).toHaveLength(1)
@@ -205,7 +272,7 @@ describe('history group (archived sessions)', () => {
 })
 describe('project registration degraded hint (harden-core-channel-deployment 4.3)', () => {
   it('shows the honest degraded hint when the core is unreachable and the add lands in the local registry', async () => {
-    apiMock.projects.add.mockResolvedValue({
+    mockOf(apiMock.projects.add).mockResolvedValue({
       ...projects[0],
       degraded: { cause: 'socket absent' },
     } as any)
@@ -227,7 +294,7 @@ describe('project registration degraded hint (harden-core-channel-deployment 4.3
   })
 
   it('shows no hint for a healthy (status-store) registration, and a later refresh clears a stale hint', async () => {
-    apiMock.projects.add.mockResolvedValue({ ...projects[0] } as any)
+    mockOf(apiMock.projects.add).mockResolvedValue({ ...projects[0] } as any)
     const el = await mount()
     ;(el as any).addPath = '/home/me/alpha'
     await (el as any).submitAddProject()
@@ -237,7 +304,7 @@ describe('project registration degraded hint (harden-core-channel-deployment 4.3
   })
 
   it('clears the degraded hint once the core recovers (refresh-driven)', async () => {
-    apiMock.projects.add.mockResolvedValue({
+    mockOf(apiMock.projects.add).mockResolvedValue({
       ...projects[0],
       degraded: { cause: 'socket absent' },
     } as any)
@@ -251,6 +318,48 @@ describe('project registration degraded hint (harden-core-channel-deployment 4.3
     await el.refresh()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="project-degraded-hint"]')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('rail close confirmation (workbench-turn-queue 7.4)', () => {
+  it('names how many pending submissions a close will discard', async () => {
+    const pendingRow = row({
+      status: 'working',
+      status_slug: 'working',
+      pending_count: 2,
+    })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([pendingRow]))
+    const el = await mount()
+    // 会话行在默认折叠的 Inbox 组里，先展开。
+    ;(el.shadowRoot!.querySelector('.group-head') as HTMLElement)!.click()
+    await el.updateComplete
+    const closeBtn = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'li.session-item button[aria-label^="Close"]',
+    )
+    expect(closeBtn).toBeTruthy()
+    closeBtn!.click()
+    await el.updateComplete
+
+    const line = el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')
+    expect(line).toBeTruthy()
+    expect(line!.textContent).toContain('2')
+    expect(line!.textContent).toContain('待执行')
+    el.remove()
+  })
+
+  it('omits the discard line when the session has no pending submissions', async () => {
+    const plainRow = row({ status: 'working', status_slug: 'working', pending_count: 0 })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([plainRow]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelector('.group-head') as HTMLElement)!.click()
+    await el.updateComplete
+    const closeBtn = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'li.session-item button[aria-label^="Close"]',
+    )
+    closeBtn!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')).toBeNull()
     el.remove()
   })
 })

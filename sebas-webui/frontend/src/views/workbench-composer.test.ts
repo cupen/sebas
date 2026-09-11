@@ -17,6 +17,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SebasPendingStack } from '../components/pending-stack.js'
+import '../components/pending-stack.js'
 import type { SebasWorkbenchComposer } from './workbench-composer.js'
 import type { Summary } from '../api/client.js'
 import {
@@ -56,6 +58,7 @@ vi.mock('../api/client.js', () => ({
     setSessionModel: vi.fn(),
     agentDefaults: vi.fn(),
     routerProviders: vi.fn(),
+    routerDefaults: vi.fn(),
   },
 }))
 
@@ -160,6 +163,13 @@ beforeEach(() => {
     total_sessions: 0,
     active_session_key: null,
   })
+  // 创建模式的 Settings 目录（workbench-conversation-view 4.2/4.3）：默认
+  // 空目录（model 预选保持 null，供既有提交用例稳定）；两级选择用例按需覆写。
+  ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
+  ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    default_provider: null,
+    default_model: null,
+  })
 })
 
 afterEach(() => {
@@ -195,46 +205,56 @@ describe('sebas-workbench-composer', () => {
     expect(callout?.textContent ?? '').toContain('无法获取服务状态')
   })
 
-  it('shows a model dropdown from the latest session and forwards the model', async () => {
+  it('creation mode offers the two-level Settings catalog and forwards the picked model (4.3)', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
-    ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
-      recent_sessions: [
+    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
         {
-          encoded_key: 'oc_gemini%00',
-          chat_id: 'oc_gemini',
-          thread_id: null,
-          session_id: 's1',
-          session_id_short: 's1',
-          status: 'active',
-          status_label: 'Working',
-          status_slug: 'working',
-          status_glyph: '▶',
-          last_active: '0s ago',
-          last_active_unix: 42,
-          is_active: false,
-          project_dir: null,
-          prompt_preview: 'hi',
-          current_model: 'pro-model',
-          available_models: ['free-model', 'pro-model', 'gemini-2.5'],
+          name: 'deepseek',
+          base_url_anthropic: null,
+          base_url_openai_chat: 'https://api.deepseek.example',
+          base_url_openai_responses: null,
+          api_key_env: 'DEEPSEEK_API_KEY',
+          api_key_configured: true,
+          models: [{ id: 'deepseek-chat', tags: [] }, { id: 'deepseek-reasoner', tags: [] }],
+        },
+        {
+          name: 'anthropic',
+          base_url_anthropic: 'https://api.anthropic.example',
+          base_url_openai_chat: null,
+          base_url_openai_responses: null,
+          api_key_env: 'ANTHROPIC_API_KEY',
+          api_key_configured: true,
+          models: [{ id: 'claude-sonnet', tags: ['vision'] }],
         },
       ],
-      active_count: 1,
-      dormant_count: 0,
-      spawning_count: 0,
-      total_sessions: 1,
-      active_session_key: null,
-    } as never)
+    })
+    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+      default_provider: 'deepseek',
+      default_model: 'deepseek-reasoner',
+    })
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_m' })
     const el = await mount({ projectDir: null })
 
-    // The dropdown is rendered and preselects the session's current model.
-    const sel = el.shadowRoot?.querySelector('wa-select[aria-label="Model"]') as HTMLElement & {
-      value: string
-    }
-    expect(sel).toBeTruthy()
-    expect(sel.value).toBe('pro-model')
+    // 一级 = provider，默认预选配置的 default provider。
+    const providerSel = el.shadowRoot?.querySelector(
+      'wa-select[aria-label="Provider"]',
+    ) as unknown as HTMLElement & { value: string }
+    expect(providerSel).toBeTruthy()
+    expect(providerSel.value).toBe('deepseek')
+    // 二级 = model，默认预选配置的 default model。
+    const modelSel = el.shadowRoot?.querySelector(
+      'wa-select[aria-label="Model"]',
+    ) as unknown as HTMLElement & { value: string }
+    expect(modelSel.value).toBe('deepseek-reasoner')
 
-    // Submit through the model picker value.
+    // 两级联动：切 provider → model 列表换到该 provider、预选其首项。
+    providerSel.value = 'anthropic'
+    providerSel.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    await el.updateComplete
+    expect(modelSel.value).toBe('claude-sonnet')
+
+    // 提交把选定的 model 一并下发。
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
     ta.value = 'use this model'
     ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
@@ -242,41 +262,97 @@ describe('sebas-workbench-composer', () => {
     ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(api.createSession).toHaveBeenCalledWith({ prompt: 'use this model', projectId: null, agent: expect.any(String), model: 'pro-model' })
+    expect(api.createSession).toHaveBeenCalledWith({
+      prompt: 'use this model',
+      projectId: null,
+      agent: expect.any(String),
+      model: 'claude-sonnet',
+    })
   })
 
-  it('hides the model dropdown when no session exposes available_models', async () => {
+  it('a configured default outside the catalog cannot preselect (no fabricated options, 4.3)', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
-    ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
-      recent_sessions: [
+    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
         {
-          encoded_key: 'oc_claude%00',
-          chat_id: 'oc_claude',
-          thread_id: null,
-          session_id: 's1',
-          session_id_short: 's1',
-          status: 'active',
-          status_label: 'Working',
-          status_slug: 'working',
-          status_glyph: '▶',
-          last_active: '0s ago',
-          last_active_unix: 42,
-          is_active: false,
-          project_dir: null,
-          prompt_preview: 'hi',
-          current_model: null,
-          available_models: null,
+          name: 'alpha',
+          base_url_anthropic: null,
+          base_url_openai_chat: null,
+          base_url_openai_responses: null,
+          api_key_env: null,
+          api_key_configured: true,
+          models: [{ id: 'a1', tags: [] }],
         },
       ],
-      active_count: 1,
-      dormant_count: 0,
-      spawning_count: 0,
-      total_sessions: 1,
-      active_session_key: null,
-    } as never)
+    })
+    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+      default_provider: 'ghost',
+      default_model: 'nope',
+    })
     const el = await mount({ projectDir: null })
-    const sel = el.shadowRoot?.querySelector('wa-select[aria-label="Model"]')
-    expect(sel).toBeNull()
+    const providerSel = el.shadowRoot?.querySelector(
+      'wa-select[aria-label="Provider"]',
+    ) as unknown as HTMLElement & { value: string }
+    // 目录里只有 alpha：预选落到目录第一项，绝不伪造 ghost 选项。
+    expect(providerSel.value).toBe('alpha')
+    const providerOptions = [
+      ...el.shadowRoot!.querySelectorAll('wa-select[aria-label="Provider"] wa-option'),
+    ].map((o) => o.getAttribute('value'))
+    expect(providerOptions).toEqual(['alpha'])
+    const modelSel = el.shadowRoot?.querySelector(
+      'wa-select[aria-label="Model"]',
+    ) as unknown as HTMLElement & { value: string }
+    expect(modelSel.value).toBe('a1')
+  })
+
+  it('follow mode: no session models means no dropdown and no error (D8)', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    const el = await mount({
+      sessionKey: 'web%00web-1',
+      agentKind: 'claude',
+      sessionModels: [],
+      currentModel: null,
+    })
+    // 会话内不给模型下拉（acp-model-selection 语义），也不显示目录不可用
+    // （跟随模式与创建目录正交）。
+    expect(el.shadowRoot?.querySelector('wa-select[aria-label="Model"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('[data-testid="catalog-unavailable"]')).toBeNull()
+    expect(el.shadowRoot?.querySelector('wa-select[aria-label="Provider"]')).toBeNull()
+  })
+
+  it('existing sessions keep session-sourced options, not the catalog (D8)', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    // 目录里只有 deepseek，但会话自己的模型面才是权威。
+    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
+        {
+          name: 'deepseek',
+          base_url_anthropic: null,
+          base_url_openai_chat: null,
+          base_url_openai_responses: null,
+          api_key_env: null,
+          api_key_configured: true,
+          models: [{ id: 'deepseek-chat', tags: [] }],
+        },
+      ],
+    })
+    const el = await mount({
+      sessionKey: 'web%00web-1',
+      agentKind: 'claude',
+      sessionModels: ['sonnet', 'haiku'],
+      currentModel: 'sonnet',
+    })
+    const sel = el.shadowRoot?.querySelector(
+      'wa-select[aria-label="Model"]',
+    ) as unknown as HTMLElement & { value: string }
+    expect(sel).toBeTruthy()
+    expect(sel.value).toBe('sonnet')
+    const options = [...el.shadowRoot!.querySelectorAll('wa-select[aria-label="Model"] wa-option')].map(
+      (o) => o.getAttribute('value'),
+    )
+    expect(options).toEqual(['sonnet', 'haiku'])
+    // 一级 provider 选择器只在创建模式出现。
+    expect(el.shadowRoot?.querySelector('wa-select[aria-label="Provider"]')).toBeNull()
   })
 
   it('submit calls createSession with project_id null when projectId prop is null', async () => {
@@ -354,8 +430,24 @@ describe('sebas-workbench-composer', () => {
     expect(api.createSession).not.toHaveBeenCalled()
   })
 
-  it('forwards the agent selected in the drop-down (default = first reachable)', async () => {
+  it('project switch preselects the remembered default agent; no record keeps the pick (wire D5)', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    const el = await mount({ projectDir: null })
+    // 初始预选 = 首个可达 agent（catalog 兜底）。
+    expect(el.agent).toBe('claude')
+
+    // 项目带着记住的 default_agent 切入 → 预选它（wire D5）。
+    el.projectDefaultAgent = 'gemini'
+    await el.updateComplete
+    expect(el.agent).toBe('gemini')
+
+    // 无记录（null）不改动现选——「first visit falls back honestly」的另一面。
+    el.projectDefaultAgent = null
+    await el.updateComplete
+    expect(el.agent).toBe('gemini')
+  })
+
+  it('forwards the agent selected in the drop-down (default = first reachable)', async () => {    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_native' })
     const el = await mount({ projectDir: null })
 
@@ -702,21 +794,11 @@ describe('sebas-workbench-composer', () => {
 })
 
 
-// ── add-agent-defaults-catalog：创建模式选择器的 catalog 数据源 ───────────
+// ── workbench-conversation-view 4.3/4.4：创建模式目录的诚实降级 ───────────
 
-it('creation mode states model unavailability honestly without any session model surface', async () => {
-  // workbench-agent-wire-fix 3.3：/api/agent-defaults 退役，无会话模型面
-  // 时创建模式的模型选择如实呈现不可用（模型下发给 4.x change 接管）。
+it('creation mode states model unavailability honestly when no catalog exists', async () => {
+  // 空目录（无 provider 目录）：显式不可用提示，不显示空下拉、不伪造选项。
   ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
-  ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
-    recent_sessions: [],
-    active_count: 0,
-    dormant_count: 0,
-    spawning_count: 0,
-    total_sessions: 0,
-    active_session_key: null,
-  } as never)
-
   const el = await mount({
     sessionKey: 'web%00web-1',
     agentKind: 'claude',
@@ -731,37 +813,86 @@ it('creation mode states model unavailability honestly without any session model
 
   const sel = el.shadowRoot?.querySelector('wa-select[aria-label="Model"]')
   expect(sel).toBeNull()
-  const hint = el.shadowRoot?.querySelector('[role="status"]')
-  expect(hint?.textContent ?? '').toContain('no model catalog')
+  const hint = el.shadowRoot?.querySelector('[data-testid="catalog-unavailable"]')
+  expect(hint?.textContent ?? '').toContain('model catalog unavailable')
 })
 
-it('creation mode states catalog unavailability honestly when nothing is available', async () => {
+it('creation mode states catalog unavailability when the directory read fails (4.4)', async () => {
   ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
-  ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
-    recent_sessions: [],
-    active_count: 0,
-    dormant_count: 0,
-    spawning_count: 0,
-    total_sessions: 0,
-    active_session_key: null,
-  } as never)
-  ;(api.agentDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
-    provider: null,
-    model: null,
-  })
-
-  const el = await mount({
-    sessionKey: 'web%00web-1',
-    agentKind: 'claude',
-    sessionModels: ['sonnet', 'haiku'],
-    currentModel: 'sonnet',
-  })
-  const chip = () => el.shadowRoot?.querySelector('.mode-chip') as HTMLElement
-  chip().click()
-  await el.updateComplete
+  // router/core 状态库不在跑：providers 读取失败 → 显式不可用，不是空列表。
+  const failure = Object.assign(new Error('core 状态库不可达'), { status: 503 })
+  ;(api.routerProviders as ReturnType<typeof vi.fn>).mockRejectedValue(failure)
+  ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockRejectedValue(failure)
+  const el = await mount({ projectDir: null })
   await new Promise((r) => setTimeout(r, 0))
   await el.updateComplete
 
-  const hint = el.shadowRoot?.querySelector('[role="status"]')
-  expect(hint?.textContent ?? '').toContain('no model catalog')
+  expect(el.shadowRoot?.querySelector('wa-select[aria-label="Provider"]')).toBeNull()
+  expect(el.shadowRoot?.querySelector('wa-select[aria-label="Model"]')).toBeNull()
+  const hint = el.shadowRoot?.querySelector<HTMLElement>('[data-testid="catalog-unavailable"]')
+  expect(hint).toBeTruthy()
+  expect(hint!.textContent).toContain('model catalog unavailable')
+  // 提交门不因目录不可用而锁死——模型是正交维度（agent 仍可选）。
+  const agentSel = el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]')
+  expect(agentSel).toBeTruthy()
+})
+
+describe('submission appends to a non-empty stack (workbench-turn-queue 7.5)', () => {
+  it('follow-mode submit appends: sendMessage carries the new text and no stack entry is altered', async () => {
+    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
+    ;(api.sessions as ReturnType<typeof vi.fn>).mockResolvedValue({
+      recent_sessions: [],
+      active_count: 0,
+      dormant_count: 0,
+      spawning_count: 0,
+      total_sessions: 0,
+      active_session_key: 'web%00web-1',
+    } as never)
+    ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude', reachable: true }],
+    })
+    ;(api.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'ok' })
+
+    // 堆叠区已有两条待执行提交（一条在跑回合后的排队回合 + 一条优先项）。
+    const el = document.createElement('sebas-pending-stack') as SebasPendingStack
+    el.sessionKey = 'web%00web-1'
+    el.pending = [
+      { id: 1, text: 'queued one', position: 0, disposition: 'turn', priority: false },
+      { id: 2, text: 'urgent /btw', position: 1, disposition: 'turn', priority: true },
+    ]
+    document.body.appendChild(el)
+    await el.updateComplete
+
+    const composer = await mount({
+      sessionKey: 'web%00web-1',
+      agentKind: 'claude',
+    })
+    const textarea = () =>
+      composer.shadowRoot?.querySelector('wa-textarea') as unknown as HTMLTextAreaElement
+    textarea().value = 'a brand new submission'
+    textarea().dispatchEvent(new Event('input', { bubbles: true }))
+    await composer.updateComplete
+    const send = composer.shadowRoot?.querySelector('.send-button') as HTMLElement
+    send.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await composer.updateComplete
+
+    // 提交是追加：sendMessage 收到完整的新文本。
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'a brand new submission')
+    // 既有条目文本不被覆盖、不被合并：堆叠区仍逐字保留原文本。
+    const stackText = el.shadowRoot?.textContent ?? ''
+    expect(stackText).toContain('queued one')
+    expect(stackText).toContain('urgent /btw')
+    expect(stackText).not.toContain('a brand new submission')
+    el.remove()
+  })
+})
+
+describe('native availability fixtures (wire-webui-sebas-agent-e2e 4.1)', () => {
+  it('the fixtures model one available and one unavailable execution body', () => {
+    expect(summaryNativeAvailable.execution_bodies?.every((b) => b.ok)).toBe(true)
+    expect(summaryNativeUnavailable.execution_bodies?.find((b) => b.name === 'native')?.ok).toBe(
+      false,
+    )
+  })
 })

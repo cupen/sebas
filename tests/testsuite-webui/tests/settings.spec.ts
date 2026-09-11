@@ -1,22 +1,30 @@
 /**
  * Journey S.x — settings surface (phase-3 tasks S1–S6, new IA
- * fix-settings-menu-and-services-semantics).
+ * fix-settings-menu-and-services-semantics; S5 rewritten for
+ * make-core-own-provider-data 5.3 and again for
+ * redesign-provider-models-settings 5.1).
  *
- * 功能：设置面 / 子功能：只读呈现、写降级
+ * 功能：设置面 / 子功能：只读呈现、provider 管理旅程（core store 承载）
  *
  * New IA: default section Settings (overview shell), Services reads the
  * watchdog managed-service surface (/api/admin/services, response-driven —
- * the sandbox assembly is a variable, never enumerate concrete services),
- * Models carries the Router gateway card (/api/router listen/debug/auth).
- * Read-only sections are reconciled against their JSON API truth with
- * contains-assertions (never literals: listen addrs and uptime move with
- * the sandbox). The sandbox has no SEBAS_CONTROL_SECRET, so every router
- * mutation deterministically answers 503 — the contract under test is
- * honest degradation: the failure surfaces inline (`.callout-error`),
- * server-side lists/defaults stay unchanged, and the dialogs remain
- * interactive. Write persistence is explicitly NOT asserted (needs a
- * control-secret sandbox shape, separate item). The sandbox is bare core
- * (no watchdog adapter), so /api/admin/services answers
+ * the sandbox assembly is a variable, never enumerate concrete services).
+ * Since redesign-provider-models-settings the Models section carries provider
+ * management ONLY (no /api/router gateway card); router runtime state lives
+ * in Services. Read-only sections are reconciled against their JSON API truth
+ * with contains-assertions (never literals: listen addrs and uptime move with
+ * the sandbox). Since make-core-own-provider-data the provider management
+ * cluster (/router/api/providers*) is fulfilled by the webui backend from
+ * the core-owned provider store: in this sandbox the core is live, so
+ * create/edit/delete persist for real (S5a/S5b). The minimal preset/custom
+ * forms follow redesign-provider-models-settings: preset create needs only
+ * the preset + key (instance name defaults to the preset name); custom create
+ * needs name + one base URL + protocol. Since add-fetch-models the
+ * probe/fetch entry is live for providers with a usable base URL (covered in
+ * models.spec.ts); S5b pins the honest no-entry rendering for a provider
+ * without any base URL (the router proxy stays retired). The sandbox is bare
+ * core (no
+ * watchdog adapter), so /api/admin/services answers
  * `{adapter_ok: false, services: []}` — S1 pins the response-driven
  * reconciliation (empty-truth branch) and S6 pins the no-adapter banner +
  * disabled restart.
@@ -158,7 +166,7 @@ test.describe('设置面', () => {
   })
 
   test.describe('写降级', () => {
-    test('S4 defaults read parity; sandbox write fails honestly', async ({ page }) => {
+    test('S4 defaults read parity; set-default stays local, provider seeded via API', async ({ page }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
@@ -166,6 +174,13 @@ test.describe('设置面', () => {
       // 404，诚实性改由 UI 的「no default set」与写降级路径共同承担。
       const gone = await page.request.get('/api/agent-defaults')
       expect(gone.status()).toBe(404)
+      // make-core-own-provider-data：provider 列表来自 core 状态库（空库
+      // 起）——为 default-dialog 旅程经 API 预置一行。
+      const seededName = `spec-default-${Date.now()}`
+      const seeded = await page.request.post('/router/api/providers', {
+        data: { name: seededName, preset: 'deepseek', api_key: 'sk-spec' },
+      })
+      expect(seeded.status()).toBe(201)
       await page.goto('/')
       await settings.openViaComposer()
       // New IA default section is Settings — defaults live under Models.
@@ -178,14 +193,16 @@ test.describe('设置面', () => {
         { timeout: 10_000 },
       )
 
-      // ★ opens the set-default dialog for the first provider row.
-      const firstRow = settings.panel.locator('.provider-row').first()
+      // ★ opens the set-default dialog for the seeded provider row.
+      const firstRow = settings.panel
+        .locator('.provider-row')
+        .filter({ hasText: seededName })
       const providerName = (await firstRow.locator('.provider-row-name').textContent())?.trim()
       expect(providerName).toBeTruthy()
       await firstRow.locator('button[title="Set as default for new sessions"]').click()
       const dialog = page.locator('sebas-settings-modal wa-dialog[label="Set default for new sessions"]')
       await expect(
-        dialog.locator('.dialog-text').filter({ hasText: providerName! }),
+        dialog.locator('.dialog-text').filter({ hasText: seededName }),
       ).toBeVisible()
       // Model choice is catalog-dependent: rows without a catalog honestly
       // say so, rows with one offer the select — either branch is legitimate.
@@ -201,7 +218,7 @@ test.describe('设置面', () => {
       await dialog.locator('wa-button').filter({ hasText: 'Set default' }).click()
       await expect(
         settings.panel.locator('.provider-toolbar span.label'),
-      ).toHaveText(`default: ${providerName!.split(' ')[0]}`, { timeout: 10_000 })
+      ).toHaveText(`default: ${seededName.split(' ')[0]}`, { timeout: 10_000 })
       expect((await page.request.get('/api/agent-defaults')).status()).toBe(404)
       // 确认即收（defaultDraft 清空 = dialog 关闭）；无需再点 Cancel。
       await expect(dialog).toBeHidden({ timeout: 10_000 })
@@ -210,23 +227,25 @@ test.describe('设置面', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('S5a create/edit mutations: client validation + honest 503', async ({ page }) => {
+    test('S5a create/edit journeys persist through the core store (minimal forms)', async ({
+      page,
+    }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
-      const providersBefore = await listRouterProviders(page.request)
       await page.goto('/')
       await settings.openViaComposer()
       // New IA default section is Settings — provider management lives under Models.
       await settings.openSection('Models')
 
-      // Empty name is rejected client-side with zero network traffic.
+      // Empty custom create is rejected client-side with zero network traffic
+      // (custom minimal form requires the instance name).
       let postCalls = 0
       await page.route('**/router/api/providers', (route) => {
         if (route.request().method() === 'POST') postCalls += 1
         void route.continue()
       })
-      await settings.panel.locator('wa-button').filter({ hasText: 'New (preset)' }).click()
+      await settings.panel.locator('wa-button').filter({ hasText: 'New (custom)' }).click()
       const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
       // wa-dialog hosts read popover-hidden in the top layer — assert the
       // rendered footer action instead (same discipline as the rail dialogs).
@@ -235,79 +254,125 @@ test.describe('设置面', () => {
       await expect(editor.locator('.callout-error[role="alert"]')).toContainText('名称不能为空')
       expect(postCalls).toBe(0)
 
-      // A named create reaches the server and meets the 503 wall honestly.
-      const probeName = `spec-probe-${Date.now()}`
+      // A named custom create now SUCCEEDS with the minimal input (name +
+      // one base URL; the payload carries no advanced-only fields). Dialog
+      // closes, list refreshes (make-core-own-provider-data 3.2).
+      const probeName = `spec-create-${Date.now()}`
       const nameInput = editor.locator('wa-input[label="Name"] input')
       await nameInput.click()
       await nameInput.pressSequentially(probeName)
+      await editor.locator('wa-input[label="Base URL (OpenAI-compatible)"] input').fill('http://127.0.0.1:9/v1')
       await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
-      await expect(editor.locator('.callout-error[role="alert"]')).not.toContainText(
-        '名称不能为空',
-        { timeout: 10_000 },
-      )
-      await expect(editor.locator('.callout-error[role="alert"]')).toBeVisible()
-      expect(await listRouterProviders(page.request)).toEqual(providersBefore)
-      await editor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await expect(editor).toBeHidden({ timeout: 10_000 })
+      // API truth: the new row is there immediately (no restart).
+      await expect
+        .poll(async () => (await listRouterProviders(page.request)).includes(probeName))
+        .toBe(true)
+      // UI parity: the row renders.
+      await expect(
+        settings.panel.locator('.provider-row').filter({ hasText: probeName }),
+      ).toBeVisible({ timeout: 10_000 })
 
-      // Edit-save on an existing row meets the same wall; the list is untouched.
+      // Persistence: the store is core-owned — a fresh page load still sees it.
+      await page.reload()
+      await settings.openViaComposer()
+      await settings.openSection('Models')
+      await expect(
+        settings.panel.locator('.provider-row').filter({ hasText: probeName }),
+      ).toBeVisible({ timeout: 10_000 })
+
+      // Edit-save on the new row persists over the same seam (empty key keeps
+      // the stored key).
       await settings.panel
         .locator('.provider-row')
-        .first()
+        .filter({ hasText: probeName })
         .locator('button[title="Edit"]')
         .click()
       const editDialog = page.locator('sebas-settings-modal wa-dialog.provider-editor')
       await expect(editDialog.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
       await editDialog.locator('wa-button').filter({ hasText: 'Save' }).click()
-      await expect(editDialog.locator('.callout-error[role="alert"]')).toBeVisible({
-        timeout: 10_000,
-      })
-      expect(await listRouterProviders(page.request)).toEqual(providersBefore)
-      await editDialog.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await expect(editDialog).toBeHidden({ timeout: 10_000 })
+      await expect(
+        settings.panel.locator('.provider-row').filter({ hasText: probeName }),
+      ).toBeVisible({ timeout: 10_000 })
+
+      // Preset create needs no name input: the instance is stored under the
+      // preset name (redesign-provider-models-settings D5) and its model
+      // catalog follows the code table. The editor defaults to the first
+      // code-table preset ("anthropic").
+      await settings.panel.locator('wa-button').filter({ hasText: 'New (preset)' }).click()
+      const presetEditor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+      await expect(presetEditor.locator('wa-input[label="Name"]')).toHaveCount(0)
+      await presetEditor.locator('wa-input[label="API key"] input').fill('sk-spec-preset')
+      await presetEditor.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await expect(presetEditor).toBeHidden({ timeout: 10_000 })
+      await expect(
+        settings.panel.locator('.provider-row').filter({ hasText: 'anthropic' }),
+      ).toBeVisible({ timeout: 10_000 })
+      const presetResp = await page.request.get('/router/api/providers')
+      const presetBody = (await presetResp.json()) as {
+        providers?: Array<{ name: string; preset: string | null; models: Array<{ id: string }> }>
+      }
+      const presetRow = presetBody.providers?.find((p) => p.name === 'anthropic')
+      expect(presetRow?.preset).toBe('anthropic')
+      // Catalog materializes from the code table as entries (ids + tags).
+      expect((presetRow?.models ?? []).map((m) => m.id)).toContain('claude-opus-4-20250514')
       await settings.close()
 
       expect(collector.clean()).toEqual([])
     })
 
-    test('S5b delete/probe mutations fail honestly, list unchanged', async ({ page }) => {
+    test('S5b delete persists; fetch entry hidden without a base URL', async ({ page }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
-      const providersBefore = await listRouterProviders(page.request)
-      expect(providersBefore.length).toBeGreaterThan(0)
+      // Seed a row over the API so the delete journey owns a known target.
+      const seededName = `spec-delete-${Date.now()}`
+      const seeded = await page.request.post('/router/api/providers', {
+        data: { name: seededName, preset: 'deepseek', api_key: 'sk-spec' },
+      })
+      expect(seeded.status()).toBe(201)
       await page.goto('/')
       await settings.openViaComposer()
       // New IA default section is Settings — provider management lives under Models.
       await settings.openSection('Models')
-      await expect(settings.panel.locator('.provider-row').first()).toBeVisible({
-        timeout: 10_000,
-      })
+      const seededRow = settings.panel.locator('.provider-row').filter({ hasText: seededName })
+      await expect(seededRow).toBeVisible({ timeout: 10_000 })
 
-      // Delete confirm meets the 503 wall: error surfaces, dialog stays open.
-      await settings.panel
-        .locator('.provider-row')
-        .first()
-        .locator('button[title="Delete"]')
-        .click()
+      // Delete confirm now succeeds: dialog closes, the row disappears from
+      // the UI and from the API truth.
+      await seededRow.locator('button[title="Delete"]').click()
       const confirm = page.locator('sebas-settings-modal wa-dialog[label="Delete provider"]')
       await expect(confirm.locator('.dialog-text')).toBeVisible()
       await confirm.locator('wa-button').filter({ hasText: 'Delete' }).click()
-      await expect(settings.panel.locator('.callout-error[role="alert"]')).toBeVisible({
-        timeout: 10_000,
-      })
-      expect(await listRouterProviders(page.request)).toEqual(providersBefore)
-      await confirm.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await expect(confirm).toBeHidden({ timeout: 10_000 })
+      await expect(seededRow).toHaveCount(0)
+      await expect
+        .poll(async () => (await listRouterProviders(page.request)).includes(seededName))
+        .toBe(false)
 
-      // Probe meets the same wall: no success result, error surfaces instead.
-      await settings.panel
-        .locator('.provider-row')
-        .first()
-        .locator('button[title="Probe model list"]')
-        .click()
-      await expect(settings.panel.locator('.callout-error[role="alert"]')).toBeVisible({
-        timeout: 10_000,
+      // add-fetch-models: the fetch entry exists only for providers with a
+      // usable base URL. A URL-less provider renders no entry at all (and the
+      // API answers a typed 400 — never a fabricated success).
+      await settings.close()
+      const urllessName = `spec-nourl-${Date.now()}`
+      const urlless = await page.request.post('/router/api/providers', {
+        data: { name: urllessName },
       })
-      await expect(settings.panel.locator('.callout[role="status"]')).toHaveCount(0)
-      expect(await listRouterProviders(page.request)).toEqual(providersBefore)
+      expect(urlless.status()).toBe(201)
+      // Reload so the SPA rebuilds and re-reads the provider list fresh.
+      await page.reload()
+      await settings.openViaComposer()
+      await settings.openSection('Models')
+      const urllessRow = settings.panel.locator('.provider-row').filter({ hasText: urllessName })
+      await expect(urllessRow).toBeVisible({ timeout: 10_000 })
+      await expect(urllessRow.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
+      const probe = await page.request.post(
+        `/router/api/providers/${encodeURIComponent(urllessName)}/probe`,
+      )
+      expect(probe.status()).toBe(400)
+      const probeBody = (await probe.json()) as { error?: string }
+      expect(probeBody.error ?? '').toContain('base URL')
       await settings.close()
 
       expect(collector.clean()).toEqual([])
