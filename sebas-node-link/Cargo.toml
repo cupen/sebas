@@ -1,0 +1,14 @@
+[package]
+name = "sebas-node-link"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+# 链路契约 crate（add-remote-execution-node D0）：**只放两侧都要懂的类型**——
+# 协议版本、握手、能力清单、拒绝码。主控与节点各有一份运行时实现，本 crate 两边
+# 都依赖它，从而不必复制粘贴协议定义。它同样不得依赖任何主控角色实现。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]

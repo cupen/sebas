@@ -34,6 +34,9 @@ jobs:
       # fake-claude 与 sebas 都是集成测试的被测进程，必须先于测试构建
       # （sebas-gateway 的 process_e2e_test 会 spawn target/debug/sebas）。
       - run: cargo build --bin sebas --bin fake-claude
+      # sebas-node 是独立二进制的执行节点（add-remote-execution-node）。
+      # 必须带 -p：`--bin` 只在默认包里解析目标，跨包要显式指定包。
+      - run: cargo build -p sebas-node --bin sebas-node
       - run: cargo test --workspace
 
   # 前端单测此前不在 CI 里，导致 ElementInternals 垫片缺失长期静默（vitest

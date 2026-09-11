@@ -44,7 +44,9 @@ jobs:
         run: choco install nasm -y --no-progress
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: sebas
+          # sebas-node 是执行节点的独立二进制（add-remote-execution-node D0）。
+          # 两个产物打进同一个归档；装哪一个是运维的选择（节点机不需要主控角色）。
+          bin: sebas,sebas-node
           target: ${{ matrix.target }}
           archive: sebas-$tag-$target
           tar: unix   # Linux 发 tar.gz
