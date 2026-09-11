@@ -11,7 +11,14 @@
  * persisted state (nothing lost).
  */
 import { expect, test } from '@playwright/test'
-import { ErrorCollector, resetState, FocusedSession, Workbench } from './helpers/index'
+import {
+  ErrorCollector,
+  ensureSceneProject,
+  ProjectRail,
+  resetState,
+  FocusedSession,
+  Workbench,
+} from './helpers/index'
 
 test.describe('agent 对话覆盖', () => {
   let collector: ErrorCollector
@@ -23,14 +30,20 @@ test.describe('agent 对话覆盖', () => {
   test.describe('首回合往返与重载恢复', () => {
     test('composer submit → reply → done → reload restores', async ({ page }) => {
       const workbench = new Workbench(page)
+      const rail = new ProjectRail(page)
       const detail = new FocusedSession(page)
 
       // The creation-mode composer submit (this journey's first step) needs a
       // focused-free workbench — close everything any earlier journey left.
       await resetState(page.request)
 
+      // rail-declutter-unread D6：创建必须显式选项目——先注册并选中 scene
+      // 项目（点项目行），composer 的 project 门禁解除后提交才会创建。
+      const { name: projectName } = await ensureSceneProject(page.request)
+
       await page.goto('/')
       await expect(workbench.composer).toBeVisible()
+      await rail.expandProject(projectName)
 
       await workbench.sendPrompt('hello')
 

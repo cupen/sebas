@@ -193,6 +193,10 @@ pub struct SessionRow {
     /// （add-agent-mode-selection）执行体回报的实际生效 mode；`None` = 未声称
     /// 生效（与 desired 的差异如实可见）。
     pub effective_mode: Option<String>,
+    /// （rail-declutter-unread D1）服务端累计的可见回复段数——rail 会话行
+    /// 未读徽标 = `msg_count − 浏览器读锚`。随 `session.updated` 广播 +
+    /// rail 10s 轮询兜底。
+    pub msg_count: u64,
 }
 
 /// Dashboard overview data.

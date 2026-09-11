@@ -683,6 +683,7 @@ export class SebasDashboard extends LitElement {
           @pending-changed=${this.onComposerSent}
         ></sebas-pending-stack>
         <sebas-workbench-composer
+          .projectId=${this.selectedProjectId}
           .projectDir=${this.selectedPath}
           .providerLabel=${this.providerLabel}
           .sessionKey=${focusKey}
@@ -779,6 +780,7 @@ export class SebasDashboard extends LitElement {
                     fill
                     .entries=${d.entries}
                     sessionKey=${d.encoded_key}
+                    .msgCount=${d.msg_count ?? null}
                   ></sebas-transcript-view>`}
             `
           : this.focusedUnavailable

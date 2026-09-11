@@ -76,6 +76,8 @@ pub(crate) fn build_session_rows(
                 last_active_unix: info.last_active_unix,
                 is_active,
                 remote: info.remote.clone(),
+                // rail-declutter-unread 1.2：未读徽标的服务端计数随行下发。
+                msg_count: info.msg_count,
             }
         })
         .collect();
@@ -135,6 +137,9 @@ pub(crate) fn session_summary(
         "remote": info.remote,
         // workbench-turn-queue 6.1：聚焦会话的待生效提交全量视图（投递序）。
         "pending": serde_json::to_value(&info.pending).unwrap_or_default(),
+        // rail-declutter-unread：聚焦会话的段计数（transcript 标记已读时
+        // 推进浏览器读锚用，保证 seam 与徽标一致）。
+        "msg_count": info.msg_count,
         // workbench-conversation-view 1.4：与 detail 同形状的有序条目序列。
         "entries": conversation,
     })

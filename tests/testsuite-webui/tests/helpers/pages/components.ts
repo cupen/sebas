@@ -6,7 +6,7 @@
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 
-/** Sidebar project tree: projects, per-project sessions, Inbox/History groups. */
+/** Sidebar project tree: projects, per-project sessions, Waiting/History groups (rail-declutter-unread: Inbox 分组已移除，行操作收敛为 … 菜单). */
 export class ProjectRail {
   readonly page: Page
   readonly host: Locator
@@ -28,10 +28,6 @@ export class ProjectRail {
     await this.projectRow(name).click()
   }
 
-  /** Expand the Inbox group (hidden when there are no inbox sessions). */
-  async expandInbox(): Promise<void> {
-    await this.host.locator('.group-head', { hasText: 'Inbox' }).click()
-  }
 
   /** Expand the History group (archived sessions; hidden when empty). */
   async expandHistory(): Promise<void> {
@@ -47,31 +43,47 @@ export class ProjectRail {
   }
 
   /**
-   * Archive a session row (by its `.session-name` text — the displayed
-   * `session_id_short`). The button is opacity-0 until hovered, so hover
-   * first (Playwright treats opacity-0 as hidden).
+   * Open a session row's overflow (…) menu (rail-declutter-unread 3.2).
+   * The trigger is hover-revealed, so hover first (Playwright treats
+   * opacity-0 as hidden), then click it and wait for the items.
    */
-  async archiveSession(sessionIdShort: string): Promise<void> {
+  async openSessionMenu(rowLabel: string): Promise<Locator> {
     const row = this.host
-      .locator('li.session-item:not(.archived)', { hasText: sessionIdShort })
+      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
     await row.hover()
-    // workbench-agent-wire-fix 5.2：行内现在有 archive + close 两颗按钮，
-    // 以 title 精确锚定（共用 .session-archive-btn 外观类）。
-    await row.locator('button[title="Archive this session"]').click()
+    await row.locator('wa-dropdown button[title="Session actions"]').click()
+    const menu = row.locator('wa-dropdown-item[value="archive"]')
+    await expect(menu).toBeVisible()
+    return menu
   }
 
   /**
-   * Close (delete) a session row by its displayed id (workbench-agent-wire-fix
-   * 5.2). Inactive sessions close immediately; active ones raise the inline
+   * Archive a session row (by its displayed label — since
+   * rail-declutter-unread the first prompt's preview). Goes through the
+   * row's … menu.
+   */
+  async archiveSession(rowLabel: string): Promise<void> {
+    await this.openSessionMenu(rowLabel)
+    await this.host
+      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
+      .first()
+      .locator('wa-dropdown-item[value="archive"]')
+      .click()
+  }
+
+  /**
+   * Close (delete) a session row by its displayed label, via the row's …
+   * menu. Inactive sessions close immediately; active ones raise the inline
    * confirm dialog — callers that need the dialog handle it themselves.
    */
-  async closeSession(sessionIdShort: string): Promise<void> {
-    const row = this.host
-      .locator('li.session-item:not(.archived)', { hasText: sessionIdShort })
+  async closeSession(rowLabel: string): Promise<void> {
+    await this.openSessionMenu(rowLabel)
+    await this.host
+      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
-    await row.hover()
-    await row.locator('button[title="Close (delete) this session"]').click()
+      .locator('wa-dropdown-item[value="close"]')
+      .click()
   }
 
   /**

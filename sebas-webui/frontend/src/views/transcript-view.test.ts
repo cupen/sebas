@@ -67,10 +67,12 @@ import './transcript-view.js'
 async function mount(opts: {
   entries: ConversationEntryView[]
   sessionKey?: string
+  msgCount?: number
 }): Promise<SebasTranscriptView> {
   const el = document.createElement('sebas-transcript-view') as SebasTranscriptView
   el.entries = opts.entries
   el.sessionKey = opts.sessionKey ?? 'oc_test'
+  if (opts.msgCount !== undefined) el.msgCount = opts.msgCount
   document.body.appendChild(el)
   // Lit schedules its first update asynchronously; then the
   // component's `requestAnimationFrame(() => applyAutoScroll())` runs
@@ -341,7 +343,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(seam?.hasAttribute('hidden')).toBe(true)
     expect(seam?.textContent ?? '').not.toContain('new since you last viewed')
 
-    // 未读态 → mark all seen → localStorage 写入最大时间戳、seam 消失。
+    // 未读态 → mark all seen → 游标写入最大时间戳、seam 消失。
     store.set('sebas:seen:oc_test', String(FIXED_DATES.T1 - 10))
     el.entries = [...entries]
     await el.updateComplete
@@ -351,8 +353,37 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(seam?.hasAttribute('hidden')).toBe(false)
     seam!.querySelector<HTMLButtonElement>('button.link')!.click()
     await el.updateComplete
-    expect(store.get('sebas:seen:oc_test')).toBe(String(FIXED_DATES.T1))
+    // rail-declutter-unread 2.2：存储迁到共享游标模块（JSON 形状），时间戳
+    // 语义不变；无 msgCount payload 时段数锚保持 null（按已读）。
+    const stored = JSON.parse(store.get('sebas:seen:oc_test')!) as {
+      seen_ts: number
+      anchor_count: number | null
+    }
+    expect(stored.seen_ts).toBe(FIXED_DATES.T1)
+    expect(stored.anchor_count).toBeNull()
     expect(el.shadowRoot?.querySelector<HTMLElement>('.seam')?.hasAttribute('hidden')).toBe(true)
+  })
+
+  it('mark-all-seen advances the shared badge anchor when msgCount rides the payload (D3)', async () => {
+    // rail-declutter-unread：payload 带 msg_count 时，标记已读把共享游标的
+    // 段数锚推进到当前值——读到底部 = seam 清零 + 徽标清零（两者同锚）。
+    const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
+    const el = await mount({ entries, msgCount: 3 })
+    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1 - 10))
+    el.entries = [...entries]
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    const seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
+    expect(seam?.hasAttribute('hidden')).toBe(false)
+    seam!.querySelector<HTMLButtonElement>('button.link')!.click()
+    await el.updateComplete
+    const stored = JSON.parse(store.get('sebas:seen:oc_test')!) as {
+      seen_ts: number
+      anchor_count: number | null
+    }
+    expect(stored.seen_ts).toBe(FIXED_DATES.T1)
+    expect(stored.anchor_count).toBe(3)
   })
 
   it('timestamps render inside each bubble meta row with datetime attrs', async () => {

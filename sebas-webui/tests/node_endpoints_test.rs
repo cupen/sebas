@@ -299,6 +299,7 @@ fn remote_session() -> SessionInfo {
         }),
         desired_mode: Some("ask".into()),
         effective_mode: Some("edit".into()),
+        msg_count: 0,
     }
 }
 

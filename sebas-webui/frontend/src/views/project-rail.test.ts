@@ -2,14 +2,36 @@
  * Tests for the sidebar project tree (project-rail.ts).
  *
  * Covers: project rows with counts, expand/collapse, session deep-links,
- * drag-to-reorder, add-project dialog, Inbox group (unbound sessions),
- * History group (archived sessions), and archive/restore.
+ * drag-to-reorder, add-project dialog, row action consolidation (… menu +
+ * "+"), the unread badge (shared read cursor), session naming by first
+ * prompt, History newest-first, and Inbox removal (rail-declutter-unread).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { api, type Project, type SessionRow } from '../api/client.js'
+import { writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
 import type { SebasProjectRail } from './project-rail.js'
+
+// ---- localStorage polyfill --------------------------------------------
+// 测试环境的全局没有 localStorage；徽标读锚走共享游标模块（写全局），用
+// 内存 Map 替换以获得确定性行为（与 transcript-view.test.ts 同款）。
+const seenStore = new Map<string, string>()
+const ls = {
+  getItem: (k: string) => seenStore.get(k) ?? null,
+  setItem: (k: string, v: string) => {
+    seenStore.set(k, v)
+  },
+  removeItem: (k: string) => {
+    seenStore.delete(k)
+  },
+  clear: () => seenStore.clear(),
+  key: () => null,
+  get length() {
+    return seenStore.size
+  },
+}
+Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true })
 
 vi.mock('../api/client.js')
 
@@ -47,6 +69,7 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     available_models: null,
     agent_kind: null,
     pending_count: 0,
+    msg_count: 0,
     ...overrides,
   }
 }
@@ -98,6 +121,8 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = ''
   window.history.replaceState({}, '', '/')
+  // 徽标读锚在 localStorage 里：用例间清空，防串扰。
+  seenStore.clear()
 })
 
 describe('sebas-project-rail (sidebar tree)', () => {
@@ -230,51 +255,299 @@ describe('sebas-project-rail (sidebar tree)', () => {
   })
 })
 
-describe('inbox group', () => {
-  it('lists project-less sessions under a collapsible Inbox header', async () => {
+describe('inbox removal (rail-declutter-unread 4.1)', () => {
+  it('renders no Inbox group even when project-less sessions exist', async () => {
     const el = await mount()
-    const head = el.shadowRoot!.querySelector('.group-head')
-    expect(head).toBeTruthy()
-    expect(head!.textContent).toContain('Inbox')
-    expect(head!.querySelector('.group-count')?.textContent).toBe('2')
-    // Default collapsed.
-    expect(el.shadowRoot!.querySelectorAll('.group-section li.session-item')).toHaveLength(0)
-    ;(head as HTMLElement).click()
+    // 无项目会话（project_id null）不再有任何 rail 展示位：Inbox 组不存在，
+    // 会话也不落在任何分组里。
+    const heads = [...el.shadowRoot!.querySelectorAll('.group-head')].map((h) => h.textContent)
+    expect(heads.some((t) => t?.includes('Inbox'))).toBe(false)
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
-    const items = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item')]
+    const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
     expect(items).toHaveLength(2)
-    expect(items[0]!.querySelector('.session-dot')?.getAttribute('data-status')).toBe('working')
+    expect(items.every((i) => i.textContent!.includes('aaaa'))).toBe(true)
     el.remove()
   })
 
-  it('stays hidden entirely when every session is bound to a project', async () => {
-    mockOf(apiMock.sessions).mockResolvedValue(sessionList([sessionRows[0]]))
+  it('unbound sessions are invisible even when they are the only sessions', async () => {
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([sessionRows[2]]))
     const el = await mount()
     expect(el.shadowRoot!.querySelector('.group-head')).toBeNull()
+    expect(el.shadowRoot!.querySelector('li.session-item')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('row action consolidation (rail-declutter-unread 3.1/3.2)', () => {
+  it('project row exposes the … menu first, then the + button; … opens the remove dialog', async () => {
+    const el = await mount()
+    const actions = el.shadowRoot!.querySelector('.row .row-actions')!
+    const children = [...actions.children]
+    // 顺序固定：… 下拉在前，+ 在后；行内不再有平铺的移除按钮。
+    expect(children[0]!.tagName.toLowerCase()).toBe('wa-dropdown')
+    expect(children[1]!.tagName.toLowerCase()).toBe('button')
+    expect(children[1]!.getAttribute('aria-label')).toBe('New session in alpha')
+    expect(el.shadowRoot!.querySelector('.row .row-remove')).toBeNull()
+
+    // … 菜单含「移除项目」；点击菜单项打开移除弹窗。
+    const item = el.shadowRoot!.querySelector('wa-dropdown-item[value="remove"]') as HTMLElement
+    item.click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="Remove project"]')
+    expect((dialog as any).open).toBe(true)
+    el.remove()
+  })
+
+  it('session row has a single … menu holding Archive and Close (danger); no inline buttons', async () => {
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const item = el.shadowRoot!.querySelector('li.session-item')!
+    // 行内不再有直删/归档按钮。
+    expect(item.querySelector('button[title="Archive this session"]')).toBeNull()
+    expect(item.querySelector('button[title="Close (delete) this session"]')).toBeNull()
+    // 唯一的 … 菜单：归档 + 关闭（danger）。
+    expect(item.querySelectorAll('wa-dropdown').length).toBe(1)
+    const archive = item.querySelector('wa-dropdown-item[value="archive"]')
+    const close = item.querySelector('wa-dropdown-item[value="close"]')
+    expect(archive).toBeTruthy()
+    expect(close).toBeTruthy()
+    expect(close!.getAttribute('variant')).toBe('danger')
+    el.remove()
+  })
+
+  it('the … menu triggers archive through the menu item (3.2)', async () => {
+    mockOf(apiMock.archiveSession).mockResolvedValue({ status: 'archived' })
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const item = el.shadowRoot!.querySelector('li.session-item')!
+    ;(item.querySelector('wa-dropdown-item[value="archive"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMock.archiveSession).toHaveBeenCalledWith('oc_1%00')
+    el.remove()
+  })
+
+  it('the … menu closes a dormant session immediately and asks first for a working one (3.2)', async () => {
+    mockOf(apiMock.closeSession).mockResolvedValue({ status: 'closed', discarded_pending: 0 })
+    const dormant = row({ project_id: 'proj-alpha', status: 'done', status_slug: 'done' })
+    const working = row({ project_id: 'proj-alpha', status: 'working', status_slug: 'working' })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([dormant, working]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
+    // inactive：直删。
+    ;(items[0]!.querySelector('wa-dropdown-item[value="close"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(apiMock.closeSession).toHaveBeenCalledTimes(1)
+    // active：先弹确认，不直接删。
+    ;(items[1]!.querySelector('wa-dropdown-item[value="close"]') as HTMLElement).click()
+    await el.updateComplete
+    expect(apiMock.closeSession).toHaveBeenCalledTimes(1)
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="Close session"]')
+    expect((dialog as any).open).toBe(true)
+    el.remove()
+  })
+})
+
+describe('unread badge (rail-declutter-unread 2.3)', () => {
+  it('shows no badge without a stored anchor (first visit = fully read)', async () => {
+    const unreadRow = row({ project_id: 'proj-alpha', msg_count: 7 })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([unreadRow]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    el.remove()
+  })
+
+  it('shows msg_count − anchor_count and clears when focus advances the anchor', async () => {
+    const unreadRow = row({ project_id: 'proj-alpha', msg_count: 120 })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([unreadRow]))
+    // 预置读锚 = 118 → 未读 2。
+    writeFocusAnchor(unreadRow.encoded_key, 118)
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const badge = el.shadowRoot!.querySelector('[data-testid="session-unread"]')
+    expect(badge?.textContent?.trim()).toBe('2')
+
+    // 聚焦成功 = 写锚推进到当前 count → 徽标消失。
+    mockOf(apiMock.switchSession).mockResolvedValue({ status: 'switched' })
+    const item = el.shadowRoot!.querySelector('li.session-item') as HTMLElement
+    item.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')).toBeNull()
+    el.remove()
+  })
+
+  it('caps the displayed number at 99+', async () => {
+    const unreadRow = row({ project_id: 'proj-alpha', msg_count: 300 })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([unreadRow]))
+    writeFocusAnchor(unreadRow.encoded_key, 1)
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="session-unread"]')?.textContent?.trim()).toBe('99+')
+    el.remove()
+  })
+})
+
+describe('session naming by first prompt (rail-declutter-unread 3.4)', () => {
+  it('names rows by prompt_preview and carries the full text in the title', async () => {
+    const named = row({
+      project_id: 'proj-alpha',
+      prompt_preview: '帮我重构 rail 组件的渲染逻辑',
+    })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([named]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const item = el.shadowRoot!.querySelector('li.session-item')!
+    expect(item.querySelector('.session-name')?.textContent).toBe('帮我重构 rail 组件的渲染逻辑')
+    expect(item.getAttribute('title')).toContain('帮我重构 rail 组件的渲染逻辑')
+    el.remove()
+  })
+
+  it('truncates long previews at 40 code points with an ellipsis; title keeps the full text', async () => {
+    const long = 'x'.repeat(60) + '尾巴'
+    const named = row({ project_id: 'proj-alpha', prompt_preview: long })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([named]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const item = el.shadowRoot!.querySelector('li.session-item')!
+    const name = item.querySelector('.session-name')?.textContent ?? ''
+    expect([...name].length).toBe(41) // 40 码点 + …
+    expect(name.endsWith('…')).toBe(true)
+    expect(item.getAttribute('title')).toBe(long)
+    el.remove()
+  })
+
+  it('zero-turn placeholders fall back to the short identifier', async () => {
+    const placeholder = row({
+      project_id: 'proj-alpha',
+      prompt_preview: null,
+      session_id_short: 'aaaa0009',
+    })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([placeholder]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    expect(
+      el.shadowRoot!.querySelector('li.session-item .session-name')?.textContent,
+    ).toBe('aaaa0009')
+    el.remove()
+  })
+
+  it('the close confirmation names the session by the same label', async () => {
+    const working = row({
+      project_id: 'proj-alpha',
+      status: 'working',
+      status_slug: 'working',
+      prompt_preview: '确认弹窗里的名字',
+      pending_count: 2,
+    })
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([working]))
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    const item = el.shadowRoot!.querySelector('li.session-item')!
+    ;(item.querySelector('wa-dropdown-item[value="close"]') as HTMLElement).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="Close session"]')
+    expect(dialog?.textContent).toContain('确认弹窗里的名字')
+    const line = el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')
+    expect(line?.textContent).toContain('2')
+    el.remove()
+  })
+})
+
+describe('project removal precheck (rail-declutter-unread 3.3)', () => {
+  it('prechecks live sessions and states the count inline; backend rejection surfaces too', async () => {
+    const el = await mount()
+    // alpha 有 2 个非归档会话：弹窗就地说明。
+    ;(el as unknown as { openRemoveDialog: (e: Event, p: Project) => void }).openRemoveDialog(
+      new Event('click'),
+      projects[0],
+    )
+    await el.updateComplete
+    const blocked = el.shadowRoot!.querySelector('[data-testid="remove-blocked"]')
+    expect(blocked?.textContent).toContain('2')
+    expect(blocked?.textContent).toContain('归档')
+    // 旧「迁移 Inbox」文案废除。
+    expect(el.shadowRoot!.textContent).not.toContain('迁移到 Inbox')
+
+    // 后端 typed rejection 内联呈现（预检只是提醒，强制在后端）。
+    mockOf(apiMock.projects.remove).mockRejectedValue(
+      new Error('项目下仍有 2 个未归档会话，请先归档或关闭它们再移除项目'),
+    )
+    await (el as unknown as { confirmRemoveProject: () => Promise<void> }).confirmRemoveProject()
+    await el.updateComplete
+    expect(apiMock.projects.remove).toHaveBeenCalledWith('proj-alpha')
+    expect(el.shadowRoot!.textContent).toContain('请先归档或关闭')
+    el.remove()
+  })
+
+  it('shows the plain copy when no live sessions remain', async () => {
+    mockOf(apiMock.sessions).mockResolvedValue(sessionList([]))
+    const el = await mount()
+    ;(el as unknown as { openRemoveDialog: (e: Event, p: Project) => void }).openRemoveDialog(
+      new Event('click'),
+      projects[0],
+    )
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="remove-blocked"]')).toBeNull()
+    expect(el.shadowRoot!.textContent).toContain('此操作只解除注册')
     el.remove()
   })
 })
 
 describe('history group (archived sessions)', () => {
-  it('shows archived sessions from the archive API', async () => {
+  it('lists archived sessions newest-first by archive time (rail-declutter-unread 4.2)', async () => {
     mockOf(apiMock.archiveList).mockResolvedValue({
       archived_sessions: [
-        { session_key: 'oc_arch%00', project_path: '/home/me/alpha', label: 'Old session', archived_at: 1000, retention_deadline: 2000 },
+        { session_key: 'oc_old%00', project_path: '/home/me/alpha', label: 'Old session', archived_at: 1000, retention_deadline: 2000 },
+        { session_key: 'oc_new%00', project_path: '/home/me/alpha', label: 'New session', archived_at: 5000, retention_deadline: 6000 },
+        { session_key: 'oc_mid%00', project_path: '/home/me/alpha', label: 'Mid session', archived_at: 3000, retention_deadline: 4000 },
       ],
     })
     const el = await mount()
     const heads = [...el.shadowRoot!.querySelectorAll('.group-head')]
     const historyHead = heads.find((h) => h.textContent?.includes('History'))
     expect(historyHead).toBeTruthy()
-    expect(historyHead!.querySelector('.group-count')?.textContent).toBe('1')
+    expect(historyHead!.querySelector('.group-count')?.textContent).toBe('3')
     ;(historyHead as HTMLElement).click()
     await el.updateComplete
-    const items = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item')]
-    expect(items).toHaveLength(1)
-    expect(items[0]!.classList.contains('archived')).toBe(true)
+    const labels = [...el.shadowRoot!.querySelectorAll('.group-section li.session-item.archived .session-name')].map(
+      (n) => n.textContent,
+    )
+    expect(labels).toEqual(['New session', 'Mid session', 'Old session'])
+    el.remove()
+  })
+
+  it('does not render a branch name in the project row (D8), probing still runs', async () => {
+    mockOf(apiMock.projects.branch).mockResolvedValue({
+      project_id: 'proj-alpha',
+      branch: 'feat/webui',
+      accessible: true,
+    })
+    const el = await mount()
+    await el.refresh()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.row .branch')).toBeNull()
+    expect(el.shadowRoot!.textContent).not.toContain('feat/webui')
+    // 探测链路保留：branch 接口仍被调用（删除线告警依赖它）。
+    expect(apiMock.projects.branch).toHaveBeenCalledWith('proj-alpha')
     el.remove()
   })
 })
+
 describe('project registration degraded hint (harden-core-channel-deployment 4.3)', () => {
   it('shows the honest degraded hint when the core is unreachable and the add lands in the local registry', async () => {
     mockOf(apiMock.projects.add).mockResolvedValue({
@@ -323,48 +596,6 @@ describe('project registration degraded hint (harden-core-channel-deployment 4.3
     await el.refresh()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="project-degraded-hint"]')).toBeNull()
-    el.remove()
-  })
-})
-
-describe('rail close confirmation (workbench-turn-queue 7.4)', () => {
-  it('names how many pending submissions a close will discard', async () => {
-    const pendingRow = row({
-      status: 'working',
-      status_slug: 'working',
-      pending_count: 2,
-    })
-    mockOf(apiMock.sessions).mockResolvedValue(sessionList([pendingRow]))
-    const el = await mount()
-    // 会话行在默认折叠的 Inbox 组里，先展开。
-    ;(el.shadowRoot!.querySelector('.group-head') as HTMLElement)!.click()
-    await el.updateComplete
-    const closeBtn = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      'li.session-item button[aria-label^="Close"]',
-    )
-    expect(closeBtn).toBeTruthy()
-    closeBtn!.click()
-    await el.updateComplete
-
-    const line = el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')
-    expect(line).toBeTruthy()
-    expect(line!.textContent).toContain('2')
-    expect(line!.textContent).toContain('待执行')
-    el.remove()
-  })
-
-  it('omits the discard line when the session has no pending submissions', async () => {
-    const plainRow = row({ status: 'working', status_slug: 'working', pending_count: 0 })
-    mockOf(apiMock.sessions).mockResolvedValue(sessionList([plainRow]))
-    const el = await mount()
-    ;(el.shadowRoot!.querySelector('.group-head') as HTMLElement)!.click()
-    await el.updateComplete
-    const closeBtn = el.shadowRoot!.querySelector<HTMLButtonElement>(
-      'li.session-item button[aria-label^="Close"]',
-    )
-    closeBtn!.click()
-    await el.updateComplete
-    expect(el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')).toBeNull()
     el.remove()
   })
 })
@@ -459,7 +690,9 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     expect(cause!.textContent).toContain('dev-box')
     expect(cause!.textContent).toContain('离线')
 
-    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>('.row-action:not(.row-remove)')
+    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'button[aria-label^="New session"]',
+    )
     expect(plus!.disabled).toBe(true)
 
     // 直接走创建路径也被拦下（不提交，成因点名节点）。
@@ -488,7 +721,9 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     await el.refresh()
     await el.updateComplete
     expect(el.shadowRoot!.querySelector('[data-testid="project-node-cause"]')).toBeNull()
-    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>('.row-action:not(.row-remove)')
+    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'button[aria-label^="New session"]',
+    )
     expect(plus!.disabled).toBe(false)
     el.remove()
   })

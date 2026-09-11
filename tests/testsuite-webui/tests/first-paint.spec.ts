@@ -49,7 +49,12 @@ test.describe('工作台首屏', () => {
       // Nothing focused → empty-stream stage, composer in creation mode.
       await expect(workbench.emptyStream).toBeVisible()
       await expect(workbench.newSessionChip).toBeHidden()
-      await expect(workbench.composerTextarea).toBeEnabled()
+      // rail-declutter-unread D6：创建必须显式选项目——无项目可选时提交门禁
+      // 禁用并就地说明（不再提供 inbox 绑定）。
+      await expect(workbench.composerTextarea).toBeDisabled()
+      await expect(
+        workbench.composer.locator('[data-testid="project-required"]'),
+      ).toContainText('未选择项目')
 
       // Reachability, honest form: core connected (no warning banner) and the
       // native backend option disabled with its cause spelled out. The

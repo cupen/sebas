@@ -193,6 +193,11 @@ export class SebasWorkbenchComposer extends LitElement {
         font-family: var(--sebas-font-mono);
         color: var(--sebas-text-faint);
       }
+      /* rail-declutter-unread D6：未选项目的绑定占位——弱化但可读，说明为何提交禁用。 */
+      .composer-bottom .binding-missing {
+        color: var(--sebas-text-faint);
+        font-style: italic;
+      }
       .composer-bottom a {
         font-size: 0.78rem;
         color: var(--sebas-text-faint);
@@ -407,7 +412,13 @@ export class SebasWorkbenchComposer extends LitElement {
 
   private disabled(): boolean {
     // 8.2：节点不可用 = 提交只会 bounce，门禁在前（与 core 不可达同一姿态）。
-    return this.sending || this.unreachable !== null || this.nodeBlocked !== null
+    if (this.sending || this.unreachable !== null || this.nodeBlocked !== null) return true
+    // rail-declutter-unread D6：创建必须显式选项目。Inbox 分组移除后，
+    // composer 不得再造 rail 无展示位的无项目会话——未选择项目时禁用提交
+    // 并就地说明（跟随模式不受约束）。过渡态：创建模式终态由
+    // workbench-interaction-polish 收口。
+    if (!this.isFollowMode && !this.projectId) return true
+    return false
   }
 
   private async submit(): Promise<void> {
@@ -498,12 +509,22 @@ export class SebasWorkbenchComposer extends LitElement {
     return this.agents.find((x) => x.id === 'native' && false)?.display ?? 'default agent'
   }
 
+  /**
+   * 创建模式的绑定提示（rail-declutter-unread D6）：选中项目显示目录尾段；
+   * 未选择项目不再提供「→ inbox」绑定，就地说明「未选择项目」——提交门禁
+   * 同步禁用（disabled()）。
+   */
   private renderBinding() {
-    if (this.projectDir) {
+    if (this.projectId && this.projectDir) {
       const tail = this.projectDir.split('/').filter(Boolean).pop() ?? this.projectDir
       return html`<span class="binding">→ ${tail}</span>`
     }
-    return html`<span class="binding">→ inbox</span>`
+    return html`<span
+      class="binding binding-missing"
+      data-testid="project-required"
+      title="创建会话必须先选择项目（左侧栏选中即生效）"
+      >→ 未选择项目</span
+    >`
   }
 
   /**

@@ -128,10 +128,10 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 项目注册表 webui 持有 | ✅ | state-store 测试；J: workbench |
 | | 会话归属 | ✅ | sebas-webui `session_endpoints_test` |
 | | 并发项目 | ✅ | state-store 并发测试；`session_endpoints_test::concurrent_project_sessions_run_simultaneously_and_leave_a_untouched` |
-| | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）；前端 `transcript-view.test.ts`（多 chunk 未读回合计一次、seam 不切开回合、mark-all-seen 写入并消隐）|
+| | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）；前端 `transcript-view.test.ts`（多 chunk 未读回合计一次、seam 不切开回合、mark-all-seen 写入并消隐、msg_count 随 payload 推进共享锚）；`unread-cursor.test.ts`（rail-declutter-unread D3：seam 与徽标共用游标、首访/清缓存不冒红点、单调写）|
 | | composer 只承诺进程能力 | ✅ | sebas-webui `agent_kinds_test`；J: workbench（agent-kinds）|
 | | 会话来源可见 | ✅ | sebas-webui 内联测试 |
-| | 项目视图真实工作副本上下文 | ✅ | browser `projects.spec.ts` 1.2「git branch shows, plain dir shows none」（API branch 值 + rail `.branch` 标签 + 30s TTL 过期后 reload 刷新）|
+| | 项目视图真实工作副本上下文 | ✅ | browser `projects.spec.ts` 1.2（rail-declutter-unread D8 改写：分支探测链路 + 30s TTL 过期后 API 刷新仍断言；rail 不再显示分支名，可达性标记仍由探测驱动）|
 | | 原生内核会话执行 | ✅ | J: `native_agent_turn_via_router_journey`（E 级）|
 | | 原生内核 gated call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/fail-closed）|
 | | 目录浏览器加项目 | ✅ | sebas-webui `api_endpoints_test`（browse-dirs）|
@@ -142,8 +142,8 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 执行体可用性如实呈现 | ✅ | 前端 `workbench-composer.test.ts`（native 不可用禁用+cause、可用可选、下次 poll 恢复无需重载）；browser `first-paint.spec.ts`（native option disabled + unavailable + provider label 诚实降级）|
 | | 原生内核模型选择 | ✅ | src `agent_backend.rs`（`dual_set_session_model_routes_native_key_and_rejects_unknown`、spawn 期模型落快照 override）；前端 `workbench-composer.test.ts` 模型下拉/切换 |
 | | 会话前模型目录（backend catalog）| ✅ | 前端 `workbench-composer.test.ts`（creation mode offers the two-level Settings catalog、无目录诚实标注、读失败 4.4）；`model-catalog.test.ts`（providers × models 展平、空目录不造假）；browser `conversation.spec.ts`「creation mode offers provider → model from the Settings catalog」|
-| | Rail project removal entry（审计补行）| ✅ | `session_endpoints_test::projects_remove_project / projects_remove_unknown_returns_404`；browser `projects.spec.ts`「removed project disappears」；前端 `project-rail.test.ts` |
-| | Rail session close entry（turn-queue 修订）| ✅ | 前端 `project-rail.test.ts`（close 点名丢弃 pending 条数/无 pending 省略）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（close names the loss）|
+| | Rail project removal entry（审计补行；rail-declutter-unread D5 修订）| ✅ | `session_endpoints_test::projects_remove_project / projects_remove_unknown_returns_404 / projects_remove_blocked_while_live_sessions_exist`（有存活会话 409 typed rejection 带会话数、无会话放行）；browser `projects.spec.ts`「removed project disappears」+「… menu removal: blocked while live sessions exist」（… 菜单 → 移除弹窗就地预检 + 后端拒绝一致）；前端 `project-rail.test.ts`（预检文案/旧「迁移 Inbox」文案废除/拒绝内联）|
+| | Rail session close entry（turn-queue 修订；rail-declutter-unread 3.2 修订）| ✅ | 前端 `project-rail.test.ts`（close 移入会话行 `…` 菜单：inactive 直删/active 先确认/关闭 danger、点名丢弃 pending 条数/无 pending 省略、无行内直删按钮）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（close names the loss，经 `…` 菜单）|
 | | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test`（占位首条消息必须 SpawnNew、0-turn 占位同样 spawn、标记 dump/restore 存活）；J: workbench（占位会话）；browser `session-roundtrip.spec.ts` |
 | | Session agent binding is immutable（wire-fix 补行）| ✅ | 前端 `workbench-composer.test.ts`（agent 只读小字、无任何 agent 选择器）；browser `models.spec.ts`「detail head shows the bound agent with the lock affordance」|
 | | Composer submissions always deliver（wire-fix 补行）| ✅ | `spawn_race_test`（占位标记一次性消费/生产发射路径 WebSpawn 携带 kind/model/0-turn 占位同样 spawn——「输入框发不出消息」回归锁）；E `session_round_trip_via_webui_http` |
@@ -170,9 +170,9 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | project-session-actions | 目录选择器加项目 | ✅ | J: `projects_session_journey` |
 | | 无 prompt 新会话 | ✅ | J: `workbench_aggregate_journey` |
 | | 会话归档 | ✅ | sebas-webui `api_endpoints_test` |
-| | 历史组即归档 | ✅ | 同上 |
+| | 历史组即归档（rail-declutter-unread 修订：倒序 + Inbox 移除）| ✅ | sebas-webui `api_endpoints_test`；前端 `project-rail.test.ts`（History 按 archived_at 降序渲染、Inbox 组不存在断言、无项目会话无 rail 展示位）|
 | | 归档过期 | ✅ | src `archive.rs` 内联测试 |
-| | Project removal from the rail（审计补行）| ✅ | `session_endpoints_test::projects_remove_project`、`projects_remove_unknown_returns_404`；browser `projects.spec.ts`「removed project disappears」|
+| | Project removal from the rail（rail-declutter-unread D5 修订）| ✅ | 见簇③「Rail project removal entry」同行证据|
 | | Session close from the rail（审计补行）| ✅ | sebas-dispatch `web_close_test`（active/dormant/spawning/unknown/focused 全语义）；`session_endpoints_test::close_active_session_drops_mapping_and_returns_200` 等 close 族；browser `session-mgmt.spec.ts`「close removes the session from the active list」|
 | | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test` 占位三态（见簇③同行）；browser `session-roundtrip.spec.ts` |
 | state-store (projects 面) | DB 位置与单写者 | ✅ | sebas-router state_store 测试；J: lifecycle（迁移日志）|
@@ -298,7 +298,8 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 审批卡片旅程 | 会话级允许 | allow-session path — observed product gap: the follow-up call is gated again | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
 | 项目管理覆盖 | 增删 | add via project dialog appears in rail; removed project disappears | `projects.spec.ts` | 项目管理覆盖「项目增删」 |
 | 项目管理覆盖 | 异常拒绝 | 1.1 illegal path 400, duplicate 409, removal persists across reload | `projects.spec.ts` | 项目管理覆盖「项目异常拒绝」 |
-| 项目管理覆盖 | 排序与持久化 | 1.2 reorder persists; git branch shows, plain dir shows none | `projects.spec.ts` | 项目管理覆盖「项目排序与分支呈现」 |
+| 项目管理覆盖 | 排序与持久化 | 1.2 reorder persists; branch probe drives state, rail hides the branch name (D8) | `projects.spec.ts` | 项目管理覆盖「项目排序与分支呈现」（rail-declutter-unread 改写：分支名不再上 rail） |
+| 项目管理覆盖 | 增删 | … menu removal: blocked while live sessions exist, precheck and typed rejection agree | `projects.spec.ts` | project-session-actions「Project removal from the rail」removal-blocked/rejection scenarios（rail-declutter-unread） |
 | 项目管理覆盖 | 选择器交互 | P1 tree expand, click-select fills path, submit lands in rail | `projects.spec.ts` | 项目管理覆盖「folder-picker 树展开点选回填」 |
 | 项目管理覆盖 | 选择器交互 | P2 empty path disables submit; missing path errors inline, dialog stays | `projects.spec.ts` | 项目管理覆盖「选择器空路径与非法路径」 |
 | 会话管理 | close 与 archive | close removes the session from the active list | `session-mgmt.spec.ts` | 会话管理覆盖「close 与 archive」 |
@@ -429,6 +430,8 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 
 | 日期 | change | commit | 说明 |
 |---|---|---|---|
+| 2026-09-11 | rail-declutter-unread（工作树实施） | 未提交（feat/webui 工作树） | rail 收敛 + 未读徽标：Inbox 分组移除（无项目会话不再进 rail，API 仍可达）；移除项目遇非归档会话改 typed rejection 409（废除「迁移 Inbox」承诺，`session_endpoints_test` 两例 + browser 旅程）；项目/会话行操作收敛 `…` 菜单（wa-dropdown）；会话行新增未读徽标（服务端 `msg_count` = 可见回复段口径，dispatch 引擎 `count_chat_messages` 派生 + native 后端 flush 处累计；浏览器 localStorage 游标 `unread-cursor.ts` 与 seam 同锚）；会话名改 prompt_preview（40 码点截断）；History 倒序；composer 创建强制选项目。浏览器用例改写 6 处（projects 1.2 分支呈现按 D8 改写）+ 新增 1 例（主 config 42→43）；全套件 3 配置 50 例全绿（46+3+4）。 |
+
 | 2026-09-11 | 五 change 归档复核（make-core-own-provider-data、add-fetch-models、redesign-provider-models-settings、workbench-turn-queue、workbench-conversation-view） | specs 同步在工作树（归档目录 `openspec/changes/archive/2026-09-11-*`） | 五簇 requirement 级全量重数：117/117 = 100%（豁免 1 条不计分母）。分母 100 → 117：五 change 新增 +7（① Pending submissions observable/manageable；② Core owns provider and model data、Model entries carry capability tags；③ Pending submissions stack、conversation render、single surface；⑤ Model list fetch over the channel）；上期基数后归档补入账 +10（③ agent-workbench +6：审计 `982b4cc` rail/placeholder 三条 + wire-fix `bad057e` 三条；④ +4：project-session-actions rail 三条 + state-store Runtime state boundaries）；router-admin-api REMOVED 4 条退役出账（非核心面）。证据行全面改写（router CRUD/探测/默认值证据迁到 webui BFF + core store + 通道契约面；turn-queue/conversation-view 新 scenario 落行）。本期两处真缺口当场补测收口：E `core_owned_provider_reaches_router_without_restart`（router 订阅 core provider 数据的进程级闭环，此前零覆盖）+ `project_default_agent_follows_last_use` 与前端预选单测。树形账本 41 → 49 行（conversation/pending-stack 新 spec）。实施清单见各归档 change `tasks.md`。 |
 | 2026-09-08 | raise-core-coverage-to-90 | `feat/raise-core-coverage-to-90`（基数：fail-fast `5eb1d85`、harden `52847f1`、cover-channel `f14767e`） | 核心集门槛 80%→90% 且扩为五簇（新增 ⑤ 通道与监督 = core-session-channel + watchdog，界定写死进主 spec「核心功能集界定」）；五簇 requirement 级全量重数入账（100/100 = 100%，豁免 1 条不计分母）；三期变更新用例证据归行（fail-fast → watchdog/webui/testsuite 行；harden → ⑤/webui/④/testsuite 行；cover-channel → ⑤/webui 行）；缺口清单收口（detached 审批、projects_branch、watchdog 监督旅程均已有交付命中；spawn-fail 进程级注入转豁免）；复核 grep 清单落 tasks 1.1。实施清单为本期 `tasks.md`。 |
 | 2026-09-09 | harden-core-channel-deployment | `feat/harden-core-channel-deployment`（694c2a5 起） | 核心通道部署加固：core 无条件自动装配（生成密钥写 `<config dir>/core.secret` 0600，env 优先）、客户端每次连接 env→文件发现（轮换自愈）、ready 后移至 bind 成功后（bind 失败→75）、im/router/webui 订阅侧共享 resolver、webui 全局核心不可达横幅 + 项目注册降级标记/提示。证据：E `no_secret_assembly_end_to_end` / `secret_rotation_self_heal_across_core_restart` / `watchdog_supervised_core_recovery`（`testsuite_e2e_test`，3 连绿 11 passed ×3）；browser `deployment.spec.ts` 部署韧性旅程（detached 双进程，3 连绿）；`testsuite-webui/tests/helpers/detached.ts` 双进程 fixture（交付物，cover-B 复用）。实施清单为本期 `tasks.md`。 |

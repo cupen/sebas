@@ -17,10 +17,10 @@
 import { expect, test } from '@playwright/test'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   FocusedSession,
   getSession,
-  middleTruncate,
   ProjectRail,
   resetState,
   ReviewCards,
@@ -133,14 +133,16 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       const workbench = new Workbench(page)
 
       await resetState(page.request)
-      const key = await createSession(page.request, { prompt: `inplace-${t}` })
+      // rail-declutter-unread：Inbox 分组移除 → 会话绑定 scene 项目才会
+      // 出现在 rail；行名即首条 prompt。
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const key = await createSession(page.request, { prompt: `inplace-${t}`, projectId })
       await waitStatus(page.request, key, ['done'])
 
       await page.goto('/')
       await expect(workbench.composer).toBeVisible()
-      await rail.expandInbox()
-      const short = await shortId(page.request, key)
-      await rail.sessionItem(short).click()
+      await rail.expandProject(projectName)
+      await rail.sessionItem(`inplace-${t}`).click()
 
       // The conversation renders IN PLACE: same workbench surface, no
       // navigation to any other view.
@@ -204,10 +206,3 @@ test.describe('对话视图（workbench-conversation-view）', () => {
 })
 
 /** Short rail label for a session key (mirrors the backend elision). */
-async function shortId(
-  request: import('@playwright/test').APIRequestContext,
-  key: string,
-): Promise<string> {
-  const { detail } = await getSession(request, key)
-  return middleTruncate(detail!.session_id ?? '', 18)
-}

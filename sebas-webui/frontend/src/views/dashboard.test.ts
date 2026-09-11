@@ -70,6 +70,7 @@ function row(overrides: Partial<SessionRow>): SessionRow {
     available_models: null,
     agent_kind: null,
     pending_count: 0,
+    msg_count: 0,
     ...overrides,
   }
 }
@@ -96,6 +97,7 @@ function detailFixture(): SessionDetail {
     status_label: 'Working',
     status_slug: 'working',
     status_glyph: '●',
+    msg_count: 2,
     entries: [
       { position: 0, kind: 'prompt', element_type: 'markdown', content: 'do the thing', created_at_unix: 1_700_000_000 },
       { position: 1, kind: 'content', element_type: 'markdown', content: 'first entry', created_at_unix: 1_700_000_100 },

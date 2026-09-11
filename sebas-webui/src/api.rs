@@ -229,6 +229,9 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         // workbench-turn-queue 6.1：待生效提交全量视图（投递序，staging 先于
         // turn；每条带稳定 id/文本/位置/处置/优先标记）。
         "pending": serde_json::to_value(&info.pending).unwrap_or_default(),
+        // rail-declutter-unread：会话的可见回复段数——transcript 标记已读时
+        // 以它推进浏览器读锚（seam 与徽标共用，D3）。
+        "msg_count": info.msg_count,
     });
     Json(data).into_response()
 }
@@ -878,6 +881,7 @@ async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
             .cloned()
             .unwrap_or_default()
     } else {
+        eprintln!("[proj-debug] state_snapshot projects => None (file fallback)");
         // 回退：webui 本地文件注册表（list() 自带 id 回填）。
         return crate::projects::list()
             .into_iter()
@@ -1167,6 +1171,10 @@ pub async fn nodes(State(state): State<WebUiState>) -> Response {
 ///
 /// 8.1：远端条目只存在于文件注册表，且**绝不能按 path 删状态库**——同路径的
 /// 本机项目会被顺手删掉（那正是 `(节点, 路径)` 要防的串味）。
+///
+/// rail-declutter-unread D5：项目下还有非归档会话时**拒绝移除**（typed
+/// rejection，带会话数）——废除「存活会话迁移 Inbox」的承诺，操作员须先
+/// 归档/关闭。
 pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<String>) -> Response {
     let id = match urlencoding::decode(&id) {
         Ok(d) => d.into_owned(),
@@ -1191,6 +1199,29 @@ pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<Str
     else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
+    // rail-declutter-unread 1.3：非归档会话存在 → 拒绝（远端项目同样受此
+    // 门禁约束——行投影的 project_id 就是 wire 标识，直接按行数）。会话数
+    // 以当前后端快照为准（归档会话已离开快照，不计入）。
+    let live_sessions = state
+        .backend
+        .snapshot()
+        .await
+        .iter()
+        .filter(|info| crate::projects::project_id_for_session(info).as_deref() == Some(id.as_str()))
+        .count();
+    if live_sessions > 0 {
+        return (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": format!(
+                    "项目下仍有 {live_sessions} 个未归档会话，请先归档或关闭它们再移除项目"
+                ),
+                "code": "project_has_live_sessions",
+                "session_count": live_sessions,
+            })),
+        )
+            .into_response();
+    }
     // 远端：只处理文件注册表。
     if node != crate::projects::LOCAL_NODE_ID {
         return match crate::projects::remove_by_id(&id) {

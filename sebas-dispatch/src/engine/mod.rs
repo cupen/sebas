@@ -12,7 +12,7 @@ mod inbound;
 mod maps;
 pub mod provider_card;
 
-pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry};
+pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, count_chat_messages};
 pub use maps::{
     MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
 };
@@ -458,6 +458,19 @@ impl DispatchHandle {
             },
             None => (None, None, None),
         };
+        // rail-declutter-unread D1：可见回复段计数由 transcript 投影（口径见
+        // [`count_chat_messages`]）。transcript 只追加、随映射删除（Dormant/
+        // Spawning 无可寻址 transcript → 0），单调性由 transcript 保证，无需
+        // 第二份计数状态；随 `session.updated` 广播 + rail 10s 轮询兜底。
+        let msg_count = match m.transcript_id() {
+            Some(tid) => {
+                let g = self.turn_log.read().await;
+                g.get(tid)
+                    .map(|log| count_chat_messages(log))
+                    .unwrap_or(0)
+            }
+            None => 0,
+        };
         Some(SessionInfo {
             channel: key.channel_str().to_string(),
             key: key.reference.clone(),
@@ -485,6 +498,8 @@ impl DispatchHandle {
             // （add-remote-execution-node 8.x）router 只跟踪主控本机会话；远端
             // 投影由 core 侧节点链路投影合并进来，这里不臆造节点维度。
             remote: None,
+            // rail-declutter-unread D1：可见回复段数随快照/事件下发。
+            msg_count,
         })
     }
 

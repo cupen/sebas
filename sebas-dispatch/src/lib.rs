@@ -14,6 +14,7 @@ pub mod state_store;
 
 pub use crate::engine::{
     DispatchHandle, MsgIdMap, Out, RemoteSessionView, SessionEvent, SessionInfo, TurnEntry,
+    count_chat_messages,
 };
 pub use cards::{CardConfig, ThinkingDisplay};
 pub use commands::{Command, RouterAction, parse_command};

@@ -234,7 +234,7 @@ describe('sebas-workbench-composer', () => {
       default_model: 'deepseek-reasoner',
     })
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_m' })
-    const el = await mount({ projectDir: null })
+    const el = await mount({ projectId: 'proj-x', projectDir: null })
 
     // 一级 = provider，默认预选配置的 default provider。
     const providerSel = el.shadowRoot?.querySelector(
@@ -264,7 +264,7 @@ describe('sebas-workbench-composer', () => {
     await el.updateComplete
     expect(api.createSession).toHaveBeenCalledWith({
       prompt: 'use this model',
-      projectId: null,
+      projectId: 'proj-x',
       agent: expect.any(String),
       model: 'claude-sonnet',
           mode: null, // add-agent-mode-selection：缺省 = agent 默认
@@ -356,40 +356,47 @@ describe('sebas-workbench-composer', () => {
     expect(el.shadowRoot?.querySelector('wa-select[aria-label="Provider"]')).toBeNull()
   })
 
-  it('submit calls createSession with project_id null when projectId prop is null', async () => {
+  it('creation mode without a project disables submit and binds nothing (rail-declutter-unread D6)', async () => {
+    // Inbox 分组移除后 composer 不再造无项目会话：未选择项目 = 提交禁用 +
+    // 就地说明，绝不静默绑定 inbox。
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
-    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_inbox' })
     const el = await mount({ projectDir: null })
 
-    // Type into the textarea by simulating an `input` event on the
-    // WA shadow-DOM textarea. We reach into its shadow root directly
-    // because that's the only path the real WA component supports too.
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & {
       value: string
     }
-    expect(ta).toBeTruthy()
+    expect(ta.hasAttribute('disabled')).toBe(true)
+    const binding = el.shadowRoot?.querySelector('[data-testid="project-required"]')
+    expect(binding?.textContent ?? '').toContain('未选择项目')
+
+    // 直接驱动 submit 路径（绕过禁用态的假想点击）同样不创建。
     ta.value = 'hello agent'
     ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
     await el.updateComplete
-
     const created = vi.fn()
     el.addEventListener('composer-created', created)
-    const sendBtn = el.shadowRoot?.querySelector('.send-button')
-    expect(sendBtn).toBeTruthy()
-    ;(sendBtn as HTMLElement).click()
+    ;(el as unknown as { submit: () => void }).submit()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
 
-    expect(api.createSession).toHaveBeenCalledTimes(1)
+    expect(api.createSession).not.toHaveBeenCalled()
+    expect(created).not.toHaveBeenCalled()
+
+    // 显式选项目后门禁解除：提交携带选定的 project_id。
+    el.projectId = 'proj-sebas'
+    el.projectDir = '/home/me/code/sebas'
+    ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_proj' })
+    await el.updateComplete
+    ;(el.shadowRoot?.querySelector('.send-button') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
     expect(api.createSession).toHaveBeenCalledWith({
       prompt: 'hello agent',
-      projectId: null,
-      agent: 'claude', // 预选 = 首个可达 agent（mock catalog 的第一项）
+      projectId: 'proj-sebas',
+      agent: 'claude',
       model: null,
-      mode: null, // add-agent-mode-selection：缺省 = agent 默认
+      mode: null,
     })
-    expect(created).toHaveBeenCalledTimes(1)
-    expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_inbox')
   })
 
   it('submit calls createSession with project_id=<id> when projectId prop is set', async () => {
@@ -452,7 +459,7 @@ describe('sebas-workbench-composer', () => {
 
   it('forwards the agent selected in the drop-down (default = first reachable)', async () => {    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_native' })
-    const el = await mount({ projectDir: null })
+    const el = await mount({ projectId: 'proj-x', projectDir: null })
 
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
     ta.value = 'run natively'
@@ -477,7 +484,7 @@ describe('sebas-workbench-composer', () => {
     expect(api.createSession).toHaveBeenCalledTimes(1)
     expect(api.createSession).toHaveBeenCalledWith({
       prompt: 'run natively',
-      projectId: null,
+      projectId: 'proj-x',
       agent: 'native',
       model: null,
           mode: null, // add-agent-mode-selection：缺省 = agent 默认
@@ -487,7 +494,7 @@ describe('sebas-workbench-composer', () => {
   it('lists reachable agents and forwards the selected agent id (D2 wire)', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_gemini' })
-    const el = await mount({ projectDir: null })
+    const el = await mount({ projectId: 'proj-x', projectDir: null })
 
     // Dropdown: reachable kinds + native; unreachable kinds are omitted.
     const options = Array.from(
@@ -521,7 +528,7 @@ describe('sebas-workbench-composer', () => {
     expect(api.createSession).toHaveBeenCalledTimes(1)
     expect(api.createSession).toHaveBeenCalledWith({
       prompt: 'use gemini',
-      projectId: null,
+      projectId: 'proj-x',
       agent: 'gemini',
       model: null,
           mode: null, // add-agent-mode-selection：缺省 = agent 默认
@@ -531,7 +538,7 @@ describe('sebas-workbench-composer', () => {
   it('error path surfaces inline and preserves text', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom: 500'))
-    const el = await mount({ projectDir: null })
+    const el = await mount({ projectId: 'proj-x', projectDir: null })
 
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & {
       value: string
@@ -556,7 +563,7 @@ describe('sebas-workbench-composer', () => {
   it('plain Enter sends; Shift+Enter does not', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
     ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_enter' })
-    const el = await mount({ projectDir: null })
+    const el = await mount({ projectId: 'proj-x', projectDir: null })
     const ta = el.shadowRoot?.querySelector('wa-textarea') as HTMLElement & { value: string }
     ta.value = 'enter to send'
     ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
@@ -576,7 +583,7 @@ describe('sebas-workbench-composer', () => {
     expect(api.createSession).toHaveBeenCalledTimes(1)
     expect(api.createSession).toHaveBeenCalledWith({
       prompt: 'enter to send',
-      projectId: null,
+      projectId: 'proj-x',
       agent: 'claude',
       model: null,
           mode: null, // add-agent-mode-selection：缺省 = agent 默认
@@ -672,7 +679,7 @@ describe('sebas-workbench-composer', () => {
     it('"+ new session" chip flips to creation mode and back', async () => {
       ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
       ;(api.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ key: 'oc_new' })
-      const el = await mount(focus)
+      const el = await mount({ ...focus, projectId: 'proj-sebas', projectDir: '/home/me/code/sebas' })
       expect(el.shadowRoot?.querySelector('wa-select[aria-label="Agent"]')).toBeNull()
 
       const chip = () => el.shadowRoot?.querySelector('.mode-chip') as HTMLElement
@@ -695,7 +702,7 @@ describe('sebas-workbench-composer', () => {
       await el.updateComplete
       expect(api.createSession).toHaveBeenCalledWith({
         prompt: 'brand new session',
-        projectId: null,
+        projectId: 'proj-sebas',
         agent: 'claude',
         model: null,
               mode: null, // add-agent-mode-selection：缺省 = agent 默认
@@ -777,7 +784,9 @@ describe('sebas-workbench-composer', () => {
 
   it('reachability recovers on poll without remounting', async () => {
     ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)
-    const el = await mount({ projectDir: null })
+    // 带projectId挂载：本用例只验证 reachability 门禁的恢复，不掺入
+    // rail-declutter-unread D6 的项目门禁（创建模式无项目时提交恒禁用）。
+    const el = await mount({ projectId: 'proj-x', projectDir: null })
     expect(el.shadowRoot?.querySelector('.callout-warning')).toBeTruthy()
     // connectedCallback 安装了轮询定时器。
     const timer = (el as unknown as { reachabilityTimer: number | undefined }).reachabilityTimer

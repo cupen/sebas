@@ -1102,6 +1102,8 @@ impl SessionBackend for FakeBackend {
             remote: None,
             desired_mode: None,
             effective_mode: None,
+            // rail-declutter-unread：fake 会话不产 transcript，段数为 0。
+            msg_count: 0,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1369,6 +1371,7 @@ mod tests {
                 remote: None,
                 desired_mode: None,
                 effective_mode: None,
+                msg_count: 0,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

@@ -43,6 +43,12 @@ struct NativeSession {
     /// The in-flight streamed text, flushed into the transcript on tool
     /// boundaries and turn end.
     text_buf: String,
+    /// rail-declutter-unread D1/D2：累计「可见回复段」数——在 transcript
+    /// flush 处累加（`flush_text` 落一段正文 +1；`⚠` 错误行 +1）。工具
+    /// 痕迹（push_markdown 的 📖/✓/⏳/🛡/🗒 行）是过程噪声，不计。
+    /// 不用 `count_chat_messages` 派生：native transcript 全部是 markdown，
+    /// 连续段永不打断，派生口径在这里退化为 1。
+    msg_count: u64,
     /// （wire-webui-sebas-agent-e2e）会话级模型 override。`None` = 走内核默认；
     /// 设置后下一次 turn 起用，新值即时生效。
     current_model_override: Option<String>,
@@ -58,6 +64,7 @@ impl NativeSession {
             return;
         }
         let text = std::mem::take(&mut self.text_buf);
+        self.msg_count += 1;
         self.transcript.push(TurnEntry {
             position: self.transcript.len() as u64,
             kind: "content".into(),
@@ -110,6 +117,8 @@ impl NativeSession {
             // （add-agent-mode-selection）native 内核不承载 mode：不声称生效。
             desired_mode: None,
             effective_mode: None,
+            // rail-declutter-unread D1：transcript flush 处累计的可见回复段数。
+            msg_count: self.msg_count,
         }
     }
 }
@@ -410,6 +419,10 @@ impl NativeAgentBackend {
                     AE::Error {
                         message, terminal, ..
                     } => {
+                        // ⚠ 错误行是操作员可见的 agent 产出（D2 口径含 error）
+                        // ——计入段数；terminal 错误随后拆除映射，计数值随
+                        // 会话一起消失。
+                        session.msg_count += 1;
                         session.push_markdown(format!("⚠ {message}"));
                         removed = terminal;
                         None
@@ -505,6 +518,7 @@ impl SessionBackend for NativeAgentBackend {
                     prompt: prompt.clone(),
                     transcript: Vec::new(),
                     text_buf: String::new(),
+                    msg_count: 0,
                     current_model_override: None,
                     available_models: self.available_models.clone(),
                     default_model: self.default_model.clone(),
@@ -1086,6 +1100,57 @@ mod tests {
         // close 后 sessions 清空。
         assert!(backend.close(key).await.is_ok());
         assert!(backend.snapshot().await.is_empty());
+    }
+
+    // rail-declutter-unread 1.1（native 侧）：msg_count 在 transcript flush
+    // 处累计——一回合的流式正文（一次 flush）计 1，工具痕迹（📖/✓）不计；
+    // 第二回合再 +1。badge 数据源的单测钉住口径。
+    #[tokio::test]
+    async fn native_msg_count_counts_reply_flushes_not_tool_noise() {
+        let backend = NativeAgentBackend::with_manager(manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        // 回合一：bash 工具调用（gated，先放行；2 条痕迹）+ 收尾文本（1 次
+        // flush）。
+        let mut notices = backend.permission_requests().expect("native has notices");
+        let notice = tokio::time::timeout(Duration::from_secs(10), notices.recv())
+            .await
+            .expect("notice timeout")
+            .expect("notice");
+        assert!(
+            backend
+                .answer_permission(&notice.request_id, PermissionDecision::AllowOnce)
+                .await,
+            "decision must reach the pending request"
+        );
+        let deadline = Duration::from_secs(10);
+        let _ = tokio::time::timeout(deadline, async {
+            loop {
+                let turns = backend.turns(key.clone(), 0).await.unwrap();
+                let joined: String = turns.iter().map(|t| t.content.clone()).collect();
+                if joined.contains("gated call was approved") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        let info = backend
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| s.channel_key() == key)
+            .expect("native session in snapshot");
+        assert_eq!(
+            info.msg_count, 1,
+            "one reply flush counts 1; the two tool traces must not add"
+        );
+
+        backend.close(key).await.unwrap();
     }
 
     #[tokio::test]
