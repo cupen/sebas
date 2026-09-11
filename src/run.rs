@@ -127,6 +127,14 @@ pub async fn run(
                 let engine = Box::new(crate::sebas_state::engine::DbStateEngine::new(
                     writer.handle().clone(),
                 ));
+                // make-core-own-provider-data 1.4：legacy defaults.json 一次性
+                // 导入 settings 域（标记在场即永不读该文件）。放在 init_engine
+                // 之前——经同一 writer 句柄串行提交，不与后续引擎写并发。
+                if let Err(e) =
+                    crate::sebas_state::defaults_import::import_legacy_defaults_once(writer.handle()).await
+                {
+                    tracing::warn!(error = %e, "legacy defaults 导入阶段失败（不阻断启动）");
+                }
                 sebas_dispatch::state_store::init_engine(engine);
                 tracing::info!(path = %path.display(), "state store DB initialized");
             }

@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { matchRoute } from './router.js'
 
 // IA v2 production routes (app-shell.ts ROUTES): the workbench, the
-// sessions table and session deep links. /settings /router /about
+// sessions table and session deep links (the deep link renders the same
+// workbench focused — no separate detail view). /settings /router /about
 // redirect to / and /admin/* is deleted — no fixture entries for them.
 const ROUTES = [
   { id: 'dashboard', pattern: '/' },
   { id: 'sessions', pattern: '/sessions' },
-  { id: 'session-detail', pattern: '/sessions/:key' },
+  { id: 'session-deep-link', pattern: '/sessions/:key' },
 ]
 
 describe('matchRoute', () => {
@@ -24,7 +25,7 @@ describe('matchRoute', () => {
     // encoded so fetch('/api/sessions/' + key) keeps working; decoding here
     // produced a literal NUL that the browser strips from URLs → 400.
     const m = matchRoute(ROUTES, '/sessions/oc_abc%00')
-    expect(m?.id).toBe('session-detail')
+    expect(m?.id).toBe('session-deep-link')
     expect(m?.params['key']).toBe('oc_abc%00')
   })
 

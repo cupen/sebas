@@ -8,7 +8,7 @@
 //! (`core --webui`) or across the core session channel (standalone webui).
 
 use crate::events::WebUiEvent;
-use crate::models::{CardConfigInfo, CardElementView, SessionStatus};
+use crate::models::{CardConfigInfo, ConversationEntryView, SessionStatus};
 use crate::routes::{
     build_session_rows, decode_session_key, encode_channel_key, encode_session_key,
     format_relative_time, format_uptime, session_summary,
@@ -46,6 +46,15 @@ fn rejection_response(rej: SessionRejection) -> Response {
         SessionRejection::UnusableProjectDir | SessionRejection::Capacity { .. } => {
             StatusCode::BAD_REQUEST
         }
+        // workbench-turn-queue 5.1/D7：满队列 409（4xx 点名上限）；pending
+        // 管理拒绝按原因映射——未知 404、已开始/越优先 409、越界 400。
+        SessionRejection::QueueFull { .. } => StatusCode::CONFLICT,
+        SessionRejection::PendingRejected { reason } => match reason {
+            crate::session_backend::PendingReason::Unknown => StatusCode::NOT_FOUND,
+            crate::session_backend::PendingReason::AlreadyStarted
+            | crate::session_backend::PendingReason::PriorityConflict => StatusCode::CONFLICT,
+            crate::session_backend::PendingReason::OutOfRange => StatusCode::BAD_REQUEST,
+        },
     };
     api_error(status, rej.to_string())
 }
@@ -58,12 +67,19 @@ pub async fn summary(State(state): State<WebUiState>) -> Response {
     let focused = state.backend.focused().await;
     let reachability = state.backend.reachability().await;
     let (rows, active, dormant, spawning) = build_session_rows(&infos, focused.as_ref());
-    let active_session = focused.as_ref().and_then(|f| {
-        infos
-            .iter()
-            .find(|i| i.channel == f.channel.as_str() && i.key == f.reference)
-            .map(session_summary)
-    });
+    // workbench-conversation-view 1.4（design D1）：聚焦会话与 detail 同形状
+    // ——条目序列随 summary 下发，客户端不必再为对话内容发第二个请求；
+    // 取不到（瞬时失败）给空序列而不是失败 payload。
+    let active_session = match focused.as_ref() {
+        Some(f) => {
+            let turns = state.backend.turns(f.clone(), 0).await.unwrap_or_default();
+            infos
+                .iter()
+                .find(|i| i.channel == f.channel.as_str() && i.key == f.reference)
+                .map(|info| session_summary(info, &turns))
+        }
+        None => None,
+    };
 
     let data = json!({
         "active_count": active,
@@ -149,25 +165,28 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
 
     // A known session with no readable transcript yet renders empty
     // rather than failing the view.
-    let entries: Vec<sebas_dispatch::TurnEntry> =
-        state.backend.turns(session_key.clone(), 0).await.unwrap_or_default();
-    // The transcript carries the agent/tool output blocks; the current
-    // turn's prompt travels in `user_prompt`. The SPA renders markdown
-    // blocks and hides the rest (thinking blocks stay in the payload for
-    // forward-compatible clients). The wall-clock stamp travels with each
-    // entry so the SPA can render a flush-left timestamp and anchor the
-    // seen-boundary seam to a stable identity that doesn't change when an
-    // earlier card refreshes in place.
-    let body: Vec<CardElementView> = entries
+    let entries: Vec<sebas_dispatch::TurnEntry> = state
+        .backend
+        .turns(session_key.clone(), 0)
+        .await
+        .unwrap_or_default();
+    // workbench-conversation-view 1.1/1.2（design D1/D2）：payload 是一条
+    // 有序条目序列（提交与 agent 输出同序，position 单调），`user_prompt` 与
+    // `body` 退役。`kind` 随条目透传（prompt = 操作员提交），渲染类型
+    // `element_type` 保留 core 的 thinking/tool/error 标记，让前端把回合内
+    // 的 thinking 折叠、工具收组、错误单独呈现。时间戳随条目走，前端据此
+    // 渲染 flush-left 时间并把未读 seam 锚到稳定身份上。
+    let conversation: Vec<ConversationEntryView> = entries
         .iter()
-        .filter(|e| e.kind != "prompt")
-        .map(|e| CardElementView {
+        .map(|e| ConversationEntryView {
+            position: e.position,
+            kind: e.kind.clone(),
             element_type: match e.element_type.as_str() {
-                "thinking" => "thinking",
-                // fail-fast-on-startup-errors：spawn-failed 错误事件按原类型
-                // 透传，前端据此渲染带计数的错误气泡。
-                "error" => "error",
-                _ => "markdown",
+                // thinking / tool / error 按原类型透传（conversation-view
+                // 1.1/1.3：前端靠它折叠 thinking、收工具组、渲染错误气泡）；
+                // 未知遗留值归一为 markdown，内容不丢。
+                "thinking" | "tool" | "error" => e.element_type.clone(),
+                _ => "markdown".to_string(),
             },
             content: e.content.clone(),
             created_at_unix: e.created_at_unix,
@@ -184,8 +203,7 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         "status_label": derived.label(),
         "status_slug": derived.slug(),
         "status_glyph": derived.glyph(),
-        "user_prompt": info.user_prompt,
-        "body": body,
+        "entries": conversation,
         // The seam does not transport the core's msg-id bookkeeping; the
         // SPA tolerates a null here.
         "msg_id": Option::<String>::None,
@@ -202,6 +220,9 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
             .project_dir
             .as_deref()
             .map(crate::projects::project_id_for),
+        // workbench-turn-queue 6.1：待生效提交全量视图（投递序，staging 先于
+        // turn；每条带稳定 id/文本/位置/处置/优先标记）。
+        "pending": serde_json::to_value(&info.pending).unwrap_or_default(),
     });
     Json(data).into_response()
 }
@@ -257,14 +278,14 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
     // fix-webui-detached-status：provider 列表取状态库真源（两种部署形态
     // 同源，运行期经 admin API 的增删改免重启可见）；真源不可达时如实标注
     // `providers_available: false`，不把空集冒充"未配置"。
-    let (providers_value, providers_available) = match state.backend.state_snapshot("providers").await
-    {
-        Some(v) if v.get("error").is_none() => {
-            let list: Vec<serde_json::Value> = v
-                .get("providers")
-                .and_then(serde_json::Value::as_object)
-                .map(|cards| {
-                    cards
+    let (providers_value, providers_available) =
+        match state.backend.state_snapshot("providers").await {
+            Some(v) if v.get("error").is_none() => {
+                let list: Vec<serde_json::Value> = v
+                    .get("providers")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|cards| {
+                        cards
                         .iter()
                         .map(|(id, card)| {
                             json!({
@@ -276,12 +297,12 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
                             })
                         })
                         .collect()
-                })
-                .unwrap_or_default();
-            (serde_json::Value::Array(list), true)
-        }
-        _ => (json!([]), false),
-    };
+                    })
+                    .unwrap_or_default();
+                (serde_json::Value::Array(list), true)
+            }
+            _ => (json!([]), false),
+        };
     let mut router = serde_json::to_value(&state.router).unwrap_or_else(|_| json!({}));
     if let Some(obj) = router.as_object_mut() {
         obj.insert("providers".into(), providers_value.clone());
@@ -352,7 +373,11 @@ pub async fn auth_me(State(state): State<WebUiState>, headers: axum::http::Heade
         Some(sid) => state.auth.session_store.validate(&sid).await.is_ok(),
         None => false,
     };
-    let username = if authenticated { state.auth.username() } else { None };
+    let username = if authenticated {
+        state.auth.username()
+    } else {
+        None
+    };
     Json(json!({
         "enabled": true,
         "authenticated": authenticated,
@@ -383,7 +408,11 @@ pub async fn auth_login(
     let (display_name, login) = if let Some(secret) = form.secret.as_deref() {
         let login = state.auth.login_secret(&client_ip, secret).await;
         (
-            login.as_ref().ok().and_then(|_| state.auth.username()).unwrap_or_else(|| "admin".into()),
+            login
+                .as_ref()
+                .ok()
+                .and_then(|_| state.auth.username())
+                .unwrap_or_else(|| "admin".into()),
             login,
         )
     } else if let (Some(username), Some(password)) =
@@ -541,7 +570,12 @@ pub async fn create_session(
     // 下次在该项目创建会话时 composer 预选它。状态库优先，文件注册表回退。
     if let Some(id) = &req.project_id {
         let payload = json!({ "op": "set_default_agent", "id": id, "agent": req.agent });
-        if state.backend.state_mutate("projects", payload).await.is_err() {
+        if state
+            .backend
+            .state_mutate("projects", payload)
+            .await
+            .is_err()
+        {
             crate::projects::set_default_agent(id, &req.agent);
         }
     }
@@ -562,7 +596,11 @@ pub async fn set_session_model(
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
     };
-    if let Err(rej) = state.backend.set_session_model(session_key, req.model_id).await {
+    if let Err(rej) = state
+        .backend
+        .set_session_model(session_key, req.model_id)
+        .await
+    {
         return rejection_response(rej);
     }
     (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
@@ -598,15 +636,19 @@ pub async fn close_session(State(state): State<WebUiState>, Path(key): Path<Stri
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
     };
 
-    if let Err(rej) = state.backend.close(session_key).await {
-        return rejection_response(rej);
-    }
+    // workbench-turn-queue 5.2：close 响应携带随之丢弃的未执行提交条数
+    // （discarded_pending），关闭带队列的会话不再静默丢队。
+    let report = match state.backend.close(session_key).await {
+        Ok(r) => r,
+        Err(rej) => return rejection_response(rej),
+    };
     let focused = state.backend.focused().await;
     (
         StatusCode::OK,
         Json(json!({
             "status": "closed",
             "active_session_key": focused.as_ref().map(encode_session_key),
+            "discarded_pending": report.discarded_pending,
         })),
     )
         .into_response()
@@ -644,6 +686,51 @@ pub async fn switch_session(State(state): State<WebUiState>, Path(key): Path<Str
         })),
     )
         .into_response()
+}
+
+/// POST /api/sessions/{key}/pending/{pending_id}/remove — 移除一个未开始的
+/// 待生效提交（workbench-turn-queue 6.2，design D7）。成功返回操作后的全量
+/// pending（客户端据此对账）；拒绝类型化（未知 id 404 / 已开始 409 / 越界
+/// 400），绝不静默。
+pub async fn pending_remove(
+    State(state): State<WebUiState>,
+    Path((key, pending_id)): Path<(String, u64)>,
+) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    match state.backend.remove_pending(session_key, pending_id).await {
+        Ok(pending) => Json(json!({ "status": "removed", "pending": pending })).into_response(),
+        Err(rej) => rejection_response(rej),
+    }
+}
+
+/// POST /api/sessions/{key}/pending/{pending_id}/move — 把一个未开始的提交
+/// 重排到其处置组内 `to_index` 位置（workbench-turn-queue 6.2，design D7）。
+/// 成功返回操作后的全量 pending；越优先/越界/已开始均为类型化 4xx。
+#[derive(Deserialize)]
+pub struct MovePendingRequest {
+    pub to_index: usize,
+}
+
+pub async fn pending_move(
+    State(state): State<WebUiState>,
+    Path((key, pending_id)): Path<(String, u64)>,
+    Json(req): Json<MovePendingRequest>,
+) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    match state
+        .backend
+        .move_pending(session_key, pending_id, req.to_index)
+        .await
+    {
+        Ok(pending) => Json(json!({ "status": "moved", "pending": pending })).into_response(),
+        Err(rej) => rejection_response(rej),
+    }
 }
 
 /// GET /api/fs/browse-dirs?path=...&root=... — list only subdirectories for
@@ -727,7 +814,10 @@ pub async fn projects_add(
     if !state.allowed_roots.is_empty()
         && !crate::fs::within_allowed_roots(dir, &state.allowed_roots)
     {
-        return api_error(StatusCode::BAD_REQUEST, "路径超出允许范围: 不在 allowed_roots 白名单内");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "路径超出允许范围: 不在 allowed_roots 白名单内",
+        );
     }
     if !dir.exists() {
         return api_error(StatusCode::BAD_REQUEST, format!("路径不存在: {path}"));
@@ -779,7 +869,10 @@ pub async fn projects_add(
         if crate::projects::add(&canonical).is_ok() {
             degraded = Some(json!({ "cause": cause }));
         } else {
-            return api_error(StatusCode::SERVICE_UNAVAILABLE, "无法注册项目（状态库与本地均失败）");
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "无法注册项目（状态库与本地均失败）",
+            );
         }
     }
     // 返回新条目（从列表反查，保证与数据源一致）。
@@ -798,10 +891,7 @@ pub async fn projects_add(
 /// POST /api/projects/{id}/remove — unregister a project（状态库优先）。
 /// 路径参数是稳定项目 id（workbench-agent-wire-fix 2.5）：先解析 id →
 /// 内部 path（状态库以 path 为键），再走既有删除。
-pub async fn projects_remove(
-    State(state): State<WebUiState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<String>) -> Response {
     let id = match urlencoding::decode(&id) {
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
@@ -856,15 +946,17 @@ pub async fn projects_reorder(
 ) -> Response {
     // 读当前列表 → 按新顺序重排（未知 id 落地为 add_time 顺序尾部）→ save。
     let mut projects = projects_from_backend(&state).await;
-    let mut by_id: std::collections::HashMap<String, serde_json::Value> =
-        projects.drain(..).map(|p| {
+    let mut by_id: std::collections::HashMap<String, serde_json::Value> = projects
+        .drain(..)
+        .map(|p| {
             let id = p
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
             (id, p)
-        }).collect();
+        })
+        .collect();
     let mut next: Vec<serde_json::Value> = Vec::with_capacity(req.ids.len());
     let mut seen = std::collections::HashSet::new();
     for id in &req.ids {
@@ -878,10 +970,7 @@ pub async fn projects_reorder(
     let mut tail: Vec<(i64, serde_json::Value)> = by_id
         .into_values()
         .map(|v| {
-            let t = v
-                .get("added_at")
-                .and_then(|x| x.as_i64())
-                .unwrap_or(0);
+            let t = v.get("added_at").and_then(|x| x.as_i64()).unwrap_or(0);
             (t, v)
         })
         .collect();
@@ -896,7 +985,10 @@ pub async fn projects_reorder(
     // 状态库优先；不可达时回退文件注册表 reorder。
     let via_backend = state
         .backend
-        .state_mutate("projects", json!({ "op": "save", "projects": next.clone() }))
+        .state_mutate(
+            "projects",
+            json!({ "op": "save", "projects": next.clone() }),
+        )
         .await
         .is_ok();
     if via_backend {
@@ -916,10 +1008,7 @@ pub async fn projects_reorder(
 /// GET /api/projects/{id}/branch — current git branch (TTL-cached server-side)。
 /// Git 探测是本地文件系统操作；backend 不可达时列表来自文件回退，语义一致。
 /// 路径参数是稳定项目 id（workbench-agent-wire-fix 2.5）。
-pub async fn projects_branch(
-    State(state): State<WebUiState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<String>) -> Response {
     let id = match urlencoding::decode(&id) {
         Ok(d) => d.into_owned(),
         Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid id encoding"),
@@ -931,7 +1020,10 @@ pub async fn projects_branch(
     let Some(entry) = entry else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
-    let Some(project_path) = entry.get("path").and_then(|v| v.as_str()).map(str::to_string)
+    let Some(project_path) = entry
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
     else {
         return api_error(StatusCode::NOT_FOUND, "project not found");
     };
@@ -942,8 +1034,12 @@ pub async fn projects_branch(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let branch_at = entry.get("branch_at").and_then(|v| v.as_i64()).unwrap_or(0);
-    let cached_branch = entry.get("branch").and_then(|v| v.as_str()).map(str::to_string);
-    let branch = if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some() {
+    let cached_branch = entry
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let branch = if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some()
+    {
         cached_branch
     } else {
         let fresh = crate::projects::probe_git_branch(std::path::Path::new(&project_path));
@@ -970,10 +1066,7 @@ pub async fn archive_list(State(_state): State<WebUiState>) -> Response {
 /// POST /api/sessions/{key}/archive — archive a session.
 /// Moves it from the active session list into the archive. The session is
 /// closed (child killed if active) and set to read-only.
-pub async fn archive_session(
-    State(state): State<WebUiState>,
-    Path(key): Path<String>,
-) -> Response {
+pub async fn archive_session(State(state): State<WebUiState>, Path(key): Path<String>) -> Response {
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
@@ -981,23 +1074,33 @@ pub async fn archive_session(
 
     // Look up the session to get its project_dir and label.
     let infos = state.backend.snapshot().await;
-    let info = match infos.iter().find(|i| {
-        i.channel == session_key.channel.as_str() && i.key == session_key.reference
-    }) {
+    let info = match infos
+        .iter()
+        .find(|i| i.channel == session_key.channel.as_str() && i.key == session_key.reference)
+    {
         Some(i) => i,
         None => return api_error(StatusCode::NOT_FOUND, "Session not found"),
     };
 
     let project_path = info.project_dir.clone().unwrap_or_default();
-    let label = info.user_prompt.clone().unwrap_or_else(|| info.session_id.clone().unwrap_or_else(|| "unnamed".to_string()));
+    let label = info.user_prompt.clone().unwrap_or_else(|| {
+        info.session_id
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string())
+    });
 
     // Close the session first (kills child if active).
     if let Err(_rej) = state.backend.close(session_key).await {
         // If close fails (unknown, unavailable), we still proceed with the archive.
     }
 
-    match crate::archive::archive_session(&key, &project_path, &label, state.archive_retention_days) {
-        Ok(entry) => (StatusCode::OK, Json(json!({ "status": "archived", "entry": entry }))).into_response(),
+    match crate::archive::archive_session(&key, &project_path, &label, state.archive_retention_days)
+    {
+        Ok(entry) => (
+            StatusCode::OK,
+            Json(json!({ "status": "archived", "entry": entry })),
+        )
+            .into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -1012,7 +1115,11 @@ pub async fn restore_session(
         Some(entry) => {
             // The session key is the same, so it reappears in the next snapshot
             // fetch. The frontend will re-fetch the session list.
-            (StatusCode::OK, Json(json!({ "status": "restored", "entry": entry }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({ "status": "restored", "entry": entry })),
+            )
+                .into_response()
         }
         None => api_error(StatusCode::NOT_FOUND, "Archived session not found"),
     }
@@ -1040,11 +1147,26 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
             session_id: encode_channel_key(&session.channel, &session.key),
             status: session.status,
         }),
-        SessionEvent::Removed {
+        SessionEvent::Removed { channel, key } => Some(WebUiEvent::SessionRemoved {
+            session_id: encode_channel_key(&channel, &key),
+        }),
+        // workbench-turn-queue 5.2/7.3：会话终结时未执行的待生效提交——
+        // 逐条标注转发给前端，供一次性「未执行」提示。
+        SessionEvent::PendingDropped {
             channel,
             key,
-        } => Some(WebUiEvent::SessionRemoved {
+            dropped,
+        } => Some(WebUiEvent::SessionPendingDropped {
             session_id: encode_channel_key(&channel, &key),
+            dropped: dropped
+                .into_iter()
+                .map(|d| crate::events::PendingSubmissionView {
+                    id: d.id,
+                    text: d.text,
+                    disposition: d.disposition,
+                    priority: d.priority,
+                })
+                .collect(),
         }),
         SessionEvent::Resync => None,
     }
@@ -1143,6 +1265,9 @@ pub async fn answer_permission(
     if delivered {
         Json(json!({ "status": "delivered" })).into_response()
     } else {
-        api_error(StatusCode::NOT_FOUND, "no pending permission request with that id")
+        api_error(
+            StatusCode::NOT_FOUND,
+            "no pending permission request with that id",
+        )
     }
 }

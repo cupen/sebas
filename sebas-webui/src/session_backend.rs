@@ -12,11 +12,11 @@
 
 use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
-use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 /// Whether the backend can currently reach the session authority (the core),
 /// and if not, why — rendered verbatim so degradation is honest.
 ///
@@ -60,6 +60,36 @@ pub enum SessionRejection {
     /// the core is reachable (e.g. native without provider credentials), or
     /// the caller named a backend hint the core does not know.
     BackendUnavailable { backend: String, cause: String },
+    /// （workbench-turn-queue 5.1，design D5）spawn 窗口 staging 队列已满：
+    /// 提交未被接受、也不顶掉已暂存条目。携带上限，提交面据此可见拒绝。
+    QueueFull { limit: usize },
+    /// （workbench-turn-queue D7）pending submission 管理操作的类型化拒绝。
+    PendingRejected { reason: PendingReason },
+}
+
+/// pending submission 管理拒绝的具体原因（workbench-turn-queue D7）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingReason {
+    /// id 不在待执行栈里，也从未开始过。
+    Unknown,
+    /// 该提交已经开轮（或已被激活合并）——绝不回滚在跑的回合。
+    AlreadyStarted,
+    /// 不能把普通提交移到优先（/btw）提交之前。
+    PriorityConflict,
+    /// 目标位置超出该处置组的范围。
+    OutOfRange,
+}
+
+impl std::fmt::Display for PendingReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PendingReason::Unknown => write!(f, "待执行提交不存在"),
+            PendingReason::AlreadyStarted => write!(f, "该提交已开始执行"),
+            PendingReason::PriorityConflict => write!(f, "不能越过优先提交排序"),
+            PendingReason::OutOfRange => write!(f, "目标位置越界"),
+        }
+    }
 }
 
 impl std::fmt::Display for SessionRejection {
@@ -74,6 +104,10 @@ impl std::fmt::Display for SessionRejection {
             SessionRejection::BackendUnavailable { backend, cause } => {
                 write!(f, "执行体不可用: {backend} — {cause}")
             }
+            SessionRejection::QueueFull { limit } => {
+                write!(f, "待执行队列已满（上限 {limit}）：这条消息没有提交")
+            }
+            SessionRejection::PendingRejected { reason } => write!(f, "{reason}"),
         }
     }
 }
@@ -89,6 +123,13 @@ pub struct PermissionNotice {
     pub tool_name: String,
     pub args: serde_json::Value,
     pub reason: String,
+}
+
+/// （workbench-turn-queue 5.2）关闭会话的结果：`discarded_pending` = 随之
+/// 丢弃的未执行待生效提交条数（close 响应携带，绝不静默丢队）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseReport {
+    pub discarded_pending: usize,
 }
 
 /// （wire-webui-sebas-agent-e2e）单个执行体（acp / native）的可用性：
@@ -145,7 +186,11 @@ pub trait SessionBackend: Send + Sync {
     /// （extract-im-service 2.1）ensure 语义的消息投递：未知 key 自动建会话、
     /// dormant 会话懒复活（IM 前端的聊天式投递）。缺省退化为普通 `message`
     /// ——未知 key 被执行体拒绝；具备建会话语义的执行体覆写本方法。
-    async fn ensure_message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
+    async fn ensure_message(
+        &self,
+        key: ChannelKey,
+        message: String,
+    ) -> Result<(), SessionRejection> {
         self.message(key, message).await
     }
 
@@ -157,8 +202,42 @@ pub trait SessionBackend: Send + Sync {
         })
     }
 
-    /// Close a session (kills the live child when there is one).
-    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection>;
+    /// Close a session (kills the live child when there is one). The report
+    /// names how many pending submissions were discarded with it
+    /// (workbench-turn-queue 5.2 — a close never drops a queue silently).
+    async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection>;
+
+    /// （workbench-turn-queue D6/D7）会话的待生效提交全量视图（投递序）。
+    /// 无队列的后端返回空列表——native 会话没有待执行栈。
+    async fn pending(&self, _key: ChannelKey) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        Ok(Vec::new())
+    }
+
+    /// （workbench-turn-queue D7）按 id 移除一个未开始的提交，成功返回操作
+    /// 后的全量 pending（客户端据此对账）。拒绝类型化：未知 id / 已开始 /
+    /// 越过优先项 / 越界。缺省诚实不可用——不承载队列的后端没有管理面。
+    async fn remove_pending(
+        &self,
+        _key: ChannelKey,
+        _pending_id: u64,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不承载待执行队列".into(),
+        })
+    }
+
+    /// （workbench-turn-queue D7）把一个未开始的提交重排到其处置组内的
+    /// `to_index` 位置，成功返回操作后的全量 pending。
+    async fn move_pending(
+        &self,
+        _key: ChannelKey,
+        _pending_id: u64,
+        _to_index: usize,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不承载待执行队列".into(),
+        })
+    }
 
     /// 中程切换会话模型（add-acp-model-selection）：把所选的 model id 送给
     /// 会话驱动（ACP `session/set_config_option{configId:"model"}`）。成功 =
@@ -237,6 +316,14 @@ pub trait SessionBackend: Send + Sync {
         Err("state store 不可用".into())
     }
 
+    /// （add-fetch-models）providers 域抓取 op：按 provider 名解析 base url
+    /// 与密钥，core 侧执行一次只读 GET 上游 `/models`，返回 id 列表。抓取不
+    /// 改任何字段、不持久化；错误串 = `fetch_models: ` 前缀 + 净化原因。默认
+    /// 实现诚实不可用——不承载 core providers 域的后端没有抓取能力。
+    async fn fetch_provider_models(&self, _provider: &str) -> Result<Vec<String>, String> {
+        Err("模型列表抓取不可用：core providers 域未由此后端承载".into())
+    }
+
     /// Create a 0-turn placeholder session without spawning an agent child
     /// (P2 fix: an empty prompt must not be sent to the agent — opencode
     /// hangs on `session/prompt ""`). `agent` is the same agent id as
@@ -263,65 +350,25 @@ fn agent_kind_of(agent: &str) -> String {
     agent.to_string()
 }
 
-/// projects 域 mutation 分发（与 core channel 服务端同款）：payload 用
-/// `op` 字段区分子操作——add / remove / save。
-async fn project_mutation(
-    engine: &(dyn sebas_dispatch::state_store::StateStoreEngine + Send + Sync),
-    payload: &serde_json::Value,
-) -> Result<(), String> {
-    let op = payload
-        .get("op")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("save");
-    match op {
-        "add" => {
-            let path = payload
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "add: 缺少 path 字段".to_string())?;
-            let name = payload
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "add: 缺少 name 字段".to_string())?;
-            let added_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            engine.add_project(path, name, added_at).await
-        }
-        "remove" => {
-            let path = payload
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "remove: 缺少 path 字段".to_string())?;
-            match engine.remove_project(path).await {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(format!("remove: project '{path}' 不存在")),
-                Err(e) => Err(e),
-            }
-        }
-        "save" => {
-            let projects = payload
-                .get("projects")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            engine.save_projects(projects).await
-        }
-        // workbench-agent-wire-fix 2.6：项目级默认 agent（按稳定 id）。
-        "set_default_agent" => {
-            let id = payload
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "set_default_agent: 缺少 id 字段".to_string())?;
-            let agent = payload
-                .get("agent")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "set_default_agent: 缺少 agent 字段".to_string())?;
-            engine.set_project_default_agent(id, agent).await
-        }
-        other => Err(format!("projects: 未知 op '{other}'")),
-    }
+/// 代码内置 preset 表的 JSON 形状（make-core-own-provider-data 1.3；与 core
+/// channel 的 presets 域 / router `/admin/presets` 同一 wire：name + 三槽位 +
+/// api_key_env + models）。preset 数据跟随代码，只读、无存储副本。models 是
+/// 条目列表（id + 能力标记；redesign-provider-models-settings 1.2）。
+fn preset_table_value() -> serde_json::Value {
+    let out: Vec<serde_json::Value> = sebas_router::config::presets()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "base_url_anthropic": p.base_url_anthropic,
+                "base_url_openai_chat": p.base_url_openai_chat,
+                "base_url_openai_responses": p.base_url_openai_responses,
+                "api_key_env": p.api_key_env,
+                "models": p.models.iter().map(sebas_router::config::PresetModel::to_entry).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "presets": out })
 }
 
 /// In-process backend over the router. Used by `sebas run --webui`, where the
@@ -392,6 +439,24 @@ impl InProcessBackend {
             request_sessions,
         }
     }
+}
+
+/// dispatch 层的类型化拒绝 → wire 上的 `SessionRejection`（workbench-turn-queue
+/// D7）。会话不存在与 id 未知同形（404 PendingRejected::Unknown）。
+fn pending_op_rejection(e: sebas_dispatch::PendingOpError) -> SessionRejection {
+    let reason = match e {
+        sebas_dispatch::PendingOpError::Unknown => crate::session_backend::PendingReason::Unknown,
+        sebas_dispatch::PendingOpError::AlreadyStarted => {
+            crate::session_backend::PendingReason::AlreadyStarted
+        }
+        sebas_dispatch::PendingOpError::PriorityConflict => {
+            crate::session_backend::PendingReason::PriorityConflict
+        }
+        sebas_dispatch::PendingOpError::OutOfRange => {
+            crate::session_backend::PendingReason::OutOfRange
+        }
+    };
+    SessionRejection::PendingRejected { reason }
 }
 
 /// `PermissionDecision` → ACP `Decision`（design D6/R5）。ACP 侧没有 escalate
@@ -471,10 +536,19 @@ impl SessionBackend for InProcessBackend {
             .await)
     }
 
-    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+    async fn set_session_model(
+        &self,
+        key: ChannelKey,
+        model_id: String,
+    ) -> Result<(), SessionRejection> {
         // 解析路由 session_id（web 会话的 chat_id 是 web-* 键，不是 ACP
         // routing id），再经 Out::SendAcp 送达 SetModel。
-        let Some(sid) = self.router.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned))
+        let Some(sid) = self
+            .router
+            .map
+            .get(&key)
+            .await
+            .and_then(|m| m.session_id().map(str::to_owned))
         else {
             return Err(SessionRejection::UnknownSession {
                 key: key.reference.clone(),
@@ -495,20 +569,52 @@ impl SessionBackend for InProcessBackend {
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         // Route semantics preserved: an unknown key spawns a new session (the
         // feishu inbound path behaves the same). Typed rejections apply to the
-        // channel server, which pre-checks existence.
-        self.router.web_send_message(key, message).await;
-        Ok(())
+        // channel server, which pre-checks existence. The staging-queue
+        // overflow (workbench-turn-queue 5.1) surfaces as a typed QueueFull.
+        self.router
+            .web_send_message(key, message)
+            .await
+            .map_err(|cap_full| SessionRejection::QueueFull {
+                limit: cap_full.cap,
+            })
     }
 
-    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection> {
         match self.router.web_close_session(key).await {
-            sebas_dispatch::engine::CloseOutcome::Closed => Ok(()),
+            sebas_dispatch::engine::CloseOutcome::Closed { discarded_pending } => {
+                Ok(CloseReport { discarded_pending })
+            }
             sebas_dispatch::engine::CloseOutcome::NotFound => {
-                Err(SessionRejection::UnknownSession {
-                    key: String::new(),
-                })
+                Err(SessionRejection::UnknownSession { key: String::new() })
             }
         }
+    }
+
+    async fn pending(&self, key: ChannelKey) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        Ok(self.router.session_pending(&key).await)
+    }
+
+    async fn remove_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        self.router
+            .remove_pending(&key, pending_id)
+            .await
+            .map_err(pending_op_rejection)
+    }
+
+    async fn move_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+        to_index: usize,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        self.router
+            .move_pending(&key, pending_id, to_index)
+            .await
+            .map_err(pending_op_rejection)
     }
 
     /// （extract-im-service 2.2）取消在飞 turn：映射存在即发 `AcpCommand::Cancel`。
@@ -537,6 +643,11 @@ impl SessionBackend for InProcessBackend {
     }
 
     async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        // preset 表是只读代码数据，不依赖状态库（make-core-own-provider-data
+        // 1.3）：无论引擎是否初始化都可读。
+        if domain == "presets" {
+            return Some(preset_table_value());
+        }
         // In-process backend: use the engine when available.
         let engine = sebas_dispatch::state_store::engine()?;
         match domain {
@@ -555,19 +666,26 @@ impl SessionBackend for InProcessBackend {
     }
 
     async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        // 与 core channel 服务端共用同一组分发实现（make-core-own-provider-data
+        // 1.1/1.2/3.1：settings 域含 defaults ops；providers / aliases 域是
+        // provider 数据唯一写通道的两个入口，形状逐字相同）。
         let engine = sebas_dispatch::state_store::engine()
             .ok_or_else(|| "state store 未初始化".to_string())?;
         match domain {
-            "settings" => {
-                let value = payload.get("value").cloned().unwrap_or(payload);
-                engine.save_settings(value).await
-            }
-            "projects" => {
-                // 与 core channel 服务端同款 op 分发（add/remove/save）。
-                project_mutation(engine, &payload).await
-            }
+            "settings" => sebas_dispatch::state_store::settings_mutation(engine, &payload).await,
+            "providers" => sebas_dispatch::state_store::providers_mutation(engine, &payload).await,
+            "aliases" => sebas_dispatch::state_store::aliases_mutation(engine, &payload).await,
+            "projects" => sebas_dispatch::state_store::project_mutation(engine, &payload).await,
             other => Err(format!("unknown domain: {other}")),
         }
+    }
+
+    async fn fetch_provider_models(&self, provider: &str) -> Result<Vec<String>, String> {
+        // add-fetch-models：内嵌形态与 core channel 服务端共用同一实现（单一
+        // 实现避免两侧漂移，同 state_mutate 的做法）。
+        let engine = sebas_dispatch::state_store::engine()
+            .ok_or_else(|| "fetch_models: state store 未初始化".to_string())?;
+        sebas_dispatch::state_store::providers_fetch_models(engine, provider).await
     }
 
     fn permission_requests(&self) -> Option<broadcast::Receiver<PermissionNotice>> {
@@ -575,12 +693,7 @@ impl SessionBackend for InProcessBackend {
     }
 
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        let session_id = self
-            .request_sessions
-            .read()
-            .await
-            .get(request_id)
-            .cloned();
+        let session_id = self.request_sessions.read().await.get(request_id).cloned();
         let Some(session_id) = session_id else {
             return false;
         };
@@ -598,7 +711,11 @@ impl SessionBackend for InProcessBackend {
                 sebas_dispatch::native_bridge::NativeApprovalDecision::Escalate { reason }
             }
         };
-        if self.router.answer_native_permission(request_id, native).await {
+        if self
+            .router
+            .answer_native_permission(request_id, native)
+            .await
+        {
             return true;
         }
         // acp 会话：走既有 Out::SendAcp PermissionReply。
@@ -637,6 +754,9 @@ pub struct FakeBackend {
     /// harden-core-channel-deployment 4.2（端点测试用）：`state_mutate` 是否
     /// 成功。默认 false（真源不可达 → 降级路径）；置 true 模拟状态库可用。
     state_mutate_ok: std::sync::atomic::AtomicBool,
+    /// add-fetch-models（route 层测试用）：按 provider 名注入的抓取结果。
+    /// 未注入的名字走 trait 默认（诚实不可用）。
+    fetch_models_results: std::sync::Mutex<HashMap<String, Result<Vec<String>, String>>>,
 }
 
 #[derive(Default)]
@@ -664,6 +784,7 @@ impl FakeBackend {
             state_domains: std::sync::Mutex::new(HashMap::new()),
             execution_bodies: std::sync::Mutex::new(None),
             state_mutate_ok: std::sync::atomic::AtomicBool::new(false),
+            fetch_models_results: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -722,6 +843,14 @@ impl FakeBackend {
     pub fn set_state_mutate_ok(&self, ok: bool) {
         self.state_mutate_ok
             .store(ok, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// add-fetch-models：注入某个 provider 的抓取结果（route 层测试用）。
+    pub fn set_fetch_models_result(&self, provider: &str, result: Result<Vec<String>, String>) {
+        self.fetch_models_results
+            .lock()
+            .expect("fetch models results lock")
+            .insert(provider.to_string(), result);
     }
 
     /// （wire-webui-sebas-agent-e2e 3.1）注入逐执行体可用性，summary 原样
@@ -790,6 +919,7 @@ impl SessionBackend for FakeBackend {
             agent_kind: None,
             usage: None,
             backend: None,
+            pending: Vec::new(),
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -825,7 +955,7 @@ impl SessionBackend for FakeBackend {
         }
     }
 
-    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection> {
         if !self.reachable.load(std::sync::atomic::Ordering::SeqCst) {
             let cause = self
                 .unreachable_cause
@@ -852,7 +982,17 @@ impl SessionBackend for FakeBackend {
             channel: key.channel.as_str().to_string(),
             key: key.reference,
         });
-        Ok(())
+        // Fake 会话不建模待执行栈的丢弃计数（route 层测试只关心 close 语义）。
+        Ok(CloseReport::default())
+    }
+
+    async fn pending(&self, key: ChannelKey) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        let g = self.inner.read().await;
+        Ok(g.sessions
+            .iter()
+            .find(|s| s.channel == key.channel.as_str() && s.key == key.reference)
+            .map(|s| s.pending.clone())
+            .unwrap_or_default())
     }
 
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
@@ -891,6 +1031,15 @@ impl SessionBackend for FakeBackend {
             return Ok(());
         }
         Err("state store 不可用".into())
+    }
+
+    async fn fetch_provider_models(&self, provider: &str) -> Result<Vec<String>, String> {
+        self.fetch_models_results
+            .lock()
+            .expect("fetch models results lock")
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| Err("fetch_models: core providers 域未由此后端承载".into()))
     }
 
     async fn reachability(&self) -> Reachability {
@@ -979,6 +1128,7 @@ mod tests {
                 agent_kind: None,
                 usage: None,
                 backend: None,
+                pending: Vec::new(),
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;
@@ -990,7 +1140,10 @@ mod tests {
 
         // close works and emits Removed.
         assert!(backend.close(key.clone()).await.is_ok());
-        assert!(matches!(events.try_recv(), Ok(SessionEvent::Removed { .. })));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SessionEvent::Removed { .. })
+        ));
         assert!(backend.snapshot().await.is_empty());
 
         // unreachable mode reports the cause through every mutating path.
@@ -1036,7 +1189,10 @@ mod tests {
     fn legacy_rejection_wire_shapes_unchanged() {
         // 旧报文仍可解码；code 名保持 snake_case 稳定。
         for (json, expect) in [
-            (r#"{"code":"unknown_session","key":"web-legacy-k"}"#, "unknown"),
+            (
+                r#"{"code":"unknown_session","key":"web-legacy-k"}"#,
+                "unknown",
+            ),
             (r#"{"code":"unusable_project_dir"}"#, "dir"),
             (r#"{"code":"capacity","limit":3}"#, "cap"),
             (r#"{"code":"unavailable","cause":"socket gone"}"#, "unavail"),

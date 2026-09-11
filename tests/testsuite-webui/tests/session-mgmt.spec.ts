@@ -20,7 +20,7 @@ import {
   middleTruncate,
   ProjectRail,
   resetState,
-  SessionDetailPage,
+  FocusedSession,
   SessionsPage,
   waitStatus,
 } from './helpers/index'
@@ -96,18 +96,20 @@ test.describe('会话管理', () => {
     test('deep link renders the session via SPA fallback; /settings redirects to /', async ({
       page,
     }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
 
       const key = await createSession(page.request, { prompt: 'deep link' })
       await waitStatus(page.request, key, ['done'])
 
-      // Cold navigation straight to the deep path: the session renders with
-      // its streamed reply (fake-claude answers "hello " + "world" as two
-      // separate assistant bubbles).
+      // Cold navigation straight to the deep path: the WORKBENCH renders with
+      // the session focused (workbench-conversation-view 3.4 — no separate
+      // detail page) and its conversation (fake-claude answers "hello " +
+      // "world" as ONE agent turn bubble).
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
+      await expect(detail.sessionHead).toBeVisible({ timeout: 15_000 })
       await expect(detail.bubbles().filter({ hasText: 'hello' }).first()).toBeVisible({
         timeout: 15_000,
       })
@@ -127,7 +129,7 @@ test.describe('会话管理', () => {
     test('model honest absence — no selector, switch attempt keeps model absent', async ({
       page,
     }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
 
@@ -139,9 +141,9 @@ test.describe('会话管理', () => {
       // D4: the head has no model picker; the follow-mode composer has no
       // model dropdown; and nothing errored while rendering.
       await expect(detail.modelPick).toHaveCount(0)
-      await expect(
-        page.locator('sebas-session-detail .composer wa-select.model-select'),
-      ).toHaveCount(0)
+      await expect(page.locator('sebas-workbench-composer wa-select[aria-label="Model"]')).toHaveCount(
+        0,
+      )
 
       // The API accepts the request but the truth doesn't change: no model
       // materialises on a session whose agent exposes none.

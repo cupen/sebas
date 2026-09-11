@@ -28,12 +28,14 @@ import './views/login-view.js'
 // only the workbench, the all-sessions table and session deep links;
 // `/settings` `/router` `/about` redirect to `/` (see redirectFor) and
 // `/admin/*` is deleted outright — it falls through to the dashboard
-// fallback in onNavigate like any unknown path.
+// fallback in onNavigate like any unknown path. Session deep links render
+// the SAME workbench with that session focused（workbench-conversation-view
+// 3.4：session-detail 视图退休，工作台是唯一对话面）。
 export const ROUTES: RouteDef[] = [
   { id: 'dashboard', pattern: '/' },
   // `/sessions` stays routed (History group header link + old deep links).
   { id: 'sessions', pattern: '/sessions' },
-  { id: 'session-detail', pattern: '/sessions/:key' },
+  { id: 'session-deep-link', pattern: '/sessions/:key' },
 ]
 
 @customElement('sebas-app')
@@ -434,13 +436,14 @@ export class SebasApp extends LitElement {
   }
 
   /**
-   * Full-bleed outlet routes: the workbench (`/`) and the session detail
-   * (`/sessions/:key`) are app-frame panes — the outlet carries no padding
-   * and the view flexes to fill the frame, scrolling internally. Document
-   * routes (the `/sessions` table) keep the readable 1080px padded column.
+   * Full-bleed outlet routes: the workbench (`/` and the `/sessions/:key`
+   * deep link, which renders the same workbench focused) are app-frame
+   * panes — the outlet carries no padding and the view flexes to fill the
+   * frame, scrolling internally. Document routes (the `/sessions` table)
+   * keep the readable 1080px padded column.
    */
   private isWideRoute(): boolean {
-    return this.routeId === 'dashboard' || this.routeId === 'session-detail'
+    return this.routeId === 'dashboard' || this.routeId === 'session-deep-link'
   }
 
   /** 侧栏项目树选中项目 → 记录并回到 workbench（其它路由上点树也要生效）。 */
@@ -455,8 +458,13 @@ export class SebasApp extends LitElement {
         return html`<sebas-dashboard .selectedPath=${this.selectedPath}></sebas-dashboard>`
       case 'sessions':
         return html`<sebas-sessions></sebas-sessions>`
-      case 'session-detail':
-        return html`<sebas-session-detail key=${this.params['key'] ?? ''}></sebas-session-detail>`
+      case 'session-deep-link':
+        // 深链渲染同一个工作台并聚焦该会话（读 detail 即设置服务端焦点
+        // 指针）——没有独立详情页。
+        return html`<sebas-dashboard
+          .selectedPath=${this.selectedPath}
+          .deepLinkKey=${this.params['key'] ?? null}
+        ></sebas-dashboard>`
       default:
         return html`<sebas-dashboard .selectedPath=${this.selectedPath}></sebas-dashboard>`
     }

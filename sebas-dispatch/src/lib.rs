@@ -4,19 +4,22 @@ pub mod cards;
 pub mod cards_ui;
 pub mod commands;
 pub mod crud;
+pub mod engine;
 pub mod error;
 pub mod native_bridge;
 pub mod provider_state;
-pub mod engine;
 pub mod settings;
 pub mod state;
 pub mod state_store;
 
+pub use crate::engine::{DispatchHandle, MsgIdMap, Out, SessionEvent, SessionInfo, TurnEntry};
+pub use cards::{CardConfig, ThinkingDisplay};
 pub use commands::{Command, RouterAction, parse_command};
 pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};
-pub use crate::engine::{MsgIdMap, Out, DispatchHandle, SessionEvent, SessionInfo, TurnEntry};
-pub use cards::{CardConfig, ThinkingDisplay};
-pub use state::{Mapping, SessionMap};
+pub use state::{
+    MAX_PENDING_SUBMISSIONS, Mapping, PendingDisposition, PendingOpError, PendingSubmission,
+    QueuedTurn, SessionMap,
+};
 
 /// 所有 SEBAS_STATE_FILE env 操作串行化（crud + provider_state 共享）。
 #[doc(hidden)]

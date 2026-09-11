@@ -1,34 +1,41 @@
 /**
- * Streaming transcript view with a per-session "seen" boundary.
+ * Conversation view with a per-session "seen" boundary
+ * (workbench-conversation-view 2.1–2.5, design D3/D4/D5).
  *
- * Renders each entry in `entries` as an avatar + chat bubble, mirroring
- * the approved workbench preview: 26px avatar circles (assistant =
- * accent gradient; user prompts, `kind === 'prompt'`, = accent-soft on a
- * reversed right-aligned bubble), 14px-radius bubbles with a 4px notch
- * toward the avatar, and the timestamp moved from the old left-rail
- * column into each bubble's meta row. A thin "seam" strip highlights
- * anything appended since the reader last looked at the session; it
- * flows inline between the last seen and first unseen bubble. The seam
- * is anchored to the largest `created_at_unix` the client has actually
- * scrolled past (or clicked through). Anchoring by timestamp — not by
- * array index — keeps the seam pinned to the same logical entry even
- * when an older card refreshes in place (spec 4.4: the router stamps
- * `created_at_unix` at push time, never on refresh).
+ * The payload is one ordered entry sequence (`kind` prompt|content,
+ * `element_type` markdown|thinking|tool|error). The view groups it into
+ * TURNS — the display unit — client-side, leaving the core's chunk-level
+ * transcript alone:
  *
- * Scroll behaviour:
+ *   - a `kind === 'prompt'` entry opens an operator turn ("你" bubble);
+ *   - the entries after it (until the next prompt) form ONE agent turn =
+ *     ONE assistant bubble, no matter how many streamed chunks arrived;
+ *   - inside an agent turn, contiguous entry runs chunk into: concatenated
+ *     text (markdown), a folded thinking block, and an expandable
+ *     "used N tools" group — each run keeps its position, so a tool call
+ *     between two statements splits the text instead of gluing it;
+ *   - error entries (spawn failures) render as their own counted error
+ *     bubbles, positioned in sequence.
+ *
+ * The seen-boundary seam counts TURNS, never entries: it sits above the
+ * first turn with an entry newer than the stored seen-timestamp and never
+ * splits a turn (D5). The stored boundary is still the per-browser
+ * `created_at_unix` timestamp in localStorage — anchoring by timestamp, not
+ * array index, keeps the seam pinned to the same logical turn even when an
+ * older card refreshes in place.
+ *
+ * Scroll behaviour (unchanged):
  *   - while `sticky` is true, the view auto-scrolls to the seam (when
- *     there are unseen entries) or to the bottom (when everything is
- *     already seen)
- *   - a near-bottom scroll (within 80px) marks entries as seen (250ms
+ *     there are unseen turns) or to the bottom (when everything is seen)
+ *   - a near-bottom scroll (within 80px) marks turns as seen (250ms
  *     debounce, monotonic — only ever advances the boundary)
- *   - if the reader scrolls up past the seam, sticky flips off so we
- *     don't fight them; scrolling back down to the seam re-engages it
+ *   - scrolling up past the seam disengages sticky; returning re-engages
  */
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
-import type { CardElementView } from '../api/client.js'
+import type { ConversationEntryView } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
 
@@ -40,14 +47,14 @@ const MARK_SEEN_DEBOUNCE_MS = 250
 /**
  * Window (in unix seconds) within which consecutive identical error entries
  * (fail-fast-on-startup-errors: repeated spawn failures) merge into a single
- * counted bubble instead of flooding the transcript. "相邻 N 秒内的同类失败
+ * counted bubble instead of flooding the conversation. "相邻 N 秒内的同类失败
  * 事件合并为一条带计数的错误" — adjacency is measured between consecutive
  * error entries, and only identical content merges.
  */
 export const ERROR_MERGE_WINDOW_SECS = 10
 
-/** A transcript entry possibly carrying a merge count (errors only). */
-export type ErrorCountedView = CardElementView & { count?: number }
+/** A conversation entry possibly carrying a merge count (errors only). */
+export type ErrorCountedView = ConversationEntryView & { count?: number }
 
 /**
  * Merge runs of identical `element_type === 'error'` entries that arrive
@@ -56,7 +63,7 @@ export type ErrorCountedView = CardElementView & { count?: number }
  * the stable identity the seen-boundary seam anchors to. Non-error entries
  * and non-adjacent errors pass through untouched.
  */
-export function mergeSpawnErrors(entries: CardElementView[]): ErrorCountedView[] {
+export function mergeSpawnErrors(entries: ConversationEntryView[]): ErrorCountedView[] {
   const out: ErrorCountedView[] = []
   // State of the current adjacent run: last error ts + content, and the
   // merged entry the run is counting into.
@@ -90,6 +97,140 @@ export function mergeSpawnErrors(entries: CardElementView[]): ErrorCountedView[]
     lastErrContent = e.content
   }
   return out
+}
+
+// ---- turn grouping（design D3）-----------------------------------------
+
+/** A run of contiguous markdown entries, concatenated in position order. */
+export interface TextBlock {
+  type: 'text'
+  content: string
+  /** Position of the run's first entry. */
+  position: number
+}
+
+/** A run of contiguous thinking entries, folded into one block. */
+export interface ThinkingBlock {
+  type: 'thinking'
+  content: string
+  position: number
+}
+
+/** A run of contiguous tool entries, one expandable group. */
+export interface ToolBlock {
+  type: 'tools'
+  items: { content: string; position: number }[]
+  /** Position of the run's first entry. */
+  position: number
+}
+
+export type AgentBlock = TextBlock | ThinkingBlock | ToolBlock
+
+/** The operator's submission — its own turn. */
+export interface OperatorUnit {
+  kind: 'operator'
+  entry: ConversationEntryView
+}
+
+/** One agent turn: everything the agent produced, chunked into blocks (D4). */
+export interface AgentUnit {
+  kind: 'agent'
+  blocks: AgentBlock[]
+  /** Position of the turn's first entry. */
+  position: number
+  /** Timestamp of the turn's first entry (bubble meta row). */
+  startedAt: number
+  /** Max entry timestamp within the turn (seam determination, D5). */
+  maxTs: number
+}
+
+/** A merged error bubble (spawn failure etc.) — its own unit in sequence. */
+export interface ErrorUnit {
+  kind: 'error'
+  entry: ErrorCountedView
+}
+
+export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit
+
+/**
+ * Group the ordered entry sequence into turn units (D3): each prompt opens
+ * an operator turn; the entries until the next prompt belong to the
+ * following agent turn; error entries render as standalone counted bubbles.
+ * Empty-content entries are skipped (they carry nothing to display).
+ */
+export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
+  const units: TurnUnit[] = []
+  for (const e of entries) {
+    if (!e.content) continue
+    if (e.element_type === 'error') {
+      units.push({ kind: 'error', entry: e })
+      continue
+    }
+    if (e.kind === 'prompt') {
+      units.push({ kind: 'operator', entry: e })
+      continue
+    }
+    // Agent-side content: join the current agent turn or open one.
+    const last = units[units.length - 1]
+    if (last?.kind === 'agent') {
+      appendAgentBlock(last, e)
+      last.maxTs = Math.max(last.maxTs, e.created_at_unix || 0)
+    } else {
+      const unit: AgentUnit = {
+        kind: 'agent',
+        blocks: [],
+        position: e.position,
+        startedAt: e.created_at_unix,
+        maxTs: e.created_at_unix || 0,
+      }
+      appendAgentBlock(unit, e)
+      units.push(unit)
+    }
+  }
+  return units
+}
+
+/** The newest entry timestamp of a turn — the turn's seam edge (D5). */
+export function unitMaxTs(unit: TurnUnit): number {
+  if (unit.kind === 'operator' || unit.kind === 'error') return unit.entry.created_at_unix || 0
+  return unit.maxTs
+}
+
+/**
+ * Chunk one agent turn's entries into blocks (D4): contiguous markdown runs
+ * concatenate into text; contiguous thinking entries fold together;
+ * contiguous tool entries collect into one expandable group. A run break
+ * (text→tool→text) splits the blocks so the tool group sits BETWEEN the two
+ * text segments, in true sequence order.
+ */
+function appendAgentBlock(unit: AgentUnit, e: ConversationEntryView): void {
+  const last = unit.blocks[unit.blocks.length - 1]
+  if (last) {
+    // Contiguous run of the same kind merges into the open block.
+    if (last.type === 'text' && e.element_type !== 'thinking' && e.element_type !== 'tool') {
+      last.content += e.content
+      return
+    }
+    if (last.type === 'thinking' && e.element_type === 'thinking') {
+      last.content += e.content
+      return
+    }
+    if (last.type === 'tools' && e.element_type === 'tool') {
+      last.items.push({ content: e.content, position: e.position })
+      return
+    }
+  }
+  if (e.element_type === 'thinking') {
+    unit.blocks.push({ type: 'thinking', content: e.content, position: e.position })
+  } else if (e.element_type === 'tool') {
+    unit.blocks.push({
+      type: 'tools',
+      items: [{ content: e.content, position: e.position }],
+      position: e.position,
+    })
+  } else {
+    unit.blocks.push({ type: 'text', content: e.content, position: e.position })
+  }
 }
 
 /**
@@ -126,8 +267,8 @@ function isoTime(unixSecs: number): string {
 
 @customElement('sebas-transcript-view')
 export class SebasTranscriptView extends LitElement {
-  /** The transcript blocks from `SessionDetail.body`. */
-  @property({ attribute: false }) entries: CardElementView[] = []
+  /** The conversation entries from the session payload (`entries`). */
+  @property({ attribute: false }) entries: ConversationEntryView[] = []
   /** Encoded session key; namespaces the seen-boundary in localStorage. */
   @property() sessionKey = ''
   /**
@@ -145,15 +286,15 @@ export class SebasTranscriptView extends LitElement {
   @property({ type: Boolean, reflect: true })
   fill = false
 
-  /** Number of entries strictly after the seam. */
+  /** Number of turns strictly below the seam. */
   @state() private unseenCount = 0
-  /** Index of the first unseen entry; null when everything is seen. */
+  /** Index of the first unseen turn; null when everything is seen. */
   @state() private seamIndex: number | null = 0
   /**
-   * fail-fast-on-startup-errors 3.3：渲染管线输入——相邻同类错误条目合并
-   * 后的视图列表（seam/滚动/渲染都以此为准，合并后索引保持一致）。
+   * 渲染管线输入：错误合并 → 回合分组（seam/滚动/渲染都以此为准，
+   * 分组后索引与回合一一对应）。
    */
-  @state() private renderEntries: ErrorCountedView[] = []
+  @state() private turnUnits: TurnUnit[] = []
 
   /** Debounce timer for mark-as-seen writes. */
   private markSeenTimer: number | null = null
@@ -194,8 +335,8 @@ export class SebasTranscriptView extends LitElement {
       min-height: 0;
       padding: var(--sebas-space-5);
     }
-    /* 未读边界 seam：预览稿同款细线分隔（两侧 1px 规则线 + 大写字距
-       淡色标签），不再用整条着色横幅。DOM 文案与 class 钩子保持不变。 */
+    /* 未读边界 seam：细线分隔（两侧 1px 规则线 + 大写字距淡色标签）。
+       计数单位是回合（D5）：数字 = 边界下方的气泡数，与视觉一致。 */
     .seam {
       display: flex;
       align-items: center;
@@ -239,10 +380,10 @@ export class SebasTranscriptView extends LitElement {
       color: var(--sebas-accent);
     }
     /* ── 对话气泡 ──
-       预览稿 workbench.ts 同款：26px 头像圆（assistant = accent 渐变底，
-       user = accent-soft 底），气泡 14px 圆角并朝头像一侧收 4px 小角，
-       最宽 min(680px, 100% - 60px)；时间戳从旧版左侧时间轨移进气泡
-       meta 行（作者名 weight 600 淡色 + 时间右对齐 tabular-nums）。 */
+       26px 头像圆（assistant = accent 渐变底，user = accent-soft 底），
+       气泡 14px 圆角并朝头像一侧收 4px 小角，最宽 min(680px, 100% - 60px)；
+       时间戳在气泡 meta 行（作者名 weight 600 淡色 + 时间右对齐
+       tabular-nums）。一个 agent 回合 = 一个气泡（2.1）。 */
     .turn-block {
       display: flex;
       gap: 10px;
@@ -338,6 +479,14 @@ export class SebasTranscriptView extends LitElement {
       line-height: 1.65;
       color: var(--sebas-text);
     }
+    /* 回合内多段文本（工具组切开的两段论述）：段间留一行呼吸，视觉上
+       明确「中间发生过事」（design Risks：分段规则可读）。 */
+    .turn-block .body + .body,
+    .turn-block .body + details,
+    .turn-block details + .body,
+    .turn-block details + details {
+      margin-top: var(--sebas-space-2);
+    }
     .turn-block .body :is(p, pre, ul, ol, h1, h2, h3, h4) {
       overflow-wrap: break-word;
     }
@@ -383,16 +532,14 @@ export class SebasTranscriptView extends LitElement {
       border-left: 3px solid var(--sebas-border-strong);
       color: var(--sebas-text-dim);
     }
-    /* thinking 折叠：details 整块搬进 assistant 气泡，折叠行沿用预览稿
-       work-group 的出血条（surface-2 底 + 顶部 1px 分隔线，左右 -14px /
-       底 -9px 抵消 bubble padding），18px accent-soft kind-icon 小徽章
-       与文案保持不变。 */
-    .turn-block details.thinking-fold {
+    /* thinking 折叠：details 整块收在回合气泡内，折叠行沿用 work-group
+       出血条样式；summary 是原生 details/summary，可键盘展开（2.5）。 */
+    .turn-block details.fold {
       margin: var(--sebas-space-3) -14px -9px;
       border-top: 1px solid var(--sebas-border);
       background: var(--sebas-surface-2);
     }
-    .turn-block details.thinking-fold summary {
+    .turn-block details.fold summary {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -407,10 +554,10 @@ export class SebasTranscriptView extends LitElement {
       transition: background var(--sebas-dur) var(--sebas-ease),
         color var(--sebas-dur) var(--sebas-ease);
     }
-    .turn-block details.thinking-fold summary::-webkit-details-marker {
+    .turn-block details.fold summary::-webkit-details-marker {
       display: none;
     }
-    .turn-block details.thinking-fold summary .kind-icon {
+    .turn-block details.fold summary .kind-icon {
       display: grid;
       place-items: center;
       width: 18px;
@@ -420,16 +567,26 @@ export class SebasTranscriptView extends LitElement {
       background: var(--sebas-accent-soft);
       color: var(--sebas-accent);
     }
-    .turn-block details.thinking-fold summary:hover {
+    .turn-block details.fold summary:hover {
       background: var(--sebas-surface-3);
       color: var(--sebas-text-bright);
     }
-    /* 展开内容：预览稿 work-block-body 同款（0.82rem/1.6 + 虚线顶边）。
-       同时挂 .body 以复用上面的 markdown 排版规则（后写的字号覆盖之）。 */
-    .turn-block .thinking-body {
+    .turn-block details.fold summary .fold-count {
+      color: var(--sebas-accent);
+      font-variant-numeric: tabular-nums;
+    }
+    /* 展开内容：work-block-body 同款（0.82rem/1.6 + 虚线顶边）。挂 .body
+       复用 markdown 排版规则（后写的字号覆盖之）。 */
+    .turn-block .fold-body {
       padding: 8px 14px 12px;
       font-size: 0.82rem;
       line-height: 1.6;
+      border-top: 1px dashed var(--sebas-border);
+    }
+    /* 工具组内逐条工具之间以虚线分隔，与 thinking 折叠同一视觉语言。 */
+    .turn-block .fold-body .tool-item + .tool-item {
+      margin-top: var(--sebas-space-2);
+      padding-top: var(--sebas-space-2);
       border-top: 1px dashed var(--sebas-border);
     }
   `
@@ -451,7 +608,7 @@ export class SebasTranscriptView extends LitElement {
 
   protected willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('entries') || changed.has('sessionKey')) {
-      this.renderEntries = mergeSpawnErrors(this.entries)
+      this.turnUnits = groupConversation(mergeSpawnErrors(this.entries))
       this.recomputeSeam()
     }
   }
@@ -506,43 +663,43 @@ export class SebasTranscriptView extends LitElement {
   // ---- seam logic -------------------------------------------------------
 
   /**
-   * Recompute `seamIndex` and `unseenCount` from the current entries
-   * and the stored seen-boundary. The seam is the first index whose
-   * `created_at_unix` is strictly greater than the stored value; entries
-   * without a timestamp (legacy, value 0) are ignored — they cannot
-   * advance the seam, because anchoring on them would let an
-   * unknown-time entry push the seam onto a clearly-seen neighbour.
+   * Recompute `seamIndex` and `unseenCount` from the current turns and the
+   * stored seen-boundary（D5，按回合计数）. A turn is unseen when ANY of
+   * its entries is newer than the stored value — so the boundary can never
+   * fall inside a turn: it sits above the first turn whose newest entry
+   * crossed it, and the count is turns-below, not entries. Turns without
+   * a timestamp (legacy, value 0) cannot advance the seam: anchoring on
+   * them would let an unknown-time turn push the seam onto a clearly-seen
+   * neighbour.
    */
   private recomputeSeam(): void {
     const seen = this.readSeen()
-    const ts = this.renderEntries.map((e) => e.created_at_unix || 0)
-    if (ts.length === 0) {
+    if (this.turnUnits.length === 0) {
       this.seamIndex = null
       this.unseenCount = 0
       return
     }
-    const maxTs = ts.reduce((a, b) => (b > a ? b : a), 0)
+    const maxTs = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
     if (seen > 0 && seen >= maxTs) {
       // Everything is at or below the stored boundary.
       this.seamIndex = null
       this.unseenCount = 0
       return
     }
-    const idx = this.renderEntries.findIndex((e) => (e.created_at_unix || 0) > seen)
+    const idx = this.turnUnits.findIndex((u) => unitMaxTs(u) > seen)
     if (idx === -1) {
       this.seamIndex = null
       this.unseenCount = 0
     } else {
       this.seamIndex = idx
-      this.unseenCount = this.renderEntries.length - idx
+      this.unseenCount = this.turnUnits.length - idx
     }
   }
 
   // ---- mark-all-seen ----------------------------------------------------
 
   private markAllSeen = (): void => {
-    const ts = this.renderEntries.map((e) => e.created_at_unix || 0)
-    const max = ts.length === 0 ? 0 : ts.reduce((a, b) => (b > a ? b : a), 0)
+    const max = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
     this.writeSeen(max)
     this.seamIndex = null
     this.unseenCount = 0
@@ -580,12 +737,10 @@ export class SebasTranscriptView extends LitElement {
     }, MARK_SEEN_DEBOUNCE_MS)
   }
 
-  /** Push the seen-boundary forward to the newest rendered entry. */
+  /** Push the seen-boundary forward to the newest rendered turn. */
   private commitMarkSeen(): void {
-    const ts = this.renderEntries.map((e) => e.created_at_unix || 0)
-    if (ts.length === 0) return
-    const max = ts.reduce((a, b) => (b > a ? b : a), 0)
-    if (max > this.readSeen()) {
+    const max = this.turnUnits.reduce((m, u) => Math.max(m, unitMaxTs(u)), 0)
+    if (this.turnUnits.length > 0 && max > this.readSeen()) {
       this.writeSeen(max)
       // The seam may have moved or disappeared; update internal state
       // and re-render without scheduling another auto-scroll — the user
@@ -606,7 +761,7 @@ export class SebasTranscriptView extends LitElement {
         seam.scrollIntoView({ block: 'center' })
       }
     } else {
-      // Already-seen case: stick to the newest entry.
+      // Already-seen case: stick to the newest turn.
       el.scrollTop = el.scrollHeight
     }
   }
@@ -616,13 +771,15 @@ export class SebasTranscriptView extends LitElement {
   render() {
     const showSeam = this.unseenCount > 0
     // seam 仍是整行分隔条（文案 / localStorage 锚定 / 滚动锚点均不变），
-    // 但现在内联落在最后一条已读与第一条未读气泡之间（index =
+    // 但内联落在最后一条已读与第一条未读**回合**之间（index =
     // seamIndex）；全部已读时保留行首的 hidden 占位，供滚动逻辑
-    // querySelector('.seam') 命中 —— 行为与旧版一致。
+    // querySelector('.seam') 命中。
     const seam = showSeam
       ? html`
           <div class="seam" data-count=${this.unseenCount} role="status">
-            <span class="pill"><span class="count">~${this.unseenCount} new</span> since you last viewed</span>
+            <span class="pill"
+              ><span class="count">~${this.unseenCount} new</span> since you last viewed</span
+            >
             <button type="button" class="link" @click=${this.markAllSeen}>
               mark all seen
             </button>
@@ -630,79 +787,112 @@ export class SebasTranscriptView extends LitElement {
         `
       : html`<div class="seam" hidden></div>`
     return html`
-      <div class="scroll" role="log" aria-label="Session transcript">
+      <div class="scroll" role="log" aria-label="Session conversation">
         ${showSeam
-          ? this.renderEntries.map((e, i) =>
-              i === this.seamIndex ? html`${seam}${this.renderEntry(e)}` : this.renderEntry(e),
+          ? this.turnUnits.map((u, i) =>
+              i === this.seamIndex ? html`${seam}${this.renderUnit(u)}` : this.renderUnit(u),
             )
-          : html`${seam}${this.renderEntries.map((e) => this.renderEntry(e))}`}
+          : html`${seam}${this.turnUnits.map((u) => this.renderUnit(u))}`}
       </div>
     `
   }
 
-  private renderEntry(e: ErrorCountedView) {
-    if (!e.content) return nothing
+  private renderUnit(u: TurnUnit) {
+    if (u.kind === 'error') return this.renderErrorUnit(u)
+    if (u.kind === 'operator') return this.renderOperatorUnit(u)
+    return this.renderAgentUnit(u)
+  }
+
+  /** fail-fast-on-startup-errors 3.3：错误条目仍是独立计数气泡。 */
+  private renderErrorUnit(u: ErrorUnit) {
+    const e = u.entry
     const iso = isoTime(e.created_at_unix)
     const ts = formatTime(e.created_at_unix)
-    if (e.element_type === 'error') {
-      // fail-fast-on-startup-errors 3.3：spawn-failed 等错误事件渲染为独立
-      // 错误气泡（failed 色 + "!" 头像）；相邻同类合并后 count>1 时带 ×N
-      // 计数，不再整屏刷重复错误。
-      const count = e.count ?? 1
-      return html`
-        <div class="turn-block is-error" data-error-count=${count}>
-          <div class="avatar error">!</div>
-          <div class="bubble error">
-            <div class="meta">
-              <span class="author error">spawn failed</span>
-              ${count > 1 ? html`<span class="count">×${count}</span>` : nothing}
-              <time class="time" datetime=${iso || nothing}>${ts}</time>
-            </div>
-            <div class="body">${unsafeHTML(renderMarkdown(e.content))}</div>
-          </div>
-        </div>
-      `
-    }
-    if (e.element_type === 'thinking') {
-      // thinking 仍走 details 折叠，但整块搬进 assistant 气泡：meta 行
-      // 照常（作者 + 时间），折叠行用预览稿 work-group 出血条样式。
-      return html`
-        <div class="turn-block is-assistant">
-          <div class="avatar assistant">AI</div>
-          <div class="bubble">
-            <div class="meta">
-              <span class="author">assistant</span>
-              <time class="time" datetime=${iso || nothing}>${ts}</time>
-            </div>
-            <details class="thinking-fold">
-              <summary>
-                <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
-                <span class="label">thinking</span>
-              </summary>
-              <div class="body thinking-body">${unsafeHTML(renderMarkdown(e.content))}</div>
-            </details>
-          </div>
-        </div>
-      `
-    }
-    // kind === 'prompt' 的用户输入走右侧 user 气泡（accent-soft 底 +
-    // 「你」头像）；其余（markdown 及未知遗留类型）一律按 agent 输出
-    // 渲染为 assistant 气泡。未知 element_type 仍默认走 markdown，
-    // 让内容不丢（legacy `collapsible`/`div` 形态照旧兜底）。
-    const isUser = e.element_type === 'prompt'
+    const count = e.count ?? 1
     return html`
-      <div class="turn-block ${isUser ? 'is-user' : 'is-assistant'}">
-        <div class="avatar ${isUser ? 'user' : 'assistant'}">${isUser ? '你' : 'AI'}</div>
-        <div class="bubble">
+      <div class="turn-block is-error" data-error-count=${count}>
+        <div class="avatar error">!</div>
+        <div class="bubble error">
           <div class="meta">
-            <span class="author ${isUser ? 'you' : ''}">${isUser ? 'you' : 'assistant'}</span>
+            <span class="author error">spawn failed</span>
+            ${count > 1 ? html`<span class="count">×${count}</span>` : nothing}
             <time class="time" datetime=${iso || nothing}>${ts}</time>
           </div>
-          <div class="body">
-            ${isUser ? html`<p>${e.content}</p>` : unsafeHTML(renderMarkdown(e.content))}
-          </div>
+          <div class="body">${unsafeHTML(renderMarkdown(e.content))}</div>
         </div>
       </div>
+    `
+  }
+
+  /** 2.3：operator 回合 = 「你」气泡（accent-soft 底，右对齐）。 */
+  private renderOperatorUnit(u: OperatorUnit) {
+    const e = u.entry
+    const iso = isoTime(e.created_at_unix)
+    const ts = formatTime(e.created_at_unix)
+    return html`
+      <div class="turn-block is-user">
+        <div class="avatar user">你</div>
+        <div class="bubble">
+          <div class="meta">
+            <span class="author you">you</span>
+            <time class="time" datetime=${iso || nothing}>${ts}</time>
+          </div>
+          <div class="body"><p>${e.content}</p></div>
+        </div>
+      </div>
+    `
+  }
+
+  /**
+   * 2.1/2.2：一个 agent 回合 = 一个气泡。回合内按 D4 分块：文本段 /
+   * thinking 折叠 / 工具组按位置交替落放。
+   */
+  private renderAgentUnit(u: AgentUnit) {
+    const iso = isoTime(u.startedAt)
+    const ts = formatTime(u.startedAt)
+    return html`
+      <div class="turn-block is-assistant" data-turn-position=${u.position}>
+        <div class="avatar assistant">AI</div>
+        <div class="bubble">
+          <div class="meta">
+            <span class="author">assistant</span>
+            <time class="time" datetime=${iso || nothing}>${ts}</time>
+          </div>
+          ${u.blocks.map((b) => this.renderAgentBlock(b))}
+        </div>
+      </div>
+    `
+  }
+
+  private renderAgentBlock(b: AgentBlock) {
+    if (b.type === 'text') {
+      return html`<div class="body">${unsafeHTML(renderMarkdown(b.content))}</div>`
+    }
+    if (b.type === 'thinking') {
+      return html`
+        <details class="fold thinking-fold">
+          <summary>
+            <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
+            <span class="label">thinking</span>
+          </summary>
+          <div class="body fold-body">${unsafeHTML(renderMarkdown(b.content))}</div>
+        </details>
+      `
+    }
+    // 工具组（2.2）：「used N tools」可展开组；原生 details/summary 支持
+    // 键盘展开（2.5）。
+    return html`
+      <details class="fold tools-fold" data-tool-count=${b.items.length}>
+        <summary>
+          <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
+          <span class="label">used ${b.items.length} tool${b.items.length === 1 ? '' : 's'}</span>
+        </summary>
+        <div class="body fold-body">
+          ${b.items.map(
+            (it) => html`<div class="tool-item">${unsafeHTML(renderMarkdown(it.content))}</div>`,
+          )}
+        </div>
+      </details>
     `
   }
 }

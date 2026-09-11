@@ -1,9 +1,16 @@
 /**
  * Journey 3.x — model面诚实语义 (phase-2 task 3.2, fallback C +
- * cover-core-channel-test-gaps B2.2).
+ * cover-core-channel-test-gaps B2.2 + add-fetch-models 4.1 +
+ * redesign-provider-models-settings 5.1).
  *
- * 功能：模型管理覆盖 / 子功能：无模型诚实缺省、settings provider 只读、
- * 有模型面的正向切换与 typed rejection
+ * 功能：模型管理覆盖 / 子功能：无模型诚实缺省、settings provider 可抓取可
+ * 编辑（模型条目 + 能力标记可编辑并持久；抓取可用且不改库、挑选后才写、
+ * 无 URL 不渲染入口）、有模型面的正向切换与 typed rejection
+ *
+ * redesign-provider-models-settings：provider 模型列表是条目列表（id + 能力
+ * 标记），WebUI 编辑器可增删条目、勾选 vision/audio/video；旧的「provider
+ * 只读 + 零 probe 流量」断言升级为「可抓取、可编辑模型条目」（browsing 仍
+ * 然零 probe 流量）。
  *
  * ## 两条拒绝路径的区分（B2.2 要求先写清；7f1d7c9 后 SetModel 一律非终态）
  *
@@ -21,16 +28,35 @@
  * 两条路径共同契约：拒绝不销毁会话、不伪造成功。
  */
 import { expect, test } from '@playwright/test'
+import type { APIRequestContext } from '@playwright/test'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import {
   createSession,
   ErrorCollector,
   getSession,
   listSessions,
   resetState,
-  SessionDetailPage,
+  FocusedSession,
   SettingsModal,
   waitStatus,
 } from './helpers/index'
+
+/** Catalog truth for one provider (store projection via the BFF). Models are
+ * entry objects ({id, tags}) since redesign-provider-models-settings; the
+ * helper returns bare ids for assertions. */
+async function fetchCatalog(
+  request: APIRequestContext,
+  name: string,
+): Promise<string[]> {
+  const resp = await request.get('/router/api/providers')
+  expect(resp.ok()).toBe(true)
+  const body = (await resp.json()) as {
+    providers?: Array<{ name: string; models: Array<{ id: string } | string> }>
+  }
+  const models = body.providers?.find((p) => p.name === name)?.models ?? []
+  return models.map((m) => (typeof m === 'string' ? m : m.id))
+}
 
 test.describe('模型管理覆盖', () => {
   let collector: ErrorCollector
@@ -43,7 +69,7 @@ test.describe('模型管理覆盖', () => {
     test('3.2 set_model on a model-less session fails non-terminally and honestly', async ({
       page,
     }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
       const key = await createSession(page.request, { prompt: 'modeless' })
@@ -82,7 +108,7 @@ test.describe('模型管理覆盖', () => {
     test('set_session_model happy path — POST ok-model → ModelChanged → current_model 同步 + 选择器呈现', async ({
       page,
     }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
       const key = await createSession(page.request, {
@@ -128,7 +154,7 @@ test.describe('模型管理覆盖', () => {
     test('set_session_model rejects unknown model — typed rejection 到达但 webui 无内联错误面（observed product gap），会话存活、current_model 不变', async ({
       page,
     }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
       const key = await createSession(page.request, {
@@ -174,43 +200,165 @@ test.describe('模型管理覆盖', () => {
     })
   })
 
-  test.describe('settings provider 只读', () => {
-    test('3.2 settings provider list matches API, zero probe traffic', async ({
+  test.describe('settings provider 抓取（add-fetch-models）+ 模型条目编辑（redesign-provider-models-settings）', () => {
+    test('3.2 providers are editable: model entries with capability tags persist; browsing stays probe-free', async ({
       page,
     }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
+      // Seed a custom provider over the API; the UI edit journey then owns it.
+      const created = await page.request.post('/router/api/providers', {
+        data: { name: 'editable', base_url_openai_chat: 'http://127.0.0.1:9/v1' },
+      })
+      expect(created.ok()).toBe(true)
+
       await page.goto('/')
       await settings.openViaComposer()
-      // New IA default section is Settings — the provider list lives under Models.
       await settings.openSection('Models')
 
-      // Count the API truth first.
-      const apiResp = await page.request.get('/router/api/providers')
-      expect(apiResp.ok()).toBe(true)
-      const apiBody = (await apiResp.json()) as { providers?: unknown[] }
-      const apiCount = apiBody.providers?.length ?? 0
-
-      // Never probe during a read-only assertion.
-      let probeCalls = 0
+      // Browsing the list stays read-only on the network: zero fetch traffic
+      // (each fetch dials the provider's upstream from core).
+      let fetchCalls = 0
       await page.route('**/probe*', (route) => {
-        probeCalls += 1
+        fetchCalls += 1
         void route.continue()
       })
 
-      // UI parity: row count matches the API (empty state included).
-      const rows = settings.panel.locator('.provider-row')
-      if (apiCount === 0) {
-        await expect(
-          settings.panel.locator('.provider-row-empty'),
-        ).toBeVisible({ timeout: 10_000 })
-        await expect(rows).toHaveCount(0)
-      } else {
-        await expect(rows.first()).toBeVisible({ timeout: 10_000 })
-        expect(await rows.count()).toBe(apiCount)
+      const row = settings.panel.locator('.provider-row', { hasText: 'editable' })
+      await expect(row).toBeVisible({ timeout: 10_000 })
+
+      // Model entries are editable: add two entries, one tagged vision.
+      await row.locator('button[title="Edit"]').click()
+      const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+      const add = editor.locator('button[data-testid="add-model-entry"]')
+      await expect(add).toBeVisible()
+      await add.click()
+      const entry0 = editor.locator('[data-testid="model-entry"]').first()
+      await entry0.locator('wa-input input').fill('entry-a')
+      await entry0.locator('input[data-testid="tag-vision"]').check()
+      await add.click()
+      const entry1 = editor.locator('[data-testid="model-entry"]').nth(1)
+      await entry1.locator('wa-input input').fill('entry-b')
+      await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+      await expect(editor).toBeHidden({ timeout: 10_000 })
+
+      // API truth: the entries persisted with their capability tags (entry
+      // objects; text implicit and never stored).
+      const resp = await page.request.get('/router/api/providers')
+      expect(resp.ok()).toBe(true)
+      const body = (await resp.json()) as {
+        providers?: Array<{ name: string; models: Array<{ id: string; tags: string[] }> }>
       }
-      expect(probeCalls).toBe(0)
+      const stored = body.providers?.find((p) => p.name === 'editable')
+      expect(stored?.models).toEqual([
+        { id: 'entry-a', tags: ['vision'] },
+        { id: 'entry-b', tags: [] },
+      ])
+
+      // UI parity: the row lists the entries and the vision tag.
+      await expect(row.locator('.model-chip', { hasText: 'entry-a' })).toContainText('vision')
+      await expect(row.locator('.model-chip', { hasText: 'entry-b' })).toBeVisible()
+
+      // Browsing + editing never dialed an upstream.
+      expect(fetchCalls).toBe(0)
+      await settings.close()
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('fetch lists the official ids without persisting; picking joins the catalog via an ordinary edit', async ({
+      page,
+    }) => {
+      const settings = new SettingsModal(page)
+
+      // Node-local fake upstream (never a real provider host): serves an
+      // openai-style /v1/models envelope to whatever path core dials.
+      const upstreamModels = ['fetch-m-1', 'fetch-m-2']
+      const upstream = http.createServer((_req, res) => {
+        res.setHeader('content-type', 'application/json')
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: upstreamModels.map((id) => ({ id, object: 'model' })),
+          }),
+        )
+      })
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+      const port = (upstream.address() as AddressInfo).port
+
+      try {
+        await resetState(page.request)
+        // Ordinary edit path: create a custom provider pointed at the fake
+        // upstream (core dials 127.0.0.1 only — sandbox-safe).
+        const created = await page.request.post('/router/api/providers', {
+          data: {
+            name: 'fetchable',
+            base_url_openai_chat: `http://127.0.0.1:${port}/v1`,
+          },
+        })
+        expect(created.ok()).toBe(true)
+        const catalogBefore = await fetchCatalog(page.request, 'fetchable')
+        expect(catalogBefore).toEqual([])
+
+        await page.goto('/')
+        await settings.openViaComposer()
+        await settings.openSection('Models')
+
+        // 抓取：结果列表如实列出上游 ids。
+        const row = settings.panel.locator('.provider-row', { hasText: 'fetchable' })
+        await expect(row.locator('button[data-testid="fetch-models"]')).toBeVisible({
+          timeout: 10_000,
+        })
+        await row.locator('button[data-testid="fetch-models"]').click()
+        const resultList = settings.panel.locator('.fetch-result-list')
+        await expect(resultList).toBeVisible({ timeout: 10_000 })
+        await expect(resultList).toContainText('fetch-m-1')
+        await expect(resultList).toContainText('fetch-m-2')
+
+        // 抓取不改库：catalog 仍是抓取前的样子（挑选前没有任何写请求落库）。
+        expect(await fetchCatalog(page.request, 'fetchable')).toEqual(catalogBefore)
+
+        // 挑选 fetch-m-1 → 普通编辑 → catalog 才长出该 id。
+        await resultList
+          .locator('li', { hasText: 'fetch-m-1' })
+          .locator('button[data-testid="pick-fetched-model"]')
+          .click()
+        await expect
+          .poll(async () => fetchCatalog(page.request, 'fetchable'), {
+            timeout: 10_000,
+            intervals: [250],
+          })
+          .toContain('fetch-m-1')
+
+        // 挑选是逐 id 的普通编辑：未挑选的 fetch-m-2 不被顺手批量写入。
+        const finalCatalog = await fetchCatalog(page.request, 'fetchable')
+        expect(finalCatalog).not.toContain('fetch-m-2')
+      } finally {
+        await new Promise<void>((resolve) => upstream.close(() => resolve()))
+      }
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('a provider without any usable base URL renders no fetch entry', async ({
+      page,
+    }) => {
+      const settings = new SettingsModal(page)
+
+      await resetState(page.request)
+      const created = await page.request.post('/router/api/providers', {
+        data: { name: 'urlless' },
+      })
+      expect(created.ok()).toBe(true)
+
+      await page.goto('/')
+      await settings.openViaComposer()
+      await settings.openSection('Models')
+
+      const row = settings.panel.locator('.provider-row', { hasText: 'urlless' })
+      await expect(row).toBeVisible({ timeout: 10_000 })
+      await expect(row.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -219,7 +367,7 @@ test.describe('模型管理覆盖', () => {
 
   test.describe('agent 不可变的锁定提示（workbench-agent-wire-fix）', () => {
     test('detail head shows the bound agent with the lock affordance', async ({ page }) => {
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
       const key = await createSession(page.request, { prompt: 'lock check' })
@@ -228,8 +376,10 @@ test.describe('模型管理覆盖', () => {
       await expect(detail.host).toBeVisible()
 
       // Agent 不可变的 UI 承诺：🔒 + tooltip（spec scenario "UI communicates
-      // immutability"）；不渲染任何 agent 切换控件。
-      const lock = page.locator('sebas-session-detail [data-testid="agent-lock"]')
+      // immutability"）；不渲染任何 agent 切换控件。（session-detail 视图已
+      // 退休——锁提示现在住在工作台的聚焦会话头里，3.3。）
+      // 会话头与跟随模式 composer 各有一枚锁提示——限定会话头那枚。
+      const lock = page.locator('sebas-dashboard .session-head [data-testid="agent-lock"]')
       await expect(lock).toContainText('🔒')
       await expect(lock).toHaveAttribute('title', /immutable — chosen when the session was created/)
 

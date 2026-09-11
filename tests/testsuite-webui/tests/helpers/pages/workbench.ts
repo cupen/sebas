@@ -84,55 +84,83 @@ export class Workbench {
     return this.backendSelect.locator('wa-option[value="native"]')
   }
 
-  /** The model dropdown — D4 honest absence: MUST NOT render without model options. */
+  /**
+   * The session model dropdown (follow-up mode) — D4 honest absence: MUST
+   * NOT render when the agent exposes no model option. In creation mode the
+   * two-level catalog offers provider + model selects instead (4.3), so the
+   * provider select is excluded here.
+   */
   modelSelect(): Locator {
-    return this.composer.locator('wa-select.backend-select.model-select')
+    return this.composer.locator('wa-select.backend-select.model-select:not(.provider-select)')
+  }
+
+  /** Creation-mode catalog level 1: the provider select（4.3）. */
+  providerSelect(): Locator {
+    return this.composer.locator('wa-select.provider-select')
+  }
+
+  /** Creation-mode catalog level 2: the model select（4.3）. */
+  catalogModelSelect(): Locator {
+    return this.composer.locator('wa-select[aria-label="Model"]')
+  }
+
+  /** Creation-mode honest degradation: the explicit unavailability note（4.4）. */
+  catalogUnavailable(): Locator {
+    return this.composer.locator('[data-testid="catalog-unavailable"]')
   }
 }
 
 /**
- * Session detail view (`sebas-session-detail`): status head, original
- * prompt quote, transcript, pinned composer, close dialog.
+ * The focused session ON THE WORKBENCH (workbench-conversation-view 3.3/3.4:
+ * the retired `sebas-session-detail` view is gone - `/sessions/:key` deep
+ * links and rail switches render the same `sebas-dashboard` focused). One
+ * object for the session head (badge/chat id/model pick/close/archive), the
+ * conversation stream, and the follow-up composer.
  */
-export class SessionDetailPage {
+export class FocusedSession {
   readonly page: Page
   readonly host: Locator
-  readonly head: Locator
+  readonly sessionHead: Locator
   readonly statusBadge: Locator
   readonly chatId: Locator
-  readonly promptQuote: Locator
   readonly transcript: Locator
-  readonly emptyTranscript: Locator
+  readonly emptyConversation: Locator
   readonly composerTextarea: Locator
   readonly sendButton: Locator
   readonly closeButton: Locator
+  readonly archiveButton: Locator
   readonly closeDialog: Locator
   readonly closeDialogConfirm: Locator
-  readonly errorCallout: Locator
-  readonly backToWorkbench: Locator
+  readonly unavailableNote: Locator
   readonly modelPick: Locator
 
   constructor(page: Page) {
     this.page = page
-    this.host = page.locator('sebas-session-detail')
-    this.head = page.locator('sebas-session-detail .head')
-    this.statusBadge = page.locator('sebas-session-detail .head sebas-status-badge')
-    this.chatId = page.locator('sebas-session-detail .head .ident .chat')
-    this.promptQuote = page.locator('sebas-session-detail blockquote.prompt')
-    this.transcript = page.locator('sebas-session-detail section.transcript')
-    this.emptyTranscript = page.locator('sebas-session-detail section.transcript .empty')
-    this.composerTextarea = page.locator('sebas-session-detail .composer wa-textarea textarea')
-    this.sendButton = page.locator('sebas-session-detail .composer .send-button')
-    this.closeButton = page.locator('sebas-session-detail .head .actions wa-button')
-    this.closeDialog = page.locator('sebas-session-detail wa-dialog[label="Close session"]')
+    this.host = page.locator('sebas-dashboard')
+    this.sessionHead = page.locator('sebas-dashboard .session-head')
+    this.statusBadge = page.locator('sebas-dashboard .session-head sebas-status-badge')
+    this.chatId = page.locator('sebas-dashboard .session-head .ident .chat')
+    this.transcript = page.locator('sebas-dashboard .turn-stream-area')
+    this.emptyConversation = page
+      .locator('sebas-dashboard .turn-stream-area .empty-stream')
+      .filter({ hasText: 'Nothing yet' })
+    this.unavailableNote = page
+      .locator('sebas-dashboard .turn-stream-area .empty-stream')
+      .filter({ hasText: 'Session unavailable' })
+    // The composer is the dashboard's own workbench composer (follow-up mode).
+    this.composerTextarea = page.locator('sebas-workbench-composer wa-textarea textarea')
+    this.sendButton = page.locator('sebas-workbench-composer .send-button')
+    this.closeButton = page
+      .locator('sebas-dashboard .session-head wa-button')
+      .filter({ hasText: 'Close' })
+    this.archiveButton = page
+      .locator('sebas-dashboard .session-head wa-button')
+      .filter({ hasText: 'Archive' })
+    this.closeDialog = page.locator('sebas-dashboard wa-dialog[label="Close session"]')
     this.closeDialogConfirm = page
-      .locator('sebas-session-detail wa-dialog[label="Close session"] wa-button')
+      .locator('sebas-dashboard wa-dialog[label="Close session"] wa-button')
       .filter({ hasText: 'Close session' })
-    this.errorCallout = page
-      .locator('sebas-session-detail .callout-error[role="alert"]')
-      .first()
-    this.backToWorkbench = page.locator('sebas-session-detail a', { hasText: '← Back to workbench' })
-    this.modelPick = page.locator('sebas-session-detail .head .model-pick')
+    this.modelPick = page.locator('sebas-dashboard .session-head .model-pick')
   }
 
   /** Status badge's current slug (`data`-driven attribute on the element). */
@@ -140,21 +168,40 @@ export class SessionDetailPage {
     return (await this.statusBadge.getAttribute('slug')) ?? ''
   }
 
-  /** All transcript bubble bodies as text. */
+  /** All conversation bubble bodies (both sides) as text. */
   bubbles(): Locator {
-    return this.page.locator('sebas-session-detail sebas-transcript-view .turn-block .body')
+    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block .body')
   }
 
-  /** The transcript turn block containing `text` (this page's own transcript). */
+  /** The conversation turn block containing `text` (either side). */
   turnWith(text: string): Locator {
-    return this.page.locator('sebas-session-detail sebas-transcript-view .turn-block', {
+    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block', {
       hasText: text,
     })
   }
 
+  /** The operator's own turn bubble carrying `text` (2.3: both sides render). */
+  userTurn(text: string): Locator {
+    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block.is-user', {
+      hasText: text,
+    })
+  }
+
+  /** An agent turn bubble carrying `text`. */
+  agentTurn(text: string): Locator {
+    return this.page.locator('sebas-dashboard sebas-transcript-view .turn-block.is-assistant', {
+      hasText: text,
+    })
+  }
+
+  /** The turn's expandable tool group (2.2: "used N tools" group). */
+  toolGroup(): Locator {
+    return this.page.locator('sebas-dashboard sebas-transcript-view details.tools-fold')
+  }
+
   /**
-   * Send a follow-up message through the session-detail composer (in
-   * follow-up mode the composer targets this session). Submits with Enter.
+   * Send a follow-up through the dashboard composer (follow-up mode targets
+   * the focused session). Submits with Enter.
    */
   async sendFollowUp(text: string): Promise<void> {
     await this.composerTextarea.fill(text)

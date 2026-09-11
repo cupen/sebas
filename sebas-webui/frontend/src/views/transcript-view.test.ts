@@ -1,18 +1,19 @@
 // @vitest-environment jsdom
 /**
- * sebas-transcript-view behaviour. The component owns its own seen-boundary
- * (localStorage) and seam visualisation, so we drive it directly rather
- * than through the parent view.
+ * sebas-transcript-view — the conversation view
+ * (workbench-conversation-view 2.1–2.5).
  *
- * Eight scenarios:
- *   - timestamps rendered inside each bubble's meta row with correct datetime attrs
- *   - thinking blocks collapsed by default
- *   - no seam when everything is seen
- *   - seam pill with "~N new since you last viewed" wording
- *   - seam pill copy starts with "~"
- *   - in-place entry update does not move the seam (spec 4.4)
- *   - mark-all-seen link writes localStorage and hides the seam
- *   - empty content entries are skipped
+ * The component groups the ordered entry sequence into turns (a prompt
+ * opens an operator turn; agent chunks until the next prompt form ONE
+ * bubble), chunks each agent turn into text/thinking/tools blocks, and
+ * runs a turn-counting seen-boundary seam. Scenarios:
+ *
+ *   2.1  N streamed chunks → one agent bubble; both conversation sides in order
+ *   2.2  text→tool→text yields a three-segment structure; thinking folds
+ *   2.3  operator turns render as "你" bubbles, alternating with agent turns
+ *   2.4  a multi-chunk turn counts as ONE unseen turn and the seam never
+ *        splits a turn
+ *   2.5  empty entries skipped, keyboard-operable folds, fill mode intact
  *
  * The localStorage polyfill below replaces whatever jsdom ships so the
  * tests stay deterministic across environments and so the production
@@ -21,8 +22,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { CardElementView } from '../api/client.js'
-import { ERROR_MERGE_WINDOW_SECS, mergeSpawnErrors } from './transcript-view.js'
+import type { ConversationEntryView } from '../api/client.js'
+import {
+  ERROR_MERGE_WINDOW_SECS,
+  groupConversation,
+  mergeSpawnErrors,
+} from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
 
 // ---- localStorage polyfill --------------------------------------------
@@ -60,7 +65,7 @@ import './transcript-view.js'
 // ---- helpers ----------------------------------------------------------
 
 async function mount(opts: {
-  entries: CardElementView[]
+  entries: ConversationEntryView[]
   sessionKey?: string
 }): Promise<SebasTranscriptView> {
   const el = document.createElement('sebas-transcript-view') as SebasTranscriptView
@@ -86,145 +91,313 @@ const FIXED_DATES: Record<string, number> = {
   T2: 1735732801,
   T3: 1735732802,
   T4: 1735732803,
+  T5: 1735732804,
 }
 
-function makeEntries(): CardElementView[] {
-  return [
-    { element_type: 'markdown', content: 'first', created_at_unix: FIXED_DATES.T1 },
-    { element_type: 'markdown', content: 'second', created_at_unix: FIXED_DATES.T2 },
-    { element_type: 'markdown', content: 'third', created_at_unix: FIXED_DATES.T3 },
+function entry(e: Partial<ConversationEntryView>): ConversationEntryView {
+  return {
+    position: 0,
+    kind: 'content',
+    element_type: 'markdown',
+    content: '',
+    created_at_unix: 0,
+    ...e,
+  }
+}
+
+/** A streamed agent turn: prompt + N text chunks (the wire's chunk level). */
+function streamedTurn(prompt: string, chunks: string[], startAt: number): ConversationEntryView[] {
+  const out: ConversationEntryView[] = [
+    entry({ position: 0, kind: 'prompt', content: prompt, created_at_unix: startAt }),
   ]
+  chunks.forEach((c, i) =>
+    out.push(
+      entry({
+        position: i + 1,
+        kind: 'content',
+        content: c,
+        created_at_unix: startAt,
+      }),
+    ),
+  )
+  return out
 }
 
-// ---- tests ------------------------------------------------------------
+// ---- pure-function coverage -------------------------------------------
 
-describe('sebas-transcript-view', () => {
-  it('renders each timestamp inside its bubble meta row', async () => {
-    const el = await mount({ entries: makeEntries() })
-    const times = el.shadowRoot?.querySelectorAll<HTMLTimeElement>(
-      '.turn-block .bubble .meta time.time',
+describe('groupConversation (design D3/D4)', () => {
+  it('one agent turn from N chunks — turn grouping, not entry grouping', () => {
+    const units = groupConversation(
+      mergeSpawnErrors(streamedTurn('do it', ['a', 'b', 'c', 'd'], FIXED_DATES.T1)),
     )
-    expect(times?.length).toBe(3)
-    expect(times?.[0]?.getAttribute('datetime')).toBe(
-      new Date(FIXED_DATES.T1 * 1000).toISOString(),
-    )
-    expect(times?.[1]?.getAttribute('datetime')).toBe(
-      new Date(FIXED_DATES.T2 * 1000).toISOString(),
-    )
-    expect(times?.[2]?.getAttribute('datetime')).toBe(
-      new Date(FIXED_DATES.T3 * 1000).toISOString(),
-    )
+    expect(units).toHaveLength(2)
+    expect(units[0].kind).toBe('operator')
+    expect(units[1].kind).toBe('agent')
+    const agent = units[1]
+    if (agent.kind !== 'agent') return expect.unreachable()
+    const text = agent.blocks[0]
+    expect(text.type).toBe('text')
+    if (text.type !== 'text') return expect.unreachable()
+    expect(text.content).toBe('abcd')
   })
 
-  it('collapses thinking blocks by default', async () => {
-    const entries: CardElementView[] = [
-      { element_type: 'markdown', content: 'visible', created_at_unix: FIXED_DATES.T1 },
-      { element_type: 'thinking', content: 'hidden', created_at_unix: FIXED_DATES.T2 },
+  it('text → tool → text chunks into a three-segment structure (D4)', () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'let me check.', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', element_type: 'tool', content: '📖 **read**', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '✓ **read**', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 4, kind: 'content', content: 'done.', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    expect(units).toHaveLength(2)
+    const agent = units[1]
+    if (agent.kind !== 'agent') return expect.unreachable()
+    expect(agent.blocks.map((b) => b.type)).toEqual(['text', 'tools', 'text'])
+    // The tool group sits BETWEEN the two text segments with both items.
+    const tools = agent.blocks[1]
+    if (tools.type !== 'tools') return expect.unreachable()
+    expect(tools.items).toHaveLength(2)
+  })
+
+  it('thinking runs fold into their own blocks, keeping position order', () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'why', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'hmm', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', element_type: 'thinking', content: ' aha', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 3, kind: 'content', content: 'because', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    const agent = units[1]
+    if (agent.kind !== 'agent') return expect.unreachable()
+    expect(agent.blocks.map((b) => b.type)).toEqual(['thinking', 'text'])
+    const th = agent.blocks[0]
+    if (th.type !== 'thinking') return expect.unreachable()
+    expect(th.content).toBe('hmm aha')
+  })
+
+  it('conversation sides alternate in transcript order', () => {
+    const entries = [
+      ...streamedTurn('first', ['hello'], FIXED_DATES.T1),
+      ...streamedTurn('second', ['world'], FIXED_DATES.T3).map((e, i) => ({ ...e, position: 2 + i })),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    expect(units.map((u) => u.kind)).toEqual(['operator', 'agent', 'operator', 'agent'])
+  })
+
+  it('error entries stay standalone units (fail-fast 3.3)', () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'error', content: '**spawn failed**: x', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    expect(units.map((u) => u.kind)).toEqual(['operator', 'error'])
+  })
+})
+
+describe('mergeSpawnErrors', () => {
+  const SPAWN_ERR = '**spawn failed**: agent binary missing'
+  const errEntry = (at: number, content = SPAWN_ERR): ConversationEntryView =>
+    entry({ kind: 'content', element_type: 'error', content, created_at_unix: at })
+
+  it('merges adjacent identical errors within the window into one counted entry', () => {
+    const merged = mergeSpawnErrors([errEntry(100, SPAWN_ERR), errEntry(100 + ERROR_MERGE_WINDOW_SECS - 1, SPAWN_ERR)])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].count).toBe(2)
+    expect(merged[0].created_at_unix).toBe(100)
+  })
+
+  it('keeps identical errors outside the window as separate entries', () => {
+    const split = mergeSpawnErrors([errEntry(100), errEntry(100 + ERROR_MERGE_WINDOW_SECS + 1)])
+    expect(split).toHaveLength(2)
+    expect(split.every((e) => e.count === 1)).toBe(true)
+  })
+
+  it('does not merge errors with different reasons; non-errors reset adjacency', () => {
+    const A = 'err-a'
+    const split = mergeSpawnErrors([errEntry(100, A), errEntry(101, 'other reason')])
+    expect(split).toHaveLength(2)
+    const reset = mergeSpawnErrors([
+      errEntry(100, A),
+      entry({ content: 'x', created_at_unix: 101 }),
+      errEntry(102, A),
+    ])
+    expect(reset).toHaveLength(3)
+    expect(reset.filter((e) => e.element_type === 'error').every((e) => e.count === 1)).toBe(true)
+  })
+})
+
+// ---- rendered-component coverage ---------------------------------------
+
+describe('sebas-transcript-view (conversation rendering)', () => {
+  it('renders N streamed chunks as ONE assistant bubble (2.1)', async () => {
+    const el = await mount({
+      entries: streamedTurn('do it', ['chunk one ', 'chunk two ', 'chunk three'], FIXED_DATES.T1),
+    })
+    const assistant = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
+    expect(assistant?.length).toBe(1)
+    const bodies = assistant?.[0]?.querySelectorAll<HTMLElement>('.bubble > .body')
+    expect(bodies?.length).toBe(1)
+    expect(bodies?.[0]?.textContent).toContain('chunk one')
+    expect(bodies?.[0]?.textContent).toContain('chunk three')
+  })
+
+  it('renders both conversation sides alternating with submission text (2.3)', async () => {
+    const entries = [
+      ...streamedTurn('first question', ['hello ', 'world'], FIXED_DATES.T1),
+      ...streamedTurn('second question', ['again'], FIXED_DATES.T3).map((e, i) => ({
+        ...e,
+        position: 4 + i,
+      })),
     ]
     const el = await mount({ entries })
-    // Markdown is rendered inline (not wrapped in <details>).
-    const sections = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block')
-    expect(sections?.length).toBe(2)
-    const markdownSection = sections?.[0]
-    const thinkingSection = sections?.[1]
-    expect(markdownSection?.querySelector('details')).toBeNull()
-    expect(thinkingSection?.querySelector('details')).not.toBeNull()
-    const summary = thinkingSection?.querySelector<HTMLElement>('summary')
-    expect(summary?.textContent?.trim()).toBe('thinking')
-    const details = thinkingSection?.querySelector<HTMLDetailsElement>('details')
-    expect(details?.open).toBe(false)
+    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block')
+    expect(blocks?.length).toBe(4)
+    const classes = Array.from(blocks ?? []).map((b) => b.classList.contains('is-user'))
+    expect(classes).toEqual([true, false, true, false])
+    const firstUser = blocks?.[0]?.querySelector<HTMLElement>('.body p')
+    expect(firstUser?.textContent).toBe('first question')
+    expect(blocks?.[2]?.querySelector<HTMLElement>('.body p')?.textContent).toBe('second question')
+    // 「你」头像与 you 作者标注（既有 is-user 样式族）。
+    expect(blocks?.[0]?.querySelector('.avatar.user')?.textContent).toBe('你')
+    expect(blocks?.[0]?.querySelector('.author.you')?.textContent).toBe('you')
   })
 
-  it('does not show a seam when all entries are seen', async () => {
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T3 + 100))
-    const el = await mount({ entries: makeEntries() })
-    const seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
-    expect(seam).not.toBeNull()
-    expect(seam?.hasAttribute('hidden')).toBe(true)
-    // Pill text should not be visible at all when hidden.
-    expect(seam?.textContent ?? '').not.toContain('new since you last viewed')
+  it('text → tool → text renders three segments and the tool group is expandable (2.2)', async () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'let me check.', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', element_type: 'tool', content: '📖 **read_file**', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '✓ **read_file**', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 4, kind: 'content', content: 'done.', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    const el = await mount({ entries })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    // 三段式：text 段、工具组、text 段。
+    const segments = assistant.querySelectorAll<HTMLElement>('.bubble > .body:not(.fold-body)')
+    expect(segments.length).toBe(2)
+    expect(segments[0].textContent).toContain('let me check.')
+    expect(segments[1].textContent).toContain('done.')
+    const tools = assistant.querySelector<HTMLDetailsElement>('details.tools-fold')!
+    expect(tools).toBeTruthy()
+    expect(tools.getAttribute('data-tool-count')).toBe('2')
+    const label = tools.querySelector<HTMLElement>('summary .label')
+    expect(label?.textContent?.trim()).toBe('used 2 tools')
+    // 默认折叠，summary 可展开（原生 details/summary：键盘可操作）。
+    expect(tools.open).toBe(false)
+    tools.querySelector<HTMLElement>('summary')!.click()
+    await el.updateComplete
+    expect(tools.open).toBe(true)
+    expect(tools.textContent).toContain('read_file')
   })
 
-  it('shows a seam with the unseen count when entries are newer than the boundary', async () => {
-    // Stored boundary at T1 — entries T2 and T3 are unseen, T1 sits at
-    // or before the boundary (strictly-greater rule means T1 is not
-    // unseen). So unseenCount = 2.
+  it('thinking folds inside the agent bubble and stays collapsed by default (2.2)', async () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'why', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'deep thought', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', content: 'because', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    const el = await mount({ entries })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    const fold = assistant.querySelector<HTMLDetailsElement>('details.thinking-fold')!
+    expect(fold).toBeTruthy()
+    expect(fold.open).toBe(false)
+    expect(fold.querySelector('summary .label')?.textContent?.trim()).toBe('thinking')
+  })
+
+  it('a multi-chunk unseen turn counts as ONE unseen turn and the seam never splits it (2.4)', async () => {
+    const entries = [
+      ...streamedTurn('old', ['seen'], FIXED_DATES.T1),
+      ...streamedTurn('new', ['a', 'b', 'c', 'd', 'e', 'f', 'g'], FIXED_DATES.T3).map((e, i) => ({
+        ...e,
+        position: 2 + i,
+        created_at_unix: FIXED_DATES.T4,
+      })),
+    ]
     store.set('sebas:seen:oc_test', String(FIXED_DATES.T1))
-    const el = await mount({ entries: makeEntries() })
+    const el = await mount({ entries })
+    // 边界下方是两个回合（new 提交 + 七条 chunk 的 agent 回合），但
+    // agent 回合无论多少条 chunk 只计 1。
+    expect((el as unknown as { unseenCount: number }).unseenCount).toBe(2)
     const seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(false)
-    expect(seam?.textContent ?? '').toContain('~2 new since you last viewed')
+    expect(seam?.textContent).toContain('~2 new')
+    // 边界不切开回合：seam 下方第一个块是完整回合的开头（operator 气泡），
+    // 第二个块就是那个完整的七 chunk agent 气泡。
+    const seamNext = seam?.nextElementSibling
+    // 边界落在未读第一个回合（operator 气泡）上方，不切开任何回合。
+    expect(seamNext?.classList.contains('is-user')).toBe(true)
+    const agentBubbles = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
+    expect(agentBubbles?.length).toBe(2)
+    expect(agentBubbles?.[1]?.textContent).toContain('a')
+    expect(agentBubbles?.[1]?.textContent).toContain('g')
   })
 
-  it('seam pill copy starts with "~"', async () => {
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1))
-    const el = await mount({ entries: makeEntries() })
-    const pill = el.shadowRoot?.querySelector<HTMLElement>('.seam .pill')
-    const text = (pill?.textContent ?? '').trim()
-    expect(text.startsWith('~')).toBe(true)
-  })
+  it('no seam when everything is seen; mark-all-seen writes and hides', async () => {
+    const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
+    store.set('sebas:seen:oc_test', String(FIXED_DATES.T2))
+    const el = await mount({ entries })
+    let seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
+    expect(seam?.hasAttribute('hidden')).toBe(true)
+    expect(seam?.textContent ?? '').not.toContain('new since you last viewed')
 
-  it('keeps the seam in place when an entry updates without a new timestamp', async () => {
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1))
-    const el = await mount({ entries: makeEntries() })
-    // Initial state: seam at index 1, unseen = 2.
-    expect((el as unknown as { seamIndex: number | null }).seamIndex).toBe(1)
-    expect((el as unknown as { unseenCount: number }).unseenCount).toBe(2)
-
-    // In-place update of entry at index 0 — content changes, timestamp
-    // is the same. The router never bumps `created_at_unix` on a
-    // refresh, so the seam must remain anchored at index 1.
-    const next = [...makeEntries()]
-    next[0] = { ...next[0], content: 'first (revised)' }
-    el.entries = next
+    // 未读态 → mark all seen → localStorage 写入最大时间戳、seam 消失。
+    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1 - 10))
+    el.entries = [...entries]
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
-
-    expect((el as unknown as { seamIndex: number | null }).seamIndex).toBe(1)
-    expect((el as unknown as { unseenCount: number }).unseenCount).toBe(2)
-  })
-
-  it('hides the seam and writes localStorage when "mark all seen" is clicked', async () => {
-    store.set('sebas:seen:oc_test', String(FIXED_DATES.T1))
-    const el = await mount({ entries: makeEntries() })
-    const seamBefore = el.shadowRoot?.querySelector<HTMLElement>('.seam')
-    expect(seamBefore?.hasAttribute('hidden')).toBe(false)
-
-    // The "mark all seen" control is rendered as a <button class="link">
-    // inside the seam strip.
-    const link = el.shadowRoot?.querySelector<HTMLElement>('.seam button.link, .seam a')
-    expect(link).not.toBeNull()
-    link?.click()
+    seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
+    expect(seam?.hasAttribute('hidden')).toBe(false)
+    seam!.querySelector<HTMLButtonElement>('button.link')!.click()
     await el.updateComplete
-
-    expect(store.get('sebas:seen:oc_test')).toBe(String(FIXED_DATES.T3))
-    const seamAfter = el.shadowRoot?.querySelector<HTMLElement>('.seam')
-    expect(seamAfter?.hasAttribute('hidden')).toBe(true)
-    expect((el as unknown as { unseenCount: number }).unseenCount).toBe(0)
+    expect(store.get('sebas:seen:oc_test')).toBe(String(FIXED_DATES.T1))
+    expect(el.shadowRoot?.querySelector<HTMLElement>('.seam')?.hasAttribute('hidden')).toBe(true)
   })
 
-  it('skips entries with empty content', async () => {
-    const entries: CardElementView[] = [
-      { element_type: 'markdown', content: '', created_at_unix: FIXED_DATES.T1 },
-      { element_type: 'markdown', content: 'kept', created_at_unix: FIXED_DATES.T2 },
+  it('timestamps render inside each bubble meta row with datetime attrs', async () => {
+    const el = await mount({
+      entries: streamedTurn('hi', ['a', 'b'], FIXED_DATES.T1),
+    })
+    const times = el.shadowRoot?.querySelectorAll<HTMLTimeElement>(
+      '.turn-block .bubble .meta time.time',
+    )
+    expect(times?.length).toBe(2)
+    expect(times?.[0]?.getAttribute('datetime')).toBe(new Date(FIXED_DATES.T1 * 1000).toISOString())
+    expect(times?.[1]?.getAttribute('datetime')).toBe(new Date(FIXED_DATES.T1 * 1000).toISOString())
+  })
+
+  it('skips entries with empty content (2.5)', async () => {
+    const entries: ConversationEntryView[] = [
+      entry({ position: 0, kind: 'prompt', content: '', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'kept', created_at_unix: FIXED_DATES.T2 }),
     ]
     const el = await mount({ entries })
-    const sections = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block')
-    expect(sections?.length).toBe(1)
-    // The remaining entry carries the non-empty content.
-    expect(sections?.[0]?.textContent ?? '').toContain('kept')
+    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block')
+    expect(blocks?.length).toBe(1)
+    expect(blocks?.[0]?.textContent).toContain('kept')
   })
 
-  it('fill mode lifts the 58vh cap and flexes the scroll region', async () => {
-    const el = await mount({ entries: makeEntries() })
-    // 非 fill：宿主无 fill 属性，.scroll 规则里带 58vh 封顶。
+  it('renders error entries as counted error bubbles, not assistant bubbles (2.5)', async () => {
+    const el = await mount({
+      entries: [
+        entry({ kind: 'content', element_type: 'error', content: '**spawn failed**: x', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    const block = el.shadowRoot?.querySelector<HTMLElement>('.turn-block.is-error')
+    expect(block).not.toBeNull()
+    expect(block?.getAttribute('data-error-count')).toBe('1')
+    expect(block?.textContent).toContain('spawn failed')
+    expect(block?.querySelector('.meta .count')).toBeNull()
+  })
+
+  it('fill mode lifts the 58vh cap and flexes the scroll region (2.5)', async () => {
+    const el = await mount({ entries: streamedTurn('hi', ['a'], FIXED_DATES.T1) })
     expect(el.hasAttribute('fill')).toBe(false)
     const styleText = [...el.shadowRoot!.querySelectorAll('style')]
       .map((s) => s.textContent ?? '')
       .join('\n')
     expect(styleText).toContain('58vh')
-    // fill 模式：宿主反射 fill 属性，滚动区封顶取消（规则切换而非新节点）。
     const scroll = el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
     el.fill = true
     await el.updateComplete
@@ -233,85 +406,5 @@ describe('sebas-transcript-view', () => {
     expect(styleText).toMatch(/:host\(\[fill\]\)\s*\{[^}]*flex:\s*1/)
     expect(styleText).toMatch(/:host\(\[fill\]\)[\s\S]*max-height:\s*none/)
     expect(el.shadowRoot!.querySelector<HTMLElement>('.scroll') === scroll).toBe(true)
-  })
-
-  // ---- fail-fast-on-startup-errors 3.3：spawn-failed 错误事件渲染 ----
-
-  const SPAWN_ERR = '**spawn failed**: agent binary missing'
-
-  function errEntry(at: number, content = SPAWN_ERR): CardElementView {
-    return { element_type: 'error', content, created_at_unix: at }
-  }
-
-  it('renders an error entry as a counted error bubble, not an assistant bubble', async () => {
-    const el = await mount({ entries: [errEntry(FIXED_DATES.T1)] })
-    const block = el.shadowRoot?.querySelector<HTMLElement>('.turn-block.is-error')
-    expect(block).not.toBeNull()
-    expect(block?.getAttribute('data-error-count')).toBe('1')
-    // 作者标签 + 内容都在。
-    expect(block?.textContent).toContain('spawn failed')
-    expect(block?.textContent).toContain('agent binary missing')
-    // 不带 ×N 徽标（单条）。
-    expect(block?.querySelector('.meta .count')).toBeNull()
-  })
-
-  it('merges adjacent identical errors within the window into one counted entry', async () => {
-    const el = await mount({
-      entries: [errEntry(FIXED_DATES.T1), errEntry(FIXED_DATES.T1 + ERROR_MERGE_WINDOW_SECS - 1)],
-    })
-    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-error')
-    expect(blocks?.length).toBe(1, '窗口内同类失败合并为一条')
-    expect(blocks?.[0]?.getAttribute('data-error-count')).toBe('2')
-    expect(blocks?.[0]?.querySelector<HTMLElement>('.meta .count')?.textContent?.trim()).toBe(
-      '×2',
-    )
-  })
-
-  it('keeps identical errors outside the window as separate entries', async () => {
-    const el = await mount({
-      entries: [errEntry(FIXED_DATES.T1), errEntry(FIXED_DATES.T1 + ERROR_MERGE_WINDOW_SECS + 1)],
-    })
-    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-error')
-    expect(blocks?.length).toBe(2, '窗口外不合并')
-    for (const b of blocks ?? []) {
-      expect(b.getAttribute('data-error-count')).toBe('1')
-    }
-  })
-
-  it('does not merge errors with different reasons', async () => {
-    const el = await mount({
-      entries: [errEntry(FIXED_DATES.T1), errEntry(FIXED_DATES.T1 + 1, 'other reason')],
-    })
-    const blocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-error')
-    expect(blocks?.length).toBe(2)
-  })
-
-  it('mergeSpawnErrors: pure-function merge/non-merge/non-error-reset branches', () => {
-    const A = 'err-a'
-    // 三条相邻同类（间隔 5s）→ 合并为一条 count=3，ts 取首条（seam 锚定稳定）。
-    const merged = mergeSpawnErrors([
-      errEntry(100, A),
-      errEntry(105, A),
-      errEntry(110, A),
-    ])
-    expect(merged.length).toBe(1)
-    expect(merged[0].count).toBe(3)
-    expect(merged[0].created_at_unix).toBe(100)
-    // 间隔超窗 → 各自成条。
-    const split = mergeSpawnErrors([errEntry(100, A), errEntry(100 + ERROR_MERGE_WINDOW_SECS + 1, A)])
-    expect(split.length).toBe(2)
-    expect(split.every((e) => e.count === 1)).toBe(true)
-    // 中间插入普通条目 → 重置相邻性，不跨条目合并。
-    const reset = mergeSpawnErrors([
-      errEntry(100, A),
-      { element_type: 'markdown', content: 'x', created_at_unix: 101 },
-      errEntry(102, A),
-    ])
-    expect(reset.length).toBe(3)
-    expect(reset.filter((e) => e.element_type === 'error').every((e) => e.count === 1)).toBe(true)
-    // 非 error 条目原样透传（无 count 字段）。
-    const plain = mergeSpawnErrors(makeEntries())
-    expect(plain.length).toBe(3)
-    expect(plain.every((e) => e.count === undefined)).toBe(true)
   })
 })

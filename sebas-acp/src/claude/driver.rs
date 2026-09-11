@@ -786,11 +786,22 @@ pub(crate) fn map_message(
                     || text.to_lowercase().contains("refusal")
                     || text.to_lowercase().contains("refused");
                 if refused {
-                    vec![AcpEvent::Error {
-                        session_id: sid(),
-                        message: text,
-                        terminal: false,
-                    }]
+                    // workbench-turn-queue 回归修复：refusal result 帧就是回合
+                    // 边界（本函数上方对任意 Result 帧清 turn_active——回合确
+                    // 实结束了），所以 Error 之后必须紧跟 Finished 宣告收尾。
+                    // 锚定即此配对：收尾由 Finished 驱动（pump 即时路径的
+                    // 既有 FSM WORKING→DONE + 队列 drain），游离的非终端
+                    // Error（如 SetModel 被拒，不伴随 Result 帧）则永不收尾
+                    // ——事件流本身无法按内容区分二者，只有驱动的回合边界
+                    // 能锚定「本回合的失败事件」。
+                    vec![
+                        AcpEvent::Error {
+                            session_id: sid(),
+                            message: text,
+                            terminal: false,
+                        },
+                        AcpEvent::Finished { session_id: sid() },
+                    ]
                 } else {
                     vec![AcpEvent::Error {
                         session_id: sid(),
@@ -1104,9 +1115,9 @@ mod tests {
                 [AcpEvent::Error {
                     terminal: false,
                     ..
-                }]
+                }, AcpEvent::Finished { .. }]
             ),
-            "refusal must be non-terminal, got {evts:?}"
+            "refusal must be non-terminal AND close the turn with Finished, got {evts:?}"
         );
     }
 
@@ -1125,9 +1136,9 @@ mod tests {
         assert!(
             matches!(
                 &evts[..],
-                [AcpEvent::Error { terminal: false, message, .. }] if message.contains("refusal")
+                [AcpEvent::Error { terminal: false, message, .. }, AcpEvent::Finished { .. }] if message.contains("refusal")
             ),
-            "refusal in result text must be non-terminal, got {evts:?}"
+            "refusal in result text must be non-terminal AND close the turn, got {evts:?}"
         );
     }
 

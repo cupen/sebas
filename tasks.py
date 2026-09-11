@@ -374,6 +374,10 @@ enabled = false
 [acp.agents.claude]
 driver = "claude"
 path = "{fake}"
+# workbench-turn-queue：慢档让 turn 在内容帧之后停留 800ms（driver 的
+# watchdog 探测超时 1.5s，800ms 同步 sleep 仍可应答）——浏览器旅程因此有
+# 确定性的 WORKING 窗口可提交忙中消息；其余旅程的轮询超时远大于此，无感。
+args = ["--slow-ms", "800"]
 sessions_dir = "{cfg}/claude-sessions"
 work_dir = "{cfg}/work"
 {fakeacp_toml}

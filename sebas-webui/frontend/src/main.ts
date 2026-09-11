@@ -1,10 +1,11 @@
 // Entry point: registers the app shell and every routed view. The settings
 // modal renders its sections in place (no routed settings/router pages —
 // those routes redirect to / in IA v2); the about/admin views are deleted.
+// session-detail 已退休（workbench-conversation-view 3.4）：/sessions/:key
+// 深链由 dashboard 渲染聚焦态。
 import './app-shell.js'
 import './views/dashboard.js'
 import './views/sessions.js'
-import './views/session-detail.js'
 
 // Web Awesome theme + base styles (self-hosted, no CDN).
 import '@awesome.me/webawesome/dist/styles/webawesome.css'

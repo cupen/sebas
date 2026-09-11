@@ -105,9 +105,7 @@ pub enum StateChange {
 /// 初始化全局状态存储引擎 + 变更通知广播。
 pub fn init_engine(engine: Box<dyn StateStoreEngine + Send + Sync>) {
     let (tx, _) = tokio::sync::broadcast::channel(64);
-    CHANGE_TX
-        .set(tx)
-        .expect("state change broadcast 已初始化");
+    CHANGE_TX.set(tx).expect("state change broadcast 已初始化");
     ENGINE
         .set(engine)
         .ok()
@@ -396,6 +394,468 @@ pub fn delete_provider_and_clear_default(id: &str) -> anyhow::Result<PersistedSt
     })
 }
 
+// ---- 域 mutation 分发（core channel 服务端与 webui InProcessBackend 共用；
+// make-core-own-provider-data 1.1/1.2：单一实现避免两侧漂移）----
+
+/// providers 域条目的已知字段集（make-core-own-provider-data 1.2）。未知
+/// 字段 = 非法 payload，mutation 以 typed rejection 拒绝（不静默吞错）。
+/// `name` 是卡片表单写入的展示名；其余与 router `ProviderConfig` /
+/// `/provider` 表单字段一一对应。
+const PROVIDER_ITEM_KNOWN_FIELDS: &[&str] = &[
+    "name",
+    "preset",
+    "base_url_anthropic",
+    "base_url_openai_chat",
+    "base_url_openai_responses",
+    "api_key",
+    "api_key_env",
+    "default_model",
+    "protocol",
+    "models",
+    "model_map",
+];
+
+/// 校验单个 provider 条目（1.2）并就地归一化 `models`（task 1.1「写回为
+/// 条目」）：未知字段 / 类型错误 → Err（错误信息含 provider 名与字段名，
+/// 调用方把它作为 rejection cause 透传）；`models` 数组元素经 router 侧
+/// `ModelEntry` 兼容反序列化（裸字符串 → 仅隐含 text 的条目），未知能力
+/// 标记 → 显式拒绝；逗号分隔字符串 → 条目数组。写出的 `models` 一律是
+/// `{"id", "tags"}` 条目对象的规范数组。preset 派生条目显式写 URL 的拒绝
+/// 在 router 侧 resolve 管线里管（core 不复制该规则——条目形状合法性在
+/// 此把关即可，避免跨 crate 语义复制）。
+fn validate_and_normalize_provider_item(name: &str, item: &mut Item) -> Result<(), String> {
+    for key in item.keys() {
+        if !PROVIDER_ITEM_KNOWN_FIELDS.contains(&key.as_str()) {
+            return Err(format!("put: provider '{name}' 含未知字段 '{key}'"));
+        }
+    }
+    for field in [
+        "preset",
+        "api_key",
+        "api_key_env",
+        "default_model",
+        "protocol",
+    ] {
+        if let Some(v) = item.get(field)
+            && !v.is_null()
+            && !v.is_string()
+        {
+            return Err(format!(
+                "put: provider '{name}' 字段 '{field}' 必须是字符串"
+            ));
+        }
+    }
+    match item.get("models") {
+        None | Some(Value::Null) => {
+            item.remove("models");
+        }
+        Some(Value::String(s)) => {
+            let entries: Vec<Value> = s
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(sebas_router::models::ModelEntry::text_only)
+                .map(|e| serde_json::to_value(&e).expect("ModelEntry serializes"))
+                .collect();
+            item.insert("models".into(), Value::Array(entries));
+        }
+        Some(Value::Array(arr)) => {
+            let mut entries = Vec::with_capacity(arr.len());
+            for el in arr {
+                let e: sebas_router::models::ModelEntry = serde_json::from_value(el.clone())
+                    .map_err(|e| format!("put: provider '{name}' 字段 'models' 条目非法: {e}"))?;
+                entries.push(serde_json::to_value(&e).expect("ModelEntry serializes"));
+            }
+            item.insert("models".into(), Value::Array(entries));
+        }
+        Some(_) => {
+            return Err(format!(
+                "put: provider '{name}' 字段 'models' 必须是条目数组或逗号分隔字符串"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// providers 域 mutation 分发（5.3 admin 写路径通道代理；自
+/// make-core-own-provider-data 起这是 provider 数据唯一写通道）。
+/// payload `op` 子操作：
+/// - `{"op":"put","name":"...","item":{...}}` → upsert provider（1.2：条目
+///   先过字段/类型校验，非法 payload 走 rejection）
+/// - `{"op":"delete","name":"..."}` → 删除 + 写墓碑
+/// - `{"op":"save","state":{PersistedState 形状}}` → 全量替换
+///
+/// 全部经 RMW（读 → 改 → save_persisted_state），与 router 卡片写路径同语义。
+pub async fn providers_mutation(
+    engine: &(dyn StateStoreEngine + Send + Sync),
+    payload: &Value,
+) -> Result<(), String> {
+    let op = payload.get("op").and_then(Value::as_str).unwrap_or("save");
+    let mut state = engine.load_persisted_state().await;
+    match op {
+        "put" => {
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "put: 缺少 name 字段".to_string())?;
+            let mut item = payload
+                .get("item")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| "put: 缺少 item 对象".to_string())?;
+            validate_and_normalize_provider_item(name, &mut item)?;
+            state.providers.insert(name.to_string(), item);
+            // 撤销同名墓碑（re-add）。
+            state.deleted.retain(|d| d != name);
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "delete" => {
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "delete: 缺少 name 字段".to_string())?;
+            let existed = state.providers.remove(name).is_some();
+            if !state.deleted.iter().any(|d| d == name) {
+                state.deleted.push(name.to_string());
+            }
+            if state
+                .default_selection
+                .as_ref()
+                .map(|d| d.provider.as_str())
+                == Some(name)
+            {
+                state.default_selection = None;
+            }
+            if !existed {
+                return Err(format!("provider '{name}' 不存在"));
+            }
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "save" => {
+            let raw = payload
+                .get("state")
+                .cloned()
+                .ok_or_else(|| "save: 缺少 state 字段".to_string())?;
+            let mut incoming: PersistedState = serde_json::from_value(raw)
+                .map_err(|e| format!("save: 非法 PersistedState: {e}"))?;
+            // 校验每个条目（1.2：与 put 同一把关）并归一化 models（1.1）。
+            for (name, item) in &mut incoming.providers {
+                validate_and_normalize_provider_item(name, item)?;
+            }
+            // 保留 mode/default_selection（admin 面不管运行时状态，只写 provider 数据）。
+            let mut merged = incoming;
+            merged.mode = state.mode.clone();
+            merged.default_selection = state.default_selection.clone();
+            engine
+                .save_persisted_state(merged)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!("providers: 未知 op '{other}'")),
+    }
+}
+
+// ---- providers 域抓取 op（add-fetch-models D5：provider 域上的只读动作，
+// ---- 与 put/delete/save 同域；不落任何存储分区）----
+
+/// 纯解析：provider 条目（含 preset 代码表物化）→ 抓取目标 `(url, key)`。
+/// URL 槽位优先级 openai_chat → openai_responses → anthropic（specs delta
+/// 原文；失败不回退其他槽位，由 [`sebas_router::probe::fetch_models`] 的
+/// 单 URL 语义承担）。无可用槽位 → Err（typed rejection naming that
+/// reason，且不发上游请求）。
+///
+/// 密钥解析优先级：条目明文 `api_key` → 条目 `api_key_env` → preset 代码表
+/// `api_key_env`（preset 派生条目不落盘 env 名时跟随代码）。两者皆无 →
+/// `None`：跳过 Authorization 头（与旧卡片探测同一姿态）。
+pub fn provider_fetch_target(item: &Item) -> Result<(String, Option<String>), String> {
+    let slots = (
+        crate::engine::provider_card::effective_field(item, "base_url_openai_chat"),
+        crate::engine::provider_card::effective_field(item, "base_url_openai_responses"),
+        crate::engine::provider_card::effective_field(item, "base_url_anthropic"),
+    );
+    let (url, _kind) = sebas_router::probe::resolve_fetch_url(
+        slots.0.as_deref(),
+        slots.1.as_deref(),
+        slots.2.as_deref(),
+    )
+    .ok_or_else(|| "未配置任何 base URL 槽位".to_string())?;
+    // 密钥：明文 → env 名（条目 → preset 代码表）→ None。
+    let plain = item
+        .get("api_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let key = if let Some(k) = plain {
+        Some(k)
+    } else {
+        let env_name = item
+            .get("api_key_env")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let preset_name = item.get("preset").and_then(Value::as_str)?;
+                sebas_router::config::presets()
+                    .iter()
+                    .find(|p| p.name == preset_name)
+                    .map(|p| p.api_key_env.to_string())
+            })
+            .filter(|s| !s.is_empty());
+        match env_name.and_then(|name| std::env::var(name).ok()) {
+            Some(v) if !v.trim().is_empty() => Some(v),
+            _ => None,
+        }
+    };
+    Ok((url, key))
+}
+
+/// providers 域抓取 op（core channel 与 webui InProcessBackend 共用；spec
+/// "Model list fetch over the channel"）：以 provider 名从 store 解析条目，
+/// 执行**一次只读 GET**（5s 超时、无重试），返回上游 model id 列表。
+///
+/// 抓取**不改 provider 任何字段、不持久化任何东西**——本函数从不调用
+/// `save_persisted_state`；id 进入模型列表只能走后续的普通编辑（put）。
+/// 错误 = typed rejection：`fetch_models: ` 前缀 + 净化原因（只含状态码/
+/// 类别，绝无 key 材料与上游 body）。
+pub async fn providers_fetch_models(
+    engine: &(dyn StateStoreEngine + Send + Sync),
+    name: &str,
+) -> Result<Vec<String>, String> {
+    let state = engine.load_persisted_state().await;
+    let item = state
+        .providers
+        .get(name)
+        .ok_or_else(|| format!("fetch_models: provider '{name}' 不存在（store 无此条目）"))?;
+    let (url, key) =
+        provider_fetch_target(item).map_err(|e| format!("fetch_models: provider '{name}' {e}"))?;
+    sebas_router::probe::fetch_models(&sebas_router::probe::fetch_client(), &url, key.as_deref())
+        .await
+        .map_err(|e| format!("fetch_models: provider '{name}' 上游抓取失败: {e}"))
+}
+
+/// aliases 域 mutation 分发（5.3 admin 写路径通道代理）。
+/// payload `op` 子操作：
+/// - `{"op":"put","alias":"...","entry":{"provider":"...","upstream_model":"..."}}`
+/// - `{"op":"delete","alias":"..."}`
+/// - `{"op":"save","aliases":{alias: entry,...}}` → 全量替换
+pub async fn aliases_mutation(
+    engine: &(dyn StateStoreEngine + Send + Sync),
+    payload: &Value,
+) -> Result<(), String> {
+    let op = payload.get("op").and_then(Value::as_str).unwrap_or("save");
+    let mut state = engine.load_persisted_state().await;
+    /// entry 的已知字段集（1.2：未知字段拒绝）。
+    const ENTRY_KNOWN_FIELDS: &[&str] = &["provider", "upstream_model"];
+    let validate_entry = |where_: &str, entry: &Value| -> Result<(), String> {
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("{where_}: entry 必须是对象"))?;
+        for key in obj.keys() {
+            if !ENTRY_KNOWN_FIELDS.contains(&key.as_str()) {
+                return Err(format!("{where_}: entry 含未知字段 '{key}'"));
+            }
+        }
+        let provider = obj
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{where_}: entry 缺少 provider 字段"))?;
+        if let Some(up) = obj.get("upstream_model")
+            && !up.is_null()
+            && !up.is_string()
+        {
+            return Err(format!(
+                "{where_}: entry 字段 'upstream_model' 必须是字符串"
+            ));
+        }
+        let _ = provider;
+        Ok(())
+    };
+    match op {
+        "put" => {
+            let alias = payload
+                .get("alias")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "put: 缺少 alias 字段".to_string())?;
+            let entry = payload
+                .get("entry")
+                .cloned()
+                .ok_or_else(|| "put: 缺少 entry 对象".to_string())?;
+            validate_entry("put", &entry)?;
+            let entry: ModelAliasEntry =
+                serde_json::from_value(entry).map_err(|e| format!("put: entry 非法: {e}"))?;
+            state.model_aliases.insert(alias.to_string(), entry);
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "delete" => {
+            let alias = payload
+                .get("alias")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "delete: 缺少 alias 字段".to_string())?;
+            if state.model_aliases.remove(alias).is_none() {
+                return Err(format!("alias '{alias}' 不存在"));
+            }
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "save" => {
+            let raw = payload
+                .get("aliases")
+                .cloned()
+                .ok_or_else(|| "save: 缺少 aliases 字段".to_string())?;
+            let map = raw
+                .as_object()
+                .ok_or_else(|| "save: aliases 必须是对象".to_string())?;
+            let mut incoming: BTreeMap<String, ModelAliasEntry> = BTreeMap::new();
+            for (alias, entry) in map {
+                validate_entry("save", entry)?;
+                incoming.insert(
+                    alias.clone(),
+                    serde_json::from_value(entry.clone())
+                        .map_err(|e| format!("save: alias '{alias}' entry 非法: {e}"))?,
+                );
+            }
+            state.model_aliases = incoming;
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!("aliases: 未知 op '{other}'")),
+    }
+}
+
+/// settings 域 mutation 分发（make-core-own-provider-data 1.1：defaults 并入
+/// settings 域，与 provider 数据同事务落盘）。
+/// - `{"op":"set_defaults","provider":"...","model":"..."?}` → 写
+///   `default_selection`（RMW，与 providers/aliases 同一次 save 提交）；
+/// - `{"op":"clear_defaults"}` → 清除默认；
+/// - 其它（无 `op` / `{"value": {...}}`）→ 既有 CardConfig 保存，wire 形状
+///   不变（sebas-im 设置面同款）。
+pub async fn settings_mutation(
+    engine: &(dyn StateStoreEngine + Send + Sync),
+    payload: &Value,
+) -> Result<(), String> {
+    match payload.get("op").and_then(Value::as_str) {
+        Some("set_defaults") => {
+            let provider = payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "set_defaults: 缺少 provider 字段".to_string())?;
+            let model = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let mut state = engine.load_persisted_state().await;
+            state.default_selection = Some(match model {
+                Some(m) => DefaultSelection::with_model(provider, m),
+                None => DefaultSelection::new(provider),
+            });
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        Some("clear_defaults") => {
+            let mut state = engine.load_persisted_state().await;
+            state.default_selection = None;
+            engine
+                .save_persisted_state(state)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        _ => {
+            let value = payload
+                .get("value")
+                .cloned()
+                .unwrap_or_else(|| payload.clone());
+            engine.save_settings(value).await
+        }
+    }
+}
+
+/// projects 域 mutation 分发：payload 用 `op` 字段区分子操作。
+/// - `{"op": "add", "path": "...", "name": "..."}` → 新增（added_at 取当前时间）
+/// - `{"op": "remove", "path": "..."}` → 删除（不存在返回错误）
+/// - `{"op": "save", "projects": [...]}` → 全量替换
+pub async fn project_mutation(
+    engine: &(dyn StateStoreEngine + Send + Sync),
+    payload: &Value,
+) -> Result<(), String> {
+    let op = payload.get("op").and_then(Value::as_str).unwrap_or("save");
+    match op {
+        "add" => {
+            let path = payload
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "add: 缺少 path 字段".to_string())?;
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "add: 缺少 name 字段".to_string())?;
+            let added_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            engine.add_project(path, name, added_at).await
+        }
+        "remove" => {
+            let path = payload
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remove: 缺少 path 字段".to_string())?;
+            match engine.remove_project(path).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("remove: project '{path}' 不存在")),
+                Err(e) => Err(e),
+            }
+        }
+        "save" => {
+            let projects = payload
+                .get("projects")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            engine.save_projects(projects).await
+        }
+        // workbench-agent-wire-fix 2.6：项目级默认 agent（按稳定 id）。
+        "set_default_agent" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "set_default_agent: 缺少 id 字段".to_string())?;
+            let agent = payload
+                .get("agent")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "set_default_agent: 缺少 agent 字段".to_string())?;
+            engine.set_project_default_agent(id, agent).await
+        }
+        other => Err(format!("projects: 未知 op '{other}'")),
+    }
+}
+
 // ---- 内部实现（路径参数化，测试不走 env var 可并行） ----
 
 /// state.json 侧的加载结果。
@@ -527,7 +987,9 @@ fn load_runtime_side(state_p: &Path) -> RuntimeSide {
             RuntimeSide {
                 state_exists: true,
                 mode: legacy.mode,
-                default_selection: legacy.default_provider_for_direct.map(DefaultSelection::new),
+                default_selection: legacy
+                    .default_provider_for_direct
+                    .map(DefaultSelection::new),
                 stranded_providers: BTreeMap::new(),
                 stranded_deleted: Vec::new(),
                 needs_rewrite: true,
@@ -647,16 +1109,10 @@ fn save_overlay(
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    root.insert(
-        "providers".to_string(),
-        serde_json::to_value(providers)?,
-    );
+    root.insert("providers".to_string(), serde_json::to_value(providers)?);
     root.insert("deleted".to_string(), serde_json::to_value(deleted)?);
     if let Some(aliases) = model_aliases {
-        root.insert(
-            "model_aliases".to_string(),
-            serde_json::to_value(aliases)?,
-        );
+        root.insert("model_aliases".to_string(), serde_json::to_value(aliases)?);
     }
     write_json_atomic(path, &Value::Object(root))
 }
@@ -731,6 +1187,132 @@ fn repair_mode(mut s: PersistedState) -> PersistedState {
 mod tests {
     use super::*;
 
+    /// add-fetch-models 1.4 验收：preset 派生 provider 无存储 URL 时抓取仍
+    /// 发起——`provider_fetch_target` 从代码表物化出抓取 URL（deepseek 的
+    /// openai_chat 槽位），不因「条目未落盘 url」而拒绝。本测试只断言解析
+    /// 结果（纯函数，不外联）：全路径的 mock 上游往返由 core channel 侧
+    /// `tests/state_channel_contract_test.rs` 对自定义 provider 覆盖。
+    #[test]
+    fn preset_derived_provider_resolves_fetch_target_from_code_table() {
+        let mut item = Map::new();
+        item.insert("name".into(), Value::String("my-deepseek".into()));
+        item.insert("preset".into(), Value::String("deepseek".into()));
+        item.insert("api_key".into(), Value::String("sk-preset-derived".into()));
+
+        let (url, key) = provider_fetch_target(&item).expect("preset table materializes a URL");
+        assert_eq!(
+            url,
+            format!("{}/models", "https://api.deepseek.com"),
+            "fetch URL comes from the preset code table's openai_chat slot"
+        );
+        assert_eq!(key.as_deref(), Some("sk-preset-derived"));
+
+        // 无明文 key 时跟随代码表 api_key_env 解析（env 未设置 → None，仍可
+        // 发起匿名抓取——与卡片探测同一姿态），绝不因此拒绝。
+        let mut item = item.clone();
+        item.remove("api_key");
+        let (_, key) = provider_fetch_target(&item).expect("still resolvable");
+        let env_set = std::env::var("DEEPSEEK_API_KEY").is_ok_and(|v| !v.trim().is_empty());
+        assert_eq!(
+            key.is_some(),
+            env_set,
+            "key resolution follows the code-table env name"
+        );
+    }
+
+    /// add-fetch-models 1.2 验收（解析层）：无任何槽位、无 preset → Err。
+    #[test]
+    fn provider_fetch_target_rejects_when_no_usable_base_url() {
+        let mut item = Map::new();
+        item.insert("name".into(), Value::String("bare".into()));
+        assert!(provider_fetch_target(&item).is_err());
+
+        // 空白槽位视同未配置。
+        item.insert("base_url_openai_chat".into(), Value::String("  ".into()));
+        item.insert("base_url_anthropic".into(), Value::String("".into()));
+        assert!(provider_fetch_target(&item).is_err());
+    }
+
+    /// redesign-provider-models-settings 1.1 验收：遗留字符串 models 列表
+    /// 可读且无错（归一化为仅隐含 text 的条目）；写回（put/save 落库形状）
+    /// 一律是 `{"id","tags"}` 条目对象。
+    #[test]
+    fn provider_models_legacy_strings_read_and_normalize_to_entries() {
+        // 裸字符串数组（旧 WebUI/手写形态）。
+        let mut item = Map::new();
+        item.insert(
+            "base_url_anthropic".into(),
+            Value::String("https://x".into()),
+        );
+        item.insert("models".into(), serde_json::json!(["m1", "m2"]));
+        validate_and_normalize_provider_item("lg", &mut item).expect("legacy list reads");
+        assert_eq!(
+            item.get("models"),
+            Some(&serde_json::json!([
+                {"id": "m1", "tags": []},
+                {"id": "m2", "tags": []},
+            ])),
+            "write-back is the entry-object shape"
+        );
+
+        // 逗号分隔字符串（/provider 卡片提交形态）同样归一化。
+        let mut item = Map::new();
+        item.insert("models".into(), Value::String("m1, m2".into()));
+        validate_and_normalize_provider_item("cm", &mut item).expect("comma string reads");
+        assert_eq!(
+            item.get("models"),
+            Some(&serde_json::json!([
+                {"id": "m1", "tags": []},
+                {"id": "m2", "tags": []},
+            ]))
+        );
+
+        // null / 缺省 → 字段移除（等价空目录，display 回落 preset 代码表）。
+        let mut item = Map::new();
+        item.insert("models".into(), Value::Null);
+        validate_and_normalize_provider_item("nn", &mut item).expect("null models");
+        assert!(item.get("models").is_none());
+    }
+
+    /// redesign-provider-models-settings 1.4 验收（store 侧）：条目对象带
+    /// 标记写出；未知标记显式拒绝（不静默吞）；`text` 拒收（隐含不落盘）；
+    /// 非数组非字符串类型拒绝。
+    #[test]
+    fn provider_models_entry_writes_canonical_unknown_tags_rejected() {
+        let mut item = Map::new();
+        item.insert(
+            "models".into(),
+            serde_json::json!([{"id": "m1", "tags": ["vision"]}]),
+        );
+        validate_and_normalize_provider_item("en", &mut item).expect("entries write");
+        assert_eq!(
+            item.get("models"),
+            Some(&serde_json::json!([{"id": "m1", "tags": ["vision"]}])),
+        );
+
+        let mut item = Map::new();
+        item.insert(
+            "models".into(),
+            serde_json::json!([{"id": "m1", "tags": ["telepathy"]}]),
+        );
+        let err = validate_and_normalize_provider_item("um", &mut item).unwrap_err();
+        assert!(err.contains("um") && err.contains("telepathy"), "{err}");
+
+        let mut item = Map::new();
+        item.insert(
+            "models".into(),
+            serde_json::json!([{"id": "m1", "tags": ["text"]}]),
+        );
+        assert!(
+            validate_and_normalize_provider_item("tx", &mut item).is_err(),
+            "text must never be stored"
+        );
+
+        let mut item = Map::new();
+        item.insert("models".into(), serde_json::json!(42));
+        assert!(validate_and_normalize_provider_item("nm", &mut item).is_err());
+    }
+
     fn write_file(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -783,7 +1365,10 @@ mod tests {
         // state.json materialize 为 v2 runtime。
         assert!(state_p.exists());
         let raw = std::fs::read_to_string(&state_p).unwrap();
-        assert!(!raw.contains("\"providers\""), "state.json 不应含 providers 段");
+        assert!(
+            !raw.contains("\"providers\""),
+            "state.json 不应含 providers 段"
+        );
 
         // 二次 load 稳定。
         let s2 = load_at(&state_p, &prov_p);
@@ -885,7 +1470,10 @@ mod tests {
         assert_eq!(prov["deleted"][0], "openai");
         // state.json 只剩 runtime 段。
         let state_raw = std::fs::read_to_string(&state_p).unwrap();
-        assert!(!state_raw.contains("\"providers\""), "state.json 应已清空 providers 段");
+        assert!(
+            !state_raw.contains("\"providers\""),
+            "state.json 应已清空 providers 段"
+        );
         assert!(!state_raw.contains("\"deleted\""));
 
         // 二次 load 幂等。
@@ -1022,12 +1610,16 @@ mod tests {
         );
         let mut s = load_at(&state_p, &prov_p);
         // 卡片路径改一个 provider（模拟 FileStore persist）。
-        s.providers.insert("beta".into(), item_with(&[("name", "beta")]));
+        s.providers
+            .insert("beta".into(), item_with(&[("name", "beta")]));
         save_at(&state_p, &prov_p, &s).unwrap();
 
         let raw = std::fs::read_to_string(&prov_p).unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
-        assert!(v["model_aliases"]["my-claude"].is_object(), "未知段必须保留: {raw}");
+        assert!(
+            v["model_aliases"]["my-claude"].is_object(),
+            "未知段必须保留: {raw}"
+        );
         assert!(v["providers"]["beta"].is_object());
         // 二次 load 仍还原 provider + 墓碑语义。
         let s2 = load_at(&state_p, &prov_p);
@@ -1082,7 +1674,10 @@ mod tests {
         // runtime corrupt → default；providers 侧照常。
         assert_eq!(s.mode, ProviderMode::Off);
         assert_eq!(s.default_selection, None);
-        assert!(s.providers.contains_key("alpha"), "overlay 数据不受 state 损坏影响");
+        assert!(
+            s.providers.contains_key("alpha"),
+            "overlay 数据不受 state 损坏影响"
+        );
     }
 
     /// DefaultSelection wire 形状回归（openspec/specs/provider-management/spec.md）。
@@ -1130,7 +1725,11 @@ mod tests {
         assert!(!s2.providers.contains_key("deepseek"));
         assert!(s2.deleted.contains(&"deepseek".to_string()));
         assert_eq!(s2.default_selection, None);
-        assert_eq!(s2.mode, ProviderMode::Off, "repair 应清掉指向墓碑的 Direct mode");
+        assert_eq!(
+            s2.mode,
+            ProviderMode::Off,
+            "repair 应清掉指向墓碑的 Direct mode"
+        );
     }
 
     /// save 父目录不存在 → 自动创建。
@@ -1150,7 +1749,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        write_file(&prov_p, r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#);
+        write_file(
+            &prov_p,
+            r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#,
+        );
         write_file(&state_p, r#"{ "version": 99 }"#);
         let s = load_at(&state_p, &prov_p);
         assert_eq!(s.mode, ProviderMode::Off);
@@ -1163,7 +1765,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_p = dir.path().join("state.json");
         let prov_p = dir.path().join("providers.json");
-        write_file(&prov_p, r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#);
+        write_file(
+            &prov_p,
+            r#"{ "providers": { "alpha": { "name": "alpha" } }, "deleted": [] }"#,
+        );
         write_file(&state_p, "{not valid json");
         let s = load_at(&state_p, &prov_p);
         assert_eq!(s.mode, ProviderMode::Off);

@@ -122,17 +122,22 @@ stored key rather than clearing it.
 ### Requirement: Model probing
 
 The probe-models button SHALL appear only for providers with at least one
-OpenAI-family base URL slot configured. Probing issues a single `GET`
-(5 s timeout) to one URL — `{base_url_openai_chat}/models` when set, else
-`{base_url_openai_responses}/models`, else
-`{base_url_anthropic}/v1/models` — authenticating with the stored API key
-when present (plain-text key preferred, else the `api_key_env` value), and
-parses the `data[].id` array. On success the full returned model list is
-displayed on a separate result card whose `使用 <model>` buttons write that
-model as the provider's default model. For custom providers the list is
-also written back to the provider's models catalog; for preset-derived
-providers nothing is persisted (the catalog follows the code table).
-Probing failure renders a red error card with the reason.
+OpenAI-family base URL slot configured. Probing is performed by core on behalf of the
+requesting surface: it issues a single `GET` (5 s timeout) to one URL —
+`{base_url_openai_chat}/models` when set, else `{base_url_openai_responses}/models`,
+else `{base_url_anthropic}/v1/models` — authenticating with the provider's resolved
+key (plain-text key preferred, else the `api_key_env` value), and parses the
+`data[].id` array. It SHALL be available for preset-derived providers as well as
+custom ones, using the preset's code-table base URLs. On success the full returned
+model list is displayed on a separate result card whose `使用 <model>` buttons write
+that model as the provider's default model. For custom providers the list is also
+written back to the provider's models catalog; for preset-derived providers nothing is
+persisted, because the fetch itself modifies no provider field. The upstream response
+carries model ids only: context window and similar parameters SHALL be resolved from
+the local static table by id, and an unknown id SHALL fall back to the documented
+default and be labelled unknown rather than guessed from its name. Neither the result
+card nor any error message SHALL contain key material. Probing failure renders a red
+error card with the sanitized reason.
 
 #### Scenario: single-URL probe choice
 
@@ -145,19 +150,29 @@ Probing failure renders a red error card with the reason.
 
 - **WHEN** the probe against a custom provider returns models `m1` and
   `m2` and the user clicks `使用 m2`
-- **THEN** the provider's `models` catalog holds `["m1","m2"]` and its
+- **THEN** the provider's model list contains `m1` and `m2` and its
   `default_model` is set to `m2`
 
 #### Scenario: preset-derived probe is report-only
 
 - **WHEN** the probe succeeds against a preset-derived provider
 - **THEN** the result card lists the models and can set the default model,
-  but the provider's stored data does not gain a models catalog
+  but the fetch writes no provider field and the preset's code-table data is unchanged
 
 #### Scenario: probe without openai URL
 
 - **WHEN** a provider defines only `base_url_anthropic`
 - **THEN** no probe button is rendered on its panel
+
+#### Scenario: upstream parameters are not invented
+
+- **WHEN** the probe returns a model id absent from the local static table
+- **THEN** the result entry carries the id with its parameters marked unknown and the documented default applied, rather than a value derived from the model's name
+
+#### Scenario: key material never reaches the result
+
+- **WHEN** the probe succeeds or fails
+- **THEN** neither the result card nor the error text contains the provider's key or the `api_key_env` value
 
 ### Requirement: Off mode resolution
 
@@ -293,41 +308,55 @@ The `/provider` card SHALL render normally while the state store is reachable. W
 
 ### Requirement: Preset data follows the code table
 
-The built-in preset table SHALL remain hardcoded in the application code.
-A provider that selects a preset (by name or explicit `preset` field)
-SHALL resolve its base URLs and models catalog from that table at
-load/resolve time — never from a persisted copy — so an application update
-that changes a preset's data automatically applies to every provider
-derived from it without any stored-data change. The only user-owned fields
-on a preset-derived provider are its API key (or `api_key_env`), its
-default model, and its Direct-spawn `protocol` preference. An explicit
-base URL or models override on a preset-derived provider SHALL be a
+The built-in preset table SHALL remain hardcoded in the application code and SHALL be
+read-only data that is never rewritten by any surface. A provider that selects a preset
+(by name or explicit `preset` field) SHALL resolve its base URLs from that table at
+load/resolve time — never from a persisted copy — so an application update that changes a
+preset's URLs automatically applies to every provider derived from it without any
+stored-data change. An explicit base URL on a preset-derived provider SHALL be a
 configuration error, not a silent overwrite of preset data.
+
+The provider's **model list is core-owned data, not preset data**. It is seeded from the
+preset's code-table list when the provider is created, and after that the operator may add,
+remove, or reorder models through the ordinary provider-management surface. The code table
+is therefore a starting point rather than the authority: the same preset can back providers
+with different model lists, and a preset's own list is never modified by a provider edit.
 
 #### Scenario: derived provider resolves from code
 
-- **WHEN** a provider entry names preset `deepseek` with no URL or models
-  fields of its own
-- **THEN** it resolves with the `deepseek` preset's base URLs and models
-  from the built-in table
+- **WHEN** a provider entry names preset `deepseek` with no URL or models fields of its own
+- **THEN** it resolves with the `deepseek` preset's base URLs and models from the built-in
+  table
 
 #### Scenario: code preset update propagates
 
-- **WHEN** the application updates preset `kimi`'s URLs and the user
-  restarts (or hot-reloads) without touching stored provider data
+- **WHEN** the application updates preset `kimi`'s URLs and the user restarts (or
+  hot-reloads) without touching stored provider data
 - **THEN** the preset-derived provider `kimi` serves the new URLs
 
 #### Scenario: URL override rejected
 
 - **WHEN** a preset-derived provider entry sets any explicit base URL slot
-- **THEN** configuration parsing fails with an error explaining that
-  preset-derived providers follow the code table
+- **THEN** configuration parsing fails with an error explaining that preset-derived
+  providers follow the code table
 
 #### Scenario: api key stays user-owned
 
-- **WHEN** the user stores an API key on a preset-derived provider and the
-  application later ships a changed preset
+- **WHEN** the user stores an API key on a preset-derived provider and the application later
+  ships a changed preset
 - **THEN** the stored key is untouched by the preset update
+
+#### Scenario: model list is editable per provider
+
+- **WHEN** the operator adds a model to a provider derived from preset `deepseek`
+- **THEN** that provider's stored model list contains it while a second provider on the same
+  preset keeps its own list
+
+#### Scenario: editing a provider never rewrites the preset table
+
+- **WHEN** the operator edits the model list of a provider derived from preset `deepseek`
+- **THEN** the code table's `deepseek` entry is unchanged, and a provider created later from
+  the same preset starts from the code-table list again
 
 ### Requirement: Set default provider and model from the page
 
@@ -355,3 +384,69 @@ return new sessions to the execution body's built-in default.
 - **WHEN** the operator clears the default
 - **THEN** new sessions use their execution body's built-in default and the
   page shows no default
+
+### Requirement: Core owns provider and model data
+
+The provider and model store SHALL be owned by the core process: core SHALL be its only
+writer, and the feishu `/provider` card, the WebUI provider surface, and any
+operator-facing management path SHALL obtain and mutate provider, model, alias, and
+default data through core. The router SHALL be a read-only consumer of that data — it
+resolves and serves them, and SHALL NOT persist, create, rename, delete, or override them
+by any path, including a file fallback. Default provider and default model SHALL be
+stored with the provider data, not in a separate process-owned file.
+
+#### Scenario: card edit is written by core
+
+- **WHEN** the `/provider` card stores a provider
+- **THEN** the write is committed by core, and a later read from the card, the WebUI, and the router all observe the same value
+
+#### Scenario: router cannot write provider data
+
+- **WHEN** a management operation is attempted against the router process while no core is reachable
+- **THEN** it fails honestly with an unavailable-source error and no provider file is written or modified
+
+#### Scenario: defaults live with provider data
+
+- **WHEN** the operator sets the default provider and model
+- **THEN** core stores them alongside provider data, and they survive both a router restart and a WebUI restart without a separate defaults file
+
+#### Scenario: router reads a core change without a restart
+
+- **WHEN** core commits a provider change while the router is running
+- **THEN** the router picks it up through its subscription and routes by the new configuration without a restart
+
+### Requirement: Model entries carry capability tags
+
+A provider's model list SHALL be a list of entries rather than a list of bare strings.
+Each entry SHALL carry the model id and that model's capability tags. `text` SHALL be
+implicit for every entry and SHALL NOT be stored; `vision`, `audio`, and `video` SHALL be
+explicit and selectable, marking a model that accepts image, audio, or video input
+respectively. Tags SHALL be per entry and editable by the operator. Legacy stored lists of
+bare strings SHALL be accepted on read and normalised to entries carrying `text` alone, so
+existing data keeps working without an offline migration. Capability tags SHALL be
+metadata: they SHALL NOT alter routing, protocol selection, or whether a request is
+accepted.
+
+#### Scenario: an entry carries its id and tags
+
+- **WHEN** a provider's model list is read
+- **THEN** each element is an entry exposing its model id and its capability tags, with
+  `text` implied on every entry
+
+#### Scenario: multimodal tags are stored explicitly
+
+- **WHEN** the operator marks a model as accepting image input
+- **THEN** that entry carries `vision` in addition to the implicit `text`, and the other
+  tags stay absent
+
+#### Scenario: legacy string lists are accepted
+
+- **WHEN** a provider's stored model list is still a list of bare strings
+- **THEN** it is read as entries whose ids are those strings, each carrying `text` alone,
+  with no error and no offline migration step
+
+#### Scenario: tags do not gate requests
+
+- **WHEN** a request targets a model whose tags omit `vision`
+- **THEN** the request is routed and forwarded exactly as it would be without any
+  capability tag

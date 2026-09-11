@@ -36,7 +36,12 @@ async fn close_active_session_drops_mapping_and_clears_active() {
     );
 
     let out = router.web_close_session(key.clone()).await;
-    assert_eq!(out, CloseOutcome::Closed);
+    assert_eq!(
+        out,
+        CloseOutcome::Closed {
+            discarded_pending: 0
+        }
+    );
     assert!(map.get(&key).await.is_none(), "mapping must drop");
     assert_eq!(
         router.active_session_snapshot().await,
@@ -53,7 +58,12 @@ async fn close_spawning_placeholder_drops_by_key() {
 
     let (router, _rx) = DispatchHandle::new(map.clone());
     let out = router.web_close_session(key.clone()).await;
-    assert_eq!(out, CloseOutcome::Closed);
+    assert_eq!(
+        out,
+        CloseOutcome::Closed {
+            discarded_pending: 0
+        }
+    );
     assert!(map.get(&key).await.is_none());
 }
 
@@ -67,7 +77,12 @@ async fn close_dormant_drops_without_killing() {
 
     let (router, _rx) = DispatchHandle::new(map.clone());
     let out = router.web_close_session(key.clone()).await;
-    assert_eq!(out, CloseOutcome::Closed);
+    assert_eq!(
+        out,
+        CloseOutcome::Closed {
+            discarded_pending: 0
+        }
+    );
     assert!(map.get(&key).await.is_none());
 }
 
@@ -91,7 +106,12 @@ async fn close_session_clears_reply_target() {
     assert_eq!(router.reply_target(&key).await.as_deref(), Some("om_root"));
 
     let out = router.web_close_session(key.clone()).await;
-    assert_eq!(out, CloseOutcome::Closed);
+    assert_eq!(
+        out,
+        CloseOutcome::Closed {
+            discarded_pending: 0
+        }
+    );
     assert_eq!(
         router.reply_target(&key).await,
         None,
@@ -133,7 +153,12 @@ async fn close_unfocused_session_leaves_active_untouched() {
     router.web_set_active(Some(a.clone())).await;
 
     let out = router.web_close_session(b.clone()).await;
-    assert_eq!(out, CloseOutcome::Closed);
+    assert_eq!(
+        out,
+        CloseOutcome::Closed {
+            discarded_pending: 0
+        }
+    );
     assert_eq!(
         router.active_session_snapshot().await,
         Some(a.clone()),

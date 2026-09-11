@@ -12,8 +12,8 @@
  *                  desired / actual / uptime + /api/admin/events 最近错误；
  *                  enable/disable/restart 动作；无 adapter 时诚实呈现
  *                  「无 watchdog 控制面」横幅且不渲染动作按钮）
- *   - models     → provider 路由网关总览（/api/router 的 listen / debug /
- *                  auth）+ provider 管理列表
+ *   - models     → provider 管理列表（redesign-provider-models-settings
+ *                  3.4：router 运行状态归 Services，本分区不再呈现网关卡）
  *   - appearance → 主题三态（system / dark / light；切换与持久化在 theme.ts）
  *   - env        → 环境变量名清单（后端无 env 端点，值一律如实标注
  *                  "managed by core config"，绝不编造）
@@ -23,19 +23,25 @@
  * 上次停留分区记忆在 localStorage `lastSettingsSection`（非法值回退
  * `settings`）。关闭交互：关闭按钮 / Esc / 点击遮罩 → `open` 置 false 并
  * 冒泡 `close` 事件，宿主（app-shell）据此同步状态。
+ *
+ * 弹窗误关闭修复（redesign-provider-models-settings 2.1 / design D6）：
+ * Web Awesome 的子控件（如 `<wa-select>`）收起列表框时会冒泡 composed
+ * `wa-hide`；所有 `<wa-dialog>` 的 `@wa-hide` 处理器都带
+ * `e.target === e.currentTarget` 来源守卫——只有事件源是对话框自身才关闭。
  */
 
-import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
+import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import {
   api,
   type About,
   type AdminEvent,
   type AdminService,
-  type RouterInfo,
   type RouterProviderAdmin,
   type ProviderPreset,
   type ProviderPayload,
+  type ProviderModelEntry,
+  type ModelCapability,
   ApiError,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
@@ -51,9 +57,10 @@ import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /**
  * 设置弹窗分区。`settings` 是弹窗壳/总览（含高危动作入口）；Services 以
- * watchdog 受管子进程为唯一数据源（/api/admin/services），/api/router 的
- * listen/debug/auth 归 Models 顶部的「Router 路由网关」总览卡——两个语义
- * 彻底解耦（fix-settings-menu-and-services-semantics D2）。
+ * watchdog 受管子进程为唯一数据源（/api/admin/services）；Models 只承载
+ * provider 管理——router 运行状态（desired/actual/uptime）由 Services 呈现
+ * （redesign-provider-models-settings 3.4/4.1，取代旧的「Models 顶部网关
+ * 卡」约束）。
  */
 export type SettingsSection =
   | 'settings'
@@ -162,9 +169,6 @@ export class SebasSettingsModal extends LitElement {
   @state() private aboutData: About | null = null
   @state() private aboutError = ''
   @state() private aboutLoading = false
-  /** /api/router 响应（Models 分区的「Router 路由网关」总览卡）；懒加载。 */
-  @state() private router: RouterInfo | null = null
-  @state() private routerError = ''
   /**
    * watchdog 受管子进程面（Services 分区，/api/admin/services）。null =
    * 尚未加载；`adapterOk` 为 false 时（无 watchdog 控制面）services 为
@@ -192,18 +196,32 @@ export class SebasSettingsModal extends LitElement {
   @state() private adminProviders: RouterProviderAdmin[] | null = null
   @state() private adminError = ''
   @state() private presets: ProviderPreset[] | null = null
-  /** 编辑器对话框状态：mode 决定字段集；null = 关闭。 */
+  /**
+   * 编辑器对话框状态：mode 决定字段集；null = 关闭。
+   *
+   * 表单最小输入（redesign-provider-models-settings 3.1/3.2 / design
+   * D3–D5）：预制 = 选 preset + API key + 模型条目（实例名默认取 preset
+   * 名）；定制 = 再加实例名 / 单个 base url / 协议；其余 URL 槽、模型
+   * 改名映射、default model 收进默认折叠的 Advanced；`api_key_env` 不是
+   * 输入项（preset 的 env 名只是隐式回退，编辑时静默回填存量值防丢）。
+   */
   @state() private editor: {
     mode: 'create-preset' | 'create-custom' | 'edit'
     name: string
     preset: string
+    /** 定制最小输入的单个 base url：按 protocol 落到对应槽位（视图绑定）。 */
     baseUrlAnthropic: string
     baseUrlOpenaiChat: string
     baseUrlOpenaiResponses: string
     apiKey: string
-    apiKeyEnv: string
     defaultModel: string
     protocol: string
+    /** Advanced：模型改名映射，每行 `旧id -> 新id`。 */
+    modelMapText: string
+    /** 模型条目（id + 显式能力标记；text 隐含）。 */
+    models: ProviderModelEntry[]
+    /** 操作者动过条目列表（未动 → preset 派生不落 models，保持跟随代码）。 */
+    modelsTouched: boolean
   } | null = null
   @state() private deleteTarget: string | null = null
   /** 默认 provider/model（router admin defaults 透传；workbench-agent-wire-fix
@@ -214,7 +232,16 @@ export class SebasSettingsModal extends LitElement {
   @state() private defaultDraft: { provider: string; model: string | null } | null = null
   @state() private busy = false
   @state() private actionError = ''
-  @state() private probeResult: { name: string; models: string[]; note: string } | null = null
+  /**
+   * （add-fetch-models）抓取状态：pending = 请求在飞；ok = 上游返回的
+   * id 列表（只读呈现，挑选才写入）；error = 净化后的失败原因。失败
+   * 绝不渲染成空列表冒充「该 provider 没有模型」。
+   */
+  @state() private fetchResult:
+    | { name: string; state: 'pending' }
+    | { name: string; state: 'ok'; models: string[] }
+    | { name: string; state: 'error'; reason: string }
+    | null = null
   /** 当前主题三态（Appearance 分区）；初值来自 localStorage（theme.ts）。 */
   @state() private themeMode: ThemeMode = getThemeMode()
 
@@ -354,8 +381,8 @@ export class SebasSettingsModal extends LitElement {
     }
     .provider-row {
       display: flex;
-      align-items: center;
-      gap: var(--sebas-space-3);
+      flex-direction: column;
+      gap: 6px;
       padding: var(--sebas-space-2) var(--sebas-space-3);
       background: var(--sebas-surface-2);
       border: 1px solid var(--sebas-border);
@@ -364,6 +391,33 @@ export class SebasSettingsModal extends LitElement {
     }
     .provider-row:hover {
       border-color: var(--sebas-accent-border);
+    }
+    .provider-row-main {
+      display: flex;
+      align-items: center;
+      gap: var(--sebas-space-3);
+      min-width: 0;
+    }
+    /* 模型条目行（redesign-provider-models-settings：列表呈现条目与能力标记）。 */
+    .provider-row-models {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px 12px;
+      font-size: 0.72rem;
+    }
+    .model-chip {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 4px;
+      min-width: 0;
+    }
+    .model-chip code {
+      font-family: var(--sebas-font-mono);
+      color: var(--sebas-text-dim);
+      overflow-wrap: anywhere;
+    }
+    .model-chip-tags {
+      color: var(--sebas-text-faint);
     }
     .provider-row-empty {
       padding: var(--sebas-space-4) var(--sebas-space-3);
@@ -464,6 +518,37 @@ export class SebasSettingsModal extends LitElement {
     .probe-note {
       margin-top: 4px;
       font-size: 0.72rem;
+      color: var(--sebas-text-faint);
+    }
+    /* 抓取结果列表（add-fetch-models 3.1）：只读呈现 + 每行一个挑选动作。 */
+    .fetch-result-list {
+      margin: 6px 0 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .fetch-result-list li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--sebas-space-3);
+      font-size: 0.78rem;
+      padding: 2px 4px;
+      border-radius: var(--sebas-radius-md);
+    }
+    .fetch-result-list li:hover {
+      background: var(--sebas-surface-2);
+    }
+    .fetch-result-list .fetched-id {
+      font-family: var(--sebas-mono, monospace);
+      overflow-wrap: anywhere;
+    }
+    .fetch-result-list .params-note {
+      font-size: 0.68rem;
       color: var(--sebas-text-faint);
     }
     /* 编辑器对话框内的表单栅格。 */
@@ -589,9 +674,70 @@ export class SebasSettingsModal extends LitElement {
     .service-error-msg {
       color: var(--sebas-text-dim);
     }
-    /* Models 分区顶部的路由网关卡（从 Services 迁来的 listen/debug/auth）。 */
-    .gateway-card {
-      margin-bottom: var(--sebas-space-4);
+    /* 编辑器 Advanced 折叠区（redesign-provider-models-settings 3.2）与
+     * 模型条目编辑器（3.1）。 */
+    details.advanced {
+      border: 1px dashed var(--sebas-border);
+      border-radius: var(--sebas-radius-lg);
+      padding: var(--sebas-space-2) var(--sebas-space-3);
+    }
+    details.advanced > summary {
+      cursor: pointer;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--sebas-text-dim);
+      user-select: none;
+    }
+    details.advanced > summary:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
+    }
+    details.advanced .advanced-body {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sebas-space-3);
+      padding-top: var(--sebas-space-3);
+    }
+    .advanced-note {
+      font-size: 0.72rem;
+      color: var(--sebas-text-faint);
+    }
+    .model-entries {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sebas-space-2);
+    }
+    .model-entries .entries-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--sebas-text-dim);
+    }
+    .model-entries .entries-hint {
+      font-size: 0.72rem;
+      color: var(--sebas-text-faint);
+    }
+    .model-entry-row {
+      display: flex;
+      align-items: center;
+      gap: var(--sebas-space-2);
+      flex-wrap: wrap;
+    }
+    .model-entry-row wa-input {
+      flex: 1 1 200px;
+      min-width: 0;
+    }
+    .model-entry-row .tag-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 0.72rem;
+      color: var(--sebas-text-dim);
+      cursor: pointer;
+      user-select: none;
+    }
+    .model-entry-row .tag-check input {
+      accent-color: var(--sebas-accent, currentColor);
+      cursor: pointer;
     }
     /* Settings 总览的维护动作区。 */
     .danger-zone {
@@ -815,11 +961,8 @@ export class SebasSettingsModal extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // About 分区懒加载：切到 about 时拉一次（失败可重试——下次切换再取）。
     if (changed.has('section') && this.section === 'about') this.loadAbout()
-    // Models 分区的 router 总览卡数据，懒加载一次。
-    if (changed.has('section') && this.section === 'models') {
-      this.loadGateway()
-    }
     // provider 管理面：每次切到 models 都刷新（增删改后重新进入也新鲜）。
+    // redesign-provider-models-settings 3.4：Models 分区不再读 /api/router。
     if (changed.has('section') && this.section === 'models') this.loadProviders()
     // Services 分区：受管子进程 + 最近错误（每次切入都刷新，动作后重取）。
     if (changed.has('section') && this.section === 'services') this.loadServices()
@@ -864,18 +1007,6 @@ export class SebasSettingsModal extends LitElement {
       })
       .finally(() => {
         this.aboutLoading = false
-      })
-  }
-
-  private loadGateway(): void {
-    if (this.router || this.routerError) return // 已加载或已失败（可重试开关）
-    api
-      .router()
-      .then((d) => {
-        this.router = d.router
-      })
-      .catch((e) => {
-        this.routerError = String(e)
       })
   }
 
@@ -1048,7 +1179,7 @@ export class SebasSettingsModal extends LitElement {
 
   private openCreatePreset(): void {
     this.actionError = ''
-    this.probeResult = null
+    this.fetchResult = null
     this.editor = {
       mode: 'create-preset',
       name: '',
@@ -1057,15 +1188,17 @@ export class SebasSettingsModal extends LitElement {
       baseUrlOpenaiChat: '',
       baseUrlOpenaiResponses: '',
       apiKey: '',
-      apiKeyEnv: '',
       defaultModel: '',
       protocol: 'auto',
+      modelMapText: '',
+      models: [],
+      modelsTouched: false,
     }
   }
 
   private openCreateCustom(): void {
     this.actionError = ''
-    this.probeResult = null
+    this.fetchResult = null
     this.editor = {
       mode: 'create-custom',
       name: '',
@@ -1074,18 +1207,20 @@ export class SebasSettingsModal extends LitElement {
       baseUrlOpenaiChat: '',
       baseUrlOpenaiResponses: '',
       apiKey: '',
-      apiKeyEnv: '',
       defaultModel: '',
-      protocol: 'auto',
+      protocol: 'openai',
+      modelMapText: '',
+      models: [],
+      modelsTouched: false,
     }
   }
 
   private openEdit(p: RouterProviderAdmin): void {
     this.actionError = ''
-    this.probeResult = null
+    this.fetchResult = null
+    const map = p.model_map ?? {}
     this.editor = {
-      // preset 派生条目按 preset 语义编辑（url 只读）；自定义按 custom。
-      mode: p.preset ? 'edit' : 'edit',
+      mode: 'edit',
       name: p.name,
       preset: p.preset ?? '',
       baseUrlAnthropic: p.base_url_anthropic ?? '',
@@ -1093,9 +1228,14 @@ export class SebasSettingsModal extends LitElement {
       baseUrlOpenaiResponses: p.base_url_openai_responses ?? '',
       // 密钥绝不回填——空提交 = 保留旧 key（服务端语义）。
       apiKey: '',
-      apiKeyEnv: p.api_key_env ?? '',
-      defaultModel: '',
-      protocol: 'auto',
+      // default_model 在 Advanced（编辑回填；put 整体替换，回填防丢）。
+      defaultModel: p.default_model ?? '',
+      protocol: p.protocol ?? 'auto',
+      modelMapText: Object.entries(map)
+        .map(([from, to]) => `${from} -> ${to}`)
+        .join('\n'),
+      models: p.models.map((m) => ({ id: m.id, tags: [...m.tags] })),
+      modelsTouched: false,
     }
   }
 
@@ -1103,24 +1243,83 @@ export class SebasSettingsModal extends LitElement {
     if (this.editor) this.editor = { ...this.editor, ...patch }
   }
 
-  private editorPayload(): ProviderPayload {
+  // ---- 模型条目编辑（3.1：可增删、可勾选能力；text 隐含）----
+
+  private setModelId(index: number, id: string): void {
+    if (!this.editor) return
+    const models = this.editor.models.map((m, i) => (i === index ? { ...m, id } : m))
+    this.setEditor({ models, modelsTouched: true })
+  }
+
+  private toggleModelTag(index: number, tag: ModelCapability, on: boolean): void {
+    if (!this.editor) return
+    const models = this.editor.models.map((m, i) => {
+      if (i !== index) return m
+      const tags = m.tags.filter((t) => t !== tag)
+      if (on) tags.push(tag)
+      return { ...m, tags }
+    })
+    this.setEditor({ models, modelsTouched: true })
+  }
+
+  private addModelEntry(): void {
+    if (!this.editor) return
+    this.setEditor({ models: [...this.editor.models, { id: '', tags: [] }], modelsTouched: true })
+  }
+
+  private removeModelEntry(index: number): void {
+    if (!this.editor) return
+    this.setEditor({
+      models: this.editor.models.filter((_, i) => i !== index),
+      modelsTouched: true,
+    })
+  }
+
+  /** Advanced 的模型改名映射文本 → 对象（跳过残行；`旧id -> 新id` 每行）。 */
+  private parseModelMap(text: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const line of text.split('\n')) {
+      const [from, to] = line.split('->').map((s) => s.trim())
+      if (from && to) out[from] = to
+    }
+    return out
+  }
+
+  /**
+   * 提交载荷（3.1/3.2 验收锚点）：
+   * - 预制派生：绝不含 `base_url_*` / `api_key_env`（连接数据跟随代码）；
+   * - 定制：Advanced 展开与否不影响「最小提交」形态——其余 URL 槽 / 改名
+   *   映射只在有值时出现（默认折叠 = 空值 = 不提交）；
+   * - `models` 只在操作者动过条目列表时提交（预制派生未动 = 保持跟随
+   *   代码表；定制编辑恒提交，防整体替换丢目录）；
+   * - `api_key_env` 不是输入项；定制编辑静默回填存量值（与空 key 保留
+   *   同一姿态）。
+   */
+  private editorPayload(stored: RouterProviderAdmin | null): ProviderPayload {
     const e = this.editor
     if (!e) return {}
-    const payload: ProviderPayload = {
-      default_model: e.defaultModel.trim() || undefined,
-      protocol: e.protocol,
-    }
-    if (e.mode === 'create-preset' || (e.mode === 'edit' && e.preset)) {
+    const payload: ProviderPayload = { protocol: e.protocol }
+    const isPreset = e.mode === 'create-preset' || (e.mode === 'edit' && !!e.preset)
+    if (isPreset) {
       payload.preset = e.preset
+      if (e.defaultModel.trim()) payload.default_model = e.defaultModel.trim()
     } else {
       payload.base_url_anthropic = e.baseUrlAnthropic.trim() || undefined
       payload.base_url_openai_chat = e.baseUrlOpenaiChat.trim() || undefined
       payload.base_url_openai_responses = e.baseUrlOpenaiResponses.trim() || undefined
-      payload.api_key_env = e.apiKeyEnv.trim() || undefined
+      if (e.defaultModel.trim()) payload.default_model = e.defaultModel.trim()
+      const mm = this.parseModelMap(e.modelMapText)
+      if (Object.keys(mm).length > 0) payload.model_map = mm
+      if (e.mode === 'edit') payload.api_key_env = stored?.api_key_env ?? undefined
     }
     if (e.apiKey.trim()) payload.api_key = e.apiKey.trim()
+    const entries = e.models
+      .filter((m) => m.id.trim())
+      .map((m) => ({ id: m.id.trim(), tags: [...m.tags] }))
+    if (e.modelsTouched || (e.mode === 'edit' && !isPreset)) payload.models = entries
     if (e.mode === 'create-preset' || e.mode === 'create-custom') {
-      payload.name = e.name.trim()
+      // D5：预制实例名缺省取 preset 名；name 输入只在 Advanced。
+      payload.name = e.name.trim() || (e.mode === 'create-preset' ? e.preset : '')
     }
     return payload
   }
@@ -1128,7 +1327,7 @@ export class SebasSettingsModal extends LitElement {
   private async submitEditor(): Promise<void> {
     if (!this.editor || this.busy) return
     const e = this.editor
-    if ((e.mode === 'create-preset' || e.mode === 'create-custom') && !e.name.trim()) {
+    if (e.mode === 'create-custom' && !e.name.trim()) {
       this.actionError = '名称不能为空'
       return
     }
@@ -1143,7 +1342,11 @@ export class SebasSettingsModal extends LitElement {
     }
     this.busy = true
     this.actionError = ''
-    const payload = this.editorPayload()
+    const stored =
+      e.mode === 'edit'
+        ? (this.adminProviders?.find((p) => p.name === e.name) ?? null)
+        : null
+    const payload = this.editorPayload(stored)
     try {
       if (e.mode === 'create-preset' || e.mode === 'create-custom') {
         await api.routerProviderCreate(payload)
@@ -1174,20 +1377,64 @@ export class SebasSettingsModal extends LitElement {
     }
   }
 
-  private async probeProvider(name: string): Promise<void> {
+  /**
+   * （add-fetch-models 3.1）抓取动作：调 core 的 providers 域抓取 op（只读
+   * GET，**不提交任何写请求**）。成功 → 结果列表（只读呈现）；失败 → 净化
+   * 原因（绝不渲染成空列表冒充「该 provider 没有模型」）。
+   */
+  private async fetchModels(name: string): Promise<void> {
     if (this.busy) return
     this.busy = true
     this.actionError = ''
-    this.probeResult = null
+    this.fetchResult = { name, state: 'pending' }
     try {
-      const r = await api.routerProviderProbe(name)
-      this.probeResult = {
+      const r = await api.fetchProviderModels(name)
+      this.fetchResult = { name, state: 'ok', models: r.models }
+    } catch (err) {
+      this.fetchResult = {
         name,
-        models: r.models,
-        note: r.applied
-          ? 'model list saved to the provider catalog.'
-          : 'preset-derived provider: the code table owns the catalog; only the display above is updated.',
+        state: 'error',
+        reason: err instanceof ApiError ? err.message : String(err),
       }
+    } finally {
+      this.busy = false
+    }
+  }
+
+  /**
+   * （add-fetch-models 3.2）挑选某个抓取结果 = 一次普通编辑（PUT
+   * /router/api/providers/{name}），抓取本身从不提交写请求：
+   * - 自定义 provider：id 以条目形态（`{id, tags: []}`，text 隐含）追加进
+   *   `models` 目录。
+   * - preset 派生 provider：挑选语义 = 写 `default_model`（与 /provider
+   *   卡片「使用 <model>」同一契约；条目目录的常规增删走编辑器）。
+   */
+  private async pickFetchedModel(p: RouterProviderAdmin, id: string): Promise<void> {
+    if (this.busy) return
+    this.busy = true
+    this.actionError = ''
+    try {
+      if (p.preset) {
+        await api.routerProviderUpdate(p.name, { preset: p.preset, default_model: id })
+      } else {
+        const models: ProviderModelEntry[] = p.models.some((m) => m.id === id)
+          ? p.models
+          : [...p.models, { id, tags: [] }]
+        await api.routerProviderUpdate(p.name, {
+          name: p.name,
+          base_url_anthropic: p.base_url_anthropic ?? undefined,
+          base_url_openai_chat: p.base_url_openai_chat ?? undefined,
+          base_url_openai_responses: p.base_url_openai_responses ?? undefined,
+          api_key_env: p.api_key_env ?? undefined,
+          default_model: p.default_model ?? undefined,
+          protocol: p.protocol ?? undefined,
+          model_map: p.model_map ?? undefined,
+          // 目录存条目数组（服务端也接受遗留字符串形态；条目无歧义）。
+          models,
+        })
+      }
+      this.fetchResult = null
+      await this.refreshProviders()
     } catch (err) {
       this.actionError = err instanceof ApiError ? err.message : String(err)
     } finally {
@@ -1261,37 +1508,15 @@ export class SebasSettingsModal extends LitElement {
     }
   }
 
-  /** Models：路由网关总览卡（/api/router 的 listen / debug / auth，task 1.3）
-   *  + provider 管理页（列表 + 新增/编辑/删除/探测）。 */
+  /**
+   * Models：provider 管理页（列表 + 新增/编辑/删除/抓取）。router 运行
+   * 状态（listen / debug / auth / desired / actual）不在此呈现——归
+   * Services 分区（redesign-provider-models-settings 3.4 / spec「router
+   * 状态只在 Services 呈现」）。
+   */
   private renderModels() {
-    if (this.routerError)
-      return html`
-        <div class="callout callout-error" role="alert">
-          ${icon('alert')}<span>Failed to load: ${this.routerError}</span>
-        </div>
-      `
-    // 「Router 路由网关」总览卡（fix-settings-menu-and-services-semantics
-    // D2：listen / debug / auth 从 Services 分区迁来，provider 路由事实
-    // 归 Models 语义）。
-    const gateway =
-      this.router === null
-        ? html`<div class="panel panel-pad gateway-card">
-            <div class="skel-row"><div class="skel skel-line" style="width:40%"></div></div>
-            <div class="skel-row"><div class="skel skel-line" style="width:60%"></div></div>
-          </div>`
-        : html`<div class="readonly-urls gateway-card">
-            <div class="readonly-title">Router 路由网关</div>
-            <div class="readonly-row"><span>Listen</span><code>${this.router.listen ?? '—'}</code></div>
-            <div class="readonly-row">
-              <span>Debug</span><code>${this.router.debug ? 'on' : 'off'}</code>
-            </div>
-            <div class="readonly-row">
-              <span>Auth</span><code>${this.router.has_auth ? 'configured' : 'none'}</code>
-            </div>
-          </div>`
     const providers = this.adminProviders
     return html`
-      ${gateway}
       <div class="provider-toolbar">
         <wa-button variant="brand" appearance="filled" @click=${() => this.openCreatePreset()}>
           ＋ New (preset)
@@ -1322,14 +1547,11 @@ export class SebasSettingsModal extends LitElement {
       ${this.actionError
         ? html`<div class="callout callout-error" role="alert">${this.actionError}</div>`
         : nothing}
-      ${this.probeResult
-        ? html`
-            <div class="callout" role="status">
-              <strong>${this.probeResult.name}</strong>: ${this.probeResult.models.join(', ')}
-              <div class="probe-note">${this.probeResult.note}</div>
-            </div>
-          `
-        : nothing}
+      ${this.fetchResult === null
+        ? nothing
+        : this.renderFetchResult(
+            this.adminProviders?.find((p) => p.name === this.fetchResult?.name) ?? null,
+          )}
 
       ${providers === null
         ? html`
@@ -1348,52 +1570,131 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
+  /**
+   * 抓取结果呈现（add-fetch-models 3.1/3.3）：pending 提示；ok = 只读 id
+   * 列表 + 每行一个挑选动作（挑选 = 普通编辑，见 pickFetchedModel；参数
+   * 标注「本地解析/未知」——上游只给 id，绝不从 id 发明参数）；error =
+   * 净化原因，绝不渲染成空列表冒充「该 provider 没有模型」。
+   */
+  private renderFetchResult(p: RouterProviderAdmin | null) {
+    const fr = this.fetchResult
+    if (!fr) return nothing
+    if (fr.state === 'pending') {
+      return html`
+        <div class="callout" role="status">
+          <strong>${fr.name}</strong>: fetching model list…
+        </div>
+      `
+    }
+    if (fr.state === 'error') {
+      return html`
+        <div class="callout callout-error" role="alert">
+          <strong>${fr.name}</strong>: fetch failed — ${fr.reason}
+        </div>
+      `
+    }
+    if (fr.models.length === 0) {
+      return html`
+        <div class="callout" role="status">
+          <strong>${fr.name}</strong>: upstream served an empty model list.
+        </div>
+      `
+    }
+    return html`
+      <div class="callout" role="status">
+        <strong>${fr.name}</strong>: ${fr.models.length} models fetched (display only — nothing
+        saved until you pick one)
+        <ul class="fetch-result-list">
+          ${fr.models.map(
+            (id) => html`
+              <li>
+                <span class="fetched-id">${id}</span>
+                <span class="params-note">params: local table / unknown</span>
+                <button
+                  class="row-action"
+                  title="Add this model via an ordinary edit"
+                  data-testid="pick-fetched-model"
+                  ?disabled=${this.busy || p === null}
+                  @click=${() => {
+                    if (p) void this.pickFetchedModel(p, id)
+                  }}
+                >
+                  ＋
+                </button>
+              </li>
+            `,
+          )}
+        </ul>
+        <div class="probe-note">
+          ids only: context window and capabilities are resolved locally (unknown ids fall back to
+          the documented default).
+        </div>
+      </div>
+    `
+  }
+
   private renderProviderRow(p: RouterProviderAdmin) {
     const url = p.base_url_anthropic ?? p.base_url_openai_chat ?? p.base_url_openai_responses
     return html`
       <div class="provider-row">
-        <span class="provider-row-name">${p.name}</span>
-        <span class="provider-badge ${p.preset ? 'preset' : 'custom'}">
-          ${p.preset ? `${p.preset} · code` : 'custom'}
-        </span>
-        <span class="provider-key ${p.api_key_configured ? 'on' : 'off'}">
-          ${p.api_key_configured ? 'key configured' : 'no key'}
-        </span>
-        ${this.defaults?.provider === p.name
-          ? html`<span class="provider-badge default" role="status">default</span>`
-          : nothing}
-        <span class="provider-row-url" title=${url ?? ''}>${url ?? 'no base url'}</span>
-        <span class="provider-row-actions">
-          <button
-            class="row-action"
-            title="Set as default for new sessions"
-            ?disabled=${this.busy}
-            @click=${() => this.openSetDefault(p)}
-          >
-            ★
-          </button>
-          ${p.base_url_openai_chat || p.base_url_openai_responses || p.preset
-            ? html`
-                <button
-                  class="row-action"
-                  title="Probe model list"
-                  ?disabled=${this.busy}
-                  @click=${() => void this.probeProvider(p.name)}
-                >
-                  🔍
-                </button>
-              `
+        <div class="provider-row-main">
+          <span class="provider-row-name">${p.name}</span>
+          <span class="provider-badge ${p.preset ? 'preset' : 'custom'}">
+            ${p.preset ? `${p.preset} · code` : 'custom'}
+          </span>
+          <span class="provider-key ${p.api_key_configured ? 'on' : 'off'}">
+            ${p.api_key_configured ? 'key configured' : 'no key'}
+          </span>
+          ${this.defaults?.provider === p.name
+            ? html`<span class="provider-badge default" role="status">default</span>`
             : nothing}
-          <button class="row-action" title="Edit" @click=${() => this.openEdit(p)}>✎</button>
-          <button
-            class="row-action danger"
-            title="Delete"
-            ?disabled=${this.busy}
-            @click=${() => (this.deleteTarget = p.name)}
-          >
-            🗑
-          </button>
-        </span>
+          <span class="provider-row-url" title=${url ?? ''}>${url ?? 'no base url'}</span>
+          <span class="provider-row-actions">
+            <button
+              class="row-action"
+              title="Set as default for new sessions"
+              ?disabled=${this.busy}
+              @click=${() => this.openSetDefault(p)}
+            >
+              ★
+            </button>
+            ${p.base_url_anthropic || p.base_url_openai_chat || p.base_url_openai_responses
+              ? html`
+                  <button
+                    class="row-action"
+                    title="Fetch model list from the provider's official base URL"
+                    data-testid="fetch-models"
+                    ?disabled=${this.busy}
+                    @click=${() => void this.fetchModels(p.name)}
+                  >
+                    🔍
+                  </button>
+                `
+              : nothing}
+            <button class="row-action" title="Edit" @click=${() => this.openEdit(p)}>✎</button>
+            <button
+              class="row-action danger"
+              title="Delete"
+              ?disabled=${this.busy}
+              @click=${() => (this.deleteTarget = p.name)}
+            >
+              🗑
+            </button>
+          </span>
+        </div>
+        ${p.models.length > 0
+          ? html`<div class="provider-row-models">
+              ${p.models.map(
+                (m) => html`
+                  <span class="model-chip">
+                    <code>${m.id}</code>${m.tags.length
+                      ? html`<span class="model-chip-tags">${m.tags.join(' ')}</span>`
+                      : nothing}
+                  </span>
+                `,
+              )}
+            </div>`
+          : nothing}
       </div>
     `
   }
@@ -1713,15 +2014,29 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
+  /**
+   * wa-hide 来源守卫（redesign-provider-models-settings 2.1 / design D6）：
+   * Web Awesome 子控件（如 `<wa-select>`）收起自身列表框时会冒泡 composed
+   * `wa-hide`；`<wa-dialog>` 只在事件源是对话框自身时才关闭，子控件冒泡
+   * 上来的 hide 一律忽略——编辑器内任何选择交互都不会连带关闭整个弹窗。
+   */
+  private guardedHide(close: () => void): (e: Event) => void {
+    return (e: Event) => {
+      if (e.target === e.currentTarget) close()
+    }
+  }
+
   /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认 +
-   *  Settings 高危动作二次确认（全部挂在 settings 面板外层）。 */
+   *  Settings 高危动作二次确认（全部挂在 settings 面板外层；全部带
+   *  wa-hide 来源守卫——编辑器 / 设默认 / 删除 / 服务确认 / 全部重启 /
+   *  重置，共 6 处）。 */
   private renderProviderDialogs() {
     return html`
       ${this.renderActionConfirmDialogs()}
       <wa-dialog
         label=${this.editorLabel()}
         ?open=${this.editor !== null}
-        @wa-hide=${() => (this.editor = null)}
+        @wa-hide=${this.guardedHide(() => (this.editor = null))}
         class="provider-editor"
       >
         ${this.editor === null ? nothing : this.renderEditorBody()}
@@ -1741,7 +2056,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Delete provider"
         ?open=${this.deleteTarget !== null}
-        @wa-hide=${() => (this.deleteTarget = null)}
+        @wa-hide=${this.guardedHide(() => (this.deleteTarget = null))}
       >
         <p class="dialog-text">
           Delete provider
@@ -1764,7 +2079,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Set default for new sessions"
         ?open=${this.defaultDraft !== null}
-        @wa-hide=${() => (this.defaultDraft = null)}
+        @wa-hide=${this.guardedHide(() => (this.defaultDraft = null))}
       >
         ${this.defaultDraft === null
           ? nothing
@@ -1821,7 +2136,7 @@ export class SebasSettingsModal extends LitElement {
           ? `${this.confirmTarget.kind === 'disable' ? 'Disable' : 'Restart'} service`
           : 'Service action'}
         ?open=${this.confirmTarget !== null}
-        @wa-hide=${() => (this.confirmTarget = null)}
+        @wa-hide=${this.guardedHide(() => (this.confirmTarget = null))}
       >
         <p class="dialog-text">
           ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'} managed service
@@ -1849,7 +2164,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="全部进程重启"
         ?open=${this.restartAllOpen}
-        @wa-hide=${() => (this.restartAllOpen = false)}
+        @wa-hide=${this.guardedHide(() => (this.restartAllOpen = false))}
       >
         <p class="dialog-text">
           Restart every managed service via the watchdog? 进行中的会话会被中断，此操作不可撤销
@@ -1871,7 +2186,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="重置 Settings"
         ?open=${this.resetSettingsOpen}
-        @wa-hide=${() => (this.resetSettingsOpen = false)}
+        @wa-hide=${this.guardedHide(() => (this.resetSettingsOpen = false))}
       >
         <p class="dialog-text">
           Clear the remembered settings section（lastSettingsSection）in this browser and return
@@ -1887,9 +2202,13 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** 设默认对话框的模型选项：目标 provider 的 catalog（admin 列表）。 */
+  /** 设默认对话框的模型选项：目标 provider 目录条目的 id（admin 列表）。 */
   private modelChoicesFor(provider: string): string[] {
-    return this.adminProviders?.find((p) => p.name === provider)?.models ?? []
+    return (
+      this.adminProviders
+        ?.find((p) => p.name === provider)
+        ?.models.map((m) => m.id) ?? []
+    )
   }
 
   private openSetDefault(p: RouterProviderAdmin): void {
@@ -1937,34 +2256,122 @@ export class SebasSettingsModal extends LitElement {
     return `Edit provider: ${e.name}`
   }
 
-  /** 编辑器表单体：mode 决定哪些字段可编辑。 */
+  /** 定制最小输入的「单个 Base URL」读写的是 protocol 选中的槽位
+   *  （design D4：一个 URL 落到协议命名的槽位，绝不写满三槽）。 */
+  private primaryBaseUrl(): string {
+    const e = this.editor!
+    return e.protocol === 'anthropic' ? e.baseUrlAnthropic : e.baseUrlOpenaiChat
+  }
+
+  private setPrimaryBaseUrl(v: string): void {
+    const e = this.editor
+    if (!e) return
+    if (e.protocol === 'anthropic') this.setEditor({ baseUrlAnthropic: v })
+    else this.setEditor({ baseUrlOpenaiChat: v })
+  }
+
+  /** 模型条目编辑器（3.1）：id + 能力勾选（text 隐含，vision/audio/video
+   *  显式；标记是展示用元数据，不影响路由）。 */
+  private renderModelEntries(): TemplateResult {
+    const e = this.editor!
+    const presetCreate = e.mode === 'create-preset'
+    return html`
+      <div class="model-entries">
+        <span class="entries-label">Model entries</span>
+        ${presetCreate
+          ? html`<span class="entries-hint">
+              Leave empty to follow the preset's built-in catalog.
+            </span>`
+          : html`<span class="entries-hint">
+              First entry = the provider's default model. Tags are annotations only.
+            </span>`}
+        ${e.models.map(
+          (m, i) => html`
+            <div class="model-entry-row" data-testid="model-entry">
+              <wa-input
+                placeholder="model id"
+                .value=${m.id}
+                @input=${(ev: Event) => this.setModelId(i, (ev.target as HTMLInputElement).value)}
+              ></wa-input>
+              ${(['vision', 'audio', 'video'] as const).map(
+                (tag) => html`
+                  <label class="tag-check">
+                    <input
+                      type="checkbox"
+                      ?checked=${m.tags.includes(tag)}
+                      data-testid=${`tag-${tag}`}
+                      @change=${(ev: Event) =>
+                        this.toggleModelTag(
+                          i,
+                          tag,
+                          (ev.target as HTMLInputElement).checked,
+                        )}
+                    />
+                    ${tag}
+                  </label>
+                `,
+              )}
+              <button
+                class="row-action danger"
+                title="Remove model entry"
+                ?disabled=${this.busy}
+                @click=${() => this.removeModelEntry(i)}
+              >
+                ✕
+              </button>
+            </div>
+          `,
+        )}
+        <button
+          class="row-action"
+          title="Add a model entry"
+          data-testid="add-model-entry"
+          ?disabled=${this.busy}
+          @click=${() => this.addModelEntry()}
+        >
+          ＋ Add model
+        </button>
+      </div>
+    `
+  }
+
+  /** 编辑器表单体（3.1/3.2）：mode 决定最小字段集；其余输入收进默认折叠
+   *  的 Advanced（`<details class="advanced">`）。`api_key_env` 不是输入
+   *  项——只在 Advanced 如实展示继承/存量的 env 回退名。 */
   private renderEditorBody() {
     const e = this.editor!
-    const isPresetMode = e.mode === 'create-preset' || (e.mode === 'edit' && !!e.preset)
+    const isPreset = e.mode === 'create-preset' || (e.mode === 'edit' && !!e.preset)
     const presetDef = this.presets?.find((p) => p.name === e.preset) ?? null
+    const stored =
+      e.mode === 'edit' ? (this.adminProviders?.find((p) => p.name === e.name) ?? null) : null
+    const advancedEnvName = isPreset
+      ? (presetDef?.api_key_env ?? stored?.api_key_env ?? '')
+      : (stored?.api_key_env ?? '')
+    const primaryIsAnthropic = e.protocol === 'anthropic'
     return html`
       ${this.actionError
         ? html`<div class="callout callout-error" role="alert">${this.actionError}</div>`
         : nothing}
       <div class="editor-grid">
-        ${e.mode === 'create-preset' || e.mode === 'create-custom'
+        ${e.mode === 'create-custom'
           ? html`
               <wa-input
                 label="Name"
                 required
                 .value=${e.name}
-                @input=${(ev: any) => this.setEditor({ name: ev.target.value })}
+                @input=${(ev: Event) => this.setEditor({ name: (ev.target as HTMLInputElement).value })}
               ></wa-input>
             `
-          : html`
-              <wa-input label="Name" .value=${e.name} disabled></wa-input>
-            `}
+          : e.mode === 'edit'
+            ? html`<wa-input label="Name" .value=${e.name} disabled></wa-input>`
+            : nothing}
         ${e.mode === 'create-preset'
           ? html`
               <wa-select
                 label="Preset"
                 value=${e.preset}
-                @change=${(ev: any) => this.setEditor({ preset: ev.target.value })}
+                @change=${(ev: Event) =>
+                  this.setEditor({ preset: (ev.target as HTMLSelectElement).value })}
               >
                 ${(this.presets ?? []).map(
                   (p) => html`<wa-option value=${p.name}>${p.name}</wa-option>`,
@@ -1972,7 +2379,7 @@ export class SebasSettingsModal extends LitElement {
               </wa-select>
             `
           : nothing}
-        ${isPresetMode && presetDef
+        ${isPreset && presetDef
           ? html`
               <div class="readonly-urls" part="preset-details">
                 <div class="readonly-title">Preset values (owned by the code, follow updates)</div>
@@ -1986,36 +2393,32 @@ export class SebasSettingsModal extends LitElement {
                   <span>OpenAI Responses</span>
                   <code>${presetDef.base_url_openai_responses ?? '—'}</code>
                 </div>
-                <div class="readonly-row"><span>Default env</span><code>${presetDef.api_key_env}</code></div>
               </div>
             `
           : nothing}
-        ${!isPresetMode
+        ${!isPreset
           ? html`
               <wa-input
-                label="Base URL (Anthropic)"
-                placeholder="empty = no Anthropic protocol"
-                .value=${e.baseUrlAnthropic}
-                @input=${(ev: any) => this.setEditor({ baseUrlAnthropic: ev.target.value })}
+                label=${primaryIsAnthropic ? 'Base URL (Anthropic)' : 'Base URL (OpenAI-compatible)'}
+                placeholder=${primaryIsAnthropic
+                  ? 'anthropic-messages endpoint'
+                  : 'chat-completions endpoint'}
+                .value=${this.primaryBaseUrl()}
+                @input=${(ev: Event) =>
+                  this.setPrimaryBaseUrl((ev.target as HTMLInputElement).value)}
               ></wa-input>
-              <wa-input
-                label="Base URL (OpenAI Chat)"
-                placeholder="chat-completions endpoint"
-                .value=${e.baseUrlOpenaiChat}
-                @input=${(ev: any) => this.setEditor({ baseUrlOpenaiChat: ev.target.value })}
-              ></wa-input>
-              <wa-input
-                label="Base URL (OpenAI Responses)"
-                placeholder="Responses API endpoint"
-                .value=${e.baseUrlOpenaiResponses}
-                @input=${(ev: any) => this.setEditor({ baseUrlOpenaiResponses: ev.target.value })}
-              ></wa-input>
-              <wa-input
-                label="API key env var"
-                placeholder="e.g. MY_OPENAI_API_KEY"
-                .value=${e.apiKeyEnv}
-                @input=${(ev: any) => this.setEditor({ apiKeyEnv: ev.target.value })}
-              ></wa-input>
+              <wa-select
+                label="Protocol"
+                value=${e.protocol}
+                @change=${(ev: Event) =>
+                  this.setEditor({ protocol: (ev.target as HTMLSelectElement).value })}
+              >
+                <wa-option value="openai">OpenAI-compatible</wa-option>
+                <wa-option value="anthropic">Anthropic</wa-option>
+                ${e.mode === 'edit'
+                  ? html`<wa-option value="auto">Auto (stored preference)</wa-option>`
+                  : nothing}
+              </wa-select>
             `
           : nothing}
         <wa-input
@@ -2023,23 +2426,88 @@ export class SebasSettingsModal extends LitElement {
           type="password"
           placeholder=${e.mode === 'edit' ? 'leave empty to keep the stored key' : 'paste API key'}
           .value=${e.apiKey}
-          @input=${(ev: any) => this.setEditor({ apiKey: ev.target.value })}
+          @input=${(ev: Event) => this.setEditor({ apiKey: (ev.target as HTMLInputElement).value })}
         ></wa-input>
-        <wa-input
-          label="Default model"
-          placeholder="model id passed to the agent (optional)"
-          .value=${e.defaultModel}
-          @input=${(ev: any) => this.setEditor({ defaultModel: ev.target.value })}
-        ></wa-input>
-        <wa-select
-          label="Protocol"
-          value=${e.protocol}
-          @change=${(ev: any) => this.setEditor({ protocol: ev.target.value })}
-        >
-          <wa-option value="auto">Auto (Anthropic first)</wa-option>
-          <wa-option value="anthropic">Anthropic</wa-option>
-          <wa-option value="openai">OpenAI</wa-option>
-        </wa-select>
+        ${this.renderModelEntries()}
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="advanced-body">
+            ${e.mode === 'create-preset'
+              ? html`
+                  <wa-input
+                    label="Name (defaults to the preset name)"
+                    placeholder=${e.preset}
+                    .value=${e.name}
+                    @input=${(ev: Event) =>
+                      this.setEditor({ name: (ev.target as HTMLInputElement).value })}
+                  ></wa-input>
+                `
+              : nothing}
+            ${!isPreset
+              ? html`
+                  <wa-input
+                    label=${primaryIsAnthropic
+                      ? 'Base URL (OpenAI-compatible)'
+                      : 'Base URL (Anthropic)'}
+                    placeholder="empty = protocol not served"
+                    .value=${primaryIsAnthropic ? e.baseUrlOpenaiChat : e.baseUrlAnthropic}
+                    @input=${(ev: Event) =>
+                      primaryIsAnthropic
+                        ? this.setEditor({ baseUrlOpenaiChat: (ev.target as HTMLInputElement).value })
+                        : this.setEditor({ baseUrlAnthropic: (ev.target as HTMLInputElement).value })}
+                  ></wa-input>
+                  <wa-input
+                    label="Base URL (OpenAI Responses)"
+                    placeholder="Responses API endpoint"
+                    .value=${e.baseUrlOpenaiResponses}
+                    @input=${(ev: Event) =>
+                      this.setEditor({
+                        baseUrlOpenaiResponses: (ev.target as HTMLInputElement).value,
+                      })}
+                  ></wa-input>
+                `
+              : nothing}
+            ${advancedEnvName
+              ? html`<div class="advanced-note">
+                  API key env fallback: <code>${advancedEnvName}</code> (inherited; used only when
+                  no plaintext key is stored)
+                </div>`
+              : nothing}
+            <wa-input
+              label="Default model"
+              placeholder="model id passed to the agent (optional)"
+              .value=${e.defaultModel}
+              @input=${(ev: Event) =>
+                this.setEditor({ defaultModel: (ev.target as HTMLInputElement).value })}
+            ></wa-input>
+            ${!isPreset
+              ? html`
+                  <wa-input
+                    label="Model rename map (one per line: old-id -> new-id)"
+                    placeholder="old-id -> new-id"
+                    .value=${e.modelMapText}
+                    @input=${(ev: Event) =>
+                      this.setEditor({ modelMapText: (ev.target as HTMLInputElement).value })}
+                  ></wa-input>
+                `
+              : nothing}
+            ${isPreset
+              ? html`
+                  <wa-select
+                    label="Protocol"
+                    value=${e.protocol}
+                    @change=${(ev: Event) =>
+                      this.setEditor({ protocol: (ev.target as HTMLSelectElement).value })}
+                  >
+                    <wa-option value="auto">Auto (Anthropic first)</wa-option>
+                    <wa-option value="anthropic">Anthropic</wa-option>
+                    <wa-option value="openai">OpenAI</wa-option>
+                  </wa-select>
+                `
+              : nothing}
+          </div>
+        </details>
       </div>
     `
   }

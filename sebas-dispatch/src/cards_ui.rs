@@ -214,7 +214,12 @@ fn permission_args_elements(tool_name: &str, args: &Value) -> Vec<ChannelElement
 }
 
 /// 权限卡：`{tool} 想要执行：` + 参数展示 + 灰注 + 三个放行/拒绝按钮。
-pub fn permission_card(session_id: &str, request_id: &str, tool_name: &str, args: &Value) -> ChannelCard {
+pub fn permission_card(
+    session_id: &str,
+    request_id: &str,
+    tool_name: &str,
+    args: &Value,
+) -> ChannelCard {
     let mut card = ChannelCard::new("⚠ 权限请求", "orange");
     card.elements.push(ChannelElement::Markdown {
         content: format!("**{tool_name}** 想要执行："),
@@ -238,7 +243,8 @@ pub fn permission_card(session_id: &str, request_id: &str, tool_name: &str, args
         }],
     };
     card.elements.push(btn("本次允许", "primary", "allow_once"));
-    card.elements.push(btn("本会话不再询问", "default", "allow_session"));
+    card.elements
+        .push(btn("本会话不再询问", "default", "allow_session"));
     card.elements.push(btn("拒绝", "danger", "deny"));
     card
 }
@@ -534,7 +540,9 @@ mod tests {
         assert_eq!(card.title, "❌ 启动失败");
         assert_eq!(card.theme, "red");
         assert!(
-            serde_json::to_string(&card.elements).unwrap().contains("```"),
+            serde_json::to_string(&card.elements)
+                .unwrap()
+                .contains("```"),
             "long message must be fenced"
         );
     }
@@ -546,8 +554,10 @@ mod tests {
         let expired = expired_permission_card();
         assert_eq!(expired.theme, "grey");
         let resolved = resolved_permission_card("✅ 已允许（仅此一次）");
-        assert!(serde_json::to_string(&resolved.elements)
-            .unwrap()
-            .contains("已允许（仅此一次）"));
+        assert!(
+            serde_json::to_string(&resolved.elements)
+                .unwrap()
+                .contains("已允许（仅此一次）")
+        );
     }
 }

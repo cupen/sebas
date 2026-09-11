@@ -1,6 +1,17 @@
 //! Real-time events pushed to WebUI clients over the WebSocket channel.
 
+use sebas_dispatch::PendingDisposition;
 use serde::Serialize;
+
+/// （workbench-turn-queue 7.3）一次性「未执行」提示的条目形状：id + 文本 +
+/// 处置 + 优先标记。position 不随提示下发（提示只点名哪些提交没有执行）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingSubmissionView {
+    pub id: u64,
+    pub text: String,
+    pub disposition: PendingDisposition,
+    pub priority: bool,
+}
 
 /// Events that the WebUI can push to connected clients.
 ///
@@ -20,6 +31,13 @@ pub enum WebUiEvent {
     /// A session was removed.
     #[serde(rename = "session.removed")]
     SessionRemoved { session_id: String },
+    /// （workbench-turn-queue 5.2/7.3）会话终结时未执行的待生效提交，逐条
+    /// 列出（id/文本/处置/优先）。在 session.removed 帧之前到达。
+    #[serde(rename = "session.pending_dropped")]
+    SessionPendingDropped {
+        session_id: String,
+        dropped: Vec<PendingSubmissionView>,
+    },
     /// Configuration was updated. No sender exists yet; the variant is
     /// reserved so clients must tolerate it (and unknown types) arriving.
     #[serde(rename = "config.updated")]
@@ -65,6 +83,24 @@ mod tests {
                     session_id: "oc_b".into(),
                 },
                 json!({"type": "session.removed", "session_id": "oc_b"}),
+            ),
+            (
+                WebUiEvent::SessionPendingDropped {
+                    session_id: "oc_b".into(),
+                    dropped: vec![crate::events::PendingSubmissionView {
+                        id: 5,
+                        text: "never ran".into(),
+                        disposition: sebas_dispatch::PendingDisposition::Turn,
+                        priority: true,
+                    }],
+                },
+                json!({
+                    "type": "session.pending_dropped",
+                    "session_id": "oc_b",
+                    "dropped": [
+                        {"id": 5, "text": "never ran", "disposition": "turn", "priority": true}
+                    ]
+                }),
             ),
             (WebUiEvent::ConfigUpdated, json!({"type": "config.updated"})),
             (

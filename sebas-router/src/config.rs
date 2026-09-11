@@ -6,8 +6,9 @@
 //!
 //! provider 支持「名称即 preset」（可选显式 `preset = "..."` 别名）：
 //! preset 数据跟随代码表——base_url 三槽位（anthropic / openai_chat /
-//! openai_responses）与 models 一律在 resolve 期从内置表物化，preset 派生
-//! 条目显式写这些字段即配置错误；用户仅拥有 api_key / api_key_env /
+//! openai_responses）在 resolve 期从内置表物化，preset 派生条目显式写这些
+//! 字段即配置错误；模型列表是实例级条目目录（条目自带非空列表优先，缺省
+//! 物化代码表，见 `resolve_providers`）；用户仅拥有 api_key / api_key_env /
 //! default_model / protocol。统一槽 `base_url_openai` 已移除（未发布，
 //! 不留别名），出现即拒绝。
 //! 下游客户端鉴权用 `[router] auth_token`（单个字符串或字符串数组），只做
@@ -183,13 +184,17 @@ pub struct ProviderConfig {
     /// model 字段的最终名字。
     #[serde(default)]
     pub model_map: HashMap<String, String>,
-    /// 按从强到弱排列的模型名列表（手写或 preset 物化）。`[n]` 后缀（如
-    /// `[1m]`）既是模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
+    /// 按从强到弱排列的模型**条目**列表（手写或 preset 物化；条目 = id +
+    /// 能力标记，见 `crate::models::ModelEntry`）。`[n]` 后缀（如 `[1m]`）
+    /// 既是模型名一部分，也表示上下文长度。见 `crate::models::map_to_env`。
     /// `models` 顺序 = 强→弱，用于 Claude Code
     /// 4 个 MODEL 环境变量（OPUS/SONNET/HAIKU）的赋值；与 `model_map`
     /// 不重复，前者定 model 列表的强弱档位，后者定上游 id 重命名。
+    ///
+    /// 兼容读取：遗留的裸字符串条目反序列化为仅隐含 `text` 的条目，写入
+    /// 一律是条目对象（redesign-provider-models-settings task 1.1）。
     #[serde(default)]
-    pub models: Vec<String>,
+    pub models: Vec<crate::models::ModelEntry>,
 }
 
 /// 给定请求协议返回对应槽位 URL；三槽全空视为未配置（由 validate 拒绝）。
@@ -213,9 +218,16 @@ impl ProviderConfig {
         crate::models::resolve_caps(model)
     }
 
-    /// 最强模型（列表头）＝ provider 的默认模型。空列表 → `None`。
+    /// 最强模型（列表首条条目的 id）＝ provider 的默认模型。空列表 → `None`。
+    /// task 1.3：默认模型取首条**条目的 id**，顺序语义与字符串时代一致。
     pub fn default_model(&self) -> Option<&str> {
-        self.models.first().map(String::as_str)
+        self.models.first().map(|m| m.id.as_str())
+    }
+
+    /// 条目 id 视图（顺序保持强→弱）。供需要纯 id 列表的消费方（卡片表单、
+    /// spawn env、admin 投影）复用，避免各自内联映射。
+    pub fn model_ids(&self) -> Vec<&str> {
+        self.models.iter().map(|m| m.id.as_str()).collect()
     }
 }
 
@@ -278,8 +290,10 @@ where
 }
 
 /// TOML 原始形态的 provider 段：字段全 Option，preset 物化后收敛成
-/// 对外 `ProviderConfig`（preset 派生禁写 url/models；自定义至少一槽）。
+/// 对外 `ProviderConfig`（preset 派生禁写 url；自定义至少一槽）。
 /// `base_url_openai` 统一槽已移除，字段保留仅为显式拒绝（见 resolve）。
+/// `models` 条目经 `ModelEntry` 的兼容反序列化：裸字符串（旧写法）与
+/// `{id, tags}` 表（新写法）都接受。
 #[derive(Deserialize)]
 struct RawProviderConfig {
     /// 显式 preset 别名；缺省时「名称即 preset」。
@@ -301,7 +315,7 @@ struct RawProviderConfig {
     #[serde(default)]
     model_map: HashMap<String, String>,
     #[serde(default)]
-    models: Vec<String>,
+    models: Vec<crate::models::ModelEntry>,
 }
 
 /// provider 惯例默认（见 openspec/specs/provider-management/spec.md 的 Provider 格局调研）。
@@ -318,10 +332,35 @@ pub struct ProviderPreset {
     pub base_url_openai_responses: Option<&'static str>,
     /// 默认 env 变量名（可被 `api_key_env` 覆盖）。
     pub api_key_env: &'static str,
-    /// 该 provider 提供的 model 列表（静态约定，覆盖主页宣传的常用 model；
-    /// 不调 /v1/models 动态拉取，详见 docs/... 或 bead sebas-63f.2 设计讨论）。
-    pub models: &'static [&'static str],
+    /// 该 provider 提供的 model 条目列表（静态约定，覆盖主页宣传的常用
+    /// model；不调 /v1/models 动态拉取）。条目携带能力标记（task 1.2）：
+    /// `text` 隐含不写，`vision` 等显式标注。
+    pub models: &'static [PresetModel],
 }
+
+/// preset 代码表的单个模型条目（静态形态的 `crate::models::ModelEntry`）。
+pub struct PresetModel {
+    pub id: &'static str,
+    /// 显式能力标记；`text` 隐含、永不出现。空 = 纯文本模型。
+    pub tags: &'static [crate::models::ModelCapability],
+}
+
+impl PresetModel {
+    /// 条目视图（wire 形状由 `ModelEntry` 的 Serialize 统一承载）。
+    pub fn to_entry(&self) -> crate::models::ModelEntry {
+        crate::models::ModelEntry {
+            id: self.id.to_string(),
+            tags: self.tags.to_vec(),
+        }
+    }
+}
+
+/// 常用标记简写，保持 preset 表可读。
+const VISION: &[crate::models::ModelCapability] = &[crate::models::ModelCapability::Vision];
+const VISION_AUDIO: &[crate::models::ModelCapability] = &[
+    crate::models::ModelCapability::Vision,
+    crate::models::ModelCapability::Audio,
+];
 
 const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
@@ -331,11 +370,11 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_responses: None,
         api_key_env: "ANTHROPIC_API_KEY",
         models: &[
-            "claude-opus-4-20250514",
-            "claude-sonnet-4-20250514",
-            "claude-haiku-4-20250514",
-            "claude-3-7-sonnet-20250219",
-            "claude-3-5-haiku-20241022",
+            PresetModel { id: "claude-opus-4-20250514", tags: VISION },
+            PresetModel { id: "claude-sonnet-4-20250514", tags: VISION },
+            PresetModel { id: "claude-haiku-4-20250514", tags: VISION },
+            PresetModel { id: "claude-3-7-sonnet-20250219", tags: VISION },
+            PresetModel { id: "claude-3-5-haiku-20241022", tags: &[] },
         ],
     },
     ProviderPreset {
@@ -345,13 +384,13 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_responses: Some("https://api.openai.com/v1"),
         api_key_env: "OPENAI_API_KEY",
         models: &[
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4-turbo",
-            "o1",
-            "o1-mini",
-            "o3-mini",
-            "gpt-3.5-turbo",
+            PresetModel { id: "gpt-4o", tags: VISION_AUDIO },
+            PresetModel { id: "gpt-4o-mini", tags: VISION },
+            PresetModel { id: "gpt-4-turbo", tags: VISION },
+            PresetModel { id: "o1", tags: &[] },
+            PresetModel { id: "o1-mini", tags: &[] },
+            PresetModel { id: "o3-mini", tags: &[] },
+            PresetModel { id: "gpt-3.5-turbo", tags: &[] },
         ],
     },
     ProviderPreset {
@@ -360,7 +399,10 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_chat: Some("https://api.deepseek.com"),
         base_url_openai_responses: None,
         api_key_env: "DEEPSEEK_API_KEY",
-        models: &["deepseek-chat", "deepseek-reasoner"],
+        models: &[
+            PresetModel { id: "deepseek-chat", tags: &[] },
+            PresetModel { id: "deepseek-reasoner", tags: &[] },
+        ],
     },
     ProviderPreset {
         name: "kimi",
@@ -369,10 +411,10 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_responses: None,
         api_key_env: "MOONSHOT_API_KEY",
         models: &[
-            "moonshot-v1-8k",
-            "moonshot-v1-32k",
-            "moonshot-v1-128k",
-            "kimi-k2-0711-preview",
+            PresetModel { id: "moonshot-v1-8k", tags: &[] },
+            PresetModel { id: "moonshot-v1-32k", tags: &[] },
+            PresetModel { id: "moonshot-v1-128k", tags: &[] },
+            PresetModel { id: "kimi-k2-0711-preview", tags: &[] },
         ],
     },
     ProviderPreset {
@@ -382,11 +424,11 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_responses: None,
         api_key_env: "ZHIPU_API_KEY",
         models: &[
-            "glm-4-plus",
-            "glm-4-0520",
-            "glm-4-air",
-            "glm-4-airx",
-            "glm-4-flash",
+            PresetModel { id: "glm-4-plus", tags: &[] },
+            PresetModel { id: "glm-4-0520", tags: VISION },
+            PresetModel { id: "glm-4-air", tags: &[] },
+            PresetModel { id: "glm-4-airx", tags: &[] },
+            PresetModel { id: "glm-4-flash", tags: VISION },
         ],
     },
     ProviderPreset {
@@ -397,10 +439,10 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_key_env: "MINIMAX_API_KEY",
         // TODO: 实际 ids 待确认 (MiniMax 官方 model 命名常变)
         models: &[
-            "MiniMax-Text-01",
-            "MiniMax-VL-01",
-            "abab6.5s-chat",
-            "abab6.5g-chat",
+            PresetModel { id: "MiniMax-Text-01", tags: &[] },
+            PresetModel { id: "MiniMax-VL-01", tags: VISION },
+            PresetModel { id: "abab6.5s-chat", tags: &[] },
+            PresetModel { id: "abab6.5g-chat", tags: &[] },
         ],
     },
     ProviderPreset {
@@ -410,7 +452,11 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_responses: None,
         api_key_env: "ARK_API_KEY",
         // TODO: 实际 endpoint ids (doubao-pro / lite 等含版本号后缀) 待确认
-        models: &["doubao-pro", "doubao-lite", "doubao-1-5-pro"],
+        models: &[
+            PresetModel { id: "doubao-pro", tags: VISION },
+            PresetModel { id: "doubao-lite", tags: &[] },
+            PresetModel { id: "doubao-1-5-pro", tags: &[] },
+        ],
     },
     ProviderPreset {
         name: "dashscope",
@@ -418,7 +464,12 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_chat: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         base_url_openai_responses: None,
         api_key_env: "DASHSCOPE_API_KEY",
-        models: &["qwen-turbo", "qwen-plus", "qwen-max", "qwen-long"],
+        models: &[
+            PresetModel { id: "qwen-turbo", tags: &[] },
+            PresetModel { id: "qwen-plus", tags: &[] },
+            PresetModel { id: "qwen-max", tags: &[] },
+            PresetModel { id: "qwen-long", tags: &[] },
+        ],
     },
     ProviderPreset {
         name: "gemini",
@@ -427,10 +478,10 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         base_url_openai_responses: None,
         api_key_env: "GEMINI_API_KEY",
         models: &[
-            "gemini-1.5-pro",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-2.0-flash-exp",
+            PresetModel { id: "gemini-1.5-pro", tags: VISION },
+            PresetModel { id: "gemini-1.5-flash", tags: VISION },
+            PresetModel { id: "gemini-1.5-flash-8b", tags: &[] },
+            PresetModel { id: "gemini-2.0-flash-exp", tags: VISION_AUDIO },
         ],
     },
 ];
@@ -445,9 +496,11 @@ pub fn presets() -> &'static [ProviderPreset] {
 }
 
 /// raw → resolved：把每个 provider 收敛成对外 `ProviderConfig`。
-/// - 名称即 preset（或显式 `preset = "..."` 别名）：preset 数据跟随代码表，
-///   三槽位与 models 全部在 resolve 期物化；派生条目显式写任一 url 槽或
-///   models → 配置错误（用户仅拥有 key / env / default_model / protocol）；
+/// - 名称即 preset（或显式 `preset = "..."` 别名）：preset 数据跟随代码，
+///   三槽位在 resolve 期物化；派生条目显式写任一 url 槽 → 配置错误；
+///   `models` 自 redesign-provider-models-settings 起是实例级目录：条目
+///   自带（非空）优先，否则物化 preset 代码表（「模型列表对 preset 派生
+///   provider 可编辑，但不改代码表本身」——webui spec delta 场景）；
 /// - 无 preset（自定义 provider）→ 三个 url 槽至少一个必填。
 fn resolve_providers(
     raw: HashMap<String, RawProviderConfig>,
@@ -464,7 +517,7 @@ fn resolve_providers(
         let (base_url_anthropic, base_url_openai_chat, base_url_openai_responses, models) =
             match preset {
                 Some(p) => {
-                    // preset 数据跟随代码：任何 url 槽 / models 覆盖都拒绝。
+                    // preset 连接数据跟随代码：任何 url 槽覆盖都拒绝。
                     for (field, v) in [
                         ("base_url_anthropic", &r.base_url_anthropic),
                         ("base_url_openai_chat", &r.base_url_openai_chat),
@@ -476,16 +529,16 @@ fn resolve_providers(
                             )));
                         }
                     }
-                    if !r.models.is_empty() {
-                        return Err(RouterError::Config(format!(
-                            "provider.{name}: preset '{preset_name}' 的 models 跟随代码，不能写 models"
-                        )));
-                    }
                     (
                         p.base_url_anthropic.unwrap_or_default().to_string(),
                         p.base_url_openai_chat.unwrap_or_default().to_string(),
                         p.base_url_openai_responses.unwrap_or_default().to_string(),
-                        p.models.iter().map(|s| s.to_string()).collect(),
+                        // 条目自带目录优先；缺省物化代码表（跟随代码更新）。
+                        if r.models.is_empty() {
+                            p.models.iter().map(PresetModel::to_entry).collect()
+                        } else {
+                            r.models
+                        },
                     )
                 }
                 None => {
@@ -566,7 +619,7 @@ pub fn validate_provider_entry(
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         model_map: HashMap::new(),
-        models: parse_models_list(item),
+        models: parse_models_list(name, item)?,
     };
     let mut resolved = resolve_providers(HashMap::from([(name.to_string(), raw)]))?;
     resolved
@@ -579,25 +632,42 @@ fn option_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// 从 provider overlay JSON 条目里读 `models`。支持两种格式：
-/// - 数组（router 直接读）：`["a", "b"]`
+/// 从 provider overlay JSON 条目里读 `models`（task 1.1 兼容读取）。支持：
+/// - 条目对象数组（新写法）：`[{"id":"a","tags":["vision"]}, …]`
+/// - 裸字符串数组（遗留写法）：`["a", "b"]` → 仅隐含 `text` 的条目
 /// - 逗号分隔字符串（来自 `/provider` 表单提交）：`"a,b"`
 ///
-/// 保持书写顺序 = 强→弱。缺省 → 空列表。
-fn parse_models_list(item: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
-    match item.get("models") {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_string)
-            .collect(),
+/// 每个元素经 `ModelEntry` 反序列化：未知能力标记 / 形状非法 → Err
+/// （task 1.4「拒绝」语义；错误信息含 provider 名）。保持书写顺序 = 强→弱。
+/// 缺省 → 空列表。
+fn parse_models_list(
+    name: &str,
+    item: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<crate::models::ModelEntry>> {
+    let entries: Vec<crate::models::ModelEntry> = match item.get("models") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(arr)) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for el in arr {
+                out.push(serde_json::from_value(el.clone()).map_err(|e| {
+                    RouterError::Config(format!("provider.{name}: models 条目非法: {e}"))
+                })?);
+            }
+            out
+        }
         Some(serde_json::Value::String(s)) => s
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
+            .map(crate::models::ModelEntry::text_only)
             .collect(),
-        _ => Vec::new(),
-    }
+        Some(_) => {
+            return Err(RouterError::Config(format!(
+                "provider.{name}: models 必须是条目数组或逗号分隔字符串"
+            )));
+        }
+    };
+    Ok(entries)
 }
 
 // 按 preset 物化 base_url/models 的旧「显式覆盖」分支已随跟随代码语义移除
@@ -1103,23 +1173,64 @@ auth_token = "sk-test"
             Some("https://api.deepseek.com")
         );
         assert!(ds.base_url_openai_responses.is_none());
+        // models 物化为条目（id + 能力标记）；deepseek 全是纯文本条目。
         assert_eq!(
-            ds.models,
-            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+            ds.model_ids(),
+            vec!["deepseek-chat", "deepseek-reasoner"],
             "models must materialize from the code table"
+        );
+        assert!(
+            ds.models.iter().all(|m| m.tags.is_empty()),
+            "text-only presets materialize entries with no explicit tags"
         );
         assert_eq!(ds.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
         assert_eq!(ds.preset.as_deref(), Some("deepseek"));
     }
 
+    /// task 1.2：preset 代码表条目携带能力标记——能从 preset 读到带
+    /// `vision` 的条目，且 `text` 永不显式出现。
     #[test]
-    fn preset_explicit_url_or_models_override_errors() {
+    fn preset_table_carries_vision_entries() {
+        let openai = find_preset("openai").expect("openai preset");
+        let gpt4o = openai.models.iter().find(|m| m.id == "gpt-4o").expect("gpt-4o");
+        let e = gpt4o.to_entry();
+        assert_eq!(e.tags, vec![crate::models::ModelCapability::Vision, crate::models::ModelCapability::Audio]);
+        // resolve 管线物化后仍然带着标记。
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        let cfg = parse_isolated("[provider.openai]\n").expect("parse");
+        let p = cfg.providers.get("openai").expect("openai provider");
+        let vision = p
+            .models
+            .iter()
+            .find(|m| m.id == "gpt-4o")
+            .expect("gpt-4o entry");
+        assert!(vision.tags.contains(&crate::models::ModelCapability::Vision));
+        // text 隐含、永不落盘：条目序列化形状里没有 text 一词。
+        for m in &p.models {
+            let v = serde_json::to_value(m).expect("entry serializes");
+            let tags = v
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .expect("tags array");
+            assert!(
+                !tags.iter().any(|t| t.as_str() == Some("text")),
+                "text must never be stored explicitly"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_explicit_url_override_errors() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        // preset 数据跟随代码：显式 url / models 一律配置错误。
+        // preset 连接数据跟随代码：显式 url 一律配置错误（models 自
+        // redesign-provider-models-settings 起改为实例级目录，不再拒绝）。
         for raw in [
             r#"
 [router]
@@ -1139,12 +1250,6 @@ auth_token = "sk-test"
 [provider.deepseek]
 base_url_openai_responses = "https://mirror.example/v1"
 "#,
-            r#"
-[router]
-auth_token = "sk-test"
-[provider.deepseek]
-models = ["my-model"]
-"#,
         ] {
             let err = parse_isolated(raw).expect_err("preset override must error");
             let msg = err.to_string();
@@ -1157,6 +1262,37 @@ models = ["my-model"]
                 "error must name the provider: {msg}"
             );
         }
+    }
+
+    /// preset 派生条目写 models = 实例级目录（webui spec delta「model list
+    /// is editable for a preset-derived provider」）：非空条目列表优先于
+    /// 代码表物化，代码表数据本身不动。
+    #[test]
+    fn preset_derived_explicit_models_form_instance_catalog() {
+        let _g = LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("SEBAS_ROUTER_LISTEN");
+        }
+        // 新写法：条目对象数组。
+        let raw = r#"
+[provider.deepseek]
+models = [
+    { id = "my-deepseek-pro", tags = ["vision"] },
+    { id = "my-deepseek-flash" },
+]
+"#;
+        let cfg = parse_isolated(raw).expect("instance catalog should parse");
+        let ds = cfg.providers.get("deepseek").expect("deepseek provider");
+        assert_eq!(ds.model_ids(), vec!["my-deepseek-pro", "my-deepseek-flash"]);
+        assert_eq!(
+            ds.models[0].tags,
+            vec![crate::models::ModelCapability::Vision],
+            "instance entries keep their capability tags"
+        );
+        // 首条即默认（task 1.3）。
+        assert_eq!(ds.default_model(), Some("my-deepseek-pro"));
+        // 代码表数据不动。
+        assert_eq!(find_preset("deepseek").unwrap().models.len(), 2);
     }
 
     #[test]
@@ -1318,7 +1454,8 @@ auth_token = "sk-test"
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        // 自定义 provider 手写 models（preset 派生条目不允许写 models）。
+        // 自定义 provider 手写 models（TOML 裸字符串 = 遗留写法，兼容读取
+        // 为仅隐含 text 的条目，task 1.1）。
         let raw = r#"
 [router]
 default_provider = "ds-custom"
@@ -1329,11 +1466,12 @@ models = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]
 "#;
         let cfg = parse_isolated(raw).expect("provider with models should parse");
         let ds = cfg.providers.get("ds-custom").expect("custom provider");
-        // models 手写列表按从强到弱保留
-        assert_eq!(ds.models, vec!["deepseek-v4-pro[1m]", "deepseek-v4-flash"]);
-        // 最强 = 默认
+        // models 手写列表按从强到弱保留（条目 id 视图）。
+        assert_eq!(ds.model_ids(), vec!["deepseek-v4-pro[1m]", "deepseek-v4-flash"]);
+        assert!(ds.models.iter().all(|m| m.tags.is_empty()));
+        // 最强 = 默认 = 首条条目的 id（task 1.3「首条即默认」）。
         assert_eq!(ds.default_model(), Some("deepseek-v4-pro[1m]"));
-        // env 映射：MODEL=OPUS=最强、SONNET=次强、HAIKU=最弱
+        // env 映射：MODEL=OPUS=最强、SONNET=次强、HAIKU=最弱（按条目 id 解析）。
         let env = ds.model_env();
         assert_eq!(env.model.as_deref(), Some("deepseek-v4-pro[1m]"));
         assert_eq!(env.opus.as_deref(), Some("deepseek-v4-pro[1m]"));
@@ -1816,8 +1954,8 @@ m1 = ["anthropic"]
     }
 
     /// 校验辅助：无效候选（无 preset 无 URL）Err 且错误信息含 provider 名；
-    /// 有效 preset 候选解析出 URL；旧统一槽名拒绝；preset 派生候选带 models
-    /// 字段拒绝（跟随代码）。
+    /// 有效 preset 候选解析出 URL；旧统一槽名拒绝；遗留字符串 models 与
+    /// 逗号字符串 models 均兼容读取为条目；条目对象携带标记；未知标记拒绝。
     #[test]
     fn validate_provider_entry_rejects_invalid_and_names_provider() {
         let mut bad = serde_json::Map::new();
@@ -1835,8 +1973,8 @@ m1 = ["anthropic"]
         let cfg = validate_provider_entry("deepseek", &good).expect("preset 候选有效");
         assert!(cfg.base_url_openai_chat.is_some(), "preset 补全 URL");
         assert_eq!(
-            cfg.models,
-            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+            cfg.model_ids(),
+            vec!["deepseek-chat", "deepseek-reasoner"],
             "preset models 物化自代码表"
         );
 
@@ -1848,13 +1986,42 @@ m1 = ["anthropic"]
             "旧统一槽必须显式拒绝: {err}"
         );
 
-        let mut with_models = serde_json::Map::new();
-        with_models.insert("preset".into(), serde_json::json!("deepseek"));
-        with_models.insert("models".into(), serde_json::json!(["m1"]));
-        let err = validate_provider_entry("ds2", &with_models).unwrap_err();
-        assert!(
-            err.to_string().contains("跟随代码"),
-            "preset 派生条目写 models 必须拒绝: {err}"
+        // 遗留字符串数组（task 1.1）：读取无错、归一化为仅 text 条目。
+        let mut legacy_models = serde_json::Map::new();
+        legacy_models.insert("base_url_anthropic".into(), serde_json::json!("https://x"));
+        legacy_models.insert("models".into(), serde_json::json!(["m1", "m2"]));
+        let cfg = validate_provider_entry("lm", &legacy_models).expect("legacy list reads");
+        assert_eq!(cfg.model_ids(), vec!["m1", "m2"]);
+        assert!(cfg.models.iter().all(|m| m.tags.is_empty()));
+
+        // 逗号分隔字符串（/provider 卡片提交形态）同样兼容。
+        let mut comma = serde_json::Map::new();
+        comma.insert("base_url_anthropic".into(), serde_json::json!("https://x"));
+        comma.insert("models".into(), serde_json::json!("m1, m2"));
+        let cfg = validate_provider_entry("cm", &comma).expect("comma list reads");
+        assert_eq!(cfg.model_ids(), vec!["m1", "m2"]);
+
+        // 条目对象数组：id + 能力标记原样保留。
+        let mut entries = serde_json::Map::new();
+        entries.insert("base_url_anthropic".into(), serde_json::json!("https://x"));
+        entries.insert(
+            "models".into(),
+            serde_json::json!([{"id": "m1", "tags": ["vision"]}, {"id": "m2"}]),
         );
+        let cfg = validate_provider_entry("em", &entries).expect("entry objects read");
+        assert_eq!(cfg.models[0].id, "m1");
+        assert_eq!(
+            cfg.models[0].tags,
+            vec![crate::models::ModelCapability::Vision]
+        );
+        assert_eq!(cfg.models[1].tags, Vec::new());
+
+        // 未知能力标记 → 显式拒绝（task 1.4），错误含 provider 名与原词。
+        let mut unknown = serde_json::Map::new();
+        unknown.insert("base_url_anthropic".into(), serde_json::json!("https://x"));
+        unknown.insert("models".into(), serde_json::json!([{"id": "m1", "tags": ["telepathy"]}]));
+        let err = validate_provider_entry("um", &unknown).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("um") && msg.contains("telepathy"), "{msg}");
     }
 }

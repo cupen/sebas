@@ -4,11 +4,9 @@
 //! 只累积**中立** `ChannelElement`（`sebas-channels`），feishu 适配器把累积
 //! 结果按 spec 渲染成飞书 card JSON（decouple-feishu-channel task 3）。
 
-use sebas_acp::claude::session::AcpEvent;
-use sebas_channels::card::{
-    ChannelElement, CollapsiblePanel, DivText, RichText,
-};
 use crate::cards::CardConfig;
+use sebas_acp::claude::session::AcpEvent;
+use sebas_channels::card::{ChannelElement, CollapsiblePanel, DivText, RichText};
 
 /// 卡片累积的中立输入（extract-im-service）：core 内的 `AcpEvent` 与 im
 /// 进程经通道拉取的 turn 流都归一到此形状 —— 卡片机单份实现，两端复用
@@ -16,35 +14,69 @@ use crate::cards::CardConfig;
 /// 独立卡、usage 随 SessionInfo），故 `from_acp` 对其返回 None。
 #[derive(Debug, Clone)]
 pub enum CardInput {
-    TextDelta { delta: String },
-    ThinkingDelta { delta: String },
-    ToolStart { tool_name: String, args: serde_json::Value },
-    ToolEnd { tool_name: String, result: String },
-    ToolProgress { tool_name: String, progress: String },
+    TextDelta {
+        delta: String,
+    },
+    ThinkingDelta {
+        delta: String,
+    },
+    ToolStart {
+        tool_name: String,
+        args: serde_json::Value,
+    },
+    ToolEnd {
+        tool_name: String,
+        result: String,
+    },
+    ToolProgress {
+        tool_name: String,
+        progress: String,
+    },
     Finished,
-    Error { message: String },
-    ModelChanged { model_id: String },
+    Error {
+        message: String,
+    },
+    ModelChanged {
+        model_id: String,
+    },
 }
 
 impl CardInput {
     pub fn from_acp(event: &AcpEvent) -> Option<Self> {
         Some(match event {
-            AcpEvent::TextDelta { delta, .. } => CardInput::TextDelta { delta: delta.clone() },
-            AcpEvent::ThinkingDelta { delta, .. } => CardInput::ThinkingDelta { delta: delta.clone() },
-            AcpEvent::ToolStart { tool_name, args, .. } => {
-                CardInput::ToolStart { tool_name: tool_name.clone(), args: args.clone() }
-            }
-            AcpEvent::ToolEnd { tool_name, result, .. } => {
-                CardInput::ToolEnd { tool_name: tool_name.clone(), result: result.clone() }
-            }
-            AcpEvent::ToolProgress { tool_name, progress, .. } => {
-                CardInput::ToolProgress { tool_name: tool_name.clone(), progress: progress.clone() }
-            }
+            AcpEvent::TextDelta { delta, .. } => CardInput::TextDelta {
+                delta: delta.clone(),
+            },
+            AcpEvent::ThinkingDelta { delta, .. } => CardInput::ThinkingDelta {
+                delta: delta.clone(),
+            },
+            AcpEvent::ToolStart {
+                tool_name, args, ..
+            } => CardInput::ToolStart {
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            },
+            AcpEvent::ToolEnd {
+                tool_name, result, ..
+            } => CardInput::ToolEnd {
+                tool_name: tool_name.clone(),
+                result: result.clone(),
+            },
+            AcpEvent::ToolProgress {
+                tool_name,
+                progress,
+                ..
+            } => CardInput::ToolProgress {
+                tool_name: tool_name.clone(),
+                progress: progress.clone(),
+            },
             AcpEvent::Finished { .. } => CardInput::Finished,
-            AcpEvent::Error { message, .. } => CardInput::Error { message: message.clone() },
-            AcpEvent::ModelChanged { model_id, .. } => {
-                CardInput::ModelChanged { model_id: model_id.clone() }
-            }
+            AcpEvent::Error { message, .. } => CardInput::Error {
+                message: message.clone(),
+            },
+            AcpEvent::ModelChanged { model_id, .. } => CardInput::ModelChanged {
+                model_id: model_id.clone(),
+            },
             AcpEvent::PermissionRequest { .. } | AcpEvent::UsageUpdate { .. } => return None,
         })
     }
@@ -124,7 +156,10 @@ pub fn apply_input_to_card(body: &mut Vec<ChannelElement>, input: &CardInput, cf
                 push_tool_end_result(body, tool_name, result, cfg);
             }
         }
-        CardInput::ToolProgress { tool_name, progress } => {
+        CardInput::ToolProgress {
+            tool_name,
+            progress,
+        } => {
             if let Some(panel) = last_tool_panel_mut(body, tool_name) {
                 // 限制进度通知数量：超过上限时移除最旧的进度通知，
                 // 防止工具面板内部元素超 100 上限。
@@ -351,8 +386,9 @@ fn mark_parent_completed(body: &mut [ChannelElement]) {
 
 /// 在 body 中查找父级折叠面板的索引。
 fn find_tools_parent_index(body: &[ChannelElement]) -> Option<usize> {
-    body.iter()
-        .position(|el| matches!(el, ChannelElement::CollapsiblePanel(panel) if is_tools_parent(panel)))
+    body.iter().position(
+        |el| matches!(el, ChannelElement::CollapsiblePanel(panel) if is_tools_parent(panel)),
+    )
 }
 
 /// ThinkingDelta 折叠面板的标准标题。所有 thinking 面板共用此常量，
@@ -398,7 +434,9 @@ fn append_thinking_delta(body: &mut Vec<ChannelElement>, delta: &str, fold_long_
             panel.elements.push(ChannelElement::Markdown {
                 content: delta.to_string(),
             });
-            parent.elements.push(ChannelElement::CollapsiblePanel(panel));
+            parent
+                .elements
+                .push(ChannelElement::CollapsiblePanel(panel));
             return;
         }
     }
@@ -554,7 +592,11 @@ pub fn format_elapsed(d: &std::time::Duration) -> String {
 
 /// 更新父折叠面板标题，添加项数和经过时间。
 /// 标题格式：`"🤔 折腾中 · 3项 · 45s"` → Finished 后 `"✅ 已完成 · 5项 · 2m 30s"`。
-pub fn update_parent_title(body: &mut [ChannelElement], count: usize, elapsed: &std::time::Duration) {
+pub fn update_parent_title(
+    body: &mut [ChannelElement],
+    count: usize,
+    elapsed: &std::time::Duration,
+) {
     let Some(idx) = find_tools_parent_index(body) else {
         return;
     };
@@ -618,10 +660,13 @@ mod tests {
             &c,
         );
         let s = serde_json::to_string(&body).unwrap();
-        assert!(s.contains("(已折叠 1 字)") || s.contains("（已折叠 1 字）"), "{s}");
-        assert!(body
-            .iter()
-            .any(|el| matches!(el, ChannelElement::Markdown { content } if content.chars().count() <= 11)));
+        assert!(
+            s.contains("(已折叠 1 字)") || s.contains("（已折叠 1 字）"),
+            "{s}"
+        );
+        assert!(body.iter().any(
+            |el| matches!(el, ChannelElement::Markdown { content } if content.chars().count() <= 11)
+        ));
     }
 
     #[test]
@@ -637,7 +682,10 @@ mod tests {
             },
             &c,
         );
-        assert!(body.is_empty(), "hide 模式下 thinking 不进入 body: {body:?}");
+        assert!(
+            body.is_empty(),
+            "hide 模式下 thinking 不进入 body: {body:?}"
+        );
     }
 
     #[test]
@@ -665,7 +713,10 @@ mod tests {
         );
         let s = serde_json::to_string(&body).unwrap();
         assert!(!s.contains("shhh"), "max_tool_output_chars=0 屏蔽结果: {s}");
-        assert!(s.contains("✓ Bash"), "工具调用本身仍在（ToolEnd 后标题为 ✓ Bash）: {s}");
+        assert!(
+            s.contains("✓ Bash"),
+            "工具调用本身仍在（ToolEnd 后标题为 ✓ Bash）: {s}"
+        );
     }
 
     #[test]

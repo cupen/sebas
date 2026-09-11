@@ -9,6 +9,25 @@
 
 export type StatusSlug = 'starting' | 'queued' | 'working' | 'done' | 'failed' | 'dormant'
 
+/**
+ * 待生效提交的处置（workbench-turn-queue D1）：`staging` = 并入首条消息
+ * （spawn 窗口暂存）；`turn` = 按序执行的待执行回合。
+ */
+export type PendingDisposition = 'staging' | 'turn'
+
+/**
+ * One pending submission (workbench-turn-queue D1/D6): accepted by the core
+ * but not yet started. `position` is the delivery-order index (staging
+ * entries precede the turn queue); ids are per-session monotonic.
+ */
+export interface PendingSubmission {
+  id: number
+  text: string
+  position: number
+  disposition: PendingDisposition
+  priority: boolean
+}
+
 export interface SessionRow {
   encoded_key: string
   chat_id: string
@@ -34,6 +53,8 @@ export interface SessionRow {
   agent_kind: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
+  /** （workbench-turn-queue 7.4）待生效提交条数（Rail 关闭确认文案用）。 */
+  pending_count: number
 }
 
 export interface SessionSummary {
@@ -53,6 +74,13 @@ export interface SessionSummary {
   agent_kind: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
+  /** （workbench-turn-queue 6.1）待生效提交全量视图（投递序）。 */
+  pending: PendingSubmission[]
+  /**
+   * Focused session only（workbench-conversation-view 1.4）: the conversation
+   * as one ordered entry sequence, same shape as the detail endpoint.
+   */
+  entries?: ConversationEntryView[]
 }
 
 export interface CardConfig {
@@ -72,7 +100,21 @@ export interface ProviderInfo {
   base_url_openai_responses: string | null
 }
 
-/** /router/api/providers 的 admin 列表条目（BFF 透传 router admin API）。 */
+/**
+ * 模型条目的能力标记词表（redesign-provider-models-settings D2）。`text`
+ * 隐含于每个条目、**不在 wire 上出现**；其余三个显式标注多模态输入能力。
+ * 标记是纯展示/编辑用的元数据：不影响路由与请求准入。
+ */
+export type ModelCapability = 'vision' | 'audio' | 'video'
+
+/** provider 模型列表的一个条目（redesign-provider-models-settings 1.1）：
+ * 模型 id + 显式能力标记。遗留的裸字符串在读取侧归一化为 `tags: []`。 */
+export interface ProviderModelEntry {
+  id: string
+  tags: ModelCapability[]
+}
+
+/** /router/api/providers 的 admin 列表条目（BFF 透传 core 状态库投影）。 */
 export interface RouterProviderAdmin {
   name: string
   preset?: string | null
@@ -81,7 +123,13 @@ export interface RouterProviderAdmin {
   base_url_openai_responses: string | null
   api_key_env: string | null
   api_key_configured: boolean
-  models: string[]
+  models: ProviderModelEntry[]
+  /** 条目上存的默认 model（编辑回填用；null = 未设）。 */
+  default_model?: string | null
+  /** 协议偏好（auto/anthropic/openai；编辑回填用）。 */
+  protocol?: string | null
+  /** 上游 model id 改名映射（Advanced 编辑用；null/缺省 = 未设）。 */
+  model_map?: Record<string, string> | null
 }
 
 /** /router/api/presets 的条目（内置 preset 表只读视图，跟随代码）。 */
@@ -91,10 +139,13 @@ export interface ProviderPreset {
   base_url_openai_chat: string | null
   base_url_openai_responses: string | null
   api_key_env: string
-  models: string[]
+  models: ProviderModelEntry[]
 }
 
-/** provider 创建/编辑 payload（admin API 的键值子集）。 */
+/** provider 创建/编辑 payload（admin API 的键值子集）。`models` 是模型条目
+ *  目录（条目对象数组；add-fetch-models 起抓取结果的挑选经普通编辑写入）。
+ *  `api_key_env` 不再是表单输入（preset 的 env 名只是无明文 key 时的隐式
+ *  回退）；仅编辑路径静默回填存量值以防整体替换丢字段。 */
 export interface ProviderPayload {
   name?: string
   preset?: string
@@ -105,6 +156,8 @@ export interface ProviderPayload {
   api_key_env?: string
   default_model?: string
   protocol?: string
+  model_map?: Record<string, string>
+  models?: ProviderModelEntry[]
 }
 
 export interface RouterInfo {
@@ -115,18 +168,27 @@ export interface RouterInfo {
   providers: ProviderInfo[]
 }
 
-export interface CardElementView {
+/**
+ * One conversation entry on the session payload（workbench-conversation-view
+ * 1.1，design D1/D2）: `kind` is who produced it (`prompt` = operator
+ * submission, `content` = agent side), `element_type` is the render type
+ * (`markdown` | `thinking` | `tool` | `error`). The two sides of the
+ * conversation share one ordered sequence — a client never rebuilds the
+ * operator's turns from a separate field or from timestamps.
+ */
+export interface ConversationEntryView {
+  /** 0-based monotonic transcript position. */
+  position: number
+  kind: string
   element_type: string
   content: string
   /**
    * Unix seconds when this entry was appended (stamped at push time by
-   * the router). `0` for legacy entries that pre-date the field — the
-   * client treats those as "no timestamp known" and skips them from the
-   * seen-boundary calculation. The value is the stable-identity anchor
-   * used by the transcript view's seam visualisation: anchoring by
-   * position alone would drift onto a different element when an older
-   * card refreshes in place, because `transcript_push` does not bump
-   * `created_at_unix` on refresh.
+   * the core). `0` for entries without a known time — the client treats
+   * those as anchor-less for the seen-boundary seam. The value is the
+   * stable-identity anchor used by the conversation view's seam
+   * visualisation: anchoring by position alone would drift onto a
+   * different element when an older card refreshes in place.
    */
   created_at_unix: number
 }
@@ -139,8 +201,12 @@ export interface SessionDetail {
   status_label: string
   status_slug: StatusSlug
   status_glyph: string
-  user_prompt: string | null
-  body: CardElementView[]
+  /**
+   * The conversation as one ordered entry sequence（design D1）. The former
+   * single `user_prompt` and agent-output-only `body` fields are retired —
+   * a client SHALL NOT reconstruct operator turns from a separate field.
+   */
+  entries: ConversationEntryView[]
   msg_id: string | null
   last_active: string
   encoded_key: string
@@ -152,6 +218,8 @@ export interface SessionDetail {
   agent_kind: string | null
   /** （wire-webui-sebas-agent-e2e）会话所属执行体（"acp"/"native"）；null = 未打标。 */
   backend?: string | null
+  /** （workbench-turn-queue 6.1）待生效提交全量视图（投递序）。 */
+  pending: PendingSubmission[]
 }
 
 /**
@@ -533,8 +601,25 @@ export const api = {
     }),
   sendMessage: (encodedKey: string, message: string) =>
     post<{ status: string }>(`/api/sessions/${encodedKey}/message`, { message }),
+  /**
+   * （workbench-turn-queue 6.2/D8）移除一个未开始的待生效提交；成功返回
+   * 操作后的全量 pending（调用方据此对账，design D8）。拒绝类型化：未知
+   * id 404 / 已开始 409 / 越优先 409 / 越界 400。
+   */
+  removePending: (encodedKey: string, pendingId: number) =>
+    post<{ status: string; pending: PendingSubmission[] }>(
+      `/api/sessions/${encodedKey}/pending/${pendingId}/remove`,
+    ),
+  /** （workbench-turn-queue 6.2/D8）在处置组内把提交重排到 to_index。 */
+  movePending: (encodedKey: string, pendingId: number, toIndex: number) =>
+    post<{ status: string; pending: PendingSubmission[] }>(
+      `/api/sessions/${encodedKey}/pending/${pendingId}/move`,
+      { to_index: toIndex },
+    ),
+  /** close 返回 discarded_pending（workbench-turn-queue 5.2）：随之丢弃的
+   * 未执行待生效提交条数。 */
   closeSession: (encodedKey: string) =>
-    post<{ status: string; active_session_key: string | null }>(
+    post<{ status: string; active_session_key: string | null; discarded_pending: number }>(
       `/api/sessions/${encodedKey}/close`,
     ),
   switchSession: (encodedKey: string) =>
@@ -542,9 +627,18 @@ export const api = {
       `/api/sessions/${encodedKey}/switch`,
     ),
 
-  // Router provider 管理（BFF → router admin API；preset 表跟随代码）。
+  // Router provider 管理（BFF → core 状态库；preset 表跟随代码）。
   routerProviders: () =>
     get<{ providers: RouterProviderAdmin[] }>('/router/api/providers'),
+  /**
+   * （workbench-conversation-view 4.1）默认 provider/model 预选数据。数据
+   * 真源是 core 状态库（BFF 经状态 seam 读）；未设置 → 双 null；core 不可达
+   * → 503（ApiError），调用方据此落到「目录不可用」显式态。
+   */
+  routerDefaults: () =>
+    get<{ default_provider: string | null; default_model: string | null }>(
+      '/router/api/defaults',
+    ),
   routerPresets: () => get<{ presets: ProviderPreset[] }>('/router/api/presets'),
   routerProviderCreate: (payload: ProviderPayload) =>
     post<{ created: string }>('/router/api/providers', payload),
@@ -552,9 +646,15 @@ export const api = {
     put<{ updated: string }>(`/router/api/providers/${encodeURIComponent(name)}`, payload),
   routerProviderDelete: (name: string) =>
     del<{ deleted: string }>(`/router/api/providers/${encodeURIComponent(name)}`),
-  routerProviderProbe: (name: string) =>
-    post<{ models: string[]; applied: boolean }>(
-      `/router/api/providers/${encodeURIComponent(name)}/probe?apply=true`,
+  /**
+   * （add-fetch-models）从 provider 官方 base url 抓取 model id 列表。core
+   * 只读 GET，**不落库**：返回的 ids 仅用于呈现，挑选某个 id 才是普通编辑
+   * （routerProviderUpdate）。失败抛 ApiError，message 是净化后的原因
+   * （状态码/类别，绝无密钥材料）。
+   */
+  fetchProviderModels: (name: string) =>
+    post<{ provider: string; models: string[] }>(
+      `/router/api/providers/${encodeURIComponent(name)}/probe`,
     ),
 
   // Admin reads

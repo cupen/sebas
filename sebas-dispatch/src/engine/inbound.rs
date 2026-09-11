@@ -7,7 +7,7 @@
 //! 通道相关的门禁（chat_type / 群聊 @ bot 检测 / 去重）已下沉到各通道适配器，
 //! 核心只看到中立事件与 `ChannelKey`。
 
-use super::{Out, DispatchHandle, compose_media_prompt, text_from_caption};
+use super::{DispatchHandle, Out, compose_media_prompt, text_from_caption};
 use crate::cards::{CardConfig, ThinkingDisplay};
 use crate::cards_ui;
 use crate::commands::{Command, RouterAction, parse_command};
@@ -38,7 +38,10 @@ fn same_chat_context(a: &ChannelKey, b: &ChannelKey) -> bool {
 
 /// 引用的 chat 部分（`\0` 前；无 `\0` 时整个引用即 chat）。
 fn chat_part(reference: &str) -> &str {
-    reference.split_once('\0').map(|(c, _)| c).unwrap_or(reference)
+    reference
+        .split_once('\0')
+        .map(|(c, _)| c)
+        .unwrap_or(reference)
 }
 
 /// `/sessions` 列表里一行的话题后缀（` thread=<tid>`；无话题时空串）。
@@ -280,6 +283,17 @@ impl DispatchHandle {
                         .await;
                     }
                     Ok(crate::state::TextRoute::Enqueued) => {}
+                    // workbench-turn-queue 5.1（design D5）：满队列可见拒绝
+                    // ——IM 侧的出口是一条明确提示消息，不是静默吞掉。
+                    Ok(crate::state::TextRoute::Overflow { cap }) => {
+                        self.emit(Out::PlainText {
+                            key,
+                            content: format!(
+                                "队列已满（上限 {cap}）：这条消息没有提交，也没有顶掉已排队的消息。请稍后再发。"
+                            ),
+                        })
+                        .await;
+                    }
                     Err(e) => {
                         tracing::warn!(?e, "route_text failed");
                         self.emit(Out::HelpText { key }).await;
@@ -316,6 +330,16 @@ impl DispatchHandle {
                         .await;
                     }
                     Ok(crate::state::TextRoute::Enqueued) => {}
+                    // workbench-turn-queue 5.1（design D5）：同 PassThrough 臂。
+                    Ok(crate::state::TextRoute::Overflow { cap }) => {
+                        self.emit(Out::PlainText {
+                            key,
+                            content: format!(
+                                "队列已满（上限 {cap}）：这条消息没有提交，也没有顶掉已排队的消息。请稍后再发。"
+                            ),
+                        })
+                        .await;
+                    }
                     Err(e) => {
                         tracing::warn!(?e, "route_text failed");
                         self.emit(Out::HelpText { key }).await;
@@ -459,12 +483,8 @@ impl DispatchHandle {
                 let card = cards_ui::help_card(tab, &theme);
                 // 查找已有帮助卡 msg_id → 原地更新；没有则发新卡
                 if let Some(msg_id) = self.help_card_msg_id(&key).await {
-                    self.emit(Out::UpdateCardByMsgId {
-                        key,
-                        msg_id,
-                        card,
-                    })
-                    .await;
+                    self.emit(Out::UpdateCardByMsgId { key, msg_id, card })
+                        .await;
                 } else {
                     self.emit(Out::SendCard {
                         key,
@@ -719,55 +739,18 @@ impl DispatchHandle {
         key: ChannelKey,
         priority: bool,
     ) {
-        use crate::card_state::phase::WORKING;
-
-        // In-flight check: if the session's card is still streaming (WORKING),
-        // don't reset/don't POST a new card/don't SendAcp. Instead enqueue this
-        // turn and emit a ⏳ reaction on the in-flight card to signal back-pressure.
-        let in_flight = matches!(
-            self.card_states.status_emoji(&session_id).await.as_deref(),
-            Some(WORKING)
-        );
-        if in_flight {
-            self.map
-                .enqueue_turn(
-                    &key,
-                    crate::state::QueuedTurn {
-                        prompt,
-                        reply_to: root_id,
-                        priority,
-                    },
-                )
-                .await;
-            self.emit_reaction(&session_id, "⏳").await;
-            return;
-        }
-
-        // Settled path: DONE/FAILED -> flip to WORKING, flush, react, then emit
-        // per-turn card + SendAcp.
-        let flipped = self
-            .card_states
-            .apply(&session_id, |st| {
-                if matches!(
-                    st.status_emoji.as_str(),
-                    crate::card_state::phase::DONE | crate::card_state::phase::FAILED
-                ) {
-                    st.status_emoji = WORKING.into();
-                    true
-                } else {
-                    false
-                }
-            })
-            .await;
-        if flipped {
-            self.flush_card(&session_id).await;
-            self.emit_reaction(&session_id, WORKING).await;
-        }
-
-        // Emit the per-turn card that becomes the new streaming target
-        // (MsgIdMap flips to this card). Reset CardState so streaming
-        // body accumulates fresh (not appended to previous turn's body).
-        self.emit_turn_card(key, &session_id, prompt, root_id).await;
+        // workbench-turn-queue design D3：Feishu 路径与 web 路径共用同一个
+        // 提交入口（in-flight 判定 / 入队 / 开轮全部收敛在 submit_turn），
+        // 本函数只保留 Feishu 特有的反馈面（⏳ reaction、话题 root_id）。
+        self.submit_turn(
+            key,
+            &session_id,
+            prompt,
+            priority,
+            root_id,
+            super::TurnOrigin::Feishu,
+        )
+        .await;
     }
 
     async fn forward_to_session(&self, session_id: &str, text: String) {

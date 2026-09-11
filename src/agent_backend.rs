@@ -17,20 +17,21 @@
 use sebas_agent::llm::{
     AnthropicMessagesClient, LlmClient, LlmError, LlmRequest, LlmTurn, StreamEvent,
 };
-use sebas_agent::policy::{Approver, ApprovalAnswer, ApproverHub, PolicyConfig, PolicyEngine};
-use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::policy::SandboxMode;
+use sebas_agent::policy::{ApprovalAnswer, Approver, ApproverHub, PolicyConfig, PolicyEngine};
+use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_webui::session_backend::{
-    PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
+    CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
+    SessionRejection,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 /// One live native session: kernel handle + its rendered transcript.
 struct NativeSession {
@@ -91,7 +92,10 @@ impl NativeSession {
             project_dir: self.workdir.clone(),
             // wire-webui-sebas-agent-e2e: 原生内核可用模型来自装配期的环境
             // 变量清单；当前模型取会话级 override，缺省为内核默认。
-            current_model: self.current_model_override.clone().or(Some(self.default_model.clone())),
+            current_model: self
+                .current_model_override
+                .clone()
+                .or(Some(self.default_model.clone())),
             available_models: Some(self.available_models.clone()),
             // 原生内核不属于任何 ACP kind（add-composer-agent-binding）。
             agent_kind: None,
@@ -100,6 +104,7 @@ impl NativeSession {
             usage: None,
             // wire-webui-sebas-agent-e2e D4：native 会话在快照/事件中自带执行体标。
             backend: Some("native".into()),
+            pending: Vec::new(), // native 会话无 core 侧待执行栈
         }
     }
 }
@@ -159,12 +164,7 @@ impl NativeAgentBackend {
     /// `SEBAS_AGENT_MODEL` 推导，与管理器共享同一装配面（wire-webui-sebas-agent-e2e D5）。
     pub fn build_native_manager(
         bash_timeout: Duration,
-    ) -> (
-        Arc<SessionManager>,
-        Option<String>,
-        Vec<String>,
-        String,
-    ) {
+    ) -> (Arc<SessionManager>, Option<String>, Vec<String>, String) {
         let (client, cause): (Option<Arc<dyn LlmClient>>, Option<String>) = {
             let router_url = std::env::var("SEBAS_AGENT_ROUTER_URL").ok();
             if let Some(url) = router_url {
@@ -175,12 +175,13 @@ impl NativeAgentBackend {
                     None,
                 )
             } else {
-                let base =
-                    std::env::var("SEBAS_AGENT_PROVIDER_BASE_URL")
-                        .unwrap_or_else(|_| "https://api.anthropic.com".into());
+                let base = std::env::var("SEBAS_AGENT_PROVIDER_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.anthropic.com".into());
                 match std::env::var("SEBAS_AGENT_PROVIDER_API_KEY") {
                     Ok(key) if !key.is_empty() => (
-                        Some(Arc::new(AnthropicMessagesClient::direct_provider(base, key))),
+                        Some(Arc::new(AnthropicMessagesClient::direct_provider(
+                            base, key,
+                        ))),
                         None,
                     ),
                     _ => (
@@ -195,7 +196,8 @@ impl NativeAgentBackend {
             }
         };
 
-        let model = std::env::var("SEBAS_AGENT_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".into());
+        let model =
+            std::env::var("SEBAS_AGENT_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".into());
         // 无凭据时不 panic：以死客户端占位构造。`spawn` 先检查
         // `unavailable_cause` 并拒绝（诚实降级），占位客户端永远不被调用；
         // 直接调到它 = 既有门卫失效，terminal 错误立刻暴露。
@@ -297,7 +299,8 @@ impl NativeAgentBackend {
 
     async fn session_info(&self, encoded: &str) -> Option<SessionInfo> {
         let g = self.sessions.read().await;
-        g.get(encoded).map(|s| s.info(&Self::decode_agent_key(encoded)))
+        g.get(encoded)
+            .map(|s| s.info(&Self::decode_agent_key(encoded)))
     }
 
     fn decode_agent_key(encoded: &str) -> ChannelKey {
@@ -328,24 +331,42 @@ impl NativeAgentBackend {
             // 锁内只做变更与 frame 计算；发送在锁外（发事件会同步唤醒订阅者）。
             let frame: Option<SessionEvent> = {
                 let mut g = sessions.write().await;
-                let Some(session) = g.get_mut(&encoded) else { break };
+                let Some(session) = g.get_mut(&encoded) else {
+                    break;
+                };
                 match ev {
                     AE::TextDelta { delta, .. } => {
                         session.text_buf.push_str(&delta);
                         None
                     }
-                    AE::ThinkingDelta { .. } | AE::ToolProgress { .. } | AE::ToolFinish { .. } => None,
-                    AE::ToolStart { tool_name, args, .. } => {
+                    AE::ThinkingDelta { .. } | AE::ToolProgress { .. } | AE::ToolFinish { .. } => {
+                        None
+                    }
+                    AE::ToolStart {
+                        tool_name, args, ..
+                    } => {
                         let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
                         session
                             .push_markdown(format!("📖 **{tool_name}**\n```json\n{args_str}\n```"));
-                        Some(SessionEvent::Updated { session: session.info(&key) })
+                        Some(SessionEvent::Updated {
+                            session: session.info(&key),
+                        })
                     }
-                    AE::ToolEnd { tool_name, result, .. } => {
+                    AE::ToolEnd {
+                        tool_name, result, ..
+                    } => {
                         session.push_markdown(format!("✓ **{tool_name}**\n{result}"));
-                        Some(SessionEvent::Updated { session: session.info(&key) })
+                        Some(SessionEvent::Updated {
+                            session: session.info(&key),
+                        })
                     }
-                    AE::PermissionRequest { request_id, tool_name, args, reason, .. } => {
+                    AE::PermissionRequest {
+                        request_id,
+                        tool_name,
+                        args,
+                        reason,
+                        ..
+                    } => {
                         session.push_markdown(format!(
                             "⏳ **{tool_name}** awaits approval — {reason}"
                         ));
@@ -356,26 +377,43 @@ impl NativeAgentBackend {
                             args,
                             reason,
                         });
-                        Some(SessionEvent::Updated { session: session.info(&key) })
+                        Some(SessionEvent::Updated {
+                            session: session.info(&key),
+                        })
                     }
-                    AE::ToolPolicy { tool_name, outcome, .. } => {
+                    AE::ToolPolicy {
+                        tool_name, outcome, ..
+                    } => {
                         session.push_markdown(format!("🛡 **{tool_name}** policy: {outcome}"));
-                        Some(SessionEvent::Updated { session: session.info(&key) })
+                        Some(SessionEvent::Updated {
+                            session: session.info(&key),
+                        })
                     }
-                    AE::SessionSummary { turn_ms, model_calls, tool_calls, .. } => {
+                    AE::SessionSummary {
+                        turn_ms,
+                        model_calls,
+                        tool_calls,
+                        ..
+                    } => {
                         session.push_markdown(format!(
                             "🗒 turn summary — {model_calls} model calls, {tool_calls} tools, {turn_ms}ms"
                         ));
-                        Some(SessionEvent::Updated { session: session.info(&key) })
+                        Some(SessionEvent::Updated {
+                            session: session.info(&key),
+                        })
                     }
-                    AE::Error { message, terminal, .. } => {
+                    AE::Error {
+                        message, terminal, ..
+                    } => {
                         session.push_markdown(format!("⚠ {message}"));
                         removed = terminal;
                         None
                     }
                     AE::Finished { .. } => {
                         session.flush_text();
-                        Some(SessionEvent::Updated { session: session.info(&key) })
+                        Some(SessionEvent::Updated {
+                            session: session.info(&key),
+                        })
                     }
                 }
             };
@@ -403,8 +441,10 @@ impl NativeAgentBackend {
 impl SessionBackend for NativeAgentBackend {
     async fn snapshot(&self) -> Vec<SessionInfo> {
         let g = self.sessions.read().await;
-        let mut out: Vec<SessionInfo> =
-            g.iter().map(|(encoded, s)| s.info(&Self::decode_agent_key(encoded))).collect();
+        let mut out: Vec<SessionInfo> = g
+            .iter()
+            .map(|(encoded, s)| s.info(&Self::decode_agent_key(encoded)))
+            .collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.last_active_unix));
         out
     }
@@ -445,7 +485,10 @@ impl SessionBackend for NativeAgentBackend {
         let handle = self.manager.create_session(workdir);
         // Native sessions live on the feishu channel with a bare
         // `agent-{8-hex}` reference (no thread part).
-        let key = ChannelKey::new("feishu", format!("agent-{}", &handle.key[..8.min(handle.key.len())]));
+        let key = ChannelKey::new(
+            "feishu",
+            format!("agent-{}", &handle.key[..8.min(handle.key.len())]),
+        );
         let encoded = Self::encode_key(&key);
         {
             let mut g = self.sessions.write().await;
@@ -495,7 +538,11 @@ impl SessionBackend for NativeAgentBackend {
     /// 当前模型字段，再下发内核 `set_model` 命令作用于后续 turn。`model_id`
     /// 不在 `available_models` 内仍接受（与 ACP 行为一致 —— 模型 ID 合法性
     /// 由内核 LLM 客户端实时校验）。
-    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+    async fn set_session_model(
+        &self,
+        key: ChannelKey,
+        model_id: String,
+    ) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
         let mut g = self.sessions.write().await;
         let Some(session) = g.get_mut(&encoded) else {
@@ -516,14 +563,15 @@ impl SessionBackend for NativeAgentBackend {
         Ok(())
     }
 
-    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection> {
         let encoded = Self::encode_key(&key);
         let mut g = self.sessions.write().await;
         let Some(session) = g.remove(&encoded) else {
             return Err(SessionRejection::UnknownSession { key: encoded });
         };
         session.handle.cancel().await;
-        Ok(())
+        // native 内核没有 core 侧待执行栈（提交即投递）。
+        Ok(CloseReport::default())
     }
 
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
@@ -544,7 +592,9 @@ impl SessionBackend for NativeAgentBackend {
         match &self.unavailable_cause {
             // A1.1: this seam only knows "the agent is unavailable right now"
             // — the generic runtime-down shape of the three-way enum.
-            Some(cause) => Reachability::Disconnected { cause: cause.clone() },
+            Some(cause) => Reachability::Disconnected {
+                cause: cause.clone(),
+            },
             None => Reachability::Reachable,
         }
     }
@@ -682,8 +732,7 @@ impl DualSessionBackend {
     /// ACP 侧的 agent kinds 把关，这里只看词汇形式。
     fn validate_agent_id(agent: &str) -> Result<(), SessionRejection> {
         let legacy = agent == "acp" || agent.starts_with("acp:");
-        let valid = !legacy
-            && (agent == "native" || (!agent.is_empty() && !agent.contains(':')));
+        let valid = !legacy && (agent == "native" || (!agent.is_empty() && !agent.contains(':')));
         if valid {
             Ok(())
         } else {
@@ -731,6 +780,25 @@ impl SessionBackend for DualSessionBackend {
 
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    // make-core-own-provider-data 3.1：状态库域不属于任何一个执行体（provider
+    // /aliases/settings/projects/presets 是 core 持有的共享数据）。复合后端
+    // 必须转发到承载状态库的一侧（acp 桥，内嵌形态即 InProcessBackend→
+    // engine），否则内嵌 webui 的 provider 管理面会误报不可达。native 侧
+    // 不持有状态库。
+    async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {
+        self.acp.state_snapshot(domain).await
+    }
+
+    async fn state_mutate(&self, domain: &str, payload: serde_json::Value) -> Result<(), String> {
+        self.acp.state_mutate(domain, payload).await
+    }
+
+    // add-fetch-models：抓取 op 与状态库域同归属（core 持有的共享数据面），
+    // 复合后端转发到承载状态库的一侧。
+    async fn fetch_provider_models(&self, provider: &str) -> Result<Vec<String>, String> {
+        self.acp.fetch_provider_models(provider).await
     }
 
     async fn spawn(
@@ -793,7 +861,7 @@ impl SessionBackend for DualSessionBackend {
         self.route(&key).message(key, message).await
     }
 
-    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection> {
         self.route(&key).close(key).await
     }
 
@@ -801,7 +869,11 @@ impl SessionBackend for DualSessionBackend {
         self.route(&key).cancel(key).await
     }
 
-    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+    async fn set_session_model(
+        &self,
+        key: ChannelKey,
+        model_id: String,
+    ) -> Result<(), SessionRejection> {
         // wire-webui-sebas-agent-e2e：按 key 分发。原生 key 路由到内核，
         // ACP key 走既有 InProcessBackend 的 Out::SendAcp SetModel。
         self.route(&key).set_session_model(key, model_id).await
@@ -818,7 +890,9 @@ impl SessionBackend for DualSessionBackend {
         self.acp.reachability().await
     }
 
-    async fn execution_bodies(&self) -> Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>> {
+    async fn execution_bodies(
+        &self,
+    ) -> Option<Vec<sebas_webui::session_backend::ExecutionBodyStatus>> {
         // A1.1：三类不可达对逐体上报同义——body 不可用，cause 原样透传。
         let to_body = |name: &str, r: Reachability| match r {
             Reachability::Reachable => sebas_webui::session_backend::ExecutionBodyStatus {
@@ -846,7 +920,11 @@ impl SessionBackend for DualSessionBackend {
     }
 
     async fn answer_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        if self.native.answer_permission(request_id, decision.clone()).await {
+        if self
+            .native
+            .answer_permission(request_id, decision.clone())
+            .await
+        {
             return true;
         }
         self.acp.answer_permission(request_id, decision).await
@@ -864,10 +942,10 @@ fn agent_sandbox_mode() -> SandboxMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sebas_channels::ChannelKey;
     use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
     use sebas_agent::llm::fake::FakeLlmClient;
     use sebas_agent::policy::NetworkMode;
+    use sebas_channels::ChannelKey;
     use sebas_dispatch::engine::Out;
     use sebas_dispatch::state::{Mapping, SessionMap};
 
@@ -943,8 +1021,14 @@ mod tests {
         // turns：transcript 里能看到审批与工具痕迹。
         let turns = backend.turns(key.clone(), 0).await.unwrap();
         let joined: String = turns.iter().map(|t| t.content.clone()).collect();
-        assert!(joined.contains("bash"), "tool trace in transcript: {joined}");
-        assert!(joined.contains("policy"), "policy event in transcript: {joined}");
+        assert!(
+            joined.contains("bash"),
+            "tool trace in transcript: {joined}"
+        );
+        assert!(
+            joined.contains("policy"),
+            "policy event in transcript: {joined}"
+        );
         assert!(
             joined.contains("gated call was approved"),
             "completion text in transcript: {joined}"
@@ -957,10 +1041,9 @@ mod tests {
 
     #[tokio::test]
     async fn dual_routes_on_backend_hint_and_prefix() {
-        let acp: Arc<dyn SessionBackend> =
-            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
-                make_router().await,
-            ));
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
         // backend hint = native → key 前缀 agent-；创建时选定的模型随 spawn
         // 生效于会话级 override（4.2：选中生效于快照）。
@@ -995,17 +1078,21 @@ mod tests {
     // typed rejection，不再无条件转发 ACP。
     #[tokio::test]
     async fn dual_set_session_model_routes_native_key_and_rejects_unknown() {
-        let acp: Arc<dyn SessionBackend> =
-            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
-                make_router().await,
-            ));
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
 
         // native key：spawn（隔离 workdir）→ 放行 gated 调用 → 等 turn 收尾，
         // 让 set_model 走内核空闲期路径（turn 中收下、下一 turn 才生效）。
         let ws = tempfile::tempdir().unwrap();
         let key = dual
-            .spawn_with("go".into(), Some(ws.path().to_string_lossy().into()), "native", None)
+            .spawn_with(
+                "go".into(),
+                Some(ws.path().to_string_lossy().into()),
+                "native",
+                None,
+            )
             .await
             .expect("spawn native");
         let mut notices = dual.permission_requests().expect("dual has notices");
@@ -1058,10 +1145,9 @@ mod tests {
     // agent id 一律 typed rejection 且不建会话。
     #[tokio::test]
     async fn invalid_agent_values_reject_without_session() {
-        let acp: Arc<dyn SessionBackend> =
-            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
-                make_router().await,
-            ));
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
         let dual = DualSessionBackend::new(acp, NativeAgentBackend::with_manager(manager()));
 
         // 词汇形式非法：driver 命名空间残留（acp:*）、空串。
@@ -1082,11 +1168,15 @@ mod tests {
             );
         }
         // 占位创建同受校验；且全程未产生任何会话。
-        assert!(dual
-            .create_placeholder(None, "acp:claude", None)
-            .await
-            .is_err());
-        assert!(dual.snapshot().await.is_empty(), "no session may be created");
+        assert!(
+            dual.create_placeholder(None, "acp:claude", None)
+                .await
+                .is_err()
+        );
+        assert!(
+            dual.snapshot().await.is_empty(),
+            "no session may be created"
+        );
 
         // 合法 agent id（含大小写敏感的普通 id、native）放行路由。
         for agent in ["claude", "native"] {
@@ -1100,13 +1190,15 @@ mod tests {
     // 不再复用"核心不可达"文案。
     #[tokio::test]
     async fn native_missing_credentials_rejection_names_the_backend() {
-        let acp: Arc<dyn SessionBackend> =
-            Arc::new(sebas_webui::session_backend::InProcessBackend::new(
-                make_router().await,
-            ));
+        let acp: Arc<dyn SessionBackend> = Arc::new(
+            sebas_webui::session_backend::InProcessBackend::new(make_router().await),
+        );
         let native = NativeAgentBackend::with_manager_arc(
             Arc::new(manager()),
-            Some("native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)".into()),
+            Some(
+                "native backend needs SEBAS_AGENT_PROVIDER_API_KEY (or SEBAS_AGENT_ROUTER_URL)"
+                    .into(),
+            ),
             vec!["claude-sonnet-4-5".into()],
             "claude-sonnet-4-5".into(),
         );
@@ -1124,10 +1216,9 @@ mod tests {
 
     /// 出站接收端必须保活：router 发送在通道关闭时会 panic。
     async fn make_router() -> sebas_dispatch::DispatchHandle {
-        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(sebas_dispatch::SessionMap::new());
-        tokio::spawn(async move {
-            while out_rx.recv().await.is_some() {}
-        });
+        let (router, mut out_rx) =
+            sebas_dispatch::DispatchHandle::new(sebas_dispatch::SessionMap::new());
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
         router
     }
 
@@ -1146,7 +1237,8 @@ mod tests {
         let acp: Arc<dyn SessionBackend> = Arc::new(
             sebas_webui::session_backend::InProcessBackend::new(router.clone()),
         );
-        let dual = DualSessionBackend::new(acp.clone(), NativeAgentBackend::with_manager(manager()));
+        let dual =
+            DualSessionBackend::new(acp.clone(), NativeAgentBackend::with_manager(manager()));
 
         // 订阅 acp 后端审查卡流，再触发权限请求。
         let mut notices = acp.permission_requests().expect("acp has notices");

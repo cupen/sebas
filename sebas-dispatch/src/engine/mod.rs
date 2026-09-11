@@ -176,9 +176,32 @@ pub enum Out {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloseOutcome {
     /// Session was found and torn down (mapping dropped, child killed).
-    Closed,
+    /// `discarded_pending` is the number of pending submissions that died
+    /// with it (design D5 — a close must name what it threw away).
+    Closed { discarded_pending: usize },
     /// No mapping exists for `key` (already closed, or stale URL).
     NotFound,
+}
+
+/// web 消息路径的类型化拒绝（workbench-turn-queue 5.1，design D5）：目前唯
+/// 一的拒绝是 staging 队列溢出——携带上限，提交面映射为可见 4xx。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueFull {
+    pub cap: usize,
+}
+
+/// 提交来源（design D3）：决定 back-pressure 下的反馈面——Feishu 在在飞卡
+/// 上打 ⏳ reaction，web 侧经 SessionInfo.pending 可见即可。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOrigin {
+    Feishu,
+    Web,
+}
+
+impl TurnOrigin {
+    fn is_feishu(self) -> bool {
+        matches!(self, TurnOrigin::Feishu)
+    }
 }
 
 pub struct DispatchHandle {
@@ -444,10 +467,42 @@ impl DispatchHandle {
             available_models: m.available_models.clone(),
             agent_kind: m.pending_kind.clone(),
             usage,
+            // workbench-turn-queue D6：待生效提交全量随 SessionInfo 下发
+            //（快照与每次事件都携带，投递序）。
+            pending: self.map.pending_submissions(key).await,
             // 执行体归属由复合后端在快照/事件出口统一打标（D4）；router 自身
             // 只跟踪 ACP 侧映射，留 None 交给上游。
             backend: None,
         })
+    }
+
+    /// The session's pending submissions (delivery order). Empty for unknown
+    /// keys and for backends without a queue (native kernel sessions).
+    pub async fn session_pending(&self, key: &ChannelKey) -> Vec<crate::state::PendingSubmission> {
+        self.map.pending_submissions(key).await
+    }
+
+    /// Remove a pending submission by id（design D7）。返回操作后的全量
+    /// pending 视图（成功时），或类型化拒绝。
+    pub async fn remove_pending(
+        &self,
+        key: &ChannelKey,
+        pending_id: u64,
+    ) -> Result<Vec<crate::state::PendingSubmission>, crate::state::PendingOpError> {
+        self.map.remove_pending(key, pending_id).await?;
+        Ok(self.map.pending_submissions(key).await)
+    }
+
+    /// Reorder a pending submission to `to_index` within its disposition
+    /// group（design D7）。返回操作后的全量 pending 视图（成功时）。
+    pub async fn move_pending(
+        &self,
+        key: &ChannelKey,
+        pending_id: u64,
+        to_index: usize,
+    ) -> Result<Vec<crate::state::PendingSubmission>, crate::state::PendingOpError> {
+        self.map.move_pending(key, pending_id, to_index).await?;
+        Ok(self.map.pending_submissions(key).await)
     }
 
     /// The session's transcript after `from` (monotonic positions).
@@ -735,9 +790,12 @@ impl DispatchHandle {
                 tool_name, args, ..
             } => {
                 let args_str = serde_json::to_string_pretty(args).unwrap_or_default();
+                // workbench-conversation-view 1.3（design D2）：工具条目打
+                // `element_type = "tool"` 标签（内容仍为可读 markdown），让
+                // 前端把工具调用与正文区分开、收进可展开组。
                 self.transcript_push(
                     session_id,
-                    TurnEntry::markdown(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```")),
+                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```")),
                 )
                 .await;
             }
@@ -746,7 +804,7 @@ impl DispatchHandle {
             } => {
                 self.transcript_push(
                     session_id,
-                    TurnEntry::markdown(0, format!("✓ **{tool_name}**\n{result}")),
+                    TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}")),
                 )
                 .await;
             }
@@ -986,7 +1044,10 @@ impl DispatchHandle {
         model: Option<sebas_acp::AcpModelInfo>,
     ) -> Vec<String> {
         let existed = self.map.get(key).await.is_some();
-        let pending = self.map.activate(key, session_id, acp_session_id, model).await;
+        let pending = self
+            .map
+            .activate(key, session_id, acp_session_id, model)
+            .await;
         if existed {
             self.publish_updated(key).await;
         } else {
@@ -1141,11 +1202,26 @@ impl DispatchHandle {
         }
     }
 
-    pub async fn web_send_message(&self, key: ChannelKey, message: String) {
+    /// Send a message to an existing session from the WebUI. Returns
+    /// `Err(QueueFull)` when the spawn-window staging queue is at its cap —
+    /// the caller must reject visibly (workbench-turn-queue 5.1, design D5).
+    /// Routes the message through the session map (same logic as Feishu
+    /// text messages) and emits the appropriate Out instruction. Command
+    /// text is parsed like the Feishu path (B 档冒烟 2026-09-04：webui 直达
+    /// 路径此前把 `/cancel` 当普通 prompt 发给 opencode，中断无效）。
+    pub async fn web_send_message(
+        &self,
+        key: ChannelKey,
+        message: String,
+    ) -> Result<(), QueueFull> {
         match crate::commands::parse_command(&message) {
             // 命令臂：无活跃会话明确回复（与 feishu 路径一致，sebas-ixv）。
             Command::Cost | Command::Cancel | Command::Status => {
-                let sid = self.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned));
+                let sid = self
+                    .map
+                    .get(&key)
+                    .await
+                    .and_then(|m| m.session_id().map(str::to_owned));
                 if let Some(sid) = sid {
                     let cmd = match crate::commands::parse_command(&message) {
                         Command::Cost => AcpCommand::ContinueSession {
@@ -1156,22 +1232,34 @@ impl DispatchHandle {
                             session_id: sid.clone(),
                             prompt: "/status".into(),
                         },
-                        Command::Cancel => AcpCommand::Cancel { session_id: sid.clone() },
+                        Command::Cancel => AcpCommand::Cancel {
+                            session_id: sid.clone(),
+                        },
                         _ => unreachable!(),
                     };
-                    self.emit(Out::SendAcp { session_id: sid, cmd }).await;
+                    self.emit(Out::SendAcp {
+                        session_id: sid,
+                        cmd,
+                    })
+                    .await;
                 } else {
                     let cmd = message.split_whitespace().next().unwrap_or("");
                     self.emit(Out::PlainText {
                         key,
-                        content: format!("当前没有活跃会话，{cmd} 需要活跃会话。发送 /new 开始新会话。"),
+                        content: format!(
+                            "当前没有活跃会话，{cmd} 需要活跃会话。发送 /new 开始新会话。"
+                        ),
                     })
                     .await;
                 }
-                return;
+                return Ok(());
             }
             Command::Compact => {
-                let sid = self.map.get(&key).await.and_then(|m| m.session_id().map(str::to_owned));
+                let sid = self
+                    .map
+                    .get(&key)
+                    .await
+                    .and_then(|m| m.session_id().map(str::to_owned));
                 if let Some(sid) = sid {
                     self.emit(Out::SendAcp {
                         session_id: sid.clone(),
@@ -1184,11 +1272,12 @@ impl DispatchHandle {
                 } else {
                     self.emit(Out::PlainText {
                         key,
-                        content: "当前没有活跃会话，/compact 需要活跃会话。发送 /new 开始新会话。".into(),
+                        content: "当前没有活跃会话，/compact 需要活跃会话。发送 /new 开始新会话。"
+                            .into(),
                     })
                     .await;
                 }
-                return;
+                return Ok(());
             }
             // 其余命令/普通文本：webui 侧不处理的命令保持原行为（不静默
             // 截留），与 feishu 路径的 PassThrough 语义一致。
@@ -1196,22 +1285,12 @@ impl DispatchHandle {
         }
         match self.map.route_text(key.clone(), message.clone()).await {
             Ok(crate::state::TextRoute::Continue(sid)) => {
-                // 记录本轮用户 prompt 到 transcript（与 feishu 路径的
-                // seed_card 对齐）：否则 WebUI composer 发出的消息不出现在
-                // 会话记录里，turn-content 检索漏掉这一轮的提问。
-                self.transcript_push(&sid, TurnEntry::prompt(0, message.clone()))
+                // 共享提交入口（design D3）：WORKING → 入队（不写 transcript、
+                // 不发 SendAcp）；否则开新轮。prompt 一律由 seed_card 在开轮
+                // 时写入 transcript（design D4——提交即写会让在跑回合的输出
+                // 被插话切开）。
+                self.submit_turn(key, &sid, message, false, None, TurnOrigin::Web)
                     .await;
-                // The route touched last_active on the mapping — push an
-                // Updated so subscribers refresh recency (and phase).
-                self.publish_updated(&key).await;
-                self.emit(Out::SendAcp {
-                    session_id: sid.clone(),
-                    cmd: AcpCommand::ContinueSession {
-                        session_id: sid,
-                        prompt: message,
-                    },
-                })
-                .await;
             }
             Ok(crate::state::TextRoute::SpawnNew) => {
                 // route_text inserted a Spawning placeholder for `key`. A
@@ -1255,12 +1334,17 @@ impl DispatchHandle {
                 .await;
             }
             Ok(crate::state::TextRoute::Enqueued) => {
-                tracing::debug!("web message queued (session already spawning)");
+                tracing::debug!("web message staged (session spawning); visible as pending");
+            }
+            // 5.1（design D5）：满队列可见拒绝——提交面映射 4xx。
+            Ok(crate::state::TextRoute::Overflow { cap }) => {
+                return Err(QueueFull { cap });
             }
             Err(e) => {
                 tracing::warn!(?e, "web_send_message: route_text failed");
             }
         }
+        Ok(())
     }
 
     /// Mark `key` as the currently focused WebUI session. The dashboard
@@ -1293,6 +1377,18 @@ impl DispatchHandle {
         };
         let session_id_opt = mapping.session_id().map(|s| s.to_string());
 
+        // design D5：在移除映射之前盘点未执行的待生效提交并发出 PendingDropped
+        // ——关闭带队列的会话绝不静默丢队，观察者收到逐条标注。
+        let pending = self.map.pending_submissions(&key).await;
+        let discarded_pending = pending.len();
+        if !pending.is_empty() {
+            self.publish(SessionEvent::PendingDropped {
+                channel: key.channel_str().to_string(),
+                key: key.reference.clone(),
+                dropped: pending,
+            });
+        }
+
         // Active sessions have a live child — kill it before dropping state.
         // Dormant mappings (restored from disk) have no child; Spawning
         // placeholders have a child we never tracked, so we don't kill
@@ -1323,7 +1419,7 @@ impl DispatchHandle {
         if active.as_ref() == Some(&key) {
             *active = None;
         }
-        CloseOutcome::Closed
+        CloseOutcome::Closed { discarded_pending }
     }
 
     /// Emit a per-turn card and ContinueSession command.
@@ -1376,6 +1472,78 @@ impl DispatchHandle {
         // detached frontends flip the row off done/working immediately.
         // Covers both the continue_session and drain_queue_if_terminal paths.
         self.publish_updated(&key).await;
+    }
+
+    /// 提交一次回合（workbench-turn-queue design D3）：所有通道共用的唯一
+    /// in-flight 判定与投递入口。卡片仍在 WORKING → `enqueue_turn` 进
+    /// back-pressure（D4：发一次 Updated，pending 即时可见、last_active 不变；
+    /// prompt **不**写 transcript——它由 `emit_turn_card`→`seed_card` 在开轮
+    /// 时写入）；否则翻转 DONE/FAILED → WORKING 并开新轮（出卡 + SendAcp）。
+    /// Feishu 的 `inbound::continue_session` 与 web 的 `TextRoute::Continue`
+    /// 分支都改调它，两条路径不再各写一份判定。
+    async fn submit_turn(
+        &self,
+        key: ChannelKey,
+        session_id: &str,
+        prompt: String,
+        priority: bool,
+        reply_to: Option<String>,
+        origin: TurnOrigin,
+    ) {
+        use crate::card_state::phase::WORKING;
+
+        // In-flight check: if the session's card is still streaming (WORKING),
+        // don't reset/don't POST a new card/don't SendAcp. Enqueue this turn
+        // instead (back-pressure); Feishu additionally signals it with a ⏳
+        // reaction on the in-flight card.
+        let in_flight = matches!(
+            self.card_states.status_emoji(session_id).await.as_deref(),
+            Some(WORKING)
+        );
+        if in_flight {
+            self.map
+                .enqueue_turn(
+                    &key,
+                    crate::state::QueuedTurn::new(prompt, reply_to, priority),
+                )
+                .await;
+            if origin.is_feishu() {
+                self.emit_reaction(session_id, "⏳").await;
+            }
+            // D4：入队即发布 Updated——pending 随 SessionInfo 首次出现在观察
+            // 面，且 last_active 已随 route_text 触碰（recent 排序不变）。
+            self.publish_updated(&key).await;
+            return;
+        }
+
+        // Settled path: DONE/FAILED -> flip to WORKING, flush, react, then emit
+        // per-turn card + SendAcp. The prompt lands in the transcript at turn
+        // start (seed_card), never at submission time (D4).
+        let flipped = self
+            .card_states
+            .apply(session_id, |st| {
+                if matches!(
+                    st.status_emoji.as_str(),
+                    crate::card_state::phase::DONE | crate::card_state::phase::FAILED
+                ) {
+                    st.status_emoji = WORKING.into();
+                    true
+                } else {
+                    false
+                }
+            })
+            .await;
+        if flipped {
+            self.flush_card(session_id).await;
+            if origin.is_feishu() {
+                self.emit_reaction(session_id, WORKING).await;
+            }
+        }
+
+        // Emit the per-turn card that becomes the new streaming target
+        // (MsgIdMap flips to this card). Reset CardState so streaming
+        // body accumulates fresh (not appended to previous turn's body).
+        self.emit_turn_card(key, session_id, prompt, reply_to).await;
     }
 
     /// Drain ONE queued turn if the session is in a terminal state (DONE/FAILED)

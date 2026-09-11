@@ -19,9 +19,11 @@
 use crate::engine::Out;
 // `SelectOption` 仅在 #[cfg(test)] 的 provider_spec helper 里用到，lib 构建
 // 会触发 unused_imports warning，故显式 allow。
-#[allow(unused_imports)]
-use sebas_channels::card::{ButtonSpec, ChannelCard, ChannelElement, FormField, FormSpec, SelectOption};
 use sebas_channels::ChannelKey;
+#[allow(unused_imports)]
+use sebas_channels::card::{
+    ButtonSpec, ChannelCard, ChannelElement, FormField, FormSpec, SelectOption,
+};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -349,11 +351,7 @@ impl ProviderForms {
     ) -> crate::engine::Out {
         let card = self.build_list_card().await;
         match message_id {
-            Some(msg_id) => crate::engine::Out::UpdateCardByMsgId {
-                key,
-                msg_id,
-                card,
-            },
+            Some(msg_id) => crate::engine::Out::UpdateCardByMsgId { key, msg_id, card },
             None => crate::engine::Out::SendCard {
                 key,
                 card,
@@ -701,7 +699,11 @@ impl<S: CrudStore> CrudForm<S> {
         out
     }
 
-    fn render_edit_card(&self, initial: &BTreeMap<String, String>, id: Option<&str>) -> ChannelCard {
+    fn render_edit_card(
+        &self,
+        initial: &BTreeMap<String, String>,
+        id: Option<&str>,
+    ) -> ChannelCard {
         let mut submit = Map::new();
         submit.insert(KEY_FORM.into(), Value::String(self.spec.form_name.clone()));
         submit.insert(KEY_OP.into(), Value::String(OP_SUBMIT.into()));
@@ -727,7 +729,11 @@ impl<S: CrudStore> CrudForm<S> {
                 self.payload(OP_FETCH_MODELS, id),
             ));
         }
-        actions.push(ButtonSpec::new("取消", "default", self.payload(OP_CANCEL, None)));
+        actions.push(ButtonSpec::new(
+            "取消",
+            "default",
+            self.payload(OP_CANCEL, None),
+        ));
         card.push_actions(actions);
         card
     }
@@ -814,6 +820,20 @@ fn scalar_display(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "—".into(),
+        // 列表（redesign-provider-models-settings 起包括 `models` 条目数组）
+        // 显示为逗号分隔的 id/标量文本——卡片表单字段是标量文本框，回显
+        // 原始 JSON 会诱导用户提交出损坏数据；id 回显则未修改提交即干净
+        // 往返（store 归一化把逗号字符串再写成条目）。
+        Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.get("id").and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(","),
         other => other.to_string(),
     }
 }
@@ -847,6 +867,19 @@ fn upsert_item(items: &mut Vec<Item>, item: Item, id_field: &str) {
 mod tests {
     use super::*;
     use crate::test_util::lock_state_file;
+
+    /// redesign-provider-models-settings：条目数组在卡片表单里显示为逗号
+    /// 分隔 id（不回显原始 JSON——未修改提交才不会把 JSON 文本当模型名写回）。
+    #[test]
+    fn scalar_display_renders_entry_arrays_as_comma_ids() {
+        let entries = serde_json::json!([
+            { "id": "m1", "tags": ["vision"] },
+            { "id": "m2", "tags": [] }
+        ]);
+        assert_eq!(scalar_display(&entries), "m1,m2");
+        // 遗留字符串数组同样显示为逗号文本。
+        assert_eq!(scalar_display(&serde_json::json!(["a", "b"])), "a,b");
+    }
 
     // openspec/specs/provider-management/spec.md：FileStore 持久化到 unified state.json（路径由
     // SEBAS_STATE_FILE 决定）。所有写盘的测试都要先把 SEBAS_STATE_FILE 指

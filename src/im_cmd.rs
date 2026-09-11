@@ -7,10 +7,10 @@
 
 use crate::config::Config;
 use crate::error::{Result, SebasError};
-use sebas_im::frontend::ImFrontend;
-use sebas_im::port::{ControlPort, ControlRequest, CoreSessionPort};
 use sebas_channels::ChannelKey;
 use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_im::frontend::ImFrontend;
+use sebas_im::port::{ControlPort, ControlRequest, CoreSessionPort};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice, SessionBackend};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -42,9 +42,9 @@ impl CoreSessionPort for ChannelPort {
         use sebas_webui::session_backend::Reachability;
         match self.backend.reachability().await {
             Reachability::Reachable => None,
-            Reachability::StartupFailed { cause } | Reachability::AuthRejected { cause } | Reachability::Disconnected { cause } => {
-                Some(cause)
-            }
+            Reachability::StartupFailed { cause }
+            | Reachability::AuthRejected { cause }
+            | Reachability::Disconnected { cause } => Some(cause),
         }
     }
     async fn ensure_message(
@@ -67,7 +67,11 @@ impl CoreSessionPort for ChannelPort {
             .map_err(|r| format!("{r:?}"))
     }
     async fn close(&self, key: ChannelKey) -> std::result::Result<(), String> {
-        self.backend.close(key).await.map_err(|r| format!("{r:?}"))
+        self.backend
+            .close(key)
+            .await
+            .map(|_| ())
+            .map_err(|r| format!("{r:?}"))
     }
     async fn cancel(&self, key: ChannelKey) -> std::result::Result<(), String> {
         self.backend.cancel(key).await.map_err(|r| format!("{r:?}"))
@@ -99,8 +103,13 @@ struct WatchdogControl {
 }
 
 impl WatchdogControl {
-    async fn send(&self, request: crate::watchdog::control_rpc::RpcControlRequest) -> std::result::Result<String, String> {
-        use crate::watchdog::control_rpc::{request as rpc_request, ControlEnvelope, RpcActor, RpcControlResponse};
+    async fn send(
+        &self,
+        request: crate::watchdog::control_rpc::RpcControlRequest,
+    ) -> std::result::Result<String, String> {
+        use crate::watchdog::control_rpc::{
+            ControlEnvelope, RpcActor, RpcControlResponse, request as rpc_request,
+        };
         let envelope = ControlEnvelope {
             version: 1,
             request_id: "im_control".into(),
@@ -110,9 +119,11 @@ impl WatchdogControl {
         };
         match rpc_request(&self.socket_path, &envelope).await {
             Ok(resp) => match resp {
-                RpcControlResponse::Accepted { operation_id, status, .. } => {
-                    Ok(format!("已受理（op={operation_id}，状态 {status}）。"))
-                }
+                RpcControlResponse::Accepted {
+                    operation_id,
+                    status,
+                    ..
+                } => Ok(format!("已受理（op={operation_id}，状态 {status}）。")),
                 RpcControlResponse::Rejected { code, message } => {
                     Err(format!("watchdog 拒绝 [{code}]: {message}"))
                 }
@@ -140,9 +151,7 @@ impl ControlPort for WatchdogControl {
     async fn submit(&self, req: ControlRequest) -> std::result::Result<String, String> {
         use crate::watchdog::control_rpc::RpcControlRequest as R;
         match req {
-            ControlRequest::Upgrade { dev, dry_run } => {
-                self.send(R::Update { dev, dry_run }).await
-            }
+            ControlRequest::Upgrade { dev, dry_run } => self.send(R::Update { dev, dry_run }).await,
             ControlRequest::Rollback => self.send(R::Rollback { dry_run: false }).await,
             ControlRequest::Restart => self.send(R::RestartCore).await,
             ControlRequest::Services => self.send(R::ServiceStatus).await,
@@ -150,20 +159,36 @@ impl ControlPort for WatchdogControl {
             ControlRequest::Router(args) => {
                 let action = args.get("action").cloned().unwrap_or_default();
                 match action.as_str() {
-                    "status" => self.send(R::ServiceStatusFor { service: "router".into() }).await,
-                    "on" | "off" => self
-                        .send(R::ServiceSet {
+                    "status" => {
+                        self.send(R::ServiceStatusFor {
+                            service: "router".into(),
+                        })
+                        .await
+                    }
+                    "on" | "off" => {
+                        self.send(R::ServiceSet {
                             service: "router".into(),
                             desired: action,
                             persist: false,
                         })
-                        .await,
-                    "restart" => self.send(R::ServiceRestart { service: "router".into() }).await,
-                    other => Err(format!("/router 未知动作：{other}（on|off|restart|status）")),
+                        .await
+                    }
+                    "restart" => {
+                        self.send(R::ServiceRestart {
+                            service: "router".into(),
+                        })
+                        .await
+                    }
+                    other => Err(format!(
+                        "/router 未知动作：{other}（on|off|restart|status）"
+                    )),
                 }
             }
             ControlRequest::Webui => {
-                self.send(R::ServiceStatusFor { service: "webui".into() }).await
+                self.send(R::ServiceStatusFor {
+                    service: "webui".into(),
+                })
+                .await
             }
             ControlRequest::Confirm { token } => self.send(R::Confirm { token }).await,
         }
@@ -195,7 +220,9 @@ pub async fn run(args: ImArgs) -> Result<()> {
         crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(secret_file));
     let control_secret = std::env::var("SEBAS_CONTROL_SECRET").unwrap_or_default();
     if control_secret.is_empty() {
-        warn!("SEBAS_CONTROL_SECRET not set: control commands (/upgrade etc.) will report unavailable");
+        warn!(
+            "SEBAS_CONTROL_SECRET not set: control commands (/upgrade etc.) will report unavailable"
+        );
     }
 
     // ws dump 目录（--dump-inbound 随迁自 core）。

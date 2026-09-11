@@ -3,18 +3,18 @@
 //! unified `{ "error": ... }` envelope. Drives the router in-process via
 //! axum's `oneshot` — no live listener required.
 
-use sebas_feishu::cards::CardConfig;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use sebas_channels::ChannelKey;
 use http_body_util::BodyExt;
+use sebas_channels::ChannelKey;
 use sebas_dispatch::engine::DispatchHandle;
 use sebas_dispatch::state::{Mapping, SessionMap};
+use sebas_feishu::cards::CardConfig;
+use sebas_webui::build_router;
+use sebas_webui::models::RouterInfo;
 use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
-use sebas_webui::models::RouterInfo;
-use sebas_webui::build_router;
 
 fn key(id: &str) -> ChannelKey {
     ChannelKey::feishu(&format!("oc_{id}"), None)
@@ -29,7 +29,11 @@ fn encode(key: &ChannelKey) -> String {
 /// backend seam. The second element is the outbound receiver: keeping it
 /// alive prevents `DispatchHandle::emit`'s closed-channel debug assertion
 /// from firing when a test drives the create/message mutations.
-async fn fixture() -> (DispatchHandle, tokio::sync::mpsc::Receiver<sebas_dispatch::engine::Out>, axum::Router) {
+async fn fixture() -> (
+    DispatchHandle,
+    tokio::sync::mpsc::Receiver<sebas_dispatch::engine::Out>,
+    axum::Router,
+) {
     let map = SessionMap::new();
     let k1 = key("a");
     let k2 = key("b");
@@ -48,7 +52,12 @@ async fn fixture() -> (DispatchHandle, tokio::sync::mpsc::Receiver<sebas_dispatc
     (router, rx, app)
 }
 
-async fn request(app: &axum::Router, method: &str, uri: &str, body: Option<String>) -> (StatusCode, Value) {
+async fn request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+) -> (StatusCode, Value) {
     let builder = Request::builder().method(method).uri(uri);
     let req = match body {
         Some(b) => builder
@@ -69,18 +78,13 @@ async fn request(app: &axum::Router, method: &str, uri: &str, body: Option<Strin
 async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let v: Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("non-JSON body from {uri}: {e}"));
+    let v: Value =
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("non-JSON body from {uri}: {e}"));
     (status, v)
 }
 
@@ -113,10 +117,20 @@ async fn sessions_list_is_active_first_with_status_projection() {
     // Focus the active session first: the contract is focused-first, then
     // most-recent activity.
     let encoded_a = encode(&key("a"));
-    let (status, _) = request(&app, "POST", &format!("/api/sessions/{encoded_a}/switch"), None).await;
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/api/sessions/{encoded_a}/switch"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (_, v) = get_json(&app, "/api/sessions").await;
-    assert_eq!(v["active_session_key"], encoded_a.as_str(), "focus must be set");
+    assert_eq!(
+        v["active_session_key"],
+        encoded_a.as_str(),
+        "focus must be set"
+    );
     let rows = v["recent_sessions"].as_array().unwrap();
     let first = rows[0]["reference"].as_str().unwrap();
     assert_eq!(first, "oc_a", "focused session must sort first: {v}");
@@ -136,12 +150,14 @@ async fn sessions_list_is_active_first_with_status_projection() {
         .collect();
     for slug in &slugs {
         assert!(
-            ["starting", "queued", "working", "done", "failed", "dormant"]
-                .contains(slug),
+            ["starting", "queued", "working", "done", "failed", "dormant"].contains(slug),
             "unknown status slug {slug}"
         );
     }
-    assert_eq!(rows[0]["status_slug"], "queued", "active without phase reads Queued");
+    assert_eq!(
+        rows[0]["status_slug"], "queued",
+        "active without phase reads Queued"
+    );
     // Numeric recency order: the spawning fixture (just created) precedes
     // the dormant one (timestamp 1), regardless of rendered "…d ago" text.
     assert_eq!(rows[1]["status_slug"], "starting");
@@ -157,7 +173,20 @@ async fn session_detail_returns_payload_and_sets_focus() {
     assert_eq!(v["reference"], "oc_a");
     assert_eq!(v["session_id"], "s1");
     assert!(v["status_slug"].as_str().is_some());
-    assert!(v["body"].is_array(), "card body must be a list: {v}");
+    assert!(
+        v["entries"].is_array(),
+        "conversation entries must be a list: {v}"
+    );
+    // workbench-conversation-view 1.2：user_prompt / body 退役——旧字段出现
+    // 即失败。
+    assert!(
+        v.get("body").is_none(),
+        "retired body field must be gone: {v}"
+    );
+    assert!(
+        v.get("user_prompt").is_none(),
+        "retired user_prompt field must be gone: {v}"
+    );
     assert!(v["last_active"].as_str().is_some());
     assert_eq!(v["encoded_key"], encoded.as_str());
 
@@ -254,14 +283,24 @@ async fn send_message_and_error_envelope() {
 async fn close_session_semantics_over_json() {
     let (_router, _rx, app) = fixture().await;
     // Unknown key → 404, nothing mutated.
-    let (status, v) = request(&app, "POST", &format!("/api/sessions/{}/close", encode(&key("zz"))), None)
-        .await;
+    let (status, v) = request(
+        &app,
+        "POST",
+        &format!("/api/sessions/{}/close", encode(&key("zz"))),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(v["error"].as_str().is_some());
 
     // Dormant mapping drops without a kill.
-    let (status, v) = request(&app, "POST", &format!("/api/sessions/{}/close", encode(&key("b"))), None)
-        .await;
+    let (status, v) = request(
+        &app,
+        "POST",
+        &format!("/api/sessions/{}/close", encode(&key("b"))),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["status"], "closed");
 
@@ -279,7 +318,13 @@ async fn close_session_semantics_over_json() {
 async fn switch_session_returns_route_and_focuses() {
     let (_router, _rx, app) = fixture().await;
     let encoded = encode(&key("b"));
-    let (status, v) = request(&app, "POST", &format!("/api/sessions/{encoded}/switch"), None).await;
+    let (status, v) = request(
+        &app,
+        "POST",
+        &format!("/api/sessions/{encoded}/switch"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["redirect"], format!("/sessions/{encoded}"));
 
@@ -287,8 +332,13 @@ async fn switch_session_returns_route_and_focuses() {
     assert_eq!(summary["active_session_key"], encoded.as_str());
 
     // Unknown key → 404 so the client never navigates to a dead view.
-    let (status, v) = request(&app, "POST", &format!("/api/sessions/{}/switch", encode(&key("zz"))), None)
-        .await;
+    let (status, v) = request(
+        &app,
+        "POST",
+        &format!("/api/sessions/{}/switch", encode(&key("zz"))),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(v["error"].as_str().is_some());
 }

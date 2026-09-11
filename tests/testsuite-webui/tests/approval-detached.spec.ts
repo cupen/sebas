@@ -34,7 +34,7 @@ import {
   isCoreAlive,
   reachabilityOk,
   ReviewCards,
-  SessionDetailPage,
+  FocusedSession,
   startCore,
   waitForCoreReachability,
   waitStatus,
@@ -64,7 +64,7 @@ test.describe('审批卡片旅程', () => {
   ) {
     await ensureCoreUp(page.request)
 
-    const detail = new SessionDetailPage(page)
+    const detail = new FocusedSession(page)
     const cards = new ReviewCards(page)
     const key = await createSession(page.request, { prompt: 'idle' })
     await waitStatus(page.request, key, ['done'])

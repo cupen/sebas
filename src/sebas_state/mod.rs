@@ -14,6 +14,7 @@
 //! - 迁移函数一旦进入 `MIGRATIONS` 数组就不可变, 不许修改已归档的迁移。
 
 pub mod db;
+pub mod defaults_import;
 pub mod engine;
 pub mod migration;
 pub mod repo;

@@ -8,6 +8,10 @@ sebas-dispatch = { path = "../sebas-dispatch" }
 sebas-feishu = { path = "../sebas-feishu" }
 sebas-channels = { path = "../sebas-channels" }
 sebas-acp = { path = "../sebas-acp" }
+# make-core-own-provider-data 3.1：provider 管理面改由 core 状态库承载后，
+# preset 代码表的只读读取直接复用 `sebas_router::config::presets()`（preset
+# 数据跟随代码，BFF 与 core 读同一张表）。
+sebas-router = { path = "../sebas-router" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 鉴权：PBKDF2-HMAC-SHA256 密码哈希 + OS CSPRNG（盐 / 会话 token）。
@@ -36,3 +40,5 @@ http-body-util = "0.1"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5", features = ["util"] }
+# gateway_bff_test 的内存 StateStoreEngine 需要 trait 签名里的 anyhow::Result。
+anyhow = "1"

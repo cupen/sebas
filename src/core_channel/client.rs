@@ -18,11 +18,12 @@ use super::protocol::{
 use super::secret::ChannelSecret;
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
-use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
-use sebas_webui::session_backend::{
-    PermissionDecision, PermissionNotice, Reachability, SessionBackend, SessionRejection,
-};
+use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
 use sebas_ipc::{ReadHalf, WriteHalf};
+use sebas_webui::session_backend::{
+    CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
+    SessionRejection,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,7 +76,11 @@ impl CoreChannelBackend {
         attachments: Vec<crate::core_channel::protocol::Attachment>,
     ) -> Result<(), SessionRejection> {
         match self
-            .request(&CoreChannelRequest::EnsureMessage { key, message, attachments })
+            .request(&CoreChannelRequest::EnsureMessage {
+                key,
+                message,
+                attachments,
+            })
             .await?
         {
             CoreChannelResponse::Ok => Ok(()),
@@ -119,7 +124,10 @@ impl CoreChannelBackend {
     /// into the caller-facing typed rejection.
     fn fail(&self, kind: FailKind, cause: impl Into<String>) -> SessionRejection {
         let cause = cause.into();
-        self.set_status(ConnStatus::Failed { kind, cause: cause.clone() });
+        self.set_status(ConnStatus::Failed {
+            kind,
+            cause: cause.clone(),
+        });
         unavailable(cause)
     }
 
@@ -179,7 +187,10 @@ impl CoreChannelBackend {
             return Err(self.fail(FailKind::Disconnected, "connection dropped"));
         }
         serde_json::from_str::<CoreChannelResponse>(line.trim()).map_err(|e| {
-            self.fail(FailKind::Disconnected, format!("parse response failed: {e}"))
+            self.fail(
+                FailKind::Disconnected,
+                format!("parse response failed: {e}"),
+            )
         })
     }
 
@@ -192,7 +203,10 @@ impl CoreChannelBackend {
         match connect(&self.path).await {
             Ok(pair) => Ok(pair),
             Err((kind, cause)) => {
-                self.set_status(ConnStatus::Failed { kind, cause: cause.clone() });
+                self.set_status(ConnStatus::Failed {
+                    kind,
+                    cause: cause.clone(),
+                });
                 Err(unavailable(cause))
             }
         }
@@ -229,12 +243,9 @@ impl CoreChannelBackend {
         loop {
             // Failure latching happened inside stream_once at each failure
             // point; the outcome itself only drives the retry cadence.
-            let outcome = tokio::time::timeout(
-                Duration::from_secs(3600),
-                self.stream_once(),
-            )
-            .await
-            .unwrap_or(Err("subscription timed out".into()));
+            let outcome = tokio::time::timeout(Duration::from_secs(3600), self.stream_once())
+                .await
+                .unwrap_or(Err("subscription timed out".into()));
             let _ = outcome;
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(15));
@@ -246,7 +257,10 @@ impl CoreChannelBackend {
     /// Every failure path latches its (kind, cause) status before returning.
     async fn stream_once(&self) -> std::result::Result<(), String> {
         let (mut writer, mut reader) = connect(&self.path).await.map_err(|(kind, cause)| {
-            self.set_status(ConnStatus::Failed { kind, cause: cause.clone() });
+            self.set_status(ConnStatus::Failed {
+                kind,
+                cause: cause.clone(),
+            });
             cause
         })?;
         handshake(&mut writer, &mut reader, &self.secret.current())
@@ -274,27 +288,21 @@ impl CoreChannelBackend {
             });
             cause
         };
-        writer
-            .write_all(sub.as_bytes())
-            .await
-            .map_err(write_sub)?;
+        writer.write_all(sub.as_bytes()).await.map_err(write_sub)?;
         writer.write_all(b"\n").await.map_err(write_sub)?;
         writer.flush().await.map_err(write_sub)?;
 
         let mut line = String::new();
         loop {
             line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| {
-                    let cause = format!("stream read failed: {e}");
-                    self.set_status(ConnStatus::Failed {
-                        kind: FailKind::Disconnected,
-                        cause: cause.clone(),
-                    });
-                    cause
-                })?;
+            let n = reader.read_line(&mut line).await.map_err(|e| {
+                let cause = format!("stream read failed: {e}");
+                self.set_status(ConnStatus::Failed {
+                    kind: FailKind::Disconnected,
+                    cause: cause.clone(),
+                });
+                cause
+            })?;
             if n == 0 {
                 let cause = "connection dropped".to_string();
                 self.set_status(ConnStatus::Failed {
@@ -370,21 +378,19 @@ async fn connect(
             let (r, w) = sebas_ipc::split(stream);
             Ok((w, BufReader::new(r)))
         }
-        Err(e) => {
-            match e.kind() {
-                std::io::ErrorKind::NotFound => Err((
-                    FailKind::StartupFailed,
-                    format!(
-                        "core session channel socket not found at {}",
-                        path.display()
-                    ),
-                )),
-                std::io::ErrorKind::ConnectionRefused => {
-                    Err((FailKind::Disconnected, "connection refused".into()))
-                }
-                _ => Err((FailKind::Disconnected, "connect failed".into())),
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound => Err((
+                FailKind::StartupFailed,
+                format!(
+                    "core session channel socket not found at {}",
+                    path.display()
+                ),
+            )),
+            std::io::ErrorKind::ConnectionRefused => {
+                Err((FailKind::Disconnected, "connection refused".into()))
             }
-        }
+            _ => Err((FailKind::Disconnected, "connect failed".into())),
+        },
     }
 }
 
@@ -490,7 +496,11 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    async fn set_session_model(&self, key: ChannelKey, model_id: String) -> Result<(), SessionRejection> {
+    async fn set_session_model(
+        &self,
+        key: ChannelKey,
+        model_id: String,
+    ) -> Result<(), SessionRejection> {
         match self
             .request(&CoreChannelRequest::SetSessionModel { key, model_id })
             .await?
@@ -529,7 +539,11 @@ impl SessionBackend for CoreChannelBackend {
 
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         match self
-            .request(&CoreChannelRequest::Message { key, message, attachments: vec![] })
+            .request(&CoreChannelRequest::Message {
+                key,
+                message,
+                attachments: vec![],
+            })
             .await?
         {
             CoreChannelResponse::Ok => Ok(()),
@@ -538,9 +552,62 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
-    async fn close(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+    async fn close(&self, key: ChannelKey) -> Result<CloseReport, SessionRejection> {
         match self.request(&CoreChannelRequest::Close { key }).await? {
-            CoreChannelResponse::Ok => Ok(()),
+            // workbench-turn-queue 5.2：close 结果携带丢弃的待生效提交数。
+            CoreChannelResponse::Closed { discarded_pending } => {
+                Ok(CloseReport { discarded_pending })
+            }
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// （workbench-turn-queue 4.3）detached 后端的队列观察面：全量 pending
+    /// 随快照/事件自然到达（SessionInfo.pending），这里提供显式读取。
+    async fn pending(&self, key: ChannelKey) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        // 沿用快照通道：单会话的 pending 从全量快照里取（队列极小，量级
+        // 16 + 手打条数；独立 op 会多一条 wire 词汇，无收益）。
+        let target = serde_json::to_string(&key).unwrap_or_default();
+        Ok(self
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| serde_json::to_string(&s.channel_key()).unwrap_or_default() == target)
+            .map(|s| s.pending)
+            .unwrap_or_default())
+    }
+
+    async fn remove_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::RemovePending { key, pending_id })
+            .await?
+        {
+            CoreChannelResponse::PendingList { pending } => Ok(pending),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    async fn move_pending(
+        &self,
+        key: ChannelKey,
+        pending_id: u64,
+        to_index: usize,
+    ) -> Result<Vec<PendingSubmission>, SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::MovePending {
+                key,
+                pending_id,
+                to_index,
+            })
+            .await?
+        {
+            CoreChannelResponse::PendingList { pending } => Ok(pending),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),
             other => Err(unavailable(format!("unexpected response: {other:?}"))),
         }
@@ -548,10 +615,13 @@ impl SessionBackend for CoreChannelBackend {
 
     /// （extract-im-service 2.1）ensure 语义走专线请求：服务端跳过存在性
     /// 预检，未知 key 由核心按入站文本历史语义建会话。
-    async fn ensure_message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
+    async fn ensure_message(
+        &self,
+        key: ChannelKey,
+        message: String,
+    ) -> Result<(), SessionRejection> {
         self.ensure_message_with(key, message, Vec::new()).await
     }
-
 
     /// （extract-im-service 2.2）取消会话在飞 turn。
     async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
@@ -563,7 +633,10 @@ impl SessionBackend for CoreChannelBackend {
     }
 
     async fn turns(&self, key: ChannelKey, from: u64) -> Result<Vec<TurnEntry>, SessionRejection> {
-        match self.request(&CoreChannelRequest::Turns { key, from }).await? {
+        match self
+            .request(&CoreChannelRequest::Turns { key, from })
+            .await?
+        {
             CoreChannelResponse::Turns { entries } => Ok(entries),
             CoreChannelResponse::Rejected { rejection } => Err(rejection),
             other => Err(unavailable(format!("unexpected response: {other:?}"))),
@@ -611,6 +684,23 @@ impl SessionBackend for CoreChannelBackend {
                 Err(format!("state mutation rejected: {rejection}"))
             }
             _ => Err("state store 不可用".into()),
+        }
+    }
+
+    /// add-fetch-models：providers 域抓取 op 经专线帧到 core；结果 = id 列表，
+    /// typed rejection 透传 core 的净化 cause。
+    async fn fetch_provider_models(&self, provider: &str) -> Result<Vec<String>, String> {
+        match self
+            .request(&CoreChannelRequest::FetchModels {
+                provider: provider.to_string(),
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::Models { models, .. }) => Ok(models),
+            Ok(CoreChannelResponse::Rejected { rejection }) => {
+                Err(format!("fetch_models: {rejection}"))
+            }
+            _ => Err("fetch_models: core 不可达".into()),
         }
     }
 

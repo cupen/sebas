@@ -13,11 +13,22 @@
  */
 
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
+import type { PendingSubmission } from './client.js'
 
 export interface WsEvents {
   'session.created': { type: 'session.created'; session_id: string }
   'session.updated': { type: 'session.updated'; session_id: string; status: string }
   'session.removed': { type: 'session.removed'; session_id: string }
+  /**
+   * （workbench-turn-queue 5.2/7.3）会话终结时未执行的待生效提交，逐条
+   * 列出。在 session.removed 帧之前到达；前端据此渲染一次性「未执行」
+   * 提示。
+   */
+  'session.pending_dropped': {
+    type: 'session.pending_dropped'
+    session_id: string
+    dropped: PendingSubmission[]
+  }
   'config.updated': { type: 'config.updated' }
   /**
    * A gated tool call awaits an operator decision (the review card).
@@ -42,6 +53,7 @@ const EVENTS = {
   'session.created': true,
   'session.updated': true,
   'session.removed': true,
+  'session.pending_dropped': true,
   'config.updated': true,
   'permission.requested': true,
 }

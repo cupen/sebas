@@ -2,27 +2,27 @@
 //! 会话端口请求，出站从会话事件 + turn 流重建卡片（design D3），审批卡走
 //! 通道审批面。卡片机复用 sebas-dispatch 的中立实现（CardInput）。
 
-use crate::port::{parse_decision, ControlPort, ControlRequest, CoreSessionPort};
+use crate::port::{ControlPort, ControlRequest, CoreSessionPort, parse_decision};
+use crate::reactions::{ReactPlan, ReactionTracker};
 use sebas_channels::card::{AppUsage, ChannelCard, ChannelElement, TurnChrome};
 use sebas_channels::{ChannelEvent, ChannelKey};
 use sebas_dispatch::card_events::{apply_input_to_card, card_needs_rotation, continuation_note};
-use sebas_dispatch::card_state::{phase, CardState};
-use sebas_dispatch::commands::{parse_command, Command};
+use sebas_dispatch::card_state::{CardState, phase};
 use sebas_dispatch::cards_ui;
+use sebas_dispatch::commands::{Command, parse_command};
 use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
 use sebas_feishu::adapter::{render_channel_card_frame, render_standalone_card};
 use sebas_feishu::client::{FeishuApiError, FeishuClient, TokenManager};
 use sebas_feishu::events::SessionKey;
-use crate::reactions::{ReactPlan, ReactionTracker};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 #[cfg(test)]
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 /// 会话轮询节奏（design D3：turn 流拉取 + 本地防抖合并出卡）。
@@ -93,7 +93,10 @@ fn feishu_key(key: &ChannelKey) -> SessionKey {
 }
 
 fn thread_of(key: &ChannelKey) -> Option<&str> {
-    key.reference.split_once('\0').map(|(_, t)| t).filter(|t| !t.is_empty())
+    key.reference
+        .split_once('\0')
+        .map(|(_, t)| t)
+        .filter(|t| !t.is_empty())
 }
 
 impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
@@ -149,15 +152,26 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 // INFO——量级是人的操作频率，默认级别即可追踪每一次点击/消息。
                 info!(chat = %key.reference, text = %text, "feishu 入站文本");
                 if let Some(t) = &reply_target {
-                    self.reply_targets.write().await.insert(view_id(&key), t.clone());
+                    self.reply_targets
+                        .write()
+                        .await
+                        .insert(view_id(&key), t.clone());
                 }
                 self.on_text(key, text).await;
             }
-            ChannelEvent::Media { files, caption, reply_target, .. } => {
+            ChannelEvent::Media {
+                files,
+                caption,
+                reply_target,
+                ..
+            } => {
                 // reply_target 即携带文件的消息 id（media API 路径参数）。
                 info!(chat = %key.reference, files = files.len(), "feishu 入站媒体");
                 if let Some(t) = &reply_target {
-                    self.reply_targets.write().await.insert(view_id(&key), t.clone());
+                    self.reply_targets
+                        .write()
+                        .await
+                        .insert(view_id(&key), t.clone());
                 }
                 self.on_media(key, files, caption, reply_target).await;
             }
@@ -177,7 +191,11 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 // /new：关闭旧会话（未知视为已关）+ ensure 触发新会话；
                 // 空 trailing 文本以空 prompt 建会话（route_text 的历史语义）。
                 let _ = self.port.close(key.clone()).await;
-                if let Err(e) = self.port.ensure_message(key.clone(), prompt, Vec::new()).await {
+                if let Err(e) = self
+                    .port
+                    .ensure_message(key.clone(), prompt, Vec::new())
+                    .await
+                {
                     self.send_text(&key, format!("开新会话失败：{e}")).await;
                 }
             }
@@ -189,7 +207,8 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             Command::Settings(sk, sv) => self.handle_settings(&key, sk, sv).await,
             Command::Provider => self.handle_provider(&key).await,
             Command::Upgrade { dev, dry_run } => {
-                self.reply_control(&key, ControlRequest::Upgrade { dev, dry_run }).await;
+                self.reply_control(&key, ControlRequest::Upgrade { dev, dry_run })
+                    .await;
             }
             Command::Rollback => self.reply_control(&key, ControlRequest::Rollback).await,
             Command::Restart => self.reply_control(&key, ControlRequest::Restart).await,
@@ -206,7 +225,8 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 if token.is_empty() {
                     self.send_text(&key, "用法: /confirm <token>。token 来自 /upgrade /rollback /restart 提交后的待确认回复。".into()).await;
                 } else {
-                    self.reply_control(&key, ControlRequest::Confirm { token }).await;
+                    self.reply_control(&key, ControlRequest::Confirm { token })
+                        .await;
                 }
             }
             Command::Cancel => {
@@ -218,8 +238,16 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             // 会话转发类（/cost /status /compact /btw）与普通文本统一走
             // ensure 投递 —— core 的 web_send_message 对 Cost/Cancel/Status/
             // Compact 有专属臂，其余按 PassThrough 续聊。
-            Command::Cost | Command::Status | Command::Compact | Command::Btw(_) | Command::PassThrough(_) => {
-                if let Err(e) = self.port.ensure_message(key.clone(), text, Vec::new()).await {
+            Command::Cost
+            | Command::Status
+            | Command::Compact
+            | Command::Btw(_)
+            | Command::PassThrough(_) => {
+                if let Err(e) = self
+                    .port
+                    .ensure_message(key.clone(), text, Vec::new())
+                    .await
+                {
                     self.send_text(&key, format!("消息未送达：{e}")).await;
                 }
             }
@@ -233,12 +261,27 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     /// 入站媒体（extract-im-service 4.2）：解析为本地附件后随消息投递。
     /// 下载失败如实回复；M2 先以附件标记文本投递（4.1 协议面落地后升级为
     /// 结构化 attachments 字段）。
-    async fn on_media(&self, key: ChannelKey, files: Vec<String>, caption: Option<String>, message_id: Option<String>) {
+    async fn on_media(
+        &self,
+        key: ChannelKey,
+        files: Vec<String>,
+        caption: Option<String>,
+        message_id: Option<String>,
+    ) {
         let mut markers = Vec::new();
         let bearer = self.tokens.token().await.unwrap_or_default();
         let msg_id = message_id.unwrap_or_default();
         for file_key in &files {
-            match crate::media::resolve(&self.http, &bearer, &msg_id, file_key, &self.media_dir, self.max_file_size).await {
+            match crate::media::resolve(
+                &self.http,
+                &bearer,
+                &msg_id,
+                file_key,
+                &self.media_dir,
+                self.max_file_size,
+            )
+            .await
+            {
                 Ok(path) => markers.push(format!("[图片已接收: {}]", path.display())),
                 Err(e) => {
                     self.send_text(&key, format!("附件未能接收：{e}")).await;
@@ -289,13 +332,24 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             return;
         };
         let msg_id = self.perm_cards.read().await.get(&request_id).cloned();
-        let accepted = self.port.approval_answer(&request_id, decision.clone()).await;
+        let accepted = self
+            .port
+            .approval_answer(&request_id, decision.clone())
+            .await;
         let (title, theme, note): (&str, &str, String) = if !accepted {
-            ("请求已过期", "grey", "该请求已处理、超时或会话已结束。".into())
+            (
+                "请求已过期",
+                "grey",
+                "该请求已处理、超时或会话已结束。".into(),
+            )
         } else {
             match decision {
-                PermissionDecision::AllowOnce => ("已允许（本次）", "green", "本次调用已放行。".into()),
-                PermissionDecision::AllowSession => ("已允许（本会话）", "green", "本会话同类调用已放行。".into()),
+                PermissionDecision::AllowOnce => {
+                    ("已允许（本次）", "green", "本次调用已放行。".into())
+                }
+                PermissionDecision::AllowSession => {
+                    ("已允许（本会话）", "green", "本会话同类调用已放行。".into())
+                }
                 PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
                 PermissionDecision::Escalate { reason } => ("已升级", "orange", reason),
             }
@@ -329,7 +383,11 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     }
 
     /// 表单回调（provider/settings 卡）：payload 带 op 时直通状态库。
-    async fn on_form(&self, value: serde_json::Value, form_value: BTreeMap<String, serde_json::Value>) {
+    async fn on_form(
+        &self,
+        value: serde_json::Value,
+        form_value: BTreeMap<String, serde_json::Value>,
+    ) {
         let Some(op) = value.get("op").and_then(|v| v.as_str()).map(str::to_owned) else {
             return;
         };
@@ -352,6 +410,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                     let ck = ChannelKey::new(channel, key);
                     self.views.write().await.remove(&view_id(&ck));
                 }
+                // workbench-turn-queue：丢弃标注事件对 IM 前端是建议性的
+                // （队列管理面在 webui），随后的 Removed 帧会移除该会话视图。
+                Ok(SessionEvent::PendingDropped { .. }) => {}
                 Ok(SessionEvent::Resync) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "session event lag; resyncing from snapshot");
@@ -398,13 +459,19 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             let plan = self.reactions.plan(&id, emoji).await;
             let swapped = match plan {
                 ReactPlan::Swap { unreact_id } => {
-                    let _ = self.feishu.unreact(&self.http, &self.tokens, msg_id, &unreact_id).await;
+                    let _ = self
+                        .feishu
+                        .unreact(&self.http, &self.tokens, msg_id, &unreact_id)
+                        .await;
                     true
                 }
                 ref p => *p == ReactPlan::ReactOnly,
             };
             if swapped
-                && let Ok(rid) = self.feishu.react(&self.http, &self.tokens, msg_id, emoji).await
+                && let Ok(rid) = self
+                    .feishu
+                    .react(&self.http, &self.tokens, msg_id, emoji)
+                    .await
             {
                 self.reactions.record(&id, emoji.to_string(), rid).await;
             }
@@ -428,10 +495,18 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     /// 权限卡渲染（流上审批帧 → 交互卡）。
     async fn render_permission_card(&self, notice: PermissionNotice) {
         let key = decode_wire_key(&notice.session_id);
-        let card = cards_ui::permission_card(&notice.session_id, &notice.request_id, &notice.tool_name, &notice.args);
+        let card = cards_ui::permission_card(
+            &notice.session_id,
+            &notice.request_id,
+            &notice.tool_name,
+            &notice.args,
+        );
         match self.send_standalone_card(&key, card).await {
             Some(msg_id) => {
-                self.perm_cards.write().await.insert(notice.request_id.clone(), msg_id);
+                self.perm_cards
+                    .write()
+                    .await
+                    .insert(notice.request_id.clone(), msg_id);
             }
             None => error!(request_id = %notice.request_id, "permission card send failed"),
         }
@@ -475,7 +550,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 apply_input_to_card(&mut view.card.body, input, &self.card_config());
                 dirty = true;
             }
-            if matches!(input, Some(sebas_dispatch::card_events::CardInput::Finished)) {
+            if matches!(
+                input,
+                Some(sebas_dispatch::card_events::CardInput::Finished)
+            ) {
                 view.frozen = true;
             }
         }
@@ -499,7 +577,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let id = view_id(key);
         let (card, msg_id) = {
             let mut views = self.views.write().await;
-            let Some(view) = views.get_mut(&id) else { return };
+            let Some(view) = views.get_mut(&id) else {
+                return;
+            };
             if view.session_id.is_none() {
                 return;
             }
@@ -516,19 +596,38 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 usage: Some(view.usage.clone()),
             };
             let card = ChannelCard {
-                title: view.prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("sebas").to_string(),
+                title: view
+                    .prompt
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("sebas")
+                    .to_string(),
                 theme: self.theme_color.clone(),
                 elements: view.card.body.clone(),
                 turn: Some(chrome),
             };
             (card, view.card_msg_id.clone())
         };
-        let framed = render_channel_card_frame(&card.turn.as_ref().unwrap().prompt, &card.turn.as_ref().unwrap().session_id, &card, None);
-        let Ok(card_json) = serde_json::to_value(framed) else { return };
+        let framed = render_channel_card_frame(
+            &card.turn.as_ref().unwrap().prompt,
+            &card.turn.as_ref().unwrap().session_id,
+            &card,
+            None,
+        );
+        let Ok(card_json) = serde_json::to_value(framed) else {
+            return;
+        };
         let new_msg_id = match msg_id.as_deref() {
-            Some(mid) => match self.feishu.update_card(&self.http, &self.tokens, mid, card_json).await {
+            Some(mid) => match self
+                .feishu
+                .update_card(&self.http, &self.tokens, mid, card_json)
+                .await
+            {
                 Ok(()) => Some(mid.to_string()),
-                Err(e) if e.downcast_ref::<FeishuApiError>().is_some_and(FeishuApiError::is_topic_invalid) => {
+                Err(e)
+                    if e.downcast_ref::<FeishuApiError>()
+                        .is_some_and(FeishuApiError::is_topic_invalid) =>
+                {
                     // feishu-bridge spec「Invalid-topic errors force session close」：
                     // 话题失效不可恢复——文本通知 + 幂等关会话，不重试该卡。
                     warn!(msg_id = %mid, "topic invalid (230019/230071); closing session");
@@ -550,11 +649,21 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 let root = self.reply_targets.read().await.get(&id).cloned();
                 match self
                     .feishu
-                    .send_card(&self.http, &self.tokens, &feishu_key(key), card_json, root.as_deref(), thread_of(key))
+                    .send_card(
+                        &self.http,
+                        &self.tokens,
+                        &feishu_key(key),
+                        card_json,
+                        root.as_deref(),
+                        thread_of(key),
+                    )
                     .await
                 {
                     Ok(mid) => Some(mid),
-                    Err(e) if e.downcast_ref::<FeishuApiError>().is_some_and(FeishuApiError::is_topic_invalid) => {
+                    Err(e)
+                        if e.downcast_ref::<FeishuApiError>()
+                            .is_some_and(FeishuApiError::is_topic_invalid) =>
+                    {
                         warn!("card send topic-invalid (230019/230071); closing session");
                         self.send_text(
                             key,
@@ -575,9 +684,14 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             self.views.write().await.get_mut(&id).unwrap().card_msg_id = Some(mid.clone());
             // 首卡出现：挂「已收到」相位 reaction（feishu-reactions 语义）。
             if self.reactions.plan(&id, phase::SEED).await == ReactPlan::ReactOnly
-                && let Ok(rid) = self.feishu.react(&self.http, &self.tokens, &mid, phase::SEED).await
+                && let Ok(rid) = self
+                    .feishu
+                    .react(&self.http, &self.tokens, &mid, phase::SEED)
+                    .await
             {
-                self.reactions.record(&id, phase::SEED.to_string(), rid).await;
+                self.reactions
+                    .record(&id, phase::SEED.to_string(), rid)
+                    .await;
             }
         }
     }
@@ -585,7 +699,11 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     // ── 发送原语 ───────────────────────────────────────────────────────────
 
     async fn send_text(&self, key: &ChannelKey, content: String) {
-        if let Err(e) = self.feishu.send_text(&self.http, &self.tokens, &feishu_key(key), &content).await {
+        if let Err(e) = self
+            .feishu
+            .send_text(&self.http, &self.tokens, &feishu_key(key), &content)
+            .await
+        {
             warn!(?e, "send_text failed");
             return;
         }
@@ -594,11 +712,20 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
 
     /// 独立 UI 卡（help/权限/表单），返回 message_id 供就地更新。
     async fn send_standalone_card(&self, key: &ChannelKey, card: ChannelCard) -> Option<String> {
-        let Ok(framed) = serde_json::to_value(render_standalone_card(&card)) else { return None };
+        let Ok(framed) = serde_json::to_value(render_standalone_card(&card)) else {
+            return None;
+        };
         let root = self.reply_targets.read().await.get(&view_id(key)).cloned();
         match self
             .feishu
-            .send_card(&self.http, &self.tokens, &feishu_key(key), framed, root.as_deref(), thread_of(key))
+            .send_card(
+                &self.http,
+                &self.tokens,
+                &feishu_key(key),
+                framed,
+                root.as_deref(),
+                thread_of(key),
+            )
             .await
         {
             Ok(mid) => {
@@ -613,8 +740,14 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     }
 
     async fn update_card(&self, msg_id: &str, card: &ChannelCard) {
-        let Ok(framed) = serde_json::to_value(render_standalone_card(card)) else { return };
-        if let Err(e) = self.feishu.update_card(&self.http, &self.tokens, msg_id, framed).await {
+        let Ok(framed) = serde_json::to_value(render_standalone_card(card)) else {
+            return;
+        };
+        if let Err(e) = self
+            .feishu
+            .update_card(&self.http, &self.tokens, msg_id, framed)
+            .await
+        {
             warn!(?e, "card update failed");
             return;
         }
@@ -638,7 +771,8 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             .filter(|s| s.channel == "feishu" && same_chat(&s.key, &key.reference))
             .collect();
         if chat.is_empty() {
-            self.send_text(key, "当前没有会话。发送 /new 开始新会话。".into()).await;
+            self.send_text(key, "当前没有会话。发送 /new 开始新会话。".into())
+                .await;
             return;
         }
         let mut lines = vec!["会话列表：".to_string()];
@@ -646,7 +780,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             lines.push(format!(
                 "- [{}] {}（{}）",
                 s.status,
-                s.user_prompt.clone().unwrap_or_else(|| "(无 prompt)".into()),
+                s.user_prompt
+                    .clone()
+                    .unwrap_or_else(|| "(无 prompt)".into()),
                 s.session_id.clone().unwrap_or_else(|| "spawning".into()),
             ));
         }
@@ -656,7 +792,8 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     /// /settings：读 settings 域（StateSnapshot）→ 校验写回（StateMutation）。
     async fn handle_settings(&self, key: &ChannelKey, sk: Option<String>, sv: Option<String>) {
         let Some(current) = self.port.state_snapshot("settings").await else {
-            self.send_text(key, "设置域不可用（核心状态库未初始化）。".into()).await;
+            self.send_text(key, "设置域不可用（核心状态库未初始化）。".into())
+                .await;
             return;
         };
         let (Some(sk), Some(sv)) = (sk, sv) else {
@@ -665,7 +802,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         };
         let payload = json!({"key": sk, "value": serde_json::Value::String(sv)});
         match self.port.state_mutate("settings", payload).await {
-            Ok(()) => self.send_text(key, format!("已保存 {sk} 并即时生效。")).await,
+            Ok(()) => {
+                self.send_text(key, format!("已保存 {sk} 并即时生效。"))
+                    .await
+            }
             Err(e) => self.send_text(key, format!("设置被拒绝：{e}")).await,
         }
     }
@@ -674,15 +814,20 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     /// 经 webui 或表单回调 op → StateMutation）。
     async fn handle_provider(&self, key: &ChannelKey) {
         let Some(providers) = self.port.state_snapshot("providers").await else {
-            self.send_text(key, "provider 域不可用（核心状态库未初始化）。".into()).await;
+            self.send_text(key, "provider 域不可用（核心状态库未初始化）。".into())
+                .await;
             return;
         };
         let card = ChannelCard {
             title: "Provider 管理".into(),
             theme: self.theme_color.clone(),
             elements: vec![
-                ChannelElement::Markdown { content: format!("```json\n{providers}\n```") },
-                ChannelElement::Markdown { content: "新增/编辑/删除请使用 WebUI 管理页；表单回调将经状态库持久化。".into() },
+                ChannelElement::Markdown {
+                    content: format!("```json\n{providers}\n```"),
+                },
+                ChannelElement::Markdown {
+                    content: "新增/编辑/删除请使用 WebUI 管理页；表单回调将经状态库持久化。".into(),
+                },
             ],
             turn: None,
         };
@@ -720,10 +865,18 @@ fn turn_to_card_input(entry: &TurnEntry) -> Option<sebas_dispatch::card_events::
     use sebas_dispatch::card_events::CardInput;
     match (entry.kind.as_str(), entry.element_type.as_str()) {
         ("prompt", _) => None,
-        (_, "thinking") => Some(CardInput::ThinkingDelta { delta: entry.content.clone() }),
-        (_, "image") => Some(CardInput::TextDelta { delta: format!("🖼 {} ", entry.content) }),
-        (_, "markdown") | (_, "text") => Some(CardInput::TextDelta { delta: format!("{}\n", entry.content) }),
-        _ => Some(CardInput::TextDelta { delta: format!("{}\n", entry.content) }),
+        (_, "thinking") => Some(CardInput::ThinkingDelta {
+            delta: entry.content.clone(),
+        }),
+        (_, "image") => Some(CardInput::TextDelta {
+            delta: format!("🖼 {} ", entry.content),
+        }),
+        (_, "markdown") | (_, "text") => Some(CardInput::TextDelta {
+            delta: format!("{}\n", entry.content),
+        }),
+        _ => Some(CardInput::TextDelta {
+            delta: format!("{}\n", entry.content),
+        }),
     }
 }
 
@@ -731,8 +884,8 @@ fn turn_to_card_input(entry: &TurnEntry) -> Option<sebas_dispatch::card_events::
 mod tests {
     use super::*;
     use crate::port::{ControlPort, ControlRequest};
-    use serde_json::Value;
     use async_trait::async_trait;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakePort {
@@ -743,7 +896,10 @@ mod tests {
         turns: Mutex<HashMap<String, Vec<TurnEntry>>>,
         // 只写不读：保留事件管道形状供后续用例扩展。
         #[allow(dead_code)]
-        events: (tokio::sync::mpsc::Sender<SessionEvent>, tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>),
+        events: (
+            tokio::sync::mpsc::Sender<SessionEvent>,
+            tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+        ),
     }
 
     impl FakePort {
@@ -785,12 +941,21 @@ mod tests {
         }
         async fn turns(&self, key: &ChannelKey, from: u64) -> Option<Vec<TurnEntry>> {
             let g = self.turns.lock().await;
-            Some(g.get(&view_id(key)).cloned().unwrap_or_default().into_iter().filter(|e| e.position >= from).collect())
+            Some(
+                g.get(&view_id(key))
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|e| e.position >= from)
+                    .collect(),
+            )
         }
         fn subscribe_sessions(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
             unimplemented!("tests drive on_session_info/apply_turns directly")
         }
-        fn subscribe_approvals(&self) -> Option<tokio::sync::broadcast::Receiver<PermissionNotice>> {
+        fn subscribe_approvals(
+            &self,
+        ) -> Option<tokio::sync::broadcast::Receiver<PermissionNotice>> {
             None
         }
         async fn approval_answer(&self, request_id: &str, _decision: PermissionDecision) -> bool {
@@ -867,6 +1032,7 @@ mod tests {
             agent_kind: None,
             backend: None,
             usage: None,
+            pending: Vec::new(),
         };
         fe.on_session_info(info.clone()).await;
         {
@@ -887,12 +1053,21 @@ mod tests {
             let v = views.get(&view_id(&key)).unwrap();
             assert_eq!(v.last_pos, 3);
             assert!(!v.frozen);
-            assert!(v.card.body.len() >= 2, "markdown entries accumulate: {:?}", v.card.body);
+            assert!(
+                v.card.body.len() >= 2,
+                "markdown entries accumulate: {:?}",
+                v.card.body
+            );
         }
 
         // Finished → 卡冻结。
-        fe.apply_turns(key.clone(), vec![TurnEntry::markdown(3, "final")]).await;
-        fe.on_session_info(SessionInfo { phase: Some("DONE".into()), ..info }).await;
+        fe.apply_turns(key.clone(), vec![TurnEntry::markdown(3, "final")])
+            .await;
+        fe.on_session_info(SessionInfo {
+            phase: Some("DONE".into()),
+            ..info
+        })
+        .await;
         let entries = vec![TurnEntry::markdown(4, "ok")];
         fe.apply_turns(key.clone(), entries).await;
         // 冻结由 turn 流里的 Finished 事件驱动（此处 turn 流没有 finished

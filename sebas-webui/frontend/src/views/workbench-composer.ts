@@ -25,6 +25,7 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo,  } from '../api/client.js'
+import { toModelCatalog, type ModelCatalog } from '../api/model-catalog.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
@@ -76,13 +77,22 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private agent = ''
   /** Agent catalog（/api/agents；唯一可用性真源，含 native 行）。 */
   @state() private agents: AgentKindInfo[] = []
-  /** 创建会话时请求的模型 id（add-acp-model-selection）；仅当数据源（最近
-   *  会话的可用模型列表）非空时显示下拉。 */
+  /**
+   * 创建模式两级选择的模型 id（workbench-conversation-view 4.3）：目录里
+   * 选定 provider 下的 model；提交时随创建请求下发。
+   */
   @state() private model: string | null = null
-  /** 模型下拉的数据源：最近一个暴露 available_models 的会话的模型列表。 */
-  @state() private modelOptions: string[] = []
-  /** add-agent-defaults-catalog：创建模式下既无会话模型也无 backend catalog
-   * （defaults 指向的 provider 没有模型目录）——下拉位置显示显式不可用提示。 */
+  /** 创建模式两级选择的一级：选定的 provider 名。 */
+  @state() private selectedProvider: string | null = null
+  /**
+   * Settings 目录（workbench-conversation-view 4.2/4.3，design D7/D8）：
+   * adapter 只规整不解释；`null` = 目录尚未取得。
+   */
+  @state() private catalog: ModelCatalog | null = null
+  /**
+   * 目录显式不可得（4.4）：读取失败（router/core 状态库不在跑）或目录为空
+   * ——下拉位置显示显式不可用提示并禁用，绝不伪造选项、绝不显示空列表。
+   */
   @state() private catalogUnavailable = false
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
@@ -287,41 +297,64 @@ export class SebasWorkbenchComposer extends LitElement {
   }
 
   /**
-   * 模型下拉数据源（add-acp-model-selection D4）：创建会话表单的模型列表来自
-   * 快照里最近一个暴露 `available_models` 的会话（agent 的 configOptions）。
-   * 无模型选项的 agent（如 Claude）→ 空列表 → 不显示下拉、不报错。
-   * （跟随模式不用这份借来的数据——它用聚焦会话自己的 `sessionModels`。）
+   * 创建模式的模型目录（workbench-conversation-view 4.2/4.3/4.4，design
+   * D7/D8）：BFF 读 Settings 目录（/router/api/providers 的 models）+
+   * defaults（/router/api/defaults），adapter 规整成两级结构。读取失败或
+   * 目录为空 → `catalogUnavailable`（显式「目录不可用」，不显示空列表）。
+   * 会话内模型面与此无关——跟随模式只看聚焦会话自己的 `sessionModels`
+   * （acp-model-selection：切换要发给该会话的执行体，目录它未必认）。
    */
   private async loadModelOptions(): Promise<void> {
-    // 第一优先：会话级 available_models（既有语义，acp-model-selection）。
     try {
-      const data = await api.sessions()
-      const latest = data.recent_sessions
-        .slice()
-        .sort((a, b) => b.last_active_unix - a.last_active_unix)
-        .find((r) => Array.isArray(r.available_models) && r.available_models.length > 0)
-      if (latest && latest.available_models) {
-        this.catalogUnavailable = false
-        this.modelOptions = latest.available_models
-        // 预选会话当前模型（若列表里含它），否则选第一项。
-        this.model =
-          latest.current_model && this.modelOptions.includes(latest.current_model)
-            ? latest.current_model
-            : (this.modelOptions[0] ?? null)
+      const [providers, defaults] = await Promise.all([
+        api.routerProviders(),
+        api.routerDefaults().catch(() => null),
+      ])
+      const catalog = toModelCatalog(providers.providers, defaults)
+      if (catalog.pairs.length === 0) {
+        // 目录为空 = 没有可选项：显式不可用，而非空下拉。
+        this.catalog = catalog
+        this.catalogUnavailable = true
+        this.model = null
+        this.selectedProvider = null
         return
       }
+      this.catalog = catalog
+      this.catalogUnavailable = false
+      // 预选：配置的 default provider / default model 在目录内才用（不伪造
+      // 选项）；否则取目录第一对。
+      const provider =
+        catalog.defaultProvider && catalog.pairs.some((p) => p.provider === catalog.defaultProvider)
+          ? catalog.defaultProvider
+          : catalog.pairs[0]!.provider
+      this.selectedProvider = provider
+      const models = this.modelsFor(provider)
+      const wanted =
+        catalog.defaultProvider === provider && catalog.defaultModel !== null
+          ? catalog.defaultModel
+          : null
+      this.model = wanted && models.includes(wanted) ? wanted : (models[0] ?? null)
     } catch {
-      // sessions 不可达不代表 catalog 不可达——继续尝试 defaults。
+      // 目录不可得（providers 读取失败——core 状态库离线）：显式不可用。
+      this.catalog = null
+      this.model = null
+      this.selectedProvider = null
+      this.catalogUnavailable = true
     }
-    // 第二优先（add-agent-defaults-catalog 遗产，workbench-agent-wire-fix
-    // 3.3 退役 /api/agent-defaults 后）：无会话模型面时的兜底数据源不再
-    // 存在——模型是 agent catalog 之外的正交维度，catalog 未就位前如实
-    // 显示不可用（4.x change 会把创建时模型下发接上）。
-    void 0
-    // 兜底：显式不可用（而非空列表/伪造选项）。
-    this.modelOptions = []
-    this.model = null
-    this.catalogUnavailable = true
+  }
+
+  /** 一级选定的 provider 下的模型 id 列表（保持 payload 顺序）。 */
+  private modelsFor(provider: string): string[] {
+    return this.catalog?.pairs.filter((p) => p.provider === provider).map((p) => p.model) ?? []
+  }
+
+  /** 两级目录去重后的 provider 列表。 */
+  private get catalogProviders(): string[] {
+    const out: string[] = []
+    for (const p of this.catalog?.pairs ?? []) {
+      if (!out.includes(p.provider)) out.push(p.provider)
+    }
+    return out
   }
 
   private async loadAgents(): Promise<void> {
@@ -471,8 +504,11 @@ export class SebasWorkbenchComposer extends LitElement {
   render() {
     const disabled = this.disabled()
     const follow = this.isFollowMode
-    const modelList = follow ? this.sessionModels : this.modelOptions
-    const modelValue = follow ? this.currentModel : this.model
+    // 跟随模式：会话 available_models（D8——会话已存在让位给会话面）。
+    // 创建模式：两级 Settings 目录（4.3）。
+    const sessionModelList = this.sessionModels
+    const providerList = this.catalogProviders
+    const providerModels = this.selectedProvider ? this.modelsFor(this.selectedProvider) : []
     return html`
       ${this.unreachable
         ? html`
@@ -519,31 +555,58 @@ export class SebasWorkbenchComposer extends LitElement {
                     : html`<span class="label placeholder">· · ·</span>`}
                   ${this.renderBinding()}
                 `}
-            ${modelList.length > 0
-              ? html`<wa-select
-                  class="backend-select model-select"
-                  aria-label="Model"
-                  value=${modelValue ?? ''}
-                  ?disabled=${disabled || (follow && this.modelSwitching)}
-                  @change=${(e: Event) => {
-                    const v = (e.target as HTMLSelectElement).value || null
-                    if (follow) {
+            ${follow
+              ? sessionModelList.length > 0
+                ? html`<wa-select
+                    class="backend-select model-select"
+                    aria-label="Model"
+                    value=${this.currentModel ?? ''}
+                    ?disabled=${disabled || this.modelSwitching}
+                    @change=${(e: Event) => {
+                      const v = (e.target as HTMLSelectElement).value || null
                       if (v) void this.switchModel(v)
-                    } else {
-                      this.model = v
-                    }
-                  }}
-                >
-                  ${modelList.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
-                </wa-select>`
-              : !follow && this.catalogUnavailable
+                    }}
+                  >
+                    ${sessionModelList.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
+                  </wa-select>`
+                : nothing
+              : this.catalogUnavailable
                 ? html`<span
                     class="label placeholder"
-                    title="Set a default provider with models in Settings → Models"
+                    title="Configure a provider with models in Settings → Models"
                     role="status"
-                    >no model catalog</span
+                    data-testid="catalog-unavailable"
+                    >model catalog unavailable</span
                   >`
-                : nothing}
+                : html`
+                    <wa-select
+                      class="backend-select model-select provider-select"
+                      aria-label="Provider"
+                      value=${this.selectedProvider ?? ''}
+                      ?disabled=${disabled}
+                      data-testid="provider-select"
+                      @change=${(e: Event) => {
+                        const v = (e.target as HTMLSelectElement).value
+                        this.selectedProvider = v
+                        const models = this.modelsFor(v)
+                        this.model = models[0] ?? null
+                      }}
+                    >
+                      ${providerList.map((p) => html`<wa-option value=${p}>${p}</wa-option>`)}
+                    </wa-select>
+                    <wa-select
+                      class="backend-select model-select"
+                      aria-label="Model"
+                      value=${this.model ?? ''}
+                      ?disabled=${disabled || providerModels.length === 0}
+                      data-testid="model-select"
+                      @change=${(e: Event) => {
+                        this.model = (e.target as HTMLSelectElement).value || null
+                      }}
+                    >
+                      ${providerModels.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
+                    </wa-select>
+                  `}
             ${follow
               ? nothing
               : html`<wa-select

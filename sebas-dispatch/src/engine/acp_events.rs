@@ -2,7 +2,7 @@
 //!
 //! `DispatchHandle` 的 impl 延续块（子模块可访问私有字段），从 router.rs 拆出。
 
-use super::{Out, DispatchHandle, extract_session_id};
+use super::{DispatchHandle, Out, SessionEvent, extract_session_id};
 use crate::cards_ui;
 use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
 
@@ -86,7 +86,8 @@ impl DispatchHandle {
                 // 模型切换成功：更新映射 current model + 发布 Updated 让快照
                 // 立即反映（webui 中程模型选择器的数据源）；并把可见行累积进
                 // transcript（apply_event 会在 card body 留 "⚙ model → …"）。
-                self.apply_model_changed(session_id.as_str(), model_id).await;
+                self.apply_model_changed(session_id.as_str(), model_id)
+                    .await;
                 let react = self.apply_event(session_id.as_str(), event).await;
                 self.flush_card(session_id.as_str()).await;
                 if let Some(emoji) = react {
@@ -106,6 +107,17 @@ impl DispatchHandle {
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
                     self.allowlist.clear(&key).await;
                     self.reply_targets.clear(&key).await;
+                    // workbench-turn-queue 5.2（design D5）：移除映射**之前**
+                    // 发出 PendingDropped——随会话死掉的待生效提交被逐条标注
+                    // 为未执行，绝不静默丢弃。
+                    let dropped = self.map.pending_submissions(&key).await;
+                    if !dropped.is_empty() {
+                        self.publish(SessionEvent::PendingDropped {
+                            channel: key.channel_str().to_string(),
+                            key: key.reference.clone(),
+                            dropped,
+                        });
+                    }
                     self.map.remove_by_session(sid).await;
                     // Terminal teardown is observable: detached frontends
                     // must drop the row.
@@ -116,8 +128,49 @@ impl DispatchHandle {
                 // session_id→msg_id 条目长期积累内存泄漏 / 复用 id 继承 stale msg_id。
                 self.msgid.drop(sid).await;
             }
+            AcpEvent::Error {
+                terminal: false, ..
+            } => {
+                // workbench-turn-queue：非终端错误 = 回合异常结束（子进程存
+                // 活、会话不拆除）。卡面 FSM 对非终端错误不转移（next_emoji
+                // 契约），但回合确实结束了——把相位收尾到 DONE，否则
+                // back-pressure 队列（drain 只认终态）会永远饿死排队回合，
+                // 「下一条消息仍可用」的合同被破坏。
+                //
+                // 收尾锚定（防误收尾）：仅当「本回合仍开启」（SEED = 开轮未
+                // 出内容 / WORKING = 流式中）才收尾到 DONE；终态（DONE/
+                // FAILED）一律不动——回合之外的游离 Error（如 SetModel 被
+                // 拒）到达时回合早已收尾，不得伪造转移。SEED 必须参与：拒
+                // 绝回合（refusal result 帧）通常没有任何内容帧，本事件到达
+                // 时回合卡刚被 emit_turn_card 重置回 SEED。
+                //
+                // 生产 pump 路径的收尾由 claude 驱动的回合边界锚定（refusal
+                // result 帧映射为 Error + Finished 配对，Finished 走本函数
+                // 的 Finished 臂收尾）；本臂服务 dispatch_acp_event 直达路
+                // 径，与该配对语义一致。
+                use crate::card_state::phase::{DONE, SEED, WORKING};
+                self.card_states
+                    .apply(session_id.as_str(), |st| {
+                        if matches!(st.status_emoji.as_str(), SEED | WORKING) {
+                            st.status_emoji = DONE.into();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .await;
+                let react = self.apply_event(session_id.as_str(), event).await;
+                self.flush_card(session_id.as_str()).await;
+                if let Some(emoji) = react {
+                    self.emit_reaction(session_id.as_str(), emoji).await;
+                }
+                if let Some(key) = self.map.lookup_key_by_session(session_id.as_str()).await {
+                    self.drain_queue_if_terminal(&key, session_id.as_str())
+                        .await;
+                }
+            }
             _ => {
-                // 流式事件 + Finished + 非 terminal Error：apply_event（状态）+ flush_card（同步出卡）。
+                // 流式事件 + Finished：apply_event（状态）+ flush_card（同步出卡）。
                 // FSM emoji 转移时紧跟一个 React（先出卡，后换 reaction）—— 但
                 // 终态转移（DONE）不触发 emit_reaction（同上分支原因）。
                 let react = self.apply_event(session_id.as_str(), event).await;

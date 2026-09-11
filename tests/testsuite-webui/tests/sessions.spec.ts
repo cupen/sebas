@@ -23,7 +23,7 @@ import {
   middleTruncate,
   ProjectRail,
   resetState,
-  SessionDetailPage,
+  FocusedSession,
   SessionsPage,
   waitStatus,
 } from './helpers/index'
@@ -47,11 +47,11 @@ test.describe('会话管理', () => {
   /** Assert the detail page shows the session with the given original prompt. */
   async function expectDetail(
     page: import('@playwright/test').Page,
-    detail: SessionDetailPage,
+    detail: FocusedSession,
     prompt: string,
   ): Promise<void> {
     await expect(detail.host).toBeVisible()
-    await expect(detail.promptQuote).toContainText(prompt)
+    await expect(detail.userTurn(prompt)).toBeVisible({ timeout: 15_000 })
     await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
   }
 
@@ -64,7 +64,7 @@ test.describe('会话管理', () => {
       const promptA = `alpha-${t}`
       const promptB = `beta-${t}`
       const rail = new ProjectRail(page)
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
       const keyA = await createSession(page.request, { prompt: promptA })
@@ -85,16 +85,17 @@ test.describe('会话管理', () => {
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(countA1)
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
-      const lenAfterA = (await getSession(page.request, keyA)).detail!.body.length
-      const lenBBefore = (await getSession(page.request, keyB)).detail!.body.length
+      const lenAfterA = (await getSession(page.request, keyA)).detail!.entries.length
+      const lenBBefore = (await getSession(page.request, keyB)).detail!.entries.length
 
-      // Rail click switches to B (SPA navigation, no reload).
+      // Rail click switches to B IN PLACE (workbench-conversation-view 3.1:
+      // switch + focus, no navigation away from the workbench, no reload).
       await page.goto('/')
       await expect(rail.host).toBeVisible()
       await rail.expandInbox()
       await rail.sessionItem(shortB).click()
       await expectDetail(page, detail, promptB)
-      expect(page.url()).toContain('/sessions/')
+      expect(page.url()).not.toContain('/sessions/')
 
       // Follow-up lands in B only; A is untouched.
       const countB1 = await detail.bubbles().count()
@@ -103,14 +104,17 @@ test.describe('会话管理', () => {
         .poll(async () => detail.bubbles().count(), { timeout: 20_000, intervals: [250] })
         .toBeGreaterThan(countB1)
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
-      expect((await getSession(page.request, keyB)).detail!.body.length).toBeGreaterThan(
+      expect((await getSession(page.request, keyB)).detail!.entries.length).toBeGreaterThan(
         lenBBefore,
       )
-      expect((await getSession(page.request, keyA)).detail!.body.length).toBe(lenAfterA)
+      expect((await getSession(page.request, keyA)).detail!.entries.length).toBe(lenAfterA)
 
-      // Cold deep-link back to A: still its own transcript, still Done.
+      // Cold deep-link back to A: still its own conversation, still Done. The
+      // operator's own turn bubble carries A's LATEST submission (the
+      // follow-up) — workbench-turn-queue seeds each web turn's prompt at
+      // start, and the conversation view renders it (2.3).
       await page.goto(`/sessions/${keyA}`)
-      await expectDetail(page, detail, promptA)
+      await expectDetail(page, detail, `follow-A-${t}`)
 
       expect(collector.clean()).toEqual([])
     })
@@ -123,14 +127,14 @@ test.describe('会话管理', () => {
       test.setTimeout(60_000)
       const rail = new ProjectRail(page)
       const sessions = new SessionsPage(page)
-      const detail = new SessionDetailPage(page)
+      const detail = new FocusedSession(page)
 
       await resetState(page.request)
 
       const tag = `restore ${Date.now()}`
       const key = await createSession(page.request, { prompt: tag })
       await waitStatus(page.request, key, ['done'])
-      const bodyBefore = (await getSession(page.request, key)).detail!.body.length
+      const bodyBefore = (await getSession(page.request, key)).detail!.entries.length
 
       // Archive via the rail; row leaves the active rail.
       await page.goto('/')
@@ -157,15 +161,15 @@ test.describe('会话管理', () => {
       expect(await refused.text()).toContain('archiv')
       const afterRefuse = await getSession(page.request, key)
       if (afterRefuse.detail) {
-        expect(afterRefuse.detail.body.length).toBe(bodyBefore)
+        expect(afterRefuse.detail.entries.length).toBe(bodyBefore)
       }
 
       // Restore via the History row. IMPLEMENTATION DISCOVERY (honest contract):
       // archive closed the session (mapping + transcript dropped,
       // engine/mod.rs web_close_session), and restore only deletes the archive
       // entry (api.rs restore_session) — it does NOT resurrect the session.
-      // So the detail view honestly reports "Session not found" (same as the
-      // crash journey), never a fabricated success.
+      // The rail's restore stays on the workbench (the switch 404s silently —
+      // the session is gone); no fabricated success, no dead deep link.
       await page.goto('/')
       await expect(rail.host).toBeVisible()
       await rail.expandHistory()
@@ -173,11 +177,10 @@ test.describe('会话管理', () => {
         .locator('li.session-item.archived', { hasText: tag })
         .first()
         .click()
-      await page.waitForURL(/\/sessions\//)
-      await expect(detail.errorCallout).toContainText('Session not found', {
-        timeout: 20_000,
-      })
-      await expect(detail.backToWorkbench).toBeVisible()
+      // The operator is never navigated to a dead session view: the
+      // workbench stays up (workbench-conversation-view 3.1/3.4).
+      await expect(rail.host).toBeVisible({ timeout: 10_000 })
+      expect(page.url()).not.toContain('/sessions/')
 
       // Archive list no longer carries the entry; the session stays gone from
       // the live list (it was closed at archive time, restore resurrects nothing).

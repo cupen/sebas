@@ -19,34 +19,53 @@
 
 - ✅ = 命中（含证据）　⚠️ = 缺口（未命中且未豁免）　🚫 = 豁免（cause）
 
-## 核心功能集统计（达标复核 2026-09-08，五簇 90% 口径）
+## 核心功能集统计（达标复核 2026-09-11，五簇 90% 口径）
 
-复核基数 = 三期前置变更合并后的 main：fail-fast `5eb1d85`、harden `52847f1`、
-cover-channel `f14767e`（merge commit，可由 `git log main --grep` 复现，见 tasks 1.1
-grep 清单）。复核为 requirement 级全量重数（含三期新增 requirement 与本期补行），
+复核基数 = main 最新（workbench-agent-wire-fix 归档 `61feb1a`）+ 五个 change 归档后的
+工作树 specs（make-core-own-provider-data、add-fetch-models、redesign-provider-models-settings、
+workbench-turn-queue、workbench-conversation-view；specs 同步随归档落在工作树）。复核为
+requirement 级全量重数（`grep -c '^### Requirement:'` 对应 capability 目录，可重跑）；
 豁免不计分母；命中口径不变：任一测试层（验收旅程 J、进程级 e2e E、集成/单元/前端
-单测）完整命中该 requirement 即计入。
+单测、浏览器旅程）完整命中该 requirement 即计入。router-admin-api 的 4 条 REMOVED
+（Provider CRUD endpoints、Model alias CRUD endpoints、Model probe endpoint、
+Write-then-apply semantics）退役出账；webui 只计 projects 面（界定不变）。
 
 | 核心簇 | requirement 数（计分分母） | 命中 | 命中率 | 豁免 | 套件内旅程 |
 |---|---|---|---|---|---|
-| ① 会话管理 | 13 | 13 | 100% | 0 | `session_lifecycle_journey` |
-| ② models 管理 | 20 | 20 | 100% | 1 | `provider_governance_journey`、`native_agent_turn_via_router_journey` |
-| ③ agent workbench 相关 | 24 | 24 | 100% | 0 | `workbench_aggregate_journey`、`projects_session_journey` |
-| ④ 项目管理 | 13 | 13 | 100% | 0 | `projects_session_journey`；browser `deployment.spec.ts`（降级注册） |
-| ⑤ 通道与监督 | 30 | 30 | 100% | 0 | E: `no_secret_assembly_end_to_end`、`secret_rotation_self_heal_across_core_restart`、`watchdog_supervised_core_recovery` |
-| **核心合计** | **100** | **100** | **100%** | **1** | 每簇 ≥1 条 ✓ |
+| ① 会话管理 | 14 | 14 | 100% | 0 | `session_lifecycle_journey` |
+| ② models 管理 | 22 | 22 | 100% | 1 | `provider_governance_journey`、`native_agent_turn_via_router_journey` |
+| ③ agent workbench 相关 | 33 | 33 | 100% | 0 | `workbench_aggregate_journey`、`projects_session_journey` |
+| ④ 项目管理 | 17 | 17 | 100% | 0 | `projects_session_journey`；browser `deployment.spec.ts`（降级注册） |
+| ⑤ 通道与监督 | 31 | 31 | 100% | 0 | E: `no_secret_assembly_end_to_end`、`secret_rotation_self_heal_across_core_restart`、`watchdog_supervised_core_recovery` |
+| **核心合计** | **117** | **117** | **100%** | **1** | 每簇 ≥1 条 ✓ |
 
-上一次复核（2026-09-05，四簇 80% 口径）记 65 条 / 62 命中 / 95%。本期重数差异来源：
-三期变更新增 requirement 入账（⑤ 整簇 30 条；④ +1 webui projects 面「项目注册降级
-如实提示」）；上期漏行补齐（② +2「Preset data follows the code table」「Set default
-provider and model from the page」、③ +3「Execution-body availability…」「Model
-selection covers the native kernel」「Model selector offers the backend catalog…」，
-均为既有能力 requirement，证据已在库）；豁免不计分母规则回归（② 的 /provider 主卡
-布局为飞书端卡片渲染，此前被误计入分母）；缺口收口（③ projects_branch 由 browser
-旅程 `projects.spec.ts` 1.2 命中；permission-flow「无应答者 fail-closed」detached
-旅程由 cover-channel `approval-detached.spec.ts` + 进程内 fail-closed 单测共同命中）。
+上一次复核（2026-09-08，100/100）之后本期重数差异来源（+17，100 → 117）：
 
-全量 34 个能力目录、317 条 requirement（`grep -c '^### Requirement:'` 汇总，可重跑）。
+- **五 change 归档新增 requirement 入账 +7**：① +1「Pending submissions are
+  observable and manageable」；② +2「Core owns provider and model data」「Model
+  entries carry capability tags」；③ +3「Pending submissions stack above the
+  composer」「Workbench renders the focused session as a conversation」「Workbench
+  is the single conversation surface」；⑤ +1「Model list fetch over the channel」。
+- **上期基数后归档、本期补入账 +10**：③ agent-workbench +6（审计归档 `982b4cc`
+  的 Rail project removal entry、Rail session close entry、Placeholder session is
+  immediately writable；workbench-agent-wire-fix `bad057e` 的 Session agent binding
+  is immutable、Composer submissions always deliver、Project-level default agent）；
+  ④ +4（`982b4cc` 的 project-session-actions 三条 rail 面同名 requirement +
+  retire-session-persistence-record `c01211a` 给 state-store 增「Runtime state
+  boundaries for persisted session state」）。
+- **router-admin-api 非核心面退役 −4**（REMOVED，不进核心分母，见非核心表行）。
+
+本期两处真实缺口，均已补测收口：router 订阅 core provider 数据的进程级闭环此前
+在任何测试层都无覆盖（`Configuration source`「card-edited provider reaches
+router」/`External change hot reload`「card edit hot-applies」/Core owns「router
+reads a core change without a restart」共同指向），本期补 E
+`core_owned_provider_reaches_router_without_restart`（watchdog 形态 router 子进程
+订阅通道 → webui BFF 写库 → 不重启可路由、不写 provider 文件）；「Project-level
+default agent」（wire-fix 引入，写路径/记忆/预选全无测试），本期补
+`session_endpoints_test::project_default_agent_follows_last_use`（API 写路径）+
+前端 composer 预选单测。收口后 requirement 级「未命中且未豁免」残留 0 条。
+
+全量 35 个能力目录、339 条 requirement（`grep -c '^### Requirement:'` 汇总，可重跑）。
 豁免 23 条（飞书真实传输/端上卡片渲染、opencode CLI、真实模型跑分、watchdog
 spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且未豁免」残留 0 条，
 唯一保留的旅程级注记为 replay-debug 独立旅程（requirement 已由既有测试命中，
@@ -59,14 +78,15 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | 能力 | requirement 簇 | 状态 | 证据 |
 |---|---|---|---|
 | session-lifecycle | 身份按会话/线程 | ✅ | `full_e2e_test`（ChannelKey 语义）|
-| | 首条消息懒 spawn | ✅ | `full_e2e_test`；J: `session_lifecycle_journey` |
-| | 双 spawn 竞争保护 | ✅ | `spawn_race_test` |
+| | 首条消息懒 spawn | ✅ | `full_e2e_test`；J: `session_lifecycle_journey`；`state_test::dormant_first_text_claims_resume_then_queues`（映射激活排空队列）|
+| | 双 spawn 竞争保护 | ✅ | `spawn_race_test`（`second_text_during_spawn_is_queued_not_spawned`、`rapid_double_new_emits_single_spawn`、`pending_queue_capped_at_16`）；`state_test::overflow_rejects`（溢出丢最新）|
 | | Dormant 懒恢复 | ✅ | `restart_recovery_test`；J: lifecycle（unix 段）|
-| | 终态错误拆除 | ✅ | `error_test`、sebas-router 内联测试 |
+| | 终态错误拆除 | ✅ | `error_test`、sebas-router 内联测试；`turn_card_test::terminal_error_clears/abandons_queued_turns`（终态清队列）|
 | | 正常回合完成保活 | ✅ | `full_e2e_test`；J: lifecycle |
-| | 流式背压排队 | ✅ | sebas-router 内联测试 |
+| | 流式背压排队 | ✅ | `state_test`（fifo/priority 队列）、`turn_card_test::btw_command_queues_with_priority_ahead_of_existing_fifo`（/btw 插队）；E `turn_queue_timing_and_dropped_accounting`（忙中提交不切开在跑回合 + 排队回合自动开轮 + 丢弃记账）|
 | | 并发会话容量上限 | ✅ | sebas-router 内联测试 |
 | | 重启恢复与损坏容忍 | ✅ | `restart_recovery_test`、`state_persistence_test`；J: lifecycle |
+| | Pending submissions 可观察可管理（turn-queue 新增）| ✅ | src `core_channel/tests.rs::pending_submissions_visible_and_manageable_over_the_channel`（快照可见 + 移除/已开始 typed rejection）；`session_endpoints_test::session_payloads_carry_pending_submissions_in_delivery_order`、`pending_remove_and_move_endpoints`；前端 `pending-stack.test.ts`（顺序/priority/乐观移除/AlreadyStarted 静默和解/拖拽越组拒绝）|
 | session-persistence | 默认选择语义 | ✅ | `state_persistence_test` |
 | | 运行态不入该库 | ✅ | `state_persistence_test` |
 | acp-session-mapping | 路由 id ↔ ACP id 映射 | ✅ | `acp_session_mapping_test` |
@@ -76,27 +96,29 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 
 | 能力 | requirement 簇 | 状态 | 证据 |
 |---|---|---|---|
-| acp-model-selection | 会话模型清单暴露 | ✅ | sebas-webui `session_endpoints_test`、src `agent_backend` 内联测试 |
+| acp-model-selection | 会话模型清单暴露 | ✅ | sebas-acp `acp_resume_test::spawn_outcome_carries_model_info_from_config_options`（ConfigOptions 进快照）；前端 `workbench-composer.test.ts`（dropdown 喂清单/无 option 无 dropdown/会话清单与创建目录独立 D8）；browser `models.spec.ts`（set_session_model happy-path）|
 | | set_config_option 换模型 | ✅ | add-acp-model-selection 测试（sebas-acp）|
 | | 模型选择存活于会话生命周期 | ✅ | 同上 |
-| router-model-aliases | 别名实体与持久化 | ✅ | sebas-router `config` overlay 测试 |
+| router-model-aliases | 别名实体与持久化 | ✅ | sebas-router `config` overlay 测试；state_channel_contract `alias_mutation_rejects_invalid_entry`（core 落库面）|
 | | 别名解析优先级 | ✅ | 同上 |
 | | 上游模型翻译 | ✅ | J: `provider_governance_journey`（my-claude→stub-model）|
-| | 别名校验 | ✅ | sebas-router `admin_test` |
+| | 别名校验 | ✅ | state_channel_contract alias mutation 校验；router 侧 resolve 管线内联测试 |
 | | 别名作用域 | ✅ | sebas-router 内联测试 |
 | provider-management | /provider 主卡布局 | 🚫 | 飞书端卡片渲染（豁免，见豁免清单；替代：卡片 JSON 单测）|
 | | 模式切换 | ✅ | sebas-webui 内联/admin 测试 |
-| | Provider CRUD 表单（API 面）| ✅ | sebas-router `admin_test`；J: provider_governance |
-| | 密钥脱敏 | ✅ | sebas-router `admin_test`（api_key_configured）|
-| | 模型探测 | ✅ | sebas-router `admin_test`（probe）|
+| | Provider CRUD 表单（API 面）| ✅ | sebas-webui `gateway_bff_test::provider_mutation_semantics_preserved_over_core_store`（create/update/delete/aliases 走 core store seam）；state_channel_contract provider mutation 三态（未知字段/类型错/合法通过）；J: provider_governance |
+| | 密钥脱敏 | ✅ | `provider_card.rs::probe_cards_never_carry_key_material`；`gateway_bff_test::provider_probe_fetches_models_without_persisting`（响应无 key、上游带 Bearer）；settings-modal 编辑态 |
+| | 模型探测 | ✅ | `provider_card.rs` 内联（probe 按钮单 URL 选择/写回目录与默认/401 错误卡/仅 anthropic URL 隐藏入口）；`gateway_bff_test::provider_probe_unknown_404 / unreachable_503 / without_base_url_400`；state_store `preset_derived_provider_resolves_fetch_target_from_code_table` |
 | | Off 模式解析 | ✅ | src 内联测试 |
 | | 直连模式 env 翻译 | ✅ | src 内联测试；J: native（SEBAS_AGENT_PROVIDER_* 直连 stub）|
 | | 模型旗标优先级 | ✅ | src 内联测试 |
-| | Gateway 模式 env 翻译 | ✅ | src `agent_backend` 内联测试 |
+| | Router 模式 env 翻译 | ✅ | src `agent_backend` 内联测试 |
 | | Provider 错误中止 | ✅ | src 内联测试 |
 | | Provider 卡片反映 store 可用性 | ✅ | sebas-router `admin_test` |
-| | Preset 数据跟随代码表 | ✅ | sebas-router `config.rs` 内联（`preset_fills_all_slots_and_models_from_code_table`、`preset_explicit_url_or_models_override_errors`、`preset_alias_reuses_table_defaults`、`preset_explicit_api_key_skips_default_env`）|
-| | 页面设置默认 provider/model | ✅ | sebas-router `admin_test::agent_defaults_round_trip`（设置/校验/回读/清除）+ `agent_defaults_cleared_on_provider_delete`（API 面）；webui 代理 `/api/agent-defaults`（`routes.rs`）+ 前端 settings-modal「Default provider / model」单测 |
+| | Preset 数据跟随代码表 | ✅ | sebas-router `config.rs` 内联（`preset_fills_all_slots_and_models_from_code_table`、`preset_explicit_url_override_errors`、`preset_alias_reuses_table_defaults`、`preset_explicit_api_key_skips_default_env`、`preset_table_carries_vision_entries`）；`gateway_bff_test::presets_served_from_code_table_via_backend`；settings-modal「untouched preset entries stay unsubmitted」|
+| | 页面设置默认 provider/model | ✅ | `gateway_bff_test::router_api_defaults_reads_core_store_and_degrades_honestly`（读 core store + 诚实降级）；browser `settings.spec.ts` S4（defaults 读对账 + set-default 语义）；state_store `default_selection_wire_shape`、`delete_provider_atomically_clears_default`；composer 创建模式目录预选单测（4.3）|
+| | Core owns provider and model data（core-owned 新增）| ✅ | `gateway_bff_test`（3.2 create 立即可见无重启、3.3 不可达 503 不回陈数据）；`spawn_env_store_authority_test`（store 压过 legacy 文件/墓碑语义）；sebas-router `admin_test`（retired 404 + 无通道不写文件）；E `core_owned_provider_reaches_router_without_restart`（router 订阅 core 变更无重启可路由、不写 provider 文件，2026-09-11 补）|
+| | Model entries carry capability tags（redesign 新增）| ✅ | state_store `provider_models_legacy_strings_read_and_normalize_to_entries`（legacy 裸串归一）、`provider_models_entry_writes_canonical_unknown_tags_rejected`；sebas-router `models.rs::capability_tags_do_not_affect_env_mapping`、`unknown_capability_tag_is_rejected`；settings-modal 标记编辑单测；browser `models.spec.ts` 3.2（条目 + tags 持久化）|
 
 ### ③ agent workbench 相关（核心）
 
@@ -105,8 +127,8 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | agent-workbench | 项目为组织单元 | ✅ | J: `projects_session_journey`；state-store projects |
 | | 项目注册表 webui 持有 | ✅ | state-store 测试；J: workbench |
 | | 会话归属 | ✅ | sebas-webui `session_endpoints_test` |
-| | 并发项目 | ✅ | state-store 并发测试 |
-| | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）|
+| | 并发项目 | ✅ | state-store 并发测试；`session_endpoints_test::concurrent_project_sessions_run_simultaneously_and_leave_a_untouched` |
+| | 未读 turn 接缝 | ✅ | sebas-webui `ws_test`（事件流）；前端 `transcript-view.test.ts`（多 chunk 未读回合计一次、seam 不切开回合、mark-all-seen 写入并消隐）|
 | | composer 只承诺进程能力 | ✅ | sebas-webui `agent_kinds_test`；J: workbench（agent-kinds）|
 | | 会话来源可见 | ✅ | sebas-webui 内联测试 |
 | | 项目视图真实工作副本上下文 | ✅ | browser `projects.spec.ts` 1.2「git branch shows, plain dir shows none」（API branch 值 + rail `.branch` 标签 + 30s TTL 过期后 reload 刷新）|
@@ -119,7 +141,16 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 归档过期 | ✅ | src `archive.rs` 内联测试 |
 | | 执行体可用性如实呈现 | ✅ | 前端 `workbench-composer.test.ts`（native 不可用禁用+cause、可用可选、下次 poll 恢复无需重载）；browser `first-paint.spec.ts`（native option disabled + unavailable + provider label 诚实降级）|
 | | 原生内核模型选择 | ✅ | src `agent_backend.rs`（`dual_set_session_model_routes_native_key_and_rejects_unknown`、spawn 期模型落快照 override）；前端 `workbench-composer.test.ts` 模型下拉/切换 |
-| | 会话前模型目录（backend catalog）| ✅ | 前端 `workbench-composer.test.ts`（`creation mode offers the catalog of the defaults provider before any session`、无目录时诚实标注）；webui `/api/agent-defaults` 代理（`routes.rs`）|
+| | 会话前模型目录（backend catalog）| ✅ | 前端 `workbench-composer.test.ts`（creation mode offers the two-level Settings catalog、无目录诚实标注、读失败 4.4）；`model-catalog.test.ts`（providers × models 展平、空目录不造假）；browser `conversation.spec.ts`「creation mode offers provider → model from the Settings catalog」|
+| | Rail project removal entry（审计补行）| ✅ | `session_endpoints_test::projects_remove_project / projects_remove_unknown_returns_404`；browser `projects.spec.ts`「removed project disappears」；前端 `project-rail.test.ts` |
+| | Rail session close entry（turn-queue 修订）| ✅ | 前端 `project-rail.test.ts`（close 点名丢弃 pending 条数/无 pending 省略）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（close names the loss）|
+| | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test`（占位首条消息必须 SpawnNew、0-turn 占位同样 spawn、标记 dump/restore 存活）；J: workbench（占位会话）；browser `session-roundtrip.spec.ts` |
+| | Session agent binding is immutable（wire-fix 补行）| ✅ | 前端 `workbench-composer.test.ts`（agent 只读小字、无任何 agent 选择器）；browser `models.spec.ts`「detail head shows the bound agent with the lock affordance」|
+| | Composer submissions always deliver（wire-fix 补行）| ✅ | `spawn_race_test`（占位标记一次性消费/生产发射路径 WebSpawn 携带 kind/model/0-turn 占位同样 spawn——「输入框发不出消息」回归锁）；E `session_round_trip_via_webui_http` |
+| | Project-level default agent（wire-fix 补行）| ✅ | `session_endpoints_test::project_default_agent_follows_last_use`（创建即记录/跟随最近一次/项目间互不串/无记录如实空，2026-09-11 补）；前端 `workbench-composer.test.ts`（projectDefaultAgent 预选、null 保持现选）|
+| | Pending submissions stack above the composer（turn-queue 新增）| ✅ | 前端 `pending-stack.test.ts`（顺序/disposition 措辞/priority 钉住/移除与重排和解）；browser `pending-stack.spec.ts`（忙中提交上栈、刷新存活、close 点名损失）|
+| | Workbench renders the focused session as a conversation（conversation-view 新增）| ✅ | 前端 `transcript-view.test.ts`（两侧交替、N chunk 一气泡、tool 组可展开不混排、submission 回合开始即现）；`dashboard.test.ts`（聚焦会话内联 conversation）；browser `conversation.spec.ts`（两侧按序交替 + gated tool 组展开）|
+| | Workbench is the single conversation surface（conversation-view 新增）| ✅ | 前端 `project-rail.test.ts`（点击就地切换留在 workbench 3.1、current 标记跟随焦点指针 3.2）；`dashboard.test.ts`（深链 `/sessions/:key` 经 deepLinkKey 渲染、聚焦会话 head 带 close+archive）；browser `conversation.spec.ts`「rail click focuses the session in place on the workbench」|
 | permission-flow | Hook 驱动权限请求 | ✅ | `permission_flow_test`；fake-claude "perm" 场景 |
 | | 三种决定结果 | ✅ | `permission_flow_test`、sebas-webui `acp_permission_roundtrip_test` |
 | | allowlist 命中自动批准 | ✅ | `permission_flow_test` |
@@ -136,6 +167,9 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 会话归档 | ✅ | sebas-webui `api_endpoints_test` |
 | | 历史组即归档 | ✅ | 同上 |
 | | 归档过期 | ✅ | src `archive.rs` 内联测试 |
+| | Project removal from the rail（审计补行）| ✅ | `session_endpoints_test::projects_remove_project`、`projects_remove_unknown_returns_404`；browser `projects.spec.ts`「removed project disappears」|
+| | Session close from the rail（审计补行）| ✅ | sebas-dispatch `web_close_test`（active/dormant/spawning/unknown/focused 全语义）；`session_endpoints_test::close_active_session_drops_mapping_and_returns_200` 等 close 族；browser `session-mgmt.spec.ts`「close removes the session from the active list」|
+| | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test` 占位三态（见簇③同行）；browser `session-roundtrip.spec.ts` |
 | state-store (projects 面) | DB 位置与单写者 | ✅ | sebas-router state_store 测试；J: lifecycle（迁移日志）|
 | | schema 版本与自动迁移 | ✅ | 同上（migration 0→1 日志）|
 | | 迁移前备份 | ✅ | 同上（backup 文件）|
@@ -143,7 +177,8 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 变更持久性 | ✅ | state_store 测试 |
 | | store 不可用诚实降级 | ✅ | state_store 测试 |
 | | 损坏 store 不静默重置 | ✅ | state_store 测试 |
-| webui (projects 面) | 项目注册降级如实提示 | ✅ | sebas-webui `session_endpoints_test`（`projects_add_degraded_when_core_unreachable`：201 + `degraded.cause`；正常路径无标记）；browser `deployment.spec.ts`（加项目降级提示，harden-core-channel-deployment）|
+| | Runtime state boundaries for persisted session state（retire-session-persistence 补行）| ✅ | `state_persistence_test`（allowlist/占位不落盘、会话图落 `[dispatch] state_file` 快照语义）；`spawn_race_test::dump_filters_spawning_and_persists_mapping_dto` |
+| webui (projects 面) | 项目注册降级如实提示 | ✅ | sebas-webui `session_endpoints_test`（`projects_add_degraded_when_core_unreachable`：201 + `degraded.cause`；正常路径无标记）；browser `deployment.spec.ts`（加项目降级提示，harden-core-channel-deployment）；前端 `project-rail.test.ts`（降级 hint 三态）|
 
 > ④ 的「webui (projects 面)」按主 spec 界定收 webui capability 下直接归属项目管理面
 > 的 requirement（本期仅「项目注册降级如实提示」一条）；projects 的增删/排序等其余
@@ -156,9 +191,9 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 |---|---|---|---|
 | core-session-channel | Core 是唯一会话权威 | ✅ | src `core_channel/tests.rs`（`backend_methods_reach_the_right_handlers`、`client_converges_after_server_restart`：核心值权威、客户端收敛）|
 | | 通道传输与鉴权 | ✅ | 同上（`missing_handshake_closes_connection_without_response`、`wrong_and_empty_secrets_are_rejected`、`cross_uid_rejected_live_process` 真实 fork+setuid 跨 uid 拒绝，`#[ignore]` root 实测通过；stale socket 回收：同路径重启用例 + E `no_secret_assembly`）；harden：密钥文件 0600 |
-| | 会话观察方法 | ✅ | `subscription_delivers_every_mutation_after_the_snapshot`（snapshot 先行）、`lagging_subscriber_is_disconnected_and_can_resnapshot`；快照含执行体/模型（`create_placeholder_wires_a_zero_turn_session`）|
-| | 会话驱动方法 | ✅ | `backend_methods_reach_the_right_handlers`、`create_placeholder_wires_a_zero_turn_session`、`cancel_rejects_unknown_and_accepts_live_session`、`ensure_message_attachments_are_validated`（缺失附件 typed rejection + 合法附件 Ok）；E `session_round_trip_via_webui_http` |
-| | 回合内容获取 | ✅ | `backend_methods_reach_the_right_handlers`（turns 增量位置语义）；`full_e2e_test` 回合内容回读 |
+| | 会话观察方法 | ✅ | `subscription_delivers_every_mutation_after_the_snapshot`（snapshot 先行）、`lagging_subscriber_is_disconnected_and_can_resnapshot`；快照含执行体/模型（`create_placeholder_wires_a_zero_turn_session`）+ pending（`pending_submissions_visible_and_manageable_over_the_channel`，turn-queue 修订）|
+| | 会话驱动方法 | ✅ | `backend_methods_reach_the_right_handlers`、`create_placeholder_wires_a_zero_turn_session`、`cancel_rejects_unknown_and_accepts_live_session`、`ensure_message_attachments_are_validated`（缺失附件 typed rejection + 合法附件 Ok）；pending 管理两 scenario（移除 + 已开始拒绝，turn-queue 修订，同上用例）；E `session_round_trip_via_webui_http` |
+| | 回合内容获取 | ✅ | `backend_methods_reach_the_right_handlers`（turns 增量位置语义）；`session_events_test::tool_events_are_labelled_tool_in_turn_content`（submission 与 tool 条目可区分，conversation-view 修订）、`turns_are_incremental_by_position`；`full_e2e_test` 回合内容回读 |
 | | 核心不可达诚实降级 | ✅ | `unreachable_causes_are_distinct`、`client_converges_after_server_restart`；E `reachability_flips_across_core_restart`、`secret_rotation_self_heal_across_core_restart`；webui 全局横幅 + browser `deployment.spec.ts`（横幅 cause/composer 门禁/恢复消隐）|
 | | 协议使用中性会话键 | ✅ | `full_e2e_test`（ChannelKey 语义）；`core_channel/protocol.rs` 内联测试 |
 | | 审批请求全执行体外显 | ✅ | `acp_permission_request_streams_and_answer_routes_back`；`permission_flow_test`；browser `approval-detached.spec.ts`（detached 审批 allow/deny，cover B1.2）|
@@ -168,9 +203,10 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 无注入密钥的通道自动武装（harden）| ✅ | `auto_arm_without_env_writes_secret_file_and_completes_handshake`、`auto_arm_with_env_uses_env_value_and_writes_matching_file`；E `no_secret_assembly_end_to_end`（0600 + 会话往返）|
 | | 通道客户端密钥文件发现（harden）| ✅ | `client_discovers_secret_from_file_and_heals_key_rotation`、`discovery_both_missing_warns_once_and_uses_empty`；E `secret_rotation_self_heal_across_core_restart` |
 | | bind 失败即硬启动失败（harden）| ✅ | `arm_fails_hard_when_socket_path_is_taken_by_live_listener`；supervisor `bind_failed_exit_code_marks_degraded` |
-| | 状态库通道面（cover）| ✅ | `tests/state_channel_contract_test.rs`（StateSnapshot/StateMutation/StateMutationOk/Rejected 不静默吞错/StateSubscribe 订阅后 mutation 帧；fake engine 注入）；`state_subscription_serves_snapshot_frame_without_engine` |
+| | 状态库通道面（cover；core-owned 修订）| ✅ | `tests/state_channel_contract_test.rs`（StateSnapshot/StateMutation/StateMutationOk/Rejected 不静默吞错/StateSubscribe 订阅后 mutation 帧；fake engine 注入）；provider mutation 三态 + `settings_defaults_mutation_requires_provider`（core-owned 新 scenario：provider 管理走通道 + defaults 与 provider 数据同库）|
 | | reachability 三态区分启动失败（cover）| ✅ | `reachability_startup_failed_with_env_file`、`reachability_startup_failed_fallback`、`reachability_auth_rejected_after_handshake`、`reachability_disconnected_after_connected`（`kind`= startup_failed/auth_rejected/disconnected + 闩锁 enrich）；E `startup_failure_*` 75 契约 |
 | | ensure_message IM 投递语义（cover）| ✅ | `ensure_message_unknown_key_auto_creates`、`ensure_message_dormant_resumes`、`message_unknown_key_rejected` |
+| | Model list fetch over the channel（fetch-models 新增）| ✅ | `tests/state_channel_contract_test.rs::fetch_models_op_returns_ids_and_injects_key_upstream / rejects_provider_without_base_url / sanitizes_upstream_failure / persists_nothing`；core 侧 `sebas-dispatch/src/state_store.rs::providers_fetch_models` + `provider_fetch_target_rejects_when_no_usable_base_url`；webui 全栈 `gateway_bff_test::provider_probe_fetches_models_without_persisting`（本地 mock 上游）|
 | watchdog | Core 子进程监督 | ✅ | supervisor 单测（`spawn_failure_retries`、`spawn_failure_hits_limit_and_enters_failed_startup`、`spawn_failure_limit_is_configurable`、`ready_resets_the_spawn_failure_counter`、`early_fatal_before_ready_counts_toward_the_limit`、`post_ready_crash_never_enters_failed_startup`，fake spawner 直驱监督循环）；E `startup_failure_core/run_exits_75_with_summary`、`watchdog_supervised_core_recovery`（spawn-fail 进程级注入面转豁免，见豁免清单）|
 | | 崩溃退避 | ✅ | supervisor `crash_policy_counters_and_cool_down`、`over_limit_cools_down_then_keeps_supervising`、`unexpected_exit_restarts_with_backoff`；E `watchdog_supervised_core_recovery`（SIGKILL → 1s 退避重启新 pid）|
 | | 新二进制自动回滚 | ✅ | supervisor `unready_after_upgrade_invokes_hook_without_crash_count`；src `watchdog.rs`（`rollback_to_previous_restores_previous_version`、`rollback_without_backup_is_err`；hook 失败分支走同一条已测 `enter_failed_startup`→75 布线）|
@@ -204,7 +240,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | feishu-option | ✅ | `feishu_native_webui_test`、config 测试 |
 | feishu-reactions | ✅ | src `reactions.rs` 内联测试 |
 | im-service | ✅ | sebas-im 内联测试（`reactions.rs` 等）；`im_cmd.rs` 控制命令直发 control RPC（失败回可操作错误）；`feishu_native_webui_test` 进程内注入面 |
-| router-admin-api | ✅ | `admin_test`；J: provider_governance（/admin/stats）|
+| router-admin-api | ✅（make-core-own-provider-data 退役 4 条：Provider CRUD endpoints、Model alias CRUD endpoints、Model probe endpoint、Write-then-apply semantics——出账）| 退役面：sebas-router `admin_test`（`retired_provider_surface_answers_404`、`probe_endpoint_is_gone`、`agent_defaults_surface_is_gone`、`admin_mutations_write_no_files_without_core_channel`）；「Configuration source」：E `core_owned_provider_reaches_router_without_restart`（card-edited provider 经通道订阅无重启可路由，2026-09-11 补）+ `spawn_env_store_authority_test`（store 权威）+ state_store 迁移单测；「External change hot reload」：同 E 用例（change notification → 热交换）+ `hot_reload_external_write_and_failure_recovery`；「Admin authentication」「Preset table endpoint」：`admin_test`、J: provider_governance |
 | router-auth-rate-limit | ✅ | `auth_test`、`rate_limit_test`；J: `router_downstream_auth_journey` |
 | router-core | ✅ | `proxy_smoke_test`、`contract_test`、`debug_provider_test`、`failure_test`；E: router debug |
 | router-metrics | ✅ | sebas-router `metrics` 测试；J: /admin/stats 200 |
@@ -221,7 +257,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | testsuite-acceptance | ✅ | 套件本体：`invoke testsuite-acceptance` 六旅程（`tests/testsuite_acceptance_test.rs`，`#[ignore]` 不进默认 cargo test、失败保留沙箱、`--case` 单跑）；达标复核即本文件统计段 |
 | testsuite-process-e2e | ✅ | 套件约定（沙箱隔离/显式超时/失败保留现场/平台门控）由 `tests/testsuite_e2e_test.rs` + `tests/testsuite_acceptance_test.rs` 落地并被其用例遵循；E: 全部 e2e 用例 |
 | watchdog | ✅ | 见核心簇⑤ |
-| webui | ✅ | sebas-webui 全套端点测试（harden-core-channel-deployment：projects 注册降级标记 `degraded.cause`/正常路径无标记）；E: detached 双进程启动/健康/重连（`testsuite_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，含 web_spawn 失败内显 + deployment 部署韧性旅程，见下）|
+| webui | ✅ | sebas-webui 全套端点测试（harden-core-channel-deployment：projects 注册降级标记 `degraded.cause`/正常路径无标记；turn-queue：`session_payloads_carry_pending_submissions_in_delivery_order`、`pending_remove_and_move_endpoints`（已开始 409 typed rejection）、`message_overflow_is_a_visible_rejection`；conversation-view：`summary_focused_session_matches_detail_entry_view` 等 payload 两侧条目同序/退役字段不回流断言）；E: detached 双进程启动/健康/重连 + `turn_queue_timing_and_dropped_accounting` + `core_owned_provider_reaches_router_without_restart`（`testsuite_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，含 conversation/pending-stack 新 spec，见下）|
 
 ### testsuite-webui-browser（非核心：浏览器级 UI 旅程，Playwright）
 
@@ -264,15 +300,23 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 会话管理 | 模型面诚实缺省 | model honest absence — no selector, switch attempt keeps model absent | `session-mgmt.spec.ts` | 工作台、项目与会话管理面旅程「模型面诚实缺省」 |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
 | 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
-| 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
-| 模型管理覆盖 | settings provider 只读 | 3.2 settings provider list matches API, zero probe traffic | `models.spec.ts` | 模型管理覆盖「settings provider 只读」 |
-| 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails non-terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
+| 模型管理覆盖 | settings provider 抓取 + 条目编辑 | 3.2 providers are editable: model entries with capability tags persist; browsing stays probe-free | `models.spec.ts` | webui「Provider management page」（redesign-provider-models-settings）|
+| 模型管理覆盖 | settings provider 抓取 + 条目编辑 | fetch lists the official ids without persisting; picking joins the catalog via an ordinary edit | `models.spec.ts` | webui「Fetch models from the provider's official base URL」 |
+| 模型管理覆盖 | settings provider 抓取 + 条目编辑 | a provider without any usable base URL renders no fetch entry | `models.spec.ts` | webui「Fetch models from the provider's official base URL」 |
+| agent 绑定不可变 | 锁定提示 | detail head shows the bound agent with the lock affordance | `models.spec.ts` | agent-workbench「Session agent binding is immutable」 |
+| 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | webui「Services 分区与 router 状态归属」¹ |
 | 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S6 bare core degrades: no-adapter banner, no rows, restart disabled | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
-| 设置面 ¹ | 写降级 | S4 defaults read parity; sandbox write fails honestly | `settings.spec.ts` | 设置面写操作诚实降级覆盖「写降级失败外显且状态不变」¹ |
-| 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
-| 设置面 ¹ | 写降级 | S5b delete/probe mutations fail honestly, list unchanged | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
+| 设置面 ¹ | 写降级 | S4 defaults read parity; set-default stays local, provider seeded via API | `settings.spec.ts` | provider-management「Set default provider and model from the page」¹ |
+| 设置面 ¹ | 写降级 | S5a create/edit journeys persist through the core store (minimal forms) | `settings.spec.ts` | webui「Provider management page」（core store 持久化）¹ |
+| 设置面 ¹ | 写降级 | S5b delete persists; fetch entry hidden without a base URL | `settings.spec.ts` | webui「Provider management page」+「Fetch models…」¹ |
+| 对话视图 | 两侧交替 | submissions and replies alternate in order across several turns | `conversation.spec.ts` | agent-workbench「Workbench renders the focused session as a conversation」 |
+| 对话视图 | 工具组展开 | the gated tool call renders as the turn tool group and expands | `conversation.spec.ts` | 同上（tool 组不混排 scenario）|
+| 对话视图 | 就地聚焦 | rail click focuses the session in place on the workbench | `conversation.spec.ts` | agent-workbench「Workbench is the single conversation surface」 |
+| 对话视图 | 模型两级选择 | creation mode offers provider → model from the Settings catalog; empty catalog is stated honestly | `conversation.spec.ts` | agent-workbench「Model selector offers the backend catalog before any session」 |
+| 待执行堆叠区 | 忙中提交上栈 | busy-time submission rides the stack, survives refresh, and close names the loss | `pending-stack.spec.ts` | agent-workbench「Pending submissions stack above the composer」+「Rail session close entry」 |
 | 部署韧性 | 核心通道停启 | core 停 → 横幅含 cause、composer 门禁、加项目降级提示；core 恢复 → 横幅消失 | `deployment.spec.ts` | webui「全局核心可达性横幅」「项目注册降级如实提示」（harden-core-channel-deployment，detached 双进程形态）⁵ |
 | 审批卡片旅程（detached） | detached 审批闭环 | allow path — ApprovalRequested 跨进程到达 review-card，allow 后 transcript 记录允许语义 | `approval-detached.spec.ts` | webui「approval_answer end-to-end (detached topology)」（cover-core-channel-test-gaps B1.2，detached 双进程形态）⁶ |
 | 审批卡片旅程（detached） | detached 审批闭环 | deny path — deny 后 transcript 记录拒绝语义，回合完成 | `approval-detached.spec.ts` | webui「approval_answer rejects unknown request_id」⁶（cover B1.2，detached） |
@@ -282,10 +326,14 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 
 > Settings 语义修正（fix-settings-menu-and-services-semantics，spec 改动 `1e4a807`）：
 > S1 改写为 `/api/admin/services` 响应驱动（响应即真源，不枚举具体服务）、S6 新增裸
-> core 退化覆盖（横幅 + 零行 + 重启 disabled）；实施清单见
-> `openspec/changes/fix-settings-menu-and-services-semantics/tasks.md`；本表 41 行 =
-> 全套件 `it` 总数 41（= 主 config 34 + auth 3 + detached 4；含 S6 与 cover-channel
-> 新增 5 例）。
+> core 退化覆盖（横幅 + 零行 + 重启 disabled）。redesign-provider-models-settings 归档
+> （2026-09-11）后 S1 锚点改指 webui「Services 分区与 router 状态归属」（router
+> 状态只在 Services 呈现，S4/S5a/S5b 经 core store 持久化）。本期树形账本 49 行 =
+> 全套件 `it` 总数 49（主 config 42 + auth 3 + detached 4；较上期 41 行 +8：
+> conversation 4、pending-stack 1、models +3（条目编辑/抓取两用例与锁定提示，
+> 替换旧「settings provider 只读」对账行）、settings S4/S5a/S5b 与 session-mgmt
+> 模型面用例按归档 spec 改写为同行数）。
+> conversation.spec.ts / pending-stack.spec.ts 为本期新增 spec。
 
 > ⁶ cover-core-channel-test-gaps（2026-09-08）：detached 审批三例 + 模型面两例；
 > detached spec（`approval-detached.spec.ts`）由 `playwright.detached.config.ts` 专属承担
@@ -331,7 +379,21 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 
 ## 缺口清单（未命中且未豁免）
 
-requirement 级残留：**0 条**（五簇复核 2026-09-08 收口）。历史缺口去向：
+requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期复核发现并当场收口
+两处（收口前均为全测试层无覆盖）：
+
+0a. router 订阅 core provider 数据闭环（router-admin-api「Configuration source」
+    「card-edited provider reaches router」/「External change hot reload」
+    「card edit hot-applies」/provider-management Core owns「router reads a core
+    change without a restart」共同指向）— 已收口：本期补 E
+    `core_owned_provider_reaches_router_without_restart`（watchdog 形态 router
+    子进程订阅通道，webui BFF 写库 → 不重启可路由、不写 provider 文件）。
+0b. Project-level default agent（agent-workbench，workbench-agent-wire-fix 引入）—
+    已收口：本期补 `session_endpoints_test::project_default_agent_follows_last_use`
+    （创建即记录/跟随最近一次/项目间互不串/无记录如实空）+ 前端 composer
+    `projectDefaultAgent` 预选单测。
+
+历史缺口去向：
 
 1. ~~detached 审批通道旅程~~（permission-flow / agent-workbench）— 已收口：
    cover-core-channel-test-gaps B1.2 交付 `approval-detached.spec.ts`（detached
@@ -360,6 +422,7 @@ requirement 级残留：**0 条**（五簇复核 2026-09-08 收口）。历史�
 
 | 日期 | change | commit | 说明 |
 |---|---|---|---|
+| 2026-09-11 | 五 change 归档复核（make-core-own-provider-data、add-fetch-models、redesign-provider-models-settings、workbench-turn-queue、workbench-conversation-view） | specs 同步在工作树（归档目录 `openspec/changes/archive/2026-09-11-*`） | 五簇 requirement 级全量重数：117/117 = 100%（豁免 1 条不计分母）。分母 100 → 117：五 change 新增 +7（① Pending submissions observable/manageable；② Core owns provider and model data、Model entries carry capability tags；③ Pending submissions stack、conversation render、single surface；⑤ Model list fetch over the channel）；上期基数后归档补入账 +10（③ agent-workbench +6：审计 `982b4cc` rail/placeholder 三条 + wire-fix `bad057e` 三条；④ +4：project-session-actions rail 三条 + state-store Runtime state boundaries）；router-admin-api REMOVED 4 条退役出账（非核心面）。证据行全面改写（router CRUD/探测/默认值证据迁到 webui BFF + core store + 通道契约面；turn-queue/conversation-view 新 scenario 落行）。本期两处真缺口当场补测收口：E `core_owned_provider_reaches_router_without_restart`（router 订阅 core provider 数据的进程级闭环，此前零覆盖）+ `project_default_agent_follows_last_use` 与前端预选单测。树形账本 41 → 49 行（conversation/pending-stack 新 spec）。实施清单见各归档 change `tasks.md`。 |
 | 2026-09-08 | raise-core-coverage-to-90 | `feat/raise-core-coverage-to-90`（基数：fail-fast `5eb1d85`、harden `52847f1`、cover-channel `f14767e`） | 核心集门槛 80%→90% 且扩为五簇（新增 ⑤ 通道与监督 = core-session-channel + watchdog，界定写死进主 spec「核心功能集界定」）；五簇 requirement 级全量重数入账（100/100 = 100%，豁免 1 条不计分母）；三期变更新用例证据归行（fail-fast → watchdog/webui/testsuite 行；harden → ⑤/webui/④/testsuite 行；cover-channel → ⑤/webui 行）；缺口清单收口（detached 审批、projects_branch、watchdog 监督旅程均已有交付命中；spawn-fail 进程级注入转豁免）；复核 grep 清单落 tasks 1.1。实施清单为本期 `tasks.md`。 |
 | 2026-09-09 | harden-core-channel-deployment | `feat/harden-core-channel-deployment`（694c2a5 起） | 核心通道部署加固：core 无条件自动装配（生成密钥写 `<config dir>/core.secret` 0600，env 优先）、客户端每次连接 env→文件发现（轮换自愈）、ready 后移至 bind 成功后（bind 失败→75）、im/router/webui 订阅侧共享 resolver、webui 全局核心不可达横幅 + 项目注册降级标记/提示。证据：E `no_secret_assembly_end_to_end` / `secret_rotation_self_heal_across_core_restart` / `watchdog_supervised_core_recovery`（`testsuite_e2e_test`，3 连绿 11 passed ×3）；browser `deployment.spec.ts` 部署韧性旅程（detached 双进程，3 连绿）；`testsuite-webui/tests/helpers/detached.ts` 双进程 fixture（交付物，cover-B 复用）。实施清单为本期 `tasks.md`。 |
 | 2026-09-07 | fail-fast-on-startup-errors | `feat/fail-fast-startup-errors`（2e4d952 起，5.3 收尾 commit 为该分支末端） | 启动失败 fail-fast 规约：生命周期子命令启动失败统一退出码 75 + stderr 末行 `startup-failure:` 摘要 + `SEBAS_STARTUP_ERROR_FILE` 覆盖写；watchdog `[watchdog] max_spawn_failures`（默认 3）→ 服务终态 `failed-startup` + watchdog 整体退出 75；rollback 失败不再 silently continue；`sebas ctl status` 新增 `startup_failure` 摘要、`/api/summary` 的 `reachability.cause` 富化；webui web_spawn 失败 inline 进 transcript（spawn-failed 状态 + error 事件 + 相邻同类合并计数）。证据：E `startup_failure_core/run`（`testsuite_e2e_test`）、browser「spawn 失败内显」（`errors.spec.ts`）、supervisor 终态策略/`SpawnFailurePolicy` 单测。实施清单为本期 `tasks.md`。 |

@@ -14,7 +14,7 @@
  * deterministically captures the frame.
  */
 import { expect, test } from '@playwright/test'
-import { createSession, ErrorCollector, ReviewCards, SessionDetailPage, waitStatus } from './helpers/index'
+import { createSession, ErrorCollector, ReviewCards, FocusedSession, waitStatus } from './helpers/index'
 
 test.describe('审批卡片旅程', () => {
   let collector: ErrorCollector
@@ -25,7 +25,7 @@ test.describe('审批卡片旅程', () => {
 
   /** Navigate to an idle session with a live WS, then trigger "perm". */
   async function openAndTriggerPerm(page: import('@playwright/test').Page) {
-    const detail = new SessionDetailPage(page)
+    const detail = new FocusedSession(page)
     const cards = new ReviewCards(page)
     const key = await createSession(page.request, { prompt: 'idle' })
     await waitStatus(page.request, key, ['done'])

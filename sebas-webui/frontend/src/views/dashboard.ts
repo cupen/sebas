@@ -1,26 +1,34 @@
 /**
- * Workbench main area (IA v2)：项目树已上移到 app-shell 侧栏
- * （sebas-project-rail），本视图只保留工作台主体——
- * 选中项目的头部（名称 + mono 分支 pill + `N sessions · ● active` meta）、
- * turn-stream 舞台与 composer。无聚焦会话时渲染预览原型的空态；有聚焦
- * 会话时给 spotlight 深链卡片并**就地内联**渲染 `<sebas-transcript-view>`
- * （聚焦会话的 detail 由 /api/sessions/:key 取得，随 summary 的
- * active_session_key 刷新——与 session-detail 同一套取数/装配方式）。
- * 统计卡条（Active/Dormant/Spawning/Uptime）与 "Recent sessions" 表已随
- * IA v2 移除。Live updates arrive over the shared WebSocket; a reconnect
- * triggers a refetch.
+ * Workbench main area (IA v2 + workbench-conversation-view): the SINGLE
+ * conversation surface. 项目树已上移到 app-shell 侧栏（sebas-project-rail），
+ * 本视图承载——选中项目的头部（名称 + mono 分支 pill + `N sessions · ●
+ * active` meta）、聚焦会话头（状态徽章 + chat id + agent 锁 + 会话内模型
+ * 选择 + Close/归档 + review-cards——原 session-detail 的会话级操作全部
+ * 迁到这里，session-detail 视图已退休）、turn-stream 舞台
+ * （<sebas-transcript-view> 把 entries 渲染成两侧交替的对话）与 composer。
+ *
+ * 无聚焦会话时渲染预览原型的空态。聚焦来源有三条，全部就地渲染本视图：
+ * rail switch（app-shell 停在 `/`）、`/sessions/:key` 深链（deepLinkKey，
+ * 读 detail 即设置服务端焦点指针）、创建会话（服务端 set_focus）。Live
+ * updates arrive over the shared WebSocket; a reconnect triggers a refetch.
  */
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import type { WsEvent } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
-import { navigate } from '../router.js'
 import { viewStyles } from '../styles/shared.js'
 import '../components/status-badge.js'
+import '../components/review-card.js'
+import '../components/pending-stack.js'
 import './transcript-view.js'
 import './workbench-composer.js'
+import '@awesome.me/webawesome/dist/components/button/button.js'
+import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
+import '@awesome.me/webawesome/dist/components/select/select.js'
+import '@awesome.me/webawesome/dist/components/option/option.js'
 
 @customElement('sebas-dashboard')
 export class SebasDashboard extends LitElement {
@@ -28,14 +36,20 @@ export class SebasDashboard extends LitElement {
   @state() private allRows: SessionRow[] = []
   @state() private error = ''
   /**
-   * Focused session's full detail (transcript entries + encoded key) for
+   * Focused session's full detail (conversation entries + encoded key) for
    * the inline turn stream. Loaded from /api/sessions/:key whenever the
-   * summary's `active_session_key` changes; `null` while loading or when
-   * nothing is focused.
+   * effective focus key changes; `null` while loading or when nothing is
+   * focused.
    */
   @state() private focusedDetail: SessionDetail | null = null
   /** Set when the focused detail fetch failed (session vanished mid-flight). */
   @state() private focusedUnavailable = false
+  /**
+   * `/sessions/:key` 深链参数（app-shell 传入）：focus 指针尚未到达（summary
+   * 未刷新）时先以它取 detail——读 detail 即在服务端设置焦点指针（display
+   * pointer only）。会话关闭/焦点他移后由 effective-focus 收敛逻辑清空。
+   */
+  @property({ attribute: false }) deepLinkKey: string | null = null
   /**
    * Selected project path — owned by the app-shell（侧栏项目树驱动），
    * 这里只消费。`null` = 未选择项目。The selection only affects the
@@ -58,17 +72,44 @@ export class SebasDashboard extends LitElement {
    * itself cannot be reached (honest degradation, fix-webui-detached-status).
    */
   @state() private providerLabel: string | null = null
+  /**
+   * 中程切换聚焦会话模型（add-acp-model-selection 语义）：非空 = 请求已发出，
+   * 等事件回流。
+   */
+  @state() private modelSwitching = false
+  /** Close 确认对话框（session-detail 迁移；workbench-turn-queue：点名丢弃条数）。 */
+  @state() private confirmClose = false
   private unsubscribe?: () => void
-  private onComposerCreated = (e: Event) => {
-    const detail = (e as CustomEvent<{ key: string }>).detail
-    navigate(`/sessions/${detail.key}`)
+  /**
+   * 创建会话不再跳转（workbench-conversation-view 3.x：工作台是唯一对话面）
+   * ——服务端 create 已 set_focus，就地重取让新会话的对话出现。
+   */
+  private onComposerCreated = (): void => {
+    // 新会话创建后服务端焦点指向它：清掉深链参数，让焦点指针驱动视图。
+    this.deepLinkKey = null
+    this.refetch()
   }
   /**
    * add-composer-agent-binding：跟随模式下 composer 发出消息/切模型后乐观
    * 重取聚焦 detail——transcript 不等下一个 WS/summary 周期就能反映本轮。
    */
   private onComposerSent = (): void => {
-    this.loadFocused(this.data?.active_session_key ?? null)
+    this.loadFocused(this.effectiveFocusKey())
+  }
+  /**
+   * workbench-turn-queue 7.3：会话终结时未执行的待生效提交（一次性提示的
+   * 数据源）。`session.pending_dropped` 帧携带逐条标注。提示归属刚终结的
+   * 会话：焦点清空（会话已移除）时保留——堆叠区随会话消失，提示是唯一
+   * 记录；聚焦切换到别的会话才清除。
+   */
+  @state() private droppedPending: PendingSubmission[] | null = null
+  @state() private droppedPendingFor: string | null = null
+
+  private onWsEvent = (ev: WsEvent): void => {
+    if (ev.type === 'session.pending_dropped' && ev.session_id === this.data?.active_session_key) {
+      this.droppedPending = ev.dropped
+      this.droppedPendingFor = ev.session_id
+    }
   }
 
   static styles = [
@@ -182,6 +223,85 @@ export class SebasDashboard extends LitElement {
       .focused-link .arrow {
         font-size: 0.85rem;
       }
+      /* ── 聚焦会话头（session-detail 迁移，3.3）──状态色左缘条 + 徽章 +
+         身份 + 只读 agent 锁 + 会话内模型选择 + Close/归档动作。 */
+      .session-head {
+        display: flex;
+        align-items: center;
+        gap: var(--sebas-space-3);
+        flex-wrap: wrap;
+        flex-shrink: 0;
+        padding: var(--sebas-space-2) var(--sebas-space-5);
+        border-left: 3px solid var(--sebas-status-dormant);
+        border-bottom: 1px solid var(--sebas-border);
+        background: var(--sebas-surface);
+      }
+      .session-head[data-status='starting'] {
+        border-left-color: var(--sebas-status-starting);
+      }
+      .session-head[data-status='queued'] {
+        border-left-color: var(--sebas-status-queued);
+      }
+      .session-head[data-status='working'] {
+        border-left-color: var(--sebas-status-working);
+      }
+      .session-head[data-status='done'] {
+        border-left-color: var(--sebas-status-done);
+      }
+      .session-head[data-status='failed'] {
+        border-left-color: var(--sebas-status-failed);
+      }
+      .session-head[data-status='dormant'] {
+        border-left-color: var(--sebas-status-dormant);
+      }
+      .session-head .ident {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .session-head .chat {
+        font-family: var(--sebas-font-mono);
+        font-size: 0.9rem;
+        color: var(--sebas-text-bright);
+        overflow-wrap: anywhere;
+      }
+      .session-head .chat .dim {
+        color: var(--sebas-text-faint);
+      }
+      .session-head .meta {
+        display: flex;
+        gap: var(--sebas-space-2);
+        align-items: center;
+        color: var(--sebas-text-dim);
+        font-size: 0.74rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .session-head .meta .mono {
+        font-family: var(--sebas-font-mono);
+      }
+      /* 中程模型选择器：meta 行内的紧凑下拉（add-acp-model-selection）。 */
+      .session-head .model-pick {
+        display: inline-flex;
+        align-items: center;
+      }
+      .session-head .model-select {
+        --wa-select-min-height: 24px;
+        font-size: 0.75rem;
+        max-width: 260px;
+      }
+      .session-head .actions {
+        margin-left: auto;
+        display: flex;
+        gap: var(--sebas-space-2);
+        align-items: center;
+      }
+      .session-head .actions a {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.85rem;
+      }
       /* turn-stream 舞台：聚焦会话的 transcript 面板，随面板 flex 吃满
          余高（滚动由 transcript-view 内部 .scroll 负责，fill 模式去掉
          58vh 封顶）。 */
@@ -237,13 +357,26 @@ export class SebasDashboard extends LitElement {
       .skel-line.w25 {
         width: 25%;
       }
+      .dialog-body {
+        margin: 0;
+        color: var(--sebas-text);
+        line-height: 1.55;
+      }
+      .dialog-body .discard-note {
+        color: var(--sebas-status-failed);
+        font-size: 0.8rem;
+        margin: var(--sebas-space-2) 0 0;
+      }
     `,
   ]
 
   connectedCallback(): void {
     super.connectedCallback()
     this.refetch()
-    this.unsubscribe = sharedWs.subscribe(() => this.refetch())
+    this.unsubscribe = sharedWs.subscribe((ev) => {
+      this.onWsEvent(ev)
+      this.refetch()
+    })
     window.addEventListener('sebas:refetch', this.refetch)
   }
 
@@ -256,6 +389,18 @@ export class SebasDashboard extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // 侧栏选中项目切换 → 重取分支（面板 pill 用）。
     if (changed.has('selectedPath')) this.loadSelectedBranch()
+    // 深链参数变化（/sessions/A → /sessions/B 复用同一元素）：立即按新 key
+    // 取 detail（读即设服务端焦点）。
+    if (changed.has('deepLinkKey')) this.loadFocused(this.effectiveFocusKey())
+  }
+
+  /**
+   * 生效的聚焦 key：深链优先（URL 决定视图——读 detail 即设置服务端焦点
+   * 指针，summary 随后收敛到同一会话）；无深链时由 summary 的焦点指针驱动
+   * （rail switch / 创建会话就地生效）。
+   */
+  private effectiveFocusKey(): string | null {
+    return this.deepLinkKey ?? this.data?.active_session_key ?? null
   }
 
   private refetch = (): void => {
@@ -272,7 +417,7 @@ export class SebasDashboard extends LitElement {
       .then((d) => {
         this.data = d
         this.error = ''
-        this.loadFocused(d.active_session_key)
+        this.loadFocused(this.effectiveFocusKey())
       })
       .catch((e) => {
         this.error = String(e)
@@ -332,6 +477,7 @@ export class SebasDashboard extends LitElement {
     const d = this.data
     const rows = this.rowsForSelected()
     const hasActive = rows.some((r) => r.status_slug === 'working')
+    const focusKey = this.effectiveFocusKey()
     const projectName = this.selectedPath
       ? (this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath)
       : null
@@ -360,7 +506,7 @@ export class SebasDashboard extends LitElement {
                 <a
                   class="focused-link"
                   href=${`/sessions/${d.active_session.encoded_key}`}
-                  title="Open focused session"
+                  title="Focused session"
                 >
                   <span class="fkey">${d.active_session.chat_id}</span>
                   <sebas-status-badge
@@ -375,7 +521,7 @@ export class SebasDashboard extends LitElement {
         </span>
       </header>
 
-      ${d.active_session
+      ${focusKey
         ? this.renderTurnStream()
         : html`
             <div class="empty-stream">
@@ -388,13 +534,19 @@ export class SebasDashboard extends LitElement {
           `}
 
       <div class="composer-area">
+        <sebas-pending-stack
+          .sessionKey=${focusKey}
+          .pending=${this.focusedDetail?.pending ?? []}
+          .dropped=${this.droppedPending}
+          @pending-changed=${this.onComposerSent}
+        ></sebas-pending-stack>
         <sebas-workbench-composer
           .projectDir=${this.selectedPath}
           .providerLabel=${this.providerLabel}
-          .sessionKey=${d.active_session?.encoded_key ?? null}
-          .agentKind=${d.active_session?.agent_kind ?? null}
-          .sessionModels=${d.active_session?.available_models ?? []}
-          .currentModel=${d.active_session?.current_model ?? null}
+          .sessionKey=${focusKey}
+          .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
+          .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
+          .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
           @composer-created=${this.onComposerCreated}
           @composer-sent=${this.onComposerSent}
         ></sebas-workbench-composer>
@@ -415,12 +567,14 @@ export class SebasDashboard extends LitElement {
   private projects: Project[] = []
 
   /**
-   * Inline turn stream data: fetch the focused session's detail (same
-   * endpoint session-detail uses). `null` key clears the stage; stale
-   * responses (focus moved on while in flight) are dropped so the stream
-   * never shows a session that is no longer focused.
+   * Inline turn stream data: fetch the focused session's detail. `null`
+   * key clears the stage; stale responses (focus moved on while in flight)
+   * are dropped so the stream never shows a session that is no longer
+   * focused.
    */
   private loadFocused(key: string | null): void {
+    // 7.3：焦点清空（会话移除）时保留提示；切到别的会话才清除。
+    if (key !== null && key !== this.droppedPendingFor) this.droppedPending = null
     if (!key) {
       this.focusedDetail = null
       this.focusedUnavailable = false
@@ -429,13 +583,13 @@ export class SebasDashboard extends LitElement {
     api
       .session(key)
       .then((d) => {
-        if (this.data?.active_session_key === d.encoded_key) {
+        if (this.effectiveFocusKey() === d.encoded_key) {
           this.focusedDetail = d
           this.focusedUnavailable = false
         }
       })
       .catch(() => {
-        if (this.data?.active_session_key === key) {
+        if (this.effectiveFocusKey() === key) {
           this.focusedDetail = null
           this.focusedUnavailable = true
         }
@@ -443,31 +597,39 @@ export class SebasDashboard extends LitElement {
   }
 
   /**
-   * Inline turn-stream 舞台：聚焦会话就地的 transcript（复用
-   * `<sebas-transcript-view fill>`，内部滚动/未读 seam 均归它管）。detail 尚在
-   * 途时给骨架，取数失败（会话恰好被关闭）给一条温和空态而不是报错。
-   * 容器是满幅面板区（flex 吃满余高），不再有 panel 卡片外观。
+   * Inline conversation 舞台：聚焦会话头（状态/身份/Close/归档/review-cards，
+   * 3.3 迁移）+ 就地的对话（复用 `<sebas-transcript-view fill>`，内部滚动/
+   * 未读 seam 均归它管）。detail 尚在途时给骨架，取数失败（会话恰好被关闭）
+   * 给一条温和空态而不是报错。
    */
   private renderTurnStream() {
+    const d = this.focusedDetail
+    const key = this.effectiveFocusKey()!
     return html`
-      <div class="turn-stream-area" aria-label="Focused session transcript">
-        ${this.focusedDetail
-          ? this.focusedDetail.body.length === 0
-            ? html`
-                <div class="empty">
-                  <span class="glyph">${icon('message', 20)}</span>
-                  <span class="title">Nothing yet</span>
-                  <p class="hint">The agent has not produced output for this session.</p>
-                </div>
-              `
-            : html`<sebas-transcript-view
-                fill
-                .entries=${this.focusedDetail.body}
-                sessionKey=${this.focusedDetail.encoded_key}
-              ></sebas-transcript-view>`
+      <div class="turn-stream-area" aria-label="Focused session conversation">
+        ${d && d.encoded_key === key
+          ? html`
+              ${this.renderSessionHead(d)}
+              <sebas-review-cards .sessionKey=${d.encoded_key}></sebas-review-cards>
+              ${d.entries.length === 0
+                ? html`
+                    <div class="empty-stream">
+                      <span class="glyph">${icon('message', 20)}</span>
+                      <span class="title">Nothing yet</span>
+                      <p class="hint">
+                        The conversation starts when the next turn begins — say hello below.
+                      </p>
+                    </div>
+                  `
+                : html`<sebas-transcript-view
+                    fill
+                    .entries=${d.entries}
+                    sessionKey=${d.encoded_key}
+                  ></sebas-transcript-view>`}
+            `
           : this.focusedUnavailable
             ? html`
-                <div class="empty">
+                <div class="empty-stream">
                   <span class="glyph">${icon('message', 20)}</span>
                   <span class="title">Session unavailable</span>
                   <p class="hint">The focused session could not be loaded.</p>
@@ -485,6 +647,143 @@ export class SebasDashboard extends LitElement {
               `}
       </div>
     `
+  }
+
+  /**
+   * 聚焦会话头（3.3，从 session-detail 迁移）：状态徽章 + chat id +
+   * session_id/agent 锁/last active + 会话内模型选择（available_models 非空
+   * 才显示）+ Close/归档动作。
+   */
+  private renderSessionHead(d: SessionDetail) {
+    return html`
+      <div class="session-head" data-status=${d.status_slug}>
+        <sebas-status-badge
+          slug=${d.status_slug}
+          label=${d.status_label}
+          glyph=${d.status_glyph}
+        ></sebas-status-badge>
+        <div class="ident">
+          <span class="chat"
+            >${d.chat_id}${d.thread_id
+              ? html`<span class="dim"> · ${d.thread_id}</span>`
+              : nothing}</span
+          >
+          <span class="meta">
+            ${d.session_id
+              ? html`<span class="mono" title=${d.session_id}>${d.session_id.slice(0, 12)}</span>`
+              : nothing}
+            <span
+              class="mono"
+              data-testid="agent-lock"
+              title="Agent is immutable — chosen when the session was created"
+              >🔒 ${d.agent_kind ?? 'default agent'}</span
+            >
+            <span>last active ${d.last_active}</span>
+            ${d.available_models && d.available_models.length > 0
+              ? html`<span class="model-pick">
+                  <!-- Web Awesome 3.x 派发标准 change 事件（不派发 wa-change）。 -->
+                  <wa-select
+                    class="model-select"
+                    size="xs"
+                    hoist
+                    value=${d.current_model ?? ''}
+                    ?disabled=${this.modelSwitching}
+                    aria-label="Session model"
+                    @change=${(e: Event) => {
+                      const v = (e as unknown as { target: { value: string } }).target.value
+                      if (v) void this.setModel(d.encoded_key, v)
+                    }}
+                  >
+                    ${d.available_models.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
+                  </wa-select>
+                </span>`
+              : nothing}
+          </span>
+        </div>
+        <div class="actions">
+          <a href="/sessions">All sessions</a>
+          <wa-button
+            size="s"
+            appearance="outlined"
+            aria-label="Archive this session"
+            @click=${() => void this.archiveFocused()}
+            >Archive</wa-button
+          >
+          <wa-button
+            size="s"
+            variant="danger"
+            appearance="outlined"
+            aria-label="Close this session"
+            @click=${() => (this.confirmClose = true)}
+            >Close</wa-button
+          >
+        </div>
+      </div>
+      <wa-dialog label="Close session" ?open=${this.confirmClose}>
+        <p class="dialog-body">
+          Closing will terminate the agent child process and clear this chat's
+          permission allowlist. This cannot be undone.
+          ${d.pending.length > 0
+            ? html`<span class="discard-note" data-testid="close-discards-pending"
+                >将丢弃 <b>${d.pending.length}</b> 条待执行消息，它们不会被执行。</span
+              >`
+            : nothing}
+        </p>
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.confirmClose = false)}
+          >Cancel</wa-button
+        >
+        <wa-button slot="footer" variant="danger" @click=${() => void this.doClose(d.encoded_key)}
+          >Close session</wa-button
+        >
+      </wa-dialog>
+    `
+  }
+
+  /**
+   * 中程切换聚焦会话模型（add-acp-model-selection 2.3）：把选择送后端 →
+   * 驱动发 `session/set_config_option{configId:"model"}`。wire 层失败（agent
+   * 拒绝无效模型）经非 terminal Error 事件回流；快照的 `current_model` 在
+   * `ModelChanged` 到达后由 refetch 刷新。
+   */
+  private async setModel(key: string, modelId: string): Promise<void> {
+    if (this.modelSwitching) return
+    this.modelSwitching = true
+    try {
+      await api.setSessionModel(key, modelId)
+      // 命令已送达驱动；连刷两次以捕捉 ModelChanged 之后的快照更新。
+      await new Promise((r) => setTimeout(r, 400))
+      this.refetch()
+    } finally {
+      this.modelSwitching = false
+    }
+  }
+
+  /** Close（session-detail 迁移）：关闭后焦点指针随响应收敛，就地重取。 */
+  private async doClose(key: string): Promise<void> {
+    this.confirmClose = false
+    try {
+      await api.closeSession(key)
+      // 关闭的正是深链会话时清掉深链参数，避免 effective-focus 又指向死会话。
+      if (this.deepLinkKey === key) this.deepLinkKey = null
+      this.refetch()
+    } catch {
+      /* close 失败（会话已被别处关闭）：refetch 收敛视图。 */
+      this.refetch()
+    }
+  }
+
+  /** 归档入口（3.3）：会话关闭并移入 /api/archive，就地清焦点重取。 */
+  private async archiveFocused(): Promise<void> {
+    const key = this.focusedDetail?.encoded_key ?? this.effectiveFocusKey()
+    if (!key) return
+    try {
+      await api.archiveSession(key)
+      if (this.deepLinkKey === key) this.deepLinkKey = null
+      this.refetch()
+    } catch {
+      /* 归档失败：refetch 收敛视图。 */
+      this.refetch()
+    }
   }
 
   /** 懒加载选中项目的分支（project-header 的 mono pill 用），选中即取，失败不渲染。 */
