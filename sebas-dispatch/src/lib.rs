@@ -12,7 +12,9 @@ pub mod settings;
 pub mod state;
 pub mod state_store;
 
-pub use crate::engine::{DispatchHandle, MsgIdMap, Out, SessionEvent, SessionInfo, TurnEntry};
+pub use crate::engine::{
+    DispatchHandle, MsgIdMap, Out, RemoteSessionView, SessionEvent, SessionInfo, TurnEntry,
+};
 pub use cards::{CardConfig, ThinkingDisplay};
 pub use commands::{Command, RouterAction, parse_command};
 pub use crud::{CrudForm, CrudStore, FileStore, InMemoryStore, Item, ProviderForms};

@@ -73,6 +73,13 @@ pub enum CoreChannelRequest {
         /// 配置键名或保留值 `"native"`。driver 名与 `acp:` 前缀不再是合法
         /// 值——agent 是 wire 上唯一的执行体词汇。
         agent: String,
+        /// 项目所在的**执行节点**（add-remote-execution-node 5.1/8.2）。
+        ///
+        /// `None` 与 `Some(LOCAL_NODE_ID)` 都表示主控本机（行为与今日完全一致）；
+        /// 别的值表示"在那个节点上建"，由 core 经节点链路建立。`#[serde(default)]`：
+        /// 旧客户端不发这个字段，语义就是本机，不需要新协议版本。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
     },
     /// Create a 0-turn placeholder session WITHOUT spawning an agent child
     /// (P2 fix: an empty prompt must not reach the agent — opencode hangs on
@@ -89,6 +96,9 @@ pub enum CoreChannelRequest {
         /// D2）。占位帧必须携带——composer 建 0-turn 会话是常态路径，agent
         /// 不上线则用户选的 agent 被静默丢弃。
         agent: String,
+        /// 目标执行节点，语义与 `Spawn.node` 一致。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
@@ -153,6 +163,65 @@ pub enum CoreChannelRequest {
         request_id: String,
         decision: PermissionDecision,
     },
+    /// 节点链路管理（add-remote-execution-node 2.7）：签发配对 token / 列出节点 /
+    /// 吊销节点。**必须经 core**——只有 core 进程持有注册表的写者句柄，另开一个
+    /// 进程写同一个文件会与前者的内存副本互相覆盖。
+    NodeLink { op: NodeLinkOp },
+    /// 请**节点自己**判定一个路径（add-remote-execution-node 8.1）。
+    ///
+    /// 必须经 core：只有 core 持有到节点的链路。工作台不能自己 stat 一个远端
+    /// 路径——那台机器上有没有这个目录，只有那台机器知道。
+    NodePathCheck {
+        /// 目标节点。
+        node_id: String,
+        /// 待判定的路径（节点上的绝对路径）。
+        path: String,
+    },
+}
+
+/// 节点链路管理操作。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum NodeLinkOp {
+    /// 签发一个一次性配对 token（`ttl_secs` 缺省 900）。
+    IssueJoinToken {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_secs: Option<u64>,
+    },
+    /// 列出已注册节点。
+    ListNodes,
+    /// 吊销一个节点的凭据（此后不可接入，也不能靠重新配对绕过）。
+    RevokeNode { node_id: String },
+}
+
+/// 节点链路管理结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum NodeLinkOutcome {
+    /// 已签发：原始 token **只出现这一次**。
+    JoinToken { token: String, expires_unix: i64 },
+    /// 节点列表。
+    Nodes { nodes: Vec<NodeView> },
+    /// 吊销结果：`found` 为假表示没有这个节点（如实回报，不假装成功）。
+    Revoked { node_id: String, found: bool },
+    /// 节点链路未启用（`[node_link] enabled = false`）。
+    Disabled { cause: String },
+    /// 操作失败（落盘/读表等），带成因。
+    Failed { cause: String },
+}
+
+/// 节点在管理面上的视图（不含凭据哈希等敏感字段）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeView {
+    /// 稳定节点标识。
+    pub id: String,
+    /// `online` / `offline` / `revoked`。
+    pub status: String,
+    /// 最后一次成功握手时间（unix 秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_unix: Option<i64>,
+    /// 首次配对时间（unix 秒）。
+    pub created_unix: i64,
 }
 
 /// One response over the core session channel.
@@ -192,6 +261,10 @@ pub enum CoreChannelResponse {
         provider: String,
         models: Vec<String>,
     },
+    /// 节点链路管理结果（add-remote-execution-node 2.7）。
+    NodeLink(NodeLinkOutcome),
+    /// 节点侧路径判定结果（add-remote-execution-node 8.1）。
+    NodePath { exists: bool, is_dir: bool },
 }
 
 /// One frame of the subscription stream (task 4.2): exactly one snapshot
@@ -309,11 +382,13 @@ mod tests {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
                 agent: "claudecode".into(),
+                node: None,
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
                 agent: "claudecode".into(),
+                node: None,
             },
             CoreChannelRequest::SetSessionModel {
                 key: key.clone(),
@@ -445,6 +520,7 @@ mod tests {
             usage: None,
             backend: Some("native".into()),
             pending: Vec::new(),
+            remote: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

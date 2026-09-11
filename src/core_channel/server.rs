@@ -18,7 +18,7 @@ use super::protocol::{
 use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
-use sebas_dispatch::DispatchHandle;
+use sebas_dispatch::{DispatchHandle, SessionEvent};
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
 use std::path::{Path, PathBuf};
@@ -100,7 +100,9 @@ pub async fn serve(
     // 在主路径完成（run.rs 的 readiness 由此保证 bind 先于 ready）。测试与
     // 既有调用方仍经由本函数自行 bind。
     let listener = bind_channel_socket(&path)?;
-    serve_bound(backend, router, path, secret, listener, shutdown).await
+    // 兼容入口不带节点管理面（测试与既有调用方）。生产路径（core）走带句柄的
+    // `serve_bound`，让节点管理入口与监听共享同一份注册表写者。
+    serve_bound(backend, router, path, secret, listener, None, None, shutdown).await
 }
 
 /// Serve over a **pre-bound** listener: the caller (run.rs auto-arm path) owns
@@ -112,6 +114,12 @@ pub async fn serve_bound(
     path: PathBuf,
     secret: String,
     listener: IpcListener,
+    // 节点链路的注册表写者句柄（add-remote-execution-node 2.7）：`None` = 节点链路
+    // 未启用，管理操作如实回 `Disabled` 而不是假装成功。
+    node_link: Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
+    // 远端会话投影（5.1）：`None` = 节点链路未启用。有了它，快照与订阅流里才会
+    // 出现"跑在别的机器上"的会话；没有它就只有本机会话（行为与今日完全一致）。
+    projection: Option<Arc<crate::node_link::RemoteProjection>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     info!(
@@ -133,10 +141,12 @@ pub async fn serve_bound(
                 let backend = backend.clone();
                 let router = router.clone();
                 let secret = secret.clone();
+                let node_link = node_link.clone();
+                let projection = projection.clone();
                 let mut close_rx = close_rx.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        r = handle_connection(stream, backend, router, secret) => {
+                        r = handle_connection(stream, backend, router, secret, node_link, projection) => {
                             if let Err(e) = r {
                                 warn!(?e, "core channel connection failed");
                             }
@@ -222,6 +232,8 @@ async fn handle_connection(
     backend: Arc<dyn SessionBackend>,
     router: DispatchHandle,
     secret: String,
+    node_link: Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
+    projection: Option<Arc<crate::node_link::RemoteProjection>>,
 ) -> Result<()> {
     if !peer_uid_ok(&stream) {
         // 5.2: reject before reading anything.
@@ -267,7 +279,7 @@ async fn handle_connection(
             CoreChannelRequest::Subscribe => {
                 // 5.4: stream connection — snapshot first, then events
                 // (plus approval frames as they arise).
-                return serve_subscription(backend, writer).await;
+                return serve_subscription(backend, projection, writer).await;
             }
             CoreChannelRequest::StateSubscribe => {
                 // State subscription: persistent stream — full snapshot first,
@@ -275,7 +287,7 @@ async fn handle_connection(
                 return serve_state_subscription(router, writer).await;
             }
             other => {
-                let resp = dispatch(&backend, &router, other).await;
+                let resp = dispatch(&backend, &router, &node_link, &projection, other).await;
                 write_response(&mut writer, &resp).await?;
             }
         }
@@ -309,12 +321,26 @@ async fn write_response(writer: &mut WriteHalf, resp: &CoreChannelResponse) -> R
 /// (`ApprovalRequested`) from its review-card feed. Approval frames are not
 /// replayed on reconnect — a gated call whose request cannot reach any
 /// client fails closed at the kernel (spec).
-async fn serve_subscription(backend: Arc<dyn SessionBackend>, mut writer: WriteHalf) -> Result<()> {
+async fn serve_subscription(
+    backend: Arc<dyn SessionBackend>,
+    // 远端会话投影（5.1）：有它，订阅流里才会出现节点上的会话及其变化。
+    projection: Option<Arc<crate::node_link::RemoteProjection>>,
+    mut writer: WriteHalf,
+) -> Result<()> {
     const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
     let mut events = backend.subscribe();
     let mut approvals = backend.permission_requests();
-    let snapshot = backend.snapshot().await;
+    // 订阅先于快照（对本地与远端是同一套顺序理由）：先挂上接收端，再取两份快照，
+    // 这样订阅瞬间发生的变更一定落在快照里或事件里，不会两头都落空。
+    let mut remote_events = projection.as_ref().map(|p| p.subscribe());
+    // 远端审批与本地审批在同一个出口合流（8.4）：客户端不需要知道"这条待批
+    // 是主控本机的还是别的机器上的"。
+    let mut remote_notices = projection.as_ref().map(|p| p.notice_feed());
+    let mut snapshot = backend.snapshot().await;
+    if let Some(projection) = &projection {
+        snapshot.extend(projection.rows().await);
+    }
 
     // Frame 1: the snapshot.
     let frame = SessionStreamFrame::Snapshot { sessions: snapshot };
@@ -334,8 +360,20 @@ async fn serve_subscription(backend: Arc<dyn SessionBackend>, mut writer: WriteH
                     return Ok(()); // backend gone (core shutting down)
                 }
             },
+            // 远端会话的变化来自节点事件流（投影已把它归一成同一套 SessionEvent），
+            // 与本地事件在同一个出口合流——客户端不需要知道会话在谁那儿跑。
+            remote = recv_remote_event(&mut remote_events) => {
+                match remote {
+                    Some(event) => SessionStreamFrame::Event { event },
+                    // 投影没了（core 关停）：远端那一路退化为永不就绪，本地照常。
+                    None => std::future::pending().await,
+                }
+            }
             approval = recv_approval(&mut approvals) => {
                 SessionStreamFrame::ApprovalRequested { notice: approval }
+            }
+            notice = recv_approval(&mut remote_notices) => {
+                SessionStreamFrame::ApprovalRequested { notice }
             }
         };
         pending.push(frame);
@@ -372,6 +410,28 @@ async fn recv_approval(
                 return std::future::pending().await;
             }
         }
+    }
+}
+
+/// 从可选的远端事件流里取一个事件；没有远端投影时永不就绪（`select!` 的分支
+/// 需要一个真 future，用 `pending` 表示"这一路不存在"，而不是空转）。
+async fn recv_remote_event(
+    rx: &mut Option<broadcast::Receiver<SessionEvent>>,
+) -> Option<SessionEvent> {
+    match rx {
+        None => std::future::pending().await,
+        Some(rx) => loop {
+            match rx.recv().await {
+                Ok(event) => return Some(event),
+                // 投影落后于事件量：如实关掉这一路，客户端会在重连时重新快照
+                // （与本地订阅的 Lagged 处置一致——绝不给一个带缺口的流）。
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "core channel: remote projection lagged; dropping connection");
+                    return None;
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        },
     }
 }
 
@@ -571,18 +631,35 @@ async fn write_state_frame(writer: &mut WriteHalf, frame: &StateStreamFrame) -> 
 async fn dispatch(
     backend: &Arc<dyn SessionBackend>,
     router: &DispatchHandle,
+    node_link: &Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
+    // 远端会话投影（5.1）：快照与转写读都要把"跑在节点上的会话"算进来。
+    projection: &Option<Arc<crate::node_link::RemoteProjection>>,
     req: CoreChannelRequest,
 ) -> CoreChannelResponse {
     match req {
-        CoreChannelRequest::Snapshot => CoreChannelResponse::Snapshot {
-            sessions: backend.snapshot().await,
-        },
+        CoreChannelRequest::Snapshot => {
+            let mut sessions = backend.snapshot().await;
+            // 远端行由投影给出（节点的事实），本地行由 dispatch 给出；两者键不同
+            // （远端行的 reference 带 `node\0…` 前缀），不会互相覆盖。
+            if let Some(projection) = projection {
+                sessions.extend(projection.rows().await);
+            }
+            CoreChannelResponse::Snapshot { sessions }
+        }
         CoreChannelRequest::Spawn {
             prompt,
             project_dir,
             model,
             agent,
+            node,
         } => {
+            // 远端项目（add-remote-execution-node 5.1/8.2）：路径可用性由**节点**
+            // 判定，主控不做本地 stat——在别人的机器上 stat 本机路径毫无意义，
+            // 而"本机没有这个目录"会被误报成"项目不存在"。
+            if let Some(node_id) = node.as_deref().filter(|n| *n != crate::node_link::LOCAL_NODE_ID) {
+                return spawn_remote(projection, node_id, prompt, project_dir, model, &agent)
+                    .await;
+            }
             // 5.5: canonicalize + stat BEFORE any spawn; no existence
             // disclosure in the rejection message.
             if let Some(dir) = &project_dir
@@ -598,7 +675,7 @@ async fn dispatch(
                     .display()
                     .to_string()
             });
-            match backend.spawn_with(prompt, project_dir, &agent, model).await {
+            match backend.spawn_with(prompt, project_dir, &agent, model, None).await {
                 Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
@@ -607,7 +684,20 @@ async fn dispatch(
             project_dir,
             model,
             agent,
+            node,
         } => {
+            if let Some(node_id) = node.as_deref().filter(|n| *n != crate::node_link::LOCAL_NODE_ID) {
+                // 占位会话在远端没有意义：占位的价值是"先建行、首条消息才 spawn"，
+                // 而远端行的建立本身就要在节点上建会话。如实拒绝而不是悄悄建一个
+                // 真的会话（那会让"还没发消息"变成"已经在跑了"）。
+                return CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: format!(
+                            "远端节点 {node_id} 不支持 0-turn 占位会话：请直接带首条输入建立会话"
+                        ),
+                    },
+                };
+            }
             // 0-turn 占位（P2 修复）：只建行、不 spawn 子进程——空 prompt 绝
             // 不上送 agent。project_dir 校验与 Spawn 同款；执行体 hint 随帧
             // 上送、记在 mapping 上，首条消息触发 spawn 时生效
@@ -626,12 +716,24 @@ async fn dispatch(
                     .display()
                     .to_string()
             });
-            match backend.create_placeholder(project_dir, &agent, model).await {
+            match backend.create_placeholder(project_dir, &agent, model, None).await {
                 Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
         CoreChannelRequest::SetSessionModel { key, model_id } => {
+            // 远端会话先走节点（期望值下发，实际生效值由节点回报）。
+            if let Some((_, session_id)) = remote_target(projection, &key).await {
+                return match projection
+                    .as_ref()
+                    .expect("remote_target 非 None 蕴含 projection 非 None")
+                    .set_model(&session_id, &model_id)
+                    .await
+                {
+                    Ok(_) => CoreChannelResponse::Ok,
+                    Err(e) => node_link_rejection(e),
+                };
+            }
             // 按执行体分发（wire-webui-sebas-agent-e2e）：native key → 内核，
             // 其余 → ACP（InProcessBackend 解析 session_id 后经 Out::SendAcp）。
             match backend.set_session_model(key, model_id).await {
@@ -644,6 +746,25 @@ async fn dispatch(
             message,
             attachments,
         } => {
+            // 远端会话：输入送到节点上（附件是本地路径引用，跨机器不成立，如实拒绝）。
+            if let Some((node_id, session_id)) = remote_target(projection, &key).await {
+                if !attachments.is_empty() {
+                    return CoreChannelResponse::Rejected {
+                        rejection: SessionRejection::Unavailable {
+                            cause: format!(
+                                "会话在节点 {node_id} 上，附件路径只在主控本机有效，无法随文本送过去"
+                            ),
+                        },
+                    };
+                }
+                let projection = projection
+                    .as_ref()
+                    .expect("remote_target 非 None 蕴含 projection 非 None");
+                return match projection.prompt(&session_id, &message).await {
+                    Ok(()) => CoreChannelResponse::Ok,
+                    Err(e) => node_link_rejection(e),
+                };
+            }
             // 5.6: unknown web/feishu key → typed rejection, nothing mutated.
             // Native keys are unknown to the router map — the native backend
             // rejects them itself.
@@ -687,16 +808,41 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
-        CoreChannelRequest::Cancel { key } => match backend.cancel(key).await {
-            Ok(()) => CoreChannelResponse::Ok,
-            Err(rejection) => CoreChannelResponse::Rejected { rejection },
-        },
-        CoreChannelRequest::Close { key } => match backend.close(key).await {
-            Ok(report) => CoreChannelResponse::Closed {
-                discarded_pending: report.discarded_pending,
-            },
-            Err(rejection) => CoreChannelResponse::Rejected { rejection },
-        },
+        CoreChannelRequest::Cancel { key } => {
+            if let Some((_, session_id)) = remote_target(projection, &key).await {
+                let projection = projection
+                    .as_ref()
+                    .expect("remote_target 非 None 蕴含 projection 非 None");
+                return match projection.cancel(&session_id).await {
+                    Ok(()) => CoreChannelResponse::Ok,
+                    Err(e) => node_link_rejection(e),
+                };
+            }
+            match backend.cancel(key).await {
+                Ok(()) => CoreChannelResponse::Ok,
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
+        CoreChannelRequest::Close { key } => {
+            if let Some((_, session_id)) = remote_target(projection, &key).await {
+                let projection = projection
+                    .as_ref()
+                    .expect("remote_target 非 None 蕴含 projection 非 None");
+                return match projection.close(&session_id).await {
+                    // 远端会话没有 core 侧待执行栈，丢弃数如实为 0。
+                    Ok(()) => CoreChannelResponse::Closed {
+                        discarded_pending: 0,
+                    },
+                    Err(e) => node_link_rejection(e),
+                };
+            }
+            match backend.close(key).await {
+                Ok(report) => CoreChannelResponse::Closed {
+                    discarded_pending: report.discarded_pending,
+                },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
         // workbench-turn-queue 4.2：pending 管理与 in-process 实现共用同一
         // seam（backend 方法直调），typed rejection 原样透传。
         CoreChannelRequest::RemovePending { key, pending_id } => {
@@ -713,10 +859,21 @@ async fn dispatch(
             Ok(pending) => CoreChannelResponse::PendingList { pending },
             Err(rejection) => CoreChannelResponse::Rejected { rejection },
         },
-        CoreChannelRequest::Turns { key, from } => match backend.turns(key, from).await {
-            Ok(entries) => CoreChannelResponse::Turns { entries },
-            Err(rejection) => CoreChannelResponse::Rejected { rejection },
-        },
+        CoreChannelRequest::Turns { key, from } => {
+            // 远端会话的转写来自投影（位置 = 节点日志的 seq，缺口照实空着）。
+            // 本机会话照旧走 backend——远端行不可能在本机 backend 里，所以先问投影。
+            if let Some(projection) = projection
+                && let Some((_, session_id)) = projection.remote_target(&key).await
+            {
+                return CoreChannelResponse::Turns {
+                    entries: projection.turns(&session_id, from).await,
+                };
+            }
+            match backend.turns(key, from).await {
+                Ok(entries) => CoreChannelResponse::Turns { entries },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
         CoreChannelRequest::SetFocus { key } => {
             router.web_set_active(key).await;
             CoreChannelResponse::Ok
@@ -728,6 +885,23 @@ async fn dispatch(
             request_id,
             decision,
         } => {
+            // 远端会话的待批先送节点（6.4 的远端一半）：只有节点能放行它自己
+            // 门里的动作，主控这边没有本地裁决路径。
+            if let Some(projection) = projection
+                && projection.session_of_request(&request_id).await.is_some()
+            {
+                return match projection.answer_approval(&request_id, decision).await {
+                    Ok(true) => CoreChannelResponse::Ok,
+                    // 迟到的决定：节点如实回"没生效"（会话已结束）——这与链路失败
+                    // 是两回事，不能笼统报"失败"。
+                    Ok(false) => CoreChannelResponse::Rejected {
+                        rejection: SessionRejection::Unavailable {
+                            cause: format!("决定 {request_id} 未生效：会话已结束，节点已丢弃它"),
+                        },
+                    },
+                    Err(e) => node_link_rejection(e),
+                };
+            }
             // 审批决定回填（wire-webui-sebas-agent-e2e）：无待决请求 → typed
             // rejection（fail-closed 语义，拒绝而非伪装成功）。
             if backend.answer_permission(&request_id, decision).await {
@@ -812,6 +986,161 @@ async fn dispatch(
             }
         }
         CoreChannelRequest::StateSubscribe => CoreChannelResponse::Ok,
+        CoreChannelRequest::NodeLink { op } => {
+            CoreChannelResponse::NodeLink(dispatch_node_link(node_link, op).await)
+        }
+        CoreChannelRequest::NodePathCheck { node_id, path } => {
+            // 工作台问"这个路径在那台机器上是什么"：只有 core 够得着节点。
+            // 节点离线就没有答案——如实拒绝，绝不用本机的 stat 冒充节点的答案。
+            let Some(projection) = projection else {
+                return CoreChannelResponse::Rejected {
+                    rejection: SessionRejection::Unavailable {
+                        cause: format!(
+                            "节点链路未启用（[node_link] enabled = false），无法校验节点 {node_id} 上的路径"
+                        ),
+                    },
+                };
+            };
+            match projection.check_path(&node_id, &path).await {
+                Ok((exists, is_dir)) => CoreChannelResponse::NodePath { exists, is_dir },
+                Err(e) => node_link_rejection(e),
+            }
+        }
+    }
+}
+
+/// 远端会话目标（`None` = 本机会话，照旧走本机 backend）。
+async fn remote_target(
+    projection: &Option<Arc<crate::node_link::RemoteProjection>>,
+    key: &ChannelKey,
+) -> Option<(String, String)> {
+    match projection {
+        Some(projection) => projection.remote_target(key).await,
+        None => None,
+    }
+}
+
+/// 远端会话的一个操作有没有送达：节点的拒绝与链路失败都要变成**可判别**的
+/// 会话拒绝，而不是笼统的"失败"（成因里带着节点名与节点给的理由）。
+fn node_link_rejection(e: crate::node_link::NodeLinkError) -> CoreChannelResponse {
+    use crate::node_link::NodeLinkError;
+    let cause = match e {
+        // 链路问题（节点离线/超时）是可恢复的：操作者等节点回来再试即可。
+        NodeLinkError::Disconnected { cause } | NodeLinkError::Transport { cause } => cause,
+        NodeLinkError::Timeout { timeout } => {
+            format!("等节点应答超时（{timeout:?}）")
+        }
+    };
+    CoreChannelResponse::Rejected {
+        rejection: SessionRejection::Unavailable { cause },
+    }
+}
+
+/// 在远端节点上建立会话（5.1/8.2 的远端分支）。
+///
+/// 项目路径的可用性**由节点判定**：把一个项目路径 stat 在本机上是答非所问
+/// （那台机器上有没有这个目录才是问题）。放置失败原样变成 typed rejection。
+async fn spawn_remote(
+    projection: &Option<Arc<crate::node_link::RemoteProjection>>,
+    node_id: &str,
+    prompt: String,
+    project_dir: Option<String>,
+    model: Option<String>,
+    agent: &str,
+) -> CoreChannelResponse {
+    let Some(projection) = projection else {
+        return CoreChannelResponse::Rejected {
+            rejection: SessionRejection::Unavailable {
+                cause: format!("节点链路未启用（[node_link] enabled = false），无法在节点 {node_id} 上建立会话"),
+            },
+        };
+    };
+    if prompt.trim().is_empty() {
+        return CoreChannelResponse::Rejected {
+            rejection: SessionRejection::Unavailable {
+                cause: "远端会话必须带首条输入：空 prompt 建会话等于让节点上的执行体收到空回合"
+                    .into(),
+            },
+        };
+    }
+    // 项目身份 `(节点, 路径)` 的 id 与工作台用**同一个**派生函数，所以两边算出的
+    // 项目 id 一致——否则同一个项目在两个进程里会变成两个。
+    let project = project_dir.as_deref().map(|path| {
+        crate::node_link::placement::ProjectRef {
+            id: sebas_webui::projects::project_id_for_on(node_id, path),
+            node_id: node_id.to_string(),
+            path: path.to_string(),
+        }
+    });
+    match projection
+        .spawn_on(
+            node_id,
+            project.as_ref(),
+            Some(agent),
+            model.as_deref(),
+            None,
+            Some(&prompt),
+        )
+        .await
+    {
+        Ok((key, placed)) => {
+            // 期望值由客户端随后的操作决定；这里把节点回报的实际生效值记进行里。
+            let _ = placed;
+            CoreChannelResponse::Spawned { key }
+        }
+        Err(e) => CoreChannelResponse::Rejected {
+            rejection: SessionRejection::Unavailable {
+                cause: e.to_string(),
+            },
+        },
+    }
+}
+
+/// 节点链路管理：**只有 core 持有注册表写者句柄**，因此这里也是唯一的管理入口。
+/// 未启用时如实回 `Disabled`（不假装成功）；落盘失败回 `Failed` 并带成因。
+async fn dispatch_node_link(
+    node_link: &Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
+    op: crate::core_channel::protocol::NodeLinkOp,
+) -> crate::core_channel::protocol::NodeLinkOutcome {
+    use crate::core_channel::protocol::{NodeLinkOp, NodeLinkOutcome, NodeView};
+    let Some(registry) = node_link else {
+        return NodeLinkOutcome::Disabled {
+            cause: "[node_link] enabled = false，主控未开放节点链路".into(),
+        };
+    };
+    let now = crate::node_link::server::now_unix();
+    let mut reg = registry.lock().await;
+    match op {
+        NodeLinkOp::IssueJoinToken { ttl_secs } => {
+            let ttl = ttl_secs.unwrap_or(900) as i64;
+            match reg.issue_join_token(now, ttl) {
+                Ok(token) => NodeLinkOutcome::JoinToken {
+                    token,
+                    expires_unix: now + ttl,
+                },
+                Err(e) => NodeLinkOutcome::Failed { cause: e.to_string() },
+            }
+        }
+        NodeLinkOp::ListNodes => NodeLinkOutcome::Nodes {
+            nodes: reg
+                .nodes()
+                .iter()
+                .map(|n| NodeView {
+                    id: n.id().to_string(),
+                    status: match n.status() {
+                        crate::node_link::NodeStatus::Online => "online".into(),
+                        crate::node_link::NodeStatus::Offline => "offline".into(),
+                        crate::node_link::NodeStatus::Revoked => "revoked".into(),
+                    },
+                    last_seen_unix: n.last_seen_unix(),
+                    created_unix: n.created_unix(),
+                })
+                .collect(),
+        },
+        NodeLinkOp::RevokeNode { node_id } => match reg.revoke(&node_id) {
+            Ok(found) => NodeLinkOutcome::Revoked { node_id, found },
+            Err(e) => NodeLinkOutcome::Failed { cause: e.to_string() },
+        },
     }
 }
 
@@ -958,5 +1287,95 @@ mod tests {
         // 未设置 state store 时其余域报错，presets 域不受影响（纯代码表）。
         let missing = snapshot_domain(&router, "providers").await;
         assert!(missing.get("error").is_some());
+    }
+
+    /// 管理面测试用的注册表句柄（不需要起监听）。
+    fn admin_registry() -> (
+        tempfile::TempDir,
+        Option<Arc<tokio::sync::Mutex<crate::node_link::NodeRegistry>>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = crate::node_link::NodeRegistry::open(dir.path().join("nodes.json")).unwrap();
+        (dir, Some(Arc::new(tokio::sync::Mutex::new(reg))))
+    }
+
+    #[tokio::test]
+    async fn admin_ops_report_disabled_when_node_link_is_off() {
+        let out =
+            dispatch_node_link(&None, crate::core_channel::protocol::NodeLinkOp::ListNodes).await;
+        match out {
+            crate::core_channel::protocol::NodeLinkOutcome::Disabled { cause } => {
+                assert!(cause.contains("node_link"), "{cause}");
+            }
+            other => panic!("未启用应如实回 Disabled，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_ops_issue_list_and_revoke_through_the_shared_writer() {
+        use crate::core_channel::protocol::{NodeLinkOp, NodeLinkOutcome};
+        use crate::node_link::server::now_unix;
+
+        let (_tmp, admin) = admin_registry();
+
+        // 签发：拿到的 token 能换到长期凭据（一次性消费 + 配对）。
+        let token = match dispatch_node_link(
+            &admin,
+            NodeLinkOp::IssueJoinToken { ttl_secs: Some(600) },
+        )
+        .await
+        {
+            NodeLinkOutcome::JoinToken {
+                token,
+                expires_unix,
+            } => {
+                assert!(expires_unix > now_unix(), "过期时间应在未来");
+                token
+            }
+            other => panic!("应签发 token，实际 {other:?}"),
+        };
+        {
+            let registry = admin.as_ref().expect("已启用");
+            let mut reg = registry.lock().await;
+            reg.consume_join_token(&token, "dev-box", now_unix()).unwrap();
+            let secret = reg.pair("dev-box", now_unix()).unwrap();
+            assert!(reg.authenticate("dev-box", &secret).is_ok());
+        }
+
+        // 列表：看到刚登记的节点。
+        match dispatch_node_link(&admin, NodeLinkOp::ListNodes).await {
+            NodeLinkOutcome::Nodes { nodes } => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].id, "dev-box");
+                assert_eq!(nodes[0].status, "offline", "配对后尚未握手 → 离线");
+            }
+            other => panic!("应列出节点，实际 {other:?}"),
+        }
+
+        // 吊销：存在的 found=true，不存在的 found=false（如实回报，不假装成功）。
+        assert!(matches!(
+            dispatch_node_link(
+                &admin,
+                NodeLinkOp::RevokeNode {
+                    node_id: "dev-box".into()
+                }
+            )
+            .await,
+            NodeLinkOutcome::Revoked { found: true, .. }
+        ));
+        assert!(matches!(
+            dispatch_node_link(
+                &admin,
+                NodeLinkOp::RevokeNode {
+                    node_id: "nope".into()
+                }
+            )
+            .await,
+            NodeLinkOutcome::Revoked { found: false, .. }
+        ));
+        match dispatch_node_link(&admin, NodeLinkOp::ListNodes).await {
+            NodeLinkOutcome::Nodes { nodes } => assert_eq!(nodes[0].status, "revoked"),
+            other => panic!("{other:?}"),
+        }
     }
 }

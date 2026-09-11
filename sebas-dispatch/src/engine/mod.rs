@@ -12,7 +12,7 @@ mod inbound;
 mod maps;
 pub mod provider_card;
 
-pub use events::{SessionEvent, SessionInfo, TurnEntry};
+pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry};
 pub use maps::{
     MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
 };
@@ -473,6 +473,9 @@ impl DispatchHandle {
             // 执行体归属由复合后端在快照/事件出口统一打标（D4）；router 自身
             // 只跟踪 ACP 侧映射，留 None 交给上游。
             backend: None,
+            // （add-remote-execution-node 8.x）router 只跟踪主控本机会话；远端
+            // 投影由 core 侧节点链路投影合并进来，这里不臆造节点维度。
+            remote: None,
         })
     }
 

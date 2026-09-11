@@ -116,6 +116,22 @@ impl CoreChannelBackend {
         backend
     }
 
+    /// 节点链路管理（add-remote-execution-node 2.7）：签发配对 token / 列出节点 /
+    /// 吊销节点。
+    ///
+    /// 走通道而不是直接读写注册表文件：注册表是**单写者**文件，只有 core 进程
+    /// 持有那一份内存状态；另一个进程写同一个文件会与它互相覆盖。
+    pub async fn node_link(
+        &self,
+        op: crate::core_channel::protocol::NodeLinkOp,
+    ) -> Result<crate::core_channel::protocol::NodeLinkOutcome, SessionRejection> {
+        match self.request(&CoreChannelRequest::NodeLink { op }).await? {
+            CoreChannelResponse::NodeLink(outcome) => Ok(outcome),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
     fn set_status(&self, status: ConnStatus) {
         *self.status.lock().unwrap() = status;
     }
@@ -471,7 +487,68 @@ impl SessionBackend for CoreChannelBackend {
         // 通道帧的 agent 必填（workbench-agent-wire-fix D2）：无 agent 的
         // 调用方（feishu 默认路径）语义是「配置的默认 kind」，此处无法解析
         // 配置——由服务端按空 agent 拒绝，调用方应改用 spawn_with 显式传。
-        self.spawn_with(prompt, project_dir, "", None).await
+        self.spawn_with(prompt, project_dir, "", None, None).await
+    }
+
+    /// 节点清单（8.2）：经 core 的节点注册表拿——只有 core 有写者句柄。
+    ///
+    /// 拉不到就如实报错，让前端显示"节点状态不可得"，而不是把"看不见"说成
+    /// "没有节点"。
+    async fn nodes(&self) -> Result<Vec<sebas_webui::session_backend::NodeInfo>, String> {
+        use crate::core_channel::protocol::{NodeLinkOp, NodeLinkOutcome};
+        match self
+            .request(&CoreChannelRequest::NodeLink {
+                op: NodeLinkOp::ListNodes,
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::NodeLink(NodeLinkOutcome::Nodes { nodes })) => {
+                // 本机是**隐式节点**：它不进注册表（没有握手、没有凭据），但它确实是
+                // 这些项目可能落在的节点之一。补在最前面并标 `local: true`，
+                // 否则工作台会以为本机项目"属于一个不存在的节点"。
+                let mut out = vec![sebas_webui::session_backend::NodeInfo {
+                    id: crate::node_link::LOCAL_NODE_ID.to_string(),
+                    status: "online".into(),
+                    last_seen_unix: None,
+                    created_unix: 0,
+                    local: true,
+                }];
+                out.extend(nodes.into_iter().map(|n| sebas_webui::session_backend::NodeInfo {
+                    id: n.id,
+                    status: n.status,
+                    last_seen_unix: n.last_seen_unix,
+                    created_unix: n.created_unix,
+                    local: false,
+                }));
+                Ok(out)
+            }
+            Ok(CoreChannelResponse::NodeLink(NodeLinkOutcome::Disabled { cause })) => Err(cause),
+            Ok(CoreChannelResponse::NodeLink(NodeLinkOutcome::Failed { cause })) => Err(cause),
+            Ok(other) => Err(format!("列出节点得到非预期应答：{other:?}")),
+            Err(rejection) => Err(format!("{rejection:?}")),
+        }
+    }
+
+    /// 请节点自己判定路径（8.1）。
+    async fn check_node_path(
+        &self,
+        node_id: &str,
+        path: &str,
+    ) -> Result<sebas_webui::session_backend::PathCheck, String> {
+        match self
+            .request(&CoreChannelRequest::NodePathCheck {
+                node_id: node_id.to_string(),
+                path: path.to_string(),
+            })
+            .await
+        {
+            Ok(CoreChannelResponse::NodePath { exists, is_dir }) => {
+                Ok(sebas_webui::session_backend::PathCheck { exists, is_dir })
+            }
+            Ok(CoreChannelResponse::Rejected { rejection }) => Err(format!("{rejection:?}")),
+            Ok(other) => Err(format!("校验路径得到非预期应答：{other:?}")),
+            Err(rejection) => Err(format!("{rejection:?}")),
+        }
     }
 
     async fn spawn_with(
@@ -480,6 +557,7 @@ impl SessionBackend for CoreChannelBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::Spawn {
@@ -487,6 +565,9 @@ impl SessionBackend for CoreChannelBackend {
                 project_dir,
                 model,
                 agent: agent.to_string(),
+                // 节点维度由调用方给出：`None`/`local` = 本机（与今日一致），
+                // 别的值由 core 经节点链路建立——client 自己不解析节点。
+                node,
             })
             .await?
         {
@@ -522,12 +603,14 @@ impl SessionBackend for CoreChannelBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::CreatePlaceholder {
                 project_dir,
                 model,
                 agent: agent.to_string(),
+                node,
             })
             .await?
         {

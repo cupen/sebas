@@ -21,6 +21,49 @@ use serde::{Deserialize, Serialize};
 
 use sebas_channels::ChannelKey;
 
+/// 远端会话的呈现信息（add-remote-execution-node 8.x）。
+///
+/// 只有**执行节点上的**会话带这个结构；主控本机的会话是 `None`——本机没有
+/// 「节点在线吗」这个维度，硬填一个 `online` 只会让展示层分不清两种情形。
+///
+/// 这些字段回答操作者要看的四个问题：它跑在哪台机器上（`node_id`）、那台机器
+/// 现在通不通（`node_status` / `node_cause`）、它到底按哪个 mode 在跑
+/// （`desired_mode` vs `effective_mode`）、以及它是不是**在等人批**而不是在干活
+/// （`parked_approvals`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSessionView {
+    /// 会话所在执行节点的稳定标识（`[node] id`）。
+    pub node_id: String,
+    /// 节点对该会话的可判定状态：`online` / `offline` / `terminated` /
+    /// `gone`（节点侧已不存在）。
+    pub node_status: String,
+    /// 状态的成因（离线/终止的原因）。如实陈述——`NodeOffline` 与
+    /// `Terminated` 是两件事，展示层不该把后者说成「暂时联系不上」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_cause: Option<String>,
+    /// 会话**期望**的 mode（`ask` / `edit` / `allow` / `auto`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_mode: Option<String>,
+    /// 执行体**实际强制**的 mode。与 `desired_mode` 不同即「执行体强制不了」，
+    /// 展示层必须两个都显示并说明差异（不能只显示期望值假装已生效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_mode: Option<String>,
+    /// 仍在等主控决定的悬空审批数；`> 0` 表示会话**在等**，不是在跑。
+    #[serde(default)]
+    pub parked_approvals: u32,
+    /// 会话**期望**使用的节点 provider profile 名（7.1）。`None` = 没点名，
+    /// 由节点用它自己的默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_provider: Option<String>,
+    /// **实际生效**的 provider profile 名。与期望不同即"应用不上"，
+    /// 界面必须两个都显示（`provider_cause` 说明为什么）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// provider 应用不上的成因（节点侧如实回报）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_cause: Option<String>,
+}
+
 /// One session as the outside world sees it: mapping state joined with the
 /// card-derived fields the WebUI renders.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -67,6 +110,11 @@ pub struct SessionInfo {
     /// 快照/旧事件。
     #[serde(default)]
     pub pending: Vec<crate::state::PendingSubmission>,
+    /// （add-remote-execution-node 8.x）远端会话的节点/mode/悬空审批呈现信息；
+    /// `None` = 主控本机会话（这些维度对它不存在）。`#[serde(default)]` 兼容旧
+    /// 报文：旧客户端收不到该键，新客户端收到 `null` 时按本机会话处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteSessionView>,
 }
 
 impl SessionInfo {
@@ -208,6 +256,7 @@ mod tests {
                 disposition: crate::state::PendingDisposition::Turn,
                 priority: false,
             }],
+            remote: None,
         };
         let cases = vec![
             SessionEvent::Created {
@@ -270,6 +319,7 @@ mod tests {
             usage: None,
             backend: None,
             pending: Vec::new(),
+            remote: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -304,6 +354,7 @@ fn session_info_usage_field_is_additive() {
         agent_kind: None,
         backend: None,
         pending: Vec::new(),
+        remote: None,
         usage: Some(AppUsage {
             model: Some("claude-x".into()),
             total_input: 10,

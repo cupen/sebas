@@ -17,6 +17,8 @@ pub struct Config {
     pub log: LogConfig,
     #[serde(default)]
     pub watchdog: WatchdogConfig,
+    #[serde(default)]
+    pub node_link: NodeLinkConfig,
 }
 
 /// Wrapper for all ACP agent configs. TOML section `[acp.<agent>]` nests here.
@@ -301,6 +303,69 @@ fn default_channel_buffer() -> usize {
 }
 fn default_max_concurrent() -> usize {
     32
+}
+
+fn default_node_link_listen() -> String {
+    "127.0.0.1:9878".into()
+}
+fn default_node_link_token_ttl_secs() -> u64 {
+    900
+}
+
+/// 执行节点入站链路（add-remote-execution-node）。
+///
+/// 默认**关**：这是一个新的网络入站面，必须显式打开。默认只监听回环——
+/// 把它暴露到别的网络接口是部署决策（TLS 由部署方终止）。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct NodeLinkConfig {
+    /// 是否开放节点入站端点。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 监听地址（须为 `IP:PORT`；不接受域名，避免启动期解析歧义）。
+    #[serde(default = "default_node_link_listen")]
+    pub listen: String,
+    /// 节点注册表文件；缺省为 config 文件同目录下的 `nodes.json`。
+    #[serde(default)]
+    pub registry_file: Option<String>,
+    /// 首次启动（无节点且无待用 token）自动签发的配对 token 的有效期（秒）。
+    /// bootstrap token 只用于把第一台节点接进来，之后管理入口接手。
+    #[serde(default = "default_node_link_token_ttl_secs")]
+    pub bootstrap_token_ttl_secs: u64,
+}
+
+impl Default for NodeLinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_node_link_listen(),
+            registry_file: None,
+            bootstrap_token_ttl_secs: default_node_link_token_ttl_secs(),
+        }
+    }
+}
+
+/// 注册表路径推导：显式键优先，否则落在 config 文件同目录（与 core.secret 同款取舍）。
+pub fn node_link_registry_path(
+    registry_file: Option<&str>,
+    config_path: &std::path::Path,
+) -> std::path::PathBuf {
+    match registry_file {
+        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(expand_tilde(p)),
+        _ => {
+            let dir = config_path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            dir.join("nodes.json")
+        }
+    }
+}
+
+impl NodeLinkConfig {
+    /// 以已知 config 文件路径解析注册表位置。
+    pub fn registry_path(&self, config_path: &std::path::Path) -> std::path::PathBuf {
+        node_link_registry_path(self.registry_file.as_deref(), config_path)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -692,9 +757,24 @@ impl Config {
         {
             self.log.level = v;
         }
+        if let Ok(v) = std::env::var("SEBAS_NODE_LINK_LISTEN")
+            && !v.is_empty()
+        {
+            self.node_link.listen = v;
+        }
     }
 
     fn validate(&self) -> Result<()> {
+        // 节点链路：开着就必须是一个可 bind 的 IP:PORT —— 启动期就报错，
+        // 而不是等到 ready 之后由 arm 失败（那时已经在服务中了）。
+        if self.node_link.enabled
+            && self.node_link.listen.parse::<std::net::SocketAddr>().is_err()
+        {
+            return Err(crate::error::SebasError::Config(format!(
+                "[node_link] listen {:?} 不是 IP:PORT（不接受域名）",
+                self.node_link.listen
+            )));
+        }
         // feishu 是可选项（sebas-2ty）：app_id/app_secret 同时为空 = 不接入
         // 飞书（`sebas core` 以无飞书模式运行；watchdog 下 core 服务默认不
         // 启动）。只配其一属于半配置，明确报错而不是静默半启用。
@@ -1162,5 +1242,58 @@ port = 9798
         let cfg = Config::parse(raw).expect("config parses");
         assert!(cfg.watchdog.webui.enabled, "未显式 disabled 应启用");
         assert_eq!(cfg.watchdog.webui.port, 9798);
+    }
+
+    #[test]
+    fn node_link_defaults_are_off_and_loopback() {
+        let cfg = Config::parse("").expect("空配置应解析");
+        assert!(!cfg.node_link.enabled, "新的网络入站面必须显式打开");
+        assert_eq!(cfg.node_link.listen, "127.0.0.1:9878");
+        assert_eq!(cfg.node_link.bootstrap_token_ttl_secs, 900);
+        assert!(cfg.node_link.registry_file.is_none());
+    }
+
+    #[test]
+    fn node_link_section_parses() {
+        let raw = r#"
+[node_link]
+enabled = true
+listen = "0.0.0.0:9999"
+registry_file = "/var/lib/sebas/nodes.json"
+bootstrap_token_ttl_secs = 120
+"#;
+        let cfg = Config::parse(raw).expect("config parses");
+        assert!(cfg.node_link.enabled);
+        assert_eq!(cfg.node_link.listen, "0.0.0.0:9999");
+        assert_eq!(cfg.node_link.bootstrap_token_ttl_secs, 120);
+        assert_eq!(
+            cfg.node_link.registry_path(std::path::Path::new("/etc/sebas/config.toml")),
+            std::path::PathBuf::from("/var/lib/sebas/nodes.json")
+        );
+    }
+
+    #[test]
+    fn node_link_registry_defaults_next_to_the_config_file() {
+        let cfg = Config::parse("[node_link]\nenabled = true\n").expect("config parses");
+        assert_eq!(
+            cfg.node_link
+                .registry_path(std::path::Path::new("/etc/sebas/config.toml")),
+            std::path::PathBuf::from("/etc/sebas/nodes.json"),
+            "缺省落在 config 文件同目录（与 core.secret 同款取舍）"
+        );
+    }
+
+    #[test]
+    fn node_link_bad_listen_is_rejected_before_startup() {
+        let err = Config::parse("[node_link]\nenabled = true\nlisten = \"localhost:9878\"\n")
+            .expect_err("域名监听地址应在解析期被拒");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("IP:PORT"), "{msg}");
+    }
+
+    #[test]
+    fn node_link_disabled_tolerates_any_listen() {
+        // 没开就不校验：避免让一个没启用的段把进程拦在启动门外。
+        assert!(Config::parse("[node_link]\nlisten = \"weird\"\n").is_ok());
     }
 }

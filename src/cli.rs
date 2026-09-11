@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version)]
@@ -39,6 +39,9 @@ pub enum Cmd {
     /// watchdog when `[watchdog.im] enabled = true`（extract-im-service）。
     #[command(name = "im")]
     Im(ImArgs),
+    /// 节点链路管理：签发配对 token / 列出节点 / 吊销（经 core 会话通道）。
+    #[command(name = "node-link")]
+    NodeLink(NodeLinkArgs),
     /// One-shot update implementation used by watchdog.
     Update(UpdateArgs),
     /// Send a command to the watchdog control plane.
@@ -334,8 +337,37 @@ pub enum OutputFormat {
     Json,
 }
 
-/// `sebas im` — start the standalone IM service.
-#[derive(Parser)]
+/// `sebas node-link` 的参数。
+#[derive(Args, Debug, Clone)]
+pub struct NodeLinkArgs {
+    /// 主控配置文件（用于发现 core socket 与 secret）。
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+    /// 管理操作。
+    #[command(subcommand)]
+    pub cmd: NodeLinkCmd,
+}
+
+/// 节点链路管理操作。
+#[derive(Subcommand, Debug, Clone)]
+pub enum NodeLinkCmd {
+    /// 签发一个一次性配对 token（只显示这一次；节点用它换取长期凭据）。
+    Token {
+        /// 有效期（秒）。缺省由 core 决定（900）。
+        #[arg(long)]
+        ttl: Option<u64>,
+    },
+    /// 列出已注册节点及其在线态。
+    List,
+    /// 吊销节点凭据：此后不可接入，也不能靠重新配对绕过。
+    Revoke {
+        /// 节点标识。
+        node_id: String,
+    },
+}
+
+/// `sebas im` 的参数。
+#[derive(Args, Debug, Clone)]
 pub struct ImArgs {
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,

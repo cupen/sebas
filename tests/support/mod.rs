@@ -175,6 +175,23 @@ pub fn forward_slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// `sebas-node` 可执行文件：与 `sebas` 同一个 target 目录的兄弟文件。
+///
+/// `CARGO_BIN_EXE_<name>` 只对**同一个包**的 bin 有效，而 `sebas-node` 是另一个包；
+/// 因此按 `sebas` 的位置推。缺文件时给出一条能照做的错误，而不是一句
+/// "No such file"。
+pub fn sebas_node_bin() -> PathBuf {
+    let sebas = PathBuf::from(env!("CARGO_BIN_EXE_sebas"));
+    let name = if cfg!(windows) { "sebas-node.exe" } else { "sebas-node" };
+    let node = sebas.with_file_name(name);
+    assert!(
+        node.exists(),
+        "找不到 {}：先构建它——cargo build -p sebas-node --bin sebas-node",
+        node.display()
+    );
+    node
+}
+
 pub struct Sandbox {
     pub path: PathBuf,
     pub config_path: PathBuf,
@@ -288,6 +305,15 @@ usage_file = "{}"
     /// (auto-arm + secret-file discovery) need a genuinely unset env.
     fn envs(&self, secret: Option<&str>) -> Vec<(&'static str, String)> {
         let mut envs = vec![
+            // 项目注册表默认落在**操作者的** `~/.sebas/projects.json`
+            // （`sebas-webui::projects`：`SEBAS_PROJECTS_PATH` → `SEBAS_HOME` →
+            // `$HOME`）。沙箱必须改道：远端项目注册旅程会真的写这个文件，漏了
+            // 这一条就会去动操作者的注册表（本套件在只读文件系统上跑时才发现，
+            // 报的是"写临时文件失败"而不是"写错了地方"）。
+            (
+                "SEBAS_PROJECTS_PATH",
+                forward_slash(&self.path.join("projects.json")),
+            ),
             ("SEBAS_STATE_DB", forward_slash(&self.path.join("sebas.db"))),
             (
                 "SEBAS_STATE_FILE",
@@ -357,6 +383,85 @@ usage_file = "{}"
             .kill_on_drop(true)
             .spawn()
             .unwrap_or_else(|e| panic!("spawn sebas {args:?}: {e}"))
+    }
+
+    /// 打开节点链路（add-remote-execution-node 9.3）：在沙箱内追加 `[node_link]`
+    /// 段（监听回环 + 注册表落在沙箱里），返回实际监听端口。
+    ///
+    /// **不改默认配置**：节点链路默认关着，给它加段才开——既有旅程因此完全不受
+    /// 影响（这本身也是「无节点注册时行为与今日一致」的一个旁证）。
+    pub fn enable_node_link(&self) -> u16 {
+        let port = free_port();
+        let registry = forward_slash(&self.path.join("nodes.json"));
+        let mut config = std::fs::read_to_string(&self.config_path)
+            .unwrap_or_else(|e| panic!("read config {}: {e}", self.config_path.display()));
+        config.push_str(&format!(
+            "\n[node_link]\nenabled = true\nlisten = \"127.0.0.1:{port}\"\n\
+             registry_file = \"{registry}\"\nbootstrap_token_ttl_secs = 600\n"
+        ));
+        std::fs::write(&self.config_path, config)
+            .unwrap_or_else(|e| panic!("write config {}: {e}", self.config_path.display()));
+        port
+    }
+
+    /// 节点进程的状态目录（与 `spawn_node` 一致）。
+    pub fn node_state_dir(&self) -> PathBuf {
+        self.path.join("node-state")
+    }
+
+    /// 节点进程的默认工作目录（远端项目的路径；`enable_node_link` 的用例里
+    /// 必须真实存在，因为路径可用性由**节点**判定）。
+    pub fn node_work_dir(&self) -> PathBuf {
+        let dir = self.path.join("node-work");
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("mkdir {}: {e}", dir.display()));
+        dir
+    }
+
+    /// 起一个**真 `sebas-node` 子进程**（9.3：两个进程，不是同一进程里的两张皮）。
+    ///
+    /// `join_token` 为 `None` 时用状态目录里已存的长期凭据（重启路径）。
+    pub fn spawn_node(&self, node_id: &str, join_token: Option<&str>) -> tokio::process::Child {
+        let log = self.path.join("node.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap_or_else(|e| panic!("open log {}: {e}", log.display()));
+        let log_err = log_file
+            .try_clone()
+            .unwrap_or_else(|e| panic!("clone log handle: {e}"));
+        let mut args: Vec<String> = vec![
+            "--node-id".into(),
+            node_id.into(),
+            "--control-plane".into(),
+            format!("ws://127.0.0.1:{}", self.node_link_port()),
+            "--state-dir".into(),
+            forward_slash(&self.node_state_dir()),
+        ];
+        if let Some(token) = join_token {
+            args.push("--join-token".into());
+            args.push(token.into());
+        }
+        tokio::process::Command::new(sebas_node_bin())
+            .args(&args)
+            .current_dir(&self.path)
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_err))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn sebas-node {args:?}: {e}"))
+    }
+
+    /// 节点链路监听端口（`enable_node_link` 之后才有意义）。
+    pub fn node_link_port(&self) -> u16 {
+        let config = std::fs::read_to_string(&self.config_path).unwrap_or_default();
+        config
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("listen = \"127.0.0.1:"))
+            .and_then(|rest| rest.trim_end_matches('"').parse().ok())
+            .unwrap_or_else(|| panic!("配置里没有 [node_link] listen（先调 enable_node_link）"))
     }
 
     /// Core: `sebas run -c <config> --router --debug` (detached: no --webui;
