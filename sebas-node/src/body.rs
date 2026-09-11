@@ -976,6 +976,9 @@ fn translate_event(event: &AcpEvent) -> Vec<BodyEvent> {
             gate: None,
         }),
         AcpEvent::ModelChanged { model_id, .. } => out.push(plain("model_changed", model_id.clone())),
+        // （add-agent-mode-selection）mode 切换不是回合内容，宿主的门控状态
+        // 由 SetMode 处理器自身维护——这里无需呈现。
+        AcpEvent::ModeChanged { .. } => {}
     }
     out
 }

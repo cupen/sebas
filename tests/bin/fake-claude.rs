@@ -45,6 +45,10 @@ struct Flags {
     ignore_interrupt: bool,
     delay_init_ms: u64,
     journal: Option<String>,
+    /// （add-agent-mode-selection）argv `--permission-mode` 的值（原样保存）。
+    /// `bypassPermissions` 下 `perm` 场景跳过 hook 直接放行——行为级断言
+    /// "allow 模式免审批" 的数据源；运行时 `set_permission_mode` 更新它。
+    permission_mode: Option<String>,
     resume_fails: bool,
     /// True when argv carried `--resume <id>` (as opposed to `--session-id`)
     /// — resume rejection only applies to actual resume attempts, so the
@@ -96,6 +100,7 @@ fn parse_flags() -> Flags {
         ignore_interrupt: false,
         delay_init_ms: 0,
         journal: None,
+        permission_mode: None,
         resume_fails: false,
         resume_used: false,
         session_id_flag_used: false,
@@ -156,6 +161,14 @@ fn parse_flags() -> Flags {
             }
             "--continue" => f.continue_used = true,
             "--fork-session" => f.fork_session = true,
+            // （add-agent-mode-selection）保存权限模式值（其余 VALUE_FLAGS
+            // 照旧只消费不保存）。
+            "--permission-mode" => {
+                if let Some(v) = args.get(i + 1) {
+                    f.permission_mode = Some(v.clone());
+                }
+                i += 1;
+            }
             s if VALUE_FLAGS.contains(&s) => {
                 i += 1; // consume the value, ignore it
             }
@@ -194,7 +207,7 @@ fn main() {
         println!("2.1.206 (fake-claude-cli)");
         return;
     }
-    let flags = parse_flags();
+    let mut flags = parse_flags();
     // The real CLI rejects `--session-id` combined with `--resume` /
     // `--continue` unless `--fork-session` is also specified. Replicate the
     // validation so a bad argv construction fails fast here instead of
@@ -298,8 +311,31 @@ fn main() {
                         io.out.flush().unwrap();
                         std::process::exit(1);
                     }
+                    "set_permission_mode" => {
+                        // （add-agent-mode-selection）运行时权限模式切换：
+                        // 记 journal（测试断言切换送达与值）、更新内部模式
+                        // （影响后续 perm 场景是否走 hook），然后照常 ack。
+                        // SDK 的控制帧形状：{"request":{"subtype":
+                        // "set_permission_mode","mode":"<v>"}}。
+                        let new_mode = v
+                            .pointer("/request/mode")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        io.journal_write(
+                            "mode_change",
+                            &json!({ "type": "mode_change", "mode": new_mode }),
+                        );
+                        if !new_mode.is_empty() {
+                            flags.permission_mode = Some(new_mode);
+                        }
+                        io.emit(&json!({
+                            "type": "control_response",
+                            "response": {"subtype": "success", "request_id": req_id, "response": {}}
+                        }));
+                    }
                     _ => {
-                        // set_model / set_permission_mode / ... : ack and ignore.
+                        // set_model / ... : ack and ignore.
                         io.emit(&json!({
                             "type": "control_response",
                             "response": {"subtype": "success", "request_id": req_id, "response": {}}
@@ -370,6 +406,14 @@ fn perm_turn(
             {"type": "tool_use", "id": "tc-1", "name": "Bash", "input": {"command": "rm -rf /"}}
         ]}
     }));
+    // （add-agent-mode-selection）bypassPermissions = 完全放行：不产生
+    // hook_callback 审批交互，工具直接执行——与 ask 模式（走 hook 等决定）
+    // 形成行为级对照。
+    if flags.permission_mode.as_deref() == Some("bypassPermissions") {
+        io.emit(&tool_result_frame(sid, "tc-1", "perm done\n", false));
+        io.emit(&result_frame(sid, "success", false));
+        return;
+    }
     *hook_counter += 1;
     let req_id = format!("fake-hook-{}", *hook_counter);
     io.emit(&json!({

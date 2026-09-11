@@ -273,6 +273,10 @@ export interface SessionDetail {
   pending: PendingSubmission[]
   /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
   remote?: RemoteSessionView | null
+  /** 操作者期望的 mode（add-agent-mode-selection，控制面词汇）；null = agent 默认。 */
+  desired_mode?: string | null
+  /** 执行体回报的实际生效 mode；null = 未声称生效（与 desired 差异如实可见）。 */
+  effective_mode?: string | null
 }
 
 /**
@@ -641,17 +645,28 @@ export const api = {
     prompt?: string | null
     projectId?: string | null
     model?: string | null
+    /** 权限模式（add-agent-mode-selection）：`ask`/`edit`/`allow`/`auto`；
+     * `null` = agent 默认行为（不发送 mode 字段）。 */
+    mode?: string | null
   }) =>
     post<{ key: string }>('/api/sessions', {
       prompt: opts.prompt ?? null,
       project_id: opts.projectId ?? null,
       agent: opts.agent,
       model: opts.model ?? null,
+      // undefined = 未选 mode：JSON 序列化时整个键省略（服务端 serde default
+      // 语义 = agent 默认行为），与"缺省不发送字段"的 wire 姿态一致。
+      mode: opts.mode,
     }),
   /** 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。 */
   setSessionModel: (encodedKey: string, modelId: string) =>
     post<{ status: string }>(`/api/sessions/${encodedKey}/model`, {
       model_id: modelId,
+    }),
+  /** 中程切换会话权限模式（add-agent-mode-selection）：接受与否经事件流反馈。 */
+  setSessionMode: (encodedKey: string, mode: string) =>
+    post<{ status: string }>(`/api/sessions/${encodedKey}/mode`, {
+      mode,
     }),
   /**
    * Answer a gated tool call (review card). Resolves `{status: "delivered"}`

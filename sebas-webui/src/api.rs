@@ -213,6 +213,12 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
         // Claude）这两个字段为 null —— 前端不显示模型 UI。
         "current_model": info.current_model,
         "available_models": info.available_models,
+        // （add-agent-mode-selection）权限模式：desired = 操作者期望（创建/
+        // 切换立即反映），effective = 执行体回报的实际生效值；两者都可能为
+        // null（agent 默认行为 / 执行体未声称生效）。远端会话另有 remote
+        // 视图的同名字段，值同源。
+        "desired_mode": info.desired_mode,
+        "effective_mode": info.effective_mode,
         // （add-composer-agent-binding）创建时绑定的 agent kind；null = 默认。
         "agent_kind": info.agent_kind,
         // 绑定的项目，按稳定 id（workbench-agent-wire-fix 2.5）；null = inbox。
@@ -500,11 +506,35 @@ pub struct CreateSessionRequest {
     /// no model UI is shown).
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional permission mode for the new session
+    /// （add-agent-mode-selection）：控制面词汇 `ask`/`edit`/`allow`/`auto`
+    /// （与节点链路 SessionMode 一致）。缺省/None = agent 默认行为（wire 不
+    /// 携带 mode）。未知词汇 400 拒绝，不静默降级。只有能执行它的执行体
+    /// （本机 claude、远端节点）会生效；其它 agent 接受但不生效（非致命，
+    /// 同 model 语义）。
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// （add-agent-mode-selection）创建与切换共用的 mode 词汇表。单一出处：
+/// 与 `sebas-node-link::SessionMode` 的词汇一致（节点链路的既有门控词汇，
+/// wire 上沿用，不另造一套）。
+pub const SESSION_MODES: [&str; 4] = ["ask", "edit", "allow", "auto"];
+
+/// 校验控制面 mode 词汇；未知值返回 `None`（调用方 400 如实拒绝）。
+pub fn valid_session_mode(mode: &str) -> bool {
+    SESSION_MODES.contains(&mode.trim().to_ascii_lowercase().as_str())
 }
 
 #[derive(Deserialize)]
 pub struct SetModelRequest {
     pub model_id: String,
+}
+
+/// （add-agent-mode-selection）`POST /api/sessions/{key}/mode` 的请求体。
+#[derive(Deserialize)]
+pub struct SetSessionModeRequest {
+    pub mode: String,
 }
 
 #[derive(Deserialize)]
@@ -558,6 +588,19 @@ pub async fn create_session(
         }
         None => (None, None),
     };
+    // （add-agent-mode-selection）mode 词汇校验：未知值 400 如实拒绝，不
+    // 静默降级（同"agent 必填"的 wire 严格性）。
+    if let Some(mode) = &req.mode
+        && !valid_session_mode(mode)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "mode 非法：{mode:?}（合法词汇 {}）",
+                SESSION_MODES.join("/")
+            ),
+        );
+    }
     let prompt = req.prompt.unwrap_or_default();
     // 0-turn 占位（P2）：无 prompt 时只建行、不 spawn 子进程、不把空串当
     // prompt 发给 agent（opencode 收到 `session/prompt ""` 会挂起）。agent/
@@ -566,7 +609,13 @@ pub async fn create_session(
     let key = if prompt.trim().is_empty() {
         match state
             .backend
-            .create_placeholder(project_dir.clone(), &req.agent, req.model.clone(), node.clone())
+            .create_placeholder(
+                project_dir.clone(),
+                &req.agent,
+                req.model.clone(),
+                req.mode.clone(),
+                node.clone(),
+            )
             .await
         {
             Ok(k) => k,
@@ -575,7 +624,14 @@ pub async fn create_session(
     } else {
         match state
             .backend
-            .spawn_with(prompt, project_dir.clone(), &req.agent, req.model, node.clone())
+            .spawn_with(
+                prompt,
+                project_dir.clone(),
+                &req.agent,
+                req.model,
+                req.mode,
+                node.clone(),
+            )
             .await
         {
             Ok(k) => k,
@@ -616,6 +672,40 @@ pub async fn set_session_model(
     if let Err(rej) = state
         .backend
         .set_session_model(session_key, req.model_id)
+        .await
+    {
+        return rejection_response(rej);
+    }
+    (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+}
+
+/// POST /api/sessions/{key}/mode — 切换会话的权限模式
+/// （add-agent-mode-selection）。命令送达 = 200；执行体接受与否经事件流
+/// 反馈（`ModeChanged` = 成功、快照 effective 更新；非终态 `Error` = 拒绝，
+/// UI 显示错误、mode 不变）。远端节点会话经核心通道走节点链路
+/// `SessionOp::SetMode`。
+pub async fn set_session_mode(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+    Json(req): Json<SetSessionModeRequest>,
+) -> Response {
+    if !valid_session_mode(&req.mode) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "mode 非法：{:?}（合法词汇 {}）",
+                req.mode,
+                SESSION_MODES.join("/")
+            ),
+        );
+    }
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    if let Err(rej) = state
+        .backend
+        .set_session_mode(session_key, req.mode.trim().to_ascii_lowercase())
         .await
     {
         return rejection_response(rej);

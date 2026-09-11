@@ -557,6 +557,28 @@ usage_file = "{}"
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
+    /// （add-agent-mode-selection）给 fake-claude 加 `--journal`，让每个
+    /// spawn 的 argv 与 in/out 帧都落盘——argv 断言（mode 是否进了子进程
+    /// 参数）与运行时切换断言（mode_change 记录）的数据源。必须在 spawn
+    /// 之前调用。
+    pub fn journal_fake_agent(&self) -> std::path::PathBuf {
+        let journal = self.path.join("fake-claude-journal.jsonl");
+        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
+        let needle = "[acp.agents.claude]\n";
+        assert!(
+            toml.contains(needle),
+            "[acp.agents.claude] section not found in config"
+        );
+        let arg = format!(
+            "{needle}args = [\"--journal\", \"{}\"]\n",
+            journal.display()
+        );
+        let patched = toml.replace(needle, &arg);
+        assert_ne!(toml, patched, "journal patch did not apply");
+        std::fs::write(&self.config_path, patched).expect("write config");
+        journal
+    }
+
     /// Pin the router's HTTP listener to a specific port inside the sandbox
     /// config (the default `127.0.0.1:8787` is fixed — parallel e2e cases
     /// would collide). Must run before spawn.

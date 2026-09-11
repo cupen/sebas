@@ -487,7 +487,7 @@ impl SessionBackend for CoreChannelBackend {
         // 通道帧的 agent 必填（workbench-agent-wire-fix D2）：无 agent 的
         // 调用方（feishu 默认路径）语义是「配置的默认 kind」，此处无法解析
         // 配置——由服务端按空 agent 拒绝，调用方应改用 spawn_with 显式传。
-        self.spawn_with(prompt, project_dir, "", None, None).await
+        self.spawn_with(prompt, project_dir, "", None, None, None).await
     }
 
     /// 节点清单（8.2）：经 core 的节点注册表拿——只有 core 有写者句柄。
@@ -557,6 +557,7 @@ impl SessionBackend for CoreChannelBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        mode: Option<String>,
         node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
@@ -564,6 +565,8 @@ impl SessionBackend for CoreChannelBackend {
                 prompt,
                 project_dir,
                 model,
+                // （add-agent-mode-selection）创建时请求的权限模式随帧上送。
+                mode,
                 agent: agent.to_string(),
                 // 节点维度由调用方给出：`None`/`local` = 本机（与今日一致），
                 // 别的值由 core 经节点链路建立——client 自己不解析节点。
@@ -592,6 +595,24 @@ impl SessionBackend for CoreChannelBackend {
         }
     }
 
+    /// （add-agent-mode-selection）中程切换权限模式。命令送达 = `Ok`；执行体
+    /// 接受与否经事件流反馈（`ModeChanged` = 成功，非终态 `Error` = 拒绝、
+    /// mode 不变）——与 model 切换同一反馈契约。
+    async fn set_session_mode(
+        &self,
+        key: ChannelKey,
+        mode: String,
+    ) -> Result<(), SessionRejection> {
+        match self
+            .request(&CoreChannelRequest::SetSessionMode { key, mode })
+            .await?
+        {
+            CoreChannelResponse::Ok => Ok(()),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
+    }
+
     /// 0-turn placeholder (P2 fix): create the session row over the wire
     /// without an agent child — the trait default would fall back to
     /// `spawn("")`, putting the empty prompt on the wire exactly the bug this
@@ -603,12 +624,14 @@ impl SessionBackend for CoreChannelBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        mode: Option<String>,
         node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         match self
             .request(&CoreChannelRequest::CreatePlaceholder {
                 project_dir,
                 model,
+                mode,
                 agent: agent.to_string(),
                 node,
             })

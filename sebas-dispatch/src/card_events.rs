@@ -78,6 +78,9 @@ impl CardInput {
                 model_id: model_id.clone(),
             },
             AcpEvent::PermissionRequest { .. } | AcpEvent::UsageUpdate { .. } => return None,
+            // （add-agent-mode-selection）mode 切换不进卡片流——与模型切换
+            // 不同，它不是回合内容，只影响门控行为（快照/头部 UI 呈现）。
+            AcpEvent::ModeChanged { .. } => return None,
         })
     }
 }

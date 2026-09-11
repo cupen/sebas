@@ -161,12 +161,16 @@ pub enum Out {
     /// agent kind from the webui backend hint (`acp:<slug>`); None = the
     /// configured default kind. `model`（add-acp-model-selection）是创建时
     /// 请求的模型 id（会话建立后、首 prompt 前应用；None = 默认模型）。
+    /// `mode`（add-agent-mode-selection）是创建时请求的权限模式（控制面
+    /// 词汇 ask/edit/allow/auto；None = agent 默认行为——本机 claude 不传
+    /// `--permission-mode`，远端节点 mode=None）。
     WebSpawn {
         key: ChannelKey,
         prompt: String,
         project_dir: Option<String>,
         kind: Option<String>,
         model: Option<String>,
+        mode: Option<String>,
     },
 }
 
@@ -470,6 +474,11 @@ impl DispatchHandle {
             // workbench-turn-queue D6：待生效提交全量随 SessionInfo 下发
             //（快照与每次事件都携带，投递序）。
             pending: self.map.pending_submissions(key).await,
+            // （add-agent-mode-selection）desired/effective mode 随快照下发
+            // （本机 claude 的 effective 在 spawn argv 应用/ModeChanged 时
+            // 落定；远端会话的 mode 走 remote 视图，此处不留）。
+            desired_mode: m.desired_mode.clone(),
+            effective_mode: m.effective_mode.clone(),
             // 执行体归属由复合后端在快照/事件出口统一打标（D4）；router 自身
             // 只跟踪 ACP 侧映射，留 None 交给上游。
             backend: None,
@@ -778,6 +787,15 @@ impl DispatchHandle {
             self.map.set_current_model(&key, model_id.clone()).await;
             self.publish_updated(&key).await;
         }
+        // ModeChanged（add-agent-mode-selection）：运行时权限模式切换被
+        // agent 接受——更新映射的 effective mode 并发布 Updated，快照立即
+        // 反映（与 ModelChanged 同一到达线覆盖）。
+        if let AcpEvent::ModeChanged { mode, .. } = event
+            && let Some(key) = self.map.lookup_key_by_session(session_id).await
+        {
+            self.map.set_effective_mode(&key, Some(mode.clone())).await;
+            self.publish_updated(&key).await;
+        }
         match event {
             AcpEvent::TextDelta { delta, .. } => {
                 self.transcript_push(session_id, TurnEntry::markdown(0, delta.clone()))
@@ -1068,6 +1086,18 @@ impl DispatchHandle {
         }
     }
 
+    /// （add-agent-mode-selection）spawn 时 argv 应用 / `ModeChanged` 到达后
+    /// 更新映射的 effective mode 并发布 Updated，快照/订阅者立即反映。
+    /// `None` = 执行体不再声称某 mode 生效（当前不存在该路径，保留对称性）。
+    pub async fn apply_mode_changed(&self, session_id: &str, mode: Option<&str>) {
+        if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+            self.map
+                .set_effective_mode(&key, mode.map(str::to_string))
+                .await;
+            self.publish_updated(&key).await;
+        }
+    }
+
     /// Spawn failed/timeout（fail-fast-on-startup-errors 3.1/3.2）：占位
     /// 不再拆除、不发 Removed——会话转为 spawn-failed 终态（保持可见），
     /// transcript 立即追加一条带原因的错误事件，并发布 Updated 让前端即时
@@ -1118,6 +1148,7 @@ impl DispatchHandle {
         project_dir: Option<String>,
         kind: Option<String>,
         model: Option<String>,
+        mode: Option<String>,
     ) -> ChannelKey {
         let key = ChannelKey::web_new();
         match self.map.begin_spawn(key.clone()).await {
@@ -1125,6 +1156,11 @@ impl DispatchHandle {
                 // Record project_dir on the mapping before emitting, so the
                 // WebUI can display it even before the session is active.
                 self.map.set_project_dir(&key, project_dir.clone()).await;
+                // （add-agent-mode-selection）desired mode 记入映射供快照
+                // 暴露（effective 由执行体回报/ModeChanged 落定）。
+                if mode.is_some() {
+                    self.map.set_desired_mode(&key, mode.clone()).await;
+                }
                 // Publish after set_project_dir so the Created snapshot
                 // already carries it. AlreadySpawning changed nothing.
                 if !matches!(outcome, crate::state::BeginSpawn::AlreadySpawning) {
@@ -1136,6 +1172,7 @@ impl DispatchHandle {
                     project_dir,
                     kind,
                     model,
+                    mode,
                 })
                 .await;
                 key
@@ -1157,11 +1194,12 @@ impl DispatchHandle {
         project_dir: Option<String>,
         kind: Option<String>,
         model: Option<String>,
+        mode: Option<String>,
     ) -> ChannelKey {
         let key = ChannelKey::web_new();
         match self
             .map
-            .begin_spawn_with(key.clone(), kind.clone(), model.clone())
+            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone())
             .await
         {
             Ok(outcome) => {
@@ -1300,7 +1338,7 @@ impl DispatchHandle {
                 // 0-turn placeholder created with no prompt carries the
                 // requested project_dir/kind/model on the mapping — read them
                 // back so the first message spawns the right agent (P2 fix).
-                let (project_dir, kind, model) = self
+                let (project_dir, kind, model, mode) = self
                     .map
                     .get(&key)
                     .await
@@ -1309,9 +1347,10 @@ impl DispatchHandle {
                             m.project_dir.clone(),
                             m.pending_kind.clone(),
                             m.pending_model.clone(),
+                            m.pending_mode.clone(),
                         )
                     })
-                    .unwrap_or((None, None, None));
+                    .unwrap_or((None, None, None, None));
                 self.publish_created(&key).await;
                 self.emit(Out::WebSpawn {
                     key,
@@ -1321,6 +1360,8 @@ impl DispatchHandle {
                     // 直达消息路径的模型参数来自 0-turn 创建时记住的
                     // pending_model（用户指定模型走创建表单）。
                     model,
+                    // （add-agent-mode-selection）0-turn 创建时记住的 mode。
+                    mode,
                 })
                 .await;
             }
@@ -1681,7 +1722,8 @@ fn extract_session_id(event: &AcpEvent) -> &str {
         | AcpEvent::Finished { session_id }
         | AcpEvent::Error { session_id, .. }
         | AcpEvent::UsageUpdate { session_id, .. }
-        | AcpEvent::ModelChanged { session_id, .. } => session_id,
+        | AcpEvent::ModelChanged { session_id, .. }
+        | AcpEvent::ModeChanged { session_id, .. } => session_id,
     }
 }
 
@@ -1715,5 +1757,6 @@ fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
         AcpEvent::PermissionRequest { .. } => None,
         AcpEvent::UsageUpdate { .. } => None,
         AcpEvent::ModelChanged { .. } => None,
+        AcpEvent::ModeChanged { .. } => None,
     }
 }

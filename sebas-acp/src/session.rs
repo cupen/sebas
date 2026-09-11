@@ -92,6 +92,15 @@ pub enum AcpCommand {
         session_id: String,
         model_id: String,
     },
+    /// （add-agent-mode-selection）把会话切到控制面 mode（`ask`/`edit`/
+    /// `allow`/`auto`）。claude driver 经 SDK 运行时 `set_permission_mode`
+    /// 下发（控制面词汇→CLI permission mode 的映射在 driver 内）；接受后
+    /// 发 `AcpEvent::ModeChanged`，拒绝/失败发非终态 `Error`（mode 不变、
+    /// 会话存活）。不支持 mode 的执行体如实报错，不假装生效。
+    SetMode {
+        session_id: String,
+        mode: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,5 +178,12 @@ pub enum AcpEvent {
     ModelChanged {
         session_id: String,
         model_id: String,
+    },
+    /// （add-agent-mode-selection）运行时权限模式切换被 agent 接受后由
+    /// driver 发出：`mode` 是**控制面词汇**（`ask`/`edit`/`allow`/`auto`），
+    /// webui 据此更新快照的 effective mode。
+    ModeChanged {
+        session_id: String,
+        mode: String,
     },
 }

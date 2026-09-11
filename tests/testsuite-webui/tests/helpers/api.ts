@@ -94,7 +94,13 @@ export async function getSession(
 
 export async function createSession(
   request: APIRequestContext,
-  opts: { prompt: string; projectId?: string | null; agent?: string } = { prompt: 'hello' },
+  opts: {
+    prompt: string
+    projectId?: string | null
+    agent?: string
+    /** 权限模式（add-agent-mode-selection）：`ask`/`edit`/`allow`/`auto`。 */
+    mode?: string
+  } = { prompt: 'hello' },
 ): Promise<string> {
   const resp = await request.post('/api/sessions', {
     data: {
@@ -103,6 +109,8 @@ export async function createSession(
       // agent 必填（workbench-agent-wire-fix D2）：沙箱默认 agent 是
       // `claude`（fake-claude）；fail-fast journeys 传未知 id 强制内显失败。
       agent: opts.agent ?? 'claude',
+      // 缺省 = undefined → JSON 序列化整个键省略（服务端 serde default 语义）。
+      mode: opts.mode,
     },
   })
   if (!resp.ok()) throw new Error(`createSession failed: HTTP ${resp.status()}`)

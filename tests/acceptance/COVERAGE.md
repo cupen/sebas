@@ -157,6 +157,11 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | allowlist 作用域与生命周期 | ✅ | `permission_flow_test` |
 | | 迟到点击处理 | ✅ | src `core_channel/tests.rs`（typed rejection）|
 | | 无应答者 fail-closed | ✅ | src `core_channel/tests.rs`（fail-closed）；detached 审批闭环 browser `approval-detached.spec.ts`（cover-core-channel-test-gaps B1.2，原缺口 #1 已收口）|
+| | Session mode gates whether a decision is requested（add-agent-mode-selection 修订）| ✅ | E `mode_threads_to_agent_argv`（argv 透传 + allow 免审批 + 未知 mode 400）；E/J `mode_mid_session_switch` / `remote_node_mode_journey`（远端 allow 免门控↔ask 恢复 waiting）；sebas-acp driver 单测（词汇映射/argv 解析）；browser `mode.spec.ts` |
+| | webui：会话创建携带 mode | ✅ | `session_endpoints_test::create_session_with_mode_threads_spawn_and_mid_session_mode_switch_works`（wire 透传 + 未知 mode 400）；E `mode_threads_to_agent_argv`；browser `mode.spec.ts` |
+| | webui：会话中途切换 mode | ✅ | 同上（SetMode 经 SendAcp）；E `mode_mid_session_switch`（journal 记录运行时切换 + effective 落定）|
+| | webui：会话 mode 在 dashboard 可见可切 | ✅ | 前端 `dashboard.test.ts`（mode-tag 本机/远端同通道）；browser `mode.spec.ts`（head tag + mode-switch 切换）|
+| | webui：SessionBackend seam 承载 mode | ✅ | `spawn_race_test`（WebSpawn 携带 mode=None 透传）；src `core_channel/tests.rs`（Spawn/CreatePlaceholder/SetSessionMode 帧分发）|
 
 ### ④ 项目管理（核心）
 
@@ -226,6 +231,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | 能力 | 状态 | 证据 / 缺口 / 豁免 |
 |---|---|---|
 | acp-driver | ✅ | `full_e2e_test`、`pump_unit_test`、`continue_session_test`、sebas-acp resume/timeout 测试（注：`kill_reaps_child_process` 在 Windows 既有失败，与本套件无关）|
+| | └ add-agent-mode-selection：启动权限模式 / 运行时切换 / 探针不覆盖 | ✅ | E `mode_threads_to_agent_argv`（argv 断言）+ `mode_mid_session_switch`（ModeChanged + 探针共存）；sebas-acp driver 单测（control_mode_flag/parse/strip）|
 | acp-session-mapping | ✅ | 见核心簇① |
 | acp-model-selection | ✅ | 见核心簇② |
 | agent-bench | ✅ | sebas-agent bench 内联测试；🚫 真实模型跑分豁免 |
@@ -254,7 +260,8 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | session-lifecycle | ✅ | 见核心簇① |
 | session-persistence | ✅ | 见核心簇① |
 | state-store | ✅ | 见核心簇④ |
-| testsuite-acceptance | ✅ | 套件本体：`invoke testsuite-acceptance` 六旅程（`tests/testsuite_acceptance_test.rs`，`#[ignore]` 不进默认 cargo test、失败保留沙箱、`--case` 单跑）；达标复核即本文件统计段 |
+| testsuite-acceptance | ✅ | 套件本体：`invoke testsuite-acceptance` 旅程（`tests/testsuite_acceptance_test.rs`，`#[ignore]` 不进默认 cargo test、失败保留沙箱、`--case` 单跑）；达标复核即本文件统计段 |
+| | └ add-agent-mode-selection：远端节点 mode 旅程 | ✅ | J: `remote_node_mode_journey`（allow 免门控 → 中途切 ask 恢复 waiting → 离线拒绝点名节点；EchoBody 桩零 token）|
 | testsuite-process-e2e | ✅ | 套件约定（沙箱隔离/显式超时/失败保留现场/平台门控）由 `tests/testsuite_e2e_test.rs` + `tests/testsuite_acceptance_test.rs` 落地并被其用例遵循；E: 全部 e2e 用例 |
 | watchdog | ✅ | 见核心簇⑤ |
 | webui | ✅ | sebas-webui 全套端点测试（harden-core-channel-deployment：projects 注册降级标记 `degraded.cause`/正常路径无标记；turn-queue：`session_payloads_carry_pending_submissions_in_delivery_order`、`pending_remove_and_move_endpoints`（已开始 409 typed rejection）、`message_overflow_is_a_visible_rejection`；conversation-view：`summary_focused_session_matches_detail_entry_view` 等 payload 两侧条目同序/退役字段不回流断言）；E: detached 双进程启动/健康/重连 + `turn_queue_timing_and_dropped_accounting` + `core_owned_provider_reaches_router_without_restart`（`testsuite_e2e_test`）；浏览器级 UI 旅程 ✅（`testsuite-webui-browser`，含 conversation/pending-stack 新 spec，见下）|
