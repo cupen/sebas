@@ -195,7 +195,7 @@ pub fn bootstrap_auth() -> Arc<AuthHandle> {
 
 /// CLI entry: read + parse the config, then run the standalone WebUI server.
 pub async fn run(args: WebUiArgs) -> Result<()> {
-    init_tracing();
+    init_tracing(None);
 
     let raw = std::fs::read_to_string(&args.config)
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;
@@ -556,14 +556,19 @@ fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
 /// Install a tracing subscriber for the standalone WebUI process.
 /// Filter comes from `RUST_LOG` (default `"info"`), mirroring router_cmd.
 /// `try_init` is used so the first caller wins and later calls are no-ops.
-pub fn init_tracing_for_im() {
-    init_tracing();
+pub fn init_tracing_for_im(log_filter: Option<&str>) {
+    init_tracing(log_filter);
 }
 
-fn init_tracing() {
+fn init_tracing(log_filter: Option<&str>) {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter =
-        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
+    // `--log-level` 显式给出时优先于 RUST_LOG；两者皆缺省退默认 info。
+    let filter = match log_filter {
+        Some(f) => EnvFilter::try_new(format!("{f}{}", crate::config::LOG_FILTER_QUIET))
+            .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER)),
+        None => EnvFilter::try_from_env("RUST_LOG")
+            .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER)),
+    };
     let _ = fmt().with_env_filter(filter).try_init();
 }
 

@@ -145,6 +145,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let key = evt.key().clone();
         match evt {
             ChannelEvent::Text { text, reply_target, .. } => {
+                // 飞书交互可见性（feishu-interaction-logging）：入站事件逐条
+                // INFO——量级是人的操作频率，默认级别即可追踪每一次点击/消息。
+                info!(chat = %key.reference, text = %text, "feishu 入站文本");
                 if let Some(t) = &reply_target {
                     self.reply_targets.write().await.insert(view_id(&key), t.clone());
                 }
@@ -152,15 +155,17 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             }
             ChannelEvent::Media { files, caption, reply_target, .. } => {
                 // reply_target 即携带文件的消息 id（media API 路径参数）。
+                info!(chat = %key.reference, files = files.len(), "feishu 入站媒体");
                 if let Some(t) = &reply_target {
                     self.reply_targets.write().await.insert(view_id(&key), t.clone());
                 }
                 self.on_media(key, files, caption, reply_target).await;
             }
             ChannelEvent::ButtonCb { action, .. } => {
-                self.on_button(action.session_id, action.request_id, action.value).await;
+                self.on_button(&key, action.session_id, action.request_id, action.value).await;
             }
             ChannelEvent::FormCb { value, form_value, .. } => {
+                info!(chat = %key.reference, op = %value.get("op").and_then(|v| v.as_str()).unwrap_or(""), "feishu 入站表单提交");
                 self.on_form(value, form_value).await;
             }
         }
@@ -254,18 +259,33 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     /// 权限卡按钮（permission-flow 通道版）：解析 behavior value 里的
     /// request_id/decision → 端口回传 → 就地翻卡。stale（无待决请求）→
     /// 置灰「已过期」卡，fail-closed。
-    async fn on_button(&self, _session_id: String, request_id: Option<String>, value: serde_json::Value) {
-        let Some(request_id) = request_id.or_else(|| {
-            value.get("request_id").and_then(|v| v.as_str()).map(str::to_owned)
-        }) else {
-            return;
-        };
+    async fn on_button(
+        &self,
+        key: &ChannelKey,
+        session_id: String,
+        request_id: Option<String>,
+        value: serde_json::Value,
+    ) {
         let raw = value
             .get("decision")
             .and_then(|v| v.as_str())
             .map(str::to_owned)
             .unwrap_or_default();
+        let Some(request_id) = request_id.or_else(|| {
+            value.get("request_id").and_then(|v| v.as_str()).map(str::to_owned)
+        }) else {
+            info!(chat = %key.reference, decision = %raw, "feishu 按钮点击缺 request_id，忽略");
+            return;
+        };
+        info!(
+            chat = %key.reference,
+            session_id = %session_id,
+            request_id = %request_id,
+            decision = %raw,
+            "feishu 权限按钮点击"
+        );
         let Some(decision) = parse_decision(&raw) else {
+            info!(request_id = %request_id, raw_decision = %raw, "feishu 按钮决定无法识别，忽略");
             return;
         };
         let msg_id = self.perm_cards.read().await.get(&request_id).cloned();
@@ -280,15 +300,31 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 PermissionDecision::Escalate { reason } => ("已升级", "orange", reason),
             }
         };
-        if let Some(msg_id) = msg_id {
-            let card = ChannelCard {
-                title: title.into(),
-                theme: theme.into(),
-                elements: vec![ChannelElement::Markdown { content: note }],
-                turn: None,
-            };
-            self.update_card(&msg_id, &card).await;
-        }
+        let card_updated = match &msg_id {
+            Some(msg_id) => {
+                let card = ChannelCard {
+                    title: title.into(),
+                    theme: theme.into(),
+                    elements: vec![ChannelElement::Markdown { content: note.clone() }],
+                    turn: None,
+                };
+                self.update_card(msg_id, &card).await;
+                true
+            }
+            // 卡不在本进程登记（im 重启导致内存表丢失 / 跨实例渲染）：卡片
+            // 无法就地更新，退化为文本回执——点击必须产生可见反馈，否则
+            // 用户无从判断生效与否（正是「按钮没反应」投诉的来源之一）。
+            None => {
+                self.send_text(key, format!("[{title}] {note}")).await;
+                false
+            }
+        };
+        info!(
+            request_id = %request_id,
+            accepted,
+            card_updated,
+            "feishu 权限按钮处理完成"
+        );
         self.perm_cards.write().await.remove(&request_id);
     }
 
@@ -551,7 +587,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
     async fn send_text(&self, key: &ChannelKey, content: String) {
         if let Err(e) = self.feishu.send_text(&self.http, &self.tokens, &feishu_key(key), &content).await {
             warn!(?e, "send_text failed");
+            return;
         }
+        info!(chat = %key.reference, chars = content.len(), "feishu 文本已发送");
     }
 
     /// 独立 UI 卡（help/权限/表单），返回 message_id 供就地更新。
@@ -563,7 +601,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             .send_card(&self.http, &self.tokens, &feishu_key(key), framed, root.as_deref(), thread_of(key))
             .await
         {
-            Ok(mid) => Some(mid),
+            Ok(mid) => {
+                info!(chat = %key.reference, title = %card.title, msg_id = %mid, "feishu 卡片已发送");
+                Some(mid)
+            }
             Err(e) => {
                 warn!(?e, "standalone card send failed");
                 None
@@ -575,7 +616,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let Ok(framed) = serde_json::to_value(render_standalone_card(card)) else { return };
         if let Err(e) = self.feishu.update_card(&self.http, &self.tokens, msg_id, framed).await {
             warn!(?e, "card update failed");
+            return;
         }
+        info!(msg_id = %msg_id, title = %card.title, "feishu 卡片已就地更新");
     }
 
     async fn list_sessions(&self, key: &ChannelKey) {

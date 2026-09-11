@@ -21,6 +21,7 @@ pub mod agent_kinds;
 pub mod core_channel;
 mod dispatch;
 pub mod error;
+pub mod feishu_cmd;
 pub mod router_cmd;
 pub mod im_cmd;
 pub mod ipc;

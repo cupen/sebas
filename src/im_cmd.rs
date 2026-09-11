@@ -24,6 +24,8 @@ pub struct ImArgs {
     pub config: String,
     pub test_msg: Option<String>,
     pub dump_inbound: Option<String>,
+    /// 日志过滤（RUST_LOG 语法）；None = 沿用 RUST_LOG 环境变量 / 默认 info。
+    pub log_level: Option<String>,
 }
 
 /// 通道端口：把根 crate 的 `CoreChannelBackend` 适配成 im 的 `CoreSessionPort`。
@@ -169,7 +171,7 @@ impl ControlPort for WatchdogControl {
 }
 
 pub async fn run(args: ImArgs) -> Result<()> {
-    crate::webui_cmd::init_tracing_for_im();
+    crate::webui_cmd::init_tracing_for_im(args.log_level.as_deref());
 
     let raw = std::fs::read_to_string(&args.config)
         .map_err(|e| SebasError::Config(format!("read config {}: {e}", args.config)))?;

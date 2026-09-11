@@ -55,6 +55,39 @@ pub enum Cmd {
     /// Run the sebas-agent capability benchmark (agent-bench spec).
     #[command(name = "agent-bench")]
     AgentBench(AgentBenchArgs),
+    /// 会话外直连飞书的一次性命令：发文本/图片给指定会话（通知/运维）。
+    /// 直接使用 `[feishu]` 凭据，不经过任何运行中的 sebas 实例。
+    Feishu(FeishuArgs),
+}
+
+/// `sebas feishu` — 会话外飞书交互（通知用户、投递图片等）。
+#[derive(Parser)]
+pub struct FeishuArgs {
+    /// Path to the sebas config.toml（提供 [feishu] 凭据）。
+    #[arg(short = 'c', long, default_value = "./config.toml")]
+    pub config: String,
+
+    /// 目标会话 chat_id（`oc_` 开头；p2p 会话 id 见日志里的 open_chat_id）。
+    #[arg(long, global = true)]
+    pub chat: Option<String>,
+
+    #[command(subcommand)]
+    pub cmd: FeishuCmd,
+}
+
+#[derive(Subcommand)]
+pub enum FeishuCmd {
+    /// 发文本消息。
+    Text {
+        /// 消息内容（多个词会以空格拼接）。
+        #[arg(trailing_var_arg = true)]
+        message: Vec<String>,
+    },
+    /// 发本地图片（先上传换取 image_key，再发图片消息）。
+    Image {
+        /// 图片文件路径（png/jpg 等飞书支持的格式）。
+        path: String,
+    },
 }
 
 /// `sebas agent-bench` — scripted-client capability benchmark.
@@ -220,6 +253,13 @@ pub struct RunArgs {
     /// （内置 `test` 模型自应答、不转发上游），便于本地 curl 调试。
     #[arg(long)]
     pub debug: bool,
+
+    /// 日志过滤，RUST_LOG 语法：级别（error/warn/info/debug/trace）或
+    /// 完整过滤式（如 `info,openlark=debug`）。覆盖 config `[log] level`，
+    /// 并注入 core/webui/im 全部子进程——把与飞书的交互（收到的点击/
+    /// 消息、路由决策、发送动作）打全用 `--log-level debug`。
+    #[arg(long)]
+    pub log_level: Option<String>,
 }
 
 /// `sebas update` — one-shot update implementation used by watchdog.
@@ -305,6 +345,9 @@ pub struct ImArgs {
     /// Dump inbound WS payloads to this directory (debug affordance).
     #[arg(long)]
     pub dump_inbound: Option<String>,
+    /// 日志过滤（RUST_LOG 语法）。缺省读 RUST_LOG 环境变量，再退 `info`。
+    #[arg(long)]
+    pub log_level: Option<String>,
 }
 
 /// Watchdog control-plane subcommands. Phase 6 (sebas-npc) freezes this surface

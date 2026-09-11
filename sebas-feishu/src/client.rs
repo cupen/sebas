@@ -345,6 +345,78 @@ impl FeishuClient {
             .await
     }
 
+    /// 上传图片供消息引用（POST /open-apis/im/v1/images，multipart）。返回
+    /// `image_key`，配合 [`Self::send_image`] 发送。`file_name` 仅作表单
+    /// 元数据；内容以 `bytes` 为准，`image_type` 固定 `"message"`（聊天图）。
+    pub async fn upload_image(
+        &self,
+        http: &reqwest::Client,
+        tokens: &TokenManager,
+        file_name: &str,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<String> {
+        if self.headless {
+            return Ok("headless-noop-image".into());
+        }
+        let url = "https://open.feishu.cn/open-apis/im/v1/images";
+        // multipart 无法走 request_with_retry 的 JSON 体路径，鉴权+重试
+        // 语义与其保持一致：失败刷新 tenant token 后重试，至多 3 次。
+        let mut attempt = 0;
+        loop {
+            let token = tokens.token().await?;
+            let form = reqwest::multipart::Form::new()
+                .text("image_type", "message")
+                .part(
+                    "image",
+                    reqwest::multipart::Part::bytes(bytes.clone())
+                        .file_name(file_name.to_string()),
+                );
+            let resp: ApiResp<ImageOut> = http
+                .post(url)
+                .bearer_auth(token)
+                .multipart(form)
+                .send()
+                .await?
+                .json()
+                .await?;
+            if resp.code == 0 {
+                return Ok(resp.data.image_key);
+            }
+            attempt += 1;
+            if attempt > 2 {
+                return Err(FeishuApiError {
+                    code: resp.code,
+                    msg: resp.msg,
+                }
+                .into());
+            }
+            tokens.force_refresh().await?;
+        }
+    }
+
+    /// 发送图片消息（msg_type=image；飞书要求 content 为 JSON 串
+    /// `{"image_key":...}`，与文本的 `{"text":...}` 同型）。`image_key`
+    /// 来自 [`Self::upload_image`]。
+    pub async fn send_image(
+        &self,
+        http: &reqwest::Client,
+        tokens: &TokenManager,
+        key: &SessionKey,
+        image_key: &str,
+    ) -> anyhow::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
+        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id";
+        let body = serde_json::json!({
+            "receive_id": key.chat_id,
+            "msg_type": "image",
+            "content": serde_json::to_string(&serde_json::json!({ "image_key": image_key }))?,
+        });
+        self.request_with_retry(http, tokens, reqwest::Method::POST, url, body)
+            .await
+    }
+
     /// Add an emoji reaction to `message_id`. Returns the Feishu-assigned
     /// `reaction_id` so the caller can later `unreact` it (swap reactions).
     pub async fn react(
@@ -398,6 +470,11 @@ struct ApiResp<T> {
     msg: String,
     #[serde(default)]
     data: T,
+}
+
+#[derive(Default, Deserialize)]
+struct ImageOut {
+    image_key: String,
 }
 
 #[derive(Default, Deserialize)]

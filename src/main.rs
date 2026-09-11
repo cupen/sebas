@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 config: args.config,
                 test_msg: args.test_msg,
                 dump_inbound: args.dump_inbound,
+                log_level: args.log_level,
             };
             if let Err(e) = sebas::im_cmd::run(args).await {
                 startup_failure_exit(&e);
@@ -112,12 +113,33 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 args.config,
                 args.debug,
                 cfg.feishu.is_enabled(),
+                args.log_level,
             )
             .await
             {
                 // watchdog 整体返回 Err = 启动失败终态（含受管服务连续 spawn
                 // 失败 / rollback 失败）→ 75 + 摘要（任务 2.3）。
                 startup_failure_exit(&e);
+            }
+            Ok(())
+        }
+        Cmd::Feishu(args) => {
+            // 会话外直连飞书（一次性命令）：失败即退出码 1，无启动失败语义。
+            let args = sebas::feishu_cmd::FeishuArgs {
+                config: args.config,
+                chat: args.chat,
+                cmd: match args.cmd {
+                    cli::FeishuCmd::Text { message } => {
+                        sebas::feishu_cmd::FeishuCmd::Text { message }
+                    }
+                    cli::FeishuCmd::Image { path } => {
+                        sebas::feishu_cmd::FeishuCmd::Image { path }
+                    }
+                },
+            };
+            if let Err(e) = sebas::feishu_cmd::run(args).await {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
             }
             Ok(())
         }
@@ -753,6 +775,59 @@ mod tests {
             panic!("expected Control subcommand");
         };
         assert!(matches!(args.cmd, ControlCmd::RestartCore));
+    }
+
+    #[test]
+    fn feishu_text_subcommand_parses_trailing_message() {
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "feishu",
+            "--chat",
+            "oc_x",
+            "text",
+            "请配合",
+            "测试",
+        ])
+        .expect("`sebas feishu text` must parse");
+        let Cmd::Feishu(args) = cli.cmd else {
+            panic!("expected Feishu subcommand");
+        };
+        assert_eq!(args.chat.as_deref(), Some("oc_x"));
+        let cli::FeishuCmd::Text { message } = args.cmd else {
+            panic!("expected Text subcommand");
+        };
+        assert_eq!(message, vec!["请配合", "测试"]);
+    }
+
+    #[test]
+    fn feishu_image_subcommand_parses_path_and_global_chat() {
+        let cli = Cli::try_parse_from(["sebas", "feishu", "image", "--chat", "oc_x", "a.png"])
+            .expect("`sebas feishu image --chat` must parse");
+        let Cmd::Feishu(args) = cli.cmd else {
+            panic!("expected Feishu subcommand");
+        };
+        assert_eq!(args.chat.as_deref(), Some("oc_x"));
+        let cli::FeishuCmd::Image { path } = args.cmd else {
+            panic!("expected Image subcommand");
+        };
+        assert_eq!(path, "a.png");
+    }
+
+    #[test]
+    fn run_subcommand_accepts_log_level() {
+        let cli = Cli::try_parse_from([
+            "sebas",
+            "run",
+            "-c",
+            "x.toml",
+            "--log-level",
+            "info,openlark=debug",
+        ])
+        .expect("`sebas run --log-level` must parse");
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("expected Run subcommand");
+        };
+        assert_eq!(args.log_level.as_deref(), Some("info,openlark=debug"));
     }
 
     #[test]

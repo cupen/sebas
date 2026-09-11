@@ -52,22 +52,46 @@ fn services_persist_path() -> std::path::PathBuf {
 
 /// watchdog 自身的日志初始化。`run_watchdog` 只拿到 `WatchdogConfig`（不含
 /// `[log]` 段），沿用旧实现的约定：RUST_LOG 覆盖，默认 info，写 stdout。
-/// 漏掉这一步时 watchdog 的所有 info!（socket 监听、子进程 spawn/ready）
-/// 会被静默丢弃——表现为「启动后没有任何子进程日志」。
-fn init_watchdog_tracing() {
+/// `--log-level` 显式给出时优先于 RUST_LOG。漏掉这一步时 watchdog 的所有
+/// info!（socket 监听、子进程 spawn/ready）会被静默丢弃——表现为「启动后
+/// 没有任何子进程日志」。
+fn init_watchdog_tracing(log_filter: Option<&str>) {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter =
-        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER));
+    let filter = match log_filter {
+        // --log-level 组合 QUIET 后缀，与 core 子进程的 cfg 初始化语义一致。
+        Some(f) => EnvFilter::try_new(format!("{f}{}", crate::config::LOG_FILTER_QUIET))
+            .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER)),
+        None => EnvFilter::try_from_env("RUST_LOG")
+            .unwrap_or_else(|_| EnvFilter::new(crate::config::DEFAULT_LOG_FILTER)),
+    };
     let _ = fmt().with_env_filter(filter).try_init();
 }
 
 // ─── 各服务 spawner ────────────────────────────────────────
+
+/// `--log-level` → 子进程注入对：RUST_LOG（webui/im 的初始化约定，也是
+/// 孙进程的通用约定）+ SEBAS_LOG_LEVEL（core 的 cfg 覆盖路径）。未指定
+/// 时返回空——不得注入空值，否则会覆盖继承的 RUST_LOG。
+fn log_filter_envs(log_filter: &Option<String>) -> Vec<(&'static str, String)> {
+    match log_filter {
+        Some(f) => {
+            let quieted = format!("{f}{}", crate::config::LOG_FILTER_QUIET);
+            vec![
+                ("RUST_LOG", quieted),
+                ("SEBAS_LOG_LEVEL", f.clone()),
+            ]
+        }
+        None => Vec::new(),
+    }
+}
 
 /// core 子进程：`current_exe() run --config <path>` + 管道 readiness 握手。
 struct CoreSpawner {
     config_path: String,
     control_secret: String,
     core_secret: String,
+    /// `--log-level` 组合出的过滤式（None = 沿用继承的 RUST_LOG / 默认）。
+    log_filter: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -92,6 +116,7 @@ impl ServiceSpawner for CoreSpawner {
             .env("SEBAS_IPC", "1")
             .env("SEBAS_CONTROL_SECRET", &self.control_secret)
             .env("SEBAS_CORE_SECRET", &self.core_secret)
+            .envs(log_filter_envs(&self.log_filter))
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| SebasError::Upgrade(format!("启动子进程失败: {e}")))?;
@@ -139,6 +164,7 @@ struct WebUiSpawner {
     config_path: String,
     control_secret: String,
     core_secret: String,
+    log_filter: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -152,6 +178,7 @@ impl ServiceSpawner for WebUiSpawner {
             &["webui"],
             "webui",
             &[],
+            &self.log_filter,
         )
         .await
     }
@@ -162,6 +189,7 @@ struct ImSpawner {
     config_path: String,
     control_secret: String,
     core_secret: String,
+    log_filter: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -175,6 +203,7 @@ impl ServiceSpawner for ImSpawner {
             &["im"],
             "im",
             &[],
+            &self.log_filter,
         )
         .await
     }
@@ -187,6 +216,7 @@ struct RouterSpawner {
     core_secret: String,
     core_socket: String,
     debug: bool,
+    log_filter: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -207,6 +237,7 @@ impl ServiceSpawner for RouterSpawner {
             &args,
             "router",
             &[("SEBAS_ROUTER_CONFIG", self.config_path.as_str())],
+            &self.log_filter,
         )
         .await
     }
@@ -221,6 +252,7 @@ async fn spawn_aux_process(
     args: &[&str],
     label: &str,
     extra_env: &[(&str, &str)],
+    log_filter: &Option<String>,
 ) -> Result<SpawnedInstance> {
     let exe = std::env::current_exe()
         .map_err(|e| SebasError::Upgrade(format!("无法确定 {label} 子进程路径: {e}")))?;
@@ -244,6 +276,7 @@ async fn spawn_aux_process(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    cmd.envs(log_filter_envs(log_filter));
     cmd.stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
@@ -343,8 +376,9 @@ pub async fn run_watchdog(
     config_path: String,
     debug: bool,
     im_enabled_default: bool,
+    log_filter: Option<String>,
 ) -> Result<()> {
-    init_watchdog_tracing();
+    init_watchdog_tracing(log_filter.as_deref());
     let dbg = debug;
     tracing::info!(debug_enabled = dbg, "watchdog started");
     let control = Arc::new(Mutex::new(ControlService::new()));
@@ -396,6 +430,7 @@ pub async fn run_watchdog(
             config_path: config_path.clone(),
             control_secret: secret.clone(),
             core_secret: core_secret.clone(),
+            log_filter: log_filter.clone(),
         }),
         DesiredState::Enabled,
     ));
@@ -416,6 +451,7 @@ pub async fn run_watchdog(
                 config_path: config_path.clone(),
                 control_secret: secret.clone(),
                 core_secret: core_secret.clone(),
+                log_filter: log_filter.clone(),
             }),
             DesiredState::Enabled,
         )),
@@ -443,6 +479,7 @@ pub async fn run_watchdog(
                 core_secret: core_secret.clone(),
                 core_socket: core_channel_path.display().to_string(),
                 debug,
+                log_filter: log_filter.clone(),
             }),
             DesiredState::Enabled,
         )),
@@ -459,6 +496,7 @@ pub async fn run_watchdog(
                 config_path: config_path.clone(),
                 control_secret: secret.clone(),
                 core_secret: core_secret.clone(),
+                log_filter,
             }),
             DesiredState::Enabled,
         )),
