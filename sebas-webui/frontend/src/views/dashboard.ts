@@ -3,7 +3,7 @@
  * conversation surface. 项目树已上移到 app-shell 侧栏（sebas-project-rail），
  * 本视图承载——选中项目的头部（名称 + mono 分支 pill + `N sessions · ●
  * active` meta）、聚焦会话头（状态徽章 + chat id + agent 锁 + 会话内模型
- * 选择 + Close/归档 + review-cards——原 session-detail 的会话级操作全部
+ * 选择 + Close/归档——原 session-detail 的会话级操作全部
  * 迁到这里，session-detail 视图已退休）、turn-stream 舞台
  * （<sebas-transcript-view> 把 entries 渲染成两侧交替的对话）与 composer。
  *
@@ -417,6 +417,13 @@ export class SebasDashboard extends LitElement {
         flex-shrink: 0;
         padding: 0 var(--sebas-space-5) var(--sebas-space-4);
       }
+      /* 审批卡贴在输入框之上：整体限高内部滚动，卡再多也不挤占对话区。 */
+      .composer-area sebas-review-cards {
+        display: block;
+        max-height: min(280px, 35vh);
+        overflow-y: auto;
+        margin-bottom: var(--sebas-space-2);
+      }
       .skel-line.w60 {
         width: 60%;
       }
@@ -662,6 +669,7 @@ export class SebasDashboard extends LitElement {
           `}
 
       <div class="composer-area">
+        <sebas-review-cards .sessionKey=${focusKey}></sebas-review-cards>
         <sebas-pending-stack
           .sessionKey=${focusKey}
           .pending=${this.focusedDetail?.pending ?? []}
@@ -726,10 +734,11 @@ export class SebasDashboard extends LitElement {
   }
 
   /**
-   * Inline conversation 舞台：聚焦会话头（状态/身份/Close/归档/review-cards，
-   * 3.3 迁移）+ 就地的对话（复用 `<sebas-transcript-view fill>`，内部滚动/
-   * 未读 seam 均归它管）。detail 尚在途时给骨架，取数失败（会话恰好被关闭）
-   * 给一条温和空态而不是报错。
+   * Inline conversation 舞台：聚焦会话头（状态/身份/Close/归档，3.3 迁移）
+   * + 就地的对话（复用 `<sebas-transcript-view fill>`，内部滚动/未读 seam
+   * 均归它管）。detail 尚在途时给骨架，取数失败（会话恰好被关闭）给一条
+   * 温和空态而不是报错。审批卡（review-cards）不再在此渲染——它贴在
+   * composer 之上（.composer-area 内），不再把整条对话往下推。
    */
   private renderTurnStream() {
     const d = this.focusedDetail
@@ -750,7 +759,6 @@ export class SebasDashboard extends LitElement {
                     >
                   </div>`
                 : nothing}
-              <sebas-review-cards .sessionKey=${d.encoded_key}></sebas-review-cards>
               ${d.entries.length === 0
                 ? html`
                     <div class="empty-stream">
