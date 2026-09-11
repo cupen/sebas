@@ -44,6 +44,12 @@ pub struct ConnectConfig {
     pub session_id: String,
     /// True → `options.resume = session_id` (lazy respawn / post-cancel heal).
     pub resume: bool,
+    /// （add-agent-mode-selection）spawn 后生效的权限模式（SDK 把它渲染成
+    /// 子进程 argv 的 `--permission-mode`）。`None` = 从 `claude_args` 里的
+    /// `--permission-mode` 读取（dispatch 放在那里的启动值），两边都没有
+    /// 就是 CLI 默认。post-cancel respawn 传当前值，运行时切换过的模式
+    /// 在重生后不回退。
+    pub permission_mode: Option<claude_agent_sdk::PermissionMode>,
     pub startup_timeout: Duration,
     pub evt_tx: mpsc::Sender<AcpEvent>,
     pub pending_perms: Arc<Mutex<HashMap<String, ResponderSlot>>>,
@@ -85,6 +91,11 @@ pub struct CcDriver {
     /// a turn is active — otherwise the child is idle (waiting for the next
     /// prompt) and must not be killed.
     turn_active: bool,
+    /// （add-agent-mode-selection）当前生效的权限模式：spawn 时来自
+    /// `--permission-mode` argv（或 ConnectConfig 覆盖），运行时切换成功后
+    /// 更新。存活探针发这个值（不能发硬编码 Default——那会把操作者设置的
+    /// 模式每秒覆盖回默认）。
+    permission_mode: claude_agent_sdk::PermissionMode,
 }
 
 /// Why a connect attempt failed. `ResumeRejected` is carved out so the
@@ -145,13 +156,30 @@ impl CcDriver {
             extra_env,
             session_id,
             resume,
+            permission_mode,
             startup_timeout,
             evt_tx,
             pending_perms,
             terminal_sent,
         } = cfg;
 
+        // （add-agent-mode-selection）权限模式的单一出处：显式覆盖（post-cancel
+        // respawn 携带的运行时值）> argv 里的 `--permission-mode`（dispatch 的
+        // 启动值）> CLI 默认。显式覆盖时先从 argv 里摘掉旧 flag，避免双重
+        // `--permission-mode`；再以 extra_args 形式回写（SDK 按字典渲染成
+        // `--permission-mode <v>`，真 CLI 与 fake-claude 都认）。
+        let requested_mode = permission_mode.or_else(|| parse_permission_mode_arg(&claude_args));
+        let mut claude_args = claude_args;
+        if permission_mode.is_some() {
+            claude_args = strip_permission_mode_arg(&claude_args);
+        }
         let mut extra_args = args_to_extra_args(&claude_args);
+        if let Some(mode) = requested_mode {
+            extra_args.insert(
+                "permission-mode".into(),
+                Some(permission_mode_flag(mode).to_string()),
+            );
+        }
         // Only fresh spawns may pin the conversation id: the real CLI
         // rejects `--session-id` together with `--resume`/`--continue`
         // unless `--fork-session` is also specified (and forking would
@@ -258,6 +286,7 @@ impl CcDriver {
 
         Ok(Self {
             client,
+
             session_id,
             cfg: DriverCfg {
                 claude_path,
@@ -275,6 +304,7 @@ impl CcDriver {
             hang_stage: 0,
             waiting_permission,
             turn_active: false,
+            permission_mode: requested_mode.unwrap_or(claude_agent_sdk::PermissionMode::Default),
         })
     }
 
@@ -324,11 +354,11 @@ impl CcDriver {
             match sel {
                 Sel::Kill | Sel::Cmd(None) => break,
                 Sel::Tick => {
-                    // `set_permission_mode(default)` is a harmless no-op the
-                    // CLI always answers; any failure/timeout ⇒ child gone.
-                    let probe = self
-                        .client
-                        .set_permission_mode(claude_agent_sdk::PermissionMode::Default);
+                    // 当前权限模式是个无害 no-op，CLI 总是应答；任何失败/超时
+                    // ⇒ 子进程没了。（add-agent-mode-selection：探针必须发
+                    // 会话**当前**的模式——此前的硬编码 Default 会把操作者
+                    // 通过 mode=allow/edit 设置的权限模式每秒覆盖回默认。）
+                    let probe = self.client.set_permission_mode(self.permission_mode);
                     let dead = match tokio::time::timeout(Duration::from_millis(1500), probe).await
                     {
                         Ok(Ok(())) => false,
@@ -418,6 +448,49 @@ impl CcDriver {
                     // Replies travel via the pending map (manager.send
                     // intercepts before the channel); never expected here.
                     tracing::debug!("ignoring unexpected PermissionReply on session channel");
+                }
+                Sel::Cmd(Some(AcpCommand::SetMode { mode, .. })) => {
+                    // （add-agent-mode-selection）运行时权限模式切换：控制面
+                    // 词汇 → SDK PermissionMode，经 control request 下发。
+                    // 接受 → 更新当前模式 + ModeChanged；拒绝/失败 → 非终态
+                    // Error（mode 不变、会话存活），与 SetModel 同一非致命
+                    // 语义。
+                    match control_mode_to_permission_mode(&mode) {
+                        Some(target) => match self.client.set_permission_mode(target).await {
+                            Ok(()) => {
+                                self.permission_mode = target;
+                                let _ = self
+                                    .evt_tx
+                                    .send(AcpEvent::ModeChanged {
+                                        session_id: self.session_id.clone(),
+                                        mode: mode.clone(),
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = self
+                                    .evt_tx
+                                    .send(AcpEvent::Error {
+                                        session_id: self.session_id.clone(),
+                                        message: format!(
+                                            "set mode {mode:?} 被拒绝或未送达（{e}），模式未变"
+                                        ),
+                                        terminal: false,
+                                    })
+                                    .await;
+                            }
+                        },
+                        None => {
+                            let _ = self
+                                .evt_tx
+                                .send(AcpEvent::Error {
+                                    session_id: self.session_id.clone(),
+                                    message: format!("未知 mode {mode:?}，模式未变"),
+                                    terminal: false,
+                                })
+                                .await;
+                        }
+                    }
                 }
                 Sel::Cmd(Some(AcpCommand::SetModel { model_id, .. })) => {
                     // 模型选择是 ACP 原生能力（`session/set_config_option`），
@@ -511,6 +584,8 @@ impl CcDriver {
             extra_env: self.extra_env.clone(),
             session_id: self.session_id.clone(),
             resume: true,
+            // 运行时切换过的权限模式在重生后保持（覆盖 argv 里的启动值）。
+            permission_mode: Some(self.permission_mode),
             startup_timeout: self.cfg.startup_timeout,
             evt_tx: self.evt_tx.clone(),
             pending_perms: self.pending_perms.clone(),
@@ -643,8 +718,79 @@ fn deny_output(reason: &str) -> HookJsonOutput {
 /// `extra_args` map shape: flags without a following non-flag value become
 /// bare keys. Non-flag bare tokens are dropped with a warning (the SDK's
 /// map shape cannot express positionals).
-fn args_to_extra_args(args: &[String]) -> HashMap<String, Option<String>> {
-    let mut out = HashMap::new();
+/// （add-agent-mode-selection）mode 词汇 → SDK 权限模式。**两套词汇都认**：
+/// 控制面（`ask`/`edit`/`allow`/`auto`）与 CLI `--permission-mode` 的参数值
+/// （`default`/`acceptEdits`/`plan`/`bypassPermissions`）。约定映射：ask=
+/// CLI 默认逐次询问，edit=自动接受编辑，allow/auto=完全放行。`None` =
+/// 未知词汇（调用方如实报错，不静默降级）。
+pub fn control_mode_to_permission_mode(
+    mode: &str,
+) -> Option<claude_agent_sdk::PermissionMode> {
+    // 匹配对象是**已转小写**的输入，CLI 词汇按小写形态书写。
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "ask" | "default" => Some(claude_agent_sdk::PermissionMode::Default),
+        "edit" | "acceptedits" => Some(claude_agent_sdk::PermissionMode::AcceptEdits),
+        "allow" | "auto" | "bypasspermissions" => {
+            Some(claude_agent_sdk::PermissionMode::BypassPermissions)
+        }
+        _ => None,
+    }
+}
+
+/// （add-agent-mode-selection）控制面 mode 词汇 → CLI `--permission-mode`
+/// 参数值的约定映射（ask→不传=CLI 默认、edit→acceptEdits、allow/auto→
+/// bypassPermissions）。dispatch 组装 argv 与本模块共用这一个出处。
+pub fn control_mode_flag(mode: &str) -> Option<&'static str> {
+    match control_mode_to_permission_mode(mode) {
+        // ask（= CLI default）与未知词汇：spawn argv 不带 flag——前者是 CLI
+        // 的自然默认，后者由调用方如实拒绝，都不需要 flag。运行时切回 ask
+        // 走 SetMode → `set_permission_mode(Default)` 显式下发，不经过这里。
+        None | Some(claude_agent_sdk::PermissionMode::Default) => None,
+        Some(m) => Some(permission_mode_flag(m)),
+    }
+}
+
+/// SDK 权限模式 → CLI `--permission-mode` 参数值。
+fn permission_mode_flag(mode: claude_agent_sdk::PermissionMode) -> &'static str {
+    match mode {
+        claude_agent_sdk::PermissionMode::Default => "default",
+        claude_agent_sdk::PermissionMode::AcceptEdits => "acceptEdits",
+        claude_agent_sdk::PermissionMode::Plan => "plan",
+        claude_agent_sdk::PermissionMode::BypassPermissions => "bypassPermissions",
+    }
+}
+
+/// 从 argv 里找 `--permission-mode <v>` 并解析成 SDK 权限模式（没有/不认识
+/// → `None` = CLI 默认）。
+fn parse_permission_mode_arg(args: &[String]) -> Option<claude_agent_sdk::PermissionMode> {
+    let value = args
+        .iter()
+        .enumerate()
+        .find(|(_, a)| a.as_str() == "--permission-mode")
+        .and_then(|(i, _)| args.get(i + 1))?;
+    control_mode_to_permission_mode(value)
+}
+
+/// 摘掉 argv 里的 `--permission-mode [v]` 对（显式模式覆盖接管时用，避免
+/// 双 flag）。
+fn strip_permission_mode_arg(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--permission-mode" {
+            i += 1;
+            if matches!(args.get(i), Some(v) if !v.starts_with("--")) {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    out
+}
+
+fn args_to_extra_args(args: &[String]) -> HashMap<String, Option<String>> {    let mut out = HashMap::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -899,6 +1045,9 @@ impl crate::agent_driver::AgentDriver for ClaudeDriver {
             extra_env: extra_env.clone(),
             session_id: sid,
             resume,
+            // 初始模式来自 argv 里的 `--permission-mode`（connect 内解析）；
+            // DriverConfig 不承载 mode——dispatch 通过 command argv 传递。
+            permission_mode: None,
             startup_timeout,
             evt_tx: evt_tx.clone(),
             pending_perms: pending_perms.clone(),
@@ -959,6 +1108,61 @@ fn conn_err(e: ConnectError) -> crate::agent_driver::DriverError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- add-agent-mode-selection：控制面 mode → CLI flag 约定映射 ----
+
+    #[test]
+    fn control_mode_flag_maps_the_four_vocabulary_values() {
+        // ask = CLI 默认（不传 flag），edit = 自动接受编辑，allow/auto = 放行。
+        assert_eq!(control_mode_flag("ask"), None);
+        assert_eq!(control_mode_flag("edit"), Some("acceptEdits"));
+        assert_eq!(control_mode_flag("allow"), Some("bypassPermissions"));
+        assert_eq!(control_mode_flag("auto"), Some("bypassPermissions"));
+    }
+
+    #[test]
+    fn control_mode_flag_rejects_unknown_vocabulary() {
+        // 未知值（如 plan）如实 None——调用方拒绝或报错，不静默降级。
+        assert_eq!(control_mode_flag("plan"), None);
+        assert_eq!(control_mode_flag("yolo"), None);
+        assert_eq!(control_mode_flag(""), None);
+    }
+
+    #[test]
+    fn control_mode_flag_accepts_cli_flag_values_too() {
+        // driver 解析 argv 里的 `--permission-mode`（CLI 词汇）与运行时切换
+        // （控制面词汇）共用一套映射；default/ask 对 spawn 都意味着"不传"。
+        assert_eq!(control_mode_flag("default"), None);
+        assert_eq!(control_mode_flag("acceptEdits"), Some("acceptEdits"));
+        assert_eq!(
+            control_mode_flag("bypassPermissions"),
+            Some("bypassPermissions")
+        );
+    }
+
+    #[test]
+    fn parse_and_strip_permission_mode_arg_round_trip() {
+        let argv = vec![
+            "--model".to_string(),
+            "sonnet".to_string(),
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+        ];
+        assert_eq!(
+            parse_permission_mode_arg(&argv),
+            Some(claude_agent_sdk::PermissionMode::BypassPermissions)
+        );
+        let stripped = strip_permission_mode_arg(&argv);
+        assert!(!stripped.contains(&"--permission-mode".to_string()));
+        assert_eq!(stripped, vec!["--model".to_string(), "sonnet".to_string()]);
+        // 值缺失的孤儿 flag 也能被摘掉（不吞掉后面的参数）。
+        let orphan = vec!["--permission-mode".to_string(), "--model".to_string()];
+        assert_eq!(parse_permission_mode_arg(&orphan), None);
+        assert_eq!(
+            strip_permission_mode_arg(&orphan),
+            vec!["--model".to_string()]
+        );
+    }
 
     #[test]
     fn args_to_extra_args_pairs_flags_and_values() {

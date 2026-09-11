@@ -649,6 +649,41 @@ impl RemoteProjection {
         }
     }
 
+    /// （add-agent-mode-selection）期望模式变更：复用节点链路既有的
+    /// `SessionOp::SetMode`（此前没有任何控制面调用方）。返回节点回报的
+    /// **实际生效** mode（节点强制不了时如实 `None`，不把期望值回显成
+    /// 已生效）。节点接受后同步更新投影 meta 的 desired/effective——
+    /// 快照即时反映期望值，实际生效值随事件/对账校正。
+    pub async fn set_mode(
+        &self,
+        session_id: &str,
+        mode: &str,
+    ) -> Result<Option<String>, NodeLinkError> {
+        let result = self
+            .send_for(
+                session_id,
+                SessionOp::SetMode {
+                    session_id: session_id.to_string(),
+                    mode: mode.to_string(),
+                },
+            )
+            .await?;
+        let effective = match result {
+            // 节点复用 `ModelSet` 的形状回报实际生效值（见 sebas-node 的
+            // SetMode 处理器）。
+            SessionResult::ModelSet { model } => model,
+            _ => None,
+        };
+        {
+            let mut metas = self.meta.lock().await;
+            if let Some(entry) = metas.get_mut(session_id) {
+                entry.desired_mode = Some(mode.to_string());
+                entry.effective_mode = effective.clone();
+            }
+        }
+        Ok(effective)
+    }
+
     /// 把请求送到该会话所在的节点，并把节点的**拒绝**翻成可判别的错误。
     ///
     /// 这里刻意不吞拒绝：节点说"不"是一个正常结果，调用方（core 通道）要把它
@@ -881,6 +916,11 @@ impl RemoteProjection {
             usage: None,
             backend: None,
             pending: Vec::new(),
+            // （add-agent-mode-selection）远端会话的 desired/effective 也随
+            // 顶层字段下发（与 remote 视图同值）——前端对两种放置路径用同
+            // 一个呈现通道；remote 视图保留节点维度。
+            desired_mode: meta.desired_mode.clone(),
+            effective_mode: meta.effective_mode.clone(),
             remote: Some(RemoteSessionView {
                 node_id,
                 node_status: node_status.to_string(),

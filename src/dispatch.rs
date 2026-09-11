@@ -44,6 +44,7 @@ pub(crate) async fn dispatch_out_without_feishu(
             project_dir,
             kind,
             model,
+            mode,
         } => {
             handle_web_spawn(
                 cfg,
@@ -55,6 +56,7 @@ pub(crate) async fn dispatch_out_without_feishu(
                 project_dir,
                 kind,
                 model,
+                mode,
             )
             .await
         }
@@ -89,9 +91,21 @@ async fn handle_web_spawn(
     project_dir: Option<String>,
     requested_kind: Option<String>,
     model: Option<String>,
+    mode: Option<String>,
 ) -> anyhow::Result<()> {
     let kind = requested_kind.unwrap_or_else(|| cfg.acp.default_kind().to_string());
     let command = cfg.acp.command_for(&kind).unwrap_or_default();
+    // （add-agent-mode-selection）控制面 mode → 子进程 argv：只有 claude
+    // 驱动认识 `--permission-mode`；其它执行体接受请求但不生效（非致命，
+    // 同 model 的既有语义）。argv 是模式的单一出处（driver 解析它初始化
+    // 探针模式，fake-claude journal 也由此可断言）。
+    let mut command = command;
+    if kind == "claude"
+        && let Some(flag) = mode.as_deref().and_then(mode_to_permission_flag)
+    {
+        command.push("--permission-mode".into());
+        command.push(flag.into());
+    }
     let (session_id, pending, rx, _model_info) = match acp_spawn_and_activate(
         mgr,
         router,
@@ -116,6 +130,14 @@ async fn handle_web_spawn(
             return Ok(());
         }
     };
+    // （add-agent-mode-selection）spawn 成功且模式真的进了 argv → effective
+    // = 请求的控制面词汇；其它执行体不声称任何 mode 生效（effective 保持
+    // None，与 desired 的差异如实可见）。
+    if kind == "claude"
+        && mode.as_deref().map(mode_to_permission_flag).flatten().is_some()
+    {
+        router.apply_mode_changed(session_id.as_str(), mode.as_deref()).await;
+    }
     // Seed card state and wire the pump (no Feishu card operations).
     router.seed_card(session_id.clone(), prompt.clone()).await;
     // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
@@ -134,6 +156,14 @@ async fn handle_web_spawn(
     Ok(())
 }
 
+/// （add-agent-mode-selection）控制面 mode 词汇 → CLI `--permission-mode`
+/// 参数值的映射转发——单一出处是
+/// [`sebas_acp::claude::control_mode_flag`]（driver 解析 argv 与运行时切换
+/// 共用同一套约定）。
+fn mode_to_permission_flag(mode: &str) -> Option<&'static str> {
+    sebas_acp::claude::control_mode_flag(mode)
+}
+
 async fn handle_spawn_resume_without_feishu(
     cfg: &Config,
     router: &DispatchHandle,
@@ -145,6 +175,17 @@ async fn handle_spawn_resume_without_feishu(
 ) -> anyhow::Result<()> {
     let kind = cfg.acp.default_kind().to_string();
     let command = cfg.acp.command_for(&kind).unwrap_or_default();
+    // （add-agent-mode-selection）resume 读取映射里的 desired mode：子进程
+    // 是新建的，`--permission-mode` 必须随 argv 重新下发，否则恢复出来的
+    // 会话回退到 CLI 默认（映射字段随 state.json 持久化）。
+    let resume_mode = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
+    let mut command = command;
+    if kind == "claude"
+        && let Some(flag) = resume_mode.as_deref().and_then(mode_to_permission_flag)
+    {
+        command.push("--permission-mode".into());
+        command.push(flag.into());
+    }
     let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
         mgr,
         router,
@@ -175,6 +216,17 @@ async fn handle_spawn_resume_without_feishu(
         // fail_spawn/spawn-failed 模式），由 IM/webui 渲染，不只落日志。
         info!(%old_sid, %session_id, "old session could not be loaded; continued as fresh session");
         router.notify_resume_fell_back(&key, &session_id).await;
+    }
+    // （add-agent-mode-selection）resume 的子进程 argv 带上了 desired mode
+    // 映射值 → effective 如实记录（claude 且确有映射时）。
+    if kind == "claude"
+        && resume_mode
+            .as_deref()
+            .map(mode_to_permission_flag)
+            .flatten()
+            .is_some()
+    {
+        router.apply_mode_changed(session_id.as_str(), resume_mode.as_deref()).await;
     }
     router.seed_card(session_id.clone(), prompt.clone()).await;
     let idle_timeout = idle_timeout_from(cfg, &kind);

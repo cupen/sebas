@@ -356,6 +356,12 @@ export class SebasDashboard extends LitElement {
         font-size: 0.75rem;
         max-width: 260px;
       }
+      /* 中程模式切换下拉（add-agent-mode-selection）：与模型选择器同款紧凑
+         形态，但 class 独立（测试按 .model-pick 计数，mode 面不得混入）。 */
+      .session-head .mode-pick {
+        display: inline-flex;
+        align-items: center;
+      }
       .session-head .actions {
         margin-left: auto;
         display: flex;
@@ -807,8 +813,11 @@ export class SebasDashboard extends LitElement {
     const remote = d.remote ?? null
     const nodeId = remote?.node_id ?? LOCAL_NODE
     const nodeOffline = remote != null && remote.node_status !== 'online'
-    const desired = remote?.desired_mode ?? null
-    const effective = remote?.effective_mode ?? null
+    // （add-agent-mode-selection）mode 对本机/远端会话同通道呈现：远端来自
+    // remote 视图（节点回报），本机来自 detail 顶层字段（argv 应用值/
+    // ModeChanged）——两处同源（core 侧投影/映射）。
+    const desired = remote?.desired_mode ?? d.desired_mode ?? null
+    const effective = remote?.effective_mode ?? d.effective_mode ?? null
     const parked = remote?.parked_approvals ?? 0
     const waiting = parked > 0
     // 执行体强制不了时两个值都显示并说明；绝不只显示期望值假装已生效。
@@ -865,6 +874,32 @@ export class SebasDashboard extends LitElement {
               : nothing}
             ${ungated
               ? html`<span class="ungated" data-testid="session-ungated" title="auto：该机器交给 agent 自主执行，不产生审批">ungated</span>`
+              : nothing}
+            <!-- （add-agent-mode-selection）mode 切换入口：提交走
+                 POST /api/sessions/{key}/mode；执行体拒绝时错误经事件流
+                 呈现，mode 标签保持原值。0-turn 占位（无 session_id）不可
+                 切——会话还没建立，mode 由创建表单决定。 -->
+            ${d.session_id
+              ? html`<span class="mode-pick">
+                  <wa-select
+                    class="mode-select"
+                    size="xs"
+                    hoist
+                    value=${desired ?? ''}
+                    ?disabled=${this.modeSwitching}
+                    aria-label="Session mode"
+                    data-testid="mode-switch"
+                    @change=${(e: Event) => {
+                      const v = (e as unknown as { target: { value: string } }).target.value
+                      if (v) void this.setMode(d.encoded_key, v)
+                    }}
+                  >
+                    <wa-option value="ask">ask</wa-option>
+                    <wa-option value="edit">edit</wa-option>
+                    <wa-option value="allow">allow</wa-option>
+                    <wa-option value="auto">auto</wa-option>
+                  </wa-select>
+                </span>`
               : nothing}
             <span>last active ${d.last_active}</span>
             ${d.available_models && d.available_models.length > 0
@@ -933,6 +968,23 @@ export class SebasDashboard extends LitElement {
    * 拒绝无效模型）经非 terminal Error 事件回流；快照的 `current_model` 在
    * `ModelChanged` 到达后由 refetch 刷新。
    */
+  /** 中程切换会话权限模式时的在途标记（add-agent-mode-selection）。 */
+  @state() private modeSwitching = false
+
+  /** （add-agent-mode-selection）mode 切换：命令送达后重取快照（effective
+   * 随 ModeChanged 落定；拒绝则错误事件呈现、标签保持原值）。 */
+  private async setMode(key: string, mode: string): Promise<void> {
+    if (this.modeSwitching) return
+    this.modeSwitching = true
+    try {
+      await api.setSessionMode(key, mode)
+      await new Promise((r) => setTimeout(r, 400))
+      this.refetch()
+    } finally {
+      this.modeSwitching = false
+    }
+  }
+
   private async setModel(key: string, modelId: string): Promise<void> {
     if (this.modelSwitching) return
     this.modelSwitching = true

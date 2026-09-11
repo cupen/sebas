@@ -92,6 +92,11 @@ export class SebasWorkbenchComposer extends LitElement {
   /** 创建模式两级选择的一级：选定的 provider 名。 */
   @state() private selectedProvider: string | null = null
   /**
+   * 创建模式选定的权限模式（add-agent-mode-selection）：`null` =
+   * "agent 默认"（不发送 mode 字段）——下拉的缺省项。
+   */
+  @state() private createMode: string | null = null
+  /**
    * Settings 目录（workbench-conversation-view 4.2/4.3，design D7/D8）：
    * adapter 只规整不解释；`null` = 目录尚未取得。
    */
@@ -444,6 +449,7 @@ export class SebasWorkbenchComposer extends LitElement {
         projectId: this.projectId,
         agent: this.agent,
         model: this.model,
+        mode: this.createMode,
       })
       this.text = ''
       this.dispatchEvent(
@@ -648,6 +654,25 @@ export class SebasWorkbenchComposer extends LitElement {
                           >${a.reachable ? a.display : `${a.display} (unavailable: ${a.cause ?? ''})`}</wa-option
                         >`,
                   )}
+                </wa-select>`}
+            ${follow
+              ? nothing
+              : html`<wa-select
+                  class="backend-select"
+                  aria-label="Permission mode"
+                  value=${this.createMode ?? ''}
+                  ?disabled=${disabled}
+                  data-testid="mode-select"
+                  @change=${(e: Event) => {
+                    // 缺省项（空值）= agent 默认：不发送 mode 字段。
+                    this.createMode = (e.target as HTMLSelectElement).value || null
+                  }}
+                >
+                  <wa-option value="">默认（逐次询问）</wa-option>
+                  <wa-option value="ask">ask（逐次询问）</wa-option>
+                  <wa-option value="edit">edit（自动接受编辑）</wa-option>
+                  <wa-option value="allow">allow（放行并留审计）</wa-option>
+                  <wa-option value="auto">auto（不门控，留审计）</wa-option>
                 </wa-select>`}
             ${this.sessionKey !== null
               ? html`<button

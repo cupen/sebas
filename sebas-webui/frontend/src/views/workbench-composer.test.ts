@@ -267,7 +267,8 @@ describe('sebas-workbench-composer', () => {
       projectId: null,
       agent: expect.any(String),
       model: 'claude-sonnet',
-    })
+          mode: null, // add-agent-mode-selection：缺省 = agent 默认
+})
   })
 
   it('a configured default outside the catalog cannot preselect (no fabricated options, 4.3)', async () => {
@@ -385,6 +386,7 @@ describe('sebas-workbench-composer', () => {
       projectId: null,
       agent: 'claude', // 预选 = 首个可达 agent（mock catalog 的第一项）
       model: null,
+      mode: null, // add-agent-mode-selection：缺省 = agent 默认
     })
     expect(created).toHaveBeenCalledTimes(1)
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_inbox')
@@ -415,6 +417,7 @@ describe('sebas-workbench-composer', () => {
       projectId: 'proj-sebas',
       agent: 'claude',
       model: null,
+      mode: null,
     })
     expect((created.mock.calls[0]![0] as CustomEvent<{ key: string }>).detail.key).toBe('oc_proj')
     // Binding caption shows the trailing path segment.
@@ -477,7 +480,8 @@ describe('sebas-workbench-composer', () => {
       projectId: null,
       agent: 'native',
       model: null,
-    })
+          mode: null, // add-agent-mode-selection：缺省 = agent 默认
+})
   })
 
   it('lists reachable agents and forwards the selected agent id (D2 wire)', async () => {
@@ -520,7 +524,8 @@ describe('sebas-workbench-composer', () => {
       projectId: null,
       agent: 'gemini',
       model: null,
-    })
+          mode: null, // add-agent-mode-selection：缺省 = agent 默认
+})
   })
 
   it('error path surfaces inline and preserves text', async () => {
@@ -574,7 +579,8 @@ describe('sebas-workbench-composer', () => {
       projectId: null,
       agent: 'claude',
       model: null,
-    })
+          mode: null, // add-agent-mode-selection：缺省 = agent 默认
+})
   })
 
   it('Enter is a no-op while reachability is unreachable', async () => {
@@ -692,7 +698,8 @@ describe('sebas-workbench-composer', () => {
         projectId: null,
         agent: 'claude',
         model: null,
-      })
+              mode: null, // add-agent-mode-selection：缺省 = agent 默认
+})
       expect(api.sendMessage).not.toHaveBeenCalled()
 
       chip().click()

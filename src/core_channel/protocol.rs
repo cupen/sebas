@@ -69,6 +69,11 @@ pub enum CoreChannelRequest {
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
+        /// （add-agent-mode-selection）创建时请求的权限模式（控制面词汇
+        /// `ask`/`edit`/`allow`/`auto`；None = agent 默认行为）。
+        /// `#[serde(default)]`：旧客户端不发这个字段，行为与今日一致。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
         /// 目标 agent id（workbench-agent-wire-fix D2）：`[acp.agents.*]`
         /// 配置键名或保留值 `"native"`。driver 名与 `acp:` 前缀不再是合法
         /// 值——agent 是 wire 上唯一的执行体词汇。
@@ -92,6 +97,10 @@ pub enum CoreChannelRequest {
         /// （add-acp-model-selection）创建时请求的模型 id（None = 默认模型）。
         #[serde(default)]
         model: Option<String>,
+        /// （add-agent-mode-selection）创建时请求的权限模式（占位记住，
+        /// 首条消息 spawn 时消费；None = agent 默认行为）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
         /// 目标 agent id，语义与 `Spawn.agent` 一致（workbench-agent-wire-fix
         /// D2）。占位帧必须携带——composer 建 0-turn 会话是常态路径，agent
         /// 不上线则用户选的 agent 被静默丢弃。
@@ -102,6 +111,10 @@ pub enum CoreChannelRequest {
     },
     /// 中程切换会话模型（add-acp-model-selection）：`session/set_config_option`。
     SetSessionModel { key: ChannelKey, model_id: String },
+    /// （add-agent-mode-selection）中程切换会话权限模式：本机走
+    /// `AcpCommand::SetMode`（claude 驱动运行时切换），远端走节点链路
+    /// `SessionOp::SetMode`。执行体接受与否经事件流/节点回报反馈。
+    SetSessionMode { key: ChannelKey, mode: String },
     /// Send a message to an existing session. Attachments（extract-im-service
     /// 4.1）随 serde default 增列：旧报文缺省空附件，行为不变。服务端校验
     /// 每个附件路径存在后，以本地路径引用随文本投递（同机部署路径共享）。
@@ -381,12 +394,14 @@ mod tests {
                 prompt: "hello".into(),
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
+                mode: Some("allow".into()),
                 agent: "claudecode".into(),
                 node: None,
             },
             CoreChannelRequest::CreatePlaceholder {
                 project_dir: Some("/tmp/p".into()),
                 model: Some("m1".into()),
+                mode: None,
                 agent: "claudecode".into(),
                 node: None,
             },
@@ -521,6 +536,8 @@ mod tests {
             backend: Some("native".into()),
             pending: Vec::new(),
             remote: None,
+            desired_mode: None,
+            effective_mode: None,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

@@ -352,6 +352,7 @@ pub trait SessionBackend: Send + Sync {
         project_dir: Option<String>,
         _agent: &str,
         _model: Option<String>,
+        _mode: Option<String>,
         _node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(prompt, project_dir).await
@@ -394,9 +395,21 @@ pub trait SessionBackend: Send + Sync {
         project_dir: Option<String>,
         _agent: &str,
         _model: Option<String>,
+        _mode: Option<String>,
         _node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         self.spawn(String::new(), project_dir).await
+    }
+
+    /// （add-agent-mode-selection）中程切换会话权限模式（控制面词汇
+    /// `ask`/`edit`/`allow`/`auto`）。成功 = 命令已进入会话通道；执行体
+    /// 接受与否经事件流反馈（`ModeChanged` = 成功，非终态 `Error` = 拒绝、
+    /// mode 不变）——与 [`SessionBackend::set_session_model`] 同一契约。
+    /// 默认实现诚实不可用。
+    async fn set_session_mode(&self, _key: ChannelKey, _mode: String) -> Result<(), SessionRejection> {
+        Err(SessionRejection::Unavailable {
+            cause: "此后端不支持会话级模式切换".into(),
+        })
     }
 }
 
@@ -567,7 +580,10 @@ impl SessionBackend for InProcessBackend {
         // "surface as a Removed event later"——dispatch 立即把错误事件推进
         // transcript、会话标记 spawn-failed 并发布 Updated；Removed 只作为
         // 后续显式关闭等状态变更的次要信号。
-        Ok(self.router.web_spawn(prompt, project_dir, None, None).await)
+        Ok(self
+            .router
+            .web_spawn(prompt, project_dir, None, None, None)
+            .await)
     }
 
     /// Spawn through the router with the agent kind pinned（D2：agent id 即
@@ -584,6 +600,7 @@ impl SessionBackend for InProcessBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        mode: Option<String>,
         node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(remote) = remote_node_of(node.as_deref()) {
@@ -594,7 +611,7 @@ impl SessionBackend for InProcessBackend {
         let kind = agent_kind_of(agent);
         Ok(self
             .router
-            .web_spawn(prompt, project_dir, Some(kind), model)
+            .web_spawn(prompt, project_dir, Some(kind), model, mode)
             .await)
     }
 
@@ -606,6 +623,7 @@ impl SessionBackend for InProcessBackend {
         project_dir: Option<String>,
         agent: &str,
         model: Option<String>,
+        mode: Option<String>,
         node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         if let Some(remote) = remote_node_of(node.as_deref()) {
@@ -618,7 +636,7 @@ impl SessionBackend for InProcessBackend {
         let kind = agent_kind_of(agent);
         Ok(self
             .router
-            .web_create_placeholder(project_dir, Some(kind), model)
+            .web_create_placeholder(project_dir, Some(kind), model, mode)
             .await)
     }
 
@@ -646,6 +664,40 @@ impl SessionBackend for InProcessBackend {
                 cmd: sebas_acp::AcpCommand::SetModel {
                     session_id: sid,
                     model_id,
+                },
+            })
+            .await;
+        Ok(())
+    }
+
+    /// （add-agent-mode-selection）解析路由 session_id 后经 `Out::SendAcp`
+    /// 送达 `SetMode`——claude 驱动在运行时经 SDK `set_permission_mode`
+    /// 切换；接受与否经事件流反馈（`ModeChanged` / 非终态 `Error`）。
+    async fn set_session_mode(
+        &self,
+        key: ChannelKey,
+        mode: String,
+    ) -> Result<(), SessionRejection> {
+        let Some(sid) = self
+            .router
+            .map
+            .get(&key)
+            .await
+            .and_then(|m| m.session_id().map(str::to_owned))
+        else {
+            return Err(SessionRejection::UnknownSession {
+                key: key.reference.clone(),
+            });
+        };
+        // 期望值先记在映射上（快照立即反映操作者意图）；effective 由
+        // `ModeChanged` 事件落定（engine 的 apply_event 处理）。
+        self.router.map.set_desired_mode(&key, Some(mode.clone())).await;
+        self.router
+            .emit(sebas_dispatch::Out::SendAcp {
+                session_id: sid.clone(),
+                cmd: sebas_acp::AcpCommand::SetMode {
+                    session_id: sid,
+                    mode,
                 },
             })
             .await;
@@ -1048,6 +1100,8 @@ impl SessionBackend for FakeBackend {
             backend: None,
             pending: Vec::new(),
             remote: None,
+            desired_mode: None,
+            effective_mode: None,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1202,6 +1256,7 @@ impl SessionBackend for FakeBackend {
         project_dir: Option<String>,
         _agent: &str,
         _model: Option<String>,
+        _mode: Option<String>,
         node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
@@ -1215,6 +1270,7 @@ impl SessionBackend for FakeBackend {
         project_dir: Option<String>,
         _agent: &str,
         _model: Option<String>,
+        _mode: Option<String>,
         node: Option<String>,
     ) -> Result<ChannelKey, SessionRejection> {
         *self.last_spawn_node.lock().expect("last spawn node lock") = Some(node.clone());
@@ -1311,6 +1367,8 @@ mod tests {
                 backend: None,
                 pending: Vec::new(),
                 remote: None,
+                desired_mode: None,
+                effective_mode: None,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

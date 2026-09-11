@@ -221,7 +221,7 @@ async fn subscription_delivers_every_mutation_after_the_snapshot() {
     // Mutate AFTER the snapshot: every change must arrive as event frames.
     let key = core
         .handle
-        .web_spawn("racing prompt".into(), None, None, None)
+        .web_spawn("racing prompt".into(), None, None, None, None)
         .await;
     core.handle
         .activate(&key, "s-live".into(), None, None)
@@ -382,7 +382,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(Some("/tmp".into()), "opencode", Some("m-free".into()), None)
+        .create_placeholder(Some("/tmp".into()), "opencode", Some("m-free".into()), None, None)
         .await
         .expect("placeholder created");
 
@@ -416,7 +416,7 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     // 不可用 project_dir → 与 Spawn 同款校验拒绝。
     assert_eq!(
         backend
-            .create_placeholder(Some("/nonexistent-sebas-p2".into()), "opencode", None, None)
+            .create_placeholder(Some("/nonexistent-sebas-p2".into()), "opencode", None, None, None)
             .await,
         Err(SessionRejection::UnusableProjectDir)
     );
@@ -456,7 +456,7 @@ async fn placeholder_without_kind_or_model_spawns_on_first_message() {
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
 
     let key = backend
-        .create_placeholder(Some("/tmp".into()), "claudecode", None, None)
+        .create_placeholder(Some("/tmp".into()), "claudecode", None, None, None)
         .await
         .expect("placeholder created");
 

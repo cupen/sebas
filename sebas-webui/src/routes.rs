@@ -54,6 +54,8 @@ pub(crate) fn build_session_rows(
                 project_id: crate::projects::project_id_for_session(info),
                 prompt_preview: info.user_prompt.clone(),
                 current_model: info.current_model.clone(),
+                desired_mode: info.desired_mode.clone(),
+                effective_mode: info.effective_mode.clone(),
                 available_models: info.available_models.clone(),
                 agent_kind: info.agent_kind.clone(),
                 backend: info.backend.clone(),

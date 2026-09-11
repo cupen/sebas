@@ -115,6 +115,18 @@ pub struct SessionInfo {
     /// 报文：旧客户端收不到该键，新客户端收到 `null` 时按本机会话处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteSessionView>,
+    /// （add-agent-mode-selection）操作者期望的会话 mode（控制面词汇
+    /// `ask`/`edit`/`allow`/`auto`）：创建请求携带、中途切换立即更新。
+    /// `None` = agent 默认行为。`#[serde(default)]` 兼容旧快照/旧事件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_mode: Option<String>,
+    /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
+    /// spawn argv 应用值 / `ModeChanged`；远端 = 节点回报，见 `remote`）。
+    /// `None` = 执行体未声称任何 mode 生效——desired/effective 的差异如实
+    /// 可见（execution-node spec："mode enforceability is declared, not
+    /// assumed"）。`#[serde(default)]` 兼容旧快照/旧事件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_mode: Option<String>,
 }
 
 impl SessionInfo {
@@ -257,6 +269,8 @@ mod tests {
                 priority: false,
             }],
             remote: None,
+            desired_mode: None,
+            effective_mode: None,
         };
         let cases = vec![
             SessionEvent::Created {
@@ -320,6 +334,8 @@ mod tests {
             backend: None,
             pending: Vec::new(),
             remote: None,
+            desired_mode: None,
+            effective_mode: None,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -360,6 +376,8 @@ fn session_info_usage_field_is_additive() {
             total_input: 10,
             total_output: 25,
         }),
+        desired_mode: None,
+        effective_mode: None,
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();

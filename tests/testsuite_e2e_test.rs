@@ -1244,3 +1244,281 @@ async fn core_owned_provider_reaches_router_without_restart() {
         "watchdog must stay up"
     );
 }
+
+/// （add-agent-mode-selection）mode 透传：带 mode 的创建把映射后的
+/// `--permission-mode` 写进子进程 argv；缺省 mode 的对照会话不带该参数；
+/// 未知 mode 创建 400。数据源是 fake-claude journal（argv/meta），全程零真
+/// 模型调用。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn mode_threads_to_agent_argv() {
+    let sb = Sandbox::new("testsuite_e2e", "mode-argv");
+    let journal = sb.journal_fake_agent();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 对照会话：不带 mode → argv 无 --permission-mode。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create default session");
+    assert_eq!(status, 201, "create default session: {body}");
+
+    // mode=allow → argv 含 --permission-mode bypassPermissions。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude", "mode": "allow" }),
+    )
+    .await
+    .expect("create allow session");
+    assert_eq!(status, 201, "create allow session: {body}");
+
+    // 未知 mode → 400（词汇校验，不静默降级）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "x", "agent": "claude", "mode": "plan" }),
+    )
+    .await
+    .expect("create unknown-mode session");
+    assert_eq!(status, 400, "unknown mode must be rejected: {body}");
+
+    // 两个子进程各追加一条 argv meta。
+    wait_for(
+        "both fake-claude turns to finish (journal has 2 argv metas)",
+        Duration::from_secs(30),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    let metas = content
+                        .lines()
+                        .filter(|l| l.contains("\"dir\":\"meta\""))
+                        .count();
+                    (metas >= 2).then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    let content =
+        std::fs::read_to_string(sb.path.join("fake-claude-journal.jsonl")).expect("journal");
+    let argvs: Vec<Vec<String>> = content
+        .lines()
+        .filter(|l| l.contains("\"dir\":\"meta\""))
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("journal meta parses");
+            v["msg"]["argv"]
+                .as_array()
+                .expect("argv array")
+                .iter()
+                .map(|a| a.as_str().expect("argv str").to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(argvs.len(), 2, "two child spawns journaled: {argvs:?}");
+
+    let with_flag = argvs
+        .iter()
+        .find(|a| a.iter().any(|t| t == "--permission-mode"))
+        .expect("allow session must carry --permission-mode");
+    let idx = with_flag
+        .iter()
+        .position(|t| t == "--permission-mode")
+        .unwrap();
+    assert_eq!(
+        with_flag.get(idx + 1).map(String::as_str),
+        Some("bypassPermissions"),
+        "allow maps to bypassPermissions on the child argv"
+    );
+    assert!(
+        argvs
+            .iter()
+            .any(|a| !a.iter().any(|t| t == "--permission-mode")),
+        "default session must not carry --permission-mode"
+    );
+}
+
+/// （add-agent-mode-selection）中途切换：POST /api/sessions/{key}/mode 把
+/// 期望值送达运行中的 fake-claude（journal 记录运行时 set_permission_mode），
+/// 快照 desired/effective 跟随更新；切到 allow 后 `perm` 场景免审批直接
+/// 完成（行为级对照：ask 下同场景会停在审批等待）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn mode_mid_session_switch() {
+    let sb = Sandbox::new("testsuite_e2e", "mode-switch");
+    let journal = sb.journal_fake_agent();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 等首回合完成。
+    wait_for(
+        "first turn Done",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done")
+                        || v["status"]
+                            .as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                    done.then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 切到 allow：命令送达 = 200；执行体接受经 ModeChanged 反馈。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/mode", sb.webui_url()),
+        serde_json::json!({ "mode": "allow" }),
+    )
+    .await
+    .expect("switch mode");
+    assert_eq!(status, 200, "mode switch: {body}");
+
+    // journal 记录运行时切换（SDK set_permission_mode → "bypassPermissions"）。
+    wait_for(
+        "runtime mode_change journaled",
+        Duration::from_secs(10),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    content
+                        .lines()
+                        .any(|l| l.contains("mode_change") && l.contains("bypassPermissions"))
+                        .then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 快照：desired=allow 且 effective 落定为 allow（ModeChanged → 映射）。
+    wait_for(
+        "snapshot reflects effective mode",
+        Duration::from_secs(10),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let ok = v["desired_mode"].as_str() == Some("allow")
+                        && v["effective_mode"].as_str() == Some("allow");
+                    ok.then_some(())
+                })
+            }
+        },
+    )
+    .await;
+
+    // 行为级：allow 模式下 perm 场景免审批直接完成。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "perm" }),
+    )
+    .await
+    .expect("send perm");
+    assert_eq!(status, 200, "send perm: {body}");
+    let detail = wait_for(
+        "perm turn completes without gating",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done")
+                        || v["status"]
+                            .as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("done"));
+                    done.then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    let transcript = detail["entries"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    assert!(
+        transcript.contains("perm done"),
+        "allow session must run the gated tool without approval, got: {transcript:?}"
+    );
+}

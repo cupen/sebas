@@ -187,6 +187,12 @@ pub struct SessionRow {
     /// 直接透传 core 的 [`sebas_dispatch::RemoteSessionView`]：`None` = 主控本机
     /// 会话（节点维度对它不存在），**不伪造**一个 `online`。
     pub remote: Option<sebas_dispatch::RemoteSessionView>,
+    /// （add-agent-mode-selection）操作者期望的 mode（控制面词汇）；`None` =
+    /// agent 默认行为。远端会话与投影 desired 同值。
+    pub desired_mode: Option<String>,
+    /// （add-agent-mode-selection）执行体回报的实际生效 mode；`None` = 未声称
+    /// 生效（与 desired 的差异如实可见）。
+    pub effective_mode: Option<String>,
 }
 
 /// Dashboard overview data.

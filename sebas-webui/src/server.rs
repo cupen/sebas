@@ -198,6 +198,8 @@ fn build_router_full(
         .route("/api/sessions/{key}", get(api::session_detail))
         .route("/api/sessions/{key}/message", post(api::send_message))
         .route("/api/sessions/{key}/model", post(api::set_session_model))
+        // （add-agent-mode-selection）中程切换会话权限模式。
+        .route("/api/sessions/{key}/mode", post(api::set_session_mode))
         .route("/api/sessions/{key}/close", post(api::close_session))
         .route("/api/sessions/{key}/switch", post(api::switch_session))
         // workbench-turn-queue 6.2：待生效提交的管理面（remove / move）。

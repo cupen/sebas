@@ -135,6 +135,17 @@ pub struct Mapping {
     /// until the first message triggers the spawn; add-acp-model-selection).
     /// `None` = the agent's default model.
     pub pending_model: Option<String>,
+    /// （add-agent-mode-selection）创建时请求的 mode（0-turn 占位记住，首条
+    /// 消息触发 spawn 时消费）。词汇 = 控制面 `ask`/`edit`/`allow`/`auto`；
+    /// `None` = agent 默认行为（wire 不携带 mode）。
+    pub pending_mode: Option<String>,
+    /// （add-agent-mode-selection）操作者期望的会话 mode：创建请求携带、
+    /// 中途切换立即更新。快照暴露给前端；`None` = agent 默认。
+    pub desired_mode: Option<String>,
+    /// （add-agent-mode-selection）执行体回报的**实际生效** mode（本机 =
+    /// spawn argv 实际应用值 / `ModeChanged` 事件；远端 = 节点回报）。
+    /// `None` = 执行体未声称任何 mode 生效（如实呈现 desired/effective 差异）。
+    pub effective_mode: Option<String>,
     /// The agent's real ACP session id when it differs from the routing id
     /// (native-ACP agents, e.g. opencode; the `session/new` id on a fresh
     /// spawn, the loaded conversation id on a successful resume). `None` for
@@ -162,6 +173,9 @@ impl Mapping {
             project_dir: None,
             pending_kind: None,
             pending_model: None,
+            pending_mode: None,
+            desired_mode: None,
+            effective_mode: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -179,6 +193,9 @@ impl Mapping {
             project_dir: None,
             pending_kind: None,
             pending_model: None,
+            pending_mode: None,
+            desired_mode: None,
+            effective_mode: None,
             acp_session_id,
             current_model: None,
             available_models: None,
@@ -195,6 +212,9 @@ impl Mapping {
             project_dir: None,
             pending_kind: None,
             pending_model: None,
+            pending_mode: None,
+            desired_mode: None,
+            effective_mode: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -203,10 +223,16 @@ impl Mapping {
 
     /// A Spawning placeholder created eagerly with a 0-turn session request
     /// (no prompt yet): remember the requested kind/model so the first message
-    /// spawns the right agent (0-turn 会话修复，P2）。普通 spawn 流程直接
-    /// 消费时这些字段保持 None（走默认 kind / agent 默认模型）。
+    /// spawns the right agent (0-turn 会话修复，P2）。`mode`（
+    /// add-agent-mode-selection）同 model：占位记住、首条消息 spawn 时消费，
+    /// 并记为 desired mode 供快照暴露。普通 spawn 流程直接消费时这些字段
+    /// 保持 None（走默认 kind / agent 默认模型 / agent 默认行为）。
     /// `awaiting_first_prompt = true` 是占位身份本身（D1）。
-    pub fn spawning_with(kind: Option<String>, model: Option<String>) -> Self {
+    pub fn spawning_with(
+        kind: Option<String>,
+        model: Option<String>,
+        mode: Option<String>,
+    ) -> Self {
         Self {
             state: MappingState::Spawning {
                 pending: Vec::new(),
@@ -216,6 +242,9 @@ impl Mapping {
             project_dir: None,
             pending_kind: kind,
             pending_model: model,
+            pending_mode: mode.clone(),
+            desired_mode: mode,
+            effective_mode: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -231,6 +260,9 @@ impl Mapping {
             project_dir: None,
             pending_kind: None,
             pending_model: None,
+            pending_mode: None,
+            desired_mode: None,
+            effective_mode: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -249,6 +281,9 @@ impl Mapping {
             project_dir: None,
             pending_kind: None,
             pending_model: None,
+            pending_mode: None,
+            desired_mode: None,
+            effective_mode: None,
             acp_session_id: None,
             current_model: None,
             available_models: None,
@@ -495,13 +530,16 @@ impl SessionMap {
 
     /// [`SessionMap::begin_spawn`] plus a requested kind/model to remember on
     /// the placeholder (0-turn sessions: the first message spawns the right
-    /// agent — P2 fix). Only the `Fresh`/`ReplacedActive` insert carries the
-    /// new fields; an already-spawning placeholder keeps its existing ones.
+    /// agent — P2 fix). `mode`（add-agent-mode-selection）同 model：占位
+    /// 记住、首条消息 spawn 时消费。Only the `Fresh`/`ReplacedActive` insert
+    /// carries the new fields; an already-spawning placeholder keeps its
+    /// existing ones.
     pub async fn begin_spawn_with(
         &self,
         key: ChannelKey,
         kind: Option<String>,
         model: Option<String>,
+        mode: Option<String>,
     ) -> Result<BeginSpawn, DispatchError> {
         let mut g = self.inner.write().await;
         match g.get(&key) {
@@ -510,16 +548,35 @@ impl SessionMap {
             }
             Some(_) => {
                 self.clear_queue(&key).await;
-                g.insert(key, Mapping::spawning_with(kind, model));
+                g.insert(key, Mapping::spawning_with(kind, model, mode));
                 Ok(BeginSpawn::ReplacedActive)
             }
             None => {
                 if g.len() >= self.capacity {
                     return Err(DispatchError::Capacity(self.capacity));
                 }
-                g.insert(key, Mapping::spawning_with(kind, model));
+                g.insert(key, Mapping::spawning_with(kind, model, mode));
                 Ok(BeginSpawn::Fresh)
             }
+        }
+    }
+
+    /// （add-agent-mode-selection）记录操作者期望的 mode（创建请求携带或
+    /// 中途切换）。与 `set_current_model` 同一模式：仅改映射，publish 由
+    /// engine 层调用方完成。
+    pub async fn set_desired_mode(&self, key: &ChannelKey, mode: Option<String>) {
+        let mut g = self.inner.write().await;
+        if let Some(m) = g.get_mut(key) {
+            m.desired_mode = mode;
+        }
+    }
+
+    /// （add-agent-mode-selection）记录执行体回报的实际生效 mode（本机 =
+    /// spawn argv 应用值 / `ModeChanged`；远端 = 节点回报）。
+    pub async fn set_effective_mode(&self, key: &ChannelKey, mode: Option<String>) {
+        let mut g = self.inner.write().await;
+        if let Some(m) = g.get_mut(key) {
+            m.effective_mode = mode;
         }
     }
 
@@ -958,6 +1015,8 @@ impl SessionMap {
                     current_model: m.current_model.clone(),
                     pending_kind: m.pending_kind.clone(),
                     pending_model: m.pending_model.clone(),
+                    pending_mode: m.pending_mode.clone(),
+                    desired_mode: m.desired_mode.clone(),
                     project_dir: m.project_dir.clone(),
                     awaiting_first_prompt: is_placeholder,
                 };
@@ -995,7 +1054,11 @@ impl SessionMap {
             let mut m = if dto.awaiting_first_prompt && dto.session_id.is_empty() {
                 // 0-turn 占位（workbench-agent-wire-fix D1）：重启后仍是等待
                 // 首条消息的占位，首条消息照常触发 spawn。
-                Mapping::spawning_with(dto.pending_kind.clone(), dto.pending_model.clone())
+                Mapping::spawning_with(
+                    dto.pending_kind.clone(),
+                    dto.pending_model.clone(),
+                    dto.pending_mode.clone(),
+                )
             } else {
                 Mapping::dormant(dto.session_id, dto.last_active_unix)
             };
@@ -1008,6 +1071,10 @@ impl SessionMap {
             // 旧文件无该字段 → None → UI 显示默认 kind。
             m.pending_kind = dto.pending_kind;
             m.pending_model = dto.pending_model;
+            // 创建时请求的 mode 与操作者期望的 mode（add-agent-mode-selection）；
+            // 旧文件无该字段 → None → agent 默认行为。
+            m.pending_mode = dto.pending_mode;
+            m.desired_mode = dto.desired_mode;
             m.project_dir = dto.project_dir;
             map.insert(key, m);
         }
@@ -1074,6 +1141,14 @@ struct MappingDto {
     /// `#[serde(default)]` 兼容旧文件。
     #[serde(default)]
     pending_model: Option<String>,
+    /// 创建时请求的 mode（0-turn 占位记住，首条消息触发 spawn 时消费；
+    /// add-agent-mode-selection）。`#[serde(default)]` 兼容旧文件。
+    #[serde(default)]
+    pending_mode: Option<String>,
+    /// 操作者期望的会话 mode（重启后快照仍可显示）。`#[serde(default)]`
+    /// 兼容旧文件。
+    #[serde(default)]
+    desired_mode: Option<String>,
     /// 该项目记住的默认会话目录（0-turn 占位的 project_dir，spawn 时用）。
     /// `#[serde(default)]` 兼容旧文件。
     #[serde(default)]

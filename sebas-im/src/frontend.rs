@@ -1034,6 +1034,8 @@ mod tests {
             usage: None,
             pending: Vec::new(),
             remote: None,
+            desired_mode: None,
+            effective_mode: None,
         };
         fe.on_session_info(info.clone()).await;
         {

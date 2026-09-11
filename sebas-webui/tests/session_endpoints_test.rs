@@ -1141,6 +1141,109 @@ async fn create_session_with_model_threads_spawn_and_mid_session_model_switch_wo
     }
 }
 
+/// （add-agent-mode-selection）创建带 mode → `Out::WebSpawn` 透传；
+/// 未知 mode 创建与切换都 400；中途切换经 `Out::SendAcp SetMode` 送达。
+#[tokio::test]
+async fn create_session_with_mode_threads_spawn_and_mid_session_mode_switch_works() {
+    let (router, mut rx, app) = fixture().await;
+
+    // 1) create-with-mode：POST 带 mode=allow → 201，Out::WebSpawn 携带该
+    //    mode（desired 记入映射；argv 映射在 dispatch 侧）。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"prompt":"hello","agent":"opencode","mode":"allow"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    let key_str = v["key"].as_str().expect("key string").to_string();
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("WebSpawn out within timeout")
+        .expect("out channel open");
+    match out {
+        sebas_dispatch::engine::Out::WebSpawn { prompt, mode, .. } => {
+            assert_eq!(prompt, "hello");
+            assert_eq!(mode.as_deref(), Some("allow"));
+        }
+        other => panic!("expected Out::WebSpawn, got {other:?}"),
+    }
+
+    // 2) 中途切换：POST /api/sessions/{key}/mode {"mode":"edit"} → 200，且
+    //    Out::SendAcp SetMode 送达（进程内后端路径）。
+    // 先把映射装成 Active（web_spawn 只建 placeholder；activate 需要真实 sid）。
+    let decoded = decode_web_key(&key_str);
+    router
+        .activate(&decoded, "route-s1".into(), Some("acp-real-1".into()), None)
+        .await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{key_str}/mode"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"edit"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("SendAcp out within timeout")
+        .expect("out channel open");
+    match out {
+        sebas_dispatch::engine::Out::SendAcp {
+            cmd: sebas_acp::AcpCommand::SetMode { mode, .. },
+            ..
+        } => {
+            assert_eq!(mode, "edit");
+        }
+        other => panic!("expected Out::SendAcp SetMode, got {other:?}"),
+    }
+    let _ = router;
+
+    // 3) 未知 mode：创建 400（词汇校验，不静默降级）。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"x","agent":"opencode","mode":"plan"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // 4) 未知 mode：切换同样 400。
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{key_str}/mode"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"plan"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ---- Concurrency across projects (task 6.1) and remove-project semantics (task 6.2) ----
 
 /// Decode an encoded web session key back to its `ChannelKey`. Encoded keys

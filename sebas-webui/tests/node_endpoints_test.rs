@@ -297,6 +297,8 @@ fn remote_session() -> SessionInfo {
             provider: None,
             provider_cause: Some("节点上没有名为 work 的 provider profile".into()),
         }),
+        desired_mode: Some("ask".into()),
+        effective_mode: Some("edit".into()),
     }
 }
 

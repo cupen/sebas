@@ -650,6 +650,7 @@ async fn dispatch(
             prompt,
             project_dir,
             model,
+            mode,
             agent,
             node,
         } => {
@@ -657,7 +658,7 @@ async fn dispatch(
             // 判定，主控不做本地 stat——在别人的机器上 stat 本机路径毫无意义，
             // 而"本机没有这个目录"会被误报成"项目不存在"。
             if let Some(node_id) = node.as_deref().filter(|n| *n != crate::node_link::LOCAL_NODE_ID) {
-                return spawn_remote(projection, node_id, prompt, project_dir, model, &agent)
+                return spawn_remote(projection, node_id, prompt, project_dir, model, mode, &agent)
                     .await;
             }
             // 5.5: canonicalize + stat BEFORE any spawn; no existence
@@ -675,7 +676,10 @@ async fn dispatch(
                     .display()
                     .to_string()
             });
-            match backend.spawn_with(prompt, project_dir, &agent, model, None).await {
+            match backend
+                .spawn_with(prompt, project_dir, &agent, model, mode, None)
+                .await
+            {
                 Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
@@ -683,6 +687,7 @@ async fn dispatch(
         CoreChannelRequest::CreatePlaceholder {
             project_dir,
             model,
+            mode,
             agent,
             node,
         } => {
@@ -716,7 +721,10 @@ async fn dispatch(
                     .display()
                     .to_string()
             });
-            match backend.create_placeholder(project_dir, &agent, model, None).await {
+            match backend
+                .create_placeholder(project_dir, &agent, model, mode, None)
+                .await
+            {
                 Ok(key) => CoreChannelResponse::Spawned { key },
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
@@ -737,6 +745,26 @@ async fn dispatch(
             // 按执行体分发（wire-webui-sebas-agent-e2e）：native key → 内核，
             // 其余 → ACP（InProcessBackend 解析 session_id 后经 Out::SendAcp）。
             match backend.set_session_model(key, model_id).await {
+                Ok(()) => CoreChannelResponse::Ok,
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
+        CoreChannelRequest::SetSessionMode { key, mode } => {
+            // （add-agent-mode-selection）远端会话走节点链路既有的 SetMode
+            // （控制面此前没有任何调用方）；节点回报的实际生效 mode 由节点
+            // 侧对账/投影呈现，这里只负责送达与拒绝透传。
+            if let Some((_, session_id)) = remote_target(projection, &key).await {
+                return match projection
+                    .as_ref()
+                    .expect("remote_target 非 None 蕴含 projection 非 None")
+                    .set_mode(&session_id, &mode)
+                    .await
+                {
+                    Ok(_) => CoreChannelResponse::Ok,
+                    Err(e) => node_link_rejection(e),
+                };
+            }
+            match backend.set_session_mode(key, mode).await {
                 Ok(()) => CoreChannelResponse::Ok,
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
@@ -1046,6 +1074,7 @@ async fn spawn_remote(
     prompt: String,
     project_dir: Option<String>,
     model: Option<String>,
+    mode: Option<String>,
     agent: &str,
 ) -> CoreChannelResponse {
     let Some(projection) = projection else {
@@ -1078,7 +1107,9 @@ async fn spawn_remote(
             project.as_ref(),
             Some(agent),
             model.as_deref(),
-            None,
+            // （add-agent-mode-selection）创建请求携带的 mode 直传节点（此前
+            // 硬编码 `None`——门控词汇在 wire 上已有，只是没人填）。
+            mode.as_deref(),
             Some(&prompt),
         )
         .await

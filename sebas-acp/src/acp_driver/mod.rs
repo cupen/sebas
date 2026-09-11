@@ -357,6 +357,27 @@ impl AgentDriver for AcpDriver {
                                         }
                                     }
                                 }
+                                Some(AcpCommand::SetMode { mode, .. }) => {
+                                    // （add-agent-mode-selection）通用 ACP 协议
+                                    // 没有 permission-mode 词汇（codec 明确不
+                                    // 收 agent 的 mode updates），如实报不支持
+                                    // ——非终态 Error，mode 不变、会话存活。
+                                    tracing::debug!(
+                                        kind = %kind_slug,
+                                        session_id = %routing_id,
+                                        mode = %mode,
+                                        "ACP agent cannot enforce session mode",
+                                    );
+                                    let _ = connect_evt_tx
+                                        .send(AcpEvent::Error {
+                                            session_id: final_routing.clone(),
+                                            message: format!(
+                                                "set mode {mode:?} 需要支持权限模式的执行体；当前 ACP agent 不支持，模式未变"
+                                            ),
+                                            terminal: false,
+                                        })
+                                        .await;
+                                }
                                 Some(AcpCommand::Cancel { .. }) => {
                                     let _ = cx
                                         .send_notification(CancelNotification::new(acp_session_id.clone()));

@@ -765,3 +765,201 @@ async fn remote_node_workbench_journey() {
     core.kill().await.ok();
     webui.kill().await.ok();
 }
+
+
+/// （add-agent-mode-selection）远端节点 mode 旅程（真 sebas-node + EchoBody，
+/// 零真模型调用）：
+/// - 创建带 mode=allow → 投影 desired_mode=allow，`run:` 门控动作**不停驻**；
+/// - 中途切回 ask（节点存活时）→ 后续 `run:` 重新进入 waiting；
+/// - 节点重连对账补回执行事实（与 remote_node_workbench_journey 同款机制：
+///   沙箱里节点事件不实时进主控转写，重连后可见）；
+/// - 节点离线时带 mode 创建照旧在提交前被拒（点名节点）。
+///
+/// 诚实边界：EchoBody 不声明 `enforces_mode`，节点如实回报 effective=None
+/// （desired≠effective 正是 execution-node spec 要求的"强制不了要说出来"）；
+/// 门控放行/停驻由节点按 desired mode 判定，`allow` 放行会留审计。
+#[tokio::test]
+#[ignore = "process-level acceptance; run with -- --ignored or invoke testsuite-acceptance"]
+async fn remote_node_mode_journey() {
+    let sb = Sandbox::new("acceptance", "remote-node-mode");
+    sb.enable_node_link();
+    let node_work = sb.node_work_dir();
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let mut webui = sb.spawn_webui(&sb.core_secret);
+    support::wait_reachable(&cli, &sb).await;
+
+    // 配对上线 + 远端项目注册（与 remote_node_workbench_journey 同款装配）。
+    let token = wait_bootstrap_token(&sb).await;
+    let mut node = sb.spawn_node("itest-node", Some(&token));
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+    let (status, add) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({
+            "path": node_work.to_string_lossy(),
+            "node_id": "itest-node",
+        }),
+    )
+    .await
+    .expect("register remote project");
+    assert_eq!(status, 201, "远端项目注册: {add}");
+    let project_id = add["id"].as_str().expect("project id").to_string();
+
+    // 1) 创建带 mode=allow：mode 随放置链路（Spawn 帧 → 节点 spawn op）送达；
+    //    投影 desired_mode 如实呈现。
+    let key = create_session(
+        &cli,
+        &sb,
+        serde_json::json!({
+            "prompt": "warmup",
+            "agent": "echo",
+            "project_id": project_id,
+            "mode": "allow",
+        }),
+    )
+    .await;
+    let key_for_row = key.clone();
+    let row = wait_session_row(&cli, &sb, "远端会话行带 desired mode", move |r| {
+        r["encoded_key"].as_str() == Some(key_for_row.as_str())
+            && r["remote"]["desired_mode"].as_str() == Some("allow")
+    })
+    .await;
+    assert_eq!(row["remote"]["node_id"], "itest-node", "会话归属节点: {row}");
+
+    // 2) allow 下受门控动作直接执行：`run:` 投递成功且**不产生**悬空审批
+    //    （ask 下同输入会停在 waiting——见 remote_node_workbench_journey）。
+    //    执行事实（echo 应答）经节点重连对账补回后可见。
+    let (msg_status, _) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "run: ls -la" }),
+    )
+    .await
+    .expect("gated message under allow");
+    assert!((200..300).contains(&msg_status));
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let v = cli
+            .get(format!("{}/api/sessions", sb.webui_url()))
+            .send()
+            .await
+            .expect("sessions")
+            .json::<serde_json::Value>()
+            .await
+            .expect("sessions json");
+        let r = v["recent_sessions"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["encoded_key"].as_str() == Some(key.as_str()))
+            .expect("row");
+        assert_eq!(
+            r["remote"]["parked_approvals"].as_u64().unwrap_or(0),
+            0,
+            "allow 模式不得停驻审批: {r}"
+        );
+        assert_ne!(r["status_slug"], "waiting", "allow 下不该等人批: {r}");
+    }
+
+    // 3) 中途切回 ask：SetMode 经链路送达；后续 `run:` 重新被门控为 waiting
+    //    （悬空审批是控制面主动对账的面，这一步**实时**可见）。
+    let (switch_status, switch_body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/mode", sb.webui_url()),
+        serde_json::json!({ "mode": "ask" }),
+    )
+    .await
+    .expect("switch mode mid-session");
+    assert_eq!(switch_status, 200, "mode 切换应送达: {switch_body}");
+    let key_for_ask = key.clone();
+    wait_session_row(&cli, &sb, "投影 desired 更新为 ask", move |r| {
+        r["encoded_key"].as_str() == Some(key_for_ask.as_str())
+            && r["remote"]["desired_mode"].as_str() == Some("ask")
+    })
+    .await;
+    let _ = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "run: echo again" }),
+    )
+    .await
+    .expect("gated message under ask");
+    let key_for_wait = key.clone();
+    let waiting = wait_session_row(&cli, &sb, "ask 下门控动作恢复 waiting", move |r| {
+        r["encoded_key"].as_str() == Some(key_for_wait.as_str())
+            && r["remote"]["parked_approvals"].as_u64().unwrap_or(0) >= 1
+    })
+    .await;
+    assert_eq!(
+        waiting["status_slug"], "waiting",
+        "切回 ask 后必须重新等人批: {waiting}"
+    );
+
+    // 4) 节点重连对账：echo 对 `run:` 的应答经对账补回转写。
+    node.kill().await.expect("kill node");
+    let _ = node.wait().await;
+    let mut node = sb.spawn_node("itest-node", None);
+    wait_node_status(&cli, &sb, "itest-node", "online").await;
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let transcript = wait_for(
+        "对账补回 allow 会话的 echo 应答",
+        TURN,
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let text = v
+                        .get("entries")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|b| b.get("content").and_then(|c| c.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    text.contains("run: ls -la").then_some(text)
+                })
+            }
+        },
+    )
+    .await;
+    assert!(
+        transcript.contains("run: ls -la"),
+        "allow 会话的门控动作应执行并有应答: {transcript:?}"
+    );
+
+    // 5) 节点离线：带 mode 的创建照旧在提交前被拒，点名节点。
+    node.kill().await.expect("kill node");
+    let _ = node.wait().await;
+    wait_node_status(&cli, &sb, "itest-node", "offline").await;
+    let (create_status, create_body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({
+            "prompt": "x",
+            "agent": "echo",
+            "project_id": project_id,
+            "mode": "allow",
+        }),
+    )
+    .await
+    .expect("offline create with mode");
+    assert_ne!(create_status, 201, "节点离线不得建会话: {create_body}");
+    let cause = create_body["error"].as_str().unwrap_or_default();
+    assert!(cause.contains("itest-node"), "拒绝点名节点: {create_body}");
+
+    node.kill().await.ok();
+    core.kill().await.ok();
+    webui.kill().await.ok();
+}
