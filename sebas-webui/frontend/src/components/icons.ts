@@ -24,6 +24,8 @@ const PATHS: Record<string, string> = {
     '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   back: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
   forward: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  // workbench-interaction-polish D4：发送状态机的「停止」方块（中断在飞 turn）。
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
   clock:
     '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',

@@ -10,6 +10,7 @@ import { sharedWs } from '../api/shared-ws.js'
 import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
+import { fullSessionLabel } from './project-rail.js'
 import '../components/status-badge.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/input/input.js'
@@ -341,7 +342,7 @@ export class SebasSessions extends LitElement {
                 (row) => html`
                   <article class="scard" data-status=${row.status_slug}>
                     <div class="top">
-                      <a class="chat" href=${`/sessions/${row.encoded_key}`}>${row.chat_id}</a>
+                      <a class="chat" href=${`/sessions/${row.encoded_key}`}>${fullSessionLabel(row)}</a>
                       <sebas-status-badge
                         slug=${row.status_slug}
                         label=${row.status_label}
@@ -369,7 +370,7 @@ export class SebasSessions extends LitElement {
                         size="s"
                         appearance="plain"
                         variant="danger"
-                        aria-label=${`Close session ${row.chat_id}`}
+                        aria-label=${`Close session ${fullSessionLabel(row)}`}
                         @click=${() => (this.closeTarget = row.encoded_key)}
                         >Close</wa-button
                       >

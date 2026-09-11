@@ -695,9 +695,16 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
     )
     expect(plus!.disabled).toBe(true)
 
-    // 直接走创建路径也被拦下（不提交，成因点名节点）。
-    await (el as any).createSession(new Event('click'), (el as any).projects[0])
+    // 离线节点的项目不可达创建入口（workbench-interaction-polish 3.2：创建
+    // 唯一入口是「+」→ 对话框）——「+」禁用即拦截；成因点名节点。
+    plus!.click()
+    await el.updateComplete
     expect(apiMock.createSession).not.toHaveBeenCalled()
+    expect(
+      (el.shadowRoot!.querySelector('sebas-new-session-dialog') as HTMLElement & {
+        open: boolean
+      }).open,
+    ).toBe(false)
     expect(el.shadowRoot!.textContent).toContain('dev-box')
     el.remove()
   })
@@ -757,6 +764,129 @@ describe('project node dimension (add-remote-execution-node 8.1/8.2)', () => {
       d.getAttribute('data-status'),
     )
     expect(dots).toContain('waiting')
+    el.remove()
+  })
+})
+
+// ─── workbench-interaction-polish 3.2：项目行「+」→ 创建对话框 ────────────────
+
+describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
+  beforeEach(() => {
+    // 本文件的整体 beforeEach 不清 mock（既有用例依赖自定义编排）——
+    // 创建面板用例各自关心 createSession 的调用记录，这里统一清。
+    mockOf(apiMock.createSession).mockClear()
+  })
+
+  async function dialogOf(el: SebasProjectRail) {
+    const dialog = el.shadowRoot!.querySelector(
+      'sebas-new-session-dialog',
+    ) as unknown as HTMLElement & {
+      updateComplete: Promise<boolean>
+      open: boolean
+      projectId: string | null
+      projectName: string | null
+      defaultAgent: string | null
+    }
+    await dialog.updateComplete
+    return dialog
+  }
+
+  it('opens the dialog from a project row + button, bound to that project', async () => {
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'button[aria-label="New session in alpha"]',
+    )!
+    plus.click()
+    await el.updateComplete
+    const dialog = await dialogOf(el)
+    expect(dialog.open).toBe(true)
+    expect(dialog.projectId).toBe('proj-alpha')
+    expect(dialog.projectName).toBe('alpha')
+    el.remove()
+  })
+
+  it('confirms creation with the dialog detail and keeps the workbench route', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = await dialogOf(el)
+    dialog.dispatchEvent(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: 'deepseek-chat', mode: 'allow' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(mockOf(apiMock.createSession)).toHaveBeenCalledWith({
+      projectId: 'proj-alpha',
+      agent: 'codex',
+      model: 'deepseek-chat',
+      mode: 'allow',
+    })
+    // 成功后对话框收起、无错误。
+    expect((await dialogOf(el)).open).toBe(false)
+    el.remove()
+  })
+
+  it('keeps the dialog open with the typed rejection when creation fails', async () => {
+    mockOf(apiMock.createSession).mockRejectedValue(new Error('HTTP 409: 已有会话'))
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in beta"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = await dialogOf(el)
+    dialog.dispatchEvent(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'claude', model: null, mode: null },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 失败不假装成功：对话框仍在、错误就地呈现。
+    expect((await dialogOf(el)).open).toBe(true)
+    expect(dialog.shadowRoot!.querySelector('[data-testid="dialog-error"]')?.textContent).toContain(
+      '已有会话',
+    )
+    el.remove()
+  })
+
+  it('cancel closes the dialog and creates nothing', async () => {
+    mockOf(apiMock.nodes).mockResolvedValue({
+      nodes: [{ id: 'local', status: 'online', local: true }],
+      remote_available: true,
+    })
+    const el = await mount()
+    ;(
+      el.shadowRoot!.querySelector('button[aria-label="New session in alpha"]') as HTMLButtonElement
+    ).click()
+    await el.updateComplete
+    const dialog = await dialogOf(el)
+    dialog.dispatchEvent(new CustomEvent('dialog-cancel', { bubbles: true, composed: true }))
+    await el.updateComplete
+    expect((await dialogOf(el)).open).toBe(false)
+    expect(mockOf(apiMock.createSession)).not.toHaveBeenCalled()
     el.remove()
   })
 })

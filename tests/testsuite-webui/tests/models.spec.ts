@@ -214,7 +214,7 @@ test.describe('模型管理覆盖', () => {
       expect(created.ok()).toBe(true)
 
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Models')
 
       // Browsing the list stays read-only on the network: zero fetch traffic
@@ -302,7 +302,7 @@ test.describe('模型管理覆盖', () => {
         expect(catalogBefore).toEqual([])
 
         await page.goto('/')
-        await settings.openViaComposer()
+        await settings.openViaSidebar()
         await settings.openSection('Models')
 
         // 抓取：结果列表如实列出上游 ids。
@@ -353,7 +353,7 @@ test.describe('模型管理覆盖', () => {
       expect(created.ok()).toBe(true)
 
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Models')
 
       const row = settings.panel.locator('.provider-row', { hasText: 'urlless' })

@@ -56,6 +56,12 @@ struct NativeSession {
     available_models: Vec<String>,
     /// 装配期的默认模型 id（`SEBAS_AGENT_MODEL`），与内核 SessionConfig 共用。
     default_model: String,
+    /// （workbench-interaction-polish 1.1）宿主侧在飞近似：prompt 提交置位、
+    /// 终态事件（Finished / Error）复位。内核侧串行队列——排队中的下一条
+    /// prompt 开轮时宿主没有事件可依，此标志可能在「排队连跑」窗口里落后
+    /// 真实一拍；cancel 的 Idle 拒绝按它判定（内核对空闲 cancel 本就无效果，
+    /// 会话无损，只是拒绝文案可能偏保守）。
+    in_flight: bool,
 }
 
 impl NativeSession {
@@ -424,11 +430,17 @@ impl NativeAgentBackend {
                         // 会话一起消失。
                         session.msg_count += 1;
                         session.push_markdown(format!("⚠ {message}"));
+                        // workbench-interaction-polish 1.1：turn 终态（含取消
+                        // 的非 terminal "turn cancelled"）复位在飞标志。
+                        session.in_flight = false;
                         removed = terminal;
                         None
                     }
                     AE::Finished { .. } => {
                         session.flush_text();
+                        // workbench-interaction-polish 1.1：turn 收尾复位在飞
+                        // 标志（下一条 prompt 由 message() 再置位）。
+                        session.in_flight = false;
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -522,6 +534,8 @@ impl SessionBackend for NativeAgentBackend {
                     current_model_override: None,
                     available_models: self.available_models.clone(),
                     default_model: self.default_model.clone(),
+                    // 首条 prompt 即开轮（串行队列空）。
+                    in_flight: true,
                 },
             );
         }
@@ -574,11 +588,31 @@ impl SessionBackend for NativeAgentBackend {
 
     async fn message(&self, key: ChannelKey, message: String) -> Result<(), SessionRejection> {
         let encoded = Self::encode_key(&key);
+        // 写锁：in_flight 置位与会话查找同临界区（prompt 只借用 handle）。
+        let mut g = self.sessions.write().await;
+        let Some(session) = g.get_mut(&encoded) else {
+            return Err(SessionRejection::UnknownSession { key: encoded });
+        };
+        // workbench-interaction-polish 1.1：空闲时这条 prompt 立即开轮；busy
+        // 时内核排队，在飞标志保持 true 不变。
+        session.in_flight = true;
+        session.handle.prompt(message).await;
+        Ok(())
+    }
+
+    /// （workbench-interaction-polish 1.1）native 会话的取消：未知 key 照旧
+    /// typed 拒绝；已知会话按宿主在飞近似判定——空闲拒绝（不伪造成功），
+    /// 在飞则下发内核既有 cancel（interrupt；空闲时内核本就无效果）。
+    async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
+        let encoded = Self::encode_key(&key);
         let g = self.sessions.read().await;
         let Some(session) = g.get(&encoded) else {
             return Err(SessionRejection::UnknownSession { key: encoded });
         };
-        session.handle.prompt(message).await;
+        if !session.in_flight {
+            return Err(SessionRejection::Idle { key: encoded });
+        }
+        session.handle.cancel().await;
         Ok(())
     }
 

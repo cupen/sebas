@@ -13,6 +13,7 @@
 import { expect, test } from '@playwright/test'
 import {
   AppShell,
+  ensureSceneProject,
   ErrorCollector,
   ProjectRail,
   resetState,
@@ -40,40 +41,62 @@ test.describe('工作台首屏', () => {
       await expect(shell.brand).toBeVisible()
       await expect(rail.host).toBeVisible()
       await expect(workbench.host).toBeVisible()
-      await expect(workbench.composer).toBeVisible()
+      // workbench-interaction-polish 4.1：composer 纯跟随化——无聚焦时给
+      // 显式提示（指向 rail 创建入口），不渲染任何创建控件。
+      await expect(workbench.noFocusHint).toBeVisible()
+      await expect(workbench.noFocusHint).toContainText('+')
+      await expect(workbench.composerTextarea).toHaveCount(0)
+      await expect(workbench.submitControl).toHaveCount(0)
+      await expect(workbench.modelChip).toHaveCount(0)
 
       // No project registered in a fresh sandbox → honest empty rail.
       await expect(rail.host.locator('.empty', { hasText: '尚未注册项目' })).toBeVisible()
       // Workbench header states the no-project truth.
       await expect(workbench.noProjectSelected).toBeVisible()
-      // Nothing focused → empty-stream stage, composer in creation mode.
+      // Nothing focused → empty-stream stage with the rail-entry hint.
       await expect(workbench.emptyStream).toBeVisible()
-      await expect(workbench.newSessionChip).toBeHidden()
-      // rail-declutter-unread D6：创建必须显式选项目——无项目可选时提交门禁
-      // 禁用并就地说明（不再提供 inbox 绑定）。
-      await expect(workbench.composerTextarea).toBeDisabled()
-      await expect(
-        workbench.composer.locator('[data-testid="project-required"]'),
-      ).toContainText('未选择项目')
+      await expect(workbench.emptyStream).toContainText('sidebar')
 
-      // Reachability, honest form: core connected (no warning banner) and the
-      // native backend option disabled with its cause spelled out. The
-      // provider label shows the store-backed truth (make-core-own-provider-
-      // data 3.1: the state seam forwards to the live engine even in the
-      // embedded form): the sandbox store is reachable and starts empty, so
-      // the label reads "no provider configured" — not the stale
-      // "unavailable" wording that used to paper over the non-forwarding
-      // composite backend.
+      // Reachability, honest form: core connected (no warning banner).
       await expect(workbench.reachabilityWarning).toBeHidden()
-      await expect(workbench.providerLabel()).toHaveText('no provider configured', {
-        timeout: 10_000,
-      })
-      await expect(workbench.nativeOption()).toBeDisabled()
-      await expect(workbench.nativeOption()).toContainText('native')
-      await expect(workbench.nativeOption()).toContainText('unavailable')
 
-      // D4 honest absence: with no model options the model dropdown never renders.
-      await expect(workbench.modelSelect()).toHaveCount(0)
+      // D4 honest absence: with no focused session there is no submit
+      // control anywhere (already asserted above) — and no model chip.
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('the creation dialog is the only agent choice and marks native honestly', async ({
+      page,
+    }) => {
+      const rail = new ProjectRail(page)
+
+      await resetState(page.request)
+      const { name: projectName } = await ensureSceneProject(page.request)
+      await page.goto('/')
+      await expect(rail.host).toBeVisible()
+
+      await rail.openNewSessionDialog(projectName)
+
+      // agent 必选：native 不可达时禁选并标注 cause（沙箱无 provider 凭据）。
+      const nativeOption = rail
+        .newSessionDialog()
+        .locator('wa-option[value="native"]')
+      await expect(nativeOption).toBeDisabled()
+      await expect(nativeOption).toContainText('native')
+      await expect(nativeOption).toContainText('unavailable')
+
+      // 目录不可得（沙箱无 provider 目录）→ 显式说明，不渲染空下拉。
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-catalog-unavailable"]'),
+      ).toBeVisible()
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
+      ).toHaveCount(0)
+
+      // 取消：什么都不创建（wa-dialog 关闭后仍留在 DOM，断言隐藏）。
+      await rail.cancelNewSessionDialog()
+      await expect(rail.newSessionDialog()).toBeHidden()
 
       expect(collector.clean()).toEqual([])
     })

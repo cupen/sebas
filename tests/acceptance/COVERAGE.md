@@ -135,19 +135,19 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 原生内核会话执行 | ✅ | J: `native_agent_turn_via_router_journey`（E 级）|
 | | 原生内核 gated call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/fail-closed）|
 | | 目录浏览器加项目 | ✅ | sebas-webui `api_endpoints_test`（browse-dirs）|
-| | 无 prompt 新会话 | ✅ | J: `workbench_aggregate_journey`（占位会话）|
+| | 无 prompt 新会话（interaction-polish 修订：创建收拢进项目行「+」对话框）| ✅ | J: `workbench_aggregate_journey`（占位会话）、`creation_dialog_journey`（对话框确认 wire 面：agent+mode 落表、确认即激活、首条消息 spawn、未知 agent 4xx）；前端 `project-rail.test.ts`（+ 打开对话框/确认创建/失败留盒/取消不创建）、`new-session-dialog.test.ts`（agent 必选禁用/预选/目录两级/诚实降级）；browser `first-paint.spec.ts`、`session-roundtrip.spec.ts`（对话框旅程）|
 | | 会话归档 | ✅ | sebas-webui `api_endpoints_test`（archive 路由）|
 | | 历史组即归档 | ✅ | 同上 |
 | | 归档过期 | ✅ | src `archive.rs` 内联测试 |
-| | 执行体可用性如实呈现 | ✅ | 前端 `workbench-composer.test.ts`（native 不可用禁用+cause、可用可选、下次 poll 恢复无需重载）；browser `first-paint.spec.ts`（native option disabled + unavailable + provider label 诚实降级）|
+| | 执行体可用性如实呈现 | ✅ | 前端 `workbench-composer.test.ts`（native 不可用禁用+cause、可用可选、下次 poll 恢复无需重载）；browser `first-paint.spec.ts`（native option 在创建对话框内 disabled + unavailable，composer 不再承载 provider label）|
 | | 原生内核模型选择 | ✅ | src `agent_backend.rs`（`dual_set_session_model_routes_native_key_and_rejects_unknown`、spawn 期模型落快照 override）；前端 `workbench-composer.test.ts` 模型下拉/切换 |
-| | 会话前模型目录（backend catalog）| ✅ | 前端 `workbench-composer.test.ts`（creation mode offers the two-level Settings catalog、无目录诚实标注、读失败 4.4）；`model-catalog.test.ts`（providers × models 展平、空目录不造假）；browser `conversation.spec.ts`「creation mode offers provider → model from the Settings catalog」|
+| | 会话前模型目录（backend catalog；interaction-polish 修订：目录选择移入创建对话框，loadModelCatalog 共用）| ✅ | 前端 `new-session-dialog.test.ts`（两级选择/预选/目录不可得诚实标注/不伪造 default）；`model-catalog.test.ts`（providers × models 展平、空目录不造假、loadModelCatalog 读取失败不抛）；browser `conversation.spec.ts`「the creation dialog offers provider → model from the Settings catalog」|
 | | Rail project removal entry（审计补行；rail-declutter-unread D5 修订）| ✅ | `session_endpoints_test::projects_remove_project / projects_remove_unknown_returns_404 / projects_remove_blocked_while_live_sessions_exist`（有存活会话 409 typed rejection 带会话数、无会话放行）；browser `projects.spec.ts`「removed project disappears」+「… menu removal: blocked while live sessions exist」（… 菜单 → 移除弹窗就地预检 + 后端拒绝一致）；前端 `project-rail.test.ts`（预检文案/旧「迁移 Inbox」文案废除/拒绝内联）|
 | | Rail session close entry（turn-queue 修订；rail-declutter-unread 3.2 修订）| ✅ | 前端 `project-rail.test.ts`（close 移入会话行 `…` 菜单：inactive 直删/active 先确认/关闭 danger、点名丢弃 pending 条数/无 pending 省略、无行内直删按钮）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（close names the loss，经 `…` 菜单）|
 | | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test`（占位首条消息必须 SpawnNew、0-turn 占位同样 spawn、标记 dump/restore 存活）；J: workbench（占位会话）；browser `session-roundtrip.spec.ts` |
-| | Session agent binding is immutable（wire-fix 补行）| ✅ | 前端 `workbench-composer.test.ts`（agent 只读小字、无任何 agent 选择器）；browser `models.spec.ts`「detail head shows the bound agent with the lock affordance」|
+| | Session agent binding is immutable（wire-fix 补行；interaction-polish 修订：agent 选择唯一入口在创建对话框）| ✅ | 前端 `workbench-composer.test.ts`（🔒 只读小字、工具条无任何 agent/创建/设置控件）、`new-session-dialog.test.ts`（对话框是唯一选 agent 处）；browser `models.spec.ts`「detail head shows the bound agent with the lock affordance」|
 | | Composer submissions always deliver（wire-fix 补行）| ✅ | `spawn_race_test`（占位标记一次性消费/生产发射路径 WebSpawn 携带 kind/model/0-turn 占位同样 spawn——「输入框发不出消息」回归锁）；E `session_round_trip_via_webui_http` |
-| | Project-level default agent（wire-fix 补行）| ✅ | `session_endpoints_test::project_default_agent_follows_last_use`（创建即记录/跟随最近一次/项目间互不串/无记录如实空，2026-09-11 补）；前端 `workbench-composer.test.ts`（projectDefaultAgent 预选、null 保持现选）|
+| | Project-level default agent（wire-fix 补行）| ✅ | `session_endpoints_test::project_default_agent_follows_last_use`（创建即记录/跟随最近一次/项目间互不串/无记录如实空，2026-09-11 补）；前端 `new-session-dialog.test.ts`（defaultAgent 预选、无记录兜底首个可达）、`project-rail.test.ts`（对话框绑定项目 default_agent）|
 | | Pending submissions stack above the composer（turn-queue 新增）| ✅ | 前端 `pending-stack.test.ts`（顺序/disposition 措辞/priority 钉住/移除与重排和解）；browser `pending-stack.spec.ts`（忙中提交上栈、刷新存活、close 点名损失）|
 | | Workbench renders the focused session as a conversation（conversation-view 新增）| ✅ | 前端 `transcript-view.test.ts`（两侧交替、N chunk 一气泡、tool 组可展开不混排、submission 回合开始即现）；`dashboard.test.ts`（聚焦会话内联 conversation）；browser `conversation.spec.ts`（两侧按序交替 + gated tool 组展开）|
 | | Workbench is the single conversation surface（conversation-view 新增）| ✅ | 前端 `project-rail.test.ts`（点击就地切换留在 workbench 3.1、current 标记跟随焦点指针 3.2）；`dashboard.test.ts`（深链 `/sessions/:key` 经 deepLinkKey 渲染、聚焦会话 head 带 close+archive）；browser `conversation.spec.ts`「rail click focuses the session in place on the workbench」|
@@ -162,6 +162,10 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | webui：会话中途切换 mode | ✅ | 同上（SetMode 经 SendAcp）；E `mode_mid_session_switch`（journal 记录运行时切换 + effective 落定）|
 | | webui：会话 mode 在 dashboard 可见可切 | ✅ | 前端 `dashboard.test.ts`（mode-tag 本机/远端同通道）；browser `mode.spec.ts`（head tag + mode-switch 切换）|
 | | webui：SessionBackend seam 承载 mode | ✅ | `spawn_race_test`（WebSpawn 携带 mode=None 透传）；src `core_channel/tests.rs`（Spawn/CreatePlaceholder/SetSessionMode 帧分发）|
+| | Submit control reflects submission and turn state（interaction-polish 新增）| ✅ | 前端 `workbench-composer.test.ts`（disabled/send/sending/stop/queued 逐态、停止走 cancelSession、排队复用 sendMessage、turn 结束复位）；browser `submit-control.spec.ts`（working 停止方块 → cancel 链路 → 会话存活可继续；有字排队形态 → pending-stack；取消不丢排队提交）|
+| | Composer toolbar composition（interaction-polish 新增）| ✅ | 前端 `workbench-composer.test.ts`（左下 🔒 agent、右下模型芯片+发送；无创建/设置/mode 控件）；browser `mode.spec.ts`（composer 无 mode 控件）、`first-paint.spec.ts`（无聚焦 = 指向 rail 创建入口的提示，无任何创建控件）|
+| | Workbench layout is resizable（interaction-polish 新增）| ✅ | 前端 `split-persist.test.ts`（假 storage 持久化与恢复、180–480/120–半高 clamp、隐私模式退化）、`app-shell.test.ts`（frame 分割面板 + railWidth clamp）、`dashboard.test.ts`（vsplit + composerHeight）；browser `layout.spec.ts`（两道分割线拖拽、localStorage `sebas.rail-width`/`sebas.composer-height`、刷新恢复、<640px 禁拖退化）|
+| | Workbench regions read as floating islands（interaction-polish 新增）| ✅ | 前端 `app-shell.test.ts`（nav 圆角浮岛、无通高 border-right、frame 分割缝）；browser `layout.spec.ts`（canvas 与浮岛异色、分隔缝 rest 透明 hover 亮起、舞台浮岛在位）|
 
 ### ④ 项目管理（核心）
 
@@ -197,7 +201,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | core-session-channel | Core 是唯一会话权威 | ✅ | src `core_channel/tests.rs`（`backend_methods_reach_the_right_handlers`、`client_converges_after_server_restart`：核心值权威、客户端收敛）|
 | | 通道传输与鉴权 | ✅ | 同上（`missing_handshake_closes_connection_without_response`、`wrong_and_empty_secrets_are_rejected`、`cross_uid_rejected_live_process` 真实 fork+setuid 跨 uid 拒绝，`#[ignore]` root 实测通过；stale socket 回收：同路径重启用例 + E `no_secret_assembly`）；harden：密钥文件 0600 |
 | | 会话观察方法 | ✅ | `subscription_delivers_every_mutation_after_the_snapshot`（snapshot 先行）、`lagging_subscriber_is_disconnected_and_can_resnapshot`；快照含执行体/模型（`create_placeholder_wires_a_zero_turn_session`）+ pending（`pending_submissions_visible_and_manageable_over_the_channel`，turn-queue 修订）|
-| | 会话驱动方法 | ✅ | `backend_methods_reach_the_right_handlers`、`create_placeholder_wires_a_zero_turn_session`、`cancel_rejects_unknown_and_accepts_live_session`、`ensure_message_attachments_are_validated`（缺失附件 typed rejection + 合法附件 Ok）；pending 管理两 scenario（移除 + 已开始拒绝，turn-queue 修订，同上用例）；E `session_round_trip_via_webui_http` |
+| | 会话驱动方法 | ✅ | `backend_methods_reach_the_right_handlers`、`create_placeholder_wires_a_zero_turn_session`、`cancel_rejects_unknown_and_idle_and_cancels_working`（interaction-polish 修订：未知/空闲 typed 拒绝 + WORKING 取消 Ok 且会话保留）、`ensure_message_attachments_are_validated`（缺失附件 typed rejection + 合法附件 Ok）；pending 管理两 scenario（移除 + 已开始拒绝，turn-queue 修订，同上用例）；E `session_round_trip_via_webui_http`、`cancel_typed_rejections_over_webui_http`、`cancel_interrupts_in_flight_turn_over_webui_http`（stub 级中断，如实标注）、`cancel_without_core_answers_503` |
 | | 回合内容获取 | ✅ | `backend_methods_reach_the_right_handlers`（turns 增量位置语义）；`session_events_test::tool_events_are_labelled_tool_in_turn_content`（submission 与 tool 条目可区分，conversation-view 修订）、`turns_are_incremental_by_position`；`full_e2e_test` 回合内容回读 |
 | | 核心不可达诚实降级 | ✅ | `unreachable_causes_are_distinct`、`client_converges_after_server_restart`；E `reachability_flips_across_core_restart`、`secret_rotation_self_heal_across_core_restart`；webui 全局横幅 + browser `deployment.spec.ts`（横幅 cause/composer 门禁/恢复消隐）|
 | | 协议使用中性会话键 | ✅ | `full_e2e_test`（ChannelKey 语义）；`core_channel/protocol.rs` 内联测试 |

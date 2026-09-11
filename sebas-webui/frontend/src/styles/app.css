@@ -10,7 +10,7 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background-color: var(--sebas-bg);
+  background-color: var(--sebas-canvas);
   color: var(--sebas-text);
   font-family: var(--sebas-font-sans);
   font-size: 15px;

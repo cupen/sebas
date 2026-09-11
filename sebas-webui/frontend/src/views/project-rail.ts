@@ -22,12 +22,13 @@ import {
   type ProjectBranchInfo,
   type SessionRow,
   type ArchiveEntry,
-  type AgentKindInfo,
   type NodeInfo,
 } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
+import './new-session-dialog.js'
 import '@awesome.me/webawesome/dist/components/dropdown/dropdown.js'
 import '@awesome.me/webawesome/dist/components/dropdown-item/dropdown-item.js'
 
@@ -52,6 +53,33 @@ export function truncateName(label: string, cap = NAME_CAP_CODEPOINTS): string {
   return cps.slice(0, cap).join('') + '…'
 }
 
+/**
+ * 会话名 = 首条用户消息预览；零轮占位回退短 id / 键尾段（D10）。
+ *
+ * workbench-interaction-polish 3.2 修复：0-turn 占位（无 prompt、无
+ * session_id）在 /api/sessions 行上三者全空（`chat_id` 本就不在该 payload
+ * 的词表里）——回退到键的 reference 尾段，`[...undefined]` 曾把整棵 rail
+ * 渲染炸掉。模块级导出：/sessions 表格的卡片链接同源复用。
+ */
+export function fullSessionLabel(row: SessionRow): string {
+  return (
+    row.prompt_preview ??
+    row.session_id_short ??
+    row.chat_id ??
+    decodeSessionKeyTail(row.encoded_key)
+  )
+}
+
+/** `web%00web-1709…-4` → `web-1709…-4`（键尾段 = 占位会话的可读短名）。 */
+function decodeSessionKeyTail(encodedKey: string): string {
+  try {
+    const parts = decodeURIComponent(encodedKey).split('\0')
+    return parts[parts.length - 1] || encodedKey
+  } catch {
+    return encodedKey
+  }
+}
+
 /** unix 秒 → 粗粒度相对时间（离线成因文案用；不引入日期库）。 */
 function relativeTime(unixSecs: number): string {
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs)
@@ -67,8 +95,6 @@ export class SebasProjectRail extends LitElement {
 
   @state() private projects: Project[] = []
   @state() private sessions: SessionRow[] = []
-  /** Agent catalog（/api/agents）：「+」创建占位会话时的 agent 解析数据源。 */
-  @state() private agents: AgentKindInfo[] = []
   /**
    * 焦点会话指针（workbench-conversation-view 3.2）：/api/sessions 响应的
    * `active_session_key`——rail 的「当前」标记看它，不看 location.pathname。
@@ -109,18 +135,19 @@ export class SebasProjectRail extends LitElement {
   @state() private removeError: string | null = null
   @state() private removing = false
 
+  // ─── New session dialog（workbench-interaction-polish 3.2/D2）──────────
+  /** 对话框当前绑定的项目（`null` = 关闭）。唯一创建入口：项目行「+」。 */
+  @state() private newSessionTarget: Project | null = null
+  /** 创建请求在途（防双击重复创建）。 */
+  @state() private creatingSession = false
+  /** 创建失败：留在对话框内就地呈现。 */
+  @state() private newSessionError: string | null = null
+
   private fetchSeq = 0
   private unsubscribe?: () => void
   /** 节点可用性轮询定时器（8.2；disconnectedCallback 清理）。 */
   private nodeTimer: number | undefined = undefined
   private refetchBound = (): void => { void this.refresh() }
-
-  private async loadAgents(): Promise<void> {
-    try {
-      const d = await api.agents()
-      this.agents = d.agents
-    } catch { this.agents = [] }
-  }
 
   static styles = css`
     :host { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -293,10 +320,9 @@ export class SebasProjectRail extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     void this.refresh()
-    void this.loadAgents()
     this.unsubscribe = sharedWs.subscribe(this.refetchBound)
     window.addEventListener('sebas:refetch', this.refetchBound)
-    // 8.2：节点离线/回归没有对应的会话事件，靠轮询让项目行与 composer 的
+    // 8.2：节点离线/回归没有对应的会话事件，靠轮询让项目行与「+」的
     // 可用态**免刷新**翻转。
     this.nodeTimer = window.setInterval(() => { void this.refresh() }, NODE_POLL_MS)
   }
@@ -422,35 +448,43 @@ export class SebasProjectRail extends LitElement {
 
   sessionsFor(id: string) { return this.sessions.filter((r) => r.project_id === id) }
 
-  /**
-   * 「+」创建 0-turn 占位会话（workbench-agent-wire-fix D5/D6）：agent 取
-   * 项目 default_agent（该项目最近一次用过的 agent），无记录时取首个可达
-   * agent；创建后留在工作台路由——create_session 的 set_focus 会让 summary
-   * 的 active_session_key 驱动 composer 进入跟随模式，不再跳深链再跳回。
-   */
-  private async createSession(e: Event, p: Project) {
-    e.stopPropagation()
-    this.onSelect(p.path)
-    // 8.2：节点不可用时不提交（提交只会 bounce）。成因就地说明，点名节点。
-    const st = this.nodeStatus(p.node_id)
-    if (st.status !== 'online') {
-      this.error = `无法在项目 ${p.name} 上新建会话：${st.cause ?? `节点 ${p.node_id ?? LOCAL_NODE} 不可用`}`
-      return
-    }
-    try {
-      const agent = p.default_agent || this.firstReachableAgent()
-      if (!agent) {
-        this.error = '没有可用 agent（/api/agents 列表为空或全部不可达）'
-        return
-      }
-      await api.createSession({ projectId: p.id, agent })
-      navigate('/')
-    } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
+  // ─── New session dialog（workbench-interaction-polish 3.2，design D2）──
+  // 项目行「+」是唯一创建入口：打开对话框（agent 必选 + 两级模型 + mode），
+  // 确认后 POST /api/sessions 建 0-turn 占位（服务端 set_focus），沿用
+  // create 后的就地聚焦链路——create_session 的焦点指针会让 summary 的
+  // active_session_key 驱动 composer 进入跟随模式。取消则什么都不发生。
+  private openNewSessionDialog(p: Project): void {
+    this.newSessionTarget = p
+    this.newSessionError = null
   }
 
-  /** 首个可达 agent id（catalog 加载失败/全不可达时为空串）。 */
-  private firstReachableAgent(): string {
-    return this.agents.find((a) => a.reachable)?.id ?? ''
+  private closeNewSessionDialog(): void {
+    this.newSessionTarget = null
+    this.newSessionError = null
+  }
+
+  private async confirmNewSession(e: CustomEvent<NewSessionDialogConfirm>): Promise<void> {
+    const p = this.newSessionTarget
+    if (!p || this.creatingSession) return
+    this.creatingSession = true
+    this.newSessionError = null
+    try {
+      await api.createSession({
+        projectId: p.id,
+        agent: e.detail.agent,
+        model: e.detail.model,
+        mode: e.detail.mode,
+      })
+      this.closeNewSessionDialog()
+      this.onSelect(p.path)
+      void this.refresh()
+      if (location.pathname !== '/') navigate('/')
+    } catch (err) {
+      // 失败留在对话框内就地呈现——不假装创建成功。
+      this.newSessionError = err instanceof Error ? err.message : String(err)
+    } finally {
+      this.creatingSession = false
+    }
   }
 
   // ─── Remove project（5.1；rail-declutter-unread D5 预检 + 后端强制）──
@@ -620,13 +654,9 @@ export class SebasProjectRail extends LitElement {
   }
 
   // ─── Renderers ──────────────────────────────────────────────────
-  /** 会话名 = 首条用户消息预览；零轮占位回退短 id / chat id（D10）。 */
-  private fullSessionLabel(row: SessionRow): string {
-    return row.prompt_preview ?? row.session_id_short ?? row.chat_id
-  }
 
   private renderSessionRow(row: SessionRow) {
-    const fullLabel = this.fullSessionLabel(row)
+    const fullLabel = fullSessionLabel(row)
     const label = truncateName(fullLabel)
     // 当前标记由焦点指针驱动（3.2）：不再比较 location.pathname。
     const current = this.focusedKey === row.encoded_key
@@ -724,7 +754,10 @@ export class SebasProjectRail extends LitElement {
               title=${nodeOk ? `New session in ${p.name}` : `无法新建会话：${st.cause ?? `节点 ${nodeLabel} 不可用`}`}
               aria-label="New session in ${p.name}"
               ?disabled=${!nodeOk}
-              @click=${(e: Event) => this.createSession(e, p)}
+              @click=${(e: Event) => {
+                e.stopPropagation()
+                this.openNewSessionDialog(p)
+              }}
             >+</button>
           </span>
         </div>
@@ -834,7 +867,7 @@ export class SebasProjectRail extends LitElement {
       <wa-dialog label="Close session" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${() => this.closeConfirmDialog()}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
-            关闭会话 <b>${this.closeTarget ? truncateName(this.fullSessionLabel(this.closeTarget)) : ''}</b>？
+            关闭会话 <b>${this.closeTarget ? truncateName(fullSessionLabel(this.closeTarget)) : ''}</b>？
           </p>
           <p style="font-size:0.8rem;color:var(--sebas-text-dim);margin:0;">
             该会话的 agent 子进程正在运行，关闭会终止子进程并移除会话映射，不可撤销。
@@ -851,7 +884,21 @@ export class SebasProjectRail extends LitElement {
         </div>
         <wa-button slot="footer" variant="danger" @click=${() => void this.confirmCloseSession()}>关闭会话</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeConfirmDialog()}>取消</wa-button>
-      </wa-dialog>`
+      </wa-dialog>
+
+      <!-- 创建会话对话框（workbench-interaction-polish D2）：唯一可选 agent
+           的地方；项目行「+」打开，确认后由 rail 落 POST /api/sessions。 -->
+      <sebas-new-session-dialog
+        data-testid="new-session-dialog"
+        .open=${this.newSessionTarget !== null}
+        .projectId=${this.newSessionTarget?.id ?? null}
+        .projectName=${this.newSessionTarget?.name ?? null}
+        .defaultAgent=${this.newSessionTarget?.default_agent ?? null}
+        .error=${this.newSessionError}
+        @dialog-confirm=${(e: CustomEvent<NewSessionDialogConfirm>) =>
+          void this.confirmNewSession(e)}
+        @dialog-cancel=${() => this.closeNewSessionDialog()}
+      ></sebas-new-session-dialog>`
   }
 }
 

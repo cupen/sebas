@@ -155,22 +155,28 @@ test.describe('对话视图（workbench-conversation-view）', () => {
   })
 
   test.describe('模型两级选择', () => {
-    test('creation mode offers provider → model from the Settings catalog; empty catalog is stated honestly', async ({
+    test('the creation dialog offers provider → model from the Settings catalog; empty catalog is stated honestly', async ({
       page,
     }) => {
-      const workbench = new Workbench(page)
+      const rail = new ProjectRail(page)
 
       await resetState(page.request)
+      const { name: projectName } = await ensureSceneProject(page.request)
 
-      // Empty catalog first: the selector states unavailability honestly
+      // Empty catalog first: the dialog states unavailability honestly
       // instead of rendering an empty or fabricated list (4.4).
       await page.goto('/')
-      await expect(workbench.composer).toBeVisible()
-      await expect(workbench.catalogUnavailable()).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.providerSelect()).toHaveCount(0)
+      await rail.openNewSessionDialog(projectName)
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-catalog-unavailable"]'),
+      ).toBeVisible({ timeout: 15_000 })
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
+      ).toHaveCount(0)
+      await rail.cancelNewSessionDialog()
 
       // Configure a catalog (the same write path the Settings Models editor
-      // uses) — the composer must reflect it without any session existing.
+      // uses) — the dialog must reflect it without any session existing.
       // Re-run safety: drop a leftover from an earlier journey first.
       await page.request.delete('/router/api/providers/catalog-provider')
       const created = await page.request.post('/router/api/providers', {
@@ -185,18 +191,26 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       })
       expect(created.ok()).toBe(true)
 
-      await page.reload()
-      await expect(workbench.composer).toBeVisible()
+      // Reopen the dialog (sebas:refetch re-runs the shared catalog load).
+      await rail.openNewSessionDialog(projectName)
       // Two levels: provider first…
-      await expect(workbench.providerSelect()).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.providerSelect()).toContainText('catalog-provider')
+      const providerSelect = rail
+        .newSessionDialog()
+        .locator('[data-testid="dialog-provider-select"]')
+      await expect(providerSelect).toBeVisible({ timeout: 15_000 })
+      await expect(providerSelect).toContainText('catalog-provider')
       // …then the model of the chosen provider.
-      await expect(workbench.catalogModelSelect()).toBeVisible()
-      await expect(workbench.catalogModelSelect()).toContainText('cat-small')
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+      ).toBeVisible()
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+      ).toContainText('cat-small')
 
       // Clean up: the provider lives in the SHARED core store — leaving it
       // behind would flip later journeys' honest "no provider configured"
       // first-paint assertions.
+      await rail.cancelNewSessionDialog()
       const removed = await page.request.delete('/router/api/providers/catalog-provider')
       expect(removed.ok()).toBe(true)
 

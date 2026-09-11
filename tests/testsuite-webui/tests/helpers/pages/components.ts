@@ -105,6 +105,55 @@ export class ProjectRail {
   }
 
   /**
+   * The creation dialog（workbench-interaction-polish D2：项目行「+」打开，
+   * agent 必选 + 两级模型 + mode）——hosted by the rail; Web Awesome renders
+   * it in the top layer when open.
+   */
+  newSessionDialog(): Locator {
+    return this.page.locator('sebas-new-session-dialog [data-testid="new-session-dialog"]')
+  }
+
+  /** The `+` trigger on a project row (hover-revealed like the … menu). */
+  async openNewSessionDialog(projectName: string): Promise<void> {
+    const row = this.projectRow(projectName)
+    await row.hover()
+    await row.locator('button[aria-label^="New session"]').click()
+    await expect(
+      this.newSessionDialog().locator('h2, [role="heading"]').first(),
+    ).toBeVisible()
+  }
+
+  /** Pick an agent in the dialog (wa-select value + standard change event). */
+  async pickDialogAgent(agent: string): Promise<void> {
+    await this.newSessionDialog()
+      .locator('[data-testid="dialog-agent-select"]')
+      .evaluate((el, v) => {
+        ;(el as unknown as { value: string }).value = v as string
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }, agent)
+  }
+
+  /** Pick a permission mode ('' = agent default = omit the field). */
+  async pickDialogMode(mode: string): Promise<void> {
+    await this.newSessionDialog()
+      .locator('[data-testid="dialog-mode-select"]')
+      .evaluate((el, v) => {
+        ;(el as unknown as { value: string }).value = v as string
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }, mode)
+  }
+
+  /** Confirm the creation dialog. */
+  async confirmNewSessionDialog(): Promise<void> {
+    await this.newSessionDialog().locator('[data-testid="dialog-confirm"]').click()
+  }
+
+  /** Cancel the creation dialog (nothing is created). */
+  async cancelNewSessionDialog(): Promise<void> {
+    await this.newSessionDialog().locator('[data-testid="dialog-cancel"]').click()
+  }
+
+  /**
    * Add a project by typing its absolute path (the dialog's manual path
    * input — the same dialog that hosts the folder picker). The path field's
    * `@input` handler gates the Add button, so we type character-by-character
@@ -233,8 +282,12 @@ export class SettingsModal {
     this.closeButton = page.locator('sebas-settings-modal button.close[aria-label="Close settings"]')
   }
 
-  async openViaComposer(): Promise<void> {
-    await this.page.locator('sebas-workbench-composer .settings-link').click()
+  async openViaSidebar(): Promise<void> {
+    // workbench-interaction-polish 4.1：composer 不再有 settings 入口——
+    // Settings 归 app shell 侧栏底部（pinned footer）。
+    await this.page
+      .locator('sebas-app .sidebar-footer button[aria-label="Open settings"]')
+      .click()
     await expect(this.panel).toBeVisible()
   }
 

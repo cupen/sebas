@@ -55,6 +55,9 @@ fn rejection_response(rej: SessionRejection) -> Response {
             | crate::session_backend::PendingReason::PriorityConflict => StatusCode::CONFLICT,
             crate::session_backend::PendingReason::OutOfRange => StatusCode::BAD_REQUEST,
         },
+        // workbench-interaction-polish 1.1：空闲会话的取消是可重试的冲突——
+        // 会话还在、只是没有在飞 turn 可停（409 而非 404，与「未知会话」区分）。
+        SessionRejection::Idle { .. } => StatusCode::CONFLICT,
     };
     api_error(status, rej.to_string())
 }
@@ -735,6 +738,21 @@ pub async fn send_message(
         return rejection_response(rej);
     }
     (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+}
+
+/// POST /api/sessions/{key}/cancel — interrupt the session's in-flight turn
+/// over the core channel (workbench-interaction-polish 1.2，design D5)。
+/// 会话与子进程存活（interrupt-and-heal）；排队提交不随取消丢弃。类型化
+/// 拒绝：未知 key 404、空闲会话（无在飞 turn）409、core 不可达 503。
+pub async fn cancel_session(State(state): State<WebUiState>, Path(key): Path<String>) -> Response {
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    match state.backend.cancel(session_key).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "cancelled" }))).into_response(),
+        Err(rej) => rejection_response(rej),
+    }
 }
 
 /// POST /api/sessions/{key}/close — kill and remove a session. Returns 200

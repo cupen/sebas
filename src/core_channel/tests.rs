@@ -777,10 +777,14 @@ async fn ensure_message_spawns_unknown_key_and_message_still_rejects() {
     // 本测试环境（无子进程）不覆盖，由 process-e2e 套件覆盖。
 }
 
-/// （extract-im-service 2.2）Cancel：未知 key typed rejection；活跃会话 Ok
-/// 且会话保留（快照仍在）。
+/// （extract-im-service 2.2 + workbench-interaction-polish 1.1）Cancel：
+/// 未知 key → UnknownSession；活跃但空闲（card FSM 不在 WORKING）→ Idle
+/// typed 拒绝（不再伪造成功）；驱动到 WORKING 后 Cancel → Ok 且会话保留
+/// （快照仍在，interrupt-and-heal）。
 #[tokio::test]
-async fn cancel_rejects_unknown_and_accepts_live_session() {
+async fn cancel_rejects_unknown_and_idle_and_cancels_working() {
+    use sebas_acp::claude::session::AcpEvent;
+
     let dir = tempfile::tempdir().unwrap();
     let core = start_core(dir.path()).await;
     let backend = CoreChannelBackend::new(core.path.clone(), SECRET.into());
@@ -796,7 +800,7 @@ async fn cancel_rejects_unknown_and_accepts_live_session() {
         other => panic!("expected UnknownSession, got {other:?}"),
     }
 
-    // spawn + activate → 活跃会话；Cancel → Ok 且会话仍在快照中。
+    // spawn + activate → 活跃但空闲：card FSM 尚无 WORKING 态 → Idle 拒绝。
     let key = backend.spawn("work".into(), None).await.expect("spawn");
     let (channel_key, _) = core
         .handle
@@ -809,10 +813,30 @@ async fn cancel_rejects_unknown_and_accepts_live_session() {
     core.handle
         .activate(&channel_key, "s-cancel".into(), None, None)
         .await;
+    let err = backend
+        .cancel(key.clone())
+        .await
+        .expect_err("idle session must reject, not fabricate success");
+    match err {
+        SessionRejection::Idle { .. } => {}
+        other => panic!("expected Idle, got {other:?}"),
+    }
+
+    // 首个 TextDelta 把 card FSM 推到 WORKING（lazy seed → SEED → WORKING，
+    // 与回合队列的 in-flight 判定同源）→ Cancel → Ok。
+    core.handle
+        .apply_event(
+            "s-cancel",
+            &AcpEvent::TextDelta {
+                session_id: "s-cancel".into(),
+                delta: "streaming".into(),
+            },
+        )
+        .await;
     backend
         .cancel(key.clone())
         .await
-        .expect("cancel live session");
+        .expect("cancel working session");
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1, "cancel keeps the session: {snap:?}");
 }

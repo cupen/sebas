@@ -4,12 +4,15 @@
  * 侧栏承载项目树与 pinned 在底部的 Settings 入口，旧的 NAV_ITEMS 链接列表
  * 已删除（settings/router/about 并入设置弹窗与工作台，admin 直接移除）。
  *
+ * workbench-interaction-polish D1/D6：侧栏|主区之间是一道可拖拽的
+ * `wa-split-panel` 分割线（180–480px clamp，`sebas.rail-width` 记忆），
+ * 底色为 canvas token、侧栏与主区以圆角浮岛浮在其上——区域分隔靠留缝与
+ * 色阶，不再靠通高硬线；分割缝 rest 透明、hover 亮起把手。窄屏（<640px）
+ * 分割线禁拖、布局退化为既有纵向堆叠。
+ *
  * Link interception is document-level (composedPath) so anchors rendered
  * inside any view's shadow root navigate SPA-side too — shadow retargeting
- * hides them from a shell-scoped listener. The workbench composer's
- * "settings →" control likewise crosses shadow boundaries: it dispatches a
- * bubbling composed `open-settings` event that <main> catches here to open
- * the centered settings modal (the old `/settings` route redirects to `/`).
+ * hides them from a shell-scoped listener.
  */
 
 import { LitElement, css, html, nothing } from 'lit'
@@ -17,12 +20,21 @@ import { customElement, state } from 'lit/decorators.js'
 import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
 import { api, setUnauthorizedHandler } from './api/client.js'
 import { icon } from './components/icons.js'
+import {
+  clampRailWidth,
+  isNarrowViewport,
+  loadRailWidth,
+  onNarrowChange,
+  RAIL_DEFAULT_PX,
+  saveRailWidth,
+} from './views/split-persist.js'
 
 // The sidebar tree + settings modal are shell-owned; the outlet views are
 // registered in main.ts.
 import './views/project-rail.js'
 import './views/settings-modal.js'
 import './views/login-view.js'
+import '@awesome.me/webawesome/dist/components/split-panel/split-panel.js'
 
 // Exported for tests: the route resolution audit iterates these. IA v2 keeps
 // only the workbench, the all-sessions table and session deep links;
@@ -59,6 +71,13 @@ export class SebasApp extends LitElement {
   /** Whether the centered settings modal is open (sidebar entry toggles it). */
   @state() private settingsOpen = false
   /**
+   * 侧栏宽度（px；workbench-interaction-polish 5.1/D1）：localStorage 记忆，
+   * 拖拽 rail|main 分割线时经 clamp 后写回。
+   */
+  @state() private railWidth: number = loadRailWidth() ?? RAIL_DEFAULT_PX
+  /** 窄屏（<640px）：分割线禁拖，布局退化既有纵向堆叠。 */
+  @state() private narrow: boolean = isNarrowViewport()
+  /**
    * `/ws` 断线中（add-webui-allowed-roots D6）：共享 WS 客户端经
    * `sebas:ws-state` 广播连接状态，顶部横幅提示操作者当前视图可能冻结，
    * 重连成功即消失并触发 `sebas:refetch` 刷新。
@@ -79,34 +98,75 @@ export class SebasApp extends LitElement {
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
   private onClick: (e: MouseEvent) => void = () => {}
+  /** 窄屏媒体查询退订句柄（5.1）。 */
+  private unlistenNarrow: (() => void) | null = null
+
+  /**
+   * 拖拽 rail|main 分割线（5.1/D1）：换算 px、clamp、写 localStorage 并
+   * 同步状态（position-in-pixels 绑定随之更新）。初始化时像素/百分比换算
+   * 可能短暂产生非有限值——忽略，绝不拿垃圾值覆盖已存的宽度。
+   */
+  private onRailReposition = (e: Event): void => {
+    const panel = e.currentTarget as HTMLElement & { positionInPixels: number }
+    const raw = panel.positionInPixels
+    if (!Number.isFinite(raw)) return
+    const px = clampRailWidth(raw)
+    this.railWidth = px
+    saveRailWidth(px)
+  }
 
   static styles = css`
     :host {
-      /* 应用框架（预览原型同款）：100vh 固定高度 + overflow hidden，
-         侧栏与出口区各自内部滚动，页面本身不滚。环境渐变背景照抄
-         preview-app.ts。 */
+      /* 应用框架（预览原型同款）：100vh 固定高度 + overflow hidden。
+         workbench-interaction-polish D6：底色换 canvas token（比 surface 深
+         一档），rail / 主区以浮岛浮在其上，区域间用留缝替代通高硬线。 */
       display: flex;
       width: 100vw;
       height: 100vh;
       min-height: 0;
       overflow: hidden;
-      background: var(--sebas-bg);
+      background: var(--sebas-canvas, var(--sebas-bg));
       background-image: radial-gradient(1100px 480px at 82% -12%, rgba(91, 100, 242, 0.09), transparent 62%),
         radial-gradient(900px 420px at -8% 108%, rgba(56, 209, 221, 0.05), transparent 60%);
       background-attachment: fixed;
       color: var(--sebas-text);
     }
+    /* ── 侧栏|主区 wa-split-panel（5.1/D1）────────────────────────────
+       primary=start：窗口缩放时侧栏保持 px 宽度（180–480 由 --min/--max
+       兜底，状态里另有 clamp）。分隔缝 rest 态透明（浮岛留缝），hover 亮
+       起把手。 */
+    wa-split-panel.frame {
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      --min: 180px;
+      --max: 480px;
+      /* 缝宽 = 浮岛间距（rest 透明时就是纯留白）。 */
+      --divider-width: 12px;
+    }
+    wa-split-panel.frame::part(panel) {
+      min-width: 0;
+      min-height: 0;
+    }
+    wa-split-panel.frame::part(divider) {
+      background: transparent;
+      border-radius: var(--sebas-radius-full);
+      transition: background var(--sebas-dur) var(--sebas-ease);
+    }
+    wa-split-panel.frame::part(divider):hover {
+      background: var(--sebas-border-strong);
+    }
     nav {
-      width: 220px;
-      flex: 0 0 auto;
-      position: sticky;
-      top: 0;
-      height: 100vh;
+      /* 浮岛（D6）：圆角 surface 卡片浮在 canvas 上，与分割缝一起构成
+         区域分隔——不再有通高 1px 硬边。 */
       box-sizing: border-box; /* 高度吃进 padding，否则 100vh+padding 撑破框架 */
-      min-height: 0; /* flex 项默认 min-height:auto 会撑破 100vh 框架 */
+      min-height: 0; /* flex/grid 项默认 min-height:auto 会撑破 100vh 框架 */
+      min-width: 0;
+      margin: var(--sebas-space-3);
       overflow-y: auto;
       background: var(--sebas-surface);
-      border-right: 1px solid var(--sebas-border);
+      border: 1px solid var(--sebas-border);
+      border-radius: var(--sebas-radius-xl);
       padding: var(--sebas-space-4) var(--sebas-space-3);
       display: flex;
       flex-direction: column;
@@ -197,6 +257,8 @@ export class SebasApp extends LitElement {
       flex: 1;
       min-width: 0;
       min-height: 0;
+      /* 浮岛间距（D6）：左侧留给分割缝，其余三边自己留白。 */
+      margin: var(--sebas-space-3) var(--sebas-space-3) var(--sebas-space-3) 0;
       display: flex;
       flex-direction: column;
       position: relative; /* 断线横幅的定位上下文 */
@@ -279,17 +341,27 @@ export class SebasApp extends LitElement {
       :host {
         flex-direction: column;
       }
+      /* 窄屏退化（5.1：分割线不可拖、布局回到既有纵向堆叠）：grid 面板
+         改 flex 纵排、分隔缝隐藏；slot 面板恢复文档流高度。 */
+      wa-split-panel.frame {
+        display: flex;
+        flex-direction: column;
+        --divider-width: 0px;
+      }
+      wa-split-panel.frame::part(divider) {
+        display: none;
+      }
       nav {
-        position: static;
-        height: auto;
-        width: auto;
+        margin: var(--sebas-space-2);
         flex-direction: row;
         align-items: center;
         flex-wrap: wrap;
         gap: var(--sebas-space-1);
-        border-right: none;
-        border-bottom: 1px solid var(--sebas-border);
         padding: var(--sebas-space-3) var(--sebas-space-4);
+        overflow-y: visible;
+      }
+      main {
+        margin: 0 var(--sebas-space-2) var(--sebas-space-2);
       }
       .brand {
         padding: 0 var(--sebas-space-4) 0 0;
@@ -340,6 +412,8 @@ export class SebasApp extends LitElement {
     }
     window.addEventListener('popstate', this.onNavigateBound)
     document.addEventListener('click', this.onClick)
+    // 5.1：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
+    this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
     // add-webui-allowed-roots D6：WS 连接状态 → 全局断线横幅。
     window.addEventListener('sebas:ws-state', this.onWsState)
     // harden-core-channel-deployment 4.1：全局核心可达性轮询（与 composer
@@ -410,6 +484,7 @@ export class SebasApp extends LitElement {
   disconnectedCallback(): void {
     window.removeEventListener('popstate', this.onNavigateBound)
     document.removeEventListener('click', this.onClick)
+    this.unlistenNarrow?.()
     window.removeEventListener('sebas:ws-state', this.onWsState)
     if (this.corePollTimer !== undefined) {
       window.clearInterval(this.corePollTimer)
@@ -482,52 +557,59 @@ export class SebasApp extends LitElement {
       ></sebas-login>`
     }
     return html`
-      <nav aria-label="Primary">
-        <a class="brand" href="/" aria-label="sebas console home">
-          <span class="mark" aria-hidden="true">❯</span>
-          <span class="name">sebas<small>agent router</small></span>
-        </a>
-        <sebas-project-rail
-          .activePath=${this.selectedPath}
-          @rail-select=${this.onRailSelect}
-        ></sebas-project-rail>
-        <div class="spacer" aria-hidden="true"></div>
-        <div class="sidebar-footer">
-          ${this.authUsername
-            ? html`<button
-                class="settings-btn"
-                aria-label="Sign out"
-                title="退出登录"
-                @click=${() => void this.onLogout()}
-              >
-                ${icon('logout', 16)}<span class="settings-label">退出 (${this.authUsername})</span>
-              </button>`
-            : nothing}
-          <button
-            class="settings-btn"
-            aria-haspopup="dialog"
-            aria-label="Open settings"
-            @click=${() => (this.settingsOpen = true)}
-          >
-            ${icon('settings', 16)}<span class="settings-label">Settings</span>
-          </button>
-        </div>
-      </nav>
-      <main
-        @open-settings=${() => (this.settingsOpen = true)}
+      <wa-split-panel
+        class="frame"
+        orientation="horizontal"
+        primary="start"
+        position-in-pixels=${this.railWidth}
+        ?disabled=${this.narrow}
+        @wa-reposition=${this.onRailReposition}
       >
-        ${this.wsDown
-          ? html`<div class="ws-banner" role="alert">
-              ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
-            </div>`
-          : nothing}
-        ${this.coreUnreachableCause !== null
-          ? html`<div class="ws-banner core-banner${this.wsDown ? ' stacked' : ''}" role="alert" data-testid="core-unreachable-banner">
-              ${icon('alert', 14)}<span>核心不可达：${this.coreUnreachableCause}（会话与项目面暂不可用，页面浏览不受影响）</span>
-            </div>`
-          : nothing}
-        <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>
-      </main>
+        <nav slot="start" aria-label="Primary">
+          <a class="brand" href="/" aria-label="sebas console home">
+            <span class="mark" aria-hidden="true">❯</span>
+            <span class="name">sebas<small>agent router</small></span>
+          </a>
+          <sebas-project-rail
+            .activePath=${this.selectedPath}
+            @rail-select=${this.onRailSelect}
+          ></sebas-project-rail>
+          <div class="spacer" aria-hidden="true"></div>
+          <div class="sidebar-footer">
+            ${this.authUsername
+              ? html`<button
+                  class="settings-btn"
+                  aria-label="Sign out"
+                  title="退出登录"
+                  @click=${() => void this.onLogout()}
+                >
+                  ${icon('logout', 16)}<span class="settings-label">退出 (${this.authUsername})</span>
+                </button>`
+              : nothing}
+            <button
+              class="settings-btn"
+              aria-haspopup="dialog"
+              aria-label="Open settings"
+              @click=${() => (this.settingsOpen = true)}
+            >
+              ${icon('settings', 16)}<span class="settings-label">Settings</span>
+            </button>
+          </div>
+        </nav>
+        <main slot="end" @open-settings=${() => (this.settingsOpen = true)}>
+          ${this.wsDown
+            ? html`<div class="ws-banner" role="alert">
+                ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
+              </div>`
+            : nothing}
+          ${this.coreUnreachableCause !== null
+            ? html`<div class="ws-banner core-banner${this.wsDown ? ' stacked' : ''}" role="alert" data-testid="core-unreachable-banner">
+                ${icon('alert', 14)}<span>核心不可达：${this.coreUnreachableCause}（会话与项目面暂不可用，页面浏览不受影响）</span>
+              </div>`
+            : nothing}
+          <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>
+        </main>
+      </wa-split-panel>
       <sebas-settings-modal
         ?open=${this.settingsOpen}
         @close=${() => (this.settingsOpen = false)}

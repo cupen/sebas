@@ -145,15 +145,22 @@ describe('sidebar IA v2', () => {
     const root = el.shadowRoot!
     // jsdom 不解析 shadow 计算样式（:host 显示 inline、宽度 auto），改断言
     // 样式表规则与 DOM 契约（实机几何由浏览器验收覆盖）：框架 100vh 全屏
-    // flex、侧栏 220px + min-height:0、main/outlet 满幅 flex 列。
+    // flex；侧栏|主区是 wa-split-panel 分割（180–480px clamp）+ 圆角浮岛
+    // nav；main/outlet 满幅 flex 列。
     const styleText = [...root.querySelectorAll('style')]
       .map((s) => s.textContent ?? '')
       .join('\n')
     expect(styleText).toMatch(/:host\s*\{[^}]*display:\s*flex/)
     expect(styleText).toContain('height: 100vh')
     expect(styleText).toContain('overflow: hidden')
-    expect(styleText).toContain('width: 220px')
+    // 侧栏|主区分割（5.1/D1）：wa-split-panel 承载，clamp 边界在样式表里。
+    expect(root.querySelector('wa-split-panel.frame')).toBeTruthy()
+    expect(styleText).toMatch(/wa-split-panel\.frame\s*\{[^}]*--min:\s*180px/)
+    expect(styleText).toMatch(/wa-split-panel\.frame\s*\{[^}]*--max:\s*480px/)
+    // nav 变浮岛：圆角 + surface 底，不再有通高 border-right 硬线。
+    expect(styleText).toMatch(/nav\s*\{[^}]*border-radius:/)
     expect(styleText).toMatch(/nav\s*\{[^}]*min-height:\s*0/)
+    expect(styleText).not.toMatch(/nav\s*\{[^}]*border-right:/)
     expect(styleText).toMatch(/main\s*\{[^}]*display:\s*flex/)
     // main 不带 padding（通栏面板）；只有文档型路由的 .outlet.padded 有。
     expect(styleText).not.toMatch(/main\s*\{[^}]*padding:/)
@@ -162,6 +169,29 @@ describe('sidebar IA v2', () => {
     const outletRule = styleText.match(/\.outlet\s*\{[^}]*\}/)?.[0] ?? ''
     expect(outletRule).toContain('display: flex')
     expect(outletRule).not.toContain('max-width')
+    el.remove()
+  })
+
+  it('remembers and restores the rail width from storage (5.1/D1)', async () => {
+    // 组件初始化读 localStorage（此环境不可用 → 退默认 220px），拖拽回调
+    // 持久化走 split-persist（其单测覆盖假 storage 路径）；这里断言绑定
+    // 与监听在位。
+    const el = await mountShell()
+    const root = el.shadowRoot!
+    const frame = root.querySelector('wa-split-panel.frame') as HTMLElement & {
+      positionInPixels: number
+    }
+    expect(frame).toBeTruthy()
+    expect(frame.getAttribute('position-in-pixels')).toBe('220')
+    expect(frame.hasAttribute('disabled')).toBe(false)
+    expect((el as unknown as { railWidth: number }).railWidth).toBe(220)
+
+    // 拖拽回调：clamp 后写状态（此环境 storage 不可用，写入静默降级）。
+    const target = el as unknown as { onRailReposition: (e: Event) => void; railWidth: number }
+    target.onRailReposition({
+      currentTarget: { positionInPixels: 9999 },
+    } as unknown as Event)
+    expect(target.railWidth).toBe(480)
     el.remove()
   })
 

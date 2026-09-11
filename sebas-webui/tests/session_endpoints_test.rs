@@ -264,6 +264,113 @@ async fn close_malformed_key_returns_400() {
     );
 }
 
+// ---- workbench-interaction-polish 1.2: POST /api/sessions/{key}/cancel ----
+
+/// Cancel on a live-but-idle session: 409 typed rejection (idle ≠ fabricated
+/// success), and the session survives.
+#[tokio::test]
+async fn cancel_idle_session_returns_409_and_keeps_session() {
+    let (router, _rx, app) = fixture().await;
+    let k1 = key("a");
+    let encoded = encode(&k1);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("空闲"), "idle wording expected: {body}");
+    // The session is untouched by the rejected cancel.
+    let snap = router.map.snapshot_all().await;
+    assert_eq!(snap.len(), 3, "cancel must not remove anything: {snap:?}");
+}
+
+/// Cancel on an unknown session: 404 typed rejection.
+#[tokio::test]
+async fn cancel_unknown_session_returns_404() {
+    let (_router, _rx, app) = fixture().await;
+    let encoded = encode(&ChannelKey::feishu("oc_ghost", None));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Cancel on a working session (card FSM driven to WORKING): 200, mapping
+/// intact — the interrupt rides the driver's existing cancel semantics.
+#[tokio::test]
+async fn cancel_working_session_returns_200() {
+    let (router, mut rx, app) = fixture().await;
+    let k1 = key("a");
+    let encoded = encode(&k1);
+    // First TextDelta drives the card FSM SEED → WORKING (lazy seed), the
+    // same in-flight definition the turn queue uses.
+    router
+        .apply_event(
+            "s1",
+            &AcpEvent::TextDelta {
+                session_id: "s1".into(),
+                delta: "streaming".into(),
+            },
+        )
+        .await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("cancelled"), "{body}");
+    // The Out::SendAcp Cancel instruction was emitted toward the driver.
+    match rx.try_recv() {
+        Ok(sebas_dispatch::engine::Out::SendAcp {
+            cmd: sebas_acp::claude::session::AcpCommand::Cancel { session_id },
+            ..
+        }) => assert_eq!(session_id, "s1"),
+        other => panic!("expected SendAcp Cancel, got {other:?}"),
+    }
+}
+
+/// Cancel over a backend with the core down: honest 503, no success reported.
+#[tokio::test]
+async fn cancel_without_core_is_503() {
+    let app = core_down_app();
+    let encoded = encode(&ChannelKey::feishu("oc_any", None));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("socket absent"), "{body}");
+}
+
 #[tokio::test]
 async fn close_focused_session_clears_active_pointer() {
     let (router, _rx, app) = fixture().await;
@@ -1758,6 +1865,18 @@ impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
         sebas_webui::session_backend::CloseReport,
         sebas_webui::session_backend::SessionRejection,
     > {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "socket absent".into(),
+            },
+        )
+    }
+    // workbench-interaction-polish 1.2：cancel 走通道请求——core 不可达时
+    // 真实 CoreChannelBackend 报 Unavailable，503 语义与 message/close 同源。
+    async fn cancel(
+        &self,
+        _key: ChannelKey,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
         Err(
             sebas_webui::session_backend::SessionRejection::Unavailable {
                 cause: "socket absent".into(),

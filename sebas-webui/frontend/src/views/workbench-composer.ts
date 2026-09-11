@@ -1,19 +1,28 @@
 /**
- * Workbench composer (add-composer-agent-binding): the conversation-area
- * input is SESSION-SCOPED, in one of two modes.
+ * Workbench composer (workbench-interaction-polish D2–D4：纯跟随模式)。
  *
- * Follow-up mode (a session is focused): submit sends the message to the
- * focused session (`POST /api/sessions/{key}/message`) — it never spawns a
- * new one. The focused session's agent is fixed at creation time, so the
- * bottom toolbar shows the agent as small read-only text next to a model
- * dropdown (switching = `session/set_config_option` via the model endpoint).
+ * The conversation input is SESSION-SCOPED and always in follow-up mode:
+ * submit sends the message to the focused session
+ * (`POST /api/sessions/{key}/message`); it never spawns a new one — creation
+ * lives in the rail's creation dialog (`sebas-new-session-dialog`). The
+ * bottom toolbar places the locked agent identity (immutable since creation)
+ * at the LEFT and the model chip + submit control at the RIGHT. No settings
+ * entry (the app shell owns settings), no permission-mode control (creation
+ * mode choice lives in the dialog; mid-session switching stays in the
+ * session header), no creation controls of any kind.
  *
- * Creation mode (no focused session, or the operator pressed the "new
- * session" chip): submit spawns a session bound to the selected project (or
- * the inbox) with the agent picked in the toolbar — the only place an agent
- * can be chosen, because after spawn the binding is immutable
- * (workbench-agent-wire-fix: agent 必填、取自 /api/agents 唯一真源、创建后
- * 不可变；项目 default_agent 预选)。
+ * Submit control state machine (design D4, priority order):
+ *   POST 在途 (spinner) > turnInFlight && 无字 (红色停止方块 → cancel 链路)
+ *   > turnInFlight && 有字 (排队形态，提交复用既有 turn-queue)
+ *   > 有字 (send) > 禁用。
+ *
+ * Model chip (design D3): single chip at the bottom-right listing the
+ * focused session's `available_models` in a two-level menu grouped by
+ * provider — the grouping cross-references the shared Settings catalog
+ * (`loadModelCatalog`); ids the catalog cannot place fall into an explicit
+ * "会话提供" group at the bottom; a wholly unavailable catalog degrades to a
+ * flat list. Switching goes through `session/set_config_option`
+ * (`POST /api/sessions/{key}/model`). No models = explicit honest note.
  *
  * Reaches the agent-core reachability report from /api/summary to gate
  * submit when the core is offline (a submit would only bounce), re-polled
@@ -24,41 +33,34 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo,  } from '../api/client.js'
-import { toModelCatalog, type ModelCatalog } from '../api/model-catalog.js'
+import { api, type AgentKindInfo } from '../api/client.js'
+import {
+  loadModelCatalog,
+  groupSessionModels,
+  SESSION_PROVIDED_GROUP_LABEL,
+  type ModelCatalog,
+} from '../api/model-catalog.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
-import '@awesome.me/webawesome/dist/components/select/select.js'
-import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /** Reachability 轮询周期：断连横幅与 composer 禁用态的翻转延迟上限。 */
 const WORKBENCH_REACHABILITY_POLL_MS = 5_000
 
+/** 提交控件的五态（design D4 优先级渲染的判别值，测试按 data-state 断言）。 */
+type SubmitState = 'disabled' | 'send' | 'sending' | 'stop' | 'queued'
+
 @customElement('sebas-workbench-composer')
 export class SebasWorkbenchComposer extends LitElement {
   /**
-   * 选中项目的稳定 id（workbench-agent-wire-fix 2.5）；null = inbox，
-   * 创建请求省略 project_id。路径标识符不再上 wire。
-   */
-  @property({ attribute: false }) projectId: string | null = null
-  /** 选中项目的展示路径片段（binding 提示用；仅 UI 文案，非标识符）。 */
-  @property({ attribute: false }) projectDir: string | null = null
-  /** 项目级默认 agent（该项目最近一次创建会话所用；D5 预选用）。 */
-  @property({ attribute: false }) projectDefaultAgent: string | null = null
-  /**
-   * Read-only label like "anthropic / claude-sonnet-4-5". May be null
-   * while loading.
-   */
-  @property({ attribute: false }) providerLabel: string | null = null
-  /**
-   * Focused session's encoded key (add-composer-agent-binding). Non-null
-   * puts the composer in follow-up mode; null is creation mode.
+   * Focused session's encoded key. `null` = nothing focused: the composer
+   * renders no creation controls and an explicit hint pointing at the rail's
+   * creation entry (spec「no focus means the rail dialog」).
    */
   @property({ attribute: false }) sessionKey: string | null = null
   /**
    * Focused session's bound agent kind from the wire (`null` = the
-   * configured default kind). Only rendered in follow-up mode.
+   * configured default kind). Rendered read-only (🔒) at the bottom-left.
    */
   @property({ attribute: false }) agentKind: string | null = null
   /** Focused session's selectable models (agent configOptions). */
@@ -66,72 +68,443 @@ export class SebasWorkbenchComposer extends LitElement {
   /** Focused session's current model id. */
   @property({ attribute: false }) currentModel: string | null = null
   /**
-   * （add-remote-execution-node 8.2）选中项目的执行节点不可用（离线/吊销/
-   * 状态不可得）时的门禁：非 null 即禁用提交并说明成因。`null` = 节点可用
-   * （本机项目恒为 null）。
+   * （workbench-interaction-polish 4.3，design D4）聚焦会话是否有 turn 在飞
+   * （status == Working）。dashboard 供数；turn 结束（WS 推送）自动复位。
    */
-  @property({ attribute: false }) nodeBlocked: { nodeId: string; status: string; cause: string } | null =
-    null
+  @property({ type: Boolean }) turnInFlight = false
 
   @state() private text = ''
   @state() private sending = false
   @state() private error: string | null = null
-  /**
-   * 创建模式选定的 agent id（workbench-agent-wire-fix D2）：必填——词汇表
-   * 是 /api/agents 的 id 列（配置键名或 "native"），无隐式默认；未选择时
-   * 提交门禁禁用。会话创建后 agent 不可变。
-   */
-  @state() private agent = ''
-  /** Agent catalog（/api/agents；唯一可用性真源，含 native 行）。 */
+  /** Agent catalog（/api/agents）：跟随模式 🔒 标签的 display 名解析。 */
   @state() private agents: AgentKindInfo[] = []
   /**
-   * 创建模式两级选择的模型 id（workbench-conversation-view 4.3）：目录里
-   * 选定 provider 下的 model；提交时随创建请求下发。
-   */
-  @state() private model: string | null = null
-  /** 创建模式两级选择的一级：选定的 provider 名。 */
-  @state() private selectedProvider: string | null = null
-  /**
-   * 创建模式选定的权限模式（add-agent-mode-selection）：`null` =
-   * "agent 默认"（不发送 mode 字段）——下拉的缺省项。
-   */
-  @state() private createMode: string | null = null
-  /**
-   * Settings 目录（workbench-conversation-view 4.2/4.3，design D7/D8）：
-   * adapter 只规整不解释；`null` = 目录尚未取得。
+   * Settings 目录（design D3 分组交叉引用的数据源）：只用于把会话平铺模型
+   * id 归回 provider 组；目录不可得时芯片退化为平铺，不伪造分组。
    */
   @state() private catalog: ModelCatalog | null = null
-  /**
-   * 目录显式不可得（4.4）：读取失败（router/core 状态库不在跑）或目录为空
-   * ——下拉位置显示显式不可用提示并禁用，绝不伪造选项、绝不显示空列表。
-   */
-  @state() private catalogUnavailable = false
   /** Set when the agent core is unreachable; gates submit. */
   @state() private unreachable: { ok: false; cause: string } | null = null
   /** 中程切换聚焦会话模型时的在途标记（add-acp-model-selection 语义）。 */
   @state() private modelSwitching = false
-  /**
-   * Operator explicitly requested creation while a session is focused;
-   * cleared whenever the focused key changes.
-   */
-  @state() private createRequested = false
+  /** 模型芯片两级菜单的开合（design D3）。 */
+  @state() private modelMenuOpen = false
   /** Reachability 轮询定时器（connectedCallback 启动，disconnectedCallback 清理）。 */
   private reachabilityTimer: number | undefined = undefined
 
-  /** Follow-up when a session is focused and creation wasn't requested. */
-  private get isFollowMode(): boolean {
-    return this.sessionKey !== null && !this.createRequested
+  private reloadCatalogBound = (): void => {
+    void this.loadCatalog()
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback()
+    void this.loadReachability()
+    void this.loadAgents()
+    void this.loadCatalog()
+    // defaults/catalog 变更（管理页 set/clear）即时反映到芯片分组。
+    window.addEventListener('sebas:refetch', this.reloadCatalogBound)
+    // Reachability 只在挂载时求值一次会让断连横幅永不恢复（core 回来后
+    // composer 仍被禁用）——周期性重查，横幅与禁用态随真实状态翻转。
+    this.reachabilityTimer = window.setInterval(() => {
+      void this.loadReachability()
+    }, WORKBENCH_REACHABILITY_POLL_MS)
+  }
+
+  disconnectedCallback(): void {
+    window.removeEventListener('sebas:refetch', this.reloadCatalogBound)
+    this.removeMenuDismissListeners()
+    super.disconnectedCallback()
+    if (this.reachabilityTimer !== undefined) {
+      window.clearInterval(this.reachabilityTimer)
+      this.reachabilityTimer = undefined
+    }
+  }
+
+  protected updated(changed: PropertyValues): void {
+    // 聚焦会话变了（切换/关闭/新建跳转）：收起模型菜单、清掉上一个会话的
+    // 输入残留交给调用方……文本保留是既有语义（失败重试），这里只在会话
+    // 真正更换时清空，避免把 A 会话的草稿发进 B 会话。
+    if (changed.has('sessionKey')) {
+      this.modelMenuOpen = false
+      const prev = changed.get('sessionKey')
+      if (prev !== undefined && this.sessionKey !== prev) this.text = ''
+    }
+  }
+
+  /** 目录加载（design D2：与创建对话框共用 loadModelCatalog，防漂移）。 */
+  private async loadCatalog(): Promise<void> {
+    const { catalog } = await loadModelCatalog()
+    this.catalog = catalog
+  }
+
+  private async loadAgents(): Promise<void> {
+    try {
+      const d = await api.agents()
+      this.agents = d.agents
+    } catch {
+      // catalog 不可达：🔒 标签退回 raw slug（display 名是锦上添花）。
+      this.agents = []
+    }
+  }
+
+  private async loadReachability(): Promise<void> {
+    try {
+      const data = await api.summary()
+      if (data.reachability && data.reachability.ok === false) {
+        this.unreachable = { ok: false, cause: data.reachability.cause ?? 'core not connected' }
+      } else {
+        this.unreachable = null
+      }
+      // 逐 agent 可用性归 /api/agents（workbench-agent-wire-fix 3.2），
+      // summary 只承担 core 可达性门禁。
+      void this.loadAgents()
+    } catch {
+      /* add-webui-allowed-roots D6：summary 请求本身失败（服务进程死亡 /
+       * 网络故障）与 reachability.ok = false 同款对待——进入不可达态禁用
+       * 提交门，如实呈现而不是放行一次注定失败的提交。轮询恢复后自动
+       * 解除。 */
+      this.unreachable = { ok: false, cause: '无法获取服务状态（服务可能未运行）' }
+    }
+  }
+
+  /** 跟随模式输入门禁：无聚焦会话或 core 不可达 = 禁用。 */
+  private inputDisabled(): boolean {
+    return this.sending || this.sessionKey === null || this.unreachable !== null
+  }
+
+  /**
+   * 提交控件状态机（design D4，优先级从高到低）：POST 在途（转圈）>
+   * turn 在飞且无字（停止方块）> turn 在飞且有字（排队形态）> 有字
+   * （send）> 禁用。
+   */
+  private submitState(): SubmitState {
+    if (this.sending) return 'sending'
+    if (this.sessionKey === null || this.unreachable !== null) return 'disabled'
+    const hasText = this.text.trim().length > 0
+    if (this.turnInFlight) return hasText ? 'queued' : 'stop'
+    return hasText ? 'send' : 'disabled'
+  }
+
+  private async submit(): Promise<void> {
+    const key = this.sessionKey
+    if (!key) return
+    const prompt = this.text.trim()
+    if (!prompt) return
+    if (this.sending || this.unreachable !== null) return
+    this.sending = true
+    this.error = null
+    try {
+      // turn 在飞时服务端自动排队（workbench-turn-queue）——composer 不区分
+      // 开轮与排队，提交语义一条路径。
+      await api.sendMessage(key, prompt)
+      this.text = ''
+      // 舞台就地刷新：dashboard 监听后立刻重取聚焦 detail（WS 推送之外的
+      // 乐观刷新，避免等下一个 summary 周期）。
+      this.dispatchEvent(
+        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
+      )
+    } catch (e) {
+      this.error = String(e)
+    } finally {
+      this.sending = false
+    }
+  }
+
+  /**
+   * 停止（design D5）：点击红色方块 → 新 cancel 链路
+   * （POST /api/sessions/{key}/cancel）。错误走既有 callout；turn 结束
+   * （WS 推送 turnInFlight=false）自动回到 send 态。
+   */
+  private async cancelTurn(): Promise<void> {
+    const key = this.sessionKey
+    if (!key) return
+    this.error = null
+    try {
+      await api.cancelSession(key)
+      this.dispatchEvent(
+        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
+      )
+    } catch (e) {
+      this.error = String(e)
+    }
+  }
+
+  /** 跟随模式的模型切换：`session/set_config_option`（add-acp-model-selection）。 */
+  private async switchModel(modelId: string): Promise<void> {
+    const key = this.sessionKey
+    if (!key || this.modelSwitching) return
+    this.modelSwitching = true
+    this.error = null
+    try {
+      await api.setSessionModel(key, modelId)
+      this.dispatchEvent(
+        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
+      )
+    } catch (e) {
+      this.error = String(e)
+    } finally {
+      this.modelSwitching = false
+    }
+  }
+
+  /**
+   * Follow-up mode's read-only agent label: the bound kind resolved to its
+   * display name via /api/agents; unknown/unreachable kinds fall back
+   * to the raw slug, and `null` (the wire's "no kind recorded") means the
+   * configured default.
+   */
+  private agentLabel(): string {
+    if (this.agentKind) {
+      const a = this.agents.find((x) => x.id === this.agentKind)
+      return a?.display ?? this.agentKind
+    }
+    return this.agents.find((x) => x.id === 'native' && false)?.display ?? 'default agent'
+  }
+
+  // ─── 模型芯片（design D3）────────────────────────────────────────────
+
+  private openModelMenu(): void {
+    if (this.sessionModels.length === 0) return
+    this.modelMenuOpen = true
+    // 捕获阶段监听 document 点击：点菜单外任意处收起（打开菜单的那次点击
+    // 已过捕获阶段，不会立刻自吞）。
+    document.addEventListener('click', this.dismissMenuOnDocClick, true)
+  }
+
+  private closeModelMenu(): void {
+    this.modelMenuOpen = false
+    this.removeMenuDismissListeners()
+  }
+
+  private dismissMenuOnDocClick = (e: Event): void => {
+    const path = e.composedPath()
+    if (!path.includes(this)) this.closeModelMenu()
+  }
+
+  private menuKeydown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      this.closeModelMenu()
+    }
+  }
+
+  private removeMenuDismissListeners(): void {
+    document.removeEventListener('click', this.dismissMenuOnDocClick, true)
+  }
+
+  /**
+   * 分组视图（design D3）：目录交叉引用 → provider 组；查不到 → 「会话提供」
+   * 置底；目录不可得 → 单组平铺（消费方据 groups.length===1 &&
+   * provider===null 识别平铺态，不渲染组头）。
+   */
+  private modelGroups() {
+    return groupSessionModels(this.sessionModels, this.catalog)
+  }
+
+  private renderModelChip() {
+    if (this.sessionModels.length === 0) {
+      // 显式诚实态：该会话无可选模型，绝不渲染空菜单（agent-workbench
+      // delta「chip without session models is stated honestly」）。
+      return html`<span
+        class="label placeholder model-chip-empty"
+        data-testid="model-chip-unavailable"
+        role="status"
+        title="该会话未提供可选模型"
+        >无可用模型</span
+      >`
+    }
+    const groups = this.modelGroups()
+    const flat = groups.length === 1 && groups[0]!.provider === null
+    const label = this.currentModel ?? this.sessionModels[0]!
+    return html`
+      <div class="model-wrap">
+        <button
+          class="chip"
+          type="button"
+          data-testid="model-chip"
+          aria-haspopup="listbox"
+          aria-expanded=${this.modelMenuOpen ? 'true' : 'false'}
+          title="会话模型（切换走 session/set_config_option）"
+          @click=${() =>
+            this.modelMenuOpen ? this.closeModelMenu() : this.openModelMenu()}
+        >
+          ${icon('zap', 12)}<span class="chip-label">${label}</span>
+        </button>
+        ${this.modelMenuOpen
+          ? html`
+              <div
+                class="model-menu"
+                role="listbox"
+                aria-label="Session model"
+                data-testid="model-menu"
+                @keydown=${this.menuKeydown}
+              >
+                ${groups.map((g) =>
+                  flat
+                    ? this.renderModelItems(g.models)
+                    : html`
+                        <div class="menu-group">
+                          <div class="menu-group-label" data-testid="model-group">
+                            ${g.provider ?? SESSION_PROVIDED_GROUP_LABEL}
+                          </div>
+                          ${this.renderModelItems(g.models)}
+                        </div>
+                      `,
+                )}
+              </div>
+            `
+          : nothing}
+      </div>
+    `
+  }
+
+  private renderModelItems(models: string[]) {
+    return models.map(
+      (m) => html`
+        <button
+          class="menu-item"
+          type="button"
+          role="option"
+          aria-selected=${this.currentModel === m ? 'true' : 'false'}
+          data-model=${m}
+          ?disabled=${this.modelSwitching}
+          @click=${() => {
+            this.closeModelMenu()
+            if (m !== this.currentModel) void this.switchModel(m)
+          }}
+        >
+          <span class="menu-item-label">${m}</span>
+          ${this.currentModel === m ? html`<span class="check" aria-hidden="true">✓</span>` : nothing}
+        </button>
+      `,
+    )
+  }
+
+  /** 提交控件：按 submitState() 渲染五态（design D4）。 */
+  private renderSubmitButton() {
+    const state = this.submitState()
+    const meta: Record<
+      SubmitState,
+      { label: string; icon: ReturnType<typeof icon>; disabled: boolean }
+    > = {
+      disabled: { label: 'Send', icon: icon('forward', 14), disabled: true },
+      send: { label: 'Send', icon: icon('forward', 14), disabled: false },
+      sending: {
+        label: '发送中',
+        icon: html`<span class="spinner" aria-hidden="true"></span>`,
+        disabled: true,
+      },
+      stop: { label: '停止回复', icon: icon('stop', 14), disabled: false },
+      queued: { label: '排队提交', icon: icon('clock', 14), disabled: false },
+    }
+    const m = meta[state]
+    const onClick =
+      state === 'stop'
+        ? () => void this.cancelTurn()
+        : state === 'send' || state === 'queued'
+          ? () => void this.submit()
+          : () => {}
+    return html`
+      <button
+        class="send-button ${state}"
+        type="button"
+        data-state=${state}
+        data-testid="submit-control"
+        aria-label=${m.label}
+        title=${m.label}
+        ?disabled=${m.disabled}
+        @click=${onClick}
+      >
+        ${m.icon}
+      </button>
+    `
+  }
+
+  render() {
+    // 无聚焦会话：空态提示（dashboard 的 empty-stream 承接主提示，composer
+    // 就地给一条指向 rail 创建入口的显式说明），不渲染任何创建控件。
+    if (this.sessionKey === null) {
+      return html`
+        ${this.renderBanners()}
+        <div class="composer no-focus" data-testid="composer-no-focus">
+          <span class="no-focus-hint">
+            在左侧项目栏的 <b>+</b> 新建会话后，这里开始对话。
+          </span>
+        </div>
+      `
+    }
+    return html`
+      ${this.renderBanners()}
+      <div class="composer">
+        <wa-textarea
+          placeholder="Ask for follow-up changes…"
+          aria-label="Message"
+          resize="none"
+          ?disabled=${this.inputDisabled()}
+          .value=${this.text}
+          @input=${(e: Event) => (this.text = (e.target as HTMLTextAreaElement).value)}
+          @keydown=${(e: KeyboardEvent) => {
+            // 回车直接发送；Shift+Enter 换行；IME 组词中的回车不触发发送。
+            // turn 在飞且有字 = 排队提交（同一发送路径）；无字不触发。
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+              e.preventDefault()
+              void this.submit()
+            }
+          }}
+        ></wa-textarea>
+        <div class="composer-bottom">
+          <div class="left-tools">
+            <span
+              class="label"
+              data-testid="agent-lock"
+              title="Agent is immutable — chosen when the session was created"
+              >🔒 ${this.agentLabel()}</span
+            >
+          </div>
+          <div class="right-tools">
+            ${this.renderModelChip()}
+            ${this.renderSubmitButton()}
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  private renderBanners() {
+    return html`
+      ${this.unreachable
+        ? html`
+            <div class="callout callout-warning" role="status">
+              ${icon('alert')}<span>core not connected: ${this.unreachable.cause}</span>
+            </div>
+          `
+        : nothing}
+      ${this.error
+        ? html`
+            <div class="callout callout-error" role="alert" data-testid="composer-error">
+              ${icon('alert')}<span>${this.error}</span>
+            </div>
+          `
+        : nothing}
+    `
   }
 
   static styles = [
     viewStyles,
     css`
       :host {
-        display: block;
+        /* 宿主吃满 dashboard 分配的输入框分割面（5.2：拖出的高度给输入
+           区），无聚焦提示态同理。 */
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
       }
-      /* Composer: ONE rounded shell (preview 工作台同款), the wa-textarea
-       * inside is chrome-stripped so the shell is the only visible card. */
+      /* Composer: ONE rounded shell (浮岛视觉 D6 与预览原型同款), the
+       * wa-textarea inside is chrome-stripped so the shell is the only
+       * visible card. */
       .composer {
+        flex: 1;
+        min-height: 0;
         background: var(--sebas-surface);
         border: 1px solid var(--sebas-border);
         border-radius: 18px;
@@ -142,17 +515,22 @@ export class SebasWorkbenchComposer extends LitElement {
       }
       .composer wa-textarea {
         width: 100%;
+        flex: 1;
+        min-height: 36px;
       }
-      /* 剥掉 wa-textarea 自带的底色/边框/阴影，只留纯文本输入区。 */
+      /* 剥掉 wa-textarea 自带的底色/边框/阴影，只留纯文本输入区；高度随
+         分割面拉伸（resize=none 关掉组件自带的拖角，5.2 的分割线是唯一的
+         高度控制面），内容多时输入区内部滚动。 */
       .composer wa-textarea::part(base) {
         background: transparent;
         border: none;
         box-shadow: none;
+        height: 100%;
         min-height: 36px;
-        max-height: 200px;
         padding: 4px 8px;
+        overflow-y: auto;
       }
-      /* 8.2: the native textarea lives in wa-textarea's shadow root, so the
+      /* 8.1: the native textarea lives in wa-textarea's shadow root, so the
          shared focus-visible rule can't reach it — ring the host instead.
          5.5 / design D5: composer focus is "your move", so the ring is the
          --signal accent, not the shared indigo focus ring. */
@@ -161,7 +539,21 @@ export class SebasWorkbenchComposer extends LitElement {
         outline-offset: 2px;
         border-radius: var(--sebas-radius-sm);
       }
-      /* Bottom toolbar: agent/binding/model on the left, send on the right. */
+      /* 无聚焦会话的显式提示（spec：指向 rail 创建入口，绝不就地给创建控件）。 */
+      .composer.no-focus {
+        align-items: center;
+        justify-content: center;
+        padding: var(--sebas-space-4);
+      }
+      .no-focus-hint {
+        font-size: 0.82rem;
+        color: var(--sebas-text-dim);
+      }
+      .no-focus-hint b {
+        color: var(--sebas-text-bright);
+      }
+      /* Bottom toolbar: locked agent identity LEFT, model chip + submit
+         RIGHT（agent-workbench delta「toolbar composition」）。 */
       .composer-bottom {
         display: flex;
         align-items: center;
@@ -189,64 +581,118 @@ export class SebasWorkbenchComposer extends LitElement {
         color: var(--sebas-text-faint);
         letter-spacing: 0.15em;
       }
-      .composer-bottom .binding {
-        font-family: var(--sebas-font-mono);
-        color: var(--sebas-text-faint);
+      /* ── 模型芯片（design D3）────────────────────────────────────────── */
+      .model-wrap {
+        position: relative;
+        display: inline-flex;
+        min-width: 0;
       }
-      /* rail-declutter-unread D6：未选项目的绑定占位——弱化但可读，说明为何提交禁用。 */
-      .composer-bottom .binding-missing {
-        color: var(--sebas-text-faint);
-        font-style: italic;
-      }
-      .composer-bottom a {
-        font-size: 0.78rem;
-        color: var(--sebas-text-faint);
-      }
-      /* Toolbar selects (agent/model): slim selects inside the toolbar. */
-      .composer-bottom .backend-select {
-        font-size: 0.78rem;
-        --wa-select-min-height: 24px;
-        max-width: 220px;
-      }
-      /* add-composer-agent-binding：会话切换 chips（新会话/取消新建）。与
-       * settings-link 同款弱化外观，避免在输入框旁喧宾夺主。 */
-      .composer-bottom .mode-chip {
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: 260px;
         border: 1px solid var(--sebas-border);
-        background: none;
+        background: var(--sebas-surface-2);
         border-radius: 999px;
-        padding: 1px 10px;
+        padding: 2px 10px;
         font: inherit;
         font-size: 0.72rem;
-        color: var(--sebas-text-faint);
+        font-family: var(--sebas-font-mono);
+        color: var(--sebas-text-dim);
         cursor: pointer;
-        transition: color var(--sebas-dur) var(--sebas-ease);
+        transition:
+          color var(--sebas-dur) var(--sebas-ease),
+          border-color var(--sebas-dur) var(--sebas-ease);
       }
-      .composer-bottom .mode-chip:hover {
+      .chip:hover {
         color: var(--sebas-text-bright);
+        border-color: var(--sebas-border-strong);
       }
-      .composer-bottom .mode-chip:focus-visible {
+      .chip:focus-visible {
         outline: var(--sebas-focus-ring);
         outline-offset: 2px;
       }
-      /* IA v2：settings → 打开居中设置弹窗（冒泡 open-settings 事件，由
-       * app-shell 监听）；按钮外观与原链接一致。 */
-      .composer-bottom .settings-link {
+      .chip .chip-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .model-chip-empty {
+        font-size: 0.72rem;
+        letter-spacing: 0.05em;
+        font-style: italic;
+      }
+      /* 两级分组菜单：贴芯片上方弹出（composer 在页底）。 */
+      .model-menu {
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 6px);
+        min-width: 240px;
+        max-height: 280px;
+        overflow-y: auto;
+        background: var(--sebas-surface);
+        border: 1px solid var(--sebas-border-strong);
+        border-radius: var(--sebas-radius-md);
+        box-shadow: var(--sebas-shadow-2);
+        padding: 4px;
+        z-index: 20;
+      }
+      .menu-group + .menu-group {
+        margin-top: 4px;
+      }
+      .menu-group-label {
+        font-size: 0.66rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--sebas-text-faint);
+        padding: 4px 8px 2px;
+      }
+      .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
         border: none;
         background: none;
-        padding: 0;
+        border-radius: var(--sebas-radius-sm);
+        padding: 5px 8px;
         font: inherit;
-        font-size: 0.78rem;
-        color: var(--sebas-text-faint);
+        font-size: 0.76rem;
+        font-family: var(--sebas-font-mono);
+        color: var(--sebas-text-dim);
         cursor: pointer;
-        transition: color var(--sebas-dur) var(--sebas-ease);
+        text-align: left;
+        transition:
+          background var(--sebas-dur) var(--sebas-ease),
+          color var(--sebas-dur) var(--sebas-ease);
       }
-      .composer-bottom .settings-link:hover {
+      .menu-item:hover:enabled {
+        background: var(--sebas-surface-2);
         color: var(--sebas-text-bright);
       }
-      .composer-bottom .settings-link:focus-visible {
+      .menu-item:focus-visible {
         outline: var(--sebas-focus-ring);
-        outline-offset: 2px;
+        outline-offset: -1px;
       }
+      .menu-item[aria-selected='true'] {
+        color: var(--sebas-accent);
+      }
+      .menu-item .menu-item-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .menu-item .check {
+        flex: 0 0 auto;
+        color: var(--sebas-accent);
+        font-weight: 700;
+      }
+      /* ── 提交控件状态机（design D4）──────────────────────────────────── */
       /* 28px accent icon send button; disabled dims instead of vanishing. */
       .send-button {
         width: 28px;
@@ -259,7 +705,9 @@ export class SebasWorkbenchComposer extends LitElement {
         border-radius: var(--sebas-radius-md);
         cursor: pointer;
         padding: 0;
-        transition: opacity var(--sebas-dur) var(--sebas-ease);
+        transition:
+          opacity var(--sebas-dur) var(--sebas-ease),
+          background var(--sebas-dur) var(--sebas-ease);
       }
       .send-button:disabled {
         opacity: 0.35;
@@ -268,466 +716,44 @@ export class SebasWorkbenchComposer extends LitElement {
       .send-button:hover:enabled {
         filter: brightness(1.05);
       }
-      .divider {
-        border: none;
-        border-top: 1px solid var(--sebas-border);
-        margin: var(--sebas-space-4) 0;
+      .send-button:focus-visible {
+        outline: var(--sebas-focus-ring);
+        outline-offset: 2px;
+      }
+      /* 流式且输入为空：红色停止方块（点击走 cancel 链路）。 */
+      .send-button.stop {
+        background: var(--sebas-status-failed);
+        opacity: 1;
+      }
+      /* 流式且有字：排队形态（queued 色，提交进既有 turn-queue）。 */
+      .send-button.queued {
+        background: var(--sebas-status-queued);
+        color: #062a2e;
+        opacity: 1;
+      }
+      /* POST 在途：转圈。 */
+      .send-button .spinner {
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        border: 2px solid var(--sebas-accent-ink);
+        border-top-color: transparent;
+        animation: sebas-spin 0.8s linear infinite;
+      }
+      @keyframes sebas-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        /* reduced-motion：转圈降为静态指示（全局 tokens 的 reduced-motion
+           规则不进 shadow DOM，组件内自行遵守既有约定）。 */
+        .send-button .spinner {
+          animation: none;
+        }
       }
     `,
   ]
-
-  private reloadModelsBound = (): void => void this.loadModelOptions()
-
-  connectedCallback(): void {
-    super.connectedCallback()
-    void this.loadReachability()
-    void this.loadAgents()
-    void this.loadModelOptions()
-    // defaults/catalog 变更（管理页 set/clear）即时反映到选择器。
-    window.addEventListener('sebas:refetch', this.reloadModelsBound)
-    // Reachability 只在挂载时求值一次会让断连横幅永不恢复（core 回来后
-    // composer 仍被禁用）——周期性重查，横幅与禁用态随真实状态翻转。
-    this.reachabilityTimer = window.setInterval(() => {
-      void this.loadReachability()
-    }, WORKBENCH_REACHABILITY_POLL_MS)
-  }
-
-  disconnectedCallback(): void {
-    window.removeEventListener('sebas:refetch', this.reloadModelsBound)
-    super.disconnectedCallback()
-    if (this.reachabilityTimer !== undefined) {
-      window.clearInterval(this.reachabilityTimer)
-      this.reachabilityTimer = undefined
-    }
-  }
-
-  protected updated(changed: PropertyValues): void {
-    // 聚焦会话变了（切换/关闭/新建跳转）——显式的"新会话"请求随之作废，
-    // 让 composer 回到与新聚焦会话匹配的跟随模式。
-    if (changed.has('sessionKey')) this.createRequested = false
-    // 进入创建模式时重取模型数据源——defaults/catalog 可能刚在管理页设置过。
-    if (changed.has('createRequested') && this.createRequested) void this.loadModelOptions()
-    // 项目切换（D5）：预选该项目记住的 default_agent；无记录保持现选。
-    if (changed.has('projectDefaultAgent') && this.projectDefaultAgent) {
-      this.agent = this.projectDefaultAgent
-    }
-  }
-
-  /**
-   * 创建模式的模型目录（workbench-conversation-view 4.2/4.3/4.4，design
-   * D7/D8）：BFF 读 Settings 目录（/router/api/providers 的 models）+
-   * defaults（/router/api/defaults），adapter 规整成两级结构。读取失败或
-   * 目录为空 → `catalogUnavailable`（显式「目录不可用」，不显示空列表）。
-   * 会话内模型面与此无关——跟随模式只看聚焦会话自己的 `sessionModels`
-   * （acp-model-selection：切换要发给该会话的执行体，目录它未必认）。
-   */
-  private async loadModelOptions(): Promise<void> {
-    try {
-      const [providers, defaults] = await Promise.all([
-        api.routerProviders(),
-        api.routerDefaults().catch(() => null),
-      ])
-      const catalog = toModelCatalog(providers.providers, defaults)
-      if (catalog.pairs.length === 0) {
-        // 目录为空 = 没有可选项：显式不可用，而非空下拉。
-        this.catalog = catalog
-        this.catalogUnavailable = true
-        this.model = null
-        this.selectedProvider = null
-        return
-      }
-      this.catalog = catalog
-      this.catalogUnavailable = false
-      // 预选：配置的 default provider / default model 在目录内才用（不伪造
-      // 选项）；否则取目录第一对。
-      const provider =
-        catalog.defaultProvider && catalog.pairs.some((p) => p.provider === catalog.defaultProvider)
-          ? catalog.defaultProvider
-          : catalog.pairs[0]!.provider
-      this.selectedProvider = provider
-      const models = this.modelsFor(provider)
-      const wanted =
-        catalog.defaultProvider === provider && catalog.defaultModel !== null
-          ? catalog.defaultModel
-          : null
-      this.model = wanted && models.includes(wanted) ? wanted : (models[0] ?? null)
-    } catch {
-      // 目录不可得（providers 读取失败——core 状态库离线）：显式不可用。
-      this.catalog = null
-      this.model = null
-      this.selectedProvider = null
-      this.catalogUnavailable = true
-    }
-  }
-
-  /** 一级选定的 provider 下的模型 id 列表（保持 payload 顺序）。 */
-  private modelsFor(provider: string): string[] {
-    return this.catalog?.pairs.filter((p) => p.provider === provider).map((p) => p.model) ?? []
-  }
-
-  /** 两级目录去重后的 provider 列表。 */
-  private get catalogProviders(): string[] {
-    const out: string[] = []
-    for (const p of this.catalog?.pairs ?? []) {
-      if (!out.includes(p.provider)) out.push(p.provider)
-    }
-    return out
-  }
-
-  private async loadAgents(): Promise<void> {
-    try {
-      const data = await api.agents()
-      this.agents = data.agents
-      // 预选（D5 兜底）：保持现选；无现选时取首个可达 agent。
-      if (!this.agent || !this.agents.some((a) => a.id === this.agent)) {
-        this.agent = data.agents.find((a) => a.reachable)?.id ?? ''
-      }
-    } catch {
-      // catalog 不可达：下拉如实降级（禁用 + 提示），绝不伪造选项。
-      this.agents = []
-      this.agent = ''
-    }
-  }
-
-  private async loadReachability(): Promise<void> {
-    try {
-      const data = await api.summary()
-      if (data.reachability && data.reachability.ok === false) {
-        this.unreachable = { ok: false, cause: data.reachability.cause ?? 'core not connected' }
-      } else {
-        this.unreachable = null
-      }
-      // 逐 agent 可用性归 /api/agents（workbench-agent-wire-fix 3.2），
-      // summary 只承担 core 可达性门禁。
-      void data
-      void this.loadAgents()
-    } catch {
-      /* add-webui-allowed-roots D6：summary 请求本身失败（服务进程死亡 /
-       * 网络故障）与 reachability.ok = false 同款对待——进入不可达态禁用
-       * 提交门，如实呈现而不是放行一次注定失败的提交。轮询恢复后自动
-       * 解除。 */
-      this.unreachable = { ok: false, cause: '无法获取服务状态（服务可能未运行）' }
-    }
-  }
-
-  private disabled(): boolean {
-    // 8.2：节点不可用 = 提交只会 bounce，门禁在前（与 core 不可达同一姿态）。
-    if (this.sending || this.unreachable !== null || this.nodeBlocked !== null) return true
-    // rail-declutter-unread D6：创建必须显式选项目。Inbox 分组移除后，
-    // composer 不得再造 rail 无展示位的无项目会话——未选择项目时禁用提交
-    // 并就地说明（跟随模式不受约束）。过渡态：创建模式终态由
-    // workbench-interaction-polish 收口。
-    if (!this.isFollowMode && !this.projectId) return true
-    return false
-  }
-
-  private async submit(): Promise<void> {
-    if (this.disabled()) return
-    const prompt = this.text.trim()
-    if (!prompt) return
-    if (this.isFollowMode) return void this.submitFollow(prompt)
-    return void this.submitCreate(prompt)
-  }
-
-  /** 跟随模式：发给聚焦会话，绝不新建。 */
-  private async submitFollow(prompt: string): Promise<void> {
-    const key = this.sessionKey
-    if (!key) return
-    this.sending = true
-    this.error = null
-    try {
-      await api.sendMessage(key, prompt)
-      this.text = ''
-      // 舞台就地刷新：dashboard 监听后立刻重取聚焦 detail（WS 推送之外的
-      // 乐观刷新，避免等下一个 summary 周期）。
-      this.dispatchEvent(
-        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
-      )
-    } catch (e) {
-      this.error = String(e)
-    } finally {
-      this.sending = false
-    }
-  }
-
-  /** 创建模式：选定的 agent + 模型在这里定死进新会话。 */
-  private async submitCreate(prompt: string): Promise<void> {
-    this.sending = true
-    this.error = null
-    try {
-      const { key } = await api.createSession({
-        prompt,
-        projectId: this.projectId,
-        agent: this.agent,
-        model: this.model,
-        mode: this.createMode,
-      })
-      this.text = ''
-      this.dispatchEvent(
-        new CustomEvent<{ key: string }>('composer-created', {
-          detail: { key },
-          bubbles: true,
-          composed: true,
-        }),
-      )
-    } catch (e) {
-      this.error = String(e)
-    } finally {
-      this.sending = false
-    }
-  }
-
-  /** 跟随模式的模型切换：`session/set_config_option`（add-acp-model-selection）。 */
-  private async switchModel(modelId: string): Promise<void> {
-    const key = this.sessionKey
-    if (!key || this.modelSwitching) return
-    this.modelSwitching = true
-    this.error = null
-    try {
-      await api.setSessionModel(key, modelId)
-      this.dispatchEvent(
-        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
-      )
-    } catch (e) {
-      this.error = String(e)
-    } finally {
-      this.modelSwitching = false
-    }
-  }
-
-  /**
-   * Follow-up mode's read-only agent label: the bound kind resolved to its
-   * display name via /api/agent-kinds; unknown/unreachable kinds fall back
-   * to the raw slug, and `null` (the wire's "no kind recorded") means the
-   * configured default.
-   */
-  private agentLabel(): string {
-    if (this.agentKind) {
-      const a = this.agents.find((x) => x.id === this.agentKind)
-      return a?.display ?? this.agentKind
-    }
-    return this.agents.find((x) => x.id === 'native' && false)?.display ?? 'default agent'
-  }
-
-  /**
-   * 创建模式的绑定提示（rail-declutter-unread D6）：选中项目显示目录尾段；
-   * 未选择项目不再提供「→ inbox」绑定，就地说明「未选择项目」——提交门禁
-   * 同步禁用（disabled()）。
-   */
-  private renderBinding() {
-    if (this.projectId && this.projectDir) {
-      const tail = this.projectDir.split('/').filter(Boolean).pop() ?? this.projectDir
-      return html`<span class="binding">→ ${tail}</span>`
-    }
-    return html`<span
-      class="binding binding-missing"
-      data-testid="project-required"
-      title="创建会话必须先选择项目（左侧栏选中即生效）"
-      >→ 未选择项目</span
-    >`
-  }
-
-  /**
-   * "settings →" no longer navigates (the retired /settings route redirects
-   * to /); it opens the shell's centered settings modal by dispatching a
-   * bubbling composed event that app-shell listens for.
-   */
-  private openSettings(): void {
-    this.dispatchEvent(new CustomEvent('open-settings', { bubbles: true, composed: true }))
-  }
-
-  render() {
-    const disabled = this.disabled()
-    const follow = this.isFollowMode
-    // 跟随模式：会话 available_models（D8——会话已存在让位给会话面）。
-    // 创建模式：两级 Settings 目录（4.3）。
-    const sessionModelList = this.sessionModels
-    const providerList = this.catalogProviders
-    const providerModels = this.selectedProvider ? this.modelsFor(this.selectedProvider) : []
-    return html`
-      ${this.unreachable
-        ? html`
-            <div class="callout callout-warning" role="status">
-              ${icon('alert')}<span>core not connected: ${this.unreachable.cause}</span>
-            </div>
-          `
-        : nothing}
-      ${this.nodeBlocked
-        ? html`
-            <div class="callout callout-warning" role="status" data-testid="node-blocked">
-              ${icon('alert')}<span
-                >执行节点 ${this.nodeBlocked.nodeId} 不可用（${this.nodeBlocked.status}）：${this.nodeBlocked.cause}
-                ——无法在该节点上新建会话。</span
-              >
-            </div>
-          `
-        : nothing}
-      ${this.error
-        ? html`
-            <div class="callout callout-error" role="alert">
-              ${icon('alert')}<span>${this.error}</span>
-            </div>
-          `
-        : nothing}
-      <div class="composer">
-        <wa-textarea
-          placeholder=${follow ? 'Ask for follow-up changes…' : 'Message the agent…'}
-          aria-label="Message"
-          resize="auto"
-          ?disabled=${disabled}
-          .value=${this.text}
-          @input=${(e: Event) => (this.text = (e.target as HTMLTextAreaElement).value)}
-          @keydown=${(e: KeyboardEvent) => {
-            // 回车直接发送；Shift+Enter 换行；IME 组词中的回车不触发发送。
-            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-              e.preventDefault()
-              void this.submit()
-            }
-          }}
-        ></wa-textarea>
-        <div class="composer-bottom">
-          <div class="left-tools">
-            ${follow
-              ? html`<span
-                  class="label"
-                  data-testid="agent-lock"
-                  title="Agent is immutable — chosen when the session was created"
-                  >🔒 ${this.agentLabel()}</span
-                >`
-              : html`
-                  ${this.providerLabel
-                    ? html`<span class="label">${this.providerLabel}</span>`
-                    : html`<span class="label placeholder">· · ·</span>`}
-                  ${this.renderBinding()}
-                `}
-            ${follow
-              ? sessionModelList.length > 0
-                ? html`<wa-select
-                    class="backend-select model-select"
-                    aria-label="Model"
-                    value=${this.currentModel ?? ''}
-                    ?disabled=${disabled || this.modelSwitching}
-                    @change=${(e: Event) => {
-                      const v = (e.target as HTMLSelectElement).value || null
-                      if (v) void this.switchModel(v)
-                    }}
-                  >
-                    ${sessionModelList.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
-                  </wa-select>`
-                : nothing
-              : this.catalogUnavailable
-                ? html`<span
-                    class="label placeholder"
-                    title="Configure a provider with models in Settings → Models"
-                    role="status"
-                    data-testid="catalog-unavailable"
-                    >model catalog unavailable</span
-                  >`
-                : html`
-                    <wa-select
-                      class="backend-select model-select provider-select"
-                      aria-label="Provider"
-                      value=${this.selectedProvider ?? ''}
-                      ?disabled=${disabled}
-                      data-testid="provider-select"
-                      @change=${(e: Event) => {
-                        const v = (e.target as HTMLSelectElement).value
-                        this.selectedProvider = v
-                        const models = this.modelsFor(v)
-                        this.model = models[0] ?? null
-                      }}
-                    >
-                      ${providerList.map((p) => html`<wa-option value=${p}>${p}</wa-option>`)}
-                    </wa-select>
-                    <wa-select
-                      class="backend-select model-select"
-                      aria-label="Model"
-                      value=${this.model ?? ''}
-                      ?disabled=${disabled || providerModels.length === 0}
-                      data-testid="model-select"
-                      @change=${(e: Event) => {
-                        this.model = (e.target as HTMLSelectElement).value || null
-                      }}
-                    >
-                      ${providerModels.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
-                    </wa-select>
-                  `}
-            ${follow
-              ? nothing
-              : html`<wa-select
-                  class="backend-select"
-                  aria-label="Agent"
-                  value=${this.agent}
-                  ?disabled=${disabled}
-                  @change=${(e: Event) => {
-                    this.agent = (e.target as HTMLInputElement).value
-                  }}
-                >
-                  ${this.agents.length === 0
-                    ? html`<wa-option value="" disabled>agent catalog 不可用</wa-option>`
-                    : nothing}
-                  ${this.agents.map((a) =>
-                    a.id === 'native' && !a.reachable
-                      ? html`<wa-option value=${a.id} disabled
-                          >${a.display} (unavailable: ${a.cause ?? 'unreachable'})</wa-option
-                        >`
-                      : html`<wa-option value=${a.id} ?disabled=${!a.reachable}
-                          >${a.reachable ? a.display : `${a.display} (unavailable: ${a.cause ?? ''})`}</wa-option
-                        >`,
-                  )}
-                </wa-select>`}
-            ${follow
-              ? nothing
-              : html`<wa-select
-                  class="backend-select"
-                  aria-label="Permission mode"
-                  value=${this.createMode ?? ''}
-                  ?disabled=${disabled}
-                  data-testid="mode-select"
-                  @change=${(e: Event) => {
-                    // 缺省项（空值）= agent 默认：不发送 mode 字段。
-                    this.createMode = (e.target as HTMLSelectElement).value || null
-                  }}
-                >
-                  <wa-option value="">默认（逐次询问）</wa-option>
-                  <wa-option value="ask">ask（逐次询问）</wa-option>
-                  <wa-option value="edit">edit（自动接受编辑）</wa-option>
-                  <wa-option value="allow">allow（放行并留审计）</wa-option>
-                  <wa-option value="auto">auto（不门控，留审计）</wa-option>
-                </wa-select>`}
-            ${this.sessionKey !== null
-              ? html`<button
-                  class="mode-chip"
-                  type="button"
-                  @click=${() => (this.createRequested = !this.createRequested)}
-                >
-                  ${follow ? '+ new session' : 'cancel'}
-                </button>`
-              : nothing}
-          </div>
-          <div class="right-tools">
-            <button
-              class="settings-link"
-              type="button"
-              aria-haspopup="dialog"
-              @click=${this.openSettings}
-            >
-              settings →
-            </button>
-            <button
-              class="send-button"
-              aria-label="Send"
-              ?disabled=${disabled}
-              @click=${() => void this.submit()}
-            >
-              ${icon('forward', 14)}
-            </button>
-          </div>
-        </div>
-      </div>
-      <hr class="divider" />
-    `
-  }
 }
 
 declare global {

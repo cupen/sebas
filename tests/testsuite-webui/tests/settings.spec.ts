@@ -55,7 +55,7 @@ test.describe('设置面', () => {
       await resetState(page.request)
       const truth = await getAdminServices(page.request)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Services')
 
       if (!truth.adapter_ok) {
@@ -92,7 +92,7 @@ test.describe('设置面', () => {
       await resetState(page.request)
       const truth = await getAbout(page.request)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('About')
 
       const list = settings.panel.locator('dl.about-list')
@@ -115,7 +115,7 @@ test.describe('设置面', () => {
 
       await resetState(page.request)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Env')
 
       const table = settings.panel.locator('table.env-table')
@@ -139,7 +139,7 @@ test.describe('设置面', () => {
       const truth = await getAdminServices(page.request)
       expect(truth.adapter_ok).toBe(false)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
 
       // Services: banner, zero rows, zero row actions.
       await settings.openSection('Services')
@@ -182,7 +182,7 @@ test.describe('设置面', () => {
       })
       expect(seeded.status()).toBe(201)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       // New IA default section is Settings — defaults live under Models.
       await settings.openSection('Models')
 
@@ -234,7 +234,7 @@ test.describe('设置面', () => {
 
       await resetState(page.request)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       // New IA default section is Settings — provider management lives under Models.
       await settings.openSection('Models')
 
@@ -275,7 +275,7 @@ test.describe('设置面', () => {
 
       // Persistence: the store is core-owned — a fresh page load still sees it.
       await page.reload()
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Models')
       await expect(
         settings.panel.locator('.provider-row').filter({ hasText: probeName }),
@@ -333,7 +333,7 @@ test.describe('设置面', () => {
       })
       expect(seeded.status()).toBe(201)
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       // New IA default section is Settings — provider management lives under Models.
       await settings.openSection('Models')
       const seededRow = settings.panel.locator('.provider-row').filter({ hasText: seededName })
@@ -362,7 +362,7 @@ test.describe('设置面', () => {
       expect(urlless.status()).toBe(201)
       // Reload so the SPA rebuilds and re-reads the provider list fresh.
       await page.reload()
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Models')
       const urllessRow = settings.panel.locator('.provider-row').filter({ hasText: urllessName })
       await expect(urllessRow).toBeVisible({ timeout: 10_000 })

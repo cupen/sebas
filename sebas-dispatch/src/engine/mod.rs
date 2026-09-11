@@ -35,6 +35,19 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
+/// （workbench-interaction-polish 1.1）`web_cancel_session` 的三态结果。
+/// 调用方据此把「空闲」「未知」转成 typed rejection——取消不再对无事可做
+/// 的请求伪造成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// 在飞 turn 已收到中断指令（驱动层 interrupt，子进程与会话存活）。
+    Dispatched,
+    /// 会话存在但没有在飞 turn（card FSM 不在 WORKING）——无事可取消。
+    Idle,
+    /// 未知会话（无映射或 0-turn 占位尚无 session_id）。
+    Unknown,
+}
+
 #[derive(Debug)]
 pub enum Out {
     SpawnAcp {
@@ -1237,25 +1250,34 @@ impl DispatchHandle {
     /// text is parsed like the Feishu path (B 档冒烟 2026-09-04：webui 直达
     /// 路径此前把 `/cancel` 当普通 prompt 发给 opencode，中断无效）。
     /// （extract-im-service 2.2）取消该 key 会话的在飞 turn（`/cancel` 的
-    /// 通道面）：找到映射则发 `AcpCommand::Cancel` 并返回 true；未知 key
-    /// 返回 false（调用方转 typed rejection）。会话本身保留、可继续对话。
-    pub async fn web_cancel_session(&self, key: &ChannelKey) -> bool {
+    /// 通道面）。workbench-interaction-polish 1.1：返回从 bool 细化为三态
+    /// ——在飞 turn 已派发中断（Dispatched）、会话无在飞 turn（Idle）、
+    /// 未知会话（Unknown）。空闲/未知由调用方转 typed rejection，不再把
+    /// 「无事可取消」伪装成成功。判定与回合队列的 in-flight 定义同源
+    /// （card FSM 的 WORKING 态，`submit_turn` 同款），会话保留、可继续对话。
+    pub async fn web_cancel_session(&self, key: &ChannelKey) -> CancelOutcome {
+        use crate::card_state::phase::WORKING;
         let sid = self
             .map
             .get(key)
             .await
             .and_then(|m| m.session_id().map(str::to_owned));
-        match sid {
-            Some(sid) => {
-                self.emit(Out::SendAcp {
-                    session_id: sid.clone(),
-                    cmd: AcpCommand::Cancel { session_id: sid },
-                })
-                .await;
-                true
-            }
-            None => false,
+        let Some(sid) = sid else {
+            return CancelOutcome::Unknown;
+        };
+        let working = matches!(
+            self.card_states.status_emoji(&sid).await.as_deref(),
+            Some(WORKING)
+        );
+        if !working {
+            return CancelOutcome::Idle;
         }
+        self.emit(Out::SendAcp {
+            session_id: sid.clone(),
+            cmd: AcpCommand::Cancel { session_id: sid },
+        })
+        .await;
+        CancelOutcome::Dispatched
     }
 
     /// Send a message to an existing session from the WebUI. Returns

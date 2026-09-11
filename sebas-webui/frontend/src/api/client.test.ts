@@ -84,6 +84,26 @@ describe('api wire shapes', () => {
     })
   })
 
+  it('cancelSession posts to the cancel route and surfaces typed rejections (1.3/D5)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(okResponse({ status: 'cancelled' }))
+
+    await api.cancelSession('oc_x%00')
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/sessions/oc_x%00/cancel')
+    expect(init.method).toBe('POST')
+
+    // 类型化拒绝原样上抛（空闲 409 / 未知 404 / core 不可达 503）。
+    fetchMock.mockResolvedValue(
+      errorResponse(409, { error: '会话空闲（无在飞回复，无需取消）: oc_x%00' }),
+    )
+    const err = await api.cancelSession('oc_x%00').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(409)
+    expect((err as ApiError).message).toContain('空闲')
+  })
+
   it('parseBackendHint treats a bare acp as the default agent', () => {
     expect(parseBackendHint('acp')).toEqual({ driver: 'acp' })
   })

@@ -398,74 +398,73 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
-  it('still mounts the composer in the docked area, bound to the selected project', async () => {
+  it('still mounts the composer in the docked area, bound to the focused session', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      available_models: ['m1', 'm2'],
+      current_model: 'm1',
+    })
     const el = await mount()
-    el.selectedPath = '/home/me/sebas'
+    await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    // 无聚焦会话时也渲染 composer 底座（composer 钉底、area flex 吃满）。
+    // composer 底座常驻（composer 钉底、area 吃满输入框分割面）。
     const area = el.shadowRoot!.querySelector('.composer-area')
     expect(area).toBeTruthy()
     const composer = area!.querySelector('sebas-workbench-composer') as HTMLElement & {
-      projectDir?: string | null
+      sessionKey?: string | null
+      turnInFlight?: boolean
+      sessionModels?: string[]
+      currentModel?: string | null
     }
     expect(composer).toBeTruthy()
-    expect(composer.projectDir).toBe('/home/me/sebas')
+    // 聚焦会话指针驱动 composer（workbench-interaction-polish 4.1）。
+    expect(composer.sessionKey).toBe('oc_live%00')
+    // D4：聚焦会话 working = turnInFlight 下发。
+    expect(composer.turnInFlight).toBe(true)
+    // 会话内模型面与当前模型照常透传。
+    expect(composer.sessionModels).toEqual(['m1', 'm2'])
+    expect(composer.currentModel).toBe('m1')
     el.remove()
   })
-})
 
-describe('provider label sourcing (fix-webui-detached-status)', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    apiMocks.summary.mockResolvedValue(summaryBase)
-    apiMocks.session.mockResolvedValue(detailFixture())
-    apiMocks.sessions.mockResolvedValue({ recent_sessions: [], active_session_key: null })
-    apiMocks.projectsBranch.mockResolvedValue({
-      project_id: 'proj-sebas',
-      branch: 'feat/webui',
-      accessible: true,
-    })
-  })
-  afterEach(() => {
-    document.body.innerHTML = ''
-  })
-
-  async function labelFor(router: Record<string, unknown>): Promise<string | null> {
-    apiMocks.settings.mockResolvedValue({
-      card_config: {
-        theme_color: '#000',
-        fold_long_output: false,
-        thinking_display: 'auto',
-        max_user_text_chars: 0,
-        max_tool_output_chars: 0,
-      },
-      router,
-    })
+  it('stages the conversation and the composer in a vertical wa-split-panel (5.2/D1)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
     const el = await mount()
-    const label = (el as unknown as { providerLabel: string | null }).providerLabel
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const panel = el.shadowRoot!.querySelector('wa-split-panel.vsplit') as HTMLElement
+    expect(panel).toBeTruthy()
+    expect(panel.getAttribute('orientation')).toBe('vertical')
+    // composer 高度边界：最低 120px、最高主区一半；初始高度来自记忆
+    // （此环境无 storage → 默认 220）。
+    expect(panel.getAttribute('position-in-pixels')).toBe('220')
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    expect(styleText).toMatch(/wa-split-panel\.vsplit\s*\{[^}]*--min:\s*120px/)
+    expect(styleText).toMatch(/wa-split-panel\.vsplit\s*\{[^}]*--max:\s*50%/)
+    // 舞台浮岛（D6）：stage 列内圆角卡片。
+    expect(el.shadowRoot!.querySelector('.stage-island')).toBeTruthy()
     el.remove()
-    return label
-  }
-
-  it('shows the first provider name when the source has data', async () => {
-    expect(
-      await labelFor({
-        providers_available: true,
-        providers: [{ name: 'anthropic / claude' }],
-      }),
-    ).toBe('anthropic / claude')
   })
 
-  it('distinguishes an unavailable provider source from "no provider configured"', async () => {
-    expect(await labelFor({ providers_available: false, providers: [] })).toBe(
-      'provider status unavailable',
-    )
-  })
-
-  it('keeps "no provider configured" when the source is reachable but empty', async () => {
-    expect(await labelFor({ providers_available: true, providers: [] })).toBe(
-      'no provider configured',
-    )
+  it('clamps and persists the composer height when the divider drags (5.2/D1)', async () => {
+    const el = await mount()
+    const target = el as unknown as {
+      onComposerReposition: (e: Event) => void
+      composerHeight: number
+    }
+    // getBoundingClientRect 在 jsdom 返回 0 → 面积不可信 → 只保 120px 下限。
+    target.onComposerReposition({
+      currentTarget: { positionInPixels: 9999 },
+    } as unknown as Event)
+    expect(target.composerHeight).toBe(120)
+    target.onComposerReposition({
+      currentTarget: { positionInPixels: Number.NaN },
+    } as unknown as Event)
+    expect(target.composerHeight).toBe(120)
+    el.remove()
   })
 })
 
