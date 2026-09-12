@@ -1,0 +1,176 @@
+---
+# sebas role — uninstall tasks (sebas_action=uninstall, DESTRUCTIVE).
+#
+# Converges the target to "sebas was never here": service unit, both binaries,
+# the data/secret surface (sessions DB, core.secret, downloads, usage logs,
+# rendered config) and the deploy user with its home. Idempotency rule: the
+# target state of every step is "absent", so each step tolerates "the previous
+# step never ran" and a full re-run on an already-clean host stays green.
+
+# ------------------------------------------------- 1/6 authoritative teardown
+
+# `sebas service --uninstall` is the authoritative teardown: it knows the unit
+# name and does stop + disable + remove unit + daemon-reload in one go. It
+# exits 3 when the unit is already absent (idempotent re-run) and may fail on
+# a half-broken unit — both are fine here; the acceptance criterion is the
+# converged end state, not per-step exit codes.
+- name: Check whether the managed binary is present
+  ansible.builtin.stat:
+    path: "{{ sebas_bin_path }}"
+  register: sebas_uninstall_bin_stat
+
+- name: Tear down the service via sebas service --uninstall
+  ansible.builtin.command:
+    cmd: "{{ sebas_bin_path }} service --uninstall"
+  register: sebas_service_uninstall
+  failed_when: false
+  when: sebas_uninstall_bin_stat.stat.exists
+
+# Fallback for a missing binary (or an authoritative step that left residue):
+# bare systemctl + unit-file removal. Every command below is a no-op once the
+# unit is gone, so running it unconditionally keeps the flow convergent.
+- name: Stop the sebas unit directly (fallback)
+  ansible.builtin.command:
+    cmd: systemctl stop sebas
+  failed_when: false
+  changed_when: false
+
+- name: Disable the sebas unit directly (fallback)
+  ansible.builtin.command:
+    cmd: systemctl disable sebas
+  failed_when: false
+  changed_when: false
+
+# `sebas service --install` writes the unit to /etc/systemd/system; probe the
+# standard path and the data dir with find so a relocated unit is caught too.
+- name: Probe for leftover sebas unit files
+  ansible.builtin.find:
+    paths:
+      - /etc/systemd/system
+      - "{{ sebas_data_dir }}"
+    patterns: "sebas*.service"
+    file_type: any
+  register: sebas_uninstall_unit_files
+
+- name: Remove leftover sebas unit files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ sebas_uninstall_unit_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Reload the systemd manager state
+  ansible.builtin.systemd:
+    daemon_reload: true
+  failed_when: false
+
+# ------------------------------------------------------- 2/6 remove binaries
+
+- name: Remove the managed binary
+  ansible.builtin.file:
+    path: "{{ sebas_bin_path }}"
+    state: absent
+
+- name: Remove the seeded stable binary copy
+  ansible.builtin.file:
+    path: "{{ sebas_data_dir }}/bin/sebas"
+    state: absent
+
+- name: Remove the emptied seeded binary directory
+  ansible.builtin.file:
+    path: "{{ sebas_data_dir }}/bin"
+    state: absent
+
+# ------------------------------------------- 3/6 clear data & secret surface
+
+- name: Remove the data directory (sessions DB, core.secret, downloads, usage logs)
+  ansible.builtin.file:
+    path: "{{ sebas_data_dir }}"
+    state: absent
+
+# The default config lives inside sebas_data_dir and is already gone at this
+# point; deleting it explicitly covers an externalized sebas_config_path.
+- name: Remove the rendered config file
+  ansible.builtin.file:
+    path: "{{ sebas_config_path }}"
+    state: absent
+
+# The bare binary defaults to ~/.config/sebas/sessions.json (see the
+# dispatch_state_file note in defaults/main.yml) — clear that surface too.
+- name: Remove the bare-binary default state directory (~/.config/sebas)
+  ansible.builtin.file:
+    path: "{{ sebas_deploy_home }}/.config/sebas"
+    state: absent
+
+# ------------------------------------------------------- 4/6 remove the user
+
+- name: Remove the deploy user together with its home directory
+  ansible.builtin.command:
+    cmd: "userdel -r {{ sebas_deploy_user }}"
+  register: sebas_uninstall_userdel
+  # Exit 6 = user already absent (the converged state). Any other failure
+  # (e.g. home contains files the role does not own) is repaired below.
+  failed_when: false
+  changed_when: sebas_uninstall_userdel.rc == 0
+
+- name: Fall back to removing the deploy home directory
+  ansible.builtin.file:
+    path: "{{ sebas_deploy_home }}"
+    state: absent
+  when: sebas_uninstall_userdel.rc != 0
+
+# -------------------------------------------- 5/6 controller-side /tmp cleanup
+
+# Best-effort: whatever cannot be removed is left for the operator and does
+# not fail the play. The artifact names mirror the install flow's own paths.
+- name: Remove the controller-side user-supplied tarball
+  ansible.builtin.file:
+    path: "{{ sebas_artifact_file }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  when:
+    - sebas_artifact_source == 'file'
+    - sebas_artifact_file | length > 0
+
+- name: Remove the controller-side extraction directory
+  ansible.builtin.file:
+    path: "/tmp/{{ sebas_artifact_file | basename | regex_replace('\\.tar\\.gz$', '') }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  when:
+    - sebas_artifact_source == 'file'
+    - sebas_artifact_file | length > 0
+
+# Release mode with a pinned version resolves to the same deterministic name
+# the download step used. `latest` is skipped: the resolved tag is not known
+# without a GitHub round-trip, and uninstall must not require network access.
+- name: Remove the controller-side release tarball and extraction directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/sebas-{{ sebas_version }}-x86_64-unknown-linux-gnu.tar.gz"
+    - "/tmp/sebas-{{ sebas_version }}-x86_64-unknown-linux-gnu"
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  when:
+    - sebas_artifact_source == 'release'
+    - sebas_version != 'latest'
+
+# ----------------------------------------------------------- 6/6 report
+
+- name: Report uninstall outcome
+  ansible.builtin.debug:
+    msg:
+      - "sebas uninstalled."
+      - "service teardown: {{ 'via sebas service --uninstall' if sebas_uninstall_bin_stat.stat.exists else 'binary absent, bare systemctl fallback' }}"
+      - "removed (or already absent): {{ sebas_bin_path }}, {{ sebas_data_dir }}/bin/sebas"
+      - "removed (or already absent): {{ sebas_data_dir }}, {{ sebas_config_path }}, {{ sebas_deploy_home }}/.config/sebas"
+      - "deploy user: {{ sebas_deploy_user }} (exit code {{ sebas_uninstall_userdel.rc | default('?') }} from userdel)"
+      - "re-running this playbook is safe: every step converges to the same clean state."

@@ -4,6 +4,19 @@
 # All variables have defaults; the playbook is a no-config WebUI-only deploy
 # out of the box. Override per-host via host_vars/<host>.yml or `--extra-vars`.
 
+# --- action ----------------------------------------------------------------
+
+# What the role does. Exactly two legal values:
+#   install   — provision + start the sebas service (the default, so running
+#               the playbook without this variable is always harmless)
+#   uninstall — DESTRUCTIVE teardown: service, both binaries, the data
+#               directory (incl. core.secret and the sessions DB), the
+#               rendered config and the deploy user are all removed.
+#               Only triggered by passing it explicitly, e.g.
+#               `ansible-playbook site.yml -e sebas_action=uninstall`.
+# Any other value fails the play before a single task touches the target.
+sebas_action: install
+
 # --- identity & layout ---------------------------------------------------
 
 # OS account the systemd unit runs as. `sebas service --install` rejects root

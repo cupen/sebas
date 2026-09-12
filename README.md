@@ -91,6 +91,15 @@ ansible-playbook site.yml --skip-tags sebas_install
 
 **反向代理 / Nginx**：sebas 默认监听 loopback，仅本机可访问。公开部署需要使用 Nginx 反向代理，模板见 [`.ansible/examples/nginx-sebas-vhost.conf`](.ansible/examples/nginx-sebas-vhost.conf)。将占位符 `__SEBAS_DOMAIN__` / `__UPSTREAM_HOST__` / `__UPSTREAM_PORT__` 替换后，执行 `nginx -t` 校验并 reload。sebas 本身不处理证书与 TLS，由宿主机 Nginx 终结。
 
+**卸载（破坏性）**：role 通过 `sebas_action` 切换动作，默认 `install`——不传该变量跑 playbook 永远执行安装/升级，误跑无害。要下线一台机器，显式传入 `uninstall`：
+
+```bash
+cd .ansible
+ansible-playbook site.yml -e sebas_action=uninstall
+```
+
+⚠️ **这是破坏性动作且不做二次确认**：会停止并删除 systemd 服务、删除两份二进制（`/usr/local/bin/sebas` 与 `<data_dir>/bin/sebas`）、删除整个数据目录（含 sessions DB、`core.secret` 密钥材料、downloads、用量日志）、删除渲染出的 config.toml（provider API key、`sebas_config_extra` 里的凭据随之清除）、删除 `~/.config/sebas`，并用 `userdel -r` 连 home 一起删除部署用户。**卸载即清库，不备份不导出**——如需保留数据请先手动迁移。卸载流程幂等容错：对部分拆除（服务已停、二进制已缺）或已清空的机器重复执行同样收敛成功。远端主机换 `-i` 指定自己的 inventory 即可。
+
 ### Docker
 
 镜像启动时会校验 Agent 二进制；缺少 `claude` 会以明确错误退出。原生安装的场景可直接挂载宿主机二进制：
