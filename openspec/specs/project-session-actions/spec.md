@@ -4,9 +4,10 @@ Defines the directory-picker project registration, zero-prompt session creation,
 
 ## Requirements
 
+
 ### Requirement: Add project via directory picker
 
-The workbench SHALL provide a modal dialog with a server-side directory tree browser and a manual path input, either of which SHALL register a project directory. The tree browser SHALL lazy-load subdirectory listings on expand from `GET /api/fs/browse-dirs?path=...&root=...`, scoped to the server-side work root. The tree SHALL open at the server's default work directory (the listing rooted there, its canonical path displayed so the operator can see the starting scope), and expanding any node SHALL list its subdirectories without error — including on Windows, where previously the path round-trip failed with a 400. The registered project name SHALL be the directory's basename. The system SHALL probe the directory for a git branch after registration and display it in the project row. The manual path input SHALL NOT be bounded by the tree's root scope.
+The workbench SHALL provide a modal dialog with a server-side directory tree browser and a manual path input, either of which SHALL register a project directory. The tree browser SHALL lazy-load subdirectory listings on expand from `GET /api/fs/browse-dirs?path=...&root=...`, scoped to the server-side work root. The tree SHALL open at the server's default work directory (the listing rooted there, its canonical path displayed so the operator can see the starting scope), and expanding any node SHALL list its subdirectories without error — including on Windows, where previously the path round-trip failed with a 400. The registered project name SHALL be the directory's basename. The system SHALL probe the directory for a git branch after registration to determine directory accessibility; the branch name SHALL NOT be displayed in the project row. The manual path input SHALL NOT be bounded by the tree's root scope.
 
 #### Scenario: add project via directory browser
 
@@ -41,7 +42,7 @@ The workbench SHALL provide a modal dialog with a server-side directory tree bro
 #### Scenario: git branch shown after registration
 
 - **WHEN** a project is registered and the directory is a git repository
-- **THEN** the project row shows the current branch name
+- **THEN** the project row does not show a branch name, while the probe result still drives the directory-accessibility marking
 
 #### Scenario: empty directory is not expandable
 
@@ -88,17 +89,22 @@ Each session row SHALL have an archive button that moves the session to the Hist
 
 ### Requirement: History group is the archive
 
-The History group SHALL contain only archived sessions. Sessions with no project directory (Feishu-originated sessions) SHALL appear in a separate Inbox group instead. The History group SHALL show the total count of archived sessions and be collapsible.
+The History group SHALL contain only archived sessions, listed newest-first by archive time. The rail SHALL NOT render an Inbox group: sessions with no project directory SHALL NOT be listed in the rail (they remain accessible through the sessions API and their originating surface). The History group SHALL show the total count of archived sessions and be collapsible.
 
 #### Scenario: History holds only archived sessions
 
 - **WHEN** the History group is expanded
-- **THEN** every session listed has been archived and none are Feishu-originated sessions without a project
+- **THEN** every session listed has been archived
+
+#### Scenario: History is sorted newest-first
+
+- **WHEN** sessions are archived at different times
+- **THEN** the History group lists them in descending order of archive time
 
 #### Scenario: Inbox for unbound sessions
 
 - **WHEN** a session has no project directory
-- **THEN** it appears in the Inbox group, not in History
+- **THEN** it appears in no rail group — the Inbox group no longer exists — and History does not list it either
 
 ### Requirement: Archive expiry
 
@@ -121,12 +127,17 @@ The system SHALL permanently delete archived sessions whose `archived_at` timest
 
 ### Requirement: Project removal from the rail
 
-Each project row in the workbench rail SHALL expose a remove action (hover-revealed). Triggering it SHALL open a confirmation dialog that names the project and states that live sessions under it keep running and migrate to the Inbox. Confirming SHALL call `POST /api/projects/{path}/remove`; the project row SHALL disappear from the rail without a page reload. A backend rejection SHALL be presented inline in the dialog, with the row retained.
+Each project row SHALL expose its remove action inside the row's overflow (`...`) menu. When the project has at least one non-archived session, the removal SHALL be rejected — the backend SHALL refuse the remove request and the dialog SHALL state that sessions must be archived or closed first, naming the session count. When no non-archived sessions remain, confirming the dialog SHALL call `POST /api/projects/{id}/remove` and the project row SHALL disappear from the rail without a page reload. A backend rejection SHALL be presented inline in the dialog, with the row retained.
 
 #### Scenario: remove a project from the rail
 
-- **WHEN** the operator clicks the remove button on a project row and confirms the dialog
-- **THEN** the remove endpoint is called, the project disappears from the rail, and any live sessions under it appear in the Inbox group
+- **WHEN** the operator removes a project that has no non-archived sessions and confirms the dialog
+- **THEN** the remove endpoint is called and the project disappears from the rail
+
+#### Scenario: removal is blocked while sessions exist
+
+- **WHEN** the operator attempts to remove a project that still has non-archived sessions
+- **THEN** the removal is refused with a message naming the session count and directing the operator to archive or close them first
 
 #### Scenario: removal rejection surfaces inline
 
@@ -140,16 +151,16 @@ Each project row in the workbench rail SHALL expose a remove action (hover-revea
 
 ### Requirement: Session close from the rail
 
-Each session row in the workbench rail (project groups and Inbox) SHALL expose a close action alongside the archive button, with `POST /api/sessions/{key}/close` semantics (kill the child when active, drop the mapping). Closing an inactive session (dormant/done/failed) SHALL act immediately; closing an active session (starting/queued/working) SHALL require an inline confirmation. Closing the focused session SHALL return the workbench to the no-focus empty state.
+Each session row in the workbench rail SHALL expose a close action inside the row's overflow (`...`) menu, with `POST /api/sessions/{key}/close` semantics (kill the child when active, drop the mapping). Closing an inactive session (dormant/done/failed) SHALL act immediately; closing an active session (starting/queued/working) SHALL require an inline confirmation. Closing the focused session SHALL return the workbench to the no-focus empty state.
 
 #### Scenario: close a dormant session from the rail
 
-- **WHEN** the operator clicks the close button on a dormant session row
+- **WHEN** the operator picks Close from a dormant session row's overflow menu
 - **THEN** the session is closed immediately, the row disappears, and no confirmation is required
 
 #### Scenario: closing a working session asks first
 
-- **WHEN** the operator clicks the close button on a session whose child is running
+- **WHEN** the operator picks Close on a session whose child is running
 - **THEN** an inline confirmation is shown first; only on confirm is the close sent
 
 #### Scenario: closing the focused session clears the stage
@@ -170,3 +181,46 @@ After the operator creates a 0-turn placeholder session (rail `+` button), the w
 
 - **WHEN** a placeholder session has just been created and focused
 - **THEN** the composer renders follow-up mode (read-only agent label, no execution-backend dropdown) for that session
+
+### Requirement: Row action consolidation
+
+A project row SHALL expose exactly two hover-revealed affordances, in order: an overflow (`...`) menu followed by the "New session" (`+`) button. A session row SHALL expose a single hover-revealed overflow (`...`) menu and no add affordance. All row affordances SHALL be hidden until the row is hovered or keyboard-focused. The overflow menus SHALL be implemented as dropdowns so future actions can be added without new row buttons; the project menu currently contains only Remove.
+
+#### Scenario: project row shows menu then plus on hover
+
+- **WHEN** the operator hovers or keyboard-focuses a project row
+- **THEN** the `...` menu and the `+` button appear in that order, and are hidden again when the row is no longer hovered or focused
+
+#### Scenario: session row has only the overflow menu
+
+- **WHEN** the operator hovers a session row
+- **THEN** only a `...` menu appears; the row provides no add button, and the menu contains Archive and Close
+
+#### Scenario: project overflow menu opens the remove dialog
+
+- **WHEN** the operator opens a project row's `...` menu and picks Remove
+- **THEN** the remove confirmation dialog opens for that project
+
+### Requirement: Session rows are named by the first prompt
+
+A rail session row SHALL display the preview of the session's first user message as its name. A session that has not received any user message yet (a zero-turn placeholder) SHALL fall back to its short session identifier. Names longer than the implementation-defined display cap SHALL be truncated with an ellipsis, while the row's hover title SHALL carry the full first message. When the first message is sent to a placeholder session, its name SHALL update from the identifier to the message preview without a page reload. The rail's session dialogs SHALL name the session by the same label as its row.
+
+#### Scenario: named by the first message
+
+- **WHEN** a session has received a first user message
+- **THEN** its rail row shows a preview of that message instead of the session identifier
+
+#### Scenario: placeholder falls back to the identifier
+
+- **WHEN** a zero-turn placeholder session has no user message yet
+- **THEN** its rail row shows the short session identifier as the name
+
+#### Scenario: long first message is truncated
+
+- **WHEN** a session's first user message exceeds the display cap
+- **THEN** the row shows a truncated name ending with an ellipsis, and hovering the row reveals the full message via its title
+
+#### Scenario: placeholder name updates after the first message
+
+- **WHEN** the operator sends the first message into a placeholder session
+- **THEN** the row's name becomes the message preview without a page reload
