@@ -126,11 +126,17 @@ fn unique_stamp() -> u128 {
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub struct SandboxDir {
     path: PathBuf,
     keep: AtomicBool,
+    /// PIDs spawned as their own process-group leaders (unix). Teardown
+    /// killpg's each group so core-spawned routers and watchdog-respawned
+    /// cores die with the test even though `kill_on_drop` only reaps the
+    /// direct child (sebas-gc7 leak).
+    group_leaders: Mutex<Vec<u32>>,
 }
 
 impl SandboxDir {
@@ -148,12 +154,34 @@ impl SandboxDir {
         Arc::new(Self {
             path,
             keep: AtomicBool::new(false),
+            group_leaders: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Record a spawned child as its own process-group leader.
+    fn register_group_leader(&self, pid: u32) {
+        self.group_leaders.lock().unwrap().push(pid);
+    }
+
+    /// SIGKILL every spawned process group. Grandchildren inherit the group,
+    /// so this takes the whole tree regardless of what already exited
+    /// (ESRCH on a fully-dead group is fine). Runs on the keep-path too:
+    /// diagnosis needs the logs on disk, not the processes writing them.
+    fn kill_process_groups(&self) {
+        #[cfg(unix)]
+        for pid in self.group_leaders.lock().unwrap().drain(..) {
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        self.group_leaders.lock().unwrap().clear();
     }
 }
 
 impl Drop for SandboxDir {
     fn drop(&mut self) {
+        self.kill_process_groups();
         if self.keep.load(Ordering::Relaxed) || std::thread::panicking() {
             eprintln!(
                 "[sandbox] kept for diagnosis (logs inside): {}",
@@ -323,6 +351,14 @@ usage_file = "{}"
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 forward_slash(&self.path.join("providers.json")),
             ),
+            // archive.json falls back to SEBAS_HOME ($HOME/.sebas) — pin both
+            // into the sandbox: without this the suites read AND rewrote the
+            // operator's real archive (93-entry test pollution, 2026-09-12).
+            ("SEBAS_HOME", forward_slash(&self.path)),
+            (
+                "SEBAS_ARCHIVE_PATH",
+                forward_slash(&self.path.join("archive.json")),
+            ),
             // Keep log files plain ASCII so assertions can match them.
             ("NO_COLOR", "1".to_string()),
         ];
@@ -373,16 +409,22 @@ usage_file = "{}"
         let log_err = log_file
             .try_clone()
             .unwrap_or_else(|e| panic!("clone log handle: {e}"));
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
-            .args(args)
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"));
+        cmd.args(args)
             .current_dir(&self.path)
             .envs(self.envs(secret))
             .envs(extra.iter().copied())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let child = cmd
             .spawn()
-            .unwrap_or_else(|e| panic!("spawn sebas {args:?}: {e}"))
+            .unwrap_or_else(|e| panic!("spawn sebas {args:?}: {e}"));
+        self._dir
+            .register_group_leader(child.id().expect("freshly spawned child has a pid"));
+        child
     }
 
     /// 打开节点链路（add-remote-execution-node 9.3）：在沙箱内追加 `[node_link]`
@@ -443,15 +485,21 @@ usage_file = "{}"
             args.push("--join-token".into());
             args.push(token.into());
         }
-        tokio::process::Command::new(sebas_node_bin())
-            .args(&args)
+        let mut cmd = tokio::process::Command::new(sebas_node_bin());
+        cmd.args(&args)
             .current_dir(&self.path)
             .env("NO_COLOR", "1")
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let child = cmd
             .spawn()
-            .unwrap_or_else(|e| panic!("spawn sebas-node {args:?}: {e}"))
+            .unwrap_or_else(|e| panic!("spawn sebas-node {args:?}: {e}"));
+        self._dir
+            .register_group_leader(child.id().expect("freshly spawned child has a pid"));
+        child
     }
 
     /// 节点链路监听端口（`enable_node_link` 之后才有意义）。
@@ -648,25 +696,30 @@ usage_file = "{}"
         let log_err = log_file
             .try_clone()
             .unwrap_or_else(|e| panic!("clone log handle: {e}"));
-        let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
-            .args([
-                "core",
-                "-c",
-                &forward_slash(&self.config_path),
-                "--router",
-                "--debug",
-                "--webui",
-                "--webui-port",
-                &dashboard_port.to_string(),
-            ])
-            .current_dir(&self.path)
-            .envs(self.envs(Some(&self.core_secret)))
-            .envs(extra.iter().copied())
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_err))
-            .kill_on_drop(true)
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"));
+        cmd.args([
+            "core",
+            "-c",
+            &forward_slash(&self.config_path),
+            "--router",
+            "--debug",
+            "--webui",
+            "--webui-port",
+            &dashboard_port.to_string(),
+        ])
+        .current_dir(&self.path)
+        .envs(self.envs(Some(&self.core_secret)))
+        .envs(extra.iter().copied())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err))
+        .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("spawn sebas in-process webui: {e}"));
+        self._dir
+            .register_group_leader(child.id().expect("freshly spawned child has a pid"));
         (child, dashboard_port)
     }
 }
