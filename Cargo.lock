@@ -2828,6 +2828,7 @@ dependencies = [
  "sebas-node",
  "sebas-node-link",
  "sebas-router",
+ "sebas-schema-derive",
  "sebas-startup",
  "sebas-webui",
  "serde",
@@ -3005,6 +3006,15 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "sebas-schema-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

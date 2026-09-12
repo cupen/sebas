@@ -1,7 +1,10 @@
-//! 数据库连接管理: 打开、WAL mode、busy_timeout、user_version。
+//! 数据库连接管理: 打开、WAL mode、busy_timeout。
 //!
 //! 所有操作是同步的(rusqlite 本身同步), 包裹在 `Connection` 上。
 //! 异步调用者通过 `writer.rs` 的 actor 间接访问, 不直接调用这里的函数。
+//!
+//! 注: `PRAGMA user_version` 不再承载 schema 版本语义 (sqlite-auto-schema-sync
+//! 后版本自描述在 `schema_meta` 键值表里, 见 migration.rs)。
 
 use rusqlite::{Connection, OpenFlags, Result as SqlResult};
 use std::path::Path;
@@ -38,18 +41,6 @@ pub fn open_readonly(path: &Path) -> SqlResult<Connection> {
     )
 }
 
-/// 读取当前 schema version (`PRAGMA user_version`)。
-pub fn user_version(conn: &Connection) -> SqlResult<u32> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    Ok(version as u32)
-}
-
-/// 写入 schema version (`PRAGMA user_version = n`)。
-/// 这是一个廉价操作, 不与事务冲突。
-pub fn set_user_version(conn: &Connection, version: u32) -> SqlResult<()> {
-    conn.pragma_update(None, "user_version", version as i64)
-}
-
 /// 检查数据库是否已打开且可用 (简单 ping)。
 pub fn ping(conn: &Connection) -> bool {
     conn.query_row("SELECT 1", [], |_| Ok(()))
@@ -76,7 +67,6 @@ mod tests {
         let conn = open(&path).expect("open");
         let journal: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0)).unwrap();
         assert_eq!(journal, "wal", "expected WAL mode, got {journal}");
-        assert_eq!(user_version(&conn).unwrap(), 0, "fresh DB version 0");
     }
 
     #[test]
@@ -87,15 +77,6 @@ mod tests {
         // Check that busy_timeout is roughly 5000ms
         let timeout: i64 = conn.pragma_query_value(None, "busy_timeout", |row| row.get(0)).unwrap();
         assert!(timeout >= 4000, "busy_timeout too low: {timeout}");
-    }
-
-    #[test]
-    fn user_version_round_trip() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("version.db");
-        let conn = open(&path).expect("open");
-        set_user_version(&conn, 42).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 42);
     }
 
     #[test]

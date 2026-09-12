@@ -1,0 +1,15 @@
+[package]
+name = "sebas-schema-derive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+# 编译期 schema 提取 (sqlite-auto-schema-sync D1):
+# `#[derive(SchemaColumns)]` 从 Row struct 字段生成 `schema_columns()`。
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2"
+quote = "1"
+proc-macro2 = "1"
