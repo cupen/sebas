@@ -9,7 +9,10 @@
  *                name / desired / actual / uptime + /api/admin/events 最近错误；
  *                im→「飞书 IM」显示映射；无 adapter 时「无 watchdog 控制面」
  *                横幅而非空列表冒充——router 行的 desired/actual/uptime 只在
- *                此分区呈现）
+ *                此分区呈现）。停止被拒（400/409 + active_routed_sessions +
+ *                count，unify-router-process-shape D4）→ 二层强制出口对话框：
+ *                计数 + 流式中断后果，Force stop 以 force 重发、取消不发请求；
+ *                其余失败仍走既有内联错误
  *   - models     provider 管理列表（/router/api/providers，条目携带能力
  *                标记；不再渲染 Router 网关卡、不再请求 /api/router）
  *   - about      INSTANCE 段在上（原 Settings 总览三只读项：工作区根目录 +
@@ -76,11 +79,22 @@ const apiMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api/client.js', () => ({
+  // 与真 ApiError 同形（client.ts）：status + 机器可读拒绝码 code + 数值
+  // 载荷 count（unify-router-process-shape 2.3 的 400 拒绝经此携带）。
   ApiError: class ApiError extends Error {
     readonly status: number
-    constructor(status: number, message: string) {
+    readonly code: string | null
+    readonly count: number | null
+    constructor(
+      status: number,
+      message: string,
+      code: string | null = null,
+      count: number | null = null,
+    ) {
       super(message)
       this.status = status
+      this.code = code
+      this.count = count
     }
   },
   api: {
@@ -440,6 +454,108 @@ describe('sebas-settings-modal sections', () => {
     await el.updateComplete
     expect(navItems(el)[0]!.getAttribute('aria-current')).toBe('false')
     expect(navItems(el)[1]!.getAttribute('aria-current')).toBe('true')
+    el.remove()
+  })
+})
+
+describe('unify-router-process-shape：router 停止被拒的强制出口（D4）', () => {
+  /** 装好带 router 行的 Services 分区，并在 confirm 弹窗里点掉 Disable。 */
+  async function confirmDisableRouter(el: SebasSettingsModal): Promise<void> {
+    await goto(el, 2)
+    const routerCard = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')].find(
+      (c) => c.querySelector('.service-id')?.textContent === 'router',
+    )!
+    routerCard.querySelector<HTMLElement>('button[title="Disable service"]')!.click()
+    await el.updateComplete
+    const confirm = el.shadowRoot!.querySelector(
+      'wa-dialog.service-action-confirm',
+    ) as HTMLElement
+    confirm.querySelector<HTMLElement>('wa-button[variant="danger"]')!.click()
+    await settle(el)
+  }
+
+  function forceDialog(el: SebasSettingsModal): HTMLElement {
+    return el.shadowRoot!.querySelector('wa-dialog.service-force-stop') as HTMLElement
+  }
+
+  /**
+   * 对话框开合的真源断言：组件 state `forceStop`。wa-dialog 的 open 属性
+   * 回落走异步 requestClose 动画链（jsdom 无动画完成事件，时序不保证），
+   * 与本文件既有 `editor` 断言同款读组件 state。
+   */
+  function forceStopState(el: SebasSettingsModal): { name: string; count: number | null } | null {
+    return (el as unknown as { forceStop: { name: string; count: number | null } | null })
+      .forceStop
+  }
+
+  /** 拒绝载荷（wire 合同主形态的解析产物：ApiError 携带 code + count）。 */
+  function rejection(count: number): Error {
+    return new ApiError(400, 'router has active routed sessions', 'active_routed_sessions', count)
+  }
+
+  beforeEach(() => {
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [{ name: 'router', status: 'running', desired: 'running', uptime_secs: 30 }],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+  })
+
+  it('直接成功：首次 disable 不带 force，成功后刷新列表、不弹强制出口', async () => {
+    const el = await mount()
+    await confirmDisableRouter(el)
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
+    expect(apiMocks.disableService).toHaveBeenCalledWith('router', false)
+    expect(forceStopState(el)).toBeNull()
+    // 成功 → loadServices 重取列表（初载 + 动作后 = 2 次）。
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('拒绝后强制：二层对话框呈现计数与后果，Force stop 以 force 重发并刷新', async () => {
+    apiMocks.disableService
+      .mockRejectedValueOnce(rejection(2))
+      .mockResolvedValueOnce({ operation_id: 'op-force', status: 'accepted', message: 'accepted' })
+    const el = await mount()
+    await confirmDisableRouter(el)
+    // 二层对话框打开：拒绝驱动，携带目标与计数；拒绝不落内联错误。
+    expect(forceStopState(el)).toEqual({ name: 'router', count: 2 })
+    expect(forceDialog(el).textContent).toContain('2')
+    expect(forceDialog(el).textContent).toContain('streaming')
+    expect(el.shadowRoot!.querySelector('.callout-error')).toBeNull()
+    // 「强制停止」= 同一停止请求带 force: true 重发；成功后刷新列表。
+    forceDialog(el).querySelector<HTMLElement>('wa-button[variant="danger"]')!.click()
+    await settle(el)
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(2)
+    expect(apiMocks.disableService).toHaveBeenLastCalledWith('router', true)
+    expect(forceStopState(el)).toBeNull()
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('拒绝后取消：不发任何请求，router 行保持原状', async () => {
+    apiMocks.disableService.mockRejectedValueOnce(rejection(5))
+    const el = await mount()
+    await confirmDisableRouter(el)
+    expect(forceStopState(el)).toEqual({ name: 'router', count: 5 })
+    forceDialog(el).querySelector<HTMLElement>('wa-button[appearance="plain"]')!.click()
+    await settle(el)
+    // 取消 = 无第二次请求、列表不刷新、对话框关闭且行保持原状。
+    expect(forceStopState(el)).toBeNull()
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(1)
+    expect(el.shadowRoot!.textContent ?? '').toContain('status running')
+    el.remove()
+  })
+
+  it('400 但无 active_routed_sessions 的失败仍走既有内联错误，不弹强制出口', async () => {
+    apiMocks.disableService.mockRejectedValueOnce(new ApiError(400, 'watchdog rejected it'))
+    const el = await mount()
+    await confirmDisableRouter(el)
+    expect(forceStopState(el)).toBeNull()
+    expect(el.shadowRoot!.querySelector('.callout-error')).toBeTruthy()
+    expect(el.shadowRoot!.textContent ?? '').toContain('watchdog rejected it')
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
     el.remove()
   })
 })

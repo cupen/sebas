@@ -202,8 +202,8 @@ api_key_env = "ANTHROPIC_API_KEY"
 ```
 
 ```bash
-# 随主服务启动（也可独立进程：sebas router --config …）
-sebas core --config ./config.toml --router
+# router 以独立进程运行（或交由 watchdog 托管：config [watchdog.router] enabled = true）
+sebas router --config ./config.toml
 
 # 客户端接入
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claude
@@ -270,6 +270,6 @@ sebas/
 
 - **进程级 e2e**：`invoke testsuite-e2e`（`tests/testsuite_e2e_test.rs`）；单用例 `invoke testsuite-e2e --case <name>`。
 - **旅程级验收**：`invoke testsuite-acceptance`（`tests/testsuite_acceptance_test.rs`）；单旅程 `invoke testsuite-acceptance --case <name>`。
-- **浏览器级 UI 旅程**：`invoke testsuite-webui`。一键构建（dist 自动重建）→ 装配一次性沙箱（`sebas core --router --debug --webui` + fake-claude 桩，不触碰真实 `~/.sebas` 与 9797）→ 运行全部旅程（主 config + auth config）→ 按运行结果清理。
+- **浏览器级 UI 旅程**：`invoke testsuite-webui`。一键构建（dist 自动重建）→ 装配一次性沙箱（`core --webui` + 独立 `sebas router --debug` 两进程 + fake-claude 桩，不触碰真实 `~/.sebas` 与 9797）→ 运行全部旅程（主 config + auth config）→ 按运行结果清理。
   - 单旅程：`invoke testsuite-webui --case <spec 文件名>`（如 `--case first-paint`；`--case auth` 跑鉴权形态，端口 9898）。
   - 任一用例失败会保留沙箱现场，并在输出中打印路径（含后端日志 `core.log`），便于复现：`TESTSUITE_REUSE=1 TESTSUITE_KEEP=1 invoke testsuite-webui --case <name>`。

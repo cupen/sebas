@@ -1,8 +1,9 @@
 # sebas webui browser-e2e（Playwright）
 
 浏览器级旅程套件：真实 chromium 驱动 webui，被测后端是 `invoke testsuite-webui-server`
-（tasks.py）装配的一次性沙箱（`sebas core --router --debug --webui` 单进程调试形态 +
-`tests/bin` 的 fake-claude 桩）。绝不触碰真实 `~/.sebas` 与端口 9797。
+（tasks.py）装配的一次性沙箱（`sebas core --webui` + 独立 `sebas router --config …
+--debug` 两进程调试形态 + `tests/bin` 的 fake-claude 桩）。绝不触碰真实
+`~/.sebas` 与端口 9797。
 
 ## 一键运行
 

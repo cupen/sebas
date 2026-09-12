@@ -504,3 +504,141 @@ async fn router_api_defaults_reads_core_store_and_degrades_honestly() {
     let (status, body) = json_request(&app, "GET", "/router/api/defaults", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
+
+// ---- unify-router-process-shape 2.3：admin adapter 的 force 透传与拒绝载荷 ----
+
+/// 记录 service_set 实参的假 adapter：`reject_count` 非 None 时对未 force
+/// 的停 router 回保护拒绝（与 watchdog executor 同语义）。
+struct RecordingAdapter {
+    reject_count: Option<u64>,
+    seen_force: Mutex<Vec<bool>>,
+}
+
+impl RecordingAdapter {
+    fn rejecting(count: u64) -> Arc<Self> {
+        Arc::new(Self {
+            reject_count: Some(count),
+            seen_force: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl sebas_webui::admin::AdminAdapter for RecordingAdapter {
+    async fn status(&self) -> Result<sebas_webui::admin::AdminStatus, String> {
+        Err("not used".into())
+    }
+    async fn events_since(&self, _seq: u64) -> Result<Vec<sebas_webui::admin::AdminEvent>, String> {
+        Err("not used".into())
+    }
+    async fn update(
+        &self,
+        _dev: bool,
+        _dry_run: bool,
+    ) -> Result<sebas_webui::admin::AdminMutationResult, String> {
+        Err("not used".into())
+    }
+    async fn rollback(
+        &self,
+        _dry_run: bool,
+    ) -> Result<sebas_webui::admin::AdminMutationResult, String> {
+        Err("not used".into())
+    }
+    async fn restart_core(&self) -> Result<sebas_webui::admin::AdminMutationResult, String> {
+        Err("not used".into())
+    }
+    async fn service_restart(
+        &self,
+        _service: &str,
+    ) -> Result<sebas_webui::admin::AdminMutationResult, String> {
+        Err("not used".into())
+    }
+    async fn services(&self) -> Result<Vec<sebas_webui::admin::AdminService>, String> {
+        Err("not used".into())
+    }
+    async fn service_set(
+        &self,
+        service: &str,
+        desired: &str,
+        force: bool,
+    ) -> Result<sebas_webui::admin::AdminMutationResult, sebas_webui::admin::AdminActionError>
+    {
+        self.seen_force.lock().unwrap().push(force);
+        if let Some(count) = self.reject_count.filter(|_| !force) {
+            return Err(sebas_webui::admin::AdminActionError {
+                code: sebas_webui::admin::ACTIVE_ROUTED_SESSIONS_CODE.into(),
+                message: format!("router 有 {count} 个活跃 routed 会话"),
+                count: Some(count),
+            });
+        }
+        Ok(sebas_webui::admin::AdminMutationResult {
+            operation_id: format!("op_service_set_{service}"),
+            status: "accepted".into(),
+            message: format!("{service} set to {desired}"),
+        })
+    }
+}
+
+async fn admin_app_with(adapter: Arc<RecordingAdapter>) -> axum::Router {
+    let (router, _rx) = DispatchHandle::new(SessionMap::new());
+    let backend: Arc<dyn sebas_webui::SessionBackend> =
+        Arc::new(sebas_webui::session_backend::InProcessBackend::new(router));
+    let _ = memory_engine();
+    sebas_webui::build_router_with_admin_adapter(
+        backend,
+        snapshot_router_info(),
+        CardConfig::default(),
+        Some(adapter as Arc<dyn sebas_webui::admin::AdminAdapter>),
+    )
+}
+
+/// wire 合同：停 router 被拒 → HTTP 400，响应体顶层含
+/// `code = "active_routed_sessions"` 与 `count = <数字>`。
+#[tokio::test]
+async fn admin_bff_router_stop_rejection_answers_400_with_code_and_count() {
+    let adapter = RecordingAdapter::rejecting(4);
+    let app = admin_app_with(adapter).await;
+    let (status, body) = json_request(
+        &app,
+        "POST",
+        "/api/admin/services/router/disable",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["code"], "active_routed_sessions", "{body}");
+    assert_eq!(v["count"], 4, "{body}");
+    assert!(v["error"].as_str().is_some(), "error 信封字段保留: {body}");
+}
+
+/// 强制出口流：force 重发（`{"force": true}`）透传 adapter 并放行 → 200。
+#[tokio::test]
+async fn admin_bff_router_stop_force_is_forwarded_and_accepted() {
+    let adapter = RecordingAdapter::rejecting(2);
+    let app = admin_app_with(adapter.clone()).await;
+
+    // 无 force：被拒。
+    let (status, body) = json_request(
+        &app,
+        "POST",
+        "/api/admin/services/router/disable",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // force 重发：放行。
+    let (status, body) = json_request(
+        &app,
+        "POST",
+        "/api/admin/services/router/disable",
+        Some(r#"{"force": true}"#.into()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "accepted", "{body}");
+    // force 实参按序透传（false → true）。
+    assert_eq!(*adapter.seen_force.lock().unwrap(), vec![false, true]);
+}

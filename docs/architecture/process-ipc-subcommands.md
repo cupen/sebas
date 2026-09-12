@@ -40,7 +40,7 @@ sebas 是**单一二进制、多子命令**：子命令决定进程角色，进�
    └───────────────────────────────┬─────────────────────────────────┘
                                    ▼
                         sebas core —— 会话单一权威
-                    （内嵌形态：--webui / --router 可同进程内嵌）
+              （内嵌形态：--webui 可同进程内嵌；router 只以独立进程运行）
 
    readiness 管（pipe）：core ── {"cmd":"ready"} ──► watchdog
    （时序契约：core 先 bind 通道 socket + 落盘 secret，再发 ready——
@@ -77,18 +77,20 @@ stdout 就是它的输出流，读端关闭会导致 EPIPE 刷屏甚至卡死子
 `CoreSpawner::spawn` 内有详注。子进程在 watchdog 下把日志写 stderr
 （`src/run.rs::init_tracing`），stdout 让位给 readiness 协议。）
 
-### 1.2 内嵌形态：core 可同进程内嵌 webui / router
+### 1.2 内嵌形态：core 可同进程内嵌 webui；router 只有独立进程
 
 `sebas core` 自身就是编排点（`src/run.rs::run`）：
 
 - `core --webui`：同进程内起 dashboard，直接用进程内的 `DualSessionBackend`
   （不经过通道 socket），入口 `sebas_webui::run_with_admin_adapter_and_auth`。
-- `core --router`：在随机端口（`127.0.0.1:0`）起内置 router
-  （`sebas_router::server::serve_with_listener`），实际端口写进日志。
+- router：**没有内嵌形态**（unify-router-process-shape BREAKING——core 的
+  `--router`/`--debug` 旗标已删除，传入即 unknown-argument 报错）。需要网关
+  就跑独立进程 `sebas router --config <path> [--debug]`（手工/watchdog 子进程
+  同一入口，`src/router_cmd.rs::run`）。
 
-即：**同一个 webui/router 实体代码有两种进程形态**——core 内嵌（`src/run.rs`）
-与独立子进程（`src/webui_cmd.rs::run` / `src/router_cmd.rs::run`，由 watchdog
-派生）。排查时先分清在跟哪种形态说话。
+即：**webui 实体代码有两种进程形态**——core 内嵌（`src/run.rs`）与独立子进程
+（`src/webui_cmd.rs::run`，由 watchdog 派生）；**router 实体代码只有独立子进程
+形态**（`src/router_cmd.rs::run`）。排查时先分清在跟哪种形态说话。
 
 ### 1.3 默认启动策略（收编自旧文档的正确结论）
 
@@ -235,7 +237,7 @@ StateSnapshot / StateMutation）+ 两条持久流（`Subscribe` 会话流、
 
 | 子命令 | src/ 入口 | 委托 crate 实体（门后一跳） |
 |---|---|---|
-| `core` | `src/main.rs`（`Cmd::Core`）→ `src/run.rs::run` | 内嵌 `--router`：`sebas_router::server::serve_with_listener`；内嵌 `--webui`：`sebas_webui::run_with_admin_adapter_and_auth`；通道自动武装：`src/run.rs::arm_core_channel` → `src/core_channel/server.rs::serve_bound`；会话/适配器装配都在本函数内（ACP 驱动来自 `sebas_acp`，原生内核来自 `sebas_agent`，分发引擎来自 `sebas_dispatch`） |
+| `core` | `src/main.rs`（`Cmd::Core`）→ `src/run.rs::run` | 内嵌 `--webui`：`sebas_webui::run_with_admin_adapter_and_auth`；通道自动武装：`src/run.rs::arm_core_channel` → `src/core_channel/server.rs::serve_bound`；会话/适配器装配都在本函数内（ACP 驱动来自 `sebas_acp`，原生内核来自 `sebas_agent`，分发引擎来自 `sebas_dispatch`；router 无内嵌形态，见 1.2） |
 | `webui` | `src/main.rs`（`Cmd::WebUi`）→ `src/webui_cmd.rs::run` | `sebas_webui::run_with_admin_adapter_and_auth`（与 core 内嵌形态同一函数）；会话数据经 `src/core_channel/client.rs::CoreChannelBackend`（纯客户端）；admin 面经 control RPC（`src/webui_cmd.rs::control_admin_adapter`） |
 | `router` | `src/main.rs`（`Cmd::Router`）→ `src/router_cmd.rs::run` | `sebas_router::server::run`（HTTP/透传/admin 面）；状态订阅在 router crate 自带的客户端 `sebas-router/src/core_channel.rs::spawn_subscriber`（手工握手 + `StateSubscribe`，**不在** `src/core_channel/client.rs` 里）；`--debug` 注入 test provider（`sebas_router::debug::enable_debug_test_provider`） |
 | `im` | `src/main.rs`（`Cmd::Im`）→ `src/im_cmd.rs::run` | `sebas_im::bootstrap::bootstrap`（飞书 WS/token/问候装配）；会话操作经 `src/core_channel/client.rs`（适配成 `sebas_im::port::CoreSessionPort`）；控制命令直发 control RPC（`src/im_cmd.rs::WatchdogControl`）；卡片配置形状来自 `sebas_feishu::cards` |

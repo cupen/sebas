@@ -119,16 +119,9 @@ pub struct CoreArgs {
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 
-    /// 同时在随机端口（127.0.0.1:0）上启动内置 router；实际端口在日志中输出。
-    /// provider 从配置顶层 `[provider.*]` 读取。
-    #[arg(long)]
-    pub router: bool,
-
-    /// 同时让内置 router 进入 debug 模式：增加 `test` 模型，由 router 自身
-    /// 应答（固定文字 + 回显输入），不转发外部上游。
-    #[arg(long)]
-    pub debug: bool,
-
+    // unify-router-process-shape 1.1：内嵌 router 退役，`--router`/`--debug`
+    // 旗标已删除（传入即 unknown-argument 报错）。需要 router 就跑独立进程：
+    // `sebas router --config <path> [--debug]`（手工/watchdog 子进程同一入口）。
     /// Start the WebUI dashboard server.
     #[arg(long, conflicts_with = "no_webui")]
     pub webui: bool,

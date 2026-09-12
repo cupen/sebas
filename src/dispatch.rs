@@ -260,11 +260,13 @@ mod tests {
                 service: "router".into(),
                 desired: "on".into(),
                 persist: false,
+                force: false,
             },
             RouterAction::Off => RpcControlRequest::ServiceSet {
                 service: "router".into(),
                 desired: "off".into(),
                 persist: false,
+                force: false,
             },
             RouterAction::Status => RpcControlRequest::ServiceStatusFor {
                 service: "router".into(),
@@ -285,6 +287,7 @@ mod tests {
                 service: "router".into(),
                 desired: "on".into(),
                 persist: false,
+                force: false,
             }
         );
         assert_eq!(
@@ -293,6 +296,7 @@ mod tests {
                 service: "router".into(),
                 desired: "off".into(),
                 persist: false,
+                force: false,
             }
         );
         assert_eq!(

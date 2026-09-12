@@ -1491,7 +1491,7 @@ models = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        // run --router 场景：只有顶层 [provider.*]，无 [router] 段。
+        // 独立进程场景（`sebas router -c …`）：只有顶层 [provider.*]，无 [router] 段。
         let raw = r#"
 [feishu]
 app_id = "x"

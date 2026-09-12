@@ -28,7 +28,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 use sebas_webui::admin::{
-    AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService, AdminStatus,
+    AdminActionError, AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService,
+    AdminStatus,
 };
 
 /// Arguments for `sebas webui --config <path>`.
@@ -394,12 +395,44 @@ impl ControlRpcAdminAdapter {
                 status,
                 message: message.into(),
             }),
-            Ok(RpcControlResponse::Rejected { code, message }) => {
-                Err(format!("rejected [{code}]: {message}"))
-            }
+            Ok(RpcControlResponse::Rejected {
+                code, message, ..
+            }) => Err(format!("rejected [{code}]: {message}")),
             Ok(other) => Err(format!("unexpected response: {other:?}")),
             Err(e) => Err(format!("control RPC failed: {e}")),
         }
+    }
+}
+
+/// `ServiceSet` 的 RPC 应答 → 适配器结果（unify-router-process-shape 2.3）。
+/// 纯函数：便于对拒绝载荷（code + count）的映射做无 socket 单测。
+/// - `Rejected { code: active_routed_sessions, count }` → 结构化
+///   [`AdminActionError`]（webui BFF 据此回 400 + 顶层 code + count）；
+/// - 其余拒绝 → 原样保留 code/message（HTTP 形态与既有 500 一致）。
+fn service_set_response(
+    response: Result<RpcControlResponse>,
+    service: &str,
+    desired: &str,
+) -> std::result::Result<AdminMutationResult, AdminActionError> {
+    match response {
+        Ok(RpcControlResponse::Accepted {
+            operation_id,
+            status,
+            ..
+        }) => Ok(AdminMutationResult {
+            operation_id,
+            status,
+            message: format!("service {service} set to {desired}"),
+        }),
+        Ok(RpcControlResponse::Rejected {
+            code,
+            message,
+            count,
+        }) => Err(AdminActionError { code, message, count }),
+        Ok(other) => Err(AdminActionError::other(format!(
+            "unexpected response: {other:?}"
+        ))),
+        Err(e) => Err(AdminActionError::other(format!("control RPC failed: {e}"))),
     }
 }
 
@@ -425,7 +458,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
                     active_operation: Some(operation),
                 })
             }
-            Ok(RpcControlResponse::Rejected { code, message }) => {
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
                 Err(format!("rejected [{code}]: {message}"))
             }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
@@ -447,7 +480,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
                     message: e.public_message,
                 })
                 .collect()),
-            Ok(RpcControlResponse::Rejected { code, message }) => {
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
                 Err(format!("rejected [{code}]: {message}"))
             }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
@@ -459,17 +492,20 @@ impl AdminAdapter for ControlRpcAdminAdapter {
         &self,
         service: &str,
         desired: &str,
-    ) -> std::result::Result<AdminMutationResult, String> {
-        self.submit(
-            RpcControlRequest::ServiceSet {
+        force: bool,
+    ) -> std::result::Result<AdminMutationResult, AdminActionError> {
+        let response = self
+            .send_request(RpcControlRequest::ServiceSet {
                 service: service.into(),
                 desired: desired.into(),
                 // WebUI 服务页的启停选择持久化：watchdog 重启后保持用户意图。
                 persist: true,
-            },
-            format!("service {service} set to {desired}"),
-        )
-        .await
+                // unify-router-process-shape 2.3：强制出口流的 force 透传
+                // （watchdog executor 端执法，非 router-stop 组合忽略）。
+                force,
+            })
+            .await;
+        service_set_response(response, service, desired)
     }
 
     async fn service_restart(&self, service: &str) -> std::result::Result<AdminMutationResult, String> {
@@ -521,7 +557,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
                     uptime_secs: s.uptime_secs,
                 })
                 .collect()),
-            Ok(RpcControlResponse::Rejected { code, message }) => {
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
                 Err(format!("rejected [{code}]: {message}"))
             }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
@@ -550,6 +586,70 @@ fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
             warn!(error = %e, "settings.json parse failed; using config defaults");
             cfg.card.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod service_set_tests {
+    //! unify-router-process-shape 2.3：webui admin adapter 对 force 透传与
+    //! router 停止保护拒绝载荷的映射（纯函数，无需真实 control RPC socket）。
+
+    use super::*;
+    use sebas_webui::admin::ACTIVE_ROUTED_SESSIONS_CODE;
+
+    #[test]
+    fn rejection_with_active_routed_sessions_keeps_code_and_count() {
+        let resp = Ok(RpcControlResponse::Rejected {
+            code: ACTIVE_ROUTED_SESSIONS_CODE.into(),
+            message: "router 有 3 个活跃 routed 会话".into(),
+            count: Some(3),
+        });
+        let err = service_set_response(resp, "router", "off")
+            .expect_err("保护拒绝必须映射为错误");
+        assert_eq!(err.code, "active_routed_sessions");
+        assert_eq!(err.count, Some(3));
+        assert!(err.is_active_routed_sessions(), "前端据此弹强制出口");
+        // wire 形状钉死：序列化后 code/count 字段名不变（count 在场）。
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], "active_routed_sessions");
+        assert_eq!(json["count"], 3);
+    }
+
+    #[test]
+    fn other_rejections_map_without_count() {
+        let resp = Ok(RpcControlResponse::Rejected {
+            code: "invalid_request".into(),
+            message: "未知服务: nope".into(),
+            count: None,
+        });
+        let err =
+            service_set_response(resp, "nope", "off").expect_err("非法服务必须映射为错误");
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(err.count, None);
+        // count 缺席时 wire 上省略字段（旧形状不变）。
+        let json = serde_json::to_value(&err).unwrap();
+        assert!(json.get("count").is_none(), "{json}");
+    }
+
+    #[test]
+    fn accepted_maps_to_mutation_result() {
+        let resp = Ok(RpcControlResponse::Accepted {
+            operation_id: "op_1".into(),
+            status: "Accepted".into(),
+            startup_failure: None,
+        });
+        let out = service_set_response(resp, "router", "off").expect("接受必须映射为结果");
+        assert_eq!(out.operation_id, "op_1");
+        assert_eq!(out.message, "service router set to off");
+    }
+
+    /// RPC 传输失败（watchdog 不在等）：internal 错误码，无 count。
+    #[test]
+    fn transport_failure_maps_to_internal_error() {
+        let resp: Result<RpcControlResponse> = Err(SebasError::Upgrade("socket gone".into()));
+        let err = service_set_response(resp, "router", "off").expect_err("必须失败");
+        assert_eq!(err.code, "internal");
+        assert_eq!(err.count, None);
     }
 }
 

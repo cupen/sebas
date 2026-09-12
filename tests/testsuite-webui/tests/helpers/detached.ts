@@ -6,7 +6,8 @@
  *
  * Topology (assembled by `invoke testsuite-webui-server` with
  * TESTSUITE_MODE=detached, tasks.py): a core process WITHOUT `--webui`
- * (`sebas core -c <scene>/config.toml --router --debug`) plus a standalone
+ * (`sebas core -c <scene>/config.toml`；router 只以独立进程运行，core 旗标里
+ * 没有 router——unify-router-process-shape) plus a standalone
  * `sebas webui -c <scene>/config.toml` serving the dashboard. NO
  * SEBAS_CORE_SECRET is set anywhere: the core auto-arms (generates the key,
  * writes `<scene>/core.secret`) and clients discover the key from that file
@@ -158,7 +159,7 @@ export async function stopCore(scene: string, timeoutMs = 20_000): Promise<void>
  */
 export function startCore(scene: string): ChildProcess {
   const log = fs.openSync(path.join(scene, 'core.log'), 'a')
-  const child = spawn(sebasBin(), ['core', '-c', path.join(scene, 'config.toml'), '--router', '--debug'], {
+  const child = spawn(sebasBin(), ['core', '-c', path.join(scene, 'config.toml')], {
     cwd: scene,
     env: detachedCoreEnv(scene),
     stdio: ['ignore', log, log],

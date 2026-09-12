@@ -351,9 +351,10 @@ def testsuite_webui(c, case=None):
 # webui sandbox harness: one implementation serves humans and Playwright.
 #
 # Replaces scripts/webui_e2e_server.sh + scripts/test_webui_sandbox.sh (both
-# removed): the same throwaway-dir + sandboxed-env + core --router --debug
-# --webui assembly backs `invoke testsuite-webui-sandbox` (human, foreground,
-# friendly output) and `invoke testsuite-webui-server` (blocking server process for
+# removed): the same throwaway-dir + sandboxed-env + core --webui + 独立
+# `sebas router --config … --debug` 两进程装配 backs `invoke
+# testsuite-webui-sandbox` (human, foreground, friendly output) and `invoke
+# testsuite-webui-server` (blocking server process for
 # Playwright's webServer.command). Contract with
 # tests/testsuite-webui/tests/reporters/keep-on-fail.ts (authoritative keep/clean
 # owner): the TESTSUITE_SCENE_FILE pointer + the `.tests-failed` marker.
@@ -470,7 +471,10 @@ auth = {auth_toml}
 [provider.anthropic]
 api_key = "sk-sandbox-dummy"
 
+# router 只以独立进程运行（unify-router-process-shape）：listen 默认
+# 8787 是固定值，会撞操作员实例的托管 router——沙箱钉一个专用端口。
 [router]
+listen = "127.0.0.1:8791"
 provider_overlay = "{cfg}/providers.json"
 usage_file = "{cfg}/router-usage.jsonl"
 """
@@ -554,15 +558,20 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
             raise SystemExit(1)
 
     log_path = os.path.join(work, "core.log")
+    router_log_path = os.path.join(work, "router.log")
     log = open(log_path, "w")
     webui_log = None
+    router_log = None
     core_proc = None
+    router_proc = None
     if detached:
+        # detached 双进程（core + 独立 webui，无 SEBAS_CORE_SECRET）本就无
+        # router：core 旗标里已没有 --router，需要网关时另行手工拉起。
         webui_log_path = os.path.join(work, "webui.log")
         webui_log = open(webui_log_path, "w")
         env = _sandbox_env(work, secret=False)
         core_proc = subprocess.Popen(
-            [sebas_bin, "core", "-c", os.path.join(work, "config.toml"), "--router", "--debug"],
+            [sebas_bin, "core", "-c", os.path.join(work, "config.toml")],
             env=env,
             cwd=work,
             stdout=log,
@@ -578,19 +587,35 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
         with open(os.path.join(work, "pids.json"), "w") as f:
             json.dump({"core": core_proc.pid, "webui": proc.pid}, f)
     else:
+        # 两进程形态（unify-router-process-shape D5）：core（--webui，无
+        # router 旗标）+ 独立 `sebas router --config … --debug` 子进程；
+        # 清理侧对两个进程都 SIGTERM。
+        cfg = os.path.join(work, "config.toml")
+        env = _sandbox_env(work)
+        router_log = open(router_log_path, "w")
+        router_proc = subprocess.Popen(
+            [sebas_bin, "router", "-c", cfg, "--debug"],
+            env=env,
+            cwd=work,
+            stdout=router_log,
+            stderr=subprocess.STDOUT,
+        )
         proc = subprocess.Popen(
             [
-                sebas_bin, "core", "-c", os.path.join(work, "config.toml"),
-                "--router", "--debug", "--webui", "--webui-port", str(port),
+                sebas_bin, "core", "-c", cfg,
+                "--webui", "--webui-port", str(port),
             ],
-            env=_sandbox_env(work),
+            env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
 
     def _log_tail(n=30):
         tail = ""
-        for p in (log_path, os.path.join(work, "webui.log") if detached else None):
+        extra_logs = (
+            [os.path.join(work, "webui.log")] if detached else [router_log_path]
+        )
+        for p in [log_path, *extra_logs]:
             if not p:
                 continue
             try:
@@ -603,7 +628,8 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     def _any_dead():
         if proc.poll() is not None:
             return True
-        return detached and core_proc.poll() is not None
+        aux = core_proc if detached else router_proc
+        return aux.poll() is not None
 
     # Readiness poll; a dead child during startup is an immediate error.
     for _ in range(120):
@@ -621,21 +647,25 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
         raise SystemExit(1)
     print(f"[testsuite] sandbox ready on port {port} (dir: {work})", flush=True)
     if human:
-        topology = "detached 双进程（core + 独立 webui，无 SEBAS_CORE_SECRET）" if detached else "单进程 core --webui"
+        topology = (
+            "detached 双进程（core + 独立 webui，无 SEBAS_CORE_SECRET）"
+            if detached
+            else "两进程（core --webui + 独立 router --debug）"
+        )
         if auth_on:
             print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权开启，admin / admin；{topology}）", flush=True)
         else:
             print(f"### webui 沙箱就绪：http://127.0.0.1:{port}/  （鉴权关闭，免登录；{topology}）", flush=True)
-        print(f"### 日志与状态均在 {work}（core.log）；Ctrl-C 退出并清理", flush=True)
+        print(f"### 日志与状态均在 {work}（core.log / router.log）；Ctrl-C 退出并清理", flush=True)
 
     while proc.poll() is None and not stop.is_set():
         stop.wait(0.5)
 
-    # Teardown: SIGTERM the backend(s) — including any core the Playwright
-    # fixture started (pids.json always lists the CURRENT core pid) — then
-    # keep-or-clean (the reporter owns the authoritative decision via
-    # `.tests-failed`; this is the fallback path).
-    for child in ([proc, core_proc] if detached else [proc]):
+    # Teardown: SIGTERM the backend(s) — the router child too（两进程形态）,
+    # including any core the Playwright fixture started (pids.json always
+    # lists the CURRENT core pid) — then keep-or-clean (the reporter owns the
+    # authoritative decision via `.tests-failed`; this is the fallback path).
+    for child in ([proc, core_proc] if detached else [proc, router_proc]):
         if child is not None and child.poll() is None:
             child.terminate()
             try:
@@ -679,6 +709,8 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     log.close()
     if webui_log is not None:
         webui_log.close()
+    if router_log is not None:
+        router_log.close()
     failed_marker = os.path.exists(os.path.join(work, ".tests-failed"))
     if failed_marker or keep:
         print(f"[testsuite] sandbox scene kept at: {work} (core.log inside)", flush=True)
@@ -723,7 +755,8 @@ def testsuite_webui_server(c):
     TESTSUITE_MODE=detached selects the dual-process topology (core without
     --webui + standalone `sebas webui`, NO SEBAS_CORE_SECRET — auto-arm and
     secret-file discovery, harden-core-channel-deployment 5.4); the default
-    is the single-process `core --webui` form."""
+    is the two-process `core --webui` + standalone `sebas router --debug`
+    form (unify-router-process-shape)."""
     auth_on = os.environ.get("TESTSUITE_AUTH", "0") == "1"
     detached = os.environ.get("TESTSUITE_MODE", "") == "detached"
     if detached:

@@ -445,9 +445,24 @@ export interface AuthInfo {
 /** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
 export class ApiError extends Error {
   readonly status: number
-  constructor(status: number, message: string) {
+  /**
+   * 机器可读拒绝码（unify-router-process-shape 2.2/2.3：如
+   * `active_routed_sessions`）；错误体未携带时为 null。调用方据此区分
+   * 「业务拒绝（可交互兜底，如强制出口弹窗）」与「普通失败（内联呈现）」。
+   */
+  readonly code: string | null
+  /** 与 `code` 同行的数值载荷（如活跃 routed 会话计数）；缺失/非数值为 null。 */
+  readonly count: number | null
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    count: number | null = null,
+  ) {
     super(message)
     this.status = status
+    this.code = code
+    this.count = count
   }
 }
 
@@ -525,13 +540,27 @@ async function unwrap<T>(resp: Response, path?: string): Promise<T> {
   if (resp.ok) return (await resp.json()) as T
   if (resp.status === 401 && onUnauthorized && path && !isAuthExempt(path)) onUnauthorized()
   let message = `HTTP ${resp.status}`
+  let code: string | null = null
+  let count: number | null = null
   try {
-    const body = (await resp.json()) as { error?: string }
-    if (typeof body.error === 'string') message = body.error
+    // 错误体信封不钉死（unify-router-process-shape D4）：拒绝载荷可能是
+    // 顶层 `{code, count}`，也可能是嵌套信封 `{error: {code, count}}`；
+    // `error` 为字符串时仍是既有 message 语义。两处都找，缺失即 null。
+    const body = (await resp.json()) as unknown
+    if (typeof body === 'object' && body !== null) {
+      const b = body as { error?: unknown; code?: unknown; count?: unknown }
+      const inner =
+        b.error !== null && typeof b.error === 'object'
+          ? (b.error as { code?: unknown; count?: unknown })
+          : b
+      if (typeof inner.code === 'string') code = inner.code
+      if (typeof inner.count === 'number') count = inner.count
+      if (typeof b.error === 'string') message = b.error
+    }
   } catch {
     // non-JSON error body; keep the generic message
   }
-  throw new ApiError(resp.status, message)
+  throw new ApiError(resp.status, message, code, count)
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -796,11 +825,18 @@ export const api = {
   adminRestart: () =>
     post<{ operation_id: string; message: string }>('/api/admin/restart'),
   /** Per-service enable/disable（ServiceSet RPC，选择持久化）。
-   * 503 = 无 watchdog 控制面；401/403 = 鉴权/CSRF 拒绝，调用方区分呈现。 */
+   * 503 = 无 watchdog 控制面；401/403 = 鉴权/CSRF 拒绝，调用方区分呈现。
+   * disable 的 force 透传（unify-router-process-shape D3/D4）：停止被拒
+   * （400/409 + `active_routed_sessions` + 计数，经 ApiError.code/.count
+   * 携带）后，操作员确认强制出口即以 `{force: true}` 重发同一请求；
+   * 首次尝试不带 force 字段（body 与既有字节形态一致）。 */
   enableService: (name: string) =>
     post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/enable`),
-  disableService: (name: string) =>
-    post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/disable`),
+  disableService: (name: string, force = false) =>
+    post<AdminMutationResult>(
+      `/api/admin/services/${encodeURIComponent(name)}/disable`,
+      force ? { force: true } : undefined,
+    ),
   /**
    * Per-service restart（fix-settings-menu-and-services-semantics D3）。
    * core 走既有 restart-core 路径（spec「restart 操作」）；其余受管服务走

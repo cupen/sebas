@@ -1,6 +1,8 @@
 //! Process-level e2e for the core flows in the detached (watchdog) topology:
-//! a real core child (`sebas run --router --debug`) plus a standalone
-//! `sebas webui` process connected through the core session channel.
+//! a real core child (`sebas core`) plus a standalone `sebas webui` process
+//! connected through the core session channel; journeys that need the gateway
+//! additionally spawn an independent `sebas router --config … --debug` child
+//! （unify-router-process-shape D5：router 只以独立进程运行）.
 //!
 //! Every case runs in a throwaway sandbox (`support::Sandbox`) — config file,
 //! state DB, provider overlay and channel socket all inside it; the webui
@@ -585,12 +587,14 @@ async fn cancel_without_core_answers_503() {
 }
 
 /// The built-in debug router answers `model = "test"` over /v1/messages.
+/// （独立 router 子进程：`sebas router --config <沙箱配置> --debug`。）
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn router_debug_provider_serves_messages() {
     let sb = Sandbox::new("testsuite_e2e", "router");
     let cli = http_client();
     let _core = sb.spawn_core();
+    let _router = sb.spawn_router_debug();
 
     let router = wait_router_addr(&sb).await;
     let (status, body) = post_json(
@@ -1278,9 +1282,8 @@ async fn turn_queue_timing_and_dropped_accounting() {
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn core_owned_provider_reaches_router_without_restart() {
     let sb = Sandbox::new("testsuite_e2e", "provider-hotswap");
-    // 固定默认端口 8787 会让并行用例互踩——每例钉一个空闲端口。
-    let router_port = support::free_port();
-    sb.set_router_listen(router_port);
+    // 固定默认端口 8787 会让并行用例互踩——沙箱配置已钉一个 probed 空闲端口。
+    let router_port = sb.router_port;
 
     // 本地假上游（anthropic 协议应答，记录被问到的 model）——绝不连外网。
     let asked = Arc::new(tokio::sync::Mutex::new(None::<String>));

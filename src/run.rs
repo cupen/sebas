@@ -54,7 +54,7 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
 pub async fn run(
     cfg: Config,
     raw_config: String,
-    mut router_cfg: Option<RouterConfig>,
+    router_cfg: Option<RouterConfig>,
     webui: bool,
     webui_port: u16,
     webui_host: String,
@@ -79,19 +79,12 @@ pub async fn run(
     // Friendly Config error, no panic; runs before any network/spawn work.
     cfg.validate_runtime()?;
 
-    // `run --router`：在随机端口上启动内置 router，实际端口记入日志
-    // （调用方按需把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL 指向该地址）。
-    // 实际地址回写 `router_cfg.listen`：WebUI 的 router BFF 用同一快照
-    // 定位 admin 面（provider 管理页），拿配置默认值会打不到真实端口。
-    if let Some(gw_cfg) = router_cfg.as_mut() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| crate::error::SebasError::Router(format!("绑定随机端口失败: {e}")))?;
-        let (addr, _handle) = sebas_router::server::serve_with_listener(gw_cfg.clone(), listener)
-            .map_err(|e| crate::error::SebasError::Router(e.to_string()))?;
-        gw_cfg.listen = addr.to_string();
-        info!(%addr, "router started (core --router); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
-    }
+    // unify-router-process-shape 1.1（D1）：内嵌 router 启动块已删除——core
+    // 进程内不再有任何 router HTTP 面。`router_cfg` 只是配置声明的 `[router]`
+    // 段（listen / auth_token / providers 种子），供 spawn env 翻译（
+    // ProviderMode::Router 指向独立 router 进程）、出站分发与节点链路
+    // RouterEndpoint 使用。随机端口回写与 `router started (core --router)`
+    // 日志随形态消亡。
 
     // extract-im-service M3：core 不再接入任何 IM。飞书装配（token/WS/
     // 卡片呈现）整体移至 `sebas im` 独立服务；`[feishu]` 配置节由 im 消费，

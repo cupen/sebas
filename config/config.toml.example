@@ -22,8 +22,9 @@ driver = "claude"
 # thinking = "show"
 
 # LLM provider 网关（三协议纯透传：Anthropic / OpenAI chat-completions /
-# OpenAI Responses，契约见 openspec/specs/router-core/spec.md）。运行：
-# `sebas router -c <path>` 或 watchdog 托管 [watchdog.router]；`--debug`
+# OpenAI Responses，契约见 openspec/specs/router-core/spec.md）。router 只以
+# 独立进程运行：`sebas router -c <path>`（手工）或 watchdog 托管
+# [watchdog.router]（拉起同一入口的子进程）；`--debug`
 # 注入内置 test provider（固定文字+回显，不拨上游，跳过鉴权）。
 #
 # provider 写顶层 [provider.<name>]，名称即 preset
@@ -33,7 +34,7 @@ driver = "claude"
 # 已移除——三槽位为 base_url_anthropic / base_url_openai_chat /
 # base_url_openai_responses，缺槽 = 该协议 400。
 # [router]
-# listen = "127.0.0.1:8787"     # watchdog 托管时忽略
+# listen = "127.0.0.1:8787"     # 独立进程（含 watchdog 托管的 router 子进程）都读这里
 # default_provider = "deepseek" # 无 model 请求（如 GET /v1/models）的兜底
 # auth_token = ["sk-local-dev"] # 不配置 = 不校验下游 token（启动时 warn）
 # usage_file = "~/.sebas/router-usage.jsonl"

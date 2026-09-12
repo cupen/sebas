@@ -273,8 +273,9 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 ### testsuite-webui-browser（非核心：浏览器级 UI 旅程，Playwright）
 
 > 入口 `invoke testsuite-webui`（`tests/testsuite-webui/`，独立 pnpm 包）；后端为一次性沙箱
-> （`sebas core --router --debug --webui` + fake-claude 桩），chromium headless。detached 双进程
-> 形态（core + 独立 `sebas webui`、无 `SEBAS_CORE_SECRET`、自动装配 + 密钥文件发现）由
+> （`sebas core --webui` + 独立 `sebas router --config … --debug` 两进程 + fake-claude 桩），
+> chromium headless。detached 双进程形态（core + 独立 `sebas webui`、无
+> `SEBAS_CORE_SECRET`、自动装配 + 密钥文件发现）由
 > `--case deployment`（`playwright.detached.config.ts`，端口 9897）承担；可复用双进程 fixture：
 > `tests/helpers/detached.ts`（stopCore/startCore/isCoreAlive/waitForCoreReachability）。
 
@@ -434,7 +435,7 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 ## 实施期发现（只记录不顺手修，见 design Non-goals）
 
 1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_router_journey` 的断言可升级为 status_slug=done。
-2. **`run --router` 忽略 `SEBAS_ROUTER_LISTEN`**（run.rs:87 写死 127.0.0.1:0）：detached 形态下 `SEBAS_AGENT_ROUTER_URL` 无法预注入（router 地址只能事后从日志读）。native 走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径作为替代（本套件已覆盖）。
+2. **（unify-router-process-shape 后已消解）~~`run --router` 忽略 `SEBAS_ROUTER_LISTEN`~~**：内嵌形态删除，router 只以独立进程运行（`[router] listen` 是唯一地址来源，进程级可预注入 `SEBAS_AGENT_ROUTER_URL`）。native 仍走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径（本套件已覆盖）。
 3. **会话状态落盘仅在优雅退出**：硬杀（TerminateProcess）不产生状态转储；Windows 无便携优雅信号，故重启恢复段 unix 门控。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。
 5. **restore 不复活会话**（二期浏览器旅程发现）：`archive` 先 close（mapping + transcript 丢弃），`restore` 只删归档条目；恢复后详情页如实 404（`sessions.spec.ts` 2.2 已按此诚实语义断言）。与 project-session-actions「History 点击恢复可写」条文不一致，产品语义变更另立项。

@@ -95,8 +95,8 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
    `frontend/dist` into the binary, so the sandbox serves the real UI.
 
 4. Clean up: SIGTERM the core (graceful exit removes the channel socket and
-   dumps state — itself worth asserting), stop the webui, delete the sandbox
-   dir, and confirm the ports are free.
+   dumps state — itself worth asserting), stop the webui and the standalone
+   router process, delete the sandbox dir, and confirm the ports are free.
 
 ### Sandbox debug recipe (proven end-to-end, agent-runnable)
 
@@ -149,8 +149,10 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
    usage_file = "<SB>/router-usage.jsonl"
    ```
 
-2. Start the core in debug mode (no `SEBAS_CORE_SECRET` — auto-arm writes
-   the generated key to `<SB>/core.secret` and clients discover it):
+2. Start the two processes（unify-router-process-shape：router 只以独立进程
+   `sebas router --config <path> [--debug]` 运行，core 旗标里没有 router）
+   with no `SEBAS_CORE_SECRET` — auto-arm writes the generated key to
+   `<SB>/core.secret` and clients discover it:
 
    ```bash
    cargo build
@@ -158,11 +160,18 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
      SEBAS_STATE_FILE="<SB>/state.json" \
      SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
      target/debug/sebas core -c "<SB>/config.toml" \
-     --router --debug --webui --webui-port 9877 > "<SB>/core.log" 2>&1
+     --webui --webui-port 9877 > "<SB>/core.log" 2>&1
+   SEBAS_STATE_DB="<SB>/sebas.db" \
+     SEBAS_STATE_FILE="<SB>/state.json" \
+     SEBAS_ROUTER_PROVIDER_OVERLAY="<SB>/providers.json" \
+     target/debug/sebas router -c "<SB>/config.toml" \
+     --debug > "<SB>/router.log" 2>&1 &
    ```
 
-   The built-in router binds a random port — read it from the log line
-   `router started (core --router) … addr=127.0.0.1:<port>`.
+   Router 地址来自独立进程日志：读 `<SB>/router.log` 里的
+   `sebas router listening addr=127.0.0.1:<port>`（想钉固定端口就在 config
+   的 `[router] listen` 配一个；默认 `127.0.0.1:8787` 是固定值，别与操作员
+   实例的托管 router 相撞）。
 
 3. Verify:
    - `GET /health` → `ok`; `/api/summary` → `reachability.ok = true` and

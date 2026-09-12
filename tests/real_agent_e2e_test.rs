@@ -138,6 +138,7 @@ struct Scene {
     config_path: PathBuf,
     webui_port: u16,
     core_log: PathBuf,
+    router_log: PathBuf,
     _dir: Arc<SceneDir>,
 }
 
@@ -181,6 +182,10 @@ impl Scene {
         let webui_port = free_webui_port();
         let config_path = path.join("config.toml");
         let core_log = path.join("core.log");
+        let router_log = path.join("router.log");
+        // Router listen：默认 8787 是固定值，可能撞上操作员实例的托管
+        // router——钉一个 probed 空闲端口（unify-router-process-shape）。
+        let router_port = free_webui_port();
 
         let toml = format!(
             r#"[feishu]
@@ -222,6 +227,7 @@ api_key = "sk-real-agent-e2e-dummy"
 base_url_anthropic = "https://api.anthropic.com"
 {e2e_claude_provider}
 [router]
+listen = "127.0.0.1:{router_port}"
 provider_overlay = "{overlay}"
 usage_file = "{usage}"
 "#,
@@ -245,6 +251,7 @@ usage_file = "{usage}"
             config_path,
             webui_port,
             core_log,
+            router_log,
             _dir: dir,
         }
     }
@@ -285,25 +292,19 @@ usage_file = "{usage}"
         v
     }
 
-    /// Bare core owning an in-process webui (AGENTS.md sandbox recipe):
-    /// `core -c <config> --router --debug --webui --webui-port <free>`,
+    /// Bare core owning an in-process webui (AGENTS.md sandbox recipe,
+    /// unify-router-process-shape 两进程形态):
+    /// `core -c <config> --webui --webui-port <free>`（无 router 旗标——
+    /// router 由 [`Scene::spawn_router`] 以独立进程拉起）,
     /// cwd = scene dir so the relative channel socket lands inside it.
     fn spawn_core(&self) -> tokio::process::Child {
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.core_log)
-            .unwrap_or_else(|e| panic!("open log {}: {e}", self.core_log.display()));
-        let log_err = log
-            .try_clone()
-            .unwrap_or_else(|e| panic!("clone log handle: {e}"));
+        let log = self.open_log(&self.core_log);
+        let log_err = log.try_clone().expect("clone core log handle");
         tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
             .args([
                 "core",
                 "-c",
                 &fs_string(&self.config_path),
-                "--router",
-                "--debug",
                 "--webui",
                 "--webui-port",
                 &self.webui_port.to_string(),
@@ -316,6 +317,35 @@ usage_file = "{usage}"
             .kill_on_drop(true)
             .spawn()
             .unwrap_or_else(|e| panic!("spawn sebas core: {e}"))
+    }
+
+    /// Router 独立子进程：`sebas router -c <config> --debug`（与 core 同一
+    /// 沙箱 env；ACP 会话不经过它，拉起只为对齐 AGENTS.md 两进程菜谱）。
+    fn spawn_router(&self) -> tokio::process::Child {
+        let log = self.open_log(&self.router_log);
+        let log_err = log.try_clone().expect("clone router log handle");
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_sebas"))
+            .args([
+                "router",
+                "-c",
+                &fs_string(&self.config_path),
+                "--debug",
+            ])
+            .current_dir(&self.path)
+            .envs(self.envs())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn sebas router: {e}"))
+    }
+
+    fn open_log(&self, path: &Path) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|e| panic!("open log {}: {e}", path.display()))
     }
 
     fn url(&self) -> String {
@@ -526,6 +556,7 @@ async fn provider_selected_first_message_roundtrip(
     let scene = Scene::new(sub);
     let cli = http_client();
     let mut core = scene.spawn_core();
+    let _router = scene.spawn_router();
     wait_webui_healthy(&cli, &scene).await;
 
     // 项目管理: register a sandbox subdir as a project; assert it lists back.

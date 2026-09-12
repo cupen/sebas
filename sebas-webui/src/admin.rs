@@ -55,9 +55,16 @@ pub trait AdminAdapter: Send + Sync {
     async fn restart_core(&self) -> Result<AdminMutationResult, String>;
 
     /// Set a managed service's desired state (`desired` ∈ {"on", "off"}).
-    /// 选择会被 watchdog 持久化（services.json），重启后保持。
-    async fn service_set(&self, service: &str, desired: &str)
-        -> Result<AdminMutationResult, String>;
+    /// 选择会被 watchdog 持久化（services.json），重启后保持。`force`
+    /// （unify-router-process-shape 2.3）：仅对停 router 有意义——绕过
+    /// 活跃 routed 会话停止保护；拒绝时返回 [`AdminActionError`]（code
+    /// `active_routed_sessions` + count）。
+    async fn service_set(
+        &self,
+        service: &str,
+        desired: &str,
+        force: bool,
+    ) -> Result<AdminMutationResult, AdminActionError>;
 
     /// Restart one managed service via the watchdog supervision loop
     /// （fix-settings-menu-and-services-semantics D3：Settings→Services 的
@@ -104,6 +111,37 @@ pub struct AdminMutationResult {
     pub operation_id: String,
     pub status: String,
     pub message: String,
+}
+
+/// router 停止保护的拒绝码（unify-router-process-shape 2.3 wire 合同）。
+/// HTTP 语义：拒绝 → 400 + 响应体顶层 `code` 与 `count`。
+pub const ACTIVE_ROUTED_SESSIONS_CODE: &str = "active_routed_sessions";
+
+/// 管理动作失败（适配器层）。`code` 是机器可判别的错误码；`count` 仅在
+/// `code = "active_routed_sessions"` 时携带（活跃 routed 会话计数，前端
+/// 强制出口弹窗的数据源）。其余失败沿用纯文本 message。
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminActionError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+}
+
+impl AdminActionError {
+    /// 无特定错误码的失败（如 control RPC 连不上）。
+    pub fn other(message: impl Into<String>) -> Self {
+        Self {
+            code: "internal".into(),
+            message: message.into(),
+            count: None,
+        }
+    }
+
+    /// 是否为 router 停止保护拒绝（前端据此弹强制出口对话框）。
+    pub fn is_active_routed_sessions(&self) -> bool {
+        self.code == ACTIVE_ROUTED_SESSIONS_CODE
+    }
 }
 
 /// A managed service entry.
@@ -215,27 +253,48 @@ pub async fn admin_restart_action(State(state): State<AdminState>) -> impl IntoR
 pub async fn admin_service_enable(
     State(state): State<AdminState>,
     Path(service): Path<String>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    service_set_action(state, &service, "on").await
+    service_set_action(state, &service, "on", &body).await
 }
 
 /// POST /admin/services/{service}/disable — set desired state to "off".
 pub async fn admin_service_disable(
     State(state): State<AdminState>,
     Path(service): Path<String>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    service_set_action(state, &service, "off").await
+    service_set_action(state, &service, "off", &body).await
+}
+
+/// 服务页启停请求体（unify-router-process-shape 2.3）：`force` 是唯一的
+/// 布尔字段，缺省 false。旧客户端不发 body / 发空 body 行为不变。
+#[derive(serde::Deserialize, Default)]
+pub struct ServiceSetBody {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// 宽松解析请求体：无 body / 非 JSON 一律按 `force = false`（安全默认），
+/// 不让格式错误阻塞常规启停。
+fn parse_service_set_body(body: &[u8]) -> ServiceSetBody {
+    if body.is_empty() {
+        return ServiceSetBody::default();
+    }
+    serde_json::from_slice(body).unwrap_or_default()
 }
 
 async fn service_set_action(
     state: AdminState,
     service: &str,
     desired: &str,
+    body: &[u8],
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let force = parse_service_set_body(body).force;
     match &state.adapter {
-        Some(adapter) => match adapter.service_set(service, desired).await {
+        Some(adapter) => match adapter.service_set(service, desired, force).await {
             Ok(result) => mutation_json(&result),
-            Err(e) => mutation_error(e),
+            Err(e) => action_error_json(&e),
         },
         None => no_adapter_error(),
     }
@@ -273,6 +332,25 @@ fn mutation_error(e: String) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(serde_json::json!({ "error": e })),
     )
+}
+
+/// 管理动作失败 → HTTP 语义（unify-router-process-shape 2.3 wire 合同）：
+/// - router 停止保护拒绝（`active_routed_sessions`）→ **400**，响应体在
+///   既有 `{ "error": ... }` 信封上追加顶层 `code` 与 `count`（字段名固定，
+///   前端按 400 + code 判别并弹强制出口对话框）；
+/// - 其余失败维持既有 500 + `{ "error": ... }` 形状。
+fn action_error_json(e: &AdminActionError) -> (StatusCode, Json<serde_json::Value>) {
+    if e.is_active_routed_sessions() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": e.message,
+                "code": e.code,
+                "count": e.count,
+            })),
+        );
+    }
+    mutation_error(e.message.clone())
 }
 
 fn no_adapter_error() -> (StatusCode, Json<serde_json::Value>) {
@@ -724,8 +802,32 @@ mod tests {
 
     // ── Fake Adapter ───────────────────────────────────────────────────────
 
+    #[derive(Clone)]
     struct FakeAdapter {
         fail: bool,
+        /// router 停止保护拒绝形态（unify-router-process-shape 2.3 测试用）：
+        /// `Some(count)` = service_set 返回 active_routed_sessions 拒绝。
+        reject_router_stop: Option<u64>,
+        /// 记录最近一次 service_set 的 force 实参（透传断言；clone 共享）。
+        seen_force: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl FakeAdapter {
+        fn new() -> Self {
+            Self {
+                fail: false,
+                reject_router_stop: None,
+                seen_force: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn rejecting(count: u64) -> Self {
+            Self {
+                fail: false,
+                reject_router_stop: Some(count),
+                seen_force: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[async_trait]
@@ -805,9 +907,19 @@ mod tests {
             &self,
             service: &str,
             desired: &str,
-        ) -> Result<AdminMutationResult, String> {
+            force: bool,
+        ) -> Result<AdminMutationResult, AdminActionError> {
+            self.seen_force.lock().unwrap().push(force);
+            // 模拟 watchdog 语义：拒绝只针对未 force 的停 router。
+            if let Some(count) = self.reject_router_stop.filter(|_| !force) {
+                return Err(AdminActionError {
+                    code: ACTIVE_ROUTED_SESSIONS_CODE.into(),
+                    message: format!("router 有 {count} 个活跃 routed 会话"),
+                    count: Some(count),
+                });
+            }
             if self.fail {
-                return Err("fake failure".into());
+                return Err(AdminActionError::other("fake failure"));
             }
             Ok(AdminMutationResult {
                 operation_id: format!("op_service_{service}"),
@@ -858,7 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_status_returns_expected_operations() {
-        let adapter = FakeAdapter { fail: false };
+        let adapter = FakeAdapter::new();
         let status = adapter.status().await.expect("status must succeed");
         assert_eq!(status.version, "0.1.0-test");
         assert_eq!(status.operations.len(), 1);
@@ -868,7 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_events_since_returns_filtered_events() {
-        let adapter = FakeAdapter { fail: false };
+        let adapter = FakeAdapter::new();
         let events = adapter.events_since(1).await.expect("events must succeed");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, 2);
@@ -876,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_update_produces_normalized_request() {
-        let adapter = FakeAdapter { fail: false };
+        let adapter = FakeAdapter::new();
         // Test release update (dev=false, dry_run=false)
         let result = adapter
             .update(false, false)
@@ -903,7 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_rollback_produces_normalized_request() {
-        let adapter = FakeAdapter { fail: false };
+        let adapter = FakeAdapter::new();
         let result = adapter
             .rollback(false)
             .await
@@ -914,7 +1026,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_restart_core_produces_normalized_request() {
-        let adapter = FakeAdapter { fail: false };
+        let adapter = FakeAdapter::new();
         let result = adapter.restart_core().await.expect("restart must succeed");
         assert_eq!(result.operation_id, "op_restart");
         assert_eq!(result.message, "restart requested");
@@ -922,18 +1034,102 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_service_set_produces_normalized_request() {
-        let adapter = FakeAdapter { fail: false };
+        let adapter = FakeAdapter::new();
         let result = adapter
-            .service_set("core", "on")
+            .service_set("core", "on", false)
             .await
             .expect("service_set must succeed");
         assert_eq!(result.operation_id, "op_service_core");
         assert_eq!(result.message, "core set to on");
     }
 
+    // ── router 停止保护透传（unify-router-process-shape 2.3） ─────────────
+
+    #[tokio::test]
+    async fn service_set_force_is_forwarded_to_the_adapter() {
+        let adapter = FakeAdapter::new();
+        adapter.service_set("router", "off", true).await.unwrap();
+        adapter.service_set("router", "off", false).await.unwrap();
+        assert_eq!(
+            *adapter.seen_force.lock().unwrap(),
+            vec![true, false],
+            "force 实参必须原样到达适配器"
+        );
+    }
+
+    /// wire 合同（前端按此实现）：拒绝 = HTTP 400，响应体含顶层
+    /// `code = "active_routed_sessions"` 与 `count = <数字>`（外加既有
+    /// `error` 信封字段）。
+    #[tokio::test]
+    async fn router_stop_rejection_answers_400_with_code_and_count() {
+        let adapter = Some(Arc::new(FakeAdapter::rejecting(3)) as Arc<dyn AdminAdapter>);
+        let app = build_api_admin_router(test_state(adapter));
+        let (status, v) = api_json(
+            app,
+            "POST",
+            "/api/admin/services/router/disable",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "拒绝必须是 400: {v}");
+        assert_eq!(v["code"], "active_routed_sessions");
+        assert_eq!(v["count"], 3);
+        assert!(v["error"].as_str().is_some(), "error 信封字段保留: {v}");
+    }
+
+    /// 强制停止：请求体 `{"force": true}` 透传到适配器，保护被绕过后成功。
+    #[tokio::test]
+    async fn router_stop_with_force_body_bypasses_and_succeeds() {
+        let fake = Arc::new(FakeAdapter::rejecting(2));
+        let adapter: Arc<dyn AdminAdapter> = fake.clone();
+        let app = build_api_admin_router(test_state(Some(adapter)));
+
+        // 无 force：被拒（400 + 计数）。
+        let (status, v) = api_json(
+            app,
+            "POST",
+            "/api/admin/services/router/disable",
+            Some(r#"{"force": false}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+
+        // force 重发：适配器放行 → 200。
+        let adapter: Arc<dyn AdminAdapter> = fake.clone();
+        let app = build_api_admin_router(test_state(Some(adapter)));
+        let (status, v) = api_json(
+            app,
+            "POST",
+            "/api/admin/services/router/disable",
+            Some(r#"{"force": true}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "force 重发必须放行: {v}");
+        assert_eq!(v["status"], "accepted");
+        // force 实参按序透传到适配器（false → true）。
+        assert_eq!(*fake.seen_force.lock().unwrap(), vec![false, true]);
+    }
+
+    /// 旧客户端（无 body / 空 body / 非 JSON body）不受影响：force 缺省
+    /// false，常规启停照常工作。
+    #[tokio::test]
+    async fn service_set_without_body_defaults_to_force_false() {
+        let adapter = FakeAdapter::new();
+        let adapter: Arc<dyn AdminAdapter> = Arc::new(adapter);
+        let app = build_api_admin_router(test_state(Some(adapter)));
+        let (status, _) = api_json(
+            app,
+            "POST",
+            "/api/admin/services/webui/disable",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn service_enable_route_accepts_post() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let resp = app
             .oneshot(
@@ -951,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_disable_route_accepts_post() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let resp = app
             .oneshot(
@@ -969,7 +1165,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_restart_route_accepts_post() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let (status, v) = api_json(
             app,
@@ -1040,7 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn api_admin_status_reports_adapter_presence() {
         // With adapter: adapter_ok true, data present.
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let (status, v) = api_json(app, "GET", "/api/admin/status", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -1056,7 +1252,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_admin_events_and_services_report_adapter_presence() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let (status, v) = api_json(app, "GET", "/api/admin/events", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -1069,7 +1265,7 @@ mod tests {
         assert_eq!(v["adapter_ok"], false);
         assert_eq!(v["events"].as_array().unwrap().len(), 0);
 
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let (status, v) = api_json(app, "GET", "/api/admin/services", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -1079,7 +1275,7 @@ mod tests {
     #[tokio::test]
     async fn api_admin_mutation_proxies_and_reports_missing_adapter() {
         // With adapter: mutation accepted (POST with loopback origin).
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let (status, v) = api_json(
             app,
@@ -1100,7 +1296,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_admin_mutations_reject_get_with_405() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         // /api/admin/update is registered POST-only; GET is 405.
         let resp = app
@@ -1118,7 +1314,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_admin_foreign_origin_rejected() {
-        let adapter = Some(Arc::new(FakeAdapter { fail: false }) as Arc<dyn AdminAdapter>);
+        let adapter = Some(Arc::new(FakeAdapter::new()) as Arc<dyn AdminAdapter>);
         let app = build_api_admin_router(test_state(adapter));
         let resp = app
             .oneshot(

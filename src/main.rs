@@ -197,21 +197,12 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 Ok(cfg) => cfg,
                 Err(e) => startup_failure_exit(&e),
             };
-            let mut router_cfg = if run.router {
-                match sebas_router::config::RouterConfig::parse(&raw)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                {
-                    Ok(c) => Some(c),
-                    Err(e) => startup_failure_exit(&e),
-                }
-            } else {
-                None
-            };
-            if run.debug
-                && let Some(c) = router_cfg.as_mut()
-            {
-                sebas_router::debug::enable_debug_test_provider(c);
-            }
+            // unify-router-process-shape 1.1（D1）：内嵌 router 已退役——core
+            // 不再以任何形态在进程内起 router。这里只解析配置**声明**的
+            // `[router]` 段（listen / auth_token / providers 种子），供 spawn
+            // env 翻译（ProviderMode::Router 指向独立 router 进程）与节点链路
+            // RouterEndpoint 使用。debug test provider 走 `sebas router --debug`。
+            let router_cfg = sebas_router::config::RouterConfig::parse(&raw).ok();
             if let Err(e) = sebas::run::run(
                 cfg,
                 raw,
@@ -377,8 +368,19 @@ fn render_response(
                         );
                     }
                 }
-            RpcControlResponse::Rejected { code, message } => {
-                eprintln!("rejected code={code} message={message}");
+            RpcControlResponse::Rejected {
+                code,
+                message,
+                count,
+            } => {
+                // unify-router-process-shape 2.2：router 停止保护拒绝携带
+                // 活跃会话计数（其余拒绝该字段缺席）。
+                match count {
+                    Some(count) => {
+                        eprintln!("rejected code={code} message={message} count={count}")
+                    }
+                    None => eprintln!("rejected code={code} message={message}"),
+                }
             }
             RpcControlResponse::Events { events } => {
                 if events.is_empty() {
@@ -604,13 +606,19 @@ mod tests {
     }
 
     #[test]
-    fn run_subcommand_accepts_router_flag() {
-        let cli = Cli::try_parse_from(["sebas", "core", "--router", "--config", "x.toml"])
-            .expect("`sebas core --router --config <path>` must parse");
-        let Cmd::Core(args) = cli.cmd else {
-            panic!("expected Run subcommand");
-        };
-        assert!(args.router, "--router flag must be captured");
+    fn core_router_and_debug_flags_are_unknown_arguments() {
+        // unify-router-process-shape 1.1：内嵌 router 退役（BREAKING）——
+        // `core --router` / `core --debug` 传入即 unknown-argument 报错，
+        // 不再有任何 in-process router 可启动。debug test provider 走
+        // `sebas router --debug`（独立进程）。
+        assert!(
+            Cli::try_parse_from(["sebas", "core", "--router", "--config", "x.toml"]).is_err(),
+            "--router must be rejected as unknown argument"
+        );
+        assert!(
+            Cli::try_parse_from(["sebas", "core", "--debug", "--config", "x.toml"]).is_err(),
+            "--debug must be rejected as unknown argument"
+        );
     }
 
     #[test]
@@ -1039,6 +1047,17 @@ mod tests {
                 RpcControlResponse::Rejected {
                     code: "unauthorized".into(),
                     message: "missing or invalid control RPC secret".into(),
+                    count: None,
+                },
+            ),
+            (
+                "rejected-with-count",
+                // unify-router-process-shape 2.2：router 停止保护拒绝——
+                // code + count 字段名钉死（前端强制出口流的数据合同）。
+                RpcControlResponse::Rejected {
+                    code: "active_routed_sessions".into(),
+                    message: "router 有 3 个活跃 routed 会话".into(),
+                    count: Some(3),
                 },
             ),
             (
@@ -1102,6 +1121,19 @@ mod tests {
         assert!(json.contains("\"count\":3"), "{json}");
         assert!(json.contains("\"last_stderr\":\"spawn failed: no such file\""), "{json}");
         assert!(json.contains("\"at\":\"2026-09-07T00:00:00Z\""), "{json}");
+
+        // rejected-with-count：拒绝携带计数时的确切 wire 形状（2.2 合同，
+        // 前端强制出口流按 code + count 判别）。
+        let json = serde_json::to_string(&cases[3].1).unwrap();
+        assert!(json.contains("\"type\":\"rejected\""), "{json}");
+        assert!(
+            json.contains("\"code\":\"active_routed_sessions\""),
+            "{json}"
+        );
+        assert!(json.contains("\"count\":3"), "{json}");
+        // 无计数的拒绝保持旧形状：count 字段整体省略。
+        let json = serde_json::to_string(&cases[2].1).unwrap();
+        assert!(!json.contains("count"), "无计数时 count 必须省略: {json}");
     }
 
     #[test]

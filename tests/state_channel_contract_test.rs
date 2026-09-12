@@ -334,7 +334,10 @@ async fn state_mutation_rejected_does_not_silently_swallow() {
 
 /// StateSubscribe 先收全域快照帧，订阅期间的 mutation 以 Changed 帧到达
 /// （spec scenario: "StateSubscribe delivers mutations after snapshot"）。
-#[tokio::test]
+/// multi_thread flavor：快照域含 router_activity，其计数经
+/// provider_state::load() 合法 block_in_place——生产 server 只跑多线程
+/// 运行时（block_on_engine 契约），current_thread 测试运行时会 panic。
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn state_subscribe_delivers_mutations_after_snapshot() {
     let _inner = init_fake_state_store();
     let dir = tempfile::tempdir().unwrap();

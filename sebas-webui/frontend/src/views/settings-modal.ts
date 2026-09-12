@@ -138,6 +138,20 @@ function formatUptimeSecs(secs: number | null): string {
   return `${m}m`
 }
 
+/**
+ * Router 停止被拒识别（unify-router-process-shape D3/D4）：HTTP 400/409 且
+ * code = `active_routed_sessions` 的拒绝 → 返回携带的活跃会话计数（缺失
+ * 如实为 null，对话框以 — 呈现）；其余任何失败 → null，走既有内联错误。
+ * 竞态模型：弹窗由拒绝驱动，不做预查询；确认期间会话增减由服务端对
+ * force 重发再次执法兜底。
+ */
+function activeSessionsRejection(err: unknown): { count: number | null } | null {
+  if (!(err instanceof ApiError)) return null
+  if (err.status !== 400 && err.status !== 409) return null
+  if (err.code !== 'active_routed_sessions') return null
+  return { count: typeof err.count === 'number' ? err.count : null }
+}
+
 /** Appearance 分区的主题三态（mode 语义见 theme.ts）。 */
 const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string }> = [
   { mode: 'system', label: 'System', sub: 'Follow your OS preference' },
@@ -193,6 +207,12 @@ export class SebasSettingsModal extends LitElement {
   @state() private serviceBusy: string | null = null
   /** 行动作二次确认目标（disable/restart；null = 关闭）。 */
   @state() private confirmTarget: { kind: 'disable' | 'restart'; name: string } | null = null
+  /**
+   * Router 停止被拒的第二层对话框（unify-router-process-shape D4：拒绝驱动，
+   * 前端不做活跃数预查询）：目标服务名 + 拒绝携带的活跃 routed 会话计数；
+   * null = 关闭。「强制停止」以 force: true 重发，取消不发任何请求。
+   */
+  @state() private forceStop: { name: string; count: number | null } | null = null
   /** About INSTANCE 段：工作区根目录（/api/fs/browse-dirs 的服务端解析根）。 */
   @state() private overviewRoot: string | null = null
   @state() private rootCopied = false
@@ -1084,8 +1104,18 @@ export class SebasSettingsModal extends LitElement {
 
   // ---- Services 行动作（enable / disable / restart） ----
 
-  /** 行动作执行：成功后重取列表；失败（含 503）内联呈现且不刷新。 */
-  private async runServiceAction(kind: 'enable' | 'disable' | 'restart', name: string): Promise<void> {
+  /**
+   * 行动作执行：成功后重取列表；失败（含 503）内联呈现且不刷新。例外
+   * （unify-router-process-shape D4）：非 force 的 disable 被
+   * `active_routed_sessions` 拒绝时不走内联错误，改弹第二层强制出口对话框
+   * （计数 + 流式中断后果）；force 重发若仍被拒则如实内联——服务端对
+   * force 只有放行或真实故障两种可能，都属于诚实失败。
+   */
+  private async runServiceAction(
+    kind: 'enable' | 'disable' | 'restart',
+    name: string,
+    force = false,
+  ): Promise<void> {
     if (this.serviceBusy) return
     this.serviceBusy = name
     this.serviceAction = null
@@ -1094,11 +1124,16 @@ export class SebasSettingsModal extends LitElement {
         kind === 'enable'
           ? await api.enableService(name)
           : kind === 'disable'
-            ? await api.disableService(name)
+            ? await api.disableService(name, force)
             : await api.restartService(name)
       this.serviceAction = { ok: true, text: `${name}: ${r.message || `${kind} accepted`}` }
       this.loadServices()
     } catch (err) {
+      const rejection = !force && kind === 'disable' ? activeSessionsRejection(err) : null
+      if (rejection) {
+        this.forceStop = { name, count: rejection.count }
+        return
+      }
       this.serviceAction = {
         ok: false,
         text: err instanceof ApiError ? err.message : String(err),
@@ -1106,6 +1141,17 @@ export class SebasSettingsModal extends LitElement {
     } finally {
       this.serviceBusy = null
     }
+  }
+
+  /**
+   * 强制停止出口（unify-router-process-shape D4）：「强制停止」= 以
+   * force: true 重发同一停止请求；取消（对话框关闭）不发任何请求。
+   */
+  private async confirmForceStop(): Promise<void> {
+    const t = this.forceStop
+    if (!t || this.serviceBusy) return
+    this.forceStop = null
+    await this.runServiceAction('disable', t.name, true)
   }
 
   private copyRoot(): void {
@@ -1875,13 +1921,15 @@ export class SebasSettingsModal extends LitElement {
     }
   }
 
-  /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认（全部
-   *  挂在 settings 面板外层；全部带 wa-hide 来源守卫——编辑器 / 设默认 /
-   *  删除 / 服务确认，共 4 处）。原 Settings 高危动作对话框（全部进程重启 /
-   *  重置 Settings）随分区删除一并移除（revamp…2.1）。 */
+  /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认与停止
+   *  拒绝的强制出口（全部挂在 settings 面板外层；全部带 wa-hide 来源守卫
+   *  ——编辑器 / 设默认 / 删除 / 服务确认 / 强制出口，共 5 处）。原 Settings
+   *  高危动作对话框（全部进程重启 / 重置 Settings）随分区删除一并移除
+   *  （revamp…2.1）。 */
   private renderProviderDialogs() {
     return html`
       ${this.renderActionConfirmDialogs()}
+      ${this.renderForceStopDialog()}
       <wa-dialog
         label=${this.editorLabel()}
         ?open=${this.editor !== null}
@@ -1979,6 +2027,7 @@ export class SebasSettingsModal extends LitElement {
   private renderActionConfirmDialogs() {
     return html`
       <wa-dialog
+        class="service-action-confirm"
         label=${this.confirmTarget
           ? `${this.confirmTarget.kind === 'disable' ? 'Disable' : 'Restart'} service`
           : 'Service action'}
@@ -2005,6 +2054,42 @@ export class SebasSettingsModal extends LitElement {
           }}
         >
           ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'}
+        </wa-button>
+      </wa-dialog>
+    `
+  }
+
+  /**
+   * 强制出口对话框（unify-router-process-shape D4 / spec「router 停止被拒
+   * 呈现强制出口」）：停止请求被服务端拒绝后由拒绝驱动弹出——呈现活跃
+   * routed 会话计数与「流式会话将中断」后果；「强制停止」以 force: true
+   * 重发，取消不发任何请求（spec「router 停止被拒后取消」scenario）。
+   * 计数缺失（合同外的退化响应）如实以 — 呈现，不编造数字。
+   */
+  private renderForceStopDialog() {
+    return html`
+      <wa-dialog
+        class="service-force-stop"
+        label="Force stop service"
+        ?open=${this.forceStop !== null}
+        @wa-hide=${this.guardedHide(() => (this.forceStop = null))}
+      >
+        <p class="dialog-text">
+          Stopping <strong>${this.forceStop?.name ?? ''}</strong> was rejected: there
+          ${this.forceStop?.count === 1 ? 'is' : 'are'}
+          <strong>${this.forceStop?.count ?? '—'}</strong> active routed session(s). Forcing the
+          stop will interrupt their streaming responses.
+        </p>
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.forceStop = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${this.serviceBusy !== null}
+          @click=${() => void this.confirmForceStop()}
+        >
+          Force stop
         </wa-button>
       </wa-dialog>
     `
