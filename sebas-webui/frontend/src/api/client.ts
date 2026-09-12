@@ -665,7 +665,18 @@ export const api = {
   // Reads
   summary: () => get<Summary>('/api/summary'),
   sessions: () => get<SessionList>('/api/sessions'),
-  session: (encodedKey: string) => get<SessionDetail>(`/api/sessions/${encodedKey}`),
+  /**
+   * Session detail（conversation-incremental-sync 2.1/D2）。`entriesAfter`
+   * 给定 → 拼 `?entries_after=<n>`：响应结构不变，`entries` 只含
+   * `position > n` 的条目（后端透传 `turns(key, n)`），status/pending 等
+   * 其余字段照常随行；缺省 = 全量（现行为，老消费者零破坏）。
+   */
+  session: (encodedKey: string, entriesAfter?: number) =>
+    get<SessionDetail>(
+      withQuery(`/api/sessions/${encodedKey}`, {
+        entries_after: entriesAfter === undefined ? undefined : String(entriesAfter),
+      }),
+    ),
   settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
   router: () => get<{ router: RouterInfo }>('/api/router'),
   about: () => get<About>('/api/about'),

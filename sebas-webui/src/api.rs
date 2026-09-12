@@ -17,7 +17,7 @@ use crate::server::WebUiState;
 use crate::session_backend::{Reachability, SessionRejection};
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -145,10 +145,24 @@ pub async fn sessions_list(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
+/// （conversation-incremental-sync 1.1）`GET /api/sessions/{key}` 的 query
+/// 参数。`entries_after` 有值 = 增量读；缺省/无参 = 全量（现行为）。
+#[derive(Deserialize)]
+pub struct SessionDetailQuery {
+    /// 增量游标：只返回 `position` 严格大于该值的条目。非数字值由 axum
+    /// 的 Query 提取器直接 400 拒绝（不静默当全量）。
+    #[serde(default)]
+    pub entries_after: Option<u64>,
+}
+
 /// GET /api/sessions/{key} — session detail with the rendered transcript.
 /// A successful read focuses the session, same as the former detail page
 /// visit (a display pointer only; it never changes message routing).
-pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<String>) -> Response {
+pub async fn session_detail(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+    Query(query): Query<SessionDetailQuery>,
+) -> Response {
     let session_key = match decode_session_key(&key) {
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
@@ -168,9 +182,14 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
 
     // A known session with no readable transcript yet renders empty
     // rather than failing the view.
+    // conversation-incremental-sync 1.1：`entries_after` 有值 = 增量读——
+    // 只回 position 严格大于游标的条目。注意 seam `turns(key, from)` 是
+    // `>= from` 闭区间语义，这里 +1 对齐成开区间；缺省传 0 = 全量（现
+    // 行为）。游标超过最大 position 时得到空序列，其余 payload 字段照常。
+    let from = query.entries_after.map_or(0, |n| n.saturating_add(1));
     let entries: Vec<sebas_dispatch::TurnEntry> = state
         .backend
-        .turns(session_key.clone(), 0)
+        .turns(session_key.clone(), from)
         .await
         .unwrap_or_default();
     // workbench-conversation-view 1.1/1.2（design D1/D2）：payload 是一条
