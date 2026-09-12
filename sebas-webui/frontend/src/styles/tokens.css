@@ -17,6 +17,10 @@
 
   /* Surfaces (dark, slightly blue-cast like modern dev tools) */
   --sebas-bg: #0a0c11;
+  /* workbench-interaction-polish D6：canvas 底色——比 surface 深一档的
+   * 应用画布，rail / stage / composer 以浮岛浮在其上，区域分隔靠色阶与
+   * 留缝而不是通高硬线。 */
+  --sebas-canvas: #06080c;
   --sebas-surface: #10141c;
   --sebas-surface-2: #161b26;
   --sebas-surface-3: #1d2432;
@@ -116,6 +120,7 @@
   color-scheme: light;
 
   --sebas-bg: #f4f5f9;
+  --sebas-canvas: #e7e9f1;
   --sebas-surface: #ffffff;
   --sebas-surface-2: #f0f2f7;
   --sebas-surface-3: #e7eaf2;

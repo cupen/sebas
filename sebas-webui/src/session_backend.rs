@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
+use sebas_dispatch::engine::CancelOutcome;
 use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -65,6 +66,10 @@ pub enum SessionRejection {
     QueueFull { limit: usize },
     /// （workbench-turn-queue D7）pending submission 管理操作的类型化拒绝。
     PendingRejected { reason: PendingReason },
+    /// （workbench-interaction-polish 1.1）会话存在但没有在飞 turn——取消
+    /// 无从谈起，如实拒绝而非伪造成功。`key` 是编码会话键（诊断用）。
+    #[serde(rename = "idle_session")]
+    Idle { key: String },
 }
 
 /// pending submission 管理拒绝的具体原因（workbench-turn-queue D7）。
@@ -108,6 +113,9 @@ impl std::fmt::Display for SessionRejection {
                 write!(f, "待执行队列已满（上限 {limit}）：这条消息没有提交")
             }
             SessionRejection::PendingRejected { reason } => write!(f, "{reason}"),
+            SessionRejection::Idle { key } => {
+                write!(f, "会话空闲（无在飞回复，无需取消）: {key}")
+            }
         }
     }
 }
@@ -755,14 +763,18 @@ impl SessionBackend for InProcessBackend {
             .map_err(pending_op_rejection)
     }
 
-    /// （extract-im-service 2.2）取消在飞 turn：映射存在即发 `AcpCommand::Cancel`。
+    /// （extract-im-service 2.2）取消在飞 turn。workbench-interaction-polish
+    /// 1.1：引擎三态判定——在飞派发中断，空闲/未知转 typed 拒绝（不再对
+    /// 「无事可取消」回 Ok）。
     async fn cancel(&self, key: ChannelKey) -> Result<(), SessionRejection> {
-        if self.router.web_cancel_session(&key).await {
-            Ok(())
-        } else {
-            Err(SessionRejection::UnknownSession {
+        match self.router.web_cancel_session(&key).await {
+            CancelOutcome::Dispatched => Ok(()),
+            CancelOutcome::Idle => Err(SessionRejection::Idle {
                 key: serde_json::to_string(&key).unwrap_or_default(),
-            })
+            }),
+            CancelOutcome::Unknown => Err(SessionRejection::UnknownSession {
+                key: serde_json::to_string(&key).unwrap_or_default(),
+            }),
         }
     }
 
@@ -1102,6 +1114,8 @@ impl SessionBackend for FakeBackend {
             remote: None,
             desired_mode: None,
             effective_mode: None,
+            // rail-declutter-unread：fake 会话不产 transcript，段数为 0。
+            msg_count: 0,
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1369,6 +1383,7 @@ mod tests {
                 remote: None,
                 desired_mode: None,
                 effective_mode: None,
+                msg_count: 0,
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

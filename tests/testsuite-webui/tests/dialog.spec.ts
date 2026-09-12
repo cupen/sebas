@@ -124,12 +124,13 @@ test.describe('agent 对话覆盖', () => {
       const { detail } = await openIdle(page, `guard-${t}`)
       const before = await detail.bubbles().count()
 
-      // The guard swallows silently client-side (the send button is NOT disabled
-      // for empty input) — assert the no-op, not a disabled state.
+      // workbench-interaction-polish 4.3：空输入 = 提交控件禁用（状态机的
+      // disabled 态），客户端吞掉空提交的语义不变——断言禁用态 + 无回合。
       await detail.sendFollowUp('')
       await detail.sendFollowUp('   \n\t  ')
       await detail.composerTextarea.fill('   ')
-      await detail.sendButton.click()
+      await expect(detail.sendButton).toBeDisabled()
+      await expect(detail.sendButton).toHaveAttribute('data-state', 'disabled')
 
       // No new turn block appeared, status never left Done, no error surfaced.
       await expect

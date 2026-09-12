@@ -264,6 +264,113 @@ async fn close_malformed_key_returns_400() {
     );
 }
 
+// ---- workbench-interaction-polish 1.2: POST /api/sessions/{key}/cancel ----
+
+/// Cancel on a live-but-idle session: 409 typed rejection (idle ≠ fabricated
+/// success), and the session survives.
+#[tokio::test]
+async fn cancel_idle_session_returns_409_and_keeps_session() {
+    let (router, _rx, app) = fixture().await;
+    let k1 = key("a");
+    let encoded = encode(&k1);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("空闲"), "idle wording expected: {body}");
+    // The session is untouched by the rejected cancel.
+    let snap = router.map.snapshot_all().await;
+    assert_eq!(snap.len(), 3, "cancel must not remove anything: {snap:?}");
+}
+
+/// Cancel on an unknown session: 404 typed rejection.
+#[tokio::test]
+async fn cancel_unknown_session_returns_404() {
+    let (_router, _rx, app) = fixture().await;
+    let encoded = encode(&ChannelKey::feishu("oc_ghost", None));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Cancel on a working session (card FSM driven to WORKING): 200, mapping
+/// intact — the interrupt rides the driver's existing cancel semantics.
+#[tokio::test]
+async fn cancel_working_session_returns_200() {
+    let (router, mut rx, app) = fixture().await;
+    let k1 = key("a");
+    let encoded = encode(&k1);
+    // First TextDelta drives the card FSM SEED → WORKING (lazy seed), the
+    // same in-flight definition the turn queue uses.
+    router
+        .apply_event(
+            "s1",
+            &AcpEvent::TextDelta {
+                session_id: "s1".into(),
+                delta: "streaming".into(),
+            },
+        )
+        .await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("cancelled"), "{body}");
+    // The Out::SendAcp Cancel instruction was emitted toward the driver.
+    match rx.try_recv() {
+        Ok(sebas_dispatch::engine::Out::SendAcp {
+            cmd: sebas_acp::claude::session::AcpCommand::Cancel { session_id },
+            ..
+        }) => assert_eq!(session_id, "s1"),
+        other => panic!("expected SendAcp Cancel, got {other:?}"),
+    }
+}
+
+/// Cancel over a backend with the core down: honest 503, no success reported.
+#[tokio::test]
+async fn cancel_without_core_is_503() {
+    let app = core_down_app();
+    let encoded = encode(&ChannelKey::feishu("oc_any", None));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{encoded}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("socket absent"), "{body}");
+}
+
 #[tokio::test]
 async fn close_focused_session_clears_active_pointer() {
     let (router, _rx, app) = fixture().await;
@@ -1600,8 +1707,10 @@ async fn removing_project_keeps_its_session_running_and_reachable() {
         "live session carries prompt + content"
     );
 
-    // Remove the project from the registry（按稳定 id）; the session itself
-    // is untouched.
+    // rail-declutter-unread D5（废除「迁移 Inbox 继续运行」）：项目下仍有
+    // 非归档会话时移除被**拒绝**（typed rejection，带会话数），项目留在
+    // 注册表里，会话原样存活——「存活会话留在原项目下」由阻止达成，而非
+    // 移除后迁移。
     let project_id = projects::project_id_for(&path);
     let resp = post_json(
         &app,
@@ -1609,12 +1718,22 @@ async fn removing_project_keeps_its_session_running_and_reachable() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let rejection: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(rejection["code"], "project_has_live_sessions");
+    assert_eq!(
+        rejection["session_count"].as_u64().filter(|&n| n >= 1),
+        Some(1),
+        "rejection names the live session count: {rejection}"
+    );
+
+    // The project stays registered.
     let (_, projects) = get_json(&app, "/api/projects").await;
     assert_eq!(
         projects["projects"].as_array().unwrap().len(),
-        0,
-        "registry no longer lists the project"
+        1,
+        "blocked removal leaves the project registered"
     );
 
     // The session still resolves: same detail, same transcript.
@@ -1622,24 +1741,22 @@ async fn removing_project_keeps_its_session_running_and_reachable() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "session must still resolve after project removal"
+        "session must still resolve after the blocked removal"
     );
     assert_detail_untouched(&detail_before, &detail_after);
     let turns_after = router.session_turns(&key, 0).await.unwrap();
     assert_eq!(
         turns_before, turns_after,
-        "transcript must survive project removal"
+        "transcript must survive the blocked removal"
     );
 
-    // The list still shows the session under its origin path: the grouping
-    // label is the removed project's path, which is where the operator is
-    // told the session lives.
+    // The list still shows the session under its project.
     let (_, list) = get_json(&app, "/api/sessions").await;
     let rows = list["recent_sessions"].as_array().unwrap();
     let row = rows
         .iter()
         .find(|r| r["encoded_key"] == encoded)
-        .expect("session still listed after project removal");
+        .expect("session still listed after the blocked removal");
     assert_eq!(row["status"], "active");
     assert_eq!(
         row["project_id"].as_str(),
@@ -1748,6 +1865,18 @@ impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
         sebas_webui::session_backend::CloseReport,
         sebas_webui::session_backend::SessionRejection,
     > {
+        Err(
+            sebas_webui::session_backend::SessionRejection::Unavailable {
+                cause: "socket absent".into(),
+            },
+        )
+    }
+    // workbench-interaction-polish 1.2：cancel 走通道请求——core 不可达时
+    // 真实 CoreChannelBackend 报 Unavailable，503 语义与 message/close 同源。
+    async fn cancel(
+        &self,
+        _key: ChannelKey,
+    ) -> Result<(), sebas_webui::session_backend::SessionRejection> {
         Err(
             sebas_webui::session_backend::SessionRejection::Unavailable {
                 cause: "socket absent".into(),
@@ -2312,4 +2441,152 @@ async fn close_response_names_discarded_pending_count() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["discarded_pending"], 2, "close 必须点名丢弃条数: {body}");
+}
+
+/// rail-declutter-unread 1.2：`GET /api/sessions` 行投影携带 `msg_count`
+/// （可见回复段数，徽标数据源）。相邻 delta 合并成段：2 条 delta = 1。
+#[tokio::test]
+async fn sessions_list_rows_carry_msg_count() {
+    let (router, _rx, app) = fixture().await;
+    let k1 = key("a");
+    // prompt + 两条 markdown delta = 一段。
+    router.seed_card("s1".into(), "hello".into()).await;
+    router
+        .apply_event(
+            "s1",
+            &AcpEvent::TextDelta {
+                session_id: "s1".into(),
+                delta: "first ".into(),
+            },
+        )
+        .await;
+    router
+        .apply_event(
+            "s1",
+            &AcpEvent::TextDelta {
+                session_id: "s1".into(),
+                delta: "second".into(),
+            },
+        )
+        .await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    let row = body["recent_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["reference"] == "oc_a")
+        .expect("session row present")
+        .clone();
+    assert_eq!(
+        row["msg_count"].as_u64(),
+        Some(1),
+        "two deltas of one reply merge into one segment: {row}"
+    );
+}
+
+/// rail-declutter-unread 1.3：项目下有非归档会话时移除被拒绝（typed
+/// rejection，带会话数）；会话关闭后放行。
+#[tokio::test]
+async fn projects_remove_blocked_while_live_sessions_exist() {
+    let _env = isolated_projects().await;
+    let (router, _rx, app) = fixture().await;
+    let dir = std::env::temp_dir().join("projects-test-remove-blocked");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+
+    // 注册项目。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "path": path_str }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = project_id_after_add(&app, &path_str).await;
+
+    // 绑定一个存活会话到该项目。
+    router
+        .map
+        .set_project_dir(&key("a"), Some(path_str.clone()))
+        .await;
+
+    // 有存活会话 → 409 + 会话数。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{id}/remove"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(body["code"], "project_has_live_sessions");
+    assert_eq!(body["session_count"], 1);
+    assert!(body["error"].as_str().unwrap().contains("1"));
+
+    // 项目仍在册（拒绝不产生副作用）。
+    let listed: serde_json::Value = serde_json::from_str(
+        &body_string(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/projects")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+
+    // 关闭会话（映射移除）→ 放行。
+    let outcome = router.web_close_session(key("a")).await;
+    assert!(matches!(
+        outcome,
+        sebas_dispatch::engine::CloseOutcome::Closed { .. }
+    ));
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{id}/remove"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

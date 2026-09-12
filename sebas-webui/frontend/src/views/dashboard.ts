@@ -20,6 +20,14 @@ import type { WsEvent } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
+import {
+  clampComposerHeight,
+  COMPOSER_DEFAULT_PX,
+  isNarrowViewport,
+  loadComposerHeight,
+  onNarrowChange,
+  saveComposerHeight,
+} from './split-persist.js'
 import '../components/status-badge.js'
 import '../components/review-card.js'
 import '../components/pending-stack.js'
@@ -29,6 +37,7 @@ import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
+import '@awesome.me/webawesome/dist/components/split-panel/split-panel.js'
 
 /** 本机节点标识（与后端 projects::LOCAL_NODE_ID 同一词表）。 */
 const LOCAL_NODE = 'local'
@@ -72,40 +81,50 @@ export class SebasDashboard extends LitElement {
    */
   @state() private selectedBranch: string | null = null
   /**
-   * Provider label rendered next to the composer (e.g. "anthropic / claude").
-   * `null` while loading; `"no provider configured"` if no providers are
-   * registered; `"provider status unavailable"` when the provider source
-   * itself cannot be reached (honest degradation, fix-webui-detached-status).
-   */
-  @state() private providerLabel: string | null = null
-  /**
    * 中程切换聚焦会话模型（add-acp-model-selection 语义）：非空 = 请求已发出，
    * 等事件回流。
    */
   @state() private modelSwitching = false
+  /**
+   * 输入框高度（px；workbench-interaction-polish 5.2/D1）：localStorage
+   * 记忆，拖拽 stage|composer 分割线时 clamp 后写回。
+   */
+  @state() private composerHeight: number = loadComposerHeight() ?? COMPOSER_DEFAULT_PX
+  /** 窄屏（<640px）：分割线禁拖，布局退化。 */
+  @state() private narrow: boolean = isNarrowViewport()
   /** Close 确认对话框（session-detail 迁移；workbench-turn-queue：点名丢弃条数）。 */
   @state() private confirmClose = false
   private unsubscribe?: () => void
   /**
-   * 8.2：节点可用性轮询（节点上下线没有对应的会话事件）。composer 的节点门禁
-   * 因此**免刷新**恢复/收紧。disconnectedCallback 清理。
+   * 8.2：节点可用性轮询（节点上下线没有对应的会话事件）。rail 与项目头部
+   * 的节点标注因此**免刷新**恢复/收紧。disconnectedCallback 清理。
    */
   private nodeTimer: number | undefined = undefined
+  /** 窄屏媒体查询退订句柄（5.2）。 */
+  private unlistenNarrow: (() => void) | null = null
   /**
-   * 创建会话不再跳转（workbench-conversation-view 3.x：工作台是唯一对话面）
-   * ——服务端 create 已 set_focus，就地重取让新会话的对话出现。
-   */
-  private onComposerCreated = (): void => {
-    // 新会话创建后服务端焦点指向它：清掉深链参数，让焦点指针驱动视图。
-    this.deepLinkKey = null
-    this.refetch()
-  }
-  /**
-   * add-composer-agent-binding：跟随模式下 composer 发出消息/切模型后乐观
-   * 重取聚焦 detail——transcript 不等下一个 WS/summary 周期就能反映本轮。
+   * add-composer-agent-binding：跟随模式下 composer 发出消息/切模型/取消
+   * 后乐观重取聚焦 detail——transcript 不等下一个 WS/summary 周期就能
+   * 反映本轮。
    */
   private onComposerSent = (): void => {
     this.loadFocused(this.effectiveFocusKey())
+  }
+
+  /**
+   * 拖拽 stage|composer 分割线（5.2/D1）：换算 px、按「最低 120px、最高
+   * 主区一半」clamp、写 localStorage 并同步状态。初始化时 position/像素
+   * 换算可能短暂产生非有限值（size 未测量）——忽略这类事件，绝不拿垃圾值
+   * 覆盖已存的尺寸。
+   */
+  private onComposerReposition = (e: Event): void => {
+    const panel = e.currentTarget as HTMLElement & { positionInPixels: number }
+    const raw = panel.positionInPixels
+    if (!Number.isFinite(raw)) return
+    const areaHeight = this.getBoundingClientRect().height
+    const px = clampComposerHeight(raw, areaHeight)
+    this.composerHeight = px
+    saveComposerHeight(px, areaHeight)
   }
   /**
    * workbench-turn-queue 7.3：会话终结时未执行的待生效提交（一次性提示的
@@ -132,8 +151,8 @@ export class SebasDashboard extends LitElement {
   static styles = [
     viewStyles,
     css`
-      /* 满幅工作台面板（预览原型 workbench 同款）：宿主随 outlet
-         拉伸，project-header 钉顶、turn-stream 吃满余高、composer 钉底。 */
+      /* 满幅工作台面板（预览原型 workbench 同款）：宿主随 outlet 拉伸，
+         stage|composer 之间的垂直 wa-split-panel 吃满余高。 */
       :host {
         display: flex;
         flex: 1;
@@ -141,20 +160,67 @@ export class SebasDashboard extends LitElement {
         min-height: 0;
         min-width: 0;
       }
-      /* 项目头部（对齐预览原型 workbench 的 project-header）：钉在面板
-         顶部的通栏条——border-bottom 分隔、无边框圆角/阴影/外边距，
-         右侧聚焦会话深链与 "N sessions · ● active" meta 一起右对齐。 */
+      /* ── stage|composer 垂直分割（5.2/D1）────────────────────────────
+         primary=end：窗口缩放时 composer 保持 px 高度（最低 120px、最高
+         主区一半由 --min/--max 兜底，状态里另有 clamp）。分隔缝 rest 态
+         透明（浮岛留缝），hover 亮起把手。 */
+      wa-split-panel.vsplit {
+        flex: 1;
+        min-height: 0;
+        min-width: 0;
+        --min: 120px;
+        --max: 50%;
+        --divider-width: 12px;
+      }
+      wa-split-panel.vsplit::part(panel) {
+        min-width: 0;
+        min-height: 0;
+      }
+      wa-split-panel.vsplit::part(divider) {
+        background: transparent;
+        border-radius: var(--sebas-radius-full);
+        transition: background var(--sebas-dur) var(--sebas-ease);
+      }
+      wa-split-panel.vsplit::part(divider):hover {
+        background: var(--sebas-border-strong);
+      }
+      /* 舞台列：吃满分割面，内里浮岛留边（D6）。 */
+      .stage-col {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        padding: 0 var(--sebas-space-3) 0 var(--sebas-space-3);
+      }
+      /* 舞台浮岛：项目头部 + 会话头 + 对话流合为一张圆角 surface 卡片，
+         区域分隔靠留缝与色阶——不再有通高 border-bottom 硬线。 */
+      .stage-island {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--sebas-surface);
+        border: 1px solid var(--sebas-border);
+        border-radius: var(--sebas-radius-xl);
+        overflow: hidden;
+      }
+      /* 输入框列：吃满分割面，底部留边（D6）。 */
+      .composer-col {
+        display: flex;
+        min-height: 0;
+        padding: 0 var(--sebas-space-3) var(--sebas-space-3);
+      }
+      /* 项目头部：舞台浮岛内的通栏条（去 border-bottom 硬线，浮岛内以
+         既有 border-left 状态条 + 间距分区）。 */
       .project-header {
         display: flex;
         align-items: center;
         gap: var(--sebas-space-3);
         flex-wrap: wrap;
-        background: var(--sebas-surface);
+        background: none;
         border: none;
-        border-bottom: 1px solid var(--sebas-border);
         border-radius: 0;
         box-shadow: none;
-        padding: var(--sebas-space-3) var(--sebas-space-5);
+        padding: var(--sebas-space-3) var(--sebas-space-5) var(--sebas-space-2);
         margin-bottom: 0;
         flex-shrink: 0;
       }
@@ -290,7 +356,8 @@ export class SebasDashboard extends LitElement {
         font-size: 0.85rem;
       }
       /* ── 聚焦会话头（session-detail 迁移，3.3）──状态色左缘条 + 徽章 +
-         身份 + 只读 agent 锁 + 会话内模型选择 + Close/归档动作。 */
+         身份 + 只读 agent 锁 + 会话内模型选择 + Close/归档动作。D6：去
+         border-bottom 硬线（浮岛内以左缘状态条分区）。 */
       .session-head {
         display: flex;
         align-items: center;
@@ -299,8 +366,8 @@ export class SebasDashboard extends LitElement {
         flex-shrink: 0;
         padding: var(--sebas-space-2) var(--sebas-space-5);
         border-left: 3px solid var(--sebas-status-dormant);
-        border-bottom: 1px solid var(--sebas-border);
-        background: var(--sebas-surface);
+        border-bottom: none;
+        background: none;
       }
       .session-head[data-status='starting'] {
         border-left-color: var(--sebas-status-starting);
@@ -415,13 +482,17 @@ export class SebasDashboard extends LitElement {
         max-width: 36ch;
         margin: 0;
       }
-      /* Composer 底座：钉在面板底部的通栏（预览原型 composer-area
-         同款），内壳 18px 圆角 shell 由 workbench-composer 自绘。 */
+      /* Composer 列：分割面 end 侧的浮岛留白区（D6 去通高 border-top
+         硬线），内壳 18px 圆角 shell 由 workbench-composer 自绘。内容超出
+         （审批卡 + 堆叠区高）时列内滚动。 */
       .composer-area {
-        border-top: 1px solid var(--sebas-border);
-        background: var(--sebas-bg);
-        flex-shrink: 0;
-        padding: 0 var(--sebas-space-5) var(--sebas-space-4);
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        padding: 0 var(--sebas-space-5) 0;
       }
       /* 审批卡贴在输入框之上：整体限高内部滚动，卡再多也不挤占对话区。 */
       .composer-area sebas-review-cards {
@@ -429,6 +500,11 @@ export class SebasDashboard extends LitElement {
         max-height: min(280px, 35vh);
         overflow-y: auto;
         margin-bottom: var(--sebas-space-2);
+      }
+      /* composer 宿主吃满分割面分到的余高（5.2：拖出的高度变成输入区）。 */
+      .composer-area sebas-workbench-composer {
+        flex: 1;
+        min-height: 0;
       }
       .skel-line.w60 {
         width: 60%;
@@ -458,10 +534,13 @@ export class SebasDashboard extends LitElement {
     })
     window.addEventListener('sebas:refetch', this.refetch)
     this.nodeTimer = window.setInterval(() => { void this.loadNodes() }, NODE_POLL_MS)
+    // 5.2：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
+    this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
   }
 
   disconnectedCallback(): void {
     this.unsubscribe?.()
+    this.unlistenNarrow?.()
     window.removeEventListener('sebas:refetch', this.refetch)
     if (this.nodeTimer !== undefined) {
       window.clearInterval(this.nodeTimer)
@@ -514,24 +593,6 @@ export class SebasDashboard extends LitElement {
       })
       .catch(() => {
         /* summary already surfaces failures */
-      })
-    // Lazy provider-label fetch: cheap, only fetches once because the
-    // composer reads the cached field — refetches on WS push keep the
-    // label fresh if the operator reconfigures providers mid-session.
-    api
-      .settings()
-      .then((s) => {
-        // fix-webui-detached-status：真源不可用（providers_available=false）
-        // 如实呈现"状态不可用"，与"真的没配 provider"区分开。
-        if ((s.router as unknown as { providers_available?: boolean })?.providers_available === false) {
-          this.providerLabel = 'provider status unavailable'
-        } else {
-          const first = s.router?.providers?.[0]
-          this.providerLabel = first ? first.name : 'no provider configured'
-        }
-      })
-      .catch(() => {
-        /* leave existing label in place */
       })
   }
 
@@ -621,79 +682,95 @@ export class SebasDashboard extends LitElement {
     const projectName = this.selectedPath
       ? (this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath)
       : null
+    // D4：turn 在飞 = 聚焦会话 status == Working（与引擎 card FSM 的
+    // WORKING 同源）。深链/摘要两个数据源兜底取值。
+    const turnInFlight =
+      (this.focusedDetail?.status_slug ?? d.active_session?.status_slug ?? null) === 'working'
     return html`
-      <header class="project-header">
-        ${projectName
-          ? html`
-              <span class="path" title=${this.selectedPath ?? ''}>${projectName}</span>
-              <span class="node-chip" data-testid="header-node" data-node-status=${nodeGate?.status ?? 'online'} title=${nodeGate ? `节点 ${nodeGate.nodeId} 不可用：${nodeGate.cause}` : `执行节点 ${selectedNodeId}`}>${nodeGate ? '⚠ ' : ''}${selectedNodeId}</span>
-              ${this.selectedBranch
-                ? html`<span class="branch-pill">${this.selectedBranch}</span>`
-                : nothing}
-            `
-          : html`<span class="path muted">No project selected</span>`}
-        <span class="project-meta">
-          ${projectName
-            ? html`
-                <span class="meta-item">${rows.length} sessions</span>
-                <span class="meta-sep" aria-hidden="true">·</span>
-                <span class="meta-item ${hasActive ? 'is-active' : ''}">
-                  <span class="active-dot"></span>${hasActive ? 'active' : 'idle'}
-                </span>
-              `
-            : nothing}
-          ${d.active_session
-            ? html`
-                <a
-                  class="focused-link"
-                  href=${`/sessions/${d.active_session.encoded_key}`}
-                  title="Focused session"
-                >
-                  <span class="fkey">${d.active_session.chat_id}</span>
-                  <sebas-status-badge
-                    slug=${d.active_session.status_slug}
-                    label=${d.active_session.status_label}
-                    glyph=${d.active_session.status_glyph}
-                  ></sebas-status-badge>
-                  <span class="arrow">${icon('forward', 13)}</span>
-                </a>
-              `
-            : nothing}
-        </span>
-      </header>
+      <wa-split-panel
+        class="vsplit"
+        orientation="vertical"
+        primary="end"
+        position-in-pixels=${this.composerHeight}
+        ?disabled=${this.narrow}
+        @wa-reposition=${this.onComposerReposition}
+      >
+        <div slot="start" class="stage-col">
+          <div class="stage-island" data-testid="stage-island">
+            <header class="project-header">
+              ${projectName
+                ? html`
+                    <span class="path" title=${this.selectedPath ?? ''}>${projectName}</span>
+                    <span class="node-chip" data-testid="header-node" data-node-status=${nodeGate?.status ?? 'online'} title=${nodeGate ? `节点 ${nodeGate.nodeId} 不可用：${nodeGate.cause}` : `执行节点 ${selectedNodeId}`}>${nodeGate ? '⚠ ' : ''}${selectedNodeId}</span>
+                    ${this.selectedBranch
+                      ? html`<span class="branch-pill">${this.selectedBranch}</span>`
+                      : nothing}
+                  `
+                : html`<span class="path muted">No project selected</span>`}
+              <span class="project-meta">
+                ${projectName
+                  ? html`
+                      <span class="meta-item">${rows.length} sessions</span>
+                      <span class="meta-sep" aria-hidden="true">·</span>
+                      <span class="meta-item ${hasActive ? 'is-active' : ''}">
+                        <span class="active-dot"></span>${hasActive ? 'active' : 'idle'}
+                      </span>
+                    `
+                  : nothing}
+                ${d.active_session
+                  ? html`
+                      <a
+                        class="focused-link"
+                        href=${`/sessions/${d.active_session.encoded_key}`}
+                        title="Focused session"
+                      >
+                        <span class="fkey">${d.active_session.chat_id}</span>
+                        <sebas-status-badge
+                          slug=${d.active_session.status_slug}
+                          label=${d.active_session.status_label}
+                          glyph=${d.active_session.status_glyph}
+                        ></sebas-status-badge>
+                        <span class="arrow">${icon('forward', 13)}</span>
+                      </a>
+                    `
+                  : nothing}
+              </span>
+            </header>
 
-      ${focusKey
-        ? this.renderTurnStream()
-        : html`
-            <div class="empty-stream">
-              <span class="glyph">${icon('message', 20)}</span>
-              <span class="title">No session focused</span>
-              <p class="hint">
-                Pick a session from the sidebar tree — or start a new one with the composer below.
-              </p>
-            </div>
-          `}
-
-      <div class="composer-area">
-        <sebas-review-cards .sessionKey=${focusKey}></sebas-review-cards>
-        <sebas-pending-stack
-          .sessionKey=${focusKey}
-          .pending=${this.focusedDetail?.pending ?? []}
-          .dropped=${this.droppedPending}
-          @pending-changed=${this.onComposerSent}
-        ></sebas-pending-stack>
-        <sebas-workbench-composer
-          .projectDir=${this.selectedPath}
-          .providerLabel=${this.providerLabel}
-          .sessionKey=${focusKey}
-          .nodeBlocked=${this.selectedNodeGate()}
-          .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
-          .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
-          .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
-          @composer-created=${this.onComposerCreated}
-          @composer-sent=${this.onComposerSent}
-        ></sebas-workbench-composer>
-      </div>
+            ${focusKey
+              ? this.renderTurnStream()
+              : html`
+                  <div class="empty-stream">
+                    <span class="glyph">${icon('message', 20)}</span>
+                    <span class="title">No session focused</span>
+                    <p class="hint">
+                      Pick a session from the sidebar tree — or start a new one from a project's
+                      + button.
+                    </p>
+                  </div>
+                `}
+          </div>
+        </div>
+        <div slot="end" class="composer-col">
+          <div class="composer-area">
+            <sebas-review-cards .sessionKey=${focusKey}></sebas-review-cards>
+            <sebas-pending-stack
+              .sessionKey=${focusKey}
+              .pending=${this.focusedDetail?.pending ?? []}
+              .dropped=${this.droppedPending}
+              @pending-changed=${this.onComposerSent}
+            ></sebas-pending-stack>
+            <sebas-workbench-composer
+              .sessionKey=${focusKey}
+              .turnInFlight=${turnInFlight}
+              .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
+              .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
+              .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
+              @composer-sent=${this.onComposerSent}
+            ></sebas-workbench-composer>
+          </div>
+        </div>
+      </wa-split-panel>
     `
   }
 
@@ -779,6 +856,7 @@ export class SebasDashboard extends LitElement {
                     fill
                     .entries=${d.entries}
                     sessionKey=${d.encoded_key}
+                    .msgCount=${d.msg_count ?? null}
                   ></sebas-transcript-view>`}
             `
           : this.focusedUnavailable

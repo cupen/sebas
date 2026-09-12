@@ -1036,6 +1036,7 @@ mod tests {
             remote: None,
             desired_mode: None,
             effective_mode: None,
+            msg_count: 0,
         };
         fe.on_session_info(info.clone()).await;
         {

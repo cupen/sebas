@@ -932,6 +932,10 @@ impl RemoteProjection {
                 provider: meta.provider.clone(),
                 provider_cause: meta.provider_cause.clone(),
             }),
+            // rail-declutter-unread：远端会话的段计数不在本路径（节点侧日志
+            // 词表与 TurnEntry 不同）——如实记 0，远端行的徽标恒不亮。已知
+            // 局限，待节点链路透出统一口径后再接。
+            msg_count: 0,
         })
     }
 }

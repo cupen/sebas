@@ -10,6 +10,7 @@
  * (double-encoding only works by accident of the server's lenient decode).
  */
 import type { APIRequestContext } from '@playwright/test'
+import { sceneDir } from './scene.js'
 
 export type StatusSlug = 'starting' | 'queued' | 'working' | 'done' | 'failed' | 'dormant'
 
@@ -20,6 +21,10 @@ export interface SessionRow {
   project_dir: string | null
   available_models: string[] | null
   current_model: string | null
+  /** rail-declutter-unread：可见回复段数（未读徽标的服务端计数）。 */
+  msg_count?: number
+  /** rail-declutter-unread：首条用户消息预览（rail 行名数据源）。 */
+  prompt_preview?: string | null
 }
 
 export interface ConversationEntry {
@@ -136,6 +141,23 @@ export async function listProjects(request: APIRequestContext): Promise<
   return d.projects
 }
 
+/**
+ * rail-declutter-unread：Inbox 分组移除后，需要 rail 可见会话的旅程先注册
+ * scene 项目并把会话绑定到它。幂等：已注册则直接返回既有条目。
+ */
+export async function ensureSceneProject(
+  request: APIRequestContext,
+): Promise<{ id: string; name: string }> {
+  const scene = sceneDir()
+  const name = scene.split(/[\\/]/).filter(Boolean).pop()!
+  const existing = (await listProjects(request)).find((p) => p.path === scene)
+  if (existing) return { id: existing.id, name }
+  await addProject(request, scene)
+  const created = (await listProjects(request)).find((p) => p.path === scene)
+  if (!created) throw new Error('ensureSceneProject: project missing after add')
+  return { id: created.id, name }
+}
+
 export async function addProject(request: APIRequestContext, path: string): Promise<void> {
   const resp = await request.post('/api/projects', { data: { path } })
   if (!resp.ok()) throw new Error(`addProject failed: HTTP ${resp.status()}`)
@@ -168,6 +190,15 @@ export async function getBranch(
   if (!resp.ok()) return { status: resp.status(), branch: null }
   const d = (await resp.json()) as { branch?: string | null }
   return { status: resp.status(), branch: d.branch ?? null }
+}
+
+/** Raw remove: returns status + body so rejection semantics (409) are assertable. */
+export async function removeProjectRaw(
+  request: APIRequestContext,
+  id: string,
+): Promise<{ status: number; body: string }> {
+  const resp = await request.post(`/api/projects/${encodeURIComponent(id)}/remove`)
+  return { status: resp.status(), body: await resp.text() }
 }
 
 export async function removeProject(request: APIRequestContext, id: string): Promise<void> {

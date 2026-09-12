@@ -416,6 +416,174 @@ async fn session_round_trip_via_webui_http() {
     );
 }
 
+// ---- workbench-interaction-polish 6.1：cancel 链路（BFF → core channel）----
+
+/// Cancel 链路的类型化拒绝：未知 key 404；已知但空闲（无在飞 turn）的会话
+/// 409——「无事可取消」不再伪造成功。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn cancel_typed_rejections_over_webui_http() {
+    let sb = Sandbox::new("testsuite_e2e", "cancel-reject");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 未知 key → 404 typed rejection。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/web%00ghost/cancel", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("cancel unknown");
+    assert_eq!(status, 404, "unknown key must 404: {body}");
+
+    // 已知会话、无在飞 turn（首个 turn 已收敛）→ 409 空闲。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_for("session turn to reach Done", Duration::from_secs(25), &sb.path.clone(), || {
+        let cli = cli.clone();
+        let url = detail_url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            (v["status_slug"].as_str() == Some("done")).then_some(v)
+        })
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("cancel idle");
+    assert_eq!(status, 409, "idle session must 409: {body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("空闲"), "{body}");
+
+    // 会话不受拒绝影响：仍然可继续对话（补一条消息也收敛）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await
+    .expect("follow-up after idle cancel");
+    assert_eq!(status, 200, "{body}");
+}
+
+/// 真实中断路径（受 stub 限制如实标注）：fake-claude 桩对 control_request
+/// interrupt 的语义是「turn 以错误结果收尾 + 子进程退出 → 驱动 respawn
+/// with resume」。这里验证 cancel 链路端到端打通——200、turn 离开
+/// working、会话存活可继续——「真模型的中断体验」另需真实凭据，沙箱只能
+/// 证到桩级（AGENTS.md 诚实边界）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn cancel_interrupts_in_flight_turn_over_webui_http() {
+    let sb = Sandbox::new("testsuite_e2e", "cancel-interrupt");
+    // 每个 turn 在飞 ≈2s（5 帧 × 250ms + slow-ms 800），给取消留窗口。
+    sb.slow_fake_agent(800);
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "stream", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "{body}");
+    let key = body["key"].as_str().expect("key").to_string();
+
+    // 等 turn 开轮（WORKING）再取消。
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    wait_for("session turn to reach Working", Duration::from_secs(25), &sb.path.clone(), || {
+        let cli = cli.clone();
+        let url = detail_url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            (v["status_slug"].as_str() == Some("working")).then_some(v)
+        })
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("cancel in-flight");
+    assert_eq!(status, 200, "cancel must be accepted: {body}");
+    assert_eq!(body["status"].as_str(), Some("cancelled"), "{body}");
+
+    // turn 离开 working；会话保留且可继续（child 退出后驱动 respawn）。
+    wait_for("session turn to leave Working", Duration::from_secs(25), &sb.path.clone(), || {
+        let cli = cli.clone();
+        let url = detail_url.clone();
+        Box::pin(async move {
+            let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+            (v["status_slug"].as_str() != Some("working")).then_some(v)
+        })
+    })
+    .await;
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await
+    .expect("follow-up after cancel");
+    assert_eq!(status, 200, "session survives a cancel: {body}");
+}
+
+/// core 不可达时 cancel 的诚实退化：503，绝不伪造成功。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn cancel_without_core_answers_503() {
+    let sb = Sandbox::new("testsuite_e2e", "cancel-503");
+    let cli = http_client();
+    let mut core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 先建一个会话（idle 即可——503 来自通道不可达，先于 idle 判定）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "{body}");
+    let key = body["key"].as_str().expect("key").to_string();
+
+    // core 下线。
+    core.kill().await.expect("kill core");
+    wait_unreachable_with_cause(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/cancel", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("cancel without core");
+    assert_eq!(status, 503, "unreachable core must answer 503: {body}");
+}
+
 /// The built-in debug router answers `model = "test"` over /v1/messages.
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]

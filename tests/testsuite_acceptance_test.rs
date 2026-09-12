@@ -457,6 +457,99 @@ async fn workbench_aggregate_journey() {
     );
 }
 
+/// 创建对话框旅程（workbench-interaction-polish 6.3，design D2）：对话框
+/// 确认的 wire 面是 0-turn 占位创建（agent 必选 + 可选 mode/model），确认
+/// 即激活（set_focus）；取消不落任何东西；占位的首条消息 spawn 子进程。
+/// UI 交互本身（对话框开合、预选）由 testsuite-webui 浏览器旅程覆盖——
+/// 这条验收面钉的是对话框背后的 wire 契约跨真实进程成立。
+#[tokio::test]
+#[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
+async fn creation_dialog_journey() {
+    let sb = Sandbox::new("acceptance", "creation-dialog");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    support::wait_reachable(&cli, &sb).await;
+
+    // 1) 对话框 agent 数据源就绪（agent 必选的词汇表）。
+    let kinds = cli
+        .get(format!("{}/api/agents", sb.webui_url()))
+        .send()
+        .await
+        .expect("agent kinds")
+        .json::<serde_json::Value>()
+        .await
+        .expect("agent kinds json");
+    assert!(
+        kinds.to_string().contains("claude"),
+        "dialog agent source must include claude: {kinds}"
+    );
+
+    // 2) 确认（mode=allow，模型缺省）→ 0-turn 占位创建且激活。
+    let key = create_session(
+        &cli,
+        &sb,
+        serde_json::json!({ "agent": "claude", "mode": "allow" }),
+    )
+    .await;
+    let detail = cli
+        .get(format!("{}/api/sessions/{key}", sb.webui_url()))
+        .send()
+        .await
+        .expect("placeholder detail")
+        .json::<serde_json::Value>()
+        .await
+        .expect("detail json");
+    assert_eq!(
+        detail["desired_mode"].as_str(),
+        Some("allow"),
+        "dialog mode choice must land on the wire: {detail}"
+    );
+    // 激活：占位即成为焦点会话（composer 就地进入跟随态的数据源）。
+    let summary = cli
+        .get(format!("{}/api/summary", sb.webui_url()))
+        .send()
+        .await
+        .expect("summary")
+        .json::<serde_json::Value>()
+        .await
+        .expect("summary json");
+    assert_eq!(
+        summary["active_session_key"].as_str(),
+        Some(key.as_str()),
+        "confirmed placeholder must be the focused session: {summary}"
+    );
+
+    // 3) 首条消息 spawn 子进程，turn 收敛 Done。
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await
+    .expect("first message");
+    assert_eq!(status, 200, "first message: {resp}");
+    let transcript = wait_turn_done(&cli, &sb, &key).await;
+    assert!(
+        transcript.contains("hello") && transcript.contains("world"),
+        "first message must spawn and answer: {transcript:?}"
+    );
+
+    // 4) agent 词汇门（对话框的 agent 词汇表 = 配置键名/native；旧 backend
+    //    词汇在 wire 上被类型化拒绝——对话框选不出也发不出这些值）。
+    let (status, resp) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "agent": "acp:claude" }),
+    )
+    .await
+    .expect("legacy agent create");
+    assert!(
+        status >= 400 && status < 500,
+        "legacy backend word must be rejected: {status} {resp}"
+    );
+}
+
 /// Router downstream-auth journey: with `auth_token` configured and the
 /// router NOT in debug mode (debug skips downstream auth), the proxy surface
 /// rejects tokenless requests. The authorized-path 200 is covered by every

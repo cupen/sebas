@@ -17,10 +17,10 @@
 import { expect, test } from '@playwright/test'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   getSession,
   listSessions,
-  middleTruncate,
   ProjectRail,
   resetState,
   FocusedSession,
@@ -35,14 +35,6 @@ test.describe('会话管理', () => {
     collector = new ErrorCollector(page)
   })
 
-  /** Short rail label for a session key (mirrors the backend elision). */
-  async function shortId(
-    request: import('@playwright/test').APIRequestContext,
-    key: string,
-  ): Promise<string> {
-    const { detail } = await getSession(request, key)
-    return middleTruncate(detail!.session_id ?? '', 18)
-  }
 
   /** Assert the detail page shows the session with the given original prompt. */
   async function expectDetail(
@@ -67,13 +59,13 @@ test.describe('会话管理', () => {
       const detail = new FocusedSession(page)
 
       await resetState(page.request)
-      const keyA = await createSession(page.request, { prompt: promptA })
-      const keyB = await createSession(page.request, { prompt: promptB })
+      // rail-declutter-unread：Inbox 分组移除 → 会话绑定 scene 项目才会
+      // 出现在 rail；行名即首条 prompt。
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const keyA = await createSession(page.request, { prompt: promptA, projectId })
+      const keyB = await createSession(page.request, { prompt: promptB, projectId })
       await waitStatus(page.request, keyA, ['done'])
       await waitStatus(page.request, keyB, ['done'])
-      const shortA = await shortId(page.request, keyA)
-      const shortB = await shortId(page.request, keyB)
-
       // Cold deep-link to A.
       await page.goto(`/sessions/${keyA}`)
       await expectDetail(page, detail, promptA)
@@ -92,8 +84,8 @@ test.describe('会话管理', () => {
       // switch + focus, no navigation away from the workbench, no reload).
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandInbox()
-      await rail.sessionItem(shortB).click()
+      await rail.expandProject(projectName)
+      await rail.sessionItem(promptB).click()
       await expectDetail(page, detail, promptB)
       expect(page.url()).not.toContain('/sessions/')
 
@@ -132,17 +124,18 @@ test.describe('会话管理', () => {
       await resetState(page.request)
 
       const tag = `restore ${Date.now()}`
-      const key = await createSession(page.request, { prompt: tag })
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const key = await createSession(page.request, { prompt: tag, projectId })
       await waitStatus(page.request, key, ['done'])
       const bodyBefore = (await getSession(page.request, key)).detail!.entries.length
 
-      // Archive via the rail; row leaves the active rail.
+      // Archive via the rail's … menu; row leaves the active rail
+      // (rail-declutter-unread 3.2：归档动作收进菜单；行名 = 首 prompt)。
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandInbox()
-      const short = await shortId(page.request, key)
-      await rail.archiveSession(short)
-      await expect(rail.sessionItem(short)).toHaveCount(0, { timeout: 10_000 })
+      await rail.expandProject(projectName)
+      await rail.archiveSession(tag)
+      await expect(rail.sessionItem(tag)).toHaveCount(0, { timeout: 10_000 })
 
       // History group holds the entry; active list hides it.
       await rail.expandHistory()

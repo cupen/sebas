@@ -17,10 +17,10 @@
 import { expect, test } from '@playwright/test'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   FocusedSession,
   getSession,
-  middleTruncate,
   ProjectRail,
   resetState,
   ReviewCards,
@@ -133,14 +133,16 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       const workbench = new Workbench(page)
 
       await resetState(page.request)
-      const key = await createSession(page.request, { prompt: `inplace-${t}` })
+      // rail-declutter-unread：Inbox 分组移除 → 会话绑定 scene 项目才会
+      // 出现在 rail；行名即首条 prompt。
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const key = await createSession(page.request, { prompt: `inplace-${t}`, projectId })
       await waitStatus(page.request, key, ['done'])
 
       await page.goto('/')
       await expect(workbench.composer).toBeVisible()
-      await rail.expandInbox()
-      const short = await shortId(page.request, key)
-      await rail.sessionItem(short).click()
+      await rail.expandProject(projectName)
+      await rail.sessionItem(`inplace-${t}`).click()
 
       // The conversation renders IN PLACE: same workbench surface, no
       // navigation to any other view.
@@ -153,22 +155,28 @@ test.describe('对话视图（workbench-conversation-view）', () => {
   })
 
   test.describe('模型两级选择', () => {
-    test('creation mode offers provider → model from the Settings catalog; empty catalog is stated honestly', async ({
+    test('the creation dialog offers provider → model from the Settings catalog; empty catalog is stated honestly', async ({
       page,
     }) => {
-      const workbench = new Workbench(page)
+      const rail = new ProjectRail(page)
 
       await resetState(page.request)
+      const { name: projectName } = await ensureSceneProject(page.request)
 
-      // Empty catalog first: the selector states unavailability honestly
+      // Empty catalog first: the dialog states unavailability honestly
       // instead of rendering an empty or fabricated list (4.4).
       await page.goto('/')
-      await expect(workbench.composer).toBeVisible()
-      await expect(workbench.catalogUnavailable()).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.providerSelect()).toHaveCount(0)
+      await rail.openNewSessionDialog(projectName)
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-catalog-unavailable"]'),
+      ).toBeVisible({ timeout: 15_000 })
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
+      ).toHaveCount(0)
+      await rail.cancelNewSessionDialog()
 
       // Configure a catalog (the same write path the Settings Models editor
-      // uses) — the composer must reflect it without any session existing.
+      // uses) — the dialog must reflect it without any session existing.
       // Re-run safety: drop a leftover from an earlier journey first.
       await page.request.delete('/router/api/providers/catalog-provider')
       const created = await page.request.post('/router/api/providers', {
@@ -183,18 +191,26 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       })
       expect(created.ok()).toBe(true)
 
-      await page.reload()
-      await expect(workbench.composer).toBeVisible()
+      // Reopen the dialog (sebas:refetch re-runs the shared catalog load).
+      await rail.openNewSessionDialog(projectName)
       // Two levels: provider first…
-      await expect(workbench.providerSelect()).toBeVisible({ timeout: 15_000 })
-      await expect(workbench.providerSelect()).toContainText('catalog-provider')
+      const providerSelect = rail
+        .newSessionDialog()
+        .locator('[data-testid="dialog-provider-select"]')
+      await expect(providerSelect).toBeVisible({ timeout: 15_000 })
+      await expect(providerSelect).toContainText('catalog-provider')
       // …then the model of the chosen provider.
-      await expect(workbench.catalogModelSelect()).toBeVisible()
-      await expect(workbench.catalogModelSelect()).toContainText('cat-small')
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+      ).toBeVisible()
+      await expect(
+        rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+      ).toContainText('cat-small')
 
       // Clean up: the provider lives in the SHARED core store — leaving it
       // behind would flip later journeys' honest "no provider configured"
       // first-paint assertions.
+      await rail.cancelNewSessionDialog()
       const removed = await page.request.delete('/router/api/providers/catalog-provider')
       expect(removed.ok()).toBe(true)
 
@@ -204,10 +220,3 @@ test.describe('对话视图（workbench-conversation-view）', () => {
 })
 
 /** Short rail label for a session key (mirrors the backend elision). */
-async function shortId(
-  request: import('@playwright/test').APIRequestContext,
-  key: string,
-): Promise<string> {
-  const { detail } = await getSession(request, key)
-  return middleTruncate(detail!.session_id ?? '', 18)
-}

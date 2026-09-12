@@ -47,7 +47,9 @@ describe('accessibility baseline', () => {
     const hereDir = dirname(fileURLToPath(import.meta.url))
     const src = readFileSync(join(hereDir, '../views/sessions.ts'), 'utf8')
     // Close is an icon-ish destructive control in row context: the template
-    // must give it an accessible name derived from the row key.
-    expect(src).toContain('aria-label=${`Close session ${row.chat_id}`}')
+    // must give it an accessible name derived from the row label（
+    // workbench-interaction-polish：占位行的名字归 fullSessionLabel 的键尾
+    // 段兜底，chat_id 不在 /api/sessions 行词表里）.
+    expect(src).toContain('aria-label=${`Close session ${fullSessionLabel(row)}`}')
   })
 })

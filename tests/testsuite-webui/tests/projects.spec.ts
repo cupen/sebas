@@ -18,14 +18,18 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
   addProject,
   addProjectRaw,
+  createSession,
+  ensureSceneProject,
   ErrorCollector,
   getBranch,
   listProjects,
   ProjectRail,
   removeProject,
+  removeProjectRaw,
   reorderProjects,
   resetState,
   sceneDir,
+  waitStatus,
 } from './helpers/index'
 
 // workbench-agent-wire-fix 2.5: the wire identifies projects by stable id;
@@ -52,6 +56,11 @@ test.describe('项目管理覆盖', () => {
       const scene = sceneDir()
       // path.join 产出反斜杠路径，basename 必须按两种分隔符切开。
       const projectName = scene.split(/[\\/]/).filter(Boolean).pop()!
+
+      // Order-independence guard (rail-declutter-unread cascade fix): a
+      // preceding journey may have left the scene project registered — the
+      // dialog add would then 409 and the header would stay unselected.
+      await resetState(page.request)
 
       await page.goto('/')
       await expect(rail.host).toBeVisible()
@@ -89,6 +98,50 @@ test.describe('项目管理覆盖', () => {
       await page.reload()
       await expect(rail.projectRow(projectName)).toHaveCount(0)
 
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('… menu removal: blocked while live sessions exist, precheck and typed rejection agree', async ({
+      page,
+    }) => {
+      test.setTimeout(60_000)
+      const rail = new ProjectRail(page)
+      const scene = sceneDir()
+      const projectName = scene.split(/[\\/]/).filter(Boolean).pop()!
+
+      await resetState(page.request)
+      const { id: projectId } = await ensureSceneProject(page.request)
+      // 造一个绑定该项目的非归档会话（done 也在册——归档才算离开）。
+      const tag = `remove-guard-${Date.now()}`
+      const key = await createSession(page.request, { prompt: tag, projectId })
+      await waitStatus(page.request, key, ['done'])
+
+      await page.goto('/')
+      await expect(rail.host).toBeVisible()
+      await rail.expandProject(projectName)
+      // … 菜单 → 移除 → 弹窗就地说明「先归档/关闭（N 个会话）」。
+      const row = rail.projectRow(projectName)
+      await row.hover()
+      await row.locator('button[title="Project actions"]').click()
+      const removeItem = row.locator('wa-dropdown-item[value="remove"]')
+      await expect(removeItem).toBeVisible()
+      await removeItem.click()
+      const dialog = page.locator('wa-dialog', { hasText: '移除项目' })
+      const blocked = dialog.locator('[data-testid="remove-blocked"]')
+      await expect(blocked).toBeVisible({ timeout: 10_000 })
+      await expect(blocked).toContainText('1')
+
+      // 后端是强制层：绕过 UI 直接移除 → 409 typed rejection（带会话数）。
+      const raw = await removeProjectRaw(page.request, projectId)
+      expect(raw.status).toBe(409)
+      const rejection = JSON.parse(raw.body) as { code: string; session_count: number }
+      expect(rejection.code).toBe('project_has_live_sessions')
+      expect(rejection.session_count).toBe(1)
+      await expect(rail.projectRow(projectName)).toBeVisible()
+
+      // Cleanup: close the session so resetState's project removal passes.
+      await page.request.post(`/api/sessions/${key}/close`)
+      await resetState(page.request)
       expect(collector.clean()).toEqual([])
     })
   })
@@ -139,7 +192,7 @@ test.describe('项目管理覆盖', () => {
   })
 
   test.describe('排序与持久化', () => {
-    test('1.2 reorder persists; git branch shows, plain dir shows none', async ({
+    test('1.2 reorder persists; branch probe drives state, rail hides the branch name (D8)', async ({
       page,
     }) => {
       test.setTimeout(60_000)
@@ -172,8 +225,13 @@ test.describe('项目管理覆盖', () => {
       for (const d of [...dirs, gitDir, plainDir]) await addProject(page.request, d)
 
       // Rail order helper (project rows only).
+      // `.name` also carries the node chip (8.5) — read the project-name
+      // span only.
       const railNames = () =>
-        rail.host.locator('.row .name').allTextContents().then((ts) => ts.map((s) => s.trim()))
+        rail.host
+          .locator('.row .name > span:first-child')
+          .allTextContents()
+          .then((ts) => ts.map((s) => s.trim()))
 
       await page.goto('/')
       await expect(rail.host).toBeVisible()
@@ -215,23 +273,28 @@ test.describe('项目管理覆盖', () => {
       const plain = await getBranch(page.request, await projectIdOf(page.request, plainDir))
       expect(plain.branch).toBeNull()
 
-      // Rail rendering: git row carries the branch label, plain row has none.
+      // Rail rendering (rail-declutter-unread D8): the branch NAME is no
+      // longer shown in the project row — but the probe still runs (the API
+      // truth above) and the accessibility marking stays driven by it.
       const gitRow = rail.projectRow(gitName)
-      await expect(gitRow.locator('.meta .branch')).toContainText(gitBranch, {
-        timeout: 10_000,
-      })
+      await expect(rail.projectRow(gitName).locator('.meta .branch')).toHaveCount(0)
       await expect(
         rail.projectRow(plainName).locator('.meta .branch'),
       ).toHaveCount(0)
 
-      // New branch surfaces after reload (defeats the 30s branch TTL cache).
+      // New branch still surfaces via the API after reload (defeats the 30s
+      // branch TTL cache) — the probe chain survives, only the label is gone.
       const gitBranch2 = `feat-d3b-${t}`
       execSync(`git checkout -b ${gitBranch2}`, { cwd: gitDir })
       await page.reload()
       await expect(rail.host).toBeVisible()
-      await expect(gitRow.locator('.meta .branch')).toContainText(gitBranch2, {
-        timeout: 10_000,
-      })
+      await expect
+        .poll(
+          async () => (await getBranch(page.request, await projectIdOf(page.request, gitDir))).branch,
+          { timeout: 10_000, intervals: [200] },
+        )
+        .toContain(gitBranch2)
+      await expect(gitRow.locator('.meta .branch')).toHaveCount(0)
 
       // Cleanup: unregister everything this journey created.
       await resetState(page.request)
@@ -338,10 +401,10 @@ test.describe('项目管理覆盖', () => {
       await pathInput.pressSequentially(missing)
       await expect(submit).not.toHaveAttribute('disabled', '')
       await submit.click()
-      // The rejection renders in the div right after the path field (the
-      // dialog's only inline-error slot — a bare `div` matcher would also hit
-      // its ancestors, so scope structurally).
-      const inlineError = dialog.locator('wa-input[label="Project path"] + div')
+      // The rejection renders in the dialog's inline-error slot (scoped by
+      // testid — structural `+` selectors broke when the node select landed
+      // between the path field and the error div).
+      const inlineError = dialog.locator('[data-testid="add-project-error"]')
       await expect(inlineError).toContainText('不存在', { timeout: 10_000 })
       // The dialog is still open (heading visible) and the registry untouched.
       await expect(

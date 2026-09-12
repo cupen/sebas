@@ -213,6 +213,73 @@ async fn turns_are_incremental_by_position() {
     assert!(router.session_turns(&key("zzz"), 0).await.is_none());
 }
 
+/// rail-declutter-unread 1.1：`SessionInfo.msg_count` 按可见回复段口径投影
+/// ——相邻 markdown delta 合并成段；thinking/tool/prompt 不计数；被打断后
+/// 的正文另起一段。徽标口径（段）与 seam 口径（轮）在此分别钉住。
+#[tokio::test]
+async fn session_info_projects_visible_reply_segment_count() {
+    use sebas_acp::claude::session::AcpEvent;
+    let map = SessionMap::new();
+    let (router, _rx) = DispatchHandle::new(map);
+    let k = key("cnt");
+    router
+        .map
+        .insert(k.clone(), Mapping::active("s-cnt"))
+        .await
+        .unwrap();
+
+    let count_of = || async {
+        router
+            .session_info_for(&k)
+            .await
+            .expect("mapping exists")
+            .msg_count
+    };
+
+    // 尚无内容：0。
+    assert_eq!(count_of().await, 0);
+
+    // 一段流式回复：3 个 delta = 1 段。
+    let delta = |d: &str| AcpEvent::TextDelta {
+        session_id: "s-cnt".into(),
+        delta: d.into(),
+    };
+    router.seed_card("s-cnt".into(), "do it".into()).await;
+    router.apply_event("s-cnt", &delta("one ")).await;
+    router.apply_event("s-cnt", &delta("two ")).await;
+    router.apply_event("s-cnt", &delta("three.")).await;
+    assert_eq!(count_of().await, 1, "adjacent deltas merge into one segment");
+
+    // 工具噪声不计数。
+    router
+        .apply_event(
+            "s-cnt",
+            &AcpEvent::ToolStart {
+                session_id: "s-cnt".into(),
+                tool_name: "read_file".into(),
+                args: serde_json::json!({ "path": "/tmp/x" }),
+            },
+        )
+        .await;
+    assert_eq!(count_of().await, 1, "tool calls must not increment");
+
+    // thinking 不计数。
+    router
+        .apply_event(
+            "s-cnt",
+            &AcpEvent::ThinkingDelta {
+                session_id: "s-cnt".into(),
+                delta: "hmm".into(),
+            },
+        )
+        .await;
+    assert_eq!(count_of().await, 1, "thinking must not increment");
+
+    // 工具/thinking 打断后的正文另起一段。
+    router.apply_event("s-cnt", &delta("and done.")).await;
+    assert_eq!(count_of().await, 2, "a broken run opens a new segment");
+}
+
 /// workbench-conversation-view 1.3（design D2）：ToolStart/ToolEnd 两条 push
 /// 点写 `element_type = "tool"`（kind 仍是 agent 侧 content），turn-content
 /// 检索结果里工具与正文可区分——不再靠内容前缀当契约。

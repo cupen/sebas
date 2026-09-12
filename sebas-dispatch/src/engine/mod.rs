@@ -12,7 +12,7 @@ mod inbound;
 mod maps;
 pub mod provider_card;
 
-pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry};
+pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, count_chat_messages};
 pub use maps::{
     MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
 };
@@ -34,6 +34,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast, mpsc};
+
+/// （workbench-interaction-polish 1.1）`web_cancel_session` 的三态结果。
+/// 调用方据此把「空闲」「未知」转成 typed rejection——取消不再对无事可做
+/// 的请求伪造成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// 在飞 turn 已收到中断指令（驱动层 interrupt，子进程与会话存活）。
+    Dispatched,
+    /// 会话存在但没有在飞 turn（card FSM 不在 WORKING）——无事可取消。
+    Idle,
+    /// 未知会话（无映射或 0-turn 占位尚无 session_id）。
+    Unknown,
+}
 
 #[derive(Debug)]
 pub enum Out {
@@ -458,6 +471,19 @@ impl DispatchHandle {
             },
             None => (None, None, None),
         };
+        // rail-declutter-unread D1：可见回复段计数由 transcript 投影（口径见
+        // [`count_chat_messages`]）。transcript 只追加、随映射删除（Dormant/
+        // Spawning 无可寻址 transcript → 0），单调性由 transcript 保证，无需
+        // 第二份计数状态；随 `session.updated` 广播 + rail 10s 轮询兜底。
+        let msg_count = match m.transcript_id() {
+            Some(tid) => {
+                let g = self.turn_log.read().await;
+                g.get(tid)
+                    .map(|log| count_chat_messages(log))
+                    .unwrap_or(0)
+            }
+            None => 0,
+        };
         Some(SessionInfo {
             channel: key.channel_str().to_string(),
             key: key.reference.clone(),
@@ -485,6 +511,8 @@ impl DispatchHandle {
             // （add-remote-execution-node 8.x）router 只跟踪主控本机会话；远端
             // 投影由 core 侧节点链路投影合并进来，这里不臆造节点维度。
             remote: None,
+            // rail-declutter-unread D1：可见回复段数随快照/事件下发。
+            msg_count,
         })
     }
 
@@ -1222,25 +1250,34 @@ impl DispatchHandle {
     /// text is parsed like the Feishu path (B 档冒烟 2026-09-04：webui 直达
     /// 路径此前把 `/cancel` 当普通 prompt 发给 opencode，中断无效）。
     /// （extract-im-service 2.2）取消该 key 会话的在飞 turn（`/cancel` 的
-    /// 通道面）：找到映射则发 `AcpCommand::Cancel` 并返回 true；未知 key
-    /// 返回 false（调用方转 typed rejection）。会话本身保留、可继续对话。
-    pub async fn web_cancel_session(&self, key: &ChannelKey) -> bool {
+    /// 通道面）。workbench-interaction-polish 1.1：返回从 bool 细化为三态
+    /// ——在飞 turn 已派发中断（Dispatched）、会话无在飞 turn（Idle）、
+    /// 未知会话（Unknown）。空闲/未知由调用方转 typed rejection，不再把
+    /// 「无事可取消」伪装成成功。判定与回合队列的 in-flight 定义同源
+    /// （card FSM 的 WORKING 态，`submit_turn` 同款），会话保留、可继续对话。
+    pub async fn web_cancel_session(&self, key: &ChannelKey) -> CancelOutcome {
+        use crate::card_state::phase::WORKING;
         let sid = self
             .map
             .get(key)
             .await
             .and_then(|m| m.session_id().map(str::to_owned));
-        match sid {
-            Some(sid) => {
-                self.emit(Out::SendAcp {
-                    session_id: sid.clone(),
-                    cmd: AcpCommand::Cancel { session_id: sid },
-                })
-                .await;
-                true
-            }
-            None => false,
+        let Some(sid) = sid else {
+            return CancelOutcome::Unknown;
+        };
+        let working = matches!(
+            self.card_states.status_emoji(&sid).await.as_deref(),
+            Some(WORKING)
+        );
+        if !working {
+            return CancelOutcome::Idle;
         }
+        self.emit(Out::SendAcp {
+            session_id: sid.clone(),
+            cmd: AcpCommand::Cancel { session_id: sid },
+        })
+        .await;
+        CancelOutcome::Dispatched
     }
 
     /// Send a message to an existing session from the WebUI. Returns

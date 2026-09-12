@@ -77,7 +77,12 @@ export interface NodesResponse {
 
 export interface SessionRow {
   encoded_key: string
-  chat_id: string
+  /**
+   * ⚠ /api/sessions 行**不带** `chat_id`（它在 summary 的 active_session
+   * 与 detail 的词表里）；0-turn 占位行连 prompt_preview /
+   * session_id_short 都为 null——展示名走 fullSessionLabel 的键尾段兜底。
+   */
+  chat_id?: string
   thread_id: string | null
   session_id: string | null
   session_id_short: string | null
@@ -92,6 +97,11 @@ export interface SessionRow {
   project_id: string | null
   /** Short preview of the first user message, used as display label. */
   prompt_preview: string | null
+  /**
+   * rail-declutter-unread：服务端累计的可见回复段数。rail 未读徽标 =
+   * `msg_count − 共享读锚（unread-cursor 模块）`，聚焦会话即清零。
+   */
+  msg_count: number
   /** 当前生效的模型 id（ACP agent 的 configOptions）；null = 无模型选择面。 */
   current_model: string | null
   /** 该会话可选的模型 id 列表；fallback 给创建会话表单当下拉数据源。 */
@@ -261,6 +271,11 @@ export interface SessionDetail {
   msg_id: string | null
   last_active: string
   encoded_key: string
+  /**
+   * rail-declutter-unread：服务端累计的可见回复段数。transcript 标记已读时
+   * 以它推进共享读锚的 `anchor_count`，rail 徽标与 seam 保持一致。
+   */
+  msg_count: number
   /** 当前生效的模型 id（add-acp-model-selection）；null = agent 无模型选项。 */
   current_model: string | null
   /** 可选模型列表（agent 的 configOptions），会话详情模型选择器的数据源。 */
@@ -680,6 +695,13 @@ export const api = {
     }),
   sendMessage: (encodedKey: string, message: string) =>
     post<{ status: string }>(`/api/sessions/${encodedKey}/message`, { message }),
+  /**
+   * （workbench-interaction-polish 1.3/D5）中断会话在飞 turn：停止按钮走
+   * 这里。类型化拒绝——未知 key 404、空闲会话 409（会话在但没有在飞
+   * turn）、core 不可达 503；调用方经 callout 如实呈现。
+   */
+  cancelSession: (encodedKey: string) =>
+    post<{ status: string }>(`/api/sessions/${encodedKey}/cancel`),
   /**
    * （workbench-turn-queue 6.2/D8）移除一个未开始的待生效提交；成功返回
    * 操作后的全量 pending（调用方据此对账，design D8）。拒绝类型化：未知

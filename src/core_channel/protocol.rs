@@ -538,6 +538,7 @@ mod tests {
             remote: None,
             desired_mode: None,
             effective_mode: None,
+            msg_count: 0,
         };
         let frames = vec![
             SessionStreamFrame::Snapshot {

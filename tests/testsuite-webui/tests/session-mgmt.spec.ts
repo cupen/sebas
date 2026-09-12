@@ -5,9 +5,9 @@
  * 功能：会话管理覆盖 / 子功能：close 与 archive、深链与退役路径、模型面诚实缺省
  *
  * close: the confirmation dialog is real — closing removes the row from
- * the active list. archive: the rail's Inbox group hides the session and
- * the History group shows the archived entry; the sessions list no longer
- * lists it. Deep links: a /sessions/:key URL loaded cold (SPA fallback)
+ * the active list. archive: the session leaves the rail (via its … menu;
+ * rail-declutter-unread 收敛了行操作并移除了 Inbox 分组) and the History
+ * group shows the archived entry; the sessions list no longer lists it. Deep links: a /sessions/:key URL loaded cold (SPA fallback)
  * renders the session. Retired path: /settings canonically redirects to /.
  * Model honest absence: a fake-claude session exposes NO model selector
  * anywhere, and an API-level switch attempt leaves the model absent.
@@ -15,9 +15,9 @@
 import { expect, test } from '@playwright/test'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   getSession,
-  middleTruncate,
   ProjectRail,
   resetState,
   FocusedSession,
@@ -65,19 +65,19 @@ test.describe('会话管理', () => {
       // archive stores session_key with a raw NUL byte and labels by prompt;
       // earlier "archive me" runs leave many same-label entries behind).
       const tag = `archive ${Date.now()}`
-      const key = await createSession(page.request, { prompt: tag })
+      // rail-declutter-unread：会话行以首条 prompt 命名，且只有绑定项目的
+      // 会话才出现在 rail（Inbox 分组移除）——归档动作走行的 … 菜单。
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const key = await createSession(page.request, { prompt: tag, projectId })
       await waitStatus(page.request, key, ['done'])
 
       await page.goto('/')
       await expect(rail.host).toBeVisible()
-      await rail.expandInbox()
-      // The rail labels the active row by `session_id_short` (no chat_id).
-      const { detail } = await getSession(page.request, key)
-      const shortId = middleTruncate(detail!.session_id ?? '', 18)
-      await rail.archiveSession(shortId)
+      await rail.expandProject(projectName)
+      await rail.archiveSession(tag)
 
       // The row leaves the active rail...
-      await expect(rail.sessionItem(shortId)).toHaveCount(0, { timeout: 10_000 })
+      await expect(rail.sessionItem(tag)).toHaveCount(0, { timeout: 10_000 })
       // ...and the History group holds the archived entry (label = prompt).
       await rail.expandHistory()
       await expect(
@@ -87,6 +87,52 @@ test.describe('会话管理', () => {
       // Active list no longer shows it.
       await page.goto('/sessions')
       await expect(sessions.cardFor(key)).toHaveCount(0, { timeout: 10_000 })
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('History lists newly archived sessions newest-first (rail-declutter-unread D7)', async ({
+      page,
+    }) => {
+      test.setTimeout(60_000)
+      const rail = new ProjectRail(page)
+
+      await resetState(page.request)
+      const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+      const t = Date.now()
+      const oldTag = `hist-old-${t}`
+      const newTag = `hist-new-${t}`
+      // Two completed turns → two archive candidates with distinct labels.
+      const keyOld = await createSession(page.request, { prompt: oldTag, projectId })
+      await waitStatus(page.request, keyOld, ['done'])
+      const keyNew = await createSession(page.request, { prompt: newTag, projectId })
+      await waitStatus(page.request, keyNew, ['done'])
+
+      await page.goto('/')
+      await expect(rail.host).toBeVisible()
+      await rail.expandProject(projectName)
+
+      // archived_at is unix SECONDS: the two archives must land in different
+      // seconds or the descending sort keeps insertion order and the newest-
+      // first assertion is unjudgeable.
+      await rail.archiveSession(oldTag)
+      await expect(rail.sessionItem(oldTag)).toHaveCount(0, { timeout: 10_000 })
+      await page.waitForTimeout(1200)
+      await rail.archiveSession(newTag)
+      await expect(rail.sessionItem(newTag)).toHaveCount(0, { timeout: 10_000 })
+
+      // History renders newest-first: the later-archived row sits ABOVE the
+      // earlier one (leftover archives from other journeys may exist between
+      // them — only the relative order of our own two rows is pinned).
+      await rail.expandHistory()
+      const labels = await rail.host
+        .locator('li.session-item.archived .session-name')
+        .allTextContents()
+      const oldIdx = labels.findIndex((l) => l.includes(oldTag))
+      const newIdx = labels.findIndex((l) => l.includes(newTag))
+      expect(oldIdx, `archived rows: ${JSON.stringify(labels)}`).toBeGreaterThanOrEqual(0)
+      expect(newIdx, `archived rows: ${JSON.stringify(labels)}`).toBeGreaterThanOrEqual(0)
+      expect(newIdx, `archived rows: ${JSON.stringify(labels)}`).toBeLessThan(oldIdx)
 
       expect(collector.clean()).toEqual([])
     })

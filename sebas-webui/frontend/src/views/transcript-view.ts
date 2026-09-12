@@ -38,6 +38,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import type { ConversationEntryView } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
+import { readAnchor, writeSeen as writeCursor } from './unread-cursor.js'
 
 /** Bottom-scroll threshold for "mark-as-seen" detection. */
 const NEAR_BOTTOM_PX = 80
@@ -265,12 +266,19 @@ function isoTime(unixSecs: number): string {
   return new Date(unixSecs * 1000).toISOString()
 }
 
-@customElement('sebas-transcript-view')
+  @customElement('sebas-transcript-view')
 export class SebasTranscriptView extends LitElement {
   /** The conversation entries from the session payload (`entries`). */
   @property({ attribute: false }) entries: ConversationEntryView[] = []
   /** Encoded session key; namespaces the seen-boundary in localStorage. */
   @property() sessionKey = ''
+  /**
+   * rail-declutter-unread D3：会话当前的服务端可见回复段数（detail/summary
+   * payload 的 `msg_count`）。标记已读时以它推进共享游标的 `anchor_count`，
+   * 让 rail 徽标与 seam 同步清零；`null`（旧 payload / 测试）= 只推进
+   * seen 时间戳、不动段数锚。
+   */
+  @property({ attribute: false }) msgCount: number | null = null
   /**
    * When true (default), auto-scroll on new entries. Flipped to false
    * internally when the reader scrolls up past the seam so we don't
@@ -637,27 +645,17 @@ export class SebasTranscriptView extends LitElement {
 
   // ---- localStorage helpers --------------------------------------------
 
-  private static storageKey(sessionKey: string): string {
-    return `sebas:seen:${sessionKey}`
-  }
+  // rail-declutter-unread 2.2：seen 存储迁移到共享游标模块 unread-cursor
+  // （与 rail 徽标同一锚，`sebas:seen:<key>` 键与旧实现相同，旧数据原地
+  // 迁移）。seam 的读写语义不变：无锚读 0，写入取单调 max。
 
   private readSeen(): number {
-    try {
-      const raw = localStorage.getItem(SebasTranscriptView.storageKey(this.sessionKey))
-      if (raw === null) return 0
-      const n = Number(raw)
-      return Number.isFinite(n) ? n : 0
-    } catch {
-      return 0
-    }
+    return readAnchor(this.sessionKey)?.seenTs ?? 0
   }
 
   private writeSeen(value: number): void {
-    try {
-      localStorage.setItem(SebasTranscriptView.storageKey(this.sessionKey), String(value))
-    } catch {
-      /* storage may be disabled; degrade silently */
-    }
+    // 段数锚只在 payload 带来 msg_count 时推进（单调 max 由游标模块保证）。
+    writeCursor(this.sessionKey, value, this.msgCount ?? undefined)
   }
 
   // ---- seam logic -------------------------------------------------------

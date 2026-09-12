@@ -12,6 +12,7 @@
 import { expect, test } from '@playwright/test'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   ProjectRail,
   resetState,
@@ -33,7 +34,9 @@ test.describe('待执行堆叠区', () => {
     await resetState(page.request)
 
     // 首会话：流式场景让 turn 在飞一段时间。
-    const key = await createSession(page.request, { prompt: 'stream' })
+    // rail-declutter-unread：会话要出现在 rail（供 … 菜单关闭），须绑定项目。
+    const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
+    const key = await createSession(page.request, { prompt: 'stream', projectId })
     await page.goto('/')
 
     // turn 已开轮：转录出现流式 chunk（WORKING 窗口内）。
@@ -66,11 +69,8 @@ test.describe('待执行堆叠区', () => {
 
     // Rail 关闭该会话：确认对话框点名「将丢弃 1 条」，确认后出现一次性
     // 「未执行」提示，逐条点名被丢弃的提交（7.3）。
-    await rail.expandInbox()
-    await rail.host
-      .locator('li.session-item button[aria-label^="Close"]')
-      .first()
-      .click()
+    await rail.expandProject(projectName)
+    await rail.closeSession('stream')
     // wa-dialog host 在 top layer 读作 hidden——断言渲染出的内部元素
     // （与 settings.spec 的既有纪律一致）。
     const dialog = page.locator('wa-dialog', { hasText: '关闭会话' })

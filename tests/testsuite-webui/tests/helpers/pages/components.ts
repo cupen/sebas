@@ -6,7 +6,7 @@
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 
-/** Sidebar project tree: projects, per-project sessions, Inbox/History groups. */
+/** Sidebar project tree: projects, per-project sessions, Waiting/History groups (rail-declutter-unread: Inbox 分组已移除，行操作收敛为 … 菜单). */
 export class ProjectRail {
   readonly page: Page
   readonly host: Locator
@@ -28,10 +28,6 @@ export class ProjectRail {
     await this.projectRow(name).click()
   }
 
-  /** Expand the Inbox group (hidden when there are no inbox sessions). */
-  async expandInbox(): Promise<void> {
-    await this.host.locator('.group-head', { hasText: 'Inbox' }).click()
-  }
 
   /** Expand the History group (archived sessions; hidden when empty). */
   async expandHistory(): Promise<void> {
@@ -47,31 +43,47 @@ export class ProjectRail {
   }
 
   /**
-   * Archive a session row (by its `.session-name` text — the displayed
-   * `session_id_short`). The button is opacity-0 until hovered, so hover
-   * first (Playwright treats opacity-0 as hidden).
+   * Open a session row's overflow (…) menu (rail-declutter-unread 3.2).
+   * The trigger is hover-revealed, so hover first (Playwright treats
+   * opacity-0 as hidden), then click it and wait for the items.
    */
-  async archiveSession(sessionIdShort: string): Promise<void> {
+  async openSessionMenu(rowLabel: string): Promise<Locator> {
     const row = this.host
-      .locator('li.session-item:not(.archived)', { hasText: sessionIdShort })
+      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
     await row.hover()
-    // workbench-agent-wire-fix 5.2：行内现在有 archive + close 两颗按钮，
-    // 以 title 精确锚定（共用 .session-archive-btn 外观类）。
-    await row.locator('button[title="Archive this session"]').click()
+    await row.locator('wa-dropdown button[title="Session actions"]').click()
+    const menu = row.locator('wa-dropdown-item[value="archive"]')
+    await expect(menu).toBeVisible()
+    return menu
   }
 
   /**
-   * Close (delete) a session row by its displayed id (workbench-agent-wire-fix
-   * 5.2). Inactive sessions close immediately; active ones raise the inline
+   * Archive a session row (by its displayed label — since
+   * rail-declutter-unread the first prompt's preview). Goes through the
+   * row's … menu.
+   */
+  async archiveSession(rowLabel: string): Promise<void> {
+    await this.openSessionMenu(rowLabel)
+    await this.host
+      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
+      .first()
+      .locator('wa-dropdown-item[value="archive"]')
+      .click()
+  }
+
+  /**
+   * Close (delete) a session row by its displayed label, via the row's …
+   * menu. Inactive sessions close immediately; active ones raise the inline
    * confirm dialog — callers that need the dialog handle it themselves.
    */
-  async closeSession(sessionIdShort: string): Promise<void> {
-    const row = this.host
-      .locator('li.session-item:not(.archived)', { hasText: sessionIdShort })
+  async closeSession(rowLabel: string): Promise<void> {
+    await this.openSessionMenu(rowLabel)
+    await this.host
+      .locator('li.session-item:not(.archived)', { hasText: rowLabel })
       .first()
-    await row.hover()
-    await row.locator('button[title="Close (delete) this session"]').click()
+      .locator('wa-dropdown-item[value="close"]')
+      .click()
   }
 
   /**
@@ -90,6 +102,55 @@ export class ProjectRail {
     await expect(
       this.addDialog().locator('h2, [role="heading"]', { hasText: 'Add project' }).first(),
     ).toBeVisible()
+  }
+
+  /**
+   * The creation dialog（workbench-interaction-polish D2：项目行「+」打开，
+   * agent 必选 + 两级模型 + mode）——hosted by the rail; Web Awesome renders
+   * it in the top layer when open.
+   */
+  newSessionDialog(): Locator {
+    return this.page.locator('sebas-new-session-dialog [data-testid="new-session-dialog"]')
+  }
+
+  /** The `+` trigger on a project row (hover-revealed like the … menu). */
+  async openNewSessionDialog(projectName: string): Promise<void> {
+    const row = this.projectRow(projectName)
+    await row.hover()
+    await row.locator('button[aria-label^="New session"]').click()
+    await expect(
+      this.newSessionDialog().locator('h2, [role="heading"]').first(),
+    ).toBeVisible()
+  }
+
+  /** Pick an agent in the dialog (wa-select value + standard change event). */
+  async pickDialogAgent(agent: string): Promise<void> {
+    await this.newSessionDialog()
+      .locator('[data-testid="dialog-agent-select"]')
+      .evaluate((el, v) => {
+        ;(el as unknown as { value: string }).value = v as string
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }, agent)
+  }
+
+  /** Pick a permission mode ('' = agent default = omit the field). */
+  async pickDialogMode(mode: string): Promise<void> {
+    await this.newSessionDialog()
+      .locator('[data-testid="dialog-mode-select"]')
+      .evaluate((el, v) => {
+        ;(el as unknown as { value: string }).value = v as string
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }, mode)
+  }
+
+  /** Confirm the creation dialog. */
+  async confirmNewSessionDialog(): Promise<void> {
+    await this.newSessionDialog().locator('[data-testid="dialog-confirm"]').click()
+  }
+
+  /** Cancel the creation dialog (nothing is created). */
+  async cancelNewSessionDialog(): Promise<void> {
+    await this.newSessionDialog().locator('[data-testid="dialog-cancel"]').click()
   }
 
   /**
@@ -221,14 +282,23 @@ export class SettingsModal {
     this.closeButton = page.locator('sebas-settings-modal button.close[aria-label="Close settings"]')
   }
 
-  async openViaComposer(): Promise<void> {
-    await this.page.locator('sebas-workbench-composer .settings-link').click()
+  async openViaSidebar(): Promise<void> {
+    // workbench-interaction-polish 4.1：composer 不再有 settings 入口——
+    // Settings 归 app shell 侧栏底部（pinned footer）。
+    await this.page
+      .locator('sebas-app .sidebar-footer button[aria-label="Open settings"]')
+      .click()
     await expect(this.panel).toBeVisible()
   }
 
-  /** Switch to a settings section by its nav label; waits for load to settle. */
+  /**
+   * Switch to a settings section by its nav label; waits for load to settle.
+   * revamp-settings-nav-and-models-editor: sections are Generic → Appearance
+   * → Services → Models → About (the former Settings overview and Env sections
+   * are gone — Generic and About absorbed them).
+   */
   async openSection(
-    label: 'Settings' | 'Models' | 'Services' | 'Appearance' | 'Env' | 'About',
+    label: 'Generic' | 'Models' | 'Services' | 'Appearance' | 'About',
   ): Promise<void> {
     await this.panel.locator('.nav-item', { hasText: label }).click()
     await expect(

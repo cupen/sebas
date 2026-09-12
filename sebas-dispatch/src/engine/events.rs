@@ -125,8 +125,55 @@ pub struct SessionInfo {
     /// `None` = 执行体未声称任何 mode 生效——desired/effective 的差异如实
     /// 可见（execution-node spec："mode enforceability is declared, not
     /// assumed"）。`#[serde(default)]` 兼容旧快照/旧事件。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub effective_mode: Option<String>,
+    /// （rail-declutter-unread D1/D2）会话累计「可见回复段」数——rail 未读
+    /// 徽标的服务端数据源。口径见 [`count_chat_messages`]；随 `session.updated`
+    /// 广播（transcript flush 多数时机不发事件，rail 的 10s 轮询兜底）。
+    /// `#[serde(default)]` 兼容旧快照/旧事件。
+    #[serde(default)]
+    pub msg_count: u64,
+}
+
+/// 可见回复段的计数口径（rail-declutter-unread D2，用户拍板「可见回复段」）：
+///
+/// - 只数 `kind = "content"` 且 `element_type ∈ {markdown, error}` 的条目；
+///   prompt、thinking、tool 一律不计；
+/// - **相邻连续的 markdown 条目合并为一段**（ACP 路径逐 delta 落账，一段
+///   流式回复 = 一串 delta 条目；与前端 transcript 把连续 markdown 拼进同
+///   一个文本块同粒度），被 prompt / thinking / tool / error 打断则另起一段；
+/// - 每条 `error` 条目独立计 1（前端逐条渲染错误气泡）；
+/// - 空内容条目跳过、**不断段**（前端 `groupConversation` 同规则）。
+///
+/// 注意与 seen-boundary seam 的差异：seam 按**轮**分界，徽标按**段**计数
+/// ——两者共用同一游标（D3）但聚合粒度不同，属有意为之，测试分别钉住。
+pub fn count_chat_messages(entries: &[TurnEntry]) -> u64 {
+    let mut count = 0u64;
+    let mut in_markdown_run = false;
+    for e in entries {
+        if e.content.is_empty() {
+            // 空条目对前端不可见：不计数、不打断当前段。
+            continue;
+        }
+        if e.kind != "content" {
+            in_markdown_run = false;
+            continue;
+        }
+        match e.element_type.as_str() {
+            "markdown" => {
+                if !in_markdown_run {
+                    count += 1;
+                    in_markdown_run = true;
+                }
+            }
+            "error" => {
+                count += 1;
+                in_markdown_run = false;
+            }
+            _ => in_markdown_run = false,
+        }
+    }
+    count
 }
 
 impl SessionInfo {
@@ -271,6 +318,8 @@ mod tests {
             remote: None,
             desired_mode: None,
             effective_mode: None,
+            // rail-declutter-unread：msg_count 随 SessionInfo 往返。
+            msg_count: 0,
         };
         let cases = vec![
             SessionEvent::Created {
@@ -336,6 +385,7 @@ mod tests {
             remote: None,
             desired_mode: None,
             effective_mode: None,
+            msg_count: 0,
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -378,6 +428,7 @@ fn session_info_usage_field_is_additive() {
         }),
         desired_mode: None,
         effective_mode: None,
+        msg_count: 3,
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -389,6 +440,8 @@ fn session_info_usage_field_is_additive() {
     assert_eq!(back.usage, None);
     // workbench-turn-queue：无 pending 字段同样可读（默认空栈）。
     assert_eq!(back.pending, Vec::new());
+    // rail-declutter-unread：无 msg_count 字段的旧报文反序列化为 0。
+    assert_eq!(back.msg_count, 0);
 }
 
 /// workbench-turn-queue 5.2：PendingDropped 携带被丢弃条目（id + 文本），
@@ -422,4 +475,58 @@ fn pending_dropped_event_carries_the_dropped_entries() {
     assert_eq!(json["dropped"][1]["priority"], true);
     let back: SessionEvent = serde_json::from_value(json).unwrap();
     assert_eq!(back, ev);
+}
+
+/// rail-declutter-unread D2（计数口径）：流式 delta 合并成段——一串相邻
+/// markdown 计 1，被 tool/thinking 打断后另起一段，error 逐条各计 1。
+#[test]
+fn chat_message_count_merges_adjacent_markdown_deltas() {
+    let log = vec![
+        TurnEntry::prompt(0, "do it"),
+        // 一段流式回复：3 个 delta = 1 段。
+        TurnEntry::markdown(1, "let me "),
+        TurnEntry::markdown(2, "check "),
+        TurnEntry::markdown(3, "that."),
+        // 工具噪声：不计、但打断当前段。
+        TurnEntry::tool(4, "📖 **read_file**"),
+        TurnEntry::tool(5, "✓ **read_file**"),
+        // 工具后的新文本段：+1。
+        TurnEntry::markdown(6, "done."),
+        // thinking 噪声：不计、打断。
+        TurnEntry::thinking(7, "hmm"),
+        // 错误条目：逐条计 1。
+        TurnEntry::error(8, "**spawn failed**: boom"),
+        TurnEntry::error(9, "**spawn failed**: boom again"),
+    ];
+    // 段 1（三连 delta）+ 工具/thinking 打断后的段 2 + 两条 error 逐条 = 4。
+    assert_eq!(count_chat_messages(&log), 4, "{log:?}");
+}
+
+/// rail-declutter-unread D2（计数口径）：process noise 不计数——只有
+/// thinking / tool / prompt 的会话段数为 0；空条目不计数也不断段。
+#[test]
+fn chat_message_count_ignores_noise_and_empty_entries() {
+    // 纯噪声 = 0。
+    let noise = vec![
+        TurnEntry::prompt(0, "hello"),
+        TurnEntry::thinking(1, "thinking"),
+        TurnEntry::tool(2, "📖 **bash**"),
+        TurnEntry::tool(3, "✓ **bash**"),
+    ];
+    assert_eq!(count_chat_messages(&noise), 0);
+    // 空内容条目：不计数、不打断相邻 markdown 的连续性（前端同规则）。
+    let with_empty = vec![
+        TurnEntry::markdown(0, "first"),
+        TurnEntry {
+            position: 1,
+            kind: "content".into(),
+            element_type: "markdown".into(),
+            content: String::new(),
+            created_at_unix: 1,
+        },
+        TurnEntry::markdown(2, " still same segment"),
+    ];
+    assert_eq!(count_chat_messages(&with_empty), 1);
+    // 空 transcript = 0。
+    assert_eq!(count_chat_messages(&[]), 0);
 }

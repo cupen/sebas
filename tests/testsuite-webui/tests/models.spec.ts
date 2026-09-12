@@ -1,16 +1,21 @@
 /**
  * Journey 3.x — model面诚实语义 (phase-2 task 3.2, fallback C +
- * cover-core-channel-test-gaps B2.2 + add-fetch-models 4.1 +
- * redesign-provider-models-settings 5.1).
+ * cover-core-channel-test-gaps B2.2 + redesign-provider-models-settings 5.1 +
+ * revamp-settings-nav-and-models-editor).
  *
- * 功能：模型管理覆盖 / 子功能：无模型诚实缺省、settings provider 可抓取可
- * 编辑（模型条目 + 能力标记可编辑并持久；抓取可用且不改库、挑选后才写、
- * 无 URL 不渲染入口）、有模型面的正向切换与 typed rejection
+ * 功能：模型管理覆盖 / 子功能：无模型诚实缺省、settings provider 可编辑可
+ * 抓取（模型条目 + 能力标记可编辑并持久；抓取入口在编辑器内、成功整单替换
+ * 草稿列表、保存才落库、取消即丢弃；无 URL 不渲染入口）、有模型面的正向
+ * 切换与 typed rejection
  *
  * redesign-provider-models-settings：provider 模型列表是条目列表（id + 能力
- * 标记），WebUI 编辑器可增删条目、勾选 vision/audio/video；旧的「provider
- * 只读 + 零 probe 流量」断言升级为「可抓取、可编辑模型条目」（browsing 仍
+ * 标记），WebUI 编辑器可增删条目、勾选 vision/audio/video（browsing 仍
  * 然零 probe 流量）。
+ *
+ * revamp-settings-nav-and-models-editor：抓取入口从 provider 行内挪进编辑器
+ * 「Models」区块标题旁；抓取成功直接整单替换编辑器草稿模型列表（同 id 保留
+ * 人工 capability tags、按 id 去重），保存与否走普通编辑流；行内 🔍 与
+ * 「只读结果列表 + 逐条挑选」UI 已删除。
  *
  * ## 两条拒绝路径的区分（B2.2 要求先写清；7f1d7c9 后 SetModel 一律非终态）
  *
@@ -28,35 +33,20 @@
  * 两条路径共同契约：拒绝不销毁会话、不伪造成功。
  */
 import { expect, test } from '@playwright/test'
-import type { APIRequestContext } from '@playwright/test'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import {
   createSession,
+  ensureSceneProject,
   ErrorCollector,
   getSession,
   listSessions,
   resetState,
   FocusedSession,
+  ProjectRail,
   SettingsModal,
   waitStatus,
 } from './helpers/index'
-
-/** Catalog truth for one provider (store projection via the BFF). Models are
- * entry objects ({id, tags}) since redesign-provider-models-settings; the
- * helper returns bare ids for assertions. */
-async function fetchCatalog(
-  request: APIRequestContext,
-  name: string,
-): Promise<string[]> {
-  const resp = await request.get('/router/api/providers')
-  expect(resp.ok()).toBe(true)
-  const body = (await resp.json()) as {
-    providers?: Array<{ name: string; models: Array<{ id: string } | string> }>
-  }
-  const models = body.providers?.find((p) => p.name === name)?.models ?? []
-  return models.map((m) => (typeof m === 'string' ? m : m.id))
-}
 
 test.describe('模型管理覆盖', () => {
   let collector: ErrorCollector
@@ -200,7 +190,7 @@ test.describe('模型管理覆盖', () => {
     })
   })
 
-  test.describe('settings provider 抓取（add-fetch-models）+ 模型条目编辑（redesign-provider-models-settings）', () => {
+  test.describe('settings provider 编辑与编辑器内抓取（redesign-provider-models-settings + revamp-settings-nav-and-models-editor）', () => {
     test('3.2 providers are editable: model entries with capability tags persist; browsing stays probe-free', async ({
       page,
     }) => {
@@ -214,7 +204,7 @@ test.describe('模型管理覆盖', () => {
       expect(created.ok()).toBe(true)
 
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Models')
 
       // Browsing the list stays read-only on the network: zero fetch traffic
@@ -227,6 +217,8 @@ test.describe('模型管理覆盖', () => {
 
       const row = settings.panel.locator('.provider-row', { hasText: 'editable' })
       await expect(row).toBeVisible({ timeout: 10_000 })
+      // revamp…4.1: the provider row no longer carries a fetch button.
+      await expect(row.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
 
       // Model entries are editable: add two entries, one tagged vision.
       await row.locator('button[title="Edit"]').click()
@@ -267,7 +259,7 @@ test.describe('模型管理覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('fetch lists the official ids without persisting; picking joins the catalog via an ordinary edit', async ({
+    test('editor fetch replaces the draft wholesale (tags preserved), storage moves only on save; cancel discards', async ({
       page,
     }) => {
       const settings = new SettingsModal(page)
@@ -287,53 +279,85 @@ test.describe('模型管理覆盖', () => {
       await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
       const port = (upstream.address() as AddressInfo).port
 
+      /** Stored catalog entries (ids + tags) for one provider. */
+      const storedEntries = async (): Promise<Array<{ id: string; tags: string[] }>> => {
+        const resp = await page.request.get('/router/api/providers')
+        expect(resp.ok()).toBe(true)
+        const body = (await resp.json()) as {
+          providers?: Array<{ name: string; models: Array<{ id: string; tags: string[] }> }>
+        }
+        return body.providers?.find((p) => p.name === 'fetchable')?.models ?? []
+      }
+
       try {
         await resetState(page.request)
         // Ordinary edit path: create a custom provider pointed at the fake
-        // upstream (core dials 127.0.0.1 only — sandbox-safe).
+        // upstream (core dials 127.0.0.1 only — sandbox-safe), pre-seeded with
+        // one manually tagged entry whose id the upstream also serves.
         const created = await page.request.post('/router/api/providers', {
           data: {
             name: 'fetchable',
             base_url_openai_chat: `http://127.0.0.1:${port}/v1`,
+            models: [{ id: 'fetch-m-2', tags: ['vision'] }],
           },
         })
         expect(created.ok()).toBe(true)
-        const catalogBefore = await fetchCatalog(page.request, 'fetchable')
-        expect(catalogBefore).toEqual([])
+        expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
         await page.goto('/')
-        await settings.openViaComposer()
+        await settings.openViaSidebar()
         await settings.openSection('Models')
 
-        // 抓取：结果列表如实列出上游 ids。
         const row = settings.panel.locator('.provider-row', { hasText: 'fetchable' })
-        await expect(row.locator('button[data-testid="fetch-models"]')).toBeVisible({
+        await expect(row).toBeVisible({ timeout: 10_000 })
+
+        // ── Cancel-discard phase: fetch replaces the DRAFT only; cancelling
+        // the editor leaves the stored catalog untouched.
+        await row.locator('button[title="Edit"]').click()
+        let editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+        await expect(
+          editor.locator('button[data-testid="fetch-models"]'),
+        ).toBeVisible({ timeout: 10_000 })
+        await editor.locator('button[data-testid="fetch-models"]').click()
+
+        // The draft now lists the upstream ids — the surviving id keeps its
+        // manual vision tag, the new one starts text-only.
+        const entry0 = editor.locator('[data-testid="model-entry"]').nth(0)
+        const entry1 = editor.locator('[data-testid="model-entry"]').nth(1)
+        await expect(entry0.locator('wa-input input')).toHaveValue('fetch-m-1', {
           timeout: 10_000,
         })
-        await row.locator('button[data-testid="fetch-models"]').click()
-        const resultList = settings.panel.locator('.fetch-result-list')
-        await expect(resultList).toBeVisible({ timeout: 10_000 })
-        await expect(resultList).toContainText('fetch-m-1')
-        await expect(resultList).toContainText('fetch-m-2')
+        await expect(entry1.locator('wa-input input')).toHaveValue('fetch-m-2')
+        await expect(entry0.locator('input[data-testid="tag-vision"]')).not.toBeChecked()
+        await expect(entry1.locator('input[data-testid="tag-vision"]')).toBeChecked()
 
-        // 抓取不改库：catalog 仍是抓取前的样子（挑选前没有任何写请求落库）。
-        expect(await fetchCatalog(page.request, 'fetchable')).toEqual(catalogBefore)
+        // Fetch persists nothing by itself.
+        expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
-        // 挑选 fetch-m-1 → 普通编辑 → catalog 才长出该 id。
-        await resultList
-          .locator('li', { hasText: 'fetch-m-1' })
-          .locator('button[data-testid="pick-fetched-model"]')
-          .click()
-        await expect
-          .poll(async () => fetchCatalog(page.request, 'fetchable'), {
-            timeout: 10_000,
-            intervals: [250],
-          })
-          .toContain('fetch-m-1')
+        await editor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+        await expect(editor).toBeHidden({ timeout: 10_000 })
+        expect(await storedEntries()).toEqual([{ id: 'fetch-m-2', tags: ['vision'] }])
 
-        // 挑选是逐 id 的普通编辑：未挑选的 fetch-m-2 不被顺手批量写入。
-        const finalCatalog = await fetchCatalog(page.request, 'fetchable')
-        expect(finalCatalog).not.toContain('fetch-m-2')
+        // ── Save phase: reopen, fetch again, save through the ordinary edit
+        // flow — the wholesale replacement (dedup by id) reaches the store.
+        await row.locator('button[title="Edit"]').click()
+        editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+        await expect(
+          editor.locator('button[data-testid="fetch-models"]'),
+        ).toBeVisible({ timeout: 10_000 })
+        await editor.locator('button[data-testid="fetch-models"]').click()
+        // fetch-m-1 只在抓取完成后出现在草稿里（存量目录只有 fetch-m-2）——
+        // 以它为同步锚点。
+        await expect(editor.locator('[data-testid="model-entry"]').nth(0).locator('wa-input input')).toHaveValue(
+          'fetch-m-1',
+          { timeout: 10_000 },
+        )
+        await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+        await expect(editor).toBeHidden({ timeout: 10_000 })
+        await expect.poll(storedEntries, { timeout: 10_000, intervals: [250] }).toEqual([
+          { id: 'fetch-m-1', tags: [] },
+          { id: 'fetch-m-2', tags: ['vision'] },
+        ])
       } finally {
         await new Promise<void>((resolve) => upstream.close(() => resolve()))
       }
@@ -341,7 +365,89 @@ test.describe('模型管理覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('a provider without any usable base URL renders no fetch entry', async ({
+    test('a fetched-and-saved catalog reaches the creation dialog without a restart', async ({
+      page,
+    }) => {
+      const settings = new SettingsModal(page)
+      const rail = new ProjectRail(page)
+
+      // Node-local fake upstream (never a real provider host), same discipline
+      // as the editor-fetch journey above.
+      const upstreamModels = ['dlg-m-1', 'dlg-m-2']
+      const upstream = http.createServer((_req, res) => {
+        res.setHeader('content-type', 'application/json')
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: upstreamModels.map((id) => ({ id, object: 'model' })),
+          }),
+        )
+      })
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+      const port = (upstream.address() as AddressInfo).port
+
+      try {
+        await resetState(page.request)
+        const { name: projectName } = await ensureSceneProject(page.request)
+        // Re-run safety: the provider lives in the SHARED core store.
+        await page.request.delete('/router/api/providers/dialog-seam')
+        const created = await page.request.post('/router/api/providers', {
+          data: { name: 'dialog-seam', base_url_openai_chat: `http://127.0.0.1:${port}/v1` },
+        })
+        expect(created.ok()).toBe(true)
+
+        // The real Settings write path: editor fetch replaces the draft, save
+        // lands it in the core store.
+        await page.goto('/')
+        await settings.openViaSidebar()
+        await settings.openSection('Models')
+        const row = settings.panel.locator('.provider-row', { hasText: 'dialog-seam' })
+        await expect(row).toBeVisible({ timeout: 10_000 })
+        await row.locator('button[title="Edit"]').click()
+        const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+        await editor.locator('button[data-testid="fetch-models"]').click()
+        await expect(
+          editor.locator('[data-testid="model-entry"]').nth(0).locator('wa-input input'),
+        ).toHaveValue('dlg-m-1', { timeout: 10_000 })
+        await editor.locator('wa-button').filter({ hasText: 'Save' }).click()
+        await expect(editor).toBeHidden({ timeout: 10_000 })
+
+        // API truth: the fetched ids persisted through the ordinary save.
+        const resp = await page.request.get('/router/api/providers')
+        const body = (await resp.json()) as {
+          providers?: Array<{ name: string; models: Array<{ id: string }> }>
+        }
+        expect(body.providers?.find((p) => p.name === 'dialog-seam')?.models.map((m) => m.id)).toEqual(
+          upstreamModels,
+        )
+        await settings.close()
+
+        // The seam: WITHOUT any reload the creation dialog's catalog (same
+        // shared store) offers the fetched provider → models — the dialog
+        // reflects catalog changes live (spec: reflected without a restart).
+        await rail.expandProject(projectName)
+        await rail.openNewSessionDialog(projectName)
+        const dialog = rail.newSessionDialog()
+        const providerSelect = dialog.locator('[data-testid="dialog-provider-select"]')
+        await expect(providerSelect).toBeVisible({ timeout: 15_000 })
+        await expect(providerSelect).toContainText('dialog-seam')
+        await expect(dialog.locator('[data-testid="dialog-model-select"]')).toContainText(
+          'dlg-m-1',
+        )
+        await rail.cancelNewSessionDialog()
+
+        // Hygiene: drop the provider so later journeys' honest "no provider
+        // configured" assertions stay valid.
+        const removed = await page.request.delete('/router/api/providers/dialog-seam')
+        expect(removed.ok()).toBe(true)
+      } finally {
+        await new Promise<void>((resolve) => upstream.close(() => resolve()))
+      }
+
+      expect(collector.clean()).toEqual([])
+    })
+
+    test('a provider without any usable base URL renders no fetch entry in its editor', async ({
       page,
     }) => {
       const settings = new SettingsModal(page)
@@ -353,12 +459,17 @@ test.describe('模型管理覆盖', () => {
       expect(created.ok()).toBe(true)
 
       await page.goto('/')
-      await settings.openViaComposer()
+      await settings.openViaSidebar()
       await settings.openSection('Models')
 
       const row = settings.panel.locator('.provider-row', { hasText: 'urlless' })
       await expect(row).toBeVisible({ timeout: 10_000 })
-      await expect(row.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
+      await row.locator('button[title="Edit"]').click()
+      const editor = page.locator('sebas-settings-modal wa-dialog.provider-editor')
+      await expect(editor.locator('wa-button').filter({ hasText: 'Save' })).toBeVisible()
+      await expect(editor.locator('button[data-testid="fetch-models"]')).toHaveCount(0)
+      await editor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
+      await expect(editor).toBeHidden({ timeout: 10_000 })
       await settings.close()
 
       expect(collector.clean()).toEqual([])
