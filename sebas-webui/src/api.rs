@@ -193,6 +193,9 @@ pub async fn session_detail(State(state): State<WebUiState>, Path(key): Path<Str
             },
             content: e.content.clone(),
             created_at_unix: e.created_at_unix,
+            // workbench-agent-identity-and-process-folds 1.1：工具条目标题
+            // 原样透传（None = 旧条目，前端回退通用标签）。
+            title: e.title.clone(),
         })
         .collect();
 

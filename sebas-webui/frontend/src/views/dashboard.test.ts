@@ -26,6 +26,7 @@ const apiMocks = vi.hoisted(() => ({
   closeSession: vi.fn(),
   archiveSession: vi.fn(),
   nodes: vi.fn(),
+  agents: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -38,6 +39,7 @@ vi.mock('../api/client.js', () => ({
     closeSession: apiMocks.closeSession,
     archiveSession: apiMocks.archiveSession,
     nodes: apiMocks.nodes,
+    agents: apiMocks.agents,
   },
 }))
 
@@ -186,6 +188,10 @@ beforeEach(() => {
     nodes: [{ id: 'local', status: 'online', local: true }],
     remote_available: true,
   })
+  // workbench-agent-identity 3.1：agent 目录（聚焦会话 display 名解析）。
+  apiMocks.agents.mockResolvedValue({
+    agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+  })
 })
 
 afterEach(() => {
@@ -275,6 +281,37 @@ describe('sebas-dashboard (workbench main area)', () => {
     expect(transcript.fill).toBe(true)
     expect(transcript.entries).toHaveLength(3)
     expect(transcript.sessionKey).toBe('oc_live%00')
+    el.remove()
+  })
+
+  it('passes the agent display name to the transcript (agent-identity 3.1)', async () => {
+    // workbench-agent-identity：dashboard 按 agent_kind 匹配 /api/agents 的
+    // display 传入 transcript。已收到角标是纯 entry 序派生态（3.2 收尾修正），
+    // 不再需要 sessionWorking 传参。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.agents.mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view') as HTMLElement & {
+      agentDisplay: string | null
+    }
+    expect(transcript.agentDisplay).toBe('Claude Code')
+    el.remove()
+  })
+
+  it('falls back to the raw agent_kind slug when the catalog has no display entry (3.1)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.agents.mockResolvedValue({ agents: [] })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view') as HTMLElement & {
+      agentDisplay: string | null
+    }
+    expect(transcript.agentDisplay).toBe('claude')
     el.remove()
   })
 

@@ -227,16 +227,20 @@ impl Mapping {
     /// add-agent-mode-selection）同 model：占位记住、首条消息 spawn 时消费，
     /// 并记为 desired mode 供快照暴露。普通 spawn 流程直接消费时这些字段
     /// 保持 None（走默认 kind / agent 默认模型 / agent 默认行为）。
-    /// `awaiting_first_prompt = true` 是占位身份本身（D1）。
+    /// `awaiting_first_prompt` 是占位身份本身（D1）：只有真正的 0-turn 占位
+    /// 才置 true——prompt 已随 spawn 指令直达的真实 spawn 必须传 false，
+    /// 否则 spawn 窗口内的后续消息会被误判为占位首条消息而二次 spawn、
+    /// 且 in-flight spawn 会以占位身份入盘。
     pub fn spawning_with(
         kind: Option<String>,
         model: Option<String>,
         mode: Option<String>,
+        awaiting_first_prompt: bool,
     ) -> Self {
         Self {
             state: MappingState::Spawning {
                 pending: Vec::new(),
-                awaiting_first_prompt: true,
+                awaiting_first_prompt,
             },
             last_active_unix: crate::engine::now_unix(),
             project_dir: None,
@@ -531,15 +535,19 @@ impl SessionMap {
     /// [`SessionMap::begin_spawn`] plus a requested kind/model to remember on
     /// the placeholder (0-turn sessions: the first message spawns the right
     /// agent — P2 fix). `mode`（add-agent-mode-selection）同 model：占位
-    /// 记住、首条消息 spawn 时消费。Only the `Fresh`/`ReplacedActive` insert
-    /// carries the new fields; an already-spawning placeholder keeps its
-    /// existing ones.
+    /// 记住、首条消息 spawn 时消费，并记为 desired mode 供快照暴露。
+    /// `awaiting_first_prompt`（D1）由调用方按占位语义显式给出：0-turn 占位
+    /// 传 true；prompt 已直达的真实 spawn 传 false（记录字段但不认领占位
+    /// 身份——spawn 窗口内后续消息照常排队，dump 照常过滤 in-flight）。
+    /// Only the `Fresh`/`ReplacedActive` insert carries the new fields; an
+    /// already-spawning placeholder keeps its existing ones.
     pub async fn begin_spawn_with(
         &self,
         key: ChannelKey,
         kind: Option<String>,
         model: Option<String>,
         mode: Option<String>,
+        awaiting_first_prompt: bool,
     ) -> Result<BeginSpawn, DispatchError> {
         let mut g = self.inner.write().await;
         match g.get(&key) {
@@ -548,14 +556,14 @@ impl SessionMap {
             }
             Some(_) => {
                 self.clear_queue(&key).await;
-                g.insert(key, Mapping::spawning_with(kind, model, mode));
+                g.insert(key, Mapping::spawning_with(kind, model, mode, awaiting_first_prompt));
                 Ok(BeginSpawn::ReplacedActive)
             }
             None => {
                 if g.len() >= self.capacity {
                     return Err(DispatchError::Capacity(self.capacity));
                 }
-                g.insert(key, Mapping::spawning_with(kind, model, mode));
+                g.insert(key, Mapping::spawning_with(kind, model, mode, awaiting_first_prompt));
                 Ok(BeginSpawn::Fresh)
             }
         }
@@ -1058,6 +1066,7 @@ impl SessionMap {
                     dto.pending_kind.clone(),
                     dto.pending_model.clone(),
                     dto.pending_mode.clone(),
+                    true,
                 )
             } else {
                 Mapping::dormant(dto.session_id, dto.last_active_unix)

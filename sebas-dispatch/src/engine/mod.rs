@@ -842,18 +842,26 @@ impl DispatchHandle {
                 // workbench-conversation-view 1.3（design D2）：工具条目打
                 // `element_type = "tool"` 标签（内容仍为可读 markdown），让
                 // 前端把工具调用与正文区分开、收进可展开组。
+                // workbench-agent-identity-and-process-folds 1.2：再附结构化
+                // 标题（`{tool} · {key_arg}`，偏好键序提取 + 200 字符上限）
+                // 供前端二级折叠收起时显示。
                 self.transcript_push(
                     session_id,
-                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```")),
+                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```"))
+                        .with_title(events::tool_entry_title(false, tool_name, Some(args))),
                 )
                 .await;
             }
             AcpEvent::ToolEnd {
                 tool_name, result, ..
             } => {
+                // workbench-agent-identity-and-process-folds 1.2：完成态标题
+                // 带 `✓ ` 前缀；ToolEnd wire 不携带 args（无 call id 可配对），
+                // 传 None → 标题退化为 `✓ {tool}`。
                 self.transcript_push(
                     session_id,
-                    TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}")),
+                    TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}"))
+                        .with_title(events::tool_entry_title(true, tool_name, None)),
                 )
                 .await;
             }
@@ -1179,16 +1187,23 @@ impl DispatchHandle {
         mode: Option<String>,
     ) -> ChannelKey {
         let key = ChannelKey::web_new();
-        match self.map.begin_spawn(key.clone()).await {
+        // workbench-agent-identity-and-process-folds 收尾：带 prompt 的直接
+        // spawn 也把 kind/model/mode 记入映射（此前只记 project_dir，
+        // pending_kind 恒 None → SessionInfo.agent_kind 为 null，前端 agent
+        // 展示名链路永远走兜底）。`awaiting_first_prompt = false`：prompt 已
+        // 随 Out::WebSpawn 直达，映射不是 0-turn 占位——spawn 窗口内的后续
+        // 消息照常入队，dump 照常过滤 in-flight（D1：占位身份只属于占位）。
+        // web_new 键必新，插入必然发生（Fresh），mode 随插入记为 desired
+        // mode，无需再调 set_desired_mode（中途切换仍走该 setter）。
+        match self
+            .map
+            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone(), false)
+            .await
+        {
             Ok(outcome) => {
                 // Record project_dir on the mapping before emitting, so the
                 // WebUI can display it even before the session is active.
                 self.map.set_project_dir(&key, project_dir.clone()).await;
-                // （add-agent-mode-selection）desired mode 记入映射供快照
-                // 暴露（effective 由执行体回报/ModeChanged 落定）。
-                if mode.is_some() {
-                    self.map.set_desired_mode(&key, mode.clone()).await;
-                }
                 // Publish after set_project_dir so the Created snapshot
                 // already carries it. AlreadySpawning changed nothing.
                 if !matches!(outcome, crate::state::BeginSpawn::AlreadySpawning) {
@@ -1227,7 +1242,7 @@ impl DispatchHandle {
         let key = ChannelKey::web_new();
         match self
             .map
-            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone())
+            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone(), true)
             .await
         {
             Ok(outcome) => {

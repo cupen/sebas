@@ -981,6 +981,8 @@ impl FakeBackend {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            // webui 侧自建条目（本地回显等）无结构化标题。
+            title: None,
         });
     }
 

@@ -195,7 +195,7 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
     let key = web_key("zero-turn");
 
     let outcome = map
-        .begin_spawn_with(key.clone(), Some("opencode".into()), Some("m-free".into()), None)
+        .begin_spawn_with(key.clone(), Some("opencode".into()), Some("m-free".into()), None, true)
         .await
         .unwrap();
     assert!(matches!(outcome, sebas_dispatch::state::BeginSpawn::Fresh));
@@ -216,7 +216,7 @@ async fn placeholder_first_message_spawns_with_pending_kind_and_model() {
     // 相 2：生产发射路径 —— 全新占位 + web_send_message（内部一次
     // route_text）必须发出 WebSpawn 且携带记住的 kind/model。
     let key2 = web_key("zero-turn-emit");
-    map.begin_spawn_with(key2.clone(), Some("opencode".into()), Some("m-free".into()), None)
+    map.begin_spawn_with(key2.clone(), Some("opencode".into()), Some("m-free".into()), None, true)
         .await
         .unwrap();
     let _ = router.web_send_message(key2.clone(), "hello".into()).await;
@@ -256,7 +256,7 @@ async fn placeholder_replaces_active_and_keeps_pending_kind() {
     let (router, _out_rx) = DispatchHandle::new(map.clone());
 
     let outcome = map
-        .begin_spawn_with(key.clone(), Some("opencode".into()), None, None)
+        .begin_spawn_with(key.clone(), Some("opencode".into()), None, None, true)
         .await
         .unwrap();
     assert!(matches!(
@@ -341,7 +341,9 @@ async fn placeholder_without_kind_or_model_still_spawns_on_first_message() {
     let key = web_key("bare-placeholder");
 
     // 占位创建：kind/model 均为 None（默认 agent 路径，rail「+」同款）。
-    map.begin_spawn_with(key.clone(), None, None, None).await.unwrap();
+    map.begin_spawn_with(key.clone(), None, None, None, true)
+        .await
+        .unwrap();
 
     let route = map.route_text(key.clone(), "hello".into()).await.unwrap();
     assert!(
@@ -361,7 +363,7 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
     let active_key = ChannelKey::feishu("oc_rt", None);
 
     // 占位（带 kind/model/project_dir 的完整形状）。
-    map.begin_spawn_with(ph.clone(), Some("codex".into()), Some("m1".into()), None)
+    map.begin_spawn_with(ph.clone(), Some("codex".into()), Some("m1".into()), None, true)
         .await
         .unwrap();
     map.set_project_dir(&ph, Some("/tmp/wf".into())).await;
@@ -412,4 +414,119 @@ async fn placeholder_marker_survives_dump_restore_round_trip() {
         restored.get(&in_flight).await.is_none(),
         "in-flight spawn is not persisted"
     );
+}
+
+// ── workbench-agent-identity-and-process-folds 收尾：带 prompt 的直接
+// spawn 也把 kind/model/mode 记入映射 ────────────────────────────────────────
+
+/// webui 带 prompt 创建的会话（`web_spawn`）必须在 wire 里携带
+/// `agent_kind`：SessionInfo.agent_kind 读映射的 pending_kind，旧路径
+/// `begin_spawn`（不带 kind）使其恒为 None，前端 agent 展示名永远走兜底。
+/// 同测 desired mode 随插入落定（原 set_desired_mode 调用已收敛）。
+#[tokio::test]
+async fn web_spawn_with_kind_exposes_agent_kind_in_session_info() {
+    let map = SessionMap::new();
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
+
+    let key = router
+        .web_spawn(
+            "hello".into(),
+            Some("/tmp".into()),
+            Some("opencode".into()),
+            Some("m-free".into()),
+            Some("edit".into()),
+        )
+        .await;
+
+    let info = router
+        .session_info_snapshot()
+        .await
+        .into_iter()
+        .find(|i| i.key == key.reference)
+        .expect("spawning session listed");
+    assert_eq!(info.agent_kind.as_deref(), Some("opencode"));
+    assert_eq!(info.desired_mode.as_deref(), Some("edit"));
+    assert_eq!(info.status, "spawning");
+
+    // spawn 后不清除（SessionInfo.agent_kind 的既有语义）：激活后仍可展示。
+    map.activate(&key, "s1".into(), None, None).await;
+    let info = router
+        .session_info_snapshot()
+        .await
+        .into_iter()
+        .find(|i| i.key == key.reference)
+        .expect("active session listed");
+    assert_eq!(info.agent_kind.as_deref(), Some("opencode"));
+}
+
+/// 不带 kind 的 web_spawn 保持 agent_kind = None（= 配置的默认 kind，
+/// 展示层解析），mode 缺省时 desired_mode 亦为 None。
+#[tokio::test]
+async fn web_spawn_without_kind_keeps_agent_kind_none() {
+    let map = SessionMap::new();
+    let (router, _out_rx) = DispatchHandle::new(map.clone());
+
+    let key = router
+        .web_spawn("hello".into(), None, None, None, None)
+        .await;
+    let info = router
+        .session_info_snapshot()
+        .await
+        .into_iter()
+        .find(|i| i.key == key.reference)
+        .expect("spawning session listed");
+    assert_eq!(info.agent_kind, None);
+    assert_eq!(info.desired_mode, None);
+}
+
+/// 真实 spawn 不是 0-turn 占位（D1）：prompt 已随 Out::WebSpawn 直达，
+/// spawn 窗口内到达的后续消息必须照常入队（激活时 drain），绝不二次
+/// spawn、也不以占位身份入盘。这是 pending_kind 记录路径与占位标记解耦
+/// 的回归锁。
+#[tokio::test]
+async fn web_spawn_followup_during_spawn_window_queues_not_double_spawns() {
+    let map = SessionMap::new();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+
+    let key = router
+        .web_spawn(
+            "hello".into(),
+            None,
+            Some("opencode".into()),
+            None,
+            None,
+        )
+        .await;
+
+    // 先消费掉 web_spawn 自身发出的首个 WebSpawn。
+    let first = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(first, Out::WebSpawn { .. }), "got {first:?}");
+
+    // spawn 仍在飞（无人 activate）：第二条消息排队，不发第二个 WebSpawn。
+    router
+        .web_send_message(key.clone(), "race".into())
+        .await
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_millis(150), out_rx.recv()).await;
+    assert!(
+        second.is_err(),
+        "follow-up during spawn window must not emit a second WebSpawn"
+    );
+    let pending = router.session_pending(&key).await;
+    assert_eq!(pending.len(), 1, "message staged in the spawn window");
+    assert_eq!(pending[0].text, "race");
+
+    // in-flight（非占位）不入盘：spawn 窗口内 dump 仍过滤该条目。
+    let json = map.dump_json().await.unwrap();
+    assert!(
+        !json.contains(&key.reference),
+        "prompted spawn is not a placeholder; must stay filtered, got: {json}"
+    );
+
+    // 激活时 drain 队列。
+    let drained = map.activate(&key, "s1".into(), None, None).await;
+    assert_eq!(drained, vec!["race".to_string()]);
 }

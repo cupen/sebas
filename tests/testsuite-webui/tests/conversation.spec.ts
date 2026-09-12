@@ -4,9 +4,11 @@
  *
  * - 两侧交替: submissions and agent replies alternate in transcript order,
  *   each submission rendered as the operator's own turn bubble (2.3).
- * - 工具组展开: a gated tool call ("perm" trigger) renders as the turn's
- *   expandable "used N tools" group — distinguishable from prose (2.2) —
- *   and expands to reveal the invocation details.
+ * - 过程折叠: a gated tool call ("perm" trigger) folds into the turn's
+ *   single process fold — collapsed by default, summary `process · N`
+ *   (process-folds 2.1) — and expands level by level: second-level per-entry
+ *   folds titled by the structured title (`Bash · rm -rf /` / `✓ Bash`),
+ *   whose payload stays hidden until each is expanded (2.2).
  * - 就地聚焦: a rail click focuses the session in place; the workbench
  *   renders its conversation without a page change (3.1).
  * - 模型两级选择: with a provider catalog configured in Settings, the
@@ -87,8 +89,8 @@ test.describe('对话视图（workbench-conversation-view）', () => {
     })
   })
 
-  test.describe('工具组展开', () => {
-    test('the gated tool call renders as the turn tool group and expands', async ({
+  test.describe('过程折叠', () => {
+    test('the gated tool call folds into the turn process fold and expands level by level', async ({
       page,
     }) => {
       const detail = new FocusedSession(page)
@@ -101,24 +103,41 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await expect(detail.host).toBeVisible()
       await detail.sendFollowUp('perm')
 
-      // Resolve the gate; the turn completes with the tool group inside it.
+      // Resolve the gate; the turn completes with the process fold inside it.
       await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
       await cards.allowOnce().click()
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
-      // The turn's tool invocations are grouped — NOT ordinary prose (2.2).
-      const group = detail.toolGroup().first()
-      await expect(group).toBeVisible({ timeout: 15_000 })
-      const label = (await group.locator('summary .label').textContent()) ?? ''
-      expect(label).toMatch(/used \d+ tools?/)
-      // Collapsed by default; the invocation payload is hidden until expanded.
-      expect(await group.getAttribute('open')).toBeNull()
+      // The turn's process entries collect into ONE outer fold — NOT
+      // ordinary prose (2.1: summary `process · N`, collapsed by default,
+      // the invocation payload hidden until expanded).
+      const fold = detail.processFold().first()
+      await expect(fold).toBeVisible({ timeout: 15_000 })
+      const label = (await fold.locator('summary .label').textContent()) ?? ''
+      expect(label).toMatch(/^process · \d+$/)
+      expect(await fold.getAttribute('open')).toBeNull()
 
-      // Expand (the same action a keyboard user's Enter on the summary
-      // triggers — native details/summary): the tool detail becomes visible.
-      await group.locator('summary').click()
-      await expect(group).toHaveAttribute('open', '')
-      await expect(group).toContainText('perm done')
+      // Expand the outer fold (the same action a keyboard user's Enter on
+      // the summary triggers — native details/summary): second-level
+      // per-entry folds appear, themselves collapsed by default (2.2),
+      // titled by the backend's structured title. `.first()` — the outer
+      // summary precedes the nested per-entry summaries in DOM order.
+      await fold.locator('summary').first().click()
+      await expect(fold).toHaveAttribute('open', '')
+      const items = detail.processItems()
+      await expect(items).toHaveCount(2)
+      await expect(items.nth(0).locator('summary .item-title')).toHaveText('Bash · rm -rf /')
+      await expect(items.nth(1).locator('summary .item-title')).toHaveText('✓ Bash')
+      for (let i = 0; i < 2; i++) {
+        expect(await items.nth(i).getAttribute('open')).toBeNull()
+      }
+
+      // Second-level expand reveals the invocation detail (its result text).
+      await items.nth(1).locator('summary').click()
+      await expect(items.nth(1)).toHaveAttribute('open', '')
+      await expect(items.nth(1)).toContainText('perm done')
+      // The sibling fold stays collapsed — expansion is per entry.
+      expect(await items.nth(0).getAttribute('open')).toBeNull()
 
       expect(collector.clean()).toEqual([])
     })

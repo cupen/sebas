@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type AgentKindInfo, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
 import type { WsEvent } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
@@ -140,6 +140,13 @@ export class SebasDashboard extends LitElement {
   /** 远端注册表是否可得（false = 状态未知，≠「没有远端节点」）。 */
   @state() private remoteNodesAvailable = true
   @state() private nodesCause: string | null = null
+
+  /**
+   * Agent catalog（/api/agents，workbench-agent-identity 3.1/D1）：聚焦
+   * 会话的 assistant 作者标签 display 名解析数据源。目录不可得时为空——
+   * display 名回退 raw slug（compose 的 🔒 标签同款降级）。
+   */
+  @state() private agents: AgentKindInfo[] = []
 
   private onWsEvent = (ev: WsEvent): void => {
     if (ev.type === 'session.pending_dropped' && ev.session_id === this.data?.active_session_key) {
@@ -528,6 +535,7 @@ export class SebasDashboard extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     this.refetch()
+    void this.loadAgents()
     this.unsubscribe = sharedWs.subscribe((ev) => {
       this.onWsEvent(ev)
       this.refetch()
@@ -662,6 +670,32 @@ export class SebasDashboard extends LitElement {
         )}
       </div>
     `
+  }
+
+  /**
+   * workbench-agent-identity 3.1（D1）：agent 目录装载。目录不可得（老后端
+   * / 网络失败）如实降级为空——display 名退回 raw slug，不阻塞对话渲染。
+   */
+  private async loadAgents(): Promise<void> {
+    try {
+      const d = await api.agents()
+      this.agents = d.agents ?? []
+    } catch {
+      this.agents = []
+    }
+  }
+
+  /**
+   * workbench-agent-identity 3.1（D1）：聚焦会话绑定 agent 的展示名——目录
+   * 按 `agent_kind` 匹配取 `display`；条目缺失/无 display 回退 raw slug；
+   * 未绑定 kind → `null`（transcript 侧再回退通用 `assistant`）。回退链
+   * display → slug 在此收敛，assistant 兜底在组件内。
+   */
+  private focusedAgentDisplay(): string | null {
+    const kind = this.focusedDetail?.agent_kind ?? this.data?.active_session?.agent_kind ?? null
+    if (!kind) return null
+    const found = this.agents.find((a) => a.id === kind)
+    return found?.display || kind
   }
 
   render() {
@@ -857,6 +891,7 @@ export class SebasDashboard extends LitElement {
                     .entries=${d.entries}
                     sessionKey=${d.encoded_key}
                     .msgCount=${d.msg_count ?? null}
+                    .agentDisplay=${this.focusedAgentDisplay()}
                   ></sebas-transcript-view>`}
             `
           : this.focusedUnavailable

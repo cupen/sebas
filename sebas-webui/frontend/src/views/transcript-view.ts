@@ -10,12 +10,20 @@
  *   - a `kind === 'prompt'` entry opens an operator turn ("你" bubble);
  *   - the entries after it (until the next prompt) form ONE agent turn =
  *     ONE assistant bubble, no matter how many streamed chunks arrived;
- *   - inside an agent turn, contiguous entry runs chunk into: concatenated
- *     text (markdown), a folded thinking block, and an expandable
- *     "used N tools" group — each run keeps its position, so a tool call
- *     between two statements splits the text instead of gluing it;
+ *   - inside an agent turn, the text (markdown) segments stay outside in
+ *     stream order while ALL thinking + tool entries collect into ONE
+ *     process fold positioned at the turn's first process entry
+ *     (workbench-agent-identity-and-process-folds 2.1/2.2) — expanding it
+ *     reveals second-level per-entry folds (each thinking segment, each
+ *     tool invocation), also collapsed by default, titled by the entry's
+ *     structured `title` (generic label fallback, middle-truncated);
  *   - error entries (spawn failures) render as their own counted error
- *     bubbles, positioned in sequence.
+ *     bubbles, positioned in sequence;
+ *   - the operator's newest submission shows a low-key "已收到" receipt
+ *     badge while the session is Working and no agent output has arrived
+ *     (3.2, derived state — no sender-side state machine);
+ *   - the assistant author label resolves via `agentDisplay`
+ *     (display → slug → assistant, D1) with a first-grapheme text avatar.
  *
  * The seen-boundary seam counts TURNS, never entries: it sits above the
  * first turn with an entry newer than the stored seen-timestamp and never
@@ -34,6 +42,7 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { repeat } from 'lit/directives/repeat.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import type { ConversationEntryView } from '../api/client.js'
 import { icon } from '../components/icons.js'
@@ -110,22 +119,33 @@ export interface TextBlock {
   position: number
 }
 
-/** A run of contiguous thinking entries, folded into one block. */
-export interface ThinkingBlock {
-  type: 'thinking'
+/** One thinking/tool entry inside the turn's single process block. */
+export interface ProcessItem {
+  /** `thinking` | `tool` — the source entry's element_type. */
+  elementType: string
   content: string
+  /**
+   * Structured title built by the backend (tool name + key argument).
+   * Absent (legacy entries) → the fold falls back to a generic label.
+   */
+  title?: string | null
+  /** The source entry's transcript position — the DOM identity key. */
   position: number
 }
 
-/** A run of contiguous tool entries, one expandable group. */
-export interface ToolBlock {
-  type: 'tools'
-  items: { content: string; position: number }[]
-  /** Position of the run's first entry. */
+/**
+ * The turn's ONE process block (workbench-agent-identity-and-process-folds
+ * 2.1): every thinking + tool entry of the agent turn collects here,
+ * regardless of how many runs the old per-run chunker would have produced.
+ */
+export interface ProcessBlock {
+  type: 'process'
+  items: ProcessItem[]
+  /** Position of the turn's FIRST process entry — where the fold sits. */
   position: number
 }
 
-export type AgentBlock = TextBlock | ThinkingBlock | ToolBlock
+export type AgentBlock = TextBlock | ProcessBlock
 
 /** The operator's submission — its own turn. */
 export interface OperatorUnit {
@@ -161,20 +181,25 @@ export type TurnUnit = OperatorUnit | AgentUnit | ErrorUnit
  */
 export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
   const units: TurnUnit[] = []
+  // 当前 agent 回合内紧邻的前一条 entry（null = 回合开头）：文本段只与
+  // 紧邻的文本条目相连——被过程条目隔开的文本是不同的段（2.1）。
+  let prevInTurn: ConversationEntryView | null = null
   for (const e of entries) {
     if (!e.content) continue
     if (e.element_type === 'error') {
       units.push({ kind: 'error', entry: e })
+      prevInTurn = null
       continue
     }
     if (e.kind === 'prompt') {
       units.push({ kind: 'operator', entry: e })
+      prevInTurn = null
       continue
     }
     // Agent-side content: join the current agent turn or open one.
     const last = units[units.length - 1]
     if (last?.kind === 'agent') {
-      appendAgentBlock(last, e)
+      appendAgentBlock(last, e, prevInTurn)
       last.maxTs = Math.max(last.maxTs, e.created_at_unix || 0)
     } else {
       const unit: AgentUnit = {
@@ -184,9 +209,10 @@ export function groupConversation(entries: ErrorCountedView[]): TurnUnit[] {
         startedAt: e.created_at_unix,
         maxTs: e.created_at_unix || 0,
       }
-      appendAgentBlock(unit, e)
+      appendAgentBlock(unit, e, null)
       units.push(unit)
     }
+    prevInTurn = e
   }
   return units
 }
@@ -197,41 +223,131 @@ export function unitMaxTs(unit: TurnUnit): number {
   return unit.maxTs
 }
 
+// ---- fold title helpers（2.3，D5）---------------------------------------
+
+/** Titles longer than this many characters are middle-truncated. */
+export const TITLE_MAX_CHARS = 64
+/** Head characters preserved by the middle truncation. */
+export const TITLE_HEAD_CHARS = 28
+/** Tail characters preserved by the middle truncation. */
+export const TITLE_TAIL_CHARS = 28
+
 /**
- * Chunk one agent turn's entries into blocks (D4): contiguous markdown runs
- * concatenate into text; contiguous thinking entries fold together;
- * contiguous tool entries collect into one expandable group. A run break
- * (text→tool→text) splits the blocks so the tool group sits BETWEEN the two
- * text segments, in true sequence order.
+ * Split a string into grapheme clusters — Intl.Segmenter where available
+ * (keeps ZWJ emoji, flags and combining sequences whole), code points as
+ * the fallback. 多字节字符绝不切半个。
  */
-function appendAgentBlock(unit: AgentUnit, e: ConversationEntryView): void {
-  const last = unit.blocks[unit.blocks.length - 1]
-  if (last) {
-    // Contiguous run of the same kind merges into the open block.
-    if (last.type === 'text' && e.element_type !== 'thinking' && e.element_type !== 'tool') {
-      last.content += e.content
-      return
-    }
-    if (last.type === 'thinking' && e.element_type === 'thinking') {
-      last.content += e.content
-      return
-    }
-    if (last.type === 'tools' && e.element_type === 'tool') {
-      last.items.push({ content: e.content, position: e.position })
-      return
-    }
+function graphemes(s: string): string[] {
+  const Seg = (Intl as { Segmenter?: new (...a: unknown[]) => { segment(input: string): Iterable<{ segment: string }> } })
+    .Segmenter
+  if (typeof Seg === 'function') {
+    return Array.from(new Seg(undefined, { granularity: 'grapheme' }).segment(s), (seg) => seg.segment)
   }
-  if (e.element_type === 'thinking') {
-    unit.blocks.push({ type: 'thinking', content: e.content, position: e.position })
-  } else if (e.element_type === 'tool') {
+  return Array.from(s)
+}
+
+/**
+ * Middle-truncate a fold title（2.3，D5）: over {@link TITLE_MAX_CHARS}
+ * characters collapses the middle into a single `…`, keeping the head and
+ * tail. Callers carry the full string on the `title` attribute for hover.
+ */
+export function middleTruncate(
+  text: string,
+  max: number = TITLE_MAX_CHARS,
+  head: number = TITLE_HEAD_CHARS,
+  tail: number = TITLE_TAIL_CHARS,
+): string {
+  const g = graphemes(text)
+  if (g.length <= max) return text
+  return g.slice(0, head).join('') + '…' + g.slice(-tail).join('')
+}
+
+/**
+ * Second-level fold label fallback（2.2）: entries without the structured
+ * `title` (legacy persisted data) show a generic stable label derived from
+ * the element type instead.
+ */
+export function processItemLabel(item: ProcessItem): { label: string; full: string | null } {
+  const title = item.title?.trim() ? item.title : null
+  if (title) return { label: middleTruncate(title), full: title }
+  return { label: item.elementType, full: null }
+}
+
+// ---- agent identity + receipt（3.1/3.2）---------------------------------
+
+/**
+ * Assistant 作者标签回退链（3.1，D1）: catalog display → slug → generic
+ * `assistant`. The first two levels are resolved by the dashboard (which
+ * holds the `/api/agents` catalog) before the value arrives as
+ * {@link SebasTranscriptView.agentDisplay}; this covers the last step plus
+ * blank/whitespace tolerance.
+ */
+export function resolveAgentDisplay(agentDisplay: string | null | undefined): string {
+  const v = typeof agentDisplay === 'string' ? agentDisplay.trim() : ''
+  return v || 'assistant'
+}
+
+/**
+ * 已收到角标的派生判定（3.2，D4）: the entry sequence ends on the
+ * operator's submission — i.e. the newest rendered unit is still the prompt
+ * with no agent output yet. Pure entry-sequence semantics（spec「Operator
+ * submission receipt」）: the live flow shows queued（非 working）while the
+ * prompt is the last entry and flips working the moment the first agent
+ * entry lands, so a Working gate made the badge unreachable in practice.
+ * Purely derived: once any agent entry arrives the last unit stops being
+ * the prompt and the badge disappears without any sender-side state machine.
+ */
+export function awaitingReceipt(units: TurnUnit[]): boolean {
+  return units.length > 0 && units[units.length - 1].kind === 'operator'
+}
+
+/**
+ * Chunk one agent turn's entries into blocks（2.1，D3）: contiguous markdown
+ * runs concatenate into text; EVERY thinking/tool entry collects into the
+ * turn's single process block, which sits at the position of the first
+ * process entry. Text segments stay outside the fold, in stream order — a
+ * run break (text→process→text) splits the text so the segments keep their
+ * arrival sequence around the fold. `prev` is the immediately preceding
+ * entry of the same turn (null = turn start) and gates text concatenation.
+ */
+function appendAgentBlock(
+  unit: AgentUnit,
+  e: ConversationEntryView,
+  prev: ConversationEntryView | null,
+): void {
+  const last = unit.blocks[unit.blocks.length - 1]
+  if (e.element_type === 'thinking' || e.element_type === 'tool') {
+    // 过程条目：全部汇入本回合唯一的过程块（2.1）——不再按 run 平铺；
+    // 块定位在首个过程条目的位置，后面的条目无论隔着多少文本段都并入它。
+    const existing = unit.blocks.find((b): b is ProcessBlock => b.type === 'process')
+    if (existing) {
+      existing.items.push({
+        elementType: e.element_type,
+        content: e.content,
+        title: e.title ?? null,
+        position: e.position,
+      })
+      return
+    }
     unit.blocks.push({
-      type: 'tools',
-      items: [{ content: e.content, position: e.position }],
+      type: 'process',
+      items: [
+        { elementType: e.element_type, content: e.content, title: e.title ?? null, position: e.position },
+      ],
       position: e.position,
     })
-  } else {
-    unit.blocks.push({ type: 'text', content: e.content, position: e.position })
+    return
   }
+  if (last?.type === 'text' && prev !== null && !isProcessEntry(prev)) {
+    last.content += e.content
+    return
+  }
+  unit.blocks.push({ type: 'text', content: e.content, position: e.position })
+}
+
+/** 过程条目（2.1）：进入过程大折叠的 element_type 词表。 */
+function isProcessEntry(e: ConversationEntryView): boolean {
+  return e.element_type === 'thinking' || e.element_type === 'tool'
 }
 
 /**
@@ -279,6 +395,13 @@ export class SebasTranscriptView extends LitElement {
    * seen 时间戳、不动段数锚。
    */
   @property({ attribute: false }) msgCount: number | null = null
+  /**
+   * workbench-agent-identity 3.1（D1）：会话绑定 agent 的展示名。dashboard
+   * 按 `agent_kind` 匹配 `/api/agents` 目录后传入（目录无 display 条目时传
+   * raw slug）；`null` = 目录不可得 / 未绑定 → 组件回退通用 `assistant`。
+   * 回退链：display → slug → assistant。
+   */
+  @property({ attribute: false }) agentDisplay: string | null = null
   /**
    * When true (default), auto-scroll on new entries. Flipped to false
    * internally when the reader scrolls up past the seam so we don't
@@ -481,6 +604,29 @@ export class SebasTranscriptView extends LitElement {
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
+    /* workbench-agent-identity 3.2：已收到角标——操作者提交已被服务端接受、
+       agent 输出尚未开始的在途提示。低调 pill（faint 色 + working 色小点），
+       agent 回合开始即随派生条件消失。 */
+    .turn-block .meta .receipt {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.66rem;
+      line-height: 1;
+      color: var(--sebas-text-faint);
+      background: var(--sebas-surface-2);
+      border: 1px solid var(--sebas-border);
+      border-radius: var(--sebas-radius-full);
+      padding: 2px 8px;
+      white-space: nowrap;
+    }
+    .turn-block .meta .receipt::before {
+      content: '';
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--sebas-status-working, var(--sebas-accent));
+    }
     .turn-block .body {
       min-width: 0;
       font-size: 0.875rem;
@@ -540,8 +686,9 @@ export class SebasTranscriptView extends LitElement {
       border-left: 3px solid var(--sebas-border-strong);
       color: var(--sebas-text-dim);
     }
-    /* thinking 折叠：details 整块收在回合气泡内，折叠行沿用 work-group
-       出血条样式；summary 是原生 details/summary，可键盘展开（2.5）。 */
+    /* 过程大折叠（2.1/2.2）：回合内全部 thinking + tool 收进一个 details，
+       折叠行沿用 work-group 出血条样式；summary 是原生 details/summary，
+       可键盘展开（2.5）。展开后为二级逐条折叠（.process-item）。 */
     .turn-block details.fold {
       margin: var(--sebas-space-3) -14px -9px;
       border-top: 1px solid var(--sebas-border);
@@ -591,11 +738,42 @@ export class SebasTranscriptView extends LitElement {
       line-height: 1.6;
       border-top: 1px dashed var(--sebas-border);
     }
-    /* 工具组内逐条工具之间以虚线分隔，与 thinking 折叠同一视觉语言。 */
-    .turn-block .fold-body .tool-item + .tool-item {
+    /* 过程大折叠的二级折叠（2.2）：thinking 段 / 工具条目各一折，默认收起。
+       summary 是条目标题（title 或通用标签）——mono 小字、不改大小写
+       （路径参数被 uppercase 会变形）。相邻条目以虚线分隔，沿用同一视觉
+       语言。 */
+    .turn-block details.process-item + details.process-item {
       margin-top: var(--sebas-space-2);
       padding-top: var(--sebas-space-2);
       border-top: 1px dashed var(--sebas-border);
+    }
+    .turn-block details.process-item summary {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+      font-family: var(--sebas-font-mono);
+      font-size: 0.76rem;
+      color: var(--sebas-text-dim);
+      transition: color var(--sebas-dur) var(--sebas-ease);
+    }
+    .turn-block details.process-item summary::-webkit-details-marker {
+      display: none;
+    }
+    .turn-block details.process-item summary:hover,
+    .turn-block details.process-item summary:focus-visible {
+      color: var(--sebas-text-bright);
+    }
+    .turn-block details.process-item summary .item-title {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .turn-block details.process-item .item-body {
+      padding-top: var(--sebas-space-2);
+      font-size: 0.8rem;
+      line-height: 1.6;
     }
   `
 
@@ -768,6 +946,10 @@ export class SebasTranscriptView extends LitElement {
 
   render() {
     const showSeam = this.unseenCount > 0
+    // 3.2（D4）：角标是派生态——纯 entry 序语义：最后一条渲染单元仍是
+    // 操作者提交即显示（排队窗非 working 也成立）。agent entry 一到（收尾
+    // 不再是 prompt）条件即不成立，角标消失。
+    const receipt = awaitingReceipt(this.turnUnits)
     // seam 仍是整行分隔条（文案 / localStorage 锚定 / 滚动锚点均不变），
     // 但内联落在最后一条已读与第一条未读**回合**之间（index =
     // seamIndex）；全部已读时保留行首的 hidden 占位，供滚动逻辑
@@ -788,16 +970,20 @@ export class SebasTranscriptView extends LitElement {
       <div class="scroll" role="log" aria-label="Session conversation">
         ${showSeam
           ? this.turnUnits.map((u, i) =>
-              i === this.seamIndex ? html`${seam}${this.renderUnit(u)}` : this.renderUnit(u),
+              i === this.seamIndex
+                ? html`${seam}${this.renderUnit(u, receipt && i === this.turnUnits.length - 1)}`
+                : this.renderUnit(u, receipt && i === this.turnUnits.length - 1),
             )
-          : html`${seam}${this.turnUnits.map((u) => this.renderUnit(u))}`}
+          : html`${seam}${this.turnUnits.map((u, i) =>
+              this.renderUnit(u, receipt && i === this.turnUnits.length - 1),
+            )}`}
       </div>
     `
   }
 
-  private renderUnit(u: TurnUnit) {
+  private renderUnit(u: TurnUnit, receipt: boolean) {
     if (u.kind === 'error') return this.renderErrorUnit(u)
-    if (u.kind === 'operator') return this.renderOperatorUnit(u)
+    if (u.kind === 'operator') return this.renderOperatorUnit(u, receipt)
     return this.renderAgentUnit(u)
   }
 
@@ -823,7 +1009,7 @@ export class SebasTranscriptView extends LitElement {
   }
 
   /** 2.3：operator 回合 = 「你」气泡（accent-soft 底，右对齐）。 */
-  private renderOperatorUnit(u: OperatorUnit) {
+  private renderOperatorUnit(u: OperatorUnit, receipt: boolean) {
     const e = u.entry
     const iso = isoTime(e.created_at_unix)
     const ts = formatTime(e.created_at_unix)
@@ -833,6 +1019,11 @@ export class SebasTranscriptView extends LitElement {
         <div class="bubble">
           <div class="meta">
             <span class="author you">you</span>
+            ${receipt
+              ? html`<span class="receipt" data-receipt title="服务端已接受，等待 agent 开始输出"
+                  >已收到</span
+                >`
+              : nothing}
             <time class="time" datetime=${iso || nothing}>${ts}</time>
           </div>
           <div class="body"><p>${e.content}</p></div>
@@ -842,18 +1033,22 @@ export class SebasTranscriptView extends LitElement {
   }
 
   /**
-   * 2.1/2.2：一个 agent 回合 = 一个气泡。回合内按 D4 分块：文本段 /
-   * thinking 折叠 / 工具组按位置交替落放。
+   * 2.1/2.2：一个 agent 回合 = 一个气泡。回合内全部过程条目收进单个过程
+   * 大折叠，文本段按流序留在折叠外。作者标签走 display → slug → assistant
+   * 回退链（3.1，D1），头像维持文本形态（展示名首字母；无展示名保持既有
+   * AI 形态）。
    */
   private renderAgentUnit(u: AgentUnit) {
     const iso = isoTime(u.startedAt)
     const ts = formatTime(u.startedAt)
+    const label = resolveAgentDisplay(this.agentDisplay)
+    const avatar = label === 'assistant' ? 'AI' : graphemes(label)[0]?.toUpperCase() ?? 'AI'
     return html`
       <div class="turn-block is-assistant" data-turn-position=${u.position}>
-        <div class="avatar assistant">AI</div>
+        <div class="avatar assistant">${avatar}</div>
         <div class="bubble">
           <div class="meta">
-            <span class="author">assistant</span>
+            <span class="author">${label}</span>
             <time class="time" datetime=${iso || nothing}>${ts}</time>
           </div>
           ${u.blocks.map((b) => this.renderAgentBlock(b))}
@@ -866,30 +1061,35 @@ export class SebasTranscriptView extends LitElement {
     if (b.type === 'text') {
       return html`<div class="body">${unsafeHTML(renderMarkdown(b.content))}</div>`
     }
-    if (b.type === 'thinking') {
-      return html`
-        <details class="fold thinking-fold">
-          <summary>
-            <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
-            <span class="label">thinking</span>
-          </summary>
-          <div class="body fold-body">${unsafeHTML(renderMarkdown(b.content))}</div>
-        </details>
-      `
-    }
-    // 工具组（2.2）：「used N tools」可展开组；原生 details/summary 支持
-    // 键盘展开（2.5）。
+    // 过程大折叠（2.1/2.2）：回合内全部 thinking + tool 的唯一折叠，默认
+    // 收起；原生 details/summary 支持键盘展开（2.5）。展开后逐条二级折叠
+    // 也默认收起，条目 DOM 以 position 为键保持身份（避免重渲染丢展开态）。
     return html`
-      <details class="fold tools-fold" data-tool-count=${b.items.length}>
+      <details class="fold process-fold" data-process-count=${b.items.length}>
         <summary>
           <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
-          <span class="label">used ${b.items.length} tool${b.items.length === 1 ? '' : 's'}</span>
+          <span class="label">process · ${b.items.length}</span>
         </summary>
         <div class="body fold-body">
-          ${b.items.map(
-            (it) => html`<div class="tool-item">${unsafeHTML(renderMarkdown(it.content))}</div>`,
+          ${repeat(
+            b.items,
+            (it) => it.position,
+            (it) => this.renderProcessItem(it),
           )}
         </div>
+      </details>
+    `
+  }
+
+  /** 二级折叠（2.2）：title 概要 + `title` 属性保全量；无 title 回退通用标签。 */
+  private renderProcessItem(it: ProcessItem) {
+    const { label, full } = processItemLabel(it)
+    return html`
+      <details class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
+        <summary title=${full ?? nothing}>
+          <span class="item-title">${label}</span>
+        </summary>
+        <div class="body item-body">${unsafeHTML(renderMarkdown(it.content))}</div>
       </details>
     `
   }

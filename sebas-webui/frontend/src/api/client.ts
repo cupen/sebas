@@ -252,6 +252,12 @@ export interface ConversationEntryView {
    * different element when an older card refreshes in place.
    */
   created_at_unix: number
+  /**
+   * （workbench-agent-identity-and-process-folds D2）后端为工具条目构造的
+   * 结构化标题（工具名 + 关键参数，如 `read · src/main.rs`）。可选：
+   * 旧持久化条目没有该字段（undefined/null），前端回退通用标签。
+   */
+  title?: string | null
 }
 
 export interface SessionDetail {
