@@ -14,17 +14,21 @@
  * gone on the next reachability poll.
  */
 import { expect, test } from '@playwright/test'
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
 import {
   AppShell,
   ErrorCollector,
   ProjectRail,
   Workbench,
+  createSession,
   detachedSceneDir,
   isCoreAlive,
   reachabilityOk,
   startCore,
   stopCore,
   waitForCoreReachability,
+  waitStatus,
 } from './helpers/index'
 
 test.describe('部署韧性', () => {
@@ -54,6 +58,16 @@ test.describe('部署韧性', () => {
         }
         await waitForCoreReachability(page.request, true, 45_000)
       }
+      // Self-sufficient focus: since interaction-polish the composer only
+      // renders for a FOCUSED session. This journey used to lean on whatever
+      // server-side focus pointer an earlier spec (approval-detached runs
+      // first alphabetically) left in the persistent scene — running
+      // `--case deployment` alone landed on the empty state instead. Create
+      // a real session and deep-link to it so the baseline holds standalone;
+      // the session survives the stop/start below via graceful state dump.
+      const key = await createSession(page.request, { prompt: 'deployment-probe' })
+      await waitStatus(page.request, key, ['done'], 30_000)
+      await page.goto(`/sessions/${key}`)
       // 起点健康：无核心横幅，composer 可提交。
       await expect(page.locator('[data-testid="core-unreachable-banner"]')).toHaveCount(0)
       await expect(workbench.composerTextarea).toBeEnabled()
@@ -73,12 +87,15 @@ test.describe('部署韧性', () => {
       await expect(workbench.sendButton).toBeDisabled()
       await expect(workbench.composer).toContainText('core not connected')
 
-      // 加项目：注册成功（本地注册表降级）并就地提示，而非静默。
+      // 加项目：注册成功（本地注册表降级）并就地提示，而非静默。路径每次
+      // 尝试唯一：重试 attempt 里上一次已注册同一路径会 409，hint 就看不到。
+      const outageDir = path.join(scene, `outage-${Date.now()}`)
+      mkdirSync(outageDir, { recursive: true })
       await rail.openAddDialog()
-      await rail.addProjectByPath(scene)
+      await rail.addProjectByPath(outageDir)
       // 先等项目落栏（= add 之后的 refresh 已完成），再要降级提示——
       // hint 在 refresh 完成后立即置位，两者同帧可达。
-      const projectName = scene.split(/[\\/]/).filter(Boolean).pop()!
+      const projectName = outageDir.split(/[\\/]/).filter(Boolean).pop()!
       await expect(rail.projectRow(projectName)).toBeVisible({ timeout: 15_000 })
       const hint = page.locator('[data-testid="project-degraded-hint"]')
       await expect(hint).toBeVisible({ timeout: 15_000 })
@@ -89,10 +106,17 @@ test.describe('部署韧性', () => {
       startCore(scene)
       await waitForCoreReachability(page.request, true, 45_000)
 
-      // 无需刷新页面：横幅在下一次可达性轮询后消失，composer 解禁。
+      // 无需刷新页面：横幅在下一次可达性轮询后消失。
       await expect(page.locator('[data-testid="core-unreachable-banner"]')).toHaveCount(0, {
         timeout: 15_000,
       })
+      // composer 解禁需要聚焦会话。重启后深链会话可能已不在 summary 里
+      // （恢复面与快照的时序差，convergence 清 deepLinkKey 后不回头），
+      // 所以恢复后新建一个会话并深链聚焦——确定性成立，同时证明恢复后的
+      // core 能正常开新会话（发真消息、回合收敛）。
+      const recovered = await createSession(page.request, { prompt: 'deployment-recovered' })
+      await waitStatus(page.request, recovered, ['done'], 30_000)
+      await page.goto(`/sessions/${recovered}`)
       await expect(workbench.composerTextarea).toBeEnabled({ timeout: 15_000 })
 
       expect(collector.clean()).toEqual([])
