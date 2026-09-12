@@ -11,6 +11,7 @@ Usage:
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -42,6 +43,11 @@ def _cleanup_stale_sandboxes():
         if not os.path.isdir(d):
             continue
         pids_file = os.path.join(d, "pids.json")
+        # A failed suite keeps this dir for postmortem — its recorded pids are
+        # dead precisely BECAUSE teardown killed them, so the liveness check
+        # below would sweep it away within the same invocation. Exempt it.
+        if os.path.exists(os.path.join(d, ".tests-failed")):
+            continue
         alive = False
         try:
             with open(pids_file) as f:
@@ -60,6 +66,66 @@ def _cleanup_stale_sandboxes():
             removed.append(d)
     if removed:
         print(f"[cleanup] removed {len(removed)} stale sandbox dirs", flush=True)
+    _sweep_orphan_test_processes()
+
+
+def _sweep_orphan_test_processes():
+    """Kill orphaned sebas processes leaked by crashed suite runs (sebas-gc7).
+
+    Two leak classes, two rules:
+
+    - Rust suites (`target/tests/sebas/testsuite_*` in cmdline): the dir only
+      exists while a suite runs and cargo's target lock serializes suite
+      runs, so any live process carrying one is leaked — kill.
+    - webui sandbox (`sbtestsuite.` in cmdline): the dir survives for active
+      runs AND intentionally-kept failure scenes, so only kill when the
+      referenced dir is already gone — the surest sign the harness died and
+      teardown never ran (an active run's dir always exists).
+
+    SIGTERM first so cores exit gracefully, SIGKILL stragglers. The
+    operator's real instance (AppImage / cargo bin, ~/.sebas config) never
+    references either test path.
+    """
+    if not os.path.isdir("/proc"):
+        return
+    rust_marker = "target/tests/sebas/testsuite_"
+    targets = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if "sebas" not in cmd:
+            continue
+        if rust_marker in cmd:
+            targets.append(int(entry))
+            continue
+        m = re.search(r"(\S*sbtestsuite\.\S+)/", cmd)
+        if m and not os.path.isdir(m.group(1)):
+            targets.append(int(entry))
+    if not targets:
+        return
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 3
+    alive = targets
+    while time.time() < deadline:
+        alive = [p for p in targets if os.path.exists(f"/proc/{p}")]
+        if not alive:
+            return
+        time.sleep(0.2)
+    for pid in alive:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    print(f"[cleanup] killed orphaned test processes: {targets}", flush=True)
 
 
 
@@ -330,6 +396,11 @@ def _sandbox_env(work, secret=True):
             "SEBAS_ROUTER_PROVIDER_OVERLAY": os.path.join(work, "providers.json"),
             "SEBAS_WEBUI_AUTH_FILE": os.path.join(work, "webui-auth.json"),
             "SEBAS_PROJECTS_PATH": os.path.join(work, "projects.json"),
+            # archive.json derives from SEBAS_HOME ($HOME/.sebas) — without
+            # this the sandbox READ AND REWROTE the operator's real archive
+            # (test sessions landed in it, 93-entry pollution, 2026-09-12).
+            "SEBAS_HOME": work,
+            "SEBAS_ARCHIVE_PATH": os.path.join(work, "archive.json"),
         }
     )
     if secret:
@@ -574,15 +645,37 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     if detached:
         try:
             with open(os.path.join(work, "pids.json")) as f:
-                for pid in json.load(f).values():
-                    if not isinstance(pid, int):
-                        continue
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError):
-                        pass
+                recorded = [
+                    pid for pid in json.load(f).values() if isinstance(pid, int)
+                ]
         except (OSError, ValueError):
-            pass
+            recorded = []
+        for pid in recorded:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Graceful exit has a deadline; escalate to SIGKILL. Without this a
+        # hung or late-started core outlives this process and its sandbox
+        # dir — reparented to init, referenced by a deleted config (sebas-oo2).
+        deadline = time.time() + 5
+        alive = recorded
+        while time.time() < deadline:
+            alive = []
+            for pid in recorded:
+                try:
+                    os.kill(pid, 0)
+                    alive.append(pid)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if not alive:
+                break
+            time.sleep(0.25)
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
     log.close()
     if webui_log is not None:
         webui_log.close()
@@ -596,6 +689,10 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
         except OSError:
             pass
         print(f"[testsuite] sandbox cleaned: {work}", flush=True)
+        # The dir is gone, so any sebas still referencing it is by definition
+        # an orphan (e.g. a fixture-restarted core that never made it into
+        # pids.json) — the sweep is the last-resort reaper.
+        _sweep_orphan_test_processes()
 
 
 @task(
