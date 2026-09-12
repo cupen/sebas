@@ -56,10 +56,12 @@ test.describe('提交控件状态机', () => {
     await resetState(page.request)
     const { id: projectId } = await ensureSceneProject(page.request)
     const key = await createSession(page.request, { prompt: 'stream', projectId })
+    // Poll for WORKING before the page boots: the ~2s working window can pass
+    // entirely during goto + first paint on a loaded machine, and the turn
+    // would already read "done" at the first sample (cold-window flake).
+    const working = waitStatus(page.request, key, ['working'], 15_000)
     await page.goto(`/sessions/${key}`)
-
-    // 等 turn 真正进入 WORKING（首个内容帧）。
-    await waitStatus(page.request, key, ['working'], 15_000)
+    await working
     await expect(workbench.submitControl).toHaveAttribute('data-state', 'stop', {
       timeout: 10_000,
     })
@@ -92,9 +94,10 @@ test.describe('提交控件状态机', () => {
     await resetState(page.request)
     const { id: projectId } = await ensureSceneProject(page.request)
     const key = await createSession(page.request, { prompt: 'stream', projectId })
+    // Same cold-window guard as above: sample the API while the page boots.
+    const working = waitStatus(page.request, key, ['working'], 15_000)
     await page.goto(`/sessions/${key}`)
-
-    await waitStatus(page.request, key, ['working'], 15_000)
+    await working
 
     // 有字 → 排队形态（非停止、非发送）。
     await workbench.composerTextarea.fill('queued behind this turn')
