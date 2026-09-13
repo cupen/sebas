@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 /**
- * 登录视图（add-webui-multiuser-rbac 5.1）：用户名+密码双字段形态——
- * 旧 `{secret}` 单字段（token 或密码二义）链路已整体移除：
+ * 登录视图（add-webui-multiuser-rbac 5.1）：用户名+密码双字段形态：
  *   - 提交载荷只含 `{username, password}`（authLogin 双参，绝无 secret 字段）
  *   - 成功冒泡 `login-success`（携带登录响应的 username）
  *   - 401 凭据错 / 429 限速 / 其他 HTTP 失败 / 网络失败，文案就地展示
@@ -79,12 +78,12 @@ afterEach(() => {
 })
 
 describe('sebas-login two-field form (add-webui-multiuser-rbac 5.1)', () => {
-  it('renders separate username and password fields with no single-field secret path', async () => {
+  it('renders separate username and password fields', async () => {
     const el = await mount()
     expect(field(el, 'username')).toBeTruthy()
     expect(field(el, 'password')).toBeTruthy()
     expect(field(el, 'password').getAttribute('autocomplete')).toBe('current-password')
-    // hintUsername 单字段链路已删：无任何 secret 输入与 hint 绑定。
+    // 无 secret 输入与 hint 绑定。
     expect(el.shadowRoot!.querySelector('input[name="secret"]')).toBeNull()
     expect(el.shadowRoot!.textContent ?? '').not.toContain('Token')
     el.remove()

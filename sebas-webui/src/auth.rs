@@ -4,11 +4,8 @@
 //! # 账户模型
 //!
 //! 用户存独立 SQLite 库 auth.db（[`crate::user_store`]，默认
-//! `~/.sebas/auth.db`，`SEBAS_WEBUI_AUTH_DB` 覆盖）。DB 即活数据：旧单账户
-//! 时代的「凭据文件 + mtime 热重载」机制整体移除，用户管理/改密/禁用经
-//! [`UserStore`] 写库即时生效。`webui-auth.json` / `SEBAS_WEBUI_AUTH_FILE` /
-//! `SEBAS_WEBUI_TOKEN` / `{"secret"}` 单字段登录全部不再支持（旧系统不做
-//! 兼容，未正式发布）。
+//! `~/.sebas/auth.db`，`SEBAS_WEBUI_AUTH_DB` 覆盖）。DB 即活数据：
+//! 用户管理/改密/禁用经 [`UserStore`] 写库即时生效。
 //!
 //! # 登录
 //!

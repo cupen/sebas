@@ -1101,11 +1101,11 @@ mod auth_guard_tests {
         assert_eq!(status, StatusCode::OK);
     }
 
-    /// add-webui-auth-switch Scenario「测试环境关闭」：凭据文件存在但开关
-    /// 关闭（接线层注入 disabled handle）→ 全路由免登录、me 报 enabled:false。
+    /// add-webui-auth-switch Scenario「测试环境关闭」：开关关闭（接线层注入
+    /// disabled handle）→ 全路由免登录、me 报 enabled:false。
     #[tokio::test]
     async fn switch_off_disables_auth_even_with_credentials() {
-        // disabled handle 的 path 为空：enabled() 恒 false，与凭据文件无关。
+        // disabled handle 的 path 为空：enabled() 恒 false。
         let app = build_router_with_auth(
             Arc::new(FakeBackend::new()),
             RouterInfo::default(),

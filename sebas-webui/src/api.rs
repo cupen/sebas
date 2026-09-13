@@ -399,7 +399,6 @@ impl EnvVarKind {
 /// （sebas-router config.rs、sebas-dispatch state_store.rs、acp claude
 /// driver、run.rs）。内部管道与测试专用变量（`SEBAS_IPC`、
 /// `SEBAS_CORE_SOCKET` 等）不在表内，即整体不出现（design Non-Goals）。
-/// `SEBAS_WEBUI_TOKEN`（单字段登录）随 add-webui-multiuser-rbac 移除。
 struct EnvVarSpec {
     name: &'static str,
     what: &'static str,
@@ -582,7 +581,7 @@ pub async fn auth_me(State(state): State<WebUiState>, headers: axum::http::Heade
 }
 
 /// POST /api/auth/login — 仅 `{ username, password }`（add-webui-multiuser-
-/// rbac D5：`{"secret"}` 单字段形态移除，缺字段 → 400）。限速按来源 IP
+/// rbac D5：缺字段 → 400）。限速按来源 IP
 /// （SessionStore），失败统一 401（不区分用户名错/密码错/账户禁用）。
 #[derive(Deserialize)]
 pub struct AuthLoginForm {
@@ -2291,8 +2290,6 @@ mod env_endpoint_tests {
             .map(|i| i["name"].as_str().unwrap())
             .collect();
         // 清单全量钉死（含补入的 SEBAS_STATE_DB）：增删条目须显式过这里。
-        // add-webui-multiuser-rbac：SEBAS_WEBUI_TOKEN（单字段登录）随该
-        // 机制整体移除。
         assert_eq!(
             names,
             [

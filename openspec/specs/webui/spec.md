@@ -1086,7 +1086,7 @@ WebUI SHALL 暴露 `POST /api/sessions/{key}/mode`（请求体 `{"mode": "<ask|e
 WebUI SHALL 提供只读端点 `GET /api/env`：读取 **webui 进程自身**的环境变量，返回**策划过**的变量清单（每项含名字、人读解释、按分类的值展示），经既有鉴权。策划清单之外的环境变量（内部管道、测试专用）SHALL NOT 出现在响应中。清单分类与展示语义：
 
 - **非敏感**（路径与开关，如 `SEBAS_STATE_DB`、`SEBAS_STATE_FILE`、`SEBAS_ROUTER_CONFIG`、`SEBAS_ROUTER_PROVIDER_OVERLAY`、`SEBAS_LOG_LEVEL`、`SEBAS_HANG_TIMEOUT_SECS`、`SEBAS_FEISHU_APP_ID`）：已设置显示实际值；未设置标注「未设置（用默认）」且解释里写明默认值。
-- **敏感**（凭据类，如 `SEBAS_WEBUI_PASSWORD`、`SEBAS_WEBUI_TOKEN`、`SEBAS_CONTROL_SECRET`、`SEBAS_FEISHU_APP_SECRET`）：SHALL 只显示「已设置 / 未设置」，**值本身 SHALL NOT 出现在响应里**（遮蔽在服务端完成）。
+- **敏感**（凭据类，如 `SEBAS_WEBUI_PASSWORD`、`SEBAS_CONTROL_SECRET`、`SEBAS_FEISHU_APP_SECRET`）：SHALL 只显示「已设置 / 未设置」，**值本身 SHALL NOT 出现在响应里**（遮蔽在服务端完成）。
 
 前端 `Env Vars` 分区 SHALL 消费该端点渲染只读表；端点失败（core 无关，纯 webui 面）时分区 SHALL 如实呈现错误状态而非空白或编造数据。
 
@@ -1158,7 +1158,7 @@ root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为
 ### Requirement: 多用户登录形态
 
 `POST /api/auth/login` SHALL 只接受 `{"username", "password"}` 一种
-形态（旧单字段 `{"secret"}` 移除，缺失字段返回 400）。成功即建立
+形态（缺失字段返回 400）。成功即建立
 绑定该用户的会话 cookie；凭据失败统一 401，不区分「用户不存在」与
 「密码错误」，限速策略不变（按来源 IP）。登录页 SHALL 呈现用户名 +
 密码两个字段。
@@ -1168,11 +1168,6 @@ root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为
 - **WHEN** `{"username", "password"}` 提交到 `/api/auth/login` 且凭据
   正确
 - **THEN** 登录成功并建立绑定该用户的会话，响应携带该用户名
-
-#### Scenario: 旧单字段形态不可用
-
-- **WHEN** `{"secret": "..."}` 提交到 `/api/auth/login`
-- **THEN** 返回 400（登录请求缺用户名/密码字段）
 
 #### Scenario: 失败不泄漏用户存在性
 

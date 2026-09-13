@@ -750,7 +750,7 @@ export const api = {
 
   // Auth（webui 多用户登录鉴权，add-webui-multiuser-rbac D5/D6）：me 探明
   // enabled/authenticated/needs_setup/role；login 只收 {username,password}
-  // 双字段（旧 {secret} 单字段形态已移除，服务端一律 400）；setup 为零用户
+  // 双字段（服务端缺字段一律 400）；setup 为零用户
   // 首启专属（成功即建立会话，语义同登录）。
   authMe: () => get<AuthInfo>('/api/auth/me'),
   authLogin: (username: string, password: string) =>
