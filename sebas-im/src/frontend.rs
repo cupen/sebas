@@ -51,6 +51,16 @@ struct SessionView {
     frozen: bool,
 }
 
+/// 入站 prompt 消息 → 轮次的归属账（feishu-turn-badges）：ack 👌 打在消息
+/// 到达时；终态 ✅/❌ 只该落在「触发当轮」的那条消息上。入站事件先记
+/// `pending`，轮次开始（prompt 变化 / 新视图首见）时提升为 `current`；
+/// 轮中追加的排队消息不抢归属（`current` 已有时只在换轮时刷新）。
+#[derive(Default)]
+struct TurnMsgs {
+    pending: Option<String>,
+    current: Option<String>,
+}
+
 impl SessionView {
     fn new(key: ChannelKey, info: &SessionInfo) -> Self {
         let prompt = info.user_prompt.clone().unwrap_or_default();
@@ -84,6 +94,8 @@ pub struct ImFrontend<P: CoreSessionPort, C: ControlPort> {
     views: RwLock<HashMap<String, SessionView>>,
     /// chat key reference → 触发消息 message_id（线程回复目标）。
     reply_targets: RwLock<HashMap<String, String>>,
+    /// view_id → 入站消息的轮次归属账（feishu-turn-badges）。
+    turn_msgs: RwLock<HashMap<String, TurnMsgs>>,
     /// request_id → 权限卡 message_id（点击后就地翻卡）。
     perm_cards: RwLock<HashMap<String, String>>,
     reactions: ReactionTracker,
@@ -134,6 +146,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             max_file_size,
             views: RwLock::new(HashMap::new()),
             reply_targets: RwLock::new(HashMap::new()),
+            turn_msgs: RwLock::new(HashMap::new()),
             perm_cards: RwLock::new(HashMap::new()),
             reactions: ReactionTracker::default(),
             cards_sent: AtomicU64::new(0),
@@ -171,6 +184,14 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                         .write()
                         .await
                         .insert(view_id(&key), t.clone());
+                    // 即时回执（feishu-turn-badges）：会进会话的消息一到就在
+                    // 原消息上挂「已收到」👌，先于任何 spawn/投递动作。
+                    // 状态查询类（/cost /status /compact）只回执不入归属——
+                    // 它们不开启轮次，不该抢终态角标的落点。
+                    if prompt_taking_command(&text) {
+                        let starts_turn = turn_starting_command(&text);
+                        self.ack_inbound(&key, t, starts_turn).await;
+                    }
                 }
                 self.on_text(key, text).await;
             }
@@ -187,6 +208,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                         .write()
                         .await
                         .insert(view_id(&key), t.clone());
+                    // 媒体恒成 prompt：ack 先于下载——「收到了」与「处理成了」
+                    // 是两件事，下载失败的文本回执另说。
+                    self.ack_inbound(&key, t, true).await;
                 }
                 self.on_media(key, files, caption, reply_target).await;
             }
@@ -200,6 +224,66 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 info!(chat = %key.reference, op = %value.get("op").and_then(|v| v.as_str()).unwrap_or(""), "feishu 入站表单提交");
                 self.on_form(value, form_value).await;
             }
+        }
+    }
+
+    /// 入站即时回执（feishu-turn-badges）：在用户原消息上挂「已收到」👌
+    /// （`phase::SEED` = 飞书 emoji_type "Get"）。尽力而为：失败仅 warn 不
+    /// 上抛；同一消息去重，重放/重复事件不叠挂。`starts_turn` 时把该消息
+    /// 记为最新待归属轮次的触发消息，轮次开始时提升为终态角标的落点。
+    async fn ack_inbound(&self, key: &ChannelKey, msg_id: &str, starts_turn: bool) {
+        if self.reactions.is_acked(msg_id).await {
+            return;
+        }
+        if starts_turn {
+            self.turn_msgs
+                .write()
+                .await
+                .entry(view_id(key))
+                .or_default()
+                .pending = Some(msg_id.to_string());
+        }
+        match self
+            .feishu
+            .react(&self.http, &self.tokens, msg_id, phase::SEED)
+            .await
+        {
+            Ok(rid) => {
+                self.reactions
+                    .record_ack(msg_id, phase::SEED.to_string(), rid)
+                    .await;
+            }
+            Err(e) => warn!(msg_id = %msg_id, ?e, "ack react failed"),
+        }
+    }
+
+    /// 终态角标落到触发当轮的用户消息上（feishu-turn-badges）：👌 保留，
+    /// ✅/❌ 叠挂其侧——「已收到」与「已完成」是两段独立的回执。一次性
+    /// 落账：phase 事件重放不重复 react。
+    async fn mark_user_terminal(&self, msg_id: &str, emoji: &str) {
+        if !self.reactions.claim_user_mark(msg_id, emoji).await {
+            return;
+        }
+        if let Err(e) = self
+            .feishu
+            .react(&self.http, &self.tokens, msg_id, emoji)
+            .await
+        {
+            warn!(msg_id = %msg_id, emoji, ?e, "terminal user-msg react failed");
+        }
+    }
+
+    /// 轮次归属提升（feishu-turn-badges）：本轮 prompt 变化（新轮开始）或
+    /// `current` 尚空（视图首见/首轮）时，把最新入站消息提升为当轮触发
+    /// 消息——终态角标的落点。轮中追加的排队消息不抢归属。
+    async fn promote_turn_msg(&self, id: &str, new_turn: bool) {
+        let mut tms = self.turn_msgs.write().await;
+        let tm = tms.entry(id.to_string()).or_default();
+        if !new_turn && tm.current.is_some() {
+            return; // 轮中追加的排队消息不抢归属
+        }
+        if let Some(p) = tm.pending.take() {
+            tm.current = Some(p);
         }
     }
 
@@ -476,6 +560,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 Ok(SessionEvent::Removed { channel, key }) => {
                     let ck = ChannelKey::new(channel, key);
                     self.views.write().await.remove(&view_id(&ck));
+                    self.turn_msgs.write().await.remove(&view_id(&ck));
                 }
                 // workbench-turn-queue：丢弃标注事件对 IM 前端是建议性的
                 // （队列管理面在 webui），随后的 Removed 帧会移除该会话视图。
@@ -501,6 +586,11 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         let mut views = self.views.write().await;
         let Some(view) = views.get_mut(&id) else {
             if info.status == "spawning" || info.session_id.is_some() {
+                // 新视图首见 = 新轮起点：先提升归属（终态角标落点 = 触发
+                // 本轮的消息）再入册（feishu-turn-badges）。
+                drop(views);
+                self.promote_turn_msg(&id, true).await;
+                let mut views = self.views.write().await;
                 views.insert(id, SessionView::new(key, &info));
             }
             return;
@@ -518,6 +608,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             view.last_pos = 0;
             view.frozen = false;
         }
+        // 回执归属（feishu-turn-badges）：新轮把最新入站消息提升为当轮
+        // 触发消息；首轮沿用「current 尚空即提升」。同一文本连发的归属
+        // 缺口随 new_turn 判定的既有语义（prompt 不变不视为新轮）。
+        self.promote_turn_msg(&id, new_turn).await;
         // 相位变化 → root 卡 reaction 换挡。
         if view.phase != info.phase
             && let Some(emoji) = info.phase.as_deref()
@@ -542,6 +636,20 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             {
                 self.reactions.record(&id, emoji.to_string(), rid).await;
             }
+        }
+        // 终态相位（feishu-turn-badges）：✅/❌ 叠挂到触发当轮的用户消息上
+        // ——卡片换挡只覆盖卡面。快速完成的轮次终态可能先于首卡到达，
+        // 标记不依赖 card_msg_id。
+        if let Some(emoji) = info.phase.as_deref()
+            && matches!(emoji, phase::DONE | phase::FAILED)
+            && let Some(target) = self
+                .turn_msgs
+                .read()
+                .await
+                .get(&id)
+                .and_then(|t| t.current.clone())
+        {
+            self.mark_user_terminal(&target, emoji).await;
         }
         view.phase = info.phase.clone();
     }
@@ -788,15 +896,38 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         if let Some(mid) = new_msg_id {
             self.views.write().await.get_mut(&id).unwrap().card_msg_id = Some(mid.clone());
             // 首卡出现：挂「已收到」相位 reaction（feishu-reactions 语义）。
-            if self.reactions.plan(&id, phase::SEED).await == ReactPlan::ReactOnly
+            // 终态先到（快速完成的轮次，DONE 事件时首卡尚未出）则直接挂
+            // 终态角标——否则 SEED 挂上后不再有相位事件来换挡，卡片终态
+            // 角标会永久缺失；此时用户消息的终态标也一并补齐。
+            let phase_now = self
+                .views
+                .read()
+                .await
+                .get(&id)
+                .and_then(|v| v.phase.clone());
+            let first_badge = match phase_now.as_deref() {
+                Some(p @ (phase::DONE | phase::FAILED)) => p,
+                _ => phase::SEED,
+            };
+            if self.reactions.plan(&id, first_badge).await == ReactPlan::ReactOnly
                 && let Ok(rid) = self
                     .feishu
-                    .react(&self.http, &self.tokens, &mid, phase::SEED)
+                    .react(&self.http, &self.tokens, &mid, first_badge)
                     .await
             {
                 self.reactions
-                    .record(&id, phase::SEED.to_string(), rid)
+                    .record(&id, first_badge.to_string(), rid)
                     .await;
+            }
+            if first_badge != phase::SEED
+                && let Some(target) = self
+                    .turn_msgs
+                    .read()
+                    .await
+                    .get(&id)
+                    .and_then(|t| t.current.clone())
+            {
+                self.mark_user_terminal(&target, first_badge).await;
             }
         }
     }
@@ -955,6 +1086,32 @@ fn same_chat(a: &str, b: &str) -> bool {
     let (ca, _) = a.split_once('\0').unwrap_or((a, ""));
     let (cb, _) = b.split_once('\0').unwrap_or((b, ""));
     ca == cb
+}
+
+/// 该入站文本会投递进会话（feishu-turn-badges 的 ack 面）：普通消息与
+/// 转发/查询类命令都打「已收到」👌；纯控制命令（/help /settings /sessions
+/// /new 空参…）自带即时文字回执，不打。
+fn prompt_taking_command(text: &str) -> bool {
+    match parse_command(text) {
+        Command::New(prompt) => !prompt.is_empty(),
+        Command::Cost
+        | Command::Status
+        | Command::Compact
+        | Command::Btw(_)
+        | Command::PassThrough(_) => true,
+        _ => false,
+    }
+}
+
+/// 该入站文本会开启（或排队进入）一个 agent 轮次（feishu-turn-badges 的
+/// 归属面）：只有这些消息参与终态角标落点的竞争。/cost /status /compact
+/// 是状态查询、不产生轮次，回执但不入账。
+fn turn_starting_command(text: &str) -> bool {
+    match parse_command(text) {
+        Command::New(prompt) => !prompt.is_empty(),
+        Command::Btw(_) | Command::PassThrough(_) => true,
+        _ => false,
+    }
 }
 
 /// 原始值缩略（feishu-card-callback-observability：异常 decision 原值在
@@ -1529,5 +1686,161 @@ mod tests {
         .await;
         assert!(port.ensures.lock().await.is_empty());
         assert_eq!(port.approvals.lock().await.len(), 0);
+    }
+
+    // ── feishu-turn-badges：入站回执 / 终态双标 / 归属账 ─────────────────
+
+    fn text_event(key: &ChannelKey, text: &str, msg_id: &str) -> ChannelEvent {
+        ChannelEvent::Text {
+            key: key.clone(),
+            text: text.into(),
+            reply_target: Some(msg_id.into()),
+        }
+    }
+
+    fn info(prompt: &str, phase: Option<&str>) -> SessionInfo {
+        SessionInfo {
+            channel: "feishu".into(),
+            key: "oc_t".into(),
+            session_id: Some("s1".into()),
+            status: "active".into(),
+            phase: phase.map(Into::into),
+            user_prompt: Some(prompt.into()),
+            last_active_unix: 0,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            backend: None,
+            usage: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+        }
+    }
+
+    /// 回执面/归属面两谓词的分野：查询类打 👌 但不竞争终态落点；纯控制
+    /// 命令既不打也不竞争。
+    #[test]
+    fn ack_and_attribution_predicates() {
+        assert!(prompt_taking_command("hi"));
+        assert!(prompt_taking_command("/new hello"));
+        assert!(prompt_taking_command("/cost"));
+        assert!(prompt_taking_command("/btw 补充一句"));
+        assert!(!prompt_taking_command("/help"));
+        assert!(!prompt_taking_command("/new"));
+        assert!(!prompt_taking_command("/settings k v"));
+
+        assert!(turn_starting_command("hi"));
+        assert!(turn_starting_command("/new hello"));
+        assert!(turn_starting_command("/btw 补充"));
+        assert!(!turn_starting_command("/cost"), "查询不开启轮次");
+        assert!(!turn_starting_command("/new"));
+    }
+
+    #[tokio::test]
+    async fn prompt_messages_get_immediate_ack_and_turn_attribution() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+
+        fe.on_channel_event(text_event(&key, "hi there", "om_1"))
+            .await;
+        fe.on_channel_event(text_event(&key, "/new hello", "om_2"))
+            .await;
+        fe.on_channel_event(text_event(&key, "/help", "om_3")).await;
+        fe.on_channel_event(text_event(&key, "/cost", "om_4")).await;
+
+        assert!(fe.reactions.is_acked("om_1").await);
+        assert!(fe.reactions.is_acked("om_2").await);
+        assert!(!fe.reactions.is_acked("om_3").await, "纯控制命令不打回执");
+        assert!(fe.reactions.is_acked("om_4").await, "状态查询打回执");
+
+        let tms = fe.turn_msgs.read().await;
+        let tm = tms.get(&view_id(&key)).unwrap();
+        assert_eq!(
+            tm.pending.as_deref(),
+            Some("om_2"),
+            "最新轮次触发消息覆盖归属"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_phase_marks_trigger_message_once() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+
+        fe.on_channel_event(text_event(&key, "do it", "om_1")).await;
+        fe.on_session_info(info("do it", Some("OnIt"))).await;
+        fe.on_session_info(info("do it", Some("DONE"))).await;
+
+        assert!(
+            !fe.reactions.claim_user_mark("om_1", phase::DONE).await,
+            "终态角标已落在触发当轮的消息上"
+        );
+        // 重放终态事件：一次性落账，不重复 react。
+        fe.on_session_info(info("do it", Some("DONE"))).await;
+    }
+
+    #[tokio::test]
+    async fn queued_message_does_not_steal_terminal_attribution() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+
+        fe.on_channel_event(text_event(&key, "first", "om_1")).await;
+        fe.on_session_info(info("first", Some("OnIt"))).await;
+        // 会话在飞时追加排队消息：ack 👌，但不抢归属。
+        fe.on_channel_event(text_event(&key, "second", "om_2"))
+            .await;
+        // 第一轮完成：✅ 落 om_1。
+        fe.on_session_info(info("first", Some("DONE"))).await;
+
+        assert!(
+            !fe.reactions.claim_user_mark("om_1", phase::DONE).await,
+            "om_1 已标终态"
+        );
+        assert!(
+            fe.reactions.claim_user_mark("om_2", phase::DONE).await,
+            "om_2 未被抢标——它的轮次还没开始"
+        );
+
+        // 第二轮开始（prompt 变化）→ 归属提升 om_2 → 完成标 om_2。
+        fe.on_session_info(info("second", Some("OnIt"))).await;
+        fe.on_session_info(info("second", Some("DONE"))).await;
+        assert!(
+            !fe.reactions.claim_user_mark("om_2", phase::DONE).await,
+            "第二轮终态落 om_2"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_card_with_terminal_phase_skips_seed_badge() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+
+        fe.on_channel_event(text_event(&key, "do it", "om_1")).await;
+        // 终态先到：无卡可挂（card_msg_id 尚缺），用户消息已标。
+        fe.on_session_info(info("do it", Some("DONE"))).await;
+        // 随后 turn 流才驱动首卡 flush。
+        fe.apply_turns(key.clone(), vec![TurnEntry::markdown(0, "答案")])
+            .await;
+
+        assert_eq!(
+            fe.reactions.plan(&view_id(&key), phase::DONE).await,
+            ReactPlan::Skip,
+            "首卡直接挂终态角标（DONE 已记录）"
+        );
+        assert!(
+            matches!(
+                fe.reactions.plan(&view_id(&key), phase::SEED).await,
+                ReactPlan::Swap { .. }
+            ),
+            "当前记录不是 SEED——终态先到时不该再从 👌 起步"
+        );
     }
 }

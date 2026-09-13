@@ -12,15 +12,41 @@ fn derive_topic_uses_first_nonempty_line() {
     // 首行空白 → 取下一非空行。
     let prompt2 = "\n  \n真正的标题\n继续";
     assert_eq!(derive_topic(prompt2), "真正的标题");
-    // 超长截断加省略号，UTF-8 安全（按字符而非字节）。
+    // 超长截断加省略号，UTF-8 安全（按字符而非字节）；上限 24（精简概括）。
     let long = "a".repeat(60);
     let t = derive_topic(&long);
-    assert_eq!(t.chars().count(), 41, "40 chars + ellipsis");
+    assert_eq!(t.chars().count(), 25, "24 chars + ellipsis");
     assert!(t.ends_with('…'));
     // 空 / 纯空白 / 纯围栏回退占位。
     assert_eq!(derive_topic(""), "Claude Code");
     assert_eq!(derive_topic("   "), "Claude Code");
     assert_eq!(derive_topic("```\n```"), "Claude Code");
+}
+
+#[test]
+fn derive_topic_condenses_whitespace() {
+    // 连续空白（含 tab）折叠为单空格——精简概括的一步。
+    assert_eq!(derive_topic("重构   src/foo\t\t模块"), "重构 src/foo 模块");
+    // 首部空白顺带去掉。
+    assert_eq!(derive_topic("   带前导空格的问题"), "带前导空格的问题");
+}
+
+#[test]
+fn derive_topic_truncates_at_word_boundary() {
+    // 英文长句优先回退到空白边界截断，不腰斩单词。
+    let english = "please help me refactor the whole authentication module now";
+    let t = derive_topic(english);
+    assert_eq!(t, "please help me refactor…", "cut at last space in window");
+    // 中文长句无空白可退 → 硬切到上限，剥不掉省略号。
+    let chinese = "帮我把这个仓库里所有还没迁移到新配置格式的模块全部梳理出来列一张清单";
+    let t2 = derive_topic(chinese);
+    assert_eq!(t2.chars().count(), 25, "24 chars + ellipsis: {t2}");
+    assert!(t2.ends_with('…'));
+    // 截断点悬在连接标点上 → 剥掉再接省略号，不留「xxx，…」。
+    assert_eq!(
+        derive_topic("abcdefghijklmnopqrstuvw，xyz后续内容也保留"),
+        "abcdefghijklmnopqrstuvw…"
+    );
 }
 
 #[test]
