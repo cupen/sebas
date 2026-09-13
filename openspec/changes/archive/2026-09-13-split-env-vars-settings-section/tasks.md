@@ -11,5 +11,5 @@
 
 ## 3. 收尾
 
-- [ ] 3.1 `cargo test -p sebas-webui` 全绿；`invoke testsuite-webui` 冒烟（settings 相关 journey 若断言旧 Generic env 表需适配）
-- [ ] 3.2 `openspec validate split-env-vars-settings-section --strict` 通过
+- [x] 3.1 `cargo test -p sebas-webui` 全绿；`invoke testsuite-webui` 冒烟（settings 相关 journey 若断言旧 Generic env 表需适配）
+- [x] 3.2 `openspec validate split-env-vars-settings-section --strict` 通过

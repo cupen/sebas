@@ -33,6 +33,16 @@
 - **WHEN** 设置弹窗渲染左导航
 - **THEN** 分区按 `Generic → Appearance → Services → Models → Env Vars · About` 排列，`Appearance` 与 `Services` 之间有组间分隔线；`Env Vars` 与 `About` 通过弹性留白压在导航底部、上方有分隔线，与功能区视觉分离
 
+#### Scenario: 分区顺序与 About 压底
+
+- **WHEN** 设置弹窗渲染左导航
+- **THEN** 功能分区按 `Generic → Appearance → Services → Models` 排列，`About` 与 `Env Vars` 同处底部只读组、整体通过弹性留白压底且上方有分隔线
+
+#### Scenario: Settings 分区总览
+
+- **WHEN** 聚焦 `About` 分区
+- **THEN** 主区先呈现 INSTANCE 段——工作区根目录（路径 + 复制按钮）、default agent kind（只读）、default provider/model（只读 + 跳转 Models 分区的链接），后呈现 BUILD 段（版本、commit、构建时间）
+
 #### Scenario: Generic 分区不再有环境变量表
 
 - **WHEN** 聚焦 `Generic` 分区
