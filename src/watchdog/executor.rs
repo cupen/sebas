@@ -10,7 +10,7 @@
 //! Invariant enforced here: **every accepted exclusive operation is settled**,
 //! on success, failure, and panic.
 
-use crate::config::WatchdogConfig;
+use crate::config::{ServiceConfig, WatchdogConfig};
 use crate::error::{Result, SebasError};
 use crate::watchdog::auth::{AssertionPrincipal, actor_to_principal};
 use crate::watchdog::confirmation::{ConfirmationError, ConfirmationService};
@@ -108,6 +108,9 @@ enum Execution {
 pub struct ControlExecutor {
     control: Arc<Mutex<ControlService>>,
     runner: Arc<dyn UpdaterRunner>,
+    /// 受管服务三节（core/webui/router）的配置——router 停止保护探针从
+    /// 这里解析 core channel 位置与 secret（simplify-service-config 拆分）。
+    service: ServiceConfig,
     config: WatchdogConfig,
     config_path: String,
     /// Managed-service table (core/webui/router supervision handles).
@@ -146,6 +149,7 @@ impl ControlExecutor {
     pub fn new(
         control: Arc<Mutex<ControlService>>,
         runner: Arc<dyn UpdaterRunner>,
+        service: ServiceConfig,
         config: WatchdogConfig,
         config_path: String,
         services: ServiceManager,
@@ -153,7 +157,7 @@ impl ControlExecutor {
         // router 停止保护探针（2.2/D2）：通道位置与 core 自身解析同一来源
         // （channel_path 或缺省），secret 走 env → config 目录 secret 文件的
         // 既有发现链。
-        let channel_path = config
+        let channel_path = service
             .core
             .channel_path
             .clone()
@@ -162,7 +166,7 @@ impl ControlExecutor {
             .unwrap_or_else(crate::core_channel::default_socket_path);
         let secret = crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(
             crate::config::core_secret_file_path(
-                config.core.secret_file.as_deref(),
+                service.core.secret_file.as_deref(),
                 std::path::Path::new(&config_path),
             ),
         ));
@@ -170,13 +174,14 @@ impl ControlExecutor {
             channel_path,
             secret,
         });
-        Self::with_activity_probe(control, runner, config, config_path, services, probe)
+        Self::with_activity_probe(control, runner, service, config, config_path, services, probe)
     }
 
     /// 注入探针的构造形态（测试替身 / 未来扩展用）。
     pub fn with_activity_probe(
         control: Arc<Mutex<ControlService>>,
         runner: Arc<dyn UpdaterRunner>,
+        service: ServiceConfig,
         config: WatchdogConfig,
         config_path: String,
         services: ServiceManager,
@@ -185,6 +190,7 @@ impl ControlExecutor {
         Self {
             control,
             runner,
+            service,
             config,
             config_path,
             services,
@@ -853,6 +859,7 @@ mod tests {
         let executor = ControlExecutor::new(
             control.clone(),
             runner,
+            ServiceConfig::default(),
             WatchdogConfig::default(),
             "./config.toml".into(),
             services,
@@ -891,6 +898,7 @@ mod tests {
         let executor = ControlExecutor::with_activity_probe(
             control.clone(),
             Arc::new(FakeRunner::default()),
+            ServiceConfig::default(),
             WatchdogConfig::default(),
             "./config.toml".into(),
             services,

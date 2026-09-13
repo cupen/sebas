@@ -15,6 +15,13 @@ pub struct Config {
     pub media: MediaConfig,
     #[serde(default)]
     pub log: LogConfig,
+    /// 受管服务的三节配置（simplify-service-config）：`[service.core]` /
+    /// `[service.webui]` / `[service.router]`。旧的 `[watchdog.*]` 同名节
+    /// 警告忽略（见 `warn_deprecated_watchdog_keys`）。
+    #[serde(default)]
+    pub service: ServiceConfig,
+    /// watchdog 自身的运维配置：`[watchdog.im]` / `[watchdog.upgrade]` /
+    /// `[watchdog.storage]` 与裸 `max_spawn_failures`（前缀保留 watchdog）。
     #[serde(default)]
     pub watchdog: WatchdogConfig,
     #[serde(default)]
@@ -413,18 +420,25 @@ fn default_log_level() -> String {
     "info".into()
 }
 
+/// 受管服务三节的配置载体（simplify-service-config）：core / webui /
+/// router 的配置节更名 `[watchdog.*]` → `[service.*]`；im/upgrade/storage
+/// 保留 `[watchdog.*]` 前缀，仍在 [`WatchdogConfig`]。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ServiceConfig {
+    #[serde(default)]
+    pub core: ServiceCoreConfig,
+    #[serde(default)]
+    pub webui: ServiceWebUiConfig,
+    #[serde(default)]
+    pub router: ServiceRouterConfig,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatchdogConfig {
-    #[serde(default)]
-    pub core: WatchdogCoreConfig,
     #[serde(default)]
     pub upgrade: WatchdogUpgradeConfig,
     #[serde(default)]
     pub storage: WatchdogStorageConfig,
-    #[serde(default)]
-    pub webui: WatchdogWebUiConfig,
-    #[serde(default)]
-    pub router: WatchdogRouterConfig,
     #[serde(default)]
     pub im: WatchdogImConfig,
     /// 受管服务连续 spawn 失败上限（fail-fast-on-startup-errors D1）：同一
@@ -438,11 +452,8 @@ pub struct WatchdogConfig {
 impl Default for WatchdogConfig {
     fn default() -> Self {
         Self {
-            core: Default::default(),
             upgrade: Default::default(),
             storage: Default::default(),
-            webui: Default::default(),
-            router: Default::default(),
             im: Default::default(),
             max_spawn_failures: default_max_spawn_failures(),
         }
@@ -453,12 +464,12 @@ fn default_max_spawn_failures() -> u32 {
     3
 }
 
-/// watchdog 模式下 core 子进程（会话核心 + ACP）的路径配置。
+/// `sebas run` 模式下 core 子进程（会话核心 + ACP）的路径配置。
 /// core 恒启动（enable-core-by-default）：无 `enabled` 开关，watchdog
 /// 无条件拉起并监督；旧的 `enabled` 键被忽略并告警（见
 /// `warn_deprecated_watchdog_keys`）。
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct WatchdogCoreConfig {
+pub struct ServiceCoreConfig {
     /// core session channel 的 Unix socket 路径（openspec/changes/
     /// add-core-session-channel）。空/缺省 → `$XDG_RUNTIME_DIR/sebas/core.sock`
     /// （或 per-uid 临时目录回退）。
@@ -473,7 +484,7 @@ pub struct WatchdogCoreConfig {
 }
 
 /// 解析 core session channel 的 secret 文件路径（D1 纯函数）：
-/// `[watchdog.core] secret_file` 显式键优先（`~` 由 with_expanded_paths 展开）；
+/// `[service.core] secret_file` 显式键优先（`~` 由 with_expanded_paths 展开）；
 /// 缺省推导为 `<config 文件所在目录>/core.secret`。双进程（core 与客户端）
 /// 读同一份 `-c` config，路径天然一致；沙箱用自己的 config，隔离天然成立。
 pub fn core_secret_file_path(secret_file: Option<&str>, config_path: &std::path::Path) -> std::path::PathBuf {
@@ -489,7 +500,7 @@ pub fn core_secret_file_path(secret_file: Option<&str>, config_path: &std::path:
     }
 }
 
-impl WatchdogCoreConfig {
+impl ServiceCoreConfig {
     /// 以已知 config 文件路径解析 secret 文件位置（`core_secret_file_path`
     /// 的方法形态，调用方不必拆字段）。
     pub fn secret_file_path(&self, config_path: &std::path::Path) -> std::path::PathBuf {
@@ -498,7 +509,7 @@ impl WatchdogCoreConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct WatchdogWebUiConfig {
+pub struct ServiceWebUiConfig {
     /// Let watchdog own the WebUI lifecycle. 默认开：watchdog 唯一默认启动
     /// 的服务，其余（core/router）由 WebUI 服务页按需启停。
     #[serde(default = "default_webui_enabled")]
@@ -521,13 +532,13 @@ pub struct WatchdogWebUiConfig {
     #[serde(default)]
     pub allowed_roots: Vec<String>,
     /// 归档保留期（天）。默认 30；过期归档在 webui 启动时及每次列表请求时
-    /// 删除（add-project-session-actions）。配置项归属 `[watchdog.webui]`
+    /// 删除（add-project-session-actions）。配置项归属 `[service.webui]`
     /// （webui 配置的现唯一归属地，无独立 `[webui]` 顶层节）。
     #[serde(default = "default_archive_retention_days")]
     pub archive_retention_days: u64,
 }
 
-impl Default for WatchdogWebUiConfig {
+impl Default for ServiceWebUiConfig {
     fn default() -> Self {
         Self {
             enabled: default_webui_enabled(),
@@ -546,7 +557,7 @@ impl Default for WatchdogWebUiConfig {
 /// 引入白名单前完全一致；配置了 → 返回配置项 + 服务端默认根（work_dir /
 /// cwd 回退）自动入列，保证「不带 root」的既有语义不受启用影响。
 pub fn webui_allowed_roots(
-    cfg: &WatchdogWebUiConfig,
+    cfg: &ServiceWebUiConfig,
     work_root: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
     if cfg.allowed_roots.is_empty() {
@@ -587,7 +598,7 @@ fn default_webui_port() -> u16 {
 /// `sebas router` 或本开关开启后的 watchdog 受管子进程，同一入口；
 /// 内嵌形态（`core --router`）已删除（sebas-08c）。
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct WatchdogRouterConfig {
+pub struct ServiceRouterConfig {
     #[serde(default)]
     pub enabled: bool,
 }
@@ -660,18 +671,21 @@ fn deprecated_watchdog_upgrade_hits(raw: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// `[watchdog.core] enabled` 是否出现在原始 TOML（enable-core-by-default：
-/// core 恒启动，该键已删除）。
-fn deprecated_watchdog_core_enabled_hit(raw: &str) -> bool {
+/// simplify-service-config：`[watchdog.{core,webui,router}]` 三节已更名
+/// `[service.*]`。返回命中的旧节名（原始 TOML 扫描；serde 侧这些表已不在
+/// `WatchdogConfig`，未知子表被静默忽略——可见性全靠本扫描）。
+fn deprecated_watchdog_service_tables(raw: &str) -> Vec<&'static str> {
     let Ok(value) = raw.parse::<toml::Table>() else {
-        return false;
+        return Vec::new();
     };
-    value
-        .get("watchdog")
-        .and_then(|v| v.as_table())
-        .and_then(|w| w.get("core"))
-        .and_then(|v| v.as_table())
-        .is_some_and(|c| c.contains_key("enabled"))
+    let Some(watchdog) = value.get("watchdog").and_then(|v| v.as_table()) else {
+        return Vec::new();
+    };
+    ["core", "webui", "router"]
+        .iter()
+        .copied()
+        .filter(|k| watchdog.contains_key(*k))
+        .collect()
 }
 
 fn warn_deprecated_watchdog_keys(raw: &str) {
@@ -682,10 +696,15 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
             hit.join(", ")
         );
     }
-    if deprecated_watchdog_core_enabled_hit(raw) {
+    let renamed = deprecated_watchdog_service_tables(raw);
+    if !renamed.is_empty() {
         // parse 发生在 tracing 初始化之前（watchdog 在 parse 后才 init），
         // tracing::warn 会被静默丢弃——deprecation 提示同时走 stderr，确保可见。
-        let msg = "config [watchdog.core] enabled is deprecated and ignored: core is always started; remove the key";
+        let msg = format!(
+            "config deprecated section(s) [watchdog.{}] ignored: renamed to [service.{}] - move the section",
+            renamed.join(", "),
+            renamed.join(", ")
+        );
         tracing::warn!("{msg}");
         eprintln!("warning: {msg}");
     }
@@ -830,8 +849,8 @@ impl Config {
 
     fn with_expanded_paths(mut self) -> Self {
         self.dispatch.state_file = expand_tilde(&self.dispatch.state_file);
-        if let Some(ref f) = self.watchdog.core.secret_file {
-            self.watchdog.core.secret_file = Some(expand_tilde(f));
+        if let Some(ref f) = self.service.core.secret_file {
+            self.service.core.secret_file = Some(expand_tilde(f));
         }
         for agent in self.acp.agents.values_mut() {
             if let AgentConfig::Claude(c) = agent {
@@ -842,7 +861,7 @@ impl Config {
             }
         }
         self.media.download_dir = expand_tilde(&self.media.download_dir);
-        for root in &mut self.watchdog.webui.allowed_roots {
+        for root in &mut self.service.webui.allowed_roots {
             *root = expand_tilde(root);
         }
         if let Some(ref f) = self.log.file {
@@ -931,45 +950,53 @@ mod tests {
         // watchdog 默认服务面（enable-core-by-default）：core 恒启动（无
         // enabled 开关），webui 默认开，router 默认关。
         let cfg = Config::parse("").expect("空配置应可解析（feishu 可选）");
-        assert!(cfg.watchdog.webui.enabled, "webui 应默认启用");
-        assert!(!cfg.watchdog.router.enabled, "router 应默认停用");
+        assert!(cfg.service.webui.enabled, "webui 应默认启用");
+        assert!(!cfg.service.router.enabled, "router 应默认停用");
         assert!(!cfg.feishu.enabled(), "无凭证时 feishu 应视为未启用");
         assert!(
-            cfg.watchdog.webui.allowed_roots.is_empty(),
+            cfg.service.webui.allowed_roots.is_empty(),
             "allowed_roots 缺省 = 未启用范围约束"
         );
         assert!(
-            cfg.watchdog.core.secret_file.is_none(),
+            cfg.service.core.secret_file.is_none(),
             "secret_file 缺省 = None（由 core_secret_file_path 推导）"
         );
     }
 
     #[test]
-    fn deprecated_core_enabled_key_is_ignored() {
-        // enable-core-by-default：旧 `[watchdog.core] enabled` 键照常解析
-        // （不报错），且不影响 core 恒启动语义。
+    fn deprecated_watchdog_service_tables_are_warned_and_ignored() {
+        // enable-core-by-default + simplify-service-config：`[watchdog.core]`
+        // 整节废弃（先 enabled 键、后整节更名），警告忽略、serde 静默跳过。
         let cfg = Config::parse("[watchdog.core]\nenabled = false\n")
-            .expect("旧 enabled 键应被忽略而非报错");
-        assert!(deprecated_watchdog_core_enabled_hit("[watchdog.core]\nenabled = false\n"));
-        assert!(!deprecated_watchdog_core_enabled_hit("[watchdog.core]\nchannel_path = \"/x\"\n"));
+            .expect("旧节应被忽略而非报错");
+        assert_eq!(
+            deprecated_watchdog_service_tables("[watchdog.core]\nenabled = false\n"),
+            vec!["core"]
+        );
+        assert!(deprecated_watchdog_service_tables(
+            "[service.core]\nchannel_path = \"/x\"\n"
+        )
+        .is_empty());
         // 旧键不再能关掉 core：结构里没有 enabled 字段可读，恒启动由 watchdog 保证。
         let _ = cfg;
     }
 
     #[test]
     fn secret_file_path_explicit_key_wins() {
-        // harden-core-channel-deployment 1.1：`[watchdog.core] secret_file`
-        // 显式键优先于缺省推导。
+        // harden-core-channel-deployment 1.1：`[service.core] secret_file`
+        // 显式键优先于缺省推导。TOML 值用正斜杠——Windows 反斜杠路径在
+        // basic string 里是 `\U` 转义起点，会解析失败。
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let explicit = dir.path().join("keys/channel.key");
+        let explicit_toml = explicit.to_string_lossy().replace('\\', "/");
         let cfg = Config::parse(&format!(
-            "[watchdog.core]\nsecret_file = \"{}\"\n",
-            explicit.display()
+            "[service.core]\nsecret_file = \"{}\"\n",
+            explicit_toml
         ))
         .expect("secret_file 键应可解析");
         assert_eq!(
-            cfg.watchdog.core.secret_file_path(&config_path),
+            cfg.service.core.secret_file_path(&config_path),
             explicit,
             "显式键必须原样（已展开）生效"
         );
@@ -984,14 +1011,14 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         let cfg = Config::parse("").expect("空配置应可解析");
         assert_eq!(
-            cfg.watchdog.core.secret_file_path(&config_path),
+            cfg.service.core.secret_file_path(&config_path),
             dir.path().join("nested").join("core.secret"),
             "缺省 secret 文件必须与 config 文件同目录"
         );
         // 空/空白字符串视同未配置（与 channel_path 的空值语义一致）。
-        let cfg_blank = Config::parse("[watchdog.core]\nsecret_file = \"\"\n").unwrap();
+        let cfg_blank = Config::parse("[service.core]\nsecret_file = \"\"\n").unwrap();
         assert_eq!(
-            cfg_blank.watchdog.core.secret_file_path(&config_path),
+            cfg_blank.service.core.secret_file_path(&config_path),
             dir.path().join("nested").join("core.secret"),
             "空字符串 secret_file 回退缺省推导"
         );
@@ -1003,12 +1030,12 @@ mod tests {
         // 经由 Config::parse 的既有展开管线生效）。
         let cfg = Config::parse(
             r#"
-[watchdog.webui]
+[service.webui]
 allowed_roots = ["~/work", "/srv/projects"]
 "#,
         )
         .expect("allowed_roots 应可解析");
-        let roots = &cfg.watchdog.webui.allowed_roots;
+        let roots = &cfg.service.webui.allowed_roots;
         assert_eq!(roots.len(), 2);
         assert!(
             !roots[0].starts_with("~"),
@@ -1022,14 +1049,14 @@ allowed_roots = ["~/work", "/srv/projects"]
     fn webui_allowed_roots_empty_config_disables_enforcement() {
         // 未配置 allowed_roots → 空表 = 不启用范围约束（冒烟抓到的回归：
         // 默认根无条件入列会让白名单永远非空、强制生效）。
-        let cfg = WatchdogWebUiConfig::default();
+        let cfg = ServiceWebUiConfig::default();
         assert!(webui_allowed_roots(&cfg, Some(std::path::Path::new("/any/work"))).is_empty());
         assert!(webui_allowed_roots(&cfg, None).is_empty());
     }
 
     #[test]
     fn webui_allowed_roots_configured_merges_default_root_once() {
-        let cfg = WatchdogWebUiConfig {
+        let cfg = ServiceWebUiConfig {
             allowed_roots: vec!["/srv/projects".into()],
             ..Default::default()
         };
@@ -1135,18 +1162,18 @@ app_secret = "s"
     #[test]
     fn watchdog_webui_explicit_disabled_wins() {
         let raw = r#"
-[watchdog.webui]
+[service.webui]
 enabled = false
 "#;
         let cfg = Config::parse(raw).expect("显式关闭应可解析");
-        assert!(!cfg.watchdog.webui.enabled, "显式 false 应优先于默认值");
+        assert!(!cfg.service.webui.enabled, "显式 false 应优先于默认值");
     }
 
     #[test]
     fn watchdog_webui_auth_defaults_true() {
         let cfg = Config::parse("").expect("空配置应可解析");
         assert!(
-            cfg.watchdog.webui.auth,
+            cfg.service.webui.auth,
             "鉴权开关缺省必须为 true（生产安全底线）"
         );
     }
@@ -1154,12 +1181,12 @@ enabled = false
     #[test]
     fn watchdog_webui_auth_explicit_false_wins() {
         let raw = r#"
-[watchdog.webui]
+[service.webui]
 auth = false
 "#;
         let cfg = Config::parse(raw).expect("显式关鉴权应可解析");
         assert!(
-            !cfg.watchdog.webui.auth,
+            !cfg.service.webui.auth,
             "显式 false 应优先于默认值"
         );
     }
@@ -1211,9 +1238,9 @@ app_id = "a"
 app_secret = "b"
 "#;
         let cfg = Config::parse(raw).expect("config parses");
-        assert!(cfg.watchdog.webui.enabled, "默认 webui 应启用");
-        assert_eq!(cfg.watchdog.webui.host, "127.0.0.1");
-        assert_eq!(cfg.watchdog.webui.port, 9797);
+        assert!(cfg.service.webui.enabled, "默认 webui 应启用");
+        assert_eq!(cfg.service.webui.host, "127.0.0.1");
+        assert_eq!(cfg.service.webui.port, 9797);
     }
 
     #[test]
@@ -1223,11 +1250,11 @@ app_secret = "b"
 app_id = "a"
 app_secret = "b"
 
-[watchdog.webui]
+[service.webui]
 enabled = false
 "#;
         let cfg = Config::parse(raw).expect("config parses");
-        assert!(!cfg.watchdog.webui.enabled, "显式 false 应关闭");
+        assert!(!cfg.service.webui.enabled, "显式 false 应关闭");
     }
 
     #[test]
@@ -1237,12 +1264,12 @@ enabled = false
 app_id = "a"
 app_secret = "b"
 
-[watchdog.webui]
+[service.webui]
 port = 9798
 "#;
         let cfg = Config::parse(raw).expect("config parses");
-        assert!(cfg.watchdog.webui.enabled, "未显式 disabled 应启用");
-        assert_eq!(cfg.watchdog.webui.port, 9798);
+        assert!(cfg.service.webui.enabled, "未显式 disabled 应启用");
+        assert_eq!(cfg.service.webui.port, 9798);
     }
 
     #[test]

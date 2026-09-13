@@ -8,7 +8,7 @@ pub mod services;
 pub mod supervisor;
 pub mod updater;
 
-use crate::config::WatchdogConfig;
+use crate::config::{ServiceConfig, WatchdogConfig};
 use crate::error::{Result, SebasError};
 use crate::ipc::ChildMsg;
 use crate::upgrade;
@@ -372,6 +372,7 @@ fn rollback_hook(
 /// （连续 spawn 失败达上限 / rollback 失败）→ shutdown 全部子进程并以
 /// EX_TEMPFAIL (75) 退出（经返回 Err → main 统一出口打 startup-failure 摘要）。
 pub async fn run_watchdog(
+    service: ServiceConfig,
     config: WatchdogConfig,
     config_path: String,
     debug: bool,
@@ -386,6 +387,7 @@ pub async fn run_watchdog(
     let executor = ControlExecutor::new(
         control.clone(),
         Arc::new(SubprocessUpdaterRunner),
+        service.clone(),
         config.clone(),
         config_path.clone(),
         services.clone(),
@@ -455,7 +457,7 @@ pub async fn run_watchdog(
             }),
             DesiredState::Enabled,
         )),
-        config.webui.enabled,
+        service.webui.enabled,
     );
 
     // router：config 开关（默认关）；`--debug` 强制启用 debug 形态
@@ -463,7 +465,7 @@ pub async fn run_watchdog(
     // 注入 core channel 的 secret + socket 路径（5.3 订阅投影）：router
     // 订阅状态变更需要与 core 相同的密钥与通道位置——core 自己按同一
     // config 计算路径（channel_path 或缺省），此处直接用同一解析结果。
-    let core_channel_path = config
+    let core_channel_path = service
         .core
         .channel_path
         .clone()
@@ -483,7 +485,7 @@ pub async fn run_watchdog(
             }),
             DesiredState::Enabled,
         )),
-        config.router.enabled || debug,
+        service.router.enabled || debug,
     );
 
     // im：`[watchdog.im] enabled` 缺省跟随飞书启用判定（feishu-option spec）；
@@ -571,19 +573,16 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{WatchdogRouterConfig, WatchdogStorageConfig, WatchdogUpgradeConfig};
+    use crate::config::{WatchdogStorageConfig, WatchdogUpgradeConfig};
     use std::fs;
 
     fn test_config(tmp_data_dir: &std::path::Path) -> WatchdogConfig {
         WatchdogConfig {
-            core: Default::default(),
             upgrade: WatchdogUpgradeConfig::default(),
             storage: WatchdogStorageConfig {
                 data_dir: tmp_data_dir.display().to_string(),
                 keep_versions: 1,
             },
-            webui: Default::default(),
-            router: WatchdogRouterConfig::default(),
             im: Default::default(),
             max_spawn_failures: crate::watchdog::supervisor::DEFAULT_MAX_SPAWN_FAILURES,
         }

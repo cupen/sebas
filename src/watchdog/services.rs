@@ -4,7 +4,7 @@
 //! 运行时 ServiceSet 覆盖。监督本体在 supervisor.rs 的每服务 task；
 //! 本模块负责聚合查询与期望态翻译。
 
-use crate::config::WatchdogWebUiConfig;
+use crate::config::ServiceWebUiConfig;
 use crate::watchdog::control::DesiredState;
 use crate::watchdog::supervisor::{
     ServiceCommand, ServiceHandle, ServiceName, ServiceSnapshot, ServiceSpec, ServiceState,
@@ -23,7 +23,7 @@ pub struct WebUiEndpoint {
 }
 
 impl WebUiEndpoint {
-    pub fn from_config(config: &WatchdogWebUiConfig) -> Option<Self> {
+    pub fn from_config(config: &ServiceWebUiConfig) -> Option<Self> {
         config.enabled.then(|| Self {
             host: config.host.clone(),
             port: config.port,
@@ -554,15 +554,15 @@ mod tests {
 app_id = "a"
 app_secret = "b"
 
-[watchdog.webui]
+[service.webui]
 enabled = true
 host = "127.0.0.1"
 port = 9798
 "#;
         let cfg = crate::config::Config::parse(raw).expect("config parses");
-        assert!(cfg.watchdog.webui.enabled);
+        assert!(cfg.service.webui.enabled);
         assert_eq!(
-            WebUiEndpoint::from_config(&cfg.watchdog.webui),
+            WebUiEndpoint::from_config(&cfg.service.webui),
             Some(WebUiEndpoint {
                 host: "127.0.0.1".into(),
                 port: 9798,

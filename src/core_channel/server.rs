@@ -43,10 +43,10 @@ pub fn default_socket_path() -> PathBuf {
     base.join("core.sock")
 }
 
-/// Resolve the socket path for the given config: `[watchdog.core] channel_path`
+/// Resolve the socket path for the given config: `[service.core] channel_path`
 /// overrides the default.
 pub fn socket_path(cfg: &crate::config::Config) -> PathBuf {
-    match cfg.watchdog.core.channel_path.as_deref() {
+    match cfg.service.core.channel_path.as_deref() {
         Some(p) if !p.is_empty() => PathBuf::from(p),
         _ => default_socket_path(),
     }

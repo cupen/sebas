@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
                 Err(e) => startup_failure_exit(&e),
             };
             if let Err(e) = sebas::watchdog::run_watchdog(
+                cfg.service,
                 cfg.watchdog,
                 args.config,
                 args.debug,

@@ -24,19 +24,19 @@ use support::*;
 /// 两把下游 token（`sk-gw-contract` / `sk-gw-openai`）；三条路由规则
 /// （claude-* / gpt-* / text-*）。
 fn base_config(anth_url: &str, oai_url: &str) -> String {
+    // oai 侧模型路由改走 overlay 别名（`[router.routes]` 已作废，
+    // simplify-service-config）：gpt-4 / text-embedding-3-small → oai-mock，
+    // 别名缺省透传 upstream model，字节级行为与原 glob 路由一致。
+    let overlay_path = contract_overlay_path().to_string_lossy().replace('\\', "/");
     format!(
         r#"
 [router]
 listen = "127.0.0.1:0"
 usage_file = "__USAGE__"
 default_provider = "anth-mock"
+provider_overlay = "{overlay_path}"
 
 auth_token = ["sk-gw-contract", "sk-gw-openai"]
-
-[router.routes]
-"claude-*" = ["anth-mock"]
-"gpt-*" = ["oai-mock"]
-"text-*" = ["oai-mock"]
 
 [provider.anth-mock]
 base_url_anthropic = "{anth_url}"
@@ -50,6 +50,27 @@ api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY_OAI"
     )
 }
 
+/// overlay 别名表：进程内只写一次（OnceLock 串行化并发 setup 的写窗口），
+/// 内容恒定——gpt-4 / text-embedding-3-small 别名到 oai-mock。
+fn contract_overlay_path() -> &'static std::path::PathBuf {
+    static OVERLAY: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    OVERLAY.get_or_init(|| {
+        let overlay = std::env::temp_dir().join("sebas-contract-overlay.json");
+        std::fs::write(
+            &overlay,
+            r#"{
+    "providers": {},
+    "model_aliases": {
+        "gpt-4": { "provider": "oai-mock" },
+        "text-embedding-3-small": { "provider": "oai-mock" }
+    }
+}"#,
+        )
+        .expect("write contract overlay");
+        overlay
+    })
+}
+
 /// rename config：在 base 上给 anthropic provider 加 model_map（claude-sonnet → claude-sonnet-4-20250514）。
 fn rename_config(anth_url: &str, oai_url: &str) -> String {
     format!(
@@ -61,8 +82,6 @@ default_provider = "anth-mock"
 
 auth_token = "sk-gw-contract"
 
-[router.routes]
-"claude-*" = ["anth-mock"]
 
 [provider.anth-mock]
 base_url_anthropic = "{anth_url}"
@@ -91,8 +110,6 @@ default_provider = "oai-mock"
 
 auth_token = "sk-gw-openai"
 
-[router.routes]
-"claude-*" = ["anth-mock"]
 
 [provider.anth-mock]
 base_url_anthropic = "{anth_url}"

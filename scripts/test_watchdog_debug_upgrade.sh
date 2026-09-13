@@ -42,7 +42,7 @@ dev_build_timeout_secs = 1800
 [watchdog.storage]
 data_dir = "/REPLACE_DATA"
 
-[watchdog.webui]
+[service.webui]
 enabled = false
 CONF
 sed -i "s|/REPLACE|$DATA|" "$CFG"

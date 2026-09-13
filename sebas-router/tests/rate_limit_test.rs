@@ -31,8 +31,6 @@ refill_per_sec = 0.0001
 [provider.anthropic]
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[router.routes]
-"claude-*" = ["anthropic"]
 "#;
 
 fn client() -> reqwest::Client {
@@ -122,8 +120,6 @@ refill_per_sec = 0.0001
 [provider.anthropic]
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
 
-[router.routes]
-"claude-*" = ["anthropic"]
 "#;
     let gw = start_router(CFG_TWO).await;
     let client = client();
