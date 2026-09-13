@@ -1,17 +1,30 @@
 // @vitest-environment jsdom
 /**
- * Settings modal (IA v3, revamp-settings-nav-and-models-editor)：左侧分区
- * 导航 + 右侧内容。五个分区（顺序即规约）——
- *   - generic    通用偏好与杂项：原 Env 分区的环境变量只读表（值一律
- *                "managed by core config"）；语言切换仅预留信息架构位置
+ * Settings modal (IA v3, revamp-settings-nav-and-models-editor +
+ * split-env-vars-settings-section + add-webui-multiuser-rbac)：左侧分区导航 +
+ * 右侧内容。七个分区（顺序即规约；Users/Services 随角色裁剪可见性）——
+ *   - generic    纯通用可配置项分区：语言切换等偏好落地前只呈现说明占位
+ *                文案（环境变量表已迁往 env-vars，该分区不再有 env 表）
  *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
  *   - services   watchdog 受管子进程（/api/admin/services 经 adminServicesSafe：
  *                name / desired / actual / uptime + /api/admin/events 最近错误；
  *                im→「飞书 IM」显示映射；无 adapter 时「无 watchdog 控制面」
  *                横幅而非空列表冒充——router 行的 desired/actual/uptime 只在
- *                此分区呈现）
+ *                此分区呈现）。停止被拒（400/409 + active_routed_sessions +
+ *                count，unify-router-process-shape D4）→ 二层强制出口对话框：
+ *                计数 + 流式中断后果，Force stop 以 force 重发、取消不发请求；
+ *                其余失败仍走既有内联错误
+ *   - users      用户管理（add-webui-multiuser-rbac 5.3/5.4，root 专属）：
+ *                /api/users 列表 + 新建对话框（用户名/密码/角色下拉）+ 行内
+ *                改角色/重置密码/启停/删除；400/409 文案就地展示。分区可见性
+ *                随 role 裁剪（Users 仅 root、Services 隐藏于 member/viewer；
+ *                role 缺省 = 鉴权关闭的宿主，保持既有分区）
  *   - models     provider 管理列表（/router/api/providers，条目携带能力
  *                标记；不再渲染 Router 网关卡、不再请求 /api/router）
+ *   - env-vars   环境变量只读表（/api/env 服务端策划清单，懒加载）：plain
+ *                已设置显实际值、未设置显「未设置（用默认）」、set_unset
+ *                敏感项只显已设置/未设置（set 缺失如实显「无法确定」）；
+ *                失败 → 分区内联错误态，不渲染空表假象
  *   - about      INSTANCE 段在上（原 Settings 总览三只读项：工作区根目录 +
  *                复制、default agent kind、default provider/model + 跳转
  *                Models），BUILD 段在下（/api/about 真实字段）
@@ -59,6 +72,7 @@ beforeEach(() => themeStore.clear())
 const apiMocks = vi.hoisted(() => ({
   router: vi.fn(),
   about: vi.fn(),
+  env: vi.fn(),
   routerProviders: vi.fn(),
   routerPresets: vi.fn(),
   routerProviderCreate: vi.fn(),
@@ -73,19 +87,37 @@ const apiMocks = vi.hoisted(() => ({
   disableService: vi.fn(),
   restartService: vi.fn(),
   fsBrowseDirs: vi.fn(),
+  usersList: vi.fn(),
+  usersCreate: vi.fn(),
+  usersSetPassword: vi.fn(),
+  usersSetRole: vi.fn(),
+  usersSetEnabled: vi.fn(),
+  usersDelete: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
+  // 与真 ApiError 同形（client.ts）：status + 机器可读拒绝码 code + 数值
+  // 载荷 count（unify-router-process-shape 2.3 的 400 拒绝经此携带）。
   ApiError: class ApiError extends Error {
     readonly status: number
-    constructor(status: number, message: string) {
+    readonly code: string | null
+    readonly count: number | null
+    constructor(
+      status: number,
+      message: string,
+      code: string | null = null,
+      count: number | null = null,
+    ) {
       super(message)
       this.status = status
+      this.code = code
+      this.count = count
     }
   },
   api: {
     router: apiMocks.router,
     about: apiMocks.about,
+    env: apiMocks.env,
     routerProviders: apiMocks.routerProviders,
     routerPresets: apiMocks.routerPresets,
     routerProviderCreate: apiMocks.routerProviderCreate,
@@ -100,7 +132,15 @@ vi.mock('../api/client.js', () => ({
     disableService: apiMocks.disableService,
     restartService: apiMocks.restartService,
     fsBrowseDirs: apiMocks.fsBrowseDirs,
+    usersList: apiMocks.usersList,
+    usersCreate: apiMocks.usersCreate,
+    usersSetPassword: apiMocks.usersSetPassword,
+    usersSetRole: apiMocks.usersSetRole,
+    usersSetEnabled: apiMocks.usersSetEnabled,
+    usersDelete: apiMocks.usersDelete,
   },
+  // 角色词表（渲染层常量，Users 分区的角色下拉数据源）与真模块同值。
+  ROLES: ['root', 'admin', 'member', 'viewer'] as const,
 }))
 
 import './settings-modal.js'
@@ -190,6 +230,14 @@ beforeEach(() => {
   apiMocks.disableService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
   apiMocks.restartService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
   apiMocks.fsBrowseDirs.mockResolvedValue({ path: '/tmp/test-work', entries: [] })
+  // Users 分区（add-webui-multiuser-rbac 5.3）默认空表桩：默认挂载（role
+  // 为 null）不渲染该分区、也不发请求；root 挂载的用例在各自 describe 覆写。
+  apiMocks.usersList.mockResolvedValue({ users: [] })
+  apiMocks.usersCreate.mockResolvedValue({ status: 'ok', username: 'new-user' })
+  apiMocks.usersSetPassword.mockResolvedValue({ status: 'ok' })
+  apiMocks.usersSetRole.mockResolvedValue({ status: 'ok' })
+  apiMocks.usersSetEnabled.mockResolvedValue({ status: 'ok' })
+  apiMocks.usersDelete.mockResolvedValue({ status: 'ok' })
   apiMocks.routerPresets.mockResolvedValue({
     presets: [
       {
@@ -209,6 +257,38 @@ beforeEach(() => {
     router_listen: '127.0.0.1:8787',
     provider_count: 2,
   })
+  // /api/env 策划清单默认桩：四条覆盖三种呈现形态（plain 已设置/未设置、
+  // set_unset 已设置/未设置）。
+  apiMocks.env.mockResolvedValue({
+    items: [
+      {
+        name: 'SEBAS_STATE_DB',
+        what: 'Session state database path (default ~/.sebas/sebas.db)',
+        kind: 'plain',
+        value: '/tmp/sebas-itest/sebas.db',
+      },
+      {
+        name: 'SEBAS_STATE_FILE',
+        what: 'Session state store path (default ~/.sebas/state.json)',
+        kind: 'plain',
+        value: null,
+      },
+      {
+        name: 'SEBAS_WEBUI_TOKEN',
+        what: 'WebUI single-field login token (token or password accepted at login)',
+        kind: 'set_unset',
+        value: null,
+        set: true,
+      },
+      {
+        name: 'SEBAS_FEISHU_APP_SECRET',
+        what: 'Feishu app secret',
+        kind: 'set_unset',
+        value: null,
+        set: false,
+      },
+    ],
+  })
 })
 
 afterEach(() => {
@@ -219,23 +299,26 @@ afterEach(() => {
 })
 
 describe('sebas-settings-modal sections', () => {
-  it('renders the left nav with exactly Generic/Appearance/Services/Models/About', async () => {
+  it('renders the left nav with exactly Generic/Appearance/Services/Models/Env Vars/About', async () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())
-    expect(labels).toEqual(['Generic', 'Appearance', 'Services', 'Models', 'About'])
+    expect(labels).toEqual(['Generic', 'Appearance', 'Services', 'Models', 'Env Vars', 'About'])
     el.remove()
   })
 
-  it('separates the nav into groups: a break before Services and a tail break pinning About to the bottom', async () => {
+  it('separates the nav into groups: a break before Services and a tail break pinning the Env Vars · About bottom group', async () => {
     const el = await mount()
     const nav = el.shadowRoot!.querySelector('.nav')!
     const seps = [...nav.querySelectorAll<HTMLElement>('.nav-sep')]
     expect(seps.length).toBe(2)
-    // About 上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 About 项。
+    // 底部组上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 Env Vars 项。
     const tail = seps.find((s) => s.classList.contains('tail'))!
     expect(tail).toBeTruthy()
+    expect(tail.previousElementSibling?.textContent?.trim()).toBe('Models')
     expect(tail.nextElementSibling?.classList.contains('nav-item')).toBe(true)
-    expect(tail.nextElementSibling?.textContent?.trim()).toBe('About')
+    expect(tail.nextElementSibling?.textContent?.trim()).toBe('Env Vars')
+    // 底部组内 Env Vars → About 之间不再有分隔线（同组并列）。
+    expect(tail.nextElementSibling?.nextElementSibling?.textContent?.trim()).toBe('About')
     // 另一条在 Services 项之前（appearance|services 组间线）。
     const plain = seps.find((s) => !s.classList.contains('tail'))!
     expect(plain.nextElementSibling?.textContent?.trim()).toBe('Services')
@@ -243,23 +326,23 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('defaults to the Generic section rendering the env reference table', async () => {
+  it('defaults to the Generic section — preferences placeholder, no env table, no /api/env call', async () => {
     const el = await mount()
     expect(el.section).toBe('generic')
     await settle(el)
-    const rows = [...el.shadowRoot!.querySelectorAll('.env-table tbody tr')]
-    expect(rows.length).toBeGreaterThan(0)
-    expect(el.shadowRoot!.textContent).toContain('SEBAS_ROUTER_LISTEN')
-    // Every row's value is the "not exposed" marker — no fabricated data.
-    for (const row of rows) {
-      expect(row.querySelector('.value')?.textContent).toBe('managed by core config')
-    }
+    // split-env-vars-settings-section：Generic 收敛为纯偏好分区，env 表迁出。
+    expect(el.shadowRoot!.querySelector('.env-table')).toBeNull()
+    expect(apiMocks.env).not.toHaveBeenCalled()
+    // 占位文案指明偏好项（语言切换等）后续提供（textContent 含模板换行，
+    // 先折叠空白再断言）。
+    const text = (el.shadowRoot!.textContent ?? '').replace(/\s+/g, ' ')
+    expect(text).toContain('will be provided here later')
     el.remove()
   })
 
   it('renders no maintenance actions anywhere (restart-all and reset retired)', async () => {
     const el = await mount()
-    for (const index of [0, 1, 2, 3, 4]) {
+    for (const index of [0, 1, 2, 3, 4, 5]) {
       await goto(el, index)
       const buttons = waButtons(el).map((b) => b.textContent?.trim())
       expect(buttons).not.toContain('全部进程重启')
@@ -403,7 +486,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About section shows INSTANCE (overview items) above BUILD (/api/about)', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
@@ -440,6 +523,194 @@ describe('sebas-settings-modal sections', () => {
     await el.updateComplete
     expect(navItems(el)[0]!.getAttribute('aria-current')).toBe('false')
     expect(navItems(el)[1]!.getAttribute('aria-current')).toBe('true')
+    el.remove()
+  })
+})
+
+describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () => {
+  function envRows(el: SebasSettingsModal): HTMLElement[] {
+    return [...el.shadowRoot!.querySelectorAll<HTMLElement>('.env-table tbody tr')]
+  }
+
+  function valueOf(rows: HTMLElement[], name: string): string | null {
+    const row = rows.find((r) => r.querySelector('.var')?.textContent?.trim() === name)
+    return row?.querySelector('.value')?.textContent?.trim() ?? null
+  }
+
+  it('lazily loads /api/env on first visit and renders the three display states', async () => {
+    const el = await mount()
+    await settle(el)
+    // 懒加载：未访问该分区前不拉取。
+    expect(apiMocks.env).not.toHaveBeenCalled()
+    await goto(el, 4)
+    expect(el.section).toBe('env-vars')
+    expect(apiMocks.env).toHaveBeenCalledTimes(1)
+    const rows = envRows(el)
+    expect(rows.length).toBe(4)
+    // plain 已设置 → 实际值。
+    expect(valueOf(rows, 'SEBAS_STATE_DB')).toBe('/tmp/sebas-itest/sebas.db')
+    // plain 未设置 → 「未设置（用默认）」。
+    expect(valueOf(rows, 'SEBAS_STATE_FILE')).toBe('未设置（用默认）')
+    // set_unset（敏感）→ 只显已设置/未设置，与 set 布尔一致。
+    expect(valueOf(rows, 'SEBAS_WEBUI_TOKEN')).toBe('已设置')
+    expect(valueOf(rows, 'SEBAS_FEISHU_APP_SECRET')).toBe('未设置')
+    el.remove()
+  })
+
+  it('never renders a value for set_unset entries even if the response leaks one', async () => {
+    // 防御性钉死：遮蔽是服务端责任，但前端对 set_unset 项也不得渲染 value
+    // ——合同外的泄漏值不能经前端落到界面。
+    apiMocks.env.mockResolvedValue({
+      items: [
+        {
+          name: 'SEBAS_WEBUI_TOKEN',
+          what: 'WebUI single-field login token',
+          kind: 'set_unset',
+          value: 'super-secret-leak',
+          set: true,
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, 4)
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).not.toContain('super-secret-leak')
+    expect(text).toContain('已设置')
+    el.remove()
+  })
+
+  it('shows 无法确定 for set_unset entries without a set flag (degraded contract, not fake unset)', async () => {
+    // 防御性解析：kind=set_unset 且无 set 字段 → 前端无法断言状态，如实显
+    // 「无法确定」，绝不冒充「未设置」。
+    apiMocks.env.mockResolvedValue({
+      items: [
+        {
+          name: 'SEBAS_CONTROL_SECRET',
+          what: 'Router control-plane secret',
+          kind: 'set_unset',
+          value: null,
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, 4)
+    const rows = envRows(el)
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.querySelector('.value')?.textContent?.trim()).toBe('无法确定')
+    el.remove()
+  })
+
+  it('renders an inline error instead of an empty table when /api/env fails', async () => {
+    apiMocks.env.mockRejectedValue(new ApiError(500, 'env listing exploded'))
+    const el = await mount()
+    await goto(el, 4)
+    const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('env listing exploded')
+    // 失败 → 不渲染空表假象。
+    expect(el.shadowRoot!.querySelector('.env-table')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('unify-router-process-shape：router 停止被拒的强制出口（D4）', () => {
+  /** 装好带 router 行的 Services 分区，并在 confirm 弹窗里点掉 Disable。 */
+  async function confirmDisableRouter(el: SebasSettingsModal): Promise<void> {
+    await goto(el, 2)
+    const routerCard = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')].find(
+      (c) => c.querySelector('.service-id')?.textContent === 'router',
+    )!
+    routerCard.querySelector<HTMLElement>('button[title="Disable service"]')!.click()
+    await el.updateComplete
+    const confirm = el.shadowRoot!.querySelector(
+      'wa-dialog.service-action-confirm',
+    ) as HTMLElement
+    confirm.querySelector<HTMLElement>('wa-button[variant="danger"]')!.click()
+    await settle(el)
+  }
+
+  function forceDialog(el: SebasSettingsModal): HTMLElement {
+    return el.shadowRoot!.querySelector('wa-dialog.service-force-stop') as HTMLElement
+  }
+
+  /**
+   * 对话框开合的真源断言：组件 state `forceStop`。wa-dialog 的 open 属性
+   * 回落走异步 requestClose 动画链（jsdom 无动画完成事件，时序不保证），
+   * 与本文件既有 `editor` 断言同款读组件 state。
+   */
+  function forceStopState(el: SebasSettingsModal): { name: string; count: number | null } | null {
+    return (el as unknown as { forceStop: { name: string; count: number | null } | null })
+      .forceStop
+  }
+
+  /** 拒绝载荷（wire 合同主形态的解析产物：ApiError 携带 code + count）。 */
+  function rejection(count: number): Error {
+    return new ApiError(400, 'router has active routed sessions', 'active_routed_sessions', count)
+  }
+
+  beforeEach(() => {
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [{ name: 'router', status: 'running', desired: 'running', uptime_secs: 30 }],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+  })
+
+  it('直接成功：首次 disable 不带 force，成功后刷新列表、不弹强制出口', async () => {
+    const el = await mount()
+    await confirmDisableRouter(el)
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
+    expect(apiMocks.disableService).toHaveBeenCalledWith('router', false)
+    expect(forceStopState(el)).toBeNull()
+    // 成功 → loadServices 重取列表（初载 + 动作后 = 2 次）。
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('拒绝后强制：二层对话框呈现计数与后果，Force stop 以 force 重发并刷新', async () => {
+    apiMocks.disableService
+      .mockRejectedValueOnce(rejection(2))
+      .mockResolvedValueOnce({ operation_id: 'op-force', status: 'accepted', message: 'accepted' })
+    const el = await mount()
+    await confirmDisableRouter(el)
+    // 二层对话框打开：拒绝驱动，携带目标与计数；拒绝不落内联错误。
+    expect(forceStopState(el)).toEqual({ name: 'router', count: 2 })
+    expect(forceDialog(el).textContent).toContain('2')
+    expect(forceDialog(el).textContent).toContain('streaming')
+    expect(el.shadowRoot!.querySelector('.callout-error')).toBeNull()
+    // 「强制停止」= 同一停止请求带 force: true 重发；成功后刷新列表。
+    forceDialog(el).querySelector<HTMLElement>('wa-button[variant="danger"]')!.click()
+    await settle(el)
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(2)
+    expect(apiMocks.disableService).toHaveBeenLastCalledWith('router', true)
+    expect(forceStopState(el)).toBeNull()
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('拒绝后取消：不发任何请求，router 行保持原状', async () => {
+    apiMocks.disableService.mockRejectedValueOnce(rejection(5))
+    const el = await mount()
+    await confirmDisableRouter(el)
+    expect(forceStopState(el)).toEqual({ name: 'router', count: 5 })
+    forceDialog(el).querySelector<HTMLElement>('wa-button[appearance="plain"]')!.click()
+    await settle(el)
+    // 取消 = 无第二次请求、列表不刷新、对话框关闭且行保持原状。
+    expect(forceStopState(el)).toBeNull()
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(1)
+    expect(el.shadowRoot!.textContent ?? '').toContain('status running')
+    el.remove()
+  })
+
+  it('400 但无 active_routed_sessions 的失败仍走既有内联错误，不弹强制出口', async () => {
+    apiMocks.disableService.mockRejectedValueOnce(new ApiError(400, 'watchdog rejected it'))
+    const el = await mount()
+    await confirmDisableRouter(el)
+    expect(forceStopState(el)).toBeNull()
+    expect(el.shadowRoot!.querySelector('.callout-error')).toBeTruthy()
+    expect(el.shadowRoot!.textContent ?? '').toContain('watchdog rejected it')
+    expect(apiMocks.disableService).toHaveBeenCalledTimes(1)
     el.remove()
   })
 })
@@ -1026,6 +1297,286 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
     expect(payload.base_url_anthropic).toBe('https://api.example/anthropic')
     expect(payload.base_url_openai_responses).toBe('https://api.example/responses')
     expect(payload.model_map).toEqual({ 'old-model': 'new-model' })
+    el.remove()
+  })
+})
+
+describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () => {
+  const usersFixture = [
+    { id: 1, username: 'root', role: 'root', enabled: true, created_at_unix: 1_700_000_000 },
+    { id: 2, username: 'alice', role: 'member', enabled: false, created_at_unix: 1_700_000_500 },
+  ]
+
+  /** 带角色挂载（role=null = 鉴权关闭的宿主，保持既有分区）。 */
+  async function mountAs(
+    role: 'root' | 'admin' | 'member' | 'viewer' | null,
+  ): Promise<SebasSettingsModal> {
+    const el = document.createElement('sebas-settings-modal') as SebasSettingsModal
+    if (role !== null) el.role = role
+    el.open = true
+    document.body.appendChild(el)
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    return el
+  }
+
+  function navLabels(el: SebasSettingsModal): (string | undefined)[] {
+    return navItems(el).map((b) => b.textContent?.trim())
+  }
+
+  async function gotoUsers(el: SebasSettingsModal): Promise<void> {
+    const index = navLabels(el).indexOf('Users')
+    expect(index).toBeGreaterThanOrEqual(0)
+    await goto(el, index)
+  }
+
+  function userRow(el: SebasSettingsModal, username: string): HTMLElement {
+    const row = [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="user-row"]')].find(
+      (r) => r.dataset['username'] === username,
+    )
+    expect(row).toBeTruthy()
+    return row!
+  }
+
+  /** 设 WA 控件值并派发事件（input/change，组件 handler 读 target.value）。 */
+  function setWaValue(host: Element, selector: string, value: string, event = 'input'): void {
+    const input = host.querySelector(selector) as unknown as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event(event, { bubbles: true, composed: true }))
+  }
+
+  /**
+   * 选 wa-select 的值并派发 change。jsdom 不触发 slotchange，晚于 connect
+   * 加入的 wa-option 让 select 留下空选项缓存、value getter 过滤为 null
+   * （见 new-session-dialog.test.ts 同款注释）——先显式 nudge 重建索引。
+   */
+  function pickWaSelect(host: Element, selector: string, value: string): void {
+    const sel = host.querySelector(selector) as unknown as HTMLElement & {
+      processSlotChange?: () => void
+      value: string
+    }
+    sel.processSlotChange?.()
+    sel.value = value
+    sel.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+  }
+
+  function draftState(el: SebasSettingsModal, key: 'userCreate' | 'userReset' | 'userDelete'): unknown {
+    return (el as unknown as Record<string, unknown>)[key]
+  }
+
+  beforeEach(() => {
+    apiMocks.usersList.mockResolvedValue({ users: usersFixture })
+  })
+
+  it('trims the nav by role: Users is root-only, Services hides for member/viewer', async () => {
+    const rootEl = await mountAs('root')
+    expect(navLabels(rootEl)).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Users',
+      'Models',
+      'Env Vars',
+      'About',
+    ])
+    rootEl.remove()
+
+    const adminEl = await mountAs('admin')
+    expect(navLabels(adminEl)).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Models',
+      'Env Vars',
+      'About',
+    ])
+    adminEl.remove()
+
+    // member/viewer：无服务控制（services.control）、无用户管理（users.manage）。
+    for (const role of ['member', 'viewer'] as const) {
+      const el = await mountAs(role)
+      const labels = navLabels(el)
+      expect(labels).not.toContain('Users')
+      expect(labels).not.toContain('Services')
+      el.remove()
+    }
+
+    // role 缺省（服务端未启用鉴权的宿主）：既有分区全保留，Users 仍不可见
+    // （users.manage 需要服务端身份）。
+    const hostEl = await mountAs(null)
+    expect(navLabels(hostEl)).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Models',
+      'Env Vars',
+      'About',
+    ])
+    hostEl.remove()
+  })
+
+  it('a remembered section that the role may not see falls back to generic', async () => {
+    localStorage.setItem('lastSettingsSection', 'users')
+    const el = await mountAs('admin')
+    await settle(el)
+    expect(el.section).toBe('generic')
+    el.remove()
+  })
+
+  it('lists users lazily with role / enabled / created date; no request before the visit', async () => {
+    const el = await mountAs('root')
+    expect(apiMocks.usersList).not.toHaveBeenCalled()
+    await gotoUsers(el)
+    expect(el.section).toBe('users')
+    expect(apiMocks.usersList).toHaveBeenCalledTimes(1)
+    const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="user-row"]')]
+    expect(rows.length).toBe(2)
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('alice')
+    expect(text).toContain('member')
+    expect(text).toContain('disabled')
+    // created_at_unix → ISO 日期（列表不携带任何哈希字段可展示）。
+    expect(text).toContain('created 2023-11-14')
+    expect(userRow(el, 'alice').querySelector('wa-select.user-role')).toBeTruthy()
+    el.remove()
+  })
+
+  it('renders an inline error instead of an empty list when /api/users fails', async () => {
+    apiMocks.usersList.mockRejectedValue(new ApiError(403, 'forbidden: users.manage only'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    expect(el.shadowRoot!.querySelector('.toolbar-error')?.textContent).toContain(
+      'forbidden: users.manage only',
+    )
+    expect(el.shadowRoot!.querySelectorAll('[data-testid="user-row"]').length).toBe(0)
+    el.remove()
+  })
+
+  it('creates a user with {username, password, role} from the dialog and refreshes the list', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New user'))!
+      .click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
+    setWaValue(dialog, 'wa-input[label="Username"]', 'bob')
+    setWaValue(dialog, 'wa-input[label^="Password"]', 'long-enough')
+    pickWaSelect(dialog, 'wa-select[label="Role"]', 'admin')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersCreate).toHaveBeenCalledTimes(1)
+    expect(apiMocks.usersCreate).toHaveBeenCalledWith('bob', 'long-enough', 'admin')
+    // 成功才关闭对话框并重取列表（初载 + 刷新 = 2 次）。
+    expect(draftState(el, 'userCreate')).toBeNull()
+    expect(apiMocks.usersList).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('rejects a weak password locally without any request', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New user'))!
+      .click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
+    setWaValue(dialog, 'wa-input[label="Username"]', 'bob')
+    setWaValue(dialog, 'wa-input[label^="Password"]', 'short')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersCreate).not.toHaveBeenCalled()
+    expect(dialog.querySelector('[data-testid="user-create-error"]')?.textContent).toContain(
+      '密码至少需要 8 个字符',
+    )
+    el.remove()
+  })
+
+  it('shows the server 409 message in place and keeps the create dialog open', async () => {
+    apiMocks.usersCreate.mockRejectedValue(new ApiError(409, '用户名已被占用'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New user'))!
+      .click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
+    setWaValue(dialog, 'wa-input[label="Username"]', 'alice')
+    setWaValue(dialog, 'wa-input[label^="Password"]', 'long-enough')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersCreate).toHaveBeenCalledTimes(1)
+    expect(dialog.querySelector('[data-testid="user-create-error"]')?.textContent).toContain(
+      '用户名已被占用',
+    )
+    expect(draftState(el, 'userCreate')).not.toBeNull()
+    el.remove()
+  })
+
+  it('row actions hit the role / enabled endpoints and surface results in place', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    pickWaSelect(userRow(el, 'alice'), 'wa-select.user-role', 'viewer')
+    await settle(el)
+    expect(apiMocks.usersSetRole).toHaveBeenCalledWith(2, 'viewer')
+    // 改角色触发列表重取后 DOM 重建：重新寻行再点启停。
+    ;(userRow(el, 'root').querySelector('button[title="Disable user"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersSetEnabled).toHaveBeenCalledWith(1, false)
+    const callout = el.shadowRoot!.querySelector('[data-testid="user-action"]')
+    expect(callout?.getAttribute('role')).toBe('status')
+    expect(callout?.textContent).toContain('已禁用')
+    el.remove()
+  })
+
+  it('a last-root 409 on role change shows the server message in place and reverts via refetch', async () => {
+    apiMocks.usersSetRole.mockRejectedValue(new ApiError(409, '不能降级最后一个启用的 root'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    pickWaSelect(userRow(el, 'root'), 'wa-select.user-role', 'member')
+    await settle(el)
+    const callout = el.shadowRoot!.querySelector('[data-testid="user-action"]')
+    expect(callout?.getAttribute('role')).toBe('alert')
+    expect(callout?.textContent).toContain('不能降级最后一个启用的 root')
+    // 失败也重取列表：行内 select 的显示值以服务端读数回滚，不假装改成功。
+    expect(apiMocks.usersList).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('reset password goes through its dialog and reports success in place', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    ;(userRow(el, 'alice').querySelector('button[title="Reset password"]') as HTMLElement).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-reset') as HTMLElement
+    expect(dialog.textContent).toContain('alice')
+    setWaValue(dialog, 'wa-input', 'new-password')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersSetPassword).toHaveBeenCalledWith(2, 'new-password')
+    expect(draftState(el, 'userReset')).toBeNull()
+    expect(el.shadowRoot!.querySelector('[data-testid="user-action"]')?.textContent).toContain(
+      '已重置',
+    )
+    el.remove()
+  })
+
+  it('delete confirmation shows the last-root protection message in place on 409', async () => {
+    apiMocks.usersDelete.mockRejectedValue(new ApiError(409, '不能删除最后一个启用的 root'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    ;(userRow(el, 'root').querySelector('button[title="Delete user"]') as HTMLElement).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-delete') as HTMLElement
+    ;(dialog.querySelector('wa-button[variant="danger"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersDelete).toHaveBeenCalledWith(1)
+    expect(dialog.querySelector('[data-testid="user-delete-error"]')?.textContent).toContain(
+      '不能删除最后一个启用的 root',
+    )
+    // 失败保持打开，操作者可取消。
+    expect(draftState(el, 'userDelete')).not.toBeNull()
     el.remove()
   })
 })

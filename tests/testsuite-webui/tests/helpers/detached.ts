@@ -6,7 +6,8 @@
  *
  * Topology (assembled by `invoke testsuite-webui-server` with
  * TESTSUITE_MODE=detached, tasks.py): a core process WITHOUT `--webui`
- * (`sebas core -c <scene>/config.toml --router --debug`) plus a standalone
+ * (`sebas core -c <scene>/config.toml`；router 只以独立进程运行，core 旗标里
+ * 没有 router——unify-router-process-shape) plus a standalone
  * `sebas webui -c <scene>/config.toml` serving the dashboard. NO
  * SEBAS_CORE_SECRET is set anywhere: the core auto-arms (generates the key,
  * writes `<scene>/core.secret`) and clients discover the key from that file
@@ -47,7 +48,7 @@ export function sebasBin(): string {
  * Env for a core (or any channel client) spawned against the scene: every
  * default that would fall back to the real `~/.sebas` is redirected into
  * the scene (SAME set the harness injects — SEBAS_PROJECTS_PATH /
- * SEBAS_WEBUI_AUTH_FILE / SEBAS_HOME included: the projects registry
+ * SEBAS_WEBUI_AUTH_DB / SEBAS_HOME included: the projects registry
  * defaults to `~/.sebas/projects.json`), and SEBAS_CORE_SECRET is REMOVED
  * so the auto-arm + discovery path is exercised, never the env shortcut.
  */
@@ -59,7 +60,7 @@ export function detachedCoreEnv(scene: string): NodeJS.ProcessEnv {
   env.SEBAS_STATE_FILE = path.join(scene, 'state.json')
   env.SEBAS_ROUTER_PROVIDER_OVERLAY = path.join(scene, 'providers.json')
   env.SEBAS_PROJECTS_PATH = path.join(scene, 'projects.json')
-  env.SEBAS_WEBUI_AUTH_FILE = path.join(scene, 'webui-auth.json')
+  env.SEBAS_WEBUI_AUTH_DB = path.join(scene, 'auth.db')
   return env
 }
 
@@ -158,7 +159,7 @@ export async function stopCore(scene: string, timeoutMs = 20_000): Promise<void>
  */
 export function startCore(scene: string): ChildProcess {
   const log = fs.openSync(path.join(scene, 'core.log'), 'a')
-  const child = spawn(sebasBin(), ['core', '-c', path.join(scene, 'config.toml'), '--router', '--debug'], {
+  const child = spawn(sebasBin(), ['core', '-c', path.join(scene, 'config.toml')], {
     cwd: scene,
     env: detachedCoreEnv(scene),
     stdio: ['ignore', log, log],

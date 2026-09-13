@@ -381,3 +381,93 @@ describe('global core-unreachable banner (harden-core-channel-deployment 4.1)', 
     el.remove()
   })
 })
+
+describe('multiuser auth gate (add-webui-multiuser-rbac 5.2/5.4)', () => {
+  /** 等 login/setup 成功后的身份重探（checkAuth 的第二次 authMe）落定。 */
+  async function afterRecheck(el: SebasApp): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function modalRole(el: SebasApp): string | null {
+    const modal = el.shadowRoot!.querySelector('sebas-settings-modal') as unknown as {
+      role: string | null
+    }
+    return modal?.role ?? null
+  }
+
+  it('renders the first-run setup view while needs_setup is set (zero users)', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false, needs_setup: true })
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('sebas-setup')).toBeTruthy()
+    // 设置页与登录页/工作台互斥：建 root 前不渲染任何工作台骨架。
+    expect(el.shadowRoot!.querySelector('sebas-login')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeNull()
+    el.remove()
+  })
+
+  it('renders the login view when users exist but there is no session (no needs_setup)', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false })
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('sebas-login')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-setup')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeNull()
+    el.remove()
+  })
+
+  it('a setup-success enters the workbench and re-fetches the identity (role drives the modal)', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false, needs_setup: true })
+    const el = await mountShell()
+    apiMocks.authMe.mockResolvedValue({
+      enabled: true,
+      authenticated: true,
+      username: 'cupen',
+      role: 'root',
+    })
+    el.shadowRoot!.querySelector('sebas-setup')!.dispatchEvent(
+      new CustomEvent('setup-success', {
+        detail: { username: 'cupen' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await afterRecheck(el)
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-setup')).toBeNull()
+    // 身份重探带回 root：设置弹窗收到角色（5.4 分区裁剪的数据源）。
+    expect(modalRole(el)).toBe('root')
+    expect(el.shadowRoot!.textContent).toContain('退出 (cupen)')
+    el.remove()
+  })
+
+  it('a login-success re-fetches the identity and plumbs the member role to the modal', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false })
+    const el = await mountShell()
+    apiMocks.authMe.mockResolvedValue({
+      enabled: true,
+      authenticated: true,
+      username: 'amy',
+      role: 'member',
+    })
+    el.shadowRoot!.querySelector('sebas-login')!.dispatchEvent(
+      new CustomEvent('login-success', {
+        detail: { username: 'amy' },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await afterRecheck(el)
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeTruthy()
+    expect(modalRole(el)).toBe('member')
+    el.remove()
+  })
+
+  it('auth disabled keeps the ready workbench with no role (null passes every section)', async () => {
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeTruthy()
+    expect(modalRole(el)).toBeNull()
+    el.remove()
+  })
+})

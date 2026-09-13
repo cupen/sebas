@@ -9,8 +9,6 @@ the watchdog control plane.
 
 ## Requirements
 
-
-
 ### Requirement: HTTP route surface
 
 The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and `GET /assets/*` for its built styles, scripts, and fonts. Any other browser-facing GET (for example `/sessions/{key}`) resolves through the SPA fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about` canonicalise to `/` — those surfaces live in the Settings modal now. The JSON API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with optional `prompt` field and a required `agent` field naming the target agent), `GET /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST /api/sessions/{key}/cancel` (interrupt the session's in-flight turn over the core channel), `POST /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `POST /api/sessions/{key}/pending/{pending_id}/remove` (remove a not-yet-started submission), `POST /api/sessions/{key}/pending/{pending_id}/move` (reorder a not-yet-started submission within its own disposition group; body `to_index`), `GET /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`, `GET /api/router`, `GET /api/about`, `POST /api/sessions/{key}/model` (mid-session model switch), `POST /api/sessions/{key}/mode` (mid-session permission-mode switch), the agent catalog `GET /api/agents` (each configured agent plus the built-in native kernel, with id, display name, reachability, optional cause and version), `GET /router/api/presets` (read-only preset table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, the project APIs `GET /api/projects` and `POST /api/projects` (register), `POST /api/projects/reorder`, `POST /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET /api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to the server's work directory — the configured work dir of the default agent kind, falling back to the WebUI process working directory; an explicit `root` query parameter overrides the default), `POST /api/sessions/{key}/archive` (archive a session), `POST /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive` (list archived sessions with expiry info), and `GET /ws` (WebSocket session stream). Project and session mutations are POST-only and carry the same posture as the existing session APIs. The provider management cluster under `/router/api/*` (providers, model aliases, defaults, presets, model fetch) SHALL be fulfilled by the WebUI backend from the core-owned provider store over the core channel, never by proxying the router process; the route names are retained for compatibility. Without a reachable core these routes SHALL fail honestly (503) and SHALL NOT serve a stale snapshot. The JSON admin API `/api/admin/*` (status, events, services, login, logout, update, update/dry-run, update/dev, rollback, restart) is always mounted: without a control-plane adapter its reads report `adapter_ok: false` and its mutations return 503 (honest degradation). `GET /health` returns the literal `ok`. All browser assets the UI needs to render — styles, fonts, Web Awesome, markdown rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI SHALL NOT depend on an external CDN at render time. Navigation SHALL only link to routes this surface serves.
@@ -218,100 +216,41 @@ consistent with a reported `reachability.ok = false`.
 The standalone WebUI SHALL default to a loopback bind (`127.0.0.1:9797`).
 The legacy `core --webui` path binds hard-coded `127.0.0.1`. A non-loopback
 `watchdog.webui.host` SHALL be refused with a configuration error unless the
-authentication switch is enabled and login credentials exist (see
-「鉴权开关（auth）」and「非 loopback bind 与开关联动」below).
+authentication switch is enabled and at least one enabled user exists in the
+user store (see「鉴权开关（auth）与首启用户引导」and「非 loopback bind 与
+开关联动」below).
 
 #### Scenario: non-loopback refused without auth
 
-- **WHEN** the config sets `watchdog.webui.host = "0.0.0.0"` while login
-  credentials are absent, or while `auth = false`
+- **WHEN** the config sets `watchdog.webui.host = "0.0.0.0"` while the user
+  store holds no enabled user, or while `auth = false`
 - **THEN** `sebas webui` exits with a configuration error rather than
   binding
 
-### Requirement: 鉴权开关（auth）与凭据自动引导
-
-WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。
-开关为 `true` 时，鉴权门 SHALL 恒在：凭据文件缺失时按优先级自动引导——
-`SEBAS_WEBUI_TOKEN`（单字段登录密钥，SHA-256 摘要落盘）→
-`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`（密码注入）→ 自动生成随机
-密码并以醒目日志打印一次（用户名 `admin`，仅落 PBKDF2 哈希）；引导后
-`/api/*`、`/router/api/*`、`/ws` 需要有效会话。开关为 `false` 时，即使
-凭据文件存在，SHALL 对所有路由（含静态资源）完全放行，不要求登录且不
-触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染
-登录页）。`sebas webui-passwd` 在开关关闭时仍可管理凭据（为重新启用做
-准备），改密 SHALL 保留已引导的 token 摘要，但不产生任何强制登录效果。
-
-#### Scenario: 默认打开且凭据存在
-
-- **WHEN** 配置未写 `auth` 且凭据文件存在
-- **THEN** 未带会话的 `/api/summary` 请求返回 401，行为与无开关时一致
-
-#### Scenario: 默认打开且凭据缺失自动生成
-
-- **WHEN** 配置未写 `auth`、凭据文件不存在、且未设凭据环境变量
-- **THEN** 首次启动自动生成随机凭据（用户名 `admin`），密码打印到日志一次
-- **AND** 未带会话的 `/api/summary` 请求返回 401（登录门开箱即用）
-
-#### Scenario: token 环境变量注入
-
-- **WHEN** 凭据文件不存在且 `SEBAS_WEBUI_TOKEN` 非空
-- **THEN** 该 token 以 SHA-256 摘要写入凭据文件，单字段登录可用
-
-#### Scenario: 测试环境关闭
-
-- **WHEN** 配置设置 `watchdog.webui.auth = false` 且凭据文件存在
-- **THEN** 未带任何会话的 `/api/summary` 请求返回 200，全部路由免登录
-- **AND** `GET /api/auth/me` 返回 `{"enabled": false, "authenticated": false}`
-
-#### Scenario: 关闭后重新打开立即生效
-
-- **WHEN** 开关从 `false` 改回 `true` 并重启 webui
-- **THEN** 已存在的凭据立即恢复强制登录，无需重建凭据文件
-
-### Requirement: 单字段登录（token 或密码）
-
-`POST /api/auth/login` SHALL 接受单字段 `{"secret"}`（登录 token 或账户
-密码，服务端自动识别），并保持兼容旧格式 `{"username", "password"}`。
-成功即建立会话 cookie；失败统一 401，限速策略不变（按来源 IP）。
-
-#### Scenario: token 登录
-
-- **WHEN** `SEBAS_WEBUI_TOKEN` 引导的 token 通过 `{"secret"}` 提交
-- **THEN** 登录成功并返回会话 cookie，响应携带服务端账户名
-
-#### Scenario: 密码单字段登录
-
-- **WHEN** 引导生成的随机密码通过 `{"secret"}` 提交
-- **THEN** 登录成功（密码与 token 由服务端自动识别，无需用户名字段）
-
-#### Scenario: 旧格式保持兼容
-
-- **WHEN** `{"username", "password"}` 提交到 `/api/auth/login`
-- **THEN** 行为与单字段形态一致（校验通过即建立会话）
-
-#### Scenario: 登录页单字段
-
-- **WHEN** 前端渲染登录门
-- **THEN** 登录表单只有一个凭据输入框（密码或 token 通吃），401 就地
-  提示「凭据错误」
-
 ### Requirement: 非 loopback bind 与开关联动
 
-当 `watchdog.webui.host` 非 loopback 时，webui SHALL 仅在
-`auth = true`（或缺省）且登录凭据存在时才允许绑定启动；凭据缺失时先经
-自动引导（见「鉴权开关（auth）与凭据自动引导」），引导后凭据即存在，
-因此该状态下 SHALL 放行启动。开关关闭时无论凭据是否存在，SHALL 拒绝
-非 loopback bind（防止误关开关叠加公网暴露）。
+当 `watchdog.webui.host` 非 loopback 时，webui SHALL 仅在 `auth = true`
+（或缺省）且用户库存在至少一个启用用户时才允许绑定启动。零用户时
+SHALL 先经环境变量引导（`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`）
+建立 root，否则以配置错误拒绝启动——防止公网下「先访问者注册
+root」。开关关闭时无论用户库为何，SHALL 拒绝非 loopback bind
+（防止误关开关叠加公网暴露）。
 
 #### Scenario: 开关关闭拒绝公网 bind
 
 - **WHEN** 配置同时设置 `auth = false` 与 `host = "0.0.0.0"`
 - **THEN** `sebas webui` 以配置错误退出，不绑定端口
 
+#### Scenario: 开关打开但零用户拒绝公网 bind
+
+- **WHEN** 配置设置 `auth = true`（或缺省）、`host = "0.0.0.0"`，
+  用户库零用户且未设凭据环境变量
+- **THEN** `sebas webui` 以配置错误退出，不绑定端口
+
 #### Scenario: 开关打开且凭据存在允许公网 bind
 
 - **WHEN** 配置设置 `auth = true`（或缺省）、`host = "0.0.0.0"`，
-  且凭据文件存在（含自动引导生成）
+  且用户库存在启用用户（含环境变量引导建立的 root）
 - **THEN** `sebas webui` 正常绑定并在日志中提示已启用登录鉴权
 
 ### Requirement: Optional admin authentication
@@ -324,7 +263,8 @@ SPA fallback). A successful admin login sets an HttpOnly, SameSite=Lax
 cookie with a 24 h TTL, and login attempts are rate-limited to 5 per 30 s.
 When no control secret is configured, admin reads are loopback-only and
 mutations report the control plane as disconnected. The main session APIs
-are governed by the「鉴权开关（auth）与凭据自动引导」requirement, not this one.
+are governed by the「鉴权开关（auth）与首启用户引导」requirement, not this
+one.
 
 #### Scenario: password-gated admin API
 
@@ -803,11 +743,13 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 - **THEN** 新 turn 正常进入 transcript；之前的 spawn-failed 错误事件保留为历史（不删除），但会话状态恢复为非 spawn-failed
 
 ### Requirement: 设置弹窗分区与缺省首项
-设置弹窗 SHALL 暴露分区导航，分区 SHALL 按下列顺序排列：`Generic` → `Appearance` →（组间分隔线）`Services` → `Models` →（弹性留白 + 组间分隔线，压底）`About`。打开弹窗时缺省聚焦 `Generic` 分区；用户上次停留分区 SHALL 在新会话首次打开时被记住（localStorage），之后打开仍按记忆回到上次分区；记忆中的值若已不存在于分区表（如旧值 `settings`），SHALL 回退到缺省分区。
+设置弹窗 SHALL 暴露分区导航，分区 SHALL 按下列顺序排列：`Generic` → `Appearance` →（组间分隔线）`Services` → `Models` →（弹性留白 + 组间分隔线，压底）`Env Vars` · `About`。打开弹窗时缺省聚焦 `Generic` 分区；用户上次停留分区 SHALL 在新会话首次打开时被记住（localStorage），之后打开仍按记忆回到上次分区；记忆中的值若已不存在于分区表（如旧值 `settings`），SHALL 回退到缺省分区。
 
 导航项 SHALL 提供足够的点击目标与选中可见性：行高约 36px、字号不低于 0.875rem、整行 hover 反馈、当前项以左侧 accent 竖条标示。
 
-`Generic` 分区 SHALL 承载通用偏好与杂项——初期内容为原 `Env` 分区的环境变量只读表，并为后续语言切换等偏好预留信息架构位置。
+`Generic` 分区 SHALL 收敛为纯通用可配置项分区，不再承载环境变量表；在语言切换等偏好落地前，主区 SHALL 呈现说明占位文案（指明偏好项后续提供）。
+
+`Env Vars` 分区 SHALL 承载环境变量只读表（数据来自 `GET /api/env`，见「环境变量只读展示」），与 `About` 同属底部只读参考组。
 
 `About` 分区 SHALL 分两段呈现：INSTANCE 段在上（工作区根目录 + 复制按钮、当前 default agent kind、当前 default provider/model + 跳转 Models 分区的链接，数据来自既有 `/api/summary`、`/api/agent-defaults`），BUILD 段在下（`/api/about` 的运行时构建信息）。
 
@@ -816,7 +758,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 #### Scenario: 缺省聚焦 Generic 分区
 
 - **WHEN** 操作员从侧栏底部打开设置弹窗，且无历史记忆
-- **THEN** 弹窗打开后左导航高亮 `Generic`，主区渲染 `Generic` 分区内容
+- **THEN** 弹窗打开后左导航高亮 `Generic`，主区渲染 `Generic` 分区内容（占位文案）
 
 #### Scenario: 历史记忆恢复上次分区
 
@@ -828,15 +770,30 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 - **WHEN** localStorage 记忆值为 `settings`（本变更前的合法分区名，`Settings` 总览分区已由 `Generic` 接替）
 - **THEN** 左导航高亮 `Generic` 而非报错或空白
 
+#### Scenario: 分区顺序与底部只读组
+
+- **WHEN** 设置弹窗渲染左导航
+- **THEN** 分区按 `Generic → Appearance → Services → Models → Env Vars · About` 排列，`Appearance` 与 `Services` 之间有组间分隔线；`Env Vars` 与 `About` 通过弹性留白压在导航底部、上方有分隔线，与功能区视觉分离
+
 #### Scenario: 分区顺序与 About 压底
 
 - **WHEN** 设置弹窗渲染左导航
-- **THEN** 分区按 `Generic → Appearance → Services → Models` 顺序排列，`Appearance` 与 `Services` 之间有组间分隔线；`About` 通过弹性留白压在导航底部、上方有分隔线，与功能区视觉分离
+- **THEN** 功能分区按 `Generic → Appearance → Services → Models` 排列，`About` 与 `Env Vars` 同处底部只读组、整体通过弹性留白压底且上方有分隔线
 
 #### Scenario: Settings 分区总览
 
 - **WHEN** 聚焦 `About` 分区
-- **THEN** 主区先呈现 INSTANCE 段——即原 Settings 总览的三只读项：工作区根目录（路径 + 复制按钮）、default agent kind（只读）、default provider/model（只读 + 跳转 Models 分区的链接），后呈现 BUILD 段（版本、commit、构建时间）
+- **THEN** 主区先呈现 INSTANCE 段——工作区根目录（路径 + 复制按钮）、default agent kind（只读）、default provider/model（只读 + 跳转 Models 分区的链接），后呈现 BUILD 段（版本、commit、构建时间）
+
+#### Scenario: Generic 分区不再有环境变量表
+
+- **WHEN** 聚焦 `Generic` 分区
+- **THEN** 主区呈现偏好占位文案，环境变量只读表不再出现在该分区
+
+#### Scenario: 环境变量表移居 Env Vars 分区
+
+- **WHEN** 聚焦 `Env Vars` 分区
+- **THEN** 主区渲染环境变量只读表（名字、解释、按分类展示的值），数据来自 `GET /api/env`
 
 #### Scenario: About 分区承载实例信息
 
@@ -954,6 +911,8 @@ be presented as an empty successful list.
 ### Requirement: Services 分区与 router 状态归属
 Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）。core 为恒启动服务：其行 SHALL 仅呈现状态与 restart 入口，SHALL NOT 渲染 enable/disable 按钮（enable-core-by-default）。无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。router 的运行状态（desired / actual / uptime）SHALL 仅由本分区呈现；Models 分区 SHALL NOT 呈现 router 网关总览、listen / debug / auth 或任何 router 运行状态，provider 管理面与 router 运行状态在产品语义上分离。
 
+停止 `router` SHALL 走强制出口流：停止请求被拒（存在活跃 routed 会话，响应携带会话计数）时，前端 SHALL 呈现确认对话框——显示活跃会话计数与后果（流式中断），操作员可取消或选择「强制停止」；强制停止 SHALL 以 `force: true` 重发并被服务端放行。前端 SHALL NOT 预先查询活跃会话数（避免竞态窗口），拒绝驱动弹窗即可；并发竞态（确认期间会话增减）由服务端再次执法兜底。
+
 #### Scenario: Services 渲染受管子进程
 
 - **WHEN** watchdog 拉起 core/webui/router/im 四个进程，Services 分区聚焦
@@ -973,6 +932,16 @@ Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `G
 
 - **WHEN** 操作员对辅助服务（如 `router`）点击 disable（前提：confirm 弹窗已确认）
 - **THEN** 前端 POST `/api/admin/services/router/disable` 收到 200；列表行刷新；core 行不渲染 enable/disable 按钮
+
+#### Scenario: router 停止被拒呈现强制出口
+
+- **WHEN** 操作员停止 `router` 被拒且响应携带活跃 routed 会话计数
+- **THEN** 前端呈现确认对话框（计数与流式中断后果），操作员选择「强制停止」后以 force 重发并成功，列表行刷新为 stopped
+
+#### Scenario: router 停止被拒后取消
+
+- **WHEN** 操作员在强制出口对话框中取消
+- **THEN** 不发送任何请求，router 行保持原状
 
 #### Scenario: restart 操作
 
@@ -997,6 +966,19 @@ operator's turns from a separate field, nor infer turn boundaries from timestamp
 A session with no entries SHALL render an honest empty state rather than a failed
 payload.
 
+`GET /api/sessions/{key}` SHALL accept an optional `entries_after` query
+parameter: when present, the payload's `entries` SHALL contain only entries
+whose `position` is greater than the given value, while the rest of the
+payload (status, model face, project binding) stays complete; an absent
+parameter SHALL keep the full-sequence behavior; a non-numeric value SHALL
+be rejected with 400 rather than silently treated as a full fetch. Position
+semantics SHALL guarantee incremental-fetch correctness: within a live
+session,
+positions SHALL be gapless (assigned contiguously from the log length) and
+append-only (an appended entry is never rewritten or removed while the
+session exists) — so a fetch from `entries_after=N` returns exactly the
+entries a client holding position N has not seen.
+
 #### Scenario: both sides of the conversation are in the payload
 
 - **WHEN** the browser requests a session in which the operator submitted messages across several turns
@@ -1011,6 +993,32 @@ payload.
 
 - **WHEN** a session has no transcript entries yet
 - **THEN** the payload returns an empty entry sequence with a success status
+
+#### Scenario: incremental fetch returns only newer entries
+
+- **WHEN** the browser requests the session with `entries_after=5` and the
+  transcript holds positions 0..9
+- **THEN** `entries` contains exactly positions 6..9 (ordered), and the
+  payload's non-entry fields stay complete
+
+#### Scenario: absent parameter keeps full sequence
+
+- **WHEN** the browser requests the session without `entries_after`
+- **THEN** `entries` contains the full sequence from position 0 (current
+  behavior)
+
+#### Scenario: invalid parameter is a typed rejection
+
+- **WHEN** the browser requests the session with `entries_after=abc`
+- **THEN** the response is 400 with an error message, not a silent full
+  fetch
+
+#### Scenario: positions are gapless and append-only
+
+- **WHEN** entries are appended to a live session's transcript
+- **THEN** each new entry's position equals the transcript length before
+  the append (no gaps, no reuse), and previously appended entries keep
+  their position and content unchanged
 
 ### Requirement: 会话创建携带 mode
 
@@ -1072,3 +1080,107 @@ WebUI SHALL 暴露 `POST /api/sessions/{key}/mode`（请求体 `{"mode": "<ask|e
 
 - **WHEN** mode 发给无法生效它的执行体（如 native 内核、未声明 mode 能力的通用 ACP agent）
 - **THEN** 创建成功但该执行体不声称 mode 生效；能回报 effective 的位置如实回报空
+
+### Requirement: 环境变量只读展示（/api/env）
+
+WebUI SHALL 提供只读端点 `GET /api/env`：读取 **webui 进程自身**的环境变量，返回**策划过**的变量清单（每项含名字、人读解释、按分类的值展示），经既有鉴权。策划清单之外的环境变量（内部管道、测试专用）SHALL NOT 出现在响应中。清单分类与展示语义：
+
+- **非敏感**（路径与开关，如 `SEBAS_STATE_DB`、`SEBAS_STATE_FILE`、`SEBAS_ROUTER_CONFIG`、`SEBAS_ROUTER_PROVIDER_OVERLAY`、`SEBAS_LOG_LEVEL`、`SEBAS_HANG_TIMEOUT_SECS`、`SEBAS_FEISHU_APP_ID`）：已设置显示实际值；未设置标注「未设置（用默认）」且解释里写明默认值。
+- **敏感**（凭据类，如 `SEBAS_WEBUI_PASSWORD`、`SEBAS_WEBUI_TOKEN`、`SEBAS_CONTROL_SECRET`、`SEBAS_FEISHU_APP_SECRET`）：SHALL 只显示「已设置 / 未设置」，**值本身 SHALL NOT 出现在响应里**（遮蔽在服务端完成）。
+
+前端 `Env Vars` 分区 SHALL 消费该端点渲染只读表；端点失败（core 无关，纯 webui 面）时分区 SHALL 如实呈现错误状态而非空白或编造数据。
+
+#### Scenario: 非敏感变量显示实际值或默认标注
+
+- **WHEN** `GET /api/env` 返回且 `SEBAS_STATE_DB` 已设置
+- **THEN** 该项显示实际路径值；`SEBAS_STATE_FILE` 未设置时该项显示「未设置（用默认）」且解释含默认路径
+
+#### Scenario: 敏感值永不出现在响应
+
+- **WHEN** `SEBAS_FEISHU_APP_SECRET` 已设置且操作员请求 `GET /api/env`
+- **THEN** 响应中该项只标「已设置」，任何字段都不含其值明文
+
+#### Scenario: 内部与测试变量不列
+
+- **WHEN** webui 进程环境中存在内部管道或测试专用变量（如 `SEBAS_IPC`、`SEBAS_TEST_SPAWN_SESSION`）
+- **THEN** 它们不出现在 `/api/env` 响应与 Env Vars 分区表中
+
+#### Scenario: 端点经既有鉴权
+
+- **WHEN** webui 鉴权开启且未登录的客户端请求 `GET /api/env`
+- **THEN** 请求被既有鉴权拒绝，与其他 `/api` 端点一致
+
+#### Scenario: 端点失败如实呈现
+
+- **WHEN** `GET /api/env` 请求失败（非 200）
+- **THEN** Env Vars 分区呈现明确的错误提示，不渲染编造或空表假象
+
+### Requirement: 鉴权开关（auth）与首启用户引导
+
+WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。开关为
+`true` 时，鉴权门 SHALL 恒在：`/api/*`、`/router/api/*`、`/ws` 需要有效
+会话；用户库（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入
+首启引导流程（见 `webui-user-management` 能力：设置页或环境变量建立
+root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为
+`false` 时，无论用户库是否存在用户，SHALL 对所有路由（含静态资源）
+完全放行，不要求登录且不触发引导；`GET /api/auth/me` SHALL 报告
+`enabled: false`（前端据此不渲染登录页）。`sebas webui-passwd` 在开关
+关闭时仍可管理用户（为重新启用做准备），但不产生任何强制登录效果。
+
+#### Scenario: 默认打开且有用户
+
+- **WHEN** 配置未写 `auth` 且用户库存在启用用户
+- **THEN** 未带会话的 `/api/summary` 请求返回 401，行为与无开关时一致
+
+#### Scenario: 默认打开且零用户进入设置流程
+
+- **WHEN** 配置未写 `auth`、用户库零用户、且未设凭据环境变量
+- **THEN** `GET /api/auth/me` 返回 `needs_setup: true`（前端渲染首启
+  设置页而非登录页），受保护 API 仍对未带会话请求返回 401
+
+#### Scenario: 环境变量引导 root
+
+- **WHEN** 用户库零用户且 `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`
+  非空
+- **THEN** 启动时建立名为该用户名的 root 用户，`needs_setup` 不再出现
+
+#### Scenario: 测试环境关闭
+
+- **WHEN** 配置设置 `watchdog.webui.auth = false`
+- **THEN** 未带任何会话的 `/api/summary` 请求返回 200，全部路由免登录
+- **AND** `GET /api/auth/me` 返回 `{"enabled": false, "authenticated": false}`
+
+#### Scenario: 关闭后重新打开立即生效
+
+- **WHEN** 开关从 `false` 改回 `true` 并重启 webui
+- **THEN** 用户库中已有的用户立即恢复强制登录，无需重建用户
+
+### Requirement: 多用户登录形态
+
+`POST /api/auth/login` SHALL 只接受 `{"username", "password"}` 一种
+形态（旧单字段 `{"secret"}` 移除，缺失字段返回 400）。成功即建立
+绑定该用户的会话 cookie；凭据失败统一 401，不区分「用户不存在」与
+「密码错误」，限速策略不变（按来源 IP）。登录页 SHALL 呈现用户名 +
+密码两个字段。
+
+#### Scenario: 用户名密码登录
+
+- **WHEN** `{"username", "password"}` 提交到 `/api/auth/login` 且凭据
+  正确
+- **THEN** 登录成功并建立绑定该用户的会话，响应携带该用户名
+
+#### Scenario: 旧单字段形态不可用
+
+- **WHEN** `{"secret": "..."}` 提交到 `/api/auth/login`
+- **THEN** 返回 400（登录请求缺用户名/密码字段）
+
+#### Scenario: 失败不泄漏用户存在性
+
+- **WHEN** 提交不存在的用户名或错误密码
+- **THEN** 响应统一为 401，文案不区分两种失败，响应时序无可区分的
+  快慢差
+
+#### Scenario: 登录页两字段
+
+- **WHEN** 前端渲染登录门
+- **THEN** 登录表单有用户名与密码两个输入框，401 就地提示「凭据错误」

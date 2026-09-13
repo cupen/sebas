@@ -52,6 +52,9 @@ export default defineConfig(({ mode }) => {
     test: {
       environment: 'happy-dom',
       include: ['src/**/*.test.ts'],
+      // 全局安装 WA 渲染垫片：jsdom/happy-dom 缺 WA 依赖的 DOM API 时组件
+      // 会抛未处理 rejection（用例过但整轮退 1）。不再依赖各测试文件自觉导入。
+      setupFiles: ['src/test-support/setup.ts'],
     },
   }
 })

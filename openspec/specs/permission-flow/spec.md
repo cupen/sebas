@@ -24,60 +24,34 @@ The system SHALL surface every Claude PreToolUse hook invocation as a permission
 
 ### Requirement: Three decision outcomes
 
-The system SHALL support three user decisions on a Feishu permission card: `Allow once`, `Allow session`, and `Deny`. This capability owns the Feishu-side rendering and the per-chat allowlist for the hook-driven path; the cross-driver decision vocabulary (including `escalate`) and `request_id` namespacing are governed by `agent-driver`. Each decision maps to a distinct hook output and a distinct post-click card state.
+The system SHALL support three user decisions on a Feishu permission card: `Allow once`, `Allow session`, and `Deny`. This capability owns the Feishu-side rendering; the cross-driver decision vocabulary (including `escalate`) and `request_id` namespacing are governed by `agent-driver`. Each decision maps to a distinct hook output and a distinct post-click card state. `Allow session` SHALL mean: allow the current request AND switch the session's mode to `auto` — it is the Feishu-side mode-switching surface; the former chat-level grant-all allowlist is retired and mode gating is the only "stop asking" mechanism. `auto` SHALL leave an audit trail when selected from the card: the card SHALL flip in place to a "✅ 已切换自动模式" state.
 
 #### Scenario: Allow once approves this call only
 
 - **WHEN** the user clicks `Allow once`
 - **THEN** the hook callback returns `permissionDecision: allow` for this `request_id`
-- **AND** the `(tool, args)` signature is NOT added to the allowlist
+- **AND** the session's mode is NOT changed
 - **AND** the card flips in place to a resolved "已允许（仅本次）" state
 
 #### Scenario: Allow session approves and remembers
 
-- **WHEN** the user clicks `Allow session`
-- **THEN** the hook callback returns `permissionDecision: allow`
-- **AND** the exact `(tool, args)` signature is added to the per-chat allowlist
-- **AND** the card flips in place to a resolved "已允许（本会话）" state
+- **WHEN** the user clicks `Allow session`（「本会话不再询问」）
+- **THEN** the hook callback returns `permissionDecision: allow` for this `request_id`（当前请求立即放行）
+- **AND** the session's mode is switched to `auto`（生效与 `desired`/`effective` 的既有语义一致）
+- **AND** the card flips in place to the "✅ 已切换自动模式" audit-trail state
+
+#### Scenario: Allow session with failed mode switch is honest
+
+- **WHEN** the user clicks `Allow session` but the mode switch is rejected or cannot reach the execution body
+- **THEN** the current request is still allowed（点击的首要语义不回退）
+- **AND** the card presents the failure honestly（mode 未切换的如实状态），不伪装成已切换
 
 #### Scenario: Deny rejects the call
 
 - **WHEN** the user clicks `Deny`
 - **THEN** the hook callback returns `permissionDecision: deny`
-- **AND** the allowlist is not modified
+- **AND** the session's mode is not modified
 - **AND** the card flips in place to a resolved "已拒绝" state
-
-### Requirement: Auto-approve on allowlist hit
-
-The system SHALL skip the interactive card entirely when the `(tool, args)` signature is already present on the current chat's allowlist, and SHALL immediately resolve the hook callback with `allow`.
-
-#### Scenario: Allowlisted signature runs silently
-
-- **WHEN** the agent invokes a tool whose exact `(tool, args)` signature is on the current chat's allowlist
-- **THEN** no permission card is sent
-- **AND** the hook callback returns `permissionDecision: allow` without user interaction
-- **AND** the tool runs immediately
-
-#### Scenario: Slightly different args are not auto-approved
-
-- **WHEN** the agent invokes a tool whose signature differs in any argument from every allowlisted entry
-- **THEN** the request is treated as a miss and the normal card flow runs
-
-### Requirement: Allowlist scope and lifetime
-
-The allowlist SHALL be scoped to the current `SessionKey` (chat + thread) and SHALL be cleared when the session ends (terminal error, `/new`, or daemon restart with no resume).
-
-#### Scenario: Session end wipes the allowlist
-
-- **WHEN** a session terminates for any reason
-- **THEN** the allowlist for that chat key is cleared
-- **AND** the next session in the same chat starts with an empty allowlist
-
-#### Scenario: /new resets permissions
-
-- **WHEN** the user issues `/new` in a chat
-- **THEN** the previous session's allowlist is discarded
-- **AND** the first tool call in the new session prompts again
 
 ### Requirement: Stale click handling
 
@@ -118,6 +92,12 @@ Each session SHALL carry a mode (`ask`, `edit`, `allow`, `auto`, and any further
 
 The mode SHALL be selectable at session creation time from the control-plane surfaces (web session create and mid-session mode switch), not only assigned by node-side defaults. On the local (in-process) claude execution path, the control-plane mode SHALL map onto the claude CLI's permission-mode vocabulary by convention — `ask` → CLI default (no flag), `edit` → acceptEdits, `allow`/`auto` → bypassPermissions — applied as a spawn-time flag and switchable at runtime; an execution body that receives a mode it cannot apply SHALL NOT fail the session (non-fatal, same posture as model selection). The node-link path SHALL carry the control-plane mode verbatim as its existing gate vocabulary.
 
+**Hook-side gating（本变更合规修复）**: the claude driver's PreToolUse hook SHALL consult the session's currently effective mode (the shared mode unit maintained by spawn argv and runtime `SetMode`) before producing a permission request. Under a bypass tier (`allow`/`auto`) the hook SHALL resolve `allow` directly — no `PermissionRequest`, no permission card, silently and identically across every surface (Feishu, WebUI, and any other consumer of the same driver path). A runtime mode switch SHALL take effect for subsequent hook consults without respawning.
+
+The Feishu permission card's `Allow session` button（「本会话不再询问」）SHALL act as a mode-switching surface: allow the current request and switch the session mode to `auto` (see「Three decision outcomes」).
+
+Feishu-created sessions SHALL default to no mode (≈`ask`): every gated action asks. The mode, once set, lives on the session mapping (`desired_mode`) and SHALL be re-issued via the spawn argv on resume; `/new` and session end naturally return to the default tier.
+
 #### Scenario: auto runs without prompting
 
 - **WHEN** a session's mode is `auto` and its agent invokes a tool that would otherwise be gated
@@ -147,6 +127,27 @@ The mode SHALL be selectable at session creation time from the control-plane sur
 
 - **WHEN** a create or switch request carries a mode outside the vocabulary
 - **THEN** the request is rejected with an explicit error and the session's mode is unchanged
+
+#### Scenario: hook side gate is silent across surfaces
+
+- **WHEN** a claude session's effective mode is a bypass tier (`allow`/`auto`) and its PreToolUse hook fires for a gated tool
+- **THEN** the hook resolves `allow` directly — no permission request and no card appears on any surface (Feishu or WebUI alike)
+
+#### Scenario: runtime switch takes effect on the next hook consult
+
+- **WHEN** a running claude session is switched from `ask` to `allow` mid-turn
+- **THEN** the next gated tool invocation's hook consult sees the new mode and resolves `allow` without producing a request, no respawn required
+
+#### Scenario: feishu created session defaults to asking
+
+- **WHEN** a session is created from Feishu with no mode set and its agent invokes a gated tool
+- **THEN** the permission card flow runs as usual (default ≈ `ask`)
+
+#### Scenario: resume re-issues the session mode
+
+- **WHEN** a session with `desired_mode` = `auto` is resumed
+- **THEN** the mode is re-applied via the spawn argv and the hook gate stays silent from the first tool call
+
 ### Requirement: Remote approval requests survive control-plane absence
 
 Permission requests raised by remote sessions SHALL travel to the control plane over the link and SHALL remain parked while the control plane is absent. On its return, the control plane SHALL present every request that is still parked, and SHALL NOT present one that was already resolved. A decision arriving for a session that has already terminated SHALL be discarded under the existing stale-click semantics.

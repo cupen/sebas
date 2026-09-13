@@ -276,7 +276,7 @@ pub fn compute_provider_resolution(
         ProviderMode::Off => (ProviderResolution::Off, None),
         ProviderMode::Router => match router_cfg {
             Some(cfg) => router_resolution(cfg),
-            // 没有可用的 router（既没 --router 内嵌、config.toml 也没有对应
+            // 没有可用的 router（config.toml 没有 [router] 段）→ 回退 Off +
             // 段）→ 回退 Off + warn，而不是拒绝启动。mode=router 但 router
             // 没起来时，让 claude 走自己 env 配置（Off 的语义）比整 bot 卡死
             // 在「refusing to launch」强。真把 router 配坏了（listen 空）仍

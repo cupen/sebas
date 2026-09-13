@@ -9,8 +9,10 @@
  * Appearance → Services → Models → About: the former Settings overview shell
  * is gone (its three read-only items moved into About's INSTANCE segment,
  * above BUILD = /api/about; its restart-all / reset maintenance actions are
- * retired — per-service restart lives only in Services), and the former Env
- * table lives under Generic. Services reads the watchdog managed-service
+ * retired — per-service restart lives only in Services). Since
+ * split-env-vars-settings-section the former Env table lives in its own
+ * read-only「Env Vars」section in the bottom group (above About, pushed to
+ * the bottom by the tail separator). Services reads the watchdog managed-service
  * surface (/api/admin/services, response-driven — the sandbox assembly is a
  * variable, never enumerate concrete services). Since
  * redesign-provider-models-settings the Models section carries provider
@@ -142,21 +144,24 @@ test.describe('设置面', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('S3 env table renders placeholder semantics under Generic', async ({ page }) => {
+    test('S3 env table renders placeholder semantics under Env Vars', async ({ page }) => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
       await page.goto('/')
       await settings.openViaSidebar()
-      // revamp-settings-nav-and-models-editor：Env 表并入 Generic 分区。
-      await settings.openSection('Generic')
+      // split-env-vars-settings-section D4：Env 表自 Generic 迁出，住底部
+      // 只读组「Env Vars」（与 About 同组，压底分隔线）。
+      await settings.openSection('Env Vars')
 
       const table = settings.panel.locator('table.env-table')
       await expect(table).toBeVisible({ timeout: 10_000 })
       const row = table.locator('tr', { hasText: 'SEBAS_WEBUI_PASSWORD' })
       await expect(row).toBeVisible()
-      // Placeholder semantics: presence is documented, values are not leaked.
-      await expect(row.locator('.value')).toHaveText('managed by core config')
+      // Placeholder semantics (add-webui-multiuser-rbac 后该条目是服务端策划
+      // 的 set_unset 敏感项): presence is documented, values are not leaked —
+      // 沙箱未设置该变量 → 如实呈现「未设置」，绝不展示/编造值。
+      await expect(row.locator('.value')).toHaveText('未设置')
       await settings.close()
 
       expect(collector.clean()).toEqual([])
@@ -202,7 +207,7 @@ test.describe('设置面', () => {
   })
 
   test.describe('分区导航 IA', () => {
-    test('nav order Generic→Appearance→Services→Models→About(pinned), default focus, memory, stale-value fallback', async ({
+    test('nav order Generic→Appearance→Services→Models→Env Vars→About(pinned), default focus, memory, stale-value fallback', async ({
       page,
     }) => {
       const settings = new SettingsModal(page)
@@ -217,9 +222,12 @@ test.describe('设置面', () => {
         timeout: 10_000,
       })
 
-      // 分区顺序即规约：Generic → Appearance →〔分隔线〕Services → Models →
-      // 〔压底分隔线〕About。一次结构断言钉住顺序 + 两条组间分隔线 + About
-      // 的 tail 分隔线（弹性留白压底的载体）。
+      // 分区顺序即规约（settings-modal SECTIONS）：Generic → Appearance →
+      // 〔分隔线〕Services → Models →〔压底分隔线〕Env Vars → About。免登录
+      // 沙箱（服务端未启用鉴权，role = null）下 Users 分区按角色裁剪隐藏
+      // （仅 root 可见——登录形态的呈现由 auth.spec.ts + 前端单测承担）。
+      // 一次结构断言钉住顺序 + 两条组间分隔线 + About 的 tail 分隔线（弹性
+      // 留白压底的载体）。
       const signature = await settings.panel.locator('.nav').evaluate((nav) =>
         Array.from(nav.children).map((el) => {
           if (el.classList.contains('nav-sep')) {
@@ -235,8 +243,10 @@ test.describe('设置面', () => {
         'Services',
         'Models',
         'sep-tail',
+        'Env Vars',
         'About',
       ])
+      await expect(navItem('Users')).toHaveCount(0)
 
       // 历史记忆：切到 Models 后关闭再打开，缺省直接回到 Models（无点击）。
       await settings.openSection('Models')

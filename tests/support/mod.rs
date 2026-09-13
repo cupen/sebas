@@ -133,7 +133,7 @@ pub struct SandboxDir {
     path: PathBuf,
     keep: AtomicBool,
     /// PIDs spawned as their own process-group leaders (unix). Teardown
-    /// killpg's each group so core-spawned routers and watchdog-respawned
+    /// killpg's each group so test-spawned routers and watchdog-respawned
     /// cores die with the test even though `kill_on_drop` only reaps the
     /// direct child (sebas-gc7 leak).
     group_leaders: Mutex<Vec<u32>>,
@@ -233,6 +233,11 @@ pub struct Sandbox {
     pub state_file: PathBuf,
     pub core_log: PathBuf,
     pub webui_log: PathBuf,
+    /// Router 子进程日志（独立进程形态：`sebas router --config … --debug`）。
+    pub router_log: PathBuf,
+    /// 沙箱配置里钉住的 router 监听端口（probed free port）——默认 8787 是
+    /// 固定值，并行的 e2e/验收用例会互踩。
+    pub router_port: u16,
     /// The one fake secret shared by core and (matching) webui processes.
     pub core_secret: String,
     /// Holds the drop guard (kept alive for the sandbox's whole life).
@@ -253,11 +258,13 @@ impl Sandbox {
         mkdir(&path.join("downloads"));
 
         let webui_port = free_port();
+        let router_port = free_port();
         let config_path = path.join("config.toml");
         let channel_path = path.join("core-channel.sock");
         let state_file = path.join("sessions.json");
         let core_log = path.join("core.log");
         let webui_log = path.join("webui.log");
+        let router_log = path.join("router.log");
         let providers = path.join("providers.json");
         let usage = path.join("router-usage.jsonl");
         let fake_claude = forward_slash(Path::new(env!("CARGO_BIN_EXE_fake-claude")));
@@ -290,8 +297,9 @@ channel_path = "core-channel.sock"
 enabled = true
 host = "127.0.0.1"
 port = {webui_port}
-# auth 默认 true 且缺失凭据时会自动生成（写进真实 ~/.sebas）；API 断言
-# 沙箱一律免登录，显式关闭（webui 鉴权旅程由 testsuite-webui 专测）。
+# auth 默认 true；API 断言沙箱一律免登录，显式关闭（webui 登录旅程由
+# testsuite-webui 专测）。开启形态的凭据走沙箱内 SEBAS_WEBUI_AUTH_DB +
+# env 引导 / webui-passwd，绝不落真实 ~/.sebas。
 auth = false
 
 # router validate requires >=1 provider with a base_url; the debug `test`
@@ -301,6 +309,8 @@ auth = false
 api_key = "sk-sandbox-dummy"
 
 [router]
+# 默认 listen 是固定 8787——并行用例互踩，每个沙箱钉一个 probed 端口。
+listen = "127.0.0.1:{router_port}"
 provider_overlay = "{}"
 usage_file = "{}"
 "#,
@@ -322,6 +332,8 @@ usage_file = "{}"
             state_file,
             core_log,
             webui_log,
+            router_log,
+            router_port,
             core_secret: "sandbox-secret".into(),
             _dir: dir,
         }
@@ -350,6 +362,13 @@ usage_file = "{}"
             (
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 forward_slash(&self.path.join("providers.json")),
+            ),
+            // WebUI 用户库（add-webui-multiuser-rbac）：auth = false 时无人
+            // 打开它，钉进沙箱是纵深防御——任何开启 auth 或调 webui-passwd
+            // 的变体都不会写到操作者的真实 ~/.sebas/auth.db。
+            (
+                "SEBAS_WEBUI_AUTH_DB",
+                forward_slash(&self.path.join("auth.db")),
             ),
             // archive.json falls back to SEBAS_HOME ($HOME/.sebas) — pin both
             // into the sandbox: without this the suites read AND rewrote the
@@ -503,17 +522,33 @@ usage_file = "{}"
     }
 
     /// 节点链路监听端口（`enable_node_link` 之后才有意义）。
+    ///
+    /// 按 section 作用域解析：config 里 `[router] listen` 也在（两进程形态给
+    /// router 针的 probed 端口），全局找第一个 `listen =` 会错拿 router 的。
     pub fn node_link_port(&self) -> u16 {
         let config = std::fs::read_to_string(&self.config_path).unwrap_or_default();
-        config
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("listen = \"127.0.0.1:"))
-            .and_then(|rest| rest.trim_end_matches('"').parse().ok())
-            .unwrap_or_else(|| panic!("配置里没有 [node_link] listen（先调 enable_node_link）"))
+        let mut in_node_link = false;
+        for line in config.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_node_link = trimmed == "[node_link]";
+                continue;
+            }
+            if in_node_link
+                && let Some(rest) = trimmed.strip_prefix("listen = \"127.0.0.1:")
+            {
+                return rest
+                    .trim_end_matches('"')
+                    .parse()
+                    .unwrap_or_else(|e| panic!("解析 [node_link] listen 失败: {e}"));
+            }
+        }
+        panic!("配置里没有 [node_link] listen（先调 enable_node_link）")
     }
 
-    /// Core: `sebas run -c <config> --router --debug` (detached: no --webui;
-    /// the channel socket comes up because SEBAS_CORE_SECRET is set).
+    /// Core: `sebas core -c <config>`（bare core，无 router——需要 router 就
+    /// 另行 spawn 独立子进程 [`Self::spawn_router_debug`]；channel socket 因
+    /// SEBAS_CORE_SECRET 已设置而照常出现）。
     pub fn spawn_core(&self) -> tokio::process::Child {
         self.spawn_core_extra(&[])
     }
@@ -522,13 +557,7 @@ usage_file = "{}"
     /// `SEBAS_TEST_SPAWN_SESSION=1`).
     pub fn spawn_core_extra(&self, extra: &[(&str, &str)]) -> tokio::process::Child {
         self.spawn(
-            &[
-                "core",
-                "-c",
-                &forward_slash(&self.config_path),
-                "--router",
-                "--debug",
-            ],
+            &["core", "-c", &forward_slash(&self.config_path)],
             &self.core_secret,
             extra,
             &self.core_log,
@@ -539,15 +568,38 @@ usage_file = "{}"
     /// key, writes the secret file and binds the channel (5.1/5.2).
     pub fn spawn_core_no_secret(&self) -> tokio::process::Child {
         self.spawn_no_secret(
-            &[
-                "core",
-                "-c",
-                &forward_slash(&self.config_path),
-                "--router",
-                "--debug",
-            ],
+            &["core", "-c", &forward_slash(&self.config_path)],
             &[],
             &self.core_log,
+        )
+    }
+
+    /// Router 子进程（unify-router-process-shape D5 两进程形态）：
+    /// `sebas router -c <config> --debug`（内置 test provider、下游免鉴权）。
+    /// 地址从 [`wait_router_addr`] 读 router.log 获得；进程保活在返回的
+    /// Child（kill_on_drop）里，SandboxDir Drop 再 killpg 兜底。
+    pub fn spawn_router_debug(&self) -> tokio::process::Child {
+        self.spawn(
+            &[
+                "router",
+                "-c",
+                &forward_slash(&self.config_path),
+                "--debug",
+            ],
+            &self.core_secret,
+            &[],
+            &self.router_log,
+        )
+    }
+
+    /// Router 子进程，不带 `--debug`（下游 auth 强制生效；无内置 test
+    /// provider）。供下游鉴权拒绝类旅程。
+    pub fn spawn_router(&self) -> tokio::process::Child {
+        self.spawn(
+            &["router", "-c", &forward_slash(&self.config_path)],
+            &self.core_secret,
+            &[],
+            &self.router_log,
         )
     }
 
@@ -627,33 +679,6 @@ usage_file = "{}"
         journal
     }
 
-    /// Pin the router's HTTP listener to a specific port inside the sandbox
-    /// config (the default `127.0.0.1:8787` is fixed — parallel e2e cases
-    /// would collide). Must run before spawn.
-    pub fn set_router_listen(&self, port: u16) {
-        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
-        let patched = toml.replace(
-            "[router]",
-            &format!("[router]\nlisten = \"127.0.0.1:{port}\""),
-        );
-        assert!(
-            patched != toml && patched.contains("[router]"),
-            "[router] section not found in config"
-        );
-        std::fs::write(&self.config_path, patched).expect("write config");
-    }
-
-    /// Core with the router but WITHOUT `--debug` (downstream auth enforced;
-    /// no built-in test provider). For auth-rejection journeys.
-    pub fn spawn_core_router_auth(&self) -> tokio::process::Child {
-        self.spawn(
-            &["core", "-c", &forward_slash(&self.config_path), "--router"],
-            &self.core_secret,
-            &[],
-            &self.core_log,
-        )
-    }
-
     /// Standalone webui: `sebas webui -c <config>`; `secret` is what the
     /// webui presents to the core channel (pass a different one for
     /// wrong-secret cases).
@@ -679,10 +704,9 @@ usage_file = "{}"
         std::fs::write(&self.config_path, patched).expect("write config");
     }
 
-    /// In-process webui form: `sebas run -c <config> --router --debug
-    /// --webui --webui-port <p>`. Returns the child and the dashboard port.
-    /// Extra envs may pin the router port (`SEBAS_ROUTER_LISTEN`) so the
-    /// native agent can be pointed at it via `SEBAS_AGENT_ROUTER_URL`.
+    /// In-process webui form: `sebas core -c <config> --webui --webui-port
+    /// <p>`（无 router 旗标——router 只以独立进程运行，见
+    /// [`Self::spawn_router_debug`]）。Returns the child and the dashboard port.
     pub fn spawn_core_inprocess_webui(
         &self,
         extra: &[(&str, &str)],
@@ -701,8 +725,6 @@ usage_file = "{}"
             "core",
             "-c",
             &forward_slash(&self.config_path),
-            "--router",
-            "--debug",
             "--webui",
             "--webui-port",
             &dashboard_port.to_string(),
@@ -836,13 +858,14 @@ pub async fn wait_unreachable_with_cause(cli: &reqwest::Client, sb: &Sandbox) ->
     .await
 }
 
-/// Parse the router bind address from the core log
-/// (`router started … addr=127.0.0.1:<port>`).
+/// Parse the router bind address from the router child's log
+/// (`sebas router listening … addr=127.0.0.1:<port>`；独立进程形态，
+/// 地址不再写进 core.log)。
 pub async fn wait_router_addr(sb: &Sandbox) -> String {
-    let log_path = sb.core_log.clone();
+    let log_path = sb.router_log.clone();
     let hint = sb.path.clone();
     wait_for(
-        "router addr in core log",
+        "router addr in router log",
         Duration::from_secs(15),
         &hint,
         move || {
@@ -851,7 +874,7 @@ pub async fn wait_router_addr(sb: &Sandbox) -> String {
                 let log = std::fs::read_to_string(&log_path).ok()?;
                 for line in log.lines().rev() {
                     let line = strip_ansi(line);
-                    if line.contains("router started")
+                    if line.contains("router listening")
                         && let Some(idx) = line.find("addr=")
                     {
                         let addr = line[idx + 5..].split_whitespace().next()?;

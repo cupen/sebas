@@ -23,6 +23,9 @@ pub enum ControlRequest {
         service: ManagedService,
         desired: DesiredState,
         persist: bool,
+        /// unify-router-process-shape 2.2（D3）：仅对 `{router, off}` 有意义
+        /// ——绕过活跃 routed 会话停止保护。其他组合 executor 忽略。
+        force: bool,
     },
     ServiceRestart {
         service: ManagedService,

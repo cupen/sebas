@@ -183,8 +183,9 @@ pub async fn run(cfg: RouterConfig) -> Result<()> {
 }
 
 /// 以外部提供的 listener 启动 router（不接管 ctrl_c/SIGTERM），返回实际监听
-/// 地址与 serve task。供嵌入方（`sebas run --router`）在随机端口（`127.0.0.1:0`）
-/// 上启动并向日志输出真实端口；进程生命周期由调用方/runtime 管理。
+/// 地址与 serve task。供需要自带 listener 的宿主/嵌入场景使用；router 的正式
+/// 进程形态只有独立进程 `sebas router --config <path> [--debug]`（见 [`run`]），
+/// 本函数不改变这一点，进程生命周期由调用方/runtime 管理。
 pub fn serve_with_listener(
     cfg: RouterConfig,
     listener: tokio::net::TcpListener,

@@ -124,9 +124,11 @@ impl WatchdogControl {
                     status,
                     ..
                 } => Ok(format!("已受理（op={operation_id}，状态 {status}）。")),
-                RpcControlResponse::Rejected { code, message } => {
-                    Err(format!("watchdog 拒绝 [{code}]: {message}"))
-                }
+                RpcControlResponse::Rejected {
+                    code,
+                    message,
+                    count: _,
+                } => Err(format!("watchdog 拒绝 [{code}]: {message}")),
                 other => Ok(format!("{other:?}")),
             },
             Err(e) => Err(format!("watchdog control RPC 失败：{e}")),
@@ -170,6 +172,9 @@ impl ControlPort for WatchdogControl {
                             service: "router".into(),
                             desired: action,
                             persist: false,
+                            // im 卡片的 /router off 不带 force：被拒时如实
+                            // 把拒绝（含计数）回给对话（unify-router-process-shape 2.2）。
+                            force: false,
                         })
                         .await
                     }

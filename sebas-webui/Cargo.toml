@@ -19,6 +19,9 @@ sha2 = "0.11"
 hmac = "0.13"
 getrandom = "0.4"
 dirs = "7"
+# add-webui-multiuser-rbac：多用户用户库 auth.db（与根 crate 的 rusqlite
+# 同版本同 bundled 特性，workspace 惯例）。
+rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.8", features = ["ws"] }

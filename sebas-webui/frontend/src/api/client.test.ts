@@ -115,6 +115,67 @@ describe('api wire shapes', () => {
   it('parseBackendHint recognises native', () => {
     expect(parseBackendHint('native')).toEqual({ driver: 'native' })
   })
+
+  it('disableService first attempt sends no force field (byte shape unchanged)', async () => {
+    // unify-router-process-shape D3：force 是操作者显式意图，首次尝试不带。
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(okResponse({ operation_id: 'op-1', status: 'accepted', message: '' }))
+
+    await api.disableService('router')
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/admin/services/router/disable')
+    expect(JSON.parse(String(init.body))).toEqual({})
+  })
+
+  it('disableService force retry pins the field name `force` (boolean)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(okResponse({ operation_id: 'op-2', status: 'accepted', message: '' }))
+
+    await api.disableService('router', true)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ force: true })
+  })
+
+  it('disableService rejection carries code/count from a flat body', async () => {
+    // 拒绝合同主形态（2.3：400 + code + count，顶层平铺）。
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      errorResponse(400, { code: 'active_routed_sessions', count: 3 }),
+    )
+
+    const err = await api.disableService('router').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(400)
+    expect((err as ApiError).code).toBe('active_routed_sessions')
+    expect((err as ApiError).count).toBe(3)
+  })
+
+  it('disableService rejection also parses a nested {error:{code,count}} envelope', async () => {
+    // 防御性兜底：后端适配层若以嵌套信封包裹，code/count 仍可读。
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      errorResponse(400, { error: { code: 'active_routed_sessions', count: 2 } }),
+    )
+
+    const err = await api.disableService('router').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).code).toBe('active_routed_sessions')
+    expect((err as ApiError).count).toBe(2)
+  })
+
+  it('disableService keeps string error bodies as message with code/count null', async () => {
+    // 既有语义不回归：error 为字符串 → message；无 code/count 载荷 → null。
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(503, { error: 'no watchdog adapter' }))
+
+    const err = await api.disableService('router').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).message).toBe('no watchdog adapter')
+    expect((err as ApiError).code).toBeNull()
+    expect((err as ApiError).count).toBeNull()
+  })
 })
 
 describe('withQuery (add-webui-picker-workdir-start)', () => {

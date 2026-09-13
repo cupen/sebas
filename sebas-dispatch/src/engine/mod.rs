@@ -13,9 +13,7 @@ mod maps;
 pub mod provider_card;
 
 pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, count_chat_messages};
-pub use maps::{
-    MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap, SessionAllowlist, tool_signature,
-};
+pub use maps::{AutoModeSwitch, AutoModeSwitchMap, MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap};
 
 use crate::card_events::{
     apply_event_to_card, card_needs_rotation, count_folded_items, update_parent_title,
@@ -200,6 +198,17 @@ pub enum CloseOutcome {
     NotFound,
 }
 
+/// 控制面「自动」mode 词汇（permission-mode-auto-gate）。「本会话不再询问」
+/// 的 mode 语义固定切到该值。
+pub const AUTO_MODE: &str = "auto";
+
+/// claude 驱动 SetMode 失败时非终态 `Error` 消息的稳定后缀（「…模式未变」，
+/// 见 `sebas-acp/src/claude/driver.rs` 的 SetMode 臂）。dispatch 据此把
+/// SetMode 失败与同会话其它游离非终态 Error（如 SetModel 被拒=「模型未变」）
+/// 区分开——匹配范围已被在飞记录限定到刚点击 auto 的会话，误报面极窄。
+/// 【跨 crate 契约】sebas-acp 若改写该文案需同步此处。
+pub const MODE_UNCHANGED_MARKER: &str = "模式未变";
+
 /// web 消息路径的类型化拒绝（workbench-turn-queue 5.1，design D5）：目前唯
 /// 一的拒绝是 staging 队列溢出——携带上限，提交面映射为可见 4xx。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,13 +251,11 @@ pub struct DispatchHandle {
     /// the user clicks (or to mark it expired on a stale click). Entries are
     /// removed once resolved so a duplicate click doesn't re-update.
     perm_cards: PermCardMap,
-    /// Per-chat approval state for "本会话不再询问". When a new
-    /// `PermissionRequest` arrives, the router checks this and auto-
-    /// approves without rendering a card. The bridge sees the same
-    /// approve/deny either way; the difference is purely UX.
-    /// Scope: per-ChannelKey (= per feishu chat/thread). Cleared when the
-    /// session is removed (`/new`, terminal error, daemon restart).
-    allowlist: SessionAllowlist,
+    /// 「本会话不再询问」点击后在飞的自动模式切换（permission-mode-auto-gate）。
+    /// 点击记入（keyed by session_id），driver 的 `ModeChanged`（成功）或
+    /// SetMode 失败的非终态 `Error` 到达时取走：失败据实翻卡 + 写 turn 流
+    /// 事件契约。随事件消费或会话终结清空，无持久化。
+    auto_mode_switches: AutoModeSwitchMap,
     /// Provider CRUD 表单实例（`/provider` 命令 + 卡片回调路由）。
     /// 未接线（None）时 `/provider` 落到 HelpText，表单回调仅记日志。
     /// `ProviderForms` 包含 preset + custom 两张表单（共享同一个 overlay 文件），
@@ -306,7 +313,7 @@ impl Clone for DispatchHandle {
             card_states: self.card_states.clone(),
             card_cfg: self.card_cfg.clone(),
             perm_cards: self.perm_cards.clone(),
-            allowlist: self.allowlist.clone(),
+            auto_mode_switches: self.auto_mode_switches.clone(),
             provider_forms: self.provider_forms.clone(),
             mgr: self.mgr.clone(),
             native: self.native.clone(),
@@ -380,7 +387,7 @@ impl DispatchHandle {
                 card_states: crate::card_state::CardStateMap::default(),
                 card_cfg: Arc::new(RwLock::new(card_cfg)),
                 perm_cards: PermCardMap::default(),
-                allowlist: SessionAllowlist::default(),
+                auto_mode_switches: AutoModeSwitchMap::default(),
                 provider_forms,
                 mgr,
                 native: Arc::new(RwLock::new(native)),
@@ -750,12 +757,11 @@ impl DispatchHandle {
         self.perm_cards.take(request_id).await
     }
 
-    /// Per-chat approval state set by "本会话不再询问". Tests use this to
-    /// seed and inspect entries; the production path goes through
-    /// `apply_event_to_out` (auto-approve) and `on_button` (grant on click)
-    /// without reaching for the field directly.
-    pub fn allowlist(&self) -> &SessionAllowlist {
-        &self.allowlist
+    /// 「本会话不再询问」点击后在飞的自动模式切换登记/取用（permission-mode-
+    /// auto-gate）。生产路径：`on_button`（点击记入）→ `apply_event`
+    /// （ModeChanged / SetMode 失败 Error 到达时取走）。公开给测试断言。
+    pub fn auto_mode_switches(&self) -> &AutoModeSwitchMap {
+        &self.auto_mode_switches
     }
 
     /// Look up the root card message_id for a session (used by `UpdateCard`).
@@ -824,6 +830,29 @@ impl DispatchHandle {
             self.map.set_effective_mode(&key, Some(mode.clone())).await;
             self.publish_updated(&key).await;
         }
+        // permission-mode-auto-gate：「本会话不再询问」发起的 auto 切换被
+        // 接受 → 取走在飞记录（成功静默——卡片在点击时已翻「已切换自动
+        // 模式」，无需二次上报）。
+        if let AcpEvent::ModeChanged { mode, .. } = event
+            && mode == AUTO_MODE
+        {
+            let _ = self.auto_mode_switches.take(session_id).await;
+        }
+        // permission-mode-auto-gate：SetMode 被执行体拒绝（非终态 Error，
+        // 带驱动「模式未变」标记）→ 放行不回滚、失败如实上报：写 turn 流
+        // 事件契约条目（im 等 detached 前端翻出失败态）+ 就地翻卡（卡归
+        // 本进程跟踪时）。
+        if let AcpEvent::Error {
+            terminal: false,
+            message,
+            ..
+        } = event
+            && message.contains(MODE_UNCHANGED_MARKER)
+            && let Some(sw) = self.auto_mode_switches.take(session_id).await
+        {
+            self.report_auto_mode_switch_failed(session_id, &sw, message)
+                .await;
+        }
         match event {
             AcpEvent::TextDelta { delta, .. } => {
                 self.transcript_push(session_id, TurnEntry::markdown(0, delta.clone()))
@@ -842,18 +871,26 @@ impl DispatchHandle {
                 // workbench-conversation-view 1.3（design D2）：工具条目打
                 // `element_type = "tool"` 标签（内容仍为可读 markdown），让
                 // 前端把工具调用与正文区分开、收进可展开组。
+                // workbench-agent-identity-and-process-folds 1.2：再附结构化
+                // 标题（`{tool} · {key_arg}`，偏好键序提取 + 200 字符上限）
+                // 供前端二级折叠收起时显示。
                 self.transcript_push(
                     session_id,
-                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```")),
+                    TurnEntry::tool(0, format!("📖 **{tool_name}**\n```json\n{args_str}\n```"))
+                        .with_title(events::tool_entry_title(false, tool_name, Some(args))),
                 )
                 .await;
             }
             AcpEvent::ToolEnd {
                 tool_name, result, ..
             } => {
+                // workbench-agent-identity-and-process-folds 1.2：完成态标题
+                // 带 `✓ ` 前缀；ToolEnd wire 不携带 args（无 call id 可配对），
+                // 传 None → 标题退化为 `✓ {tool}`。
                 self.transcript_push(
                     session_id,
-                    TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}")),
+                    TurnEntry::tool(0, format!("✓ **{tool_name}**\n{result}"))
+                        .with_title(events::tool_entry_title(true, tool_name, None)),
                 )
                 .await;
             }
@@ -914,6 +951,48 @@ impl DispatchHandle {
             emoji: emoji.into(),
         })
         .await;
+    }
+
+    /// 「本会话不再询问」的 auto 切换失败上报（permission-mode-auto-gate，
+    /// spec「Allow session with failed mode switch is honest」）：放行已在
+    /// 点击时发生、不回滚；这里只负责把失败如实送达两张面——
+    /// ① turn 流事件契约条目（detached 前端据此翻出失败态，形状见
+    ///    [`TurnEntry::permission_mode_result`]）；
+    /// ② 就地翻卡（卡归本进程跟踪时，orange 主题失败文案）。
+    async fn report_auto_mode_switch_failed(
+        &self,
+        session_id: &str,
+        sw: &maps::AutoModeSwitch,
+        cause: &str,
+    ) {
+        tracing::warn!(
+            %session_id,
+            request_id = %sw.request_id,
+            %cause,
+            "allow-session auto mode switch failed; allow stands, reporting honestly"
+        );
+        let payload = serde_json::json!({
+            "request_id": sw.request_id,
+            "ok": false,
+            "mode": AUTO_MODE,
+            "detail": cause,
+        });
+        self.transcript_push(
+            session_id,
+            TurnEntry::permission_mode_result(0, payload),
+        )
+        .await;
+        if let Some(msg_id) = &sw.msg_id {
+            let label = format!(
+                "✅ 当前调用已放行；⚠️ 自动模式切换失败：{cause}\n本会话仍会在工具调用时询问（可用 /new 结束会话）。"
+            );
+            self.emit(Out::UpdateCardByMsgId {
+                key: sw.key.clone(),
+                msg_id: msg_id.clone(),
+                card: crate::cards_ui::resolved_permission_card_titled(&label, "orange"),
+            })
+            .await;
+        }
     }
 
     /// flush_card：快照 → 累积中立卡（turn chrome + body）→ Out::UpdateCard。
@@ -1179,16 +1258,23 @@ impl DispatchHandle {
         mode: Option<String>,
     ) -> ChannelKey {
         let key = ChannelKey::web_new();
-        match self.map.begin_spawn(key.clone()).await {
+        // workbench-agent-identity-and-process-folds 收尾：带 prompt 的直接
+        // spawn 也把 kind/model/mode 记入映射（此前只记 project_dir，
+        // pending_kind 恒 None → SessionInfo.agent_kind 为 null，前端 agent
+        // 展示名链路永远走兜底）。`awaiting_first_prompt = false`：prompt 已
+        // 随 Out::WebSpawn 直达，映射不是 0-turn 占位——spawn 窗口内的后续
+        // 消息照常入队，dump 照常过滤 in-flight（D1：占位身份只属于占位）。
+        // web_new 键必新，插入必然发生（Fresh），mode 随插入记为 desired
+        // mode，无需再调 set_desired_mode（中途切换仍走该 setter）。
+        match self
+            .map
+            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone(), false)
+            .await
+        {
             Ok(outcome) => {
                 // Record project_dir on the mapping before emitting, so the
                 // WebUI can display it even before the session is active.
                 self.map.set_project_dir(&key, project_dir.clone()).await;
-                // （add-agent-mode-selection）desired mode 记入映射供快照
-                // 暴露（effective 由执行体回报/ModeChanged 落定）。
-                if mode.is_some() {
-                    self.map.set_desired_mode(&key, mode.clone()).await;
-                }
                 // Publish after set_project_dir so the Created snapshot
                 // already carries it. AlreadySpawning changed nothing.
                 if !matches!(outcome, crate::state::BeginSpawn::AlreadySpawning) {
@@ -1227,7 +1313,7 @@ impl DispatchHandle {
         let key = ChannelKey::web_new();
         match self
             .map
-            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone())
+            .begin_spawn_with(key.clone(), kind.clone(), model.clone(), mode.clone(), true)
             .await
         {
             Ok(outcome) => {
@@ -1448,7 +1534,7 @@ impl DispatchHandle {
     /// - Removes the mapping + drain queue (SessionMap does both).
     /// - Drops card state and root msg_id so recycled ids don't inherit
     ///   stale entries.
-    /// - Clears the chat-level permission allowlist and the per-key reply
+    /// - Clears the in-flight auto-mode switch (若有) and the per-key reply
     ///   target (topic root message_id) so recycled keys don't inherit
     ///   stale aggregation targets.
     /// - Clears `active_session` if this key was the focused one.
@@ -1492,7 +1578,11 @@ impl DispatchHandle {
         }
         self.publish_removed(&key);
 
-        self.allowlist.clear(&key).await;
+        // 在飞的自动模式切换随会话消亡：没有 driver 事件会再来，取走即弃
+        // （防 recycled session_id 继承陈旧记录）。
+        if let Some(sid) = &session_id_opt {
+            let _ = self.auto_mode_switches.take(sid).await;
+        }
         self.reply_targets.clear(&key).await;
 
         // Clear the active pointer if this was the focused session.

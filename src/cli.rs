@@ -27,9 +27,10 @@ pub enum Cmd {
     /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
     #[command(name = "webui")]
     WebUi(WebUiArgs),
-    /// 初始化 / 修改 WebUI 登录账户（用户名 + 密码，PBKDF2 落盘）。
-    /// 配置凭据后 webui 全部 API/WS 需登录；非 loopback bind 也只有
-    /// 凭据存在时才放行。运行中的 webui 经 mtime 热重载，无需重启。
+    /// 初始化 / 修改 WebUI 登录用户（多用户库 auth.db，PBKDF2 落盘）。
+    /// 第一个用户默认 root 角色，其后默认 member（--role 显式指定）。
+    /// 配置用户后 webui 全部 API/WS 需登录；非 loopback bind 也只有用户库
+    /// 存在启用用户时才放行。用户库即活数据，改密即时生效。
     #[command(name = "webui-passwd")]
     WebUiPasswd(WebUiPasswdArgs),
     /// Run the watchdog daemon: supervise core/webui/router children and
@@ -119,16 +120,9 @@ pub struct CoreArgs {
     #[arg(short = 'c', long, default_value = "./config.toml")]
     pub config: String,
 
-    /// 同时在随机端口（127.0.0.1:0）上启动内置 router；实际端口在日志中输出。
-    /// provider 从配置顶层 `[provider.*]` 读取。
-    #[arg(long)]
-    pub router: bool,
-
-    /// 同时让内置 router 进入 debug 模式：增加 `test` 模型，由 router 自身
-    /// 应答（固定文字 + 回显输入），不转发外部上游。
-    #[arg(long)]
-    pub debug: bool,
-
+    // unify-router-process-shape 1.1：内嵌 router 退役，`--router`/`--debug`
+    // 旗标已删除（传入即 unknown-argument 报错）。需要 router 就跑独立进程：
+    // `sebas router --config <path> [--debug]`（手工/watchdog 子进程同一入口）。
     /// Start the WebUI dashboard server.
     #[arg(long, conflicts_with = "no_webui")]
     pub webui: bool,
@@ -228,10 +222,11 @@ pub struct WebUiArgs {
     pub config: String,
 }
 
-/// `sebas webui-passwd` — create or update the WebUI login account.
+/// `sebas webui-passwd` — create or update a WebUI login user（写 auth.db
+/// 用户库；不读写任何 JSON 凭据文件）。
 #[derive(Parser)]
 pub struct WebUiPasswdArgs {
-    /// 账户用户名。缺省时保留现有凭据的用户名（首次建户必须提供）。
+    /// 账户用户名（多用户库里没有「现有用户名」可沿用，必填）。
     #[arg(long)]
     pub user: Option<String>,
     /// 新密码（明文；<8 字符仅告警不拦截——测试环境统一 admin/admin）。
@@ -242,6 +237,11 @@ pub struct WebUiPasswdArgs {
     /// （`printf '%s' 'pw' | sebas webui-passwd --password-stdin`）。
     #[arg(long, conflicts_with = "password")]
     pub password_stdin: bool,
+    /// 角色（root/admin/member/viewer）。缺省：库里第一个用户为 root，
+    /// 其后为 member。用户已存在时同时把其角色改为该值（最后一个启用的
+    /// root 受保护，不能被降级/禁用/删除）。
+    #[arg(long)]
+    pub role: Option<String>,
 }
 
 /// `sebas run` — start the watchdog daemon.

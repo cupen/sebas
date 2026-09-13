@@ -216,6 +216,7 @@ async fn provider_governance_journey() {
     .expect("write providers overlay");
 
     let _core = sb.spawn_core();
+    let _router_child = sb.spawn_router_debug();
     let router = wait_router_addr(&sb).await;
 
     let (status, body) = post_json(
@@ -251,8 +252,9 @@ async fn provider_governance_journey() {
 /// Native-kernel journey (spike 1.2): `SEBAS_AGENT_PROVIDER_BASE_URL` pointed
 /// at a local stub provider; an `agent: "native"` spawn completes a full
 /// turn with no real credentials. (The `SEBAS_AGENT_ROUTER_URL` variant is
-/// the watchdog's production wiring — `run --router` binds a random port, so
-/// it cannot be pre-injected at process level; see COVERAGE.md notes.)
+/// the watchdog's production wiring — 走独立 router 进程与 core 状态库里的
+/// provider 数据，由 e2e 的 core_owned_provider_reaches_router_without_restart
+/// 进程级覆盖；本旅程只钉 native 直连 provider 面。see COVERAGE.md notes.)
 #[tokio::test]
 #[ignore = "acceptance journey; run with -- --ignored or invoke testsuite-acceptance"]
 async fn native_agent_turn_via_router_journey() {
@@ -560,7 +562,8 @@ async fn router_downstream_auth_journey() {
     let sb = Sandbox::new("acceptance", "auth");
     sb.set_router_auth_token("sk-gw-test-token");
     let cli = http_client();
-    let _core = sb.spawn_core_router_auth();
+    let _core = sb.spawn_core();
+    let _router = sb.spawn_router();
     let router = wait_router_addr(&sb).await;
 
     let url = format!("{router}/v1/messages");

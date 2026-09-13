@@ -65,12 +65,18 @@ pub enum RpcControlRequest {
         service: String,
     },
     /// `/router on|off`: set a managed service's desired state.
-    /// `service` ∈ {core, router, webui}, `desired` ∈ {on, off}. core 的
+    /// `service` ∈ {core, router, webui, im}, `desired` ∈ {on, off}. core 的
     /// 启停只接受 CLI/WebUI actor（飞书 actor 拒绝，见 handle 侧）。
+    /// `force`（unify-router-process-shape 2.2/D3）：仅对停 router 有意义
+    /// （绕过活跃 routed 会话保护）；其他组合忽略。`#[serde(default)]`：
+    /// 旧客户端不发该字段，行为与 force=false 一致（serde 内部 tag 枚举
+    /// 未开 `deny_unknown_fields`，旧 watchdog 也忽略未知字段——双向兼容）。
     ServiceSet {
         service: String,
         desired: String,
         persist: bool,
+        #[serde(default)]
+        force: bool,
     },
     /// `/router restart`: restart a managed service. Same Phase 4
     /// limitation as `ServiceSet`.
@@ -102,9 +108,15 @@ pub enum RpcControlResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         startup_failure: Option<RpcStartupFailure>,
     },
+    /// Typed rejection. `count`（unify-router-process-shape 2.2）：仅当
+    /// `code` = `active_routed_sessions`（router 停止保护）时携带活跃 routed
+    /// 会话数；其余拒绝省略该字段（skip_serializing_if 保证旧 wire 形状不变，
+    /// 旧客户端照常反序列化）。
     Rejected {
         code: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u64>,
     },
     Events {
         events: Vec<RpcControlEvent>,
@@ -248,6 +260,7 @@ async fn handle_stream(
         Err(e) => RpcControlResponse::Rejected {
             code: "invalid_request".into(),
             message: format!("invalid control RPC request: {e}"),
+            count: None,
         },
     };
     let json = serde_json::to_string(&response)
@@ -267,6 +280,7 @@ async fn handle_envelope(
         return RpcControlResponse::Rejected {
             code: "unsupported_version".into(),
             message: format!("unsupported control RPC version {}", envelope.version),
+            count: None,
         };
     }
 
@@ -274,6 +288,7 @@ async fn handle_envelope(
         return RpcControlResponse::Rejected {
             code: "unauthorized".into(),
             message: "missing or invalid control RPC secret".into(),
+            count: None,
         };
     }
 
@@ -337,14 +352,16 @@ async fn handle_envelope(
             None => RpcControlResponse::Rejected {
                 code: "unauthorized".into(),
                 message: "only Feishu actors may confirm a confirmation".into(),
-            },
+            count: None,
+        },
         },
         RpcControlRequest::Cancel { token } => match feishu_principal_channel(envelope.actor) {
             Some((principal, channel)) => executor.cancel(&token, &principal, &channel).await,
             None => RpcControlResponse::Rejected {
                 code: "unauthorized".into(),
                 message: "only Feishu actors may cancel a confirmation".into(),
-            },
+            count: None,
+        },
         },
         RpcControlRequest::ServiceStatus => executor.service_status().await,
         RpcControlRequest::ServiceStatusFor { service } => {
@@ -357,26 +374,33 @@ async fn handle_envelope(
             service,
             desired,
             persist,
+            force,
         } => {
             if service_from_str(&service) == Some(ServiceName::Core) {
                 return RpcControlResponse::Rejected {
                     code: "invalid_request".into(),
                     message: "core 恒启动，不接受启停；如需重启请用 restart_core".into(),
+                    count: None,
                 };
             }
-            match service_set_request(&service, &desired, persist) {
+            match service_set_request(&service, &desired, persist, force) {
                 Ok(request) => {
                     let actor = crate::watchdog::control::Actor::from(envelope.actor);
                     executor.submit_or_confirm(actor, request).await
                 }
-                Err((code, message)) => RpcControlResponse::Rejected { code, message },
+                Err((code, message)) => RpcControlResponse::Rejected {
+                    code,
+                    message,
+                    count: None,
+                },
             }
         }
         RpcControlRequest::ServiceRestart { service } => match service_from_str(&service) {
             Some(ServiceName::Core) => RpcControlResponse::Rejected {
                 code: "invalid_request".into(),
                 message: "core 使用 restart_core（升级/回滚语义），不接受 service restart".into(),
-            },
+            count: None,
+        },
             Some(name) => {
                 let actor = crate::watchdog::control::Actor::from(envelope.actor);
                 executor
@@ -391,18 +415,21 @@ async fn handle_envelope(
             None => RpcControlResponse::Rejected {
                 code: "invalid_request".into(),
                 message: format!("未知服务: {service}"),
-            },
+            count: None,
+        },
         },
     }
 }
 
 /// 把 RPC 的 ServiceSet 翻译成 ControlRequest；错误返回 (code, message)。
 /// core 合法（sebas-2ty：由 WebUI/CLI 启停）；飞书 actor 的 core 操作已在
-/// 上层拒绝。
+/// 上层拒绝。`force` 只在停 router 组合被 executor 消费，其余组合原样携带、
+/// 执行侧忽略（D3）。
 fn service_set_request(
     service: &str,
     desired: &str,
     persist: bool,
+    force: bool,
 ) -> std::result::Result<ControlRequest, (String, String)> {
     let name = service_from_str(service)
         .ok_or_else(|| ("invalid_request".into(), format!("未知服务: {service}")))?;
@@ -420,6 +447,7 @@ fn service_set_request(
         service: managed_service(name),
         desired,
         persist,
+        force,
     })
 }
 
@@ -467,6 +495,7 @@ async fn accept_control_request(
         ControlResponse::Rejected { code, message } => RpcControlResponse::Rejected {
             code: format!("{code:?}"),
             message,
+            count: None,
         },
     }
 }
@@ -485,7 +514,8 @@ impl From<ControlResponse> for RpcControlResponse {
             ControlResponse::Rejected { code, message } => RpcControlResponse::Rejected {
                 code: format!("{code:?}"),
                 message,
-            },
+            count: None,
+        },
         }
     }
 }
@@ -557,6 +587,41 @@ mod tests {
     #[test]
     fn default_socket_path_ends_with_control_sock() {
         assert!(default_socket_path().ends_with("control.sock"));
+    }
+
+    /// unify-router-process-shape 2.2：旧客户端 wire 兼容——ServiceSet 报文
+    /// 不带 `force` 字段时以 false 缺省（envelope / request 均未开
+    /// `deny_unknown_fields`，旧 watchdog 忽略未知字段，双向兼容）。
+    #[test]
+    fn legacy_service_set_without_force_deserializes() {
+        let legacy = r#"{"version":1,"request_id":"r","secret":"s",
+            "actor":{"type":"cli","uid":1},
+            "request":{"cmd":"service_set","service":"router","desired":"off","persist":true}}"#;
+        let envelope: ControlEnvelope =
+            serde_json::from_str(legacy).expect("无 force 字段的旧报文必须可反序列化");
+        match envelope.request {
+            RpcControlRequest::ServiceSet { force, .. } => {
+                assert!(!force, "force 缺省必须为 false");
+            }
+            other => panic!("expected ServiceSet, got {other:?}"),
+        }
+        // 反向：带 force 的新报文照常解析。
+        let modern = r#"{"version":1,"request_id":"r","secret":"s",
+            "actor":{"type":"cli","uid":1},
+            "request":{"cmd":"service_set","service":"router","desired":"off","persist":true,"force":true}}"#;
+        let envelope: ControlEnvelope = serde_json::from_str(modern).expect("force 报文可解析");
+        match envelope.request {
+            RpcControlRequest::ServiceSet { force, .. } => assert!(force),
+            other => panic!("expected ServiceSet, got {other:?}"),
+        }
+        // Rejected 缺 count 字段（旧 watchdog 应答）同样可解析。
+        let old_rejection: RpcControlResponse =
+            serde_json::from_str(r#"{"type":"rejected","code":"unauthorized","message":"m"}"#)
+                .expect("旧 Rejected 报文必须可反序列化");
+        assert!(matches!(
+            old_rejection,
+            RpcControlResponse::Rejected { count: None, .. }
+        ));
     }
 
     #[test]
@@ -753,6 +818,7 @@ mod tests {
                     service: "router".into(),
                     desired: "on".into(),
                     persist: false,
+                    force: false,
                 },
             },
             test_executor(),
@@ -782,6 +848,7 @@ mod tests {
                     service: "core".into(),
                     desired: "off".into(),
                     persist: true,
+                    force: false,
                 },
             },
             test_executor(),
@@ -812,6 +879,7 @@ mod tests {
                     service: "core".into(),
                     desired: "off".into(),
                     persist: true,
+                    force: false,
                 },
             },
             test_executor(),

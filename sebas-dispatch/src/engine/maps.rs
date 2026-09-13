@@ -1,6 +1,8 @@
-//! Router 的登记表：root 卡 msg_id、未决权限卡、会话级工具白名单。
+//! Router 的登记表：root 卡 msg_id、未决权限卡、在飞自动模式切换。
 //!
 //! 从 router.rs 拆出；经 `super` re-export，外部路径 `sebas_dispatch::MsgIdMap` 等不变。
+//! （permission-mode-auto-gate：聊天级 grant_all 白名单已退役——「本会话不再
+//! 询问」改走会话 mode 门控，自动放行不再有 dispatch 侧存储。）
 
 use sebas_channels::ChannelKey;
 use serde_json::Value;
@@ -44,8 +46,9 @@ impl MsgIdMap {
 }
 
 /// One outstanding permission card: the chat to PATCH, the Feishu message_id
-/// to PATCH by, and the (tool_name, args) needed to register the call in the
-/// session allowlist when the user picks "Allow session".
+/// to PATCH by, and the (tool_name, args) call metadata (diagnostics only
+/// since permission-mode-auto-gate retired the allowlist — the click handler
+/// keys off `key`/`msg_id`).
 #[derive(Debug, Clone)]
 pub struct PermCardEntry {
     pub key: ChannelKey,
@@ -90,68 +93,37 @@ impl PermCardMap {
     }
 }
 
-/// Per-chat permission allowlist. When a user clicks "本会话不再询问" on a
-/// permission card, the chat enters allow-all mode; subsequent
-/// `PermissionRequest`s in the same chat are auto-approved without a card.
+/// 「本会话不再询问」点击后在飞的自动模式切换（permission-mode-auto-gate）。
+/// 会话 routing id → 本次点击的卡片信息；SetMode 结果到达时取用：
+/// `ModeChanged{auto}` = 成功（静默消费）；带驱动「模式未变」标记的非终态
+/// `Error` = 失败（据实翻卡 + 写事件契约条目，放行不回滚）。
 #[derive(Default, Clone)]
-pub struct SessionAllowlist {
-    inner: Arc<RwLock<HashMap<ChannelKey, AllowEntry>>>,
+pub struct AutoModeSwitchMap {
+    inner: Arc<RwLock<HashMap<String, AutoModeSwitch>>>,
 }
 
-/// Per-chat approval state. `allow_all` is set by "本会话不再询问" and
-/// auto-approves every subsequent permission request in the chat;
-/// `sigs` holds individual (tool, args) signatures (kept for the
-/// granular-grant API and its tests).
-///
-/// Signature is `format!("{tool_name}|{args_json}")` where `args_json` is
-/// `serde_json::to_string` of the canonicalized args value.
-#[derive(Default)]
-struct AllowEntry {
-    allow_all: bool,
-    sigs: std::collections::HashSet<String>,
+/// 一次在飞的自动模式切换：发起它的权限卡（request_id + 飞书 message_id，
+/// 用于失败时就地翻卡）与所属 chat（`UpdateCardByMsgId` 的寻址键）。
+#[derive(Debug, Clone)]
+pub struct AutoModeSwitch {
+    pub request_id: String,
+    /// 权限卡的飞书 message_id；`None` = 卡不归本进程跟踪（如 detached
+    /// 前端渲染），失败只走事件契约、无卡可翻。
+    pub msg_id: Option<String>,
+    pub key: ChannelKey,
 }
 
-impl SessionAllowlist {
-    /// Check whether a (tool_name, args) call is allowed for the given chat:
-    /// either the chat is in allow-all mode, or the exact signature was
-    /// granted individually.
-    pub async fn is_allowed(&self, key: &ChannelKey, tool_name: &str, args: &Value) -> bool {
-        let sig = tool_signature(tool_name, args);
-        self.inner
-            .read()
-            .await
-            .get(key)
-            .map(|e| e.allow_all || e.sigs.contains(&sig))
-            .unwrap_or(false)
+impl AutoModeSwitchMap {
+    /// Record the in-flight auto-mode switch for `session_id`（后到覆盖先到：
+    /// 同会话连点两张卡时以最后一次点击为准，早的那张已被 take 处理）。
+    pub async fn record(&self, session_id: String, switch: AutoModeSwitch) {
+        self.inner.write().await.insert(session_id, switch);
     }
 
-    /// Record an "Allow session" approval: from now on, auto-approve every
-    /// permission request in this chat. Idempotent.
-    pub async fn grant_all(&self, key: &ChannelKey) {
-        self.inner
-            .write()
-            .await
-            .entry(key.clone())
-            .or_default()
-            .allow_all = true;
-    }
-
-    /// Record a single-signature approval. Idempotent.
-    pub async fn grant(&self, key: &ChannelKey, tool_name: &str, args: &Value) {
-        let sig = tool_signature(tool_name, args);
-        self.inner
-            .write()
-            .await
-            .entry(key.clone())
-            .or_default()
-            .sigs
-            .insert(sig);
-    }
-
-    /// Drop the allowlist for a chat (session ended). Called from
-    /// `remove_by_session` and similar lifecycle hooks.
-    pub async fn clear(&self, key: &ChannelKey) {
-        self.inner.write().await.remove(key);
+    /// Take（并移除）the in-flight entry for `session_id`。取走即消费——
+    /// 成功/失败各处理一次，重复事件不重复上报。
+    pub async fn take(&self, session_id: &str) -> Option<AutoModeSwitch> {
+        self.inner.write().await.remove(session_id)
     }
 }
 
@@ -182,42 +154,6 @@ impl ReplyTargetMap {
     }
 }
 
-/// Canonical signature for matching tool calls. Canonicalizes `args` so
-/// that two semantically-equal (tool, args) calls hash to the same string
-/// regardless of:
-///   - key order in objects (Claude may serialise the same object with
-///     keys in different order on different invocations)
-///   - null fields (Claude sometimes emits `parent_tool_use_id: null`
-///     or other optional wrappers)
-///
-/// Array order is preserved (semantically meaningful for command args,
-/// env, etc.).
-pub fn tool_signature(tool_name: &str, args: &Value) -> String {
-    let canonical = canonicalize_value(args);
-    let args_str = serde_json::to_string(&canonical).unwrap_or_else(|_| "{}".to_string());
-    format!("{tool_name}|{args_str}")
-}
-
-/// Recursively canonicalize a JSON value for stable hashing:
-/// - Objects: drop `null` fields, sort remaining keys, recurse.
-/// - Arrays: preserve order, recurse.
-/// - Other: unchanged.
-fn canonicalize_value(v: &Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map
-                .iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (k.clone(), canonicalize_value(v)))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            Value::Object(entries.into_iter().collect())
-        }
-        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize_value).collect()),
-        other => other.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +170,25 @@ mod tests {
         // isolation
         m.record("s2".into(), "om_xyz".into()).await;
         assert_eq!(m.get("s2").await.as_deref(), Some("om_xyz"));
+    }
+
+    #[tokio::test]
+    async fn auto_mode_switch_take_consumes_entry() {
+        let m = AutoModeSwitchMap::default();
+        assert!(m.take("s1").await.is_none());
+        m.record(
+            "s1".into(),
+            AutoModeSwitch {
+                request_id: "r1".into(),
+                msg_id: Some("om_1".into()),
+                key: ChannelKey::feishu("oc_x", None),
+            },
+        )
+        .await;
+        let taken = m.take("s1").await.expect("entry recorded");
+        assert_eq!(taken.request_id, "r1");
+        assert_eq!(taken.msg_id.as_deref(), Some("om_1"));
+        // 取走即消费：重复事件不重复上报。
+        assert!(m.take("s1").await.is_none());
     }
 }

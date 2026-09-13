@@ -228,7 +228,7 @@ pub fn permission_card(
         card.elements.push(el);
     }
     card.elements.push(note_element(
-        "本会话不再询问 = 之后本会话所有权限请求自动放行；/new 或会话结束后失效".into(),
+        "本会话不再询问 = 放行本次调用并把会话切到自动模式（后续工具调用不再询问）；/new 或会话结束后回到默认档".into(),
     ));
     let btn = |label: &str, style: &str, decision: &str| ChannelElement::Button {
         text: RichText::plain(label),
@@ -269,7 +269,13 @@ pub fn session_lost_card() -> ChannelCard {
 
 /// 权限卡点击后的原位替换：`label` 是 "✅ 已允许（仅此一次）" 等，无按钮。
 pub fn resolved_permission_card(label: &str) -> ChannelCard {
-    let mut card = ChannelCard::new("权限请求", "blue");
+    resolved_permission_card_titled(label, "blue")
+}
+
+/// 同上，主题可指定：自动模式切换失败的如实态用 orange（
+/// permission-mode-auto-gate——不伪装成已切换）。
+pub fn resolved_permission_card_titled(label: &str, theme: &str) -> ChannelCard {
+    let mut card = ChannelCard::new("权限请求", theme);
     card.elements.push(ChannelElement::Markdown {
         content: label.into(),
     });

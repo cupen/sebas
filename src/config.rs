@@ -583,8 +583,9 @@ fn default_webui_port() -> u16 {
 }
 
 /// watchdog 模式下 router 子进程的开关（默认关：未 opt-in 不 spawn）。
-/// 生产 router 默认形态仍是裸 core 的 in-process `run --router`；
-/// 显式开启后由 watchdog 作为受管子进程监督（sebas-08c）。
+/// router 只以独立进程存在（unify-router-process-shape）：手工
+/// `sebas router` 或本开关开启后的 watchdog 受管子进程，同一入口；
+/// 内嵌形态（`core --router`）已删除（sebas-08c）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WatchdogRouterConfig {
     #[serde(default)]

@@ -366,6 +366,40 @@ fn unavailable(cause: String) -> SessionRejection {
     SessionRejection::Unavailable { cause }
 }
 
+/// 一次性 state domain 查询（unify-router-process-shape 2.2，design D2）：
+/// watchdog 停 router 前查 `router_activity` 用——不需要常驻订阅流，一次
+/// 连接 + 握手 + 单请求即走。secret 经 [`ChannelSecret::current`] 现场解析
+/// （env → secret 文件，与 [`CoreChannelBackend`] 同一发现链）。
+///
+/// 返回 `None` = core 不可达（socket 缺失 / 握手拒绝 / 超时 / 应答异常）；
+/// 调用方按各自的 fail 语义处置（executor 的语义是放行停止）。
+pub async fn snapshot_domain_once(
+    path: &Path,
+    secret: &ChannelSecret,
+    domain: &str,
+) -> Option<serde_json::Value> {
+    let (mut writer, mut reader) = connect(path).await.ok()?;
+    handshake(&mut writer, &mut reader, &secret.current()).await.ok()?;
+    let req = serde_json::to_string(&CoreChannelRequest::StateSnapshot {
+        domain: domain.to_string(),
+    })
+    .ok()?;
+    use tokio::io::AsyncWriteExt;
+    writer.write_all(req.as_bytes()).await.ok()?;
+    writer.write_all(b"\n").await.ok()?;
+    writer.flush().await.ok()?;
+
+    let mut line = String::new();
+    tokio::time::timeout(REQUEST_TIMEOUT, reader.read_line(&mut line))
+        .await
+        .ok()?
+        .ok()?;
+    match serde_json::from_str::<CoreChannelResponse>(line.trim()).ok()? {
+        CoreChannelResponse::StateSnapshot { payload, .. } => Some(payload),
+        _ => None,
+    }
+}
+
 /// fail-fast-on-startup-errors（core-session-channel spec delta / task 2.4）：
 /// core 不可达时，若 `SEBAS_STARTUP_ERROR_FILE` 里有最近一次启动失败的摘要
 /// （core 的「最近一次启动尝试失败」闩锁，ready 后自清除），把它并进 cause

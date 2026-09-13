@@ -252,6 +252,12 @@ export interface ConversationEntryView {
    * different element when an older card refreshes in place.
    */
   created_at_unix: number
+  /**
+   * （workbench-agent-identity-and-process-folds D2）后端为工具条目构造的
+   * 结构化标题（工具名 + 关键参数，如 `read · src/main.rs`）。可选：
+   * 旧持久化条目没有该字段（undefined/null），前端回退通用标签。
+   */
+  title?: string | null
 }
 
 export interface SessionDetail {
@@ -393,6 +399,28 @@ export interface AdminMutationResult {
 }
 
 /**
+ * `GET /api/env` 单条目的分类（split-env-vars-settings-section D2）：
+ * `plain` = 非敏感（可显实际值）；`set_unset` = 敏感（只显已设置/未设置，
+ * 值经服务端遮蔽、永不出现在响应里）。
+ */
+export type EnvVarKind = 'plain' | 'set_unset'
+
+/**
+ * `GET /api/env` 策划清单里的一条环境变量。`plain` 已设置时 `value` 是
+ * 实际值，未设置时 `value = null`（默认值说明随 `what` 下发，前端标注
+ * 「未设置（用默认）」）。`set_unset` 项 `value` 恒为 null；`set` 布尔表达
+ * 已设置与否——**该字段缺失时前端无法断言状态**，必须如实呈现「无法确定」
+ * 而不是按未设置处理（防御性解析）。
+ */
+export interface EnvVarEntry {
+  name: string
+  what: string
+  kind: EnvVarKind
+  value: string | null
+  set?: boolean
+}
+
+/**
  * Execution-backend hint sent with `POST /api/sessions`. `"native"` spawns the
  * built-in kernel; `"acp"` (the default) spawns the configured default
  * third-party agent; `"acp:<slug>"` selects a specific configured agent kind.
@@ -434,20 +462,65 @@ export type PermissionDecision =
   | { decision: 'deny' }
   | { decision: 'escalate'; reason: string }
 
-/** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
+/**
+ * RBAC 角色词表（add-webui-multiuser-rbac）：固定四档，映射由服务端代码
+ * 定义（D3）。前端只做呈现层裁剪（隐藏无权限入口），防线在服务端路由层。
+ */
+export type Role = 'root' | 'admin' | 'member' | 'viewer'
+
+/** 角色词表的规范顺序（新建/改角色下拉的数据源；跟随代码，不落配置）。 */
+export const ROLES: readonly Role[] = ['root', 'admin', 'member', 'viewer']
+
 /** GET /api/auth/me 的响应：服务端是否启用登录鉴权 + 当前会话状态。 */
 export interface AuthInfo {
   enabled: boolean
   authenticated: boolean
   username: string | null
+  /**
+   * 零用户首启标记（add-webui-multiuser-rbac D5）：enabled 且未认证且
+   * `needs_setup` 为真 → 前端渲染首启设置页而非登录页。字段缺失（旧服务端
+   * 过渡期）按 false 处理。
+   */
+  needs_setup?: boolean
+  /** 认证后随行的角色（会话绑定用户的当次实时解析读数）；未认证/未启用时缺省。 */
+  role?: Role
+}
+
+/**
+ * /api/users 列表条目（add-webui-multiuser-rbac D6）：无任何哈希字段——
+ * 盐/哈希绝不 travels the wire，这里也不为它们留位。
+ */
+export interface UserRecord {
+  id: number
+  username: string
+  role: Role
+  enabled: boolean
+  created_at_unix: number
+  /** 服务端可能随行的更新时间；缺失不参与任何呈现判定。 */
+  updated_at_unix?: number
 }
 
 /** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
 export class ApiError extends Error {
   readonly status: number
-  constructor(status: number, message: string) {
+  /**
+   * 机器可读拒绝码（unify-router-process-shape 2.2/2.3：如
+   * `active_routed_sessions`）；错误体未携带时为 null。调用方据此区分
+   * 「业务拒绝（可交互兜底，如强制出口弹窗）」与「普通失败（内联呈现）」。
+   */
+  readonly code: string | null
+  /** 与 `code` 同行的数值载荷（如活跃 routed 会话计数）；缺失/非数值为 null。 */
+  readonly count: number | null
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    count: number | null = null,
+  ) {
     super(message)
     this.status = status
+    this.code = code
+    this.count = count
   }
 }
 
@@ -502,6 +575,7 @@ function isAuthExempt(path: string): boolean {
   return (
     path === '/api/auth/login' ||
     path === '/api/auth/me' ||
+    path === '/api/auth/setup' ||
     path === '/api/auth/logout' ||
     path === '/api/admin/login' ||
     path === '/api/admin/csrf'
@@ -525,13 +599,27 @@ async function unwrap<T>(resp: Response, path?: string): Promise<T> {
   if (resp.ok) return (await resp.json()) as T
   if (resp.status === 401 && onUnauthorized && path && !isAuthExempt(path)) onUnauthorized()
   let message = `HTTP ${resp.status}`
+  let code: string | null = null
+  let count: number | null = null
   try {
-    const body = (await resp.json()) as { error?: string }
-    if (typeof body.error === 'string') message = body.error
+    // 错误体信封不钉死（unify-router-process-shape D4）：拒绝载荷可能是
+    // 顶层 `{code, count}`，也可能是嵌套信封 `{error: {code, count}}`；
+    // `error` 为字符串时仍是既有 message 语义。两处都找，缺失即 null。
+    const body = (await resp.json()) as unknown
+    if (typeof body === 'object' && body !== null) {
+      const b = body as { error?: unknown; code?: unknown; count?: unknown }
+      const inner =
+        b.error !== null && typeof b.error === 'object'
+          ? (b.error as { code?: unknown; count?: unknown })
+          : b
+      if (typeof inner.code === 'string') code = inner.code
+      if (typeof inner.count === 'number') count = inner.count
+      if (typeof b.error === 'string') message = b.error
+    }
   } catch {
     // non-JSON error body; keep the generic message
   }
-  throw new ApiError(resp.status, message)
+  throw new ApiError(resp.status, message, code, count)
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -630,10 +718,27 @@ export const api = {
   // Reads
   summary: () => get<Summary>('/api/summary'),
   sessions: () => get<SessionList>('/api/sessions'),
-  session: (encodedKey: string) => get<SessionDetail>(`/api/sessions/${encodedKey}`),
+  /**
+   * Session detail（conversation-incremental-sync 2.1/D2）。`entriesAfter`
+   * 给定 → 拼 `?entries_after=<n>`：响应结构不变，`entries` 只含
+   * `position > n` 的条目（后端透传 `turns(key, n)`），status/pending 等
+   * 其余字段照常随行；缺省 = 全量（现行为，老消费者零破坏）。
+   */
+  session: (encodedKey: string, entriesAfter?: number) =>
+    get<SessionDetail>(
+      withQuery(`/api/sessions/${encodedKey}`, {
+        entries_after: entriesAfter === undefined ? undefined : String(entriesAfter),
+      }),
+    ),
   settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
   router: () => get<{ router: RouterInfo }>('/api/router'),
   about: () => get<About>('/api/about'),
+  /**
+   * 环境变量只读清单（split-env-vars-settings-section 1.1/2.1）：webui
+   * 进程自身 env 的服务端策划清单，遮蔽在服务端完成——敏感项只回
+   * `set` 布尔。纯 webui 面，core 不可达时照常工作。
+   */
+  env: () => get<{ items: EnvVarEntry[] }>('/api/env'),
   /** Agent catalog（唯一可用性真源；workbench-agent-wire-fix 3.2）。 */
   agents: () => get<{ agents: AgentKindInfo[] }>('/api/agents'),
   /**
@@ -643,12 +748,30 @@ export const api = {
    */
   nodes: () => get<NodesResponse>('/api/nodes'),
 
-  // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie。
-  // 登录为单字段形态：secret 可以是登录 token 或账户密码，服务端自动识别。）
+  // Auth（webui 多用户登录鉴权，add-webui-multiuser-rbac D5/D6）：me 探明
+  // enabled/authenticated/needs_setup/role；login 只收 {username,password}
+  // 双字段（旧 {secret} 单字段形态已移除，服务端一律 400）；setup 为零用户
+  // 首启专属（成功即建立会话，语义同登录）。
   authMe: () => get<AuthInfo>('/api/auth/me'),
-  authLogin: (secret: string) =>
-    post<{ status: string; username: string }>('/api/auth/login', { secret }),
+  authLogin: (username: string, password: string) =>
+    post<{ status: string; username: string }>('/api/auth/login', { username, password }),
+  authSetup: (username: string, password: string) =>
+    post<{ status: string; username: string }>('/api/auth/setup', { username, password }),
   authLogout: () => post<{ status: string }>('/api/auth/logout'),
+
+  // Users 管理（add-webui-multiuser-rbac D6，仅 root；越权 403、用户名占用
+  // 与最后启用 root 保护 409、弱密码 400——文案取响应 error 字段就地展示）。
+  // password/role/enabled 变更与删除按需踢目标用户会话（服务端职责）。
+  usersList: () => get<{ users: UserRecord[] }>('/api/users'),
+  usersCreate: (username: string, password: string, role: Role) =>
+    post<{ status: string; username: string }>('/api/users', { username, password, role }),
+  usersSetPassword: (id: number, password: string) =>
+    post<{ status: string }>(`/api/users/${id}/password`, { password }),
+  usersSetRole: (id: number, role: Role) =>
+    post<{ status: string }>(`/api/users/${id}/role`, { role }),
+  usersSetEnabled: (id: number, enabled: boolean) =>
+    post<{ status: string }>(`/api/users/${id}/enabled`, { enabled }),
+  usersDelete: (id: number) => del<{ status: string }>(`/api/users/${id}`),
 
   // Session mutations
   /**
@@ -796,11 +919,18 @@ export const api = {
   adminRestart: () =>
     post<{ operation_id: string; message: string }>('/api/admin/restart'),
   /** Per-service enable/disable（ServiceSet RPC，选择持久化）。
-   * 503 = 无 watchdog 控制面；401/403 = 鉴权/CSRF 拒绝，调用方区分呈现。 */
+   * 503 = 无 watchdog 控制面；401/403 = 鉴权/CSRF 拒绝，调用方区分呈现。
+   * disable 的 force 透传（unify-router-process-shape D3/D4）：停止被拒
+   * （400/409 + `active_routed_sessions` + 计数，经 ApiError.code/.count
+   * 携带）后，操作员确认强制出口即以 `{force: true}` 重发同一请求；
+   * 首次尝试不带 force 字段（body 与既有字节形态一致）。 */
   enableService: (name: string) =>
     post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/enable`),
-  disableService: (name: string) =>
-    post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/disable`),
+  disableService: (name: string, force = false) =>
+    post<AdminMutationResult>(
+      `/api/admin/services/${encodeURIComponent(name)}/disable`,
+      force ? { force: true } : undefined,
+    ),
   /**
    * Per-service restart（fix-settings-menu-and-services-semantics D3）。
    * core 走既有 restart-core 路径（spec「restart 操作」）；其余受管服务走

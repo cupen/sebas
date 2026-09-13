@@ -1,230 +1,26 @@
 ---
-# sebas role — tasks.
+# sebas role — task dispatcher.
 #
-# Order matters: user → dirs → binary → config → install → flush → health.
-# Idempotency is enforced per-step; the install step is gated by stat +
-# checksum so a redeploy with the same binary converges to no-op.
+# The role's behavior is selected by `sebas_action` (see defaults/main.yml):
+#   install   — provision and start the sebas service (default, tasks/install.yml)
+#   uninstall — tear everything down: service, binaries, data/secrets, user
+#               (DESTRUCTIVE, tasks/uninstall.yml)
 #
-# Binary provisioning (release / file / preinstalled) funnels into a single
-# extract + copy step. The release tarball layout
-# (leading-dir: `sebas-<tag>-<target>/sebas`) is the canonical shape; a
-# self-built tarball in `file` mode is expected to match it (see README).
+# The whitelist assertion is deliberately the first task in the play: an
+# illegal value must fail before any task touches the target host.
 
-# ---------------------------------------------------------------- pre: derive
-
-- name: Split sebas_webui_listen into host and port facts
-  ansible.builtin.set_fact:
-    sebas_webui_host: "{{ sebas_webui_listen | split(':') | first }}"
-    sebas_webui_port: "{{ sebas_webui_listen | split(':') | last | int }}"
-
-- name: Resolve latest release tag from GitHub
-  ansible.builtin.uri:
-    url: "https://api.github.com/repos/{{ sebas_github_repo }}/releases/latest"
-    return_content: true
-  register: sebas_github_latest
-  when:
-    - sebas_artifact_source == 'release'
-    - sebas_version == 'latest'
-  # Fail loudly on rate limit so the user knows to switch to sebas_artifact_source=file.
-  failed_when: >-
-    sebas_github_latest.status != 200 or
-    (sebas_github_latest.status | string) == '403'
-
-- name: Pin resolved tag as a fact
-  ansible.builtin.set_fact:
-    sebas_version_resolved: >-
-      {{ sebas_version if sebas_version != 'latest'
-         else (sebas_github_latest.json.tag_name | regex_replace('^v', '')) }}
-  when: sebas_artifact_source == 'release'
-
-# Layout assumed: <basename>/sebas (matches taiki-e/upload-rust-binary-action
-# default `leading-dir: true`, which release.yml does not override).
-- name: Pin tarball basename as a fact
-  ansible.builtin.set_fact:
-    sebas_artifact_basename: "{{ release_basename if sebas_artifact_source == 'release' else file_basename }}"
-  vars:
-    release_basename: "sebas-{{ sebas_version_resolved }}-x86_64-unknown-linux-gnu"
-    file_basename: "{{ sebas_artifact_file | basename | regex_replace('\\.tar\\.gz$', '') }}"
-  when: sebas_artifact_source in ['release', 'file']
-
-- name: Fail when sebas_artifact_source=file but no path is given
+- name: Assert sebas_action is one of the legal values
   ansible.builtin.fail:
-    msg: "sebas_artifact_source=file requires sebas_artifact_file (path to a prebuilt tarball or binary)"
-  when:
-    - sebas_artifact_source == 'file'
-    - sebas_artifact_file | length == 0
+    msg: >-
+      sebas_action must be 'install' or 'uninstall' (got '{{ sebas_action }}').
+      Pass it explicitly, e.g. -e sebas_action=uninstall. Omitting the variable
+      keeps the default (install).
+  when: sebas_action not in ['install', 'uninstall']
 
-# ------------------------------------------------------------ user & layout
+- name: Run the install flow
+  ansible.builtin.include_tasks: install.yml
+  when: sebas_action == 'install'
 
-- name: Ensure deploy user exists
-  ansible.builtin.user:
-    name: "{{ sebas_deploy_user }}"
-    home: "{{ sebas_deploy_home }}"
-    shell: /usr/sbin/nologin
-    create_home: true
-    system: false
-  tags: [sebas_user]
-
-- name: Ensure sebas data directory layout exists with correct ownership
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    owner: "{{ sebas_deploy_user }}"
-    group: "{{ sebas_deploy_user }}"
-    mode: "0750"
-  loop:
-    - "{{ sebas_data_dir }}"
-    - "{{ sebas_data_dir }}/bin"
-    - "{{ sebas_config_path | dirname }}"
-
-# ---------------------------------------------- binary: resolve tarball path
-
-# Final tarball location on the controller, regardless of source. Each branch
-# below sets sebas_tarball_path; the extract step downstream consumes it.
-# `release` downloads from GitHub; `file` uses a user-supplied tarball that
-# is expected to match release layout (see README); `preinstalled` skips
-# provisioning entirely.
-
-- name: (release) Download sebas tarball to controller
-  ansible.builtin.get_url:
-    url: "https://github.com/{{ sebas_github_repo }}/releases/download/v{{ sebas_version_resolved }}/{{ sebas_artifact_basename }}.tar.gz"
-    dest: "/tmp/{{ sebas_artifact_basename }}.tar.gz"
-    mode: "0644"
-  delegate_to: localhost
-  become: false
-  when: sebas_artifact_source == 'release'
-
-- name: Pin sebas_tarball_path to the downloaded release tarball
-  ansible.builtin.set_fact:
-    sebas_tarball_path: "/tmp/{{ sebas_artifact_basename }}.tar.gz"
-  when: sebas_artifact_source == 'release'
-
-- name: Pin sebas_tarball_path to the user-supplied tarball
-  ansible.builtin.set_fact:
-    sebas_tarball_path: "{{ sebas_artifact_file }}"
-  when: sebas_artifact_source == 'file'
-
-# ---------------------------------------- binary: extract + install copy
-
-# `unarchive` puts files under <basename>/sebas. We then copy just the binary
-# to the managed path. Done as a 2-step so the checksum gate downstream sees
-# only the file that's actually deployed.
-
-- name: Extract sebas tarball on the controller (release / file modes)
-  ansible.builtin.unarchive:
-    src: "{{ sebas_tarball_path }}"
-    dest: /tmp
-    remote_src: true
-    creates: "/tmp/{{ sebas_artifact_basename }}/sebas"
-  delegate_to: localhost
-  become: false
-  when: sebas_artifact_source in ['release', 'file']
-
-- name: Copy extracted binary to target
-  ansible.builtin.copy:
-    src: "/tmp/{{ sebas_artifact_basename }}/sebas"
-    dest: "{{ sebas_bin_path }}"
-    owner: root
-    group: root
-    mode: "0755"
-  when: sebas_artifact_source in ['release', 'file']
-
-# (preinstalled) mode — no tarball, just verify what's already on the target.
-
-- name: (preinstalled) Verify a sebas binary already exists at the managed path
-  ansible.builtin.stat:
-    path: "{{ sebas_bin_path }}"
-  register: sebas_bin_stat
-  when: sebas_artifact_source == 'preinstalled'
-
-- name: (preinstalled) Fail when the binary is missing
-  ansible.builtin.fail:
-    msg: "sebas_artifact_source=preinstalled but no binary at {{ sebas_bin_path }}"
-  when:
-    - sebas_artifact_source == 'preinstalled'
-    - not sebas_bin_stat.stat.exists
-
-# ---------------------------------------------------------- checksum gate
-
-# `sebas service --install` is NOT idempotent: with --force absent and the
-# unit already present, it exits 3. We only force when the seeded stable
-# binary doesn't match the supplied one, so a redeploy with the same
-# artifact converges to no-op.
-- name: Compute checksum of the provisioned binary
-  ansible.builtin.stat:
-    path: "{{ sebas_bin_path }}"
-    checksum: sha256
-  register: sebas_bin_stat
-
-- name: Compute checksum of the previously seeded stable binary
-  ansible.builtin.stat:
-    path: "{{ sebas_data_dir }}/bin/sebas"
-    checksum: sha256
-  register: sebas_seeded_stat
-
-- name: Decide whether the install step needs --force
-  ansible.builtin.set_fact:
-    sebas_install_force: >-
-      {{ (not sebas_seeded_stat.stat.exists)
-         or (sebas_bin_stat.stat.checksum != sebas_seeded_stat.stat.checksum) }}
-
-# --------------------------------------------------------------- config
-
-- name: Render config.toml onto the target
-  ansible.builtin.template:
-    src: config.toml.j2
-    dest: "{{ sebas_config_path }}"
-    owner: "{{ sebas_deploy_user }}"
-    group: "{{ sebas_deploy_user }}"
-    mode: "0640"
-  notify: restart sebas
-
-# --------------------------------------------------------------- install
-
-- name: Install sebas as a systemd service
-  ansible.builtin.command:
-    cmd: >-
-      {{ sebas_bin_path }} service --install
-      --user {{ sebas_deploy_user }}
-      --config {{ sebas_config_path }}
-      --force
-      --auto-start
-  register: sebas_install
-  changed_when: sebas_install_force | bool
-  # `--skip-tags sebas_install` runs only the prep work (user, dirs, binary).
-  tags: [sebas_install]
-
-# Make sure any `restart sebas` notification from the config render runs
-# before we probe /health. Without this, the health check races the restart
-# (notified handlers flush at end-of-play by default).
-- name: Flush pending handlers
-  ansible.builtin.meta: flush_handlers
-
-# --------------------------------------------------------------- health
-
-- name: Wait for the sebas service to become active
-  ansible.builtin.systemd:
-    name: sebas
-    state: started
-  register: sebas_service_state
-  until: sebas_service_state.status.ActiveState == 'active'
-  retries: "{{ sebas_health_retries }}"
-  delay: "{{ sebas_health_delay }}"
-
-- name: Probe /health over HTTP
-  ansible.builtin.uri:
-    url: "http://{{ sebas_webui_host }}:{{ sebas_webui_port }}/health"
-    status_code: 200
-    return_content: true
-  register: sebas_health
-  until: sebas_health.status == 200
-  retries: "{{ sebas_health_retries }}"
-  delay: "{{ sebas_health_delay }}"
-
-- name: Report deploy outcome
-  ansible.builtin.debug:
-    msg:
-      - "sebas deployed."
-      - "service: {{ sebas_service_state.status.ActiveState }}"
-      - "webui:   http://{{ sebas_webui_listen }}"
-      - "config:  {{ sebas_config_path }}"
+- name: Run the uninstall flow
+  ansible.builtin.include_tasks: uninstall.yml
+  when: sebas_action == 'uninstall'

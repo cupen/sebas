@@ -25,44 +25,6 @@ The domain state SHALL live in a single SQLite database at `~/.sebas/sebas.db` (
 - **WHEN** two clients issue state mutations concurrently
 - **THEN** both apply in serialization order and a later snapshot reflects the combined result — never a torn or lost update without an explicit error
 
-### Requirement: Schema version and auto-migration
-
-The database SHALL carry an integer schema version. On open, core SHALL apply pending migrations in ascending order, each migration entirely within one transaction together with its version bump; no separate migration step or operator action is required. Migration failure SHALL abort the affected startup and leave the database at its previous version. A database whose version is newer than this binary knows SHALL be refused with a diagnostic naming the version — it MUST NOT be silently read or rewritten. There is no migration of legacy JSON data: the first migration SHALL create the schema and the store starts empty.
-
-#### Scenario: Fresh database is created at current version
-
-- **WHEN** core starts with no existing database
-- **THEN** the database is created and stamped with the current schema version
-
-#### Scenario: Pending migrations apply transactionally
-
-- **WHEN** a database at version N is opened by a binary knowing migrations through N+2
-- **THEN** migrations apply in order and the stamped version ends at N+2
-
-#### Scenario: Failed migration rolls back
-
-- **WHEN** a migration fails partway through its transaction
-- **THEN** the database remains at its previous version with content unchanged, and startup aborts with the error
-
-#### Scenario: Newer database is refused
-
-- **WHEN** a binary that knows schema version N opens a database stamped N+1
-- **THEN** startup aborts with a diagnostic naming the version, and the file is not modified
-
-### Requirement: Pre-migration backup
-
-Before applying any migration, the system SHALL produce a consistent snapshot backup of the database at a sibling path recording the source version, and SHALL retain the most recent backup.
-
-#### Scenario: Backup exists after migration
-
-- **WHEN** a migration completes
-- **THEN** a snapshot taken at the source version exists next to the database
-
-#### Scenario: Backup usable for manual recovery
-
-- **WHEN** the user restores the retained backup over the database file
-- **THEN** the database opens again at the source version
-
 ### Requirement: State methods on the core channel
 
 The core channel SHALL expose state methods for snapshot queries (providers with model aliases, settings, projects, session map) and mutations (provider/alias/settings/projects CRUD), plus a change subscription that delivers a notification after each committed mutation. Access SHALL be governed by the channel's authentication; unauthorized peers are denied.
@@ -102,7 +64,7 @@ A client that cannot reach the state store SHALL present an explicit unavailable
 
 ### Requirement: Corrupt store is not silently reset
 
-A database that cannot be opened due to corruption SHALL block the affected startup with a diagnostic naming the file path. The system MUST NOT delete, truncate, or recreate the database automatically; the retained pre-migration backup remains the manual recovery path.
+A database that cannot be opened due to corruption SHALL block the affected startup with a diagnostic naming the file path. The system MUST NOT delete, truncate, or recreate the database automatically in this case. Corruption and schema incompatibility are distinct and MUST NOT be conflated: corruption means the file cannot be opened or read at the SQLite level; schema incompatibility means the file opens but its structure diverges from the models, and only incompatibility may trigger the automatic reset. Manual recovery of a corrupt database (restoring the user's own copy or deleting it by hand) is outside the system's responsibilities.
 
 #### Scenario: Corrupt database aborts startup with diagnostic
 
@@ -113,6 +75,11 @@ A database that cannot be opened due to corruption SHALL block the affected star
 
 - **WHEN** the corrupt database persists across restart attempts
 - **THEN** every attempt fails with the same diagnostic and user data is never automatically discarded
+
+#### Scenario: Reset never fires for an unopenable file
+
+- **WHEN** a schema check would run against a database that fails to open
+- **THEN** the startup aborts with the corruption diagnostic instead of resetting, even if the structure would also have been judged incompatible
 
 ### Requirement: Runtime state boundaries for persisted session state
 
@@ -132,3 +99,32 @@ The state store SHALL NOT persist the permission allowlist, outstanding permissi
 
 - **WHEN** core is terminated without a graceful shutdown (e.g. SIGKILL)
 - **THEN** the session map at next start reflects the snapshot written at the last graceful shutdown, not any in-flight mutations since then (per-mutation durability is a deferred migration, not yet implemented)
+
+### Requirement: Schema self-description and startup sync
+
+The schema SHALL be derived from the code's model objects: each registered table's column set is declared by its model struct, which is the single source of truth. On open, the store SHALL stamp self-describing version metadata as key-value pairs (`version_format` with value `date`, and `version` with a date constant that is bumped when the schema changes — never a wall-clock read) so any database file can be diagnosed as to which schema date produced it. The store SHALL then reconcile each registered table against the live database: missing columns SHALL be added in place (`ALTER TABLE ADD COLUMN`) with their constant default; a structure that cannot be reconciled — a type mismatch, an extra column, a missing table, or an absent/unknown version format — SHALL reset the database: delete the file and rebuild an empty schema from the current models, logging honestly that a schema incompatibility triggered the reset. The version value alone SHALL NOT trigger a reset; structure comparison is the only reset trigger. A reset MUST NOT run for a database that cannot be opened at all — that is corruption, governed by the corrupt-store requirement.
+
+#### Scenario: Fresh database is created from current models
+
+- **WHEN** core starts with no existing database
+- **THEN** the schema is created from the current model definitions and the version metadata is stamped (`version_format=date`, `version=<SCHEMA_VERSION>`)
+
+#### Scenario: Missing column is added in place
+
+- **WHEN** a model struct gains a column and the database lacks it
+- **THEN** startup adds the column via `ALTER TABLE ADD COLUMN` with its constant default, existing rows remain readable, and no other table is touched
+
+#### Scenario: Incompatible structure resets the database
+
+- **WHEN** a table's live structure diverges irreconcilably from the model (type mismatch, extra column, or the table is absent entirely)
+- **THEN** the database is deleted and rebuilt as an empty schema from the current models, and the log names the incompatibility that caused the reset
+
+#### Scenario: Unknown version format resets the database
+
+- **WHEN** the database lacks the version metadata or carries an unrecognized `version_format` (including databases produced by the retired migration chain)
+- **THEN** the database is reset to the current schema with the reset recorded in the log
+
+#### Scenario: Version value alone never resets
+
+- **WHEN** the stamped `version` differs from the binary's constant but every registered table's structure matches the models exactly
+- **THEN** no reset occurs; the version metadata is updated to the current value

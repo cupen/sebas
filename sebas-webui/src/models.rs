@@ -267,6 +267,11 @@ pub struct ConversationEntryView {
     /// seen-boundary seam to a stable identity that doesn't change when an
     /// earlier card refreshes in place.
     pub created_at_unix: u64,
+    /// （workbench-agent-identity-and-process-folds 1.1）工具条目的结构化
+    /// 折叠标题（`Read · src/main.rs` / `✓ Read · …`，core 构造，原样透传）。
+    /// `None` = 旧条目无标题，前端回退通用标签；序列化时省略键。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[cfg(test)]

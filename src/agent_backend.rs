@@ -77,6 +77,7 @@ impl NativeSession {
             element_type: "markdown".into(),
             content: text,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
+            title: None,
         });
     }
 
@@ -88,6 +89,7 @@ impl NativeSession {
             element_type: "markdown".into(),
             content,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
+            title: None,
         });
     }
 

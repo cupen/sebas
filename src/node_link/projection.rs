@@ -1070,6 +1070,8 @@ pub fn turn_entry_of(entry: &LogEntry) -> TurnEntry {
         element_type: element_type.into(),
         content: entry.text.clone(),
         created_at_unix: entry.at_unix.max(0) as u64,
+        // 节点日志无结构化标题来源（workbench-agent-identity-and-process-folds）。
+        title: None,
     }
 }
 

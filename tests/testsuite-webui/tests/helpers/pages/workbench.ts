@@ -175,9 +175,22 @@ export class FocusedSession {
     })
   }
 
-  /** The turn's expandable tool group (2.2: "used N tools" group). */
-  toolGroup(): Locator {
-    return this.page.locator('sebas-dashboard sebas-transcript-view details.tools-fold')
+  /**
+   * The agent turn's single process fold（workbench-agent-identity-and-
+   * process-folds 2.1/2.2: one collapsed `<details class="process-fold">`
+   * per turn, summary `process · N`）.
+   */
+  processFold(): Locator {
+    return this.page.locator('sebas-dashboard sebas-transcript-view details.process-fold')
+  }
+
+  /**
+   * Second-level per-entry folds inside the process fold（2.2: each thinking
+   * segment / tool invocation, collapsed by default, titled by the entry's
+   * structured `title`）.
+   */
+  processItems(): Locator {
+    return this.page.locator('sebas-dashboard sebas-transcript-view details.process-item')
   }
 
   /**

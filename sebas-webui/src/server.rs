@@ -6,6 +6,7 @@ use crate::api;
 use crate::assets;
 use crate::auth::{AuthHandle, SESSION_COOKIE_NAME};
 use crate::models::RouterInfo;
+use crate::rbac::Permission;
 use crate::routes;
 use crate::session_backend::SessionBackend;
 use axum::Router;
@@ -14,7 +15,7 @@ use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::serve;
 use sebas_feishu::cards::CardConfig;
 use std::sync::Arc;
@@ -227,12 +228,24 @@ fn build_router_full(
             get(routes::router_api_providers_list),
         )
         .route("/api/about", get(api::about))
+        // split-env-vars-settings-section 1.1：环境变量只读清单（webui 自身
+        // env，不依赖 core 通道）。/api/ 前缀落进既有 auth_guard。
+        .route("/api/env", get(api::env_vars))
         .route("/api/agents", get(api::agent_kinds))
         // add-remote-execution-node 8.2：执行节点可用性（本机恒在线 + core 注册表）。
         .route("/api/nodes", get(api::nodes))
         .route("/api/auth/me", get(api::auth_me))
         .route("/api/auth/login", post(api::auth_login))
         .route("/api/auth/logout", post(api::auth_logout))
+        // add-webui-multiuser-rbac 3.2：首启设置页建 root（零用户专属，
+        // design D4）与 root 的用户管理面（design D6；角色执法在 auth_guard
+        // 的 required_permission 中央表，users.manage = 仅 root）。
+        .route("/api/auth/setup", post(api::auth_setup))
+        .route("/api/users", get(api::users_list).post(api::users_create))
+        .route("/api/users/{id}/password", post(api::users_set_password))
+        .route("/api/users/{id}/role", post(api::users_set_role))
+        .route("/api/users/{id}/enabled", post(api::users_set_enabled))
+        .route("/api/users/{id}", delete(api::users_delete))
         .route(
             "/api/projects",
             get(api::projects_list).post(api::projects_add),
@@ -295,15 +308,69 @@ fn build_router_full(
 
 // ─── 登录鉴权中间件 ──────────────────────────────────────────────────────────
 
-/// `GET /api/auth/me` 与登录端点自身不受鉴权门拦截（前端需要先探明状态）。
+/// `GET /api/auth/me` 与登录/登出/首启设置端点不受鉴权门拦截（前端需要先
+/// 探明状态；setup 必须在无会话可达时建 root）。setup 的同源校验不豁免，
+/// 见 [`auth_guard`]。
 fn is_auth_exempt_path(path: &str) -> bool {
-    path == "/api/auth/login" || path == "/api/auth/me" || path == "/api/auth/logout"
+    path == "/api/auth/login"
+        || path == "/api/auth/me"
+        || path == "/api/auth/logout"
+        || path == "/api/auth/setup"
 }
 
 /// 需要登录的路径面：JSON API、router BFF、WebSocket。静态 SPA 资源与
 /// `/health`（watchdog 探活）保持公开。
 fn is_protected_path(path: &str) -> bool {
     path == "/ws" || path.starts_with("/api/") || path.starts_with("/router/api/")
+}
+
+/// RBAC 中央权限表（add-webui-multiuser-rbac 3.1，design D3）：`路径 +
+/// 方法 → 所需权限`；`None` = 认证即可、不按角色执法（spec 权限表最后一行
+/// 「只读」不设权限词）。`auth_guard` 认证通过后查表执法，不足即 403。
+///
+/// 逐路由审计（对照 design D3 表与 [`build_router_full`] 的实际路由）：
+///
+/// | 路由面 | 方法 | 权限 |
+/// |---|---|---|
+/// | `/api/users*`（列表/创建/改密/改角色/启停/删除） | 全部 | `users.manage`（spec：用户管理面**全部**仅限 root，含列表） |
+/// | `/api/admin/*`（状态/事件/服务启停/升级/回滚/restart-core/login） | 全部 | `services.control` |
+/// | `/api/settings`（卡片/显示偏好写） | 非安全方法 | `settings.manage`（GET 认证即可） |
+/// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
+/// | `/router/api/*`（BFF 读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
+/// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
+/// | `/api/auth/{login,logout,setup,me}` | — | 豁免路径（[`is_auth_exempt_path`]），不进本表 |
+///
+/// admin 控制面自身的 `SEBAS_CONTROL_SECRET` 会话保持第二层不动；RBAC 只
+/// 是在其外再按角色拦截 viewer/member（design D3）。
+fn required_permission(path: &str, method: &str) -> Option<Permission> {
+    // 用户管理面：列表也在内——非 root 一律 403，即使已认证（spec
+    // 「用户管理（root 专用）」）。
+    if path == "/api/users" || path.starts_with("/api/users/") {
+        return Some(Permission::UsersManage);
+    }
+    // router BFF（读 + 写）：不纳入 RBAC（design D3 / proposal Non-goals）。
+    if path.starts_with("/router/api/") {
+        return None;
+    }
+    // admin 控制面（含服务启停/升级/回滚——同一控制面）。
+    if path.starts_with("/api/admin/") {
+        return Some(Permission::ServicesControl);
+    }
+    let mutating = !is_safe_method(method);
+    if path == "/api/settings" {
+        return mutating.then_some(Permission::SettingsManage);
+    }
+    // 会话与项目写（创建/发消息/取消/模型/mode/关闭/切换/pending 管理/
+    // 归档/恢复/项目增删排序/审批应答）。
+    if path == "/api/sessions"
+        || path.starts_with("/api/sessions/")
+        || path == "/api/projects"
+        || path.starts_with("/api/projects/")
+        || path.starts_with("/api/permissions/")
+    {
+        return mutating.then_some(Permission::SessionsWrite);
+    }
+    None
 }
 
 /// 提取 webui 会话 cookie 值。
@@ -331,23 +398,48 @@ fn origin_authority(origin: &str) -> Option<&str> {
     }
 }
 
-/// 鉴权门：凭据已配置时，受保护路径需要有效会话 cookie；非安全方法（POST
-/// 等）额外要求同源（Origin 头存在且与 Host 一致），与 SameSite=Lax cookie
-/// 一起构成 CSRF 防线。未配置凭据时全部放行（原行为）。
+/// 鉴权门（add-webui-multiuser-rbac 3.1 重写）：鉴权开启时受保护路径需要
+/// 有效会话 cookie，且按请求实时解析用户身份（禁用/删号即刻失效）。执行
+/// 顺序：
+///
+/// 1. 非受保护路径 / 豁免路径放行（setup 保留非安全方法同源校验——spec
+///    「首启 root 引导」：设置页与其它受保护 API 一样受同源校验）；
+/// 2. 开关关闭（`auth = false`）全放行（原行为）；
+/// 3. 会话 cookie → [`AuthHandle::identity_for_session`] 实时身份解析
+///    （design D5）；解析不出（无 cookie / 会话过期 / 绑定用户已删或已
+///    禁用 / admin 控制面哨兵 user_id=0）一律 401，fail-closed；
+/// 4. [`required_permission`] 中央表执法：角色不足 403（spec：执法完全在
+///    服务端路由层完成）；
+/// 5. 非安全方法同源校验（CSRF 防线，现状保留）；
+/// 6. 把 [`crate::auth::Identity`] 塞进 request extensions 供 handler 按需读取
+///    （design D3：如用户管理端点取 user_id 判「不能删自己」）。
 async fn auth_guard(State(state): State<WebUiState>, req: Request<Body>, next: Next) -> Response {
-    let path = req.uri().path();
-    if !is_protected_path(path) || is_auth_exempt_path(path) {
+    let path = req.uri().path().to_owned();
+    let method = req.method().as_str().to_owned();
+    if !is_protected_path(&path) {
+        return next.run(req).await;
+    }
+    if is_auth_exempt_path(&path) {
+        // setup 无会话可达，但同源校验不豁免（spec「首启 root 引导」）。
+        if path == "/api/auth/setup"
+            && !is_safe_method(&method)
+            && let Some(resp) = cross_origin_rejection(&req)
+        {
+            return resp;
+        }
         return next.run(req).await;
     }
     if !state.auth.enabled() {
         return next.run(req).await;
     }
 
-    let authorized = match extract_webui_session_cookie(req.headers()) {
-        Some(session_id) => state.auth.session_store.validate(&session_id).await.is_ok(),
-        None => false,
+    // 认证 + 实时身份解析：会话有效但绑定的用户已被禁用/删除时按未认证
+    // 处理（spec「禁用用户即刻失效」）。
+    let identity = match extract_webui_session_cookie(req.headers()) {
+        Some(session_id) => state.auth.identity_for_session(&session_id).await,
+        None => None,
     };
-    if !authorized {
+    let Some(identity) = identity else {
         // /ws 在升级前拒绝；API 一律 JSON 401（前端据此弹登录页）。
         return (
             StatusCode::UNAUTHORIZED,
@@ -355,34 +447,59 @@ async fn auth_guard(State(state): State<WebUiState>, req: Request<Body>, next: N
             axum::Json(serde_json::json!({ "error": "authentication required" })),
         )
             .into_response();
+    };
+
+    // RBAC 中央表执法：无对应权限的已认证请求 403（而非仅前端隐藏入口）。
+    if let Some(required) = required_permission(&path, &method)
+        && !identity.role.has(required)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": format!("权限不足：{} 角色无权执行该操作", identity.role),
+            })),
+        )
+            .into_response();
     }
 
     // CSRF：浏览器发起的跨站写请求会带 Origin 头——与 Host 不一致即拒绝。
     // SameSite=Lax cookie 已挡掉绝大多数跨站携带，这里兜底非浏览器场景。
-    if !is_safe_method(req.method().as_str())
-        && let Some(origin) = req
-            .headers()
-            .get(header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
+    if !is_safe_method(&method)
+        && let Some(resp) = cross_origin_rejection(&req)
     {
-        let same_origin = origin_authority(origin)
-            .zip(
-                req.headers()
-                    .get(header::HOST)
-                    .and_then(|h| h.to_str().ok()),
-            )
-            .map(|(origin_host, host)| origin_host.eq_ignore_ascii_case(host))
-            .unwrap_or(false);
-        if !same_origin {
-            return (
-                StatusCode::FORBIDDEN,
-                axum::Json(serde_json::json!({ "error": "cross-origin request rejected" })),
-            )
-                .into_response();
-        }
+        return resp;
     }
 
+    let mut req = req;
+    req.extensions_mut().insert(identity);
     next.run(req).await
+}
+
+/// 非 safe 方法的同源校验：`Origin` 头存在且与 `Host` 不一致 → 403 响应；
+/// 无 Origin（CLI/curl）或同源 → None（放行）。
+fn cross_origin_rejection(req: &Request<Body>) -> Option<Response> {
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())?;
+    let same_origin = origin_authority(origin)
+        .zip(
+            req.headers()
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok()),
+        )
+        .map(|(origin_host, host)| origin_host.eq_ignore_ascii_case(host))
+        .unwrap_or(false);
+    if same_origin {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "cross-origin request rejected" })),
+        )
+            .into_response(),
+    )
 }
 
 /// GET/HEAD/OPTIONS 不改状态，不参与同源校验。
@@ -689,7 +806,6 @@ mod auth_guard_tests {
     //! 登录鉴权门的路由级测试：未启用时零影响；启用后 /api、/ws 要会话，
     //! 静态资源 / /health 放行；登录-使用-注销闭环；同源校验；限速。
     use super::*;
-    use crate::auth::Credentials;
     use crate::models::RouterInfo;
     use crate::session_backend::FakeBackend;
     use axum::body::Body;
@@ -703,16 +819,18 @@ mod auth_guard_tests {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
     }
 
-    /// 鉴权开启的 router + 凭据文件句柄（tempdir 必须由调用方持有存活：
-    /// AuthHandle.enabled() 每次 mtime 探测，文件被删会即时关闭鉴权）。
-    fn auth_on_app() -> (Router, tempfile::TempDir) {
+    /// 鉴权开启的 router + 临时 auth.db（小迭代数提速；tempdir 由调用方
+    /// 持有存活：AuthHandle 持有该库的连接）。
+    async fn auth_on_app() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.json");
-        crate::auth::store_credentials(
-            &path,
-            &Credentials::with_iterations("alice", "password8", 1000),
-        )
-        .unwrap();
+        let handle = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        handle
+            .setup_root("alice", "password8")
+            .await
+            .expect("setup root");
         let app = build_router_with_auth(
             Arc::new(FakeBackend::new()),
             RouterInfo::default(),
@@ -720,7 +838,7 @@ mod auth_guard_tests {
             None,
             Arc::new(ConfigAgentKindProvider::new(Vec::new())),
             30,
-            Arc::new(AuthHandle::open(path)),
+            handle,
         );
         (app, dir)
     }
@@ -767,7 +885,7 @@ mod auth_guard_tests {
 
     #[tokio::test]
     async fn auth_on_blocks_api_and_ws_but_not_static_or_health() {
-        let (app, _dir) = auth_on_app();
+        let (app, _dir) = auth_on_app().await;
 
         // API 401（JSON body）。
         let (status, body) = req(app.clone(), "GET", "/api/summary", None, None, None).await;
@@ -787,7 +905,7 @@ mod auth_guard_tests {
 
     #[tokio::test]
     async fn login_use_logout_round_trip() {
-        let (app, _dir) = auth_on_app();
+        let (app, _dir) = auth_on_app().await;
 
         // 错误密码 → 401。
         let (status, _) = req(
@@ -866,7 +984,7 @@ mod auth_guard_tests {
 
     #[tokio::test]
     async fn cross_origin_mutation_rejected() {
-        let (app, _dir) = auth_on_app();
+        let (app, _dir) = auth_on_app().await;
         let login_req = Request::builder()
             .method("POST")
             .uri("/api/auth/login")
@@ -914,7 +1032,7 @@ mod auth_guard_tests {
 
     #[tokio::test]
     async fn login_rate_limited_per_ip() {
-        let (app, _dir) = auth_on_app();
+        let (app, _dir) = auth_on_app().await;
         for _ in 0..5 {
             let (status, _) = req(
                 app.clone(),
@@ -937,6 +1055,50 @@ mod auth_guard_tests {
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// spec「首启 root 引导」：setup 端点与其它受保护 API 一样受非安全
+    /// 方法同源校验——跨站 POST 携带合法载荷也被 403 拒绝，库保持零用户。
+    #[tokio::test]
+    async fn setup_rejects_cross_origin_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        assert!(handle.needs_setup(), "夹具应是零用户库");
+        let app = build_router_with_auth(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            handle,
+        );
+
+        let (status, _) = req(
+            app.clone(),
+            "POST",
+            "/api/auth/setup",
+            None,
+            Some("http://evil.example"),
+            Some(r#"{"username":"evil","password":"password8"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "跨站 setup 必须 403");
+
+        // 同源 setup 放行（零用户 → 建 root）。
+        let (status, _) = req(
+            app,
+            "POST",
+            "/api/auth/setup",
+            None,
+            Some("http://127.0.0.1:12345"),
+            Some(r#"{"username":"cupen","password":"password8"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     /// add-webui-auth-switch Scenario「测试环境关闭」：凭据文件存在但开关
@@ -972,6 +1134,243 @@ mod auth_guard_tests {
             body.contains("\"enabled\":false") && body.contains("\"authenticated\":false"),
             "{body}"
         );
+    }
+
+    // ── RBAC 中央表执法（add-webui-multiuser-rbac 3.1，design D3）──
+
+    use crate::rbac::Role;
+
+    /// 四角色夹具：root alice（setup 建）、admin ada、member bob、viewer vic
+    /// （store 直建）。返回句柄供禁用/查 id 等库操作；tempdir 由调用方持有
+    /// 存活。
+    async fn rbac_app() -> (Router, tempfile::TempDir, Arc<AuthHandle>) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        auth.setup_root("alice", "password8").await.unwrap();
+        let store = auth.user_store().expect("用户库在场");
+        store.create("ada", "password8", Role::Admin).unwrap();
+        store.create("bob", "password8", Role::Member).unwrap();
+        store.create("vic", "password8", Role::Viewer).unwrap();
+        let app = build_router_with_auth(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            auth.clone(),
+        );
+        (app, dir, auth)
+    }
+
+    /// 走登录端点换会话 cookie（形如 `sebas_webui_session=…`）。
+    async fn login_cookie(app: &Router, username: &str, password: &str) -> String {
+        let login_req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .body(Body::from(
+                format!(r#"{{"username":"{username}","password":"{password}"}}"#),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(login_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "login as {username}");
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        cookie.split(';').next().unwrap().trim().to_string()
+    }
+
+    /// spec「viewer 只读」：viewer 的会话/项目写 403，读面放行。
+    #[tokio::test]
+    async fn viewer_writes_are_403_but_reads_pass() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let vic = login_cookie(&app, "vic", "password8").await;
+
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/sessions",
+            Some(&vic),
+            None,
+            Some(r#"{"agent":"native"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // 项目写同表（sessions.write）。
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/projects",
+            Some(&vic),
+            None,
+            Some(r#"{"path":"/tmp/x"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // 设置写（settings.manage）。
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/settings",
+            Some(&vic),
+            None,
+            Some("{}".into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // 读面：认证即可（viewer 可读）。
+        let (status, _) = req(app.clone(), "GET", "/api/summary", Some(&vic), None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = req(app, "GET", "/api/users", Some(&vic), None, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "用户管理面 viewer 也 403");
+    }
+
+    /// spec「member 不能碰设置与服务」+「admin 不能管用户」：用户管理仅
+    /// root（列表也在内），admin/member 一律 403；root 通过且列表无哈希。
+    #[tokio::test]
+    async fn member_and_admin_cannot_manage_users_root_can() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+        let ada = login_cookie(&app, "ada", "password8").await;
+        let alice = login_cookie(&app, "alice", "password8").await;
+
+        for (who, cookie) in [("member", &bob), ("admin", &ada)] {
+            let (status, body) = req(
+                app.clone(),
+                "GET",
+                "/api/users",
+                Some(cookie),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{who} 列表必须 403: {body}");
+            let (status, body) = req(
+                app.clone(),
+                "POST",
+                "/api/users",
+                Some(cookie),
+                None,
+                Some(r#"{"username":"x","password":"password8","role":"member"}"#.into()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{who} 建户必须 403: {body}");
+        }
+
+        // root 通过：列表 200、四个用户、无哈希字段。
+        let (status, body) = req(app.clone(), "GET", "/api/users", Some(&alice), None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["users"].as_array().expect("users array").len(), 4);
+        let raw = body;
+        for leak in ["salt", "hash", "iterations"] {
+            assert!(!raw.contains(leak), "列表泄漏 {leak}: {raw}");
+        }
+
+        // 匿名仍是 401（登录门先于角色执法）。
+        let (status, _) = req(app, "GET", "/api/users", None, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// member 拥有 sessions.write：会话写到达 handler（绝不 401/403）；
+    /// admin 控制面（services.control）对 member 是 403。
+    #[tokio::test]
+    async fn member_session_writes_pass_and_admin_plane_is_403() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/sessions",
+            Some(&bob),
+            None,
+            Some(r#"{"agent":"native"}"#.into()),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "member 会话写不得被角色拦截: {status} {body}"
+        );
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+        // admin 控制面对 member：RBAC 层 403（在 control-secret 第二层之外）。
+        let (status, body) = req(
+            app.clone(),
+            "GET",
+            "/api/admin/status",
+            Some(&bob),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // root 过 RBAC 层后到达 admin 自身守卫（无 secret + loopback →
+        // 非 403 的第二层语义）。
+        let alice = login_cookie(&app, "alice", "password8").await;
+        let (status, _) = req(app, "GET", "/api/admin/status", Some(&alice), None, None).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "root 不得被 RBAC 层拦截");
+    }
+
+    /// spec「router BFF 仅登录门」：member 调 router BFF 写不因角色被拦
+    /// （登录门 + 自身 POST-only/origin 守卫照常）。FakeBackend 无 router
+    /// 可达 → 503（到达 handler 的证据），绝不是 401/403。
+    #[tokio::test]
+    async fn member_router_bff_write_is_not_role_blocked() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/router/api/reload",
+            Some(&bob),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "member 的 router BFF 写必须穿过角色执法到达 handler: {status} {body}"
+        );
+
+        // 未登录仍被登录门拦（BFF 只豁免角色执法，不豁免登录）。
+        let (status, _) = req(app, "POST", "/router/api/reload", None, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// spec「禁用用户即刻失效」：禁用后既有会话的下一个请求 401。
+    #[tokio::test]
+    async fn disabled_users_existing_session_is_unauthorized() {
+        let (app, _dir, auth) = rbac_app().await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+
+        // 用户管理端点的库层效果（端点行为在 api_endpoints_test 覆盖）。
+        let uid = auth
+            .user_store()
+            .unwrap()
+            .get_by_username("bob")
+            .unwrap()
+            .unwrap()
+            .id;
+        auth.user_store().unwrap().set_enabled(uid, false).unwrap();
+
+        let (status, _) = req(app, "GET", "/api/summary", Some(&bob), None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用用户的既有会话必须 401");
     }
 }
 

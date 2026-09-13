@@ -2590,3 +2590,151 @@ async fn projects_remove_blocked_while_live_sessions_exist() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── conversation-incremental-sync 1.1：entries_after 增量参数 ──────────────
+
+/// 驱动一个带两条已知条目的会话（position 0 = prompt、1 = agent 内容），
+/// 作为增量参数各用例的公共底座。
+async fn driven_two_entry_session(
+    app: &axum::Router,
+    router: &DispatchHandle,
+    tag: &str,
+) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = canonical_path_str(&dir);
+    let (encoded, _key) = spawn_and_drive_project_session(
+        app,
+        router,
+        &format!("{tag} prompt"),
+        &path,
+        &format!("acp-inc-{tag}"),
+        &format!("{tag}-content"),
+    )
+    .await;
+    encoded
+}
+
+/// 无参 = 全量回归：entries 从 position 0 起完整下发，不因新增 query
+/// 参数改变既有行为。
+#[tokio::test]
+async fn detail_without_entries_after_returns_full_sequence() {
+    let _env = isolated_projects().await;
+    let (router, _rx, app) = fixture().await;
+    let encoded = driven_two_entry_session(&app, &router, "full").await;
+
+    let (status, detail) = get_json(&app, &format!("/api/sessions/{encoded}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = detail["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2, "prompt + content, full sequence: {detail}");
+    assert_eq!(entries[0]["position"], 0);
+    assert_eq!(entries[0]["kind"], "prompt");
+    assert_eq!(entries[0]["content"], "full prompt");
+    assert_eq!(entries[1]["position"], 1);
+    assert_eq!(entries[1]["kind"], "content");
+    assert_eq!(entries[1]["content"], "full-content");
+}
+
+/// `entries_after=N` 只回 position > N 的条目，且其余 payload 字段
+/// （status/agent_kind/msg_count 等）与全量完全一致——增量不打折。
+#[tokio::test]
+async fn detail_entries_after_returns_only_newer_entries_with_intact_fields() {
+    let _env = isolated_projects().await;
+    let (router, _rx, app) = fixture().await;
+    let encoded = driven_two_entry_session(&app, &router, "inc").await;
+
+    let (_, full) = get_json(&app, &format!("/api/sessions/{encoded}")).await;
+    let (status, inc) = get_json(&app, &format!("/api/sessions/{encoded}?entries_after=0")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entries = inc["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1, "entries_after=0 keeps only position 1: {inc}");
+    assert_eq!(entries[0]["position"], 1);
+    assert_eq!(entries[0]["kind"], "content");
+    assert_eq!(entries[0]["content"], "inc-content");
+    // position 0 的 prompt 条目必须被切掉。
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["position"].as_u64().is_some_and(|p| p > 0)),
+        "no entry at or below the cursor: {entries:?}"
+    );
+
+    // 其余字段照常：逐字段与全量 payload 对账。
+    for field in [
+        "channel",
+        "reference",
+        "session_id",
+        "status",
+        "status_label",
+        "status_slug",
+        "status_glyph",
+        "msg_id",
+        "encoded_key",
+        "current_model",
+        "available_models",
+        "desired_mode",
+        "effective_mode",
+        "agent_kind",
+        "project_id",
+        "remote",
+        "pending",
+        "msg_count",
+    ] {
+        assert_eq!(
+            full[field], inc[field],
+            "field {field:?} must stay complete under entries_after"
+        );
+    }
+    // 关键字段真实在场（不是两边同为 null 的空对空）。
+    assert_eq!(inc["status"], "active");
+    assert!(inc.get("agent_kind").is_some(), "agent_kind present");
+    assert!(inc.get("msg_count").is_some(), "msg_count present");
+    assert!(inc.get("last_active").is_some(), "last_active present");
+}
+
+/// `entries_after=abc` → 400 类型化拒绝（不静默当全量）。
+#[tokio::test]
+async fn detail_entries_after_non_numeric_is_400() {
+    let _env = isolated_projects().await;
+    let (router, _rx, app) = fixture().await;
+    let encoded = driven_two_entry_session(&app, &router, "bad").await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{encoded}?entries_after=abc"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "non-numeric entries_after must be a typed rejection"
+    );
+    let body = body_string(resp.into_body()).await;
+    assert!(!body.is_empty(), "400 must carry an error message: {body}");
+}
+
+/// `entries_after` 超过最大 position → 200 + 空 entries 序列（其余字段
+/// 照常，空序列不是失败 payload）。
+#[tokio::test]
+async fn detail_entries_after_beyond_max_position_returns_empty_entries() {
+    let _env = isolated_projects().await;
+    let (router, _rx, app) = fixture().await;
+    let encoded = driven_two_entry_session(&app, &router, "past").await;
+
+    let (status, detail) = get_json(&app, &format!("/api/sessions/{encoded}?entries_after=99")).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = detail["entries"].as_array().expect("entries array");
+    assert!(
+        entries.is_empty(),
+        "cursor beyond the max position yields an empty sequence: {detail}"
+    );
+    // 其余字段照常，客户端据此仍能渲染会话外壳（identity 字段原样往返）。
+    assert_eq!(detail["status"], "active");
+    assert_eq!(detail["encoded_key"].as_str(), Some(encoded.as_str()));
+    assert!(detail.get("msg_count").is_some());
+}

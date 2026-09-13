@@ -33,6 +33,41 @@ fn iso_from_unix(secs: i64) -> String {
         .unwrap_or_else(|| format!("{secs}"))
 }
 
+/// router 停止保护的拒绝码（unify-router-process-shape 2.2；wire 合同，
+/// webui adapter / 前端按此判别）。拒绝响应同时携带 `count` = 活跃会话数。
+/// 单一定义在 `sebas_webui::admin`（依赖图下游），此处 re-export 防漂移。
+pub use sebas_webui::admin::ACTIVE_ROUTED_SESSIONS_CODE;
+
+/// 活跃 routed 会话探针（unify-router-process-shape 2.2，design D2）：
+/// executor 停 router 前经 core session channel 查询事实。
+/// `None` = core 不可达（无 core 即无活跃流 → 放行停止，fail-open）。
+#[async_trait::async_trait]
+pub trait RouterActivityProbe: Send + Sync {
+    async fn active_routed_sessions(&self) -> Option<u64>;
+}
+
+/// 真实探针：复用 `state_snapshot` 机制加 `router_activity` 轻量域（D2）。
+/// secret 走既有发现链（env → config 目录 secret 文件），无新鉴权面。
+struct CoreChannelActivityProbe {
+    channel_path: std::path::PathBuf,
+    secret: crate::core_channel::secret::ChannelSecret,
+}
+
+#[async_trait::async_trait]
+impl RouterActivityProbe for CoreChannelActivityProbe {
+    async fn active_routed_sessions(&self) -> Option<u64> {
+        let payload = crate::core_channel::client::snapshot_domain_once(
+            &self.channel_path,
+            &self.secret,
+            "router_activity",
+        )
+        .await?;
+        payload
+            .get("active_routed_sessions")
+            .and_then(serde_json::Value::as_u64)
+    }
+}
+
 /// Outcome of running an operation to completion.
 #[derive(Debug, Clone)]
 pub struct ExecutionOutcome {
@@ -55,6 +90,9 @@ enum Execution {
         name: ServiceName,
         desired: DesiredState,
         persist: bool,
+        /// unify-router-process-shape 2.2：仅 `{router, off}` 组合被停止
+        /// 保护消费；其他组合忽略。
+        force: bool,
     },
     /// Restart a managed service.
     ServiceRestart { name: ServiceName },
@@ -77,6 +115,9 @@ pub struct ControlExecutor {
     /// Single-use, short-lived confirmation grants for dangerous actions
     /// (openspec/specs/watchdog/spec.md). Shared across executor clones.
     confirmation: Arc<ConfirmationService>,
+    /// 活跃 routed 会话探针（unify-router-process-shape 2.2）：router 停止
+    /// 保护的事实源。clone 共享同一探针。
+    router_activity: Arc<dyn RouterActivityProbe>,
     /// Pending dangerous actions awaiting confirmation, keyed by the opaque
     /// grant token. The `(Actor, ControlRequest)` is the canonical action
     /// truth — the client only ever carries the token.
@@ -109,6 +150,38 @@ impl ControlExecutor {
         config_path: String,
         services: ServiceManager,
     ) -> Self {
+        // router 停止保护探针（2.2/D2）：通道位置与 core 自身解析同一来源
+        // （channel_path 或缺省），secret 走 env → config 目录 secret 文件的
+        // 既有发现链。
+        let channel_path = config
+            .core
+            .channel_path
+            .clone()
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(crate::core_channel::default_socket_path);
+        let secret = crate::core_channel::secret::ChannelSecret::from_env_or_file(Some(
+            crate::config::core_secret_file_path(
+                config.core.secret_file.as_deref(),
+                std::path::Path::new(&config_path),
+            ),
+        ));
+        let probe: Arc<dyn RouterActivityProbe> = Arc::new(CoreChannelActivityProbe {
+            channel_path,
+            secret,
+        });
+        Self::with_activity_probe(control, runner, config, config_path, services, probe)
+    }
+
+    /// 注入探针的构造形态（测试替身 / 未来扩展用）。
+    pub fn with_activity_probe(
+        control: Arc<Mutex<ControlService>>,
+        runner: Arc<dyn UpdaterRunner>,
+        config: WatchdogConfig,
+        config_path: String,
+        services: ServiceManager,
+        router_activity: Arc<dyn RouterActivityProbe>,
+    ) -> Self {
         Self {
             control,
             runner,
@@ -116,12 +189,51 @@ impl ControlExecutor {
             config_path,
             services,
             confirmation: Arc::new(ConfirmationService::new()),
+            router_activity,
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn control(&self) -> &Arc<Mutex<ControlService>> {
         &self.control
+    }
+
+    /// router 停止保护（unify-router-process-shape 2.2，design D2/D3）。
+    ///
+    /// 仅对 `ServiceSet { service: router, desired: off }` 有意义：
+    /// - `force: true` → 放行（操作者显式意图）；
+    /// - 活跃 routed 会话计数非零且未 force → `Some(拒绝响应)`，wire 上是
+    ///   `Rejected { code: "active_routed_sessions", count }`；
+    /// - 计数为零或 **core 不可达** → 放行（fail-open：无 core 即无任何
+    ///   活跃流，挡一个无风险的清理动作反而不诚实）。
+    ///
+    /// 其他 ServiceSet 组合与非 ServiceSet 请求一律返回 `None`（force 字段
+    /// 在非 router-stop 组合被忽略）。
+    async fn router_stop_blocker(&self, request: &ControlRequest) -> Option<RpcControlResponse> {
+        use crate::watchdog::control::ManagedService;
+        let ControlRequest::ServiceSet {
+            service: ManagedService::Router,
+            desired: DesiredState::Disabled,
+            persist: _,
+            force,
+        } = request
+        else {
+            return None;
+        };
+        if *force {
+            return None;
+        }
+        match self.router_activity.active_routed_sessions().await {
+            Some(0) | None => None,
+            Some(count) => Some(RpcControlResponse::Rejected {
+                code: ACTIVE_ROUTED_SESSIONS_CODE.to_string(),
+                message: format!(
+                    "router 有 {count} 个活跃 routed 会话，停止会中断流式输出；\
+                     确认后果后可以 force 强制停止"
+                ),
+                count: Some(count),
+            }),
+        }
     }
 
     /// Accept a request and run it to completion, awaiting the result.
@@ -171,6 +283,13 @@ impl ControlExecutor {
         actor: Actor,
         request: ControlRequest,
     ) -> RpcControlResponse {
+        // router 停止保护（unify-router-process-shape 2.2，D2）：执法点在
+        // executor——覆盖 CLI 直执行与飞书确认创建两条入口；确认兑换
+        // （confirm）路径在下方再次执法兜底（D3 竞态模型：force 是操作者
+        // 显式意图，确认期间会话变化由服务端再次执法）。
+        if let Some(rejection) = self.router_stop_blocker(&request).await {
+            return rejection;
+        }
         match &actor {
             Actor::Feishu {
                 chat_id: Some(chat),
@@ -185,11 +304,13 @@ impl ControlExecutor {
                 Err(e) => RpcControlResponse::Rejected {
                     code: "confirmation_required".into(),
                     message: e.to_string(),
+                    count: None,
                 },
             },
             Actor::Feishu { chat_id: None, .. } => RpcControlResponse::Rejected {
                 code: "confirmation_required".into(),
                 message: "Feishu dangerous action requires a chat channel for confirmation".into(),
+                count: None,
             },
             _ => self.submit_detached(actor, request).await.into(),
         }
@@ -249,12 +370,18 @@ impl ControlExecutor {
             return RpcControlResponse::Rejected {
                 code: "confirmation_required".into(),
                 message: "unknown or already handled confirmation token".into(),
+                count: None,
             };
         };
         let params = confirmation_params(&stored.request);
         match self.confirmation.redeem(token, principal, channel, &params) {
             Ok(_) => {
                 self.pending.lock().await.remove(token);
+                // 确认兑换不豁免停止保护：确认窗口里会话可能又起来了，
+                // 服务端以当前事实再次执法（D3 竞态兜底）。
+                if let Some(rejection) = self.router_stop_blocker(&stored.request).await {
+                    return rejection;
+                }
                 self.submit_detached(stored.actor, stored.request)
                     .await
                     .into()
@@ -262,14 +389,17 @@ impl ControlExecutor {
             Err(ConfirmationError::AlreadyRedeemed) => RpcControlResponse::Rejected {
                 code: "already_redeemed".into(),
                 message: "this confirmation was already handled".into(),
+                count: None,
             },
             Err(ConfirmationError::Expired) => RpcControlResponse::Rejected {
                 code: "confirmation_expired".into(),
                 message: "confirmation token has expired".into(),
+                count: None,
             },
             Err(_) => RpcControlResponse::Rejected {
                 code: "unauthorized".into(),
                 message: "confirmation token does not match this actor/channel".into(),
+                count: None,
             },
         }
     }
@@ -289,6 +419,7 @@ impl ControlExecutor {
             return RpcControlResponse::Rejected {
                 code: "confirmation_required".into(),
                 message: "unknown or already handled confirmation token".into(),
+                count: None,
             };
         };
         let params = confirmation_params(&stored.request);
@@ -309,14 +440,17 @@ impl ControlExecutor {
             Err(ConfirmationError::AlreadyRedeemed) => RpcControlResponse::Rejected {
                 code: "already_redeemed".into(),
                 message: "this confirmation was already handled".into(),
+                count: None,
             },
             Err(ConfirmationError::Expired) => RpcControlResponse::Rejected {
                 code: "confirmation_expired".into(),
                 message: "confirmation token has expired".into(),
+                count: None,
             },
             Err(_) => RpcControlResponse::Rejected {
                 code: "unauthorized".into(),
                 message: "confirmation token does not match this actor/channel".into(),
+                count: None,
             },
         }
     }
@@ -359,10 +493,11 @@ impl ControlExecutor {
                 name,
                 desired,
                 persist,
+                force,
             } => {
                 self.control.lock().await.mark_running(
                     &operation_id,
-                    format!("setting {} to {desired:?}", name.as_str()),
+                    format!("setting {} to {desired:?}{}", name.as_str(), if force { " (force)" } else { "" }),
                 );
                 match self.services.set_desired(name, desired, persist).await {
                     Ok(()) => self.control.lock().await.mark_done(
@@ -497,10 +632,12 @@ impl ControlExecutor {
                 service,
                 desired,
                 persist,
+                force,
             } => Execution::ServiceSet {
                 name: service_name(service),
                 desired: *desired,
                 persist: *persist,
+                force: *force,
             },
             ControlRequest::ServiceRestart { service } => Execution::ServiceRestart {
                 name: service_name(service),
@@ -729,6 +866,118 @@ mod tests {
             dry_run,
             target: None,
         }
+    }
+
+    // ── unify-router-process-shape 2.2：router 停止保护三态 ──────────────
+
+    /// 固定计数的假探针：`None` 模拟 core 不可达。
+    struct FixedProbe(Option<u64>);
+
+    #[async_trait::async_trait]
+    impl RouterActivityProbe for FixedProbe {
+        async fn active_routed_sessions(&self) -> Option<u64> {
+            self.0
+        }
+    }
+
+    fn executor_with_probe(
+        probe: Arc<dyn RouterActivityProbe>,
+    ) -> (ControlExecutor, Arc<Mutex<ControlService>>) {
+        let control = Arc::new(Mutex::new(ControlService::new()));
+        let services = ServiceManager::new(
+            std::env::temp_dir()
+                .join(format!("sebas-executor-probe-{}.json", std::process::id())),
+        );
+        let executor = ControlExecutor::with_activity_probe(
+            control.clone(),
+            Arc::new(FakeRunner::default()),
+            WatchdogConfig::default(),
+            "./config.toml".into(),
+            services,
+            probe,
+        );
+        (executor, control)
+    }
+
+    fn router_stop(force: bool) -> ControlRequest {
+        ControlRequest::ServiceSet {
+            service: crate::watchdog::control::ManagedService::Router,
+            desired: DesiredState::Disabled,
+            persist: false,
+            force,
+        }
+    }
+
+    /// 三态之一「拒」：活跃 routed 会话非零且未 force → Rejected，
+    /// wire 上 code = `active_routed_sessions`、count = 计数。
+    #[tokio::test]
+    async fn router_stop_with_active_sessions_is_rejected_with_count() {
+        let (executor, _control) = executor_with_probe(Arc::new(FixedProbe(Some(2))));
+        let response = executor
+            .submit_or_confirm(Actor::Cli { uid: 1000 }, router_stop(false))
+            .await;
+        match response {
+            RpcControlResponse::Rejected { code, count, .. } => {
+                assert_eq!(code, ACTIVE_ROUTED_SESSIONS_CODE);
+                assert_eq!(count, Some(2), "拒绝必须携带活跃会话计数");
+            }
+            other => panic!("expected rejection with count, got {other:?}"),
+        }
+    }
+
+    /// 三态之二「force 过」：force 是操作者显式意图，绕过保护放行。
+    #[tokio::test]
+    async fn router_stop_with_force_bypasses_protection() {
+        let (executor, _control) = executor_with_probe(Arc::new(FixedProbe(Some(2))));
+        let response = executor
+            .submit_or_confirm(Actor::Cli { uid: 1000 }, router_stop(true))
+            .await;
+        assert!(
+            matches!(response, RpcControlResponse::Accepted { .. }),
+            "force 必须放行, got {response:?}"
+        );
+    }
+
+    /// 三态之三「不可达过」：core 不可达 → fail-open 放行（D2：无 core 即
+    /// 无任何活跃流，挡一个无风险的清理动作反而不诚实）。
+    #[tokio::test]
+    async fn router_stop_proceeds_when_core_is_unreachable() {
+        let (executor, _control) = executor_with_probe(Arc::new(FixedProbe(None)));
+        let response = executor
+            .submit_or_confirm(Actor::Cli { uid: 1000 }, router_stop(false))
+            .await;
+        assert!(
+            matches!(response, RpcControlResponse::Accepted { .. }),
+            "core 不可达必须放行 (fail-open), got {response:?}"
+        );
+    }
+
+    /// 计数为零同样放行；非 router-stop 组合（force 字段被忽略）不受影响。
+    #[tokio::test]
+    async fn router_stop_with_zero_sessions_and_other_combinations_pass() {
+        let (executor, _control) = executor_with_probe(Arc::new(FixedProbe(Some(0))));
+        let response = executor
+            .submit_or_confirm(Actor::Cli { uid: 1000 }, router_stop(false))
+            .await;
+        assert!(matches!(response, RpcControlResponse::Accepted { .. }));
+
+        // force 对 webui 启动无意义（忽略），照常受理。
+        let (executor, _control) = executor_with_probe(Arc::new(FixedProbe(Some(5))));
+        let response = executor
+            .submit_or_confirm(
+                Actor::Cli { uid: 1000 },
+                ControlRequest::ServiceSet {
+                    service: crate::watchdog::control::ManagedService::WebUi,
+                    desired: DesiredState::Disabled,
+                    persist: false,
+                    force: true,
+                },
+            )
+            .await;
+        assert!(
+            matches!(response, RpcControlResponse::Accepted { .. }),
+            "非 router-stop 组合必须忽略 force, got {response:?}"
+        );
     }
 
     #[tokio::test]

@@ -75,8 +75,8 @@ pub struct StateWriter {
 
 impl StateWriter {
     /// 启动写者线程, 使用给定的数据库路径。
-    /// 会自动打开/创建数据库并执行迁移。
-    /// 在迁移完成前阻塞, 返回后 DB 已就绪。
+    /// 会自动打开/创建数据库并同步 schema (sqlite-auto-schema-sync)。
+    /// 在同步完成前阻塞, 返回后 DB 已就绪。
     pub fn start(db_path: PathBuf) -> Result<Self, String> {
         let (tx, mut rx) = mpsc::channel::<(Cmd, oneshot::Sender<Result<Box<dyn std::any::Any + Send>, String>>)>(128);
         let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
@@ -84,37 +84,20 @@ impl StateWriter {
         let join_handle = std::thread::Builder::new()
             .name("sebas-state-db".into())
             .spawn(move || {
-                // 在专用线程中打开数据库
-                let mut conn = match crate::sebas_state::db::open(&db_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!(path = %db_path.display(), error = %e, "state writer failed to open database");
-                        let _ = ready_tx.send(Err(format!("打开数据库失败: {e}")));
-                        return;
-                    }
-                };
-
-                // 执行迁移
-                match crate::sebas_state::migration::run_migrations(&mut conn, &db_path) {
-                    Err(e) => {
-                        tracing::error!(path = %db_path.display(), error = %e, "state writer migration failed");
-                        let _ = ready_tx.send(Err(format!("迁移失败: {e}")));
-                        return;
-                    }
-                    Ok(crate::sebas_state::migration::MigrationOutcome::TooNew {
-                        db_version,
-                        binary_version,
-                    }) => {
-                        // 数据库版本高于本二进制: 不得静默读写, 启动失败 (spec「Newer database is refused」)
-                        tracing::error!(path = %db_path.display(), db_version, binary_version, "state store newer than binary; refusing to start");
-                        let _ = ready_tx.send(Err(format!(
-                            "状态库版本过新 (db v{db_version} > 本二进制 v{binary_version}), 拒绝启动: {}",
-                            db_path.display()
-                        )));
-                        return;
-                    }
-                    Ok(_) => {}
-                }
+                // 打开 + schema 同步 (sqlite-auto-schema-sync): open 失败按损坏拒启,
+                // 不兼容由 sync 层重置重建, 这里只区分"就绪/失败"。
+                let mut conn =
+                    match crate::sebas_state::migration::open_and_sync(&db_path) {
+                        Ok((conn, outcome)) => {
+                            tracing::info!(path = %db_path.display(), outcome = ?outcome, "state store schema synced");
+                            conn
+                        }
+                        Err(e) => {
+                            tracing::error!(path = %db_path.display(), error = %e, "state writer failed to open/sync database");
+                            let _ = ready_tx.send(Err(format!("状态库初始化失败: {e}")));
+                            return;
+                        }
+                    };
 
                 tracing::info!(path = %db_path.display(), "state writer ready");
                 let _ = ready_tx.send(Ok(()));
@@ -130,7 +113,7 @@ impl StateWriter {
             })
             .map_err(|e| format!("创建 state writer 线程失败: {e}"))?;
 
-        // 等待迁移完成
+        // 等待打开 + schema 同步完成
         ready_rx.recv()
             .map_err(|_| "state writer 启动失败: 通道关闭".to_string())??;
 
@@ -175,17 +158,26 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn writer_refuses_newer_database_at_startup() {
-        // state-store spec「Newer database is refused」: db user_version 高于
-        // 本二进制版本时, start 必须报错而非静默读写 (C1 修复断言)。
+    async fn writer_refuses_corrupt_database_at_startup() {
+        // state-store spec「Corrupt store is not silently reset」: 损坏库必须
+        // 拒启并报出路径, 且绝不自动删除/重建文件 (与 schema 不兼容的重置严格分离)。
         let dir = tempdir().unwrap();
-        let path = dir.path().join("toonew.db");
-        {
-            let conn = db::open(&path).unwrap();
-            db::set_user_version(&conn, crate::sebas_state::migration::CURRENT_VERSION + 1).unwrap();
+        let path = dir.path().join("corrupt.db");
+        let garbage = b"not a sqlite database at all".to_vec();
+        std::fs::write(&path, &garbage).unwrap();
+
+        let err = StateWriter::start(path.clone()).err().expect("corrupt db must abort startup");
+        assert!(
+            err.contains("初始化失败") || err.contains("损坏"),
+            "unexpected error: {err}"
+        );
+
+        // 跨重启同样拒启, 文件始终原样
+        for _ in 0..2 {
+            let err = StateWriter::start(path.clone()).err().expect("corrupt db must abort startup");
+            assert!(err.contains("初始化失败") || err.contains("损坏"));
+            assert_eq!(std::fs::read(&path).unwrap(), garbage, "损坏文件不得被改动");
         }
-        let err = StateWriter::start(path.clone()).err().expect("too-new db must abort startup");
-        assert!(err.contains("版本过新"), "unexpected error: {err}");
     }
 
     #[tokio::test]
@@ -260,23 +252,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_migration_creates_tables() {
+    async fn writer_sync_creates_schema_and_stamps_version() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("migrate_writer.db");
+        let path = dir.path().join("sync_writer.db");
         let _writer = StateWriter::start(path.clone()).unwrap();
 
-        // 直接打开数据库验证迁移已执行
+        // 直接打开数据库验证 schema 同步已执行
         let conn = db::open(&path).unwrap();
-        let version = db::user_version(&conn).unwrap();
-        assert_eq!(version, crate::sebas_state::migration::CURRENT_VERSION);
+        let version_format: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'version_format'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_format, "date");
+        assert_eq!(version, crate::sebas_state::migration::SCHEMA_VERSION);
 
-        // 验证表存在
+        // 验证五张领域表 + schema_meta 都存在
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table'", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert!(count >= 5, "expected at least 5 tables, got {count}");
+        assert!(count >= 6, "expected at least 6 tables, got {count}");
     }
 
     #[tokio::test]

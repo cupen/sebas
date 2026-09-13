@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionDetail, SessionRow, Summary } from '../api/client.js'
+import type { ConversationEntryView, SessionDetail, SessionRow, Summary } from '../api/client.js'
 import { installWaDomPolyfills } from '../test-support/wa-polyfills.js'
 
 // 会话头渲染 WA 表单关联组件（wa-button / wa-dialog / wa-select）——jsdom
@@ -26,6 +26,7 @@ const apiMocks = vi.hoisted(() => ({
   closeSession: vi.fn(),
   archiveSession: vi.fn(),
   nodes: vi.fn(),
+  agents: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -38,6 +39,7 @@ vi.mock('../api/client.js', () => ({
     closeSession: apiMocks.closeSession,
     archiveSession: apiMocks.archiveSession,
     nodes: apiMocks.nodes,
+    agents: apiMocks.agents,
   },
 }))
 
@@ -186,6 +188,10 @@ beforeEach(() => {
     nodes: [{ id: 'local', status: 'online', local: true }],
     remote_available: true,
   })
+  // workbench-agent-identity 3.1：agent 目录（聚焦会话 display 名解析）。
+  apiMocks.agents.mockResolvedValue({
+    agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+  })
 })
 
 afterEach(() => {
@@ -275,6 +281,37 @@ describe('sebas-dashboard (workbench main area)', () => {
     expect(transcript.fill).toBe(true)
     expect(transcript.entries).toHaveLength(3)
     expect(transcript.sessionKey).toBe('oc_live%00')
+    el.remove()
+  })
+
+  it('passes the agent display name to the transcript (agent-identity 3.1)', async () => {
+    // workbench-agent-identity：dashboard 按 agent_kind 匹配 /api/agents 的
+    // display 传入 transcript。已收到角标是纯 entry 序派生态（3.2 收尾修正），
+    // 不再需要 sessionWorking 传参。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.agents.mockResolvedValue({
+      agents: [{ id: 'claude', display: 'Claude Code', reachable: true }],
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view') as HTMLElement & {
+      agentDisplay: string | null
+    }
+    expect(transcript.agentDisplay).toBe('Claude Code')
+    el.remove()
+  })
+
+  it('falls back to the raw agent_kind slug when the catalog has no display entry (3.1)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.agents.mockResolvedValue({ agents: [] })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const transcript = el.shadowRoot!.querySelector('sebas-transcript-view') as HTMLElement & {
+      agentDisplay: string | null
+    }
+    expect(transcript.agentDisplay).toBe('claude')
     el.remove()
   })
 
@@ -564,5 +601,166 @@ describe('remote session presentation (add-remote-execution-node 8.3-8.5)', () =
     // 成因写在 title 上（如实陈述，不是笼统的「不可用」）。
     expect(tag!.getAttribute('title')).toContain('链路断开')
     el.remove()
+  })
+})
+
+/**
+ * conversation-incremental-sync 2.1/2.2：内存游标与增量 merge。游标 =
+ * 已渲染序列的末位 position（per-session Map，页面生命周期内）；首次聚焦
+ * 全量拉，后续 refetch 带 `entries_after=游标` 增量 append；merge 按
+ * position 升序、过滤 `<= 游标` 去重；失败游标不推进；重载（实例重建）
+ * 后重新全量。session mock 按后端契约替身：entries 过滤 position > n。
+ */
+describe('conversation incremental sync (conversation-incremental-sync 2.1/2.2)', () => {
+  /** 收敛一轮 refetch 链（mock 全部即时 resolve，一个宏任务轮即够）。 */
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function transcriptOf(
+    el: SebasDashboard,
+  ): (HTMLElement & { entries: ConversationEntryView[] }) | null {
+    return el.shadowRoot!.querySelector<HTMLElement & { entries: ConversationEntryView[] }>(
+      'sebas-transcript-view',
+    )
+  }
+
+  it('fetches the full sequence on first focus (no entries_after)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledTimes(1)
+    // 精确单参调用 = 未携带 entries_after（spec「first fetch is full」）。
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_live%00')
+    expect(transcriptOf(el)!.entries.map((e) => e.position)).toEqual([0, 1, 2])
+    el.remove()
+  })
+
+  it('appends only new entries on a websocket-triggered refetch (incremental)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    // 新条目到达：响应契约 = entries 只含 position > 游标(2)，status 随行。
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      status: 'done',
+      status_label: 'Done',
+      status_slug: 'done',
+      status_glyph: '✓',
+      msg_count: 3,
+      entries: [
+        { position: 3, kind: 'content', element_type: 'markdown', content: 'third entry', created_at_unix: 1_700_000_300 },
+      ],
+    })
+    // WS 事件与动作后 refetch 同走 refetch() → loadFocused 链路
+    // （dashboard 监听的 sebas:refetch 与 sharedWs 回调共用同一入口）。
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_live%00', 2)
+    const transcript = transcriptOf(el)!
+    expect(transcript.entries.map((e) => e.position)).toEqual([0, 1, 2, 3])
+    expect(transcript.entries[3].content).toBe('third entry')
+    // D2：status 变化随增量响应同行（会话头状态翻转，entries 只增不重拉）。
+    expect(el.shadowRoot!.querySelector('.session-head')?.getAttribute('data-status')).toBe('done')
+    el.remove()
+  })
+
+  it('keeps per-session cursors: switching back resumes from each session cursor', async () => {
+    const a = detailFixture() // positions 0..2
+    const b: SessionDetail = {
+      ...detailFixture(),
+      encoded_key: 'oc_b%00',
+      chat_id: 'chat-b',
+      session_id: 'bbbbbbbb-0002',
+      entries: [
+        { position: 0, kind: 'prompt', element_type: 'markdown', content: 'b prompt', created_at_unix: 1_700_001_000 },
+        { position: 1, kind: 'content', element_type: 'markdown', content: 'b reply', created_at_unix: 1_700_001_100 },
+      ],
+    }
+    apiMocks.session.mockImplementation((key: string, entriesAfter?: number) => {
+      const base = key === a.encoded_key ? a : key === b.encoded_key ? b : null
+      if (!base) return Promise.reject(new Error(`404: ${key}`))
+      return Promise.resolve({
+        ...base,
+        entries: base.entries.filter((e) => e.position > (entriesAfter ?? -1)),
+      })
+    })
+    const el = await mount() // summaryBase：无聚焦
+    el.deepLinkKey = 'oc_live%00'
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_live%00') // A 首拉全量
+    el.deepLinkKey = 'oc_b%00'
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_b%00') // B 首拉全量
+    // A 在后台长出新条目（position 3）。
+    a.entries.push({ position: 3, kind: 'content', element_type: 'markdown', content: 'a third', created_at_unix: 1_700_000_300 })
+    el.deepLinkKey = 'oc_live%00'
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_live%00', 2) // 从 A 自己的游标增量
+    expect(transcriptOf(el)!.entries.map((e) => e.content)).toEqual([
+      'do the thing',
+      'first entry',
+      'second entry',
+      'a third',
+    ])
+    // B 的游标独立：切回 B 从 B 的游标(1)增量——既不是全量也不是 A 的游标。
+    el.deepLinkKey = 'oc_b%00'
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledWith('oc_b%00', 1)
+    expect(transcriptOf(el)!.entries.map((e) => e.position)).toEqual([0, 1])
+    el.remove()
+  })
+
+  it('keeps sequence and cursor when an incremental fetch fails; next refetch resumes', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    apiMocks.session.mockRejectedValue(new TypeError('Failed to fetch'))
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    let calls = apiMocks.session.mock.calls
+    expect(calls[calls.length - 1]).toEqual(['oc_live%00', 2])
+    // 序列与游标原样保留：transcript 还在、内容完整，不落「Session unavailable」。
+    const transcript = transcriptOf(el)!
+    expect(transcript.entries.map((e) => e.position)).toEqual([0, 1, 2])
+    expect(el.shadowRoot!.textContent).not.toContain('Session unavailable')
+    // 下次成功：仍从同一游标重试（未推进），新条目 append 无缺口。
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      entries: [
+        { position: 3, kind: 'content', element_type: 'markdown', content: 'after failure', created_at_unix: 1_700_000_300 },
+      ],
+    })
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    calls = apiMocks.session.mock.calls
+    expect(calls[calls.length - 1]).toEqual(['oc_live%00', 2])
+    expect(transcriptOf(el)!.entries.map((e) => e.content)).toEqual([
+      'do the thing',
+      'first entry',
+      'second entry',
+      'after failure',
+    ])
+    el.remove()
+  })
+
+  it('refetches the full sequence after a reload (memory cursors only)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el1 = await mount()
+    await settle(el1)
+    expect(apiMocks.session).toHaveBeenCalledTimes(1)
+    el1.remove()
+    // F5 = 全新元素实例：内存游标表是实例字段，随实例消亡 → 重新全量
+    // （spec「reload resets cursors」，无 stale localStorage 游标）。
+    const el2 = document.createElement('sebas-dashboard') as SebasDashboard
+    document.body.appendChild(el2)
+    await el2.updateComplete
+    await settle(el2)
+    expect(apiMocks.session).toHaveBeenCalledTimes(2)
+    const calls = apiMocks.session.mock.calls
+    expect(calls[calls.length - 1]).toEqual(['oc_live%00']) // 无 entries_after = 全量
+    expect(transcriptOf(el2)!.entries.map((e) => e.position)).toEqual([0, 1, 2])
+    el2.remove()
   })
 })

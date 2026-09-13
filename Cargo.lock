@@ -2828,6 +2828,7 @@ dependencies = [
  "sebas-node",
  "sebas-node-link",
  "sebas-router",
+ "sebas-schema-derive",
  "sebas-startup",
  "sebas-webui",
  "serde",
@@ -3008,6 +3009,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sebas-schema-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "sebas-startup"
 version = "0.1.0"
 dependencies = [
@@ -3030,6 +3040,7 @@ dependencies = [
  "hmac 0.13.0",
  "http-body-util",
  "reqwest 0.13.4",
+ "rusqlite",
  "rust-embed",
  "sebas-acp",
  "sebas-channels",

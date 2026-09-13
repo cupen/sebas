@@ -29,6 +29,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+/// （permission-mode-auto-gate 1.1）驱动主循环与 PreToolUse hook 回调共享的
+/// 「当前生效 permission mode」单元。`PermissionMode: Copy`，`std::sync::Mutex`
+/// 足够（临界区只做一次拷贝，绝不跨 await 持锁）；与 stderr_tail 同款惯例。
+type SharedPermissionMode = Arc<std::sync::Mutex<claude_agent_sdk::PermissionMode>>;
+
+/// 读取共享 mode 单元的当前值（poisoning 不致命——沿用 stderr_tail 的
+/// `unwrap_or_else` 惯例）。
+fn load_mode(cell: &SharedPermissionMode) -> claude_agent_sdk::PermissionMode {
+    *cell.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// bypass 档判定：控制面 `allow`/`auto` 都映射为 CLI `bypassPermissions`，
+/// hook 门控据此直接放行（ask=Default / edit=AcceptEdits 维持请求流）。
+fn is_bypass_tier(mode: claude_agent_sdk::PermissionMode) -> bool {
+    matches!(mode, claude_agent_sdk::PermissionMode::BypassPermissions)
+}
+
 /// Everything needed to establish one claude-backed session.
 pub struct ConnectConfig {
     pub claude_path: String,
@@ -95,7 +112,10 @@ pub struct CcDriver {
     /// `--permission-mode` argv（或 ConnectConfig 覆盖），运行时切换成功后
     /// 更新。存活探针发这个值（不能发硬编码 Default——那会把操作者设置的
     /// 模式每秒覆盖回默认）。
-    permission_mode: claude_agent_sdk::PermissionMode,
+    /// （permission-mode-auto-gate 1.1）Arc 共享单元：PreToolUse hook 回调
+    /// 每次咨询最前置读取同一份值——bypass 档直接放行，SetMode 更新后下一
+    /// 次咨询即时生效（无需 respawn）。
+    permission_mode: SharedPermissionMode,
 }
 
 /// Why a connect attempt failed. `ResumeRejected` is carved out so the
@@ -195,11 +215,18 @@ impl CcDriver {
             extra_env.iter().cloned().collect();
 
         let waiting_permission = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // （permission-mode-auto-gate 1.1）mode 共享单元：初值 = spawn 生效值
+        // （显式覆盖 > argv `--permission-mode` > CLI 默认）。hook 回调与驱动
+        // 主循环（SetMode / 存活探针 / respawn）共同持有同一份 Arc。
+        let shared_mode: SharedPermissionMode = Arc::new(std::sync::Mutex::new(
+            requested_mode.unwrap_or(claude_agent_sdk::PermissionMode::Default),
+        ));
         let cb = permission_hook(
             session_id.clone(),
             evt_tx.clone(),
             pending_perms.clone(),
             waiting_permission.clone(),
+            shared_mode.clone(),
         );
         let mut hooks: HashMap<HookEvent, Vec<HookMatcher>> = HashMap::new();
         hooks.insert(
@@ -304,7 +331,7 @@ impl CcDriver {
             hang_stage: 0,
             waiting_permission,
             turn_active: false,
-            permission_mode: requested_mode.unwrap_or(claude_agent_sdk::PermissionMode::Default),
+            permission_mode: shared_mode,
         })
     }
 
@@ -358,7 +385,9 @@ impl CcDriver {
                     // ⇒ 子进程没了。（add-agent-mode-selection：探针必须发
                     // 会话**当前**的模式——此前的硬编码 Default 会把操作者
                     // 通过 mode=allow/edit 设置的权限模式每秒覆盖回默认。）
-                    let probe = self.client.set_permission_mode(self.permission_mode);
+                    let probe = self
+                        .client
+                        .set_permission_mode(load_mode(&self.permission_mode));
                     let dead = match tokio::time::timeout(Duration::from_millis(1500), probe).await
                     {
                         Ok(Ok(())) => false,
@@ -458,7 +487,13 @@ impl CcDriver {
                     match control_mode_to_permission_mode(&mode) {
                         Some(target) => match self.client.set_permission_mode(target).await {
                             Ok(()) => {
-                                self.permission_mode = target;
+                                // （permission-mode-auto-gate 1.1）写进与 hook
+                                // 回调共享的同一单元：下一次 hook 咨询读到新值，
+                                // bypass 档即静默放行（无 respawn）。
+                                *self
+                                    .permission_mode
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner()) = target;
                                 let _ = self
                                     .evt_tx
                                     .send(AcpEvent::ModeChanged {
@@ -585,7 +620,7 @@ impl CcDriver {
             session_id: self.session_id.clone(),
             resume: true,
             // 运行时切换过的权限模式在重生后保持（覆盖 argv 里的启动值）。
-            permission_mode: Some(self.permission_mode),
+            permission_mode: Some(load_mode(&self.permission_mode)),
             startup_timeout: self.cfg.startup_timeout,
             evt_tx: self.evt_tx.clone(),
             pending_perms: self.pending_perms.clone(),
@@ -639,11 +674,16 @@ fn stderr_suffix(tail: &Arc<std::sync::Mutex<String>>) -> String {
 /// Build the PreToolUse hook callback that bridges a claude permission
 /// prompt into `AcpEvent::PermissionRequest` and parks the decision oneshot.
 /// The manager's `send(PermissionReply)` resolves the oneshot.
+/// （permission-mode-auto-gate 1.1）回调最前置先查会话当前生效 mode
+/// （`mode` 共享单元）：bypass 档（allow/auto）直接构造 allow 输出返回——
+/// 不产生 PermissionRequest、不泊车、不发卡。本层在 driver 内，飞书与
+/// webui 等 surface 共用同一驱动路径，天然跨面一致静默。
 fn permission_hook(
     session_id: String,
     evt_tx: mpsc::Sender<AcpEvent>,
     pending: Arc<Mutex<HashMap<String, ResponderSlot>>>,
     waiting_permission: Arc<std::sync::atomic::AtomicBool>,
+    mode: SharedPermissionMode,
 ) -> HookCallback {
     use std::sync::atomic::Ordering;
     Arc::new(move |input: HookInput, tool_use_id: Option<String>, _ctx| {
@@ -651,10 +691,18 @@ fn permission_hook(
         let evt_tx = evt_tx.clone();
         let pending = pending.clone();
         let waiting = waiting_permission.clone();
+        let mode = mode.clone();
         async move {
             let HookInput::PreToolUse(pre) = input else {
                 return allow_output("non-PreToolUse hook passthrough");
             };
+            // 门控最前置（design D1）：每次咨询先读共享 mode 单元。bypass 档
+            // （allow/auto → BypassPermissions）直接放行——零请求、零泊车；
+            // SetMode 成功即更新同一单元，下一次咨询即时生效（无需 respawn）。
+            // 非 bypass 档（ask/edit）维持既有请求流。
+            if is_bypass_tier(load_mode(&mode)) {
+                return allow_output("allowed by session permission mode (bypass tier)");
+            }
             // request_id 以 `claude:` 前缀命名空间化，与 agent-driver spec「request_id
             // as `<kind-slug>:<raw-id>`」一致，避免与通用 ACP 驱动的同名 raw id 在
             // 共享 perm_cards/待决映射里冲突。
@@ -1182,6 +1230,186 @@ mod tests {
         // indistinguishable from an intended value at this layer.
         let m = args_to_extra_args(&["--verbose".into(), "stray".into()]);
         assert_eq!(m.get("verbose"), Some(&Some("stray".to_string())));
+    }
+
+    // ---- permission-mode-auto-gate 1.1：hook 门控（mode 共享单元） ----
+
+    /// 构造 PreToolUse hook 输入（形状与 fake-claude 的 hook_callback 帧
+    /// 一致，也即真 CLI 的 PreToolUse 载荷）。
+    fn pre_tool_use_input(tool_name: &str) -> HookInput {
+        let v = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "transcript_path": "/tmp/fake.jsonl",
+            "cwd": "/tmp",
+            "tool_name": tool_name,
+            "tool_input": {"command": "rm -rf /"}
+        });
+        serde_json::from_value(v).expect("PreToolUse hook input parses")
+    }
+
+    fn hook_ctx() -> claude_agent_sdk::HookContext {
+        claude_agent_sdk::HookContext { signal: None }
+    }
+
+    /// 从 hook 输出里取 permissionDecision（none = 输出形状不符）。
+    fn permission_decision(out: &HookJsonOutput) -> Option<&str> {
+        match out {
+            HookJsonOutput::Sync(sync) => match &sync.hook_specific_output {
+                Some(HookSpecificOutput::PreToolUse(p)) => p.permission_decision.as_deref(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// 一套 hook 咨询环境：回调 + 事件通道 + 待决映射 + hang 挂起位 +
+    /// mode 共享单元——正是 `connect()` 里组装的那几件（client 除外）。
+    struct HookRig {
+        hook: HookCallback,
+        evt_rx: mpsc::Receiver<AcpEvent>,
+        pending: Arc<Mutex<HashMap<String, ResponderSlot>>>,
+        waiting: Arc<std::sync::atomic::AtomicBool>,
+        mode: SharedPermissionMode,
+    }
+
+    fn hook_rig(mode: claude_agent_sdk::PermissionMode) -> HookRig {
+        let (evt_tx, evt_rx) = mpsc::channel(8);
+        let pending: Arc<Mutex<HashMap<String, ResponderSlot>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let waiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mode_cell: SharedPermissionMode = Arc::new(std::sync::Mutex::new(mode));
+        let hook = permission_hook(
+            "s1".into(),
+            evt_tx,
+            pending.clone(),
+            waiting.clone(),
+            mode_cell.clone(),
+        );
+        HookRig {
+            hook,
+            evt_rx,
+            pending,
+            waiting,
+            mode: mode_cell,
+        }
+    }
+
+    #[test]
+    fn bypass_tier_predicate_matches_only_bypass_permissions() {
+        // 控制面 allow/auto 都映射为 BypassPermissions（见
+        // control_mode_to_permission_mode）；ask/edit 不得误入 bypass 档。
+        assert!(is_bypass_tier(claude_agent_sdk::PermissionMode::BypassPermissions));
+        assert!(!is_bypass_tier(claude_agent_sdk::PermissionMode::Default));
+        assert!(!is_bypass_tier(claude_agent_sdk::PermissionMode::AcceptEdits));
+        assert!(!is_bypass_tier(claude_agent_sdk::PermissionMode::Plan));
+    }
+
+    /// bypass 档（allow/auto）：hook 直接构造 allow 返回——零请求、零泊车、
+    /// 不触碰 hang 挂起位（不发卡路径完全不经过既有泊车机制）。
+    #[tokio::test]
+    async fn bypass_tier_hook_allows_without_request_or_parking() {
+        let mut rig = hook_rig(claude_agent_sdk::PermissionMode::BypassPermissions);
+        let out = (rig.hook)(pre_tool_use_input("Bash"), Some("tu-1".into()), hook_ctx()).await;
+        assert_eq!(
+            permission_decision(&out),
+            Some("allow"),
+            "bypass tier must resolve allow directly"
+        );
+        assert!(
+            rig.evt_rx.try_recv().is_err(),
+            "bypass tier must not produce a PermissionRequest"
+        );
+        assert!(rig.pending.lock().await.is_empty(), "nothing parked");
+        assert!(
+            !rig
+                .waiting
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "permission wait flag must stay untouched on the silent path"
+        );
+    }
+
+    /// 非 bypass 档（ask/edit）：维持既有请求流——产生 PermissionRequest、
+    /// 泊车等决定、挂起 hang 检测，决定到达后按决定输出。
+    #[tokio::test]
+    async fn ask_and_edit_tiers_still_request_and_park() {
+        for tier in [
+            claude_agent_sdk::PermissionMode::Default,
+            claude_agent_sdk::PermissionMode::AcceptEdits,
+        ] {
+            let mut rig = hook_rig(tier);
+            let hook = rig.hook.clone();
+            let task = tokio::spawn(
+                async move { hook(pre_tool_use_input("Bash"), Some("tu-2".into()), hook_ctx()).await },
+            );
+            let evt = tokio::time::timeout(Duration::from_secs(2), rig.evt_rx.recv())
+                .await
+                .expect("event timeout")
+                .expect("event channel open");
+            let AcpEvent::PermissionRequest { request_id, tool_name, .. } = evt else {
+                panic!("non-bypass tier {tier:?} must produce PermissionRequest, got {evt:?}");
+            };
+            assert_eq!(tool_name, "Bash");
+            assert_eq!(rig.pending.lock().await.len(), 1, "decision must be parked");
+            assert!(
+                rig.waiting.load(std::sync::atomic::Ordering::SeqCst),
+                "hang detection suspended while parked (现状流不变)"
+            );
+            let responder = rig
+                .pending
+                .lock()
+                .await
+                .remove(&request_id)
+                .expect("parked responder");
+            responder.send(Decision::AllowOnce).expect("resolve decision");
+            let out = task.await.expect("hook future joins");
+            assert_eq!(permission_decision(&out), Some("allow"));
+            assert!(rig.pending.lock().await.is_empty(), "parking consumed");
+        }
+    }
+
+    /// SetMode 更新共享单元后，下一次咨询即时读到新值——同一 hook 实例
+    /// （同一驱动、无 respawn）从「照常弹请求」变为「直接放行、零请求」。
+    #[tokio::test]
+    async fn set_mode_unit_update_takes_effect_on_next_consult_without_respawn() {
+        let mut rig = hook_rig(claude_agent_sdk::PermissionMode::Default);
+        // 第一次咨询（ask 档）：照常产生请求——证明门控确实在查共享单元。
+        let hook = rig.hook.clone();
+        let task = tokio::spawn(
+            async move { hook(pre_tool_use_input("Bash"), Some("tu-3".into()), hook_ctx()).await },
+        );
+        let evt = tokio::time::timeout(Duration::from_secs(2), rig.evt_rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel open");
+        let AcpEvent::PermissionRequest { request_id, .. } = evt else {
+            panic!("ask tier must produce PermissionRequest, got {evt:?}");
+        };
+        let responder = rig
+            .pending
+            .lock()
+            .await
+            .remove(&request_id)
+            .expect("parked responder");
+        responder.send(Decision::Deny).expect("resolve decision");
+        let out = task.await.expect("hook future joins");
+        assert_eq!(permission_decision(&out), Some("deny"));
+        // 模拟 run() 的 SetMode 分支：SDK set_permission_mode 被接受后写同一
+        // 共享单元（测试与驱动持有同一个 Arc）。
+        *rig.mode.lock().unwrap_or_else(|p| p.into_inner()) =
+            claude_agent_sdk::PermissionMode::BypassPermissions;
+        // 第二次咨询：即时生效——直接放行，零请求、零泊车。
+        let out2 = (rig.hook)(pre_tool_use_input("Bash"), Some("tu-4".into()), hook_ctx()).await;
+        assert_eq!(
+            permission_decision(&out2),
+            Some("allow"),
+            "next consult after SetMode must see the new mode"
+        );
+        assert!(
+            rig.evt_rx.try_recv().is_err(),
+            "no PermissionRequest after the mode switch"
+        );
+        assert!(rig.pending.lock().await.is_empty());
     }
 
     fn assistant_msg(blocks: serde_json::Value) -> Message {

@@ -91,6 +91,15 @@ ansible-playbook site.yml --skip-tags sebas_install
 
 **反向代理 / Nginx**：sebas 默认监听 loopback，仅本机可访问。公开部署需要使用 Nginx 反向代理，模板见 [`.ansible/examples/nginx-sebas-vhost.conf`](.ansible/examples/nginx-sebas-vhost.conf)。将占位符 `__SEBAS_DOMAIN__` / `__UPSTREAM_HOST__` / `__UPSTREAM_PORT__` 替换后，执行 `nginx -t` 校验并 reload。sebas 本身不处理证书与 TLS，由宿主机 Nginx 终结。
 
+**卸载（破坏性）**：role 通过 `sebas_action` 切换动作，默认 `install`——不传该变量跑 playbook 永远执行安装/升级，误跑无害。要下线一台机器，显式传入 `uninstall`：
+
+```bash
+cd .ansible
+ansible-playbook site.yml -e sebas_action=uninstall
+```
+
+⚠️ **这是破坏性动作且不做二次确认**：会停止并删除 systemd 服务、删除两份二进制（`/usr/local/bin/sebas` 与 `<data_dir>/bin/sebas`）、删除整个数据目录（含 sessions DB、`core.secret` 密钥材料、downloads、用量日志）、删除渲染出的 config.toml（provider API key、`sebas_config_extra` 里的凭据随之清除）、删除 `~/.config/sebas`，并用 `userdel -r` 连 home 一起删除部署用户。**卸载即清库，不备份不导出**——如需保留数据请先手动迁移。卸载流程幂等容错：对部分拆除（服务已停、二进制已缺）或已清空的机器重复执行同样收敛成功。远端主机换 `-i` 指定自己的 inventory 即可。
+
 ### Docker
 
 镜像启动时会校验 Agent 二进制；缺少 `claude` 会以明确错误退出。原生安装的场景可直接挂载宿主机二进制：
@@ -202,8 +211,8 @@ api_key_env = "ANTHROPIC_API_KEY"
 ```
 
 ```bash
-# 随主服务启动（也可独立进程：sebas router --config …）
-sebas core --config ./config.toml --router
+# router 以独立进程运行（或交由 watchdog 托管：config [watchdog.router] enabled = true）
+sebas router --config ./config.toml
 
 # 客户端接入
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=sk-gw-local-dev claude
@@ -270,6 +279,6 @@ sebas/
 
 - **进程级 e2e**：`invoke testsuite-e2e`（`tests/testsuite_e2e_test.rs`）；单用例 `invoke testsuite-e2e --case <name>`。
 - **旅程级验收**：`invoke testsuite-acceptance`（`tests/testsuite_acceptance_test.rs`）；单旅程 `invoke testsuite-acceptance --case <name>`。
-- **浏览器级 UI 旅程**：`invoke testsuite-webui`。一键构建（dist 自动重建）→ 装配一次性沙箱（`sebas core --router --debug --webui` + fake-claude 桩，不触碰真实 `~/.sebas` 与 9797）→ 运行全部旅程（主 config + auth config）→ 按运行结果清理。
+- **浏览器级 UI 旅程**：`invoke testsuite-webui`。一键构建（dist 自动重建）→ 装配一次性沙箱（`core --webui` + 独立 `sebas router --debug` 两进程 + fake-claude 桩，不触碰真实 `~/.sebas` 与 9797）→ 运行全部旅程（主 config + auth config）→ 按运行结果清理。
   - 单旅程：`invoke testsuite-webui --case <spec 文件名>`（如 `--case first-paint`；`--case auth` 跑鉴权形态，端口 9898）。
   - 任一用例失败会保留沙箱现场，并在输出中打印路径（含后端日志 `core.log`），便于复现：`TESTSUITE_REUSE=1 TESTSUITE_KEEP=1 invoke testsuite-webui --case <name>`。

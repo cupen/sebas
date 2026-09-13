@@ -503,25 +503,10 @@ async fn permission_card_click_emits_resolved_card_flip() {
             },
         })
         .await;
-    // First Out: UpdateCardByMsgId that flips the original card in place.
+    // First Out: SendAcp carrying PermissionReply — 放行是首要语义，先行
+    // 让泊车的 hook 解锁（permission-mode-auto-gate D2 的 ①②③ 顺序）。
     let o1 = recv(&mut out_rx).await;
-    let msg_id = match &o1 {
-        Out::UpdateCardByMsgId { key: k, msg_id, .. } => {
-            assert_eq!(k.reference, "oc_perm");
-            assert_eq!(msg_id, "om_real");
-            msg_id.clone()
-        }
-        other => panic!("expected UpdateCardByMsgId, got {other:?}"),
-    };
-    // The card body should carry the resolved label.
-    if let Out::UpdateCardByMsgId { card, .. } = &o1 {
-        let s = serde_json::to_string(card).unwrap();
-        assert!(s.contains("已允许"), "resolved card body: {s}");
-    }
-    // Second Out: SendAcp carrying PermissionReply (the actual decision
-    // forwarded to the bridge).
-    let o2 = recv(&mut out_rx).await;
-    match o2 {
+    match &o1 {
         Out::SendAcp {
             cmd:
                 sebas_acp::claude::session::AcpCommand::PermissionReply {
@@ -534,7 +519,22 @@ async fn permission_card_click_emits_resolved_card_flip() {
             assert_eq!(request_id, "req-1");
             assert!(matches!(decision, sebas_acp::claude::session::Decision::AllowOnce));
         }
-        other => panic!("expected SendAcp, got {other:?}"),
+        other => panic!("expected SendAcp PermissionReply, got {other:?}"),
+    }
+    // Second Out: UpdateCardByMsgId that flips the original card in place.
+    let o2 = recv(&mut out_rx).await;
+    let msg_id = match &o2 {
+        Out::UpdateCardByMsgId { key: k, msg_id, .. } => {
+            assert_eq!(k.reference, "oc_perm");
+            assert_eq!(msg_id, "om_real");
+            msg_id.clone()
+        }
+        other => panic!("expected UpdateCardByMsgId, got {other:?}"),
+    };
+    // The card body should carry the resolved label.
+    if let Out::UpdateCardByMsgId { card, .. } = &o2 {
+        let s = serde_json::to_string(card).unwrap();
+        assert!(s.contains("已允许"), "resolved card body: {s}");
     }
     // take_perm_card removed the entry on click — a second click now
     // hits the stale path and emits a fresh "已过期" card instead of
@@ -595,217 +595,15 @@ fn render_resolved_card_includes_label() {
     assert!(s.contains("已允许（仅此一次）"), "resolved label: {s}");
 }
 
-// ---- sebas session-level allowlist (Allow session semantics) ----
+// ---- permission-mode-auto-gate：「本会话不再询问」= 放行 + SetMode(auto) ----
+// （聊天级 allowlist 已退役：签名匹配/grant_all 存储与「命中即放行」路径
+// 全部删除，自动放行一律由 driver 层 mode 门控执法。）
 
 use sebas_acp::claude::session::{AcpCommand, Decision};
-use sebas_dispatch::engine::tool_signature;
 use serde_json::json;
 
-#[test]
-fn tool_signature_is_stable_for_same_input() {
-    // Exact match: same tool + same args → same signature.
-    let sig_a = tool_signature("Bash", &json!({"command": "ls /tmp"}));
-    let sig_b = tool_signature("Bash", &json!({"command": "ls /tmp"}));
-    assert_eq!(sig_a, sig_b);
-    // Different args → different signature.
-    let sig_c = tool_signature("Bash", &json!({"command": "ls /home"}));
-    assert_ne!(sig_a, sig_c);
-    // Different tool → different signature.
-    let sig_d = tool_signature("Read", &json!({"command": "ls /tmp"}));
-    assert_ne!(sig_a, sig_d);
-}
-
-#[test]
-fn tool_signature_canonicalizes_key_order() {
-    // Reproduce the real-world failure mode: Claude's tool_use args may
-    // serialise the same logical object with keys in a different order on
-    // different invocations. A naive `serde_json::to_string` would produce
-    // different strings, and the allowlist would miss a "second same call".
-    // The signature must be order-insensitive.
-    let a = tool_signature(
-        "Bash",
-        &json!({"command": "ls /tmp", "description": "list /tmp"}),
-    );
-    let b = tool_signature(
-        "Bash",
-        &json!({"description": "list /tmp", "command": "ls /tmp"}),
-    );
-    assert_eq!(a, b, "key order must not affect signature");
-}
-
-#[test]
-fn tool_signature_ignores_null_fields() {
-    // Claude sometimes emits a `parent_tool_use_id: null` or other optional
-    // fields. Including those would defeat the match. The signature must
-    // strip nulls.
-    let with_null = tool_signature("Bash", &json!({"command": "ls", "parent": null}));
-    let without = tool_signature("Bash", &json!({"command": "ls"}));
-    assert_eq!(with_null, without, "null fields must not affect signature");
-}
-
-#[test]
-fn tool_signature_nested_object_keys_canonicalized() {
-    // Nested objects should also be canonicalized recursively.
-    let a = tool_signature(
-        "Bash",
-        &json!({"command": "ls", "env": {"PATH": "/usr/bin", "HOME": "/root"}}),
-    );
-    let b = tool_signature(
-        "Bash",
-        &json!({"env": {"HOME": "/root", "PATH": "/usr/bin"}, "command": "ls"}),
-    );
-    assert_eq!(a, b, "nested object key order must not affect signature");
-}
-
-#[test]
-fn tool_signature_preserves_array_order() {
-    // Array order is semantically meaningful for command args, env, etc.
-    // Canonicalization must NOT sort arrays.
-    let a = tool_signature("Bash", &json!({"args": ["ls", "-la", "/tmp"]}));
-    let b = tool_signature("Bash", &json!({"args": ["/tmp", "-la", "ls"]}));
-    assert_ne!(a, b, "array order is meaningful; must not be sorted");
-}
-
-#[test]
-fn tool_signature_claude_style_bash_args_match_across_invocations() {
-    // The exact scenario from the user's test: same `Bash ls /tmp` call
-    // arriving in two separate tool_use blocks with the surrounding
-    // Claude-Code wrapper fields. The wrapper fields may be added by the
-    // bridge translator and shouldn't be part of the signature.
-    //
-    // We model the inner call (the bridge would normalize before this point
-    // in production; the test pins the contract).
-    let args_a = json!({"command": "ls /tmp", "description": "list /tmp contents"});
-    let args_b = json!({"description": "list /tmp contents", "command": "ls /tmp"});
-    assert_eq!(
-        tool_signature("Bash", &args_a),
-        tool_signature("Bash", &args_b),
-        "Claude-style Bash args with reordered keys must match"
-    );
-}
-
 #[tokio::test]
-async fn allowlist_grant_and_check() {
-    use sebas_channels::ChannelKey;
-    use sebas_dispatch::engine::DispatchHandle;
-    use sebas_dispatch::state::SessionMap;
-
-    let (router, _rx) = DispatchHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc_x", None);
-    // Initial state: not allowed.
-    assert!(
-        !router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
-            .await
-    );
-    // Grant.
-    router
-        .allowlist()
-        .grant(&key, "Bash", &json!({"command": "ls"}))
-        .await;
-    // Now allowed.
-    assert!(
-        router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
-            .await
-    );
-    // Different args → not allowed.
-    assert!(
-        !router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "rm -rf /"}))
-            .await
-    );
-    // Different chat → not allowed.
-    let other_key = ChannelKey::feishu("oc_y", None);
-    assert!(
-        !router
-            .allowlist()
-            .is_allowed(&other_key, "Bash", &json!({"command": "ls"}))
-            .await
-    );
-}
-
-#[tokio::test]
-async fn allowlist_clear_drops_everything_for_chat() {
-    use sebas_channels::ChannelKey;
-    use sebas_dispatch::engine::DispatchHandle;
-    use sebas_dispatch::state::SessionMap;
-
-    let (router, _rx) = DispatchHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc_x", None);
-    router
-        .allowlist()
-        .grant(&key, "Bash", &json!({"command": "ls"}))
-        .await;
-    router
-        .allowlist()
-        .grant(&key, "Read", &json!({"path": "/etc"}))
-        .await;
-    assert!(
-        router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
-            .await
-    );
-    // Clear wipes the whole entry (no leak across sessions).
-    router.allowlist().clear(&key).await;
-    assert!(
-        !router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
-            .await
-    );
-    assert!(
-        !router
-            .allowlist()
-            .is_allowed(&key, "Read", &json!({"path": "/etc"}))
-            .await
-    );
-}
-
-#[tokio::test]
-async fn new_command_clears_session_allowlist() {
-    use sebas_channels::{ChannelEvent, ChannelKey};
-    use sebas_dispatch::engine::DispatchHandle;
-    use sebas_dispatch::state::SessionMap;
-
-    let (router, _rx) = DispatchHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc_x", None);
-    router
-        .allowlist()
-        .grant(&key, "Bash", &json!({"command": "ls"}))
-        .await;
-    assert!(
-        router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
-            .await
-    );
-
-    // /new starts a FRESH session in the same chat: "Allow session" grants
-    // are scoped to the session that approved them and must not carry over.
-    router
-        .dispatch(ChannelEvent::Text {
-            key: key.clone(),
-            text: "/new".into(),
-            reply_target: None,
-        })
-        .await;
-
-    assert!(
-        !router
-            .allowlist()
-            .is_allowed(&key, "Bash", &json!({"command": "ls"}))
-            .await,
-        "/new must clear the session allowlist for the chat"
-    );
-}
-
-#[tokio::test]
-async fn allow_session_click_grants_and_auto_approves_identical_call() {
+async fn allow_session_click_replies_then_switches_mode_to_auto() {
     use sebas_acp::claude::session::AcpEvent;
     use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
     use sebas_dispatch::engine::{Out, DispatchHandle};
@@ -819,137 +617,7 @@ async fn allow_session_click_grants_and_auto_approves_identical_call() {
         .unwrap();
     let (router, mut out_rx) = DispatchHandle::new(map.clone());
 
-    let args = json!({"command": "ls /tmp"});
-    // First call: nothing granted yet, so a card must go out carrying the
-    // (tool, args) stash for the click handler.
-    router
-        .apply_event_to_out(
-            "s1".into(),
-            &AcpEvent::PermissionRequest {
-                session_id: "s1".into(),
-                request_id: "r1".into(),
-                tool_name: "Bash".into(),
-                args: args.clone(),
-            },
-        )
-        .await;
-    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    match out {
-        Out::SendCard {
-            perm_request_id,
-            perm_meta,
-            ..
-        } => {
-            assert_eq!(perm_request_id.as_deref(), Some("r1"));
-            assert_eq!(
-                perm_meta,
-                Some(("Bash".to_string(), args.clone())),
-                "card must stash (tool, args) for the allowlist grant"
-            );
-        }
-        other => panic!("expected SendCard, got {other:?}"),
-    }
-    // Dispatcher records the msg_id (production: after send_card returns).
-    router
-        .record_perm_card_msg_id(
-            "r1".into(),
-            key.clone(),
-            "om_1".into(),
-            "Bash".into(),
-            args.clone(),
-        )
-        .await;
-
-    // User clicks 相同调用不再询问.
-    router
-        .dispatch(ChannelEvent::ButtonCb {
-            key: key.clone(),
-            action: ChannelAction {
-                session_id: "s1".into(),
-                request_id: Some("r1".into()),
-                decision: Some("allow_session".into()),
-                value: json!({ "chat_type": "p2p" }),
-            },
-        })
-        .await;
-    // Expect: card flip + PermissionReply(AllowSession), and the grant
-    // registered.
-    let mut saw_reply = false;
-    for _ in 0..2 {
-        match tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        {
-            Out::UpdateCardByMsgId { .. } => {}
-            Out::SendAcp {
-                cmd: AcpCommand::PermissionReply { decision, .. },
-                ..
-            } => {
-                assert!(matches!(decision, Decision::AllowSession));
-                saw_reply = true;
-            }
-            other => panic!("unexpected Out after click: {other:?}"),
-        }
-    }
-    assert!(saw_reply, "click must emit a PermissionReply");
-    assert!(
-        router.allowlist().is_allowed(&key, "Bash", &args).await,
-        "click must grant the (tool, args) signature"
-    );
-
-    // Second identical call: auto-approved — SendAcp straight away, no card.
-    router
-        .apply_event_to_out(
-            "s1".into(),
-            &AcpEvent::PermissionRequest {
-                session_id: "s1".into(),
-                request_id: "r2".into(),
-                tool_name: "Bash".into(),
-                args: args.clone(),
-            },
-        )
-        .await;
-    match tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
-        .await
-        .unwrap()
-        .unwrap()
-    {
-        Out::SendAcp {
-            cmd:
-                AcpCommand::PermissionReply {
-                    request_id,
-                    decision,
-                    ..
-                },
-            ..
-        } => {
-            assert_eq!(request_id, "r2");
-            assert!(matches!(decision, Decision::AllowSession));
-        }
-        other => panic!("expected auto-approve SendAcp, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
-    use sebas_acp::claude::session::AcpEvent;
-    use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
-    use sebas_dispatch::engine::{Out, DispatchHandle};
-    use sebas_dispatch::state::{Mapping, SessionMap};
-    use std::time::Duration;
-
-    let map = SessionMap::new();
-    let key = ChannelKey::feishu("oc_x", None);
-    map.insert(key.clone(), Mapping::active("s1"))
-        .await
-        .unwrap();
-    let (router, mut out_rx) = DispatchHandle::new(map.clone());
-
-    // First call prompts; user clicks 本会话不再询问.
+    // First call: a card goes out carrying the request for the click handler.
     router
         .apply_event_to_out(
             "s1".into(),
@@ -961,10 +629,17 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
             },
         )
         .await;
-    let _card = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
         .await
         .unwrap()
         .unwrap();
+    match out {
+        Out::SendCard {
+            perm_request_id, ..
+        } => assert_eq!(perm_request_id.as_deref(), Some("r1")),
+        other => panic!("expected SendCard, got {other:?}"),
+    }
+    // Dispatcher records the msg_id (production: after send_card returns).
     router
         .record_perm_card_msg_id(
             "r1".into(),
@@ -974,6 +649,11 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
             json!({"command": "ls /tmp"}),
         )
         .await;
+
+    // User clicks 本会话不再询问. Expected Out order pins the semantics:
+    // ① PermissionReply(AllowSession) 放行（首要语义，先行让 hook 解锁）
+    // ② SendAcp SetMode{auto}（与 webui 中程切换同源的 Out::SendAcp 路径）
+    // ③ UpdateCardByMsgId 翻面「✅ 已切换自动模式」
     router
         .dispatch(ChannelEvent::ButtonCb {
             key: key.clone(),
@@ -985,13 +665,254 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
             },
         })
         .await;
-    // Drain card flip + reply.
-    for _ in 0..2 {
-        let _ = tokio::time::timeout(Duration::from_millis(200), out_rx.recv()).await;
+
+    let mut saw_reply = false;
+    let mut saw_set_mode = false;
+    let mut saw_flip = false;
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Out::SendAcp {
+                session_id,
+                cmd: AcpCommand::PermissionReply { decision, .. },
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(matches!(decision, Decision::AllowSession));
+                assert!(!saw_set_mode, "放行必须先于 SetMode（hook 先解锁）");
+                saw_reply = true;
+            }
+            Out::SendAcp {
+                session_id,
+                cmd: AcpCommand::SetMode { session_id: sid, mode },
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(sid, "s1");
+                assert_eq!(mode, "auto");
+                assert!(saw_reply, "SetMode 在放行之后");
+                saw_set_mode = true;
+            }
+            Out::UpdateCardByMsgId { card, .. } => {
+                let s = serde_json::to_string(&card).unwrap();
+                assert!(s.contains("已切换自动模式"), "flip label: {s}");
+                saw_flip = true;
+            }
+            other => panic!("unexpected Out after click: {other:?}"),
+        }
+    }
+    assert!(saw_reply && saw_set_mode && saw_flip);
+
+    // ③ mapping desired_mode=auto 落位（ask 会话点击后的「不再弹卡」语义由
+    // driver 层 hook 门控保证——dispatch 只负责把 mode 请求送达执行体）。
+    let desired = router
+        .map
+        .get(&key)
+        .await
+        .and_then(|m| m.desired_mode.clone());
+    assert_eq!(desired.as_deref(), Some("auto"));
+
+    // 在飞记录已登记（driver 事件回执失败时据实翻卡用）。
+    assert!(router.auto_mode_switches().take("s1").await.is_some());
+
+    // 其后同会话的游离 SetMode 失败 Error 不再误报（记录已被成功消费）。
+    // 注：ModeChanged/Error 经 apply_event_to_out 会顺带 flush 会话卡
+    // （Out::UpdateCard，既有行为）——只容忍该噪声，断言无失败翻卡。
+    router.apply_event_to_out(
+        "s1".into(),
+        &AcpEvent::ModeChanged {
+            session_id: "s1".into(),
+            mode: "auto".into(),
+        },
+    ).await;
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::Error {
+                session_id: "s1".into(),
+                message: "set mode \"auto\" 被拒绝或未送达（boom），模式未变".into(),
+                terminal: false,
+            },
+        )
+        .await;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await {
+            Err(_) => break, // 无更多 Out
+            Ok(Some(Out::UpdateCard { .. })) => continue, // 会话卡 flush 噪声
+            Ok(Some(other)) => panic!("成功消费后不应有失败翻卡，got {other:?}"),
+            Ok(None) => break,
+        }
+    }
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    assert!(
+        !turns
+            .iter()
+            .any(|e| e.element_type == "permission_mode_result"),
+        "成功路径不写失败契约条目"
+    );
+}
+
+#[tokio::test]
+async fn allow_session_click_failure_keeps_allow_and_reports_honestly() {
+    use sebas_acp::claude::session::AcpEvent;
+    use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
+    use sebas_dispatch::engine::{Out, DispatchHandle};
+    use sebas_dispatch::state::{Mapping, SessionMap};
+    use std::time::Duration;
+
+    let map = SessionMap::new();
+    let key = ChannelKey::feishu("oc_x", None);
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+    router
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_1".into(),
+            "Bash".into(),
+            json!({"command": "ls /tmp"}),
+        )
+        .await;
+
+    // 点击（SetMode 已发出，随后执行体拒绝）。
+    router
+        .dispatch(ChannelEvent::ButtonCb {
+            key: key.clone(),
+            action: ChannelAction {
+                session_id: "s1".into(),
+                request_id: Some("r1".into()),
+                decision: Some("allow_session".into()),
+                value: json!({}),
+            },
+        })
+        .await;
+    // 排掉点击三连（reply + SetMode + 翻面）。
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
-    // A DIFFERENT tool with different args must also auto-approve: the grant
-    // is session-wide, not signature-scoped.
+    // 执行体拒绝：非终态 Error 带驱动「模式未变」标记。
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::Error {
+                session_id: "s1".into(),
+                message: "set mode \"auto\" 被拒绝或未送达（rejected），模式未变".into(),
+                terminal: false,
+            },
+        )
+        .await;
+
+    // 失败如实上报（事件契约）：turn 流 permission_mode_result 条目。
+    let turns = router.session_turns(&key, 0).await.unwrap();
+    let entry = turns
+        .iter()
+        .find(|e| e.element_type == "permission_mode_result")
+        .expect("失败必须写事件契约条目");
+    let payload: serde_json::Value = serde_json::from_str(&entry.content).unwrap();
+    assert_eq!(payload["request_id"], "r1");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["mode"], "auto");
+    assert!(payload["detail"].as_str().unwrap().contains("rejected"));
+
+    // 失败如实翻卡（卡归本进程跟踪时）：orange 主题 + 放行仍在的诚实文案。
+    let out = tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match out {
+        Out::UpdateCardByMsgId { key: k, card, .. } => {
+            assert_eq!(k, key);
+            let s = serde_json::to_string(&card).unwrap();
+            assert!(s.contains("当前调用已放行"), "放行不回滚须如实呈现: {s}");
+            assert!(s.contains("自动模式切换失败"), "失败文案: {s}");
+            assert!(s.contains("orange"), "失败态主题: {s}");
+        }
+        other => panic!("expected failure flip, got {other:?}"),
+    }
+    // 取走即消费：重复 Error 不重复上报（容忍既有会话卡 flush 噪声）。
+    router
+        .apply_event_to_out(
+            "s1".into(),
+            &AcpEvent::Error {
+                session_id: "s1".into(),
+                message: "set mode \"auto\" 被拒绝或未送达（rejected），模式未变".into(),
+                terminal: false,
+            },
+        )
+        .await;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await {
+            Err(_) => break,
+            Ok(Some(Out::UpdateCard { .. })) => continue,
+            Ok(Some(other)) => panic!("重复失败事件不应二次翻卡，got {other:?}"),
+            Ok(None) => break,
+        }
+    }
+    let turns_after = router.session_turns(&key, 0).await.unwrap();
+    assert_eq!(
+        turns_after
+            .iter()
+            .filter(|e| e.element_type == "permission_mode_result")
+            .count(),
+        1,
+        "重复失败事件不写第二条契约条目"
+    );
+}
+
+#[tokio::test]
+async fn later_requests_still_render_cards_after_allow_session() {
+    // allowlist 路径不复存在：点击「本会话不再询问」后，dispatch 侧不再
+    // 自动放行任何请求——后续 PermissionRequest 照常出卡（自动放行由
+    // driver 层 mode 门控在 hook 里执法，根本不产生请求）。
+    use sebas_acp::claude::session::AcpEvent;
+    use sebas_channels::{ChannelAction, ChannelEvent, ChannelKey};
+    use sebas_dispatch::engine::{Out, DispatchHandle};
+    use sebas_dispatch::state::{Mapping, SessionMap};
+    use std::time::Duration;
+
+    let map = SessionMap::new();
+    let key = ChannelKey::feishu("oc_x", None);
+    map.insert(key.clone(), Mapping::active("s1"))
+        .await
+        .unwrap();
+    let (router, mut out_rx) = DispatchHandle::new(map.clone());
+    router
+        .record_perm_card_msg_id(
+            "r1".into(),
+            key.clone(),
+            "om_1".into(),
+            "Bash".into(),
+            json!({"command": "ls /tmp"}),
+        )
+        .await;
+
+    router
+        .dispatch(ChannelEvent::ButtonCb {
+            key: key.clone(),
+            action: ChannelAction {
+                session_id: "s1".into(),
+                request_id: Some("r1".into()),
+                decision: Some("allow_session".into()),
+                value: json!({}),
+            },
+        })
+        .await;
+    // Drain 点击三连。
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    // 第二个请求（不同工具不同参数）：必须出卡，绝不静默放行。
     router
         .apply_event_to_out(
             "s1".into(),
@@ -1008,90 +929,20 @@ async fn allow_session_click_auto_approves_all_later_calls_in_chat() {
         .unwrap()
         .unwrap()
     {
-        Out::SendAcp {
-            cmd:
-                AcpCommand::PermissionReply {
-                    request_id,
-                    decision,
-                    ..
-                },
-            ..
-        } => {
-            assert_eq!(request_id, "r2");
-            assert!(matches!(decision, Decision::AllowSession));
-        }
-        other => panic!("expected session-wide auto-approve, got {other:?}"),
+        Out::SendCard {
+            perm_request_id, ..
+        } => assert_eq!(perm_request_id.as_deref(), Some("r2")),
+        other => panic!("expected a card for r2 (no dispatch-side auto-approve), got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn permission_request_after_grant_auto_approves_without_card() {
-    use sebas_channels::ChannelKey;
-    use sebas_dispatch::engine::DispatchHandle;
-    use sebas_dispatch::state::SessionMap;
-
-    let (router, mut out_rx) = DispatchHandle::new(SessionMap::new());
-    let key = ChannelKey::feishu("oc_x", None);
-    let session_id = "sess-1".to_string();
-    // Seed the session map so apply_event_to_out can resolve the key.
-    let _ = router
-        .map
-        .insert(
-            key.clone(),
-            sebas_dispatch::state::Mapping::active(session_id.clone()),
-        )
-        .await;
-
-    // Pre-grant: the (Bash, ls) call is on the allowlist.
-    router
-        .allowlist()
-        .grant(&key, "Bash", &json!({"command": "ls /tmp"}))
-        .await;
-
-    // Drive a PermissionRequest through the same path production uses
-    // (apply_event_to_out, immediate branch for permission prompts).
-    router
-        .dispatch_acp_event(AcpEvent::PermissionRequest {
-            session_id: session_id.clone(),
-            request_id: "req-auto".into(),
-            tool_name: "Bash".into(),
-            args: json!({"command": "ls /tmp"}),
-        })
-        .await;
-
-    // Expected: NO SendCard (user shouldn't see anything). Only the
-    // auto-approved PermissionReply flows downstream to the bridge.
-    let out = tokio::time::timeout(std::time::Duration::from_millis(200), out_rx.recv())
-        .await
-        .expect("no Out within 200ms")
-        .expect("channel closed");
-    match out {
-        Out::SendAcp {
-            cmd:
-                AcpCommand::PermissionReply {
-                    session_id: sid,
-                    request_id: rid,
-                    decision,
-                },
-            ..
-        } => {
-            assert_eq!(sid, session_id);
-            assert_eq!(rid, "req-auto");
-            // The router's auto-approve path uses AllowSession (the same
-            // decision that "Allow session" maps to) — the bridge can't
-            // tell them apart, and the allowlist already accepted it.
-            assert!(matches!(decision, Decision::AllowSession));
-        }
-        other => panic!("expected SendAcp, got {other:?}"),
-    }
-    // No further Out (no card).
+    // 不产生任何自动放行 reply。
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), out_rx.recv())
+        tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
             .await
             .is_err(),
-        "auto-approve should not render a card"
+        "dispatch 侧不再自动放行"
     );
 }
+
 
 // ---- sebas-per-turn: Out::SendCard carries root_id (Task 2) ----
 

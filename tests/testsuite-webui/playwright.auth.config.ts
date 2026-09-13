@@ -10,7 +10,8 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
 /**
  * Auth-on form of the suite (task 3.8): same harness, TESTSUITE_AUTH=1 → the
  * sandbox comes up on port 9898 with the unified test account admin/admin
- * provisioned in the sandbox-local auth file. Only auth.spec.ts runs here.
+ * provisioned in the sandbox-local auth.db (SEBAS_WEBUI_AUTH_DB). Only
+ * auth.spec.ts runs here.
  */
 process.env.TESTSUITE_AUTH = '1'
 // Same default the harness script derives for port 9898; the keep-on-fail

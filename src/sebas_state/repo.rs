@@ -3,8 +3,10 @@
 //! 每个方法接受 `&mut Connection` 并同步执行, 由 `StateHandle::exec` 调度到
 //! 写者线程。所有方法都是纯同步的, 不依赖 tokio。
 
+use crate::sebas_state::migration::TableSchema;
 use crate::sebas_state::writer::StateHandle;
 use rusqlite::{params, Connection};
+use sebas_schema_derive::SchemaColumns;
 
 // ---- Provider state ----
 
@@ -318,7 +320,11 @@ pub fn save_settings(conn: &mut Connection, cfg: &sebas_feishu::cards::CardConfi
 // ---- Projects ----
 
 /// 项目条目 (JSON 兼容形状, 与 `sebas_webui::projects::ProjectEntry` 对应)。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// 同时是 projects 表结构的单一事实源 (sqlite-auto-schema-sync): 列由
+/// `#[derive(SchemaColumns)]` 提取, 约束 (PRIMARY KEY/UNIQUE) 只在注册
+/// 清单的 DDL 里表达。
+#[derive(Debug, Clone, SchemaColumns, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     /// 稳定项目 id（`proj-<12hex>`；workbench-agent-wire-fix 2.4）。
     /// 迁移 2 之前的行读取时为 None，由应用层按 path 回填。
@@ -327,8 +333,10 @@ pub struct ProjectRow {
     pub name: String,
     pub default_agent: Option<String>,
     pub branch: Option<String>,
+    #[column(default = "0")]
     pub branch_at: i64,
     pub added_at: i64,
+    #[column(default = "0")]
     pub sort_order: i64,
 }
 
@@ -423,8 +431,17 @@ pub fn update_project_branch(conn: &mut Connection, path: &str, branch: Option<&
 
 // ---- Session map ----
 
-/// session_map 行形状（chat_id, thread_id, session_id, last_active_unix, project_dir）。
-pub type SessionMapRow = (String, Option<String>, String, i64, Option<String>);
+/// session_map 行 (chat_id, thread_id, session_id, last_active_unix, project_dir)。
+/// struct 即表结构事实源 (sqlite-auto-schema-sync); 复合主键
+/// `PRIMARY KEY (chat_id, thread_id)` 只在注册清单的 DDL 里表达。
+#[derive(Debug, Clone, SchemaColumns)]
+pub struct SessionMapRow {
+    pub chat_id: String,
+    pub thread_id: Option<String>,
+    pub session_id: String,
+    pub last_active_unix: i64,
+    pub project_dir: Option<String>,
+}
 
 /// 加载会话映射 (用于恢复)。
 pub fn load_session_map(conn: &mut Connection) -> Result<Vec<SessionMapRow>, String> {
@@ -434,13 +451,13 @@ pub fn load_session_map(conn: &mut Connection) -> Result<Vec<SessionMapRow>, Str
 
     let rows = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
+            Ok(SessionMapRow {
+                chat_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                session_id: row.get(2)?,
+                last_active_unix: row.get(3)?,
+                project_dir: row.get(4)?,
+            })
         })
         .map_err(|e| format!("查询 session_map 失败: {e}"))?;
 
@@ -463,10 +480,10 @@ pub fn save_session_map(
     tx.execute("DELETE FROM session_map", [])
         .map_err(|e| format!("清空 session_map 表失败: {e}"))?;
 
-    for (chat_id, thread_id, session_id, last_active_unix, project_dir) in entries {
+    for entry in entries {
         tx.execute(
             "INSERT INTO session_map (chat_id, thread_id, session_id, last_active_unix, project_dir) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![chat_id, thread_id, session_id, last_active_unix, project_dir],
+            params![entry.chat_id, entry.thread_id, entry.session_id, entry.last_active_unix, entry.project_dir],
         )
         .map_err(|e| format!("写入 session_map 失败: {e}"))?;
     }
@@ -475,6 +492,108 @@ pub fn save_session_map(
         .map_err(|e| format!("保存 session_map 事务提交失败: {e}"))?;
     Ok(())
 }
+
+// ---- Table schemas (sqlite-auto-schema-sync) ----
+
+/// providers 行, 表结构的单一事实源。PRIMARY KEY 等约束只在下方注册清单的
+/// DDL 里表达; `load_persisted_state` 的读取路径只取部分列, 其余字段仅为
+/// schema 声明存在, 故整体 allow(dead_code)。
+#[allow(dead_code)]
+#[derive(Debug, Clone, SchemaColumns)]
+pub struct ProviderRow {
+    pub id: String,
+    pub config: String,
+    #[column(default = "0")]
+    pub deleted: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// model_aliases 行, 表结构的单一事实源 (同上, 读取路径只取部分列)。
+#[allow(dead_code)]
+#[derive(Debug, Clone, SchemaColumns)]
+pub struct ModelAliasRow {
+    pub alias: String,
+    pub provider: String,
+    pub upstream_model: Option<String>,
+    pub created_at: i64,
+}
+
+/// settings 行 (key-value), 表结构的单一事实源。
+#[allow(dead_code)]
+#[derive(Debug, Clone, SchemaColumns)]
+pub struct SettingRow {
+    pub key: String,
+    pub value: String,
+}
+
+/// 五表注册清单: (表名, 首建/重建 DDL, 派生列) (sqlite-auto-schema-sync D2)。
+///
+/// - DDL 只在"建新库/重置"时执行, 与 v2 基线逐字对齐 (列名/类型/默认值/
+///   约束/索引); 日常同步只对比派生列 vs `PRAGMA table_info`。
+/// - 结构性约束 (PRIMARY KEY / UNIQUE / REFERENCES) 与索引只能表达在 DDL:
+///   这类列在 struct 里没有非空默认, 缺列场景由 sync 判为不可原地补列 → 重置。
+pub static REGISTERED_TABLES: &[TableSchema] = &[
+    TableSchema {
+        name: "providers",
+        create_ddl: "CREATE TABLE providers (
+            id          TEXT PRIMARY KEY,
+            config      TEXT NOT NULL,       -- JSON blob
+            deleted     INTEGER NOT NULL DEFAULT 0,
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        );
+        CREATE INDEX idx_providers_deleted ON providers(deleted);",
+        columns: ProviderRow::schema_columns(),
+    },
+    TableSchema {
+        name: "model_aliases",
+        create_ddl: "CREATE TABLE model_aliases (
+            alias           TEXT PRIMARY KEY,
+            provider        TEXT NOT NULL REFERENCES providers(id),
+            upstream_model  TEXT,
+            created_at      INTEGER NOT NULL
+        );
+        CREATE INDEX idx_model_aliases_provider ON model_aliases(provider);",
+        columns: ModelAliasRow::schema_columns(),
+    },
+    TableSchema {
+        name: "settings",
+        create_ddl: "CREATE TABLE settings (
+            key     TEXT PRIMARY KEY,
+            value   TEXT NOT NULL    -- JSON blob
+        );",
+        columns: SettingRow::schema_columns(),
+    },
+    TableSchema {
+        name: "projects",
+        create_ddl: "CREATE TABLE projects (
+            path        TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            branch      TEXT,
+            branch_at   INTEGER NOT NULL DEFAULT 0,
+            added_at    INTEGER NOT NULL,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            -- workbench-agent-wire-fix 2.4: 迁移 2 追加的列, 放在末尾与 v2 布局一致
+            id            TEXT,
+            default_agent TEXT
+        );
+        CREATE UNIQUE INDEX idx_projects_id ON projects(id);",
+        columns: ProjectRow::schema_columns(),
+    },
+    TableSchema {
+        name: "session_map",
+        create_ddl: "CREATE TABLE session_map (
+            chat_id          TEXT NOT NULL,
+            thread_id        TEXT,
+            session_id       TEXT NOT NULL,
+            last_active_unix INTEGER NOT NULL,
+            project_dir      TEXT,
+            PRIMARY KEY (chat_id, thread_id)
+        );",
+        columns: SessionMapRow::schema_columns(),
+    },
+];
 
 // ---- Runtime state wire type ----
 
@@ -560,15 +679,13 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sebas_state::db;
-    use crate::sebas_state::migration::run_migrations;
+    use crate::sebas_state::migration::open_and_sync;
     use tempfile::tempdir;
 
     fn setup_db() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.db");
-        let mut conn = db::open(&path).unwrap();
-        run_migrations(&mut conn, &path).unwrap();
+        let conn = open_and_sync(&path).unwrap().0;
         (dir, conn)
     }
 

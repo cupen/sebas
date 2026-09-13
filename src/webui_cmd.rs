@@ -24,11 +24,14 @@ use crate::watchdog::services::WebUiEndpoint;
 use crate::watchdog::EXIT_BIND_FAILED;
 use async_trait::async_trait;
 use sebas_webui::auth::{self, AuthHandle};
+use sebas_webui::rbac::Role;
+use sebas_webui::user_store::{StoreError, UserStore};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 use sebas_webui::admin::{
-    AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService, AdminStatus,
+    AdminActionError, AdminAdapter, AdminEvent, AdminMutationResult, AdminOperation, AdminService,
+    AdminStatus,
 };
 
 /// Arguments for `sebas webui --config <path>`.
@@ -47,27 +50,45 @@ pub struct WebUiPasswdArgs {
     pub user: Option<String>,
     pub password: Option<String>,
     pub password_stdin: bool,
+    /// 显式角色（root/admin/member/viewer）。缺省：库里第一个用户为 root，
+    /// 其后为 member（design D7）。已存在用户时同时把其角色改为该值。
+    pub role: Option<String>,
 }
 
-/// `sebas webui-passwd` — 初始化 / 修改 WebUI 登录账户。
+/// `sebas webui-passwd` — 初始化 / 修改 WebUI 登录用户（写 auth.db 用户库，
+/// add-webui-multiuser-rbac 4.1，design D7）。
 ///
-/// 改密 = 重跑同命令（写入新盐新哈希）；运行中的 webui 进程经 mtime
-/// 热重载拾取，无需重启。密码来源：`--password-stdin`（一行）或
-/// `--password`；用户名缺省沿用现有凭据。
+/// 改密 = 重跑同命令（写入新盐新哈希）；用户库即活数据，运行中的 webui
+/// 进程每请求实时读库，改密即时生效、既有会话留待下次请求自然失效（或
+/// 在 WebUI 用户管理里踢掉）。密码来源：`--password-stdin`（一行）或
+/// `--password`。用户名必填（多用户库里没有「现有用户名」可沿用）；库里
+/// 已有同名账户 → 改密（`--role` 同时改角色），否则建户——首个用户默认
+/// root，其后默认 member，`--role` 显式覆盖。不再读写任何 JSON 凭据文件。
 pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
-    let path = auth::default_auth_file();
-    let existing = auth::load_credentials(&path)
-        .map_err(|e| SebasError::Config(format!("webui 凭据文件损坏，请先删除 {path:?}: {e}")))?;
+    let path = auth::default_auth_db();
+    let store = UserStore::open(&path)
+        .map_err(|e| SebasError::Config(format!("打开 WebUI 用户库 {path:?} 失败: {e}")))?;
 
-    let username = match args.user.or_else(|| existing.as_ref().map(|c| c.username.clone())) {
-        Some(u) if !u.trim().is_empty() => u,
+    let username = match args.user.as_deref().map(str::trim) {
+        Some(u) if !u.is_empty() => u.to_string(),
         _ => {
             return Err(SebasError::Config(
-                "缺少用户名：首次建户请用 --user <name>（修改密码可省略，沿用现有用户名）"
-                    .into(),
+                "缺少用户名：请用 --user <name> 指定要创建或改密的账户".into(),
             ))
         }
     };
+
+    let explicit_role = args
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            word.parse::<Role>().map_err(|e| {
+                SebasError::Config(format!("--role 非法: {e}"))
+            })
+        })
+        .transpose()?;
 
     let password = if args.password_stdin {
         use std::io::Read;
@@ -89,108 +110,152 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
         return Err(SebasError::Config("密码不能为空".into()));
     }
     if password.chars().count() < 8 {
-        // 不做硬性拦截：测试环境统一用 admin/admin 这类短密码（见
-        // scripts/test_webui_sandbox.sh）；公网部署由部署者自己权衡强度。
+        // 不做硬性拦截：测试环境统一用 admin/admin 这类短密码；公网部署
+        // 由部署者自己权衡强度（与首启 setup 页的 ≥8 硬门槛不同）。
         warn!("webui password is shorter than 8 chars, weak; use a strong password for public deploys");
     }
 
-    // 改密保留已注入的登录 token（token 由 env 引导管理，不经 passwd 覆写）。
-    let mut credentials = auth::Credentials::new(&username, &password);
-    if let Some(existing) = &existing {
-        credentials.token_hash = existing.token_hash;
-    }
-    auth::store_credentials(&path, &credentials).map_err(SebasError::Config)?;
-
+    let existing = store
+        .get_by_username(&username)
+        .map_err(|e| SebasError::Config(format!("查询用户库失败: {e}")))?;
     match existing {
-        Some(_) => println!("WebUI 密码已更新：用户 {}（{}）", username, path.display()),
-        None => println!(
-            "WebUI 登录账户已创建：用户 {}（{}）\n现在 webui 的全部 API/WebSocket 都需要登录；\
-             若需公网部署，把 [watchdog.webui] host 指到 0.0.0.0 即可。",
-            username,
-            path.display()
-        ),
+        Some(user) => {
+            store
+                .set_password(user.id, &password)
+                .map_err(|e| SebasError::Config(format!("改密失败: {e}")))?;
+            if let Some(role) = explicit_role {
+                store
+                    .set_role(user.id, role)
+                    .map_err(|e| SebasError::Config(format!("改角色失败: {e}")))?;
+                println!(
+                    "WebUI 用户已更新：用户 {}（角色 {}，{}）",
+                    username,
+                    role,
+                    path.display()
+                );
+            } else {
+                println!("WebUI 密码已更新：用户 {}（{}）", username, path.display());
+            }
+        }
+        None => {
+            // 首个用户默认 root，其后默认 member；`--role` 显式覆盖（design D7）。
+            let role = explicit_role.unwrap_or(
+                if store.count().unwrap_or(0) == 0 {
+                    Role::Root
+                } else {
+                    Role::Member
+                },
+            );
+            store
+                .create(&username, &password, role)
+                .map_err(|e| match e {
+                    StoreError::UsernameTaken => {
+                        SebasError::Config(format!("用户名 {username} 已存在"))
+                    }
+                    other => SebasError::Config(format!("建户失败: {other}")),
+                })?;
+            println!(
+                "WebUI 登录用户已创建：用户 {}（角色 {}，{}）\n现在 webui 的全部 API/WebSocket 都需要登录；\
+                 若需公网部署，把 [watchdog.webui] host 指到 0.0.0.0 即可。",
+                username,
+                role,
+                path.display()
+            );
+        }
     }
     Ok(())
 }
 
-/// webui 启动前的鉴权引导（开关打开 + 凭据文件缺失时，按优先级）：
-/// 1. `SEBAS_WEBUI_TOKEN` → 注入单字段登录密钥（SHA-256 落盘）。
-/// 2. `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` → 注入密码（容器/公网部署）。
-/// 3. 两者皆缺 → 自动生成随机密码（默认开箱即要求登录；Jupyter 风格，
-///    密码打印一次到日志，服务端只留 PBKDF2 哈希）。
+/// webui 启动前的鉴权引导（add-webui-multiuser-rbac 3.3，design D4 顺序）：
+/// 1. 打开/初始化 auth.db（`SEBAS_WEBUI_AUTH_DB` 覆盖，默认 `~/.sebas/auth.db`）。
+/// 2. 零用户且 `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` 非空 → 建 root
+///    （容器/公网部署路径，spec「环境变量引导 root」；已有用户时静默跳过
+///    ——幂等重启不吃错）。
+/// 3. 仍零用户 → 保持零用户，loopback 下由 WebUI 首启设置页接手（
+///    `POST /api/auth/setup`）；非 loopback 由 [`ensure_non_loopback_bind_allowed`]
+///    在 bind 前拒启。
 ///
-/// 返回共享 [`AuthHandle`]。任何一步落盘失败都只 warn（登录门以文件实况
-/// 为准，不因引导失败拒启）。
+/// design D4 第 4 点的旧路径已整体删除，不做兼容：自动生成随机密码、旧
+/// `webui-auth.json` 读取/迁移、`SEBAS_WEBUI_TOKEN`、`SEBAS_WEBUI_AUTH_FILE`
+/// 均不再被读取或写入。
+///
+/// 返回共享 [`AuthHandle`]。env 引导失败只 warn（零用户库仍可用设置页
+/// 兜底，不因引导失败拒启）。
 pub fn bootstrap_auth() -> Arc<AuthHandle> {
-    const DEFAULT_BOOTSTRAP_USER: &str = "admin";
-    let path = auth::default_auth_file();
-    if auth::load_credentials(&path).ok().flatten().is_none() {
-        let bootstrapped = if let Ok(token) = std::env::var("SEBAS_WEBUI_TOKEN")
-            && !token.trim().is_empty()
-        {
-            let mut credentials = auth::Credentials::new(DEFAULT_BOOTSTRAP_USER, token.trim());
-            use sha2::Digest;
-            credentials.token_hash = Some(sha2::Sha256::digest(token.trim().as_bytes()).into());
-            match auth::store_credentials(&path, &credentials) {
-                Ok(()) => {
+    let path = auth::default_auth_db();
+    let handle = Arc::new(AuthHandle::open(path.clone()));
+
+    if let (Ok(user), Ok(pass)) = (
+        std::env::var("SEBAS_WEBUI_USER"),
+        std::env::var("SEBAS_WEBUI_PASSWORD"),
+    ) && !user.trim().is_empty()
+        && !pass.is_empty()
+    {
+        if pass.chars().count() < 8 {
+            warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
+        }
+        match handle.user_store() {
+            Some(store) => match store.setup_root(user.trim(), &pass) {
+                Ok(_) => {
                     info!(
-                        "webui auth bootstrapped from SEBAS_WEBUI_TOKEN ({})",
+                        "webui root user {} bootstrapped from env ({})",
+                        user.trim(),
                         path.display()
                     );
-                    true
                 }
-                Err(e) => {
-                    warn!("webui auth bootstrap (token) failed: {e}");
-                    false
-                }
-            }
-        } else if let (Ok(user), Ok(pass)) = (
-            std::env::var("SEBAS_WEBUI_USER"),
-            std::env::var("SEBAS_WEBUI_PASSWORD"),
-        ) && !user.is_empty()
-            && !pass.is_empty()
-        {
-            if pass.chars().count() < 8 {
-                warn!("SEBAS_WEBUI_PASSWORD shorter than 8 chars (ok for test env admin/admin), use a strong password for public deploys");
-            }
-            match auth::store_credentials(&path, &auth::Credentials::new(&user, &pass)) {
-                Ok(()) => {
-                    info!("webui auth bootstrapped from env for user {user} ({})", path.display());
-                    true
-                }
-                Err(e) => {
-                    warn!("webui auth bootstrap failed: {e}");
-                    false
-                }
-            }
-        } else {
-            let password = auth::generate_random_password();
-            match auth::store_credentials(
-                &path,
-                &auth::Credentials::new(DEFAULT_BOOTSTRAP_USER, &password),
-            ) {
-                Ok(()) => {
-                    eprintln!(
-                        "\n  webui 首次启动：已自动生成登录凭据（auth 默认开启）\n\n    用户名: {DEFAULT_BOOTSTRAP_USER}\n    密码:   {password}\n\n  已写入 {}，可用 `sebas webui-passwd` 修改，或设 SEBAS_WEBUI_TOKEN / SEBAS_WEBUI_PASSWORD 自带凭据。\n",
-                        path.display()
-                    );
-                    warn!(
-                        "auto-generated bootstrap credentials for user {DEFAULT_BOOTSTRAP_USER} written to {} (password printed once above)",
-                        path.display()
-                    );
-                    true
-                }
-                Err(e) => {
-                    warn!("webui auto-bootstrap failed: {e}");
-                    false
-                }
-            }
-        };
-        if !bootstrapped {
-            warn!("webui auth switch is on but no credentials could be provisioned; routes stay open until a credentials file appears");
+                // 已有用户：env 引导让位（幂等重启不吃错）。
+                Err(StoreError::AlreadyInitialized) => {}
+                Err(e) => warn!("webui env bootstrap failed: {e}"),
+            },
+            None => warn!("webui auth.db unavailable, cannot bootstrap root from env"),
         }
     }
-    Arc::new(AuthHandle::open(path))
+    handle
+}
+
+/// 用户库是否至少有一个启用用户。fail-closed：句柄不在场（disabled/库打不
+/// 开）或读取失败一律视为没有——公网门不能对「鉴权不可用」开绿灯。
+pub(crate) fn has_enabled_user(auth: &AuthHandle) -> bool {
+    auth.user_store()
+        .and_then(|store| store.list().ok())
+        .map(|users| users.iter().any(|u| u.enabled))
+        .unwrap_or(false)
+}
+
+/// 非 loopback bind 安全门（add-webui-multiuser-rbac 3.3，design D4 步骤 3；
+/// spec「非 loopback bind 与开关联动」）。`sebas webui` 独立进程与
+/// `core --webui` 内嵌两条启动路径共用同一裁决：
+///
+/// - 开关关闭：一律拒绝——误关开关叠加公网暴露只能是误配（spec 场景
+///   「开关关闭拒绝公网 bind」）；
+/// - 开关打开但用户库没有启用用户：拒绝。零用户 = 公网先访问者可抢注
+///   root（spec 场景「开关打开但零用户拒绝公网 bind」）；全禁用 = 无人可
+///   登录；库损坏 = 鉴权不可用——三者都不得绑公网。先经环境变量
+///   （`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`）或
+///   `sebas webui-passwd --user <name>` 建立 root 再绑公网。
+///
+/// （spec 原文按「存在至少一个启用用户」判定；比只看 `needs_setup()`
+/// （= 零用户）更紧：全禁用/坏库同样拒绝，fail-closed。）
+pub(crate) fn ensure_non_loopback_bind_allowed(
+    auth_on: bool,
+    auth: &AuthHandle,
+) -> Result<()> {
+    if !auth_on {
+        return Err(SebasError::Config(
+            "watchdog.webui.host 非 loopback：auth 开关必须保持打开（误关开关叠加公网暴露 = 误配）；\
+             如需免鉴权请保持 loopback bind"
+                .into(),
+        ));
+    }
+    if !has_enabled_user(auth) {
+        return Err(SebasError::Config(
+            "watchdog.webui.host 非 loopback：用户库中还没有启用用户（零用户时公网先访问者可抢注 root）。\
+             先用 SEBAS_WEBUI_USER + SEBAS_WEBUI_PASSWORD 环境变量或 \
+             `sebas webui-passwd --user <name>` 建立 root，再绑非 loopback 地址"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// CLI entry: read + parse the config, then run the standalone WebUI server.
@@ -208,8 +273,8 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         .ok_or_else(|| SebasError::Config("watchdog.webui.enabled is false".into()))?;
 
     // 登录鉴权：开关关闭（测试/联调）→ 注入 disabled 态，全路由免登录；
-    // 开关打开（默认）→ 引导凭据（SEBAS_WEBUI_TOKEN → SEBAS_WEBUI_USER/
-    // SEBAS_WEBUI_PASSWORD → 自动生成随机密码），之后全部 /api 与 /ws 需要登录。
+    // 开关打开（默认）→ 按 design D4 引导（建库 → env 建 root → 零用户
+    // 留给首启设置页），之后全部 /api 与 /ws 需要登录。
     let auth = if cfg.watchdog.webui.auth {
         bootstrap_auth()
     } else {
@@ -219,20 +284,15 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         Arc::new(AuthHandle::disabled())
     };
 
-    // 非 loopback bind（公网/局域网部署）只在「开关打开且凭据存在」时放行
-    // ——没有登录门就把控制面暴露到公网等于裸奔；开关关闭即意图免鉴权，
-    // 此时公网 bind 只能是误配，启动时硬失败。
-    if !endpoint.is_loopback() && !(cfg.watchdog.webui.auth && auth.enabled()) {
-        return Err(SebasError::Config(
-            "watchdog.webui.host 非 loopback：必须先配置 WebUI 登录凭据 \
-             （`sebas webui-passwd --user <name>` 或 SEBAS_WEBUI_USER/SEBAS_WEBUI_PASSWORD），\
-             且 auth 保持打开"
-                .into(),
-        ));
-    }
+    // 非 loopback bind 安全门（add-webui-multiuser-rbac 3.3，design D4 步骤
+    // 3；spec「非 loopback bind 与开关联动」）：开关关闭、或用户库没有启用
+    // 用户（零用户设置页形态 / 全禁用 / 库损坏）都以配置错误退出，不绑定
+    // 端口——没有登录门的控制面暴露公网等于裸奔，零用户公网 bind 更会让
+    // 先访问者抢注 root。
     if !endpoint.is_loopback() {
+        ensure_non_loopback_bind_allowed(cfg.watchdog.webui.auth, &auth)?;
         warn!(
-            "webui binds {} (non-loopback): make sure login credentials are set ({})",
+            "webui binds {} (non-loopback): login auth enabled, user store at {}",
             endpoint.bind_addr(),
             auth.path().display()
         );
@@ -394,12 +454,44 @@ impl ControlRpcAdminAdapter {
                 status,
                 message: message.into(),
             }),
-            Ok(RpcControlResponse::Rejected { code, message }) => {
-                Err(format!("rejected [{code}]: {message}"))
-            }
+            Ok(RpcControlResponse::Rejected {
+                code, message, ..
+            }) => Err(format!("rejected [{code}]: {message}")),
             Ok(other) => Err(format!("unexpected response: {other:?}")),
             Err(e) => Err(format!("control RPC failed: {e}")),
         }
+    }
+}
+
+/// `ServiceSet` 的 RPC 应答 → 适配器结果（unify-router-process-shape 2.3）。
+/// 纯函数：便于对拒绝载荷（code + count）的映射做无 socket 单测。
+/// - `Rejected { code: active_routed_sessions, count }` → 结构化
+///   [`AdminActionError`]（webui BFF 据此回 400 + 顶层 code + count）；
+/// - 其余拒绝 → 原样保留 code/message（HTTP 形态与既有 500 一致）。
+fn service_set_response(
+    response: Result<RpcControlResponse>,
+    service: &str,
+    desired: &str,
+) -> std::result::Result<AdminMutationResult, AdminActionError> {
+    match response {
+        Ok(RpcControlResponse::Accepted {
+            operation_id,
+            status,
+            ..
+        }) => Ok(AdminMutationResult {
+            operation_id,
+            status,
+            message: format!("service {service} set to {desired}"),
+        }),
+        Ok(RpcControlResponse::Rejected {
+            code,
+            message,
+            count,
+        }) => Err(AdminActionError { code, message, count }),
+        Ok(other) => Err(AdminActionError::other(format!(
+            "unexpected response: {other:?}"
+        ))),
+        Err(e) => Err(AdminActionError::other(format!("control RPC failed: {e}"))),
     }
 }
 
@@ -425,7 +517,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
                     active_operation: Some(operation),
                 })
             }
-            Ok(RpcControlResponse::Rejected { code, message }) => {
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
                 Err(format!("rejected [{code}]: {message}"))
             }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
@@ -447,7 +539,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
                     message: e.public_message,
                 })
                 .collect()),
-            Ok(RpcControlResponse::Rejected { code, message }) => {
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
                 Err(format!("rejected [{code}]: {message}"))
             }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
@@ -459,17 +551,20 @@ impl AdminAdapter for ControlRpcAdminAdapter {
         &self,
         service: &str,
         desired: &str,
-    ) -> std::result::Result<AdminMutationResult, String> {
-        self.submit(
-            RpcControlRequest::ServiceSet {
+        force: bool,
+    ) -> std::result::Result<AdminMutationResult, AdminActionError> {
+        let response = self
+            .send_request(RpcControlRequest::ServiceSet {
                 service: service.into(),
                 desired: desired.into(),
                 // WebUI 服务页的启停选择持久化：watchdog 重启后保持用户意图。
                 persist: true,
-            },
-            format!("service {service} set to {desired}"),
-        )
-        .await
+                // unify-router-process-shape 2.3：强制出口流的 force 透传
+                // （watchdog executor 端执法，非 router-stop 组合忽略）。
+                force,
+            })
+            .await;
+        service_set_response(response, service, desired)
     }
 
     async fn service_restart(&self, service: &str) -> std::result::Result<AdminMutationResult, String> {
@@ -521,7 +616,7 @@ impl AdminAdapter for ControlRpcAdminAdapter {
                     uptime_secs: s.uptime_secs,
                 })
                 .collect()),
-            Ok(RpcControlResponse::Rejected { code, message }) => {
+            Ok(RpcControlResponse::Rejected { code, message, .. }) => {
                 Err(format!("rejected [{code}]: {message}"))
             }
             Ok(other) => Err(format!("unexpected response: {other:?}")),
@@ -553,6 +648,70 @@ fn load_card_config(cfg: &Config) -> sebas_feishu::cards::CardConfig {
     }
 }
 
+#[cfg(test)]
+mod service_set_tests {
+    //! unify-router-process-shape 2.3：webui admin adapter 对 force 透传与
+    //! router 停止保护拒绝载荷的映射（纯函数，无需真实 control RPC socket）。
+
+    use super::*;
+    use sebas_webui::admin::ACTIVE_ROUTED_SESSIONS_CODE;
+
+    #[test]
+    fn rejection_with_active_routed_sessions_keeps_code_and_count() {
+        let resp = Ok(RpcControlResponse::Rejected {
+            code: ACTIVE_ROUTED_SESSIONS_CODE.into(),
+            message: "router 有 3 个活跃 routed 会话".into(),
+            count: Some(3),
+        });
+        let err = service_set_response(resp, "router", "off")
+            .expect_err("保护拒绝必须映射为错误");
+        assert_eq!(err.code, "active_routed_sessions");
+        assert_eq!(err.count, Some(3));
+        assert!(err.is_active_routed_sessions(), "前端据此弹强制出口");
+        // wire 形状钉死：序列化后 code/count 字段名不变（count 在场）。
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], "active_routed_sessions");
+        assert_eq!(json["count"], 3);
+    }
+
+    #[test]
+    fn other_rejections_map_without_count() {
+        let resp = Ok(RpcControlResponse::Rejected {
+            code: "invalid_request".into(),
+            message: "未知服务: nope".into(),
+            count: None,
+        });
+        let err =
+            service_set_response(resp, "nope", "off").expect_err("非法服务必须映射为错误");
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(err.count, None);
+        // count 缺席时 wire 上省略字段（旧形状不变）。
+        let json = serde_json::to_value(&err).unwrap();
+        assert!(json.get("count").is_none(), "{json}");
+    }
+
+    #[test]
+    fn accepted_maps_to_mutation_result() {
+        let resp = Ok(RpcControlResponse::Accepted {
+            operation_id: "op_1".into(),
+            status: "Accepted".into(),
+            startup_failure: None,
+        });
+        let out = service_set_response(resp, "router", "off").expect("接受必须映射为结果");
+        assert_eq!(out.operation_id, "op_1");
+        assert_eq!(out.message, "service router set to off");
+    }
+
+    /// RPC 传输失败（watchdog 不在等）：internal 错误码，无 count。
+    #[test]
+    fn transport_failure_maps_to_internal_error() {
+        let resp: Result<RpcControlResponse> = Err(SebasError::Upgrade("socket gone".into()));
+        let err = service_set_response(resp, "router", "off").expect_err("必须失败");
+        assert_eq!(err.code, "internal");
+        assert_eq!(err.count, None);
+    }
+}
+
 /// Install a tracing subscriber for the standalone WebUI process.
 /// Filter comes from `RUST_LOG` (default `"info"`), mirroring router_cmd.
 /// `try_init` is used so the first caller wins and later calls are no-ops.
@@ -574,10 +733,13 @@ fn init_tracing(log_filter: Option<&str>) {
 
 #[cfg(test)]
 mod auth_gate_tests {
-    //! add-webui-auth-switch：非 loopback 安全门与开关的联动（spec 场景）。
+    //! add-webui-auth-switch：非 loopback 安全门与开关的联动（spec 场景），
+    //! 以及 bootstrap_auth 的引导行为（add-webui-multiuser-rbac 3.3 收口：
+    //! design D4 顺序——建库 → env 引导 root → 零用户留设置页/非 loopback
+    //! 拒启；随机密码/token/旧 JSON 路径全部删除且被忽略）。
 
     use super::*;
-    use sebas_webui::auth::{self, Credentials};
+    use sebas_webui::rbac::Role;
 
     /// 写一份沙箱配置并返回 config 路径。host/auth 按用例注入。
     fn write_config(dir: &std::path::Path, host: &str, auth: bool) -> PathBuf {
@@ -622,19 +784,35 @@ auth = {auth}
     /// 甚至让 B 绕过 gate 真的去 bind 0.0.0.0:9879），用互斥锁串行化。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct AuthFileGuard;
-    fn set_auth_file(dir: &std::path::Path) -> AuthFileGuard {
+    struct AuthDbGuard(PathBuf);
+    fn set_auth_db(dir: &std::path::Path) -> AuthDbGuard {
+        let db = dir.join("auth.db");
         // SAFETY: ENV_LOCK 由调用方持有，无并发 env 访问。
         unsafe {
-            std::env::set_var("SEBAS_WEBUI_AUTH_FILE", dir.join("webui-auth.json"));
+            std::env::set_var("SEBAS_WEBUI_AUTH_DB", &db);
         }
-        AuthFileGuard
+        AuthDbGuard(db)
     }
-    impl Drop for AuthFileGuard {
+    impl Drop for AuthDbGuard {
         fn drop(&mut self) {
             // SAFETY: 同上，ENV_LOCK 仍被持有。
             unsafe {
-                std::env::remove_var("SEBAS_WEBUI_AUTH_FILE");
+                std::env::remove_var("SEBAS_WEBUI_AUTH_DB");
+            }
+        }
+    }
+
+    /// 把测试注入的全部引导 env 还原（AuthDbGuard 只管 AUTH_DB）。
+    fn clear_bootstrap_env() {
+        // SAFETY: ENV_LOCK 已被调用方持有，无并发 env 访问。
+        unsafe {
+            for name in [
+                "SEBAS_WEBUI_USER",
+                "SEBAS_WEBUI_PASSWORD",
+                "SEBAS_WEBUI_AUTH_FILE",
+                "SEBAS_WEBUI_TOKEN",
+            ] {
+                std::env::remove_var(name);
             }
         }
     }
@@ -642,17 +820,10 @@ auth = {auth}
     #[tokio::test]
     // env 锁有意横跨整个测试（含 await）：env 是进程全局的。
     #[allow(clippy::await_holding_lock)]
-    async fn non_loopback_refused_when_switch_off_even_with_credentials() {
+    async fn non_loopback_refused_when_switch_off() {
         let _env = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config = write_config(dir.path(), "0.0.0.0", false);
-        // 凭据存在：拒绝理由必须来自开关关闭，而不是缺凭据。
-        auth::store_credentials(
-            &dir.path().join("webui-auth.json"),
-            &Credentials::new("admin", "admin-admin"),
-        )
-        .unwrap();
-        let _auth_file = set_auth_file(dir.path());
         let err = run(WebUiArgs::new(config.to_string_lossy().into_owned()))
             .await
             .expect_err("开关关闭 + 非 loopback 必须配置错误退出");
@@ -660,10 +831,26 @@ auth = {auth}
         assert!(msg.contains("非 loopback"), "{msg}");
     }
 
-    // 「开关打开 + 凭据缺失 + 非 loopback」的旧拒绝场景已随自动引导移除：
-    // bootstrap_auth 现在总能让凭据存在（token env → 密码 env → 随机生成），
-    // 该状态下启动放行而非退出；引导行为本身由
-    // `bootstrap_prefers_token_then_password_then_random` 覆盖。
+    /// spec 场景「开关打开但零用户拒绝公网 bind」（design D4 步骤 3）：
+    /// auth 默认打开、用户库零用户（tempdir 沙箱库）→ 配置错误退出，不 bind。
+    #[tokio::test]
+    // env 锁有意横跨整个测试（含 await）。
+    #[allow(clippy::await_holding_lock)]
+    async fn non_loopback_refused_when_zero_users() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_config(dir.path(), "0.0.0.0", true);
+        let _db = set_auth_db(dir.path());
+        let err = run(WebUiArgs::new(config.to_string_lossy().into_owned()))
+            .await
+            .expect_err("零用户 + 非 loopback 必须配置错误退出");
+        let msg = err.to_string();
+        assert!(msg.contains("非 loopback"), "{msg}");
+        assert!(
+            msg.contains("启用用户"),
+            "错误信息应指引用先建 root: {msg}"
+        );
+    }
 
     #[test]
     fn loopback_starts_with_switch_off() {
@@ -679,52 +866,111 @@ auth = {auth}
         assert!(WebUiEndpoint::from_config(&cfg.watchdog.webui).unwrap().is_loopback());
     }
 
-    /// bootstrap_auth 的 env 全局性同样需要互斥（SEBAS_WEBUI_TOKEN 与
-    /// SEBAS_WEBUI_AUTH_FILE 都是进程级）。
+    /// 安全门的三态判定（纯函数，不真 bind）：零用户拒、env 引导后放行、
+    /// 开关关闭恒拒（spec 场景「开关打开且凭据存在允许公网 bind」）。
     #[test]
-    // env 锁横跨整个测试体。
-    #[allow(clippy::await_holding_lock)]
-    fn bootstrap_prefers_token_then_password_then_random() {
-        use sebas_webui::auth::load_credentials;
-
+    fn gate_refuses_zero_users_then_allows_after_env_bootstrap() {
         let _env = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let _auth_file = set_auth_file(dir.path());
+        let _db = set_auth_db(dir.path());
+        clear_bootstrap_env();
 
-        // 1) 无任何 env → 自动生成：凭据文件出现，admin 可登录。
+        // 零用户：门拒绝（无论开关态——开关关闭走另一条拒绝分支）。
         let handle = bootstrap_auth();
-        assert!(handle.enabled(), "无凭据时应自动生成而不是保持关闭");
-        assert_eq!(handle.username().as_deref(), Some("admin"));
-        std::fs::remove_file(dir.path().join("webui-auth.json")).unwrap();
+        assert!(handle.needs_setup(), "沙箱库应保持零用户");
+        assert!(ensure_non_loopback_bind_allowed(true, &handle).is_err());
 
-        // 2) 仅 TOKEN → verify_secret 命中 token。
+        // env 引导 root 后：门放行（不真 bind——gate 是纯判定，serve 不在
+        // 本测射程内）。
         // SAFETY: ENV_LOCK 已持有，无并发 env 访问。
-        unsafe { std::env::set_var("SEBAS_WEBUI_TOKEN", "tok-abc-123456") };
-        let handle = bootstrap_auth();
-        assert!(handle.enabled());
-        let credentials = load_credentials(&dir.path().join("webui-auth.json"))
-            .unwrap()
-            .unwrap();
-        assert!(credentials.verify_secret("tok-abc-123456"));
-        assert!(!credentials.verify_secret("other"));
-        // 顺手断言热重载后 login_secret 也通（与落盘凭据同一句柄语义）。
-        std::fs::remove_file(dir.path().join("webui-auth.json")).unwrap();
-
-        // 3) USER/PASSWORD → 密码注入；TOKEN 存在时 TOKEN 优先（空值除外）。
-        unsafe { std::env::set_var("SEBAS_WEBUI_TOKEN", "") };
         unsafe { std::env::set_var("SEBAS_WEBUI_USER", "admin") };
         unsafe { std::env::set_var("SEBAS_WEBUI_PASSWORD", "password8") };
         let handle = bootstrap_auth();
-        let credentials = load_credentials(&dir.path().join("webui-auth.json"))
-            .unwrap()
-            .unwrap();
-        assert!(credentials.verify("admin", "password8"));
-        assert!(credentials.token_hash.is_none(), "纯密码引导不写 token");
-        drop(handle);
+        assert!(!handle.needs_setup());
+        ensure_non_loopback_bind_allowed(true, &handle)
+            .expect("env 引导建立 root 后公网 bind 应放行");
 
-        // 清理本测注入的全部 env。
-        unsafe { std::env::remove_var("SEBAS_WEBUI_TOKEN") };
-        unsafe { std::env::remove_var("SEBAS_WEBUI_USER") };
-        unsafe { std::env::remove_var("SEBAS_WEBUI_PASSWORD") };
+        // 开关关闭：无论用户库为何都拒绝。
+        assert!(ensure_non_loopback_bind_allowed(false, &handle).is_err());
+
+        clear_bootstrap_env();
+    }
+
+    /// spec 场景「旧单账户凭据文件被忽略」：旧 `webui-auth.json` 存在、
+    /// `SEBAS_WEBUI_AUTH_FILE` 与 `SEBAS_WEBUI_TOKEN` 都设置时，引导不读取
+    /// 不迁移（用户库仍零用户进设置流程），旧文件原样保留。
+    #[test]
+    fn legacy_json_auth_file_and_token_are_ignored() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = set_auth_db(dir.path());
+        clear_bootstrap_env();
+
+        let legacy = dir.path().join("webui-auth.json");
+        std::fs::write(
+            &legacy,
+            r#"{"username":"legacy-admin","password":"legacy-pw"}"#,
+        )
+        .unwrap();
+        // SAFETY: ENV_LOCK 已持有，无并发 env 访问。
+        unsafe { std::env::set_var("SEBAS_WEBUI_AUTH_FILE", &legacy) };
+        unsafe { std::env::set_var("SEBAS_WEBUI_TOKEN", "legacy-token") };
+
+        let handle = bootstrap_auth();
+        assert!(handle.enabled());
+        assert!(
+            handle.needs_setup(),
+            "旧凭据文件/token 在场时用户库仍必须为零用户（不读取不迁移）"
+        );
+        assert_eq!(handle.user_store().unwrap().count().unwrap(), 0);
+        let raw = std::fs::read_to_string(&legacy).unwrap();
+        assert!(
+            raw.contains("legacy-admin"),
+            "旧 JSON 不得被改写或删除: {raw}"
+        );
+        assert!(db.0.exists(), "auth.db 应按新路径创建");
+
+        clear_bootstrap_env();
+    }
+
+    /// bootstrap_auth 的 env 全局性同样需要互斥（SEBAS_WEBUI_USER/
+    /// SEBAS_WEBUI_PASSWORD/SEBAS_WEBUI_AUTH_DB 都是进程级）。
+    #[test]
+    fn bootstrap_opens_db_and_env_bootstraps_root() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = set_auth_db(dir.path());
+        clear_bootstrap_env();
+
+        // 1) 无任何 env → 建库并保持零用户（设置页形态；不再自动生成
+        //    随机密码，spec「不自动生成任何默认凭据」）。
+        let handle = bootstrap_auth();
+        assert!(handle.enabled(), "开关打开时库句柄应视为启用");
+        assert!(handle.needs_setup(), "零用户应是首启设置页形态");
+        assert!(db.0.exists(), "auth.db 应被创建");
+
+        // 2) USER/PASSWORD → 建 root（可登录）。
+        // SAFETY: ENV_LOCK 已持有，无并发 env 访问。
+        unsafe { std::env::set_var("SEBAS_WEBUI_USER", "admin") };
+        unsafe { std::env::set_var("SEBAS_WEBUI_PASSWORD", "password8") };
+        let handle = bootstrap_auth();
+        assert!(!handle.needs_setup(), "env 引导后不再是设置页形态");
+        let store = handle.user_store().expect("用户库在场");
+        let root = store.get_by_username("admin").unwrap().expect("root 已建");
+        assert_eq!(root.role, Role::Root);
+        assert!(root.enabled);
+        assert!(root.verify_password("password8"));
+
+        // 3) 已有用户时重复 bootstrap 幂等：不建第二户、不覆盖。
+        unsafe { std::env::set_var("SEBAS_WEBUI_PASSWORD", "other-pass-9") };
+        let handle = bootstrap_auth();
+        let store = handle.user_store().expect("用户库在场");
+        assert_eq!(store.count().unwrap(), 1, "已有用户时 env 引导必须让位");
+        assert!(
+            store.get_by_username("admin").unwrap().unwrap().verify_password("password8"),
+            "重复引导不得覆盖既有 root 的密码"
+        );
+
+        clear_bootstrap_env();
     }
 }

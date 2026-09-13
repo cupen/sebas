@@ -15,7 +15,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
+import { api, type AgentKindInfo, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
 import type { WsEvent } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
@@ -42,6 +42,21 @@ import '@awesome.me/webawesome/dist/components/split-panel/split-panel.js'
 /** 本机节点标识（与后端 projects::LOCAL_NODE_ID 同一词表）。 */
 const LOCAL_NODE = 'local'
 
+/**
+ * 增量 merge（conversation-incremental-sync D1/D3）：滤掉 `<= 游标` 的条目
+ * （协议保证不会有——防御双触发 refetch 竞态下乱序到达的重叠窗口），与既有
+ * 序列 concat 后按 position 升序排一次。纯函数：不 mutate 入参——本地序列与
+ * focusedDetail 共享数组引用，原地修改会破坏「失败保持原序列」的语义。
+ */
+function mergeEntries(
+  existing: ConversationEntryView[],
+  incoming: ConversationEntryView[],
+  cursor: number | undefined,
+): ConversationEntryView[] {
+  const fresh = cursor === undefined ? incoming : incoming.filter((e) => e.position > cursor)
+  return [...existing, ...fresh].sort((a, b) => a.position - b.position)
+}
+
 /** 节点可用性轮询周期（8.2：节点回归/掉线免刷新反映到 composer 门禁）。 */
 const NODE_POLL_MS = 10_000
 
@@ -57,6 +72,13 @@ export class SebasDashboard extends LitElement {
    * focused.
    */
   @state() private focusedDetail: SessionDetail | null = null
+  /**
+   * conversation-incremental-sync（D1）：per-session 已渲染条目序列（键 =
+   * encoded_key，普通字段非持久化）。游标不单独存——序列升序的末位
+   * position 就是游标，单一真源免漂移。序列为空的会话无游标（下次全量）。
+   * 页面生命周期内跨会话切换保留；F5 / 元素重建即随实例消亡，回到全量。
+   */
+  private sessionEntries = new Map<string, ConversationEntryView[]>()
   /** Set when the focused detail fetch failed (session vanished mid-flight). */
   @state() private focusedUnavailable = false
   /**
@@ -140,6 +162,13 @@ export class SebasDashboard extends LitElement {
   /** 远端注册表是否可得（false = 状态未知，≠「没有远端节点」）。 */
   @state() private remoteNodesAvailable = true
   @state() private nodesCause: string | null = null
+
+  /**
+   * Agent catalog（/api/agents，workbench-agent-identity 3.1/D1）：聚焦
+   * 会话的 assistant 作者标签 display 名解析数据源。目录不可得时为空——
+   * display 名回退 raw slug（compose 的 🔒 标签同款降级）。
+   */
+  @state() private agents: AgentKindInfo[] = []
 
   private onWsEvent = (ev: WsEvent): void => {
     if (ev.type === 'session.pending_dropped' && ev.session_id === this.data?.active_session_key) {
@@ -528,6 +557,7 @@ export class SebasDashboard extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     this.refetch()
+    void this.loadAgents()
     this.unsubscribe = sharedWs.subscribe((ev) => {
       this.onWsEvent(ev)
       this.refetch()
@@ -664,6 +694,32 @@ export class SebasDashboard extends LitElement {
     `
   }
 
+  /**
+   * workbench-agent-identity 3.1（D1）：agent 目录装载。目录不可得（老后端
+   * / 网络失败）如实降级为空——display 名退回 raw slug，不阻塞对话渲染。
+   */
+  private async loadAgents(): Promise<void> {
+    try {
+      const d = await api.agents()
+      this.agents = d.agents ?? []
+    } catch {
+      this.agents = []
+    }
+  }
+
+  /**
+   * workbench-agent-identity 3.1（D1）：聚焦会话绑定 agent 的展示名——目录
+   * 按 `agent_kind` 匹配取 `display`；条目缺失/无 display 回退 raw slug；
+   * 未绑定 kind → `null`（transcript 侧再回退通用 `assistant`）。回退链
+   * display → slug 在此收敛，assistant 兜底在组件内。
+   */
+  private focusedAgentDisplay(): string | null {
+    const kind = this.focusedDetail?.agent_kind ?? this.data?.active_session?.agent_kind ?? null
+    if (!kind) return null
+    const found = this.agents.find((a) => a.id === kind)
+    return found?.display || kind
+  }
+
   render() {
     if (this.error)
       return html`
@@ -791,6 +847,13 @@ export class SebasDashboard extends LitElement {
    * key clears the stage; stale responses (focus moved on while in flight)
    * are dropped so the stream never shows a session that is no longer
    * focused.
+   *
+   * conversation-incremental-sync（2.1/D1）：per-session 游标 = 本页已渲染
+   * 的最大 position（`sessionEntries` 序列的末位）。首次聚焦（或重载后内存
+   * 为空）全量拉；已有游标走 `?entries_after=<n>` 增量，把新条目并入本地
+   * 序列——游标（即序列表）只在 merge 成功后写入，失败原样保留，下次
+   * refetch 从同一游标重试。会话切换只换 focus 不清表，切回已见会话从
+   * 各自游标增量续传；F5 / 元素重建清空 Map，自然回到全量。
    */
   private loadFocused(key: string | null): void {
     // 7.3：焦点清空（会话移除）时保留提示；切到别的会话才清除。
@@ -800,19 +863,30 @@ export class SebasDashboard extends LitElement {
       this.focusedUnavailable = false
       return
     }
-    api
-      .session(key)
+    const cached = this.sessionEntries.get(key)
+    const cursor = cached && cached.length > 0 ? cached[cached.length - 1].position : undefined
+    const incremental = cursor !== undefined
+    // 无游标不带参（与既有全量调用形态一致）；有游标才拼 entries_after。
+    const pending = incremental ? api.session(key, cursor) : api.session(key)
+    pending
       .then((d) => {
-        if (this.effectiveFocusKey() === d.encoded_key) {
-          this.focusedDetail = d
-          this.focusedUnavailable = false
-        }
+        if (this.effectiveFocusKey() !== d.encoded_key) return
+        // merge 成功才推进游标（序列表即游标真源）；status/pending 等其余
+        // 字段随本次响应照常刷新（D2：状态变化必须随增量响应同行）。
+        const merged = mergeEntries(incremental ? (cached ?? []) : [], d.entries, cursor)
+        this.sessionEntries.set(d.encoded_key, merged)
+        this.focusedDetail = { ...d, entries: merged }
+        this.focusedUnavailable = false
       })
       .catch(() => {
-        if (this.effectiveFocusKey() === key) {
+        if (this.effectiveFocusKey() !== key) return
+        if (!incremental) {
+          // 首拉失败：无本地序列可保，照旧温和空态。
           this.focusedDetail = null
           this.focusedUnavailable = true
         }
+        // 增量失败：序列与游标原样保留（视图继续渲染已有对话），下次
+        // refetch 从同一游标自愈。
       })
   }
 
@@ -857,6 +931,7 @@ export class SebasDashboard extends LitElement {
                     .entries=${d.entries}
                     sessionKey=${d.encoded_key}
                     .msgCount=${d.msg_count ?? null}
+                    .agentDisplay=${this.focusedAgentDisplay()}
                   ></sebas-transcript-view>`}
             `
           : this.focusedUnavailable

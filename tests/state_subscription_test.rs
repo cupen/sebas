@@ -90,7 +90,9 @@ static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 4.2 验收：mutation 提交后，StateSubscribe 订阅端收到对应 scope 的
 /// Changed 帧（快照帧之后）。
-#[tokio::test]
+// multi_thread flavor：订阅前置快照含 router_activity 域，计数路径合法
+// block_in_place 需要多线程运行时（同生产 server 的运行时契约）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[allow(clippy::await_holding_lock)] // 串行锁有意横跨整个测试调用
 async fn mutation_delivers_change_notification_on_subscription() {
     let _guard = TEST_SERIAL.lock().unwrap();

@@ -18,7 +18,7 @@
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
-import { api, setUnauthorizedHandler } from './api/client.js'
+import { api, setUnauthorizedHandler, type Role } from './api/client.js'
 import { icon } from './components/icons.js'
 import {
   clampRailWidth,
@@ -34,6 +34,7 @@ import {
 import './views/project-rail.js'
 import './views/settings-modal.js'
 import './views/login-view.js'
+import './views/setup-view.js'
 import '@awesome.me/webawesome/dist/components/split-panel/split-panel.js'
 
 // Exported for tests: the route resolution audit iterates these. IA v2 keeps
@@ -55,12 +56,20 @@ export class SebasApp extends LitElement {
   @state() private routeId: string = 'dashboard'
 
   /**
-   * 登录鉴权门禁（webui auth）：checking = /api/auth/me 探测中；login =
-   * 服务端启用鉴权且当前无有效会话（渲染登录页替代工作台）；ready = 放行。
+   * 登录鉴权门禁（webui auth）：checking = /api/auth/me 探测中；setup =
+   * 服务端启用鉴权且用户库零用户（首启设置页，add-webui-multiuser-rbac
+   * 5.2，由 needs_setup 驱动）；login = 已有用户但当前无有效会话（渲染登录
+   * 页替代工作台）；ready = 放行。
    */
-  @state() private authState: 'checking' | 'login' | 'ready' = 'checking'
+  @state() private authState: 'checking' | 'login' | 'setup' | 'ready' = 'checking'
   /** 已登录账户名（仅用于侧栏登出入口与登录页预填；null = 未登录/未启用）。 */
   @state() private authUsername: string | null = null
+  /**
+   * 当前登录用户的角色（add-webui-multiuser-rbac 5.4）：呈现层据此隐藏
+   * 无权限入口（settings 弹窗分区等）；防线仍在服务端路由层，这里只是
+   * D8 的呈现优化。null = 未认证或服务端未启用鉴权。
+   */
+  @state() private authRole: Role | null = null
 
   /**
    * Selected project path, owned here so the sidebar tree and the workbench
@@ -445,21 +454,30 @@ export class SebasApp extends LitElement {
     this.wsDown = (e as CustomEvent<{ connected: boolean }>).detail?.connected === false
   }
 
-  /** 探明服务端鉴权状态，决定渲染登录页还是工作台。 */
+  /**
+   * 探明服务端鉴权状态，决定渲染首启设置页、登录页还是工作台
+   * （add-webui-multiuser-rbac 5.2：needs_setup 驱动 setup 态）。
+   */
   private async checkAuth(): Promise<void> {
     try {
       const info = await api.authMe()
       if (info.enabled && !info.authenticated) {
         this.authUsername = null
-        this.authState = 'login'
+        this.authRole = null
+        // 零用户首启 → 设置页建 root；否则常规登录页。
+        this.authState = info.needs_setup ? 'setup' : 'login'
         return
       }
       this.authUsername = info.authenticated ? info.username : null
+      this.authRole = info.authenticated ? (info.role ?? null) : null
       this.authState = 'ready'
     } catch {
-      // /api/auth/me 本身失败（网络/服务异常）：按未启用处理，后续请求的
-      // 401 会经 setUnauthorizedHandler 再切回登录页。
-      this.authState = 'ready'
+      if (this.authState === 'checking') {
+        // /api/auth/me 本身失败（网络/服务异常）：按未启用处理，后续请求的
+        // 401 会经 setUnauthorizedHandler 再切回登录页。
+        this.authState = 'ready'
+      }
+      // 登录/设置成功后的身份重探失败：维持当前视图，操作者可重试或登出。
     }
   }
 
@@ -467,9 +485,22 @@ export class SebasApp extends LitElement {
     this.authState = 'login'
   }
 
+  /**
+   * 登录成功：先放行进工作台（username 取自登录响应），再重探
+   * /api/auth/me 取权威身份——登录响应不带 role，角色驱动的入口裁剪
+   * （5.4）以 me 的读数为准。
+   */
   private onLoginSuccess = (e: Event): void => {
-    this.authUsername = (e as CustomEvent<{ username: string }>).detail.username
+    this.authUsername = (e as CustomEvent<{ username: string | null }>).detail?.username ?? null
     this.authState = 'ready'
+    void this.checkAuth()
+  }
+
+  /** 首启设置成功（root 已建、会话已立）：与登录同一放行路径。 */
+  private onSetupSuccess = (e: Event): void => {
+    this.authUsername = (e as CustomEvent<{ username: string | null }>).detail?.username ?? null
+    this.authState = 'ready'
+    void this.checkAuth()
   }
 
   private async onLogout(): Promise<void> {
@@ -551,10 +582,11 @@ export class SebasApp extends LitElement {
       return html``
     }
     if (this.authState === 'login') {
-      return html`<sebas-login
-        .hintUsername=${this.authUsername}
-        @login-success=${this.onLoginSuccess}
-      ></sebas-login>`
+      return html`<sebas-login @login-success=${this.onLoginSuccess}></sebas-login>`
+    }
+    if (this.authState === 'setup') {
+      // 首启（零用户）：建 root 前不渲染任何工作台骨架。
+      return html`<sebas-setup @setup-success=${this.onSetupSuccess}></sebas-setup>`
     }
     return html`
       <wa-split-panel
@@ -611,6 +643,7 @@ export class SebasApp extends LitElement {
         </main>
       </wa-split-panel>
       <sebas-settings-modal
+        .role=${this.authRole}
         ?open=${this.settingsOpen}
         @close=${() => (this.settingsOpen = false)}
       ></sebas-settings-modal>

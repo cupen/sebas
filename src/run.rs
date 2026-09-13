@@ -54,7 +54,7 @@ fn build_agent_registry(cfg: &Config) -> HashMap<String, AgentEntry> {
 pub async fn run(
     cfg: Config,
     raw_config: String,
-    mut router_cfg: Option<RouterConfig>,
+    router_cfg: Option<RouterConfig>,
     webui: bool,
     webui_port: u16,
     webui_host: String,
@@ -79,19 +79,12 @@ pub async fn run(
     // Friendly Config error, no panic; runs before any network/spawn work.
     cfg.validate_runtime()?;
 
-    // `run --router`：在随机端口上启动内置 router，实际端口记入日志
-    // （调用方按需把 ANTHROPIC_BASE_URL/OPENAI_BASE_URL 指向该地址）。
-    // 实际地址回写 `router_cfg.listen`：WebUI 的 router BFF 用同一快照
-    // 定位 admin 面（provider 管理页），拿配置默认值会打不到真实端口。
-    if let Some(gw_cfg) = router_cfg.as_mut() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| crate::error::SebasError::Router(format!("绑定随机端口失败: {e}")))?;
-        let (addr, _handle) = sebas_router::server::serve_with_listener(gw_cfg.clone(), listener)
-            .map_err(|e| crate::error::SebasError::Router(e.to_string()))?;
-        gw_cfg.listen = addr.to_string();
-        info!(%addr, "router started (core --router); point ANTHROPIC_BASE_URL/OPENAI_BASE_URL at {}", format!("http://{addr}"));
-    }
+    // unify-router-process-shape 1.1（D1）：内嵌 router 启动块已删除——core
+    // 进程内不再有任何 router HTTP 面。`router_cfg` 只是配置声明的 `[router]`
+    // 段（listen / auth_token / providers 种子），供 spawn env 翻译（
+    // ProviderMode::Router 指向独立 router 进程）、出站分发与节点链路
+    // RouterEndpoint 使用。随机端口回写与 `router started (core --router)`
+    // 日志随形态消亡。
 
     // extract-im-service M3：core 不再接入任何 IM。飞书装配（token/WS/
     // 卡片呈现）整体移至 `sebas im` 独立服务；`[feishu]` 配置节由 im 消费，
@@ -308,20 +301,27 @@ pub async fn run(
         // （不启用）；配置了 = 配置项 + 默认根自动入列。
         let webui_allowed_roots =
             crate::config::webui_allowed_roots(&cfg.watchdog.webui, webui_work_root.as_deref());
+        // 登录鉴权与独立 webui 进程同一套（add-webui-multiuser-rbac 3.4，
+        // design D4）：开关关闭 → disabled 态全路由免登录；打开 → 建库 +
+        // env 引导 root，零用户留给首启设置页。装配提到 bind 之前，让非
+        // loopback 安全门先于 bind 完成裁决。
+        let webui_auth = if cfg.watchdog.webui.auth {
+            crate::webui_cmd::bootstrap_auth()
+        } else {
+            tracing::warn!("webui auth disabled via [watchdog.webui] auth = false: all routes are public");
+            std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
+        };
+        // 非 loopback 安全门与独立 webui 进程同一裁决（webui_cmd::
+        // ensure_non_loopback_bind_allowed）：`--webui-host` 可传 0.0.0.0 等
+        // 公网地址，开关关闭 / 用户库无启用用户时在 bind 前硬失败——不给
+        // 公网留裸奔端口或抢注 root 的窗口。默认 127.0.0.1 时门不触发。
+        if !webui_host_is_loopback(&webui_host) {
+            crate::webui_cmd::ensure_non_loopback_bind_allowed(cfg.watchdog.webui.auth, &webui_auth)?;
+        }
         let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
-        let webui_auth = cfg.watchdog.webui.auth;
         tokio::spawn(async move {
-            // 登录鉴权与独立 webui 进程同一套（add-webui-auth-switch）：
-            // 开关关闭 → disabled 态全路由免登录；打开 → 凭据文件 + env 引导。
-            // core --webui 恒绑 127.0.0.1，不受非 loopback 门影响。
-            let auth = if webui_auth {
-                crate::webui_cmd::bootstrap_auth()
-            } else {
-                tracing::warn!("webui auth disabled via [watchdog.webui] auth = false: all routes are public");
-                std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
-            };
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
                 router_info,
@@ -329,7 +329,7 @@ pub async fn run(
                 agent_kinds,
                 listener,
                 None,
-                auth,
+                webui_auth,
                 webui_work_root,
                 webui_allowed_roots,
                 cfg.watchdog.webui.archive_retention_days,
@@ -550,6 +550,15 @@ fn init_tracing(cfg: &Config) {
         return;
     }
     subscriber.init();
+}
+
+/// CLI `--webui-host` 的 loopback 判定。与 watchdog `WebUiEndpoint::is_loopback`
+/// 同语义：只认 IP 字面量（127.0.0.1/::1 = loopback）；域名（含 `localhost`）
+/// 一律按非 loopback 走安全门——两条启动路径的判定必须一致。
+fn webui_host_is_loopback(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Build a RouterInfo from the optional router config for the WebUI.

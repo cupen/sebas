@@ -18,6 +18,7 @@ use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(test)]
@@ -27,6 +28,10 @@ use tracing::{error, info, warn};
 
 /// 会话轮询节奏（design D3：turn 流拉取 + 本地防抖合并出卡）。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// 回调到达性告警阈值（feishu-card-callback-observability）：发出 ≥N 张
+/// 带按钮卡片仍零回调 → WARN 一次（spec「按钮卡片回调到达性可观测」）。
+const CARD_CALLBACK_WARN_MIN_SENT: u64 = 3;
 
 /// 一路会话的 im 侧视图（原 CardState + 卡片引用的角色）。
 struct SessionView {
@@ -82,6 +87,13 @@ pub struct ImFrontend<P: CoreSessionPort, C: ControlPort> {
     /// request_id → 权限卡 message_id（点击后就地翻卡）。
     perm_cards: RwLock<HashMap<String, String>>,
     reactions: ReactionTracker,
+    // ── 回调到达性自检（feishu-card-callback-observability）─────────────────
+    /// 已成功发出的带按钮交互卡数（经 send_standalone_card 汇聚出口入计）。
+    cards_sent: AtomicU64,
+    /// 曾收到的 card.action.trigger 回调数（帧到达即计，无论后续可否识别）。
+    callbacks_received: AtomicU64,
+    /// 到达性告警闩锁：同一次进程运行内 WARN 只打一条（swap 兼作测试）。
+    callback_warn_latched: AtomicBool,
 }
 
 fn view_id(key: &ChannelKey) -> String {
@@ -124,6 +136,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             reply_targets: RwLock::new(HashMap::new()),
             perm_cards: RwLock::new(HashMap::new()),
             reactions: ReactionTracker::default(),
+            cards_sent: AtomicU64::new(0),
+            callbacks_received: AtomicU64::new(0),
+            callback_warn_latched: AtomicBool::new(false),
         }
     }
 
@@ -176,6 +191,9 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
                 self.on_media(key, files, caption, reply_target).await;
             }
             ChannelEvent::ButtonCb { action, .. } => {
+                // 到达性自检（feishu-card-callback-observability）：card.action.
+                // trigger 帧到达即 +1，无论后续能否识别（design D1）。
+                self.note_card_callback_received();
                 self.on_button(&key, action.session_id, action.request_id, action.value).await;
             }
             ChannelEvent::FormCb { value, form_value, .. } => {
@@ -318,6 +336,14 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             value.get("request_id").and_then(|v| v.as_str()).map(str::to_owned)
         }) else {
             info!(chat = %key.reference, decision = %raw, "feishu 按钮点击缺 request_id，忽略");
+            // 可见反馈（feishu-card-callback-observability）：点击不许无痕
+            // 返回——缺 request_id 通常意味着按钮来自旧版本卡片（版本错位）。
+            self.send_unrecognized_click_notice(
+                key,
+                "按钮回调缺少 request_id，可能来自旧版本卡片（卡片版本错位），请等待新的权限卡片。"
+                    .into(),
+            )
+            .await;
             return;
         };
         info!(
@@ -329,6 +355,16 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         );
         let Some(decision) = parse_decision(&raw) else {
             info!(request_id = %request_id, raw_decision = %raw, "feishu 按钮决定无法识别，忽略");
+            // 可见反馈（feishu-card-callback-observability）：附原始值缩略，
+            // 让「点了没反应」变成可诊断的聊天内提示。
+            self.send_unrecognized_click_notice(
+                key,
+                format!(
+                    "无法识别按钮决定「{}」（合法值：allow_once / allow_session / deny）。",
+                    abbreviate(&raw, 24)
+                ),
+            )
+            .await;
             return;
         };
         let msg_id = self.perm_cards.read().await.get(&request_id).cloned();
@@ -336,24 +372,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             .port
             .approval_answer(&request_id, decision.clone())
             .await;
-        let (title, theme, note): (&str, &str, String) = if !accepted {
-            (
-                "请求已过期",
-                "grey",
-                "该请求已处理、超时或会话已结束。".into(),
-            )
-        } else {
-            match decision {
-                PermissionDecision::AllowOnce => {
-                    ("已允许（本次）", "green", "本次调用已放行。".into())
-                }
-                PermissionDecision::AllowSession => {
-                    ("已允许（本会话）", "green", "本会话同类调用已放行。".into())
-                }
-                PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
-                PermissionDecision::Escalate { reason } => ("已升级", "orange", reason),
-            }
-        };
+        let (title, theme, note) = click_flip_state(&decision, accepted);
         let card_updated = match &msg_id {
             Some(msg_id) => {
                 let card = ChannelCard {
@@ -395,6 +414,54 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         if let Err(e) = self.port.state_mutate("providers", payload).await {
             warn!(error = %e, "form mutation failed");
         }
+    }
+
+    /// 不可识别点击的文本回执（design D3）：经 ensure_message 向来源聊天发
+    /// 一条「点击未识别」说明。尽力而为——发送失败仅 warn 不上抛（不因
+    /// 回执失败放大故障）。
+    async fn send_unrecognized_click_notice(&self, key: &ChannelKey, reason: String) {
+        let text = format!("点击未识别：{reason}");
+        if let Err(e) = self
+            .port
+            .ensure_message(key.clone(), text, Vec::new())
+            .await
+        {
+            warn!(error = %e, "unrecognized-click notice send failed");
+        }
+    }
+
+    // ── 回调到达性自检（feishu-card-callback-observability）────────────────
+
+    /// 发出侧记账：交互卡发送成功后 +1 并随即评估告警（design D2：选发送
+    /// 时点评估而非后台定时器——无新发送就没有新的不可达风险）。
+    fn note_interactive_card_sent(&self) {
+        self.cards_sent.fetch_add(1, Ordering::Relaxed);
+        self.maybe_warn_card_callback_unreachable();
+    }
+
+    /// 到达侧记账：card.action.trigger 帧到达即 +1（无论后续可否识别）。
+    fn note_card_callback_received(&self) {
+        self.callbacks_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 「发出按钮卡 ≥3 且从未收到任何回调」→ 单次 WARN（spec：同一次进程
+    /// 运行内不重复触发；收到过回调后表达式恒假，无需显式复位逻辑）。
+    /// 返回 true = 本次触发（闩锁语义的可观察缝，供单测断言）。
+    fn maybe_warn_card_callback_unreachable(&self) -> bool {
+        let sent = self.cards_sent.load(Ordering::Relaxed);
+        let received = self.callbacks_received.load(Ordering::Relaxed);
+        if sent >= CARD_CALLBACK_WARN_MIN_SENT
+            && received == 0
+            && !self.callback_warn_latched.swap(true, Ordering::Relaxed)
+        {
+            warn!(
+                sent_cards = sent,
+                received_callbacks = received,
+                "已发出 {sent} 张带按钮卡片但从未收到任何卡片回调（card.action.trigger）：请检查飞书开发者后台的卡片回调订阅是否已随版本发布生效——订阅未生效时回调仅以 type=card 帧到达，该帧会被官方 SDK 丢弃"
+            );
+            return true;
+        }
+        false
     }
 
     // ── 出站：会话事件 + 轮询 ──────────────────────────────────────────────
@@ -545,6 +612,12 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             if entry.kind == "prompt" {
                 continue; // prompt 已在 Created/Updated 时 seed
             }
+            // permission-mode-auto-gate 事件契约：自动模式切换失败条目不进
+            // 正文，而是驱动对应权限卡的就地失败翻面（放行仍在、如实呈现）。
+            if entry.element_type == "permission_mode_result" {
+                self.handle_mode_result_entry(&key, &entry).await;
+                continue;
+            }
             let input = turn_to_card_input(&entry);
             if let Some(input) = &input {
                 apply_input_to_card(&mut view.card.body, input, &self.card_config());
@@ -561,6 +634,38 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         if dirty {
             self.flush(&key).await;
         }
+    }
+
+    /// 处理一条 permission_mode_result 契约条目（permission-mode-auto-gate）：
+    /// dispatch 上报什么渲染什么——`ok=false` 时把该 request_id 的权限卡翻成
+    /// 如实失败态；卡不在本进程登记表（im 重启 / 跨实例渲染）时退化为文本
+    /// 回执，点击的失败反馈不许无痕消失。成功（ok=true）不发条目，无此分支。
+    async fn handle_mode_result_entry(&self, key: &ChannelKey, entry: &TurnEntry) {
+        let Some((request_id, detail)) = parse_mode_result_entry(entry) else {
+            return;
+        };
+        info!(
+            %request_id,
+            %detail,
+            "core 上报自动模式切换失败；就翻权限卡失败态"
+        );
+        let (title, theme, note) = mode_failure_flip(&detail);
+        let msg_id = self.perm_cards.read().await.get(&request_id).cloned();
+        match &msg_id {
+            Some(msg_id) => {
+                let card = ChannelCard {
+                    title: title.into(),
+                    theme: theme.into(),
+                    elements: vec![ChannelElement::Markdown { content: note.clone() }],
+                    turn: None,
+                };
+                self.update_card(msg_id, &card).await;
+            }
+            None => {
+                self.send_text(key, format!("[{title}] {note}")).await;
+            }
+        }
+        self.perm_cards.write().await.remove(&request_id);
     }
 
     fn card_config(&self) -> sebas_dispatch::CardConfig {
@@ -730,6 +835,10 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         {
             Ok(mid) => {
                 info!(chat = %key.reference, title = %card.title, msg_id = %mid, "feishu 卡片已发送");
+                // 发出侧记账（feishu-card-callback-observability）：本出口是
+                // 全部独立交互卡（权限卡/help/provider/表单卡）的汇聚点，
+                // 新卡种以 ChannelCard 走此通道即自动入计。
+                self.note_interactive_card_sent();
                 Some(mid)
             }
             Err(e) => {
@@ -848,6 +957,78 @@ fn same_chat(a: &str, b: &str) -> bool {
     ca == cb
 }
 
+/// 原始值缩略（feishu-card-callback-observability：异常 decision 原值在
+/// 回执文案里截断展示，防长串刷屏）。
+fn abbreviate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars).collect();
+    format!("{head}…")
+}
+
+/// 权限卡点击翻面状态（permission-mode-auto-gate：allow_session 语义重定义
+/// 为「放行 + 切自动模式」，点击即翻「✅ 已切换自动模式」；SetMode 的最终
+/// 成败由 dispatch 经 turn 流事件回执，失败态见 [`mode_failure_flip`]）。
+/// `accepted=false` = 无待决请求（fail-closed 置灰）。
+fn click_flip_state(decision: &PermissionDecision, accepted: bool) -> (&'static str, &'static str, String) {
+    if !accepted {
+        return (
+            "请求已过期",
+            "grey",
+            "该请求已处理、超时或会话已结束。".into(),
+        );
+    }
+    match decision {
+        PermissionDecision::AllowOnce => {
+            ("已允许（本次）", "green", "本次调用已放行。".into())
+        }
+        // 按钮文案维持「本会话不再询问」（卡面由 dispatch 的 permission_card
+        // 定义）；点击后的翻面即 mode 语义的 audit trail。
+        PermissionDecision::AllowSession => (
+            "✅ 已切换自动模式",
+            "green",
+            "本会话已切换为自动模式（auto），后续工具调用不再询问；/new 或会话结束后回到默认档。".into(),
+        ),
+        PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
+        PermissionDecision::Escalate { reason } => ("已升级", "orange", reason.clone()),
+    }
+}
+
+/// 解析 permission-mode-auto-gate 事件契约条目（dispatch 经 turn 流上报：
+/// `element_type = "permission_mode_result"`、content = JSON
+/// `{request_id, ok, mode, detail}`）→ `(request_id, detail)`。
+/// `ok != false`（含显式成功上报与非契约载荷）返回 None——成功面是点击时
+/// 的翻面，无需事件。
+fn parse_mode_result_entry(entry: &TurnEntry) -> Option<(String, String)> {
+    if entry.element_type != "permission_mode_result" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&entry.content).ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(false) {
+        return None;
+    }
+    let request_id = v.get("request_id")?.as_str()?.to_string();
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or("原因未知")
+        .to_string();
+    Some((request_id, detail))
+}
+
+/// 自动模式切换失败的如实翻面（spec「Allow session with failed mode switch
+/// is honest」）：放行不回滚，模式未切必须如实可见，不伪装成已切换。
+fn mode_failure_flip(detail: &str) -> (&'static str, &'static str, String) {
+    (
+        "⚠️ 已放行本次调用，但自动模式切换失败",
+        "orange",
+        format!(
+            "当前调用已放行；自动模式切换失败：{detail}\n本会话仍会在工具调用时询问。"
+        ),
+    )
+}
+
 /// wire 上 URL-safe 编码的会话 key → ChannelKey（webui routes 口径的逆）。
 fn decode_wire_key(encoded: &str) -> ChannelKey {
     if let Ok(raw) = urlencoding::decode(encoded)
@@ -890,6 +1071,8 @@ mod tests {
 
     struct FakePort {
         ensures: Mutex<Vec<(String, String)>>,
+        /// 置位后 ensure_message 返回 Err（验证回执失败不影响主流程）。
+        fail_ensures: AtomicBool,
         cancels: AtomicUsize,
         closes: AtomicUsize,
         approvals: Mutex<Vec<String>>,
@@ -907,6 +1090,7 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             Arc::new(Self {
                 ensures: Mutex::new(Vec::new()),
+                fail_ensures: AtomicBool::new(false),
                 cancels: AtomicUsize::new(0),
                 closes: AtomicUsize::new(0),
                 approvals: Mutex::new(Vec::new()),
@@ -928,6 +1112,9 @@ mod tests {
             attachments: Vec<crate::port::ImAttachment>,
         ) -> Result<(), String> {
             let _ = attachments;
+            if self.fail_ensures.load(Ordering::SeqCst) {
+                return Err("fake port: ensure failed".into());
+            }
             self.ensures.lock().await.push((key.reference, message));
             Ok(())
         }
@@ -1098,5 +1285,249 @@ mod tests {
         )
         .await;
         assert_eq!(port.approvals.lock().await.len(), 1);
+        // 可识别点击（feishu-card-callback-observability 2.1）：不额外发
+        // 「点击未识别」文本回执，反馈维持既有就地翻卡/置灰语义。
+        assert!(
+            port.ensures.lock().await.is_empty(),
+            "合法点击不应产生文本回执"
+        );
+    }
+
+    // ── permission-mode-auto-gate：权限卡翻面两态（3.1）──────────────────
+
+    /// 两态之一（成功）：「本会话不再询问」点击（accepted）→ 翻面
+    /// 「✅ 已切换自动模式」——mode 语义的 audit trail。
+    #[test]
+    fn allow_session_click_flips_to_auto_mode_state() {
+        let (title, theme, note) = click_flip_state(&PermissionDecision::AllowSession, true);
+        assert_eq!(title, "✅ 已切换自动模式");
+        assert_eq!(theme, "green");
+        assert!(note.contains("自动模式（auto）"), "audit trail note: {note}");
+        assert!(
+            note.contains("不再询问"),
+            "翻面注记应说明后续不再询问: {note}"
+        );
+    }
+
+    /// 两态之二（失败）：如实文案——放行仍在、模式未切，绝不伪装成已切换。
+    #[test]
+    fn mode_switch_failure_flip_is_honest() {
+        let (title, theme, note) = mode_failure_flip("set mode \"auto\" 被拒绝（boom）");
+        assert!(title.contains("已放行本次调用"), "放行不回滚须可见: {title}");
+        assert!(title.contains("切换失败"), "失败须可见: {title}");
+        assert_eq!(theme, "orange");
+        assert!(note.contains("当前调用已放行"), "{note}");
+        assert!(note.contains("被拒绝"), "原因须透传: {note}");
+        assert!(!note.contains("已切换自动模式"), "失败态不得伪装成功: {note}");
+    }
+
+    /// 事件契约解析：只有 `ok=false` 的 permission_mode_result 载荷触发翻面。
+    #[test]
+    fn mode_result_entry_parses_contract_payload_only() {
+        let entry = |payload: serde_json::Value| TurnEntry {
+            position: 0,
+            kind: "content".into(),
+            element_type: "permission_mode_result".into(),
+            content: payload.to_string(),
+            created_at_unix: 0,
+            title: None,
+        };
+        let ok = parse_mode_result_entry(&entry(json!({
+            "request_id": "toolu_9", "ok": false, "mode": "auto", "detail": "boom"
+        })));
+        assert_eq!(ok, Some(("toolu_9".into(), "boom".into())));
+        // ok=true（显式成功上报，当前不发）不触发翻面（成功面=点击时翻面）。
+        assert_eq!(
+            parse_mode_result_entry(&entry(json!({
+                "request_id": "toolu_9", "ok": true, "mode": "auto", "detail": ""
+            }))),
+            None
+        );
+        // 非契约载荷 / 缺 request_id 一律忽略。
+        assert_eq!(parse_mode_result_entry(&entry(json!("garbage"))), None);
+        assert_eq!(
+            parse_mode_result_entry(&entry(json!({"ok": false, "detail": "x"}))),
+            None
+        );
+        // 非 permission_mode_result 条目一律忽略。
+        let mut md = entry(json!({}));
+        md.element_type = "markdown".into();
+        md.content = "正文".into();
+        assert_eq!(parse_mode_result_entry(&md), None);
+    }
+
+    /// wiring：turn 流里的失败契约条目 → 消费 perm_cards 登记项（翻面经
+    /// update_card 出站，headless 下 no-op），且载荷绝不进会话卡正文。
+    #[tokio::test]
+    async fn mode_failure_entry_flips_registered_card_and_skips_body() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+        fe.on_session_info(SessionInfo {
+            channel: "feishu".into(),
+            key: "oc_t".into(),
+            session_id: Some("s1".into()),
+            status: "active".into(),
+            phase: None,
+            user_prompt: Some("do it".into()),
+            last_active_unix: 0,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            backend: None,
+            usage: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+        })
+        .await;
+        fe.perm_cards
+            .write()
+            .await
+            .insert("toolu_9".into(), "om_9".into());
+
+        let entry = TurnEntry {
+            position: 0,
+            kind: "content".into(),
+            element_type: "permission_mode_result".into(),
+            content: json!({
+                "request_id": "toolu_9", "ok": false, "mode": "auto", "detail": "rejected"
+            })
+            .to_string(),
+            created_at_unix: 0,
+            title: None,
+        };
+        fe.apply_turns(key, vec![entry]).await;
+
+        // 登记项被消费（翻面只发生一次）。
+        assert!(
+            !fe.perm_cards.read().await.contains_key("toolu_9"),
+            "失败翻面后应移除权限卡登记"
+        );
+        // 载荷不进正文（不影响会话卡渲染）。
+        let views = fe.views.read().await;
+        let v = views.get(&view_id(&ChannelKey::feishu("oc_t", None))).unwrap();
+        let body = serde_json::to_string(&v.card.body).unwrap();
+        assert!(!body.contains("permission_mode_result"), "{body}");
+        assert!(!body.contains("rejected"), "{body}");
+    }
+
+    // ── 回调到达性自检（feishu-card-callback-observability 3.1）────────────
+
+    /// 沙箱无真实飞书 ws：发送侧计数经逻辑入口直接驱动（design D4——
+    /// 端到端到达性归真实环境人工复测）。
+    #[tokio::test]
+    async fn card_callback_warn_fires_at_threshold_then_latches() {
+        let fe = fe(FakePort::new());
+
+        // 2 发 0 收：低于阈值不触发。
+        fe.note_interactive_card_sent();
+        fe.note_interactive_card_sent();
+        assert_eq!(fe.cards_sent.load(Ordering::Relaxed), 2);
+        assert!(!fe.callback_warn_latched.load(Ordering::Relaxed));
+
+        // 第 3 发 0 收：发送出口内的评估触发 WARN 并置闩。
+        fe.note_interactive_card_sent();
+        assert!(fe.callback_warn_latched.load(Ordering::Relaxed), "3 发 0 收应触发");
+
+        // 闩锁后继续发（评估仍满足条件）：不再重复触发。
+        assert!(!fe.maybe_warn_card_callback_unreachable(), "闩锁后不重复");
+        fe.note_interactive_card_sent();
+        assert_eq!(fe.cards_sent.load(Ordering::Relaxed), 4);
+        assert!(fe.callback_warn_latched.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn card_callback_received_disables_warn() {
+        let fe = fe(FakePort::new());
+
+        // 到达即计（无论后续可否识别），收到后表达式恒假：再多发也不触发。
+        fe.note_card_callback_received();
+        assert_eq!(fe.callbacks_received.load(Ordering::Relaxed), 1);
+        for _ in 0..5 {
+            fe.note_interactive_card_sent();
+        }
+        assert!(!fe.callback_warn_latched.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn button_cb_arrival_counts_before_dispatch() {
+        // 入站分发入口（on_channel_event 的 ButtonCb 臂）到达即计——
+        // 即使点击不可识别（此处缺 request_id）计数也已落账。
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+        let evt = ChannelEvent::ButtonCb {
+            key: key.clone(),
+            action: sebas_channels::ChannelAction {
+                session_id: "s1".into(),
+                request_id: None,
+                decision: Some("allow_once".into()),
+                value: json!({"decision": "allow_once"}),
+            },
+        };
+        fe.on_channel_event(evt).await;
+        assert_eq!(fe.callbacks_received.load(Ordering::Relaxed), 1);
+        assert_eq!(port.approvals.lock().await.len(), 0, "缺 request_id 不回传审批");
+    }
+
+    // ── 不可识别点击可见反馈（feishu-card-callback-observability 2.1）──────
+
+    #[tokio::test]
+    async fn unrecognized_clicks_produce_visible_receipts() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+
+        // 早退一：顶层与 behavior value 均缺 request_id。
+        fe.on_button(&key, "s1".into(), None, json!({"decision": "allow_once"}))
+            .await;
+        // 早退二：决定无法识别（附原始值缩略）。
+        fe.on_button(
+            &key,
+            "s1".into(),
+            Some("toolu_2".into()),
+            json!({"decision": "maybe_grant", "request_id": "toolu_2"}),
+        )
+        .await;
+
+        let ensures = port.ensures.lock().await;
+        assert_eq!(ensures.len(), 2, "两类不可识别点击各产生一条回执: {ensures:?}");
+        assert!(
+            ensures[0].1.contains("点击未识别") && ensures[0].1.contains("request_id"),
+            "缺 request_id 回执应说明原因: {}",
+            ensures[0].1
+        );
+        assert!(
+            ensures[1].1.contains("点击未识别") && ensures[1].1.contains("maybe_grant"),
+            "决定无法识别回执应附原始值: {}",
+            ensures[1].1
+        );
+        // 早退路径不触达审批回传。
+        assert_eq!(port.approvals.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn unrecognized_receipt_failure_does_not_break_flow() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+        port.fail_ensures.store(true, Ordering::SeqCst);
+
+        // 回执发送失败：仅 warn 不上抛，早退路径完整走完（不 panic）。
+        fe.on_button(&key, "s1".into(), None, json!({"decision": "allow_once"}))
+            .await;
+        fe.on_button(
+            &key,
+            "s1".into(),
+            Some("toolu_2".into()),
+            json!({"decision": "maybe_grant", "request_id": "toolu_2"}),
+        )
+        .await;
+        assert!(port.ensures.lock().await.is_empty());
+        assert_eq!(port.approvals.lock().await.len(), 0);
     }
 }

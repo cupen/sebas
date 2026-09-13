@@ -273,8 +273,9 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 ### testsuite-webui-browser（非核心：浏览器级 UI 旅程，Playwright）
 
 > 入口 `invoke testsuite-webui`（`tests/testsuite-webui/`，独立 pnpm 包）；后端为一次性沙箱
-> （`sebas core --router --debug --webui` + fake-claude 桩），chromium headless。detached 双进程
-> 形态（core + 独立 `sebas webui`、无 `SEBAS_CORE_SECRET`、自动装配 + 密钥文件发现）由
+> （`sebas core --webui` + 独立 `sebas router --config … --debug` 两进程 + fake-claude 桩），
+> chromium headless。detached 双进程形态（core + 独立 `sebas webui`、无
+> `SEBAS_CORE_SECRET`、自动装配 + 密钥文件发现）由
 > `--case deployment`（`playwright.detached.config.ts`，端口 9897）承担；可复用双进程 fixture：
 > `tests/helpers/detached.ts`（stopCore/startCore/isCoreAlive/waitForCoreReachability）。
 
@@ -295,11 +296,11 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
-| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: not-found presentation, no fake success | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: mapping torn down, row gone, open view retains transcript | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
 | agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors） |
 | 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
 | 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
-| 审批卡片旅程 | 会话级允许 | allow-session path — observed product gap: the follow-up call is gated again | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
+| 审批卡片旅程 | 会话级允许 | allow-session path — session switches to auto mode, follow-up is no longer gated | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
 | 项目管理覆盖 | 增删 | add via project dialog appears in rail; removed project disappears | `projects.spec.ts` | 项目管理覆盖「项目增删」 |
 | 项目管理覆盖 | 异常拒绝 | 1.1 illegal path 400, duplicate 409, removal persists across reload | `projects.spec.ts` | 项目管理覆盖「项目异常拒绝」 |
 | 项目管理覆盖 | 排序与持久化 | 1.2 reorder persists; branch probe drives state, rail hides the branch name (D8) | `projects.spec.ts` | 项目管理覆盖「项目排序与分支呈现」（rail-declutter-unread 改写：分支名不再上 rail） |
@@ -322,9 +323,9 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | agent 绑定不可变 | 锁定提示 | detail head shows the bound agent with the lock affordance | `models.spec.ts` | agent-workbench「Session agent binding is immutable」 |
 | 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | webui「Services 分区与 router 状态归属」¹ |
 | 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
-| 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics under Env Vars | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S6 bare core degrades: no-adapter banner, no rows, restart disabled | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
-| 设置面 ¹ | 分区导航 IA | nav order Generic→Appearance→Services→Models→About(pinned), default focus, memory, stale-value fallback | `settings.spec.ts` | webui「设置弹窗分区与缺省首项」：缺省聚焦 Generic 分区／历史记忆恢复上次分区／缺省聚焦 Settings 分区（旧值回退）／分区顺序与 About 压底（revamp-settings-nav-and-models-editor） |
+| 设置面 ¹ | 分区导航 IA | nav order Generic→Appearance→Services→Models→Env Vars→About(pinned), default focus, memory, stale-value fallback | `settings.spec.ts` | webui「设置弹窗分区与缺省首项」：缺省聚焦 Generic 分区／历史记忆恢复上次分区／缺省聚焦 Settings 分区（旧值回退）／分区顺序与 About 压底（revamp-settings-nav-and-models-editor） |
 | 设置面 ¹ | 写降级 | S4 defaults read parity; set-default stays local, provider seeded via API | `settings.spec.ts` | provider-management「Set default provider and model from the page」¹ |
 | 设置面 ¹ | 写降级 | S5a create/edit journeys persist through the core store (minimal forms) | `settings.spec.ts` | webui「Provider management page」（core store 持久化）¹ |
 | 设置面 ¹ | 写降级 | S5b delete persists; fetch entry hidden without a base URL | `settings.spec.ts` | webui「Provider management page」+「Fetch models…」¹ |
@@ -434,7 +435,7 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 ## 实施期发现（只记录不顺手修，见 design Non-goals）
 
 1. **native 会话状态卡在 Queued**：native 回合完成（turn summary 已写、模型调用已完成），但 `src/native_router_bridge.rs` 从不设置 phase=DONE，workbench 状态恒为 "Queued"（models.rs derive：active+"" → Queued）。建议立项修复后，`native_agent_turn_via_router_journey` 的断言可升级为 status_slug=done。
-2. **`run --router` 忽略 `SEBAS_ROUTER_LISTEN`**（run.rs:87 写死 127.0.0.1:0）：detached 形态下 `SEBAS_AGENT_ROUTER_URL` 无法预注入（router 地址只能事后从日志读）。native 走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径作为替代（本套件已覆盖）。
+2. **（unify-router-process-shape 后已消解）~~`run --router` 忽略 `SEBAS_ROUTER_LISTEN`~~**：内嵌形态删除，router 只以独立进程运行（`[router] listen` 是唯一地址来源，进程级可预注入 `SEBAS_AGENT_ROUTER_URL`）。native 仍走 `SEBAS_AGENT_PROVIDER_BASE_URL` 直连路径（本套件已覆盖）。
 3. **会话状态落盘仅在优雅退出**：硬杀（TerminateProcess）不产生状态转储；Windows 无便携优雅信号，故重启恢复段 unix 门控。
 4. **路由状态已入 SQLite**：`[router] state_file`（sessions.json）不再是重启恢复的活性来源，state store DB（sebas.db）承担持久化——矩阵断言已按此更新。
 5. **restore 不复活会话**（二期浏览器旅程发现）：`archive` 先 close（mapping + transcript 丢弃），`restore` 只删归档条目；恢复后详情页如实 404（`sessions.spec.ts` 2.2 已按此诚实语义断言）。与 project-session-actions「History 点击恢复可写」条文不一致，产品语义变更另立项。

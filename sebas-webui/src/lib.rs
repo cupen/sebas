@@ -13,15 +13,17 @@ pub mod fs;
 pub mod router_client;
 pub mod models;
 pub mod projects;
+pub mod rbac;
 pub mod routes;
 pub mod server;
 pub mod session_backend;
+pub mod user_store;
 pub mod web_adapter;
 
 #[doc(hidden)]
 pub use server::WebUiState;
 pub use server::{
-    build_router, build_router_with_agent_kind_provider, build_router_with_auth, run,
-    run_with_admin_adapter, run_with_admin_adapter_and_auth,
+    build_router, build_router_with_admin_adapter, build_router_with_agent_kind_provider,
+    build_router_with_auth, run, run_with_admin_adapter, run_with_admin_adapter_and_auth,
 };
 pub use session_backend::{Reachability, SessionBackend, SessionRejection};

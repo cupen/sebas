@@ -874,12 +874,25 @@ impl SessionBackend for InProcessBackend {
             .emit(sebas_dispatch::Out::SendAcp {
                 session_id: session_id.clone(),
                 cmd: sebas_acp::AcpCommand::PermissionReply {
-                    session_id,
+                    session_id: session_id.clone(),
                     request_id: request_id.to_string(),
-                    decision,
+                    decision: decision.clone(),
                 },
             })
             .await;
+        // permission-mode-auto-gate：「Allow session」（「本会话不再询问」）
+        // 语义重定义为 放行当前请求 + 会话 mode 切 auto——与 dispatch 飞书
+        // 点击路径、飞书卡面同一组合（复用 [`Self::set_session_mode`]：
+        // desired_mode 落映射 + `Out::SendAcp(SetMode)`，与 webui 中程切换
+        // 同源）。放行已先行回出、不回退；SetMode 发不出（会话映射竞态
+        // 消失）只是失去 mode 切换，不影响已回的 allow。成败经事件流回执
+        // （`ModeChanged`=成功 / 带「模式未变」标记的非终态 `Error`=失败，
+        // engine 的 apply_event 据实翻卡上报，im/前端失败呈现已就绪）。
+        if matches!(decision, sebas_acp::Decision::AllowSession)
+            && let Some(key) = self.router.map.lookup_key_by_session(&session_id).await
+        {
+            let _ = self.set_session_mode(key, sebas_dispatch::engine::AUTO_MODE.to_string()).await;
+        }
         true
     }
 }
@@ -981,6 +994,8 @@ impl FakeBackend {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            // webui 侧自建条目（本地回显等）无结构化标题。
+            title: None,
         });
     }
 
@@ -1460,5 +1475,120 @@ mod tests {
                 _ => assert!(matches!(r, SessionRejection::Unavailable { .. })),
             }
         }
+    }
+
+    // ── permission-mode-auto-gate：answer_permission 的 AllowSession 组合 ──
+
+    async fn recv_out(
+        rx: &mut tokio::sync::mpsc::Receiver<sebas_dispatch::Out>,
+    ) -> sebas_dispatch::Out {
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("Out within 200ms")
+            .expect("outbound channel open")
+    }
+
+    #[tokio::test]
+    async fn answer_permission_allow_session_also_switches_mode_to_auto() {
+        let map = sebas_dispatch::SessionMap::new();
+        let key = sebas_channels::ChannelKey::feishu("oc_mode", None);
+        map.insert(key.clone(), sebas_dispatch::Mapping::active("s-mode"))
+            .await
+            .unwrap();
+        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(map);
+        let backend = InProcessBackend::new(router.clone());
+        // 生产由 relay 在 PermissionRequest 广播时登记；测试直接注入
+        // request_id → routing session_id（同文件私有字段）。
+        backend
+            .request_sessions
+            .write()
+            .await
+            .insert("req-auto".into(), "s-mode".into());
+
+        assert!(
+            backend
+                .answer_permission("req-auto", PermissionDecision::AllowSession)
+                .await
+        );
+
+        // Out 顺序钉死语义：① 放行（首要语义先行）② SetMode{auto}
+        // （与 webui 中程切换/dispatch 点击路径同源的组合件）。
+        match recv_out(&mut out_rx).await {
+            sebas_dispatch::Out::SendAcp {
+                session_id,
+                cmd: sebas_acp::AcpCommand::PermissionReply { decision, .. },
+            } => {
+                assert_eq!(session_id, "s-mode");
+                assert!(matches!(decision, sebas_acp::Decision::AllowSession));
+            }
+            other => panic!("expected PermissionReply first, got {other:?}"),
+        }
+        match recv_out(&mut out_rx).await {
+            sebas_dispatch::Out::SendAcp {
+                session_id,
+                cmd: sebas_acp::AcpCommand::SetMode { session_id: sid, mode },
+            } => {
+                assert_eq!(session_id, "s-mode");
+                assert_eq!(sid, "s-mode");
+                assert_eq!(mode, "auto");
+            }
+            other => panic!("expected SetMode after reply, got {other:?}"),
+        }
+        // desired_mode 落位（成败的最终回执走 engine 的事件流处理）。
+        let desired = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
+        assert_eq!(desired.as_deref(), Some("auto"));
+    }
+
+    #[tokio::test]
+    async fn answer_permission_allow_once_and_deny_do_not_switch_mode() {
+        let map = sebas_dispatch::SessionMap::new();
+        let key = sebas_channels::ChannelKey::feishu("oc_mode", None);
+        map.insert(key.clone(), sebas_dispatch::Mapping::active("s-mode"))
+            .await
+            .unwrap();
+        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(map);
+        let backend = InProcessBackend::new(router.clone());
+        backend
+            .request_sessions
+            .write()
+            .await
+            .insert("req-1".into(), "s-mode".into());
+        backend
+            .request_sessions
+            .write()
+            .await
+            .insert("req-2".into(), "s-mode".into());
+
+        for (req, expect) in [
+            ("req-1", sebas_acp::Decision::AllowOnce),
+            ("req-2", sebas_acp::Decision::Deny),
+        ] {
+            let d = match expect {
+                sebas_acp::Decision::AllowOnce => PermissionDecision::AllowOnce,
+                _ => PermissionDecision::Deny,
+            };
+            assert!(backend.answer_permission(req, d).await);
+            match recv_out(&mut out_rx).await {
+                sebas_dispatch::Out::SendAcp {
+                    cmd: sebas_acp::AcpCommand::PermissionReply { decision, .. },
+                    ..
+                } => {
+                    assert_eq!(
+                        std::mem::discriminant(&decision),
+                        std::mem::discriminant(&expect)
+                    );
+                }
+                other => panic!("expected PermissionReply for {req}, got {other:?}"),
+            }
+        }
+        // 只有 reply、没有 SetMode；desired_mode 不被触碰。
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), out_rx.recv())
+                .await
+                .is_err(),
+            "AllowOnce/Deny 不得触发 SetMode"
+        );
+        let desired = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
+        assert_eq!(desired, None, "AllowOnce/Deny 不得改写 desired_mode");
     }
 }

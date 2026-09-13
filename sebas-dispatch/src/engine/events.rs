@@ -213,7 +213,8 @@ pub enum SessionEvent {
 /// One rendered block of a session's transcript, addressed by a monotonic
 /// position. `kind` distinguishes the user's prompt from agent/tool output;
 /// `element_type` tells the client how to render `content`
-/// (`"markdown"` | `"thinking"` | `"tool"` | `"error"`).
+/// (`"markdown"` | `"thinking"` | `"tool"` | `"error"` |
+/// `"permission_mode_result"`——最后者见 [`TurnEntry::permission_mode_result`]）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnEntry {
     /// 0-based monotonic position within the session's transcript.
@@ -231,6 +232,14 @@ pub struct TurnEntry {
     /// drift onto a different element; the timestamp is the canonical
     /// identity that doesn't change once written).
     pub created_at_unix: u64,
+    /// （workbench-agent-identity-and-process-folds 1.1/1.2）工具条目的结构化
+    /// 折叠标题（如 `Read · src/main.rs` / `✓ Read · src/main.rs`）：工具名 +
+    /// 关键参数摘要，前端二级折叠收起时显示。`None` = 旧持久化条目无标题，
+    /// 前端回退通用标签。`#[serde(default)]` 兼容旧 JSON（缺字段 → None，
+    /// 无需迁移）；`skip_serializing_if` 让 None 不上 wire（只增可选字段，
+    /// 不破坏旧消费端）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 impl TurnEntry {
@@ -261,6 +270,26 @@ impl TurnEntry {
         Self::new(position, "content", "error", content)
     }
 
+    /// 权限卡「本会话不再询问」触发的自动模式切换结果条目
+    /// （permission-mode-auto-gate 事件契约）。
+    ///
+    /// wire 形状（上游 e2e 依赖，勿随意改动）：
+    /// - `kind = "content"`、`element_type = "permission_mode_result"`；
+    /// - `content` = JSON 载荷 `{ "request_id": String, "ok": bool,
+    ///   "mode": String, "detail": String }`；
+    /// - 语义：`ok=false` = 该 request_id 的权限卡点击后，SetMode(auto) 被
+    ///   执行体拒绝/不可达——**当前调用已放行（不回滚）**，detached 前端
+    ///   （im）应把对应权限卡翻成如实失败态；`ok=true` 预留给显式成功上报，
+    ///   当前不发（成功面=点击时的卡面翻转）。
+    pub fn permission_mode_result(position: u64, payload: serde_json::Value) -> Self {
+        Self::new(
+            position,
+            "content",
+            "permission_mode_result",
+            payload.to_string(),
+        )
+    }
+
     fn new(position: u64, kind: &str, element_type: &str, content: impl Into<String>) -> Self {
         Self {
             position,
@@ -271,8 +300,83 @@ impl TurnEntry {
             // entry carries the moment it was appended, not the moment
             // the helper was called.
             created_at_unix: now_unix_secs(),
+            title: None,
         }
     }
+
+    /// 附加结构化标题（workbench-agent-identity-and-process-folds 1.2）：
+    /// 仅工具条目使用，链在 [`TurnEntry::tool`] 之后；其余条目保持 `None`。
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+}
+
+/// 折叠标题的硬上限（workbench-agent-identity-and-process-folds 1.2）：
+/// 工具名 + 参数摘要整体 200 字符，防异常超长参数撑爆折叠栏。
+const TITLE_MAX_CHARS: usize = 200;
+
+/// 关键参数的偏好键序（design D2）：路径类 > 模式 > URL > 命令 > 查询，
+/// 覆盖 read/edit/write、glob/grep、web fetch/search、bash 等主流工具的
+/// 实际参数形态。
+const KEY_ARG_PREFERRED: [&str; 11] = [
+    "path",
+    "file_path",
+    "absolute_path",
+    "file",
+    "dir",
+    "directory",
+    "cwd",
+    "pattern",
+    "url",
+    "command",
+    "query",
+];
+
+/// 从工具 args JSON 提取关键参数摘要（workbench-agent-identity-and-process-folds
+/// 1.2）：偏好键序取第一个**非空**字符串值；全未命中退化为对象里第一个
+/// 字符串值；再没有（非对象 / 无字符串值）返回 `None`，标题退化为纯工具名。
+fn key_arg_from_args(args: &serde_json::Value) -> Option<String> {
+    let obj = args.as_object()?;
+    for key in KEY_ARG_PREFERRED {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    obj.values()
+        .find_map(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 按**字符数**截断（非字节）：中文等多字节字符不切出半个 UTF-8 序列。
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
+}
+
+/// （workbench-agent-identity-and-process-folds 1.2）工具条目的结构化标题：
+/// `done=false` 为调用开始（`{tool} · {key_arg}`），`done=true` 带完成前缀
+/// （`✓ {tool} · {key_arg}`）；提取不到关键参数就只有工具名（带/不带 ✓）。
+/// 注意：`AcpEvent::ToolEnd` 不携带 args（wire 无 call id 可配对），完成态
+/// 调用方传 `None`，标题即 `✓ {tool}`。
+pub(crate) fn tool_entry_title(
+    done: bool,
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+) -> String {
+    let mut title = match args.and_then(key_arg_from_args) {
+        Some(arg) => format!("{tool_name} · {arg}"),
+        None => tool_name.to_string(),
+    };
+    if done {
+        title.insert_str(0, "✓ ");
+    }
+    truncate_chars(&title, TITLE_MAX_CHARS)
 }
 
 /// Wall-clock seconds since the UNIX epoch. Wrapped so tests can override
@@ -397,6 +501,115 @@ mod tests {
         let e = TurnEntry::prompt(3, "fix the bug");
         let back: TurnEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
+    }
+
+    /// workbench-agent-identity-and-process-folds 1.1：旧持久化 JSON 无
+    /// `title` 字段仍反序列化（→ None，不报错）；带 title 的条目完整往返；
+    /// None 序列化时**省略键**（wire 只在有值时多一个可选键）。
+    #[test]
+    fn turn_entry_title_field_is_additive() {
+        // 旧形状：无 title 字段。
+        let legacy = r#"{
+            "position": 4,
+            "kind": "content",
+            "element_type": "tool",
+            "content": "📖 **Read**",
+            "created_at_unix": 42
+        }"#;
+        let back: TurnEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.title, None);
+        assert_eq!(back.position, 4);
+        assert_eq!(back.element_type, "tool");
+
+        // 带 title：完整往返。
+        let titled = TurnEntry::tool(0, "📖 **Read**")
+            .with_title(tool_entry_title(false, "Read", Some(&serde_json::json!({"file_path": "src/main.rs"}))));
+        let json = serde_json::to_string(&titled).unwrap();
+        assert_eq!(serde_json::from_str::<TurnEntry>(&json).unwrap(), titled);
+        assert!(json.contains(r#""title""#), "{json}");
+
+        // None：键不上 wire。
+        let untitled = TurnEntry::tool(1, "✓ **Read**");
+        let json = serde_json::to_string(&untitled).unwrap();
+        assert!(!json.contains("title"), "{json}");
+    }
+
+    /// workbench-agent-identity-and-process-folds 1.2：路径类键命中——
+    /// `file_path` 提取为关键参数；同现 `path` 与 `command` 时路径键优先。
+    #[test]
+    fn tool_title_prefers_path_keys() {
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            tool_entry_title(false, "Read", Some(&args)),
+            "Read · src/main.rs"
+        );
+        // 路径组在偏好键序里先于 command/pattern。
+        let args = serde_json::json!({"command": "cat f", "path": "src/"});
+        assert_eq!(tool_entry_title(false, "Read", Some(&args)), "Read · src/");
+    }
+
+    /// workbench-agent-identity-and-process-folds 1.2：无路径键时按偏好键序
+    /// 回退到 command / pattern。
+    #[test]
+    fn tool_title_falls_back_to_command_and_pattern() {
+        let args = serde_json::json!({"command": "cargo test -p sebas-dispatch"});
+        assert_eq!(
+            tool_entry_title(false, "Bash", Some(&args)),
+            "Bash · cargo test -p sebas-dispatch"
+        );
+        let args = serde_json::json!({"pattern": "TurnEntry", "path": ""});
+        assert_eq!(
+            tool_entry_title(false, "Grep", Some(&args)),
+            "Grep · TurnEntry",
+            "空字符串的偏好键视为未命中，继续向后找"
+        );
+    }
+
+    /// workbench-agent-identity-and-process-folds 1.2：没有任何字符串参数
+    /// （空对象 / 非字符串值 / 非对象 args / ToolEnd 无 args）时标题退化为
+    /// 纯工具名；完成态带 `✓ ` 前缀。其余字符串值兜底（偏好键全未命中时
+    /// 取对象里第一个字符串值）。
+    #[test]
+    fn tool_title_without_string_args_is_tool_name_only() {
+        assert_eq!(
+            tool_entry_title(false, "Bash", Some(&serde_json::json!({}))),
+            "Bash"
+        );
+        assert_eq!(
+            tool_entry_title(false, "Bash", Some(&serde_json::json!({"count": 3}))),
+            "Bash"
+        );
+        // 非对象 args（null / 数组）同样只有工具名。
+        assert_eq!(tool_entry_title(false, "Bash", Some(&serde_json::Value::Null)), "Bash");
+        assert_eq!(
+            tool_entry_title(false, "Bash", Some(&serde_json::json!(["a", "b"]))),
+            "Bash"
+        );
+        // ToolEnd：wire 无 args → 传 None，只有 `✓ {tool}`。
+        assert_eq!(tool_entry_title(true, "Bash", None), "✓ Bash");
+        assert_eq!(tool_entry_title(false, "Bash", None), "Bash");
+        // 偏好键全未命中：第一个字符串值兜底。
+        assert_eq!(
+            tool_entry_title(false, "Tool", Some(&serde_json::json!({"x": "y", "n": 1}))),
+            "Tool · y"
+        );
+    }
+
+    /// workbench-agent-identity-and-process-folds 1.2：标题整体 200 字符上限，
+    /// 按字符截断（多字节中文不切半个、不 panic）。
+    #[test]
+    fn tool_title_caps_at_200_chars_on_char_boundaries() {
+        // 300 个中文字符的 command：截到 200 字符。
+        let long = "读".repeat(300);
+        let args = serde_json::json!({ "command": long });
+        let title = tool_entry_title(false, "Bash", Some(&args));
+        assert_eq!(title.chars().count(), 200);
+        assert!(title.starts_with("Bash · "));
+        // 恰好 200 字符（"Bash · " 占 7 字符 + 193 字符参数）：不截断。
+        let exact = "a".repeat(193);
+        let title = tool_entry_title(false, "Bash", Some(&serde_json::json!({ "command": exact })));
+        assert_eq!(title.chars().count(), 200);
+        assert!(title.ends_with(&exact));
     }
 }
 
@@ -523,6 +736,7 @@ fn chat_message_count_ignores_noise_and_empty_entries() {
             element_type: "markdown".into(),
             content: String::new(),
             created_at_unix: 1,
+            title: None,
         },
         TurnEntry::markdown(2, " still same segment"),
     ];

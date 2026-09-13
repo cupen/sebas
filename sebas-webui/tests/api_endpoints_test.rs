@@ -422,3 +422,544 @@ mod provider_source {
         assert_eq!(v["router"]["providers"], serde_json::json!([]));
     }
 }
+
+// add-webui-multiuser-rbac 3.2：首启 setup、me 的 needs_setup/role、
+// 双字段登录形态，以及 /api/users 全套端点的成功 / 越权 / 保护规则
+// （design D4/D5/D6）。带鉴权的 router + tempdir auth.db（小迭代数提速），
+// 无监听端口、不触真实 ~/.sebas。
+mod multiuser_rbac {
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use sebas_webui::auth::AuthHandle;
+    use sebas_webui::build_router_with_auth;
+    use sebas_webui::models::RouterInfo;
+    use sebas_webui::rbac::Role;
+    use serde_json::Value;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    /// 零用户 app（needs_setup 形态）。
+    async fn fresh_app() -> (axum::Router, tempfile::TempDir, Arc<AuthHandle>) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        let app = build_router_with_auth(
+            Arc::new(sebas_webui::session_backend::FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+                Vec::new(),
+            )),
+            30,
+            auth.clone(),
+        );
+        (app, dir, auth)
+    }
+
+    /// 四角色夹具：root alice + admin ada + member bob + viewer vic。
+    async fn rbac_app() -> (axum::Router, tempfile::TempDir, Arc<AuthHandle>) {
+        let (app, dir, auth) = fresh_app().await;
+        auth.setup_root("alice", "password8").await.unwrap();
+        let store = auth.user_store().unwrap();
+        store.create("ada", "password8", Role::Admin).unwrap();
+        store.create("bob", "password8", Role::Member).unwrap();
+        store.create("vic", "password8", Role::Viewer).unwrap();
+        (app, dir, auth)
+    }
+
+    async fn request(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        cookie: Option<&str>,
+        body: Option<String>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()));
+        if let Some(c) = cookie {
+            builder = builder.header("cookie", c);
+        }
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder
+            .body(Body::from(body.unwrap_or_default()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("non-JSON body from {uri} [{status}]: {e}"))
+        };
+        (status, v)
+    }
+
+    /// 走登录端点换会话 cookie（`sebas_webui_session=…`，取 Set-Cookie 值）。
+    async fn login_cookie(app: &axum::Router, username: &str, password: &str) -> String {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"username":"{username}","password":"{password}"}}"#
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "login {username}");
+        resp.headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    // ── 首启 setup（design D4，spec「首启 root 引导」）──
+
+    #[tokio::test]
+    async fn setup_creates_root_and_session_then_conflicts() {
+        let (app, _dir, _auth) = fresh_app().await;
+
+        // me：零用户 → needs_setup。
+        let (status, v) = request(&app, "GET", "/api/auth/me", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["needs_setup"], true, "{v}");
+        assert_eq!(v["authenticated"], false);
+
+        // 弱密码 → 400，库保持零用户。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/auth/setup",
+            None,
+            Some(r#"{"username":"cupen","password":"short"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        let (_, v) = request(&app, "GET", "/api/auth/me", None, None).await;
+        assert_eq!(v["needs_setup"], true, "弱密码不得留下半初始化状态");
+
+        // 缺字段 → 400。
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/auth/setup",
+            None,
+            Some(r#"{"username":"cupen"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // 成功：响应携带会话 cookie，me 报已认证 root。
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/setup")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"username":"cupen","password":"long-enough"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(cookie.starts_with("sebas_webui_session="), "{cookie}");
+
+        let (_, v) = request(&app, "GET", "/api/auth/me", Some(&cookie), None).await;
+        assert_eq!(v["authenticated"], true, "{v}");
+        assert_eq!(v["username"], "cupen");
+        assert_eq!(v["role"], "root");
+        assert_eq!(v["needs_setup"], false);
+
+        // 非零用户：一律 409。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/auth/setup",
+            None,
+            Some(r#"{"username":"second","password":"long-enough"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    }
+
+    #[tokio::test]
+    async fn setup_is_rejected_when_auth_disabled() {
+        // 开关关闭（disabled handle）：无设置页形态 → 400（spec：开关关闭
+        // 时完全放行且不触发引导）。
+        let app = build_router_with_auth(
+            Arc::new(sebas_webui::session_backend::FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(
+                Vec::new(),
+            )),
+            30,
+            Arc::new(AuthHandle::disabled()),
+        );
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/auth/setup",
+            None,
+            Some(r#"{"username":"cupen","password":"long-enough"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    }
+
+    // ── 登录形态（design D5）──
+
+    #[tokio::test]
+    async fn login_only_accepts_username_password_form() {
+        let (app, _dir, auth) = fresh_app().await;
+        auth.setup_root("alice", "password8").await.unwrap();
+
+        // 旧 {"secret"} 单字段形态 → 400（缺 username/password 字段）。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(r#"{"secret":"whatever"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+
+        // 凭据错误统一 401。
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(r#"{"username":"alice","password":"wrong"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // 成功登录建立会话。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(r#"{"username":"alice","password":"password8"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["username"], "alice");
+    }
+
+    // ── 用户管理（design D6，spec「用户管理（root 专用）」）──
+
+    #[tokio::test]
+    async fn users_surface_is_root_only() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let alice = login_cookie(&app, "alice", "password8").await;
+        let ada = login_cookie(&app, "ada", "password8").await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+        let vic = login_cookie(&app, "vic", "password8").await;
+
+        // 匿名 401；member/admin/viewer 全操作 403（已认证仍拒）。
+        let (status, _) = request(&app, "GET", "/api/users", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        for (who, cookie) in [("admin", &ada), ("member", &bob), ("viewer", &vic)] {
+            let (status, _) = request(&app, "GET", "/api/users", Some(cookie), None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{who} 列表必须 403");
+            let (status, _) = request(
+                &app,
+                "POST",
+                "/api/users",
+                Some(cookie),
+                Some(r#"{"username":"x","password":"password8","role":"member"}"#.into()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{who} 建户必须 403");
+        }
+
+        // root：列表 200，形状无哈希字段。
+        let (status, v) = request(&app, "GET", "/api/users", Some(&alice), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let users = v["users"].as_array().expect("users array");
+        assert_eq!(users.len(), 4);
+        let first = &users[0];
+        for field in [
+            "id",
+            "username",
+            "role",
+            "enabled",
+            "created_at_unix",
+            "updated_at_unix",
+        ] {
+            assert!(first.get(field).is_some(), "缺字段 {field}: {first}");
+        }
+        let raw = serde_json::to_string(&v).unwrap();
+        for leak in ["salt", "hash", "iterations"] {
+            assert!(!raw.contains(leak), "列表泄漏 {leak}: {raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn root_creates_user_who_can_login_immediately() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let alice = login_cookie(&app, "alice", "password8").await;
+
+        // 用户名撞车（大小写不敏感）→ 409。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/users",
+            Some(&alice),
+            Some(r#"{"username":"ALICE","password":"password8","role":"member"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+
+        // 角色词表外 → 400。
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/users",
+            Some(&alice),
+            Some(r#"{"username":"carol","password":"password8","role":"boss"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // 成功创建 member：201 + user 形状（无哈希字段），立即能登录。
+        let (status, v) = request(
+            &app,
+            "POST",
+            "/api/users",
+            Some(&alice),
+            Some(r#"{"username":"carol","password":"password8","role":"member"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        assert_eq!(v["user"]["username"], "carol");
+        assert_eq!(v["user"]["role"], "member");
+        assert_eq!(v["user"]["enabled"], true);
+        assert!(v["user"].get("salt").is_none() && v["user"].get("hash").is_none());
+
+        let cookie = login_cookie(&app, "carol", "password8").await;
+        let (status, _) = request(&app, "GET", "/api/summary", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn password_reset_and_disable_kick_sessions() {
+        let (app, _dir, auth) = rbac_app().await;
+        let alice = login_cookie(&app, "alice", "password8").await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+        let bob_id = auth
+            .user_store()
+            .unwrap()
+            .get_by_username("bob")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        // 重置密码 → bob 既有会话立即 401；新密码可登录。
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/users/{bob_id}/password"),
+            Some(&alice),
+            Some(r#"{"password":"new-pass-99"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, _) = request(&app, "GET", "/api/summary", Some(&bob), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "重置密码必须踢会话");
+        let new_cookie = login_cookie(&app, "bob", "new-pass-99").await;
+        let (status, _) = request(&app, "GET", "/api/summary", Some(&new_cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 禁用 → 既有会话 401（spec「禁用用户即刻失效」）。
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/users/{bob_id}/enabled"),
+            Some(&alice),
+            Some(r#"{"enabled":false}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, _) = request(&app, "GET", "/api/summary", Some(&new_cookie), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用必须踢会话");
+        // 禁用后登录被拒（与凭据错误同文案 401）。
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(r#"{"username":"bob","password":"new-pass-99"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // 未知用户 → 404。
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/users/424242/enabled",
+            Some(&alice),
+            Some(r#"{"enabled":false}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn role_change_takes_effect_without_relogin() {
+        let (app, _dir, auth) = rbac_app().await;
+        let alice = login_cookie(&app, "alice", "password8").await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+        let bob_id = auth
+            .user_store()
+            .unwrap()
+            .get_by_username("bob")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        // member 在线写会话 → 到达 handler（不被角色拦）。
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/sessions",
+            Some(&bob),
+            Some(r#"{"agent":"native"}"#.into()),
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "member 会话写应放行");
+
+        // 降级 viewer：同一会话下一个写操作 403（无需重登）。
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/users/{bob_id}/role"),
+            Some(&alice),
+            Some(r#"{"role":"viewer"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/sessions",
+            Some(&bob),
+            Some(r#"{"agent":"native"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "角色调整必须即时生效");
+
+        // 词表外角色 → 400。
+        let (status, _) = request(
+            &app,
+            "POST",
+            &format!("/api/users/{bob_id}/role"),
+            Some(&alice),
+            Some(r#"{"role":"boss"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn last_root_and_self_are_protected() {
+        let (app, _dir, auth) = rbac_app().await;
+        let alice = login_cookie(&app, "alice", "password8").await;
+        let store = auth.user_store().unwrap();
+        let alice_id = store.get_by_username("alice").unwrap().unwrap().id;
+        let ada_id = store.get_by_username("ada").unwrap().unwrap().id;
+
+        // 删号前先给 bob 换个会话（删号后旧 cookie 必须失效）。
+        let bob_cookie = login_cookie(&app, "bob", "password8").await;
+        let bob_id = store.get_by_username("bob").unwrap().unwrap().id;
+
+        // 不能删自己 → 400。
+        let (status, v) =
+            request(&app, "DELETE", &format!("/api/users/{alice_id}"), Some(&alice), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+
+        // 最后启用的 root：降级 / 禁用 / 删除全 400，root 原状。
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/users/{alice_id}/role"),
+            Some(&alice),
+            Some(r#"{"role":"member"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        let (status, v) = request(
+            &app,
+            "POST",
+            &format!("/api/users/{alice_id}/enabled"),
+            Some(&alice),
+            Some(r#"{"enabled":false}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        let (status, v) =
+            request(&app, "DELETE", &format!("/api/users/{alice_id}"), Some(&alice), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        let (_, v) = request(&app, "GET", "/api/auth/me", Some(&alice), None).await;
+        assert_eq!(v["role"], "root", "最后 root 必须保持原状: {v}");
+
+        // 删除普通成员：200；其既有会话失效；重放登录被拒（用户没了）。
+        let (status, v) =
+            request(&app, "DELETE", &format!("/api/users/{bob_id}"), Some(&alice), None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, _) = request(&app, "GET", "/api/summary", Some(&bob_cookie), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "删号后旧会话必须失效");
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(r#"{"username":"bob","password":"password8"}"#.into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "已删用户登录必须拒绝");
+
+        // ada（admin）不受最后 root 保护，可删；不存在的 id → 404。
+        let (status, _) =
+            request(&app, "DELETE", &format!("/api/users/{ada_id}"), Some(&alice), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = request(&app, "DELETE", "/api/users/424242", Some(&alice), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}

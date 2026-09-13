@@ -18,6 +18,8 @@ use super::protocol::{
 use crate::agent_backend::DualSessionBackend;
 use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
+use sebas_dispatch::provider_state::ProviderMode;
+use sebas_dispatch::SessionInfo;
 use sebas_dispatch::{DispatchHandle, SessionEvent};
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
@@ -452,6 +454,12 @@ async fn snapshot_domain(router: &DispatchHandle, domain: &str) -> serde_json::V
     if domain == "presets" {
         return preset_table_value();
     }
+    if domain == "router_activity" {
+        // unify-router-process-shape 2.1：活跃 routed 会话计数（watchdog 停
+        // router 保护的事实源，design D2）。轻量只读域：不进 state store。
+        let count = router_activity_count(router).await;
+        return serde_json::json!({ "active_routed_sessions": count });
+    }
     let Some(engine) = sebas_dispatch::state_store::engine() else {
         return serde_json::json!({"error": "state store 未初始化"});
     };
@@ -498,13 +506,61 @@ fn preset_table_value() -> serde_json::Value {
     serde_json::json!({ "presets": out })
 }
 
-/// 全域快照：providers / settings / projects / presets / sessions。
+/// 全域快照：providers / settings / projects / presets / sessions /
+/// router_activity。
 async fn state_snapshot_all(router: &DispatchHandle) -> serde_json::Value {
     let mut domains = serde_json::Map::new();
-    for domain in ["providers", "settings", "projects", "presets", "sessions"] {
+    for domain in [
+        "providers",
+        "settings",
+        "projects",
+        "presets",
+        "sessions",
+        "router_activity",
+    ] {
         domains.insert(domain.to_string(), snapshot_domain(router, domain).await);
     }
     serde_json::Value::Object(domains)
+}
+
+/// 活跃 routed 会话计数（unify-router-process-shape 2.1，design D2）：
+/// 状态库 provider mode 为 Router **且**会话状态非终态的行数。
+///
+/// mode 来源与 spawn env 翻译同源（[`sebas_dispatch::provider_state::load`]，
+/// state store 引擎优先、文件回退）——spawn 路径按哪个事实把 agent 指向
+/// router，停止保护就按同一个事实计数。
+async fn router_activity_count(router: &DispatchHandle) -> u64 {
+    let mode = sebas_dispatch::provider_state::load().mode;
+    let sessions = router.session_info_snapshot().await;
+    count_active_routed(&mode, &sessions)
+}
+
+/// [`router_activity_count`] 的纯函数核（可测）。
+pub(crate) fn count_active_routed(mode: &ProviderMode, sessions: &[SessionInfo]) -> u64 {
+    if !matches!(mode, ProviderMode::Router) {
+        return 0;
+    }
+    sessions
+        .iter()
+        .filter(|s| is_active_routed_session(s))
+        .count() as u64
+}
+
+/// 单会话计数口径（unify-router-process-shape 2.1）：
+///
+/// - **计入**：Warming（`spawning`，子进程 spawn 在途——router 停了它马上
+///   断流）与 Running（`active` + 卡片 WORKING phase，turn 在飞、流式输出
+///   经 router）。
+/// - **不计入**：Queue（`active` 但尚无产出/仅 Get/空 phase——turn 未起，
+///   router 停了它们 spawn 时诚实报错，design D2 的可接受失败）、Done /
+///   Failed（终态 phase）、Dormant（无活子进程）、spawn-failed（终态）。
+/// - 归档会话不在 live 快照里，天然不计。
+fn is_active_routed_session(s: &SessionInfo) -> bool {
+    match s.status.as_str() {
+        "spawning" => true,
+        "active" => s.phase.as_deref() == Some(sebas_dispatch::card_state::phase::WORKING),
+        _ => false,
+    }
 }
 
 /// 4.2 状态订阅：先发全域快照，再持续转发变更通知（合并窗口 100ms，
@@ -1216,6 +1272,105 @@ fn usable_project_dir(dir: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── unify-router-process-shape 2.1：router_activity 计数语义 ──
+
+    use sebas_dispatch::provider_state::ProviderMode;
+
+    /// 计数口径的最小 SessionInfo 行（其余字段与计数无关，取默认）。
+    fn info(status: &str, phase: Option<&str>) -> SessionInfo {
+        SessionInfo {
+            channel: "web".into(),
+            key: format!("k-{status}-{phase:?}"),
+            session_id: None,
+            status: status.into(),
+            phase: phase.map(str::to_string),
+            user_prompt: None,
+            last_active_unix: 0,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage: None,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+        }
+    }
+
+    #[test]
+    fn running_and_warming_count_toward_router_activity() {
+        let sessions = vec![
+            // Running：turn 在飞（卡片 WORKING phase）。
+            info("active", Some(sebas_dispatch::card_state::phase::WORKING)),
+            // Warming：spawn 在途（phase 尚未产生）。
+            info("spawning", None),
+        ];
+        assert_eq!(
+            count_active_routed(&ProviderMode::Router, &sessions),
+            2,
+            "Running 与 Warming 都计入活跃 routed 会话"
+        );
+    }
+
+    #[test]
+    fn queue_done_and_dormant_do_not_count_toward_router_activity() {
+        let sessions = vec![
+            // Queue：active 但尚无产出（Get / 空 phase）——turn 未起。
+            info("active", Some(sebas_dispatch::card_state::phase::SEED)),
+            info("active", None),
+            // Done / Failed：终态 phase。
+            info("active", Some(sebas_dispatch::card_state::phase::DONE)),
+            info("active", Some(sebas_dispatch::card_state::phase::FAILED)),
+            // Dormant：无活子进程；未知状态同样按不计处理。
+            info("dormant", Some(sebas_dispatch::card_state::phase::WORKING)),
+            info("spawn-failed", None),
+        ];
+        assert_eq!(
+            count_active_routed(&ProviderMode::Router, &sessions),
+            0,
+            "Queue / Done / Failed / Dormant 一律不计入"
+        );
+    }
+
+    #[test]
+    fn non_router_provider_modes_count_nothing() {
+        // provider mode 不是 Router 时，哪怕会话在跑也不算 routed：
+        // Direct / Off 的会话流不经过 router，router 停了不受影响。
+        let sessions = vec![
+            info("active", Some(sebas_dispatch::card_state::phase::WORKING)),
+            info("spawning", None),
+        ];
+        assert_eq!(count_active_routed(&ProviderMode::Off, &sessions), 0);
+        assert_eq!(
+            count_active_routed(
+                &ProviderMode::Direct {
+                    provider: "deepseek".into()
+                },
+                &sessions
+            ),
+            0
+        );
+        // 空表恒为 0。
+        assert_eq!(count_active_routed(&ProviderMode::Router, &[]), 0);
+    }
+
+    #[test]
+    fn router_activity_payload_shape_is_a_count() {
+        // domain payload 的 wire 形状钉死：`active_routed_sessions` 是数字
+        // （watchdog executor 与前端都只消费计数）。
+        let sessions = vec![info(
+            "active",
+            Some(sebas_dispatch::card_state::phase::WORKING),
+        )];
+        let count = count_active_routed(&ProviderMode::Router, &sessions);
+        let payload = serde_json::json!({ "active_routed_sessions": count });
+        assert!(payload["active_routed_sessions"].is_u64());
+        assert_eq!(payload["active_routed_sessions"], 1);
+    }
 
     // 5.1 验收：同一路径连续 bind 两次，第二次成功（stale socket 回收）。
     #[tokio::test]
