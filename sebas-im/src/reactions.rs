@@ -1,14 +1,16 @@
 //! Tracks the current emoji reaction on each session's root card so the
-//! router's phase machine can **swap** reactions (EYES->OnIt->DONE) rather
+//! router's phase machine can **swap** reactions (SEED/OnIt->DONE) rather
 //! than pile them up. Feishu's unreact API needs the `reaction_id` returned
 //! by the `react` call, so `react` returns it and we stash it here.
 //!
-//! Also tracks ack reactions (immediate "received" emoji on user messages)
-//! keyed by Feishu message_id, so the phase reaction handler can clean up
-//! the ack emoji before adding the new one.
+//! Also tracks ack reactions ("已收到" 👌 on the user's inbound message,
+//! keyed by Feishu message_id) so duplicate inbound events / replays never
+//! stack a second 👌, and one-shot terminal marks (✅/❌ on that same
+//! message once the turn settles) so repeated phase events don't double-mark.
 //!
-//! The *when* (which emoji on which phase transition) lives in the router;
-//! this struct owns only the *what* (the id bookkeeping) and the swap plan.
+//! The *when* (which emoji on which phase transition) lives in the dispatch
+//! FSM + im frontend; this struct owns only the *what* (the id bookkeeping)
+//! and the swap plan.
 
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -26,10 +28,13 @@ pub enum ReactPlan {
 #[derive(Default)]
 pub struct ReactionTracker {
     inner: Mutex<HashMap<String, (String, String)>>, // session -> (emoji, reaction_id)
-    /// Ack reactions keyed by Feishu message_id (not session_id). The phase
-    /// reaction handler consumes these so EYES gets removed before the new
-    /// phase emoji is added.
+    /// Ack reactions keyed by Feishu message_id (not session_id): dedupe
+    /// gate for the immediate "已收到" 👌 (kept for the message's lifetime;
+    /// the terminal ✅/❌ is stacked next to it, not swapped in).
     ack_map: Mutex<HashMap<String, (String, String)>>, // message_id -> (emoji, reaction_id)
+    /// One-shot terminal marks on the user's inbound message, keyed by
+    /// message_id → emoji. First writer wins; the rest skip the API call.
+    user_marks: Mutex<HashMap<String, String>>, // message_id -> emoji
 }
 
 impl ReactionTracker {
@@ -51,8 +56,8 @@ impl ReactionTracker {
             .insert(session_id.into(), (emoji, reaction_id));
     }
 
-    /// Record an ack reaction keyed by Feishu message_id, so the phase
-    /// reaction handler can later remove it before adding the new emoji.
+    /// Record an ack reaction keyed by Feishu message_id. The entry doubles
+    /// as the dedupe gate (`is_acked`) for duplicate inbound events.
     pub async fn record_ack(&self, message_id: &str, emoji: String, reaction_id: String) {
         self.ack_map
             .lock()
@@ -60,10 +65,17 @@ impl ReactionTracker {
             .insert(message_id.into(), (emoji, reaction_id));
     }
 
-    /// Take (remove and return) the ack reaction for the given message_id,
-    /// if one exists. Returns the emoji and reaction_id.
-    pub async fn take_ack(&self, message_id: &str) -> Option<(String, String)> {
-        self.ack_map.lock().await.remove(message_id)
+    /// Whether an ack reaction was already recorded for this message.
+    pub async fn is_acked(&self, message_id: &str) -> bool {
+        self.ack_map.lock().await.contains_key(message_id)
+    }
+
+    /// One-shot terminal mark bookkeeping for the user's inbound message:
+    /// returns true (= caller should `react`) on first claim, false when the
+    /// message was already marked (phase events can repeat across resyncs).
+    pub async fn claim_user_mark(&self, message_id: &str, emoji: &str) -> bool {
+        let mut g = self.user_marks.lock().await;
+        g.insert(message_id.into(), emoji.into()).is_none()
     }
 }
 
@@ -113,18 +125,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_ack_and_take_ack_round_trip() {
+    async fn record_ack_and_is_acked_round_trip() {
         let t = ReactionTracker::default();
-        t.record_ack("om_1", "EYES".into(), "rid_eyes".into()).await;
-        let taken = t.take_ack("om_1").await;
-        assert_eq!(taken, Some(("EYES".into(), "rid_eyes".into())));
-        // Second take returns None
-        assert!(t.take_ack("om_1").await.is_none());
+        assert!(!t.is_acked("om_1").await);
+        t.record_ack("om_1", "Get".into(), "rid_eyes".into()).await;
+        assert!(t.is_acked("om_1").await, "重复入站事件不得叠挂 ack");
     }
 
     #[tokio::test]
-    async fn take_ack_returns_none_when_not_present() {
+    async fn is_acked_returns_none_when_not_present() {
         let t = ReactionTracker::default();
-        assert!(t.take_ack("nonexistent").await.is_none());
+        assert!(!t.is_acked("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn claim_user_mark_is_one_shot() {
+        let t = ReactionTracker::default();
+        assert!(t.claim_user_mark("om_1", "DONE").await, "首标放行");
+        assert!(
+            !t.claim_user_mark("om_1", "DONE").await,
+            "同 emoji 重复 phase 事件不重复 react"
+        );
+        assert!(
+            !t.claim_user_mark("om_1", "CrossMark").await,
+            "已终态的消息不换标（首标即定）"
+        );
+        assert!(t.claim_user_mark("om_2", "DONE").await, "消息间互不影响");
     }
 }

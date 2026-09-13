@@ -441,12 +441,14 @@ impl Card {
     }
 }
 
-/// 卡片 header 标题的字符上限：主题过长即截断加省略号，防超飞书标题限长。
-const CARD_TITLE_MAX_CHARS: usize = 40;
+/// 卡片 header 标题的字符上限：标题取「精简概括」而非整行原文，24 字符内
+/// 足以点题（feishu-turn-badges）；超长在空白边界优先截断加省略号。
+const CARD_TITLE_MAX_CHARS: usize = 24;
 
 /// 从用户首条 prompt 派生卡片主题（header title）。
 ///
-/// 逐行清理后取首个非空行（`clean_topic_line`）。清理规则按顺序：
+/// 逐行清理后取首个非空行（`clean_topic_line`），再经 [`condense_title`]
+/// 精简成概括性短标题。清理规则按顺序：
 /// 1. 纯代码围栏行（```` ``` ```` 或 ```` ```lang ````）整行跳过，看下一行。
 /// 2. 嵌套块引用：剥掉所有前导 `>` 和之后的空白（`>>` / `>>>` 一并处理）。
 /// 3. 行首/行尾 markdown 标题标记（`#` / `##` / `###` …）各剥一次。
@@ -454,19 +456,55 @@ const CARD_TITLE_MAX_CHARS: usize = 40;
 ///    游离 `` ` ``；中间的反引号保留）。
 ///
 /// 全部行清理后仍为空（空 prompt / lazy seed / 纯围栏）回退中性占位
-/// `"Claude Code"`。超长截断成 `…`。`user_prompt` 会话内不变（root 卡只在
-/// spawn 时种一次，flush 不重写），故标题随会话保持稳定，跨卡 / 换卡一致
-/// —— 正表达"主题"语义。
+/// `"Claude Code"`。只对文字本身做加工（不调模型、不看上下文），一次派生
+/// 即固定；`user_prompt` 会话内不变，故标题跨 flush / 换卡稳定——正表达
+/// "主题"语义。
 pub fn derive_topic(prompt: &str) -> String {
     let first_line = prompt.lines().map(clean_topic_line).find(|l| !l.is_empty());
     let Some(cleaned) = first_line else {
         return "Claude Code".to_string();
     };
-    let mut out: String = cleaned.chars().take(CARD_TITLE_MAX_CHARS).collect();
-    if cleaned.chars().count() > CARD_TITLE_MAX_CHARS {
-        out.push('…');
+    condense_title(&cleaned, CARD_TITLE_MAX_CHARS)
+}
+
+/// 精简标题（feishu-turn-badges）：折叠连续空白 → 上限内截断（优先回退到
+/// 空白边界，避免词被腰斩；无空白如中文长句则硬切）→ 剥截断点悬挂的连接
+/// 标点 → 省略号。按字符而非字节切，UTF-8 安全。
+fn condense_title(s: &str, max: usize) -> String {
+    let mut folded = String::with_capacity(s.len());
+    let mut prev_ws = true; // 顺带去首部空白
+    for c in s.chars() {
+        if c.is_whitespace() {
+            prev_ws = true;
+        } else {
+            if prev_ws && !folded.is_empty() {
+                folded.push(' ');
+            }
+            folded.push(c);
+            prev_ws = false;
+        }
     }
-    out
+    let chars: Vec<char> = folded.chars().collect();
+    if chars.len() <= max {
+        return folded;
+    }
+    let lookback = max / 3;
+    let window = max - lookback;
+    let cut = chars[window..max]
+        .iter()
+        .rposition(|&c| c == ' ')
+        .map(|p| window + p)
+        .unwrap_or(max);
+    let mut head: String = chars[..cut].iter().collect();
+    head = head.trim_end().to_string();
+    if let Some(stripped) = head
+        .trim_end()
+        .strip_suffix(['，', ',', '、', '：', ':', '；', ';'])
+    {
+        head = stripped.trim_end().to_string();
+    }
+    head.push('…');
+    head
 }
 
 /// 单行 prompt 清理：剥掉会让标题变难读的 markdown 噪音。
