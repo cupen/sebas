@@ -1,26 +1,18 @@
-# permission-flow Specification
+## REMOVED Requirements
 
-## Purpose
-Governs the full round-trip of a Claude tool-permission request: from the agent's PreToolUse hook, through a Feishu interactive card with Allow-once / Allow-session / Deny buttons, back to the hook response that unblocks the tool call. Defines how per-chat allowlists suppress repeat prompts and how stale clicks, session ends, and unanswered requests stay fail-closed.
+### Requirement: Auto-approve on allowlist hit
 
-## Requirements
+**Reason**: 「本会话不再询问」类自动放行统一收敛到会话 mode 门控（见「Session mode gates whether a decision is requested」的 hook 侧门控）：allowlist 是与 mode 语义重叠的第二套"别问我"机制，两套并存导致自动放行路径分叉、审计口径不一。driver 层 mode 成为唯一门控机制后，按签名白名单不再有独立存在价值（proposal Non-goals 明确不做按签名白名单）。
 
-### Requirement: Hook-driven permission request
+**Migration**: 存量 allowlist 条目无迁移价值——会话按其当前 mode 继续门控；需要"本会话别再问"的操作者改走权限卡「本会话不再询问」按钮（放行当前请求并切 `auto`）或 webui 的 mode 切换。
 
-The system SHALL surface every Claude PreToolUse hook invocation as a permission decision point keyed by the hook control `request_id` (which equals the Claude `tool_use_id`). The system SHALL park the hook callback until a decision is returned, and SHALL correlate the decision to the request strictly by `request_id`, never by position or arrival order.
+### Requirement: Allowlist scope and lifetime
 
-#### Scenario: First-time tool call emits a permission card
+**Reason**: allowlist 机制整体退役（见上），其生命周期规则随之失去载体。会话级"不再询问"的生命周期由 mode 承载：mode 存会话映射，`/new` 与会话结束自然回到默认档（不设 mode ≈ `ask`），无需独立清理逻辑。
 
-- **WHEN** the agent invokes a tool whose `(tool, args)` signature is not on the current chat's allowlist
-- **THEN** the system emits a `PermissionRequest` event carrying the session id, the `request_id`, the tool name, and the tool arguments
-- **AND** the router sends a Feishu interactive card with three buttons: `Allow once`, `Allow session`, `Deny`
-- **AND** the card is recorded in a `perm_cards` map keyed by `request_id` so a later button click can be correlated
+**Migration**: 无。原「会话结束清空白名单」的语义由 mode 生命周期自然覆盖（新会话无 mode = 默认 ask，事事照问）。
 
-#### Scenario: Parallel tool calls each get their own request id
-
-- **WHEN** the agent invokes multiple tools concurrently
-- **THEN** each PreToolUse hook callback parks an independent oneshot under its own `request_id`
-- **AND** replies to one request do not resolve any other request
+## MODIFIED Requirements
 
 ### Requirement: Three decision outcomes
 
@@ -52,39 +44,6 @@ The system SHALL support three user decisions on a Feishu permission card: `Allo
 - **THEN** the hook callback returns `permissionDecision: deny`
 - **AND** the session's mode is not modified
 - **AND** the card flips in place to a resolved "已拒绝" state
-
-### Requirement: Stale click handling
-
-The system SHALL distinguish a live permission card from an already-resolved one. A click on a resolved card SHALL NOT resolve any hook and SHALL surface a "请求已过期" notice to the user.
-
-#### Scenario: Second click on a resolved card
-
-- **WHEN** the user clicks a button on a permission card whose `request_id` has already been consumed
-- **THEN** the system sends a new "⚠ 请求已过期" card
-- **AND** no `PermissionReply` is emitted for that `request_id`
-
-### Requirement: Fail-closed on missing responder
-
-The system SHALL default to `deny` whenever a permission request cannot be answered — including when the router is unreachable, the session is gone, or a reply arrives for an unknown `request_id`. **补充（远程会话）**：control plane 暂时不可达 SHALL NOT 算作「无法应答」——远程会话的权限请求 SHALL 保持 parked，直至 control plane 返回或该请求所属会话终止（节点重启等），且 parked 期间 SHALL NOT 有任何本地裁决路径。
-
-#### Scenario: Reply for unknown request_id is dropped
-
-- **WHEN** a `PermissionReply` arrives for a `request_id` that has no parked responder
-- **THEN** the reply is logged and dropped
-- **AND** the hook callback (if still pending elsewhere) resolves to `deny` via its own drop path
-
-#### Scenario: Session termination while awaiting click
-
-- **WHEN** the owning session terminates while a permission card is still awaiting user click
-- **THEN** the parked oneshot is dropped
-- **AND** the hook callback resolves to `deny`
-- **AND** the tool call does not execute
-
-#### Scenario: unreachable control plane parks instead of denying
-
-- **WHEN** a remote session's permission request is parked and the control plane becomes unreachable
-- **THEN** the request stays parked and is not resolved to `deny` by the absence
-- **AND** it is resolved when the control plane returns, or when its session terminates
 
 ### Requirement: Session mode gates whether a decision is requested
 
@@ -147,17 +106,3 @@ Feishu-created sessions SHALL default to no mode (≈`ask`): every gated action 
 
 - **WHEN** a session with `desired_mode` = `auto` is resumed
 - **THEN** the mode is re-applied via the spawn argv and the hook gate stays silent from the first tool call
-
-### Requirement: Remote approval requests survive control-plane absence
-
-Permission requests raised by remote sessions SHALL travel to the control plane over the link and SHALL remain parked while the control plane is absent. On its return, the control plane SHALL present every request that is still parked, and SHALL NOT present one that was already resolved. A decision arriving for a session that has already terminated SHALL be discarded under the existing stale-click semantics.
-
-#### Scenario: parked requests are presented after the control plane returns
-
-- **WHEN** the control plane returns after an absence during which requests were parked on a node
-- **THEN** every request still outstanding is presented for a decision
-
-#### Scenario: a decision after session termination resolves nothing
-
-- **WHEN** a decision arrives for a request whose session terminated while the control plane was away
-- **THEN** the decision is discarded and the operator is told the request is no longer valid

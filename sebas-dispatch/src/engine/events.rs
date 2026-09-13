@@ -213,7 +213,8 @@ pub enum SessionEvent {
 /// One rendered block of a session's transcript, addressed by a monotonic
 /// position. `kind` distinguishes the user's prompt from agent/tool output;
 /// `element_type` tells the client how to render `content`
-/// (`"markdown"` | `"thinking"` | `"tool"` | `"error"`).
+/// (`"markdown"` | `"thinking"` | `"tool"` | `"error"` |
+/// `"permission_mode_result"`——最后者见 [`TurnEntry::permission_mode_result`]）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnEntry {
     /// 0-based monotonic position within the session's transcript.
@@ -267,6 +268,26 @@ impl TurnEntry {
     /// prompt|content 两值是 workbench-conversation-view 的 delta 契约。）
     pub fn error(position: u64, content: impl Into<String>) -> Self {
         Self::new(position, "content", "error", content)
+    }
+
+    /// 权限卡「本会话不再询问」触发的自动模式切换结果条目
+    /// （permission-mode-auto-gate 事件契约）。
+    ///
+    /// wire 形状（上游 e2e 依赖，勿随意改动）：
+    /// - `kind = "content"`、`element_type = "permission_mode_result"`；
+    /// - `content` = JSON 载荷 `{ "request_id": String, "ok": bool,
+    ///   "mode": String, "detail": String }`；
+    /// - 语义：`ok=false` = 该 request_id 的权限卡点击后，SetMode(auto) 被
+    ///   执行体拒绝/不可达——**当前调用已放行（不回滚）**，detached 前端
+    ///   （im）应把对应权限卡翻成如实失败态；`ok=true` 预留给显式成功上报，
+    ///   当前不发（成功面=点击时的卡面翻转）。
+    pub fn permission_mode_result(position: u64, payload: serde_json::Value) -> Self {
+        Self::new(
+            position,
+            "content",
+            "permission_mode_result",
+            payload.to_string(),
+        )
     }
 
     fn new(position: u64, kind: &str, element_type: &str, content: impl Into<String>) -> Self {

@@ -627,42 +627,22 @@ impl DispatchHandle {
         // We still send the PermissionReply below — the bridge drops replies
         // for unknown request_ids, but withholding the reply when the hook
         // IS still parked would leave the tool call hanging forever.
-        let mut stale_click = false;
-        if let Some(rid) = action.request_id.as_deref() {
-            if let Some(entry) = self.take_perm_card(rid).await {
-                // "本会话不再询问" puts the chat in allow-all mode so every
-                // subsequent permission request auto-approves without
-                // prompting. The bridge side can't see the difference
-                // (AllowSession maps to "allow_always" which is just
-                // approve-per-call) — the allowlist lives on the sebas side
-                // and intercepts before the user is even asked.
-                if matches!(decision, Decision::AllowSession) {
-                    self.allowlist.grant_all(&entry.key).await;
-                }
-                let label = match decision {
-                    Decision::AllowOnce => "✅ 已允许（仅此一次）",
-                    Decision::AllowSession => "✅ 已允许（本会话不再询问）",
-                    Decision::Deny => "❌ 已拒绝",
-                };
-                let card = cards_ui::resolved_permission_card(label);
-                self.emit(Out::UpdateCardByMsgId {
-                    key: entry.key,
-                    msg_id: entry.msg_id,
-                    card,
-                })
-                .await;
-            } else {
-                stale_click = true;
-            }
-        }
-        match (action.session_id.clone(), action.request_id.clone()) {
+        let request_id = action.request_id.clone();
+        let entry = match request_id.as_deref() {
+            Some(rid) => self.take_perm_card(rid).await,
+            None => None,
+        };
+        let stale_click = entry.is_none() && request_id.is_some();
+        // ① 首要语义（permission-mode-auto-gate D2）：放行当前请求，先行
+        // 发出让泊车的 hook 尽早解锁；后续 mode 切换失败也**不回滚**它。
+        match (action.session_id.clone(), request_id.clone()) {
             (sid, Some(rid)) => {
                 self.emit(Out::SendAcp {
                     session_id: sid.clone(),
                     cmd: AcpCommand::PermissionReply {
                         session_id: sid,
                         request_id: rid,
-                        decision,
+                        decision: decision.clone(),
                     },
                 })
                 .await;
@@ -670,6 +650,35 @@ impl DispatchHandle {
             _ => {
                 self.emit(Out::HelpText { key: key.clone() }).await;
             }
+        }
+        // ②③ mode 侧组合 + 翻面。SetMode 的最终成败由 driver 事件回执：
+        // 成功（ModeChanged）静默、失败（带「模式未变」标记的非终态 Error）
+        // 在 apply_event 里据实翻卡 + 写 turn 流事件契约。这里只呈现同步
+        // 可知的部分——SetMode 发不出去（会话映射不可解析）时当场翻失败态。
+        if let Some(entry) = entry {
+            let (label, theme) = match decision {
+                Decision::AllowOnce => ("✅ 已允许（仅此一次）".to_string(), "blue"),
+                Decision::Deny => ("❌ 已拒绝".to_string(), "blue"),
+                Decision::AllowSession => match self
+                    .issue_auto_mode_switch(&entry, request_id.as_deref().unwrap_or_default())
+                    .await
+                {
+                    Ok(()) => ("✅ 已切换自动模式".to_string(), "blue"),
+                    Err(cause) => (
+                        format!(
+                            "✅ 当前调用已放行；⚠️ 自动模式切换失败：{cause}\n本会话仍会在工具调用时询问（可用 /new 结束会话）。"
+                        ),
+                        "orange",
+                    ),
+                },
+            };
+            let card = cards_ui::resolved_permission_card_titled(&label, theme);
+            self.emit(Out::UpdateCardByMsgId {
+                key: entry.key,
+                msg_id: entry.msg_id,
+                card,
+            })
+            .await;
         }
         if stale_click {
             // The card couldn't be flipped in place — show expired so the
@@ -689,6 +698,50 @@ impl DispatchHandle {
         }
     }
 
+    /// 「本会话不再询问」的 mode 侧组合（permission-mode-auto-gate D2 ②③）：
+    /// 期望值落会话映射（`desired_mode=auto`，快照即时反映操作者意图），再
+    /// 经与 webui 中程切换**同源**的 `Out::SendAcp(SetMode)` 路径送达执行体
+    /// （claude 驱动运行时 `set_permission_mode`；effective 由 `ModeChanged`
+    /// 回执）。同时在飞登记本次点击的卡片，供失败事件据实翻卡。
+    /// `Err(cause)` = SetMode 无法发出（会话映射不可解析）——调用方就地呈现
+    /// 失败态；放行语义不受影响。
+    async fn issue_auto_mode_switch(
+        &self,
+        entry: &super::PermCardEntry,
+        request_id: &str,
+    ) -> Result<(), String> {
+        let Some(sid) = self
+            .map
+            .get(&entry.key)
+            .await
+            .and_then(|m| m.session_id().map(str::to_owned))
+        else {
+            return Err("会话不可达".into());
+        };
+        self.map
+            .set_desired_mode(&entry.key, Some(super::AUTO_MODE.to_string()))
+            .await;
+        self.auto_mode_switches
+            .record(
+                sid.clone(),
+                super::AutoModeSwitch {
+                    request_id: request_id.to_string(),
+                    msg_id: Some(entry.msg_id.clone()),
+                    key: entry.key.clone(),
+                },
+            )
+            .await;
+        self.emit(Out::SendAcp {
+            session_id: sid.clone(),
+            cmd: AcpCommand::SetMode {
+                session_id: sid,
+                mode: super::AUTO_MODE.to_string(),
+            },
+        })
+        .await;
+        Ok(())
+    }
+
     /// `/provider`：渲染 Provider 管理主卡（mode + default-direct + 列表 +
     /// 详情/新建面板，bead sebas-63f.5）。未接线时退回帮助。
     async fn on_provider(&self, key: ChannelKey) {
@@ -701,12 +754,11 @@ impl DispatchHandle {
     }
 
     async fn spawn_new(&self, key: ChannelKey, prompt: String, input_msg_id: Option<String>) {
-        // A fresh session must not inherit "本会话不再询问" grants from the
-        // previous session in this chat — the user approved those for the
-        // session that asked, not for whatever comes next.
-        self.allowlist.clear(&key).await;
-        // 新会话也不继承上一条入站的回复目标（话题内 root_id）。和 allowlist
-        // 一样随会话终止清理，防止 ReplyTargetMap 无界增长。
+        // permission-mode-auto-gate：不再有聊天级「不再询问」授权可继承——
+        // 「本会话不再询问」切的是会话 mode（desired_mode 存会话映射），
+        // /new 重建映射后自然回到默认档（无 mode ≈ ask），无需显式清理。
+        // 新会话也不继承上一条入站的回复目标（话题内 root_id）。随会话
+        // 终止清理，防止 ReplyTargetMap 无界增长。
         self.reply_targets.clear(&key).await;
         // 原生执行体路由（make-feishu-optional-webui-primary，design D2）：
         // 该 chat 已是原生会话（agent-* 前缀）→ 走桥；否则走 acp 桥（默认）。

@@ -4,7 +4,7 @@
 
 use super::{DispatchHandle, Out, SessionEvent, extract_session_id};
 use crate::cards_ui;
-use sebas_acp::claude::session::{AcpCommand, AcpEvent, Decision};
+use sebas_acp::claude::session::AcpEvent;
 
 impl DispatchHandle {
     /// Dispatch an inbound `AcpEvent`, extracting the session_id from the
@@ -42,26 +42,10 @@ impl DispatchHandle {
                     tracing::warn!(%session_id, "no ChannelKey for permission request; dropping card");
                     return;
                 };
-                // Auto-approve if the user previously clicked "本会话不再
-                // 询问" in this chat. No card, no user click — the bridge
-                // gets the same AllowSession reply as a manual click
-                // would have produced.
-                if self.allowlist.is_allowed(&key, tool_name, args).await {
-                    tracing::info!(
-                        %session_id, %tool_name, %request_id,
-                        "permission auto-approved by session allowlist"
-                    );
-                    self.emit(Out::SendAcp {
-                        session_id: session_id.clone(),
-                        cmd: AcpCommand::PermissionReply {
-                            session_id: session_id.clone(),
-                            request_id: request_id.clone(),
-                            decision: Decision::AllowSession,
-                        },
-                    })
-                    .await;
-                    return;
-                }
+                // permission-mode-auto-gate：不再有 dispatch 侧自动放行（聊天级
+                // allowlist 已退役）。「不再询问」由会话 mode 门控在 driver 的
+                // hook 层执法——bypass 档根本不产生 PermissionRequest；走到这里
+                // 的请求一律出卡交给人批。
                 let card = cards_ui::permission_card(session_id, request_id, tool_name, args);
                 self.emit(Out::SendCard {
                     key,
@@ -105,7 +89,6 @@ impl DispatchHandle {
                 self.flush_card(session_id.as_str()).await;
                 let sid = session_id.as_str();
                 if let Some(key) = self.map.lookup_key_by_session(sid).await {
-                    self.allowlist.clear(&key).await;
                     self.reply_targets.clear(&key).await;
                     // workbench-turn-queue 5.2（design D5）：移除映射**之前**
                     // 发出 PendingDropped——随会话死掉的待生效提交被逐条标注
@@ -124,6 +107,9 @@ impl DispatchHandle {
                     self.publish_removed(&key);
                 }
                 self.drop_card(sid).await;
+                // 会话消亡 = 不会再有 ModeChanged/Error 来消费在飞的自动
+                // 模式切换记录，取走即弃（permission-mode-auto-gate）。
+                let _ = self.auto_mode_switches.take(sid).await;
                 // 终态会话同时清 root msg_id（与 web_close_session 对称），防止
                 // session_id→msg_id 条目长期积累内存泄漏 / 复用 id 继承 stale msg_id。
                 self.msgid.drop(sid).await;

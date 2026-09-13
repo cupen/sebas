@@ -164,6 +164,27 @@ fn mode_to_permission_flag(mode: &str) -> Option<&'static str> {
     sebas_acp::claude::control_mode_flag(mode)
 }
 
+/// （permission-mode-auto-gate 4.1）resume 装配点：把会话映射的
+/// `desired_mode` 翻译进 spawn 的 `--permission-mode` argv。resume 的子进程
+/// 是新建的，模式必须随 argv 重新下发（spec「resume re-issues the session
+/// mode」），否则恢复出来的会话回退 CLI 默认档。只有 claude 驱动认识该
+/// flag；`None`（未设 ≈ ask）与 CLI 默认词汇不加 flag，与 fresh spawn 的
+/// `handle_web_spawn` 同一套容错。
+fn resume_command_with_mode(
+    kind: &str,
+    command: Vec<String>,
+    desired_mode: Option<&str>,
+) -> Vec<String> {
+    let mut command = command;
+    if kind == "claude"
+        && let Some(flag) = desired_mode.and_then(mode_to_permission_flag)
+    {
+        command.push("--permission-mode".into());
+        command.push(flag.into());
+    }
+    command
+}
+
 async fn handle_spawn_resume_without_feishu(
     cfg: &Config,
     router: &DispatchHandle,
@@ -179,13 +200,7 @@ async fn handle_spawn_resume_without_feishu(
     // 是新建的，`--permission-mode` 必须随 argv 重新下发，否则恢复出来的
     // 会话回退到 CLI 默认（映射字段随 state.json 持久化）。
     let resume_mode = router.map.get(&key).await.and_then(|m| m.desired_mode.clone());
-    let mut command = command;
-    if kind == "claude"
-        && let Some(flag) = resume_mode.as_deref().and_then(mode_to_permission_flag)
-    {
-        command.push("--permission-mode".into());
-        command.push(flag.into());
-    }
+    let command = resume_command_with_mode(&kind, command, resume_mode.as_deref());
     let (session_id, pending, rx, resumed) = match acp_resume_and_activate(
         mgr,
         router,
@@ -245,6 +260,46 @@ async fn handle_spawn_resume_without_feishu(
 #[cfg(test)]
 mod tests {
     use sebas_dispatch::commands::RouterAction;
+
+    /// （permission-mode-auto-gate 4.1）resume 装配点单测：映射的
+    /// `desired_mode` 必须翻译成 spawn argv 末尾的 `--permission-mode` 对。
+    /// spec 场景「resume re-issues the session mode」的 argv 半边（driver
+    /// 把 flag 解析回 mode 共享单元、hook 从首次工具调用起静默，由
+    /// sebas-acp 的 resume 集成测试锁定）。
+    #[test]
+    fn resume_command_carries_desired_mode_as_permission_mode_flag() {
+        let base = vec!["claude".to_string(), "--model".to_string(), "sonnet".to_string()];
+        // desired_mode=auto（及 allow，同档）→ bypassPermissions 进 argv。
+        for mode in ["auto", "allow"] {
+            let argv = super::resume_command_with_mode("claude", base.clone(), Some(mode));
+            assert_eq!(
+                argv[argv.len() - 2..],
+                ["--permission-mode".to_string(), "bypassPermissions".to_string()],
+                "desired_mode={mode} must re-issue bypassPermissions on resume argv"
+            );
+        }
+        // edit → acceptEdits。
+        let argv = super::resume_command_with_mode("claude", base.clone(), Some("edit"));
+        assert_eq!(argv[argv.len() - 1], "acceptEdits");
+        // 未设（≈ask）/ ask：CLI 默认档，argv 不带 flag（spec：不默认 auto，
+        // 恢复出的会话照常事事询问）。
+        for mode in [None, Some("ask")] {
+            let argv = super::resume_command_with_mode("claude", base.clone(), mode);
+            assert!(
+                !argv.iter().any(|a| a == "--permission-mode"),
+                "mode {mode:?} must not add a permission-mode flag"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_command_leaves_non_claude_kinds_untouched() {
+        // 只有 claude 驱动认识 `--permission-mode`；其它执行体如实不带
+        // （非致命，与 fresh spawn 同语义）。
+        let base = vec!["opencode".to_string()];
+        let argv = super::resume_command_with_mode("opencode", base.clone(), Some("auto"));
+        assert_eq!(argv, base, "non-claude kind must not get the flag");
+    }
 
     /// `/router on|off` 归一化为 ServiceSet(router, persist=false)；
     /// `/router status` 归一化为 ServiceStatusFor(router)；

@@ -372,24 +372,7 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             .port
             .approval_answer(&request_id, decision.clone())
             .await;
-        let (title, theme, note): (&str, &str, String) = if !accepted {
-            (
-                "请求已过期",
-                "grey",
-                "该请求已处理、超时或会话已结束。".into(),
-            )
-        } else {
-            match decision {
-                PermissionDecision::AllowOnce => {
-                    ("已允许（本次）", "green", "本次调用已放行。".into())
-                }
-                PermissionDecision::AllowSession => {
-                    ("已允许（本会话）", "green", "本会话同类调用已放行。".into())
-                }
-                PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
-                PermissionDecision::Escalate { reason } => ("已升级", "orange", reason),
-            }
-        };
+        let (title, theme, note) = click_flip_state(&decision, accepted);
         let card_updated = match &msg_id {
             Some(msg_id) => {
                 let card = ChannelCard {
@@ -629,6 +612,12 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
             if entry.kind == "prompt" {
                 continue; // prompt 已在 Created/Updated 时 seed
             }
+            // permission-mode-auto-gate 事件契约：自动模式切换失败条目不进
+            // 正文，而是驱动对应权限卡的就地失败翻面（放行仍在、如实呈现）。
+            if entry.element_type == "permission_mode_result" {
+                self.handle_mode_result_entry(&key, &entry).await;
+                continue;
+            }
             let input = turn_to_card_input(&entry);
             if let Some(input) = &input {
                 apply_input_to_card(&mut view.card.body, input, &self.card_config());
@@ -645,6 +634,38 @@ impl<P: CoreSessionPort + 'static, C: ControlPort + 'static> ImFrontend<P, C> {
         if dirty {
             self.flush(&key).await;
         }
+    }
+
+    /// 处理一条 permission_mode_result 契约条目（permission-mode-auto-gate）：
+    /// dispatch 上报什么渲染什么——`ok=false` 时把该 request_id 的权限卡翻成
+    /// 如实失败态；卡不在本进程登记表（im 重启 / 跨实例渲染）时退化为文本
+    /// 回执，点击的失败反馈不许无痕消失。成功（ok=true）不发条目，无此分支。
+    async fn handle_mode_result_entry(&self, key: &ChannelKey, entry: &TurnEntry) {
+        let Some((request_id, detail)) = parse_mode_result_entry(entry) else {
+            return;
+        };
+        info!(
+            %request_id,
+            %detail,
+            "core 上报自动模式切换失败；就翻权限卡失败态"
+        );
+        let (title, theme, note) = mode_failure_flip(&detail);
+        let msg_id = self.perm_cards.read().await.get(&request_id).cloned();
+        match &msg_id {
+            Some(msg_id) => {
+                let card = ChannelCard {
+                    title: title.into(),
+                    theme: theme.into(),
+                    elements: vec![ChannelElement::Markdown { content: note.clone() }],
+                    turn: None,
+                };
+                self.update_card(msg_id, &card).await;
+            }
+            None => {
+                self.send_text(key, format!("[{title}] {note}")).await;
+            }
+        }
+        self.perm_cards.write().await.remove(&request_id);
     }
 
     fn card_config(&self) -> sebas_dispatch::CardConfig {
@@ -946,6 +967,68 @@ fn abbreviate(s: &str, max_chars: usize) -> String {
     format!("{head}…")
 }
 
+/// 权限卡点击翻面状态（permission-mode-auto-gate：allow_session 语义重定义
+/// 为「放行 + 切自动模式」，点击即翻「✅ 已切换自动模式」；SetMode 的最终
+/// 成败由 dispatch 经 turn 流事件回执，失败态见 [`mode_failure_flip`]）。
+/// `accepted=false` = 无待决请求（fail-closed 置灰）。
+fn click_flip_state(decision: &PermissionDecision, accepted: bool) -> (&'static str, &'static str, String) {
+    if !accepted {
+        return (
+            "请求已过期",
+            "grey",
+            "该请求已处理、超时或会话已结束。".into(),
+        );
+    }
+    match decision {
+        PermissionDecision::AllowOnce => {
+            ("已允许（本次）", "green", "本次调用已放行。".into())
+        }
+        // 按钮文案维持「本会话不再询问」（卡面由 dispatch 的 permission_card
+        // 定义）；点击后的翻面即 mode 语义的 audit trail。
+        PermissionDecision::AllowSession => (
+            "✅ 已切换自动模式",
+            "green",
+            "本会话已切换为自动模式（auto），后续工具调用不再询问；/new 或会话结束后回到默认档。".into(),
+        ),
+        PermissionDecision::Deny => ("已拒绝", "red", "该工具调用已被拒绝。".into()),
+        PermissionDecision::Escalate { reason } => ("已升级", "orange", reason.clone()),
+    }
+}
+
+/// 解析 permission-mode-auto-gate 事件契约条目（dispatch 经 turn 流上报：
+/// `element_type = "permission_mode_result"`、content = JSON
+/// `{request_id, ok, mode, detail}`）→ `(request_id, detail)`。
+/// `ok != false`（含显式成功上报与非契约载荷）返回 None——成功面是点击时
+/// 的翻面，无需事件。
+fn parse_mode_result_entry(entry: &TurnEntry) -> Option<(String, String)> {
+    if entry.element_type != "permission_mode_result" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&entry.content).ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(false) {
+        return None;
+    }
+    let request_id = v.get("request_id")?.as_str()?.to_string();
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or("原因未知")
+        .to_string();
+    Some((request_id, detail))
+}
+
+/// 自动模式切换失败的如实翻面（spec「Allow session with failed mode switch
+/// is honest」）：放行不回滚，模式未切必须如实可见，不伪装成已切换。
+fn mode_failure_flip(detail: &str) -> (&'static str, &'static str, String) {
+    (
+        "⚠️ 已放行本次调用，但自动模式切换失败",
+        "orange",
+        format!(
+            "当前调用已放行；自动模式切换失败：{detail}\n本会话仍会在工具调用时询问。"
+        ),
+    )
+}
+
 /// wire 上 URL-safe 编码的会话 key → ChannelKey（webui routes 口径的逆）。
 fn decode_wire_key(encoded: &str) -> ChannelKey {
     if let Ok(raw) = urlencoding::decode(encoded)
@@ -1208,6 +1291,128 @@ mod tests {
             port.ensures.lock().await.is_empty(),
             "合法点击不应产生文本回执"
         );
+    }
+
+    // ── permission-mode-auto-gate：权限卡翻面两态（3.1）──────────────────
+
+    /// 两态之一（成功）：「本会话不再询问」点击（accepted）→ 翻面
+    /// 「✅ 已切换自动模式」——mode 语义的 audit trail。
+    #[test]
+    fn allow_session_click_flips_to_auto_mode_state() {
+        let (title, theme, note) = click_flip_state(&PermissionDecision::AllowSession, true);
+        assert_eq!(title, "✅ 已切换自动模式");
+        assert_eq!(theme, "green");
+        assert!(note.contains("自动模式（auto）"), "audit trail note: {note}");
+        assert!(
+            note.contains("不再询问"),
+            "翻面注记应说明后续不再询问: {note}"
+        );
+    }
+
+    /// 两态之二（失败）：如实文案——放行仍在、模式未切，绝不伪装成已切换。
+    #[test]
+    fn mode_switch_failure_flip_is_honest() {
+        let (title, theme, note) = mode_failure_flip("set mode \"auto\" 被拒绝（boom）");
+        assert!(title.contains("已放行本次调用"), "放行不回滚须可见: {title}");
+        assert!(title.contains("切换失败"), "失败须可见: {title}");
+        assert_eq!(theme, "orange");
+        assert!(note.contains("当前调用已放行"), "{note}");
+        assert!(note.contains("被拒绝"), "原因须透传: {note}");
+        assert!(!note.contains("已切换自动模式"), "失败态不得伪装成功: {note}");
+    }
+
+    /// 事件契约解析：只有 `ok=false` 的 permission_mode_result 载荷触发翻面。
+    #[test]
+    fn mode_result_entry_parses_contract_payload_only() {
+        let entry = |payload: serde_json::Value| TurnEntry {
+            position: 0,
+            kind: "content".into(),
+            element_type: "permission_mode_result".into(),
+            content: payload.to_string(),
+            created_at_unix: 0,
+            title: None,
+        };
+        let ok = parse_mode_result_entry(&entry(json!({
+            "request_id": "toolu_9", "ok": false, "mode": "auto", "detail": "boom"
+        })));
+        assert_eq!(ok, Some(("toolu_9".into(), "boom".into())));
+        // ok=true（显式成功上报，当前不发）不触发翻面（成功面=点击时翻面）。
+        assert_eq!(
+            parse_mode_result_entry(&entry(json!({
+                "request_id": "toolu_9", "ok": true, "mode": "auto", "detail": ""
+            }))),
+            None
+        );
+        // 非契约载荷 / 缺 request_id 一律忽略。
+        assert_eq!(parse_mode_result_entry(&entry(json!("garbage"))), None);
+        assert_eq!(
+            parse_mode_result_entry(&entry(json!({"ok": false, "detail": "x"}))),
+            None
+        );
+        // 非 permission_mode_result 条目一律忽略。
+        let mut md = entry(json!({}));
+        md.element_type = "markdown".into();
+        md.content = "正文".into();
+        assert_eq!(parse_mode_result_entry(&md), None);
+    }
+
+    /// wiring：turn 流里的失败契约条目 → 消费 perm_cards 登记项（翻面经
+    /// update_card 出站，headless 下 no-op），且载荷绝不进会话卡正文。
+    #[tokio::test]
+    async fn mode_failure_entry_flips_registered_card_and_skips_body() {
+        let port = FakePort::new();
+        let fe = fe(port.clone());
+        let key = ChannelKey::feishu("oc_t", None);
+        fe.on_session_info(SessionInfo {
+            channel: "feishu".into(),
+            key: "oc_t".into(),
+            session_id: Some("s1".into()),
+            status: "active".into(),
+            phase: None,
+            user_prompt: Some("do it".into()),
+            last_active_unix: 0,
+            project_dir: None,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            backend: None,
+            usage: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+        })
+        .await;
+        fe.perm_cards
+            .write()
+            .await
+            .insert("toolu_9".into(), "om_9".into());
+
+        let entry = TurnEntry {
+            position: 0,
+            kind: "content".into(),
+            element_type: "permission_mode_result".into(),
+            content: json!({
+                "request_id": "toolu_9", "ok": false, "mode": "auto", "detail": "rejected"
+            })
+            .to_string(),
+            created_at_unix: 0,
+            title: None,
+        };
+        fe.apply_turns(key, vec![entry]).await;
+
+        // 登记项被消费（翻面只发生一次）。
+        assert!(
+            !fe.perm_cards.read().await.contains_key("toolu_9"),
+            "失败翻面后应移除权限卡登记"
+        );
+        // 载荷不进正文（不影响会话卡渲染）。
+        let views = fe.views.read().await;
+        let v = views.get(&view_id(&ChannelKey::feishu("oc_t", None))).unwrap();
+        let body = serde_json::to_string(&v.card.body).unwrap();
+        assert!(!body.contains("permission_mode_result"), "{body}");
+        assert!(!body.contains("rejected"), "{body}");
     }
 
     // ── 回调到达性自检（feishu-card-callback-observability 3.1）────────────
