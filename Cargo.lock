@@ -3040,6 +3040,7 @@ dependencies = [
  "hmac 0.13.0",
  "http-body-util",
  "reqwest 0.13.4",
+ "rusqlite",
  "rust-embed",
  "sebas-acp",
  "sebas-channels",

@@ -7,6 +7,7 @@
 //! handlers never know whether the session authority is in-process
 //! (`core --webui`) or across the core session channel (standalone webui).
 
+use crate::auth::Identity;
 use crate::events::WebUiEvent;
 use crate::models::{CardConfigInfo, ConversationEntryView, SessionStatus};
 use crate::routes::{
@@ -15,6 +16,8 @@ use crate::routes::{
 };
 use crate::server::WebUiState;
 use crate::session_backend::{Reachability, SessionRejection};
+use crate::user_store::StoreError;
+use axum::Extension;
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -396,6 +399,7 @@ impl EnvVarKind {
 /// （sebas-router config.rs、sebas-dispatch state_store.rs、acp claude
 /// driver、run.rs）。内部管道与测试专用变量（`SEBAS_IPC`、
 /// `SEBAS_CORE_SOCKET` 等）不在表内，即整体不出现（design Non-Goals）。
+/// `SEBAS_WEBUI_TOKEN`（单字段登录）随 add-webui-multiuser-rbac 移除。
 struct EnvVarSpec {
     name: &'static str,
     what: &'static str,
@@ -435,17 +439,11 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         kind: EnvVarKind::Plain,
         unset_default: Some("~/.sebas/sebas.db"),
     },
-    // 凭据类（*_PASSWORD / *_TOKEN / *_SECRET）一律 set_unset：
+    // 凭据类（*_PASSWORD / *_SECRET）一律 set_unset：
     // 值不出现在响应的任何字段（design D2）。
     EnvVarSpec {
         name: "SEBAS_WEBUI_PASSWORD",
-        what: "WebUI bootstrap password (used when credentials file is missing)",
-        kind: EnvVarKind::SetUnset,
-        unset_default: None,
-    },
-    EnvVarSpec {
-        name: "SEBAS_WEBUI_TOKEN",
-        what: "WebUI single-field login token (token or password accepted at login)",
+        what: "WebUI root bootstrap password (used with SEBAS_WEBUI_USER at first start)",
         kind: EnvVarKind::SetUnset,
         unset_default: None,
     },
@@ -550,42 +548,48 @@ pub async fn agent_kinds(State(state): State<WebUiState>) -> Response {
 
 // ---- Auth endpoints（webui 登录鉴权，见 `auth` 模块） ----
 
-/// GET /api/auth/me — 探明鉴权状态。始终 200：`enabled` = 服务端是否配置了
-/// 凭据；`authenticated` = 当前请求是否携带有效会话；`username` 仅在已
-/// 认证时给出。前端据此决定渲染登录页还是工作台。
+/// GET /api/auth/me — 探明鉴权状态。始终 200：
+/// - `enabled`：服务端鉴权开关是否打开；
+/// - `authenticated`：当前请求是否携带解析得出有效身份的会话（会话绑定
+///   用户，用户被删/禁用时按未认证处理）；
+/// - `needs_setup`：鉴权开启且用户库零用户——前端渲染首启设置页而非登录
+///   页（spec「首启 root 引导」）；
+/// - `username` / `role`：仅在已认证时给出（spec「me 返回身份与角色」）。
+///
+/// 前端据此决定渲染首启设置页、登录页还是工作台。
 pub async fn auth_me(State(state): State<WebUiState>, headers: axum::http::HeaderMap) -> Response {
     if !state.auth.enabled() {
-        return Json(json!({ "enabled": false, "authenticated": false, "username": null }))
-            .into_response();
+        return Json(json!({
+            "enabled": false,
+            "authenticated": false,
+            "username": null,
+            "needs_setup": false,
+        }))
+        .into_response();
     }
-    let authenticated = match crate::server::extract_webui_session_cookie(&headers) {
-        Some(sid) => state.auth.session_store.validate(&sid).await.is_ok(),
-        None => false,
-    };
-    let username = if authenticated {
-        state.auth.username()
-    } else {
-        None
+    let identity = match crate::server::extract_webui_session_cookie(&headers) {
+        Some(sid) => state.auth.identity_for_session(&sid).await,
+        None => None,
     };
     Json(json!({
         "enabled": true,
-        "authenticated": authenticated,
-        "username": username,
+        "authenticated": identity.is_some(),
+        "username": identity.as_ref().map(|i| i.username.clone()),
+        "role": identity.as_ref().map(|i| i.role),
+        "needs_setup": state.auth.needs_setup(),
     }))
     .into_response()
 }
 
-/// POST /api/auth/login — 单字段 `{ secret }`（token 或密码，服务端自动
-/// 识别）或旧格式 `{ username, password }` → 会话 cookie。
-/// 限速按来源 IP（SessionStore），失败统一 401（不区分凭据类型/对错）。
+/// POST /api/auth/login — 仅 `{ username, password }`（add-webui-multiuser-
+/// rbac D5：`{"secret"}` 单字段形态移除，缺字段 → 400）。限速按来源 IP
+/// （SessionStore），失败统一 401（不区分用户名错/密码错/账户禁用）。
 #[derive(Deserialize)]
 pub struct AuthLoginForm {
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
-    #[serde(default)]
-    pub secret: Option<String>,
 }
 
 pub async fn auth_login(
@@ -593,32 +597,14 @@ pub async fn auth_login(
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Json(form): Json<AuthLoginForm>,
 ) -> Response {
-    let client_ip = addr.ip().to_string();
-    let (display_name, login) = if let Some(secret) = form.secret.as_deref() {
-        let login = state.auth.login_secret(&client_ip, secret).await;
-        (
-            login
-                .as_ref()
-                .ok()
-                .and_then(|_| state.auth.username())
-                .unwrap_or_else(|| "admin".into()),
-            login,
-        )
-    } else if let (Some(username), Some(password)) =
-        (form.username.as_deref(), form.password.as_deref())
-    {
-        let username = username.to_string();
-        (
-            username.clone(),
-            state.auth.login(&client_ip, &username, password).await,
-        )
-    } else {
+    let (Some(username), Some(password)) = (form.username, form.password) else {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "login requires {\"secret\"} or {\"username\", \"password\"}.",
+            "login requires {\"username\", \"password\"}.",
         );
     };
-    match login {
+    let client_ip = addr.ip().to_string();
+    match state.auth.login(&client_ip, &username, &password).await {
         Ok(session_id) => {
             let cookie = format!(
                 "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
@@ -628,7 +614,7 @@ pub async fn auth_login(
             (
                 StatusCode::OK,
                 [(axum::http::header::SET_COOKIE, cookie)],
-                Json(json!({ "status": "ok", "username": display_name })),
+                Json(json!({ "status": "ok", "username": username })),
             )
                 .into_response()
         }
@@ -636,6 +622,8 @@ pub async fn auth_login(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many login attempts. Try again later.",
         ),
+        // Invalid / AccountDisabled 同文案（spec：禁用用户的登录与凭据错误
+        // 同样 401，不向攻击者区分）。
         Err(_) => api_error(StatusCode::UNAUTHORIZED, "Invalid username or password."),
     }
 }
@@ -658,6 +646,263 @@ pub async fn auth_logout(
         Json(json!({ "status": "ok" })),
     )
         .into_response()
+}
+
+/// POST /api/auth/setup — 首启建 root（add-webui-multiuser-rbac 3.2，
+/// design D4：零用户专属，spec「首启 root 引导」路径 1）。挂在鉴权豁免
+/// 名单上（零用户时无会话可用），但与其它受保护 API 一样受非安全方法
+/// 同源校验（server.rs auth_guard）。成功即建会话并下发 cookie——前端
+/// 据此直接进入工作台。
+///
+/// 错误语义：非零用户 409；密码 < 8 位 400；鉴权开关关闭（设置页形态
+/// 不存在，spec：开关关闭时完全放行且不触发引导）400；用户名非法 400；
+/// 用户库不可用 503。
+#[derive(Deserialize)]
+pub struct AuthSetupForm {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+pub async fn auth_setup(State(state): State<WebUiState>, Json(form): Json<AuthSetupForm>) -> Response {
+    let (Some(username), Some(password)) = (form.username, form.password) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "setup requires {\"username\", \"password\"}.",
+        );
+    };
+    let username = username.trim();
+    match state.auth.setup_root(username, &password).await {
+        Ok(session_id) => {
+            let cookie = format!(
+                "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                crate::auth::SESSION_COOKIE_NAME,
+                session_id
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::SET_COOKIE, cookie)],
+                Json(json!({ "status": "ok", "username": username, "role": "root" })),
+            )
+                .into_response()
+        }
+        Err(crate::auth::SetupError::AlreadySetup) => api_error(
+            StatusCode::CONFLICT,
+            "用户库已有用户，无法再次初始化 root",
+        ),
+        Err(crate::auth::SetupError::WeakPassword) => api_error(
+            StatusCode::BAD_REQUEST,
+            format!("密码过短：至少 {} 位", crate::auth::MIN_PASSWORD_LEN),
+        ),
+        Err(crate::auth::SetupError::Disabled) => api_error(
+            StatusCode::BAD_REQUEST,
+            "WebUI 鉴权已关闭（[watchdog.webui] auth = false），无需首启设置",
+        ),
+        Err(crate::auth::SetupError::Unavailable) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "用户库不可用（auth.db 打开失败）")
+        }
+        Err(crate::auth::SetupError::Store(StoreError::UsernameTaken)) => {
+            api_error(StatusCode::CONFLICT, "用户名已存在（大小写不敏感）")
+        }
+        Err(crate::auth::SetupError::Store(StoreError::InvalidUsername)) => {
+            api_error(StatusCode::BAD_REQUEST, "用户名不能为空")
+        }
+        Err(crate::auth::SetupError::Store(e)) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    }
+}
+
+// ---- 用户管理端点（add-webui-multiuser-rbac 3.2，design D6） ----
+//
+// 整个面仅限 root：users.manage 的角色执法在 server.rs 的 required_permission
+// 中央表完成（非 root 已认证请求在中间件层 403，到不了 handler）。「不能删
+// 自己」需要请求者身份，从 extensions 里的 Identity 读取（auth_guard 塞入；
+// 鉴权关闭时缺席）。最后启用的 root 的删/禁/降级保护在 UserStore 内判定。
+
+/// 用户库句柄缺失（鉴权关闭的 disabled 态 / auth.db 打开失败的降级态）的
+/// 统一文案。开关关闭时路由门放行，但没有可操作的用户库——如实 503。
+const USERS_STORE_UNAVAILABLE: &str = "用户库不可用（鉴权关闭或 auth.db 打开失败）";
+
+/// 用户库语义错误 → HTTP：目标不存在 404；最后 root / 用户名非法 400；
+/// 用户名撞车 409；其余（库损坏等）500。
+fn store_error_response(e: StoreError) -> Response {
+    let status = match &e {
+        StoreError::NotFound => StatusCode::NOT_FOUND,
+        StoreError::LastRoot | StoreError::InvalidUsername => StatusCode::BAD_REQUEST,
+        StoreError::UsernameTaken => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    api_error(status, e.to_string())
+}
+
+/// GET /api/users — 用户列表（无哈希字段，[`crate::user_store::UserInfo`]
+/// 形状）。
+pub async fn users_list(State(state): State<WebUiState>) -> Response {
+    let Some(store) = state.auth.user_store() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
+    };
+    match store.list() {
+        Ok(users) => Json(json!({ "users": users })).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /api/users 的请求体。角色词表 root/admin/member/viewer 必填
+/// （spec「创建用户 SHALL 指定角色与初始密码」）。
+#[derive(Deserialize)]
+pub struct CreateUserForm {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// POST /api/users — 创建用户（201 + `{"user": …}`，无哈希字段）。
+/// 用户名撞车 409（大小写不敏感）、角色词表外 400。
+pub async fn users_create(
+    State(state): State<WebUiState>,
+    Json(form): Json<CreateUserForm>,
+) -> Response {
+    let Some(store) = state.auth.user_store() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
+    };
+    let (Some(username), Some(password)) = (form.username, form.password) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "创建用户需要 {\"username\", \"password\", \"role\"} 字段",
+        );
+    };
+    if password.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "密码不能为空");
+    }
+    let Some(role_word) = form.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return api_error(StatusCode::BAD_REQUEST, "role 必填（root/admin/member/viewer）");
+    };
+    let role = match role_word.parse::<crate::rbac::Role>() {
+        Ok(r) => r,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    match store.create(username.trim(), &password, role) {
+        Ok(info) => (StatusCode::CREATED, Json(json!({ "user": info }))).into_response(),
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// POST /api/users/{id}/password 的请求体。
+#[derive(Deserialize)]
+pub struct SetUserPasswordForm {
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// POST /api/users/{id}/password — 重置密码，并立即踢掉该用户全部会话
+/// （spec「重置密码踢会话」：旧 cookie 立即失效，后续 API 401）。
+pub async fn users_set_password(
+    State(state): State<WebUiState>,
+    Path(id): Path<i64>,
+    Json(form): Json<SetUserPasswordForm>,
+) -> Response {
+    let Some(store) = state.auth.user_store() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
+    };
+    let Some(password) = form.password else {
+        return api_error(StatusCode::BAD_REQUEST, "password 字段必填");
+    };
+    if password.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "密码不能为空");
+    }
+    if let Err(e) = store.set_password(id, &password) {
+        return store_error_response(e);
+    }
+    state.auth.session_store.remove_all_for_user(id).await;
+    (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+}
+
+/// POST /api/users/{id}/role 的请求体。
+#[derive(Deserialize)]
+pub struct SetUserRoleForm {
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// POST /api/users/{id}/role — 修改角色。角色每请求实时解析（design D5），
+/// 在线用户的下一个请求即按新角色执法，无需重新登录。降级最后一个启用的
+/// root 在存储层被拒（400）。
+pub async fn users_set_role(
+    State(state): State<WebUiState>,
+    Path(id): Path<i64>,
+    Json(form): Json<SetUserRoleForm>,
+) -> Response {
+    let Some(store) = state.auth.user_store() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
+    };
+    let Some(role_word) = form.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return api_error(StatusCode::BAD_REQUEST, "role 字段必填（root/admin/member/viewer）");
+    };
+    let role = match role_word.parse::<crate::rbac::Role>() {
+        Ok(r) => r,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    if let Err(e) = store.set_role(id, role) {
+        return store_error_response(e);
+    }
+    (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+}
+
+/// POST /api/users/{id}/enabled 的请求体。
+#[derive(Deserialize)]
+pub struct SetUserEnabledForm {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// POST /api/users/{id}/enabled — 启用/禁用。禁用立即踢掉该用户全部会话
+/// （spec「禁用用户即刻失效」）；启用不影响会话。禁用最后一个启用的 root
+/// 在存储层被拒（400）。
+pub async fn users_set_enabled(
+    State(state): State<WebUiState>,
+    Path(id): Path<i64>,
+    Json(form): Json<SetUserEnabledForm>,
+) -> Response {
+    let Some(store) = state.auth.user_store() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
+    };
+    let Some(enabled) = form.enabled else {
+        return api_error(StatusCode::BAD_REQUEST, "enabled 字段必填（布尔）");
+    };
+    if let Err(e) = store.set_enabled(id, enabled) {
+        return store_error_response(e);
+    }
+    if !enabled {
+        state.auth.session_store.remove_all_for_user(id).await;
+    }
+    (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+}
+
+/// DELETE /api/users/{id} — 删除用户并清除其全部会话。不能删除当前登录的
+/// 自己（400，spec）；删除最后一个启用的 root 在存储层被拒（400）。
+pub async fn users_delete(
+    State(state): State<WebUiState>,
+    identity: Option<Extension<Identity>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let Some(store) = state.auth.user_store() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
+    };
+    if let Some(Extension(identity)) = identity
+        && identity.user_id == id
+    {
+        return api_error(StatusCode::BAD_REQUEST, "不能删除当前登录的用户自己");
+    }
+    if let Err(e) = store.delete(id) {
+        return store_error_response(e);
+    }
+    state.auth.session_store.remove_all_for_user(id).await;
+    (StatusCode::OK, Json(json!({ "status": "removed" }))).into_response()
 }
 
 // ---- Mutation endpoints ----
@@ -1848,7 +2093,7 @@ mod env_endpoint_tests {
     //! `EnvGuard` drop 时还原进入前的值，不污染同进程其他测试。
 
     use super::*;
-    use crate::auth::{AuthHandle, Credentials};
+    use crate::auth::AuthHandle;
     use crate::models::RouterInfo;
     use crate::server::build_router_with_auth;
     use crate::session_backend::FakeBackend;
@@ -1988,7 +2233,7 @@ mod env_endpoint_tests {
     #[tokio::test]
     async fn set_unset_items_never_leak_values() {
         let _lock = ENV_LOCK.lock().await;
-        let _token = EnvGuard::set("SEBAS_WEBUI_TOKEN", Some("tok-super-secret-1234"));
+        let _password = EnvGuard::set("SEBAS_WEBUI_PASSWORD", Some("pw-super-secret-1234"));
         let _feishu = EnvGuard::set("SEBAS_FEISHU_APP_SECRET", Some("fl-secret-6789"));
         let _control = EnvGuard::set("SEBAS_CONTROL_SECRET", Some("ctrl-secret-abcd"));
         let app = app();
@@ -1996,7 +2241,7 @@ mod env_endpoint_tests {
         assert_eq!(status, StatusCode::OK);
 
         for name in [
-            "SEBAS_WEBUI_TOKEN",
+            "SEBAS_WEBUI_PASSWORD",
             "SEBAS_FEISHU_APP_SECRET",
             "SEBAS_CONTROL_SECRET",
         ] {
@@ -2010,7 +2255,7 @@ mod env_endpoint_tests {
         // 遮蔽钉死：整个响应体的任何字段都不含明文。
         let raw = serde_json::to_string(&body).unwrap();
         for literal in [
-            "tok-super-secret-1234",
+            "pw-super-secret-1234",
             "fl-secret-6789",
             "ctrl-secret-abcd",
         ] {
@@ -2046,6 +2291,8 @@ mod env_endpoint_tests {
             .map(|i| i["name"].as_str().unwrap())
             .collect();
         // 清单全量钉死（含补入的 SEBAS_STATE_DB）：增删条目须显式过这里。
+        // add-webui-multiuser-rbac：SEBAS_WEBUI_TOKEN（单字段登录）随该
+        // 机制整体移除。
         assert_eq!(
             names,
             [
@@ -2055,7 +2302,6 @@ mod env_endpoint_tests {
                 "SEBAS_STATE_FILE",
                 "SEBAS_STATE_DB",
                 "SEBAS_WEBUI_PASSWORD",
-                "SEBAS_WEBUI_TOKEN",
                 "SEBAS_CONTROL_SECRET",
                 "SEBAS_LOG_LEVEL",
                 "SEBAS_HANG_TIMEOUT_SECS",
@@ -2070,17 +2316,16 @@ mod env_endpoint_tests {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
     }
 
-    /// 跟随 server.rs auth_guard_tests 的模式：凭据文件句柄 + tempdir 由
-    /// 本测试持有存活（AuthHandle.enabled() 每次 mtime 探测）。
+    /// 跟随 server.rs auth_guard_tests 的模式：临时 auth.db 句柄（小迭代数
+    /// 提速），先 setup root 再登录。
     #[tokio::test]
     async fn auth_enabled_rejects_anonymous_and_admits_session() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.json");
-        crate::auth::store_credentials(
-            &path,
-            &Credentials::with_iterations("alice", "password8", 1000),
-        )
-        .unwrap();
+        let auth = Arc::new(AuthHandle::open_with_iterations(
+            dir.path().join("auth.db"),
+            1000,
+        ));
+        auth.setup_root("alice", "password8").await.unwrap();
         let app = build_router_with_auth(
             Arc::new(FakeBackend::new()),
             RouterInfo::default(),
@@ -2088,7 +2333,7 @@ mod env_endpoint_tests {
             None,
             Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
             30,
-            Arc::new(AuthHandle::open(path)),
+            auth,
         );
 
         // 鉴权开启 + 未登录 → 401（与其他 /api 一致，不在豁免名单里）。
@@ -2111,7 +2356,7 @@ mod env_endpoint_tests {
             .header("content-type", "application/json")
             .header("host", "127.0.0.1:12345")
             .extension(ConnectInfo(test_addr()))
-            .body(Body::from(r#"{"secret":"password8"}"#))
+            .body(Body::from(r#"{"username":"alice","password":"password8"}"#))
             .unwrap();
         let resp = app.clone().oneshot(login).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

@@ -301,20 +301,27 @@ pub async fn run(
         // （不启用）；配置了 = 配置项 + 默认根自动入列。
         let webui_allowed_roots =
             crate::config::webui_allowed_roots(&cfg.watchdog.webui, webui_work_root.as_deref());
+        // 登录鉴权与独立 webui 进程同一套（add-webui-multiuser-rbac 3.4，
+        // design D4）：开关关闭 → disabled 态全路由免登录；打开 → 建库 +
+        // env 引导 root，零用户留给首启设置页。装配提到 bind 之前，让非
+        // loopback 安全门先于 bind 完成裁决。
+        let webui_auth = if cfg.watchdog.webui.auth {
+            crate::webui_cmd::bootstrap_auth()
+        } else {
+            tracing::warn!("webui auth disabled via [watchdog.webui] auth = false: all routes are public");
+            std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
+        };
+        // 非 loopback 安全门与独立 webui 进程同一裁决（webui_cmd::
+        // ensure_non_loopback_bind_allowed）：`--webui-host` 可传 0.0.0.0 等
+        // 公网地址，开关关闭 / 用户库无启用用户时在 bind 前硬失败——不给
+        // 公网留裸奔端口或抢注 root 的窗口。默认 127.0.0.1 时门不触发。
+        if !webui_host_is_loopback(&webui_host) {
+            crate::webui_cmd::ensure_non_loopback_bind_allowed(cfg.watchdog.webui.auth, &webui_auth)?;
+        }
         let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
-        let webui_auth = cfg.watchdog.webui.auth;
         tokio::spawn(async move {
-            // 登录鉴权与独立 webui 进程同一套（add-webui-auth-switch）：
-            // 开关关闭 → disabled 态全路由免登录；打开 → 凭据文件 + env 引导。
-            // core --webui 恒绑 127.0.0.1，不受非 loopback 门影响。
-            let auth = if webui_auth {
-                crate::webui_cmd::bootstrap_auth()
-            } else {
-                tracing::warn!("webui auth disabled via [watchdog.webui] auth = false: all routes are public");
-                std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
-            };
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
                 router_info,
@@ -322,7 +329,7 @@ pub async fn run(
                 agent_kinds,
                 listener,
                 None,
-                auth,
+                webui_auth,
                 webui_work_root,
                 webui_allowed_roots,
                 cfg.watchdog.webui.archive_retention_days,
@@ -543,6 +550,15 @@ fn init_tracing(cfg: &Config) {
         return;
     }
     subscriber.init();
+}
+
+/// CLI `--webui-host` 的 loopback 判定。与 watchdog `WebUiEndpoint::is_loopback`
+/// 同语义：只认 IP 字面量（127.0.0.1/::1 = loopback）；域名（含 `localhost`）
+/// 一律按非 loopback 走安全门——两条启动路径的判定必须一致。
+fn webui_host_is_loopback(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Build a RouterInfo from the optional router config for the WebUI.

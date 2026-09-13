@@ -13,9 +13,11 @@ pub mod fs;
 pub mod router_client;
 pub mod models;
 pub mod projects;
+pub mod rbac;
 pub mod routes;
 pub mod server;
 pub mod session_backend;
+pub mod user_store;
 pub mod web_adapter;
 
 #[doc(hidden)]

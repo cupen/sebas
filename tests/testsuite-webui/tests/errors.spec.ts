@@ -66,25 +66,30 @@ test.describe('agent 对话覆盖', () => {
       expect(collector.clean()).toEqual([])
     })
 
-    test('crash — honest death: unavailable note on the workbench, no fake success', async ({ page }) => {
+    test('crash — honest death: mapping torn down, row gone, open view retains transcript', async ({ page }) => {
       const { key, detail } = await openIdle(page)
 
       await detail.sendFollowUp('boom crash')
 
-      // The child dies mid-turn; the session mapping is torn down. The
-      // workbench (the only conversation surface — session-detail retired)
-      // refetches over the live WS connection and surfaces the loss honestly
-      // with its "Session unavailable" empty state instead of showing a
-      // stale or successful session.
-      await expect(detail.unavailableNote).toBeVisible({ timeout: 20_000 })
-
-      // Row gone from the live list; the API agrees.
+      // The child dies mid-turn; the session mapping is torn down. The API
+      // truth is the honest-death contract: the row leaves the live list and
+      // the detail answers not-found — no fabricated success anywhere.
       await expect
         .poll(
           async () => (await listSessions(page.request)).some((r) => r.encoded_key === key),
-          { timeout: 10_000, intervals: [200] },
+          { timeout: 20_000, intervals: [200] },
         )
         .toBe(false)
+      expect((await getSession(page.request, key)).status).toBe(404)
+
+      // conversation-incremental-sync：已打开的视图对增量续拉失败（会话已
+      // 拆除 → 404）保留已渲染的 transcript 与游标自愈——「Session
+      // unavailable」空态保留给首拉失败，不再出现在中途死亡的会话上
+      // （前端单测 dashboard.test.ts 同款钉子）。呈现上没有假成功：transcript
+      // 停在死前最后一帧（"boom"），不出现任何完成态文案。
+      const transcript = new Transcript(page)
+      await expect(transcript.turnWith('boom').first()).toBeVisible()
+      await expect(detail.unavailableNote).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
     })

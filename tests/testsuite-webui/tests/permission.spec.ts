@@ -71,13 +71,13 @@ test.describe('审批卡片旅程', () => {
   })
 
   test.describe('会话级允许', () => {
-    test('allow-session path — observed product gap: the follow-up call is gated again', async ({ page }) => {
-      // ⚠️ REAL product finding (recorded in design.md 实现期发现 1): the
-      // WebUI `answer_permission` path sends the ACP PermissionReply but never
-      // calls `SessionAllowlist::grant_all` — that registration lives only on
-      // the feishu card-click path (inbound.rs). So from the WebUI, "allow
-      // session" does NOT persist: an identical follow-up tool call in the
-      // same session is gated again. We assert that observed, stable behavior.
+    test('allow-session path — session switches to auto mode, follow-up is no longer gated', async ({ page }) => {
+      // 语义更新（6bbbc25，permission-mode-auto-gate）：「本会话不再询问」
+      // = 放行当前请求 + 会话 mode 切 auto（与飞书卡面同一组合）；旧
+      // allowlist/grant_all 退役。driver 层是 mode 的唯一定门控：auto 档的
+      // hook_callback 被静默应答、零请求跨面——后续同会话的相同调用不再
+      // 产生审批卡（本用例曾钉住的「WebUI 路径不持久化」产品缺口随
+      // grant_all 一并退役）。
       const { detail, cards } = await openAndTriggerPerm(page)
 
       // First call: allow for session.
@@ -86,14 +86,12 @@ test.describe('审批卡片旅程', () => {
       await expect(detail.turnWith('perm done').first()).toBeVisible({ timeout: 15_000 })
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 15_000 })
 
-      // Second identical call in the SAME session: since the WebUI path never
-      // registered grant_all, it is gated again (a new review card appears).
+      // Second identical call in the SAME session: auto mode answers the gate
+      // driver-side, so the turn completes with NO review card at all.
       await detail.sendFollowUp('perm')
-      await expect(cards.all().first()).toBeVisible({ timeout: 15_000 })
-
-      // Resolve it so the turn finishes and the suite stays deterministic.
-      await cards.allowOnce().click()
+      await expect(detail.turnWith('perm done')).toHaveCount(2, { timeout: 20_000 })
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
+      await expect(cards.all()).toHaveCount(0)
 
       expect(collector.clean()).toEqual([])
     })

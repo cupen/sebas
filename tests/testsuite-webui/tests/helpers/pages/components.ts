@@ -293,12 +293,13 @@ export class SettingsModal {
 
   /**
    * Switch to a settings section by its nav label; waits for load to settle.
-   * revamp-settings-nav-and-models-editor: sections are Generic → Appearance
-   * → Services → Models → About (the former Settings overview and Env sections
-   * are gone — Generic and About absorbed them).
+   * Order is the spec (settings-modal SECTIONS): Generic → Appearance →
+   *〔分隔线〕Services · Users(仅 root) → Models →〔压底分隔线〕Env Vars ·
+   * About. The former Settings overview and standalone Env sections are gone;
+   * split-env-vars-settings-section 迁出的 Env 表住底部只读组「Env Vars」。
    */
   async openSection(
-    label: 'Generic' | 'Models' | 'Services' | 'Appearance' | 'About',
+    label: 'Generic' | 'Models' | 'Services' | 'Appearance' | 'About' | 'Env Vars',
   ): Promise<void> {
     await this.panel.locator('.nav-item', { hasText: label }).click()
     await expect(

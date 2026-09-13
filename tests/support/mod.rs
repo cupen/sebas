@@ -297,8 +297,9 @@ channel_path = "core-channel.sock"
 enabled = true
 host = "127.0.0.1"
 port = {webui_port}
-# auth 默认 true 且缺失凭据时会自动生成（写进真实 ~/.sebas）；API 断言
-# 沙箱一律免登录，显式关闭（webui 鉴权旅程由 testsuite-webui 专测）。
+# auth 默认 true；API 断言沙箱一律免登录，显式关闭（webui 登录旅程由
+# testsuite-webui 专测）。开启形态的凭据走沙箱内 SEBAS_WEBUI_AUTH_DB +
+# env 引导 / webui-passwd，绝不落真实 ~/.sebas。
 auth = false
 
 # router validate requires >=1 provider with a base_url; the debug `test`
@@ -361,6 +362,13 @@ usage_file = "{}"
             (
                 "SEBAS_ROUTER_PROVIDER_OVERLAY",
                 forward_slash(&self.path.join("providers.json")),
+            ),
+            // WebUI 用户库（add-webui-multiuser-rbac）：auth = false 时无人
+            // 打开它，钉进沙箱是纵深防御——任何开启 auth 或调 webui-passwd
+            // 的变体都不会写到操作者的真实 ~/.sebas/auth.db。
+            (
+                "SEBAS_WEBUI_AUTH_DB",
+                forward_slash(&self.path.join("auth.db")),
             ),
             // archive.json falls back to SEBAS_HOME ($HOME/.sebas) — pin both
             // into the sandbox: without this the suites read AND rewrote the

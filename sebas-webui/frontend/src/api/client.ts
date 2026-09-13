@@ -462,12 +462,42 @@ export type PermissionDecision =
   | { decision: 'deny' }
   | { decision: 'escalate'; reason: string }
 
-/** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
+/**
+ * RBAC 角色词表（add-webui-multiuser-rbac）：固定四档，映射由服务端代码
+ * 定义（D3）。前端只做呈现层裁剪（隐藏无权限入口），防线在服务端路由层。
+ */
+export type Role = 'root' | 'admin' | 'member' | 'viewer'
+
+/** 角色词表的规范顺序（新建/改角色下拉的数据源；跟随代码，不落配置）。 */
+export const ROLES: readonly Role[] = ['root', 'admin', 'member', 'viewer']
+
 /** GET /api/auth/me 的响应：服务端是否启用登录鉴权 + 当前会话状态。 */
 export interface AuthInfo {
   enabled: boolean
   authenticated: boolean
   username: string | null
+  /**
+   * 零用户首启标记（add-webui-multiuser-rbac D5）：enabled 且未认证且
+   * `needs_setup` 为真 → 前端渲染首启设置页而非登录页。字段缺失（旧服务端
+   * 过渡期）按 false 处理。
+   */
+  needs_setup?: boolean
+  /** 认证后随行的角色（会话绑定用户的当次实时解析读数）；未认证/未启用时缺省。 */
+  role?: Role
+}
+
+/**
+ * /api/users 列表条目（add-webui-multiuser-rbac D6）：无任何哈希字段——
+ * 盐/哈希绝不 travels the wire，这里也不为它们留位。
+ */
+export interface UserRecord {
+  id: number
+  username: string
+  role: Role
+  enabled: boolean
+  created_at_unix: number
+  /** 服务端可能随行的更新时间；缺失不参与任何呈现判定。 */
+  updated_at_unix?: number
 }
 
 /** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
@@ -545,6 +575,7 @@ function isAuthExempt(path: string): boolean {
   return (
     path === '/api/auth/login' ||
     path === '/api/auth/me' ||
+    path === '/api/auth/setup' ||
     path === '/api/auth/logout' ||
     path === '/api/admin/login' ||
     path === '/api/admin/csrf'
@@ -717,12 +748,30 @@ export const api = {
    */
   nodes: () => get<NodesResponse>('/api/nodes'),
 
-  // Auth（webui 登录鉴权；me 探明 enabled/authenticated，login 换会话 cookie。
-  // 登录为单字段形态：secret 可以是登录 token 或账户密码，服务端自动识别。）
+  // Auth（webui 多用户登录鉴权，add-webui-multiuser-rbac D5/D6）：me 探明
+  // enabled/authenticated/needs_setup/role；login 只收 {username,password}
+  // 双字段（旧 {secret} 单字段形态已移除，服务端一律 400）；setup 为零用户
+  // 首启专属（成功即建立会话，语义同登录）。
   authMe: () => get<AuthInfo>('/api/auth/me'),
-  authLogin: (secret: string) =>
-    post<{ status: string; username: string }>('/api/auth/login', { secret }),
+  authLogin: (username: string, password: string) =>
+    post<{ status: string; username: string }>('/api/auth/login', { username, password }),
+  authSetup: (username: string, password: string) =>
+    post<{ status: string; username: string }>('/api/auth/setup', { username, password }),
   authLogout: () => post<{ status: string }>('/api/auth/logout'),
+
+  // Users 管理（add-webui-multiuser-rbac D6，仅 root；越权 403、用户名占用
+  // 与最后启用 root 保护 409、弱密码 400——文案取响应 error 字段就地展示）。
+  // password/role/enabled 变更与删除按需踢目标用户会话（服务端职责）。
+  usersList: () => get<{ users: UserRecord[] }>('/api/users'),
+  usersCreate: (username: string, password: string, role: Role) =>
+    post<{ status: string; username: string }>('/api/users', { username, password, role }),
+  usersSetPassword: (id: number, password: string) =>
+    post<{ status: string }>(`/api/users/${id}/password`, { password }),
+  usersSetRole: (id: number, role: Role) =>
+    post<{ status: string }>(`/api/users/${id}/role`, { role }),
+  usersSetEnabled: (id: number, enabled: boolean) =>
+    post<{ status: string }>(`/api/users/${id}/enabled`, { enabled }),
+  usersDelete: (id: number) => del<{ status: string }>(`/api/users/${id}`),
 
   // Session mutations
   /**

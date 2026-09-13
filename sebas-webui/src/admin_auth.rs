@@ -33,18 +33,23 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(30);
 pub struct Session {
     pub id: String,
     pub csrf_token: String,
+    /// 会话绑定的 webui 用户 id（add-webui-multiuser-rbac 2.3）。控制面
+    /// admin 会话（env 密码登录，不对应 auth.db 用户）恒为 0——用户管理
+    /// 的踢会话/删号对它无效果。
+    pub user_id: i64,
     #[allow(dead_code)]
     created_at: Instant,
     last_used: Instant,
 }
 
 impl Session {
-    fn new() -> Self {
+    fn new(user_id: i64) -> Self {
         let id = generate_token(32);
         let csrf_token = generate_token(32);
         Self {
             id,
             csrf_token,
+            user_id,
             created_at: Instant::now(),
             last_used: Instant::now(),
         }
@@ -84,10 +89,12 @@ impl SessionStore {
         }
     }
 
-    /// Create a new session, returning its ID and CSRF token.
-    pub async fn create(&self) -> (String, String) {
+    /// Create a new session bound to `user_id`, returning its ID and CSRF
+    /// token. WebUI 用户登录传真实用户 id；admin 控制面会话传 0（哨兵值，
+    /// 见 [`Session::user_id`]）。
+    pub async fn create(&self, user_id: i64) -> (String, String) {
         let mut inner = self.inner.lock().await;
-        let session = Session::new();
+        let session = Session::new(user_id);
         let id = session.id.clone();
         let csrf = session.csrf_token.clone();
         inner.sessions.insert(id.clone(), session);
@@ -97,31 +104,52 @@ impl SessionStore {
     /// Validate a session cookie value. Returns the CSRF token if valid, or
     /// an error message. Lazily prunes expired sessions.
     pub async fn validate(&self, session_id: &str) -> Result<String, &'static str> {
+        self.check(session_id)
+            .await
+            .map(|(csrf, _)| csrf)
+            .ok_or("invalid session")
+    }
+
+    /// Validate a session and return the bound user id (0 = admin control
+    /// plane session). None = 会话不存在或已过期。
+    pub async fn user_id_of(&self, session_id: &str) -> Option<i64> {
+        self.check(session_id).await.map(|(_, user_id)| user_id)
+    }
+
+    /// Shared validation path for [`Self::validate`] / [`Self::user_id_of`]:
+    /// prune expired sessions lazily, touch on activity, return
+    /// `(csrf_token, user_id)` for a live session.
+    async fn check(&self, session_id: &str) -> Option<(String, i64)> {
         let mut inner = self.inner.lock().await;
 
         // Lazy pruning: remove expired sessions
         inner.sessions.retain(|_, s| !s.is_expired());
 
-        match inner.sessions.get_mut(session_id) {
-            Some(session) => {
-                if session.is_expired() {
-                    inner.sessions.remove(session_id);
-                    Err("session expired")
-                } else {
-                    // Extend the session's lifetime on activity
-                    if session.last_used.elapsed() > SESSION_EXTEND_WINDOW {
-                        session.touch();
-                    }
-                    Ok(session.csrf_token.clone())
-                }
-            }
-            None => Err("invalid session"),
+        let session = inner.sessions.get_mut(session_id)?;
+        if session.is_expired() {
+            inner.sessions.remove(session_id);
+            return None;
         }
+        // Extend the session's lifetime on activity
+        if session.last_used.elapsed() > SESSION_EXTEND_WINDOW {
+            session.touch();
+        }
+        Some((session.csrf_token.clone(), session.user_id))
     }
 
     /// Remove a session (logout).
     pub async fn remove(&self, session_id: &str) {
         self.inner.lock().await.sessions.remove(session_id);
+    }
+
+    /// Remove every session bound to `user_id`（禁用/删号/重置密码时踢会话，
+    /// add-webui-multiuser-rbac 2.3）。返回移除的会话数。admin 控制面会话
+    /// （`user_id = 0`）不受影响——用户库里不存在 id 为 0 的用户。
+    pub async fn remove_all_for_user(&self, user_id: i64) -> usize {
+        let mut inner = self.inner.lock().await;
+        let before = inner.sessions.len();
+        inner.sessions.retain(|_, s| s.user_id != user_id);
+        before - inner.sessions.len()
     }
 
     /// Check rate limit for an IP address. Returns true if the request is
@@ -168,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn session_created_and_validated() {
         let store = SessionStore::new();
-        let (id, csrf) = store.create().await;
+        let (id, csrf) = store.create(0).await;
         assert!(!id.is_empty());
         assert!(!csrf.is_empty());
 
@@ -187,10 +215,50 @@ mod tests {
     #[tokio::test]
     async fn removed_session_rejected() {
         let store = SessionStore::new();
-        let (id, _) = store.create().await;
+        let (id, _) = store.create(0).await;
         store.remove(&id).await;
         let result = store.validate(&id).await;
         assert!(result.is_err());
+    }
+
+    /// add-webui-multiuser-rbac 2.3：会话绑定用户 id 且可查询。
+    #[tokio::test]
+    async fn session_binds_and_reports_user_id() {
+        let store = SessionStore::new();
+        let (id, _) = store.create(42).await;
+        assert_eq!(store.user_id_of(&id).await, Some(42));
+        assert_eq!(store.user_id_of("missing").await, None);
+
+        // 注销后同样查不到。
+        store.remove(&id).await;
+        assert_eq!(store.user_id_of(&id).await, None);
+    }
+
+    /// add-webui-multiuser-rbac 2.3：按用户踢会话；admin 控制面会话
+    /// （user_id = 0）不受影响。
+    #[tokio::test]
+    async fn remove_all_for_user_kicks_only_that_user() {
+        let store = SessionStore::new();
+        let (a, _) = store.create(5).await;
+        let (b, _) = store.create(5).await;
+        let (admin, _) = store.create(0).await;
+        let (other, _) = store.create(6).await;
+
+        let removed = store.remove_all_for_user(5).await;
+        assert_eq!(removed, 2, "该用户的两个会话都被移除");
+        assert!(store.validate(&a).await.is_err());
+        assert!(store.validate(&b).await.is_err());
+
+        assert!(
+            store.validate(&admin).await.is_ok(),
+            "admin 会话（user_id=0）不得被按用户踢会话波及"
+        );
+        assert!(store.validate(&other).await.is_ok(), "其他用户会话不受影响");
+
+        // 没有会话的用户 → 0，且不误删任何会话。
+        assert_eq!(store.remove_all_for_user(999).await, 0);
+        assert!(store.validate(&admin).await.is_ok());
+        assert_eq!(store.user_id_of(&admin).await, Some(0));
     }
 
     #[tokio::test]

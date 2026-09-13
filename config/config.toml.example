@@ -61,7 +61,14 @@ driver = "claude"
 # [watchdog.webui]     # 默认启用；端口冲突自动降级 degraded
 # host = "127.0.0.1"
 # port = 9797
-# auth = true          # false = 全路由免登录（仅测试用，非 loopback 拒绝启动）
+# auth = true          # 登录鉴权开关。开启（默认）= 全部 /api 与 /ws 需登录：
+#                      #   零用户首启走 WebUI 设置页引导建 root（loopback），
+#                      #   或事先用 SEBAS_WEBUI_USER + SEBAS_WEBUI_PASSWORD
+#                      #   环境变量 / `sebas webui-passwd --user <name>`
+#                      #   建户（用户库默认 ~/.sebas/auth.db，env
+#                      #   SEBAS_WEBUI_AUTH_DB 覆盖）。
+#                      # false = 全路由免登录（仅测试用）；host 非 loopback
+#                      # 时无论开关与否都拒绝启动（安全门）。
 #
 # core 恒启动（会话核心，无开关）。[watchdog.core] 只配置通道路径：
 # [watchdog.core]

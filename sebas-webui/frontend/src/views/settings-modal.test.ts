@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * Settings modal (IA v3, revamp-settings-nav-and-models-editor +
- * split-env-vars-settings-section)：左侧分区导航 + 右侧内容。六个分区
- * （顺序即规约）——
+ * split-env-vars-settings-section + add-webui-multiuser-rbac)：左侧分区导航 +
+ * 右侧内容。七个分区（顺序即规约；Users/Services 随角色裁剪可见性）——
  *   - generic    纯通用可配置项分区：语言切换等偏好落地前只呈现说明占位
  *                文案（环境变量表已迁往 env-vars，该分区不再有 env 表）
  *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
@@ -14,6 +14,11 @@
  *                count，unify-router-process-shape D4）→ 二层强制出口对话框：
  *                计数 + 流式中断后果，Force stop 以 force 重发、取消不发请求；
  *                其余失败仍走既有内联错误
+ *   - users      用户管理（add-webui-multiuser-rbac 5.3/5.4，root 专属）：
+ *                /api/users 列表 + 新建对话框（用户名/密码/角色下拉）+ 行内
+ *                改角色/重置密码/启停/删除；400/409 文案就地展示。分区可见性
+ *                随 role 裁剪（Users 仅 root、Services 隐藏于 member/viewer；
+ *                role 缺省 = 鉴权关闭的宿主，保持既有分区）
  *   - models     provider 管理列表（/router/api/providers，条目携带能力
  *                标记；不再渲染 Router 网关卡、不再请求 /api/router）
  *   - env-vars   环境变量只读表（/api/env 服务端策划清单，懒加载）：plain
@@ -82,6 +87,12 @@ const apiMocks = vi.hoisted(() => ({
   disableService: vi.fn(),
   restartService: vi.fn(),
   fsBrowseDirs: vi.fn(),
+  usersList: vi.fn(),
+  usersCreate: vi.fn(),
+  usersSetPassword: vi.fn(),
+  usersSetRole: vi.fn(),
+  usersSetEnabled: vi.fn(),
+  usersDelete: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -121,7 +132,15 @@ vi.mock('../api/client.js', () => ({
     disableService: apiMocks.disableService,
     restartService: apiMocks.restartService,
     fsBrowseDirs: apiMocks.fsBrowseDirs,
+    usersList: apiMocks.usersList,
+    usersCreate: apiMocks.usersCreate,
+    usersSetPassword: apiMocks.usersSetPassword,
+    usersSetRole: apiMocks.usersSetRole,
+    usersSetEnabled: apiMocks.usersSetEnabled,
+    usersDelete: apiMocks.usersDelete,
   },
+  // 角色词表（渲染层常量，Users 分区的角色下拉数据源）与真模块同值。
+  ROLES: ['root', 'admin', 'member', 'viewer'] as const,
 }))
 
 import './settings-modal.js'
@@ -211,6 +230,14 @@ beforeEach(() => {
   apiMocks.disableService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
   apiMocks.restartService.mockResolvedValue({ operation_id: 'op-test', status: 'accepted', message: 'accepted' })
   apiMocks.fsBrowseDirs.mockResolvedValue({ path: '/tmp/test-work', entries: [] })
+  // Users 分区（add-webui-multiuser-rbac 5.3）默认空表桩：默认挂载（role
+  // 为 null）不渲染该分区、也不发请求；root 挂载的用例在各自 describe 覆写。
+  apiMocks.usersList.mockResolvedValue({ users: [] })
+  apiMocks.usersCreate.mockResolvedValue({ status: 'ok', username: 'new-user' })
+  apiMocks.usersSetPassword.mockResolvedValue({ status: 'ok' })
+  apiMocks.usersSetRole.mockResolvedValue({ status: 'ok' })
+  apiMocks.usersSetEnabled.mockResolvedValue({ status: 'ok' })
+  apiMocks.usersDelete.mockResolvedValue({ status: 'ok' })
   apiMocks.routerPresets.mockResolvedValue({
     presets: [
       {
@@ -1270,6 +1297,286 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
     expect(payload.base_url_anthropic).toBe('https://api.example/anthropic')
     expect(payload.base_url_openai_responses).toBe('https://api.example/responses')
     expect(payload.model_map).toEqual({ 'old-model': 'new-model' })
+    el.remove()
+  })
+})
+
+describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () => {
+  const usersFixture = [
+    { id: 1, username: 'root', role: 'root', enabled: true, created_at_unix: 1_700_000_000 },
+    { id: 2, username: 'alice', role: 'member', enabled: false, created_at_unix: 1_700_000_500 },
+  ]
+
+  /** 带角色挂载（role=null = 鉴权关闭的宿主，保持既有分区）。 */
+  async function mountAs(
+    role: 'root' | 'admin' | 'member' | 'viewer' | null,
+  ): Promise<SebasSettingsModal> {
+    const el = document.createElement('sebas-settings-modal') as SebasSettingsModal
+    if (role !== null) el.role = role
+    el.open = true
+    document.body.appendChild(el)
+    await el.updateComplete
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    return el
+  }
+
+  function navLabels(el: SebasSettingsModal): (string | undefined)[] {
+    return navItems(el).map((b) => b.textContent?.trim())
+  }
+
+  async function gotoUsers(el: SebasSettingsModal): Promise<void> {
+    const index = navLabels(el).indexOf('Users')
+    expect(index).toBeGreaterThanOrEqual(0)
+    await goto(el, index)
+  }
+
+  function userRow(el: SebasSettingsModal, username: string): HTMLElement {
+    const row = [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="user-row"]')].find(
+      (r) => r.dataset['username'] === username,
+    )
+    expect(row).toBeTruthy()
+    return row!
+  }
+
+  /** 设 WA 控件值并派发事件（input/change，组件 handler 读 target.value）。 */
+  function setWaValue(host: Element, selector: string, value: string, event = 'input'): void {
+    const input = host.querySelector(selector) as unknown as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event(event, { bubbles: true, composed: true }))
+  }
+
+  /**
+   * 选 wa-select 的值并派发 change。jsdom 不触发 slotchange，晚于 connect
+   * 加入的 wa-option 让 select 留下空选项缓存、value getter 过滤为 null
+   * （见 new-session-dialog.test.ts 同款注释）——先显式 nudge 重建索引。
+   */
+  function pickWaSelect(host: Element, selector: string, value: string): void {
+    const sel = host.querySelector(selector) as unknown as HTMLElement & {
+      processSlotChange?: () => void
+      value: string
+    }
+    sel.processSlotChange?.()
+    sel.value = value
+    sel.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+  }
+
+  function draftState(el: SebasSettingsModal, key: 'userCreate' | 'userReset' | 'userDelete'): unknown {
+    return (el as unknown as Record<string, unknown>)[key]
+  }
+
+  beforeEach(() => {
+    apiMocks.usersList.mockResolvedValue({ users: usersFixture })
+  })
+
+  it('trims the nav by role: Users is root-only, Services hides for member/viewer', async () => {
+    const rootEl = await mountAs('root')
+    expect(navLabels(rootEl)).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Users',
+      'Models',
+      'Env Vars',
+      'About',
+    ])
+    rootEl.remove()
+
+    const adminEl = await mountAs('admin')
+    expect(navLabels(adminEl)).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Models',
+      'Env Vars',
+      'About',
+    ])
+    adminEl.remove()
+
+    // member/viewer：无服务控制（services.control）、无用户管理（users.manage）。
+    for (const role of ['member', 'viewer'] as const) {
+      const el = await mountAs(role)
+      const labels = navLabels(el)
+      expect(labels).not.toContain('Users')
+      expect(labels).not.toContain('Services')
+      el.remove()
+    }
+
+    // role 缺省（服务端未启用鉴权的宿主）：既有分区全保留，Users 仍不可见
+    // （users.manage 需要服务端身份）。
+    const hostEl = await mountAs(null)
+    expect(navLabels(hostEl)).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Models',
+      'Env Vars',
+      'About',
+    ])
+    hostEl.remove()
+  })
+
+  it('a remembered section that the role may not see falls back to generic', async () => {
+    localStorage.setItem('lastSettingsSection', 'users')
+    const el = await mountAs('admin')
+    await settle(el)
+    expect(el.section).toBe('generic')
+    el.remove()
+  })
+
+  it('lists users lazily with role / enabled / created date; no request before the visit', async () => {
+    const el = await mountAs('root')
+    expect(apiMocks.usersList).not.toHaveBeenCalled()
+    await gotoUsers(el)
+    expect(el.section).toBe('users')
+    expect(apiMocks.usersList).toHaveBeenCalledTimes(1)
+    const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="user-row"]')]
+    expect(rows.length).toBe(2)
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).toContain('alice')
+    expect(text).toContain('member')
+    expect(text).toContain('disabled')
+    // created_at_unix → ISO 日期（列表不携带任何哈希字段可展示）。
+    expect(text).toContain('created 2023-11-14')
+    expect(userRow(el, 'alice').querySelector('wa-select.user-role')).toBeTruthy()
+    el.remove()
+  })
+
+  it('renders an inline error instead of an empty list when /api/users fails', async () => {
+    apiMocks.usersList.mockRejectedValue(new ApiError(403, 'forbidden: users.manage only'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    expect(el.shadowRoot!.querySelector('.toolbar-error')?.textContent).toContain(
+      'forbidden: users.manage only',
+    )
+    expect(el.shadowRoot!.querySelectorAll('[data-testid="user-row"]').length).toBe(0)
+    el.remove()
+  })
+
+  it('creates a user with {username, password, role} from the dialog and refreshes the list', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New user'))!
+      .click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
+    setWaValue(dialog, 'wa-input[label="Username"]', 'bob')
+    setWaValue(dialog, 'wa-input[label^="Password"]', 'long-enough')
+    pickWaSelect(dialog, 'wa-select[label="Role"]', 'admin')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersCreate).toHaveBeenCalledTimes(1)
+    expect(apiMocks.usersCreate).toHaveBeenCalledWith('bob', 'long-enough', 'admin')
+    // 成功才关闭对话框并重取列表（初载 + 刷新 = 2 次）。
+    expect(draftState(el, 'userCreate')).toBeNull()
+    expect(apiMocks.usersList).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('rejects a weak password locally without any request', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New user'))!
+      .click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
+    setWaValue(dialog, 'wa-input[label="Username"]', 'bob')
+    setWaValue(dialog, 'wa-input[label^="Password"]', 'short')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersCreate).not.toHaveBeenCalled()
+    expect(dialog.querySelector('[data-testid="user-create-error"]')?.textContent).toContain(
+      '密码至少需要 8 个字符',
+    )
+    el.remove()
+  })
+
+  it('shows the server 409 message in place and keeps the create dialog open', async () => {
+    apiMocks.usersCreate.mockRejectedValue(new ApiError(409, '用户名已被占用'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    waButtons(el)
+      .find((b) => b.textContent?.includes('New user'))!
+      .click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-create') as HTMLElement
+    setWaValue(dialog, 'wa-input[label="Username"]', 'alice')
+    setWaValue(dialog, 'wa-input[label^="Password"]', 'long-enough')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersCreate).toHaveBeenCalledTimes(1)
+    expect(dialog.querySelector('[data-testid="user-create-error"]')?.textContent).toContain(
+      '用户名已被占用',
+    )
+    expect(draftState(el, 'userCreate')).not.toBeNull()
+    el.remove()
+  })
+
+  it('row actions hit the role / enabled endpoints and surface results in place', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    pickWaSelect(userRow(el, 'alice'), 'wa-select.user-role', 'viewer')
+    await settle(el)
+    expect(apiMocks.usersSetRole).toHaveBeenCalledWith(2, 'viewer')
+    // 改角色触发列表重取后 DOM 重建：重新寻行再点启停。
+    ;(userRow(el, 'root').querySelector('button[title="Disable user"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersSetEnabled).toHaveBeenCalledWith(1, false)
+    const callout = el.shadowRoot!.querySelector('[data-testid="user-action"]')
+    expect(callout?.getAttribute('role')).toBe('status')
+    expect(callout?.textContent).toContain('已禁用')
+    el.remove()
+  })
+
+  it('a last-root 409 on role change shows the server message in place and reverts via refetch', async () => {
+    apiMocks.usersSetRole.mockRejectedValue(new ApiError(409, '不能降级最后一个启用的 root'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    pickWaSelect(userRow(el, 'root'), 'wa-select.user-role', 'member')
+    await settle(el)
+    const callout = el.shadowRoot!.querySelector('[data-testid="user-action"]')
+    expect(callout?.getAttribute('role')).toBe('alert')
+    expect(callout?.textContent).toContain('不能降级最后一个启用的 root')
+    // 失败也重取列表：行内 select 的显示值以服务端读数回滚，不假装改成功。
+    expect(apiMocks.usersList).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('reset password goes through its dialog and reports success in place', async () => {
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    ;(userRow(el, 'alice').querySelector('button[title="Reset password"]') as HTMLElement).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-reset') as HTMLElement
+    expect(dialog.textContent).toContain('alice')
+    setWaValue(dialog, 'wa-input', 'new-password')
+    ;(dialog.querySelector('wa-button[variant="brand"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersSetPassword).toHaveBeenCalledWith(2, 'new-password')
+    expect(draftState(el, 'userReset')).toBeNull()
+    expect(el.shadowRoot!.querySelector('[data-testid="user-action"]')?.textContent).toContain(
+      '已重置',
+    )
+    el.remove()
+  })
+
+  it('delete confirmation shows the last-root protection message in place on 409', async () => {
+    apiMocks.usersDelete.mockRejectedValue(new ApiError(409, '不能删除最后一个启用的 root'))
+    const el = await mountAs('root')
+    await gotoUsers(el)
+    ;(userRow(el, 'root').querySelector('button[title="Delete user"]') as HTMLElement).click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('wa-dialog.user-delete') as HTMLElement
+    ;(dialog.querySelector('wa-button[variant="danger"]') as HTMLElement).click()
+    await settle(el)
+    expect(apiMocks.usersDelete).toHaveBeenCalledWith(1)
+    expect(dialog.querySelector('[data-testid="user-delete-error"]')?.textContent).toContain(
+      '不能删除最后一个启用的 root',
+    )
+    // 失败保持打开，操作者可取消。
+    expect(draftState(el, 'userDelete')).not.toBeNull()
     el.remove()
   })
 })

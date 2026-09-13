@@ -44,6 +44,9 @@ export interface SessionDetail {
   encoded_key: string
   current_model: string | null
   available_models: string[] | null
+  /** add-agent-mode-selection：本机会话的 argv 应用值 / ModeChanged 同步值。 */
+  desired_mode?: string | null
+  effective_mode?: string | null
 }
 
 export interface Summary {
@@ -56,6 +59,10 @@ export interface AuthInfo {
   enabled: boolean
   authenticated: boolean
   username: string | null
+  /** add-webui-multiuser-rbac：仅认证后给出。 */
+  role?: string | null
+  /** 鉴权开启且零用户——首启设置页形态（前端渲染 setup 而非 login）。 */
+  needs_setup?: boolean
 }
 
 /** Session detail path — the encoded key is already URL-safe, use verbatim. */
@@ -277,8 +284,13 @@ export async function authMe(request: APIRequestContext): Promise<AuthInfo> {
   return (await request.get('/api/auth/me')).json() as Promise<AuthInfo>
 }
 
-export async function authLogin(request: APIRequestContext, secret: string): Promise<number> {
-  const resp = await request.post('/api/auth/login', { data: { secret } })
+/** POST /api/auth/login（用户名+密码双字段）；返回状态码供断言。 */
+export async function authLogin(
+  request: APIRequestContext,
+  username: string,
+  password: string,
+): Promise<number> {
+  const resp = await request.post('/api/auth/login', { data: { username, password } })
   return resp.status()
 }
 

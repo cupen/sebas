@@ -395,7 +395,10 @@ def _sandbox_env(work, secret=True):
             "SEBAS_STATE_DB": os.path.join(work, "sebas.db"),
             "SEBAS_STATE_FILE": os.path.join(work, "state.json"),
             "SEBAS_ROUTER_PROVIDER_OVERLAY": os.path.join(work, "providers.json"),
-            "SEBAS_WEBUI_AUTH_FILE": os.path.join(work, "webui-auth.json"),
+            # WebUI 用户库（SQLite；add-webui-multiuser-rbac）：bootstrap_auth
+            # 与 webui-passwd 都从这里取路径。auth 关闭时无人打开它，设着只是
+            # 让任何 stray 的建户调用也落不进真实 ~/.sebas。
+            "SEBAS_WEBUI_AUTH_DB": os.path.join(work, "auth.db"),
             "SEBAS_PROJECTS_PATH": os.path.join(work, "projects.json"),
             # archive.json derives from SEBAS_HOME ($HOME/.sebas) — without
             # this the sandbox READ AND REWROTE the operator's real archive
@@ -548,10 +551,12 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
     _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port, fake_acp_bin=fake_acp_bin)
 
     if auth_on:
+        # 统一测试账号 admin/admin：webui-passwd 写沙箱内 auth.db（首个用户
+        # 默认 root），建户先于进程拉起、失败即退（fail-fast，不等 health）。
         result = subprocess.run(
             [sebas_bin, "webui-passwd", "--user", "admin", "--password-stdin"],
             input=b"admin",
-            env={**os.environ, "SEBAS_WEBUI_AUTH_FILE": os.path.join(work, "webui-auth.json")},
+            env={**os.environ, "SEBAS_WEBUI_AUTH_DB": os.path.join(work, "auth.db")},
         )
         if result.returncode != 0:
             print("error: provisioning admin/admin failed", flush=True)

@@ -555,6 +555,7 @@ impl From<cli::WebUiPasswdArgs> for sebas::webui_cmd::WebUiPasswdArgs {
             user: a.user,
             password: a.password,
             password_stdin: a.password_stdin,
+            role: a.role,
         }
     }
 }

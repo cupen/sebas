@@ -50,9 +50,14 @@ files.
 
 **WebUI sandbox shortcut**: `invoke testsuite-webui-sandbox` spins up a
 throwaway webui on port 9879 with auth **disabled by default** (login-free GUI
-testing); `invoke testsuite-webui-sandbox --auth` turns auth on with the test account
-**admin / admin** (`webui-passwd` only warns on passwords shorter than 8
-chars). Ctrl-C stops it and deletes the sandbox dir. The same assembly serves
+testing); `invoke testsuite-webui-sandbox --auth` turns auth on with the test
+account **admin / admin**, provisioned into the sandbox-local
+`SEBAS_WEBUI_AUTH_DB` (add-webui-multiuser-rbac) via
+`sebas webui-passwd --user admin --password-stdin` — the first user in a
+fresh user store defaults to the root role (`webui-passwd` only warns on
+passwords shorter than 8 chars; the interactive `--auth` login prompt is
+username `admin` + password `admin`). Ctrl-C stops it and deletes the sandbox
+dir. The same assembly serves
 Playwright (`invoke testsuite-webui-server` on port 9899, 9898 with `TESTSUITE_AUTH=1`);
 both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
 (their configs used stale keys the current binary rejects, e.g.
@@ -65,18 +70,33 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `[dispatch] state_file`, `[media] download_dir`,
      `[acp.claude] sessions_dir` / `work_dir`,
      `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
-     (port ≠ 9797, e.g. 9877) all set inside it — include `auth = false`
-     (or a sandbox-local `SEBAS_WEBUI_AUTH_FILE`), otherwise the default-on
-     auth switch auto-generates credentials into the real `~/.sebas`;
-   - env: three files that would otherwise default into the real `~/.sebas`
+     (port ≠ 9797, e.g. 9877) all set inside it — decide the auth posture
+     explicitly: `auth = false` for login-free sandboxing, or keep the
+     default-on switch and provision a user into a sandbox-local
+     `SEBAS_WEBUI_AUTH_DB` (below). Left alone with zero users, a loopback
+     webui stops at the first-run setup page (whoever hits it first creates
+     root) and the user store would land in the real `~/.sebas`;
+   - env: four files that would otherwise default into the real `~/.sebas`
      — all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db`
      — the easy one to miss: without it the sandbox opens the real DB even
      with everything else sandboxed), `SEBAS_STATE_FILE` (default
-     `~/.sebas/state.json`), and `SEBAS_ROUTER_PROVIDER_OVERLAY` (default
-     `~/.sebas/providers.json`). Do **not** set `SEBAS_CORE_SECRET`: the core
+     `~/.sebas/state.json`), `SEBAS_ROUTER_PROVIDER_OVERLAY` (default
+     `~/.sebas/providers.json`), and `SEBAS_WEBUI_AUTH_DB` (WebUI user
+     store, default `~/.sebas/auth.db`; nothing opens it while
+     `auth = false`, pin it anyway so any provisioning stays sandbox-local).
+     Do **not** set `SEBAS_CORE_SECRET`: the core
      auto-arms (generates a key, writes it to `<config dir>/core.secret`,
      0600) and clients discover it from that file on every connect attempt —
      the env var is only for explicitly simulating a wrong-secret refusal.
+
+   Provisioning a WebUI login user (only needed when `auth` stays on):
+   either `sebas webui-passwd --user <name> [--password-stdin|--password]
+   [--role root|admin|member|viewer]` against the pinned
+   `SEBAS_WEBUI_AUTH_DB` (first user defaults to root, later ones to
+   member), or export `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD` before
+   starting the webui (bootstraps root at first start, idempotent on
+   restart). Login is always username + password — the retired single-field
+   token / JSON credentials file forms no longer exist.
 
 2. Run the two halves exactly as the watchdog would:
 
@@ -135,8 +155,10 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
    [watchdog.webui]
    enabled = false          # bare core owns the webui via --webui-port
-   auth = false             # default-on auth would auto-generate credentials
-                            # into the real ~/.sebas on first bootstrap
+   auth = false             # 登录免了：零用户 + 默认开的 auth 会停在首启
+                            # 设置页，且 auth.db 落进真实 ~/.sebas——沙箱内
+                            # 要么显式关，要么把 SEBAS_WEBUI_AUTH_DB 钉进
+                            # 沙箱并建户（webui-passwd / env 引导）
 
    # router validate requires ≥1 provider with a base_url — the debug `test`
    # provider is injected only AFTER parse, so it cannot satisfy validate.

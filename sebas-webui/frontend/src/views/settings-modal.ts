@@ -12,6 +12,9 @@
  *                  desired / actual / uptime + /api/admin/events 最近错误；
  *                  enable/disable/restart 动作；无 adapter 时诚实呈现
  *                  「无 watchdog 控制面」横幅且不渲染动作按钮）
+ *   - users      → 用户管理（add-webui-multiuser-rbac 5.3，仅 root 可见）：
+ *                  /api/users 列表 + 新建（用户名/密码/角色下拉）+ 行内
+ *                  改角色、重置密码、启停、删除；400/409 文案就地展示
  *   - models     → provider 管理列表（redesign-provider-models-settings
  *                  3.4：router 运行状态归 Services，本分区不再呈现网关卡）
  *   - ── 弹性留白 + 分隔线，压底 ──
@@ -21,6 +24,11 @@
  *   - about      → INSTANCE 段在上（工作区根目录 + 复制、default agent
  *                  kind、default provider/model + 跳转 Models——原 Settings
  *                  总览的三只读项迁此），BUILD 段在下（/api/about）
+ *
+ * 角色 → 可见分区（add-webui-multiuser-rbac 5.4，design D3 呈现层裁剪）：
+ * users 仅 root；services 仅 root/admin；其余分区各角色通用。`role` 为
+ * null（服务端未启用鉴权的宿主）时保持既有全分区（users 仍需 root，隐藏）。
+ * 上次分区记忆落在本角色不可见的分区时按非法值回退 generic。
  *
  * 原 `Settings` 总览分区移除：其维护动作「全部进程重启」「重置 Settings」
  * 一并删除（逐服务 restart 由 Services 承载，不做广播式入口）。
@@ -46,6 +54,7 @@ import { LitElement, css, html, nothing, type PropertyValues, type TemplateResul
 import { customElement, property, state } from 'lit/decorators.js'
 import {
   api,
+  ROLES,
   type About,
   type AdminEvent,
   type AdminService,
@@ -55,6 +64,8 @@ import {
   type ProviderPayload,
   type ProviderModelEntry,
   type ModelCapability,
+  type Role,
+  type UserRecord,
   ApiError,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
@@ -69,16 +80,18 @@ import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /**
- * 设置弹窗分区。顺序即规约：generic → appearance →〔分隔线〕services →
- * models →〔弹性留白 + 分隔线，压底〕env-vars · about（底部组是两个只读
- * 参考分区，split-env-vars-settings-section D4）。`settings` 总览分区移除
- * （只读项并入 About、维护动作删除）；`env` 分区改名 `env-vars` 并迁表
- * （旧记忆值按非法值回退）。
+ * 设置弹窗分区。顺序即规约：generic → appearance →〔分隔线〕services ·
+ * users → models →〔弹性留白 + 分隔线，压底〕env-vars · about（底部组是
+ * 两个只读参考分区，split-env-vars-settings-section D4）。`settings` 总览
+ * 分区移除（只读项并入 About、维护动作删除）；`env` 分区改名 `env-vars`
+ * 并迁表（旧记忆值按非法值回退）；users 为 add-webui-multiuser-rbac 5.3
+ * 新增（仅 root 可见，导航按角色裁剪，见 visibleSections）。
  */
 export type SettingsSection =
   | 'generic'
   | 'appearance'
   | 'services'
+  | 'users'
   | 'models'
   | 'env-vars'
   | 'about'
@@ -94,11 +107,14 @@ const SERVICE_DISPLAY_NAME: Record<string, string> = {
   im: '飞书 IM',
 }
 
-/** 分区导航的静态元数据（icon 名见 components/icons.ts）。顺序即规约。 */
+/** 分区导航的静态元数据（icon 名见 components/icons.ts）。顺序即规约；
+ * 可见性由 visibleSections 按角色裁剪（users 仅 root、services 非
+ * member/viewer），元数据本身不做裁剪。 */
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string }> = [
   { id: 'generic', label: 'Generic', icon: 'settings' },
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'services', label: 'Services', icon: 'shield' },
+  { id: 'users', label: 'Users', icon: 'users' },
   { id: 'models', label: 'Models', icon: 'zap' },
   { id: 'env-vars', label: 'Env Vars', icon: 'about' },
   { id: 'about', label: 'About', icon: 'about' },
@@ -115,6 +131,7 @@ const SECTION_DESC: Record<SettingsSection, string> = {
     'General preferences will live here (language switching and more) — nothing to configure yet.',
   appearance: 'How the console looks. Your choice is saved in this browser.',
   services: 'Background services that run alongside sebas.',
+  users: 'Operator accounts for this instance. Root only — changes take effect immediately.',
   models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
   'env-vars':
     'Read-only reference: the environment variables this sebas instance reads. Sensitive ones only show whether they are set.',
@@ -149,6 +166,11 @@ function formatUptimeSecs(secs: number | null): string {
   if (d > 0) return `${d}d ${h}h ${m}m`
   if (h > 0) return `${h}h ${m}m`
   return `${m}m`
+}
+
+/** Unix 秒 → ISO 日期（YYYY-MM-DD；用户列表的创建时间戳呈现用）。 */
+function formatDateUnix(secs: number): string {
+  return new Date(secs * 1000).toISOString().slice(0, 10)
 }
 
 /**
@@ -198,6 +220,15 @@ export class SebasSettingsModal extends LitElement {
   @property({ type: String })
   section: SettingsSection = 'generic'
 
+  /**
+   * 当前登录用户的角色（add-webui-multiuser-rbac 5.3/5.4，宿主 app-shell
+   * 传入）：呈现层按 D3 裁剪分区——users 仅 root、services 仅 root/admin。
+   * null = 服务端未启用鉴权的宿主（保持既有全分区；users 仍需服务端身份，
+   * 隐藏）。这只是呈现优化，防线在服务端路由层。
+   */
+  @property({ type: String })
+  role: Role | null = null
+
   /** /api/about 响应（About 分区）；懒加载，切到该分区时拉取。 */
   @state() private aboutData: About | null = null
   @state() private aboutError = ''
@@ -224,6 +255,21 @@ export class SebasSettingsModal extends LitElement {
   @state() private serviceBusy: string | null = null
   /** 行动作二次确认目标（disable/restart；null = 关闭）。 */
   @state() private confirmTarget: { kind: 'disable' | 'restart'; name: string } | null = null
+  // ---- Users 分区（add-webui-multiuser-rbac 5.3，/api/users，仅 root）----
+  /** 用户列表；null = 尚未加载或本次加载失败（usersError 置位、内联错误态）。 */
+  @state() private users: UserRecord[] | null = null
+  @state() private usersError = ''
+  /** 行动作（改角色/启停）与删除后的内联结果呈现。 */
+  @state() private userAction: { ok: boolean; text: string } | null = null
+  @state() private userBusy = false
+  /** 新建用户对话框草稿（error 就地承载缺名校验与 400/409 文案；null = 关闭）。 */
+  @state() private userCreate: { username: string; password: string; role: Role; error: string } | null =
+    null
+  /** 重置密码对话框草稿（error 就地承载弱密码与失败文案）。 */
+  @state() private userReset: { id: number; username: string; password: string; error: string } | null =
+    null
+  /** 删除确认（error 就地承载最后-root/自删保护文案）。 */
+  @state() private userDelete: { id: number; username: string; error: string } | null = null
   /**
    * Router 停止被拒的第二层对话框（unify-router-process-shape D4：拒绝驱动，
    * 前端不做活跃数预查询）：目标服务名 + 拒绝携带的活跃 routed 会话计数；
@@ -546,6 +592,14 @@ export class SebasSettingsModal extends LitElement {
       flex: 0 0 auto;
       display: flex;
       gap: 4px;
+      align-items: center;
+    }
+    /* Users 行内角色下拉（add-webui-multiuser-rbac 5.3）：紧凑宽度，随行
+     * 动作钮同排；禁用态由 userBusy 统一驱动。 */
+    .provider-row-actions wa-select.user-role {
+      width: 128px;
+      flex: 0 0 auto;
+      min-width: 0;
     }
     .row-action {
       width: 26px;
@@ -1019,7 +1073,33 @@ export class SebasSettingsModal extends LitElement {
     this.requestUpdate()
   }
 
+  // ---- 分区可见性（add-webui-multiuser-rbac 5.4，design D3 呈现层裁剪）----
+
+  /** 用户管理仅 root（D3：users.manage 只有 root 有）。 */
+  private get canManageUsers(): boolean {
+    return this.role === 'root'
+  }
+
+  /** 服务控制 root/admin；role 为 null（鉴权关闭的宿主）保持既有可用。 */
+  private get canControlServices(): boolean {
+    return this.role === null || this.role === 'admin' || this.role === 'root'
+  }
+
+  private sectionVisible(id: SettingsSection): boolean {
+    if (id === 'users') return this.canManageUsers
+    if (id === 'services') return this.canControlServices
+    return true
+  }
+
+  /** 导航渲染的数据源：SECTIONS 的角色裁剪视图（顺序不变）。 */
+  private get visibleSections(): ReadonlyArray<{ id: SettingsSection; label: string; icon: string }> {
+    return SECTIONS.filter((s) => this.sectionVisible(s.id))
+  }
+
   protected willUpdate(changed: PropertyValues): void {
+    // 角色变化（身份重探后到达等）可能让当前分区失去可见性：回退 generic，
+    // 绝不残留无权分区。
+    if (changed.has('role') && !this.sectionVisible(this.section)) this.section = 'generic'
     // About 分区懒加载（revamp…2.2：INSTANCE + BUILD 两段）：切到 about 时
     // 拉 /api/about（BUILD）与工作区根目录（INSTANCE；失败可重试——下次切
     // 换再取）。
@@ -1032,19 +1112,22 @@ export class SebasSettingsModal extends LitElement {
     if (changed.has('section') && this.section === 'models') this.loadProviders()
     // Services 分区：受管子进程 + 最近错误（每次切入都刷新，动作后重取）。
     if (changed.has('section') && this.section === 'services') this.loadServices()
+    // Users 分区：用户列表（每次切入都刷新，与 services 同款；5.3）。
+    if (changed.has('section') && this.section === 'users') this.loadUsers()
     // Env Vars 分区：策划环境变量清单（每次切入都刷新，与 services 同款）。
     if (changed.has('section') && this.section === 'env-vars') this.loadEnvVars()
   }
 
   /**
    * 分区记忆（D5）：打开时按 localStorage 恢复上次分区（缺值/非法值——含
-   * 旧值 `settings`/`env`——回退缺省 `generic`）；打开期间每次切换都写回。
-   * 仅在 `open` 翻真/分区变化时触发，读写都容忍 storage 不可用。
+   * 旧值 `settings`/`env` 与本角色不可见的分区——回退缺省 `generic`）；
+   * 打开期间每次切换都写回。仅在 `open` 翻真/分区变化时触发，读写都容忍
+   * storage 不可用。
    */
   protected updated(changed: PropertyValues): void {
     if (changed.has('open') && this.open) {
       const saved = readLastSection()
-      if (saved && saved !== this.section) this.section = saved
+      if (saved && this.sectionVisible(saved) && saved !== this.section) this.section = saved
     }
     if (changed.has('section') && this.open) writeLastSection(this.section)
   }
@@ -1147,6 +1230,163 @@ export class SebasSettingsModal extends LitElement {
       .catch(() => {
         this.overviewRoot = null
       })
+  }
+
+  // ---- Users 分区（add-webui-multiuser-rbac 5.3）----
+
+  /**
+   * 用户列表加载（/api/users，仅 root）：每次切入分区都刷新。失败（含非
+   * root 被 403）→ usersError 置位、users 归 null，分区内联错误态——不
+   * 渲染空表假象；401 仍由全局未授权钩子接管（会话过期回登录页）。
+   */
+  private loadUsers(): void {
+    this.usersError = ''
+    api
+      .usersList()
+      .then((d) => {
+        this.users = d.users
+      })
+      .catch((e) => {
+        this.usersError = e instanceof ApiError ? e.message : String(e)
+        this.users = null
+      })
+  }
+
+  /** 动作后的列表重取；失败只置错误态（动作结果已就地呈现）。 */
+  private refreshUsers(): Promise<void> {
+    return api
+      .usersList()
+      .then((d) => {
+        this.users = d.users
+      })
+      .catch((e) => {
+        this.usersError = e instanceof ApiError ? e.message : String(e)
+      })
+  }
+
+  /** 行内错误文案归一：400/409 的响应 error 字段原文优先。 */
+  private userErrorText(err: unknown): string {
+    return err instanceof ApiError ? err.message : String(err)
+  }
+
+  private openUserCreate(): void {
+    this.userAction = null
+    this.userCreate = { username: '', password: '', role: 'member', error: '' }
+  }
+
+  private openUserReset(u: UserRecord): void {
+    this.userAction = null
+    this.userReset = { id: u.id, username: u.username, password: '', error: '' }
+  }
+
+  private openUserDelete(u: UserRecord): void {
+    this.userAction = null
+    this.userDelete = { id: u.id, username: u.username, error: '' }
+  }
+
+  /**
+   * 新建用户：客户端先做最小校验（缺名/弱密码不发请求，就地报错——与
+   * 服务端 400 同标准双保险），失败（用户名占用 409、弱密码 400）文案
+   * 取响应 error 字段就地展示、对话框保持打开。
+   */
+  private async submitUserCreate(): Promise<void> {
+    const draft = this.userCreate
+    if (!draft || this.userBusy) return
+    const name = draft.username.trim()
+    if (!name) {
+      this.userCreate = { ...draft, error: '请输入用户名' }
+      return
+    }
+    if (draft.password.length < 8) {
+      this.userCreate = { ...draft, error: '密码至少需要 8 个字符' }
+      return
+    }
+    this.userBusy = true
+    this.userCreate = { ...draft, error: '' }
+    try {
+      await api.usersCreate(name, draft.password, draft.role)
+      this.userCreate = null
+      this.userAction = { ok: true, text: `用户 ${name} 已创建（角色 ${draft.role}）` }
+      await this.refreshUsers()
+    } catch (err) {
+      this.userCreate = { ...draft, error: this.userErrorText(err) }
+    } finally {
+      this.userBusy = false
+    }
+  }
+
+  /** 重置密码（服务端踢该用户既有会话）：弱密码就地拦，服务端失败就地展示。 */
+  private async submitUserReset(): Promise<void> {
+    const draft = this.userReset
+    if (!draft || this.userBusy) return
+    if (draft.password.length < 8) {
+      this.userReset = { ...draft, error: '密码至少需要 8 个字符' }
+      return
+    }
+    this.userBusy = true
+    this.userReset = { ...draft, error: '' }
+    try {
+      await api.usersSetPassword(draft.id, draft.password)
+      this.userReset = null
+      this.userAction = { ok: true, text: `用户 ${draft.username} 的密码已重置，其既有会话已失效` }
+    } catch (err) {
+      this.userReset = { ...draft, error: this.userErrorText(err) }
+    } finally {
+      this.userBusy = false
+    }
+  }
+
+  /**
+   * 行内改角色：成功刷新列表；失败（最后启用 root 降级 409 等）就地展示
+   * 文案并重取列表——行内 select 的显示值以服务端读数回滚，不假装改成功。
+   */
+  private async setUserRole(u: UserRecord, role: Role): Promise<void> {
+    if (this.userBusy || role === u.role) return
+    this.userBusy = true
+    this.userAction = null
+    try {
+      await api.usersSetRole(u.id, role)
+      this.userAction = { ok: true, text: `用户 ${u.username} 的角色已改为 ${role}` }
+    } catch (err) {
+      this.userAction = { ok: false, text: this.userErrorText(err) }
+    } finally {
+      this.userBusy = false
+      await this.refreshUsers()
+    }
+  }
+
+  /** 启用/禁用（禁用踢会话）：最后启用 root 的禁用 409 文案就地展示。 */
+  private async setUserEnabled(u: UserRecord, enabled: boolean): Promise<void> {
+    if (this.userBusy) return
+    this.userBusy = true
+    this.userAction = null
+    try {
+      await api.usersSetEnabled(u.id, enabled)
+      this.userAction = { ok: true, text: `用户 ${u.username} 已${enabled ? '启用' : '禁用'}` }
+    } catch (err) {
+      this.userAction = { ok: false, text: this.userErrorText(err) }
+    } finally {
+      this.userBusy = false
+      await this.refreshUsers()
+    }
+  }
+
+  /** 删除用户（清会话；不能删自己、最后 root 保护——400 文案就地展示）。 */
+  private async confirmUserDelete(): Promise<void> {
+    const target = this.userDelete
+    if (!target || this.userBusy) return
+    this.userBusy = true
+    this.userDelete = { ...target, error: '' }
+    try {
+      await api.usersDelete(target.id)
+      this.userDelete = null
+      this.userAction = { ok: true, text: `用户 ${target.username} 已删除` }
+      await this.refreshUsers()
+    } catch (err) {
+      this.userDelete = { ...target, error: this.userErrorText(err) }
+    } finally {
+      this.userBusy = false
+    }
   }
 
   // ---- Services 行动作（enable / disable / restart） ----
@@ -1537,6 +1777,11 @@ export class SebasSettingsModal extends LitElement {
           ${this.renderSectionHead(section)}
           ${this.renderServices()}
         `
+      case 'users':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderUsers()}
+        `
       case 'models':
         return html`
           ${this.renderSectionHead(section)}
@@ -1835,6 +2080,116 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
+  /**
+   * Users（add-webui-multiuser-rbac 5.3，仅 root 可见）：用户列表 + 新建
+   * 对话框（用户名/密码/角色下拉）+ 行内操作（改角色、重置密码、启停、
+   * 删除）。加载中显骨架、失败显内联错误态（与 Services/Env 同款 callout）
+   * ——绝不渲染空表假象。400/409 文案一律取响应 error 字段就地展示。
+   */
+  private renderUsers() {
+    const users = this.users
+    return html`
+      <div class="provider-toolbar">
+        <wa-button variant="brand" appearance="filled" @click=${() => this.openUserCreate()}>
+          ＋ New user
+        </wa-button>
+        ${this.usersError
+          ? html`<span class="toolbar-error" role="alert">${this.usersError}</span>`
+          : nothing}
+      </div>
+      ${this.userAction
+        ? html`<div
+            class="callout ${this.userAction.ok ? '' : 'callout-error'}"
+            role=${this.userAction.ok ? 'status' : 'alert'}
+            data-testid="user-action"
+          >
+            ${this.userAction.text}
+          </div>`
+        : nothing}
+      ${users === null
+        ? html`
+            <div class="panel panel-pad">
+              ${[0, 1].map(
+                () => html`
+                  <div class="skel-row">
+                    <div class="skel skel-line" style="width:30%"></div>
+                    <div class="skel skel-line" style="width:44%"></div>
+                  </div>
+                `,
+              )}
+            </div>
+          `
+        : html`
+            <div class="provider-list">
+              ${users.length === 0
+                ? html`<div class="provider-row-empty">No users yet.</div>`
+                : users.map((u) => this.renderUserRow(u))}
+            </div>
+          `}
+    `
+  }
+
+  /** 单个用户行：用户名 / 角色徽标 / 启用态 / 创建时间 + 行内动作。 */
+  private renderUserRow(u: UserRecord) {
+    return html`
+      <div class="provider-row" data-testid="user-row" data-username=${u.username}>
+        <div class="provider-row-main">
+          <span class="provider-row-name">${u.username}</span>
+          <span class="provider-badge ${u.role === 'root' ? 'preset' : ''}">${u.role}</span>
+          <span class="provider-key ${u.enabled ? 'on' : 'off'}">
+            ${u.enabled ? 'enabled' : 'disabled'}
+          </span>
+          <span class="provider-row-url" title="created">created ${formatDateUnix(u.created_at_unix)}</span>
+          <span class="provider-row-actions">
+            <wa-select
+              class="user-role"
+              aria-label="Role of ${u.username}"
+              value=${u.role}
+              ?disabled=${this.userBusy}
+              @change=${(e: Event) =>
+                void this.setUserRole(u, (e.target as HTMLSelectElement).value as Role)}
+            >
+              ${ROLES.map((r) => html`<wa-option value=${r}>${r}</wa-option>`)}
+            </wa-select>
+            ${u.enabled
+              ? html`<button
+                  class="row-action"
+                  title="Disable user"
+                  ?disabled=${this.userBusy}
+                  @click=${() => void this.setUserEnabled(u, false)}
+                >
+                  ■
+                </button>`
+              : html`<button
+                  class="row-action"
+                  title="Enable user"
+                  ?disabled=${this.userBusy}
+                  @click=${() => void this.setUserEnabled(u, true)}
+                >
+                  ▶
+                </button>`}
+            <button
+              class="row-action"
+              title="Reset password"
+              ?disabled=${this.userBusy}
+              @click=${() => this.openUserReset(u)}
+            >
+              🔑
+            </button>
+            <button
+              class="row-action danger"
+              title="Delete user"
+              ?disabled=${this.userBusy}
+              @click=${() => this.openUserDelete(u)}
+            >
+              🗑
+            </button>
+          </span>
+        </div>
+      </div>
+    `
+  }
+
   /** Appearance：主题三态；选择立即生效（翻 <html> 的 wa-dark）并持久化。 */
   private renderAppearance() {
     return html`
@@ -1972,7 +2327,7 @@ export class SebasSettingsModal extends LitElement {
           <button class="close" aria-label="Close settings" @click=${this.requestClose}>✕</button>
           <div class="layout">
             <nav class="nav" aria-label="Settings sections">
-              ${SECTIONS.map(
+              ${this.visibleSections.map(
                 (s, i) => html`
                   ${i > 0 && NAV_BREAKS.has(s.id)
                     ? html`<div
@@ -1995,6 +2350,7 @@ export class SebasSettingsModal extends LitElement {
         </div>
       </div>
       ${this.renderProviderDialogs()}
+      ${this.renderUserDialogs()}
     `
   }
 
@@ -2104,6 +2460,155 @@ export class SebasSettingsModal extends LitElement {
           @click=${() => void this.confirmSetDefault()}
         >
           ${this.busy ? 'Saving…' : 'Set default'}
+        </wa-button>
+      </wa-dialog>
+    `
+  }
+
+  /**
+   * Users 对话框群（add-webui-multiuser-rbac 5.3）：新建（用户名/密码/
+   * 角色下拉）、重置密码、删除确认。三个对话框各自内联承载校验与服务端
+   * 400/409 文案（error 字段就地展示），失败保持打开、成功才关闭；全部带
+   * wa-hide 来源守卫（与 provider 编辑器同款）。
+   */
+  private renderUserDialogs() {
+    return html`
+      <wa-dialog
+        label="New user"
+        ?open=${this.userCreate !== null}
+        @wa-hide=${this.guardedHide(() => (this.userCreate = null))}
+        class="user-create"
+      >
+        ${this.userCreate === null
+          ? nothing
+          : html`
+              ${this.userCreate.error
+                ? html`<div class="callout callout-error" role="alert" data-testid="user-create-error">
+                    ${this.userCreate.error}
+                  </div>`
+                : nothing}
+              <div class="editor-grid">
+                <wa-input
+                  label="Username"
+                  required
+                  .value=${this.userCreate.username}
+                  @input=${(ev: Event) =>
+                    (this.userCreate = {
+                      ...this.userCreate!,
+                      username: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+                <wa-input
+                  label="Password (min 8 characters)"
+                  type="password"
+                  autocomplete="new-password"
+                  .value=${this.userCreate.password}
+                  @input=${(ev: Event) =>
+                    (this.userCreate = {
+                      ...this.userCreate!,
+                      password: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+                <wa-select
+                  label="Role"
+                  value=${this.userCreate.role}
+                  @change=${(ev: Event) =>
+                    (this.userCreate = {
+                      ...this.userCreate!,
+                      role: (ev.target as HTMLSelectElement).value as Role,
+                    })}
+                >
+                  ${ROLES.map((r) => html`<wa-option value=${r}>${r}</wa-option>`)}
+                </wa-select>
+              </div>
+            `}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.userCreate = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="brand"
+          ?disabled=${this.userBusy}
+          @click=${() => void this.submitUserCreate()}
+        >
+          ${this.userBusy ? 'Creating…' : 'Create'}
+        </wa-button>
+      </wa-dialog>
+
+      <wa-dialog
+        label="Reset password"
+        ?open=${this.userReset !== null}
+        @wa-hide=${this.guardedHide(() => (this.userReset = null))}
+        class="user-reset"
+      >
+        ${this.userReset === null
+          ? nothing
+          : html`
+              <p class="dialog-text">
+                Set a new password for <strong>${this.userReset.username}</strong>. Their
+                existing sessions are invalidated immediately.
+              </p>
+              ${this.userReset.error
+                ? html`<div class="callout callout-error" role="alert" data-testid="user-reset-error">
+                    ${this.userReset.error}
+                  </div>`
+                : nothing}
+              <div class="editor-grid">
+                <wa-input
+                  label="New password (min 8 characters)"
+                  type="password"
+                  autocomplete="new-password"
+                  .value=${this.userReset.password}
+                  @input=${(ev: Event) =>
+                    (this.userReset = {
+                      ...this.userReset!,
+                      password: (ev.target as HTMLInputElement).value,
+                    })}
+                ></wa-input>
+              </div>
+            `}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.userReset = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="brand"
+          ?disabled=${this.userBusy}
+          @click=${() => void this.submitUserReset()}
+        >
+          ${this.userBusy ? 'Saving…' : 'Reset'}
+        </wa-button>
+      </wa-dialog>
+
+      <wa-dialog
+        label="Delete user"
+        ?open=${this.userDelete !== null}
+        @wa-hide=${this.guardedHide(() => (this.userDelete = null))}
+        class="user-delete"
+      >
+        ${this.userDelete === null
+          ? nothing
+          : html`
+              <p class="dialog-text">
+                Delete user <strong>${this.userDelete.username}</strong>? Their sessions are
+                removed and they can no longer sign in.
+              </p>
+              ${this.userDelete.error
+                ? html`<div class="callout callout-error" role="alert" data-testid="user-delete-error">
+                    ${this.userDelete.error}
+                  </div>`
+                : nothing}
+            `}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.userDelete = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${this.userBusy}
+          @click=${() => void this.confirmUserDelete()}
+        >
+          Delete
         </wa-button>
       </wa-dialog>
     `

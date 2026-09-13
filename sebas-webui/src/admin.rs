@@ -638,7 +638,9 @@ pub async fn api_login_action(
     }
 
     state.session_store.reset_rate_limit(&client_ip).await;
-    let (session_id, csrf) = state.session_store.create().await;
+    // admin 控制面会话不绑定 auth.db 用户：user_id = 0（哨兵值，用户管理
+    // 的踢会话/删号对它无效果——add-webui-multiuser-rbac D2）。
+    let (session_id, csrf) = state.session_store.create(0).await;
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Lax",
         SESSION_COOKIE_NAME, session_id

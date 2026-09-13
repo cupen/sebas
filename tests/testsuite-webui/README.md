@@ -41,11 +41,11 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | agent 对话覆盖 | 输入守卫 | 4.2 empty and blank input creates no turn, session stays usable | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 输入守卫 | 4.2 special-char long text round-trips without loss or console errors | `dialog.spec.ts` | agent 对话覆盖「composer 输入守卫」 |
 | agent 对话覆盖 | 错误诚实呈现 | refuse — non-terminal: session survives, next message works | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
-| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: not-found presentation, no fake success | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
+| agent 对话覆盖 | 错误诚实呈现 | crash — honest death: mapping torn down, row gone, open view retains transcript | `errors.spec.ts` | 会话核心旅程「错误呈现」 |
 | agent 对话覆盖 | spawn 失败内显 | spawn failure inline: error event in transcript, session stays as spawn-failed | `errors.spec.ts` | webui「web_spawn 失败的立即内显」（fail-fast-on-startup-errors） |
 | 审批卡片旅程 | 拒绝路径 | deny path — refusal semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「拒绝路径」 |
 | 审批卡片旅程 | 单次允许路径 | allow-once path — allowed semantics, turn completes | `permission.spec.ts` | 审批卡片旅程「单次允许路径」 |
-| 审批卡片旅程 | 会话级允许 | allow-session path — observed product gap: the follow-up call is gated again | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
+| 审批卡片旅程 | 会话级允许 | allow-session path — session switches to auto mode, follow-up is no longer gated | `permission.spec.ts` | 审批卡片旅程「会话级允许」 |
 | 项目管理覆盖 | 增删 | add via project dialog appears in rail; removed project disappears | `projects.spec.ts` | 项目管理覆盖「项目增删」 |
 | 项目管理覆盖 | 异常拒绝 | 1.1 illegal path 400, duplicate 409, removal persists across reload | `projects.spec.ts` | 项目管理覆盖「项目异常拒绝」 |
 | 项目管理覆盖 | 排序与持久化 | 1.2 reorder persists; git branch shows, plain dir shows none | `projects.spec.ts` | 项目管理覆盖「项目排序与分支呈现」 |
@@ -61,7 +61,7 @@ pnpm --dir tests/testsuite-webui exec playwright test
 | 模型管理覆盖 | settings provider 只读 | 3.2 settings provider list matches API, zero probe traffic | `models.spec.ts` | 模型管理覆盖「settings provider 只读」 |
 | 设置面 ¹ | 只读呈现 | S1 services rows match /api/admin/services truth (response-driven) | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S2 about table matches /api/about truth | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
-| 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
+| 设置面 ¹ | 只读呈现 | S3 env table renders placeholder semantics under Env Vars | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 只读呈现 | S6 bare core degrades: no-adapter banner, no rows, restart disabled | `settings.spec.ts` | 设置面只读呈现覆盖「只读分区与 API 对账」¹ |
 | 设置面 ¹ | 写降级 | S4 defaults read parity; sandbox write fails honestly | `settings.spec.ts` | 设置面写操作诚实降级覆盖「写降级失败外显且状态不变」¹ |
 | 设置面 ¹ | 写降级 | S5a create/edit mutations: client validation + honest 503 | `settings.spec.ts` | 模型管理覆盖「settings provider 只读」 |
