@@ -422,7 +422,7 @@ def _sandbox_env(work, secret=True):
 def _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=False, port=None, fake_acp_bin=None):
     """config.toml following the AGENTS.md debug recipe.
 
-    `[watchdog.webui] enabled` decides the topology: false (default) = the
+    `[service.webui] enabled` decides the topology: false (default) = the
     bare core owns the webui via `--webui-port`; true = the standalone
     `sebas webui` serves it from host/port in this section (the detached
     dual-process form, harden-core-channel-deployment 5.4).
@@ -481,10 +481,10 @@ root = "{cfg}"
 [skills]
 dir = "{cfg}/agents-skills"
 
-[watchdog.core]
+[service.core]
 channel_path = "{cfg}/core-channel.sock"
 
-[watchdog.webui]
+[service.webui]
 {webui_toml}
 auth = {auth_toml}
 

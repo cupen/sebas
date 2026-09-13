@@ -218,13 +218,10 @@ auth_token = "sk-gw-local-dev"
 
 [provider.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
-
-[router.routes]
-"claude-*" = ["anthropic"]
 ```
 
 ```bash
-# router 以独立进程运行（或交由 watchdog 托管：config [watchdog.router] enabled = true）
+# router 以独立进程运行（或交由 watchdog 托管：config [service.router] enabled = true）
 sebas router --config ./config.toml
 
 # 客户端接入

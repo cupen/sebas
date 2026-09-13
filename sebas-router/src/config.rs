@@ -70,7 +70,10 @@ pub struct RouterConfig {
     pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-    #[serde(default)]
+    /// 编译后的路由条目：model alias（overlay `model_aliases` 编译而来）与
+    /// debug 注入的 `test` 路由。**TOML 配置不可达**——`[router.routes]`
+    /// 已作废（simplify-service-config）：RawRouterConfig 不再携带 routes，
+    /// 旧键命中时警告忽略。`RouteTable` 只做精确匹配（别名/调试均精确）。
     pub routes: Vec<RouteGroup>,
     /// 模型别名 → upstream model（`None` = 别名透传）。由 provider overlay
     /// 的 `model_aliases` 段编译而来；`RouteTable` 用它在非 namespace 路径
@@ -262,9 +265,8 @@ struct RawRouterConfig {
     auth_token: Vec<String>,
     #[serde(default)]
     rate_limit: RateLimitConfig,
-    #[serde(default)]
-    /// `[router.routes]`：`model = ["provider", ...]`，数组顺序 = 优先级。
-    routes: HashMap<String, Vec<String>>,
+    // `[router.routes]` 已作废（simplify-service-config）：字段删除后 serde
+    // 静默忽略未知键，废弃提示由 parse 入口的 raw-TOML 扫描负责。
 }
 
 /// `auth_token` 反序列化：接受单个字符串或字符串数组（`auth_token = "sk-..."`
@@ -673,11 +675,31 @@ fn parse_models_list(
 // 按 preset 物化 base_url/models 的旧「显式覆盖」分支已随跟随代码语义移除
 // （见 `resolve_providers`：覆盖即配置错误）。
 
+/// `[router.routes]` 是否出现在原始 TOML（simplify-service-config：该键
+/// 作废，解析层不再消费）。
+fn deprecated_routes_key_hit(raw: &str) -> bool {
+    raw.parse::<toml::Table>()
+        .ok()
+        .and_then(|v| v.get("router").and_then(|r| r.as_table()).map(|r| r.contains_key("routes")))
+        .unwrap_or(false)
+}
+
+/// 废弃键告警：stderr + tracing 双通道——router 进程的 parse 同样可能先于
+/// tracing 初始化执行（与根配置 warn_deprecated_watchdog_keys 同一理由）。
+fn warn_deprecated_routes_key(raw: &str) {
+    if deprecated_routes_key_hit(raw) {
+        let msg = "config [router.routes] is deprecated and ignored: routing resolves via provider namespace, model aliases, and the default provider; remove the key";
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
+    }
+}
+
 impl RouterConfig {
     /// 解析顺序对齐 root house style（src/config.rs）：
     /// toml → preset 填充（raw → resolved）→ env 覆盖（`SEBAS_ROUTER_LISTEN`）
     /// → validate → tilde 展开（`usage_file`）。
     pub fn parse(raw: &str) -> Result<Self> {
+        warn_deprecated_routes_key(raw);
         let file: RouterFile =
             toml::from_str(raw).map_err(|e| RouterError::Config(format!("toml parse: {e}")))?;
 
@@ -688,33 +710,24 @@ impl RouterConfig {
         let raw_cfg = file.router;
 
         let mut cfg = match raw_cfg {
-            Some(g) => {
-                // `[router.routes]` map → 有序 RouteGroup 列表。TOML map 本身
-                // 无配置序保证，按 model 名排序保证确定性（glob 撞车时字典序
-                // 首个命中；精确键天然唯一）。
-                let mut routes: Vec<RouteGroup> = g
-                    .routes
-                    .into_iter()
-                    .map(|(model, providers)| RouteGroup { model, providers })
-                    .collect();
-                routes.sort_by(|a, b| a.model.cmp(&b.model));
-                RouterConfig {
-                    listen: g.listen,
-                    max_body_bytes: g.max_body_bytes,
-                    connect_timeout_secs: g.connect_timeout_secs,
-                    read_timeout_secs: g.read_timeout_secs,
-                    usage_file: g.usage_file,
-                    debug: false,
-                    provider_overlay: g.provider_overlay,
-                    default_provider: g.default_provider,
-                    auth_token: g.auth_token,
-                    rate_limit: g.rate_limit,
-                    providers,
-                    routes,
-                    model_aliases: HashMap::new(),
-                    config_source: default_config_source(),
-                }
-            }
+            Some(g) => RouterConfig {
+                listen: g.listen,
+                max_body_bytes: g.max_body_bytes,
+                connect_timeout_secs: g.connect_timeout_secs,
+                read_timeout_secs: g.read_timeout_secs,
+                usage_file: g.usage_file,
+                debug: false,
+                provider_overlay: g.provider_overlay,
+                default_provider: g.default_provider,
+                auth_token: g.auth_token,
+                rate_limit: g.rate_limit,
+                providers,
+                // 编译期装载：model alias（apply_overlay）与 debug 注入。
+                // TOML 的 `[router.routes]` 不再是来源（已作废，警告忽略）。
+                routes: Vec::new(),
+                model_aliases: HashMap::new(),
+                config_source: default_config_source(),
+            },
             // 只有顶层 `[provider.*]`：无 [router] 段，其余字段全部走默认。
             None => RouterConfig {
                 listen: default_listen(),
@@ -794,9 +807,9 @@ impl RouterConfig {
             })?;
             self.providers.insert(name, provider);
         }
-        // 模型别名编译（D2）：每别名一条精确 RouteGroup 前置（胜过同名
-        // config route）；rename 记入 cfg.model_aliases（RouteTable 在非
-        // namespace 路径改写——namespace rest 不吃别名改写）。
+        // 模型别名编译（D2）：每别名一条精确 RouteGroup（config routes 已
+        // 作废，routes 里只剩别名与 debug 注入）；rename 记入 cfg.model_aliases
+        // （RouteTable 在非 namespace 路径改写——namespace rest 不吃别名改写）。
         // 引用不存在 provider 的别名 drop + warn（外部写入的自愈，不 fail fast）。
         let mut alias_routes: Vec<RouteGroup> = Vec::new();
         for (alias, entry) in file.model_aliases {
@@ -816,7 +829,7 @@ impl RouterConfig {
             });
         }
         if !alias_routes.is_empty() {
-            // 字典序稳定排列后整体前置到 config routes 之前。
+            // 字典序稳定排列后整体前置（别名之间确定性次序）。
             alias_routes.sort_by(|a, b| a.model.cmp(&b.model));
             alias_routes.append(&mut self.routes);
             self.routes = alias_routes;
@@ -853,22 +866,6 @@ impl RouterConfig {
             return Err(RouterError::Config(format!(
                 "router.default_provider 引用了未定义的 provider '{dp}'"
             )));
-        }
-        for r in &self.routes {
-            if r.providers.is_empty() {
-                return Err(RouterError::Config(format!(
-                    "router.routes.{} 的 provider 列表不能为空",
-                    r.model
-                )));
-            }
-            for p in &r.providers {
-                if !self.providers.contains_key(p) {
-                    return Err(RouterError::Config(format!(
-                        "router.routes.{} 引用了未定义的 provider '{p}'",
-                        r.model
-                    )));
-                }
-            }
         }
         for (i, t) in self.auth_token.iter().enumerate() {
             if t.is_empty() {
@@ -1012,10 +1009,6 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 [provider.deepseek]
 api_key_env = "DEEPSEEK_API_KEY"
-
-[router.routes]
-"claude-*" = ["anthropic"]
-"deepseek-*" = ["deepseek"]
 "#;
 
     #[test]
@@ -1047,10 +1040,9 @@ api_key_env = "DEEPSEEK_API_KEY"
         );
         assert!(anth.base_url_openai_chat.is_none());
         assert_eq!(anth.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
-        assert_eq!(cfg.routes.len(), 2);
-        assert_eq!(cfg.routes[0].model, "claude-*");
-        assert_eq!(cfg.routes[0].providers, vec!["anthropic"]);
-        assert_eq!(cfg.routes[1].providers, vec!["deepseek"]);
+        // simplify-service-config：[router.routes] 作废——无 overlay 时
+        // routes 为空（只剩别名与 debug 注入两个程序化来源）。
+        assert!(cfg.routes.is_empty());
     }
 
     #[test]
@@ -1095,8 +1087,10 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert_eq!(cfg.listen, "0.0.0.0:9999");
     }
 
+    /// simplify-service-config：`[router.routes]` 作废——解析不报错，键被
+    /// 警告忽略（含引用未知 provider 的条目），路由全走兜底链。
     #[test]
-    fn route_referencing_unknown_provider_errors() {
+    fn deprecated_routes_key_is_warned_and_ignored() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
@@ -1105,17 +1099,18 @@ api_key_env = "DEEPSEEK_API_KEY"
         let raw = r#"
 [router]
 auth_token = "sk-test"
+default_provider = "anthropic"
 [provider.anthropic]
 api_key = "test-key"
 [router.routes]
 "gpt-*" = ["openai"]
 "#;
-        let err = parse_isolated(raw).expect_err("unknown provider should error");
-        let msg = err.to_string();
+        let cfg = parse_isolated(raw).expect("deprecated routes key must not fail parse");
         assert!(
-            msg.contains("openai"),
-            "error should name the unknown provider: {msg}"
+            deprecated_routes_key_hit(raw),
+            "raw scan must detect the legacy key"
         );
+        assert!(cfg.routes.is_empty(), "legacy routes must not compile in");
     }
 
     #[test]
@@ -1829,17 +1824,16 @@ api_key = "test-key"
         assert_eq!(d.provider, "beta");
         assert_eq!(d.upstream_model.as_deref(), Some("bare"), "缺省 upstream 透传别名");
 
-        // 别名 RouteGroup 存在且排在 config routes 之前。
-        assert!(
-            cfg.routes
-                .iter()
-                .position(|r| r.model == "my-claude")
-                .is_some_and(|i| cfg.routes.iter().take(i).all(|r| r.model != "m*")),
-            "alias groups precede config routes"
+        // 别名 RouteGroup 编译进 routes（config routes 已作废，routes 只剩
+        // 别名与 debug 注入）；字典序确定性排列。
+        assert_eq!(
+            cfg.routes.iter().map(|r| r.model.as_str()).collect::<Vec<_>>(),
+            vec!["bare", "my-claude"]
         );
     }
 
-    /// 别名胜过同名 config route（alias 组前置 = 顺序扫描先命中）。
+    /// 别名胜过同名 legacy config route：`[router.routes]` 已作废忽略，
+    /// alias 保持权威。
     #[test]
     fn overlay_alias_beats_same_named_config_route() {
         use crate::routing::RouteTable;
@@ -1871,7 +1865,7 @@ m1 = ["anthropic"]
         let d = table
             .resolve(Some("m1"), crate::proto::WireProtocol::Anthropic)
             .expect("m1 resolves");
-        assert_eq!(d.provider, "beta", "alias must beat same-named config route");
+        assert_eq!(d.provider, "beta", "alias stays authoritative over legacy route");
     }
 
     /// 命名空间仍优先于别名：`beta/m1` 走 beta 的 rest 而非 alias 改写。

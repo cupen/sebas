@@ -120,11 +120,7 @@ export GATEWAY_KEY USAGE_FILE PORT
   echo "base_url = \"http://127.0.0.1:9\""
   echo "api_key = \"sk-e2e-smoke-plumbing\""
   echo
-  echo "[router.routes]"
-  echo "\"claude-*\" = [\"anthropic\"]"
-  echo "\"gpt-*\" = [\"openai\"]"
-  echo "\"deepseek-*\" = [\"deepseek\"]"
-  echo "\"smoke-*\" = [\"smoke\"]"
+  echo "default_provider = \"smoke\""
 } > "$CONFIG"
 
 # ---- 3. 起 router ----
@@ -172,7 +168,7 @@ run_anthropic_sse() {
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
     -H "x-api-key: $GATEWAY_KEY" \
-    -d "{\"model\":\"$ANTHROPIC_MODEL\",\"max_tokens\":16,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just: ok\"}]}")"
+    -d "{\"model\":\"anthropic/$ANTHROPIC_MODEL\",\"max_tokens\":16,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just: ok\"}]}")"
   echo "  anthropic → HTTP $s"
   if [[ "$s" == "200" ]] && grep -q '^event: message_start' "$out" && grep -q '^event: content_block_delta' "$out"; then
     echo "  anthropic SSE: message_start + content_block_delta 已确认"

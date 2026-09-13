@@ -69,9 +69,9 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
    - config `-c` path (no sandbox-safe default exists), with
      `[dispatch] state_file`, `[media] download_dir`,
      `[acp.claude] sessions_dir` / `work_dir`,
-     `[watchdog.core] channel_path`, `[skills] dir` (defaults to the real
+     `[service.core] channel_path`, `[skills] dir` (defaults to the real
      `~/.agents/skills` — pin it or `GET /api/skills` scans the operator's
-     real store; reading is already out of bounds), and `[watchdog.webui]`
+     real store; reading is already out of bounds), and `[service.webui]`
      host/port
      (port ≠ 9797, e.g. 9877) all set inside it — decide the auth posture
      explicitly: `auth = false` for login-free sandboxing, or keep the
@@ -170,10 +170,10 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
    [skills]
    dir = "<SB>/agents-skills"
 
-   [watchdog.core]
+   [service.core]
    channel_path = "<SB>/core-channel.sock"
 
-   [watchdog.webui]
+   [service.webui]
    enabled = false          # bare core owns the webui via --webui-port
    auth = false             # 登录免了：零用户 + 默认开的 auth 会停在首启
                             # 设置页，且 auth.db 落进真实 ~/.sebas——沙箱内

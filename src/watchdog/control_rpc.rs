@@ -557,7 +557,7 @@ fn set_socket_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::WatchdogConfig;
+    use crate::config::{ServiceConfig, WatchdogConfig};
     use crate::watchdog::updater::{UpdatePlan, UpdaterRunner};
 
     const TEST_SECRET: &str = "test-secret-42";
@@ -576,6 +576,7 @@ mod tests {
         ControlExecutor::new(
             control,
             Arc::new(NoopRunner),
+            ServiceConfig::default(),
             WatchdogConfig::default(),
             "./config.toml".into(),
             crate::watchdog::services::ServiceManager::new(

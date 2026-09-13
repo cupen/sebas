@@ -45,7 +45,7 @@ pub const MIN_PASSWORD_LEN: usize = 8;
 /// 登录失败原因（HTTP 语义由 handler 决定）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginError {
-    /// 鉴权关闭（`[watchdog.webui] auth = false`），登录面不存在。
+    /// 鉴权关闭（`[service.webui] auth = false`），登录面不存在。
     Disabled,
     /// 用户名或密码错误。
     Invalid,
@@ -140,7 +140,7 @@ impl AuthHandle {
         &self.path
     }
 
-    /// 鉴权是否开启（`[watchdog.webui] auth` 接线的实况）。与旧单账户时代
+    /// 鉴权是否开启（`[service.webui] auth` 接线的实况）。与旧单账户时代
     /// 不同：这只反映开关/句柄形态，与「库里有没有用户」无关——零用户是
     /// 首启设置页形态（[`Self::needs_setup`]），不是免鉴权。
     pub fn enabled(&self) -> bool {

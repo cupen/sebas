@@ -706,7 +706,7 @@ pub async fn auth_setup(State(state): State<WebUiState>, Json(form): Json<AuthSe
         ),
         Err(crate::auth::SetupError::Disabled) => api_error(
             StatusCode::BAD_REQUEST,
-            "WebUI 鉴权已关闭（[watchdog.webui] auth = false），无需首启设置",
+            "WebUI 鉴权已关闭（[service.webui] auth = false），无需首启设置",
         ),
         Err(crate::auth::SetupError::Unavailable) => {
             api_error(StatusCode::SERVICE_UNAVAILABLE, "用户库不可用（auth.db 打开失败）")

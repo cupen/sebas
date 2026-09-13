@@ -300,10 +300,10 @@ root = "{}"
 [skills]
 dir = "{}"
 
-[watchdog.core]
+[service.core]
 channel_path = "core-channel.sock"
 
-[watchdog.webui]
+[service.webui]
 enabled = true
 host = "127.0.0.1"
 port = {webui_port}

@@ -218,7 +218,7 @@ pub async fn run(args: ImArgs) -> Result<()> {
     // （core 自动武装落盘）；两者皆缺省时保持既有 warn 姿态（ChannelSecret
     // 内部 warn 一次并以空 secret 尝试），不崩溃、不静默。
     let secret_file = crate::config::core_secret_file_path(
-        cfg.watchdog.core.secret_file.as_deref(),
+        cfg.service.core.secret_file.as_deref(),
         std::path::Path::new(&args.config),
     );
     let channel_secret =

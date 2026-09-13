@@ -65,10 +65,6 @@ default_provider = "anth-mock"
 
 auth_token = "sk-gw-process"
 
-[router.routes]
-"claude-*" = ["anth-mock"]
-"gpt-*" = ["oai-mock"]
-
 [provider.anth-mock]
 base_url_anthropic = "{anth_url}"
 api_key_env = "SEBAS_ROUTER_TEST_UPSTREAM_KEY"
@@ -265,7 +261,7 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
         .post(format!("{base}/v1/chat/completions"))
         .header(auth.0, auth_val)
         .header("content-type", "application/json")
-        .body(r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#)
+        .body(r#"{"model":"oai-mock/gpt-4","messages":[{"role":"user","content":"hi"}]}"#)
         .send()
         .await
         .expect("POST /v1/chat/completions");
@@ -282,7 +278,7 @@ async fn real_binary_forwards_anthropic_openai_auth_and_usage() {
         .post(format!("{base}/v1/chat/completions"))
         .header(auth.0, auth_val)
         .header("content-type", "application/json")
-        .body(r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}"#)
+        .body(r#"{"model":"oai-mock/gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}"#)
         .send()
         .await
         .expect("POST /v1/chat/completions stream");

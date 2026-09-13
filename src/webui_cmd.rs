@@ -1,6 +1,6 @@
 //! Standalone WebUI server entry point.
 //!
-//! Spawned by the watchdog as a separate process when `[watchdog.webui] enabled`
+//! Spawned by the watchdog as a separate process when `[service.webui] enabled`
 //! is `true`. Runs independently of the core child so the dashboard stays up
 //! across core restarts (`sebas watchdog` restarts the core child; the WebUI
 //! process is unaffected).
@@ -156,7 +156,7 @@ pub fn run_passwd(args: WebUiPasswdArgs) -> Result<()> {
                 })?;
             println!(
                 "WebUI 登录用户已创建：用户 {}（角色 {}，{}）\n现在 webui 的全部 API/WebSocket 都需要登录；\
-                 若需公网部署，把 [watchdog.webui] host 指到 0.0.0.0 即可。",
+                 若需公网部署，把 [service.webui] host 指到 0.0.0.0 即可。",
                 username,
                 role,
                 path.display()
@@ -242,14 +242,14 @@ pub(crate) fn ensure_non_loopback_bind_allowed(
 ) -> Result<()> {
     if !auth_on {
         return Err(SebasError::Config(
-            "watchdog.webui.host 非 loopback：auth 开关必须保持打开（误关开关叠加公网暴露 = 误配）；\
+            "service.webui.host 非 loopback：auth 开关必须保持打开（误关开关叠加公网暴露 = 误配）；\
              如需免鉴权请保持 loopback bind"
                 .into(),
         ));
     }
     if !has_enabled_user(auth) {
         return Err(SebasError::Config(
-            "watchdog.webui.host 非 loopback：用户库中还没有启用用户（零用户时公网先访问者可抢注 root）。\
+            "service.webui.host 非 loopback：用户库中还没有启用用户（零用户时公网先访问者可抢注 root）。\
              先用 SEBAS_WEBUI_USER + SEBAS_WEBUI_PASSWORD 环境变量或 \
              `sebas webui-passwd --user <name>` 建立 root，再绑非 loopback 地址"
                 .into(),
@@ -267,19 +267,19 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     let cfg = Config::parse(&raw)?;
 
     // Build the WebUI endpoint from config (enabled, host, port).
-    // Returns None when watchdog.webui.enabled is false — we require it to be
+    // Returns None when service.webui.enabled is false — we require it to be
     // true because the standalone WebUI is a watchdog-owned service.
-    let endpoint = WebUiEndpoint::from_config(&cfg.watchdog.webui)
-        .ok_or_else(|| SebasError::Config("watchdog.webui.enabled is false".into()))?;
+    let endpoint = WebUiEndpoint::from_config(&cfg.service.webui)
+        .ok_or_else(|| SebasError::Config("service.webui.enabled is false".into()))?;
 
     // 登录鉴权：开关关闭（测试/联调）→ 注入 disabled 态，全路由免登录；
     // 开关打开（默认）→ 按 design D4 引导（建库 → env 建 root → 零用户
     // 留给首启设置页），之后全部 /api 与 /ws 需要登录。
-    let auth = if cfg.watchdog.webui.auth {
+    let auth = if cfg.service.webui.auth {
         bootstrap_auth()
     } else {
         warn!(
-            "webui auth disabled via [watchdog.webui] auth = false: all routes are public"
+            "webui auth disabled via [service.webui] auth = false: all routes are public"
         );
         Arc::new(AuthHandle::disabled())
     };
@@ -290,7 +290,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     // 端口——没有登录门的控制面暴露公网等于裸奔，零用户公网 bind 更会让
     // 先访问者抢注 root。
     if !endpoint.is_loopback() {
-        ensure_non_loopback_bind_allowed(cfg.watchdog.webui.auth, &auth)?;
+        ensure_non_loopback_bind_allowed(cfg.service.webui.auth, &auth)?;
         warn!(
             "webui binds {} (non-loopback): login auth enabled, user store at {}",
             endpoint.bind_addr(),
@@ -317,7 +317,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     // 如实上报 `secret rejected`），不再 ready 前退出 75：旧 core（无自动
     // 武装）下行为同今天（socket absent），诚实性不变差，新装配则开箱即用。
     let secret_file = crate::config::core_secret_file_path(
-        cfg.watchdog.core.secret_file.as_deref(),
+        cfg.service.core.secret_file.as_deref(),
         std::path::Path::new(&args.config),
     );
     let backend = crate::core_channel::client::CoreChannelBackend::with_secret(
@@ -411,7 +411,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         admin_adapter,
         auth,
         webui_workspace_root,
-        cfg.watchdog.webui.archive_retention_days,
+        cfg.service.webui.archive_retention_days,
         skills,
     )
     .await;
@@ -779,11 +779,11 @@ driver = "claude"
 path = "claude"
 args = []
 
-[watchdog.core]
+[service.core]
 enabled = false
 channel_path = "{dir}/core.sock"
 
-[watchdog.webui]
+[service.webui]
 enabled = true
 host = "{host}"
 port = 9879
@@ -877,8 +877,8 @@ auth = {auth}
         let config = write_config(dir.path(), "127.0.0.1", false);
         let raw = std::fs::read_to_string(&config).unwrap();
         let cfg = crate::config::Config::parse(&raw).unwrap();
-        assert!(!cfg.watchdog.webui.auth);
-        assert!(WebUiEndpoint::from_config(&cfg.watchdog.webui).unwrap().is_loopback());
+        assert!(!cfg.service.webui.auth);
+        assert!(WebUiEndpoint::from_config(&cfg.service.webui).unwrap().is_loopback());
     }
 
     /// 安全门的三态判定（纯函数，不真 bind）：零用户拒、env 引导后放行、
