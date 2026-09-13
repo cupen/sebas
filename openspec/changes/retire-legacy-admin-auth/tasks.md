@@ -13,4 +13,4 @@
 
 - [x] 3.1 specs delta 已建（`specs/webui/spec.md`：MODIFIED HTTP route surface / Mutation posture + REMOVED Optional admin authentication）；验证 `openspec validate --changes retire-legacy-admin-auth` 通过
 - [x] 3.2 全量回归：`cargo test -p sebas-webui`（145 过；3 个失败为 main 上同现的环境问题）、frontend vitest（321 过；1 个失败为 main 上同现的 jsdom 存储环境问题）、tsc --noEmit 干净；grep 确认 `sebas_admin_session` / `X-CSRF` / `api/admin/login` 在 src 与 frontend 归零
-- [ ] 3.3 沙箱冒烟（可选，AGENTS.md 菜谱）：`auth = false` 形态 `/api/admin/services` 正常读、`auth = true` + root 会话 `POST /api/admin/restart` 无需第二把 cookie
+- [x] 3.3 沙箱冒烟（AGENTS.md 菜谱手工执行，Windows 下 testsuite_e2e_test 因既有的 Linux-only `find_child_pid` 门控无法编译，属平台限制与本变更无关）：auth=false 形态 `/api/admin/services` 200 + `adapter_ok:false`、`POST /api/admin/restart` 503 诚实降级、`/api/admin/login|csrf` 404 退役；auth=true 形态未登录 401、`/api/auth/login` 建 root 会话后仅凭该会话 `GET services` 200、`POST restart` 503（RBAC 单层执法，无第二把 cookie）、跨源写 403；沙箱目录已删除、端口已释放
