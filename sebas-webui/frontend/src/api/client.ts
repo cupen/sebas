@@ -399,6 +399,28 @@ export interface AdminMutationResult {
 }
 
 /**
+ * `GET /api/env` 单条目的分类（split-env-vars-settings-section D2）：
+ * `plain` = 非敏感（可显实际值）；`set_unset` = 敏感（只显已设置/未设置，
+ * 值经服务端遮蔽、永不出现在响应里）。
+ */
+export type EnvVarKind = 'plain' | 'set_unset'
+
+/**
+ * `GET /api/env` 策划清单里的一条环境变量。`plain` 已设置时 `value` 是
+ * 实际值，未设置时 `value = null`（默认值说明随 `what` 下发，前端标注
+ * 「未设置（用默认）」）。`set_unset` 项 `value` 恒为 null；`set` 布尔表达
+ * 已设置与否——**该字段缺失时前端无法断言状态**，必须如实呈现「无法确定」
+ * 而不是按未设置处理（防御性解析）。
+ */
+export interface EnvVarEntry {
+  name: string
+  what: string
+  kind: EnvVarKind
+  value: string | null
+  set?: boolean
+}
+
+/**
  * Execution-backend hint sent with `POST /api/sessions`. `"native"` spawns the
  * built-in kernel; `"acp"` (the default) spawns the configured default
  * third-party agent; `"acp:<slug>"` selects a specific configured agent kind.
@@ -680,6 +702,12 @@ export const api = {
   settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
   router: () => get<{ router: RouterInfo }>('/api/router'),
   about: () => get<About>('/api/about'),
+  /**
+   * 环境变量只读清单（split-env-vars-settings-section 1.1/2.1）：webui
+   * 进程自身 env 的服务端策划清单，遮蔽在服务端完成——敏感项只回
+   * `set` 布尔。纯 webui 面，core 不可达时照常工作。
+   */
+  env: () => get<{ items: EnvVarEntry[] }>('/api/env'),
   /** Agent catalog（唯一可用性真源；workbench-agent-wire-fix 3.2）。 */
   agents: () => get<{ agents: AgentKindInfo[] }>('/api/agents'),
   /**

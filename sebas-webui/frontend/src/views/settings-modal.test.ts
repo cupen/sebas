@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * Settings modal (IA v3, revamp-settings-nav-and-models-editor)：左侧分区
- * 导航 + 右侧内容。五个分区（顺序即规约）——
- *   - generic    通用偏好与杂项：原 Env 分区的环境变量只读表（值一律
- *                "managed by core config"）；语言切换仅预留信息架构位置
+ * Settings modal (IA v3, revamp-settings-nav-and-models-editor +
+ * split-env-vars-settings-section)：左侧分区导航 + 右侧内容。六个分区
+ * （顺序即规约）——
+ *   - generic    纯通用可配置项分区：语言切换等偏好落地前只呈现说明占位
+ *                文案（环境变量表已迁往 env-vars，该分区不再有 env 表）
  *   - appearance 主题三态（system/dark/light，走真实 theme.ts）
  *   - services   watchdog 受管子进程（/api/admin/services 经 adminServicesSafe：
  *                name / desired / actual / uptime + /api/admin/events 最近错误；
@@ -15,6 +16,10 @@
  *                其余失败仍走既有内联错误
  *   - models     provider 管理列表（/router/api/providers，条目携带能力
  *                标记；不再渲染 Router 网关卡、不再请求 /api/router）
+ *   - env-vars   环境变量只读表（/api/env 服务端策划清单，懒加载）：plain
+ *                已设置显实际值、未设置显「未设置（用默认）」、set_unset
+ *                敏感项只显已设置/未设置（set 缺失如实显「无法确定」）；
+ *                失败 → 分区内联错误态，不渲染空表假象
  *   - about      INSTANCE 段在上（原 Settings 总览三只读项：工作区根目录 +
  *                复制、default agent kind、default provider/model + 跳转
  *                Models），BUILD 段在下（/api/about 真实字段）
@@ -62,6 +67,7 @@ beforeEach(() => themeStore.clear())
 const apiMocks = vi.hoisted(() => ({
   router: vi.fn(),
   about: vi.fn(),
+  env: vi.fn(),
   routerProviders: vi.fn(),
   routerPresets: vi.fn(),
   routerProviderCreate: vi.fn(),
@@ -100,6 +106,7 @@ vi.mock('../api/client.js', () => ({
   api: {
     router: apiMocks.router,
     about: apiMocks.about,
+    env: apiMocks.env,
     routerProviders: apiMocks.routerProviders,
     routerPresets: apiMocks.routerPresets,
     routerProviderCreate: apiMocks.routerProviderCreate,
@@ -223,6 +230,38 @@ beforeEach(() => {
     router_listen: '127.0.0.1:8787',
     provider_count: 2,
   })
+  // /api/env 策划清单默认桩：四条覆盖三种呈现形态（plain 已设置/未设置、
+  // set_unset 已设置/未设置）。
+  apiMocks.env.mockResolvedValue({
+    items: [
+      {
+        name: 'SEBAS_STATE_DB',
+        what: 'Session state database path (default ~/.sebas/sebas.db)',
+        kind: 'plain',
+        value: '/tmp/sebas-itest/sebas.db',
+      },
+      {
+        name: 'SEBAS_STATE_FILE',
+        what: 'Session state store path (default ~/.sebas/state.json)',
+        kind: 'plain',
+        value: null,
+      },
+      {
+        name: 'SEBAS_WEBUI_TOKEN',
+        what: 'WebUI single-field login token (token or password accepted at login)',
+        kind: 'set_unset',
+        value: null,
+        set: true,
+      },
+      {
+        name: 'SEBAS_FEISHU_APP_SECRET',
+        what: 'Feishu app secret',
+        kind: 'set_unset',
+        value: null,
+        set: false,
+      },
+    ],
+  })
 })
 
 afterEach(() => {
@@ -233,23 +272,26 @@ afterEach(() => {
 })
 
 describe('sebas-settings-modal sections', () => {
-  it('renders the left nav with exactly Generic/Appearance/Services/Models/About', async () => {
+  it('renders the left nav with exactly Generic/Appearance/Services/Models/Env Vars/About', async () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())
-    expect(labels).toEqual(['Generic', 'Appearance', 'Services', 'Models', 'About'])
+    expect(labels).toEqual(['Generic', 'Appearance', 'Services', 'Models', 'Env Vars', 'About'])
     el.remove()
   })
 
-  it('separates the nav into groups: a break before Services and a tail break pinning About to the bottom', async () => {
+  it('separates the nav into groups: a break before Services and a tail break pinning the Env Vars · About bottom group', async () => {
     const el = await mount()
     const nav = el.shadowRoot!.querySelector('.nav')!
     const seps = [...nav.querySelectorAll<HTMLElement>('.nav-sep')]
     expect(seps.length).toBe(2)
-    // About 上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 About 项。
+    // 底部组上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 Env Vars 项。
     const tail = seps.find((s) => s.classList.contains('tail'))!
     expect(tail).toBeTruthy()
+    expect(tail.previousElementSibling?.textContent?.trim()).toBe('Models')
     expect(tail.nextElementSibling?.classList.contains('nav-item')).toBe(true)
-    expect(tail.nextElementSibling?.textContent?.trim()).toBe('About')
+    expect(tail.nextElementSibling?.textContent?.trim()).toBe('Env Vars')
+    // 底部组内 Env Vars → About 之间不再有分隔线（同组并列）。
+    expect(tail.nextElementSibling?.nextElementSibling?.textContent?.trim()).toBe('About')
     // 另一条在 Services 项之前（appearance|services 组间线）。
     const plain = seps.find((s) => !s.classList.contains('tail'))!
     expect(plain.nextElementSibling?.textContent?.trim()).toBe('Services')
@@ -257,23 +299,23 @@ describe('sebas-settings-modal sections', () => {
     el.remove()
   })
 
-  it('defaults to the Generic section rendering the env reference table', async () => {
+  it('defaults to the Generic section — preferences placeholder, no env table, no /api/env call', async () => {
     const el = await mount()
     expect(el.section).toBe('generic')
     await settle(el)
-    const rows = [...el.shadowRoot!.querySelectorAll('.env-table tbody tr')]
-    expect(rows.length).toBeGreaterThan(0)
-    expect(el.shadowRoot!.textContent).toContain('SEBAS_ROUTER_LISTEN')
-    // Every row's value is the "not exposed" marker — no fabricated data.
-    for (const row of rows) {
-      expect(row.querySelector('.value')?.textContent).toBe('managed by core config')
-    }
+    // split-env-vars-settings-section：Generic 收敛为纯偏好分区，env 表迁出。
+    expect(el.shadowRoot!.querySelector('.env-table')).toBeNull()
+    expect(apiMocks.env).not.toHaveBeenCalled()
+    // 占位文案指明偏好项（语言切换等）后续提供（textContent 含模板换行，
+    // 先折叠空白再断言）。
+    const text = (el.shadowRoot!.textContent ?? '').replace(/\s+/g, ' ')
+    expect(text).toContain('will be provided here later')
     el.remove()
   })
 
   it('renders no maintenance actions anywhere (restart-all and reset retired)', async () => {
     const el = await mount()
-    for (const index of [0, 1, 2, 3, 4]) {
+    for (const index of [0, 1, 2, 3, 4, 5]) {
       await goto(el, index)
       const buttons = waButtons(el).map((b) => b.textContent?.trim())
       expect(buttons).not.toContain('全部进程重启')
@@ -417,7 +459,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About section shows INSTANCE (overview items) above BUILD (/api/about)', async () => {
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
@@ -454,6 +496,92 @@ describe('sebas-settings-modal sections', () => {
     await el.updateComplete
     expect(navItems(el)[0]!.getAttribute('aria-current')).toBe('false')
     expect(navItems(el)[1]!.getAttribute('aria-current')).toBe('true')
+    el.remove()
+  })
+})
+
+describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () => {
+  function envRows(el: SebasSettingsModal): HTMLElement[] {
+    return [...el.shadowRoot!.querySelectorAll<HTMLElement>('.env-table tbody tr')]
+  }
+
+  function valueOf(rows: HTMLElement[], name: string): string | null {
+    const row = rows.find((r) => r.querySelector('.var')?.textContent?.trim() === name)
+    return row?.querySelector('.value')?.textContent?.trim() ?? null
+  }
+
+  it('lazily loads /api/env on first visit and renders the three display states', async () => {
+    const el = await mount()
+    await settle(el)
+    // 懒加载：未访问该分区前不拉取。
+    expect(apiMocks.env).not.toHaveBeenCalled()
+    await goto(el, 4)
+    expect(el.section).toBe('env-vars')
+    expect(apiMocks.env).toHaveBeenCalledTimes(1)
+    const rows = envRows(el)
+    expect(rows.length).toBe(4)
+    // plain 已设置 → 实际值。
+    expect(valueOf(rows, 'SEBAS_STATE_DB')).toBe('/tmp/sebas-itest/sebas.db')
+    // plain 未设置 → 「未设置（用默认）」。
+    expect(valueOf(rows, 'SEBAS_STATE_FILE')).toBe('未设置（用默认）')
+    // set_unset（敏感）→ 只显已设置/未设置，与 set 布尔一致。
+    expect(valueOf(rows, 'SEBAS_WEBUI_TOKEN')).toBe('已设置')
+    expect(valueOf(rows, 'SEBAS_FEISHU_APP_SECRET')).toBe('未设置')
+    el.remove()
+  })
+
+  it('never renders a value for set_unset entries even if the response leaks one', async () => {
+    // 防御性钉死：遮蔽是服务端责任，但前端对 set_unset 项也不得渲染 value
+    // ——合同外的泄漏值不能经前端落到界面。
+    apiMocks.env.mockResolvedValue({
+      items: [
+        {
+          name: 'SEBAS_WEBUI_TOKEN',
+          what: 'WebUI single-field login token',
+          kind: 'set_unset',
+          value: 'super-secret-leak',
+          set: true,
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, 4)
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).not.toContain('super-secret-leak')
+    expect(text).toContain('已设置')
+    el.remove()
+  })
+
+  it('shows 无法确定 for set_unset entries without a set flag (degraded contract, not fake unset)', async () => {
+    // 防御性解析：kind=set_unset 且无 set 字段 → 前端无法断言状态，如实显
+    // 「无法确定」，绝不冒充「未设置」。
+    apiMocks.env.mockResolvedValue({
+      items: [
+        {
+          name: 'SEBAS_CONTROL_SECRET',
+          what: 'Router control-plane secret',
+          kind: 'set_unset',
+          value: null,
+        },
+      ],
+    })
+    const el = await mount()
+    await goto(el, 4)
+    const rows = envRows(el)
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.querySelector('.value')?.textContent?.trim()).toBe('无法确定')
+    el.remove()
+  })
+
+  it('renders an inline error instead of an empty table when /api/env fails', async () => {
+    apiMocks.env.mockRejectedValue(new ApiError(500, 'env listing exploded'))
+    const el = await mount()
+    await goto(el, 4)
+    const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('env listing exploded')
+    // 失败 → 不渲染空表假象。
+    expect(el.shadowRoot!.querySelector('.env-table')).toBeNull()
     el.remove()
   })
 })

@@ -1,11 +1,11 @@
 /**
- * Settings modal (IA v3, revamp-settings-nav-and-models-editor)：侧栏底部
- * Settings 入口打开的居中弹窗——暗色面板、左侧分区导航、右侧内容区、
- * 右上关闭按钮。分区由 `section` 属性驱动，顺序即规约：
+ * Settings modal (IA v3, revamp-settings-nav-and-models-editor + 
+ * split-env-vars-settings-section)：侧栏底部 Settings 入口打开的居中弹窗
+ * ——暗色面板、左侧分区导航、右侧内容区、右上关闭按钮。分区由 `section`
+ * 属性驱动，顺序即规约：
  *
- *   - generic    → 通用偏好与杂项：原 Env 分区的环境变量只读表（后端无
- *                  env 端点，值一律如实标注 "managed by core config"）；
- *                  为后续语言切换等偏好预留信息架构位置（i18n 另立变更）
+ *   - generic    → 纯通用可配置项分区：语言切换等偏好落地前只呈现说明
+ *                  占位文案（环境变量表已迁往 env-vars 分区）
  *   - appearance → 主题三态（system / dark / light；切换与持久化在 theme.ts）
  *   - ── 分隔线 ──
  *   - services   → watchdog 受管子进程（GET /api/admin/services：name /
@@ -15,6 +15,9 @@
  *   - models     → provider 管理列表（redesign-provider-models-settings
  *                  3.4：router 运行状态归 Services，本分区不再呈现网关卡）
  *   - ── 弹性留白 + 分隔线，压底 ──
+ *   - env-vars   → 环境变量只读表（GET /api/env 的服务端策划清单：plain
+ *                  已设置显实际值、未设置显「未设置（用默认）」、set_unset
+ *                  敏感项只显已设置/未设置；失败内联错误态，不渲染空表）
  *   - about      → INSTANCE 段在上（工作区根目录 + 复制、default agent
  *                  kind、default provider/model + 跳转 Models——原 Settings
  *                  总览的三只读项迁此），BUILD 段在下（/api/about）
@@ -46,6 +49,7 @@ import {
   type About,
   type AdminEvent,
   type AdminService,
+  type EnvVarEntry,
   type RouterProviderAdmin,
   type ProviderPreset,
   type ProviderPayload,
@@ -65,16 +69,18 @@ import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /**
- * 设置弹窗分区（revamp-settings-nav-and-models-editor 1.1）。顺序即规约：
- * generic → appearance →〔分隔线〕services → models →〔弹性留白 + 分隔线，
- * 压底〕about。`settings` 总览分区移除（只读项并入 About、维护动作删除）；
- * `env` 并入 `generic`（分区 id 直接改名，旧记忆值按非法值回退）。
+ * 设置弹窗分区。顺序即规约：generic → appearance →〔分隔线〕services →
+ * models →〔弹性留白 + 分隔线，压底〕env-vars · about（底部组是两个只读
+ * 参考分区，split-env-vars-settings-section D4）。`settings` 总览分区移除
+ * （只读项并入 About、维护动作删除）；`env` 分区改名 `env-vars` 并迁表
+ * （旧记忆值按非法值回退）。
  */
 export type SettingsSection =
   | 'generic'
   | 'appearance'
   | 'services'
   | 'models'
+  | 'env-vars'
   | 'about'
 
 /** 上次停留分区的 localStorage 键（D5：单键、仅本地、无服务端同步）。 */
@@ -94,17 +100,24 @@ const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'services', label: 'Services', icon: 'shield' },
   { id: 'models', label: 'Models', icon: 'zap' },
+  { id: 'env-vars', label: 'Env Vars', icon: 'about' },
   { id: 'about', label: 'About', icon: 'about' },
 ]
 
-/** 在该分区项之前渲染一条组间分隔线（appearance|services 之间、about 上方）。 */
-const NAV_BREAKS: ReadonlySet<SettingsSection> = new Set(['services', 'about'])
+/**
+ * 在该分区项之前渲染一条组间分隔线（appearance|services 之间、底部只读组
+ * env-vars 上方——带 .tail 的那条把整个底部组压到导航底部）。
+ */
+const NAV_BREAKS: ReadonlySet<SettingsSection> = new Set(['services', 'env-vars'])
 
 const SECTION_DESC: Record<SettingsSection, string> = {
-  generic: 'General preferences and misc reference values. Language switching will live here later.',
+  generic:
+    'General preferences will live here (language switching and more) — nothing to configure yet.',
   appearance: 'How the console looks. Your choice is saved in this browser.',
   services: 'Background services that run alongside sebas.',
   models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
+  'env-vars':
+    'Read-only reference: the environment variables this sebas instance reads. Sensitive ones only show whether they are set.',
   about: 'What this instance is — its workspace, defaults, and the build it runs on.',
 }
 
@@ -160,23 +173,20 @@ const THEME_OPTIONS: ReadonlyArray<{ mode: ThemeMode; label: string; sub: string
 ]
 
 /**
- * sebas 工作区实际读取的环境变量（grep 自 sebas-router / sebas-router /
- * sebas-acp / sebas-webui / core config）。后端没有任何 env 端点，所以
- * 这里只列名字与用途，值一列如实写 "managed by core config"。
+ * 环境变量「值」列的呈现（split-env-vars-settings-section D2）：plain 已
+ * 设置显实际值、未设置显「未设置（用默认）」（默认值说明随 what 下发）；
+ * set_unset（敏感）项绝不渲染 value——即便合同外的退化响应带了值也只按
+ * `set` 布尔显已设置/未设置；`set` 字段缺失时前端无法断言状态，如实显
+ * 「无法确定」，绝不冒充「未设置」。
  */
-const ENV_VARS: ReadonlyArray<{ name: string; what: string }> = [
-  { name: 'SEBAS_ROUTER_CONFIG', what: 'Router config file path' },
-  { name: 'SEBAS_ROUTER_LISTEN', what: 'Router listen address override' },
-  { name: 'SEBAS_ROUTER_PROVIDER_OVERLAY', what: 'Provider overlay file' },
-  { name: 'SEBAS_STATE_FILE', what: 'Session state store path' },
-  { name: 'SEBAS_WEBUI_PASSWORD', what: 'WebUI bootstrap password (used when credentials file is missing)' },
-  { name: 'SEBAS_WEBUI_TOKEN', what: 'WebUI single-field login token (token or password accepted at login)' },
-  { name: 'SEBAS_CONTROL_SECRET', what: 'Router control-plane secret' },
-  { name: 'SEBAS_LOG_LEVEL', what: 'Core log filter' },
-  { name: 'SEBAS_HANG_TIMEOUT_SECS', what: 'Agent driver hang timeout (seconds)' },
-  { name: 'SEBAS_FEISHU_APP_ID', what: 'Feishu app id' },
-  { name: 'SEBAS_FEISHU_APP_SECRET', what: 'Feishu app secret' },
-]
+function envValueCell(v: EnvVarEntry): string {
+  if (v.kind === 'set_unset') {
+    if (v.set === true) return '已设置'
+    if (v.set === false) return '未设置'
+    return '无法确定'
+  }
+  return v.value ?? '未设置（用默认）'
+}
 
 @customElement('sebas-settings-modal')
 export class SebasSettingsModal extends LitElement {
@@ -192,6 +202,13 @@ export class SebasSettingsModal extends LitElement {
   @state() private aboutData: About | null = null
   @state() private aboutError = ''
   @state() private aboutLoading = false
+  /**
+   * Env Vars 分区数据（split-env-vars-settings-section 2.1，/api/env）。
+   * null = 尚未加载或本次加载失败——失败时 envError 置位、envVars 保持
+   * null，分区呈现内联错误态而不渲染空表假象。
+   */
+  @state() private envVars: EnvVarEntry[] | null = null
+  @state() private envError = ''
   /**
    * watchdog 受管子进程面（Services 分区，/api/admin/services）。null =
    * 尚未加载；`adapterOk` 为 false 时（无 watchdog 控制面）services 为
@@ -386,7 +403,8 @@ export class SebasSettingsModal extends LitElement {
       outline-offset: -2px;
     }
     /* 组间分隔线（1px 低对比线，左右留白 12px）；.tail 另加 margin-top:
-     * auto 把 About 连同分隔线一起压到导航底部（design D5）。 */
+     * auto 把底部只读组（Env Vars + About）连同分隔线一起压到导航底部
+     * （design D5 / split-env-vars-settings-section D4）。 */
     .nav .nav-sep {
       flex: 0 0 auto;
       height: 1px;
@@ -863,8 +881,16 @@ export class SebasSettingsModal extends LitElement {
       font-size: 0.78rem;
       color: var(--sebas-text-faint);
     }
-    /* Env 清单（Generic 分区承载）：变量名 + 用途 + 固定的
-     * "managed by core config" 值。 */
+    /* Generic 分区偏好占位（split-env-vars-settings-section 2.1）：偏好项
+     * 落地前的说明文案。 */
+    .prefs-placeholder {
+      margin: 0;
+      font-size: 0.88rem;
+      color: var(--sebas-text-dim);
+    }
+    /* Env Vars 分区（split-env-vars-settings-section 2.1）：/api/env 策划
+     * 清单只读表——名字 + 用途 + 按分类的值（plain 显值或「未设置（用
+     * 默认）」、set_unset 显已设置/未设置）。 */
     .env-table {
       width: 100%;
       border-collapse: collapse;
@@ -1006,6 +1032,8 @@ export class SebasSettingsModal extends LitElement {
     if (changed.has('section') && this.section === 'models') this.loadProviders()
     // Services 分区：受管子进程 + 最近错误（每次切入都刷新，动作后重取）。
     if (changed.has('section') && this.section === 'services') this.loadServices()
+    // Env Vars 分区：策划环境变量清单（每次切入都刷新，与 services 同款）。
+    if (changed.has('section') && this.section === 'env-vars') this.loadEnvVars()
   }
 
   /**
@@ -1077,6 +1105,25 @@ export class SebasSettingsModal extends LitElement {
       })
       .catch(() => {
         this.serviceEvents = []
+      })
+  }
+
+  /**
+   * Env Vars 分区数据（split-env-vars-settings-section 2.1）：真源是
+   * /api/env（webui 进程自身 env 的服务端策划清单，遮蔽在服务端完成）。
+   * 失败 → envError 置位、envVars 归 null——分区内联错误态，不渲染空表
+   * 假象（spec「端点失败如实呈现」）。
+   */
+  private loadEnvVars(): void {
+    this.envError = ''
+    api
+      .env()
+      .then((d) => {
+        this.envVars = d.items
+      })
+      .catch((e) => {
+        this.envError = e instanceof ApiError ? e.message : String(e)
+        this.envVars = null
       })
   }
 
@@ -1464,36 +1511,26 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  // 分区渲染：generic 承载原 Env 只读表；services 读 watchdog 受管子进程
-  // 面；models 承载 provider 管理（router 运行状态归 Services，3.4）；
-  // about = INSTANCE（原 Settings 总览只读项）+ BUILD（/api/about）。
+  // 分区渲染：generic 只剩偏好占位（env 表已迁 env-vars）；env-vars 承载
+  // /api/env 策划清单只读表；services 读 watchdog 受管子进程面；models 承载
+  // provider 管理（router 运行状态归 Services，3.4）；about = INSTANCE（原
+  // Settings 总览只读项）+ BUILD（/api/about）。
   private renderSection(section: SettingsSection) {
     switch (section) {
       case 'generic':
         return html`
           ${this.renderSectionHead(section)}
-          <div class="panel">
-            <table class="env-table">
-              <thead>
-                <tr>
-                  <th>Variable</th>
-                  <th>Used for</th>
-                  <th>Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${ENV_VARS.map(
-                  (v) => html`
-                    <tr>
-                      <td class="var">${v.name}</td>
-                      <td class="what">${v.what}</td>
-                      <td class="value">managed by core config</td>
-                    </tr>
-                  `,
-                )}
-              </tbody>
-            </table>
+          <div class="panel panel-pad">
+            <p class="prefs-placeholder">
+              No general preferences yet. Language switching and other preferences will be
+              provided here later.
+            </p>
           </div>
+        `
+      case 'env-vars':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderEnvVars()}
         `
       case 'services':
         return html`
@@ -1625,6 +1662,58 @@ export class SebasSettingsModal extends LitElement {
               )}
             </div>`
           : nothing}
+      </div>
+    `
+  }
+
+  /**
+   * Env Vars（split-env-vars-settings-section 2.1）：环境变量只读表。数据
+   * 源是 /api/env 的服务端策划清单（服务端遮蔽，敏感值不过 wire）；三态
+   * 呈现见 envValueCell。加载中显骨架、失败显内联错误态（与 About/Services
+   * 同款 callout）——绝不渲染空表冒充成功。
+   */
+  private renderEnvVars() {
+    if (this.envError)
+      return html`
+        <div class="callout callout-error" role="alert">
+          ${icon('alert')}<span>Failed to load: ${this.envError}</span>
+        </div>
+      `
+    if (this.envVars === null)
+      return html`
+        <div class="panel panel-pad">
+          ${[0, 1].map(
+            () => html`
+              <div class="skel-row">
+                <div class="skel skel-line" style="width:30%"></div>
+                <div class="skel skel-line" style="width:50%"></div>
+              </div>
+            `,
+          )}
+        </div>
+      `
+    return html`
+      <div class="panel">
+        <table class="env-table">
+          <thead>
+            <tr>
+              <th>Variable</th>
+              <th>Used for</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${this.envVars.map(
+              (v) => html`
+                <tr data-testid="env-row">
+                  <td class="var">${v.name}</td>
+                  <td class="what">${v.what}</td>
+                  <td class="value" data-testid="env-value">${envValueCell(v)}</td>
+                </tr>
+              `,
+            )}
+          </tbody>
+        </table>
       </div>
     `
   }
@@ -1887,7 +1976,7 @@ export class SebasSettingsModal extends LitElement {
                 (s, i) => html`
                   ${i > 0 && NAV_BREAKS.has(s.id)
                     ? html`<div
-                        class="nav-sep${s.id === 'about' ? ' tail' : ''}"
+                        class="nav-sep${s.id === 'env-vars' ? ' tail' : ''}"
                         role="separator"
                       ></div>`
                     : nothing}

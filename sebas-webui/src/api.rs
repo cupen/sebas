@@ -371,6 +371,161 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
+// ---- Env endpoint（split-env-vars-settings-section 1.1）----
+
+/// `/api/env` 的变量分类（design D2）：`plain` = 非敏感（路径/开关类），已
+/// 设置显示实际值；`set_unset` = 敏感（凭据类），只表达已设置/未设置。
+#[derive(Clone, Copy, PartialEq)]
+enum EnvVarKind {
+    Plain,
+    SetUnset,
+}
+
+impl EnvVarKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            EnvVarKind::Plain => "plain",
+            EnvVarKind::SetUnset => "set_unset",
+        }
+    }
+}
+
+/// 策划清单的静态条目（design D1）：名字、人读解释、分类、未设置时的默认值
+/// 说明。清单迁自前端硬编码表（settings-modal.ts 的 ENV_VARS，描述文案原样
+/// 保留）+ 补遗漏的 `SEBAS_STATE_DB`；未设置默认值与各读取点逐一核对
+/// （sebas-router config.rs、sebas-dispatch state_store.rs、acp claude
+/// driver、run.rs）。内部管道与测试专用变量（`SEBAS_IPC`、
+/// `SEBAS_CORE_SOCKET` 等）不在表内，即整体不出现（design Non-Goals）。
+struct EnvVarSpec {
+    name: &'static str,
+    what: &'static str,
+    kind: EnvVarKind,
+    /// 未设置时追加进 `what` 的默认值说明；None = 无固定默认值说明。
+    unset_default: Option<&'static str>,
+}
+
+const ENV_VAR_SPECS: &[EnvVarSpec] = &[
+    EnvVarSpec {
+        name: "SEBAS_ROUTER_CONFIG",
+        what: "Router config file path",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("~/.sebas/config.toml"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_ROUTER_LISTEN",
+        what: "Router listen address override",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("127.0.0.1:8787"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_ROUTER_PROVIDER_OVERLAY",
+        what: "Provider overlay file",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("~/.sebas/providers.json"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_STATE_FILE",
+        what: "Session state store path",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("~/.sebas/state.json"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_STATE_DB",
+        what: "State store DB path",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("~/.sebas/sebas.db"),
+    },
+    // 凭据类（*_PASSWORD / *_TOKEN / *_SECRET）一律 set_unset：
+    // 值不出现在响应的任何字段（design D2）。
+    EnvVarSpec {
+        name: "SEBAS_WEBUI_PASSWORD",
+        what: "WebUI bootstrap password (used when credentials file is missing)",
+        kind: EnvVarKind::SetUnset,
+        unset_default: None,
+    },
+    EnvVarSpec {
+        name: "SEBAS_WEBUI_TOKEN",
+        what: "WebUI single-field login token (token or password accepted at login)",
+        kind: EnvVarKind::SetUnset,
+        unset_default: None,
+    },
+    EnvVarSpec {
+        name: "SEBAS_CONTROL_SECRET",
+        what: "Router control-plane secret",
+        kind: EnvVarKind::SetUnset,
+        unset_default: None,
+    },
+    EnvVarSpec {
+        name: "SEBAS_LOG_LEVEL",
+        what: "Core log filter",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("info"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_HANG_TIMEOUT_SECS",
+        what: "Agent driver hang timeout (seconds)",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("300 (5 min)"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_FEISHU_APP_ID",
+        what: "Feishu app id",
+        kind: EnvVarKind::Plain,
+        unset_default: Some("config file's feishu.app_id"),
+    },
+    EnvVarSpec {
+        name: "SEBAS_FEISHU_APP_SECRET",
+        what: "Feishu app secret",
+        kind: EnvVarKind::SetUnset,
+        unset_default: None,
+    },
+];
+
+/// GET /api/env — 策划过的环境变量只读清单（split-env-vars-settings-section
+/// 1.1，design D1–D3）。读 webui 进程自身环境（`std::env::var`），不依赖
+/// core 通道——core 不可达时照常工作。遮蔽在服务端完成：`set_unset` 项
+/// （凭据类）的值不进响应的任何字段，只以 `set` 布尔表达已设置与否；`plain`
+/// 项未设置时 `value = null` 且 `what` 追加默认值说明。
+///
+/// 响应形态（由 env_endpoint_tests 钉死）：
+/// `{"items":[{"name","what","kind":"plain"|"set_unset","value","set"}]}`——
+/// `set` 对 plain 项恒等于 `value != null`（五字段统一形状，前端单一分支）。
+pub async fn env_vars() -> Response {
+    let items: Vec<serde_json::Value> = ENV_VAR_SPECS
+        .iter()
+        .map(|spec| {
+            // 空串视同未设置：与各读取点的「空值忽略」语义一致
+            // （router apply_env_overrides、admin AdminState::new）。
+            let value = std::env::var(spec.name).ok().filter(|v| !v.is_empty());
+            match spec.kind {
+                EnvVarKind::Plain => {
+                    let mut what = spec.what.to_string();
+                    if value.is_none()
+                        && let Some(default) = spec.unset_default
+                    {
+                        what.push_str(&format!("（未设置，默认 {default}）"));
+                    }
+                    json!({
+                        "name": spec.name,
+                        "what": what,
+                        "kind": spec.kind.as_str(),
+                        "value": value,
+                        "set": value.is_some(),
+                    })
+                }
+                EnvVarKind::SetUnset => json!({
+                    "name": spec.name,
+                    "what": spec.what,
+                    "kind": spec.kind.as_str(),
+                    "value": serde_json::Value::Null,
+                    "set": value.is_some(),
+                }),
+            }
+        })
+        .collect();
+    Json(json!({ "items": items })).into_response()
+}
+
 /// GET /api/agents — the agent catalog（workbench-agent-wire-fix 3.2），
 /// agent 可用性的唯一真源：每个配置的 agent 一行（id/display/reachable/
 /// cause?/version?）+ 内置内核 `"native"` 一行（可用性来自执行体自身的
@@ -1682,5 +1837,304 @@ pub async fn answer_permission(
             StatusCode::NOT_FOUND,
             "no pending permission request with that id",
         )
+    }
+}
+
+#[cfg(test)]
+mod env_endpoint_tests {
+    //! split-env-vars-settings-section 1.1 路由级测试：/api/env 的三分类展示
+    //! 语义（design D2）、服务端遮蔽（敏感值不过 wire）、清单外变量不出现、
+    //! 经既有鉴权。环境变量是进程全局状态：改环境的用例经 `ENV_LOCK` 串行，
+    //! `EnvGuard` drop 时还原进入前的值，不污染同进程其他测试。
+
+    use super::*;
+    use crate::auth::{AuthHandle, Credentials};
+    use crate::models::RouterInfo;
+    use crate::server::build_router_with_auth;
+    use crate::session_backend::FakeBackend;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use sebas_feishu::cards::CardConfig;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    /// 串行化所有写环境的用例（tokio Mutex：守卫必须跨 await 存活——请求
+    /// 处理期间环境变量得保持在位；毒锁无需处理，async Mutex 无毒化概念）。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 进程级环境变量的测试守卫：构造时写入目标值（None = 确保不在），drop
+    /// 时还原进入前的值（宿主环境恰好带同名变量也不被测试破坏/依赖）。
+    struct EnvGuard {
+        name: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: Option<&str>) -> Self {
+            let prev = std::env::var(name).ok();
+            match value {
+                Some(v) => unsafe { std::env::set_var(name, v) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+            EnvGuard { name, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(self.name, v) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
+    }
+
+    fn app() -> axum::Router {
+        build_router_with_auth(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            Arc::new(AuthHandle::disabled()),
+        )
+    }
+
+    async fn get_env(app: &axum::Router) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/env")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("non-JSON body from /api/env: {e}"));
+        (status, v)
+    }
+
+    fn item<'a>(body: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("item {name} missing from: {body}"))
+    }
+
+    /// 统一五字段形状钉死（design D2 + 任务说明的形态自定项）：多出来的字段
+    /// 若将来携带值，先过这道形状门。
+    fn assert_shape(entry: &serde_json::Value) {
+        let keys: Vec<&str> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["name", "what", "kind", "value", "set"], "{entry}");
+    }
+
+    #[tokio::test]
+    async fn plain_set_item_exposes_actual_value() {
+        let _lock = ENV_LOCK.lock().await;
+        let _var = EnvGuard::set("SEBAS_ROUTER_CONFIG", Some("/tmp/sebas-test-router.toml"));
+        let app = app();
+        let (status, body) = get_env(&app).await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = item(&body, "SEBAS_ROUTER_CONFIG");
+        assert_shape(entry);
+        assert_eq!(entry["kind"], "plain");
+        assert_eq!(entry["value"], "/tmp/sebas-test-router.toml");
+        assert_eq!(entry["set"], true);
+        // 已设置时解释不带默认值标注。
+        assert_eq!(entry["what"], "Router config file path");
+    }
+
+    #[tokio::test]
+    async fn plain_unset_item_notes_default_and_empty_reads_unset() {
+        let _lock = ENV_LOCK.lock().await;
+        let _db = EnvGuard::set("SEBAS_STATE_DB", None);
+        let _log = EnvGuard::set("SEBAS_LOG_LEVEL", Some(""));
+        let app = app();
+        let (status, body) = get_env(&app).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 未设置 → value=null、set=false，解释携带默认值说明。
+        let db = item(&body, "SEBAS_STATE_DB");
+        assert_shape(db);
+        assert_eq!(db["kind"], "plain");
+        assert_eq!(db["value"], serde_json::Value::Null);
+        assert_eq!(db["set"], false);
+        let what = db["what"].as_str().unwrap();
+        assert!(what.contains("未设置"), "{what}");
+        assert!(what.contains("~/.sebas/sebas.db"), "{what}");
+
+        // 空串视同未设置（与各读取点的空值忽略语义一致）。
+        let log = item(&body, "SEBAS_LOG_LEVEL");
+        assert_eq!(log["value"], serde_json::Value::Null);
+        assert_eq!(log["set"], false);
+        assert!(log["what"].as_str().unwrap().contains("info"));
+    }
+
+    #[tokio::test]
+    async fn set_unset_items_never_leak_values() {
+        let _lock = ENV_LOCK.lock().await;
+        let _token = EnvGuard::set("SEBAS_WEBUI_TOKEN", Some("tok-super-secret-1234"));
+        let _feishu = EnvGuard::set("SEBAS_FEISHU_APP_SECRET", Some("fl-secret-6789"));
+        let _control = EnvGuard::set("SEBAS_CONTROL_SECRET", Some("ctrl-secret-abcd"));
+        let app = app();
+        let (status, body) = get_env(&app).await;
+        assert_eq!(status, StatusCode::OK);
+
+        for name in [
+            "SEBAS_WEBUI_TOKEN",
+            "SEBAS_FEISHU_APP_SECRET",
+            "SEBAS_CONTROL_SECRET",
+        ] {
+            let entry = item(&body, name);
+            assert_shape(entry);
+            assert_eq!(entry["kind"], "set_unset", "{name}");
+            assert_eq!(entry["value"], serde_json::Value::Null, "{name}");
+            assert_eq!(entry["set"], true, "{name}");
+        }
+
+        // 遮蔽钉死：整个响应体的任何字段都不含明文。
+        let raw = serde_json::to_string(&body).unwrap();
+        for literal in [
+            "tok-super-secret-1234",
+            "fl-secret-6789",
+            "ctrl-secret-abcd",
+        ] {
+            assert!(!raw.contains(literal), "response leaks secret: {raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn set_unset_unset_reports_set_false_without_value() {
+        let _lock = ENV_LOCK.lock().await;
+        let _password = EnvGuard::set("SEBAS_WEBUI_PASSWORD", None);
+        let app = app();
+        let (_, body) = get_env(&app).await;
+        let entry = item(&body, "SEBAS_WEBUI_PASSWORD");
+        assert_shape(entry);
+        assert_eq!(entry["kind"], "set_unset");
+        assert_eq!(entry["value"], serde_json::Value::Null);
+        assert_eq!(entry["set"], false);
+    }
+
+    #[tokio::test]
+    async fn catalog_is_fixed_and_excludes_internal_vars() {
+        let _lock = ENV_LOCK.lock().await;
+        // 内部管道变量即使存在于进程环境也整体不出现。
+        let _ipc = EnvGuard::set("SEBAS_IPC", Some("1"));
+        let _socket = EnvGuard::set("SEBAS_CORE_SOCKET", Some("/tmp/sebas-core.sock"));
+        let app = app();
+        let (_, body) = get_env(&app).await;
+        let names: Vec<&str> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap())
+            .collect();
+        // 清单全量钉死（含补入的 SEBAS_STATE_DB）：增删条目须显式过这里。
+        assert_eq!(
+            names,
+            [
+                "SEBAS_ROUTER_CONFIG",
+                "SEBAS_ROUTER_LISTEN",
+                "SEBAS_ROUTER_PROVIDER_OVERLAY",
+                "SEBAS_STATE_FILE",
+                "SEBAS_STATE_DB",
+                "SEBAS_WEBUI_PASSWORD",
+                "SEBAS_WEBUI_TOKEN",
+                "SEBAS_CONTROL_SECRET",
+                "SEBAS_LOG_LEVEL",
+                "SEBAS_HANG_TIMEOUT_SECS",
+                "SEBAS_FEISHU_APP_ID",
+                "SEBAS_FEISHU_APP_SECRET",
+            ],
+            "策划清单被改动：须同步核对 spec delta 与描述文案"
+        );
+    }
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
+    }
+
+    /// 跟随 server.rs auth_guard_tests 的模式：凭据文件句柄 + tempdir 由
+    /// 本测试持有存活（AuthHandle.enabled() 每次 mtime 探测）。
+    #[tokio::test]
+    async fn auth_enabled_rejects_anonymous_and_admits_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        crate::auth::store_credentials(
+            &path,
+            &Credentials::with_iterations("alice", "password8", 1000),
+        )
+        .unwrap();
+        let app = build_router_with_auth(
+            Arc::new(FakeBackend::new()),
+            RouterInfo::default(),
+            CardConfig::default(),
+            None,
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            30,
+            Arc::new(AuthHandle::open(path)),
+        );
+
+        // 鉴权开启 + 未登录 → 401（与其他 /api 一致，不在豁免名单里）。
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/env")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 登录换会话 cookie → 200（端点确实挂在鉴权之后，而非被豁免）。
+        let login = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .header("host", "127.0.0.1:12345")
+            .extension(ConnectInfo(test_addr()))
+            .body(Body::from(r#"{"secret":"password8"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(login).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/env")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -227,6 +227,9 @@ fn build_router_full(
             get(routes::router_api_providers_list),
         )
         .route("/api/about", get(api::about))
+        // split-env-vars-settings-section 1.1：环境变量只读清单（webui 自身
+        // env，不依赖 core 通道）。/api/ 前缀落进既有 auth_guard。
+        .route("/api/env", get(api::env_vars))
         .route("/api/agents", get(api::agent_kinds))
         // add-remote-execution-node 8.2：执行节点可用性（本机恒在线 + core 注册表）。
         .route("/api/nodes", get(api::nodes))
