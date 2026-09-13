@@ -546,39 +546,13 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   onUnauthorized = handler
 }
 
-/**
- * Admin CSRF token（`POST /api/admin/login` 或 `GET /api/admin/csrf` 下发，
- * JS 从 HttpOnly cookie 拿不到，只能走 body）。内存 + sessionStorage 双持：
- * 内存是真源，sessionStorage 让页面 reload/第二 tab 免重新登录即可恢复。
- */
-let adminCsrfToken: string | null = null
-try {
-  adminCsrfToken = sessionStorage.getItem('sebas_admin_csrf')
-} catch {
-  adminCsrfToken = null
-}
-export function setAdminCsrfToken(token: string | null): void {
-  adminCsrfToken = token
-  try {
-    if (token) sessionStorage.setItem('sebas_admin_csrf', token)
-    else sessionStorage.removeItem('sebas_admin_csrf')
-  } catch {
-    // sessionStorage 不可用（隐私模式等）则仅内存持有
-  }
-}
-export function getAdminCsrfToken(): string | null {
-  return adminCsrfToken
-}
-
 /** 登录/探活端点自身的 401 不应触发全局登录页跳转（否则登录失败即循环跳转）。 */
 function isAuthExempt(path: string): boolean {
   return (
     path === '/api/auth/login' ||
     path === '/api/auth/me' ||
     path === '/api/auth/setup' ||
-    path === '/api/auth/logout' ||
-    path === '/api/admin/login' ||
-    path === '/api/admin/csrf'
+    path === '/api/auth/logout'
   )
 }
 
@@ -626,10 +600,6 @@ async function get<T>(path: string): Promise<T> {
   return unwrap<T>(await doFetch(path, { headers: { accept: 'application/json' } }), path)
 }
 
-function csrfHeaders(): Record<string, string> {
-  return adminCsrfToken ? { 'x-csrf-token': adminCsrfToken } : {}
-}
-
 /**
  * Build a request URL with a query string. One place owns query encoding
  * (URLSearchParams) so values containing `\`, `+`, `&`, CJK, … survive the
@@ -653,7 +623,6 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
       headers: {
         'content-type': 'application/json',
         accept: 'application/json',
-        ...csrfHeaders(),
       },
       body: body === undefined ? '{}' : JSON.stringify(body),
     }),
@@ -668,7 +637,6 @@ async function put<T>(path: string, body?: unknown): Promise<T> {
       headers: {
         'content-type': 'application/json',
         accept: 'application/json',
-        ...csrfHeaders(),
       },
       body: body === undefined ? '{}' : JSON.stringify(body),
     }),
@@ -680,7 +648,7 @@ async function del<T>(path: string): Promise<T> {
   return unwrap<T>(
     await doFetch(path, {
       method: 'DELETE',
-      headers: { accept: 'application/json', ...csrfHeaders() },
+      headers: { accept: 'application/json' },
     }),
     path,
   )
@@ -704,7 +672,6 @@ const projects = {
     unwrapText(
       await doFetch(`/api/projects/${encodeURIComponent(id)}/remove`, {
         method: 'POST',
-        headers: { ...csrfHeaders() },
       }),
       `/api/projects/${encodeURIComponent(id)}/remove`,
     ),
@@ -943,26 +910,6 @@ export const api = {
       return { operation_id: r.operation_id, status: 'accepted', message: r.message }
     }
     return post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/restart`)
-  },
-  adminLogin: async (password: string) => {
-    const res = await post<{ status: string; csrf_token?: string }>('/api/admin/login', {
-      password,
-    })
-    if (res.csrf_token) setAdminCsrfToken(res.csrf_token)
-    return res
-  },
-  /** 已有会话免重新登录恢复 CSRF（页面 reload/第二 tab 用）。 */
-  adminCsrf: async () => {
-    const res = await get<{ csrf_token: string }>('/api/admin/csrf')
-    setAdminCsrfToken(res.csrf_token)
-    return res
-  },
-  adminLogout: async () => {
-    try {
-      return await post<{ status: string }>('/api/admin/logout')
-    } finally {
-      setAdminCsrfToken(null)
-    }
   },
 
   // Project registry (Workbench left rail).

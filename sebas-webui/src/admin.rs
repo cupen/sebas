@@ -1,26 +1,20 @@
 //! Admin dashboard routes, Adapter trait, and security middleware.
 //!
-//! Provides the control-plane admin interface for the WebUI:
-//! - `/admin/status`  — control plane status (operations, version, events)
-//! - `/admin/events`  — event timeline
-//! - `/admin/update`  — update controls (release, dev, dry-run, rollback)
-//! - `/admin/services` — managed-services overview
-//! - `/admin/restart` — restart core
-//! - `/admin/login`   — login page (if password is set)
-//! - `/admin/logout`  — logout
-//!
-//! All mutation endpoints are POST-only and protected by CSRF + origin check.
-//! When `SEBAS_WEBUI_PASSWORD` is set, all admin routes (except login) require
-//! a valid session cookie.
+//! Provides the control-plane admin JSON API for the WebUI (`/api/admin/*`):
+//! status, events, managed-services overview, update/rollback/restart.
+//! Authentication and role authorization live in the outer `auth_guard`
+//! (webui session + RBAC `services.control`); this module carries no auth
+//! of its own — mutations are POST-only with an origin check
+//! (retire-legacy-admin-auth：env 密码会话与 CSRF token 层已退役).
 //!
 //! The [`AdminAdapter`] trait allows the sebas binary crate to provide either
-//! a real control-RPC implementation or a no-op stub.
+//! a real control-RPC implementation or a no-op stub (reads report
+//! `adapter_ok: false`, mutations answer 503).
 
-use crate::admin_auth::SessionStore;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{Path, State};
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json};
@@ -160,28 +154,15 @@ pub struct AdminService {
 pub struct AdminState {
     pub adapter: Option<Arc<dyn AdminAdapter>>,
     pub started_at: Arc<Instant>,
-    pub password: Option<Arc<str>>,
-    pub session_store: SessionStore,
 }
 
 impl AdminState {
     /// Create a new admin state with an optional adapter.
     pub fn new(adapter: Option<Arc<dyn AdminAdapter>>) -> Self {
-        let password = std::env::var("SEBAS_WEBUI_PASSWORD")
-            .ok()
-            .filter(|p| !p.is_empty())
-            .map(|p| Arc::from(p.as_str()));
         Self {
             adapter,
             started_at: Arc::new(Instant::now()),
-            password,
-            session_store: SessionStore::new(),
         }
-    }
-
-    /// Whether a password is configured (auth required for mutations).
-    pub fn has_password(&self) -> bool {
-        self.password.is_some()
     }
 }
 
@@ -362,24 +343,15 @@ fn no_adapter_error() -> (StatusCode, Json<serde_json::Value>) {
 
 // ─── Auth Middleware ──────────────────────────────────────────────────────────
 
-/// Cookie name for the admin session.
-const SESSION_COOKIE_NAME: &str = "sebas_admin_session";
-
-
-
-/// Extension to pass CSRF token through request layers.
-#[derive(Clone)]
-struct CsrfExtension(String);
-
 /// Security middleware for mutation routes.
 ///
 /// Checks:
-/// 1. POST-only (returns 405 for GET/HEAD/etc.)
-/// 2. If password is set: valid CSRF token in `X-CSRF-Token` header, OR
-///    valid loopback origin (for CLI tools like curl).
-/// 3. If password is not set: valid loopback origin check only.
+/// 1. POST-only（非 POST → 405）；
+/// 2. Origin 检查：无 `Origin` 头（curl 等 CLI）、空 Origin 或 loopback
+///    origin 放行，非 loopback origin → 403。认证与角色授权在外层
+///    `auth_guard`（webui 会话 + RBAC `services.control`），本守卫只管
+///    请求形态与同源。
 pub async fn admin_mutation_guard(
-    State(state): State<AdminState>,
     req: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -388,35 +360,8 @@ pub async fn admin_mutation_guard(
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    // Origin check (always enforced)
-    let origin_is_valid =
-        if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
-            origin.is_empty() || is_loopback_origin(origin)
-        } else {
-            // No origin header — may be a CLI tool. Still require CSRF if password is set.
-            false
-        };
-
-    if state.has_password() {
-        // Password mode: require CSRF token OR valid loopback origin
-        let csrf_token = req
-            .headers()
-            .get("x-csrf-token")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let session_csrf = req.extensions().get::<CsrfExtension>().map(|c| c.0.clone());
-
-        let csrf_valid = match (csrf_token, session_csrf) {
-            (Some(token), Some(expected)) => constant_time_eq(token.as_bytes(), expected.as_bytes()),
-            _ => false,
-        };
-
-        if !csrf_valid && !origin_is_valid {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    } else if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
-        // No password mode: origin check is the only protection
+    // Origin check: absent / empty / loopback passes, the rest is foreign.
+    if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
         if !origin.is_empty() && !is_loopback_origin(origin) {
             return Err(StatusCode::FORBIDDEN);
         }
@@ -450,51 +395,7 @@ fn is_loopback_origin(origin: &str) -> bool {
         || host == "::1"
 }
 
-/// 手写常量时间比较（admin 密码与 CSRF token 比对用，避免短路泄漏）。
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-// ─── Login / Logout ─────────────────────────────────────────────────────────
-
-
-/// POST /admin/login — authenticate and create session.
-#[derive(serde::Deserialize)]
-pub struct LoginForm {
-    password: String,
-}
-
-
-
 // ─── JSON API for the SPA (see the `webui-api` capability) ──────────────────
-
-/// Extract the admin session cookie value from request headers.
-fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|c| {
-                let c = c.trim();
-                c.strip_prefix(&format!("{}=", SESSION_COOKIE_NAME))
-                    .map(|val| val.to_string())
-            })
-        })
-}
-
-fn api_401() -> axum::response::Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({ "error": "authentication required" })),
-    )
-        .into_response()
-}
 
 /// GET /api/admin/status — control plane status as JSON.
 pub async fn api_admin_status(State(state): State<AdminState>) -> impl IntoResponse {
@@ -569,135 +470,6 @@ pub async fn api_admin_services(State(state): State<AdminState>) -> impl IntoRes
     }))
 }
 
-/// Auth guard for `/api/admin/*`: like [`admin_auth_guard`], but rejects
-/// with a JSON `401` instead of redirecting, so any client can branch on
-/// the status code.
-pub async fn api_admin_auth_guard(
-    State(state): State<AdminState>,
-    req: Request<Body>,
-    next: Next,
-) -> axum::response::Response {
-    if !state.has_password() {
-        // No password configured — allow all requests (read-only mode).
-        return next.run(req).await;
-    }
-
-    let path = req.uri().path();
-    if path == "/api/admin/login" || path == "/api/admin/logout" {
-        return next.run(req).await;
-    }
-
-    match extract_session_cookie(req.headers()) {
-        Some(id) => match state.session_store.validate(&id).await {
-            Ok(csrf_token) => {
-                let mut req = req;
-                req.extensions_mut().insert(CsrfExtension(csrf_token));
-                next.run(req).await
-            }
-            Err(_) => api_401(),
-        },
-        None => api_401(),
-    }
-}
-
-/// POST /api/admin/login — authenticate with JSON `{ "password": ... }`.
-/// On success sets the admin session cookie (Path=/ so it covers
-/// `/api/admin/*`), HttpOnly, SameSite=Lax, and returns the CSRF token in
-/// the JSON body (`{ "status": "ok", "csrf_token": "…" }`) — the HttpOnly
-/// cookie is invisible to JS, so without this the SPA could never send
-/// `X-CSRF-Token` and non-loopback mutations would always 403.
-/// The 24 h inactivity TTL lives in the session store.
-pub async fn api_login_action(
-    State(state): State<AdminState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(form): Json<LoginForm>,
-) -> axum::response::Response {
-    // Per-IP rate limit：同一来源 IP 的登录尝试独立计数，避免单 IP 暴力
-    // 破解影响其他用户（admin_auth 已支持 per-IP，这里真正接线）。
-    let client_ip = addr.ip().to_string();
-    if !state.session_store.check_rate_limit(&client_ip).await {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "error": "Too many login attempts. Try again later." })),
-        )
-            .into_response();
-    }
-
-    let password_ok = match &state.password {
-        Some(expected) => {
-            constant_time_eq(form.password.as_bytes(), expected.as_bytes())
-        }
-        None => false,
-    };
-    if !password_ok {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "Invalid password." })),
-        )
-            .into_response();
-    }
-
-    state.session_store.reset_rate_limit(&client_ip).await;
-    // admin 控制面会话不绑定 auth.db 用户：user_id = 0（哨兵值，用户管理
-    // 的踢会话/删号对它无效果——add-webui-multiuser-rbac D2）。
-    let (session_id, csrf) = state.session_store.create(0).await;
-    let cookie = format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Lax",
-        SESSION_COOKIE_NAME, session_id
-    );
-    let mut resp = (
-        StatusCode::OK,
-        Json(serde_json::json!({ "status": "ok", "csrf_token": csrf })),
-    )
-        .into_response();
-    resp.headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
-    resp
-}
-
-/// GET /api/admin/csrf — return the CSRF token for the current session.
-/// Lets an SPA that already holds a valid HttpOnly session cookie (e.g.
-/// page reload after upgrade, or a second tab) recover the token without
-/// re-login. Guarded by `api_admin_auth_guard`, so unauthenticated → 401.
-pub async fn api_csrf_action(
-    headers: axum::http::HeaderMap,
-    State(state): State<AdminState>,
-) -> axum::response::Response {
-    match extract_session_cookie(&headers) {
-        Some(id) => match state.session_store.validate(&id).await {
-            Ok(csrf_token) => (
-                StatusCode::OK,
-                Json(serde_json::json!({ "csrf_token": csrf_token })),
-            )
-                .into_response(),
-            Err(_) => api_401(),
-        },
-        None => api_401(),
-    }
-}
-
-/// POST /api/admin/logout — end the session and clear the cookie.
-pub async fn api_logout_action(
-    State(state): State<AdminState>,
-    headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    if let Some(session_id) = extract_session_cookie(&headers) {
-        state.session_store.remove(&session_id).await;
-    }
-    let cookie = format!(
-        "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
-        SESSION_COOKIE_NAME
-    );
-    let mut resp = (
-        StatusCode::OK,
-        Json(serde_json::json!({ "status": "ok" })),
-    )
-        .into_response();
-    resp.headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
-    resp
-}
-
 /// Build the JSON admin API router (mounted always, unlike the HTML admin
 /// cluster): reads report `adapter_ok: false` without an adapter and
 /// mutations return 503, so the SPA can present an honest degradation
@@ -721,29 +493,13 @@ pub fn build_api_admin_router(state: AdminState) -> Router {
             "/api/admin/services/{service}/restart",
             post(admin_service_restart),
         )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            admin_mutation_guard,
-        ));
+        .layer(middleware::from_fn(admin_mutation_guard));
 
-    let protected = Router::new()
+    Router::new()
         .route("/api/admin/status", get(api_admin_status))
         .route("/api/admin/events", get(api_admin_events))
         .route("/api/admin/services", get(api_admin_services))
-        .route("/api/admin/csrf", get(api_csrf_action))
         .merge(mutation_routes)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            api_admin_auth_guard,
-        ));
-
-    let public = Router::new()
-        .route("/api/admin/login", post(api_login_action))
-        .route("/api/admin/logout", post(api_logout_action));
-
-    Router::new()
-        .merge(protected)
-        .merge(public)
         .with_state(state)
 }
 
@@ -798,6 +554,7 @@ fn format_uptime(d: std::time::Duration) -> String {
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1332,192 +1089,4 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
-    /// State with a password configured, bypassing env-var races.
-    fn password_state() -> AdminState {
-        let mut st = test_state(None);
-        st.password = Some(Arc::from("sekrit"));
-        st
-    }
-
-    #[tokio::test]
-    async fn api_admin_login_logout_round_trip() {
-        let state = password_state();
-        let app = build_api_admin_router(state.clone());
-
-        // Unauthenticated read → 401 with JSON error.
-        let (status, v) = api_json(app.clone(), "GET", "/api/admin/status", None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(v["error"].as_str().is_some());
-
-        // Wrong password → 403.
-        let (status, _) = api_json(
-            app.clone(),
-            "POST",
-            "/api/admin/login",
-            Some(r#"{"password": "wrong"}"#),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // Correct password → 200 + cookie (HttpOnly, Path=/).
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/admin/login")
-            .extension(ConnectInfo(SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)))
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"password": "sekrit"}"#.to_string()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let cookie = resp
-            .headers()
-            .get("set-cookie")
-            .and_then(|v| v.to_str().ok())
-            .unwrap()
-            .to_string();
-        assert!(cookie.starts_with("sebas_admin_session="), "cookie: {cookie}");
-        assert!(cookie.contains("HttpOnly"), "cookie: {cookie}");
-        assert!(cookie.contains("Path=/"), "cookie must cover /api/admin: {cookie}");
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).expect("login returns JSON");
-        let csrf = body["csrf_token"].as_str().expect("login returns csrf_token");
-        assert!(!csrf.is_empty(), "csrf_token must be non-empty: {body}");
-        let session_value = cookie
-            .split(';')
-            .next()
-            .unwrap()
-            .trim()
-            .to_string();
-
-        // Authenticated read succeeds.
-        let (status, _) = api_json_with_cookie(app.clone(), "GET", "/api/admin/status", &session_value).await;
-        assert_eq!(status, StatusCode::OK);
-
-        // CSRF recovery endpoint returns the same token without re-login.
-        let (status, v) =
-            api_json_with_cookie(app.clone(), "GET", "/api/admin/csrf", &session_value).await;
-        assert_eq!(status, StatusCode::OK, "body: {v}");
-        assert_eq!(v["csrf_token"].as_str(), Some(csrf), "csrf endpoint must match login token");
-
-        // Non-loopback mutation with CSRF token succeeds (public-deploy shape).
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/admin/restart")
-                    .header("cookie", &session_value)
-                    .header("x-csrf-token", csrf)
-                    .header("origin", "https://example.com")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        // No adapter in password_state → honest 503, not 403: proves CSRF passed.
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        // Same request without CSRF + foreign origin → 403.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/admin/restart")
-                    .header("cookie", &session_value)
-                    .header("origin", "https://example.com")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-        // Logout clears the session.
-        let (status, _) = api_json_with_cookie(app.clone(), "POST", "/api/admin/logout", &session_value).await;
-        assert_eq!(status, StatusCode::OK);
-
-        // After logout the same cookie is invalid again.
-        let (status, v) = api_json_with_cookie(app, "GET", "/api/admin/status", &session_value).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(v["error"].as_str().is_some());
-    }
-
-    async fn api_json_with_cookie(
-        app: Router,
-        method: &str,
-        uri: &str,
-        cookie: &str,
-    ) -> (StatusCode, Value) {
-        let req = Request::builder()
-            .method(method)
-            .uri(uri)
-            .extension(ConnectInfo(SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 12345)))
-            .header("cookie", cookie)
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v: Value = serde_json::from_slice(&bytes)
-            .unwrap_or_else(|e| panic!("non-JSON from {uri} [{status}]: {e}"));
-        (status, v)
-    }
-
-    /// POST 一次 JSON 登录尝试，模拟指定来源 IP。返回状态码 + 是否被限速。
-    async fn api_login_attempt(
-        app: &axum::Router,
-        ip: std::net::IpAddr,
-    ) -> (StatusCode, bool) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/admin/login")
-            .extension(ConnectInfo(SocketAddr::new(ip, 12345)))
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"password": "nope"}"#.to_string()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let limited = status == StatusCode::TOO_MANY_REQUESTS;
-        (status, limited)
-    }
-
-    #[tokio::test]
-    async fn api_admin_login_rate_limit_still_enforced() {
-        let state = password_state();
-        let app = build_api_admin_router(state);
-        let ip: std::net::IpAddr = "10.0.0.9".parse().unwrap();
-        for _ in 0..5 {
-            let (status, _limited) = api_login_attempt(&app, ip).await;
-            assert_eq!(status, StatusCode::FORBIDDEN);
-        }
-        // The 6th attempt inside the window is rejected by the limiter.
-        let (status, limited) = api_login_attempt(&app, ip).await;
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert!(limited);
-    }
-
-    #[tokio::test]
-    async fn api_admin_login_rate_limit_is_per_ip() {
-        let state = password_state();
-        let app = build_api_admin_router(state);
-        let ip_a: std::net::IpAddr = "10.0.1.1".parse().unwrap();
-        let ip_b: std::net::IpAddr = "10.0.1.2".parse().unwrap();
-
-        // IP A 连续失败 → 触发限速。
-        let mut blocked_a = false;
-        for _ in 0..8 {
-            let (_status, limited) = api_login_attempt(&app, ip_a).await;
-            if limited {
-                blocked_a = true;
-                break;
-            }
-        }
-        assert!(blocked_a, "IP A 连续失败后应被限速");
-
-        // 不同 IP 不受影响：第一次尝试是普通 403，而非 429。
-        let (status, limited_b) = api_login_attempt(&app, ip_b).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(!limited_b, "IP B 不应被 IP A 的失败影响（per-IP 限速）");
-    }
 }
