@@ -274,8 +274,8 @@ beforeEach(() => {
         value: null,
       },
       {
-        name: 'SEBAS_WEBUI_TOKEN',
-        what: 'WebUI single-field login token (token or password accepted at login)',
+        name: 'SEBAS_CONTROL_SECRET',
+        what: 'Watchdog control plane secret',
         kind: 'set_unset',
         value: null,
         set: true,
@@ -552,7 +552,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
     // plain 未设置 → 「未设置（用默认）」。
     expect(valueOf(rows, 'SEBAS_STATE_FILE')).toBe('未设置（用默认）')
     // set_unset（敏感）→ 只显已设置/未设置，与 set 布尔一致。
-    expect(valueOf(rows, 'SEBAS_WEBUI_TOKEN')).toBe('已设置')
+    expect(valueOf(rows, 'SEBAS_CONTROL_SECRET')).toBe('已设置')
     expect(valueOf(rows, 'SEBAS_FEISHU_APP_SECRET')).toBe('未设置')
     el.remove()
   })
@@ -563,8 +563,8 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
     apiMocks.env.mockResolvedValue({
       items: [
         {
-          name: 'SEBAS_WEBUI_TOKEN',
-          what: 'WebUI single-field login token',
+          name: 'SEBAS_CONTROL_SECRET',
+          what: 'Watchdog control plane secret',
           kind: 'set_unset',
           value: 'super-secret-leak',
           set: true,

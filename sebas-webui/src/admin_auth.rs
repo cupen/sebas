@@ -1,15 +1,10 @@
-//! Authentication, session management, CSRF protection, and rate limiting
-//! for the WebUI admin dashboard.
+//! 会话存储与登录限速——webui 登录鉴权（[`crate::auth::AuthHandle`]）的
+//! 共享基础设施。
 //!
-//! # Security Model
-//!
-//! - Password is read from `SEBAS_WEBUI_PASSWORD` env var at startup.
-//! - If unset, the admin dashboard is read-only (no login required, but
-//!   mutation routes return 401).
-//! - Login creates a session cookie with a configurable TTL (default 24h).
-//! - Every mutation route requires a valid session cookie **and** a matching
-//!   `X-CSRF-Token` header (or a loopback origin as fallback for CLI tools).
-//! - Login endpoint has a simple in-memory rate limiter (5 attempts / 30s).
+//! - [`SessionStore`]：内存会话表（24h 不活动 TTL、懒清理、按活动摊还
+//!   续期），每条会话绑定 webui 用户 id。`user_id = 0` 是保留哨兵值：
+//!   身份解析恒拒绝、按用户踢会话对它无效果（用户库里不存在 id 0）。
+//! - 登录限速：per-IP 5 次 / 30 秒，成功登录后清零。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,9 +28,9 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(30);
 pub struct Session {
     pub id: String,
     pub csrf_token: String,
-    /// 会话绑定的 webui 用户 id（add-webui-multiuser-rbac 2.3）。控制面
-    /// admin 会话（env 密码登录，不对应 auth.db 用户）恒为 0——用户管理
-    /// 的踢会话/删号对它无效果。
+    /// 会话绑定的 webui 用户 id（add-webui-multiuser-rbac 2.3）。`0` 为
+    /// 保留哨兵——不对应 auth.db 用户，身份解析恒拒绝，用户管理的踢会话/
+    /// 删号对它无效果。
     pub user_id: i64,
     #[allow(dead_code)]
     created_at: Instant,
@@ -90,8 +85,8 @@ impl SessionStore {
     }
 
     /// Create a new session bound to `user_id`, returning its ID and CSRF
-    /// token. WebUI 用户登录传真实用户 id；admin 控制面会话传 0（哨兵值，
-    /// 见 [`Session::user_id`]）。
+    /// token. WebUI 用户登录传真实用户 id；`0` 仅剩哨兵语义
+    /// （见 [`Session::user_id`]）。
     pub async fn create(&self, user_id: i64) -> (String, String) {
         let mut inner = self.inner.lock().await;
         let session = Session::new(user_id);
@@ -143,8 +138,8 @@ impl SessionStore {
     }
 
     /// Remove every session bound to `user_id`（禁用/删号/重置密码时踢会话，
-    /// add-webui-multiuser-rbac 2.3）。返回移除的会话数。admin 控制面会话
-    /// （`user_id = 0`）不受影响——用户库里不存在 id 为 0 的用户。
+    /// add-webui-multiuser-rbac 2.3）。返回移除的会话数。哨兵 `user_id = 0`
+    /// 不受影响——用户库里不存在 id 为 0 的用户。
     pub async fn remove_all_for_user(&self, user_id: i64) -> usize {
         let mut inner = self.inner.lock().await;
         let before = inner.sessions.len();
@@ -234,8 +229,7 @@ mod tests {
         assert_eq!(store.user_id_of(&id).await, None);
     }
 
-    /// add-webui-multiuser-rbac 2.3：按用户踢会话；admin 控制面会话
-    /// （user_id = 0）不受影响。
+    /// add-webui-multiuser-rbac 2.3：按用户踢会话；哨兵 user_id = 0 不受影响。
     #[tokio::test]
     async fn remove_all_for_user_kicks_only_that_user() {
         let store = SessionStore::new();

@@ -30,13 +30,6 @@ SHALL 绝不落盘。用户名唯一性 SHALL 大小写不敏感（`Alice` 与 `
 - **WHEN** 已存在用户 `alice`，再尝试创建 `Alice`
 - **THEN** 创建被拒绝并提示用户名已存在
 
-#### Scenario: 旧单账户凭据文件被忽略
-
-- **WHEN** 磁盘上存在旧版 `webui-auth.json`（或设置了
-  `SEBAS_WEBUI_AUTH_FILE`）
-- **THEN** webui 不读取、不写入、不迁移该文件；用户库仍为零用户并
-  进入首启设置流程（旧系统不兼容，未正式发布）
-
 ### Requirement: 首启 root 引导
 
 鉴权开启且用户库零用户时，SHALL 提供两条引导路径，且不自动生成任何

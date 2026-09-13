@@ -2,9 +2,8 @@
  * 登录视图：webui 启用登录鉴权（服务端配置了凭据）时的全屏门禁。
  *
  * Shell 在 `/api/auth/me` 返回 `authenticated: false`（且非零用户首启）时
- * 渲染本组件替代整个工作台。提交 → `api.authLogin`（用户名+密码双字段，
- * add-webui-multiuser-rbac 5.1：旧 `{secret}` 单字段形态已移除）→ 成功后
- * 冒泡 `login-success`（携带用户名），shell 据此挂回工作台。401（凭据错）
+ * 渲染本组件替代整个工作台。提交 → `api.authLogin`（用户名+密码双字段）→
+ * 成功后冒泡 `login-success`（携带用户名），shell 据此挂回工作台。401（凭据错）
  * 就地显示错误文案，429 显示限速提示。
  */
 

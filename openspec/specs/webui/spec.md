@@ -11,7 +11,7 @@ the watchdog control plane.
 
 ### Requirement: HTTP route surface
 
-The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and `GET /assets/*` for its built styles, scripts, and fonts. Any other browser-facing GET (for example `/sessions/{key}`) resolves through the SPA fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about` canonicalise to `/` — those surfaces live in the Settings modal now. The JSON API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with optional `prompt` field and a required `agent` field naming the target agent), `GET /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST /api/sessions/{key}/cancel` (interrupt the session's in-flight turn over the core channel), `POST /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `POST /api/sessions/{key}/pending/{pending_id}/remove` (remove a not-yet-started submission), `POST /api/sessions/{key}/pending/{pending_id}/move` (reorder a not-yet-started submission within its own disposition group; body `to_index`), `GET /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`, `GET /api/router`, `GET /api/about`, `POST /api/sessions/{key}/model` (mid-session model switch), `POST /api/sessions/{key}/mode` (mid-session permission-mode switch), the agent catalog `GET /api/agents` (each configured agent plus the built-in native kernel, with id, display name, reachability, optional cause and version), `GET /router/api/presets` (read-only preset table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, the project APIs `GET /api/projects` and `POST /api/projects` (register), `POST /api/projects/reorder`, `POST /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET /api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to the server's work directory — the configured work dir of the default agent kind, falling back to the WebUI process working directory; an explicit `root` query parameter overrides the default), `POST /api/sessions/{key}/archive` (archive a session), `POST /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive` (list archived sessions with expiry info), and `GET /ws` (WebSocket session stream). Project and session mutations are POST-only and carry the same posture as the existing session APIs. The provider management cluster under `/router/api/*` (providers, model aliases, defaults, presets, model fetch) SHALL be fulfilled by the WebUI backend from the core-owned provider store over the core channel, never by proxying the router process; the route names are retained for compatibility. Without a reachable core these routes SHALL fail honestly (503) and SHALL NOT serve a stale snapshot. The JSON admin API `/api/admin/*` (status, events, services, login, logout, update, update/dry-run, update/dev, rollback, restart) is always mounted: without a control-plane adapter its reads report `adapter_ok: false` and its mutations return 503 (honest degradation). `GET /health` returns the literal `ok`. All browser assets the UI needs to render — styles, fonts, Web Awesome, markdown rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI SHALL NOT depend on an external CDN at render time. Navigation SHALL only link to routes this surface serves.
+The WebUI SHALL serve `GET /` as the SPA shell for the project workbench and `GET /assets/*` for its built styles, scripts, and fonts. Any other browser-facing GET (for example `/sessions/{key}`) resolves through the SPA fallback, and the retired IA-v1 paths `/settings`, `/gateway`, and `/about` canonicalise to `/` — those surfaces live in the Settings modal now. The JSON API SHALL serve: `GET /api/sessions` and `POST /api/sessions` (create, with optional `prompt` field and a required `agent` field naming the target agent), `GET /api/sessions/{key}`, `POST /api/sessions/{key}/message`, `POST /api/sessions/{key}/cancel` (interrupt the session's in-flight turn over the core channel), `POST /api/sessions/{key}/close`, `POST /api/sessions/{key}/switch`, `POST /api/sessions/{key}/pending/{pending_id}/remove` (remove a not-yet-started submission), `POST /api/sessions/{key}/pending/{pending_id}/move` (reorder a not-yet-started submission within its own disposition group; body `to_index`), `GET /api/summary`, `POST /api/permissions/{request_id}/answer`, `GET /api/settings`, `GET /api/router`, `GET /api/about`, `POST /api/sessions/{key}/model` (mid-session model switch), `POST /api/sessions/{key}/mode` (mid-session permission-mode switch), the agent catalog `GET /api/agents` (each configured agent plus the built-in native kernel, with id, display name, reachability, optional cause and version), `GET /router/api/presets` (read-only preset table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, the project APIs `GET /api/projects` and `POST /api/projects` (register), `POST /api/projects/reorder`, `POST /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET /api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to the server's work directory — the configured work dir of the default agent kind, falling back to the WebUI process working directory; an explicit `root` query parameter overrides the default), `POST /api/sessions/{key}/archive` (archive a session), `POST /api/sessions/{key}/restore` (restore an archived session), `GET /api/archive` (list archived sessions with expiry info), and `GET /ws` (WebSocket session stream). Project and session mutations are POST-only and carry the same posture as the existing session APIs. The provider management cluster under `/router/api/*` (providers, model aliases, defaults, presets, model fetch) SHALL be fulfilled by the WebUI backend from the core-owned provider store over the core channel, never by proxying the router process; the route names are retained for compatibility. Without a reachable core these routes SHALL fail honestly (503) and SHALL NOT serve a stale snapshot. The JSON admin API `/api/admin/*` (status, events, services, update, update/dry-run, update/dev, rollback, restart) is always mounted: without a control-plane adapter its reads report `adapter_ok: false` and its mutations return 503 (honest degradation). `GET /health` returns the literal `ok`. All browser assets the UI needs to render — styles, fonts, Web Awesome, markdown rendering, and syntax highlighting — are self-hosted under `/assets/*`; the UI SHALL NOT depend on an external CDN at render time. Navigation SHALL only link to routes this surface serves.
 
 `GET /api/fs/browse-dirs` SHALL honour a path round-trip contract: the `path` echoed in a listing response SHALL be accepted verbatim as the `path` of a subsequent request for that same directory, and request paths that mix `/` and `\` separators SHALL resolve to the same directory. The echoed path SHALL NOT carry a Windows verbatim (`\\?\`) prefix.
 
@@ -164,7 +164,6 @@ The session payloads the workbench observes — the focused session in `GET /api
 
 - **WHEN** `POST /api/sessions/{key}/cancel` is called while the core is unreachable
 - **THEN** the response is 503 with the degradation cause, and no success is reported
-
 ### Requirement: 降级与错误表现
 
 The WebUI frontend SHALL surface a visible global indicator when its live
@@ -253,41 +252,9 @@ root」。开关关闭时无论用户库为何，SHALL 拒绝非 loopback bind
   且用户库存在启用用户（含环境变量引导建立的 root）
 - **THEN** `sebas webui` 正常绑定并在日志中提示已启用登录鉴权
 
-### Requirement: Optional admin authentication
-
-The `/api/admin/*` control-plane surface SHALL require its own admin session
-(a separate cookie from the main login) when `SEBAS_CONTROL_SECRET` is
-configured: unauthenticated admin API requests get a JSON 401 (the HTML
-`/admin/*` pages are retired; unauthenticated page paths fall through the
-SPA fallback). A successful admin login sets an HttpOnly, SameSite=Lax
-cookie with a 24 h TTL, and login attempts are rate-limited to 5 per 30 s.
-When no control secret is configured, admin reads are loopback-only and
-mutations report the control plane as disconnected. The main session APIs
-are governed by the「鉴权开关（auth）与首启用户引导」requirement, not this
-one.
-
-#### Scenario: password-gated admin API
-
-- **WHEN** the admin credential is set and an unauthenticated request hits
-  `/api/admin/status`
-- **THEN** the response is a JSON 401 (not a redirect)
-
-#### Scenario: login lockout
-
-- **WHEN** 6 login attempts with a wrong password arrive within 30 s
-- **THEN** the attempts are rejected by the rate limiter
-
 ### Requirement: Mutation posture
 
-Admin mutations SHALL be POST-only (non-POST gets 405) and guarded by an
-origin check: empty origin or loopback origin (`127.0.0.1`, `localhost`,
-`::1`) passes; a non-loopback origin requires a valid CSRF token when a
-password is set, else 403. Router mutation routes under `/router/api/*`
-follow the same posture: POST-only with the same origin check, and the
-WebUI forwards them to the router admin API server-side with the control
-secret — the secret never reaches the browser. In the shipped UI, browser
-buttons post with a loopback origin, which is the operative authentication
-path for mutations.
+Admin mutations SHALL be POST-only (non-POST gets 405) and guarded by an origin check: empty origin or loopback origin (`127.0.0.1`, `localhost`, `::1`) passes; a non-loopback origin is rejected with 403. Router mutation routes under `/router/api/*` follow the same posture: POST-only with the same origin check, and the WebUI forwards them to the router admin API server-side with the control secret — the secret never reaches the browser. In the shipped UI, browser buttons post with a loopback origin, which is the operative authentication path for mutations.
 
 #### Scenario: post-only
 
@@ -302,9 +269,15 @@ path for mutations.
 #### Scenario: router mutation is post-only and origin-checked
 
 - **WHEN** a GET hits `/router/api/providers` or a router mutation POST
-  carries a non-loopback origin without a valid CSRF token
+carries a non-loopback origin without a valid CSRF token
 - **THEN** the response is 405 (GET) or 403 (foreign origin)
 
+Access to `/api/admin/*` — authentication and role authorization — SHALL be governed solely by the「鉴权开关（auth）与首启用户引导」requirement and the RBAC permission table (`services.control`) defined in the webui-user-management capability; the retired per-control-plane password session imposes no additional gate. Honest degradation without a control-plane adapter is unchanged.
+
+#### Scenario: control plane needs only the workbench session
+
+- **WHEN** an authenticated `admin`-role session calls `POST /api/admin/restart`
+- **THEN** the mutation proceeds under `services.control` authorization — no second control-plane login or CSRF token is required
 ### Requirement: Session dashboard and focus semantics
 
 The cross-project session list SHALL render one row per known session (encoded key, chat and thread ids, session id, status, phase, relative last-active), active-first, and SHALL be reachable from the workbench rather than from primary navigation. The session list SHALL exclude archived sessions — those are served by `GET /api/archive`. Selecting a session in the rail, opening its `/sessions/{key}` deep link, or posting `/switch` SHALL focus that session in place — a display pointer only that never changes message routing — and `switch` returns the redirect target or 404 for an unknown key. There SHALL be no separate per-session detail surface: the workbench renders the focused session. Switching the displayed project SHALL NOT alter the focused session pointer. The rail's current-session marker SHALL be derived from the focused-session pointer, not from the browser location.
@@ -1086,7 +1059,7 @@ WebUI SHALL 暴露 `POST /api/sessions/{key}/mode`（请求体 `{"mode": "<ask|e
 WebUI SHALL 提供只读端点 `GET /api/env`：读取 **webui 进程自身**的环境变量，返回**策划过**的变量清单（每项含名字、人读解释、按分类的值展示），经既有鉴权。策划清单之外的环境变量（内部管道、测试专用）SHALL NOT 出现在响应中。清单分类与展示语义：
 
 - **非敏感**（路径与开关，如 `SEBAS_STATE_DB`、`SEBAS_STATE_FILE`、`SEBAS_ROUTER_CONFIG`、`SEBAS_ROUTER_PROVIDER_OVERLAY`、`SEBAS_LOG_LEVEL`、`SEBAS_HANG_TIMEOUT_SECS`、`SEBAS_FEISHU_APP_ID`）：已设置显示实际值；未设置标注「未设置（用默认）」且解释里写明默认值。
-- **敏感**（凭据类，如 `SEBAS_WEBUI_PASSWORD`、`SEBAS_WEBUI_TOKEN`、`SEBAS_CONTROL_SECRET`、`SEBAS_FEISHU_APP_SECRET`）：SHALL 只显示「已设置 / 未设置」，**值本身 SHALL NOT 出现在响应里**（遮蔽在服务端完成）。
+- **敏感**（凭据类，如 `SEBAS_WEBUI_PASSWORD`、`SEBAS_CONTROL_SECRET`、`SEBAS_FEISHU_APP_SECRET`）：SHALL 只显示「已设置 / 未设置」，**值本身 SHALL NOT 出现在响应里**（遮蔽在服务端完成）。
 
 前端 `Env Vars` 分区 SHALL 消费该端点渲染只读表；端点失败（core 无关，纯 webui 面）时分区 SHALL 如实呈现错误状态而非空白或编造数据。
 
@@ -1158,7 +1131,7 @@ root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为
 ### Requirement: 多用户登录形态
 
 `POST /api/auth/login` SHALL 只接受 `{"username", "password"}` 一种
-形态（旧单字段 `{"secret"}` 移除，缺失字段返回 400）。成功即建立
+形态（缺失字段返回 400）。成功即建立
 绑定该用户的会话 cookie；凭据失败统一 401，不区分「用户不存在」与
 「密码错误」，限速策略不变（按来源 IP）。登录页 SHALL 呈现用户名 +
 密码两个字段。
@@ -1168,11 +1141,6 @@ root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为
 - **WHEN** `{"username", "password"}` 提交到 `/api/auth/login` 且凭据
   正确
 - **THEN** 登录成功并建立绑定该用户的会话，响应携带该用户名
-
-#### Scenario: 旧单字段形态不可用
-
-- **WHEN** `{"secret": "..."}` 提交到 `/api/auth/login`
-- **THEN** 返回 400（登录请求缺用户名/密码字段）
 
 #### Scenario: 失败不泄漏用户存在性
 
