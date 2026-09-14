@@ -824,6 +824,7 @@ export class SebasDashboard extends LitElement {
               .agentKind=${this.focusedDetail?.agent_kind ?? d.active_session?.agent_kind ?? null}
               .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
               .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
+              .sessionCommands=${this.focusedDetail?.available_commands ?? d.active_session?.available_commands ?? []}
               @composer-sent=${this.onComposerSent}
             ></sebas-workbench-composer>
           </div>

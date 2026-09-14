@@ -29,11 +29,32 @@
  * on a 5s interval so the banner and disabled state follow reality. A
  * transient submit error is surfaced inline via the shared `.callout-error`
  * style and the message text is preserved so the operator can retry.
+ *
+ * Command palette (session-slash-commands 3.1–3.2/D4): when the input's
+ * first character is `/` and the focused session advertises commands
+ * (`available_commands` — the agent's own advertisement, never hardcoded),
+ * a filtered palette opens above the textarea (same floating recipe as the
+ * model menu). Each row shows name + argument hint + description; ↑/↓ move
+ * the highlight, Esc dismisses, and Enter/Tab are TWO-PHASE: the first
+ * press completes the highlighted command (inserts `name + space`, keeps
+ * focus for arguments) and never submits; after the arguments the next
+ * Enter submits normally. Filtering is a live case-insensitive prefix match
+ * on the token after `/`; no matches = no palette; a non-leading `/`
+ * (`path/to`) never triggers it. Sessions without a command surface render
+ * no palette and treat `/` as ordinary text (4.2 honest degradation).
+ *
+ * Interception (session-slash-commands 4.1/D3): with a command surface, a
+ * `/`-prefixed submission whose command name is neither advertised nor the
+ * universal built-in `compact` is blocked inline (agents like opencode
+ * swallow unknown commands silently as empty turns) — the notice names the
+ * command, nothing is sent, and editing the text clears it. The submission
+ * itself is never rewritten (3.3): supported commands ride the ordinary
+ * `api.sendMessage` path verbatim, busy/queued included (D5).
  */
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo } from '../api/client.js'
+import { api, type AgentKindInfo, type AvailableCommandInfo } from '../api/client.js'
 import {
   loadModelCatalog,
   groupSessionModels,
@@ -46,6 +67,22 @@ import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
 
 /** Reachability 轮询周期：断连横幅与 composer 禁用态的翻转延迟上限。 */
 const WORKBENCH_REACHABILITY_POLL_MS = 5_000
+
+/**
+ * universal built-in 例外集（session-slash-commands D3）：claude 广告
+ * `/compact`，opencode 硬编码处理但不广告——纯广告表会误拦它。钉为常量
+ * 表，出现真实误伤时按证据扩充（spec「universal built-in」）。
+ */
+const UNIVERSAL_SLASH_COMMANDS: ReadonlySet<string> = new Set(['compact'])
+
+/**
+ * `/` 前缀输入的命令名解析（4.1）：文本以 `/` 开头时取第一个空白前的
+ * token（不含 `/`）——`/goal`、`/goal clear`、`/compact` 都解析出命令名；
+ * 裸 `/`（无 token）返回 null，按普通文本对待。
+ */
+function parseSlashCommandName(text: string): string | null {
+  return /^\/(\S+)/.exec(text)?.[1] ?? null
+}
 
 /** 提交控件的五态（design D4 优先级渲染的判别值，测试按 data-state 断言）。 */
 type SubmitState = 'disabled' | 'send' | 'sending' | 'stop' | 'queued'
@@ -65,6 +102,11 @@ export class SebasWorkbenchComposer extends LitElement {
   @property({ attribute: false }) agentKind: string | null = null
   /** Focused session's selectable models (agent configOptions). */
   @property({ attribute: false }) sessionModels: string[] = []
+  /**
+   * Focused session's agent-advertised slash commands (session-slash-commands
+   * 2.2/3.1)。空表 = 无命令表面：不渲染面板、不拦截 `/` 输入（诚实退化）。
+   */
+  @property({ attribute: false }) sessionCommands: AvailableCommandInfo[] = []
   /** Focused session's current model id. */
   @property({ attribute: false }) currentModel: string | null = null
   /**
@@ -89,6 +131,18 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private modelSwitching = false
   /** 模型芯片两级菜单的开合（design D3）。 */
   @state() private modelMenuOpen = false
+  /**
+   * 命令面板高亮项下标（session-slash-commands 3.1）：面板打开即高亮首位，
+   * ↑/↓ 移动；文本变化时回到首位。
+   */
+  @state() private paletteIndex = 0
+  /** Esc 关闭后的面板作废标记；文本一变即重新获得开启资格。 */
+  @state() private paletteDismissed = false
+  /**
+   * 4.1 拦截提示（「该会话的 agent 不支持此命令：/xxx」）：就地呈现、不发
+   * 请求；用户修改文本后清除，可再提交。
+   */
+  @state() private slashNotice: string | null = null
   /** Reachability 轮询定时器（connectedCallback 启动，disconnectedCallback 清理）。 */
   private reachabilityTimer: number | undefined = undefined
 
@@ -126,8 +180,20 @@ export class SebasWorkbenchComposer extends LitElement {
     // 真正更换时清空，避免把 A 会话的草稿发进 B 会话。
     if (changed.has('sessionKey')) {
       this.modelMenuOpen = false
+      // 命令面板与拦截提示随旧会话作废（新会话的命令表由 dashboard 重取
+      // detail 后经 sessionCommands 到达）。
+      this.paletteDismissed = false
+      this.paletteIndex = 0
+      this.slashNotice = null
       const prev = changed.get('sessionKey')
       if (prev !== undefined && this.sessionKey !== prev) this.text = ''
+    }
+    // 文本变化（打字/补全/提交清空）：面板重新获得开启资格、高亮回首位，
+    // 撤销上一次的 Esc 作废；拦截提示就地清除（4.1「改字后可再提交」）。
+    if (changed.has('text')) {
+      this.paletteDismissed = false
+      this.paletteIndex = 0
+      this.slashNotice = null
     }
   }
 
@@ -191,6 +257,14 @@ export class SebasWorkbenchComposer extends LitElement {
     const prompt = this.text.trim()
     if (!prompt) return
     if (this.sending || this.unreachable !== null) return
+    // 拦截门（session-slash-commands 4.1/D3）：有命令表面的会话，未广告且
+    // 非 universal built-in 的命令就地阻止——opencode 会把未知命令静默吞成
+    // 空回合，发出去只能是空转。文案点名命令、保留输入；改字后可再提交。
+    const unsupported = this.interceptUnsupported(prompt)
+    if (unsupported !== null) {
+      this.slashNotice = `该会话的 agent 不支持此命令：/${unsupported}`
+      return
+    }
     this.sending = true
     this.error = null
     try {
@@ -259,6 +333,139 @@ export class SebasWorkbenchComposer extends LitElement {
       return a?.display ?? this.agentKind
     }
     return this.agents.find((x) => x.id === 'native' && false)?.display ?? 'default agent'
+  }
+
+  // ── 命令面板（session-slash-commands 3.1–3.3 / 4.1–4.2，design D3/D4/D5）──
+
+  /**
+   * 面板触发条件：文本以 `/` 开头且尚无空白——用户仍在命令名段（`/`、
+   * `/go`）。参数段（`/goal clear`）与非首位 `/`（`path/to`）都不触发；
+   * 返回的值是 `/` 之后的实时过滤前缀（小写化，3.2 不区分大小写）。
+   */
+  private palettePrefix(): string | null {
+    if (!this.text.startsWith('/') || /\s/.test(this.text)) return null
+    return this.text.slice(1).toLowerCase()
+  }
+
+  /** 前缀匹配后的候选（3.2）：无会话表面 → 空表（无面板，诚实退化 4.2）。 */
+  private filteredCommands(): AvailableCommandInfo[] {
+    const prefix = this.palettePrefix()
+    if (prefix === null || this.sessionCommands.length === 0) return []
+    return this.sessionCommands.filter((c) => c.name.toLowerCase().startsWith(prefix))
+  }
+
+  /** 面板开合的单一判据：有候选且未被 Esc 作废。无候选 = 不渲染（4.2 空态不显示）。 */
+  private paletteOpen(): boolean {
+    return !this.paletteDismissed && this.filteredCommands().length > 0
+  }
+
+  private movePaletteHighlight(delta: number): void {
+    const count = this.filteredCommands().length
+    if (count === 0) return
+    this.paletteIndex = Math.min(count - 1, Math.max(0, this.paletteIndex + delta))
+  }
+
+  /**
+   * 两段式第一段（3.1）：把 `name + 空格` 插入输入框、焦点留在输入框补
+   * 参数、面板关闭（文本含空白后 palettePrefix() 失效）。参数补完后的
+   * 下一次 Enter 走普通提交。
+   */
+  private completeCommand(name: string): void {
+    this.text = `/${name} `
+    const ta = this.shadowRoot?.querySelector('wa-textarea')
+    ta?.focus()
+  }
+
+  /**
+   * 输入区键盘路由（design D4）：面板打开期间 ↑/↓ 移动高亮、Esc 关闭、
+   * Enter/Tab 一律两段式补全——绝不发送（两段式语义：第一段永远只是把
+   * 命令补进输入框）。面板未开时维持既有语义：普通 Enter 发送、
+   * Shift+Enter 换行、IME 组词回车不触发。
+   */
+  private onInputKeydown(e: KeyboardEvent): void {
+    if (this.paletteOpen()) {
+      switch (e.key) {
+        case 'ArrowDown':
+          e.preventDefault()
+          this.movePaletteHighlight(1)
+          return
+        case 'ArrowUp':
+          e.preventDefault()
+          this.movePaletteHighlight(-1)
+          return
+        case 'Escape':
+          e.stopPropagation()
+          this.paletteDismissed = true
+          return
+        case 'Enter':
+        case 'Tab':
+          if (!e.shiftKey && !e.isComposing) {
+            e.preventDefault()
+            // 高亮钳位到当前候选范围内再补全（防文本变化与高亮复位之间
+            // 的瞬态越界把 Enter 吃成空操作）。
+            const items = this.filteredCommands()
+            const idx = Math.min(Math.max(this.paletteIndex, 0), items.length - 1)
+            const item = items[idx]
+            if (item) this.completeCommand(item.name)
+          }
+          return
+      }
+      // 其余按键（继续打字等）不拦截：面板随文本实时重过滤。
+      return
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault()
+      void this.submit()
+    }
+  }
+
+  /**
+   * 4.1/D3 拦截判定：返回应拦截的命令名（null = 放行）。规则——会话无
+   * 命令表面（空表，native 等）不拦截；非 `/` 前缀不拦截；命令名 ∈ 广告表
+   * ∨ ∈ universal built-in（compact）放行；其余拦截。
+   */
+  private interceptUnsupported(prompt: string): string | null {
+    if (this.sessionCommands.length === 0) return null
+    if (!prompt.startsWith('/')) return null
+    const name = parseSlashCommandName(prompt)
+    if (name === null) return null
+    if (this.sessionCommands.some((c) => c.name === name)) return null
+    if (UNIVERSAL_SLASH_COMMANDS.has(name)) return null
+    return name
+  }
+
+  /** 面板浮层（3.1）：定位与视觉照抄 model 菜单（textarea 上方弹出）。 */
+  private renderCommandPalette() {
+    if (!this.paletteOpen()) return nothing
+    const items = this.filteredCommands()
+    return html`
+      <div
+        class="cmd-palette"
+        role="listbox"
+        aria-label="Session commands"
+        data-testid="command-palette"
+      >
+        ${items.map((c, i) => {
+          const selected = i === this.paletteIndex
+          return html`
+            <button
+              class="menu-item ${selected ? 'highlighted' : ''}"
+              type="button"
+              role="option"
+              aria-selected=${selected ? 'true' : 'false'}
+              data-command=${c.name}
+              @click=${() => this.completeCommand(c.name)}
+            >
+              <span class="menu-item-label">/${c.name}</span>
+              ${c.hint ? html`<span class="cmd-hint">${c.hint}</span>` : nothing}
+              ${c.description
+                ? html`<span class="cmd-desc">${c.description}</span>`
+                : nothing}
+            </button>
+          `
+        })}
+      </div>
+    `
   }
 
   // ─── 模型芯片（design D3）────────────────────────────────────────────
@@ -436,22 +643,18 @@ export class SebasWorkbenchComposer extends LitElement {
     return html`
       ${this.renderBanners()}
       <div class="composer">
-        <wa-textarea
-          placeholder="Ask for follow-up changes…"
-          aria-label="Message"
-          resize="none"
-          ?disabled=${this.inputDisabled()}
-          .value=${this.text}
-          @input=${(e: Event) => (this.text = (e.target as HTMLTextAreaElement).value)}
-          @keydown=${(e: KeyboardEvent) => {
-            // 回车直接发送；Shift+Enter 换行；IME 组词中的回车不触发发送。
-            // turn 在飞且有字 = 排队提交（同一发送路径）；无字不触发。
-            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-              e.preventDefault()
-              void this.submit()
-            }
-          }}
-        ></wa-textarea>
+        <div class="input-wrap">
+          ${this.renderCommandPalette()}
+          <wa-textarea
+            placeholder="Ask for follow-up changes…"
+            aria-label="Message"
+            resize="none"
+            ?disabled=${this.inputDisabled()}
+            .value=${this.text}
+            @input=${(e: Event) => (this.text = (e.target as HTMLTextAreaElement).value)}
+            @keydown=${(e: KeyboardEvent) => this.onInputKeydown(e)}
+          ></wa-textarea>
+        </div>
         <div class="composer-bottom">
           <div class="left-tools">
             <span
@@ -486,6 +689,13 @@ export class SebasWorkbenchComposer extends LitElement {
             </div>
           `
         : nothing}
+      ${this.slashNotice
+        ? html`
+            <div class="callout callout-warning" role="status" data-testid="slash-unsupported">
+              ${icon('alert')}<span>${this.slashNotice}</span>
+            </div>
+          `
+        : nothing}
     `
   }
 
@@ -517,6 +727,57 @@ export class SebasWorkbenchComposer extends LitElement {
         width: 100%;
         flex: 1;
         min-height: 36px;
+      }
+      /* 输入区容器：命令面板的定位锚（design D4 照抄 model-wrap 的浮层
+         姿势）——面板贴 textarea 上方弹出。 */
+      .input-wrap {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+      }
+      /* 命令面板（session-slash-commands 3.1）：贴 textarea 上方，配方同
+         .model-menu（surface 底 + strong 边 + shadow-2，页底组件一律向上弹）。 */
+      .cmd-palette {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: calc(100% + 6px);
+        max-height: 260px;
+        overflow-y: auto;
+        background: var(--sebas-surface);
+        border: 1px solid var(--sebas-border-strong);
+        border-radius: var(--sebas-radius-md);
+        box-shadow: var(--sebas-shadow-2);
+        padding: 4px;
+        z-index: 20;
+      }
+      .cmd-palette .menu-item {
+        flex-wrap: wrap;
+        row-gap: 2px;
+      }
+      /* 键盘高亮态：与 hover 同视觉（design D4 键盘可达）。 */
+      .cmd-palette .menu-item.highlighted {
+        background: var(--sebas-surface-2);
+        color: var(--sebas-text-bright);
+      }
+      .cmd-palette .cmd-hint {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--sebas-text-faint);
+        font-style: italic;
+      }
+      .cmd-palette .cmd-desc {
+        flex-basis: 100%;
+        font-size: 0.7rem;
+        color: var(--sebas-text-faint);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       /* 剥掉 wa-textarea 自带的底色/边框/阴影，只留纯文本输入区；高度随
          分割面拉伸（resize=none 关掉组件自带的拖角，5.2 的分割线是唯一的
