@@ -61,8 +61,11 @@ async fn start_core(dir: &StdPath) -> TestCore {
     tokio::spawn(async move {
         let _ = server::serve(backend, serve_router, serve_path, SECRET.into(), close_rx).await;
     });
+    // 就绪探测不能查「文件存在」：Windows 上 sebas_ipc 把路径映射为 named
+    // pipe，文件系统里没有 core.sock。连接探测跨平台都成立（探测连接未握手
+    // 即被丢弃，服务端按普通客户端断连处理）。
     for _ in 0..250 {
-        if path.exists() {
+        if sebas_ipc::connect(&path).await.is_ok() {
             return TestCore { path, close_tx };
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -1085,9 +1085,12 @@ impl Drop for CoreSecretEnv {
 /// 沙箱 config：channel_path 指进沙箱（绝不落真实 XDG_RUNTIME_DIR）。
 fn arm_config(dir: &StdPath) -> (crate::config::Config, std::path::PathBuf) {
     let config_path = dir.join("config.toml");
+    // TOML basic string 不能裸写反斜杠（`\U` 是 unicode 转义），Windows
+    // 路径归一为正斜杠——std::path 在 Windows 上同样接受。
+    let channel_path_toml = dir.join("core.sock").display().to_string().replace('\\', "/");
     let raw = format!(
         "[watchdog.core]\nchannel_path = \"{}\"\n",
-        dir.join("core.sock").display()
+        channel_path_toml
     );
     let cfg = crate::config::Config::parse(&raw).expect("sandbox arm config parses");
     (cfg, config_path)
@@ -1118,6 +1121,9 @@ async fn auto_arm_without_env_writes_secret_file_and_completes_handshake() {
         armed.secret_file, secret_file,
         "default path = config dir/core.secret"
     );
+    // Windows 上 sebas_ipc 把路径映射为 named pipe，不在文件系统留
+    // core.sock——「socket 文件已存在」是 unix 语义，按平台断言。
+    #[cfg(unix)]
     assert!(
         dir.path().join("core.sock").exists(),
         "socket bound before arm returns"
@@ -1170,6 +1176,8 @@ async fn auto_arm_with_env_uses_env_value_and_writes_matching_file() {
 
 /// 1.3 bind 失败硬失败：路径被存活 listener 占用 → arm 返回特定错误
 /// （run.rs 据此在 ready 之前以 75 退出，不产生无通道的“健康”进程）。
+#[cfg(unix)] // 「存活探测→already served」是 unix 专属路径；Windows 走 bind 的
+             // Access denied（语义等价，报错文案不同），探测缺口如实留白。
 #[tokio::test]
 async fn arm_fails_hard_when_socket_path_is_taken_by_live_listener() {
     let _env = CoreSecretEnv::unset();
@@ -1542,6 +1550,7 @@ async fn message_unknown_key_rejected() {
 /// multithreaded process may only do async-signal-safe work).
 /// Exit codes: 0 = rejected as expected; 2 = setuid failed; 3 = connect
 /// failed; 4 = server ACKED a foreign-uid handshake (the bug this test guards).
+#[cfg(unix)]
 unsafe fn cross_uid_child_body(path_bytes: &[u8], handshake: &[u8], uid: u32) -> i32 {
     // Edition 2024: an `unsafe fn` body is not an implicit unsafe block.
     unsafe {

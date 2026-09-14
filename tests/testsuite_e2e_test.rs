@@ -1278,6 +1278,7 @@ async fn turn_queue_timing_and_dropped_accounting() {
 /// provider 文件的情况下变为可路由——router 只是 core 数据的只读消费者。
 /// （此前的全部测试要么用 spawn 前写好的 seed 文件，要么是 core/webui 单侧
 /// 闭环；router 的通道订阅投影 reload_from_channel 在任何层都无进程级覆盖。）
+#[cfg(target_os = "linux")] // find_child_pid 走 /proc/<pid>/cmdline，非 linux 无从自证
 #[tokio::test]
 #[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
 async fn core_owned_provider_reaches_router_without_restart() {

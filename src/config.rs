@@ -963,9 +963,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let explicit = dir.path().join("keys/channel.key");
+        // TOML basic string 不能裸写反斜杠（`\U` 是 unicode 转义），Windows
+        // 路径归一为正斜杠——std::path 在 Windows 上同样接受。
+        let explicit_toml = explicit.display().to_string().replace('\\', "/");
         let cfg = Config::parse(&format!(
             "[watchdog.core]\nsecret_file = \"{}\"\n",
-            explicit.display()
+            explicit_toml
         ))
         .expect("secret_file 键应可解析");
         assert_eq!(
