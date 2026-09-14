@@ -13,6 +13,11 @@
 //! 落盘形态：每个会话一个目录下的两个文件——`<id>.log.jsonl`（一行一条，只追加）
 //! 与 `<id>.meta.json`（纪元与水位线，原子重写）。只追加让正常路径没有重写风险；
 //! 回收与重置才重写，且都走「临时文件 + rename」。
+//!
+//! 会话 id（`<namespace>:<suffix>`）里的冒号在 Windows 文件名非法（会被当 NTFS
+//! 备用数据流），因此文件名里的 id 走可逆百分号编码：Windows 非法字符集与 `%`
+//! 本身编码为 `%XX`，其余原样。扫描侧（attach_orphan_logs）解码还原——旧的无
+//! 编码文件名（unix 历史数据）不含 `%XX` 序列，解码即原样通过，两头都能对上。
 
 use sebas_node_link::LogEntry;
 use std::collections::VecDeque;
@@ -239,12 +244,58 @@ pub(crate) fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Windows 文件名非法字符（`:` 是 NTFS 备用数据流分隔符，会话 id 的命名空间
+/// 分隔正好撞上）+ 路径分隔符。`%` 先编码保证整个变换可逆。
+const FILENAME_UNSAFE: &[char] = &['%', ':', '<', '>', '"', '/', '\\', '|', '?', '*'];
+
+/// 会话 id → 文件名安全片段（可逆）。
+pub fn encode_id_for_file(session_id: &str) -> String {
+    let mut out = String::with_capacity(session_id.len());
+    for ch in session_id.chars() {
+        if FILENAME_UNSAFE.contains(&ch) || (ch as u32) < 0x20 {
+            out.push_str(&format!("%{:02X}", ch as u32));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// 文件名片段 → 会话 id（[`encode_id_for_file`] 的逆）。无 `%XX` 序列的输入
+/// （unix 历史裸名）原样返回。
+pub fn decode_id_from_file(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|_| bytes[i] == b'%')
+            .and_then(|h| std::str::from_utf8(h).ok());
+        let ch = hex
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .and_then(char::from_u32);
+        match ch {
+            Some(ch) => {
+                out.extend(ch.encode_utf8(&mut [0u8; 4]).as_bytes());
+                i += 3;
+            }
+            // 不是合法 %XX：按字面量保留（兼容理论上的裸 % 文件名）。
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 fn log_path(dir: &Path, session_id: &str) -> PathBuf {
-    dir.join(format!("{session_id}.log.jsonl"))
+    dir.join(format!("{}.log.jsonl", encode_id_for_file(session_id)))
 }
 
 fn meta_path(dir: &Path, session_id: &str) -> PathBuf {
-    dir.join(format!("{session_id}.meta.json"))
+    dir.join(format!("{}.meta.json", encode_id_for_file(session_id)))
 }
 
 fn read_meta(path: &Path) -> Result<Meta, LogError> {
@@ -314,6 +365,36 @@ mod tests {
 
     fn dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    /// 会话 id 含冒号（`<namespace>:<suffix>`）也能落盘并读回——Windows 上
+    /// 冒号是 NTFS 备用数据流分隔符，裸 id 根本写不出文件。
+    #[test]
+    fn colon_session_id_persists_and_round_trips_through_filename_encoding() {
+        let d = dir();
+        let id = "proj-b:ab12cd34";
+        let mut log = SessionLog::open(d.path(), id).unwrap();
+        log.append("out", "hello", None).unwrap();
+        drop(log);
+
+        // 文件名是编码过的：冒号不见踪影，%XX 取而代之。
+        let names: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("proj-b%3Aab12cd34.log.jsonl")),
+            "log file must use the encoded id: {names:?}"
+        );
+
+        // 解码还原：扫描侧（attach_orphan_logs）靠这一步把文件对回会话。
+        assert_eq!(decode_id_from_file("proj-b%3Aab12cd34"), id);
+        // 无编码的裸名（unix 历史数据）解码即原样通过。
+        assert_eq!(decode_id_from_file("proj-b:ab12cd34"), id);
+
+        let reopened = SessionLog::open(d.path(), id).unwrap();
+        assert_eq!(reopened.last_seq(), 1, "重启后按编码名读回原序列");
     }
 
     #[test]

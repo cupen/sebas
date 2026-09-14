@@ -19,7 +19,7 @@
 //! 传输层按时间窗合并（4.2），但**日志里的原始序列永远完整**——控制面按 seq 回拉
 //! 即得精确内容（4.3）。缓冲超限时批次带 `coalesced_overflow` 标记，绝不静默丢。
 
-use crate::log::SessionLog;
+use crate::log::{decode_id_from_file, SessionLog};
 use sebas_node_link::{
     ApprovalDecision, GateCategory, LogEntry, ParkedApproval, SessionEvent, SessionMode,
     SessionRejectCode, SessionSummary,
@@ -429,7 +429,9 @@ impl SessionHost {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                name.strip_suffix(".log.jsonl").map(str::to_string)
+                // 文件名里的 id 是百分号编码过的（Windows 非法字符，见 log.rs），
+                // 解码还原；旧的无编码裸名解码即原样通过。
+                name.strip_suffix(".log.jsonl").map(decode_id_from_file)
             })
             .collect();
         ids.sort();
