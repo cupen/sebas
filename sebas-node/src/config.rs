@@ -525,7 +525,31 @@ fn probe_command(command: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(command)))
+    std::env::split_paths(&paths).any(|dir| {
+        path_candidates(command)
+            .iter()
+            .any(|name| is_executable_file(&dir.join(name)))
+    })
+}
+
+/// 裸命令名在 PATH 上的候选文件名。Windows 按 PATHEXT 语义解析（`cmd` 要能
+/// 找到 `cmd.exe`）；带扩展名的名字与其他平台原样查找。
+fn path_candidates(command: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if std::path::Path::new(command).extension().is_some() {
+            return vec![command.to_string()];
+        }
+        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        exts.split(';')
+            .filter(|e| e.starts_with('.'))
+            .map(|e| format!("{command}{e}"))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![command.to_string()]
+    }
 }
 
 #[cfg(unix)]
@@ -617,17 +641,27 @@ mod tests {
         // env 是进程全局的：凡是走 resolve 的用例都必须串行化，
         // 否则别的用例设置的 SEBAS_NODE_* 会漏进来（测试污染）。
         let _env = ENV_LOCK.lock().unwrap();
-        let text = r#"
+        // default_work_dir 校验「绝对路径」：Windows 上 `/srv` 不带盘符不算
+        // 绝对，fixture 按平台补齐（`C:/srv/...`），断言同步。
+        let work_dir = if cfg!(windows) { "C:/srv/work" } else { "/srv/work" };
+        let state_dir = if cfg!(windows) {
+            "C:/var/lib/sebas-node"
+        } else {
+            "/var/lib/sebas-node"
+        };
+        let text = format!(
+            r#"
 [node]
 id = "dev-box"
 control_plane = "wss://cp.example/ws"
 max_sessions = 3
 log_retention_days = 7
-default_work_dir = "/srv/work"
-state_dir = "/var/lib/sebas-node"
+default_work_dir = "{work_dir}"
+state_dir = "{state_dir}"
 upstream = "control-plane-router"
-"#;
-        let file = NodeConfig::parse(text).unwrap();
+"#
+        );
+        let file = NodeConfig::parse(&text).unwrap();
         let cli = Cli {
             config: None,
             join_token: None,
@@ -641,8 +675,8 @@ upstream = "control-plane-router"
         assert_eq!(cfg.control_plane, "wss://cp.example/ws");
         assert_eq!(cfg.max_sessions, 3);
         assert_eq!(cfg.log_retention_days, 7);
-        assert_eq!(cfg.default_work_dir, Some(PathBuf::from("/srv/work")));
-        assert_eq!(cfg.state_dir, PathBuf::from("/var/lib/sebas-node"));
+        assert_eq!(cfg.default_work_dir, Some(PathBuf::from(work_dir)));
+        assert_eq!(cfg.state_dir, PathBuf::from(state_dir));
         assert_eq!(cfg.upstream, Upstream::ControlPlaneRouter);
     }
 
@@ -970,20 +1004,25 @@ base_url = "https://api.anthropic.com"
     #[test]
     fn the_manifest_reports_reachability_with_causes() {
         let _env = ENV_LOCK.lock().unwrap();
-        let text = r#"
+        // 「命令在 PATH 上但运行时尚未接入」的样本命令：unix 取 sh，Windows
+        // 取 cmd（cmd.exe 在 PATH 上由系统保证）。
+        let on_path_cmd = if cfg!(windows) { "cmd" } else { "sh" };
+        let text = format!(
+            r#"
 [node]
 control_plane = "wss://c/ws"
 providers = ["anthropic"]
 
-[node.agents.sh]
+[node.agents.{on_path_cmd}]
 
 [node.agents.definitely-not-a-real-command-xyz]
 
 [node.agents.gemini]
 driver = "acp"
-"#;
+"#
+        );
         let cfg = NodeConfig::resolve(
-            NodeConfig::parse(text).unwrap(),
+            NodeConfig::parse(&text).unwrap(),
             &cli_with(Path::new("/tmp/x")),
         )
         .unwrap();
@@ -997,9 +1036,13 @@ driver = "acp"
         assert!(echo.reachable, "echo 永远可达");
         assert!(echo.cause.is_none());
 
-        let sh = manifest.agent_kinds.iter().find(|k| k.kind == "sh").unwrap();
-        assert!(!sh.reachable, "只有命令在不算可达");
-        let cause = sh.cause.as_deref().unwrap();
+        let wired_cmd = manifest
+            .agent_kinds
+            .iter()
+            .find(|k| k.kind == on_path_cmd)
+            .unwrap();
+        assert!(!wired_cmd.reachable, "只有命令在不算可达");
+        let cause = wired_cmd.cause.as_deref().unwrap();
         assert!(cause.contains("运行时尚未接入"), "{cause}");
 
         // driver 已接入且命令在 → 可达（真正能不能握上手由 spawn 如实回答）。
