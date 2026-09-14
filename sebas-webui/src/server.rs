@@ -1747,6 +1747,7 @@ mod workspace_root_tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            available_commands: Vec::new(),
         }
     }
 

@@ -979,6 +979,9 @@ fn translate_event(event: &AcpEvent) -> Vec<BodyEvent> {
         // （add-agent-mode-selection）mode 切换不是回合内容，宿主的门控状态
         // 由 SetMode 处理器自身维护——这里无需呈现。
         AcpEvent::ModeChanged { .. } => {}
+        // （session-slash-commands）命令表只物化进会话快照（engine 侧），
+        // 不是回合内容，不进宿主 body 流。
+        AcpEvent::AvailableCommands { .. } => {}
     }
     out
 }

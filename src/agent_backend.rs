@@ -127,6 +127,10 @@ impl NativeSession {
             effective_mode: None,
             // rail-declutter-unread D1：transcript flush 处累计的可见回复段数。
             msg_count: self.msg_count,
+            // （session-slash-commands 2.3）native 内核无命令发现——
+            // AgentEvent 词汇不动，命令表恒空（composer 不渲染面板、
+            // `/` 前缀按普通文本放行的诚实退化）。
+            available_commands: Vec::new(),
         }
     }
 }
@@ -1136,6 +1140,31 @@ mod tests {
         // close 后 sessions 清空。
         assert!(backend.close(key).await.is_ok());
         assert!(backend.snapshot().await.is_empty());
+    }
+
+    // （session-slash-commands 2.3）native 路径确认：AgentEvent 词汇不动、
+    // native 会话快照的命令表恒空——composer 据此不渲染命令面板、`/` 前缀
+    // 按普通文本放行（诚实退化）。
+    #[tokio::test]
+    async fn native_session_snapshot_has_no_command_surface() {
+        let backend = NativeAgentBackend::with_manager(manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+        let info = backend
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|s| s.channel_key() == key)
+            .expect("native session in snapshot");
+        assert!(
+            info.available_commands.is_empty(),
+            "native sessions must never advertise commands: {:?}",
+            info.available_commands
+        );
+        backend.close(key).await.unwrap();
     }
 
     // rail-declutter-unread 1.1（native 侧）：msg_count 在 transcript flush

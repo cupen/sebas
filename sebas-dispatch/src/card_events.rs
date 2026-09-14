@@ -81,6 +81,9 @@ impl CardInput {
             // （add-agent-mode-selection）mode 切换不进卡片流——与模型切换
             // 不同，它不是回合内容，只影响门控行为（快照/头部 UI 呈现）。
             AcpEvent::ModeChanged { .. } => return None,
+            // （session-slash-commands）命令表物化只走映射/快照，不是回合
+            // 内容，不进卡片流。
+            AcpEvent::AvailableCommands { .. } => return None,
         })
     }
 }

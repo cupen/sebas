@@ -944,6 +944,9 @@ impl RemoteProjection {
             // 词表与 TurnEntry 不同）——如实记 0，远端行的徽标恒不亮。已知
             // 局限，待节点链路透出统一口径后再接。
             msg_count: 0,
+            // （session-slash-commands）远端行的命令表同样不在节点链路投影
+            // 面上——如实空表（前端无命令面板），待节点链路统一透出后再接。
+            available_commands: Vec::new(),
         })
     }
 }

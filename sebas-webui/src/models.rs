@@ -197,6 +197,12 @@ pub struct SessionRow {
     /// 未读徽标 = `msg_count − 浏览器读锚`。随 `session.updated` 广播 +
     /// rail 10s 轮询兜底。
     pub msg_count: u64,
+    /// （session-slash-commands 2.2）agent 自广告的会话命令表（composer
+    /// 命令面板数据源）。空 = 无命令面板（native 等诚实退化）。`#[serde(
+    /// default, skip_serializing_if)]`：旧 core 报文无键 → 空表；本侧表空 →
+    /// 键不上 wire（旧前端看到的形状不变）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_commands: Vec<sebas_acp::AvailableCommand>,
 }
 
 /// Dashboard overview data.

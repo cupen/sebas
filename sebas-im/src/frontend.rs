@@ -1381,6 +1381,7 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            available_commands: Vec::new(),
         };
         fe.on_session_info(info.clone()).await;
         {
@@ -1539,6 +1540,7 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            available_commands: Vec::new(),
         })
         .await;
         fe.perm_cards
@@ -1718,6 +1720,7 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            available_commands: Vec::new(),
         }
     }
 

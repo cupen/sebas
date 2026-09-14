@@ -21,8 +21,8 @@
 //!
 //! Model scenarios (add-acp-model-selection):
 //! - `--model-options m1,m2,...` — return a `configOptions` `model` select on
-//!   `session/new`/`session/load` with `currentValue = <first>`; the driver
-//!   must surface `AcpModelInfo { current, options }` in the spawn outcome.
+//!   `session/new`/`session/load` with `currentValue = <first>`; the driver must
+//!   surface `AcpModelInfo { current, options }` in the spawn outcome.
 //! - `--reject-model m` — `session/set_config_option` for `m` is answered
 //!   with an RPC error (invalid model); the driver must report a non-terminal
 //!   `Error` and leave the session's current model unchanged.
@@ -30,13 +30,22 @@
 //!   `{"method":"session/set_config_option","session_id":...,"config_id":...,
 //!   "value":...}` so tests assert the *wire* request (real ACP session id,
 //!   `"model"` config id, the chosen value).
+//!
+//! Command advertisement (session-slash-commands 1.3/1.4):
+//! - `--commands "goal:<hint>,compact"` — after `session/new` /
+//!   `session/load` (and again on EVERY `session/prompt`, modelling the
+//!   agent's re-advertisement) send `session/update` notifications carrying
+//!   `available_commands_update` with one entry per spec item
+//!   (`name[:hint]`; description is auto-generated). The second notification
+//!   lets integration tests assert re-advertisement refreshes (not dedupes).
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    StopReason, TextContent,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
+    UnstructuredCommandInput,
 };
 use agent_client_protocol::schema::v1::{SessionNotification, SessionUpdate};
 use agent_client_protocol::{Agent, Error as AcpError, Stdio};
@@ -77,6 +86,7 @@ async fn main() {
     let mut hang_init = false;
     let mut model_options: Vec<String> = Vec::new();
     let mut reject_models: Vec<String> = Vec::new();
+    let mut commands_spec: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -93,10 +103,48 @@ async fn main() {
                     reject_models.push(m);
                 }
             }
+            "--commands" => {
+                // `goal:<hint>,compact` — hint 部分可省。
+                commands_spec = args.next();
+            }
             _ => scenario = a,
         }
     }
-    run(parse_behavior(&scenario), journal, hang_init, model_options, reject_models).await;
+    let commands = parse_commands(commands_spec.as_deref());
+    run(
+        parse_behavior(&scenario),
+        journal,
+        hang_init,
+        model_options,
+        reject_models,
+        commands,
+    )
+    .await;
+}
+
+/// Parse `goal:<hint>,compact` into ACP `AvailableCommand` entries
+/// (description auto-generated; hint only when present and non-empty).
+fn parse_commands(spec: Option<&str>) -> Vec<AvailableCommand> {
+    let Some(spec) = spec else {
+        return Vec::new();
+    };
+    spec.split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|item| {
+            let item = item.trim();
+            let (name, hint) = match item.split_once(':') {
+                Some((n, h)) if !h.trim().is_empty() => (n, Some(h.to_string())),
+                _ => (item, None),
+            };
+            let mut cmd = AvailableCommand::new(name, format!("Mock command {name}"));
+            if let Some(h) = hint {
+                cmd = cmd.input(Some(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new(h),
+                )));
+            }
+            cmd
+        })
+        .collect()
 }
 
 /// Build the model `configOptions` entry returned with new/load responses
@@ -126,6 +174,7 @@ async fn run(
     hang_init: bool,
     model_options: Vec<String>,
     reject_models: Vec<String>,
+    commands: Vec<AvailableCommand>,
 ) {
     let journal = Arc::new(journal);
     let log = |method: &str| {
@@ -207,7 +256,8 @@ async fn run(
         .on_receive_request(
             {
                 let model_config = model_config_options(&model_options);
-                async move |_req: NewSessionRequest, responder, _cx| {
+                let commands = commands.clone();
+                async move |_req: NewSessionRequest, responder, cx| {
                     log(NEW_SESSION);
                     // The ACP session id is application-chosen; mint a fresh
                     // one so tests can tell "new" sessions apart from the
@@ -217,6 +267,15 @@ async fn run(
                     if let Some(opts) = &model_config {
                         resp = resp.config_options(opts.clone());
                     }
+                    // session-slash-commands 1.3：会话建立后立即广告命令表。
+                    if !commands.is_empty() {
+                        let _ = cx.send_notification(SessionNotification::new(
+                            resp.session_id.to_string(),
+                            SessionUpdate::AvailableCommandsUpdate(
+                                AvailableCommandsUpdate::new(commands.clone()),
+                            ),
+                        ));
+                    }
                     responder.respond(resp)
                 }
             },
@@ -225,7 +284,8 @@ async fn run(
         .on_receive_request(
             {
                 let model_config = model_config_options(&model_options);
-                async move |req: LoadSessionRequest, responder, _cx| {
+                let commands = commands.clone();
+                async move |req: LoadSessionRequest, responder, cx| {
                     // Record the id the driver actually asked to load — a
                     // test asserts the driver uses the caller-provided real
                     // ACP session id, not the routing id.
@@ -237,6 +297,15 @@ async fn run(
                             let mut resp = LoadSessionResponse::new();
                             if let Some(opts) = &model_config {
                                 resp = resp.config_options(opts.clone());
+                            }
+                            // session-slash-commands 1.3：load 后同样广告。
+                            if !commands.is_empty() {
+                                let _ = cx.send_notification(SessionNotification::new(
+                                    req.session_id.to_string(),
+                                    SessionUpdate::AvailableCommandsUpdate(
+                                        AvailableCommandsUpdate::new(commands.clone()),
+                                    ),
+                                ));
                             }
                             responder.respond(resp)
                         }
@@ -296,11 +365,23 @@ async fn run(
         )
         .on_receive_request(
             {
+                let commands = commands.clone();
                 async move |req: PromptRequest, responder, cx| {
                     log(PROMPT);
                     // Reply with the routing id so tests can assert which
                     // session the prompt actually landed on.
                     let sid = req.session_id.to_string();
+                    // session-slash-commands 1.4：每次 prompt 前重新广告命令
+                    // 表——「二次通知覆盖旧表」的集成测试数据源（驱动不对其
+                    // 去重或丢帧）。无 `--commands` 时零行为变化。
+                    if !commands.is_empty() {
+                        let _ = cx.send_notification(SessionNotification::new(
+                            sid.clone(),
+                            SessionUpdate::AvailableCommandsUpdate(
+                                AvailableCommandsUpdate::new(commands.clone()),
+                            ),
+                        ));
+                    }
                     let _ = cx.send_notification(SessionNotification::new(
                         sid.clone(),
                         SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
