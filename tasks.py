@@ -462,6 +462,12 @@ state_file = "{cfg}/sessions.json"
 [media]
 download_dir = "{cfg}/downloads"
 
+# add-workspace-root：沙箱钉根——注册/列表/会话面/browse-dirs 的唯一边界收敛
+# 在场景目录内。不配会回退进程 cwd（= 仓库根）并打启动告警，浏览器旅程的
+# 目录选择器起点与项目注册会跟着碎。
+[workspace]
+root = "{cfg}"
+
 [watchdog.core]
 channel_path = "{cfg}/core-channel.sock"
 

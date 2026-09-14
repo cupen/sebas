@@ -19,6 +19,23 @@ pub struct Config {
     pub watchdog: WatchdogConfig,
     #[serde(default)]
     pub node_link: NodeLinkConfig,
+    /// 工作区根目录（add-workspace-root）：机器级项目 containment 边界。
+    /// 缺省段 = 装配点回退进程 cwd 并告警；`SEBAS_WORKSPACE_ROOT` env 优先。
+    /// 顶层无 `deny_unknown_fields`，旧二进制忽略新键、新二进制忽略旧键，
+    /// 双向滚动升级都不碎。
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+}
+
+/// 顶层 `[workspace]` 段（add-workspace-root D1）：workspace root 是机器级
+/// 概念——webui 只是执法者之一，节点没有 `[watchdog.webui]` 节，放顶层使
+/// 「这台机器的项目根」只配一次。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceConfig {
+    /// 项目根目录。支持 `~` 展开（with_expanded_paths 管线）；按字面量保存、
+    /// 不 canonicalize——范围判定（`within_workspace_root`）两侧同规范。
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 /// Wrapper for all ACP agent configs. TOML section `[acp.<agent>]` nests here.
@@ -514,17 +531,14 @@ pub struct WatchdogWebUiConfig {
     /// 一律拒绝（见 webui_cmd 的安全门）。
     #[serde(default = "default_webui_auth")]
     pub auth: bool,
-    /// 项目管理可选目录白名单（add-webui-allowed-roots）。空/缺省 = 不启用
-    /// 范围约束（browse-dirs 显式 root 与项目注册保持现状）；配置后两者
-    /// 都必须落在白名单目录之一内。支持 `~` 展开；相对路径按进程 cwd 解析
-    /// 并记录告警。默认根（work_dir / cwd 回退）自动并入白名单。
-    #[serde(default)]
-    pub allowed_roots: Vec<String>,
     /// 归档保留期（天）。默认 30；过期归档在 webui 启动时及每次列表请求时
     /// 删除（add-project-session-actions）。配置项归属 `[watchdog.webui]`
     /// （webui 配置的现唯一归属地，无独立 `[webui]` 顶层节）。
     #[serde(default = "default_archive_retention_days")]
     pub archive_retention_days: u64,
+    // 兼容性（add-workspace-root）：未标 `deny_unknown_fields`，旧键
+    // `allowed_roots` 出现在配置里被静默忽略、解析不报错——白名单机制已由
+    // 单一 workspace root 接管（顶层 `[workspace] root` / `SEBAS_WORKSPACE_ROOT`）。
 }
 
 impl Default for WatchdogWebUiConfig {
@@ -534,36 +548,41 @@ impl Default for WatchdogWebUiConfig {
             host: default_webui_host(),
             port: default_webui_port(),
             auth: default_webui_auth(),
-            allowed_roots: Vec::new(),
             archive_retention_days: default_archive_retention_days(),
         }
     }
 }
 
-/// 组装 browse-dirs / 项目注册的白名单（add-webui-allowed-roots）。
-///
-/// `allowed_roots` 未配置（空）→ 返回空表 = 不启用范围约束，行为与
-/// 引入白名单前完全一致；配置了 → 返回配置项 + 服务端默认根（work_dir /
-/// cwd 回退）自动入列，保证「不带 root」的既有语义不受启用影响。
-pub fn webui_allowed_roots(
-    cfg: &WatchdogWebUiConfig,
-    work_root: Option<&std::path::Path>,
-) -> Vec<std::path::PathBuf> {
-    if cfg.allowed_roots.is_empty() {
-        return Vec::new();
-    }
-    let mut roots: Vec<std::path::PathBuf> =
-        cfg.allowed_roots.iter().map(std::path::PathBuf::from).collect();
-    if let Some(root) = work_root
-        && !roots.contains(&root.to_path_buf())
-    {
-        roots.push(root.to_path_buf());
-    }
-    roots
-}
-
 fn default_archive_retention_days() -> u64 {
     30
+}
+
+/// 解析生效的 workspace root（add-workspace-root，spec「解析顺序」）：
+/// `SEBAS_WORKSPACE_ROOT` 环境变量 > 配置项 `[workspace] root` > 回退进程
+/// cwd。返回 `(根, 是否回退)`；回退时**装配点**应打一条启动告警（D5：判定
+/// 函数本身不打日志——它被高频调用，告警是启动期事实）。env / config 取值
+/// 按字面量保存（`~` 展开只走 config 管线，见 `with_expanded_paths`），是否
+/// canonicalize 由范围判定函数负责——`within_workspace_root` 两侧同规范。
+/// 空值语义与全仓一致：空白/纯空白字符串视同未配置。
+pub fn resolve_workspace_root(
+    env: Option<&str>,
+    config_root: Option<&str>,
+    cwd: &std::path::Path,
+) -> (std::path::PathBuf, bool) {
+    let explicit = env
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            config_root
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+        });
+    match explicit {
+        Some(root) => (root, false),
+        None => (cwd.to_path_buf(), true),
+    }
 }
 
 fn default_webui_enabled() -> bool {
@@ -842,8 +861,8 @@ impl Config {
             }
         }
         self.media.download_dir = expand_tilde(&self.media.download_dir);
-        for root in &mut self.watchdog.webui.allowed_roots {
-            *root = expand_tilde(root);
+        if let Some(ref root) = self.workspace.root {
+            self.workspace.root = Some(expand_tilde(root));
         }
         if let Some(ref f) = self.log.file {
             self.log.file = Some(expand_tilde(f));
@@ -935,8 +954,8 @@ mod tests {
         assert!(!cfg.watchdog.router.enabled, "router 应默认停用");
         assert!(!cfg.feishu.enabled(), "无凭证时 feishu 应视为未启用");
         assert!(
-            cfg.watchdog.webui.allowed_roots.is_empty(),
-            "allowed_roots 缺省 = 未启用范围约束"
+            cfg.workspace.root.is_none(),
+            "workspace root 缺省 = None（装配点回退 cwd 并告警）"
         );
         assert!(
             cfg.watchdog.core.secret_file.is_none(),
@@ -1001,57 +1020,64 @@ mod tests {
     }
 
     #[test]
-    fn webui_allowed_roots_parse_and_expand_tilde() {
-        // add-webui-allowed-roots：白名单解析 + `~` 展开（with_expanded_paths
-        // 经由 Config::parse 的既有展开管线生效）。
+    fn workspace_root_section_parses() {
+        // add-workspace-root 1.1：顶层 `[workspace] root` 解析 + `~` 展开
+        // （with_expanded_paths 经由 Config::parse 的既有展开管线生效）。
+        // 注意 Windows 反斜杠不能裸写进 TOML basic string，归一为正斜杠。
+        let cfg = Config::parse(
+            r#"
+[workspace]
+root = "~/projects"
+"#,
+        )
+        .expect("[workspace] root 应可解析");
+        let root = cfg.workspace.root.as_deref().expect("root 应在场");
+        assert!(!root.starts_with("~"), "~ 必须已展开: {root}");
+    }
+
+    #[test]
+    fn legacy_allowed_roots_key_is_ignored() {
+        // add-workspace-root：白名单机制退役。旧配置带 `allowed_roots` 键
+        // 必须静默忽略（解析不报错），范围约束改由 workspace root 接管。
         let cfg = Config::parse(
             r#"
 [watchdog.webui]
 allowed_roots = ["~/work", "/srv/projects"]
 "#,
         )
-        .expect("allowed_roots 应可解析");
-        let roots = &cfg.watchdog.webui.allowed_roots;
-        assert_eq!(roots.len(), 2);
+        .expect("含 allowed_roots 旧键的配置必须照常解析");
         assert!(
-            !roots[0].starts_with("~"),
-            "~ 必须已展开: {}",
-            roots[0]
+            cfg.workspace.root.is_none(),
+            "旧键不得被解读为 workspace root"
         );
-        assert_eq!(roots[1], "/srv/projects");
     }
 
     #[test]
-    fn webui_allowed_roots_empty_config_disables_enforcement() {
-        // 未配置 allowed_roots → 空表 = 不启用范围约束（冒烟抓到的回归：
-        // 默认根无条件入列会让白名单永远非空、强制生效）。
-        let cfg = WatchdogWebUiConfig::default();
-        assert!(webui_allowed_roots(&cfg, Some(std::path::Path::new("/any/work"))).is_empty());
-        assert!(webui_allowed_roots(&cfg, None).is_empty());
-    }
+    fn resolve_workspace_root_env_beats_config_beats_cwd() {
+        // add-workspace-root 1.4：三态解析——env 优先 / 配置次之 / 双缺省
+        // 回退 cwd 并置回退 flag（装配点据此打告警）。
+        let cwd = std::path::Path::new("/process/cwd");
 
-    #[test]
-    fn webui_allowed_roots_configured_merges_default_root_once() {
-        let cfg = WatchdogWebUiConfig {
-            allowed_roots: vec!["/srv/projects".into()],
-            ..Default::default()
-        };
-        let roots = webui_allowed_roots(
-            &cfg,
-            Some(std::path::Path::new("/srv/projects")),
+        let (root, fell_back) = resolve_workspace_root(
+            Some("/env/root"),
+            Some("/config/root"),
+            cwd,
         );
-        // 默认根与配置项重合 → 不重复。
-        assert_eq!(roots, vec![std::path::PathBuf::from("/srv/projects")]);
+        assert_eq!(root, std::path::PathBuf::from("/env/root"), "env 优先");
+        assert!(!fell_back, "env 生效时不算回退");
 
-        let roots = webui_allowed_roots(&cfg, Some(std::path::Path::new("/srv/work")));
-        // 默认根不同 → 追加到尾部（「不带 root」语义不受启用影响）。
-        assert_eq!(
-            roots,
-            vec![
-                std::path::PathBuf::from("/srv/projects"),
-                std::path::PathBuf::from("/srv/work"),
-            ]
-        );
+        let (root, fell_back) = resolve_workspace_root(None, Some("/config/root"), cwd);
+        assert_eq!(root, std::path::PathBuf::from("/config/root"), "配置次之");
+        assert!(!fell_back, "配置生效时不算回退");
+
+        let (root, fell_back) = resolve_workspace_root(None, None, cwd);
+        assert_eq!(root, cwd, "双缺省回退进程 cwd");
+        assert!(fell_back, "回退必须置 flag 供装配点告警");
+
+        // 空值语义：空白字符串视同未配置（与全仓 env/config 空值约定一致）。
+        let (root, fell_back) = resolve_workspace_root(Some("  "), Some(""), cwd);
+        assert_eq!(root, cwd, "空白取值视同未配置");
+        assert!(fell_back);
     }
 
     #[test]

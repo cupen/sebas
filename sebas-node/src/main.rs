@@ -28,6 +28,16 @@ async fn main() {
     }
 
     let store = IdentityStore::new(started.state_dir.clone());
+    // workspace root 回退是一次性的启动期事实：**装配处**告警一次（add-workspace-root），
+    // 判定路径（CheckPath）上不再打日志。
+    if started.workspace_root_fell_back {
+        eprintln!(
+            "sebas-node: 警告：未显式配置工作区根，回退使用进程 cwd {}；建议设置 {} 或 \
+             [node] workspace_root 以固定路径判定的边界",
+            started.workspace_root.display(),
+            sebas_node::config::WORKSPACE_ROOT_ENV
+        );
+    }
     // 执行体工厂：echo 之外还有配置里真正接入了运行时的 agent kind（6.3）。
     // 链路在握手成功后把控制面告知的 router 地址填进 `router` 槽（7.2）。
     let factory = std::sync::Arc::new(NodeBodyFactory::new(started.body.clone()));
@@ -41,6 +51,8 @@ async fn main() {
         started.state_dir.join("sessions"),
         // 操作者级材料落在这里（按版本目录隔离）。
         started.state_dir.join("materials"),
+        // 路径判定的界内/越界边界（add-workspace-root），已按 env > 配置 > cwd 解析。
+        started.workspace_root.clone(),
         started.max_sessions as usize,
     )
     .with_manifest(started.manifest.clone())

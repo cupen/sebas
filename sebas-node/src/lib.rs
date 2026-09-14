@@ -31,6 +31,11 @@ pub use identity::{IdentityStore, NodeId};
 
 use std::path::PathBuf;
 
+/// env 是进程全局的：动 `SEBAS_*` 的测试用例（config 与启动装配）共用这把锁
+/// 串行化，防止跨模块的并行用例互相污染。
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 启动解析段的结果。
 ///
 /// `checked_only` 为真表示只做了自检（`--check`），不要进入链路。
@@ -50,6 +55,12 @@ pub struct Startup {
     pub log_retention_days: u32,
     /// 默认工作目录（无项目会话的落脚点）。
     pub default_work_dir: Option<PathBuf>,
+    /// 生效的 workspace root（add-workspace-root）：显式配置，或未配置时回退的
+    /// 进程 cwd。路径判定（`CheckPath`）以它为界内/越界的边界。
+    pub workspace_root: PathBuf,
+    /// workspace root 是否为**回退值**（env 与 `[node] workspace_root` 都没有）。
+    /// 启动装配处据此打一次告警；判定路径上不再打日志。
+    pub workspace_root_fell_back: bool,
     /// 是否只做自检。
     pub checked_only: bool,
     /// 握手要上报的能力清单（agent kinds + 可达性 + provider 清单 + mode 强制能力）。
@@ -66,6 +77,15 @@ impl Startup {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(未设置：无项目会话将无法落脚)".to_string());
+        let workspace = if self.workspace_root_fell_back {
+            format!(
+                "{}（回退 cwd；建议显式配置 {} 或 [node] workspace_root）",
+                self.workspace_root.display(),
+                config::WORKSPACE_ROOT_ENV
+            )
+        } else {
+            self.workspace_root.display().to_string()
+        };
         format!(
             "node id:        {}\n\
              control plane:  {}\n\
@@ -73,7 +93,8 @@ impl Startup {
              upstream:       {}\n\
              max sessions:   {}\n\
              log retention:  {} 天\n\
-             default work:   {}",
+             default work:   {}\n\
+             workspace root: {}",
             self.node_id,
             self.control_plane,
             self.state_dir.display(),
@@ -81,6 +102,7 @@ impl Startup {
             self.max_sessions,
             self.log_retention_days,
             work_dir,
+            workspace,
         )
     }
 }
@@ -94,6 +116,14 @@ pub fn startup(cli: &Cli) -> Result<Startup, NodeError> {
     let store = IdentityStore::new(config.state_dir.clone());
     let node_id = store.load_or_create_id(config.id.as_deref())?;
 
+    // workspace root 的 cwd 回退发生在**启动装配处**（这里）而不是判定函数：
+    // 回退是一次性的启动期事实，配一条告警；`resolve_workspace_root` 与主控
+    // `src/config.rs` 同名函数同语义（add-workspace-root）。
+    let cwd = std::env::current_dir()
+        .map_err(|e| NodeError::config(format!("无法取进程 cwd 作为 workspace root 回退：{e}")))?;
+    let (workspace_root, workspace_root_fell_back) =
+        config::resolve_workspace_root(config.workspace_root.clone(), &cwd);
+
     let made = Startup {
         node_id,
         control_plane: config.control_plane.clone(),
@@ -102,6 +132,8 @@ pub fn startup(cli: &Cli) -> Result<Startup, NodeError> {
         max_sessions: config.max_sessions,
         log_retention_days: config.log_retention_days,
         default_work_dir: config.default_work_dir.clone(),
+        workspace_root,
+        workspace_root_fell_back,
         checked_only: cli.check,
         manifest: config.manifest(),
         body: config.body_config(),
@@ -209,5 +241,46 @@ mod tests {
         let second = startup(&cli(&state, true)).unwrap().node_id;
         assert_eq!(first, second);
         assert!(state.join(identity::NODE_ID_FILE).exists());
+    }
+
+    // ── workspace root 装配（add-workspace-root）───────────────────────────
+
+    #[test]
+    fn workspace_root_falls_back_to_cwd_with_a_flag_when_unconfigured() {
+        let _env = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var(config::WORKSPACE_ROOT_ENV) };
+        let tmp = tempfile::tempdir().unwrap();
+        let started = startup(&cli(&tmp.path().join("state"), true)).unwrap();
+        assert!(started.workspace_root_fell_back, "env 与配置都没有 → 回退");
+        assert_eq!(started.workspace_root, std::env::current_dir().unwrap());
+        // 自检报告要点名回退与显式配置建议（--check 也要能看见）。
+        let report = started.check_report();
+        assert!(report.contains("workspace root"), "{report}");
+        assert!(report.contains("回退 cwd"), "{report}");
+        assert!(report.contains(config::WORKSPACE_ROOT_ENV), "{report}");
+    }
+
+    #[test]
+    fn an_explicit_workspace_root_reaches_startup_without_fallback() {
+        let _env = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var(config::WORKSPACE_ROOT_ENV) };
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("node.toml");
+        // TOML 字面量字符串（单引号）：Windows 路径的反斜杠不能走基本字符串转义。
+        std::fs::write(
+            &config_path,
+            format!(
+                "[node]\ncontrol_plane = \"wss://c/ws\"\nworkspace_root = '{}'\n",
+                tmp.path().display()
+            ),
+        )
+        .unwrap();
+        let c = Cli {
+            config: Some(config_path),
+            ..cli(&tmp.path().join("state"), true)
+        };
+        let started = startup(&c).unwrap();
+        assert!(!started.workspace_root_fell_back);
+        assert_eq!(started.workspace_root, tmp.path());
     }
 }

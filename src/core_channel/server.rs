@@ -422,17 +422,16 @@ async fn recv_remote_event(
 ) -> Option<SessionEvent> {
     match rx {
         None => std::future::pending().await,
-        Some(rx) => loop {
-            match rx.recv().await {
-                Ok(event) => return Some(event),
-                // 投影落后于事件量：如实关掉这一路，客户端会在重连时重新快照
-                // （与本地订阅的 Lagged 处置一致——绝不给一个带缺口的流）。
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "core channel: remote projection lagged; dropping connection");
-                    return None;
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
+        // 每个分支都终结（返回或 pending），单次 match 即可——不必套 loop。
+        Some(rx) => match rx.recv().await {
+            Ok(event) => Some(event),
+            // 投影落后于事件量：如实关掉这一路，客户端会在重连时重新快照
+            // （与本地订阅的 Lagged 处置一致——绝不给一个带缺口的流）。
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(skipped, "core channel: remote projection lagged; dropping connection");
+                None
             }
+            Err(broadcast::error::RecvError::Closed) => None,
         },
     }
 }
@@ -726,12 +725,15 @@ async fn dispatch(
                     rejection: SessionRejection::UnusableProjectDir,
                 };
             }
-            let project_dir = project_dir.map(|dir| {
-                std::fs::canonicalize(&dir)
-                    .unwrap_or_else(|_| PathBuf::from(&dir))
-                    .display()
-                    .to_string()
-            });
+            // add-workspace-root：会话面执法把 project_dir 当「已 canonical 的
+            // 存储值」与 plain 形 root 前缀做逐分量比较。Windows 上
+            // `std::fs::canonicalize` 产出 `\\?\` verbatim 形——与注册表里
+            // `canonicalize_plain` 落库的 plain 形判等恒假（所有项目会话被误判
+            // 越界），工作台头部还会泄漏 verbatim 前缀。与注册同用 plain 形。
+            let project_dir =
+                project_dir.map(|dir| {
+                    sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir)
+                });
             match backend
                 .spawn_with(prompt, project_dir, &agent, model, mode, None)
                 .await
@@ -771,12 +773,12 @@ async fn dispatch(
                     rejection: SessionRejection::UnusableProjectDir,
                 };
             }
-            let project_dir = project_dir.map(|dir| {
-                std::fs::canonicalize(&dir)
-                    .unwrap_or_else(|_| PathBuf::from(&dir))
-                    .display()
-                    .to_string()
-            });
+            // 与 Spawn 同款：project_dir 落 plain 形 canonical（Windows verbatim
+            // 前缀还原），理由见上方 Spawn 分支注释。
+            let project_dir =
+                project_dir.map(|dir| {
+                    sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir)
+                });
             match backend
                 .create_placeholder(project_dir, &agent, model, mode, None)
                 .await
@@ -1086,7 +1088,11 @@ async fn dispatch(
                 };
             };
             match projection.check_path(&node_id, &path).await {
-                Ok((exists, is_dir)) => CoreChannelResponse::NodePath { exists, is_dir },
+                Ok((exists, is_dir, within_workspace)) => CoreChannelResponse::NodePath {
+                    exists,
+                    is_dir,
+                    within_workspace,
+                },
                 Err(e) => node_link_rejection(e),
             }
         }

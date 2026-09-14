@@ -21,7 +21,7 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    Sandbox, http_client, post_json, wait_for, wait_reachable, wait_router_addr,
+    Sandbox, free_port, http_client, post_json, wait_for, wait_reachable, wait_router_addr,
     wait_unreachable_with_cause, webui_healthy,
 };
 
@@ -1693,4 +1693,257 @@ async fn mode_mid_session_switch() {
         transcript.contains("perm done"),
         "allow session must run the gated tool without approval, got: {transcript:?}"
     );
+}
+
+/// add-workspace-root 4.3：workspace root 执法的进程级旅程——「注册后收紧根」
+/// 变体，Windows 可跑（只重启 webui 单进程，不依赖 unix 信号）。
+///
+/// webui 以 env 携带更窄的根重启（`SEBAS_WORKSPACE_ROOT` > `[workspace] root`），
+/// core 与其上的会话原地不动：注册过的项目就此成为「越界历史项目」。覆盖：
+/// 1) 注册越界 → 400「路径超出允许范围」，越界 + 不存在同文案（范围判定
+///    先行于存在性，不借文案差异探测根外目录）；
+/// 2) 越界历史项目从 GET /api/projects 隐藏，branch 探测按不可达；
+/// 3) 绑定它的会话 detail / message / switch 400 拒绝，archive / close 放行
+///    （围栏不锁垃圾）；
+/// 4) 全程 GET /api/summary 健康（沙箱没有被执法误伤）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn workspace_root_enforcement_after_tightening() {
+    let mut sb = Sandbox::new("testsuite_e2e", "workspace-root");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let mut webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 界内注册（沙箱 work 目录）+ 两个绑定它的 0-turn 占位会话。占位形态
+    // 足够：执法看的是快照上的 project_dir，与有没有跑过 turn 无关。
+    let work_dir = sb.path.join("work");
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({ "path": support::forward_slash(&work_dir) }),
+    )
+    .await
+    .expect("register in-scope project");
+    assert_eq!(status, 201, "in-scope register: {body}");
+    let project_id = body["id"].as_str().expect("project id").to_string();
+
+    let key_a = create_project_placeholder(&cli, &sb, &project_id, "a").await;
+    let key_b = create_project_placeholder(&cli, &sb, &project_id, "b").await;
+
+    // 收紧前 detail 可读——证明下面的 400 来自收紧，不是占位形态本身。
+    let (status, detail_before) =
+        get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
+            .await
+            .expect("detail before tightening");
+    assert_eq!(
+        status, 200,
+        "detail must read fine while in scope: {detail_before}"
+    );
+
+    // 收紧根：只重启 webui（新端口避免复绑等待），core 与会话不动。
+    webui.kill().await.expect("kill webui");
+    let scope = sb.path.join("scope");
+    std::fs::create_dir_all(&scope).expect("mkdir scope");
+    let new_port = free_port();
+    let config = std::fs::read_to_string(&sb.config_path).expect("read config");
+    let patched = config.replace(
+        &format!("port = {}", sb.webui_port),
+        &format!("port = {new_port}"),
+    );
+    assert_ne!(patched, config, "[watchdog.webui] port line not found");
+    std::fs::write(&sb.config_path, patched).expect("write config");
+    sb.webui_port = new_port;
+    let scope_s = support::forward_slash(&scope);
+    let _webui2 = sb.spawn(
+        &["webui", "-c", &support::forward_slash(&sb.config_path)],
+        &sb.core_secret,
+        &[("SEBAS_WORKSPACE_ROOT", &scope_s)],
+        &sb.webui_log,
+    );
+    wait_reachable(&cli, &sb).await;
+
+    // 1) 越界注册 400：界内已存在的 work 与「越界 + 不存在」的幽灵同文案。
+    let (status, oob) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({ "path": support::forward_slash(&work_dir) }),
+    )
+    .await
+    .expect("register out-of-scope existing");
+    assert_eq!(status, 400, "out-of-scope register must 400: {oob}");
+    let oob_msg = oob["error"].as_str().expect("error text").to_string();
+    assert!(
+        oob_msg.contains("路径超出允许范围"),
+        "unexpected rejection text: {oob_msg}"
+    );
+    let ghost = sb.path.join("ghost-never-created");
+    let (status, ghost_body) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({ "path": support::forward_slash(&ghost) }),
+    )
+    .await
+    .expect("register out-of-scope nonexistent");
+    assert_eq!(status, 400, "nonexistent out-of-scope must 400: {ghost_body}");
+    assert_eq!(
+        ghost_body["error"], oob["error"],
+        "越界 + 不存在必须同文案（范围先行于存在性）: {ghost_body} vs {oob}"
+    );
+
+    // 对照：界内注册照常成功——400 是执法，不是项目面坏了。
+    let inside = scope.join("inside");
+    std::fs::create_dir_all(&inside).expect("mkdir inside");
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/projects", sb.webui_url()),
+        serde_json::json!({ "path": support::forward_slash(&inside) }),
+    )
+    .await
+    .expect("register in-scope control");
+    assert_eq!(status, 201, "in-scope register after tightening: {body}");
+    let inside_id = body["id"].as_str().expect("control project id").to_string();
+
+    // 2) 越界历史项目从列表隐藏；branch 探测按不可达。
+    let projects = cli
+        .get(format!("{}/api/projects", sb.webui_url()))
+        .send()
+        .await
+        .expect("list projects")
+        .json::<serde_json::Value>()
+        .await
+        .expect("projects json");
+    let listed = projects.to_string();
+    assert!(
+        !listed.contains(&project_id),
+        "越界历史项目必须从列表隐藏: {projects}"
+    );
+    assert!(
+        listed.contains(&inside_id),
+        "界内对照项目必须在列: {projects}"
+    );
+    let branch = cli
+        .get(format!(
+            "{}/api/projects/{project_id}/branch",
+            sb.webui_url()
+        ))
+        .send()
+        .await
+        .expect("branch probe")
+        .json::<serde_json::Value>()
+        .await
+        .expect("branch json");
+    assert_eq!(
+        branch["accessible"], false,
+        "越界项目的 branch 探测必须按不可达: {branch}"
+    );
+    assert!(
+        branch["branch"].is_null(),
+        "越界项目不得泄漏分支名: {branch}"
+    );
+
+    // 3) 会话面：detail / message / switch 拒绝（同一文案），archive /
+    //    close 放行（围栏不锁垃圾）。
+    let out_of_scope = |what: &str, body: serde_json::Value| {
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("项目目录超出允许范围"),
+            "{what} must carry the typed rejection: {body}"
+        );
+    };
+    let (status, body) =
+        get_json_status(&cli, &format!("{}/api/sessions/{key_a}", sb.webui_url()))
+            .await
+            .expect("detail out-of-scope");
+    assert_eq!(status, 400, "detail on out-of-scope session must 400: {body}");
+    out_of_scope("detail", body);
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key_a}/message", sb.webui_url()),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await
+    .expect("message out-of-scope");
+    assert_eq!(status, 400, "message on out-of-scope session must 400: {body}");
+    out_of_scope("message", body);
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key_a}/switch", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("switch out-of-scope");
+    assert_eq!(status, 400, "switch on out-of-scope session must 400: {body}");
+    out_of_scope("switch", body);
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key_a}/archive", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("archive out-of-scope session");
+    assert_eq!(status, 200, "archive must pass the fence: {body}");
+    assert_eq!(body["status"], "archived", "{body}");
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key_b}/close", sb.webui_url()),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("close out-of-scope session");
+    assert_eq!(status, 200, "close must pass the fence: {body}");
+    assert_eq!(body["status"], "closed", "{body}");
+
+    // 4) 全程健康：执法没有伤到沙箱本身的可用面。
+    let summary = cli
+        .get(format!("{}/api/summary", sb.webui_url()))
+        .send()
+        .await
+        .expect("summary")
+        .json::<serde_json::Value>()
+        .await
+        .expect("summary json");
+    assert_eq!(
+        summary["reachability"]["ok"], true,
+        "sandbox must stay healthy: {summary}"
+    );
+}
+
+/// POST a 0-turn placeholder session bound to `project_id`; returns the
+/// encoded session key.
+async fn create_project_placeholder(
+    cli: &reqwest::Client,
+    sb: &Sandbox,
+    project_id: &str,
+    tag: &str,
+) -> String {
+    let (status, body) = post_json(
+        cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "agent": "claude", "project_id": project_id }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create placeholder {tag}: {e}"));
+    assert_eq!(status, 201, "placeholder {tag}: {body}");
+    body["key"].as_str().expect("key").to_string()
+}
+
+/// GET a URL, return (status, json body). Err on transport failure.
+async fn get_json_status(
+    cli: &reqwest::Client,
+    url: &str,
+) -> Result<(u16, serde_json::Value), String> {
+    let resp = cli
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let status = resp.status().as_u16();
+    let json = resp
+        .json()
+        .await
+        .map_err(|e| format!("body of {url}: {e}"))?;
+    Ok((status, json))
 }

@@ -51,6 +51,7 @@ async fn paired_node() -> (
         Some(token),
         dir.path().join("node-sessions"),
         dir.path().join("node-materials"),
+        dir.path().to_path_buf(),
         4,
     );
     tokio::spawn(async move {
@@ -246,6 +247,70 @@ async fn spawn_rejects_an_unusable_project_dir_with_a_named_cause() {
         .unwrap(),
         SessionResult::Spawned { .. }
     ));
+}
+
+/// containment 贯通（add-workspace-root）：`CheckPath` 的应答要带着节点以**它自己**
+/// 的 workspace root 判的界内/越界，跨真链路回到主控侧。节点的 root 是配对沙箱目录。
+#[tokio::test]
+async fn check_path_judgements_carry_workspace_containment() {
+    let (dir, _server, conn) = paired_node().await;
+
+    // 界内目录：事实与 containment 都为真。
+    let inside = dir.path().join("inside");
+    std::fs::create_dir(&inside).unwrap();
+    match conn
+        .request(SessionOp::CheckPath {
+            path: inside.to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap()
+    {
+        SessionResult::PathChecked {
+            exists,
+            is_dir,
+            within_workspace,
+        } => assert!(
+            exists && is_dir && within_workspace,
+            "节点 root 内的目录应判界内"
+        ),
+        other => panic!("{other:?}"),
+    }
+
+    // 越界目录：另一个沙箱是**兄弟**而非子目录 → 事实为真、within=false。
+    let outside = tempfile::tempdir().unwrap();
+    match conn
+        .request(SessionOp::CheckPath {
+            path: outside.path().to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap()
+    {
+        SessionResult::PathChecked {
+            exists,
+            is_dir,
+            within_workspace,
+        } => assert!(
+            exists && is_dir && !within_workspace,
+            "节点 root 外的真实目录：存在性为真但越界"
+        ),
+        other => panic!("{other:?}"),
+    }
+
+    // 候选解析不出（不存在）→ fail-closed：三元全 false。
+    match conn
+        .request(SessionOp::CheckPath {
+            path: dir.path().join("ghost").to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap()
+    {
+        SessionResult::PathChecked {
+            exists,
+            is_dir,
+            within_workspace,
+        } => assert!(!exists && !is_dir && !within_workspace),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -670,6 +735,7 @@ impl Harness {
             self.token.take(),
             Self::sessions_dir_for(state_dir),
             state_dir.join("materials"),
+            state_dir.to_path_buf(),
             4,
         )
         .with_manifest(self.manifest.clone());

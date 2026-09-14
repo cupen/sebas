@@ -134,6 +134,10 @@ impl HostedSession {
 /// 节点侧的会话宿主。
 pub struct SessionHost {
     log_dir: PathBuf,
+    /// workspace root（add-workspace-root）：`CheckPath` 的 containment 判定以它
+    /// 为界。启动装配处解析好（env > `[node] workspace_root` > cwd 回退 + 告警）
+    /// 才传进来，宿主只消费结果、不再回退也不再打日志。
+    workspace_root: PathBuf,
     max_sessions: usize,
     sessions: HashMap<String, HostedSession>,
     /// 每会话待上报的批次。
@@ -388,8 +392,23 @@ pub struct Spawned {
     pub provider_cause: Option<String>,
 }
 
+/// 工作区根包含判定原语（add-workspace-root）。与 sebas-webui 的
+/// `within_workspace_root` **同语义**（两侧都 canonicalize 后做逐分量前缀比较，
+/// symlink 解析后的真实根参与比较）；sebas-node 不能依赖 sebas-webui，这份小
+/// 纯函数就地实现。任一侧解析失败即不在界内（fail-closed）：候选不可解析 →
+/// 越界；root 不可解析 → 一切候选越界。
+fn within_workspace_root(candidate: &Path, root: &Path) -> bool {
+    let resolved = match std::fs::canonicalize(candidate) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    std::fs::canonicalize(root)
+        .map(|r| resolved.starts_with(&r))
+        .unwrap_or(false)
+}
+
 impl SessionHost {
-    /// 以日志目录、并发上限与执行体工厂构造。
+    /// 以日志目录、workspace root、并发上限与执行体工厂构造。
     ///
     /// **会重新挂上磁盘上的孤立日志**：节点重启后内存里的会话全没了，但日志还在。
     /// 若不挂回去，那些「执行事实」在协议上就再也拉不到（`UnknownSession`），
@@ -397,12 +416,14 @@ impl SessionHost {
     /// 不接受输入（要重新工作请重新 spawn）——节点重启**终止**会话，但不销毁事实。
     pub fn new(
         log_dir: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
         max_sessions: usize,
         storage_ceiling_bytes: u64,
         factory: Arc<dyn BodyFactory + Send + Sync>,
     ) -> Self {
         let mut host = Self {
             log_dir: log_dir.into(),
+            workspace_root: workspace_root.into(),
             max_sessions,
             sessions: HashMap::new(),
             pending: HashMap::new(),
@@ -1274,7 +1295,11 @@ impl SessionHost {
             },
             SessionOp::Ping => SessionResult::Pong,
             SessionOp::CheckPath { path } => match self.check_path(&path) {
-                Ok((exists, is_dir)) => SessionResult::PathChecked { exists, is_dir },
+                Ok((exists, is_dir, within_workspace)) => SessionResult::PathChecked {
+                    exists,
+                    is_dir,
+                    within_workspace,
+                },
                 Err(r) => rejected(r),
             },
         };
@@ -1285,28 +1310,33 @@ impl SessionHost {
     /// 「这个路径在**节点**上是什么？」（3.3 的同一条原则）。
     ///
     /// 判定规则刻意区分三种结果：
-    /// - 有元数据 → `(exists, is_dir)`；
-    /// - **确定不存在**（`NotFound`，或路径中间不是目录）→ `(false, false)`；
+    /// - 有元数据 → `(exists, is_dir, within_workspace)`；
+    /// - **确定不存在**（`NotFound`，或路径中间不是目录）→ `(false, false, false)`；
     /// - **读不到**（权限等）→ typed 拒绝，成因**指名路径**。
     ///
     /// 第三条是重点：把「读不到」报成「不存在」会让控制面以为路径没了，从而做错
     /// 决策（比如让操作者去建一个其实已存在的目录）。未知不等于不存在。
-    pub fn check_path(&self, path: &str) -> Result<(bool, bool), Rejected> {
+    ///
+    /// `within_workspace`（add-workspace-root）：候选是否落在**本节点自己的**
+    /// workspace root 内——见 [`within_workspace_root`]；候选解析不出（不存在、
+    /// 权限）一律越界（fail-closed）。
+    pub fn check_path(&self, path: &str) -> Result<(bool, bool, bool), Rejected> {
         if path.trim().is_empty() {
             return Err(Rejected::new(
                 SessionRejectCode::UnusableProjectDir,
                 "路径为空，无法判定",
             ));
         }
+        let within = within_workspace_root(Path::new(path), &self.workspace_root);
         match std::fs::metadata(path) {
-            Ok(meta) => Ok((true, meta.is_dir())),
+            Ok(meta) => Ok((true, meta.is_dir(), within)),
             Err(e)
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                Ok((false, false))
+                Ok((false, false, within))
             }
             Err(e) => Err(Rejected::new(
                 SessionRejectCode::UnusableProjectDir,
@@ -1376,7 +1406,14 @@ mod tests {
 
     fn host() -> (tempfile::TempDir, SessionHost) {
         let dir = tempfile::tempdir().unwrap();
-        let host = SessionHost::new(dir.path(), 2, 0, std::sync::Arc::new(EchoOnlyFactory));
+        // 缺省测试宿主的 workspace root 就是这个 tempdir：界内/越界样本好构造。
+        let host = SessionHost::new(
+            dir.path(),
+            dir.path(),
+            2,
+            0,
+            std::sync::Arc::new(EchoOnlyFactory),
+        );
         (dir, host)
     }
 
@@ -1391,28 +1428,31 @@ mod tests {
         let dir = d.path().to_path_buf();
         assert_eq!(
             host.check_path(&dir.to_string_lossy()).unwrap(),
-            (true, true),
-            "目录"
+            (true, true, true),
+            "目录（宿主 root 自身恒在界内）"
         );
 
         let file = dir.join("a.txt");
         std::fs::write(&file, "x").unwrap();
         assert_eq!(
             host.check_path(&file.to_string_lossy()).unwrap(),
-            (true, false),
+            (true, false, true),
             "存在但不是目录"
         );
 
         let missing = dir.join("nope");
         assert_eq!(
             host.check_path(&missing.to_string_lossy()).unwrap(),
-            (false, false),
-            "确定不存在"
+            (false, false, false),
+            "确定不存在（候选解析不出 → 越界，fail-closed）"
         );
 
         // 路径中间不是目录（ENOTDIR）同样算「不存在」，不是「读不到」。
         let under_file = file.join("child");
-        assert_eq!(host.check_path(&under_file.to_string_lossy()).unwrap(), (false, false));
+        assert_eq!(
+            host.check_path(&under_file.to_string_lossy()).unwrap(),
+            (false, false, false)
+        );
 
         // 空路径什么都判定不了 → 如实拒绝。
         assert_eq!(
@@ -1421,22 +1461,53 @@ mod tests {
         );
     }
 
+    /// containment（add-workspace-root）：候选是否落在**节点自己的** workspace
+    /// root 内，与存在性/目录事实并列上报；越界与解析失败都 fail-closed。
+    #[test]
+    fn check_path_judges_containment_against_the_node_workspace_root() {
+        let (d, host) = host();
+        // 界内目录：(exists, is_dir, within) = (true, true, true)。
+        let inside = d.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        assert_eq!(
+            host.check_path(&inside.to_string_lossy()).unwrap(),
+            (true, true, true),
+            "root 内子目录应判界内"
+        );
+
+        // 越界目录：另一个 tempdir 与宿主 root 互不包含 → 事实为真、within=false。
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(
+            host.check_path(&outside.path().to_string_lossy()).unwrap(),
+            (true, true, false),
+            "root 外的真实目录：存在性为真但越界"
+        );
+
+        // 越界 root 自身的子路径解析不出（不存在）→ 三元全 false，不漏判。
+        let ghost_outside = outside.path().join("ghost");
+        assert_eq!(
+            host.check_path(&ghost_outside.to_string_lossy()).unwrap(),
+            (false, false, false)
+        );
+    }
+
     #[test]
     fn check_path_goes_over_the_protocol_as_a_typed_answer() {
         use sebas_node_link::{Frame, SessionOp, SessionResult};
         let (d, mut host) = host();
         let dir = d.path().to_string_lossy().to_string();
-        match host.handle(
-            1,
-            SessionOp::CheckPath {
-                path: dir.clone(),
-            },
-        ) {
+        match host.handle(1, SessionOp::CheckPath { path: dir.clone() }) {
             Frame::Response {
-                result: SessionResult::PathChecked { exists, is_dir },
+                result:
+                    SessionResult::PathChecked {
+                        exists,
+                        is_dir,
+                        within_workspace,
+                    },
                 ..
             } => {
                 assert!(exists && is_dir, "{dir} 应被判定为目录");
+                assert!(within_workspace, "宿主 root 自身应判界内");
             }
             other => panic!("{other:?}"),
         }
@@ -1447,9 +1518,14 @@ mod tests {
             },
         ) {
             Frame::Response {
-                result: SessionResult::PathChecked { exists, is_dir },
+                result:
+                    SessionResult::PathChecked {
+                        exists,
+                        is_dir,
+                        within_workspace,
+                    },
                 ..
-            } => assert!(!exists && !is_dir),
+            } => assert!(!exists && !is_dir && !within_workspace),
             other => panic!("{other:?}"),
         }
     }
@@ -1577,7 +1653,7 @@ mod tests {
             enforces,
             resolved: Arc::clone(&resolved),
         });
-        let host = SessionHost::new(dir.path(), 4, 0, factory);
+        let host = SessionHost::new(dir.path(), dir.path(), 4, 0, factory);
         (dir, host, resolved)
     }
 
@@ -1679,7 +1755,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let mut host = SessionHost::new(dir.path(), 4, 0, Arc::new(DeadFactory));
+        let mut host = SessionHost::new(dir.path(), dir.path(), 4, 0, Arc::new(DeadFactory));
         host.spawn("s-1", None, Some("dying"), None, None, None)
             .unwrap();
         host.prompt("s-1", "x").unwrap();
@@ -1826,7 +1902,7 @@ mod tests {
     #[test]
     fn batches_are_coalesced_within_the_window_and_exact_on_pull() {
         let dir = tempfile::tempdir().unwrap();
-        let mut host = SessionHost::new(dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory))
+        let mut host = SessionHost::new(dir.path(), dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory))
             .with_coalescing(Duration::from_millis(50), 256);
         host.spawn("s-1", None, Some("echo"), None, None, None).unwrap();
 
@@ -1860,7 +1936,7 @@ mod tests {
     #[test]
     fn batch_overflow_is_marked_not_silently_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let mut host = SessionHost::new(dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory))
+        let mut host = SessionHost::new(dir.path(), dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory))
             .with_coalescing(Duration::from_millis(1), 4);
         host.spawn("s-1", None, Some("echo"), None, None, None).unwrap();
         for i in 0..5 {
@@ -1921,7 +1997,7 @@ mod tests {
             b
         };
 
-        let mut host = SessionHost::new(dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory));
+        let mut host = SessionHost::new(dir.path(), dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory));
         assert_eq!(
             host.list().len(),
             1,
@@ -1978,7 +2054,7 @@ mod tests {
     fn storage_ceiling_refuses_new_sessions_without_dropping_history() {
         let dir = tempfile::tempdir().unwrap();
         // 上限设为 1 字节：任何已落盘的日志都会让它触顶。
-        let mut host = SessionHost::new(dir.path(), 4, 1, std::sync::Arc::new(EchoOnlyFactory));
+        let mut host = SessionHost::new(dir.path(), dir.path(), 4, 1, std::sync::Arc::new(EchoOnlyFactory));
         host.spawn("s-1", None, Some("echo"), None, None, None).unwrap();
         let err = host
             .spawn("s-2", None, Some("echo"), None, None, None)
@@ -2408,7 +2484,7 @@ mod tests {
     #[test]
     fn parked_approvals_span_sessions_for_reconcile() {
         let dir = tempfile::tempdir().unwrap();
-        let mut host = SessionHost::new(dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory));
+        let mut host = SessionHost::new(dir.path(), dir.path(), 4, 0, std::sync::Arc::new(EchoOnlyFactory));
         host.spawn("s-1", None, Some("echo"), None, Some("ask"), None).unwrap();
         host.spawn("s-2", None, Some("echo"), None, Some("ask"), None).unwrap();
         host.prompt("s-1", "run: one").unwrap();

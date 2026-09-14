@@ -44,15 +44,18 @@ pub struct WebUiState {
     /// 登录鉴权（用户名/密码，见 `auth` 模块）。凭据未配置时鉴权关闭，
     /// 全部路由维持原有行为。
     pub auth: Arc<AuthHandle>,
-    /// 服务端默认浏览根（add-webui-picker-workdir-start）：browse-dirs 未带
-    /// 显式 `root` 时的范围。由接线方注入（core --webui 内嵌与独立 webui
-    /// 进程），取配置的默认 agent kind work_dir，未配置时回退进程 cwd；
-    /// `None` 时 browse-dirs 硬错误（不再回退文件系统根）。
-    pub work_root: Option<std::path::PathBuf>,
-    /// 项目管理可选目录白名单（add-webui-allowed-roots）。空 = 未启用
-    /// 范围约束；非空时 browse-dirs 的显式 root 与项目注册路径都必须落在
-    /// 白名单目录之一内。
-    pub allowed_roots: Vec<std::path::PathBuf>,
+    /// 工作区根目录（add-workspace-root）：恒有值的单一机器级边界。项目
+    /// 注册、项目列表、browse-dirs 的起点与显式 root 都收敛到它之内；由
+    /// 装配方经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）
+    /// 计算后注入。
+    pub workspace_root: std::path::PathBuf,
+}
+
+/// 便捷装配形态（测试 / 最小入口）的 workspace root 缺省：进程 cwd 回退、
+/// 不告警——正式装配点（webui_cmd / run）经 `resolve_workspace_root` 负责
+/// env > config 解析与回退告警（add-workspace-root D5）。
+fn fallback_workspace_root() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// Build the axum Router with all WebUI routes.
@@ -69,8 +72,7 @@ pub fn build_router(
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
@@ -90,8 +92,7 @@ pub fn build_router_with_agent_kind_provider(
         agent_kinds,
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
@@ -110,8 +111,7 @@ pub fn build_router_with_admin_adapter(
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
@@ -133,22 +133,20 @@ pub fn build_router_with_auth(
         agent_kinds,
         archive_retention_days,
         auth,
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
-/// Build the axum Router with an explicit allowed-roots whitelist
-/// （add-webui-allowed-roots）：测试与特殊装配注入白名单的入口，语义同
-/// `build_router_with_auth` + 非空白名单。
-pub fn build_router_with_allowed_roots(
+/// Build the axum Router with an explicit workspace root（add-workspace-root）：
+/// 测试与特殊装配注入单一机器级边界的入口，语义同 `build_router_with_auth`
+/// + 指定根（取代已退役的 `build_router_with_allowed_roots` 多根白名单形态）。
+pub fn build_router_with_workspace_root(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Arc<dyn AgentKindProvider>,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
 ) -> Router {
     build_router_full(
         backend,
@@ -158,8 +156,7 @@ pub fn build_router_with_allowed_roots(
         agent_kinds,
         30,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     )
 }
 
@@ -172,8 +169,7 @@ fn build_router_full(
     agent_kinds: Arc<dyn AgentKindProvider>,
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -183,8 +179,7 @@ fn build_router_full(
         agent_kinds,
         archive_retention_days,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -520,8 +515,7 @@ pub async fn run(
         None,
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
     .await;
 }
@@ -544,17 +538,15 @@ pub async fn run_with_admin_adapter(
         admin_adapter,
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
     .await;
 }
 
 /// Run the WebUI server with an auth handle（登录鉴权接线入口）。
-/// `work_root` 供给 browse-dirs 的服务端默认浏览根（配置的 work dir 或
-/// 回退进程 cwd，由接线方决定）；`None` 时该端点在双 root 皆缺时硬错误。
-/// `allowed_roots` 为项目管理目录白名单（add-webui-allowed-roots），空 =
-/// 不启用；非空时同时约束 browse-dirs 显式 root 与项目注册路径。
+/// `workspace_root` 是恒有值的单一机器级边界（add-workspace-root）：browse-dirs
+/// 的起点与显式 root 约束、项目注册/列表/查看的范围判定都以它为准；由装配方
+/// 经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）计算。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
@@ -564,8 +556,7 @@ pub async fn run_with_admin_adapter_and_auth(
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
     archive_retention_days: u64,
 ) {
     run_full(
@@ -577,8 +568,7 @@ pub async fn run_with_admin_adapter_and_auth(
         admin_adapter,
         archive_retention_days,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     )
     .await;
 }
@@ -603,8 +593,7 @@ async fn run_full(
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let addr = listener.local_addr().expect("bound listener");
@@ -632,8 +621,7 @@ async fn run_full(
         provider,
         archive_retention_days,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     );
     tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(
@@ -1395,10 +1383,9 @@ mod auth_guard_tests {
 }
 
 #[cfg(test)]
-mod allowed_roots_tests {
-    //! add-webui-allowed-roots 路由级验收：白名单启用后 browse-dirs 的
-    //! 显式 root 与项目注册路径都必须落在白名单内；空白名单时两者维持
-    //! 现状（opt-in 不破坏既有行为）。
+mod workspace_root_tests {
+    //! add-workspace-root 路由级验收：workspace root 恒存在——browse-dirs 的
+    //! 显式 root 与项目注册路径都必须落在它之内，无参浏览起点即根本身。
     use super::*;
     use crate::models::RouterInfo;
     use crate::session_backend::FakeBackend;
@@ -1414,15 +1401,14 @@ mod allowed_roots_tests {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
     }
 
-    fn app_with_roots(roots: Vec<std::path::PathBuf>) -> Router {
-        build_router_with_allowed_roots(
+    fn app_with_workspace_root(root: std::path::PathBuf) -> Router {
+        build_router_with_workspace_root(
             Arc::new(FakeBackend::new()),
             RouterInfo::default(),
             CardConfig::default(),
             Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
             Arc::new(AuthHandle::disabled()),
-            None,
-            roots,
+            root,
         )
     }
 
@@ -1479,9 +1465,9 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn project_add_rejects_path_outside_allowed_roots() {
+    async fn project_add_rejects_path_outside_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
         // fail-closed：即使路径真实存在，越界也 400（先范围后存在性）。
         let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
         let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
@@ -1491,32 +1477,378 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn project_add_accepts_path_inside_allowed_roots() {
+    async fn project_add_accepts_path_inside_workspace_root() {
         with_registry_env(|| async {
             let t = two_trees();
-            let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
             let dir = t.allowed.path().join("proj");
             std::fs::create_dir_all(&dir).unwrap();
-            let canonical = dir.canonicalize().unwrap();
+            // 回显的是 canonicalize_plain 的普通形（Windows 无 \\?\ 前缀）。
+            let canonical =
+                crate::fs::canonicalize_plain(&dir).expect("canonicalize proj dir");
             let body = serde_json::json!({ "path": dir.to_str().unwrap() });
             let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
             assert_eq!(
                 resp["path"].as_str(),
-                Some(canonical.to_string_lossy().as_ref())
+                Some(canonical.as_str())
             );
         })
         .await;
     }
 
+    // ── 2.1 注册执法：越界与「不存在且越界」同文案（不借 400 探测存在性）──
+
     #[tokio::test]
-    async fn project_add_without_whitelist_is_unchanged() {
+    async fn project_add_out_of_scope_error_is_identical_for_existing_and_missing_dirs() {
+        let t = two_trees();
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+        let existing = t.outside.path().join("exists-dir");
+        std::fs::create_dir_all(&existing).unwrap();
+        let missing = t.outside.path().join("missing-dir");
+
+        let mut msgs = Vec::new();
+        for path in [existing, missing] {
+            let body = serde_json::json!({ "path": path.to_str().unwrap() });
+            let (status, resp) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+            msgs.push(resp["error"].as_str().expect("error body").to_string());
+        }
+        assert_eq!(
+            msgs[0], msgs[1],
+            "越界与「不存在且越界」必须同文案，否则可探测目录存在性"
+        );
+        assert!(msgs[0].contains("超出允许范围"), "got: {}", msgs[0]);
+    }
+
+    // ── 2.2 列表执法 ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn projects_list_hides_out_of_scope_local_project_keeps_in_scope_and_remote() {
         with_registry_env(|| async {
             let t = two_trees();
-            let app = app_with_roots(Vec::new());
-            let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
-            let (status, _resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED, "空白名单时注册不受范围约束");
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            // 界内项目经 API 注册（FakeBackend 走文件注册表降级路径）。
+            let dir = t.allowed.path().join("in-scope");
+            std::fs::create_dir_all(&dir).unwrap();
+            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+            let (status, _) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED);
+            // 越界历史项目（升级前遗留、新二进制注册不进来的形态）直接落注册表；
+            // 远端项目同入注册表（不受主控 root 辖区约束）。
+            let legacy = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                t.outside.path().to_str().unwrap(),
+            )
+            .expect("seed legacy out-of-scope entry");
+            let remote = crate::projects::add_on("dev-box", "/srv/repo")
+                .expect("seed remote entry");
+
+            let (_, list) = req(app, "GET", "/api/projects", None).await;
+            let ids: Vec<&str> = list["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p["id"].as_str())
+                .collect();
+            assert!(
+                !ids.contains(&legacy.id.as_str()),
+                "越界本机项目必须隐藏: {ids:?}"
+            );
+            assert!(
+                ids.contains(&remote.id.as_str()),
+                "远端项目不受主控 root 影响: {ids:?}"
+            );
+            assert_eq!(ids.len(), 2, "界内本机项目 + 远端项目在列: {ids:?}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn projects_list_hides_all_local_projects_when_root_unresolvable() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            // 先用可解析的根注册一个界内项目。
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            let dir = t.allowed.path().join("in-scope");
+            std::fs::create_dir_all(&dir).unwrap();
+            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+            let (status, _) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let remote = crate::projects::add_on("dev-box", "/srv/repo").unwrap();
+
+            // root 被删/移走（不可解析）→ 本机项目全部隐藏（fail-closed），
+            // 远端项目仍在列。
+            let ghost = t.allowed.path().join("__ghost_root__");
+            let app = app_with_workspace_root(ghost);
+            let (_, list) = req(app, "GET", "/api/projects", None).await;
+            let projects = list["projects"].as_array().unwrap();
+            assert!(
+                projects.iter().all(|p| {
+                    p["node_id"].as_str().unwrap_or(crate::projects::LOCAL_NODE_ID)
+                        != crate::projects::LOCAL_NODE_ID
+                }),
+                "root 不可解析时本机项目必须全部隐藏: {list}"
+            );
+            let ids: Vec<&str> =
+                projects.iter().filter_map(|p| p["id"].as_str()).collect();
+            assert_eq!(ids, [remote.id.as_str()], "只剩远端项目: {ids:?}");
+        })
+        .await;
+    }
+
+    // ── 2.3 会话面执法 ────────────────────────────────────────────────────
+
+    fn app_and_backend_with_workspace_root(
+        root: std::path::PathBuf,
+    ) -> (Router, Arc<FakeBackend>) {
+        let backend = Arc::new(FakeBackend::new());
+        let app = build_router_with_workspace_root(
+            backend.clone(),
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(AuthHandle::disabled()),
+            root,
+        );
+        (app, backend)
+    }
+
+    /// 本机会话行（`remote: None`）：`project_dir` 即会话绑定的项目目录。
+    fn local_session(reference: &str, project_dir: Option<String>) -> sebas_dispatch::SessionInfo {
+        sebas_dispatch::SessionInfo {
+            channel: "web".into(),
+            key: reference.into(),
+            session_id: None,
+            status: "active".into(),
+            phase: None,
+            user_prompt: None,
+            last_active_unix: 0,
+            project_dir,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage: None,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+        }
+    }
+
+    fn enc_key(reference: &str) -> String {
+        urlencoding::encode(&format!("web\0{reference}")).into_owned()
+    }
+
+    #[tokio::test]
+    async fn detail_message_and_switch_reject_out_of_scope_local_project() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        let outside = crate::fs::canonicalize_plain(t.outside.path()).expect("canonicalize");
+        backend
+            .set_sessions(vec![local_session("oos", Some(outside))])
+            .await;
+        let key = enc_key("oos");
+
+        // detail / message / switch 一律 400 typed 拒绝，文案点名越界。
+        let cases = [
+            (axum::http::Method::GET, format!("/api/sessions/{key}"), None),
+            (
+                axum::http::Method::POST,
+                format!("/api/sessions/{key}/message"),
+                Some(r#"{"message":"hi"}"#.to_string()),
+            ),
+            (axum::http::Method::POST, format!("/api/sessions/{key}/switch"), None),
+        ];
+        for (method, uri, body) in cases {
+            let (status, resp) = req(app.clone(), method.as_str(), &uri, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {resp}");
+            let msg = resp["error"].as_str().unwrap_or_default();
+            assert!(msg.contains("超出允许范围"), "{uri}: {msg}");
+        }
+
+        // switch 被拒后 focus 指针不动（拒绝不留痕迹）。
+        assert!(backend.focused().await.is_none(), "拒绝的 switch 不得改 focus");
+    }
+
+    #[tokio::test]
+    async fn inbox_and_remote_sessions_stay_outside_the_fence() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        // inbox 会话不绑目录；远端会话的 project_dir 在那台机器上，主控 root
+        // 无从裁决（即使路径形似越界）。
+        let mut remote = local_session("rem", Some("/srv/definitely/elsewhere".into()));
+        remote.remote = Some(sebas_dispatch::RemoteSessionView {
+            node_id: "dev-box".into(),
+            node_status: "online".into(),
+            node_cause: None,
+            desired_mode: None,
+            effective_mode: None,
+            parked_approvals: 0,
+            desired_provider: None,
+            provider: None,
+            provider_cause: None,
+        });
+        backend
+            .set_sessions(vec![local_session("inbox", None), remote])
+            .await;
+
+        for reference in ["inbox", "rem"] {
+            let key = enc_key(reference);
+            let (status, resp) = req(app.clone(), axum::http::Method::GET.as_str(), &format!("/api/sessions/{key}"), None).await;
+            assert_eq!(status, StatusCode::OK, "{reference}: {resp}");
+            let (status, _) = req(
+                app.clone(),
+                axum::http::Method::POST.as_str(),
+                &format!("/api/sessions/{key}/message"),
+                Some(r#"{"message":"hi"}"#.to_string()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{reference} 的 message 必须放行");
+        }
+    }
+
+    #[tokio::test]
+    async fn close_and_archive_stay_available_for_out_of_scope_session() {
+        // archive 写的是 SEBAS_ARCHIVE_PATH（进程全局）：与 archive.rs 测试共用
+        // 其串行锁并重定向到一次性文件，绝不落真实 ~/.sebas。锁跨 await 是刻意
+        // 的——整个异步测试体都要串行。
+        let _archive_guard = crate::archive::test_env_lock();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let prev_archive = std::env::var("SEBAS_ARCHIVE_PATH").ok();
+        // SAFETY: archive::test_env_lock 保证进程内 archive 测试串行。
+        unsafe {
+            std::env::set_var(
+                "SEBAS_ARCHIVE_PATH",
+                archive_dir.path().join("archive.json"),
+            );
+        }
+
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        let outside = crate::fs::canonicalize_plain(t.outside.path()).expect("canonicalize");
+
+        // close 放行（围栏不锁垃圾）。
+        backend
+            .set_sessions(vec![local_session("oos", Some(outside.clone()))])
+            .await;
+        let key = enc_key("oos");
+        let (status, resp) = req(
+            app.clone(),
+            axum::http::Method::POST.as_str(),
+            &format!("/api/sessions/{key}/close"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+
+        // archive 放行（close 已移除会话，重新种子）。
+        backend
+            .set_sessions(vec![local_session("oos2", Some(outside))])
+            .await;
+        let key2 = enc_key("oos2");
+        let (status, resp) = req(
+            app,
+            axum::http::Method::POST.as_str(),
+            &format!("/api/sessions/{key2}/archive"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+
+        // SAFETY: 同上（锁仍持有）。
+        unsafe {
+            match prev_archive {
+                Some(p) => std::env::set_var("SEBAS_ARCHIVE_PATH", p),
+                None => std::env::remove_var("SEBAS_ARCHIVE_PATH"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_with_out_of_scope_project_id_is_rejected_without_spawning() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let (app, backend) =
+                app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+            // 越界历史项目（升级前遗留）直接落注册表。
+            let legacy = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                t.outside.path().to_str().unwrap(),
+            )
+            .unwrap();
+            let body = serde_json::json!({ "project_id": legacy.id, "agent": "claude" });
+            let (status, resp) =
+                req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+            assert!(
+                resp["error"].as_str().unwrap_or_default().contains("超出允许范围"),
+                "{resp}"
+            );
+            assert!(
+                backend.snapshot().await.is_empty(),
+                "携越界项目的 create 不得产生任何会话"
+            );
+
+            // 反例：界内项目照常创建 0-turn 占位。
+            let dir = t.allowed.path().join("in-scope");
+            std::fs::create_dir_all(&dir).unwrap();
+            let inside = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                dir.to_str().unwrap(),
+            )
+            .unwrap();
+            let body = serde_json::json!({ "project_id": inside.id, "agent": "claude" });
+            let (status, resp) =
+                req(app, "POST", "/api/sessions", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED, "{resp}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn branch_probe_reports_out_of_scope_project_as_inaccessible() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            // 界内 git 项目（对照：可达 + 分支可读）。
+            let inside = t.allowed.path().join("repo");
+            std::fs::create_dir_all(inside.join(".git")).unwrap();
+            std::fs::write(inside.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            let in_scope = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                inside.to_str().unwrap(),
+            )
+            .unwrap();
+            // 越界遗留项目：目录真实存在，但探测必须按不可达处理（不暴露存在性）。
+            let out_scope = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                t.outside.path().to_str().unwrap(),
+            )
+            .unwrap();
+
+            let uri = format!(
+                "/api/projects/{}/branch",
+                urlencoding::encode(&out_scope.id)
+            );
+            let (status, body) = req(app.clone(), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["accessible"], false, "越界项目按不可达处理: {body}");
+            assert_eq!(body["branch"], serde_json::Value::Null, "{body}");
+
+            let uri = format!(
+                "/api/projects/{}/branch",
+                urlencoding::encode(&in_scope.id)
+            );
+            let (status, body) = req(app, "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["accessible"], true, "{body}");
+            assert_eq!(body["branch"], "main", "{body}");
         })
         .await;
     }
@@ -1535,9 +1867,9 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn browse_dirs_rejects_root_outside_allowed_roots() {
+    async fn browse_dirs_rejects_root_outside_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
         let uri = format!(
             "/api/fs/browse-dirs?root={}",
             urlencoding_encode(t.outside.path().to_str().unwrap())
@@ -1553,9 +1885,9 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn browse_dirs_accepts_root_inside_allowed_roots() {
+    async fn browse_dirs_accepts_root_inside_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
         let uri = format!(
             "/api/fs/browse-dirs?root={}",
             urlencoding_encode(t.allowed.path().to_str().unwrap())
@@ -1571,16 +1903,22 @@ mod allowed_roots_tests {
         assert!(names.contains(&"sub"), "entries: {body}");
     }
 
+    /// spec「browse-dirs defaults to the workspace root」：无 root 参数的
+    /// 浏览起点就是 workspace root，回显其 canonical 形。
     #[tokio::test]
-    async fn browse_dirs_without_whitelist_keeps_explicit_root_working() {
+    async fn browse_dirs_without_root_starts_at_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(Vec::new());
-        let uri = format!(
-            "/api/fs/browse-dirs?root={}",
-            urlencoding_encode(t.outside.path().to_str().unwrap())
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+        let (status, body) = req(app, "GET", "/api/fs/browse-dirs", None).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(
+            body["path"].as_str(),
+            Some(
+                dunce::simplified(t.allowed.path())
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
-        let (status, _body) = req(app, "GET", &uri, None).await;
-        assert_eq!(status, StatusCode::OK, "空白名单 = 未启用约束");
     }
 
     fn urlencoding_encode(s: &str) -> String {

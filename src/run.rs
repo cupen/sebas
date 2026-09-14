@@ -290,17 +290,23 @@ pub async fn run(
                 }
             })
             .collect();
-        // add-webui-picker-workdir-start：browse-dirs 的服务端默认浏览根 =
-        // 默认 agent kind 的 work_dir（dispatch 的会话 work dir 回退语义），
-        // 未配置时回退进程 cwd；两者皆无 → browse-dirs 硬错误。
-        let webui_work_root = match cfg.acp.work_dir_for(cfg.acp.default_kind()) {
-            Some(dir) => Some(std::path::PathBuf::from(dir)),
-            None => std::env::current_dir().ok(),
-        };
-        // add-webui-allowed-roots：白名单由纯函数组装——未配置 = 空表
-        // （不启用）；配置了 = 配置项 + 默认根自动入列。
-        let webui_allowed_roots =
-            crate::config::webui_allowed_roots(&cfg.watchdog.webui, webui_work_root.as_deref());
+        // add-workspace-root：恒有值的单一机器级边界，env（SEBAS_WORKSPACE_ROOT）
+        // > config（[workspace] root）> cwd 回退；回退生效时打一条启动告警
+        // （D5：告警在装配处打——判定函数被高频调用，回退是启动期事实）。
+        // browse-dirs 的起点与显式 root 约束、项目面范围判定都以它为准
+        // （work_root / allowed_roots 双根形态已随白名单机制一并退役）。
+        let (webui_workspace_root, workspace_root_fell_back) =
+            crate::config::resolve_workspace_root(
+                std::env::var("SEBAS_WORKSPACE_ROOT").ok().as_deref(),
+                cfg.workspace.root.as_deref(),
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            );
+        if workspace_root_fell_back {
+            warn!(
+                "workspace root 未显式配置，回退进程当前工作目录 {}；建议显式配置 workspace root（[workspace] root 或 SEBAS_WORKSPACE_ROOT）",
+                webui_workspace_root.display()
+            );
+        }
         // 登录鉴权与独立 webui 进程同一套（add-webui-multiuser-rbac 3.4，
         // design D4）：开关关闭 → disabled 态全路由免登录；打开 → 建库 +
         // env 引导 root，零用户留给首启设置页。装配提到 bind 之前，让非
@@ -330,8 +336,7 @@ pub async fn run(
                 listener,
                 None,
                 webui_auth,
-                webui_work_root,
-                webui_allowed_roots,
+                webui_workspace_root,
                 cfg.watchdog.webui.archive_retention_days,
             )
             .await;

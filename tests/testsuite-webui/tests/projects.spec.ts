@@ -155,11 +155,14 @@ test.describe('项目管理覆盖', () => {
       await resetState(page.request)
       const before = (await listProjects(page.request)).length
 
-      // Illegal: nonexistent path is rejected, registry and rail unchanged.
+      // Illegal: a nonexistent path cannot be canonicalized, so it is judged
+      // out-of-scope with the SAME wording as a certain escape
+      // (add-workspace-root：范围判定先行于存在性，不区分文案)；registry
+      // and rail unchanged.
       const missing = path.join(sceneDir(), `no-such-dir-${Date.now()}`)
       const bad = await addProjectRaw(page.request, missing)
       expect(bad.status).toBe(400)
-      expect(bad.body).toContain('不存在')
+      expect(bad.body).toContain('路径超出允许范围')
       expect((await listProjects(page.request)).length).toBe(before)
 
       // Duplicate: the second register conflicts (409), rail shows a single row.
@@ -321,7 +324,8 @@ test.describe('项目管理覆盖', () => {
 
       await resetState(page.request)
       const t = Date.now()
-      const work = path.join(sceneDir(), 'work')
+      const scene = sceneDir()
+      const work = path.join(scene, 'work')
       const parent = path.join(work, `pick-parent-${t}`)
       const child = path.join(parent, `pick-child-${t}`)
       fs.mkdirSync(child, { recursive: true })
@@ -332,29 +336,37 @@ test.describe('项目管理覆盖', () => {
 
       const dialog = rail.addDialog()
       const tree = dialog.locator('sebas-folder-picker')
-      // The picker roots at the server work dir.
-      await expect(tree.locator('.root-path')).toContainText(work, { timeout: 10_000 })
+      // add-workspace-root：选择器根 = workspace root（沙箱里即场景目录）。
+      // 夹具在 scene/work 下——先展开 work，再展开夹具父目录。
+      await expect(tree.locator('.root-path')).toContainText(scene, { timeout: 10_000 })
+      // wa-tree-item 的文本带图标后的前导空格——按子串匹配，不要锚定。
+      const workItem = tree.locator('wa-tree-item').filter({ hasText: 'work' })
+      await expect(workItem).toBeVisible({ timeout: 10_000 })
+      await workItem.click()
 
       // Lazy-expand the prepared parent; the child appears underneath it.
       // data-path 携带反斜杠路径——原始 CSS 属性选择器会把 `\U` 当转义
       // 吃掉，永匹配不到；fixture 名带时间戳，按文本过滤是唯一匹配。
-      const parentItem = tree.locator('wa-tree-item').filter({ hasText: `pick-parent-${t}` })
+      // pick-parent 渲染在 work 的 slot="children" 槽内——按 slot 圈定，
+      // 否则已展开的 work 项（DOM 后代含子项文本）也会命中造成 strict violation。
+      const parentItem = tree
+        .locator('wa-tree-item[slot="children"]')
+        .filter({ hasText: `pick-parent-${t}` })
       await expect(parentItem).toBeVisible({ timeout: 10_000 })
       await parentItem.click()
-      // 子项渲染在 slot="children" 槽内且是父项的 DOM 后代——按 slot 圈定，
-      // 否则父项的 hasText 也会命中子项文本造成 strict violation。
-      const childItem = tree
-        .locator('wa-tree-item[slot="children"]')
-        .filter({ hasText: `pick-child-${t}` })
+      // 子项渲染在父项的 slot="children" 槽内——把定位圈进父项的 DOM 子树，
+      // 否则已展开的祖先项（文本含子项名）也会命中造成 strict violation。
+      const childItem = parentItem.locator('wa-tree-item[slot="children"]')
       await expect(childItem).toBeVisible({ timeout: 10_000 })
 
       // Click-select fills the manual path field (the dialog's submit gate).
       await childItem.click()
       // 选择器填入「根回显(反斜杠) + / 子名」的混合分隔符形——这是
-      // joinChildPath 的既定契约（有单测锚定）；注册经后端
+      // joinChildPath 的既定契约（有单测锚定）；根现在是 workspace root
+      // （场景目录），故期望从 scene 起拼。注册经后端
       // canonicalize_plain 归一为纯反斜杠普通形，故两处期望不同形。
       const pathInput = dialog.locator('wa-input[label="Project path"] input')
-      await expect(pathInput).toHaveValue(`${work}/pick-parent-${t}/pick-child-${t}`, {
+      await expect(pathInput).toHaveValue(`${scene}/work/pick-parent-${t}/pick-child-${t}`, {
         timeout: 10_000,
       })
 
@@ -403,9 +415,10 @@ test.describe('项目管理覆盖', () => {
       await submit.click()
       // The rejection renders in the dialog's inline-error slot (scoped by
       // testid — structural `+` selectors broke when the node select landed
-      // between the path field and the error div).
+      // between the path field and the error div). 不可解析即越界（
+      // add-workspace-root）：不存在路径与确定越界同文案。
       const inlineError = dialog.locator('[data-testid="add-project-error"]')
-      await expect(inlineError).toContainText('不存在', { timeout: 10_000 })
+      await expect(inlineError).toContainText('路径超出允许范围', { timeout: 10_000 })
       // The dialog is still open (heading visible) and the registry untouched.
       await expect(
         dialog.locator('h2, [role="heading"]', { hasText: 'Add project' }).first(),

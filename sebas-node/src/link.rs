@@ -141,6 +141,13 @@ pub struct LinkClient {
 
 impl LinkClient {
     /// 用主控端点、身份与凭据存储构造。
+    ///
+    /// `workspace_root`（add-workspace-root）由启动装配处解析好（env >
+    /// `[node] workspace_root` > cwd 回退 + 告警），这里只透传给会话宿主做
+    /// `CheckPath` 的 containment 判定。
+    // 每个参数都是启动必需、无可缺省（缺省即静默回退），宽签名是刻意的；
+    // 与 `SessionHost::spawn` 同款处理。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         control_plane: impl Into<String>,
         node_id: NodeId,
@@ -148,6 +155,7 @@ impl LinkClient {
         join_token: Option<String>,
         sessions_dir: PathBuf,
         materials_dir: PathBuf,
+        workspace_root: PathBuf,
         max_sessions: usize,
     ) -> Self {
         Self {
@@ -162,6 +170,7 @@ impl LinkClient {
             spawn_serial: tokio::sync::Mutex::new(()),
             host: tokio::sync::Mutex::new(SessionHost::new(
                 sessions_dir,
+                workspace_root,
                 0usize.max(max_sessions),
                 // 存储上限随 4.5 的策略落地；0 = 暂不限。
                 0,
@@ -710,6 +719,7 @@ mod tests {
             Some("join-token".into()),
             _tmp.path().join("sessions"),
             _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
             4,
         )
         .with_tuning(tuning());
@@ -743,7 +753,8 @@ mod tests {
             store.clone(),
             Some("join-token".into()),
             _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
             4,
         )
         .with_tuning(tuning());
@@ -776,7 +787,8 @@ mod tests {
             store.clone(),
             None,
             _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
             4,
         )
         .with_tuning(tuning());
@@ -806,9 +818,10 @@ mod tests {
                 id,
                 store,
                 None,
-                _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
-                4,
+            _tmp.path().join("sessions"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
+            4,
             )
         .with_tuning(tuning());
 
@@ -837,9 +850,10 @@ mod tests {
                 id,
                 store,
                 None,
-                _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
-                4,
+            _tmp.path().join("sessions"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
+            4,
             )
         .with_tuning(tuning());
 
@@ -867,9 +881,10 @@ mod tests {
                 id,
                 store,
                 None,
-                _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
-                4,
+            _tmp.path().join("sessions"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
+            4,
             )
         .with_tuning(tuning());
 
@@ -889,9 +904,10 @@ mod tests {
                 id,
                 store,
                 None,
-                _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
-                4,
+            _tmp.path().join("sessions"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
+            4,
             )
         .with_tuning(tuning());
 
@@ -913,7 +929,8 @@ mod tests {
             store,
             None,
             _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
             4,
         );
 
@@ -936,7 +953,8 @@ mod tests {
             store,
             None,
             _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
             4,
         );
         match client.attempt().await {
@@ -981,7 +999,8 @@ mod tests {
         let client = Arc::new(
             LinkClient::new(format!("ws://127.0.0.1:{port}"), id, store, None,
             _tmp.path().join("sessions"),
-                _tmp.path().join("materials"),
+            _tmp.path().join("materials"),
+            _tmp.path().to_path_buf(),
             4,
         )
                 .with_tuning(tuning()),
@@ -1065,6 +1084,7 @@ mod tests {
                 None,
                 sessions,
                 tmp.path().join("materials"),
+                tmp.path().to_path_buf(),
                 4,
             )
             .with_tuning(LinkTuning {

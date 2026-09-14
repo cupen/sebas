@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 pub const STATE_DIR_ENV: &str = "SEBAS_NODE_DIR";
 /// 主控端点的环境变量覆盖。
 pub const CONTROL_PLANE_ENV: &str = "SEBAS_NODE_CONTROL_PLANE";
+/// workspace root 的环境变量覆盖（add-workspace-root，与主控同一变量名：
+/// 两端各自解析、互不感知，但部署上可以共用一份环境）。
+pub const WORKSPACE_ROOT_ENV: &str = "SEBAS_WORKSPACE_ROOT";
 /// 缺省并发会话上限。
 pub const DEFAULT_MAX_SESSIONS: u32 = 8;
 /// 缺省本地 turn 日志保留天数（与 webui 归档保留期的缺省口径一致）。
@@ -69,6 +72,10 @@ pub struct NodeSection {
     pub log_retention_days: Option<u32>,
     /// 无项目会话的默认工作目录（须为绝对路径）。
     pub default_work_dir: Option<String>,
+    /// 工作区根（add-workspace-root）：本节点路径判定的界内/越界边界。缺省
+    /// （env 与配置都没有）回退进程 cwd，由启动装配处告警——见
+    /// [`NodeConfig::resolve`] 与 [`resolve_workspace_root`]。
+    pub workspace_root: Option<String>,
     /// 状态目录。
     pub state_dir: Option<String>,
     /// 模型流量上游。
@@ -204,6 +211,10 @@ pub struct NodeConfig {
     pub log_retention_days: u32,
     /// 默认工作目录（绝对路径）。
     pub default_work_dir: Option<PathBuf>,
+    /// 显式配置的 workspace root（`SEBAS_WORKSPACE_ROOT` > `[node]
+    /// workspace_root`；空白视同未配置）。`None` = 未显式配置——启动装配处
+    /// 回退进程 cwd 并告警（见 [`resolve_workspace_root`]）。
+    pub workspace_root: Option<PathBuf>,
     /// 状态目录（绝对路径或相对路径按原样使用）。
     pub state_dir: PathBuf,
     /// 模型流量上游。
@@ -269,6 +280,14 @@ impl NodeConfig {
                 .log_retention_days
                 .unwrap_or(DEFAULT_LOG_RETENTION_DAYS),
             default_work_dir: section.default_work_dir.map(PathBuf::from),
+            // env > 配置 > 无（与主控 `src/config.rs` 的解析顺序同语义）；cwd
+            // 回退不在 resolve 里做——那是**启动装配处**的职责（告警打在那儿）。
+            workspace_root: first_non_empty([
+                std::env::var(WORKSPACE_ROOT_ENV).ok(),
+                section.workspace_root,
+                None,
+            ])
+            .map(PathBuf::from),
             state_dir: resolve_state_dir(cli.state_dir.clone(), section.state_dir)?,
             upstream: section.upstream.unwrap_or_default(),
             agents: section.agents,
@@ -566,6 +585,19 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
+/// 解析生效的 workspace root（add-workspace-root）。与主控
+/// `src/config.rs::resolve_workspace_root` **同语义**的节点侧就地复制（sebas-node
+/// 不能依赖根包）：显式根（`SEBAS_WORKSPACE_ROOT` / `[node] workspace_root`，
+/// 空白已视同未配置）缺省时回退进程 cwd，返回 `(根, 是否回退)`；回退时由
+/// **启动装配处**打一条告警（判定函数高频调用，不打日志——D5）。根按字面量
+/// 保存，是否 canonicalize 由范围判定函数负责。
+pub fn resolve_workspace_root(explicit: Option<PathBuf>, cwd: &Path) -> (PathBuf, bool) {
+    match explicit {
+        Some(root) => (root, false),
+        None => (cwd.to_path_buf(), true),
+    }
+}
+
 /// 状态目录：`--state-dir` > `SEBAS_NODE_DIR` > `[node] state_dir` > `<data_dir>/sebas-node`。
 fn resolve_state_dir(cli: Option<PathBuf>, from_file: Option<String>) -> Result<PathBuf, NodeError> {
     if let Some(dir) = cli {
@@ -597,9 +629,10 @@ fn non_empty(raw: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// env 是进程全局的：并行用例互相污染，用互斥锁串行化（同 startup crate 模式）。
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // env 是进程全局的：并行用例互相污染，用互斥锁串行化。锁放在 crate 根
+    // （`crate::ENV_LOCK`），config 与启动装配（lib.rs）的 env 用例共用同一把，
+    // 否则两个模块各自持锁挡不住对方动 `SEBAS_*`。
+    use crate::ENV_LOCK;
 
     fn cli_with(state_dir: &Path) -> Cli {
         Cli {
@@ -1092,6 +1125,64 @@ providers = ["anthropic", "deepseek"]
         assert!(
             cfg.manifest().providers.is_empty(),
             "经主控 router 出网 = 节点零凭据，清单如实为空"
+        );
+    }
+
+    // ── workspace root（add-workspace-root）────────────────────────────────
+
+    #[test]
+    fn workspace_root_env_beats_file_and_blank_counts_as_unconfigured() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let with_root = r#"
+[node]
+control_plane = "wss://c/ws"
+workspace_root = "/from/file"
+"#;
+        // env > 配置。
+        unsafe { std::env::set_var(WORKSPACE_ROOT_ENV, "/from/env") };
+        let cfg = NodeConfig::resolve(
+            NodeConfig::parse(with_root).unwrap(),
+            &cli_with(Path::new("/tmp/x")),
+        )
+        .unwrap();
+        assert_eq!(cfg.workspace_root, Some(PathBuf::from("/from/env")));
+        unsafe { std::env::remove_var(WORKSPACE_ROOT_ENV) };
+        // 只有配置 → 配置生效。
+        let cfg = NodeConfig::resolve(
+            NodeConfig::parse(with_root).unwrap(),
+            &cli_with(Path::new("/tmp/x")),
+        )
+        .unwrap();
+        assert_eq!(cfg.workspace_root, Some(PathBuf::from("/from/file")));
+        // 空白 = 未配置（与主控的空值语义一致）。
+        let blank = "[node]\ncontrol_plane = \"wss://c/ws\"\nworkspace_root = \"   \"\n";
+        let cfg = NodeConfig::resolve(
+            NodeConfig::parse(blank).unwrap(),
+            &cli_with(Path::new("/tmp/x")),
+        )
+        .unwrap();
+        assert_eq!(cfg.workspace_root, None);
+    }
+
+    #[test]
+    fn workspace_root_falls_back_to_cwd_only_at_the_assembly_site() {
+        let _env = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var(WORKSPACE_ROOT_ENV) };
+        // resolve 只保留显式值；cwd 回退发生在**启动装配处**
+        // （`resolve_workspace_root`），因为伴随告警，不该在配置解析里悄悄发生。
+        let cfg = NodeConfig::resolve(NodeConfigFile::default(), &base_cli()).unwrap();
+        assert_eq!(cfg.workspace_root, None);
+
+        let cwd = Path::new("/srv/node");
+        assert_eq!(
+            resolve_workspace_root(None, cwd),
+            (PathBuf::from("/srv/node"), true),
+            "未显式配置 → 回退 cwd 并标记"
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from("/explicit")), cwd),
+            (PathBuf::from("/explicit"), false),
+            "显式配置原样生效，不回退"
         );
     }
 }

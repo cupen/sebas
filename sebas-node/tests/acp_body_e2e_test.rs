@@ -102,7 +102,7 @@ fn a_real_child_process_completes_a_turn_on_the_node() {
     let project = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let factory = Arc::new(NodeBodyFactory::new(body_config(&fake, true)));
-    let mut host = SessionHost::new(sessions.path(), 4, 0, factory);
+    let mut host = SessionHost::new(sessions.path(), sessions.path(), 4, 0, factory);
 
     let spawned = host
         .spawn(
@@ -153,7 +153,7 @@ fn a_permission_request_from_a_real_child_parks_then_resumes() {
     let project = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let factory = Arc::new(NodeBodyFactory::new(body_config(&fake, true)));
-    let mut host = SessionHost::new(sessions.path(), 4, 0, factory);
+    let mut host = SessionHost::new(sessions.path(), sessions.path(), 4, 0, factory);
     host.spawn(
         "s-1",
         Some(&project.path().to_string_lossy()),
@@ -221,7 +221,7 @@ fn a_real_child_without_declared_enforcement_reports_no_effective_mode() {
     let project = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let factory = Arc::new(NodeBodyFactory::new(body_config(&fake, false)));
-    let mut host = SessionHost::new(sessions.path(), 4, 0, factory);
+    let mut host = SessionHost::new(sessions.path(), sessions.path(), 4, 0, factory);
 
     let spawned = host
         .spawn(
@@ -253,7 +253,7 @@ fn a_real_child_reports_unsupported_model_switch_and_idle_cancel() {
     let project = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let factory = Arc::new(NodeBodyFactory::new(body_config(&fake, true)));
-    let mut host = SessionHost::new(sessions.path(), 4, 0, factory);
+    let mut host = SessionHost::new(sessions.path(), sessions.path(), 4, 0, factory);
     host.spawn(
         "s-1",
         Some(&project.path().to_string_lossy()),
@@ -293,7 +293,7 @@ fn a_project_less_session_runs_in_the_configured_default_work_dir() {
     let mut cfg = body_config(&fake, true);
     cfg.default_work_dir = Some(default_work.path().to_path_buf());
     let factory = Arc::new(NodeBodyFactory::new(cfg));
-    let mut host = SessionHost::new(sessions.path(), 4, 0, factory);
+    let mut host = SessionHost::new(sessions.path(), sessions.path(), 4, 0, factory);
 
     host.spawn("s-1", None, Some("claude"), None, Some("ask"), None)
         .expect("配了 default_work_dir 时无项目会话可落脚");
@@ -319,7 +319,7 @@ fn the_router_upstream_without_an_advertised_address_is_refused() {
     let mut cfg = body_config(&fake, true);
     cfg.upstream = Upstream::ControlPlaneRouter;
     let factory = Arc::new(NodeBodyFactory::new(cfg));
-    let mut host = SessionHost::new(sessions.path(), 4, 0, factory);
+    let mut host = SessionHost::new(sessions.path(), sessions.path(), 4, 0, factory);
 
     let err = host
         .spawn(

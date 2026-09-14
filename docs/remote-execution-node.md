@@ -115,6 +115,9 @@ log_retention_days = 30   # 缺省 30；节点本地日志保留期
 # upstream = "local"      # 缺省 local（节点持自己凭据）；可选 control-plane-router
 # default_work_dir = "/srv/work"   # 须为绝对路径；**无项目**的会话落在这里。
                                    # 没配就拒绝建立无项目会话（不替操作者挑一个目录）
+# workspace_root = "/srv/work"     # 本机 workspace root（env SEBAS_WORKSPACE_ROOT 优先）：
+                                   # 项目路径 containment 判定的边界。缺省回退进程 cwd 并打告警，
+                                   # 建议显式配置（add-workspace-root）。
 
 # 本节点配置的 agent 执行体（用于握手能力清单；command 用于可达性探测）
 [node.agents.claude]

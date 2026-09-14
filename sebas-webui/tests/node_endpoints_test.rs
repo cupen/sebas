@@ -16,6 +16,7 @@ use sebas_feishu::cards::CardConfig;
 use sebas_webui::models::RouterInfo;
 use sebas_webui::session_backend::{NodeInfo, PathCheck};
 use sebas_webui::{SessionBackend, build_router, session_backend::FakeBackend};
+use sebas_webui::server::build_router_with_workspace_root;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -51,6 +52,16 @@ async fn app_with(
     nodes: Option<Vec<NodeInfo>>,
     projects_path: Option<PathBuf>,
 ) -> (axum::Router, Arc<FakeBackend>) {
+    app_with_root(nodes, projects_path, None).await
+}
+
+/// 同 [`app_with`]，但可把 workspace root 钉到指定目录（add-workspace-root：
+/// 本机注册路径必须落在根内——注册临时目录的用例把根钉到该临时目录）。
+async fn app_with_root(
+    nodes: Option<Vec<NodeInfo>>,
+    projects_path: Option<PathBuf>,
+    workspace_root: Option<&std::path::Path>,
+) -> (axum::Router, Arc<FakeBackend>) {
     if let Some(p) = projects_path {
         unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) };
     }
@@ -59,7 +70,17 @@ async fn app_with(
     let backend = Arc::new(FakeBackend::new());
     backend.set_nodes(nodes);
     let dyn_backend: Arc<dyn SessionBackend> = backend.clone();
-    let app = build_router(dyn_backend, RouterInfo::default(), CardConfig::default());
+    let app = match workspace_root {
+        Some(root) => build_router_with_workspace_root(
+            dyn_backend,
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(sebas_webui::auth::AuthHandle::disabled()),
+            root.to_path_buf(),
+        ),
+        None => build_router(dyn_backend, RouterInfo::default(), CardConfig::default()),
+    };
     let _ = router;
     (app, backend)
 }
@@ -140,7 +161,15 @@ async fn registering_on_a_named_node_is_validated_by_that_node() {
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
     let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
-    backend.set_path_check("dev-box", "/srv/repo", Ok(PathCheck { exists: true, is_dir: true }));
+    backend.set_path_check(
+        "dev-box",
+        "/srv/repo",
+        Ok(PathCheck {
+            exists: true,
+            is_dir: true,
+            within_workspace: true,
+        }),
+    );
 
     let (status, body) = send(
         &app,
@@ -167,8 +196,17 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
     let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
-    // 节点说路径不存在。
-    backend.set_path_check("dev-box", "/srv/nope", Ok(PathCheck { exists: false, is_dir: false }));
+    // 节点说路径不存在（界内）——本用例专测「不存在」文案，containment 判定
+    // 置 true；越界拒绝另有专测（node_judged_out_of_workspace_...）。
+    backend.set_path_check(
+        "dev-box",
+        "/srv/nope",
+        Ok(PathCheck {
+            exists: false,
+            is_dir: false,
+            within_workspace: true,
+        }),
+    );
 
     let (status, body) = send(
         &app,
@@ -186,6 +224,70 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     // 注册被拒 → 一个项目都没建。
     let (_, list) = send(&app, "GET", "/api/projects", None).await;
     assert!(list["projects"].as_array().unwrap().is_empty());
+    cleanup_projects_env();
+}
+
+// ── Node-side containment (add-workspace-root 2.4) ───────────────────────
+
+#[tokio::test]
+async fn node_judged_out_of_workspace_rejects_registration() {
+    let _g = guard();
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("projects.json");
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    // 节点自判：路径存在、是目录，但越出**该节点**的 workspace root。
+    backend.set_path_check(
+        "dev-box",
+        "/srv/secret",
+        Ok(PathCheck {
+            exists: true,
+            is_dir: true,
+            within_workspace: false,
+        }),
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/projects",
+        Some(serde_json::json!({ "path": "/srv/secret", "node_id": "dev-box" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    let msg = body["error"].as_str().unwrap();
+    assert!(msg.contains("dev-box"), "未点名节点: {msg}");
+    assert!(msg.contains("/srv/secret"), "未点名路径: {msg}");
+    assert!(msg.contains("workspace root"), "未说明越界: {msg}");
+
+    // 注册被拒 → 一个项目都没建。
+    let (_, list) = send(&app, "GET", "/api/projects", None).await;
+    assert!(list["projects"].as_array().unwrap().is_empty());
+    cleanup_projects_env();
+}
+
+#[tokio::test]
+async fn legacy_node_answer_without_within_workspace_field_still_admits() {
+    let _g = guard();
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("projects.json");
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    // 老节点应答没有 within_workspace 字段：serde 缺省 true → 放行。
+    let check: PathCheck = serde_json::from_value(serde_json::json!({
+        "exists": true,
+        "is_dir": true,
+    }))
+    .expect("old-node answer deserializes");
+    assert!(check.within_workspace, "缺字段必须缺省为 true（兼容旧应答）");
+    backend.set_path_check("dev-box", "/srv/repo", Ok(check));
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/projects",
+        Some(serde_json::json!({ "path": "/srv/repo", "node_id": "dev-box" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body={body}");
     cleanup_projects_env();
 }
 
@@ -251,7 +353,10 @@ async fn local_registration_without_a_node_keeps_the_implicit_behavior() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(Some(vec![local_node()]), Some(registry)).await;
+    // add-workspace-root：本机注册必须落在 workspace root 内——把根钉到
+    // 临时目录本身，`repo` 即在界内；缺省节点 = 本机的隐式行为不变。
+    let (app, _backend) =
+        app_with_root(Some(vec![local_node()]), Some(registry), Some(dir.path())).await;
     let project_dir = dir.path().join("repo");
     std::fs::create_dir_all(&project_dir).unwrap();
 
@@ -383,11 +488,14 @@ async fn session_creation_passes_the_projects_node_to_the_seam() {
 #[tokio::test]
 async fn local_project_session_creation_passes_local() {
     let _g = guard();
-    let (app, backend) = app_with(Some(vec![local_node()]), None).await;
+    // add-workspace-root 2.3：携本机项目的 create 必须落在 workspace root 内——
+    // 把根钉到临时目录，项目路径取其子目录（占位创建不触盘，路径无需存在）。
+    let dir = tempfile::tempdir().unwrap();
+    let (app, backend) = app_with_root(Some(vec![local_node()]), None, Some(dir.path())).await;
     backend.set_state_domain(
         "projects",
         Some(serde_json::json!({ "projects": [
-            { "id": "proj-l", "path": "/home/me/repo", "name": "repo", "added_at": 0 }
+            { "id": "proj-l", "path": dir.path().join("repo").to_string_lossy(), "name": "repo", "added_at": 0 }
         ] })),
     );
     let (status, _body) = send(

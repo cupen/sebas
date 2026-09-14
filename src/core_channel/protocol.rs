@@ -276,8 +276,20 @@ pub enum CoreChannelResponse {
     },
     /// 节点链路管理结果（add-remote-execution-node 2.7）。
     NodeLink(NodeLinkOutcome),
-    /// 节点侧路径判定结果（add-remote-execution-node 8.1）。
-    NodePath { exists: bool, is_dir: bool },
+    /// 节点侧路径判定结果（add-remote-execution-node 8.1）。`within_workspace`
+    /// （add-workspace-root）是节点以它自己的 workspace root 做的 containment
+    /// 判定；serde 缺省 `true` 与节点链路同姿态——旧 core 的应答缺字段视为界内。
+    NodePath {
+        exists: bool,
+        is_dir: bool,
+        #[serde(default = "default_true")]
+        within_workspace: bool,
+    },
+}
+
+/// `NodePath::within_workspace` 的 serde 缺省：缺字段 = 界内（兼容旧应答）。
+fn default_true() -> bool {
+    true
 }
 
 /// One frame of the subscription stream (task 4.2): exactly one snapshot
