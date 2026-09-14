@@ -26,6 +26,41 @@ PROJECT = "sebas"
 IMAGE = f"ghcr.io/cupen/{PROJECT}"
 
 
+def _pid_alive(pid):
+    """Platform-safe liveness probe: NEVER terminates the probed process.
+
+    POSIX: signal 0 is the null-signal probe (delivery of nothing, existence
+    check only). Windows: os.kill(pid, 0) would call TerminateProcess — the
+    probe would KILL the target — so ask the process API instead via ctypes
+    (design D3: no psutil, the project pins zero Python deps).
+    """
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # Cannot open = does not exist (or unreachable) → treat as dead.
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another user — very much alive.
+        return True
+
+
 def _cleanup_stale_sandboxes():
     """Remove leftover sbtestsuite.* dirs from crashed/aborted runs.
 
@@ -54,10 +89,10 @@ def _cleanup_stale_sandboxes():
                 for pid in json.load(f).values():
                     if isinstance(pid, int):
                         try:
-                            os.kill(pid, 0)
-                            alive = True
-                            break
-                        except ProcessLookupError:
+                            if _pid_alive(pid):
+                                alive = True
+                                break
+                        except OSError:
                             pass
         except (OSError, ValueError, PermissionError):
             pass
@@ -67,6 +102,29 @@ def _cleanup_stale_sandboxes():
     if removed:
         print(f"[cleanup] removed {len(removed)} stale sandbox dirs", flush=True)
     _sweep_orphan_test_processes()
+
+
+def _hard_kill(pid):
+    """Hard-terminate a pid on any platform (design D3).
+
+    POSIX: SIGKILL. Windows: Popen.terminate() = TerminateProcess, the only
+    hard kill there — and the spec allows hard termination of STALE-SANDBOX
+    targets on Windows. The /proc sweep that feeds this stays Linux-only:
+    Windows reaping is solved at the source in testsupport (D2)."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def _sweep_orphan_test_processes():
@@ -121,10 +179,7 @@ def _sweep_orphan_test_processes():
             return
         time.sleep(0.2)
     for pid in alive:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+        _hard_kill(pid)
     print(f"[cleanup] killed orphaned test processes: {targets}", flush=True)
 
 
@@ -698,19 +753,13 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
         while time.time() < deadline:
             alive = []
             for pid in recorded:
-                try:
-                    os.kill(pid, 0)
+                if _pid_alive(pid):
                     alive.append(pid)
-                except (ProcessLookupError, PermissionError):
-                    pass
             if not alive:
                 break
             time.sleep(0.25)
         for pid in alive:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+            _hard_kill(pid)
     log.close()
     if webui_log is not None:
         webui_log.close()
