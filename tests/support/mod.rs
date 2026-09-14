@@ -164,35 +164,49 @@ impl SandboxDir {
     }
 
     /// Kill every spawned process tree. Grandchildren must die with the test:
-    /// on unix each leader is its own process-group head, so one `killpg`
-    /// SIGKILLs the whole group (ESRCH on a fully-dead group is fine); on
-    /// Windows `kill_on_drop` only reaps the direct child, so `taskkill /T /F`
-    /// tears down each tree instead (D2: zero new deps, zero unsafe; the
-    /// Job-Object upgrade path stays recorded in the change design). Runs on
-    /// the keep-path too: diagnosis needs the logs on disk, not the processes
+    /// teardown SIGKILLs each recorded group leader's whole tree. Runs on the
+    /// keep-path too: diagnosis needs the logs on disk, not the processes
     /// writing them.
     fn kill_process_groups(&self) {
-        #[cfg(unix)]
         for pid in self.group_leaders.lock().unwrap().drain(..) {
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
+            kill_tree(pid);
         }
-        #[cfg(windows)]
-        for pid in self.group_leaders.lock().unwrap().drain(..) {
-            // An already-exited target reports failure — treat as success
-            // (spec: a reap attempt against a dead target MUST not block
-            // sandbox-dir cleanup). /T walks the tree, /F means hard kill.
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-        #[cfg(not(any(unix, windows)))]
-        self.group_leaders.lock().unwrap().clear();
     }
 }
+
+/// Kill a process tree by leader pid — the platform wrapper (same name and
+/// signature everywhere; D2). unix: the leader is its own process-group head,
+/// so one `killpg` SIGKILL reaches every descendant (ESRCH on a fully-dead
+/// group is fine). windows: `kill_on_drop` only reaps the direct child, so
+/// `taskkill /T /F` tears down the tree instead — an already-exited target
+/// reports failure, which is success for teardown (zero new deps, zero
+/// unsafe; the Job-Object upgrade path stays recorded in the change design).
+#[cfg(unix)]
+fn kill_tree(pid: u32) {
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_tree(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Give a spawned child its own process group so teardown can address the
+/// whole tree — the platform wrapper. windows has no process-group concept
+/// in this harness; `kill_tree` walks the tree instead, so it's a no-op.
+#[cfg(unix)]
+fn set_process_group(cmd: &mut tokio::process::Command) {
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn set_process_group(_cmd: &mut tokio::process::Command) {}
 
 impl Drop for SandboxDir {
     fn drop(&mut self) {
@@ -475,8 +489,7 @@ usage_file = "{}"
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
             .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
+        set_process_group(&mut cmd);
         let child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("spawn sebas {args:?}: {e}"));
@@ -553,8 +566,7 @@ usage_file = "{}"
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
             .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
+        set_process_group(&mut cmd);
         let child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("spawn sebas-node {args:?}: {e}"));
