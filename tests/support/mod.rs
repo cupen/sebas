@@ -295,6 +295,11 @@ download_dir = "{}"
 [workspace]
 root = "{}"
 
+# add-agent-skills：skill 仓钉进沙箱。缺省值 ~/.agents/skills 经 expand_tilde
+# （dirs::home_dir()，不吃 HOME env 覆写）落到操作员真实仓——必须显式钉。
+[skills]
+dir = "{}"
+
 [watchdog.core]
 channel_path = "core-channel.sock"
 
@@ -324,6 +329,7 @@ usage_file = "{}"
             forward_slash(&state_file),
             forward_slash(&path.join("downloads")),
             forward_slash(&path),
+            forward_slash(&path.join("agents-skills")),
             forward_slash(&providers),
             forward_slash(&usage),
         );
@@ -384,6 +390,11 @@ usage_file = "{}"
                 "SEBAS_ARCHIVE_PATH",
                 forward_slash(&self.path.join("archive.json")),
             ),
+            // add-agent-skills：skills sync 的 backend 落点（claude →
+            // ~/.claude/skills）经 `skills::resolve_home()` 的 env-first
+            // （HOME > USERPROFILE > Known Folder）解析——钉进沙箱，core/webui
+            // 进程里的 sync 绝不写操作员的真实 ~/.claude/skills。
+            ("HOME", forward_slash(&self.path)),
             // add-workspace-root：env 优先于 config 的 `[workspace] root`——
             // 钉住它，宿主 shell 里 stray 的同名变量就不会把沙箱边界改道
             // （测试需要更窄根时用 spawn 的 extra env 显式覆盖）。
