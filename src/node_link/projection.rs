@@ -724,11 +724,15 @@ impl RemoteProjection {
     ///
     /// 节点离线就没有答案——如实说"够不着"，绝不回退成本地主控的 `stat`：那会把
     /// 「主控上恰好有个同名目录」当成「节点上存在」。
+    ///
+    /// 返回 `(exists, is_dir, within_workspace)`（add-workspace-root）：第三项是
+    /// 节点以**它自己的** workspace root 做的 containment 判定；旧节点应答缺该
+    /// 字段时协议层缺省为 `true`（视为界内，升级后的主控对未升级节点照常工作）。
     pub async fn check_path(
         &self,
         node_id: &str,
         path: &str,
-    ) -> Result<(bool, bool), NodeLinkError> {
+    ) -> Result<(bool, bool, bool), NodeLinkError> {
         let connection = self.connection_of(node_id).await.ok_or_else(|| {
             NodeLinkError::Disconnected {
                 cause: format!("节点 {node_id} 当前离线，无法校验路径 {path}"),
@@ -740,7 +744,11 @@ impl RemoteProjection {
             })
             .await?
         {
-            SessionResult::PathChecked { exists, is_dir } => Ok((exists, is_dir)),
+            SessionResult::PathChecked {
+                exists,
+                is_dir,
+                within_workspace,
+            } => Ok((exists, is_dir, within_workspace)),
             SessionResult::Rejected { code, cause } => Err(NodeLinkError::Transport {
                 cause: format!(
                     "节点 {node_id} 拒绝校验路径 {path}（{}）：{cause}",

@@ -576,9 +576,15 @@ impl SessionBackend for CoreChannelBackend {
             })
             .await
         {
-            Ok(CoreChannelResponse::NodePath { exists, is_dir }) => {
-                Ok(sebas_webui::session_backend::PathCheck { exists, is_dir })
-            }
+            Ok(CoreChannelResponse::NodePath {
+                exists,
+                is_dir,
+                within_workspace,
+            }) => Ok(sebas_webui::session_backend::PathCheck {
+                exists,
+                is_dir,
+                within_workspace,
+            }),
             Ok(CoreChannelResponse::Rejected { rejection }) => Err(format!("{rejection:?}")),
             Ok(other) => Err(format!("校验路径得到非预期应答：{other:?}")),
             Err(rejection) => Err(format!("{rejection:?}")),

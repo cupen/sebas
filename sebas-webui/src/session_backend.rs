@@ -164,13 +164,23 @@ pub struct NodeInfo {
 }
 
 /// 节点侧路径判定结果（节点 `SessionOp::CheckPath { path }` 的应答形状：
-/// `SessionResult::PathChecked { exists, is_dir }`）。
+/// `SessionResult::PathChecked { exists, is_dir, within_workspace }`）。
 ///
 /// 路径可用性由**项目命名的那台机器**判定，主控不替远端做本地 `stat`。
+/// `within_workspace`（add-workspace-root）是节点以它自己的 workspace root 做
+/// 的 containment 判定；远端注册据此拒绝越界路径（缺省 `true` = 旧节点应答
+/// 视为界内）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathCheck {
     pub exists: bool,
     pub is_dir: bool,
+    #[serde(default = "default_true")]
+    pub within_workspace: bool,
+}
+
+/// `PathCheck::within_workspace` 的 serde 缺省：缺字段 = 界内（兼容旧应答）。
+fn default_true() -> bool {
+    true
 }
 
 /// （wire-webui-sebas-agent-e2e）单个执行体（acp / native）的可用性：
@@ -322,8 +332,8 @@ pub trait SessionBackend: Send + Sync {
     }
 
     /// 请**节点自己**判定一个路径是否可用（`SessionOp::CheckPath { path }`
-    /// → `SessionResult::PathChecked { exists, is_dir }`）。远端项目注册前必须
-    /// 走这里：主控在这台机器上无从判断那台机器上的路径。
+    /// → `SessionResult::PathChecked { exists, is_dir, within_workspace }`）。
+    /// 远端项目注册前必须走这里：主控在这台机器上无从判断那台机器上的路径。
     ///
     /// 默认诚实不可用——绝不回退成本地 `stat`（那会把「主控上恰好同名」误当成
     /// 「节点上存在」）。

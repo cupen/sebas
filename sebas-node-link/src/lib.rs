@@ -541,6 +541,12 @@ pub enum SessionOp {
     },
 }
 
+/// 缺省 `true` 的 serde 缺省值：新字段缺省「通过 / 界内」，让升级后的主控
+/// 不会因为旧节点的应答缺字段而误拒（add-workspace-root 的兼容姿态）。
+fn default_true() -> bool {
+    true
+}
+
 /// 一次操作的应答。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -633,6 +639,11 @@ pub enum SessionResult {
         exists: bool,
         /// 是否是一个目录（`exists:false` 时恒为 `false`）。
         is_dir: bool,
+        /// 路径是否落在**节点自己**的 workspace root 内（add-workspace-root）。
+        /// 缺省 `true`：不带该字段的旧节点应答按「界内」解读，升级后的主控
+        /// 对未升级节点照常工作（containment 保证只对升级后的节点成立）。
+        #[serde(default = "default_true")]
+        within_workspace: bool,
     },
     /// 如实拒绝：带可判别码与成因，且**没有任何副作用**。
     Rejected {
@@ -1107,6 +1118,7 @@ mod tests {
                 result: SessionResult::PathChecked {
                     exists: true,
                     is_dir: true,
+                    within_workspace: true,
                 },
             },
             Frame::Response {
@@ -1499,14 +1511,17 @@ mod tests {
             SessionResult::PathChecked {
                 exists: true,
                 is_dir: true,
+                within_workspace: true,
             },
             SessionResult::PathChecked {
                 exists: true,
                 is_dir: false,
+                within_workspace: true,
             },
             SessionResult::PathChecked {
                 exists: false,
                 is_dir: false,
+                within_workspace: false,
             },
         ] {
             let json = serde_json::to_string(&result).unwrap();
@@ -1514,6 +1529,39 @@ mod tests {
                 serde_json::from_str::<SessionResult>(&json).unwrap(),
                 result
             );
+        }
+    }
+
+    /// 旧节点的应答不带 `within_workspace`（add-workspace-root 之前 wire 上没有
+    /// 这个字段）：必须能解析，并按「界内」缺省——升级后的主控对未升级节点
+    /// 照常工作，而不是把缺字段误读成越界。
+    #[test]
+    fn path_checked_without_within_workspace_defaults_to_true() {
+        let raw = r#"{"result":"path_checked","exists":true,"is_dir":true}"#;
+        match serde_json::from_str::<SessionResult>(raw).unwrap() {
+            SessionResult::PathChecked {
+                exists,
+                is_dir,
+                within_workspace,
+            } => {
+                assert!(exists && is_dir);
+                assert!(within_workspace, "旧应答缺字段 = 视为界内");
+            }
+            other => panic!("{other:?}"),
+        }
+        // 新应答则原样携带：`false` 不会被缺省值吞掉。
+        let json = serde_json::to_string(&SessionResult::PathChecked {
+            exists: true,
+            is_dir: true,
+            within_workspace: false,
+        })
+        .unwrap();
+        assert!(json.contains("within_workspace"), "{json}");
+        match serde_json::from_str::<SessionResult>(&json).unwrap() {
+            SessionResult::PathChecked { within_workspace, .. } => {
+                assert!(!within_workspace);
+            }
+            other => panic!("{other:?}"),
         }
     }
 

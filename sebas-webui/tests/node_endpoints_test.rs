@@ -161,7 +161,15 @@ async fn registering_on_a_named_node_is_validated_by_that_node() {
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
     let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
-    backend.set_path_check("dev-box", "/srv/repo", Ok(PathCheck { exists: true, is_dir: true }));
+    backend.set_path_check(
+        "dev-box",
+        "/srv/repo",
+        Ok(PathCheck {
+            exists: true,
+            is_dir: true,
+            within_workspace: true,
+        }),
+    );
 
     let (status, body) = send(
         &app,
@@ -189,7 +197,15 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     let registry = dir.path().join("projects.json");
     let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
     // 节点说路径不存在。
-    backend.set_path_check("dev-box", "/srv/nope", Ok(PathCheck { exists: false, is_dir: false }));
+    backend.set_path_check(
+        "dev-box",
+        "/srv/nope",
+        Ok(PathCheck {
+            exists: false,
+            is_dir: false,
+            within_workspace: false,
+        }),
+    );
 
     let (status, body) = send(
         &app,

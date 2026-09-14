@@ -1085,7 +1085,11 @@ async fn dispatch(
                 };
             };
             match projection.check_path(&node_id, &path).await {
-                Ok((exists, is_dir)) => CoreChannelResponse::NodePath { exists, is_dir },
+                Ok((exists, is_dir, within_workspace)) => CoreChannelResponse::NodePath {
+                    exists,
+                    is_dir,
+                    within_workspace,
+                },
                 Err(e) => node_link_rejection(e),
             }
         }
