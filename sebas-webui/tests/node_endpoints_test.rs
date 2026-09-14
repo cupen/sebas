@@ -16,6 +16,7 @@ use sebas_feishu::cards::CardConfig;
 use sebas_webui::models::RouterInfo;
 use sebas_webui::session_backend::{NodeInfo, PathCheck};
 use sebas_webui::{SessionBackend, build_router, session_backend::FakeBackend};
+use sebas_webui::server::build_router_with_workspace_root;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -51,6 +52,16 @@ async fn app_with(
     nodes: Option<Vec<NodeInfo>>,
     projects_path: Option<PathBuf>,
 ) -> (axum::Router, Arc<FakeBackend>) {
+    app_with_root(nodes, projects_path, None).await
+}
+
+/// 同 [`app_with`]，但可把 workspace root 钉到指定目录（add-workspace-root：
+/// 本机注册路径必须落在根内——注册临时目录的用例把根钉到该临时目录）。
+async fn app_with_root(
+    nodes: Option<Vec<NodeInfo>>,
+    projects_path: Option<PathBuf>,
+    workspace_root: Option<&std::path::Path>,
+) -> (axum::Router, Arc<FakeBackend>) {
     if let Some(p) = projects_path {
         unsafe { std::env::set_var("SEBAS_PROJECTS_PATH", p) };
     }
@@ -59,7 +70,17 @@ async fn app_with(
     let backend = Arc::new(FakeBackend::new());
     backend.set_nodes(nodes);
     let dyn_backend: Arc<dyn SessionBackend> = backend.clone();
-    let app = build_router(dyn_backend, RouterInfo::default(), CardConfig::default());
+    let app = match workspace_root {
+        Some(root) => build_router_with_workspace_root(
+            dyn_backend,
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(sebas_webui::auth::AuthHandle::disabled()),
+            root.to_path_buf(),
+        ),
+        None => build_router(dyn_backend, RouterInfo::default(), CardConfig::default()),
+    };
     let _ = router;
     (app, backend)
 }
@@ -251,7 +272,10 @@ async fn local_registration_without_a_node_keeps_the_implicit_behavior() {
     let _g = guard();
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
-    let (app, _backend) = app_with(Some(vec![local_node()]), Some(registry)).await;
+    // add-workspace-root：本机注册必须落在 workspace root 内——把根钉到
+    // 临时目录本身，`repo` 即在界内；缺省节点 = 本机的隐式行为不变。
+    let (app, _backend) =
+        app_with_root(Some(vec![local_node()]), Some(registry), Some(dir.path())).await;
     let project_dir = dir.path().join("repo");
     std::fs::create_dir_all(&project_dir).unwrap();
 

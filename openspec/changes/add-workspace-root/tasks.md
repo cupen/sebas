@@ -1,9 +1,9 @@
 ## 1. 工作区根原语与控制平面装配
 
-- [ ] 1.1 `src/config.rs`：顶层 `Config` 增 `[workspace] root`；删除 `WatchdogWebUiConfig.allowed_roots` 字段与 `webui_allowed_roots()`。验证：单测覆盖 env 优先 / 配置次之 / 双缺省回退 cwd 三态解析，含 `allowed_roots` 旧键的配置文件解析不报错
-- [ ] 1.2 `sebas-webui/src/fs.rs`：`within_allowed_roots` 改形为 `within_workspace_root(candidate, root)`（canonicalize 两侧 + 逐分量前缀 + fail-closed）。验证：单测覆盖 symlink 逃逸、`..` 穿越、候选不可解析、root 不可解析时一切越界
-- [ ] 1.3 `sebas-webui/src/server.rs`：`WebUiState` 的 `allowed_roots` + `work_root` 合并为 `workspace_root: PathBuf`；builder 家族（`build_router_with_allowed_roots` 等）换签名；`safe_path` / `browse_dirs` 参数换根且 browse 起点为 workspace root。验证：改写后的 fs/server 既有测试全绿
-- [ ] 1.4 装配点 `src/webui_cmd.rs` 与 `src/run.rs`：按 env > config > cwd 回退计算 workspace root，回退时 `warn!` 告警（含回退路径与显式配置建议）。验证：单测/沙箱日志断言三态取值与告警文案
+- [x] 1.1 `src/config.rs`：顶层 `Config` 增 `[workspace] root`；删除 `WatchdogWebUiConfig.allowed_roots` 字段与 `webui_allowed_roots()`。验证：单测覆盖 env 优先 / 配置次之 / 双缺省回退 cwd 三态解析，含 `allowed_roots` 旧键的配置文件解析不报错
+- [x] 1.2 `sebas-webui/src/fs.rs`：`within_allowed_roots` 改形为 `within_workspace_root(candidate, root)`（canonicalize 两侧 + 逐分量前缀 + fail-closed）。验证：单测覆盖 symlink 逃逸、`..` 穿越、候选不可解析、root 不可解析时一切越界
+- [x] 1.3 `sebas-webui/src/server.rs`：`WebUiState` 的 `allowed_roots` + `work_root` 合并为 `workspace_root: PathBuf`；builder 家族（`build_router_with_allowed_roots` 等）换签名；`safe_path` / `browse_dirs` 参数换根且 browse 起点为 workspace root。验证：改写后的 fs/server 既有测试全绿
+- [x] 1.4 装配点 `src/webui_cmd.rs` 与 `src/run.rs`：按 env > config > cwd 回退计算 workspace root，回退时 `warn!` 告警（含回退路径与显式配置建议）。验证：单测/沙箱日志断言三态取值与告警文案
 
 ## 2. 本机项目面执法
 

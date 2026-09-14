@@ -44,15 +44,18 @@ pub struct WebUiState {
     /// 登录鉴权（用户名/密码，见 `auth` 模块）。凭据未配置时鉴权关闭，
     /// 全部路由维持原有行为。
     pub auth: Arc<AuthHandle>,
-    /// 服务端默认浏览根（add-webui-picker-workdir-start）：browse-dirs 未带
-    /// 显式 `root` 时的范围。由接线方注入（core --webui 内嵌与独立 webui
-    /// 进程），取配置的默认 agent kind work_dir，未配置时回退进程 cwd；
-    /// `None` 时 browse-dirs 硬错误（不再回退文件系统根）。
-    pub work_root: Option<std::path::PathBuf>,
-    /// 项目管理可选目录白名单（add-webui-allowed-roots）。空 = 未启用
-    /// 范围约束；非空时 browse-dirs 的显式 root 与项目注册路径都必须落在
-    /// 白名单目录之一内。
-    pub allowed_roots: Vec<std::path::PathBuf>,
+    /// 工作区根目录（add-workspace-root）：恒有值的单一机器级边界。项目
+    /// 注册、项目列表、browse-dirs 的起点与显式 root 都收敛到它之内；由
+    /// 装配方经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）
+    /// 计算后注入。
+    pub workspace_root: std::path::PathBuf,
+}
+
+/// 便捷装配形态（测试 / 最小入口）的 workspace root 缺省：进程 cwd 回退、
+/// 不告警——正式装配点（webui_cmd / run）经 `resolve_workspace_root` 负责
+/// env > config 解析与回退告警（add-workspace-root D5）。
+fn fallback_workspace_root() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// Build the axum Router with all WebUI routes.
@@ -69,8 +72,7 @@ pub fn build_router(
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
@@ -90,8 +92,7 @@ pub fn build_router_with_agent_kind_provider(
         agent_kinds,
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
@@ -110,8 +111,7 @@ pub fn build_router_with_admin_adapter(
         Arc::new(ConfigAgentKindProvider::new(Vec::new())),
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
@@ -133,22 +133,20 @@ pub fn build_router_with_auth(
         agent_kinds,
         archive_retention_days,
         auth,
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
 }
 
-/// Build the axum Router with an explicit allowed-roots whitelist
-/// （add-webui-allowed-roots）：测试与特殊装配注入白名单的入口，语义同
-/// `build_router_with_auth` + 非空白名单。
-pub fn build_router_with_allowed_roots(
+/// Build the axum Router with an explicit workspace root（add-workspace-root）：
+/// 测试与特殊装配注入单一机器级边界的入口，语义同 `build_router_with_auth`
+/// + 指定根（取代已退役的 `build_router_with_allowed_roots` 多根白名单形态）。
+pub fn build_router_with_workspace_root(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
     card_config: CardConfig,
     agent_kinds: Arc<dyn AgentKindProvider>,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
 ) -> Router {
     build_router_full(
         backend,
@@ -158,8 +156,7 @@ pub fn build_router_with_allowed_roots(
         agent_kinds,
         30,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     )
 }
 
@@ -172,8 +169,7 @@ fn build_router_full(
     agent_kinds: Arc<dyn AgentKindProvider>,
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -183,8 +179,7 @@ fn build_router_full(
         agent_kinds,
         archive_retention_days,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -520,8 +515,7 @@ pub async fn run(
         None,
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
     .await;
 }
@@ -544,17 +538,15 @@ pub async fn run_with_admin_adapter(
         admin_adapter,
         30,
         Arc::new(AuthHandle::disabled()),
-        None,
-        Vec::new(),
+        fallback_workspace_root(),
     )
     .await;
 }
 
 /// Run the WebUI server with an auth handle（登录鉴权接线入口）。
-/// `work_root` 供给 browse-dirs 的服务端默认浏览根（配置的 work dir 或
-/// 回退进程 cwd，由接线方决定）；`None` 时该端点在双 root 皆缺时硬错误。
-/// `allowed_roots` 为项目管理目录白名单（add-webui-allowed-roots），空 =
-/// 不启用；非空时同时约束 browse-dirs 显式 root 与项目注册路径。
+/// `workspace_root` 是恒有值的单一机器级边界（add-workspace-root）：browse-dirs
+/// 的起点与显式 root 约束、项目注册/列表/查看的范围判定都以它为准；由装配方
+/// 经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）计算。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
@@ -564,8 +556,7 @@ pub async fn run_with_admin_adapter_and_auth(
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
     archive_retention_days: u64,
 ) {
     run_full(
@@ -577,8 +568,7 @@ pub async fn run_with_admin_adapter_and_auth(
         admin_adapter,
         archive_retention_days,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     )
     .await;
 }
@@ -603,8 +593,7 @@ async fn run_full(
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
-    work_root: Option<std::path::PathBuf>,
-    allowed_roots: Vec<std::path::PathBuf>,
+    workspace_root: std::path::PathBuf,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let addr = listener.local_addr().expect("bound listener");
@@ -632,8 +621,7 @@ async fn run_full(
         provider,
         archive_retention_days,
         auth,
-        work_root,
-        allowed_roots,
+        workspace_root,
     );
     tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(
@@ -1395,10 +1383,9 @@ mod auth_guard_tests {
 }
 
 #[cfg(test)]
-mod allowed_roots_tests {
-    //! add-webui-allowed-roots 路由级验收：白名单启用后 browse-dirs 的
-    //! 显式 root 与项目注册路径都必须落在白名单内；空白名单时两者维持
-    //! 现状（opt-in 不破坏既有行为）。
+mod workspace_root_tests {
+    //! add-workspace-root 路由级验收：workspace root 恒存在——browse-dirs 的
+    //! 显式 root 与项目注册路径都必须落在它之内，无参浏览起点即根本身。
     use super::*;
     use crate::models::RouterInfo;
     use crate::session_backend::FakeBackend;
@@ -1414,15 +1401,14 @@ mod allowed_roots_tests {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 12345)
     }
 
-    fn app_with_roots(roots: Vec<std::path::PathBuf>) -> Router {
-        build_router_with_allowed_roots(
+    fn app_with_workspace_root(root: std::path::PathBuf) -> Router {
+        build_router_with_workspace_root(
             Arc::new(FakeBackend::new()),
             RouterInfo::default(),
             CardConfig::default(),
             Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
             Arc::new(AuthHandle::disabled()),
-            None,
-            roots,
+            root,
         )
     }
 
@@ -1479,9 +1465,9 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn project_add_rejects_path_outside_allowed_roots() {
+    async fn project_add_rejects_path_outside_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
         // fail-closed：即使路径真实存在，越界也 400（先范围后存在性）。
         let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
         let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
@@ -1491,32 +1477,22 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn project_add_accepts_path_inside_allowed_roots() {
+    async fn project_add_accepts_path_inside_workspace_root() {
         with_registry_env(|| async {
             let t = two_trees();
-            let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
             let dir = t.allowed.path().join("proj");
             std::fs::create_dir_all(&dir).unwrap();
-            let canonical = dir.canonicalize().unwrap();
+            // 回显的是 canonicalize_plain 的普通形（Windows 无 \\?\ 前缀）。
+            let canonical =
+                crate::fs::canonicalize_plain(&dir).expect("canonicalize proj dir");
             let body = serde_json::json!({ "path": dir.to_str().unwrap() });
             let (status, resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
             assert_eq!(status, StatusCode::CREATED, "resp: {resp}");
             assert_eq!(
                 resp["path"].as_str(),
-                Some(canonical.to_string_lossy().as_ref())
+                Some(canonical.as_str())
             );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn project_add_without_whitelist_is_unchanged() {
-        with_registry_env(|| async {
-            let t = two_trees();
-            let app = app_with_roots(Vec::new());
-            let body = serde_json::json!({ "path": t.outside.path().to_str().unwrap() });
-            let (status, _resp) = req(app, "POST", "/api/projects", Some(body.to_string())).await;
-            assert_eq!(status, StatusCode::CREATED, "空白名单时注册不受范围约束");
         })
         .await;
     }
@@ -1535,9 +1511,9 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn browse_dirs_rejects_root_outside_allowed_roots() {
+    async fn browse_dirs_rejects_root_outside_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
         let uri = format!(
             "/api/fs/browse-dirs?root={}",
             urlencoding_encode(t.outside.path().to_str().unwrap())
@@ -1553,9 +1529,9 @@ mod allowed_roots_tests {
     }
 
     #[tokio::test]
-    async fn browse_dirs_accepts_root_inside_allowed_roots() {
+    async fn browse_dirs_accepts_root_inside_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(vec![t.allowed.path().to_path_buf()]);
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
         let uri = format!(
             "/api/fs/browse-dirs?root={}",
             urlencoding_encode(t.allowed.path().to_str().unwrap())
@@ -1571,16 +1547,22 @@ mod allowed_roots_tests {
         assert!(names.contains(&"sub"), "entries: {body}");
     }
 
+    /// spec「browse-dirs defaults to the workspace root」：无 root 参数的
+    /// 浏览起点就是 workspace root，回显其 canonical 形。
     #[tokio::test]
-    async fn browse_dirs_without_whitelist_keeps_explicit_root_working() {
+    async fn browse_dirs_without_root_starts_at_workspace_root() {
         let t = two_trees();
-        let app = app_with_roots(Vec::new());
-        let uri = format!(
-            "/api/fs/browse-dirs?root={}",
-            urlencoding_encode(t.outside.path().to_str().unwrap())
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+        let (status, body) = req(app, "GET", "/api/fs/browse-dirs", None).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(
+            body["path"].as_str(),
+            Some(
+                dunce::simplified(t.allowed.path())
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
-        let (status, _body) = req(app, "GET", &uri, None).await;
-        assert_eq!(status, StatusCode::OK, "空白名单 = 未启用约束");
     }
 
     fn urlencoding_encode(s: &str) -> String {

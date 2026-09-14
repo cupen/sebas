@@ -48,7 +48,17 @@ async fn fixture() -> (
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(
         sebas_webui::session_backend::InProcessBackend::new(router.clone()),
     );
-    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+    // add-workspace-root：本机项目注册必须落在 workspace root 内。本文件的
+    // 注册路径全部位于系统临时目录下，fixture 把根钉到那里——既有用例的
+    // 路径全部界内，边界语义照常生效。
+    let app = sebas_webui::server::build_router_with_workspace_root(
+        backend,
+        RouterInfo::default(),
+        CardConfig::default(),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+        Arc::new(sebas_webui::auth::AuthHandle::disabled()),
+        std::env::temp_dir(),
+    );
     (router, rx, app)
 }
 
@@ -708,8 +718,10 @@ async fn projects_add_nonexistent_rejected() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value =
         serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    // add-workspace-root：范围判定先行且 fail-closed——不存在的路径无法
+    // canonicalize，与确定的越界同罪、同一文案（不再单独说「不存在」）。
     assert!(
-        body["error"].as_str().unwrap().contains("不存在"),
+        body["error"].as_str().unwrap().contains("超出允许范围"),
         "got: {:?}",
         body
     );
@@ -1904,7 +1916,20 @@ impl sebas_webui::session_backend::SessionBackend for CoreDownBackend {
 
 fn core_down_app() -> axum::Router {
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(CoreDownBackend);
-    build_router(backend, RouterInfo::default(), CardConfig::default())
+    projects_app(backend)
+}
+
+/// 注册面用例专用：workspace root 钉到系统临时目录（add-workspace-root：
+/// 本机注册必须落在根内——本文件的注册路径全部位于临时目录下）。
+fn projects_app(backend: Arc<dyn sebas_webui::SessionBackend>) -> axum::Router {
+    sebas_webui::server::build_router_with_workspace_root(
+        backend,
+        RouterInfo::default(),
+        CardConfig::default(),
+        Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+        Arc::new(sebas_webui::auth::AuthHandle::disabled()),
+        std::env::temp_dir(),
+    )
 }
 
 // ---- cover-core-channel-test-gaps A1.1: reachability kind discriminator ----
@@ -2142,7 +2167,7 @@ async fn projects_add_degraded_when_core_unreachable() {
 async fn projects_add_status_store_path_has_no_degraded_marker() {
     let _env = isolated_projects().await;
     let backend: Arc<dyn sebas_webui::SessionBackend> = Arc::new(StateStoreOkBackend);
-    let app = build_router(backend, RouterInfo::default(), CardConfig::default());
+    let app = projects_app(backend);
     let dir = std::env::temp_dir().join("projects-test-no-degraded");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

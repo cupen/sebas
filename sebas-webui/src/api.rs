@@ -1279,20 +1279,15 @@ pub async fn pending_move(
 
 /// GET /api/fs/browse-dirs?path=...&root=... — list only subdirectories for
 /// the directory tree picker. Root precedence: explicit `root` beats the
-/// server-injected work root (add-webui-picker-workdir-start); with neither,
-/// `fs::safe_path` errors. Path semantics (round-trip, bounds) live in
-/// `fs::safe_path`.
+/// injected workspace root (add-workspace-root), and is honoured only inside
+/// it; without a root the listing starts at the workspace root. Path
+/// semantics (round-trip, bounds) live in `fs::safe_path`.
 pub async fn browse_dirs(
     axum::extract::Query(params): axum::extract::Query<crate::fs::BrowseParams>,
     State(state): State<WebUiState>,
 ) -> Response {
     let path = params.path.as_deref().unwrap_or("");
-    match crate::fs::browse_dirs(
-        path,
-        params.root.as_deref(),
-        state.work_root.as_deref(),
-        &state.allowed_roots,
-    ) {
+    match crate::fs::browse_dirs(path, params.root.as_deref(), &state.workspace_root) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1394,16 +1389,14 @@ pub async fn projects_add(
         return projects_add_remote(&state, node_id, path).await;
     }
     // 本地校验：路径必须存在且是目录（canonicalize 后注册 canonical 路径）。
-    // 范围判定先行于存在性判定（add-webui-allowed-roots）：fail-closed，
-    // 越界与无法解析同罪，避免借 400 文案差异探测白名单外目录的存在性；
-    // 错误信息不回显服务端解析后的路径（与 fs.rs 同一防泄露姿态）。
+    // 范围判定先行于存在性判定（add-workspace-root）：workspace root 恒存在，
+    // 越界与无法解析同罪（fail-closed），避免借 400 文案差异探测根外目录的
+    // 存在性；错误信息不回显服务端解析后的路径（与 fs.rs 同一防泄露姿态）。
     let dir = std::path::Path::new(path);
-    if !state.allowed_roots.is_empty()
-        && !crate::fs::within_allowed_roots(dir, &state.allowed_roots)
-    {
+    if !crate::fs::within_workspace_root(dir, &state.workspace_root) {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "路径超出允许范围: 不在 allowed_roots 白名单内",
+            "路径超出允许范围: 不在 workspace root 内",
         );
     }
     if !dir.exists() {

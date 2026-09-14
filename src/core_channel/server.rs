@@ -422,17 +422,16 @@ async fn recv_remote_event(
 ) -> Option<SessionEvent> {
     match rx {
         None => std::future::pending().await,
-        Some(rx) => loop {
-            match rx.recv().await {
-                Ok(event) => return Some(event),
-                // 投影落后于事件量：如实关掉这一路，客户端会在重连时重新快照
-                // （与本地订阅的 Lagged 处置一致——绝不给一个带缺口的流）。
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "core channel: remote projection lagged; dropping connection");
-                    return None;
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
+        // 每个分支都终结（返回或 pending），单次 match 即可——不必套 loop。
+        Some(rx) => match rx.recv().await {
+            Ok(event) => Some(event),
+            // 投影落后于事件量：如实关掉这一路，客户端会在重连时重新快照
+            // （与本地订阅的 Lagged 处置一致——绝不给一个带缺口的流）。
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(skipped, "core channel: remote projection lagged; dropping connection");
+                None
             }
+            Err(broadcast::error::RecvError::Closed) => None,
         },
     }
 }
