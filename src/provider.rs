@@ -357,7 +357,7 @@ pub fn build_form(raw_config: &str) -> Option<Arc<ProviderForms>> {
             .map(|(name, p)| item_from_provider(name, p))
             .collect(),
         Err(e) => {
-            tracing::warn!(error = %e, "failed to parse provider seed (missing [router] or [provider] section in config.toml), starting empty");
+            tracing::warn!(error = %e, "failed to parse provider seed from config.toml ([router] / [provider.*] are optional), starting empty");
             Vec::new()
         }
     };

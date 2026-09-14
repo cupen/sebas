@@ -160,9 +160,9 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
                             # 要么显式关，要么把 SEBAS_WEBUI_AUTH_DB 钉进
                             # 沙箱并建户（webui-passwd / env 引导）
 
-   # router validate requires ≥1 provider with a base_url — the debug `test`
-   # provider is injected only AFTER parse, so it cannot satisfy validate.
-   # This dummy never dials anything in debug mode.
+   # [router] / [provider.*] 都是可选段——纯会话核心不写它们也能启动。
+   # --debug 下省略 [provider.*] 也行：内置 test provider 在 parse 之后注入，
+   # 自答自话、不拨上游。
    [provider.anthropic]
    api_key = "sk-sandbox-dummy"
 
