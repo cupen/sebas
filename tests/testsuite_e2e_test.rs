@@ -14,7 +14,6 @@
 //! Any panic keeps the sandbox dir (with core.log / webui.log) for
 //! postmortem — the path is printed on drop.
 
-#[cfg(unix)]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -820,6 +819,11 @@ async fn startup_failure_run_exits_75_with_summary() {
 /// Find the direct child of `ppid` whose cmdline contains `needle`
 /// (linux `/proc` walk; the supervised-recovery journey needs the core
 /// CHILD pid, not the watchdog's). None while no such child is visible.
+///
+/// Windows/macOS have no `/proc`; the provider-hotswap journey keeps its
+/// process-tree assertions linux-gated (D1) so its portable body still runs
+/// there. Socket-file assertions elsewhere stay unix-gated for the same
+/// reason (named pipes leave no filesystem trace).
 #[cfg(target_os = "linux")]
 fn find_child_pid(ppid: u32, needle: &str) -> Option<u32> {
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
@@ -1315,7 +1319,7 @@ async fn core_owned_provider_reaches_router_without_restart() {
         move || {
             let log = log.clone();
             Box::pin(async move {
-                let pid = find_child_pid(watchdog_pid, "router")?;
+                let pid = router_child_pid(watchdog_pid)?;
                 let text = std::fs::read_to_string(&log).ok()?;
                 for line in text.lines().rev() {
                     if line.contains("router listening")
@@ -1394,13 +1398,38 @@ async fn core_owned_provider_reaches_router_without_restart() {
         "no provider file may be written in the core-owned topology"
     );
     // router 子进程全程未重启（同一 pid），且 pid 确是 router 子进程
-    // （cmdline 首参校验——find_child_pid 按 cmdline 子串匹配，先自证锚点）。
-    let pid_now = find_child_pid(watchdog_pid, "router");
+    // （cmdline 首参校验——进程树定位按 cmdline 子串匹配，先自证锚点）。
+    let pid_now = router_child_pid(watchdog_pid);
     assert_eq!(
         pid_now,
         Some(router_pid),
         "router must not restart for a provider change to take effect"
     );
+    assert_router_child_cmdline(pid_now);
+    assert!(
+        watchdog.try_wait().expect("watchdog try_wait").is_none(),
+        "watchdog must stay up"
+    );
+}
+
+/// The router CHILD pid under the watchdog — linux-only `/proc` walk
+/// (D1: process-tree assertions are linux-gated, the journey body is not).
+#[cfg(target_os = "linux")]
+fn router_child_pid(watchdog_pid: u32) -> Option<u32> {
+    find_child_pid(watchdog_pid, "router")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn router_child_pid(_watchdog_pid: u32) -> Option<u32> {
+    None
+}
+
+/// Anchor check: the matched child really is the router subprocess
+/// (argv[1] == "router"). Reads `/proc/{pid}/cmdline` — linux-only, and the
+/// `pid_now == Some(router_pid)` equality above is vacuously true on
+/// non-linux (`None == None`), so the restart assertion stays portable.
+#[cfg(target_os = "linux")]
+fn assert_router_child_cmdline(pid_now: Option<u32>) {
     if let Some(pid) = pid_now {
         let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
             .expect("read router child cmdline");
@@ -1411,11 +1440,10 @@ async fn core_owned_provider_reaches_router_without_restart() {
             "matched child must be the router subprocess, got cmdline {cmd:?}"
         );
     }
-    assert!(
-        watchdog.try_wait().expect("watchdog try_wait").is_none(),
-        "watchdog must stay up"
-    );
 }
+
+#[cfg(not(target_os = "linux"))]
+fn assert_router_child_cmdline(_pid_now: Option<u32>) {}
 
 /// （add-agent-mode-selection）mode 透传：带 mode 的创建把映射后的
 /// `--permission-mode` 写进子进程 argv；缺省 mode 的对照会话不带该参数；
