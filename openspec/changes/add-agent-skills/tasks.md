@@ -19,16 +19,16 @@
 
 ## 4. CLI：`sebas skills`
 
-- [ ] 4.1 `sebas skills list`：打印 name/description/invalid 标记；仓目录缺失按空仓处理不报错。验证：`cargo test --test cli_skills_test`（或现有 CLI 测试形态）断言空仓输出非错误。
-- [ ] 4.2 `sebas skills add <src>`：按 local/git/npx 三形态分派（D4），全部成功路径落盘后 `list` 可见。验证：local 形态有单元测试（2.2 复用），git/npx 在 6.x 手测各跑一次真实源记账。
-- [ ] 4.3 `sebas skills remove <name>`：只删仓内目录，不动任何 backend；不存在即报错。验证：`cargo test` 断言 backend 目录在 remove 后字节不变。
-- [ ] 4.4 `sebas skills sync`：跑全量 reconcile，输出每 backend 的 `{written, overwritten, deleted, private_ignored, no_placement}` 汇总。验证：沙箱（临时 HOME）内构造仓 + 伪 backend 目录，跑一次 sync 后断言四列表数字与文件树一致。
+- [x] 4.1 `sebas skills list`：打印 name/description/invalid 标记；仓目录缺失按空仓处理不报错。验证：`cargo test --test cli_skills_test`（或现有 CLI 测试形态）断言空仓输出非错误。
+- [x] 4.2 `sebas skills add <src>`：按 local/git/npx 三形态分派（D4），全部成功路径落盘后 `list` 可见。验证：local 形态有单元测试（2.2 复用），git/npx 在 6.x 手测各跑一次真实源记账。
+- [x] 4.3 `sebas skills remove <name>`：只删仓内目录，不动任何 backend；不存在即报错。验证：`cargo test` 断言 backend 目录在 remove 后字节不变。
+- [x] 4.4 `sebas skills sync`：跑全量 reconcile，输出每 backend 的 `{written, overwritten, deleted, private_ignored, no_placement}` 汇总。验证：沙箱（临时 HOME）内构造仓 + 伪 backend 目录，跑一次 sync 后断言四列表数字与文件树一致。
 
 ## 5. Webui：Settings/Skills 页 + `/api/skills*`
 
-- [ ] 5.1 后端 `GET /api/skills`（扫仓）+ `GET /api/skills/:name`（SKILL.md 原文 + attachments 列表）+ `DELETE /api/skills/:name`（只删仓）+ `POST /api/skills/sync`（reconcile + SyncReport 返回体）。验证：`cargo test -p sebas-webui` 的 handler 级测试覆盖四端点的 happy path 与「name 不存在」404。
+- [x] 5.1 后端 `GET /api/skills`（扫仓）+ `GET /api/skills/:name`（SKILL.md 原文 + attachments 列表）+ `DELETE /api/skills/:name`（只删仓）+ `POST /api/skills/sync`（reconcile + SyncReport 返回体）。验证：`cargo test -p sebas-webui` 的 handler 级测试覆盖四端点的 happy path 与「name 不存在」404。
 - [x] 5.2 前端 Settings 新增 Skills 区：列表（name/desc/attachment 数/invalid 徽标）、点开展开预览（渲染 SKILL.md markdown + attachment 文件名列表）、删除按钮（确认弹窗注明「backend 目录将在下次 sync 时清理」）、刷新按钮、同步按钮（结果面板呈现 overwritten/deleted/private_ignored/noPlacement 各列表）。验证：沙箱 `invoke testsuite-webui-sandbox` 起后端后，Playwright acceptance 用例走通「list→预览→删除→刷新→sync 结果可见」旅程（记入 tests/acceptance 既有套件）。
-- [ ] 5.3 RBAC 与既有 webui 管理面一致：skills 端点挂到与 provider 管理面相同的权限档。验证：对照 provider 端点权限断言的现有测试形态，补一条等价断言。
+- [x] 5.3 RBAC 与既有 webui 管理面一致：skills 端点挂到与 provider 管理面相同的权限档。验证：对照 provider 端点权限断言的现有测试形态，补一条等价断言。
 
 ## 6. 沙箱端到端 + 文档
 
