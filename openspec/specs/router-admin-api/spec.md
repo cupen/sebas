@@ -1,7 +1,7 @@
 # router-admin-api Specification
 
 ## Purpose
-router 的管理 HTTP 面：webui 及其他管理客户端通过同端口 `/admin/*` 编辑 providers 与模型别名、探测上游 model 列表、触发配置热生效并读取运行状态；管理与透传两条流量的鉴权相互独立。
+router 的管理 HTTP 面：ops/CLI 等运维客户端通过同端口 `/admin/*` 读取运行状态、探测上游 model 列表并按需触发配置重投影（`POST /admin/reload`，ops 后门）；provider 与模型别名的数据权威在 core 状态库，router 经 core channel 订阅自动热重载，WebUI 不是本面的消费者（retire-webui-router-surface：其 provider 管理面走 core 状态库，WebUI API 面无 router 概念）。管理与透传两条流量的鉴权相互独立。
 
 ## Requirements
 

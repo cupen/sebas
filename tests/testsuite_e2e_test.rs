@@ -1341,7 +1341,7 @@ async fn core_owned_provider_reaches_router_without_restart() {
     // 经 webui BFF 建 provider：写入 core 状态库（core 是唯一写者）。
     let (status, body) = post_json(
         &cli,
-        &format!("{}/router/api/providers", sb.webui_url()),
+        &format!("{}/api/providers", sb.webui_url()),
         serde_json::json!({
             "name": "stub",
             "protocol": "anthropic",

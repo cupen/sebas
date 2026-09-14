@@ -48,8 +48,8 @@ vi.mock('../api/client.js', () => ({
     sendMessage: vi.fn(),
     cancelSession: vi.fn(),
     setSessionModel: vi.fn(),
-    routerProviders: vi.fn(),
-    routerDefaults: vi.fn(),
+    providers: vi.fn(),
+    providerDefaults: vi.fn(),
   },
 }))
 
@@ -116,8 +116,8 @@ beforeEach(() => {
   ;(api.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'cancelled' })
   ;(api.setSessionModel as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'ok' })
   // 目录（4.2 分组交叉引用的数据源）：默认空目录。
-  ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
-  ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+  ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
+  ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
     default_provider: null,
     default_model: null,
   })
@@ -267,7 +267,7 @@ describe('composer is pure follow-up (4.1)', () => {
 
 describe('model chip (4.2, design D3)', () => {
   function seedCatalog() {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [
         {
           name: 'deepseek',
@@ -324,7 +324,7 @@ describe('model chip (4.2, design D3)', () => {
 
   it('degrades to a flat list when the catalog is unavailable (no fabricated groups)', async () => {
     // 目录读取失败 → 芯片仍可用，单层平铺，无组头。
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockRejectedValue(
+    ;(api.providers as ReturnType<typeof vi.fn>).mockRejectedValue(
       Object.assign(new Error('503'), { status: 503 }),
     )
     const el = await mount(focus)

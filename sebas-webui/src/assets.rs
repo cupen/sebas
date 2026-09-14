@@ -54,12 +54,15 @@ pub async fn index() -> Response {
 }
 
 /// Serve the SPA entry for any unmatched GET page path (client-side route
-/// fallback). Non-GET and API-ish prefixes stay JSON 404s.
+/// fallback). Non-GET and API-ish prefixes stay JSON 404s. The retired
+/// `/router/api/*` namespace (retire-webui-router-surface) is API-ish too —
+/// it must 404, never serve the SPA shell.
 pub async fn spa_fallback(req: axum::extract::Request) -> Response {
     let path = req.uri().path().to_string();
     if req.method() != axum::http::Method::GET
         || path.starts_with("/api/")
         || path == "/api"
+        || path.starts_with("/router/api/")
         || path.starts_with("/assets/")
         || path.starts_with("/static/")
     {

@@ -197,8 +197,8 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       // Configure a catalog (the same write path the Settings Models editor
       // uses) — the dialog must reflect it without any session existing.
       // Re-run safety: drop a leftover from an earlier journey first.
-      await page.request.delete('/router/api/providers/catalog-provider')
-      const created = await page.request.post('/router/api/providers', {
+      await page.request.delete('/api/providers/catalog-provider')
+      const created = await page.request.post('/api/providers', {
         data: {
           name: 'catalog-provider',
           base_url_openai_chat: 'http://127.0.0.1:9/v1',
@@ -230,7 +230,7 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       // behind would flip later journeys' honest "no provider configured"
       // first-paint assertions.
       await rail.cancelNewSessionDialog()
-      const removed = await page.request.delete('/router/api/providers/catalog-provider')
+      const removed = await page.request.delete('/api/providers/catalog-provider')
       expect(removed.ok()).toBe(true)
 
       expect(collector.clean()).toEqual([])

@@ -43,11 +43,13 @@ export class ErrorCollector {
       //    are unrelated to the app-under-test and may 403 in the sandbox.
       if (text.includes('favicon')) return
       if (text.includes('404') && /\/api\/sessions\//.test(url)) return
-      // Intentional mutation-wall probes (phase-3 settings journeys): the
-      // sandbox answers router mutations with 503 and chromium logs the
-      // failed resource load; the journeys assert the honest UI presentation
-      // (inline error, unchanged lists), not network silence.
-      if (text.includes('503') && /\/router\/api\/|\/api\/agent-defaults/.test(url)) return
+      // Intentional honest-degradation probes (settings journeys; provider
+      // cluster renamed from /router/api/* in retire-webui-router-surface):
+      // the sandbox answers provider reads/mutations with 503 while the core
+      // channel is down and chromium logs the failed resource load; the
+      // journeys assert the honest UI presentation (inline error, unchanged
+      // lists, explicit unavailability), not network silence.
+      if (text.includes('503') && /\/api\/providers|\/api\/provider-defaults/.test(url)) return
       // Deliberate core-outage windows (deployment journey, detached
       // topology): core-proxied reads answer 502 while the channel is down
       // by design — the journey asserts the honest UI (banner / gating /

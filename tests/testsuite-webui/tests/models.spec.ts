@@ -198,7 +198,7 @@ test.describe('模型管理覆盖', () => {
 
       await resetState(page.request)
       // Seed a custom provider over the API; the UI edit journey then owns it.
-      const created = await page.request.post('/router/api/providers', {
+      const created = await page.request.post('/api/providers', {
         data: { name: 'editable', base_url_openai_chat: 'http://127.0.0.1:9/v1' },
       })
       expect(created.ok()).toBe(true)
@@ -237,7 +237,7 @@ test.describe('模型管理覆盖', () => {
 
       // API truth: the entries persisted with their capability tags (entry
       // objects; text implicit and never stored).
-      const resp = await page.request.get('/router/api/providers')
+      const resp = await page.request.get('/api/providers')
       expect(resp.ok()).toBe(true)
       const body = (await resp.json()) as {
         providers?: Array<{ name: string; models: Array<{ id: string; tags: string[] }> }>
@@ -281,7 +281,7 @@ test.describe('模型管理覆盖', () => {
 
       /** Stored catalog entries (ids + tags) for one provider. */
       const storedEntries = async (): Promise<Array<{ id: string; tags: string[] }>> => {
-        const resp = await page.request.get('/router/api/providers')
+        const resp = await page.request.get('/api/providers')
         expect(resp.ok()).toBe(true)
         const body = (await resp.json()) as {
           providers?: Array<{ name: string; models: Array<{ id: string; tags: string[] }> }>
@@ -294,7 +294,7 @@ test.describe('模型管理覆盖', () => {
         // Ordinary edit path: create a custom provider pointed at the fake
         // upstream (core dials 127.0.0.1 only — sandbox-safe), pre-seeded with
         // one manually tagged entry whose id the upstream also serves.
-        const created = await page.request.post('/router/api/providers', {
+        const created = await page.request.post('/api/providers', {
           data: {
             name: 'fetchable',
             base_url_openai_chat: `http://127.0.0.1:${port}/v1`,
@@ -390,8 +390,8 @@ test.describe('模型管理覆盖', () => {
         await resetState(page.request)
         const { name: projectName } = await ensureSceneProject(page.request)
         // Re-run safety: the provider lives in the SHARED core store.
-        await page.request.delete('/router/api/providers/dialog-seam')
-        const created = await page.request.post('/router/api/providers', {
+        await page.request.delete('/api/providers/dialog-seam')
+        const created = await page.request.post('/api/providers', {
           data: { name: 'dialog-seam', base_url_openai_chat: `http://127.0.0.1:${port}/v1` },
         })
         expect(created.ok()).toBe(true)
@@ -413,7 +413,7 @@ test.describe('模型管理覆盖', () => {
         await expect(editor).toBeHidden({ timeout: 10_000 })
 
         // API truth: the fetched ids persisted through the ordinary save.
-        const resp = await page.request.get('/router/api/providers')
+        const resp = await page.request.get('/api/providers')
         const body = (await resp.json()) as {
           providers?: Array<{ name: string; models: Array<{ id: string }> }>
         }
@@ -438,7 +438,7 @@ test.describe('模型管理覆盖', () => {
 
         // Hygiene: drop the provider so later journeys' honest "no provider
         // configured" assertions stay valid.
-        const removed = await page.request.delete('/router/api/providers/dialog-seam')
+        const removed = await page.request.delete('/api/providers/dialog-seam')
         expect(removed.ok()).toBe(true)
       } finally {
         await new Promise<void>((resolve) => upstream.close(() => resolve()))
@@ -453,7 +453,7 @@ test.describe('模型管理覆盖', () => {
       const settings = new SettingsModal(page)
 
       await resetState(page.request)
-      const created = await page.request.post('/router/api/providers', {
+      const created = await page.request.post('/api/providers', {
         data: { name: 'urlless' },
       })
       expect(created.ok()).toBe(true)

@@ -1,5 +1,5 @@
 //! Integration tests for the JSON API surface (`/api/*`): summary, session
-//! list/detail, settings/router/about, and the session mutations with the
+//! list/detail, settings/about, and the session mutations with the
 //! unified `{ "error": ... }` envelope. Drives the router in-process via
 //! axum's `oneshot` — no live listener required.
 
@@ -218,10 +218,20 @@ async fn settings_router_about_expose_page_data() {
     assert!(v["card_config"]["theme_color"].as_str().is_some());
     assert!(v["router"].is_object());
 
-    let (status, v) = get_json(&app, "/api/router").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(v["router"].is_object());
-    assert!(v["router"]["provider_count"].is_u64());
+    // retire-webui-router-surface：/api/router 已退役（spec「Router-free
+    // API surface」）——spa_fallback 对 /api/* 前缀回文本 404，body 非 JSON，
+    // 故走原始 oneshot 断状态码。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     let (status, v) = get_json(&app, "/api/about").await;
     assert_eq!(status, StatusCode::OK);

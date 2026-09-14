@@ -10,10 +10,10 @@
  * provider without models contributes no models (never a fabricated one).
  */
 
-import type { RouterProviderAdmin } from './client.js'
+import type { ProviderAdmin } from './client.js'
 import { api } from './client.js'
 
-/** Wire shape of `GET /router/api/defaults`（双 null = 未设置）. */
+/** Wire shape of `GET /api/provider-defaults`（双 null = 未设置）. */
 export interface DefaultsPayload {
   default_provider: string | null
   default_model: string | null
@@ -44,7 +44,7 @@ export interface ModelCatalog {
  * catalog can still be preselected (it cannot — no fabricated options).
  */
 export function toModelCatalog(
-  providers: RouterProviderAdmin[],
+  providers: ProviderAdmin[],
   defaults: DefaultsPayload | null,
 ): ModelCatalog {
   const pairs: ModelCatalogPair[] = []
@@ -81,8 +81,8 @@ export interface LoadedCatalog {
 export async function loadModelCatalog(): Promise<LoadedCatalog> {
   try {
     const [providers, defaults] = await Promise.all([
-      api.routerProviders(),
-      api.routerDefaults().catch(() => null),
+      api.providers(),
+      api.providerDefaults().catch(() => null),
     ])
     const catalog = toModelCatalog(providers.providers, defaults)
     if (catalog.pairs.length === 0) return { catalog, unavailable: true }

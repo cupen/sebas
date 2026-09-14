@@ -175,8 +175,8 @@ export interface ProviderModelEntry {
   tags: ModelCapability[]
 }
 
-/** /router/api/providers 的 admin 列表条目（BFF 透传 core 状态库投影）。 */
-export interface RouterProviderAdmin {
+/** /api/providers 的 admin 列表条目（BFF 透传 core 状态库投影）。 */
+export interface ProviderAdmin {
   name: string
   preset?: string | null
   base_url_anthropic: string | null
@@ -193,7 +193,7 @@ export interface RouterProviderAdmin {
   model_map?: Record<string, string> | null
 }
 
-/** /router/api/presets 的条目（内置 preset 表只读视图，跟随代码）。 */
+/** /api/provider-presets 的条目（内置 preset 表只读视图，跟随代码）。 */
 export interface ProviderPreset {
   name: string
   base_url_anthropic: string | null
@@ -698,7 +698,6 @@ export const api = {
       }),
     ),
   settings: () => get<{ card_config: CardConfig; router: RouterInfo }>('/api/settings'),
-  router: () => get<{ router: RouterInfo }>('/api/router'),
   about: () => get<About>('/api/about'),
   /**
    * 环境变量只读清单（split-env-vars-settings-section 1.1/2.1）：webui
@@ -818,34 +817,33 @@ export const api = {
       `/api/sessions/${encodedKey}/switch`,
     ),
 
-  // Router provider 管理（BFF → core 状态库；preset 表跟随代码）。
-  routerProviders: () =>
-    get<{ providers: RouterProviderAdmin[] }>('/router/api/providers'),
+  // Provider 管理（BFF → core 状态库；preset 表跟随代码）。
+  providers: () => get<{ providers: ProviderAdmin[] }>('/api/providers'),
   /**
    * （workbench-conversation-view 4.1）默认 provider/model 预选数据。数据
    * 真源是 core 状态库（BFF 经状态 seam 读）；未设置 → 双 null；core 不可达
    * → 503（ApiError），调用方据此落到「目录不可用」显式态。
    */
-  routerDefaults: () =>
+  providerDefaults: () =>
     get<{ default_provider: string | null; default_model: string | null }>(
-      '/router/api/defaults',
+      '/api/provider-defaults',
     ),
-  routerPresets: () => get<{ presets: ProviderPreset[] }>('/router/api/presets'),
-  routerProviderCreate: (payload: ProviderPayload) =>
-    post<{ created: string }>('/router/api/providers', payload),
-  routerProviderUpdate: (name: string, payload: ProviderPayload) =>
-    put<{ updated: string }>(`/router/api/providers/${encodeURIComponent(name)}`, payload),
-  routerProviderDelete: (name: string) =>
-    del<{ deleted: string }>(`/router/api/providers/${encodeURIComponent(name)}`),
+  providerPresets: () => get<{ presets: ProviderPreset[] }>('/api/provider-presets'),
+  providerCreate: (payload: ProviderPayload) =>
+    post<{ created: string }>('/api/providers', payload),
+  providerUpdate: (name: string, payload: ProviderPayload) =>
+    put<{ updated: string }>(`/api/providers/${encodeURIComponent(name)}`, payload),
+  providerDelete: (name: string) =>
+    del<{ deleted: string }>(`/api/providers/${encodeURIComponent(name)}`),
   /**
    * （add-fetch-models）从 provider 官方 base url 抓取 model id 列表。core
    * 只读 GET，**不落库**：返回的 ids 仅用于呈现，挑选某个 id 才是普通编辑
-   * （routerProviderUpdate）。失败抛 ApiError，message 是净化后的原因
+   * （providerUpdate）。失败抛 ApiError，message 是净化后的原因
    * （状态码/类别，绝无密钥材料）。
    */
   fetchProviderModels: (name: string) =>
     post<{ provider: string; models: string[] }>(
-      `/router/api/providers/${encodeURIComponent(name)}/probe`,
+      `/api/providers/${encodeURIComponent(name)}/probe`,
     ),
 
   // Admin reads

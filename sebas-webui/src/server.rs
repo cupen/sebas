@@ -220,13 +220,9 @@ fn build_router_full(
             post(api::answer_permission),
         )
         .route("/api/settings", get(api::settings))
-        .route("/api/router", get(api::router))
-        .route("/router/api/presets", get(routes::router_api_presets))
-        .route("/router/api/defaults", get(routes::router_api_defaults))
-        .route(
-            "/router/api/providers",
-            get(routes::router_api_providers_list),
-        )
+        .route("/api/provider-presets", get(routes::provider_presets))
+        .route("/api/provider-defaults", get(routes::provider_defaults))
+        .route("/api/providers", get(routes::providers_list))
         .route("/api/about", get(api::about))
         // split-env-vars-settings-section 1.1：环境变量只读清单（webui 自身
         // env，不依赖 core 通道）。/api/ 前缀落进既有 auth_guard。
@@ -260,41 +256,32 @@ fn build_router_full(
         .route("/ws", get(api::ws_handler))
         .with_state(state.clone());
 
-    // router BFF mutation 面（Task 6.3）：独立子 router，守卫只套这一组
+    // provider 管理面 mutation 子 router：独立子 router，守卫只套这一组
     // （POST-only + loopback origin check）。
     let router_mutations = Router::new()
+        .route("/api/providers", post(routes::provider_create))
         .route(
-            "/router/api/providers",
-            post(routes::router_api_provider_create),
+            "/api/providers/{name}",
+            axum::routing::put(routes::provider_update).delete(routes::provider_delete),
         )
         .route(
-            "/router/api/providers/{name}",
-            axum::routing::put(routes::router_api_provider_update)
-                .delete(routes::router_api_provider_delete),
+            "/api/providers/{name}/probe",
+            post(routes::provider_probe),
         )
+        .route("/api/model-aliases", post(routes::alias_create))
         .route(
-            "/router/api/providers/{name}/probe",
-            post(routes::router_api_provider_probe),
+            "/api/model-aliases/{alias}",
+            axum::routing::put(routes::alias_update).delete(routes::alias_delete),
         )
-        .route(
-            "/router/api/model-aliases",
-            post(routes::router_api_alias_create),
-        )
-        .route(
-            "/router/api/model-aliases/{alias}",
-            axum::routing::put(routes::router_api_alias_update)
-                .delete(routes::router_api_alias_delete),
-        )
-        .route("/router/api/reload", post(routes::router_api_reload))
-        .layer(axum::middleware::from_fn(routes::router_mutation_guard))
+        .layer(axum::middleware::from_fn(routes::provider_mutation_guard))
         .with_state(state.clone());
 
     // The JSON admin API is always mounted: without an adapter, reads report
     // `adapter_ok: false` and mutations answer 503 (honest degradation).
     // It carries its own AdminState, merged as a stateless Router.
     // 登录鉴权层套在 merge 之后的全量路由上（按路径选择：/api/*、
-    // /router/api/*、/ws；静态资源与 /health 放行），webui 登录未启用时
-    // 各路由维持自身原有的防护（admin env-password、router origin check）。
+    // /ws；静态资源与 /health 放行），webui 登录未启用时
+    // 各路由维持自身原有的防护（admin env-password、provider origin check）。
     core.merge(router_mutations)
         .merge(admin::build_api_admin_router(AdminState::new(
             admin_adapter,
@@ -318,10 +305,10 @@ fn is_auth_exempt_path(path: &str) -> bool {
         || path == "/api/auth/setup"
 }
 
-/// 需要登录的路径面：JSON API、router BFF、WebSocket。静态 SPA 资源与
+/// 需要登录的路径面：JSON API、WebSocket。静态 SPA 资源与
 /// `/health`（watchdog 探活）保持公开。
 fn is_protected_path(path: &str) -> bool {
-    path == "/ws" || path.starts_with("/api/") || path.starts_with("/router/api/")
+    path == "/ws" || path.starts_with("/api/")
 }
 
 /// RBAC 中央权限表（add-webui-multiuser-rbac 3.1，design D3）：`路径 +
@@ -336,7 +323,7 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/admin/*`（状态/事件/服务启停/升级/回滚/restart-core/login） | 全部 | `services.control` |
 /// | `/api/settings`（卡片/显示偏好写） | 非安全方法 | `settings.manage`（GET 认证即可） |
 /// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
-/// | `/router/api/*`（BFF 读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
+/// | `/api/providers*`、`/api/provider-presets`、`/api/provider-defaults`、`/api/model-aliases*`（provider 管理面读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
 /// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
 /// | `/api/auth/{login,logout,setup,me}` | — | 豁免路径（[`is_auth_exempt_path`]），不进本表 |
 ///
@@ -348,8 +335,15 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
     if path == "/api/users" || path.starts_with("/api/users/") {
         return Some(Permission::UsersManage);
     }
-    // router BFF（读 + 写）：不纳入 RBAC（design D3 / proposal Non-goals）。
-    if path.starts_with("/router/api/") {
+    // provider 管理面（读 + 写）：不纳入 RBAC（design D3 / proposal
+    // Non-goals）。显式列出，防止未来新增 `/api/*` 规则误捕这些路径。
+    if path == "/api/providers"
+        || path.starts_with("/api/providers/")
+        || path == "/api/provider-presets"
+        || path == "/api/provider-defaults"
+        || path == "/api/model-aliases"
+        || path.starts_with("/api/model-aliases/")
+    {
         return None;
     }
     // admin 控制面（含服务启停/升级/回滚——同一控制面）。
@@ -1336,10 +1330,10 @@ mod auth_guard_tests {
         let (status, body) = req(
             app.clone(),
             "POST",
-            "/router/api/reload",
+            "/api/providers",
             Some(&bob),
             None,
-            None,
+            Some("{}".to_string()),
         )
         .await;
         assert_eq!(
@@ -1349,7 +1343,7 @@ mod auth_guard_tests {
         );
 
         // 未登录仍被登录门拦（BFF 只豁免角色执法，不豁免登录）。
-        let (status, _) = req(app, "POST", "/router/api/reload", None, None, None).await;
+        let (status, _) = req(app, "POST", "/api/providers", None, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
