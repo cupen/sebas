@@ -117,10 +117,11 @@ API 修改）：
 但这只是呈现层优化，不构成防线。被禁用用户的登录 SHALL 被拒绝（401，
 与凭据错误同文案），其既有会话立即失效。
 
-`/router/api/*`（router BFF 面）SHALL 不纳入角色执法：仅要求有效登录
-（登录门开启时），并保持其既有守卫（POST-only + origin 检查）。router
-进程自身的下游 token 鉴权（`[router] auth_token`，默认关闭）不在本
-能力范围，暂不改动。
+provider 管理面（`/api/providers*`、`/api/provider-presets`、
+`/api/provider-defaults`、`/api/model-aliases*`）SHALL 不纳入角色执法：
+仅要求有效登录（登录门开启时），并保持其既有守卫（POST-only + origin
+检查）。router 进程自身的下游 token 鉴权（`[router] auth_token`，默认关
+闭）不在本能力范围，暂不改动。
 
 #### Scenario: viewer 只读
 
@@ -135,7 +136,7 @@ API 修改）：
 
 #### Scenario: router BFF 仅登录门
 
-- **WHEN** member 会话调用 `/router/api/providers`（写）
+- **WHEN** member 会话调用 `/api/providers`（写，原 `/router/api/*` 面）
 - **THEN** 不因角色被 403（登录门与自身 origin 守卫照常生效）
 
 #### Scenario: admin 不能管用户
