@@ -681,15 +681,11 @@ impl RouterConfig {
         let file: RouterFile =
             toml::from_str(raw).map_err(|e| RouterError::Config(format!("toml parse: {e}")))?;
 
-        // provider 唯一来源：顶层 `[provider.*]`。
-        let providers = file.provider;
+        // provider 唯一来源：顶层 `[provider.*]`。`[router]` / `[provider.*]`
+        // 都是可选段：纯会话核心（只有 [feishu] / [acp.*] 等）没有 router 配置
+        // 是合法状态，全部字段走默认、providers 为空。
+        let providers = resolve_providers(file.provider)?;
         let raw_cfg = file.router;
-        if raw_cfg.is_none() && providers.is_empty() {
-            return Err(RouterError::Config(
-                "config 缺少 [router] 段或 [provider] 段".into(),
-            ));
-        }
-        let providers = resolve_providers(providers)?;
 
         let mut cfg = match raw_cfg {
             Some(g) => {
@@ -839,9 +835,8 @@ impl RouterConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.providers.is_empty() {
-            return Err(RouterError::Config("provider 不能为空".into()));
-        }
+        // providers 为空是合法状态（router/provider 段皆可选）；空配置下
+        // 路由全部 no_route，debug 模式由注入的 test provider 兜底。
         for (name, p) in &self.providers {
             if p.base_url_anthropic.is_none()
                 && p.base_url_openai_chat.is_none()
@@ -1070,19 +1065,19 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert_eq!(cfg.providers.len(), 2);
     }
 
+    // [router] / [provider.*] 皆可选：纯会话核心的 config（只有别的段的）
+    // 解析成全默认 + 零 provider，不再报 config error。
     #[test]
-    fn missing_router_section_is_config_error() {
+    fn missing_router_and_provider_sections_parse_to_defaults() {
         let _g = LOCK.lock().unwrap();
         // SAFETY: 本测试文件用 LOCK 串行化所有 env 访问（见 tests 模块注释）。
         unsafe {
             std::env::remove_var("SEBAS_ROUTER_LISTEN");
         }
-        let err = parse_isolated("[feishu]\napp_id = \"x\"\n").expect_err("missing [router]");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("[router]"),
-            "error should mention [router]: {msg}"
-        );
+        let cfg = parse_isolated("[feishu]\napp_id = \"x\"\n").expect("sections are optional");
+        assert_eq!(cfg.listen, "127.0.0.1:8787");
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.routes.is_empty());
     }
 
     #[test]
