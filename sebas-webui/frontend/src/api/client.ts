@@ -500,6 +500,46 @@ export interface UserRecord {
   updated_at_unix?: number
 }
 
+// ---- Skills 管理面（add-agent-skills 5.2）--------------------------------
+
+/**
+ * `GET /api/skills` 的一行：仓内一个条目（agentskills 格式：目录 +
+ * SKILL.md + 随附文件）。`reason` 只在 `valid=false` 时出现在 wire 上。
+ */
+export interface SkillEntry {
+  name: string
+  description: string | null
+  /** 随附文件（`/` 分隔的相对路径，已排序）；不含 SKILL.md 本身。 */
+  attachments: string[]
+  valid: boolean
+  /** invalid 成因（frontmatter 缺字段 / SKILL.md 缺失等）。 */
+  reason?: string
+}
+
+/** `GET /api/skills/{name}`：SKILL.md 原文（前端渲染 markdown）+ attachments。 */
+export interface SkillDetail {
+  name: string
+  /** 条目在仓但缺 SKILL.md（invalid）时为 null——诚实呈现，不是 404。 */
+  text: string | null
+  attachments: string[]
+}
+
+/** 一次 sync 对一个 backend 落点的报告（「仓 wins」语义的呈现层）。 */
+export interface BackendSkillSyncReport {
+  backend: string
+  written: string[]
+  overwritten: string[]
+  deleted: string[]
+  /** 名外条目计数（用户私产：服务端不读不导不动，只报数）。 */
+  private_ignored: number
+}
+
+/** `POST /api/skills/sync` 的响应：逐 backend 报告 + 无落点 backend 名单。 */
+export interface SkillsSyncResponse {
+  reports: BackendSkillSyncReport[]
+  no_placement: string[]
+}
+
 /** Error carrying the HTTP status so callers can branch (e.g. 401 login). */
 export class ApiError extends Error {
   readonly status: number
@@ -738,6 +778,17 @@ export const api = {
   usersSetEnabled: (id: number, enabled: boolean) =>
     post<{ status: string }>(`/api/users/${id}/enabled`, { enabled }),
   usersDelete: (id: number) => del<{ status: string }>(`/api/users/${id}`),
+
+  // Skills 管理面（add-agent-skills 5.2）：仓 = webui 所在机器上的
+  // agentskills 目录。webui 是「查看与移除的窗口，不是编辑器」——没有
+  // create/edit 入口（spec 明令），创建与修改走 CLI / git / npx 后点刷新。
+  skillsList: () => get<{ skills: SkillEntry[] }>('/api/skills'),
+  skillDetail: (name: string) =>
+    get<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`),
+  /** 只删仓；backend 里的副本在下次 sync 时清理（spec 语义，确认文案讲明）。 */
+  skillsDelete: (name: string) =>
+    del<{ status: string; name: string }>(`/api/skills/${encodeURIComponent(name)}`),
+  skillsSync: () => post<SkillsSyncResponse>('/api/skills/sync'),
 
   // Session mutations
   /**

@@ -223,11 +223,12 @@ test.describe('设置面', () => {
       })
 
       // 分区顺序即规约（settings-modal SECTIONS）：Generic → Appearance →
-      // 〔分隔线〕Services → Models →〔压底分隔线〕Env Vars → About。免登录
-      // 沙箱（服务端未启用鉴权，role = null）下 Users 分区按角色裁剪隐藏
-      // （仅 root 可见——登录形态的呈现由 auth.spec.ts + 前端单测承担）。
+      // 〔分隔线〕Services → Models → Skills →〔压底分隔线〕Env Vars → About。
+      // 免登录沙箱（服务端未启用鉴权，role = null）下 Users 分区按角色裁剪
+      // 隐藏（仅 root 可见——登录形态的呈现由 auth.spec.ts + 前端单测承担）。
       // 一次结构断言钉住顺序 + 两条组间分隔线 + About 的 tail 分隔线（弹性
-      // 留白压底的载体）。
+      // 留白压底的载体）。Skills 为 add-agent-skills 5.2 新增（Models 之后、
+      // 底部只读组之前）。
       const signature = await settings.panel.locator('.nav').evaluate((nav) =>
         Array.from(nav.children).map((el) => {
           if (el.classList.contains('nav-sep')) {
@@ -242,6 +243,7 @@ test.describe('设置面', () => {
         'sep',
         'Services',
         'Models',
+        'Skills',
         'sep-tail',
         'Env Vars',
         'About',

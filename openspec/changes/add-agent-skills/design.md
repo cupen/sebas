@@ -11,6 +11,9 @@
   是 agentskills 同构（`SKILL.md` + frontmatter；codex 多一个*可选*的
   `metadata.short-description`，通用解析不受影响）。gemini 在 `~/.gemini/` 下**没
   有** skills 目录，疑似无此概念。
+  （**勘误（tasks 1.1 调研后）**：gemini CLI 已有官方 skills 机制且同构，本机
+  `~/.gemini/` 整个目录不存在只说明本机没初始化过 gemini，不构成「无此概念」的
+  证据——见文末「方言矩阵调研」。NoPlacement 是本期取舍，不是事实判断。）
 - **删除语义需要记忆**：spec 里「同步会把仓里已不存在、但上次投影过的条目从
   backend 删掉」，与「无 manifest、无状态文件」的原始减法相冲——不记住上次投过什
   么就无法做这个删除。这是设计中唯一一处必须显性加回的状态。
@@ -75,9 +78,10 @@ agentskills skill「编译」成 gemini TOML 是**有损、猜测语义**的转�
 给模型的说明文档，不是命令），本期不做。方言表查无 gemini → spec 定义的
 「NoPlacement 如实报告」路径生效。
 
-**Open question → task**：方言矩阵调研（tasks 1.x）把 gemini / opencode 的真实
-skill 消费方式钉实。若调研发现 gemini 真有官方 skills 目录且同构，D1 表加一行即
-可，不改架构。
+**Open question → 已结（tasks 1.1 / 1.2 调研落盘）**：方言矩阵调研见文末
+「方言矩阵调研」小节。结论：gemini 与 opencode **都**有官方 agentskills 同构的
+skills 目录；但本期 D1 表仍只 claude/codex（spec 只承诺 claude 的 placement），
+加行留给后续 change——届时各加一行 `Placement` 即可，不改架构。
 
 ### D4: 存储在文件系统，API 是磁盘操作的薄壳
 
@@ -120,7 +124,56 @@ dir = "~/.agents/skills"   # 可选, 默认即此
 无存量数据、无 breaking 变更。config 不增 `[skills]` 段即走默认路径；首启不
 做任何自动写盘。
 
+## 方言矩阵调研（D3 注释，tasks 1.1 / 1.2 实证落盘 2026-09-14）
+
+### gemini CLI —— 有官方 skills 机制，且与 agentskills 同构
+
+- **官方文档**（Get started with Agent Skills | Gemini CLI,
+  https://geminicli.com/docs/cli/tutorials/skills-getting-started/ ）：gemini CLI
+  按 agentskills 开放标准发现 skill——个人级 `~/.gemini/skills/`（不受 trust 门控）、
+  项目级 `<workspace>/.gemini/skills/`（需 workspace 被 `/trust` 标记），且把
+  `.agents/skills` 作为**别名**一并发现。格式=目录 + `SKILL.md`：frontmatter 必须含
+  `name` 与 `description`、`---` 必须是文件第一行，缺任一即被静默跳过（与本仓
+  `scan_store` 的 invalid 标记策略不同——我们宁可显式报 invalid）。另有自带的
+  `gemini skills install <url-or-path>` / `gemini skills link <path>` 安装命令。
+- **custom TOML commands 是另一套机制**（`~/.gemini/commands/*.toml`），与 skills
+  无关——无需把 skill 降级编译成 TOML，D3 的「不做有损转换」结论维持，但理由从
+  「gemini 没有 skills」更新为「gemini 有同构目录，直接投影即可（后续 change）」。
+- **本机旁证（只读）**：`~/.gemini/` 整个目录不存在（本机未初始化 gemini CLI），
+  无目录级证据可取，结论以官方文档为准。
+- **结论**：`gemini → ~/.gemini/skills (Identity)` 具备加表条件。**本期不加表行**
+  （spec 只承诺 claude 的 placement），NoPlacement 路径照旧。
+
+### opencode —— 有 agentskills 同构的 skill 目录（旧注「无目录证据」就此更新）
+
+- **官方文档**（Agent Skills | OpenCode, https://opencode.ai/docs/skills/ ）：
+  六处发现路径，每处都是「一 skill 一目录 + `SKILL.md`」——项目级
+  `.opencode/skills/<name>/SKILL.md`、`.claude/skills/<name>/SKILL.md`、
+  `.agents/skills/<name>/SKILL.md`；全局级 `~/.config/opencode/skills/<name>/SKILL.md`、
+  `~/.claude/skills/<name>/SKILL.md`、`~/.agents/skills/<name>/SKILL.md`。格式同
+  agentskills：frontmatter 必须含 `name`/`description`，且 `name` 须与目录名一致
+  （`^[a-z0-9]+(-[a-z0-9]+)*$`）。
+- **本机旁证（只读）**：`~/.config/opencode/` 顶层为 `node_modules` /
+  `opencode.jsonc` / `package-lock.json` / `package.json`，无 `skills/` 子目录——
+  本机装了 opencode 但还没装任何 skill，与文档不冲突（那个目录是装了才有的）。
+- **结论**：同构目录存在，加行条件成立；**本期同样不加表行**。附带实证收益：
+  `~/.agents/skills`（本仓默认 store 路径）与 `~/.claude/skills` 本身就在 opencode
+  的全局发现路径里——opencode 用户对投影零依赖也能读到材质。
+
+### npx skills CLI（`sebas skills add <pkg>` 所封装的社区方案）
+
+- **出处**：vercel-labs/skills（https://github.com/vercel-labs/skills ，索引站
+  https://skills.sh/ ）。`npx skills add <source>` 接受 GitHub shorthand（
+  `owner/repo`）、git URL、本地路径、SKILL.md 直链与压缩包；相关旗标：`-g`（装到
+  用户目录而非项目）、`-a <agents…>`（选目标 agent）、`-s <skills…>`（选 skill）、
+  `--copy`（拷贝代替符号链接）、`-y` / `--yes`（跳过交互）、`--all`。
+- **落盘位置不可控**：没有「指定安装目录」的旗标，目的地由它按本机 agent 检测
+  自行决定（项目 `./<agent>/skills/` 或用户 `~/<agent>/skills/`）。因此
+  `add_from_npx` 只实现到「命令执行成功」层、不把结果收编进 store（`store` 参数
+  为签名一致保留）——如实降级，6.2 手测兜底。
+
 ## Open Questions
 
-（无——gemini 的真实消费方式归进 tasks 的调研任务，结论只影响 D1 表加不加一行，
-不动 specs / 不动本设计的任何决策。）
+（无——原「gemini 的真实消费方式」已由 tasks 1.1 / 1.2 调研钉实并落盘于上方
+「方言矩阵调研」：gemini / opencode 均有官方同构 skills 目录，本期不加表行，
+后续 change 各加一行 `Placement` 即可，不动任何决策。）

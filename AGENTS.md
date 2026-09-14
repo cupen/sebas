@@ -69,7 +69,10 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
    - config `-c` path (no sandbox-safe default exists), with
      `[dispatch] state_file`, `[media] download_dir`,
      `[acp.claude] sessions_dir` / `work_dir`,
-     `[watchdog.core] channel_path`, and `[watchdog.webui]` host/port
+     `[watchdog.core] channel_path`, `[skills] dir` (defaults to the real
+     `~/.agents/skills` — pin it or `GET /api/skills` scans the operator's
+     real store; reading is already out of bounds), and `[watchdog.webui]`
+     host/port
      (port ≠ 9797, e.g. 9877) all set inside it — decide the auth posture
      explicitly: `auth = false` for login-free sandboxing, or keep the
      default-on switch and provision a user into a sandbox-local
@@ -160,6 +163,13 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
    [workspace]
    root = "<SB>"
 
+   # add-agent-skills：skill 仓钉进沙箱。缺省 ~/.agents/skills 经 expand_tilde
+   # （Known Folder，不吃 HOME env）展开到操作员真实仓——不钉，GET /api/skills
+   # 就会扫真实仓（只读也是越界）。sync 的 backend 落点（~/.claude/skills）另
+   # 经 HOME env 解析，跑 sync 的沙箱要把 HOME 也钉进 <SB>。
+   [skills]
+   dir = "<SB>/agents-skills"
+
    [watchdog.core]
    channel_path = "<SB>/core-channel.sock"
 
@@ -238,6 +248,25 @@ real model. **Not** verifiable without the operator's provider credentials: a
 REAL ACP child completing a turn — without the stub, sessions spawn then the
 child dies honestly; that is not a channel failure. Report such limits
 explicitly instead of marking the task done.
+
+## Skills 仓与 sync（add-agent-skills）
+
+- 仓即文件系统：`[skills] dir`（缺省 `~/.agents/skills`），一 skill 一目录 +
+  `SKILL.md` frontmatter。webui Settings → Skills 只是查看与移除的窗口，
+  创建/修改走 CLI、git 或社区工具，之后点 Refresh。
+- CLI 四动词：`sebas skills list | add <src> | remove <name> | sync`（`-c`
+  全局）。`add` 三形态分派：本地目录 / git URL（http(s)、git@、.git 后缀）/
+  其余交 `npx skills add`（vercel-labs/skills，落点由它自行决定，不经仓）。
+- `sync` 投影语义：方言表本期只有 claude/codex（`~/.claude/skills`、
+  `~/.codex/skills`），其余 configured backend 如实报 no placement。仓内条目
+  镜像进落点（同名**仓 wins** 覆盖）；落点里名外条目是私产，只计数不动；
+  上次投影过、仓里已删的条目随 sync 删除（名册 = 落点里的
+  `.sebas-projection.json`，丢了退化为只投影不删除，下轮自愈）。
+- **webui 删除只删仓**：backend 里的副本要等下一次 sync 才清理——确认弹窗
+  与 CLI 输出都会说明这点。
+- gemini 与 opencode 均已实证有 agentskills 同构的 skills 目录（gemini 还把
+  `.agents/skills` 当别名发现；opencode 全局发现路径就含 `~/.agents/skills`）
+  ——本期方言表不加行，加行留给后续 change（design.md「方言矩阵调研」）。
 
 ## Non-Interactive Shell Commands
 

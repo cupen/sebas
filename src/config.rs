@@ -25,7 +25,23 @@ pub struct Config {
     /// 双向滚动升级都不碎。
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    /// 操作者级 skill 仓（add-agent-skills D5）：一行可选覆盖，无 enabled /
+    /// per-backend 开关——目录缺失当空仓处理，投影面向「所有有落点的 backend」。
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
+
+/// 顶层 `[skills]` 段（add-agent-skills D5）：只有仓路径一个可选键。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillsConfig {
+    /// skill 仓目录覆盖；缺省 `~/.agents/skills`。支持 `~` 展开（with_expanded_paths
+    /// 管线）；空白视同未配置（全仓空值语义一致）。
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+/// skill 仓缺省路径（proposal/design D5）。
+pub const DEFAULT_SKILLS_DIR: &str = "~/.agents/skills";
 
 /// 顶层 `[workspace]` 段（add-workspace-root D1）：workspace root 是机器级
 /// 概念——webui 只是执法者之一，节点没有 `[watchdog.webui]` 节，放顶层使
@@ -861,6 +877,9 @@ impl Config {
             }
         }
         self.media.download_dir = expand_tilde(&self.media.download_dir);
+        if let Some(ref d) = self.skills.dir {
+            self.skills.dir = Some(expand_tilde(d));
+        }
         if let Some(ref root) = self.workspace.root {
             self.workspace.root = Some(expand_tilde(root));
         }
@@ -868,6 +887,19 @@ impl Config {
             self.log.file = Some(expand_tilde(f));
         }
         self
+    }
+
+    /// skill 仓目录（已展开 `~`）：`[skills] dir` 非空优先，缺省回退
+    /// `~/.agents/skills`。返回的是路径字符串；目录缺失不是错误（空仓语义，
+    /// 由 `skills::scan_store` 按空列表处理）。
+    pub fn skills_dir(&self) -> String {
+        self.skills
+            .dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(expand_tilde)
+            .unwrap_or_else(|| expand_tilde(DEFAULT_SKILLS_DIR))
     }
 }
 
@@ -944,6 +976,36 @@ pub fn expand_tilde(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skills_dir_default_and_override() {
+        // add-agent-skills 3.2：缺省回退 ~/.agents/skills（已展开 ~），`[skills]
+        // dir` 覆盖生效。Windows 反斜杠不能裸写进 TOML basic string，路径归一
+        // 为正斜杠。
+        let cfg = Config::parse("").expect("空配置应可解析");
+        let default_dir = cfg.skills_dir();
+        assert!(
+            !default_dir.starts_with("~"),
+            "~ 必须已展开: {default_dir}"
+        );
+        assert!(
+            default_dir.replace('\\', "/").ends_with(".agents/skills"),
+            "缺省必须是 ~/.agents/skills: {default_dir}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let override_dir = tmp.path().join("my-skills");
+        // TOML 里写正斜杠（Windows 反斜杠不能裸写进 basic string）；配置按
+        // 字面量保存，skills_dir() 原样返回正斜杠形式。
+        let override_toml = override_dir.display().to_string().replace('\\', "/");
+        let cfg = Config::parse(&format!("[skills]\ndir = \"{override_toml}\"\n"))
+            .expect("[skills] dir 应可解析");
+        assert_eq!(cfg.skills_dir(), override_toml, "显式覆盖生效");
+
+        // 空白取值视同未配置（全仓空值语义一致），回退缺省。
+        let cfg = Config::parse("[skills]\ndir = \"   \"\n").expect("空白 dir 应可解析");
+        assert_eq!(cfg.skills_dir(), default_dir);
+    }
 
     #[test]
     fn webui_enabled_by_default_and_router_disabled() {

@@ -93,6 +93,10 @@ const apiMocks = vi.hoisted(() => ({
   usersSetRole: vi.fn(),
   usersSetEnabled: vi.fn(),
   usersDelete: vi.fn(),
+  skillsList: vi.fn(),
+  skillDetail: vi.fn(),
+  skillsDelete: vi.fn(),
+  skillsSync: vi.fn(),
 }))
 
 vi.mock('../api/client.js', () => ({
@@ -138,6 +142,10 @@ vi.mock('../api/client.js', () => ({
     usersSetRole: apiMocks.usersSetRole,
     usersSetEnabled: apiMocks.usersSetEnabled,
     usersDelete: apiMocks.usersDelete,
+    skillsList: apiMocks.skillsList,
+    skillDetail: apiMocks.skillDetail,
+    skillsDelete: apiMocks.skillsDelete,
+    skillsSync: apiMocks.skillsSync,
   },
   // 角色词表（渲染层常量，Users 分区的角色下拉数据源）与真模块同值。
   ROLES: ['root', 'admin', 'member', 'viewer'] as const,
@@ -238,6 +246,48 @@ beforeEach(() => {
   apiMocks.usersSetRole.mockResolvedValue({ status: 'ok' })
   apiMocks.usersSetEnabled.mockResolvedValue({ status: 'ok' })
   apiMocks.usersDelete.mockResolvedValue({ status: 'ok' })
+  // Skills 分区（add-agent-skills 5.2）默认桩：两个有效条目 + 一个 invalid。
+  apiMocks.skillsList.mockResolvedValue({
+    skills: [
+      {
+        name: 'beads',
+        description: 'beads 工作流',
+        attachments: [],
+        valid: true,
+      },
+      {
+        name: 'my-deploy',
+        description: '部署脚本',
+        attachments: ['ref.md', 'scripts/deploy.sh'],
+        valid: true,
+      },
+      {
+        name: 'broken',
+        description: null,
+        attachments: [],
+        valid: false,
+        reason: 'SKILL.md 必须以 --- 围栏开头（frontmatter 缺失）',
+      },
+    ],
+  })
+  apiMocks.skillDetail.mockResolvedValue({
+    name: 'beads',
+    text: '---\nname: beads\ndescription: beads 工作流\n---\n\n# beads\n\nRun `bd ready` first.',
+    attachments: [],
+  })
+  apiMocks.skillsDelete.mockResolvedValue({ status: 'deleted', name: 'beads' })
+  apiMocks.skillsSync.mockResolvedValue({
+    reports: [
+      {
+        backend: 'claude',
+        written: ['beads'],
+        overwritten: ['grill-me'],
+        deleted: ['old-skill'],
+        private_ignored: 2,
+      },
+    ],
+    no_placement: ['gemini'],
+  })
   apiMocks.providerPresets.mockResolvedValue({
     presets: [
       {
@@ -299,10 +349,18 @@ afterEach(() => {
 })
 
 describe('sebas-settings-modal sections', () => {
-  it('renders the left nav with exactly Generic/Appearance/Services/Models/Env Vars/About', async () => {
+  it('renders the left nav with exactly Generic/Appearance/Services/Models/Skills/Env Vars/About', async () => {
     const el = await mount()
     const labels = navItems(el).map((b) => b.textContent?.trim())
-    expect(labels).toEqual(['Generic', 'Appearance', 'Services', 'Models', 'Env Vars', 'About'])
+    expect(labels).toEqual([
+      'Generic',
+      'Appearance',
+      'Services',
+      'Models',
+      'Skills',
+      'Env Vars',
+      'About',
+    ])
     el.remove()
   })
 
@@ -314,7 +372,7 @@ describe('sebas-settings-modal sections', () => {
     // 底部组上方的分隔线带 .tail（margin-top: auto 压底），且紧贴 Env Vars 项。
     const tail = seps.find((s) => s.classList.contains('tail'))!
     expect(tail).toBeTruthy()
-    expect(tail.previousElementSibling?.textContent?.trim()).toBe('Models')
+    expect(tail.previousElementSibling?.textContent?.trim()).toBe('Skills')
     expect(tail.nextElementSibling?.classList.contains('nav-item')).toBe(true)
     expect(tail.nextElementSibling?.textContent?.trim()).toBe('Env Vars')
     // 底部组内 Env Vars → About 之间不再有分隔线（同组并列）。
@@ -342,7 +400,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('renders no maintenance actions anywhere (restart-all and reset retired)', async () => {
     const el = await mount()
-    for (const index of [0, 1, 2, 3, 4, 5]) {
+    for (const index of [0, 1, 2, 3, 4, 5, 6]) {
       await goto(el, index)
       const buttons = waButtons(el).map((b) => b.textContent?.trim())
       expect(buttons).not.toContain('全部进程重启')
@@ -486,7 +544,7 @@ describe('sebas-settings-modal sections', () => {
 
   it('About section shows INSTANCE (overview items) above BUILD (/api/about)', async () => {
     const el = await mount()
-    await goto(el, 5)
+    await goto(el, 6)
     expect(el.section).toBe('about')
     expect(apiMocks.about).toHaveBeenCalled()
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
@@ -542,7 +600,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
     await settle(el)
     // 懒加载：未访问该分区前不拉取。
     expect(apiMocks.env).not.toHaveBeenCalled()
-    await goto(el, 4)
+    await goto(el, 5)
     expect(el.section).toBe('env-vars')
     expect(apiMocks.env).toHaveBeenCalledTimes(1)
     const rows = envRows(el)
@@ -572,7 +630,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
       ],
     })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).not.toContain('super-secret-leak')
     expect(text).toContain('已设置')
@@ -593,7 +651,7 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
       ],
     })
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     const rows = envRows(el)
     expect(rows.length).toBe(1)
     expect(rows[0]!.querySelector('.value')?.textContent?.trim()).toBe('无法确定')
@@ -603,12 +661,152 @@ describe('split-env-vars-settings-section：Env Vars 分区（/api/env）', () =
   it('renders an inline error instead of an empty table when /api/env fails', async () => {
     apiMocks.env.mockRejectedValue(new ApiError(500, 'env listing exploded'))
     const el = await mount()
-    await goto(el, 4)
+    await goto(el, 5)
     const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
     expect(err).toBeTruthy()
     expect(err!.textContent).toContain('env listing exploded')
     // 失败 → 不渲染空表假象。
     expect(el.shadowRoot!.querySelector('.env-table')).toBeNull()
+    el.remove()
+  })
+})
+
+describe('add-agent-skills 5.2：Skills 分区（/api/skills*）', () => {
+  /**
+   * 导航序（默认 role=null 挂载）：generic(0) appearance(1) services(2)
+   * models(3) skills(4) env-vars(5) about(6)。本 describe 全用 index 4。
+   */
+  function skillRows(el: SebasSettingsModal): HTMLElement[] {
+    return [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-testid="skill-row"]')]
+  }
+
+  it('lazily loads /api/skills on first visit; rows show name, attachment counts and invalid badge with reason', async () => {
+    const el = await mount()
+    await settle(el)
+    // 懒加载：未访问该分区前不拉取。
+    expect(apiMocks.skillsList).not.toHaveBeenCalled()
+    await goto(el, 4)
+    expect(el.section).toBe('skills')
+    expect(apiMocks.skillsList).toHaveBeenCalledTimes(1)
+    const rows = skillRows(el)
+    expect(rows.length).toBe(3)
+    // 名字 + attachment 数。
+    const deploy = rows.find((r) => r.dataset.name === 'my-deploy')!
+    expect(deploy.querySelector('.skills-row-atts')?.textContent?.trim()).toBe('2 attachments')
+    // invalid 徽标 + 成因（描述位显 reason）。
+    const broken = rows.find((r) => r.dataset.name === 'broken')!
+    expect(broken.querySelector('[data-testid="skill-invalid"]')).toBeTruthy()
+    expect(broken.querySelector('.skills-row-desc')?.textContent).toContain('围栏')
+    el.remove()
+  })
+
+  it('clicking a row lazily loads the detail and renders sanitized markdown plus attachment list', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    // 点开前不发详情请求。
+    expect(apiMocks.skillDetail).not.toHaveBeenCalled()
+    const beads = skillRows(el).find((r) => r.dataset.name === 'beads')!
+    beads.querySelector<HTMLElement>('.skills-row-name')!.click()
+    await settle(el)
+    expect(apiMocks.skillDetail).toHaveBeenCalledWith('beads')
+    const preview = el.shadowRoot!.querySelector('[data-testid="skill-preview"]')!
+    // SKILL.md 经 renderMarkdown（净化管线）渲染成 HTML：标题进了 <h1>。
+    const h1 = preview.querySelector('.skills-md h1')
+    expect(h1?.textContent).toBe('beads')
+    expect(preview.querySelector('.skills-md code')?.textContent).toContain('bd ready')
+    // 再点收起。
+    skillRows(el)
+      .find((r) => r.dataset.name === 'beads')!
+      .querySelector<HTMLElement>('.skills-row-name')!
+      .click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="skill-preview"]')).toBeNull()
+    el.remove()
+  })
+
+  it('never offers create or edit: toolbar carries only Refresh and Sync', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    const buttons = waButtons(el).map((b) => b.textContent?.trim())
+    expect(buttons).toContain('Refresh')
+    expect(buttons).toContain('Sync')
+    expect(buttons.some((t) => t?.includes('New') || t?.includes('Edit'))).toBe(false)
+    // 行内也没有编辑入口（只有删除 🗑）。
+    const rowActions = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.skills-row .row-action')]
+    expect(rowActions.length).toBe(3)
+    expect(rowActions.every((b) => b.title === 'Delete')).toBe(true)
+    el.remove()
+  })
+
+  it('delete confirm dialog states backend copies are cleaned at next Sync; confirming deletes and refreshes', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    const callsBefore = apiMocks.skillsList.mock.calls.length
+    skillRows(el)
+      .find((r) => r.dataset.name === 'broken')!
+      .querySelector<HTMLElement>('button[title="Delete"]')!
+      .click()
+    await el.updateComplete
+    // 确认文案讲明两段式语义：backend 副本在下次 Sync 清理。
+    const text = el.shadowRoot!.querySelector('[data-testid="skill-delete-text"]')!.textContent!
+    expect(text).toContain('broken')
+    expect(text).toContain('Sync')
+    // 取消不发请求。
+    el.shadowRoot!
+      .querySelector('wa-dialog.skill-delete')!
+      .querySelector<HTMLElement>('wa-button[appearance="plain"]')!
+      .click()
+    await el.updateComplete
+    expect(apiMocks.skillsDelete).not.toHaveBeenCalled()
+    // 确认 → DELETE + 列表重取。
+    skillRows(el)
+      .find((r) => r.dataset.name === 'broken')!
+      .querySelector<HTMLElement>('button[title="Delete"]')!
+      .click()
+    await el.updateComplete
+    el.shadowRoot!
+      .querySelector('wa-dialog.skill-delete')!
+      .querySelector<HTMLElement>('wa-button[variant="danger"]')!
+      .click()
+    await settle(el)
+    expect(apiMocks.skillsDelete).toHaveBeenCalledWith('broken')
+    expect(apiMocks.skillsList.mock.calls.length).toBeGreaterThan(callsBefore)
+    // 组件 state 已归零（对话框关闭的真源断言，与 forceStop 同姿态）。
+    expect((el as unknown as { skillDelete: unknown }).skillDelete).toBeNull()
+    el.remove()
+  })
+
+  it('Sync renders a result panel with per-backend counts and the no-placement list', async () => {
+    const el = await mount()
+    await goto(el, 4)
+    waButtons(el)
+      .find((b) => b.textContent?.trim() === 'Sync')!
+      .click()
+    await settle(el)
+    const panel = el.shadowRoot!.querySelector('[data-testid="skills-sync-result"]')!
+    const text = panel.textContent ?? ''
+    expect(text).toContain('claude')
+    expect(text).toContain('1 written')
+    expect(text).toContain('1 overwritten')
+    expect(text).toContain('1 deleted')
+    expect(text).toContain('2 private')
+    // 无落点 backend 如实呈现（reported, not skipped）。
+    expect(text).toContain('no placement: gemini')
+    // 覆盖/删除的条目名逐一点名（「仓 wins」必须可见）。
+    expect(panel.textContent).toContain('~ grill-me')
+    expect(panel.textContent).toContain('- old-skill')
+    el.remove()
+  })
+
+  it('renders an inline error instead of an empty list when /api/skills fails', async () => {
+    apiMocks.skillsList.mockRejectedValue(new ApiError(500, 'skills listing exploded'))
+    const el = await mount()
+    await goto(el, 5)
+    await goto(el, 4)
+    const err = el.shadowRoot!.querySelector('.callout-error[role="alert"]')
+    expect(err).toBeTruthy()
+    expect(err!.textContent).toContain('skills listing exploded')
+    expect(el.shadowRoot!.querySelector('[data-testid="skill-row"]')).toBeNull()
     el.remove()
   })
 })
@@ -1377,6 +1575,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       'Services',
       'Users',
       'Models',
+      'Skills',
       'Env Vars',
       'About',
     ])
@@ -1388,6 +1587,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       'Appearance',
       'Services',
       'Models',
+      'Skills',
       'Env Vars',
       'About',
     ])
@@ -1410,6 +1610,7 @@ describe('add-webui-multiuser-rbac 5.3/5.4：Users 分区与角色裁剪', () =>
       'Appearance',
       'Services',
       'Models',
+      'Skills',
       'Env Vars',
       'About',
     ])

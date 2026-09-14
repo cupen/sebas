@@ -405,6 +405,11 @@ def _sandbox_env(work, secret=True):
             # (test sessions landed in it, 93-entry pollution, 2026-09-12).
             "SEBAS_HOME": work,
             "SEBAS_ARCHIVE_PATH": os.path.join(work, "archive.json"),
+            # add-agent-skills：skills sync 的 backend 落点（claude →
+            # ~/.claude/skills）经 `skills::resolve_home()` 的 env-first
+            # （HOME > USERPROFILE > Known Folder）解析——不钉 HOME，webui 的
+            # POST /api/skills/sync 会写操作员的真实 ~/.claude/skills。
+            "HOME": work,
         }
     )
     if secret:
@@ -467,6 +472,12 @@ download_dir = "{cfg}/downloads"
 # 目录选择器起点与项目注册会跟着碎。
 [workspace]
 root = "{cfg}"
+
+# add-agent-skills：skill 仓钉进沙箱。缺省值 ~/.agents/skills 经 expand_tilde
+# （dirs::home_dir()，Windows 上走 Known Folder API、不吃 HOME 覆写）展开到
+# 操作员真实仓——不显式钉沙箱路径，GET /api/skills 就会扫真实仓（只读也是越界）。
+[skills]
+dir = "{cfg}/agents-skills"
 
 [watchdog.core]
 channel_path = "{cfg}/core-channel.sock"

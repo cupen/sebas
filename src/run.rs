@@ -327,6 +327,12 @@ pub async fn run(
         let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
             .map_err(|e| crate::error::SebasError::Router(format!("绑定 webui 端口失败: {e}")))?;
+        // add-agent-skills 5.1：skills 管理面的仓操作接缝——仓目录与
+        // placement/no_placement 表从 config 装配（core 逻辑在
+        // sebas::skills，CLI 与 webui 同源）。在 spawn **之前**装配：
+        // async move 块里借用整个 cfg 会把它整个移进 future。
+        let skills: std::sync::Arc<dyn sebas_webui::skills::SkillsService> =
+            std::sync::Arc::new(crate::skills::FsSkillsService::from_config(&cfg));
         tokio::spawn(async move {
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
@@ -338,6 +344,7 @@ pub async fn run(
                 webui_auth,
                 webui_workspace_root,
                 cfg.watchdog.webui.archive_retention_days,
+                skills,
             )
             .await;
         });

@@ -69,6 +69,9 @@ sha2 = "0.11"
 hex = "0.4"
 getrandom = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# skills add 的 git 形态要 clone 到临时目录（add-agent-skills 2.3）；原本只是
+# dev-dependency，运行时路径现在也要用。
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
@@ -77,6 +80,11 @@ libc = "0.2"
 # 只是 dev-dependency：不进入 `sebas` 的运行时依赖图，也不影响节点侧的依赖隔离
 # （隔离检查看的是 `cargo tree -p sebas-node`，方向相反）。
 sebas-node = { path = "sebas-node" }
+# /api/skills* handler 级测试（add-agent-skills 5.1）：在根 crate 的集成测试里
+# 用真 FsSkillsService 驱动 webui router。版本随 sebas-webui（同一依赖图）。
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [[bin]]
 name = "sebas"

@@ -391,6 +391,9 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         sebas_router::config::RouterConfig::parse(&raw).ok().as_ref(),
     );
     let backend_dyn: Arc<dyn sebas_webui::SessionBackend> = backend;
+    // add-agent-skills 5.1：skills 管理面的仓操作接缝——仓目录与
+    // placement/no_placement 表从 config 装配（core 逻辑在 sebas::skills）。
+    let skills = Arc::new(crate::skills::FsSkillsService::from_config(&cfg));
     sebas_webui::run_with_admin_adapter_and_auth(
         backend_dyn,
         router_info,
@@ -401,6 +404,7 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
         auth,
         webui_workspace_root,
         cfg.watchdog.webui.archive_retention_days,
+        skills,
     )
     .await;
 
