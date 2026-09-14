@@ -52,6 +52,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import {
   api,
   ROLES,
@@ -65,10 +66,14 @@ import {
   type ProviderModelEntry,
   type ModelCapability,
   type Role,
+  type SkillDetail,
+  type SkillEntry,
+  type SkillsSyncResponse,
   type UserRecord,
   ApiError,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
+import { renderMarkdown } from '../components/markdown.js'
 import { viewStyles } from '../styles/shared.js'
 import { getThemeMode, resolvesToLight, setThemeMode, type ThemeMode } from '../theme.js'
 
@@ -93,6 +98,7 @@ export type SettingsSection =
   | 'services'
   | 'users'
   | 'models'
+  | 'skills'
   | 'env-vars'
   | 'about'
 
@@ -116,6 +122,7 @@ const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: string
   { id: 'services', label: 'Services', icon: 'shield' },
   { id: 'users', label: 'Users', icon: 'users' },
   { id: 'models', label: 'Models', icon: 'zap' },
+  { id: 'skills', label: 'Skills', icon: 'skills' },
   { id: 'env-vars', label: 'Env Vars', icon: 'about' },
   { id: 'about', label: 'About', icon: 'about' },
 ]
@@ -133,6 +140,8 @@ const SECTION_DESC: Record<SettingsSection, string> = {
   services: 'Background services that run alongside sebas.',
   users: 'Operator accounts for this instance. Root only — changes take effect immediately.',
   models: 'Manage model providers. Preset-derived values follow the app code; you own the API key.',
+  skills:
+    'Agent skills stored on this machine. Browse and remove entries, then Sync to project the store onto your agents. This page never creates or edits skills — use the CLI, git or npx, then Refresh.',
   'env-vars':
     'Read-only reference: the environment variables this sebas instance reads. Sensitive ones only show whether they are set.',
   about: 'What this instance is — its workspace, defaults, and the build it runs on.',
@@ -270,6 +279,19 @@ export class SebasSettingsModal extends LitElement {
     null
   /** 删除确认（error 就地承载最后-root/自删保护文案）。 */
   @state() private userDelete: { id: number; username: string; error: string } | null = null
+  // ---- Skills 分区（add-agent-skills 5.2，/api/skills*）----
+  /** 仓内条目列表；null = 尚未加载或加载失败（skillsError 置位、内联错误态）。 */
+  @state() private skills: SkillEntry[] | null = null
+  @state() private skillsError = ''
+  /** 展开预览的条目名 + 其详情（懒加载：点开才拉 SKILL.md 原文）。 */
+  @state() private skillPreview: { name: string; detail: SkillDetail | null; error: string } | null =
+    null
+  /** 同步动作的内联结果（成功 = 结果面板；失败 = 错误文案）。 */
+  @state() private skillSync: { ok: boolean; outcome: SkillsSyncResponse | null; error: string } | null =
+    null
+  @state() private skillBusy = false
+  /** 删除确认对话框目标（null = 关闭）。 */
+  @state() private skillDelete: { name: string; error: string } | null = null
   /**
    * Router 停止被拒的第二层对话框（unify-router-process-shape D4：拒绝驱动，
    * 前端不做活跃数预查询）：目标服务名 + 拒绝携带的活跃 routed 会话计数；
@@ -983,6 +1005,128 @@ export class SebasSettingsModal extends LitElement {
       color: var(--sebas-text-faint);
       white-space: nowrap;
     }
+    /* Skills 分区（add-agent-skills 5.2）：条目列表（名字/invalid 徽标/
+     * description/attachment 数/删除）+ 点开的预览（markdown 渲染 + 随附
+     * 文件清单）+ 同步结果面板。 */
+    .skills-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sebas-space-2);
+    }
+    .skills-row {
+      border: 1px solid var(--sebas-border);
+      border-radius: 8px;
+      padding: var(--sebas-space-2) var(--sebas-space-3);
+    }
+    .skills-row-main {
+      display: flex;
+      align-items: center;
+      gap: var(--sebas-space-3);
+      min-width: 0;
+    }
+    .skills-row-name {
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+      color: var(--sebas-text-bright);
+      white-space: nowrap;
+    }
+    .skills-row-desc {
+      flex: 1;
+      color: var(--sebas-text-dim);
+      font-size: 0.85rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .skills-row-atts {
+      color: var(--sebas-text-faint);
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+    .skills-preview {
+      margin-top: var(--sebas-space-3);
+      padding-top: var(--sebas-space-3);
+      border-top: 1px dashed var(--sebas-border);
+    }
+    .skills-md {
+      font-size: 0.85rem;
+      line-height: 1.55;
+      color: var(--sebas-text-dim);
+      overflow-wrap: anywhere;
+    }
+    .skills-md h1,
+    .skills-md h2,
+    .skills-md h3 {
+      color: var(--sebas-text-bright);
+      margin: var(--sebas-space-3) 0 var(--sebas-space-1);
+    }
+    .skills-md h1:first-child {
+      margin-top: 0;
+    }
+    .skills-md pre {
+      background: var(--sebas-bg-elevated, rgba(255, 255, 255, 0.04));
+      border: 1px solid var(--sebas-border);
+      border-radius: 6px;
+      padding: var(--sebas-space-2);
+      overflow-x: auto;
+    }
+    .skills-md code {
+      font-family: var(--sebas-font-mono);
+      font-size: 0.78rem;
+    }
+    .skills-md p > code,
+    .skills-md li > code {
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 4px;
+      padding: 0 0.25em;
+    }
+    .skills-atts {
+      margin-top: var(--sebas-space-3);
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: var(--sebas-space-2);
+    }
+    .skills-atts code {
+      font-family: var(--sebas-font-mono);
+      font-size: 0.72rem;
+      color: var(--sebas-text-faint);
+      border: 1px solid var(--sebas-border);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+    .skills-sync {
+      margin-bottom: var(--sebas-space-3);
+      display: flex;
+      flex-direction: column;
+      gap: var(--sebas-space-2);
+    }
+    .skills-sync-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: var(--sebas-space-3);
+    }
+    .skills-sync-counts {
+      color: var(--sebas-text-dim);
+      font-size: 0.8rem;
+      font-family: var(--sebas-font-mono);
+    }
+    .skills-sync-names {
+      width: 100%;
+      color: var(--sebas-text-faint);
+      font-size: 0.78rem;
+    }
+    .skills-sync-noplace {
+      color: var(--sebas-text-faint);
+      font-size: 0.8rem;
+      border-top: 1px dashed var(--sebas-border);
+      padding-top: var(--sebas-space-2);
+    }
     /* About 分区：INSTANCE 段在上（原 Settings 总览三只读项）、BUILD 段
      * （/api/about）在下的分段小标题。 */
     .about-seg-title {
@@ -1116,6 +1260,9 @@ export class SebasSettingsModal extends LitElement {
     if (changed.has('section') && this.section === 'users') this.loadUsers()
     // Env Vars 分区：策划环境变量清单（每次切入都刷新，与 services 同款）。
     if (changed.has('section') && this.section === 'env-vars') this.loadEnvVars()
+    // Skills 分区：仓内条目列表（每次切入都刷新——spec「refresh reflects
+    // on-disk community changes」，社区工具在盘上加的东西切入即见）。
+    if (changed.has('section') && this.section === 'skills') this.loadSkills()
   }
 
   /**
@@ -1267,6 +1414,119 @@ export class SebasSettingsModal extends LitElement {
   /** 行内错误文案归一：400/409 的响应 error 字段原文优先。 */
   private userErrorText(err: unknown): string {
     return err instanceof ApiError ? err.message : String(err)
+  }
+
+  // ---- Skills 分区（add-agent-skills 5.2）----
+
+  /**
+   * 仓列表加载（GET /api/skills）：每次切入分区都刷新（spec「refresh
+   * reflects on-disk community changes」）。失败 → skillsError 置位、skills
+   * 归 null——分区内联错误态，不渲染空列表假象；401 仍由全局未授权钩子
+   * 接管。切入同时清掉上次展开的预览与同步结果（列表已换，旧细节失效）。
+   */
+  private loadSkills(): void {
+    this.skillsError = ''
+    this.skillPreview = null
+    this.skillSync = null
+    api
+      .skillsList()
+      .then((d) => {
+        this.skills = d.skills
+      })
+      .catch((e) => {
+        this.skillsError = e instanceof ApiError ? e.message : String(e)
+        this.skills = null
+      })
+  }
+
+  /** 刷新按钮：只重取列表（不动预览/同步面板——它们属于当前视图状态）。 */
+  private refreshSkills(): void {
+    this.skillsError = ''
+    api
+      .skillsList()
+      .then((d) => {
+        this.skills = d.skills
+        // 预览目标被删掉时收起预览（详情随条目一起没了）。
+        if (this.skillPreview && !d.skills.some((s) => s.name === this.skillPreview!.name)) {
+          this.skillPreview = null
+        }
+      })
+      .catch((e) => {
+        this.skillsError = e instanceof ApiError ? e.message : String(e)
+      })
+  }
+
+  /** 点开/收起预览：懒加载 SKILL.md 原文（GET /api/skills/{name}）。 */
+  private toggleSkillPreview(name: string): void {
+    if (this.skillPreview?.name === name) {
+      this.skillPreview = null
+      return
+    }
+    this.skillPreview = { name, detail: null, error: '' }
+    api
+      .skillDetail(name)
+      .then((detail) => {
+        if (this.skillPreview?.name === name) this.skillPreview = { name, detail, error: '' }
+      })
+      .catch((e) => {
+        if (this.skillPreview?.name === name) {
+          this.skillPreview = {
+            name,
+            detail: null,
+            error: e instanceof ApiError ? e.message : String(e),
+          }
+        }
+      })
+  }
+
+  /** 同步按钮：POST /api/skills/sync → 结果面板（逐 backend 报告 + 无落点）。 */
+  private async runSkillsSync(): Promise<void> {
+    if (this.skillBusy) return
+    this.skillBusy = true
+    try {
+      const outcome = await api.skillsSync()
+      this.skillSync = { ok: true, outcome, error: '' }
+    } catch (err) {
+      this.skillSync = {
+        ok: false,
+        outcome: null,
+        error: err instanceof ApiError ? err.message : String(err),
+      }
+    } finally {
+      this.skillBusy = false
+    }
+  }
+
+  /** 确认删除（DELETE /api/skills/{name}）：只删仓；成功后刷新列表并收预览。 */
+  private async confirmSkillDelete(): Promise<void> {
+    const target = this.skillDelete
+    if (!target || this.skillBusy) return
+    this.skillBusy = true
+    this.skillDelete = { ...target, error: '' }
+    try {
+      await api.skillsDelete(target.name)
+      this.skillDelete = null
+      await this.refreshSkillsOnce()
+      if (this.skillPreview?.name === target.name) this.skillPreview = null
+    } catch (err) {
+      this.skillDelete = {
+        ...target,
+        error: err instanceof ApiError ? err.message : String(err),
+      }
+    } finally {
+      this.skillBusy = false
+    }
+  }
+
+  private refreshSkillsOnce(): Promise<void> {
+    return api
+      .skillsList()
+      .then((d) => {
+        this.skills = d.skills
+      })
+      .catch((e) => {
+        this.skillsError = e instanceof ApiError ? e.message : String(e)
+      })
   }
 
   private openUserCreate(): void {
@@ -1787,6 +2047,11 @@ export class SebasSettingsModal extends LitElement {
           ${this.renderSectionHead(section)}
           ${this.renderModels()}
         `
+      case 'skills':
+        return html`
+          ${this.renderSectionHead(section)}
+          ${this.renderSkills()}
+        `
       case 'appearance':
         return html`
           ${this.renderSectionHead(section)}
@@ -1905,6 +2170,173 @@ export class SebasSettingsModal extends LitElement {
                   </span>
                 `,
               )}
+            </div>`
+          : nothing}
+      </div>
+    `
+  }
+
+  /**
+   * Skills（add-agent-skills 5.2）：仓内条目列表 + 预览 + 删除 + 同步。
+   * webui 是「查看与移除的窗口，不是编辑器」——工具条上只有 Refresh 与
+   * Sync，绝不渲染 create/edit 入口（spec 明令）；创建与修改走 CLI /
+   * git / npx 后点 Refresh。加载中显骨架、失败显内联错误态（与其余分区
+   * 同款 callout），绝不渲染空列表冒充成功。
+   */
+  private renderSkills() {
+    if (this.skillsError)
+      return html`
+        <div class="callout callout-error" role="alert">
+          ${icon('alert')}<span>Failed to load: ${this.skillsError}</span>
+        </div>
+      `
+    const list = this.skills
+    return html`
+      <div class="provider-toolbar">
+        <wa-button appearance="outlined" ?disabled=${this.skillBusy} @click=${() => this.refreshSkills()}>
+          Refresh
+        </wa-button>
+        <wa-button
+          variant="brand"
+          appearance="filled"
+          ?disabled=${this.skillBusy}
+          @click=${() => void this.runSkillsSync()}
+        >
+          ${this.skillBusy ? 'Syncing…' : 'Sync'}
+        </wa-button>
+        <span class="label" role="status">
+          ${list === null ? '' : `${list.length} skill${list.length === 1 ? '' : 's'} in store`}
+        </span>
+      </div>
+      ${this.renderSkillSyncPanel()}
+      ${list === null
+        ? html`
+            <div class="panel panel-pad">
+              <div class="skel-row"><div class="skel skel-line" style="width:50%"></div></div>
+              <div class="skel-row"><div class="skel skel-line" style="width:35%"></div></div>
+            </div>
+          `
+        : list.length === 0
+          ? html`<div class="panel panel-pad">
+              <p class="prefs-placeholder">
+                The skill store is empty. Add skills with <code>sebas skills add</code>, git or
+                npx — then Refresh.
+              </p>
+            </div>`
+          : html`
+              <div class="skills-list">
+                ${list.map((s) => this.renderSkillRow(s))}
+              </div>
+            `}
+    `
+  }
+
+  /** 同步结果面板（Sync 之后出现）：逐 backend 的 written/overwritten/
+   * deleted/private_ignored 计数 + 无落点 backend 名单（如实呈现，spec
+   * 「reported, not skipped」）。 */
+  private renderSkillSyncPanel() {
+    const s = this.skillSync
+    if (!s) return nothing
+    if (!s.ok)
+      return html`
+        <div class="callout callout-error" role="alert" data-testid="skills-sync-error">
+          ${icon('alert')}<span>Sync failed: ${s.error}</span>
+        </div>
+      `
+    const o = s.outcome!
+    return html`
+      <div class="panel panel-pad skills-sync" data-testid="skills-sync-result">
+        ${o.reports.length === 0 && o.no_placement.length === 0
+          ? html`<p class="prefs-placeholder">Nothing to project — no backends with a skill placement.</p>`
+          : nothing}
+        ${o.reports.map(
+          (r) => html`
+            <div class="skills-sync-row">
+              <strong>${r.backend}</strong>
+              <span class="skills-sync-counts">
+                ${r.written.length} written · ${r.overwritten.length} overwritten ·
+                ${r.deleted.length} deleted · ${r.private_ignored} private
+              </span>
+              ${r.overwritten.length || r.deleted.length
+                ? html`<div class="skills-sync-names">
+                    ${r.overwritten.map((n) => html`<div>~ ${n}（覆盖，仓 wins）</div>`)}
+                    ${r.deleted.map((n) => html`<div>- ${n}（已从仓删除，投影随删）</div>`)}
+                  </div>`
+                : nothing}
+            </div>
+          `,
+        )}
+        ${o.no_placement.length
+          ? html`<div class="skills-sync-noplace">
+              no placement: ${o.no_placement.join(', ')}（这些 agent 没有已知的 skills
+              目录约定，sync 未写任何文件）
+            </div>`
+          : nothing}
+      </div>
+    `
+  }
+
+  /** 单个 skill 行：名字（点开预览）/ invalid 徽标（悬停显原因）/
+   * description / attachment 数 / 删除按钮。 */
+  private renderSkillRow(s: SkillEntry) {
+    const open = this.skillPreview?.name === s.name
+    return html`
+      <div class="skills-row" data-testid="skill-row" data-name=${s.name}>
+        <div class="skills-row-main">
+          <button
+            class="skills-row-name"
+            title=${open ? 'Collapse preview' : 'Preview SKILL.md'}
+            @click=${() => this.toggleSkillPreview(s.name)}
+          >
+            ${open ? '▾' : '▸'} ${s.name}
+          </button>
+          ${s.valid
+            ? nothing
+            : html`<span class="provider-badge custom" title=${s.reason ?? ''} data-testid="skill-invalid">
+                invalid
+              </span>`}
+          <span class="skills-row-desc">${s.valid ? (s.description ?? '') : (s.reason ?? '')}</span>
+          <span class="skills-row-atts">
+            ${s.attachments.length} attachment${s.attachments.length === 1 ? '' : 's'}
+          </span>
+          <span class="provider-row-actions">
+            <button
+              class="row-action danger"
+              title="Delete"
+              ?disabled=${this.skillBusy}
+              @click=${() => (this.skillDelete = { name: s.name, error: '' })}
+            >
+              🗑
+            </button>
+          </span>
+        </div>
+        ${open ? this.renderSkillPreview() : nothing}
+      </div>
+    `
+  }
+
+  /** 预览区：SKILL.md 经 renderMarkdown（marked → DOMPurify → hljs，与
+   * 会话转写同一净化管线）渲染 + attachment 文件名清单。正文缺失（invalid
+   * 条目没有 SKILL.md）如实呈现，不冒充空正文。 */
+  private renderSkillPreview() {
+    const p = this.skillPreview!
+    if (p.error)
+      return html`
+        <div class="callout callout-error" role="alert">
+          ${icon('alert')}<span>Failed to load: ${p.error}</span>
+        </div>
+      `
+    if (!p.detail)
+      return html`<div class="skel-row"><div class="skel skel-line" style="width:70%"></div></div>`
+    return html`
+      <div class="skills-preview" data-testid="skill-preview">
+        ${p.detail.text === null
+          ? html`<div class="callout" role="status">SKILL.md 缺失（invalid 条目），无正文可预览。</div>`
+          : html`<div class="skills-md">${unsafeHTML(renderMarkdown(p.detail.text))}</div>`}
+        ${p.detail.attachments.length
+          ? html`<div class="skills-atts">
+              <span class="label">attachments</span>
+              ${p.detail.attachments.map((a) => html`<code>${a}</code>`)}
             </div>`
           : nothing}
       </div>
@@ -2351,6 +2783,7 @@ export class SebasSettingsModal extends LitElement {
       </div>
       ${this.renderProviderDialogs()}
       ${this.renderUserDialogs()}
+      ${this.renderSkillsDialogs()}
     `
   }
 
@@ -2607,6 +3040,50 @@ export class SebasSettingsModal extends LitElement {
           variant="danger"
           ?disabled=${this.userBusy}
           @click=${() => void this.confirmUserDelete()}
+        >
+          Delete
+        </wa-button>
+      </wa-dialog>
+    `
+  }
+
+  /**
+   * Skills 删除确认对话框（add-agent-skills 5.2）：DELETE 只删仓——backend
+   * 里的副本在**下一次 sync** 时清理，文案必须讲明这个两段式语义（spec
+   * 「webui delete removes from the store」+ design 风险段）。失败（409/500
+   * 等）文案就地展示、对话框保持打开；带 wa-hide 来源守卫（与其他对话框
+   * 同款）。
+   */
+  private renderSkillsDialogs() {
+    return html`
+      <wa-dialog
+        label="Delete skill"
+        ?open=${this.skillDelete !== null}
+        @wa-hide=${this.guardedHide(() => (this.skillDelete = null))}
+        class="skill-delete"
+      >
+        ${this.skillDelete === null
+          ? nothing
+          : html`
+              <p class="dialog-text" data-testid="skill-delete-text">
+                Delete skill <strong>${this.skillDelete.name}</strong> from the store? The copies
+                in backend skill directories are left in place — they will be cleaned up the next
+                time you press <strong>Sync</strong>.
+              </p>
+              ${this.skillDelete.error
+                ? html`<div class="callout callout-error" role="alert" data-testid="skill-delete-error">
+                    ${this.skillDelete.error}
+                  </div>`
+                : nothing}
+            `}
+        <wa-button slot="footer" appearance="plain" @click=${() => (this.skillDelete = null)}>
+          Cancel
+        </wa-button>
+        <wa-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${this.skillBusy}
+          @click=${() => void this.confirmSkillDelete()}
         >
           Delete
         </wa-button>

@@ -163,6 +163,27 @@ async fn main() -> anyhow::Result<()> {    // reqwest 0.12 链路启用 rustls/a
             }
             Ok(())
         }
+        Cmd::Skills(args) => {
+            // 一次性管理命令（非服务）：失败按普通错误退出 1。
+            let args = sebas::skills_cmd::SkillsArgs {
+                config: args.config,
+                cmd: match args.cmd {
+                    cli::SkillsCmd::List => sebas::skills_cmd::SkillsCmd::List,
+                    cli::SkillsCmd::Add { source } => {
+                        sebas::skills_cmd::SkillsCmd::Add { source }
+                    }
+                    cli::SkillsCmd::Remove { name } => {
+                        sebas::skills_cmd::SkillsCmd::Remove { name }
+                    }
+                    cli::SkillsCmd::Sync => sebas::skills_cmd::SkillsCmd::Sync,
+                },
+            };
+            if let Err(e) = sebas::skills_cmd::run(args) {
+                eprintln!("error: {e:?}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::AgentBench(args) => {
             let record = args.record.as_deref().map(std::path::Path::new);
             let out = sebas_agent::bench::run(args.smoke, &args.tasks, record, args.debug, args.replay).await;
@@ -840,6 +861,48 @@ mod tests {
             panic!("expected Image subcommand");
         };
         assert_eq!(path, "a.png");
+    }
+
+    #[test]
+    fn skills_subcommand_parses_all_four_verbs() {
+        // add-agent-skills 4.1–4.4：list / add / remove / sync 四个子命令，
+        // `-c` 沿用全仓惯例（缺省 ./config.toml）。
+        let cli = Cli::try_parse_from(["sebas", "skills", "list"])
+            .expect("`sebas skills list` must parse");
+        let Cmd::Skills(args) = cli.cmd else {
+            panic!("expected Skills subcommand");
+        };
+        assert_eq!(args.config, "./config.toml");
+        assert!(matches!(args.cmd, cli::SkillsCmd::List));
+
+        let cli = Cli::try_parse_from(["sebas", "skills", "-c", "x.toml", "add", "./my-skill"])
+            .expect("`sebas skills add <src>` must parse");
+        let Cmd::Skills(args) = cli.cmd else {
+            panic!("expected Skills subcommand");
+        };
+        assert_eq!(args.config, "x.toml");
+        let cli::SkillsCmd::Add { source } = args.cmd else {
+            panic!("expected Add subcommand");
+        };
+        assert_eq!(source, "./my-skill");
+
+        let cli = Cli::try_parse_from(["sebas", "skills", "remove", "beads"])
+            .expect("`sebas skills remove <name>` must parse");
+        let Cmd::Skills(args) = cli.cmd else {
+            panic!("expected Skills subcommand");
+        };
+        let cli::SkillsCmd::Remove { name } = args.cmd else {
+            panic!("expected Remove subcommand");
+        };
+        assert_eq!(name, "beads");
+
+        let cli =
+            Cli::try_parse_from(["sebas", "skills", "sync"]).expect("`sebas skills sync` must parse");
+        assert!(matches!(cli.cmd, Cmd::Skills(a) if matches!(a.cmd, cli::SkillsCmd::Sync)));
+
+        // add/remove 的位置参数必填：缺了就是 clap 解析错误。
+        assert!(Cli::try_parse_from(["sebas", "skills", "add"]).is_err());
+        assert!(Cli::try_parse_from(["sebas", "skills", "remove"]).is_err());
     }
 
     #[test]

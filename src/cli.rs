@@ -62,6 +62,11 @@ pub enum Cmd {
     /// 会话外直连飞书的一次性命令：发文本/图片给指定会话（通知/运维）。
     /// 直接使用 `[feishu]` 凭据，不经过任何运行中的 sebas 实例。
     Feishu(FeishuArgs),
+    /// 操作者级 skill 仓（agentskills 格式，add-agent-skills 4.1–4.4）：
+    /// list / add / remove / sync。add 是社区流程的薄封装（本地目录 /
+    /// git URL / npx skills add 三形态分派）；sync 把仓投影到 configured
+    /// backends（claude/codex），无落点的 backend 如实报告 no placement。
+    Skills(SkillsArgs),
 }
 
 /// `sebas feishu` — 会话外飞书交互（通知用户、投递图片等）。
@@ -92,6 +97,44 @@ pub enum FeishuCmd {
         /// 图片文件路径（png/jpg 等飞书支持的格式）。
         path: String,
     },
+}
+
+/// `sebas skills` 的参数（src/skills_cmd.rs；core 逻辑全在 sebas::skills，
+/// 这里只是薄壳的薄壳）。
+#[derive(Parser)]
+pub struct SkillsArgs {
+    /// Path to the sebas config.toml（仓目录 = `[skills] dir`，缺省
+    /// `~/.agents/skills`；sync 的投影对象 = `[acp.agents.*]`）。global：
+    /// `sebas skills -c <path> list` 与 `sebas skills list -c <path>` 皆可。
+    #[arg(short = 'c', long, default_value = "./config.toml", global = true)]
+    pub config: String,
+
+    #[command(subcommand)]
+    pub cmd: SkillsCmd,
+}
+
+/// `sebas skills` 子命令（与 src/skills_cmd.rs 的 SkillsCmd 一一对应）。
+#[derive(Subcommand)]
+pub enum SkillsCmd {
+    /// 列出仓内条目：name / description / invalid 标记（附原因）。仓目录
+    /// 缺失按空仓处理，不报错。
+    List,
+    /// 落仓一个来源：本地目录（校验 SKILL.md 后整目录拷贝）/ git URL
+    /// （http(s)、git@ 前缀或 .git 后缀）/ 其余交 `npx skills add`。
+    Add {
+        /// 来源：本地目录路径、git URL 或 npx 包描述（如 `owner/repo`）。
+        source: String,
+    },
+    /// 只删仓内条目；绝不动任何 backend（backend 里的副本在下一次
+    /// `sebas skills sync` 时清理）。不存在即报错。
+    Remove {
+        /// 仓内条目名（目录名，不是 frontmatter 的 name）。
+        name: String,
+    },
+    /// 把仓投影到 configured backends 的 skill 目录（镜像语义：仓 wins；
+    /// 上次投影过、这次仓里已无的条目随删；名外条目是私产，不碰）。
+    /// 无落点约定的 backend 如实报告 no placement。
+    Sync,
 }
 
 /// `sebas agent-bench` — scripted-client capability benchmark.

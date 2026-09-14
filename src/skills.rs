@@ -412,11 +412,12 @@ pub fn reconcile(store: &Path, backend_dir: &Path) -> Result<SyncReport> {
     Ok(report)
 }
 
-/// 名册条目只允许充当一级目录名（reconcile 删除路径的安全阀）：拒绝空名、
-/// `.` / `..` 与任何带路径分隔符的名字。
-fn is_safe_entry_name(name: &str) -> bool {
+/// 名册条目/仓条目名只允许充当一级目录名（reconcile 删除路径与 remove /
+/// URL 参数共享的安全阀）：拒绝空名、`.` / `..`、任何带路径分隔符与 NUL 的
+/// 名字。
+pub fn is_safe_entry_name(name: &str) -> bool {
     !name.is_empty()
-        && !name.contains(['/', '\\'])
+        && !name.contains(['/', '\\', '\0'])
         && Path::new(name).file_name().is_some_and(|n| n == name)
 }
 
@@ -493,6 +494,213 @@ pub fn placement_for(backend_kind: &str, home: &Path) -> Option<Placement> {
             dir: home.join(rel),
             convert: Convert::Identity,
         })
+}
+
+// ── 薄壳共用操作面（tasks 4.1–4.4 CLI / 5.1 webui，design D4）───────────────
+
+/// 家目录解析（sync 投影落点的 home 来源）：env 优先（`HOME` > `USERPROFILE`
+/// ——测试覆写即钉住沙箱，与 `im_cmd` 的 env-first 同款）；缺失回退
+/// `dirs::home_dir()`（与 `config::expand_tilde` 同源；注意 Windows 上它走
+/// Known Folder API、不吃 env 覆写，所以 env 检测必须在前面）；再缺失回退
+/// 当前目录。
+pub fn resolve_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()))
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 按名删除仓内条目（tasks 4.3 / webui DELETE）：只删 `<store>/<name>`，
+/// **不动任何 backend**（backend 里的副本归下一次 sync 清理）。名字非法或
+/// 条目不在仓 → Err。
+pub fn remove_skill(store: &Path, name: &str) -> Result<()> {
+    if !is_safe_entry_name(name) {
+        return Err(SebasError::Skills(format!("非法的 skill 名 {name:?}")));
+    }
+    let dir = store.join(name);
+    if !dir.is_dir() {
+        return Err(SebasError::Skills(format!(
+            "仓里没有条目 {name:?}（store={}），无需删除",
+            store.display()
+        )));
+    }
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// 一个条目的详情（webui `GET /api/skills/{name}` 的取材）：SKILL.md 原文
+/// + attachments 文件名列表。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDetailText {
+    pub name: String,
+    /// SKILL.md 原文；条目在仓但缺该文件（invalid）时为 None——诚实呈现，
+    /// 不冒充 404。
+    pub text: Option<String>,
+    pub attachments: Vec<String>,
+}
+
+/// 读条目详情：名字非法或条目不在仓 → None。
+pub fn skill_detail(store: &Path, name: &str) -> Option<SkillDetailText> {
+    if !is_safe_entry_name(name) {
+        return None;
+    }
+    let entry = scan_store(store).into_iter().find(|s| s.name == name)?;
+    let text = fs::read_to_string(store.join(name).join(SKILL_FILE)).ok();
+    Some(SkillDetailText {
+        name: name.to_string(),
+        text,
+        attachments: entry.attachments,
+    })
+}
+
+/// 一次 sync 对一个 configured backend 的结果：`report = Some` → 有落点、
+/// 已投影；`None` → NoPlacement（spec「reported, not skipped」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendOutcome {
+    pub backend: String,
+    pub report: Option<SyncReport>,
+}
+
+/// 对一个 configured backend kind 跑投影（tasks 4.4）：方言表命中 →
+/// reconcile，未命中 → [`BackendOutcome`] 带 `report = None`。
+pub fn sync_kind(store: &Path, kind: &str, home: &Path) -> Result<BackendOutcome> {
+    match placement_for(kind, home) {
+        Some(placement) => Ok(BackendOutcome {
+            backend: kind.to_string(),
+            report: Some(reconcile(store, &placement.dir)?),
+        }),
+        None => Ok(BackendOutcome {
+            backend: kind.to_string(),
+            report: None,
+        }),
+    }
+}
+
+/// 全量 sync：对每个 configured backend kind（顺序 = [`configured_kinds`]）
+/// 各出一个 [`BackendOutcome`]。单个 backend 投影失败即整单失败——报告不
+/// 完整宁可报错。
+pub fn sync_all(store: &Path, kinds: &[String], home: &Path) -> Result<Vec<BackendOutcome>> {
+    kinds.iter().map(|k| sync_kind(store, k, home)).collect()
+}
+
+/// configured backend kinds（排序去重）：取 `[acp.agents.*]` 键；一个都没配
+/// 时回退 default kind（历史语义：无配置时的隐式 claude，与
+/// `AcpConfig::default_kind_binary` 的兜底理由一致）——`sebas skills sync`
+/// 在出厂配置上也有明确可投影的对象。
+pub fn configured_kinds(cfg: &crate::config::Config) -> Vec<String> {
+    let mut kinds: Vec<String> = cfg.acp.agents.keys().cloned().collect();
+    if kinds.is_empty() {
+        kinds.push(cfg.acp.default_kind().to_string());
+    }
+    kinds.sort();
+    kinds
+}
+
+// ── webui 接缝的文件系统实现（tasks 5.1；trait 见 sebas_webui::skills）──────
+
+/// [`sebas_webui::skills::SkillsService`] 的文件系统实现：仓目录与
+/// placement / no_placement 表在装配时定死，操作全部委托本模块 core 函数
+/// ——CLI 与 webui 两调用方同源（design「core 是唯一逻辑所在地」）。
+pub struct FsSkillsService {
+    store: PathBuf,
+    /// 有落点的 configured backend：(kind, 落点目录)。
+    placements: Vec<(String, PathBuf)>,
+    /// 无落点的 configured backend（spec：如实报告，不许静默跳过）。
+    no_placement: Vec<String>,
+}
+
+impl FsSkillsService {
+    /// 生产装配：仓目录 = config `[skills] dir`（已展开 `~`），placement 表
+    /// = configured kinds × 方言表（home 经 [`resolve_home`] 解析）。
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        let store = PathBuf::from(cfg.skills_dir());
+        let home = resolve_home();
+        let mut placements = Vec::new();
+        let mut no_placement = Vec::new();
+        for kind in configured_kinds(cfg) {
+            match placement_for(&kind, &home) {
+                Some(p) => placements.push((kind, p.dir)),
+                None => no_placement.push(kind),
+            }
+        }
+        Self {
+            store,
+            placements,
+            no_placement,
+        }
+    }
+
+    /// 测试装配：store 与落点表直接注入（tempdir 沙箱，绝不触真实 HOME）。
+    pub fn with_placements(
+        store: PathBuf,
+        placements: Vec<(String, PathBuf)>,
+        no_placement: Vec<String>,
+    ) -> Self {
+        Self {
+            store,
+            placements,
+            no_placement,
+        }
+    }
+}
+
+impl sebas_webui::skills::SkillsService for FsSkillsService {
+    fn list(&self) -> Vec<sebas_webui::skills::SkillEntry> {
+        scan_store(&self.store)
+            .into_iter()
+            .map(|s| sebas_webui::skills::SkillEntry {
+                name: s.name,
+                description: s.description,
+                attachments: s.attachments,
+                valid: s.valid,
+                reason: s.invalid_reason,
+            })
+            .collect()
+    }
+
+    fn detail(&self, name: &str) -> Option<sebas_webui::skills::SkillDetail> {
+        skill_detail(&self.store, name).map(|d| sebas_webui::skills::SkillDetail {
+            name: d.name,
+            text: d.text,
+            attachments: d.attachments,
+        })
+    }
+
+    fn delete(&self, name: &str) -> std::result::Result<bool, String> {
+        if !is_safe_entry_name(name) {
+            return Ok(false);
+        }
+        let dir = self.store.join(name);
+        if !dir.is_dir() {
+            return Ok(false);
+        }
+        fs::remove_dir_all(&dir)
+            .map(|_| true)
+            .map_err(|e| e.to_string())
+    }
+
+    fn sync(&self) -> std::result::Result<sebas_webui::skills::SkillsSyncOutcome, String> {
+        let reports = self
+            .placements
+            .iter()
+            .map(|(kind, dir)| {
+                reconcile(&self.store, dir).map(|report| sebas_webui::skills::BackendSyncReport {
+                    backend: kind.clone(),
+                    written: report.written,
+                    overwritten: report.overwritten,
+                    deleted: report.deleted,
+                    private_ignored: report.private_ignored,
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, SebasError>>()
+            .map_err(|e| e.to_string())?;
+        Ok(sebas_webui::skills::SkillsSyncOutcome {
+            reports,
+            no_placement: self.no_placement.clone(),
+        })
+    }
 }
 
 // ── 外部命令探测与执行（tasks 2.3）───────────────────────────────────────────

@@ -9,6 +9,7 @@ use crate::models::RouterInfo;
 use crate::rbac::Permission;
 use crate::routes;
 use crate::session_backend::SessionBackend;
+use crate::skills::{SkillsService, UnwiredSkills};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -49,6 +50,9 @@ pub struct WebUiState {
     /// 装配方经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）
     /// 计算后注入。
     pub workspace_root: std::path::PathBuf,
+    /// skills 管理面（add-agent-skills 5.1）：仓操作接缝，实现在主 crate
+    /// （复用 core 的扫仓/删除/投影），未接线的最小装配按空仓诚实退化。
+    pub skills: Arc<dyn SkillsService>,
 }
 
 /// 便捷装配形态（测试 / 最小入口）的 workspace root 缺省：进程 cwd 回退、
@@ -73,6 +77,7 @@ pub fn build_router(
         30,
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
+        Arc::new(UnwiredSkills),
     )
 }
 
@@ -93,6 +98,7 @@ pub fn build_router_with_agent_kind_provider(
         30,
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
+        Arc::new(UnwiredSkills),
     )
 }
 
@@ -112,6 +118,7 @@ pub fn build_router_with_admin_adapter(
         30,
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
+        Arc::new(UnwiredSkills),
     )
 }
 
@@ -134,6 +141,7 @@ pub fn build_router_with_auth(
         archive_retention_days,
         auth,
         fallback_workspace_root(),
+        Arc::new(UnwiredSkills),
     )
 }
 
@@ -157,6 +165,32 @@ pub fn build_router_with_workspace_root(
         30,
         auth,
         workspace_root,
+        Arc::new(UnwiredSkills),
+    )
+}
+
+/// Build the axum Router with an explicit skills service（add-agent-skills
+/// 5.1）：handler 级测试注入真文件系统服务的入口（workspace root 形态 +
+/// skills）；生产装配走 [`run_with_admin_adapter_and_auth`]。
+pub fn build_router_with_skills(
+    backend: Arc<dyn SessionBackend>,
+    router: RouterInfo,
+    card_config: CardConfig,
+    agent_kinds: Arc<dyn AgentKindProvider>,
+    auth: Arc<AuthHandle>,
+    workspace_root: std::path::PathBuf,
+    skills: Arc<dyn SkillsService>,
+) -> Router {
+    build_router_full(
+        backend,
+        router,
+        card_config,
+        None,
+        agent_kinds,
+        30,
+        auth,
+        workspace_root,
+        skills,
     )
 }
 
@@ -170,6 +204,7 @@ fn build_router_full(
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
     workspace_root: std::path::PathBuf,
+    skills: Arc<dyn SkillsService>,
 ) -> Router {
     let state = WebUiState {
         backend,
@@ -180,6 +215,7 @@ fn build_router_full(
         archive_retention_days,
         auth,
         workspace_root,
+        skills,
     };
 
     // Core SPA + API + WS routes, bound to WebUiState.
@@ -248,6 +284,14 @@ fn build_router_full(
         .route("/api/projects/reorder", post(api::projects_reorder))
         .route("/api/projects/{id}/remove", post(api::projects_remove))
         .route("/api/projects/{id}/branch", get(api::projects_branch))
+        // add-agent-skills 5.1：skills 管理面（列表 / 详情 / 只删仓 / 投影）。
+        // static `sync` 与 `{name}` 不同方法不冲突，静态段优先匹配。
+        .route("/api/skills", get(crate::skills::skills_list))
+        .route("/api/skills/sync", post(crate::skills::skills_sync))
+        .route(
+            "/api/skills/{name}",
+            get(crate::skills::skills_detail).delete(crate::skills::skills_delete),
+        )
         .route("/ws", get(api::ws_handler))
         .with_state(state.clone());
 
@@ -319,6 +363,7 @@ fn is_protected_path(path: &str) -> bool {
 /// | `/api/settings`（卡片/显示偏好写） | 非安全方法 | `settings.manage`（GET 认证即可） |
 /// | `/api/sessions*` 写、`/api/projects*` 写、`/api/permissions/*`（answer） | 非安全方法 | `sessions.write` |
 /// | `/api/providers*`、`/api/provider-presets`、`/api/provider-defaults`、`/api/model-aliases*`（provider 管理面读 + 写） | 全部 | 无——design D3 明确排除在角色执法外，仅登录门 + 自身守卫（POST-only + origin） |
+/// | `/api/skills*`（skills 管理面读 + 删/sync） | 全部 | 无——add-agent-skills 5.3：与 provider 管理面**同一权限档**（读=管理面读、删/sync=管理面写，都不按角色执法）；仅登录门 + 非安全方法同源校验 |
 /// | 其余 `/api/*`（summary / sessions 与 projects 读 / env / agents / nodes / about / archive 读 / browse-dirs）与 `/ws` | 全部 | 无（认证即可，viewer 可读） |
 /// | `/api/auth/{login,logout,setup,me}` | — | 豁免路径（[`is_auth_exempt_path`]），不进本表 |
 ///
@@ -339,6 +384,13 @@ fn required_permission(path: &str, method: &str) -> Option<Permission> {
         || path == "/api/model-aliases"
         || path.starts_with("/api/model-aliases/")
     {
+        return None;
+    }
+    // skills 管理面（add-agent-skills 5.3）：挂到 provider 管理面同一权限档
+    // ——读（list/detail）= 管理面读、删/sync = 管理面写，都只要求登录 +
+    // 非安全方法同源校验（auth_guard 既有防线），不按角色执法。显式列出，
+    // 防止未来新增 `/api/*` 规则误捕这些路径。
+    if path == "/api/skills" || path == "/api/skills/sync" || path.starts_with("/api/skills/") {
         return None;
     }
     // admin 控制面（含服务启停/升级/回滚——同一控制面）。
@@ -516,6 +568,7 @@ pub async fn run(
         30,
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
+        Arc::new(UnwiredSkills),
     )
     .await;
 }
@@ -539,6 +592,7 @@ pub async fn run_with_admin_adapter(
         30,
         Arc::new(AuthHandle::disabled()),
         fallback_workspace_root(),
+        Arc::new(UnwiredSkills),
     )
     .await;
 }
@@ -547,6 +601,8 @@ pub async fn run_with_admin_adapter(
 /// `workspace_root` 是恒有值的单一机器级边界（add-workspace-root）：browse-dirs
 /// 的起点与显式 root 约束、项目注册/列表/查看的范围判定都以它为准；由装配方
 /// 经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）计算。
+/// `skills` 是 skills 管理面的仓操作接缝（add-agent-skills 5.1，生产装配点
+/// webui_cmd / run 注入 config 装配的真实现）。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
@@ -558,6 +614,7 @@ pub async fn run_with_admin_adapter_and_auth(
     auth: Arc<AuthHandle>,
     workspace_root: std::path::PathBuf,
     archive_retention_days: u64,
+    skills: Arc<dyn SkillsService>,
 ) {
     run_full(
         backend,
@@ -569,6 +626,7 @@ pub async fn run_with_admin_adapter_and_auth(
         archive_retention_days,
         auth,
         workspace_root,
+        skills,
     )
     .await;
 }
@@ -594,6 +652,7 @@ async fn run_full(
     archive_retention_days: u64,
     auth: Arc<AuthHandle>,
     workspace_root: std::path::PathBuf,
+    skills: Arc<dyn SkillsService>,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let addr = listener.local_addr().expect("bound listener");
@@ -622,6 +681,7 @@ async fn run_full(
         archive_retention_days,
         auth,
         workspace_root,
+        skills,
     );
     tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(
@@ -1358,6 +1418,55 @@ mod auth_guard_tests {
 
         // 未登录仍被登录门拦（BFF 只豁免角色执法，不豁免登录）。
         let (status, _) = req(app, "POST", "/api/providers", None, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// add-agent-skills 5.3：skills 四端点挂 provider 管理面**同一权限档**
+    /// （读=管理面读、删/sync=管理面写——都不按角色执法，只要求登录）。
+    /// viewer 读放行；member 的删/sync 到达 handler（UnwiredSkills 下分别
+    /// 得 404/200，绝不是 401/403）；匿名仍被登录门拦 401。
+    #[tokio::test]
+    async fn skills_endpoints_follow_provider_plane_permission_tier() {
+        let (app, _dir, _auth) = rbac_app().await;
+        let vic = login_cookie(&app, "vic", "password8").await;
+        let bob = login_cookie(&app, "bob", "password8").await;
+
+        // viewer 读（列表）：认证即可，与 provider 管理面读同档。
+        let (status, body) = req(app.clone(), "GET", "/api/skills", Some(&vic), None, None).await;
+        assert_eq!(status, StatusCode::OK, "viewer 读 skills 不得被角色拦: {body}");
+
+        // member 写（删 / sync）：穿过角色执法到达 handler。
+        let (status, body) = req(
+            app.clone(),
+            "DELETE",
+            "/api/skills/definitely-absent",
+            Some(&bob),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "member 删 skills 必须到达 handler（404 缺条目）: {status} {body}"
+        );
+        let (status, body) = req(
+            app.clone(),
+            "POST",
+            "/api/skills/sync",
+            Some(&bob),
+            None,
+            Some("{}".into()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "member sync 必须到达 handler: {status} {body}"
+        );
+
+        // 匿名：登录门照常（豁免的是角色执法，不是登录）。
+        let (status, _) = req(app, "GET", "/api/skills", None, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
