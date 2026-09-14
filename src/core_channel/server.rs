@@ -725,12 +725,15 @@ async fn dispatch(
                     rejection: SessionRejection::UnusableProjectDir,
                 };
             }
-            let project_dir = project_dir.map(|dir| {
-                std::fs::canonicalize(&dir)
-                    .unwrap_or_else(|_| PathBuf::from(&dir))
-                    .display()
-                    .to_string()
-            });
+            // add-workspace-root：会话面执法把 project_dir 当「已 canonical 的
+            // 存储值」与 plain 形 root 前缀做逐分量比较。Windows 上
+            // `std::fs::canonicalize` 产出 `\\?\` verbatim 形——与注册表里
+            // `canonicalize_plain` 落库的 plain 形判等恒假（所有项目会话被误判
+            // 越界），工作台头部还会泄漏 verbatim 前缀。与注册同用 plain 形。
+            let project_dir =
+                project_dir.map(|dir| {
+                    sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir)
+                });
             match backend
                 .spawn_with(prompt, project_dir, &agent, model, mode, None)
                 .await
@@ -770,12 +773,12 @@ async fn dispatch(
                     rejection: SessionRejection::UnusableProjectDir,
                 };
             }
-            let project_dir = project_dir.map(|dir| {
-                std::fs::canonicalize(&dir)
-                    .unwrap_or_else(|_| PathBuf::from(&dir))
-                    .display()
-                    .to_string()
-            });
+            // 与 Spawn 同款：project_dir 落 plain 形 canonical（Windows verbatim
+            // 前缀还原），理由见上方 Spawn 分支注释。
+            let project_dir =
+                project_dir.map(|dir| {
+                    sebas_webui::fs::canonicalize_plain(Path::new(&dir)).unwrap_or(dir)
+                });
             match backend
                 .create_placeholder(project_dir, &agent, model, mode, None)
                 .await

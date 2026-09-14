@@ -32,7 +32,10 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
   webServer: {
-    command: 'TESTSUITE_MODE=detached invoke testsuite-webui-server',
+    // env 经 Playwright 注入而非 shell 前缀——`TESTSUITE_MODE=… cmd` 的
+    // 前缀形式在 Windows cmd 上不是合法命令。
+    command: 'invoke testsuite-webui-server',
+    env: { ...process.env, TESTSUITE_MODE: 'detached' },
     url: `http://127.0.0.1:${WEBUI_PORT}/health`,
     cwd: REPO_ROOT,
     timeout: 120_000,

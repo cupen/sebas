@@ -48,6 +48,19 @@ cargo build --release
 
 ---
 
+## 工作区根目录
+
+WebUI 的项目注册、项目列表、会话打开与目录浏览都收敛在**一个 workspace root**之内。建议显式配置：
+
+```toml
+[workspace]
+root = "/srv/sebas-work"
+```
+
+也可用环境变量 `SEBAS_WORKSPACE_ROOT`（优先于配置）。两者都缺省时回退到**进程当前工作目录**并在启动日志打一条 warn——生产部署请显式配置，避免边界随启动目录漂移。旧键 `[watchdog.webui] allowed_roots` 已废弃并被静默忽略：多根场景请把原根目录用符号链接合并进单一 root。远程执行节点在节点侧用 `[node] workspace_root`（或同名 env）做同样的判定，见 [docs/remote-execution-node.md](docs/remote-execution-node.md)。
+
+---
+
 ## 部署
 
 ### systemd 服务（watchdog）

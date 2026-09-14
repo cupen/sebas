@@ -14,17 +14,17 @@
 
 ## 3. 节点侧与协议
 
-- [ ] 3.1 `sebas-node-link/src/lib.rs`：`SessionResult::PathChecked` 增 `within_workspace: bool`（serde `#[serde(default = "default_true")]`）。验证：帧编解码往返测试 + 旧应答 JSON（无该字段）反序列化为 true
-- [ ] 3.2 `sebas-node/src/{config.rs,session.rs}`：`NodeConfig.workspace_root` 字段 + `SEBAS_WORKSPACE_ROOT` env 读取 + cwd 回退启动告警；`CheckPath` handler 增 containment 判定。验证：节点侧测试（界内 `(exists,is_dir,within)`、越界 within=false、未配置回退告警）
-- [ ] 3.3 协议贯通验证：主控经 `check_node_path` 拿到 within 判定并流入 2.4 的拒绝逻辑。验证：node_link projection / core_channel 测试贯通
+- [x] 3.1 `sebas-node-link/src/lib.rs`：`SessionResult::PathChecked` 增 `within_workspace: bool`（serde `#[serde(default = "default_true")]`）。验证：帧编解码往返测试 + 旧应答 JSON（无该字段）反序列化为 true
+- [x] 3.2 `sebas-node/src/{config.rs,session.rs}`：`NodeConfig.workspace_root` 字段 + `SEBAS_WORKSPACE_ROOT` env 读取 + cwd 回退启动告警；`CheckPath` handler 增 containment 判定。验证：节点侧测试（界内 `(exists,is_dir,within)`、越界 within=false、未配置回退告警）
+- [x] 3.3 协议贯通验证：主控经 `check_node_path` 拿到 within 判定并流入 2.4 的拒绝逻辑。验证：node_link projection / core_channel 测试贯通
 
 ## 4. Harness 与文档
 
-- [ ] 4.1 `tasks.py`：webui-sandbox / webui-server / e2e / acceptance 沙箱 config 钉 `[workspace] root`（或 env）指向沙箱目录。验证：`invoke testsuite-webui-sandbox` 起服后注册沙箱内项目成功、无回退告警
-- [ ] 4.2 `AGENTS.md` 沙箱菜谱与 README/部署文档：补 `[workspace] root` 与 `SEBAS_WORKSPACE_ROOT` 说明、allowed_roots 迁移（多根→符号链接合并）、cwd 回退告警解释。验证：文档评审（交付物）
-- [ ] 4.3 e2e/验收套件补越界场景：注册越界 400、越界历史项目列表隐藏、打开/发消息拒绝、close/archive 放行。验证：`invoke testsuite-e2e`（新增用例）通过
+- [x] 4.1 `tasks.py`：webui-sandbox / webui-server / e2e / acceptance 沙箱 config 钉 `[workspace] root`（或 env）指向沙箱目录。验证：`invoke testsuite-webui-sandbox` 起服后注册沙箱内项目成功、无回退告警
+- [x] 4.2 `AGENTS.md` 沙箱菜谱与 README/部署文档：补 `[workspace] root` 与 `SEBAS_WORKSPACE_ROOT` 说明、allowed_roots 迁移（多根→符号链接合并）、cwd 回退告警解释。验证：文档评审（交付物）
+- [x] 4.3 e2e/验收套件补越界场景：注册越界 400、越界历史项目列表隐藏、打开/发消息拒绝、close/archive 放行。验证：`invoke testsuite-e2e`（新增用例）通过
 
 ## 5. 收尾验证
 
-- [ ] 5.1 全量质量门：`rtk cargo test`（workspace）与 `rtk cargo clippy` 全绿。验证：命令退出码 0
-- [ ] 5.2 沙箱端到端冒烟：按 AGENTS.md 菜谱起双进程沙箱，验证告警三态、注册/列表/打开四处执法、browse-dirs 起点与越界 root 拒绝；`GET /api/summary` 正常。验证：冒烟记录（curl 输出）符合 spec 场景
+- [x] 5.1 全量质量门：`rtk cargo test`（workspace）与 `rtk cargo clippy` 全绿。验证：命令退出码 0
+- [x] 5.2 沙箱端到端冒烟：按 AGENTS.md 菜谱起双进程沙箱，验证告警三态、注册/列表/打开四处执法、browse-dirs 起点与越界 root 拒绝；`GET /api/summary` 正常。验证：冒烟记录（curl 输出）符合 spec 场景

@@ -290,6 +290,11 @@ state_file = "{}"
 [media]
 download_dir = "{}"
 
+# add-workspace-root 4.1：沙箱钉根——项目注册/列表/会话面/browse-dirs 的唯一
+# 边界收敛在沙箱目录内。不配会回退进程 cwd（= 仓库根）并打启动告警。
+[workspace]
+root = "{}"
+
 [watchdog.core]
 channel_path = "core-channel.sock"
 
@@ -318,6 +323,7 @@ usage_file = "{}"
             forward_slash(&path.join("work")),
             forward_slash(&state_file),
             forward_slash(&path.join("downloads")),
+            forward_slash(&path),
             forward_slash(&providers),
             forward_slash(&usage),
         );
@@ -377,6 +383,13 @@ usage_file = "{}"
             (
                 "SEBAS_ARCHIVE_PATH",
                 forward_slash(&self.path.join("archive.json")),
+            ),
+            // add-workspace-root：env 优先于 config 的 `[workspace] root`——
+            // 钉住它，宿主 shell 里 stray 的同名变量就不会把沙箱边界改道
+            // （测试需要更窄根时用 spawn 的 extra env 显式覆盖）。
+            (
+                "SEBAS_WORKSPACE_ROOT",
+                forward_slash(&self.path),
             ),
             // Keep log files plain ASCII so assertions can match them.
             ("NO_COLOR", "1".to_string()),
@@ -507,6 +520,9 @@ usage_file = "{}"
         let mut cmd = tokio::process::Command::new(sebas_node_bin());
         cmd.args(&args)
             .current_dir(&self.path)
+            // add-workspace-root 4.1：节点自判项目路径 containment，边界同样
+            // 钉在沙箱目录（env > [node] workspace_root > cwd 回退告警）。
+            .env("SEBAS_WORKSPACE_ROOT", forward_slash(&self.path))
             .env("NO_COLOR", "1")
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err))
@@ -669,9 +685,12 @@ usage_file = "{}"
             toml.contains(needle),
             "[acp.agents.claude] section not found in config"
         );
+        // TOML basic strings treat `\` as an escape — the path must go in with
+        // forward slashes (same convention as the base config), or Windows
+        // cores/webuis die at startup on a parse error.
         let arg = format!(
             "{needle}args = [\"--journal\", \"{}\"]\n",
-            journal.display()
+            forward_slash(&journal)
         );
         let patched = toml.replace(needle, &arg);
         assert_ne!(toml, patched, "journal patch did not apply");

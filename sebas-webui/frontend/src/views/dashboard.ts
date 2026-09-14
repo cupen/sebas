@@ -735,8 +735,10 @@ export class SebasDashboard extends LitElement {
     const focusKey = this.effectiveFocusKey()
     const nodeGate = this.selectedNodeGate()
     const selectedNodeId = this.projects.find((x) => x.path === this.selectedPath)?.node_id || LOCAL_NODE
+    // 注册表落的是 canonicalize_plain 的反斜杠普通形（Windows）——basename
+    // 切分必须兼容两种分隔符（与 projects.spec.ts 的 scene 切分同式）。
     const projectName = this.selectedPath
-      ? (this.selectedPath.split('/').filter(Boolean).pop() ?? this.selectedPath)
+      ? (this.selectedPath.split(/[\\/]/).filter(Boolean).pop() ?? this.selectedPath)
       : null
     // D4：turn 在飞 = 聚焦会话 status == Working（与引擎 card FSM 的
     // WORKING 同源）。深链/摘要两个数据源兜底取值。

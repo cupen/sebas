@@ -76,6 +76,11 @@ both live in tasks.py — the old `scripts/*sandbox*.sh` harnesses were removed
      `SEBAS_WEBUI_AUTH_DB` (below). Left alone with zero users, a loopback
      webui stops at the first-run setup page (whoever hits it first creates
      root) and the user store would land in the real `~/.sebas`;
+   - `[workspace] root` pointing at the sandbox dir (node processes:
+     `[node] workspace_root` or env `SEBAS_WORKSPACE_ROOT`). It is the single
+     boundary for project register/list, session detail/message/switch, and
+     browse-dirs; left unset it falls back to the process cwd with a startup
+     warn, and sandbox journeys break in confusing ways;
    - env: four files that would otherwise default into the real `~/.sebas`
      — all mandatory: `SEBAS_STATE_DB` (SQLite, default `~/.sebas/sebas.db`
      — the easy one to miss: without it the sandbox opens the real DB even
@@ -149,6 +154,11 @@ credentials. Let `<SB>` be the throwaway dir (e.g. `/tmp/sebas-debug`).
 
    [media]
    download_dir = "<SB>/downloads"
+
+   # add-workspace-root：沙箱钉根。项目注册/列表、会话面与 browse-dirs 的
+   # 唯一边界收敛在 <SB> 内；不配会回退进程 cwd 并打启动 warn。
+   [workspace]
+   root = "<SB>"
 
    [watchdog.core]
    channel_path = "<SB>/core-channel.sock"

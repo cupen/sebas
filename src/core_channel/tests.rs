@@ -282,10 +282,10 @@ async fn backend_methods_reach_the_right_handlers() {
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1);
     assert_eq!(snap[0].status, "spawning");
-    // 服务端 canonicalize project_dir 后存储（5.5）；断言跟随本平台的
-    // canonical 形式（Windows 会把 "/tmp" 变成 verbatim 路径）。
-    let expected_dir = std::fs::canonicalize("/tmp")
-        .map(|p| p.display().to_string())
+    // 服务端 canonicalize project_dir 后存储（5.5）；Windows verbatim 前缀
+    // 被还原为 plain 形（add-workspace-root：会话面执法与项目注册表必须同域
+    // 比较，`\\?\` 形会让 `VerbatimDisk` ≠ `Disk` 恒假、误判越界）。
+    let expected_dir = sebas_webui::fs::canonicalize_plain(std::path::Path::new("/tmp"))
         .unwrap_or_else(|_| "/tmp".to_string());
     assert_eq!(snap[0].project_dir.as_deref(), Some(expected_dir.as_str()));
 
@@ -390,9 +390,10 @@ async fn create_placeholder_wires_a_zero_turn_session() {
     let snap = backend.snapshot().await;
     assert_eq!(snap.len(), 1);
     assert_eq!(snap[0].status, "spawning");
-    // 服务端会 canonicalize project_dir：Windows 得到 verbatim 形式（\\?\D:\tmp）。
-    let expected_dir = std::fs::canonicalize("/tmp")
-        .map(|p| p.display().to_string())
+    // 服务端会 canonicalize project_dir 并还原 Windows verbatim 前缀（plain
+    // 形，add-workspace-root：与项目注册表同域比较，理由见
+    // backend_methods_reach_the_right_handlers 处注释）。
+    let expected_dir = sebas_webui::fs::canonicalize_plain(std::path::Path::new("/tmp"))
         .unwrap_or_else(|_| "/tmp".into());
     assert_eq!(snap[0].project_dir.as_deref(), Some(expected_dir.as_str()));
     assert!(
