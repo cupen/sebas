@@ -54,19 +54,10 @@ use support::TestDir;
 
 /// Locate the workspace `target/debug` directory by walking up from
 /// `CARGO_MANIFEST_DIR` (the `sebas` crate root). Assumes the standard
-/// cargo workspace layout (`target/debug` at the workspace root).
-///
-/// Platform note (D4): the file name gets a `.exe` suffix on Windows so the
-/// existence check below can actually find the binaries there; the SIGTERM
-/// journey itself stays unix-gated.
-#[cfg(unix)]
-fn workspace_target_debug() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR is always set during cargo test");
-    PathBuf::from(manifest_dir).join("target").join("debug")
-}
-
-#[cfg(windows)]
+/// cargo workspace layout (`target/debug` at the workspace root). The
+/// platform difference lives at the call site (`.exe` suffix on Windows,
+/// D4); this lookup itself is identical everywhere.
+#[cfg(any(unix, windows))]
 fn workspace_target_debug() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR is always set during cargo test");
