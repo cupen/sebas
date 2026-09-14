@@ -23,6 +23,9 @@ pub enum SebasError {
 
     #[error("upgrade error: {0}")]
     Upgrade(String),
+
+    #[error("skills error: {0}")]
+    Skills(String),
 }
 
 pub type Result<T> = std::result::Result<T, SebasError>;

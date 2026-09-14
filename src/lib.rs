@@ -29,6 +29,8 @@ pub mod native_dispatch_bridge;
 pub mod node_link;
 pub mod node_link_cmd;
 pub mod provider;
+/// 操作者级 skill 仓 + 多 backend 方言投影（add-agent-skills）。
+pub mod skills;
 pub mod service;
 // `provider_state` 已迁到 router crate（sebas-63f.5 解决 sebas→router 反向依赖）；
 // sebas 内部用 `sebas_dispatch::provider_state`。

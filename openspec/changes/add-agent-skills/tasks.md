@@ -2,20 +2,20 @@
 
 ## 1. 方言矩阵调研（实证落盘，不改代码）
 
-- [ ] 1.1 调研 gemini CLI 是否有官方 skills 消费机制（查其 docs 与 `~/.gemini/` 实际布局；区分「custom TOML commands」与「agentskills 目录」两类），结论写入本 change 的 design.md Open Questions 段更新或 D1 表注释。验证：design 或 D1 表中出现带出处（文档链接 / 本机路径）的 gemini 结论。
-- [ ] 1.2 调研 opencode 是否有 agentskills 同构的 skill 目录（同样实证 `~/.config/opencode/` 或等效路径），结论同 1.1 落盘。验证：同上。
+- [x] 1.1 调研 gemini CLI 是否有官方 skills 消费机制（查其 docs 与 `~/.gemini/` 实际布局；区分「custom TOML commands」与「agentskills 目录」两类），结论写入本 change 的 design.md Open Questions 段更新或 D1 表注释。验证：design 或 D1 表中出现带出处（文档链接 / 本机路径）的 gemini 结论。
+- [x] 1.2 调研 opencode 是否有 agentskills 同构的 skill 目录（同样实证 `~/.config/opencode/` 或等效路径），结论同 1.1 落盘。验证：同上。
 
 ## 2. Core skills 模块（`src/skills.rs`）
 
-- [ ] 2.1 实现 `scan_store(dir)`：扫仓返回 `Vec<SkillInfo>{name, description, attachments, valid, invalid_reason}`；frontmatter 解析最小化（只取 `name`/`description`，缺 `SKILL.md` 或字段缺标记 invalid 但不中断列表）。验证：`cargo test skills::scan` 覆盖正常/缺文件/缺 frontmatter 三态的单元测试通过。
-- [ ] 2.2 实现 `add_from_local(src, store)`：校验 `SKILL.md` 存在再整目录拷贝，非法源报错且不写盘。验证：`cargo test skills::add_local`（含非法源不写盘断言）。
-- [ ] 2.3 实现 `add_from_git(url, store)` 与 `add_from_npx(pkg, store)`：探测 `git`/`npx` 可用性，不在场即报错；成功路径委托外部命令后落到仓。验证：`cargo test` 用 fake 命令路径（注入 PATH 的 stub 脚本）覆盖「命令缺失报错」分支；真 clone/npx 归 6.x 手测。
-- [ ] 2.4 实现 `reconcile(store, backend_dir) -> SyncReport`：四分支投影（写/覆盖→记名册；旧名册-仓→删；仓外→不动），原子写回 `<backend>/.sebas-projection.json`（tmp+rename）；manifest 缺失时退化为只投影不删除。验证：`cargo test skills::reconcile` 覆盖 spec 四个 scenario（overwrite 用户手改、私产不动、删除已投影项、manifest 缺失退化）。
+- [x] 2.1 实现 `scan_store(dir)`：扫仓返回 `Vec<SkillInfo>{name, description, attachments, valid, invalid_reason}`；frontmatter 解析最小化（只取 `name`/`description`，缺 `SKILL.md` 或字段缺标记 invalid 但不中断列表）。验证：`cargo test skills::scan` 覆盖正常/缺文件/缺 frontmatter 三态的单元测试通过。
+- [x] 2.2 实现 `add_from_local(src, store)`：校验 `SKILL.md` 存在再整目录拷贝，非法源报错且不写盘。验证：`cargo test skills::add_local`（含非法源不写盘断言）。
+- [x] 2.3 实现 `add_from_git(url, store)` 与 `add_from_npx(pkg, store)`：探测 `git`/`npx` 可用性，不在场即报错；成功路径委托外部命令后落到仓。验证：`cargo test` 用 fake 命令路径（注入 PATH 的 stub 脚本）覆盖「命令缺失报错」分支；真 clone/npx 归 6.x 手测。
+- [x] 2.4 实现 `reconcile(store, backend_dir) -> SyncReport`：四分支投影（写/覆盖→记名册；旧名册-仓→删；仓外→不动），原子写回 `<backend>/.sebas-projection.json`（tmp+rename）；manifest 缺失时退化为只投影不删除。验证：`cargo test skills::reconcile` 覆盖 spec 四个 scenario（overwrite 用户手改、私产不动、删除已投影项、manifest 缺失退化）。
 
 ## 3. 方言表与 config
 
-- [ ] 3.1 在 core 内置方言表（D1）：`claude → ~/.claude/skills`、`codex → ~/.codex/skills`，其余 backend kind（含 gemini）返回 `NoPlacement`；`Convert` 枚举只留 `Identity` 变体。验证：`cargo test skills::placement`：claude/codex 命中 Identity，gemini 命中 NoPlacement。
-- [ ] 3.2 config 新增可选 `[skills] dir = "…"`（默认 `~/.agents/skills`），与 router/provider 同享「可选段」惯例；不新增 `enabled` / per-backend 开关。验证：`cargo test config::skills_dir_default_and_override` 两断言通过（缺省与覆盖）。
+- [x] 3.1 在 core 内置方言表（D1）：`claude → ~/.claude/skills`、`codex → ~/.codex/skills`，其余 backend kind（含 gemini）返回 `NoPlacement`；`Convert` 枚举只留 `Identity` 变体。验证：`cargo test skills::placement`：claude/codex 命中 Identity，gemini 命中 NoPlacement。
+- [x] 3.2 config 新增可选 `[skills] dir = "…"`（默认 `~/.agents/skills`），与 router/provider 同享「可选段」惯例；不新增 `enabled` / per-backend 开关。验证：`cargo test config::skills_dir_default_and_override` 两断言通过（缺省与覆盖）。
 
 ## 4. CLI：`sebas skills`
 
