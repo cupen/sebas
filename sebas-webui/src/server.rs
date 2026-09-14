@@ -583,6 +583,16 @@ pub async fn run_with_admin_adapter_and_auth(
     .await;
 }
 
+/// bind 地址 → 用户可点开的访问 URL：`0.0.0.0` / `::` 等通配地址在浏览器
+/// 里不可点，呈现为 `127.0.0.1`；其余（loopback 或具体网卡地址）原样。
+fn access_url(addr: std::net::SocketAddr) -> String {
+    if addr.ip().is_unspecified() {
+        format!("http://127.0.0.1:{}", addr.port())
+    } else {
+        format!("http://{addr}")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_full(
     backend: Arc<dyn SessionBackend>,
@@ -597,6 +607,23 @@ async fn run_full(
     allowed_roots: Vec<std::path::PathBuf>,
 ) {
     let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
+    let addr = listener.local_addr().expect("bound listener");
+    // 引导用户：就绪日志直接给出可点开的访问地址 + 按鉴权形态的下一步提示。
+    // 独立 `sebas webui` 进程与 `core --webui` 内嵌形态共用这一条就绪日志
+    // （embedded 模式没有别的引导输出），所以引导信息放在这里而不是接线方。
+    // 在 auth 被 move 进 router 之前取好判定。
+    let url = access_url(addr);
+    let mut hint = match auth.needs_setup() {
+        true => "first run: open it to create the admin account".to_string(),
+        false if auth.enabled() => "open it and sign in with your webui account".to_string(),
+        false => "auth disabled: open it directly (loopback bind only)".to_string(),
+    };
+    if addr.ip().is_unspecified() {
+        hint.push_str(&format!(
+            "; LAN devices use http://<host-ip>:{}",
+            addr.port()
+        ));
+    }
     let app = build_router_full(
         backend,
         router,
@@ -608,8 +635,7 @@ async fn run_full(
         work_root,
         allowed_roots,
     );
-    let addr = listener.local_addr().expect("bound listener");
-    tracing::info!(%addr, "webui dashboard started");
+    tracing::info!(%url, hint, "webui dashboard started");
     if let Err(e) = serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -1561,5 +1587,33 @@ mod allowed_roots_tests {
         // 最小 percent-encode：只编码查询串里非法的字符（测试路径均为
         // tempdir 生成的安全 ASCII）。
         s.replace(' ', "%20")
+    }
+
+    /// 就绪日志的引导 URL：通配 bind 呈现为 127.0.0.1（浏览器不可点
+    /// 0.0.0.0），loopback / 具体网卡地址原样。
+    #[test]
+    fn access_url_maps_unspecified_bind_to_loopback() {
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV6};
+        assert_eq!(
+            access_url(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 9877))),
+            "http://127.0.0.1:9877"
+        );
+        assert_eq!(
+            access_url(SocketAddr::from((Ipv4Addr::LOCALHOST, 9877))),
+            "http://127.0.0.1:9877"
+        );
+        assert_eq!(
+            access_url(SocketAddr::from((Ipv4Addr::new(192, 168, 1, 10), 9877))),
+            "http://192.168.1.10:9877"
+        );
+        assert_eq!(
+            access_url(SocketAddr::V6(SocketAddrV6::new(
+                std::net::Ipv6Addr::UNSPECIFIED,
+                9877,
+                0,
+                0
+            ))),
+            "http://127.0.0.1:9877"
+        );
     }
 }
