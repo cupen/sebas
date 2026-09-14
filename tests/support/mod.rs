@@ -163,10 +163,14 @@ impl SandboxDir {
         self.group_leaders.lock().unwrap().push(pid);
     }
 
-    /// SIGKILL every spawned process group. Grandchildren inherit the group,
-    /// so this takes the whole tree regardless of what already exited
-    /// (ESRCH on a fully-dead group is fine). Runs on the keep-path too:
-    /// diagnosis needs the logs on disk, not the processes writing them.
+    /// Kill every spawned process tree. Grandchildren must die with the test:
+    /// on unix each leader is its own process-group head, so one `killpg`
+    /// SIGKILLs the whole group (ESRCH on a fully-dead group is fine); on
+    /// Windows `kill_on_drop` only reaps the direct child, so `taskkill /T /F`
+    /// tears down each tree instead (D2: zero new deps, zero unsafe; the
+    /// Job-Object upgrade path stays recorded in the change design). Runs on
+    /// the keep-path too: diagnosis needs the logs on disk, not the processes
+    /// writing them.
     fn kill_process_groups(&self) {
         #[cfg(unix)]
         for pid in self.group_leaders.lock().unwrap().drain(..) {
@@ -174,7 +178,18 @@ impl SandboxDir {
                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        for pid in self.group_leaders.lock().unwrap().drain(..) {
+            // An already-exited target reports failure — treat as success
+            // (spec: a reap attempt against a dead target MUST not block
+            // sandbox-dir cleanup). /T walks the tree, /F means hard kill.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        #[cfg(not(any(unix, windows)))]
         self.group_leaders.lock().unwrap().clear();
     }
 }
