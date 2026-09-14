@@ -1,6 +1,7 @@
 //! Router BFF 集成测试（make-core-own-provider-data 3.1/3.2/3.3）：
-//! provider 管理面改由 core 状态库承载——`RouterClient` 只剩 reload 代理，
-//! BFF 处理器读写 `SessionBackend` 的 state seam。
+//! provider 管理面由 core 状态库承载，BFF 处理器读写 `SessionBackend`
+//! 的 state seam（retire-webui-router-surface 后 reload 代理已退役，
+//! webui 不再直连 router 进程）。
 //!
 //! - 3.2：create → GET 立即读到新值（无重启）；update / delete / aliases
 //!   / presets 走同一 seam。
@@ -98,7 +99,7 @@ async fn app_with_unreachable_core() -> axum::Router {
 
 fn snapshot_router_info() -> RouterInfo {
     RouterInfo {
-        listen: Some("127.0.0.1:59999".into()), // 无 router 监听（reload 代理的降级路径）
+        listen: Some("127.0.0.1:59999".into()), // 静态展示事实（retire 后 webui 不拨此地址）
         provider_count: 1,
         debug: false,
         has_auth: true,
@@ -151,11 +152,13 @@ async fn reset_store() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 #[tokio::test]
-async fn api_router_reports_snapshot_when_router_down() {
-    // SSR 网关页已由 SPA 取代；等价语义改为 API 面：/api/router 返回启动
-    // 快照（providers 含 snapshot-provider），SPA 侧自行渲染降级提示。
+async fn api_router_endpoint_is_retired() {
+    // retire-webui-router-surface：/api/router 退役（spec「Router-free API
+    // surface」scenario「retired router surface is gone」）——spa_fallback 对
+    // /api/* 前缀回文本 404；静态事实仅存于 /api/settings 的 router 段。
     let (app, _mem) = app_with_core_store().await;
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/router")
@@ -164,12 +167,29 @@ async fn api_router_reports_snapshot_when_router_down() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "快照 API 须 200");
+    assert_eq!(resp.status(), 404, "/api/router 须退役为 404");
     let body = body_string(resp.into_body()).await;
-    assert!(
-        body.contains("snapshot-provider"),
-        "保底显示启动快照: {body}"
-    );
+    assert_eq!(body, "not found");
+
+    // 旧 /router/api/* 命名空间同样退役：GET 走 fallback 404；POST 不落入
+    // mutation 子 router（守卫的 405/403 不该再出现），也不落 RBAC 豁免分支。
+    for (method, uri) in [("GET", "/router/api/providers"), ("POST", "/router/api/providers")]
+    {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("origin", "http://127.0.0.1:8080")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "退役路径 {method} {uri} 须 404");
+    }
 }
 
 /// 3.2 验收：创建 provider 后 GET **立即**读到新值（无重启）——读与写同一
@@ -180,7 +200,7 @@ async fn provider_create_is_immediately_visible_without_restart() {
     let (app, _mem) = app_with_core_store().await;
 
     // 初始列表为空（store 是唯一事实来源，种子 provider 不出现）。
-    let (status, body) = json_request(&app, "GET", "/router/api/providers", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/providers", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["providers"].as_array().unwrap().len(), 0, "{body}");
@@ -189,14 +209,14 @@ async fn provider_create_is_immediately_visible_without_restart() {
     let (status, body) = json_request(
         &app,
         "POST",
-        "/router/api/providers",
+        "/api/providers",
         Some(r#"{"name":"alpha","preset":"deepseek","api_key":"sk-a"}"#.into()),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
     // GET 立即读到新值（无重启），preset 槽位从代码表物化。
-    let (status, body) = json_request(&app, "GET", "/router/api/providers", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/providers", None).await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let rows = v["providers"].as_array().unwrap();
@@ -220,7 +240,7 @@ async fn provider_mutation_semantics_preserved_over_core_store() {
     let (status, _) = json_request(
         &app,
         "POST",
-        "/router/api/providers",
+        "/api/providers",
         Some(r#"{"name":"alpha","preset":"deepseek","api_key":"sk-keep"}"#.into()),
     )
     .await;
@@ -230,7 +250,7 @@ async fn provider_mutation_semantics_preserved_over_core_store() {
     let (status, body) = json_request(
         &app,
         "POST",
-        "/router/api/providers",
+        "/api/providers",
         Some(r#"{"name":"alpha","preset":"deepseek"}"#.into()),
     )
     .await;
@@ -240,7 +260,7 @@ async fn provider_mutation_semantics_preserved_over_core_store() {
     let (status, body) = json_request(
         &app,
         "PUT",
-        "/router/api/providers/alpha",
+        "/api/providers/alpha",
         Some(r#"{"name":"alpha","preset":"deepseek","api_key":""}"#.into()),
     )
     .await;
@@ -255,21 +275,21 @@ async fn provider_mutation_semantics_preserved_over_core_store() {
     let (status, body) = json_request(
         &app,
         "PUT",
-        "/router/api/providers/alpha",
+        "/api/providers/alpha",
         Some(r#"{"name":"alpha","bogus_field":1}"#.into()),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     // 删除 → 200 且列表回到空。
-    let (status, _) = json_request(&app, "DELETE", "/router/api/providers/alpha", None).await;
+    let (status, _) = json_request(&app, "DELETE", "/api/providers/alpha", None).await;
     assert_eq!(status, StatusCode::OK);
-    let (_, body) = json_request(&app, "GET", "/router/api/providers", None).await;
+    let (_, body) = json_request(&app, "GET", "/api/providers", None).await;
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["providers"].as_array().unwrap().len(), 0, "{body}");
 
     // 删除未知 → 404。
-    let (status, _) = json_request(&app, "DELETE", "/router/api/providers/ghost", None).await;
+    let (status, _) = json_request(&app, "DELETE", "/api/providers/ghost", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -277,7 +297,7 @@ async fn provider_mutation_semantics_preserved_over_core_store() {
 #[tokio::test]
 async fn presets_served_from_code_table_via_backend() {
     let (app, _mem) = app_with_core_store().await;
-    let (status, body) = json_request(&app, "GET", "/router/api/presets", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/provider-presets", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let presets = v["presets"].as_array().unwrap();
@@ -294,19 +314,19 @@ async fn unreachable_core_answers_503_without_stale_snapshot() {
     let _g = ENV_LOCK.lock().await;
 
     // GET：真源离线 → 503，绝不拿陈快照充数。
-    let (status, body) = json_request(&app, "GET", "/router/api/providers", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/providers", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     // POST mutation → 503。
     let (status, body) = json_request(
         &app,
         "POST",
-        "/router/api/providers",
+        "/api/providers",
         Some(r#"{"name":"x","preset":"deepseek"}"#.into()),
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     // DELETE mutation → 503。
-    let (status, _) = json_request(&app, "DELETE", "/router/api/providers/x", None).await;
+    let (status, _) = json_request(&app, "DELETE", "/api/providers/x", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -351,7 +371,7 @@ async fn provider_probe_fetches_models_without_persisting() {
     let (status, body) = json_request(
         &app,
         "POST",
-        "/router/api/providers",
+        "/api/providers",
         Some(
             serde_json::json!({
                 "name": "mocko",
@@ -367,7 +387,7 @@ async fn provider_probe_fetches_models_without_persisting() {
     let before = serde_json::to_string(&mem.state.lock().unwrap().clone()).unwrap();
 
     let (status, body) =
-        json_request(&app, "POST", "/router/api/providers/mocko/probe", None).await;
+        json_request(&app, "POST", "/api/providers/mocko/probe", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["provider"], "mocko");
@@ -398,7 +418,7 @@ async fn provider_probe_unknown_provider_answers_404() {
     let _g = reset_store().await;
     let (app, _mem) = app_with_core_store().await;
     let (status, body) =
-        json_request(&app, "POST", "/router/api/providers/ghost/probe", None).await;
+        json_request(&app, "POST", "/api/providers/ghost/probe", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("不存在"), "{body}");
 }
@@ -411,14 +431,14 @@ async fn provider_probe_without_base_url_answers_400() {
     let (status, body) = json_request(
         &app,
         "POST",
-        "/router/api/providers",
+        "/api/providers",
         Some(r#"{"name":"urlless"}"#.into()),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
     let (status, body) =
-        json_request(&app, "POST", "/router/api/providers/urlless/probe", None).await;
+        json_request(&app, "POST", "/api/providers/urlless/probe", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("base URL"), "{body}");
 }
@@ -429,7 +449,7 @@ async fn provider_probe_unreachable_core_answers_503() {
     let app = app_with_unreachable_core().await;
     let _g = ENV_LOCK.lock().await;
     let (status, body) =
-        json_request(&app, "POST", "/router/api/providers/alpha/probe", None).await;
+        json_request(&app, "POST", "/api/providers/alpha/probe", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 
@@ -438,7 +458,7 @@ async fn provider_probe_unreachable_core_answers_503() {
 #[tokio::test]
 async fn mutation_routes_guarded() {
     let (app, _mem) = app_with_core_store().await;
-    for uri in ["/router/api/model-aliases", "/router/api/reload"] {
+    for uri in ["/api/model-aliases", "/api/providers/alpha"] {
         let resp = app
             .clone()
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -452,7 +472,7 @@ async fn mutation_routes_guarded() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/router/api/providers")
+                .uri("/api/providers")
                 .header("origin", "http://evil.example")
                 .body(Body::empty())
                 .unwrap(),
@@ -462,7 +482,7 @@ async fn mutation_routes_guarded() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// workbench-conversation-view 4.1：`GET /router/api/defaults` 预选数据。
+/// workbench-conversation-view 4.1：`GET /api/provider-defaults` 预选数据。
 /// 数据面沿 c4r 契约：router 的 /admin/defaults 已下线，defaults 真源在
 /// core 状态库（providers 域快照的 default_selection 段）。未设置 → 双
 /// null；core 不可达 → 503。
@@ -473,7 +493,7 @@ async fn router_api_defaults_reads_core_store_and_degrades_honestly() {
     let (app, mem) = app_with_core_store().await;
 
     // 未设置：双 null（语义照旧）。
-    let (status, body) = json_request(&app, "GET", "/router/api/defaults", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/provider-defaults", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(v["default_provider"].is_null(), "{v}");
@@ -483,7 +503,7 @@ async fn router_api_defaults_reads_core_store_and_degrades_honestly() {
     mem.state.lock().unwrap().default_selection = Some(
         sebas_dispatch::state_store::DefaultSelection::with_model("deepseek", "deepseek-chat"),
     );
-    let (status, body) = json_request(&app, "GET", "/router/api/defaults", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/provider-defaults", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["default_provider"], "deepseek", "{v}");
@@ -493,7 +513,7 @@ async fn router_api_defaults_reads_core_store_and_degrades_honestly() {
     mem.state.lock().unwrap().default_selection = Some(
         sebas_dispatch::state_store::DefaultSelection::new("anthropic"),
     );
-    let (status, body) = json_request(&app, "GET", "/router/api/defaults", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/provider-defaults", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["default_provider"], "anthropic", "{v}");
@@ -501,7 +521,7 @@ async fn router_api_defaults_reads_core_store_and_degrades_honestly() {
 
     // core 不可达 → 503，绝不伪造默认值。
     let app = app_with_unreachable_core().await;
-    let (status, body) = json_request(&app, "GET", "/router/api/defaults", None).await;
+    let (status, body) = json_request(&app, "GET", "/api/provider-defaults", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 

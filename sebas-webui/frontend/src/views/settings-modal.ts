@@ -59,7 +59,7 @@ import {
   type AdminEvent,
   type AdminService,
   type EnvVarEntry,
-  type RouterProviderAdmin,
+  type ProviderAdmin,
   type ProviderPreset,
   type ProviderPayload,
   type ProviderModelEntry,
@@ -279,8 +279,8 @@ export class SebasSettingsModal extends LitElement {
   /** About INSTANCE 段：工作区根目录（/api/fs/browse-dirs 的服务端解析根）。 */
   @state() private overviewRoot: string | null = null
   @state() private rootCopied = false
-  /** provider 管理面（/router/api/providers + /router/api/presets）。 */
-  @state() private adminProviders: RouterProviderAdmin[] | null = null
+  /** provider 管理面（/api/providers + /api/provider-presets）。 */
+  @state() private adminProviders: ProviderAdmin[] | null = null
   @state() private adminError = ''
   @state() private presets: ProviderPreset[] | null = null
   /**
@@ -312,8 +312,8 @@ export class SebasSettingsModal extends LitElement {
   } | null = null
   @state() private deleteTarget: string | null = null
   /** 默认 provider/model（router admin defaults 透传；workbench-agent-wire-fix
-   * 3.3 起 /api/agent-defaults 退役，改读 /router/api/providers 代理旁的
-   * admin defaults 端点——经既有 routerProviders 数据推导，无独立端点）。 */
+   * 3.3 起 /api/agent-defaults 退役，改读 /api/providers 集群旁的
+   * admin defaults 端点——经既有 providers 数据推导，无独立端点）。 */
   @state() private defaults: { provider: string | null; model: string | null } | null = null
   /** 设默认对话框的草稿：目标 provider + 可选 model（null = provider 默认）。 */
   @state() private defaultDraft: { provider: string; model: string | null } | null = null
@@ -1457,7 +1457,7 @@ export class SebasSettingsModal extends LitElement {
   private loadProviders(): void {
     this.adminError = ''
     api
-      .routerProviders()
+      .providers()
       .then((d) => {
         this.adminProviders = d.providers
       })
@@ -1467,7 +1467,7 @@ export class SebasSettingsModal extends LitElement {
       })
     if (this.presets === null) {
       api
-        .routerPresets()
+        .providerPresets()
         .then((d) => {
           this.presets = d.presets
         })
@@ -1480,7 +1480,7 @@ export class SebasSettingsModal extends LitElement {
 
   private refreshProviders(): Promise<void> {
     return api
-      .routerProviders()
+      .providers()
       .then((d) => {
         this.adminProviders = d.providers
       })
@@ -1529,7 +1529,7 @@ export class SebasSettingsModal extends LitElement {
     }
   }
 
-  private openEdit(p: RouterProviderAdmin): void {
+  private openEdit(p: ProviderAdmin): void {
     this.actionError = ''
     this.fetchState = null
     const map = p.model_map ?? {}
@@ -1609,7 +1609,7 @@ export class SebasSettingsModal extends LitElement {
    * - `api_key_env` 不是输入项；定制编辑静默回填存量值（与空 key 保留
    *   同一姿态）。
    */
-  private editorPayload(stored: RouterProviderAdmin | null): ProviderPayload {
+  private editorPayload(stored: ProviderAdmin | null): ProviderPayload {
     const e = this.editor
     if (!e) return {}
     const payload: ProviderPayload = { protocol: e.protocol }
@@ -1663,9 +1663,9 @@ export class SebasSettingsModal extends LitElement {
     const payload = this.editorPayload(stored)
     try {
       if (e.mode === 'create-preset' || e.mode === 'create-custom') {
-        await api.routerProviderCreate(payload)
+        await api.providerCreate(payload)
       } else {
-        await api.routerProviderUpdate(e.name, payload)
+        await api.providerUpdate(e.name, payload)
       }
       this.editor = null
       await this.refreshProviders()
@@ -1681,7 +1681,7 @@ export class SebasSettingsModal extends LitElement {
     this.busy = true
     this.actionError = ''
     try {
-      await api.routerProviderDelete(this.deleteTarget)
+      await api.providerDelete(this.deleteTarget)
       this.deleteTarget = null
       await this.refreshProviders()
     } catch (err) {
@@ -1858,7 +1858,7 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  private renderProviderRow(p: RouterProviderAdmin) {
+  private renderProviderRow(p: ProviderAdmin) {
     const url = p.base_url_anthropic ?? p.base_url_openai_chat ?? p.base_url_openai_responses
     return html`
       <div class="provider-row">
@@ -2698,7 +2698,7 @@ export class SebasSettingsModal extends LitElement {
     )
   }
 
-  private openSetDefault(p: RouterProviderAdmin): void {
+  private openSetDefault(p: ProviderAdmin): void {
     this.actionError = ''
     this.defaultDraft = { provider: p.name, model: null }
   }

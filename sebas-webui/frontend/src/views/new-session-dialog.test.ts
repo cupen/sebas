@@ -35,8 +35,8 @@ if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'unde
 vi.mock('../api/client.js', () => ({
   api: {
     agents: vi.fn(),
-    routerProviders: vi.fn(),
-    routerDefaults: vi.fn(),
+    providers: vi.fn(),
+    providerDefaults: vi.fn(),
   },
 }))
 
@@ -103,8 +103,8 @@ beforeEach(() => {
       { id: 'native', display: 'Native Kernel', reachable: true },
     ],
   })
-  ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
-  ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+  ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
+  ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
     default_provider: null,
     default_model: null,
   })
@@ -119,7 +119,7 @@ afterEach(() => {
 
 describe('sebas-new-session-dialog', () => {
   it('confirms with agent/model/mode; mode default omits the field (null)', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [
         {
           name: 'deepseek',
@@ -127,7 +127,7 @@ describe('sebas-new-session-dialog', () => {
         },
       ],
     })
-    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
       default_provider: 'deepseek',
       default_model: 'deepseek-reasoner',
     })
@@ -184,13 +184,13 @@ describe('sebas-new-session-dialog', () => {
   })
 
   it('two-level selection: switching provider moves the model list to that provider', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [
         { name: 'alpha', models: [{ id: 'a1', tags: [] }] },
         { name: 'beta', models: [{ id: 'b1', tags: [] }, { id: 'b2', tags: [] }] },
       ],
     })
-    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
       default_provider: null,
       default_model: null,
     })
@@ -215,10 +215,10 @@ describe('sebas-new-session-dialog', () => {
   })
 
   it('a configured default outside the catalog cannot preselect (no fabricated options)', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [{ name: 'alpha', models: [{ id: 'a1', tags: [] }] }],
     })
-    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
       default_provider: 'ghost',
       default_model: 'nope',
     })
@@ -233,7 +233,7 @@ describe('sebas-new-session-dialog', () => {
   })
 
   it('states catalog unavailability honestly instead of empty selects', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockRejectedValue(
+    ;(api.providers as ReturnType<typeof vi.fn>).mockRejectedValue(
       Object.assign(new Error('503'), { status: 503 }),
     )
     const el = await mount({ open: true, defaultAgent: 'claude' })

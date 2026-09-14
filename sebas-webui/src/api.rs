@@ -357,11 +357,6 @@ pub async fn settings(State(state): State<WebUiState>) -> Response {
     Json(data).into_response()
 }
 
-/// GET /api/router — detailed provider status.
-pub async fn router(State(state): State<WebUiState>) -> Response {
-    Json(json!({ "router": state.router })).into_response()
-}
-
 /// GET /api/about — version info and system status.
 pub async fn about(State(state): State<WebUiState>) -> Response {
     let data = json!({

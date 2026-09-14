@@ -209,11 +209,6 @@ pub(crate) fn format_uptime(d: std::time::Duration) -> String {
 //   含「不存在」→ 404，含「已存在」→ 409，其余 → 400；
 // - 其余（socket not found / 连接失败 / state store 不可用 …）→ 503。
 
-fn router_client_of(state: &WebUiState) -> crate::router_client::RouterClient {
-    let listen = state.router.listen.clone().unwrap_or_default();
-    crate::router_client::RouterClient::new(&listen)
-}
-
 /// 拉取 providers 域快照；不可达（None）或快照自带 error（引擎降级）→ None。
 /// 调用方对 None 如实 503，绝不拿陈数据充数。
 async fn providers_snapshot(state: &WebUiState) -> Option<serde_json::Value> {
@@ -329,10 +324,10 @@ fn admin_provider_row(
     })
 }
 
-/// GET /router/api/providers：provider 列表（core 状态库快照投影，管理页
+/// GET /api/providers：provider 列表（core 状态库快照投影，管理页
 /// 数据源）。墓碑不出现；config 种子 provider 不在此列（store 是唯一事实
 /// 来源，种子-only 机器如实显示空表）。core 不可达 → 503。
-pub async fn router_api_providers_list(
+pub async fn providers_list(
     State(state): State<WebUiState>,
 ) -> axum::response::Response {
     let Some(snapshot) = providers_snapshot(&state).await else {
@@ -365,13 +360,13 @@ pub async fn router_api_providers_list(
     axum::Json(serde_json::json!({ "providers": out })).into_response()
 }
 
-/// GET /router/api/defaults：默认 provider/model 预选数据（workbench-
+/// GET /api/provider-defaults：默认 provider/model 预选数据（workbench-
 /// conversation-view 4.1）。路径名保留（路由面稳定），数据面随 make-core-own-
 /// provider-data 的契约走：router 的 `/admin/defaults` 已是 404 下线面，
 /// defaults 真源在 core 状态库（providers 域快照的 `default_selection` 段，
 /// 沿 providers_snapshot 同一 seam 读）。未设置 → 双 null（语义照旧）；
 /// core 不可达 → 503（不回退陈快照、不伪造默认值）。
-pub async fn router_api_defaults(State(state): State<WebUiState>) -> axum::response::Response {
+pub async fn provider_defaults(State(state): State<WebUiState>) -> axum::response::Response {
     let Some(snapshot) = providers_snapshot(&state).await else {
         return err_503_core_unreachable();
     };
@@ -390,11 +385,11 @@ pub async fn router_api_defaults(State(state): State<WebUiState>) -> axum::respo
     .into_response()
 }
 
-/// GET /router/api/presets：内置 preset 表只读视图（seam 直出代码表；detached
+/// GET /api/provider-presets：内置 preset 表只读视图（seam 直出代码表；detached
 /// 形态经 core channel 的 presets 域，同一形状）。core 不可达 → 503（表本身
 /// 是代码数据，但 preserve「真源可达才服务」的读姿态——快照 seam 同时是
 /// core 可达性探测）。
-pub async fn router_api_presets(State(state): State<WebUiState>) -> axum::response::Response {
+pub async fn provider_presets(State(state): State<WebUiState>) -> axum::response::Response {
     match state.backend.state_snapshot("presets").await {
         Some(v) if v.get("error").is_none() => axum::Json(v).into_response(),
         _ => err_503_core_unreachable(),
@@ -517,7 +512,7 @@ fn models_value_to_entries(v: &serde_json::Value) -> Option<Vec<sebas_router::mo
     }
 }
 
-pub async fn router_api_provider_create(
+pub async fn provider_create(
     State(state): State<WebUiState>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -555,7 +550,7 @@ pub async fn router_api_provider_create(
     )
 }
 
-pub async fn router_api_provider_update(
+pub async fn provider_update(
     State(state): State<WebUiState>,
     Path(name): Path<String>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -603,7 +598,7 @@ pub async fn router_api_provider_update(
     )
 }
 
-pub async fn router_api_provider_delete(
+pub async fn provider_delete(
     State(state): State<WebUiState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
@@ -627,11 +622,11 @@ pub async fn router_api_provider_delete(
     )
 }
 
-/// POST /router/api/providers/{name}/probe：上游 model 列表抓取（add-fetch-models）。
+/// POST /api/providers/{name}/probe：上游 model 列表抓取（add-fetch-models）。
 /// 由 core 的 providers 域抓取 op 承载（seam 直调内嵌引擎，detached 形态经
 /// core channel 同一 op）。**只读**：抓取不改 provider 任何字段、不持久化；
 /// 选中某个 id 是后续的普通编辑（PUT）。响应只含 id 列表，绝无 key 材料。
-pub async fn router_api_provider_probe(
+pub async fn provider_probe(
     State(state): State<WebUiState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
@@ -674,7 +669,7 @@ pub async fn router_api_provider_probe(
     }
 }
 
-pub async fn router_api_alias_create(
+pub async fn alias_create(
     State(state): State<WebUiState>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -709,7 +704,7 @@ pub async fn router_api_alias_create(
     )
 }
 
-pub async fn router_api_alias_update(
+pub async fn alias_update(
     State(state): State<WebUiState>,
     Path(alias): Path<String>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -745,7 +740,7 @@ pub async fn router_api_alias_update(
     )
 }
 
-pub async fn router_api_alias_delete(
+pub async fn alias_delete(
     State(state): State<WebUiState>,
     Path(alias): Path<String>,
 ) -> axum::response::Response {
@@ -822,27 +817,9 @@ fn validated_alias(
     Ok((alias.to_string(), serde_json::Value::Object(entry)))
 }
 
-/// POST /router/api/reload：router 配置刷新代理（读侧操作，仍走 router 的
-/// `/admin/reload`——它不写 provider 数据，只是让 router 重投影 core 快照 /
-/// 文件 overlay）。
-pub async fn router_api_reload(State(state): State<WebUiState>) -> axum::response::Response {
-    let client = router_client_of(&state);
-    if state.router.listen.is_none() {
-        return err_503_core_unreachable();
-    }
-    match client.reload().await {
-        Ok(v) => axum::Json(v).into_response(),
-        Err(e) => (
-            e.status,
-            axum::Json(serde_json::json!({"error": e.message})),
-        )
-            .into_response(),
-    }
-}
-
 /// router mutation 守卫（Task 6.3，语义与 admin_mutation_guard 一致但
 /// 不依赖 AdminState）：POST-only（405）+ loopback origin 检查（403）。
-pub async fn router_mutation_guard(
+pub async fn provider_mutation_guard(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

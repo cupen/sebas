@@ -9,14 +9,14 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { RouterProviderAdmin } from './client.js'
+import type { ProviderAdmin } from './client.js'
 
-// loadModelCatalog 走真实 api 客户端——mock 掉 fetch 面（routerProviders /
-// routerDefaults）后导入被测模块。
+// loadModelCatalog 走真实 api 客户端——mock 掉 fetch 面（providers /
+// providerDefaults）后导入被测模块。
 vi.mock('./client.js', () => ({
   api: {
-    routerProviders: vi.fn(),
-    routerDefaults: vi.fn(),
+    providers: vi.fn(),
+    providerDefaults: vi.fn(),
   },
 }))
 
@@ -29,7 +29,7 @@ import {
   toModelCatalog,
 } from './model-catalog.js'
 
-function provider(name: string, models: RouterProviderAdmin['models']): RouterProviderAdmin {
+function provider(name: string, models: ProviderAdmin['models']): ProviderAdmin {
   return {
     name,
     base_url_anthropic: null,
@@ -99,10 +99,10 @@ describe('toModelCatalog', () => {
 
 describe('loadModelCatalog', () => {
   it('fetches providers + defaults in parallel and reports a usable catalog', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [provider('alpha', [{ id: 'a1', tags: [] }])],
     })
-    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
       default_provider: 'alpha',
       default_model: 'a1',
     })
@@ -113,18 +113,18 @@ describe('loadModelCatalog', () => {
   })
 
   it('defaults fetch failing does not sink the catalog', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [provider('alpha', [{ id: 'a1', tags: [] }])],
     })
-    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('503'))
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('503'))
     const { catalog, unavailable } = await loadModelCatalog()
     expect(unavailable).toBe(false)
     expect(catalog?.defaultProvider).toBeNull()
   })
 
   it('an empty catalog is explicitly unavailable', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
-    ;(api.routerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({ providers: [] })
+    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
       default_provider: null,
       default_model: null,
     })
@@ -134,7 +134,7 @@ describe('loadModelCatalog', () => {
   })
 
   it('a providers read failure is explicitly unavailable (never throws)', async () => {
-    ;(api.routerProviders as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('503'))
+    ;(api.providers as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('503'))
     const { catalog, unavailable } = await loadModelCatalog()
     expect(unavailable).toBe(true)
     expect(catalog).toBeNull()

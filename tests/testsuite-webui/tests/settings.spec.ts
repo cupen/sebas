@@ -20,7 +20,7 @@
  * in Services. Read-only sections are reconciled against their JSON API truth
  * with contains-assertions (never literals: listen addrs and uptime move with
  * the sandbox). Since make-core-own-provider-data the provider management
- * cluster (/router/api/providers*) is fulfilled by the webui backend from
+ * cluster (/api/providers*) is fulfilled by the webui backend from
  * the core-owned provider store: in this sandbox the core is live, so
  * create/edit/delete persist for real (S5a/S5b). The minimal preset/custom
  * forms follow redesign-provider-models-settings: preset create needs only
@@ -285,7 +285,7 @@ test.describe('设置面', () => {
       // make-core-own-provider-data：provider 列表来自 core 状态库（空库
       // 起）——为 default-dialog 旅程经 API 预置一行。
       const seededName = `spec-default-${Date.now()}`
-      const seeded = await page.request.post('/router/api/providers', {
+      const seeded = await page.request.post('/api/providers', {
         data: { name: seededName, preset: 'deepseek', api_key: 'sk-spec' },
       })
       expect(seeded.status()).toBe(201)
@@ -349,7 +349,7 @@ test.describe('设置面', () => {
       // Empty custom create is rejected client-side with zero network traffic
       // (custom minimal form requires the instance name).
       let postCalls = 0
-      await page.route('**/router/api/providers', (route) => {
+      await page.route('**/api/providers', (route) => {
         if (route.request().method() === 'POST') postCalls += 1
         void route.continue()
       })
@@ -417,7 +417,7 @@ test.describe('设置面', () => {
       await expect(
         settings.panel.locator('.provider-row').filter({ hasText: 'anthropic' }),
       ).toBeVisible({ timeout: 10_000 })
-      const presetResp = await page.request.get('/router/api/providers')
+      const presetResp = await page.request.get('/api/providers')
       const presetBody = (await presetResp.json()) as {
         providers?: Array<{ name: string; preset: string | null; models: Array<{ id: string }> }>
       }
@@ -436,7 +436,7 @@ test.describe('设置面', () => {
       await resetState(page.request)
       // Seed a row over the API so the delete journey owns a known target.
       const seededName = `spec-delete-${Date.now()}`
-      const seeded = await page.request.post('/router/api/providers', {
+      const seeded = await page.request.post('/api/providers', {
         data: { name: seededName, preset: 'deepseek', api_key: 'sk-spec' },
       })
       expect(seeded.status()).toBe(201)
@@ -466,7 +466,7 @@ test.describe('设置面', () => {
       // never a fabricated success).
       await settings.close()
       const urllessName = `spec-nourl-${Date.now()}`
-      const urlless = await page.request.post('/router/api/providers', {
+      const urlless = await page.request.post('/api/providers', {
         data: { name: urllessName },
       })
       expect(urlless.status()).toBe(201)
@@ -485,7 +485,7 @@ test.describe('设置面', () => {
       await urllessEditor.locator('wa-button').filter({ hasText: 'Cancel' }).click()
       await expect(urllessEditor).toBeHidden({ timeout: 10_000 })
       const probe = await page.request.post(
-        `/router/api/providers/${encodeURIComponent(urllessName)}/probe`,
+        `/api/providers/${encodeURIComponent(urllessName)}/probe`,
       )
       expect(probe.status()).toBe(400)
       const probeBody = (await probe.json()) as { error?: string }

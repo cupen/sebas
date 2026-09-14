@@ -19,7 +19,7 @@
  *                改角色/重置密码/启停/删除；400/409 文案就地展示。分区可见性
  *                随 role 裁剪（Users 仅 root、Services 隐藏于 member/viewer；
  *                role 缺省 = 鉴权关闭的宿主，保持既有分区）
- *   - models     provider 管理列表（/router/api/providers，条目携带能力
+ *   - models     provider 管理列表（/api/providers，条目携带能力
  *                标记；不再渲染 Router 网关卡、不再请求 /api/router）
  *   - env-vars   环境变量只读表（/api/env 服务端策划清单，懒加载）：plain
  *                已设置显实际值、未设置显「未设置（用默认）」、set_unset
@@ -73,11 +73,11 @@ const apiMocks = vi.hoisted(() => ({
   router: vi.fn(),
   about: vi.fn(),
   env: vi.fn(),
-  routerProviders: vi.fn(),
-  routerPresets: vi.fn(),
-  routerProviderCreate: vi.fn(),
-  routerProviderUpdate: vi.fn(),
-  routerProviderDelete: vi.fn(),
+  providers: vi.fn(),
+  providerPresets: vi.fn(),
+  providerCreate: vi.fn(),
+  providerUpdate: vi.fn(),
+  providerDelete: vi.fn(),
   fetchProviderModels: vi.fn(),
   adminServices: vi.fn(),
   adminEvents: vi.fn(),
@@ -118,11 +118,11 @@ vi.mock('../api/client.js', () => ({
     router: apiMocks.router,
     about: apiMocks.about,
     env: apiMocks.env,
-    routerProviders: apiMocks.routerProviders,
-    routerPresets: apiMocks.routerPresets,
-    routerProviderCreate: apiMocks.routerProviderCreate,
-    routerProviderUpdate: apiMocks.routerProviderUpdate,
-    routerProviderDelete: apiMocks.routerProviderDelete,
+    providers: apiMocks.providers,
+    providerPresets: apiMocks.providerPresets,
+    providerCreate: apiMocks.providerCreate,
+    providerUpdate: apiMocks.providerUpdate,
+    providerDelete: apiMocks.providerDelete,
     fetchProviderModels: apiMocks.fetchProviderModels,
     adminServices: apiMocks.adminServices,
     adminEvents: apiMocks.adminEvents,
@@ -195,7 +195,7 @@ beforeEach(() => {
       providers: [],
     },
   })
-  apiMocks.routerProviders.mockResolvedValue({
+  apiMocks.providers.mockResolvedValue({
     providers: [
       {
         name: 'alpha',
@@ -238,7 +238,7 @@ beforeEach(() => {
   apiMocks.usersSetRole.mockResolvedValue({ status: 'ok' })
   apiMocks.usersSetEnabled.mockResolvedValue({ status: 'ok' })
   apiMocks.usersDelete.mockResolvedValue({ status: 'ok' })
-  apiMocks.routerPresets.mockResolvedValue({
+  apiMocks.providerPresets.mockResolvedValue({
     presets: [
       {
         name: 'deepseek',
@@ -464,8 +464,8 @@ describe('sebas-settings-modal sections', () => {
     expect(el.section).toBe('models')
     // 3.4：Models 渲染不再发起 /api/router 请求，也不出现网关卡。
     expect(apiMocks.router).not.toHaveBeenCalled()
-    expect(apiMocks.routerProviders).toHaveBeenCalled()
-    expect(apiMocks.routerPresets).toHaveBeenCalled()
+    expect(apiMocks.providers).toHaveBeenCalled()
+    expect(apiMocks.providerPresets).toHaveBeenCalled()
     const text = el.shadowRoot!.textContent ?? ''
     expect(text).not.toContain('Router 路由网关')
     expect(text).not.toContain('127.0.0.1:8787')
@@ -883,7 +883,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
 
   beforeEach(() => {
     apiMocks.fetchProviderModels.mockResolvedValue({ provider: 'beta', models: ['m-pro', 'm-flash'] })
-    apiMocks.routerProviderUpdate.mockResolvedValue({ updated: 'beta' })
+    apiMocks.providerUpdate.mockResolvedValue({ updated: 'beta' })
   })
 
   // 4.1 验收：入口从 provider 行内挪进编辑器——行上无 🔍，编辑器（preset
@@ -919,13 +919,13 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
     await settle(el)
 
     expect(apiMocks.fetchProviderModels).toHaveBeenCalledWith('beta')
-    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
-    expect(apiMocks.routerProviderCreate).not.toHaveBeenCalled()
+    expect(apiMocks.providerUpdate).not.toHaveBeenCalled()
+    expect(apiMocks.providerCreate).not.toHaveBeenCalled()
     expect(entryIds(dialog)).toEqual(['m-pro', 'm-flash'])
 
     await saveEditor(el)
-    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledTimes(1)
-    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledWith('beta', {
+    expect(apiMocks.providerUpdate).toHaveBeenCalledTimes(1)
+    expect(apiMocks.providerUpdate).toHaveBeenCalledWith('beta', {
       protocol: 'auto',
       base_url_anthropic: undefined,
       base_url_openai_chat: 'https://b.example/v1',
@@ -963,7 +963,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
     expect(vision.checked).toBe(true)
 
     await saveEditor(el)
-    expect(apiMocks.routerProviderUpdate).toHaveBeenCalledWith('alpha', {
+    expect(apiMocks.providerUpdate).toHaveBeenCalledWith('alpha', {
       protocol: 'auto',
       preset: 'deepseek',
       models: [
@@ -985,7 +985,7 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
     ;(dialog.querySelector('wa-button[appearance="plain"]') as HTMLElement).click()
     await el.updateComplete
     expect((el as unknown as { editor: unknown }).editor).toBeNull()
-    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
+    expect(apiMocks.providerUpdate).not.toHaveBeenCalled()
 
     // 重开编辑器：草稿回到存量目录（空），不是抓取结果。
     const dialog2 = await openEditorFor(el, 'beta')
@@ -1018,14 +1018,14 @@ describe('revamp-settings-nav-and-models-editor：编辑器内 fetch 整单替�
     expect(err).toBeTruthy()
     expect(err!.textContent).toContain('HTTP 401')
     expect(entryIds(dialog)).toEqual(['manual-1'])
-    expect(apiMocks.routerProviderUpdate).not.toHaveBeenCalled()
+    expect(apiMocks.providerUpdate).not.toHaveBeenCalled()
     el.remove()
   })
 
   // spec「no base URL means no fetch entry」：三槽位全空的 provider，编辑器
   // 不渲染 fetch 动作。
   it('renders no fetch action in the editor for a provider without a usable base URL', async () => {
-    apiMocks.routerProviders.mockResolvedValue({
+    apiMocks.providers.mockResolvedValue({
       providers: [
         {
           name: 'urlless',
@@ -1136,7 +1136,7 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
   it('preset create needs only preset + key + model entries; name defaults to the preset name', async () => {
     const el = await mount()
     const dialog = await openPresetEditor(el)
-    apiMocks.routerProviderCreate.mockResolvedValue({ created: 'deepseek' })
+    apiMocks.providerCreate.mockResolvedValue({ created: 'deepseek' })
 
     // 最小路径里没有实例名输入（D5：默认取 preset 名；改名在 Advanced）。
     expect(dialog.querySelector('wa-input[label="Name"]')).toBeNull()
@@ -1168,8 +1168,8 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
     ).click()
     await settle(el)
 
-    expect(apiMocks.routerProviderCreate).toHaveBeenCalledTimes(1)
-    const payload = apiMocks.routerProviderCreate.mock.calls[0][0] as Record<string, unknown>
+    expect(apiMocks.providerCreate).toHaveBeenCalledTimes(1)
+    const payload = apiMocks.providerCreate.mock.calls[0][0] as Record<string, unknown>
     expect(payload.preset).toBe('deepseek')
     expect(payload.api_key).toBe('sk-test')
     // 实例名缺省取预设名（D5）。
@@ -1190,13 +1190,13 @@ describe('redesign-provider-models-settings 3.1：预制最小表单', () => {
   it('untouched preset entries stay unsubmitted (catalog keeps following the code table)', async () => {
     const el = await mount()
     const dialog = await openPresetEditor(el)
-    apiMocks.routerProviderCreate.mockResolvedValue({ created: 'deepseek' })
+    apiMocks.providerCreate.mockResolvedValue({ created: 'deepseek' })
     setWaValue(dialog, 'wa-input[label="API key"]', 'sk-only')
     ;(
       el.shadowRoot!.querySelector('wa-dialog.provider-editor wa-button[variant="brand"]') as HTMLElement
     ).click()
     await settle(el)
-    const payload = apiMocks.routerProviderCreate.mock.calls[0][0] as Record<string, unknown>
+    const payload = apiMocks.providerCreate.mock.calls[0][0] as Record<string, unknown>
     expect(payload.models).toBeUndefined()
     el.remove()
   })
@@ -1242,7 +1242,7 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
   it('minimal custom create: name + base url + protocol; advanced collapsed by default', async () => {
     const el = await mount()
     const dialog = await openCustomEditor(el)
-    apiMocks.routerProviderCreate.mockResolvedValue({ created: 'my-api' })
+    apiMocks.providerCreate.mockResolvedValue({ created: 'my-api' })
 
     const advanced = dialog.querySelector('details.advanced') as HTMLDetailsElement
     expect(advanced).toBeTruthy()
@@ -1255,8 +1255,8 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
     setWaValue(dialog, 'wa-input[label="API key"]', 'sk-custom')
 
     await save(el)
-    expect(apiMocks.routerProviderCreate).toHaveBeenCalledTimes(1)
-    const payload = apiMocks.routerProviderCreate.mock.calls[0][0] as Record<string, unknown>
+    expect(apiMocks.providerCreate).toHaveBeenCalledTimes(1)
+    const payload = apiMocks.providerCreate.mock.calls[0][0] as Record<string, unknown>
     expect(payload.name).toBe('my-api')
     expect(payload.protocol).toBe('openai')
     expect(payload.base_url_openai_chat).toBe('https://api.example/v1')
@@ -1271,7 +1271,7 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
   it('expanding Advanced exposes the remaining slots and rename map for editing', async () => {
     const el = await mount()
     const dialog = await openCustomEditor(el)
-    apiMocks.routerProviderCreate.mockResolvedValue({ created: 'my-api' })
+    apiMocks.providerCreate.mockResolvedValue({ created: 'my-api' })
 
     const advanced = dialog.querySelector('details.advanced') as HTMLDetailsElement
     advanced.open = true
@@ -1293,7 +1293,7 @@ describe('redesign-provider-models-settings 3.2：定制最小表单 + Advanced 
     )
     await save(el)
 
-    const payload = apiMocks.routerProviderCreate.mock.calls[0][0] as Record<string, unknown>
+    const payload = apiMocks.providerCreate.mock.calls[0][0] as Record<string, unknown>
     expect(payload.base_url_anthropic).toBe('https://api.example/anthropic')
     expect(payload.base_url_openai_responses).toBe('https://api.example/responses')
     expect(payload.model_map).toEqual({ 'old-model': 'new-model' })

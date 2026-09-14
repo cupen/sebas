@@ -274,7 +274,7 @@ export async function getAdminServices(
 
 /** Raw provider-admin list (sandbox: read-only works, mutations 503). */
 export async function listRouterProviders(request: APIRequestContext): Promise<string[]> {
-  const d = (await (await request.get('/router/api/providers')).json()) as {
+  const d = (await (await request.get('/api/providers')).json()) as {
     providers?: { name: string }[]
   }
   return (d.providers ?? []).map((p) => p.name)

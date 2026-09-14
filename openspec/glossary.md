@@ -22,6 +22,11 @@
   channel 观察与驱动会话,或在 core 进程内运行(进程内后端)。
 - **router(模型路由)**:provider 透传代理进程,入口命令 `sebas router`,
   对外提供 OpenAI/Anthropic 兼容 API。
+
+> **拓扑原则(retire-webui-router-surface)**:服务端进程间通信一律走 IPC
+> (core channel);router 只服务 agent 执行体的数据面推理流量;WebUI 的
+> HTTP API 面不出现 router 概念,其唯一服务端出边是 core channel——provider
+> 数据权威在 core 状态库,router 经订阅自动热重载。
 - **dispatch(sebas-dispatch crate,会话分发)**:core 进程内的领域层——会话映射、
   入站事件 dispatch、slash 命令解析、权限处理、出站 Out 指令编排(会话执行向;
   IM 呈现/reaction 由 sebas-im 前端负责)。不是独立进程。
