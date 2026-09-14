@@ -1497,6 +1497,362 @@ mod workspace_root_tests {
         .await;
     }
 
+    // ── 2.1 注册执法：越界与「不存在且越界」同文案（不借 400 探测存在性）──
+
+    #[tokio::test]
+    async fn project_add_out_of_scope_error_is_identical_for_existing_and_missing_dirs() {
+        let t = two_trees();
+        let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+        let existing = t.outside.path().join("exists-dir");
+        std::fs::create_dir_all(&existing).unwrap();
+        let missing = t.outside.path().join("missing-dir");
+
+        let mut msgs = Vec::new();
+        for path in [existing, missing] {
+            let body = serde_json::json!({ "path": path.to_str().unwrap() });
+            let (status, resp) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+            msgs.push(resp["error"].as_str().expect("error body").to_string());
+        }
+        assert_eq!(
+            msgs[0], msgs[1],
+            "越界与「不存在且越界」必须同文案，否则可探测目录存在性"
+        );
+        assert!(msgs[0].contains("超出允许范围"), "got: {}", msgs[0]);
+    }
+
+    // ── 2.2 列表执法 ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn projects_list_hides_out_of_scope_local_project_keeps_in_scope_and_remote() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            // 界内项目经 API 注册（FakeBackend 走文件注册表降级路径）。
+            let dir = t.allowed.path().join("in-scope");
+            std::fs::create_dir_all(&dir).unwrap();
+            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+            let (status, _) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED);
+            // 越界历史项目（升级前遗留、新二进制注册不进来的形态）直接落注册表；
+            // 远端项目同入注册表（不受主控 root 辖区约束）。
+            let legacy = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                t.outside.path().to_str().unwrap(),
+            )
+            .expect("seed legacy out-of-scope entry");
+            let remote = crate::projects::add_on("dev-box", "/srv/repo")
+                .expect("seed remote entry");
+
+            let (_, list) = req(app, "GET", "/api/projects", None).await;
+            let ids: Vec<&str> = list["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p["id"].as_str())
+                .collect();
+            assert!(
+                !ids.contains(&legacy.id.as_str()),
+                "越界本机项目必须隐藏: {ids:?}"
+            );
+            assert!(
+                ids.contains(&remote.id.as_str()),
+                "远端项目不受主控 root 影响: {ids:?}"
+            );
+            assert_eq!(ids.len(), 2, "界内本机项目 + 远端项目在列: {ids:?}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn projects_list_hides_all_local_projects_when_root_unresolvable() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            // 先用可解析的根注册一个界内项目。
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            let dir = t.allowed.path().join("in-scope");
+            std::fs::create_dir_all(&dir).unwrap();
+            let body = serde_json::json!({ "path": dir.to_str().unwrap() });
+            let (status, _) =
+                req(app.clone(), "POST", "/api/projects", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let remote = crate::projects::add_on("dev-box", "/srv/repo").unwrap();
+
+            // root 被删/移走（不可解析）→ 本机项目全部隐藏（fail-closed），
+            // 远端项目仍在列。
+            let ghost = t.allowed.path().join("__ghost_root__");
+            let app = app_with_workspace_root(ghost);
+            let (_, list) = req(app, "GET", "/api/projects", None).await;
+            let projects = list["projects"].as_array().unwrap();
+            assert!(
+                projects.iter().all(|p| {
+                    p["node_id"].as_str().unwrap_or(crate::projects::LOCAL_NODE_ID)
+                        != crate::projects::LOCAL_NODE_ID
+                }),
+                "root 不可解析时本机项目必须全部隐藏: {list}"
+            );
+            let ids: Vec<&str> =
+                projects.iter().filter_map(|p| p["id"].as_str()).collect();
+            assert_eq!(ids, [remote.id.as_str()], "只剩远端项目: {ids:?}");
+        })
+        .await;
+    }
+
+    // ── 2.3 会话面执法 ────────────────────────────────────────────────────
+
+    fn app_and_backend_with_workspace_root(
+        root: std::path::PathBuf,
+    ) -> (Router, Arc<FakeBackend>) {
+        let backend = Arc::new(FakeBackend::new());
+        let app = build_router_with_workspace_root(
+            backend.clone(),
+            RouterInfo::default(),
+            CardConfig::default(),
+            Arc::new(crate::agent_kinds::ConfigAgentKindProvider::new(Vec::new())),
+            Arc::new(AuthHandle::disabled()),
+            root,
+        );
+        (app, backend)
+    }
+
+    /// 本机会话行（`remote: None`）：`project_dir` 即会话绑定的项目目录。
+    fn local_session(reference: &str, project_dir: Option<String>) -> sebas_dispatch::SessionInfo {
+        sebas_dispatch::SessionInfo {
+            channel: "web".into(),
+            key: reference.into(),
+            session_id: None,
+            status: "active".into(),
+            phase: None,
+            user_prompt: None,
+            last_active_unix: 0,
+            project_dir,
+            current_model: None,
+            available_models: None,
+            agent_kind: None,
+            usage: None,
+            backend: None,
+            pending: Vec::new(),
+            remote: None,
+            desired_mode: None,
+            effective_mode: None,
+            msg_count: 0,
+        }
+    }
+
+    fn enc_key(reference: &str) -> String {
+        urlencoding::encode(&format!("web\0{reference}")).into_owned()
+    }
+
+    #[tokio::test]
+    async fn detail_message_and_switch_reject_out_of_scope_local_project() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        let outside = crate::fs::canonicalize_plain(t.outside.path()).expect("canonicalize");
+        backend
+            .set_sessions(vec![local_session("oos", Some(outside))])
+            .await;
+        let key = enc_key("oos");
+
+        // detail / message / switch 一律 400 typed 拒绝，文案点名越界。
+        let cases = [
+            (axum::http::Method::GET, format!("/api/sessions/{key}"), None),
+            (
+                axum::http::Method::POST,
+                format!("/api/sessions/{key}/message"),
+                Some(r#"{"message":"hi"}"#.to_string()),
+            ),
+            (axum::http::Method::POST, format!("/api/sessions/{key}/switch"), None),
+        ];
+        for (method, uri, body) in cases {
+            let (status, resp) = req(app.clone(), method.as_str(), &uri, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {resp}");
+            let msg = resp["error"].as_str().unwrap_or_default();
+            assert!(msg.contains("超出允许范围"), "{uri}: {msg}");
+        }
+
+        // switch 被拒后 focus 指针不动（拒绝不留痕迹）。
+        assert!(backend.focused().await.is_none(), "拒绝的 switch 不得改 focus");
+    }
+
+    #[tokio::test]
+    async fn inbox_and_remote_sessions_stay_outside_the_fence() {
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        // inbox 会话不绑目录；远端会话的 project_dir 在那台机器上，主控 root
+        // 无从裁决（即使路径形似越界）。
+        let mut remote = local_session("rem", Some("/srv/definitely/elsewhere".into()));
+        remote.remote = Some(sebas_dispatch::RemoteSessionView {
+            node_id: "dev-box".into(),
+            node_status: "online".into(),
+            node_cause: None,
+            desired_mode: None,
+            effective_mode: None,
+            parked_approvals: 0,
+            desired_provider: None,
+            provider: None,
+            provider_cause: None,
+        });
+        backend
+            .set_sessions(vec![local_session("inbox", None), remote])
+            .await;
+
+        for reference in ["inbox", "rem"] {
+            let key = enc_key(reference);
+            let (status, resp) = req(app.clone(), axum::http::Method::GET.as_str(), &format!("/api/sessions/{key}"), None).await;
+            assert_eq!(status, StatusCode::OK, "{reference}: {resp}");
+            let (status, _) = req(
+                app.clone(),
+                axum::http::Method::POST.as_str(),
+                &format!("/api/sessions/{key}/message"),
+                Some(r#"{"message":"hi"}"#.to_string()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{reference} 的 message 必须放行");
+        }
+    }
+
+    #[tokio::test]
+    async fn close_and_archive_stay_available_for_out_of_scope_session() {
+        // archive 写的是 SEBAS_ARCHIVE_PATH（进程全局）：与 archive.rs 测试共用
+        // 其串行锁并重定向到一次性文件，绝不落真实 ~/.sebas。锁跨 await 是刻意
+        // 的——整个异步测试体都要串行。
+        let _archive_guard = crate::archive::test_env_lock();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let prev_archive = std::env::var("SEBAS_ARCHIVE_PATH").ok();
+        // SAFETY: archive::test_env_lock 保证进程内 archive 测试串行。
+        unsafe {
+            std::env::set_var(
+                "SEBAS_ARCHIVE_PATH",
+                archive_dir.path().join("archive.json"),
+            );
+        }
+
+        let t = two_trees();
+        let (app, backend) = app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+        let outside = crate::fs::canonicalize_plain(t.outside.path()).expect("canonicalize");
+
+        // close 放行（围栏不锁垃圾）。
+        backend
+            .set_sessions(vec![local_session("oos", Some(outside.clone()))])
+            .await;
+        let key = enc_key("oos");
+        let (status, resp) = req(
+            app.clone(),
+            axum::http::Method::POST.as_str(),
+            &format!("/api/sessions/{key}/close"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+
+        // archive 放行（close 已移除会话，重新种子）。
+        backend
+            .set_sessions(vec![local_session("oos2", Some(outside))])
+            .await;
+        let key2 = enc_key("oos2");
+        let (status, resp) = req(
+            app,
+            axum::http::Method::POST.as_str(),
+            &format!("/api/sessions/{key2}/archive"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+
+        // SAFETY: 同上（锁仍持有）。
+        unsafe {
+            match prev_archive {
+                Some(p) => std::env::set_var("SEBAS_ARCHIVE_PATH", p),
+                None => std::env::remove_var("SEBAS_ARCHIVE_PATH"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_with_out_of_scope_project_id_is_rejected_without_spawning() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let (app, backend) =
+                app_and_backend_with_workspace_root(t.allowed.path().to_path_buf());
+            // 越界历史项目（升级前遗留）直接落注册表。
+            let legacy = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                t.outside.path().to_str().unwrap(),
+            )
+            .unwrap();
+            let body = serde_json::json!({ "project_id": legacy.id, "agent": "claude" });
+            let (status, resp) =
+                req(app.clone(), "POST", "/api/sessions", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+            assert!(
+                resp["error"].as_str().unwrap_or_default().contains("超出允许范围"),
+                "{resp}"
+            );
+            assert!(
+                backend.snapshot().await.is_empty(),
+                "携越界项目的 create 不得产生任何会话"
+            );
+
+            // 反例：界内项目照常创建 0-turn 占位。
+            let dir = t.allowed.path().join("in-scope");
+            std::fs::create_dir_all(&dir).unwrap();
+            let inside = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                dir.to_str().unwrap(),
+            )
+            .unwrap();
+            let body = serde_json::json!({ "project_id": inside.id, "agent": "claude" });
+            let (status, resp) =
+                req(app, "POST", "/api/sessions", Some(body.to_string())).await;
+            assert_eq!(status, StatusCode::CREATED, "{resp}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn branch_probe_reports_out_of_scope_project_as_inaccessible() {
+        with_registry_env(|| async {
+            let t = two_trees();
+            let app = app_with_workspace_root(t.allowed.path().to_path_buf());
+            // 界内 git 项目（对照：可达 + 分支可读）。
+            let inside = t.allowed.path().join("repo");
+            std::fs::create_dir_all(inside.join(".git")).unwrap();
+            std::fs::write(inside.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            let in_scope = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                inside.to_str().unwrap(),
+            )
+            .unwrap();
+            // 越界遗留项目：目录真实存在，但探测必须按不可达处理（不暴露存在性）。
+            let out_scope = crate::projects::add_on(
+                crate::projects::LOCAL_NODE_ID,
+                t.outside.path().to_str().unwrap(),
+            )
+            .unwrap();
+
+            let uri = format!(
+                "/api/projects/{}/branch",
+                urlencoding::encode(&out_scope.id)
+            );
+            let (status, body) = req(app.clone(), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["accessible"], false, "越界项目按不可达处理: {body}");
+            assert_eq!(body["branch"], serde_json::Value::Null, "{body}");
+
+            let uri = format!(
+                "/api/projects/{}/branch",
+                urlencoding::encode(&in_scope.id)
+            );
+            let (status, body) = req(app, "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["accessible"], true, "{body}");
+            assert_eq!(body["branch"], "main", "{body}");
+        })
+        .await;
+    }
+
     /// 两个互不为邻的 tempdir 树：`allowed/`（有子目录）与 `outside/`。
     struct Trees {
         allowed: tempfile::TempDir,

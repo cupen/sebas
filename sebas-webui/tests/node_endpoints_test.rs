@@ -196,14 +196,15 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     let dir = tempfile::tempdir().unwrap();
     let registry = dir.path().join("projects.json");
     let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
-    // 节点说路径不存在。
+    // 节点说路径不存在（界内）——本用例专测「不存在」文案，containment 判定
+    // 置 true；越界拒绝另有专测（node_judged_out_of_workspace_...）。
     backend.set_path_check(
         "dev-box",
         "/srv/nope",
         Ok(PathCheck {
             exists: false,
             is_dir: false,
-            within_workspace: false,
+            within_workspace: true,
         }),
     );
 
@@ -223,6 +224,70 @@ async fn node_side_rejection_names_the_node_path_and_problem() {
     // 注册被拒 → 一个项目都没建。
     let (_, list) = send(&app, "GET", "/api/projects", None).await;
     assert!(list["projects"].as_array().unwrap().is_empty());
+    cleanup_projects_env();
+}
+
+// ── Node-side containment (add-workspace-root 2.4) ───────────────────────
+
+#[tokio::test]
+async fn node_judged_out_of_workspace_rejects_registration() {
+    let _g = guard();
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("projects.json");
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    // 节点自判：路径存在、是目录，但越出**该节点**的 workspace root。
+    backend.set_path_check(
+        "dev-box",
+        "/srv/secret",
+        Ok(PathCheck {
+            exists: true,
+            is_dir: true,
+            within_workspace: false,
+        }),
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/projects",
+        Some(serde_json::json!({ "path": "/srv/secret", "node_id": "dev-box" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    let msg = body["error"].as_str().unwrap();
+    assert!(msg.contains("dev-box"), "未点名节点: {msg}");
+    assert!(msg.contains("/srv/secret"), "未点名路径: {msg}");
+    assert!(msg.contains("workspace root"), "未说明越界: {msg}");
+
+    // 注册被拒 → 一个项目都没建。
+    let (_, list) = send(&app, "GET", "/api/projects", None).await;
+    assert!(list["projects"].as_array().unwrap().is_empty());
+    cleanup_projects_env();
+}
+
+#[tokio::test]
+async fn legacy_node_answer_without_within_workspace_field_still_admits() {
+    let _g = guard();
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("projects.json");
+    let (app, backend) = app_with(Some(vec![local_node(), node("dev-box", "online")]), Some(registry)).await;
+    // 老节点应答没有 within_workspace 字段：serde 缺省 true → 放行。
+    let check: PathCheck = serde_json::from_value(serde_json::json!({
+        "exists": true,
+        "is_dir": true,
+    }))
+    .expect("old-node answer deserializes");
+    assert!(check.within_workspace, "缺字段必须缺省为 true（兼容旧应答）");
+    backend.set_path_check("dev-box", "/srv/repo", Ok(check));
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/projects",
+        Some(serde_json::json!({ "path": "/srv/repo", "node_id": "dev-box" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body={body}");
     cleanup_projects_env();
 }
 
@@ -423,11 +488,14 @@ async fn session_creation_passes_the_projects_node_to_the_seam() {
 #[tokio::test]
 async fn local_project_session_creation_passes_local() {
     let _g = guard();
-    let (app, backend) = app_with(Some(vec![local_node()]), None).await;
+    // add-workspace-root 2.3：携本机项目的 create 必须落在 workspace root 内——
+    // 把根钉到临时目录，项目路径取其子目录（占位创建不触盘，路径无需存在）。
+    let dir = tempfile::tempdir().unwrap();
+    let (app, backend) = app_with_root(Some(vec![local_node()]), None, Some(dir.path())).await;
     backend.set_state_domain(
         "projects",
         Some(serde_json::json!({ "projects": [
-            { "id": "proj-l", "path": "/home/me/repo", "name": "repo", "added_at": 0 }
+            { "id": "proj-l", "path": dir.path().join("repo").to_string_lossy(), "name": "repo", "added_at": 0 }
         ] })),
     );
     let (status, _body) = send(

@@ -170,6 +170,11 @@ pub async fn session_detail(
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
     };
+    // add-workspace-root 2.3：越界本机项目的会话拒绝查看（先于聚焦——拒绝
+    // 不改变任何状态，包括 focus 指针）。
+    if let Some(rej) = out_of_scope_session_rejection(&state, &session_key).await {
+        return rej;
+    }
 
     let infos = state.backend.snapshot().await;
     let info = match infos
@@ -1003,6 +1008,15 @@ pub async fn create_session(
                         .filter(|s| !s.is_empty())
                         .unwrap_or(crate::projects::LOCAL_NODE_ID)
                         .to_string();
+                    // add-workspace-root 2.3：携越界本机项目的 create 一律 400，
+                    // 先于 spawn/占位（不产生任何执行事实）。远端项目由那台
+                    // 节点自己的 root 裁决，注册时已判。
+                    if node == crate::projects::LOCAL_NODE_ID
+                        && crate::fs::stored_path_in_workspace_root(&dir, &state.workspace_root)
+                            != Some(true)
+                    {
+                        return api_error(StatusCode::BAD_REQUEST, OUT_OF_WORKSPACE_MSG);
+                    }
                     (Some(dir), Some(node))
                 }
                 None => return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}")),
@@ -1150,6 +1164,10 @@ pub async fn send_message(
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
     };
+    // add-workspace-root 2.3：越界本机项目的会话拒绝投递（不产生任何 turn）。
+    if let Some(rej) = out_of_scope_session_rejection(&state, &session_key).await {
+        return rej;
+    }
     if let Err(rej) = state.backend.message(session_key, req.message).await {
         return rejection_response(rej);
     }
@@ -1210,6 +1228,11 @@ pub async fn switch_session(State(state): State<WebUiState>, Path(key): Path<Str
         Some(k) => k,
         None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
     };
+    // add-workspace-root 2.3：越界本机项目的会话拒绝切换聚焦（打不开的不
+    // 成为焦点）；未知会话照旧走下方 404。
+    if let Some(rej) = out_of_scope_session_rejection(&state, &session_key).await {
+        return rej;
+    }
 
     let infos = state.backend.snapshot().await;
     if !infos
@@ -1295,6 +1318,69 @@ pub async fn browse_dirs(
 
 // ---- Project API endpoints ----
 
+/// add-workspace-root 2.3：会话面/携项目 create 的越界统一文案。不回显服务端
+/// 解析后的路径（与注册、browse-dirs 同一防泄露姿态）。
+const OUT_OF_WORKSPACE_MSG: &str = "项目目录超出允许范围: 不在 workspace root 内";
+
+/// add-workspace-root 2.3 的集中判定：会话存在且绑定的**本机** project dir
+/// 越出 workspace root（或 root 不可解析——fail-closed）时给出 typed 400。
+/// 会话不存在、无项目绑定（inbox，不在任何目录里）与远端会话（project_dir 在
+/// 那台机器上，主控 root 无从裁决——注册时已经过该节点自判 containment）一律
+/// 放行。close / archive 等清理端点**不**调用本判定：围栏不锁垃圾。
+async fn out_of_scope_session_rejection(
+    state: &WebUiState,
+    session_key: &sebas_channels::key::ChannelKey,
+) -> Option<Response> {
+    let infos = state.backend.snapshot().await;
+    let info = infos
+        .iter()
+        .find(|i| i.channel == session_key.channel.as_str() && i.key == session_key.reference)?;
+    if info.remote.is_some() {
+        return None;
+    }
+    let dir = info.project_dir.as_deref()?;
+    if crate::fs::stored_path_in_workspace_root(dir, &state.workspace_root) == Some(true) {
+        return None;
+    }
+    Some(api_error(StatusCode::BAD_REQUEST, OUT_OF_WORKSPACE_MSG))
+}
+
+/// add-workspace-root 2.2：从项目列表滤掉越界的**本机**项目（远端项目不在
+/// 主控 root 辖区内——注册时已经过节点自判 containment）。存储路径已 canonical
+/// （注册时落库），不 re-canonicalize，与 canonical root 做逐分量前缀比较；
+/// root 解析失败 → 本机项目全部隐藏 + warn（fail-closed）。越界项目仍可按 id
+/// remove / branch 探测，这里只管**列表**这一张脸。
+fn filter_out_of_scope_local_projects(
+    projects: Vec<serde_json::Value>,
+    workspace_root: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    let is_local = |p: &serde_json::Value| {
+        p.get("node_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(crate::projects::LOCAL_NODE_ID)
+            == crate::projects::LOCAL_NODE_ID
+    };
+    // root 只解析一次；判定语义集中在 fs::stored_path_within_prefix。
+    let Some(root_prefix) = crate::fs::workspace_root_prefix(workspace_root) else {
+        tracing::warn!(
+            root = %workspace_root.display(),
+            "workspace root 无法解析：本机项目全部从列表隐藏（fail-closed）"
+        );
+        return projects.into_iter().filter(|p| !is_local(p)).collect();
+    };
+    projects
+        .into_iter()
+        .filter(|p| {
+            !is_local(p)
+                || p.get("path")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|path| {
+                        crate::fs::stored_path_within_prefix(path, &root_prefix)
+                    })
+        })
+        .collect()
+}
+
 /// 从 backend 读取项目列表（DB 引擎 / core 通道）。backend 不可达时回退
 /// 本地文件注册表（webui 进程独占视图，spec 未约束其降级语义）。
 /// 返回 JSON 数组（ProjectRow / ProjectEntry 形状，前端兼容）。
@@ -1360,8 +1446,11 @@ async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
 }
 
 /// GET /api/projects — list all registered projects（状态库优先，文件回退）。
+/// add-workspace-root 2.2：越界的本机项目从列表隐藏（fail-closed：root 不可
+/// 解析时本机项目全部隐藏 + warn）。
 pub async fn projects_list(State(state): State<WebUiState>) -> Response {
     let projects = projects_from_backend(&state).await;
+    let projects = filter_out_of_scope_local_projects(projects, &state.workspace_root);
     Json(json!({ "projects": projects })).into_response()
 }
 
@@ -1517,7 +1606,9 @@ async fn projects_add_remote(state: &WebUiState, node_id: &str, path: &str) -> R
             );
         }
     }
-    // 路径可用性由节点判定（`SessionOp::CheckPath`）。
+    // 路径可用性由节点判定（`SessionOp::CheckPath`）。2.4：应答的
+    // `within_workspace` 随形透传（`false` = 节点自判越界 → 拒绝；字段缺省的
+    // 老节点应答已在 `PathCheck` 反序列化为 `true` → 放行）。
     match state.backend.check_node_path(node_id, path).await {
         Ok(check) => {
             if let Err(msg) = crate::projects::validate_remote_path(
@@ -1526,6 +1617,7 @@ async fn projects_add_remote(state: &WebUiState, node_id: &str, path: &str) -> R
                 crate::projects::NodePathCheck {
                     exists: check.exists,
                     is_dir: check.is_dir,
+                    within_workspace: check.within_workspace,
                 },
             ) {
                 return api_error(StatusCode::BAD_REQUEST, msg);
@@ -1827,7 +1919,13 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
         }))
         .into_response();
     }
-    let accessible = crate::projects::is_accessible(&project_path);
+    // add-workspace-root 2.3：越界**本机**项目按不可达处理——`accessible:
+    // false`、分支为空，不暴露存在性，也不在围栏外做 git 探测。
+    let in_scope = crate::fs::stored_path_in_workspace_root(
+        &project_path,
+        &state.workspace_root,
+    ) == Some(true);
+    let accessible = in_scope && crate::projects::is_accessible(&project_path);
     // TTL 缓存：branch_at 距今 < 30s 用缓存。
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1838,7 +1936,9 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
         .get("branch")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let branch = if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some()
+    let branch = if !in_scope {
+        None
+    } else if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some()
     {
         cached_branch
     } else {

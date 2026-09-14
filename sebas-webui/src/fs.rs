@@ -54,9 +54,41 @@ pub fn within_workspace_root(candidate: &Path, root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 已 canonical 存储值的执法基座（add-workspace-root 2.2/2.3）：把 workspace
+/// root 解析成与存储值同域的普通形。注册/会话绑定落库的是 `canonicalize_plain`
+/// 的无 verbatim 前缀形，而 `std::fs::canonicalize` 在 Windows 产出 `\\?\`
+/// verbatim 形——`VerbatimDisk` 与 `Disk` 前缀分量判等恒 false，比较前必须拉回
+/// 同一普通形。`None` = root 不可解析（fail-closed 语义由调用方落地：列表全部
+/// 隐藏 + warn、会话面按越界拒绝）。
+pub fn workspace_root_prefix(root: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(root)
+        .ok()
+        .map(|r| dunce::simplified(&r).to_path_buf())
+}
+
+/// 已 canonical 存储的路径是否落在 root 前缀内（逐分量比较；不触碰文件系统，
+/// 目录此后被删/移走也不改写判定输入）。与 [`within_workspace_root`] 的分工：
+/// 那个用于**用户输入**（先 canonicalize 再比较），这个用于**已 canonical 的
+/// 存储值**（列表过滤、会话面执法）——存储值 re-canonicalize 会把「目录被删」
+/// 错判成「越界之外的不确定态」，且多一次无谓的系统调用。
+pub fn stored_path_within_prefix(stored: &str, root_prefix: &Path) -> bool {
+    Path::new(stored).starts_with(root_prefix)
+}
+
+/// 存储路径对 workspace root 的单步判定。`None` = root 不可解析（fail-closed：
+/// 调用方按越界处理）。会话面每请求至多一次，root 解析开销可忽略；列表过滤
+/// 请用 [`workspace_root_prefix`] 解析一次后逐条 [`stored_path_within_prefix`]，
+/// 避免 warn 与解析按项目条数重复。
+pub fn stored_path_in_workspace_root(stored: &str, root: &Path) -> Option<bool> {
+    Some(stored_path_within_prefix(
+        stored,
+        &workspace_root_prefix(root)?,
+    ))
+}
+
 /// 项目注册/回显用的规范形：canonicalize 解析真实路径后，把 Windows
 /// verbatim 前缀与混合分隔符还原成普通形（projects_add 曾把 `\\?\C:\…`
-/// 直接入库，前缀经 API 泄漏进 UI 头部，且与请求侧普通路径判等永假）。
+/// 直接入库，前缀经 API 泄漏进 UI，且与请求侧普通路径判等永假）。
 /// 范围判定不走这里——`within_workspace_root` 是两侧同规范的纯比较。
 pub fn canonicalize_plain(path: &Path) -> std::io::Result<String> {
     let canonical = std::fs::canonicalize(path)?;
@@ -453,8 +485,47 @@ mod tests {
         let plain = canonicalize_plain(dir.path()).expect("canonicalize");
         assert!(!plain.starts_with(r"\\?\"), "verbatim prefix leaked: {plain}");
         assert!(Path::new(&plain).is_dir());
-        // 注册后再次解析同一普通路径必须得到同一字符串（分隔符不漂移）。
+        // 注册后再 canonicalize 同一普通路径必须得到同一普通形（分隔符不漂移）。
         let again = canonicalize_plain(Path::new(&plain)).expect("re-canonicalize");
         assert_eq!(plain, again);
+    }
+
+    // ---- 已 canonical 存储值的范围判定（add-workspace-root 2.2/2.3）----
+
+    #[test]
+    fn stored_path_prefix_hit_miss_and_unresolvable_root() {
+        let (dir, sub) = dir_with_sub();
+        let (outside, _o) = dir_with_sub();
+
+        // 存储值取 canonicalize_plain 的普通形（注册落库形态）；root 单独
+        // canonicalize——Windows 上带 verbatim 前缀，正是普通形比较要防的错位。
+        let stored_sub = canonicalize_plain(&sub).unwrap();
+        let stored_outside = canonicalize_plain(outside.path()).unwrap();
+        assert_eq!(
+            stored_path_in_workspace_root(&stored_sub, dir.path()),
+            Some(true),
+            "界内存储路径命中"
+        );
+        assert_eq!(
+            stored_path_in_workspace_root(&stored_outside, dir.path()),
+            Some(false),
+            "树外存储路径不命中"
+        );
+
+        // root 缺失 → None（fail-closed 交调用方），即使存储路径真实存在。
+        let ghost_root = dir.path().join("__ghost_root__");
+        assert_eq!(stored_path_in_workspace_root(&stored_sub, &ghost_root), None);
+    }
+
+    #[test]
+    fn stored_path_prefix_survives_deleted_candidate_dir() {
+        // 存储值不再 canonicalize：目录此后被删只影响可达性，不改写「注册时
+        // 在根内」的判定输入（围栏不锁垃圾——会话仍可 close/archive 清理）。
+        let (dir, _sub) = dir_with_sub();
+        let doomed = dir.path().join("doomed");
+        std::fs::create_dir_all(&doomed).unwrap();
+        let stored = canonicalize_plain(&doomed).unwrap();
+        std::fs::remove_dir_all(&doomed).unwrap();
+        assert!(stored_path_in_workspace_root(&stored, dir.path()) == Some(true));
     }
 }

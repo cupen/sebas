@@ -106,19 +106,32 @@ struct RegistryFile {
 }
 
 /// 节点侧路径判定结果，与 `SessionOp::CheckPath` 的应答同形
-/// （`exists` / `is_dir`）。定义在这里而不是复用 `session_backend::PathCheck`，
-/// 是为了让 `projects` 模块（纯注册表逻辑）不依赖驱动缝。
+/// （`exists` / `is_dir` / `within_workspace`）。定义在这里而不是复用
+/// `session_backend::PathCheck`，是为了让 `projects` 模块（纯注册表逻辑）不依赖驱动缝。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodePathCheck {
     pub exists: bool,
     pub is_dir: bool,
+    /// 节点以它**自己的** workspace root 做的 containment 判定
+    /// （add-workspace-root）。进程内直传（不走 serde）；「老节点应答缺字段
+    /// 视为界内」的 wire 缺省语义在 `session_backend::PathCheck` 上落地。
+    pub within_workspace: bool,
 }
 
 /// 把**节点**给出的路径判定翻成注册拒绝（add-remote-execution-node 8.1）。
 ///
 /// spec「path does not exist」要求拒绝文案**同时点名节点、路径和哪里不对**；
 /// 只说「路径不可用」会让操作者无从判断是哪台机器上的哪条路径。
+///
+/// add-workspace-root 2.4：范围判定先行于存在性判定——`within_workspace ==
+/// false` 直接拒绝，文案不区分「存在与否」，不借 400 文案差异探测节点上目录
+/// 的存在性（与本地注册同一姿态）。
 pub fn validate_remote_path(node_id: &str, path: &str, check: NodePathCheck) -> Result<(), String> {
+    if !check.within_workspace {
+        return Err(format!(
+            "节点 {node_id} 判定路径 {path} 超出该节点的 workspace root"
+        ));
+    }
     if !check.exists {
         return Err(format!("节点 {node_id} 上路径不存在: {path}"));
     }
@@ -541,17 +554,23 @@ mod tests {
     #[test]
     fn remote_path_rejection_names_node_path_and_problem() {
         // 路径不存在：文案必须同时点名节点、路径与「不存在」。
-        let missing =
-            validate_remote_path("dev-box", "/srv/repo", NodePathCheck { exists: false, is_dir: false })
-                .unwrap_err();
+        let missing = validate_remote_path(
+            "dev-box",
+            "/srv/repo",
+            NodePathCheck { exists: false, is_dir: false, within_workspace: true },
+        )
+        .unwrap_err();
         assert!(missing.contains("dev-box"), "未点名节点: {missing}");
         assert!(missing.contains("/srv/repo"), "未点名路径: {missing}");
         assert!(missing.contains("不存在"), "未说明哪里不对: {missing}");
 
         // 存在但不是目录：与「不存在」是两回事，文案必须区分。
-        let not_dir =
-            validate_remote_path("dev-box", "/srv/file.txt", NodePathCheck { exists: true, is_dir: false })
-                .unwrap_err();
+        let not_dir = validate_remote_path(
+            "dev-box",
+            "/srv/file.txt",
+            NodePathCheck { exists: true, is_dir: false, within_workspace: true },
+        )
+        .unwrap_err();
         assert!(not_dir.contains("dev-box"));
         assert!(not_dir.contains("/srv/file.txt"));
         assert!(not_dir.contains("不是目录"));
@@ -559,9 +578,32 @@ mod tests {
 
         // 可用路径：通过。
         assert!(
-            validate_remote_path("dev-box", "/srv/repo", NodePathCheck { exists: true, is_dir: true })
-                .is_ok()
+            validate_remote_path(
+                "dev-box",
+                "/srv/repo",
+                NodePathCheck { exists: true, is_dir: true, within_workspace: true },
+            )
+            .is_ok()
         );
+    }
+
+    // ── 节点自判 containment（add-workspace-root 2.4）────────────────────
+
+    #[test]
+    fn remote_path_out_of_node_workspace_is_rejected_before_existence() {
+        // 越界拒绝点名节点/路径/根；即使节点同时报 exists=false，文案也是
+        // 越界而非「不存在」——范围判定先行，不借文案差异探测存在性。
+        let msg = validate_remote_path(
+            "dev-box",
+            "/srv/secret",
+            NodePathCheck { exists: false, is_dir: false, within_workspace: false },
+        )
+        .unwrap_err();
+        assert!(msg.contains("dev-box"), "未点名节点: {msg}");
+        assert!(msg.contains("/srv/secret"), "未点名路径: {msg}");
+        assert!(msg.contains("workspace root"), "未说明越界: {msg}");
+        assert!(!msg.contains("不存在"), "范围判定先行，不泄露存在性: {msg}");
+        assert!(!msg.contains("不是目录"), "{msg}");
     }
 
     #[test]

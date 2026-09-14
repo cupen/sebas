@@ -7,10 +7,10 @@
 
 ## 2. 本机项目面执法
 
-- [ ] 2.1 `sebas-webui/src/api.rs` `projects_add` 本地分支：越界 → 400「路径超出允许范围」，范围判定先行于存在性判定，错误不回显服务端解析路径。验证：api 层测试（界内注册成功 / 界外 400 / 不存在且越界同文案）
-- [ ] 2.2 `projects_list`：过滤越界本机项目（存储 canonical 路径与 canonical root 前缀比较；root 解析失败全部隐藏 + warn）。验证：测试覆盖界内可见 / 界外隐藏 / root 缺失全隐藏
-- [ ] 2.3 会话面拒绝：detail / message / switch / 携越界项目的 create 返回 4xx typed 拒绝；close / archive 放行；`projects_branch` 对越界项目按不可达处理。验证：api 层测试逐端点断言
-- [ ] 2.4 远端注册 `projects_add_remote`：`within_workspace == false` 拒绝，字段缺省（老节点应答）放行。验证：backend 桩测试覆盖拒绝、放行、缺省三态
+- [x] 2.1 `sebas-webui/src/api.rs` `projects_add` 本地分支：越界 → 400「路径超出允许范围」，范围判定先行于存在性判定，错误不回显服务端解析路径。验证：api 层测试（界内注册成功 / 界外 400 / 不存在且越界同文案）
+- [x] 2.2 `projects_list`：过滤越界本机项目（存储 canonical 路径与 canonical root 前缀比较；root 解析失败全部隐藏 + warn）。验证：测试覆盖界内可见 / 界外隐藏 / root 缺失全隐藏
+- [x] 2.3 会话面拒绝：detail / message / switch / 携越界项目的 create 返回 4xx typed 拒绝；close / archive 放行；`projects_branch` 对越界项目按不可达处理。验证：api 层测试逐端点断言
+- [x] 2.4 远端注册 `projects_add_remote`：`within_workspace == false` 拒绝，字段缺省（老节点应答）放行。验证：backend 桩测试覆盖拒绝、放行、缺省三态
 
 ## 3. 节点侧与协议
 

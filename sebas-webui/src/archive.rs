@@ -165,6 +165,16 @@ pub fn is_archived(session_key: &str) -> bool {
     load().iter().any(|e| e.session_key == session_key)
 }
 
+/// 测试专用：archive env（SEBAS_ARCHIVE_PATH）的进程级串行锁句柄。
+/// server.rs 的 workspace_root_tests 要对越界会话归档（会写 archive 文件），
+/// 必须与本模块测试共用一把锁，否则并发测试会在彼此临界区内改写 env。
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    tests::ARCHIVE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,7 +182,9 @@ mod tests {
 
     /// Serialize archive tests because `SEBAS_ARCHIVE_PATH` is a process-global
     /// env var and Rust tests run in parallel.
-    static ARCHIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    // pub(crate)：供上方 cfg(test) 的 test_env_lock 把锁交给同 crate 的路由级
+    // 测试（workspace_root_tests），与 archive env 写放同一临界区。
+    pub(crate) static ARCHIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Use a unique directory per test inside a shared temp root.
     fn test_path(test_name: &str) -> PathBuf {
