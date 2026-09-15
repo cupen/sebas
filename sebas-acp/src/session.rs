@@ -65,6 +65,22 @@ pub struct AcpModelInfo {
     pub options: Vec<String>,
 }
 
+/// 一条 agent 自广告的斜杠命令（session-slash-commands D1）。`name` 是提交时
+/// 的命令词（`/name`），`description` 是面板说明，`hint` 是参数提示
+/// （claude 的 `argumentHint` / ACP 的 `UnstructuredCommandInput.hint`）。
+/// 字段全部 `#[serde(default)]`：来源形状随 CLI/agent 版本漂移，缺字段反
+/// 序列化为空值而不是报错（防御性映射的落点，上游映射函数保证不产生缺
+/// name 的条目）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AvailableCommand {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpCommand {
@@ -185,5 +201,16 @@ pub enum AcpEvent {
     ModeChanged {
         session_id: String,
         mode: String,
+    },
+    /// （session-slash-commands D1）agent 广告的会话命令表：claude 路径取自
+    /// `get_server_info()` 初始化握手、通用 ACP 路径解析
+    /// `SessionUpdate::AvailableCommandsUpdate`，两条 intake 汇入同一条事件。
+    /// 引擎消费后物化进会话快照（`SessionInfo.available_commands`）；
+    /// 二次通知（重新广告）覆盖旧表。空表 = 无命令面板（诚实退化，非错误）。
+    AvailableCommands {
+        session_id: String,
+        /// `#[serde(default)]` 兼容旧 fixture/旧报文反序列化。
+        #[serde(default)]
+        commands: Vec<AvailableCommand>,
     },
 }

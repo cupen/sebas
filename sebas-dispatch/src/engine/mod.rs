@@ -520,6 +520,9 @@ impl DispatchHandle {
             remote: None,
             // rail-declutter-unread D1：可见回复段数随快照/事件下发。
             msg_count,
+            // （session-slash-commands 2.1）agent 广告的命令表随快照下发
+            // （AvailableCommands 事件物化；无发现能力 = 空表）。
+            available_commands: m.available_commands.clone(),
         })
     }
 
@@ -828,6 +831,18 @@ impl DispatchHandle {
             && let Some(key) = self.map.lookup_key_by_session(session_id).await
         {
             self.map.set_effective_mode(&key, Some(mode.clone())).await;
+            self.publish_updated(&key).await;
+        }
+        // AvailableCommands（session-slash-commands 2.1）：agent 广告的命令
+        // 表物化进映射并发布 Updated，快照立即反映。全量覆盖——二次通知
+        // （重新广告）天然刷新旧表；pump（apply_event）与即时路径
+        // （apply_event_to_out 的 `_` 臂）两条到达线都经过这里。
+        if let AcpEvent::AvailableCommands { commands, .. } = event
+            && let Some(key) = self.map.lookup_key_by_session(session_id).await
+        {
+            self.map
+                .set_available_commands(&key, commands.clone())
+                .await;
             self.publish_updated(&key).await;
         }
         // permission-mode-auto-gate：「本会话不再询问」发起的 auto 切换被
@@ -1850,7 +1865,8 @@ fn extract_session_id(event: &AcpEvent) -> &str {
         | AcpEvent::Error { session_id, .. }
         | AcpEvent::UsageUpdate { session_id, .. }
         | AcpEvent::ModelChanged { session_id, .. }
-        | AcpEvent::ModeChanged { session_id, .. } => session_id,
+        | AcpEvent::ModeChanged { session_id, .. }
+        | AcpEvent::AvailableCommands { session_id, .. } => session_id,
     }
 }
 
@@ -1885,5 +1901,7 @@ fn next_emoji(current: &str, event: &AcpEvent) -> Option<&'static str> {
         AcpEvent::UsageUpdate { .. } => None,
         AcpEvent::ModelChanged { .. } => None,
         AcpEvent::ModeChanged { .. } => None,
+        // （session-slash-commands）命令表刷新不是回合内容，FSM 不转移。
+        AcpEvent::AvailableCommands { .. } => None,
     }
 }

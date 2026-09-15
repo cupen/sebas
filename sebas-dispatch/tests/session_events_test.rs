@@ -360,3 +360,137 @@ async fn tool_events_are_labelled_tool_in_turn_content() {
     // Tool entries are distinguishable from prose without sniffing content.
     assert_ne!(tools[0].position, prose[0].position);
 }
+
+/// session-slash-commands 2.1：`AvailableCommands` 事件物化进会话快照
+/// （apply_event 写映射 → session_info_for 暴露 `available_commands`）；二次
+/// 通知（重新广告）**覆盖**旧表而非追加；空表同样覆盖（撤回广告如实呈现）。
+#[tokio::test]
+async fn available_commands_materializes_into_snapshot_and_reread_overwrites() {
+    use sebas_acp::claude::session::AcpEvent;
+    use sebas_acp::AvailableCommand;
+
+    let map = SessionMap::new();
+    let (router, _rx) = DispatchHandle::new(map);
+    let k = key("slash");
+    router
+        .map
+        .insert(k.clone(), Mapping::active("s-slash"))
+        .await
+        .unwrap();
+
+    let cmd = |name: &str, hint: Option<&str>| AvailableCommand {
+        name: name.into(),
+        description: format!("desc of {name}"),
+        hint: hint.map(str::to_string),
+    };
+    let commands_of = || async {
+        router
+            .session_info_for(&k)
+            .await
+            .expect("mapping exists")
+            .available_commands
+    };
+
+    // 尚未广告：空表（无命令面板的诚实退化形态）。
+    assert!(commands_of().await.is_empty());
+
+    // 第一次广告：快照出现命令表。
+    router
+        .apply_event(
+            "s-slash",
+            &AcpEvent::AvailableCommands {
+                session_id: "s-slash".into(),
+                commands: vec![cmd("goal", Some("<condition>"))],
+            },
+        )
+        .await;
+    let first = commands_of().await;
+    assert_eq!(first.len(), 1, "advertised table lands in the snapshot");
+    assert_eq!(first[0].name, "goal");
+    assert_eq!(first[0].hint.as_deref(), Some("<condition>"));
+
+    // 二次通知：全量覆盖旧表（不是追加）。
+    router
+        .apply_event(
+            "s-slash",
+            &AcpEvent::AvailableCommands {
+                session_id: "s-slash".into(),
+                commands: vec![cmd("compact", None), cmd("review", None)],
+            },
+        )
+        .await;
+    let second = commands_of().await;
+    assert_eq!(
+        second.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        vec!["compact", "review"],
+        "re-advertisement must OVERWRITE the old table, got {second:?}"
+    );
+
+    // 撤回广告（空表）：同样覆盖——快照如实回到「无命令面板」。
+    router
+        .apply_event(
+            "s-slash",
+            &AcpEvent::AvailableCommands {
+                session_id: "s-slash".into(),
+                commands: Vec::new(),
+            },
+        )
+        .await;
+    assert!(commands_of().await.is_empty(), "empty table overwrites too");
+
+    // 快照序列化：空表时键不上 wire（旧消费端兼容）。
+    let info = router.session_info_for(&k).await.unwrap();
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(!json.contains("available_commands"), "{json}");
+}
+
+/// session-slash-commands 2.2（webui 透出的核心断言面在 SessionInfo 本身，
+/// 这里钉住 Updated 事件携带新表——WS `session.updated` 的载荷数据源）。
+#[tokio::test]
+async fn available_commands_rides_the_updated_event() {
+    use sebas_acp::claude::session::AcpEvent;
+
+    let map = SessionMap::new();
+    let (router, _rx) = DispatchHandle::new(map);
+    let mut events = router.subscribe_session_events();
+    let k = key("slash-ev");
+    router
+        .map
+        .insert(k.clone(), Mapping::active("s-slash-ev"))
+        .await
+        .unwrap();
+
+    // 即时路径（dispatch_acp_event → apply_event_to_out 的 `_` 臂）驱动
+    // 物化：与 pump 路径（上一用例的 apply_event）殊途同归。
+    router
+        .dispatch_acp_event(AcpEvent::AvailableCommands {
+            session_id: "s-slash-ev".into(),
+            commands: vec![
+                sebas_acp::AvailableCommand {
+                    name: "goal".into(),
+                    description: "Set a goal".into(),
+                    hint: Some("<condition>".into()),
+                },
+                sebas_acp::AvailableCommand {
+                    name: "compact".into(),
+                    description: "Clear context".into(),
+                    hint: None,
+                },
+            ],
+        })
+        .await;
+
+    let mut saw_updated_with_commands = false;
+    while let Ok(ev) = events.try_recv() {
+        if let sebas_dispatch::engine::SessionEvent::Updated { session } = ev
+            && session.available_commands.len() == 2
+            && session.available_commands[0].name == "goal"
+        {
+            saw_updated_with_commands = true;
+        }
+    }
+    assert!(
+        saw_updated_with_commands,
+        "an Updated event must carry the refreshed command table"
+    );
+}

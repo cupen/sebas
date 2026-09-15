@@ -228,7 +228,7 @@ pub async fn session_detail(
 
     let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""));
 
-    let data = json!({
+    let mut data = json!({
         "channel": info.channel,
         "reference": info.key,
         "session_id": info.session_id,
@@ -266,6 +266,12 @@ pub async fn session_detail(
         // 以它推进浏览器读锚（seam 与徽标共用，D3）。
         "msg_count": info.msg_count,
     });
+    // （session-slash-commands 2.2）会话命令表（composer 面板数据源）。空表
+    // 不插键——旧前端看到的 detail 形状不变（新 core + 旧前端兼容）。
+    if !info.available_commands.is_empty() {
+        data["available_commands"] =
+            serde_json::to_value(&info.available_commands).unwrap_or_default();
+    }
     Json(data).into_response()
 }
 

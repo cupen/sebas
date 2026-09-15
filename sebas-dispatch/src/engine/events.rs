@@ -133,6 +133,14 @@ pub struct SessionInfo {
     /// `#[serde(default)]` 兼容旧快照/旧事件。
     #[serde(default)]
     pub msg_count: u64,
+    /// （session-slash-commands 2.1/2.2）agent 自广告的会话命令表（claude
+    /// `get_server_info()` 握手 / 通用 ACP `available_commands_update`）。
+    /// 空 = 无命令面板（native 等无发现能力会话恒空——诚实退化非错误）。
+    /// `#[serde(default, skip_serializing_if)]` 双向兼容：旧 core 的报文无
+    /// 此键 → 反序列化为空表；本侧表空 → 键不上 wire（与旧前端/旧消费端
+    /// 的 wire 形状一致）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_commands: Vec<sebas_acp::AvailableCommand>,
 }
 
 /// 可见回复段的计数口径（rail-declutter-unread D2，用户拍板「可见回复段」）：
@@ -424,6 +432,19 @@ mod tests {
             effective_mode: None,
             // rail-declutter-unread：msg_count 随 SessionInfo 往返。
             msg_count: 0,
+            // session-slash-commands：命令表随 SessionInfo 往返。
+            available_commands: vec![
+                sebas_acp::AvailableCommand {
+                    name: "goal".into(),
+                    description: "Set a goal".into(),
+                    hint: Some("<condition>".into()),
+                },
+                sebas_acp::AvailableCommand {
+                    name: "compact".into(),
+                    description: "Clear context".into(),
+                    hint: None,
+                },
+            ],
         };
         let cases = vec![
             SessionEvent::Created {
@@ -490,6 +511,8 @@ mod tests {
             desired_mode: None,
             effective_mode: None,
             msg_count: 0,
+            // session-slash-commands：无发现能力会话的命令表恒空。
+            available_commands: Vec::new(),
         };
         assert_eq!(info.channel, "feishu");
         assert_eq!(info.key, "oc_x\0t1");
@@ -642,6 +665,7 @@ fn session_info_usage_field_is_additive() {
         desired_mode: None,
         effective_mode: None,
         msg_count: 3,
+        available_commands: Vec::new(),
     };
     let json = serde_json::to_string(&full).unwrap();
     let back: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -655,6 +679,62 @@ fn session_info_usage_field_is_additive() {
     assert_eq!(back.pending, Vec::new());
     // rail-declutter-unread：无 msg_count 字段的旧报文反序列化为 0。
     assert_eq!(back.msg_count, 0);
+}
+
+/// session-slash-commands 2.1/2.2：`available_commands` 字段的 serde 兼容。
+/// 旧 core + 新前端组合：旧报文（无该键）反序列化为空表；新 core + 旧前端
+/// 组合：空表时键不上 wire（wire 形状与旧版本一致），非空表完整往返。
+#[test]
+fn session_info_available_commands_field_is_additive() {
+    // 新形状（非空表）：完整往返。
+    let full = SessionInfo {
+        channel: "web".into(),
+        key: "slash-1".into(),
+        session_id: Some("s1".into()),
+        status: "active".into(),
+        phase: None,
+        user_prompt: None,
+        last_active_unix: 1,
+        project_dir: None,
+        current_model: None,
+        available_models: None,
+        agent_kind: None,
+        usage: None,
+        backend: None,
+        pending: Vec::new(),
+        remote: None,
+        desired_mode: None,
+        effective_mode: None,
+        msg_count: 0,
+        available_commands: vec![sebas_acp::AvailableCommand {
+            name: "goal".into(),
+            description: "Set a goal".into(),
+            hint: Some("<condition>".into()),
+        }],
+    };
+    let json = serde_json::to_string(&full).unwrap();
+    let back: SessionInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, full);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["available_commands"][0]["name"], "goal");
+    assert_eq!(value["available_commands"][0]["hint"], "<condition>");
+
+    // 新 core + 旧前端：空表 → 键省略（旧消费端看到的 wire 无新键）。
+    let mut empty = full.clone();
+    empty.available_commands = Vec::new();
+    let json = serde_json::to_string(&empty).unwrap();
+    assert!(
+        !json.contains("available_commands"),
+        "empty table must be omitted from the wire: {json}"
+    );
+
+    // 旧 core + 新前端：旧报文（无 available_commands 键）→ 空表，不报错。
+    let legacy = r#"{"channel":"web","key":"slash-2","session_id":"s1","status":"active","phase":null,"user_prompt":null,"last_active_unix":1,"project_dir":null,"current_model":null,"available_models":null,"agent_kind":null}"#;
+    let back: SessionInfo = serde_json::from_str(legacy).unwrap();
+    assert!(
+        back.available_commands.is_empty(),
+        "missing key must deserialize to an empty (no command surface) table"
+    );
 }
 
 /// workbench-turn-queue 5.2：PendingDropped 携带被丢弃条目（id + 文本），

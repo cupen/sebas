@@ -37,15 +37,34 @@ async fn one_prompt_yields_exactly_three_events() {
     .await
     .expect("send create_session");
 
-    // Drain the event stream with a 2s budget per call. The first
-    // three events must be, in order: TextDelta "hello ", TextDelta
-    // "world", Finished — and nothing else. If the prompt had been
-    // sent twice we would see four TextDelta events (two "hello "
+    // Drain the event stream with a 2s budget per call. The claude driver
+    // advertises the (empty — the stub runs without `--advertise-commands`)
+    // command table right after connect (session-slash-commands 1.2); drain
+    // those first. The next three events must be, in order: TextDelta "hello
+    // ", TextDelta "world", Finished — and nothing else. If the prompt had
+    // been sent twice we would see four TextDelta events (two "hello "
     // pairs) before the Finished.
-    let evt1 = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
-        .await
-        .expect("timeout on event 1")
-        .expect("event 1");
+    loop {
+        let evt = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
+            .await
+            .expect("timeout on leading event")
+            .expect("leading event");
+        match evt {
+            AcpEvent::AvailableCommands { commands, .. } => {
+                assert!(
+                    commands.is_empty(),
+                    "the bare stub advertises no commands, got {commands:?}"
+                );
+            }
+            other => {
+                assert!(
+                    matches!(&other, AcpEvent::TextDelta { delta, .. } if delta == "hello "),
+                    "first turn event must be TextDelta(\"hello \"), got {other:?}",
+                );
+                break;
+            }
+        }
+    }
     let evt2 = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
         .await
         .expect("timeout on event 2")
@@ -55,10 +74,6 @@ async fn one_prompt_yields_exactly_three_events() {
         .expect("timeout on event 3")
         .expect("event 3");
 
-    assert!(
-        matches!(&evt1, AcpEvent::TextDelta { delta, .. } if delta == "hello "),
-        "first event must be TextDelta(\"hello \"), got {evt1:?}",
-    );
     assert!(
         matches!(&evt2, AcpEvent::TextDelta { delta, .. } if delta == "world"),
         "second event must be TextDelta(\"world\") — a duplicate-prompt bug would surface as a second \"hello \" here, got {evt2:?}",

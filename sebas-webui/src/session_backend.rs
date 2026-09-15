@@ -1141,6 +1141,8 @@ impl SessionBackend for FakeBackend {
             effective_mode: None,
             // rail-declutter-unread：fake 会话不产 transcript，段数为 0。
             msg_count: 0,
+            // session-slash-commands：fake 会话无命令面（空表不上 wire）。
+            available_commands: Vec::new(),
         };
         let ev = SessionEvent::Created { session };
         if let SessionEvent::Created { session } = &ev {
@@ -1409,6 +1411,7 @@ mod tests {
                 desired_mode: None,
                 effective_mode: None,
                 msg_count: 0,
+                available_commands: Vec::new(),
             }])
             .await;
         backend.push_turn("s9", "prompt", "p1").await;

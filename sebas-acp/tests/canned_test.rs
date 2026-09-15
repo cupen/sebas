@@ -27,13 +27,24 @@ async fn fake_claude_emits_finished() {
     .await
     .expect("send create_session");
 
-    // Receive events with timeout
-    let evt = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
-        .await
-        .expect("timeout")
-        .expect("event");
-    assert!(matches!(
-        evt,
-        AcpEvent::TextDelta { .. } | AcpEvent::Finished { .. }
-    ));
+    // Receive events with timeout. The claude driver now advertises the
+    // session command table right after the initialize handshake
+    // (session-slash-commands 1.2) — leading AvailableCommands events are
+    // part of the contract; the turn content must follow them.
+    let mut saw_content = false;
+    for _ in 0..10 {
+        let evt = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
+            .await
+            .expect("timeout")
+            .expect("event");
+        match evt {
+            AcpEvent::AvailableCommands { .. } => continue,
+            AcpEvent::TextDelta { .. } | AcpEvent::Finished { .. } => {
+                saw_content = true;
+                break;
+            }
+            other => panic!("unexpected leading event {other:?}"),
+        }
+    }
+    assert!(saw_content, "turn content must arrive after the advertisement");
 }

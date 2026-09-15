@@ -114,6 +114,12 @@ export interface SessionRow {
   pending_count: number
   /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
   remote?: RemoteSessionView | null
+  /**
+   * （session-slash-commands 2.2）agent 自广告的会话命令表。可选：空表不上
+   * wire（旧 core 组合下键缺省）；缺省/空 = 无命令表面（composer 不渲染
+   * 面板、不拦截 `/` 输入）。
+   */
+  available_commands?: AvailableCommandInfo[]
 }
 
 export interface SessionSummary {
@@ -137,6 +143,11 @@ export interface SessionSummary {
   pending: PendingSubmission[]
   /** （add-remote-execution-node 8.x）远端节点/mode/悬空审批呈现；null = 本机。 */
   remote?: RemoteSessionView | null
+  /**
+   * （session-slash-commands 2.2）聚焦会话的命令表（composer 面板数据源）。
+   * 可选：空表不上 wire；缺省/空 = 无命令表面。
+   */
+  available_commands?: AvailableCommandInfo[]
   /**
    * Focused session only（workbench-conversation-view 1.4）: the conversation
    * as one ordered entry sequence, same shape as the detail endpoint.
@@ -230,6 +241,20 @@ export interface RouterInfo {
 }
 
 /**
+ * 一条 agent 自广告的会话斜杠命令（session-slash-commands D1/D2 的 TS 镜像，
+ * 对应 Rust `sebas_acp::AvailableCommand`）。`name` 是提交时的命令词
+ * （`/name`），`description` 是面板说明，`hint` 是参数提示（claude 的
+ * `argumentHint` / ACP 的 `UnstructuredCommandInput.hint`）。命令表真源是
+ * agent 自己的广告（claude 握手 / 通用 ACP `available_commands_update`），
+ * 前端绝不硬编码；空表 = 无命令表面（native 等），不是错误。
+ */
+export interface AvailableCommandInfo {
+  name: string
+  description: string
+  hint?: string | null
+}
+
+/**
  * One conversation entry on the session payload（workbench-conversation-view
  * 1.1，design D1/D2）: `kind` is who produced it (`prompt` = operator
  * submission, `content` = agent side), `element_type` is the render type
@@ -298,6 +323,11 @@ export interface SessionDetail {
   desired_mode?: string | null
   /** 执行体回报的实际生效 mode；null = 未声称生效（与 desired 差异如实可见）。 */
   effective_mode?: string | null
+  /**
+   * （session-slash-commands 2.2）agent 自广告的会话命令表。可选：空表不上
+   * wire（旧 core 组合下键缺省）；缺省/空 = 无命令表面。
+   */
+  available_commands?: AvailableCommandInfo[]
 }
 
 /**

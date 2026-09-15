@@ -21,6 +21,10 @@
 //!   fake-claude-cli [scenario] [--loop] [--slow-ms N] [--hang-on-init]
 //!                   [--delay-init-ms N] [--journal PATH] [--resume-fails]
 //!   scenario: hello (default) | bash | deny | thinking
+//!   --advertise-commands: the initialize control response carries a fixed
+//!   command table (goal with an argumentHint + compact) — the claude-path
+//!   command-discovery data source (session-slash-commands 1.2); without the
+//!   flag the response stays `{}` exactly as before.
 //!   --resume-fails: exit(1) with "No conversation found" on stderr, but ONLY
 //!   when argv carries --resume — a fresh --session-id spawn still works
 //!   (mirrors the real CLI; exercises the manager's fresh-session fallback).
@@ -50,6 +54,9 @@ struct Flags {
     /// "allow 模式免审批" 的数据源；运行时 `set_permission_mode` 更新它。
     permission_mode: Option<String>,
     resume_fails: bool,
+    /// （session-slash-commands）initialize 控制响应带固定命令表
+    /// （goal/compact）——claude 命令发现 e2e 的数据源。
+    advertise_commands: bool,
     /// True when argv carried `--resume <id>` (as opposed to `--session-id`)
     /// — resume rejection only applies to actual resume attempts, so the
     /// manager's fresh-session fallback still spawns fine.
@@ -102,6 +109,7 @@ fn parse_flags() -> Flags {
         journal: None,
         permission_mode: None,
         resume_fails: false,
+        advertise_commands: false,
         resume_used: false,
         session_id_flag_used: false,
         continue_used: false,
@@ -117,6 +125,7 @@ fn parse_flags() -> Flags {
             "--hang-on-init" => f.hang_on_init = true,
             "--ignore-interrupt" => f.ignore_interrupt = true,
             "--resume-fails" => f.resume_fails = true,
+            "--advertise-commands" => f.advertise_commands = true,
             "--delay-new-ms" => {
                 // Compat alias for the ACP-era flag: slow session/new ≈
                 // slow initialize handshake in the new dialect.
@@ -283,9 +292,28 @@ fn main() {
                                 flags.delay_init_ms,
                             ));
                         }
+                        // session-slash-commands：`--advertise-commands`
+                        // 时 initialize 控制响应带固定命令表。payload 就是
+                        // 信封的内层 response 对象（真 CLI 形状）：cc-agent-sdk
+                        // flatten 后它留在 `info["response"]` 一层，claude
+                        // 驱动的映射负责解层（session-slash-commands 5.2
+                        // 进程级 e2e 实测过旧注释「SDK 拿到的就是本对象」
+                        // 是错的——差一层才对）。
+                        let payload = if flags.advertise_commands {
+                            json!({
+                                "commands": [
+                                    {"name": "goal", "description": "Track a goal across turns",
+                                     "argumentHint": "<condition>"},
+                                    {"name": "compact", "description": "Clear conversation context"}
+                                ]
+                            })
+                        } else {
+                            json!({})
+                        };
                         io.emit(&json!({
                             "type": "control_response",
-                            "response": {"subtype": "success", "request_id": req_id, "response": {}}
+                            "response": {"subtype": "success", "request_id": req_id,
+                                         "response": payload}
                         }));
                     }
                     "interrupt" => {

@@ -161,6 +161,12 @@ pub struct Mapping {
     /// 该 ACP 会话可选的模型 id 列表（来自 agent 的 configOptions）。webui
     /// 创建会话下拉的数据源；`None`/空 = 无模型选择面。
     pub available_models: Option<Vec<String>>,
+    /// （session-slash-commands 2.1）agent 自广告的会话命令表：claude 的
+    /// `get_server_info()` 握手 / 通用 ACP 的 `available_commands_update`，
+    /// 经 `AcpEvent::AvailableCommands` 物化到此（二次通知覆盖旧表）。空表
+    /// = 无命令面板（native 等无发现能力的会话恒空，诚实退化非错误）。
+    /// 内存层字段，不落盘——重连后 agent 重新广告即可重建。
+    pub available_commands: Vec<sebas_acp::AvailableCommand>,
 }
 
 impl Mapping {
@@ -179,6 +185,7 @@ impl Mapping {
             acp_session_id: None,
             current_model: None,
             available_models: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -199,6 +206,7 @@ impl Mapping {
             acp_session_id,
             current_model: None,
             available_models: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -218,6 +226,7 @@ impl Mapping {
             acp_session_id: None,
             current_model: None,
             available_models: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -252,6 +261,7 @@ impl Mapping {
             acp_session_id: None,
             current_model: None,
             available_models: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -270,6 +280,7 @@ impl Mapping {
             acp_session_id: None,
             current_model: None,
             available_models: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -291,6 +302,7 @@ impl Mapping {
             acp_session_id: None,
             current_model: None,
             available_models: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -708,6 +720,21 @@ impl SessionMap {
         let mut g = self.inner.write().await;
         if let Some(m) = g.get_mut(key) {
             m.current_model = Some(model_id);
+        }
+    }
+
+    /// （session-slash-commands 2.1）物化 agent 广告的会话命令表：
+    /// `AcpEvent::AvailableCommands` 到达时全量覆盖（二次通知 = 刷新旧表，
+    /// 与 model/mode 同一到达线）。无映射时 no-op。空表同样写入——agent 撤
+    /// 回广告也是事实，快照如实呈现。
+    pub async fn set_available_commands(
+        &self,
+        key: &ChannelKey,
+        commands: Vec<sebas_acp::AvailableCommand>,
+    ) {
+        let mut g = self.inner.write().await;
+        if let Some(m) = g.get_mut(key) {
+            m.available_commands = commands;
         }
     }
 

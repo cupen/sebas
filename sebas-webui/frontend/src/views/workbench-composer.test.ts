@@ -16,7 +16,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SebasWorkbenchComposer } from './workbench-composer.js'
-import type { Summary } from '../api/client.js'
+import type { AvailableCommandInfo, Summary } from '../api/client.js'
 import {
   elementInternalsPolyfillInvoked,
   installWaDomPolyfills,
@@ -83,6 +83,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.sessionModels !== undefined) el.sessionModels = initial.sessionModels
   if (initial.currentModel !== undefined) el.currentModel = initial.currentModel
   if (initial.turnInFlight !== undefined) el.turnInFlight = initial.turnInFlight
+  if (initial.sessionCommands !== undefined) el.sessionCommands = initial.sessionCommands
   document.body.appendChild(el)
   // LitElement schedules its first update asynchronously; then the
   // composer kicks off an async reachability fetch in connectedCallback.
@@ -103,6 +104,17 @@ async function type(el: SebasWorkbenchComposer, text: string): Promise<void> {
   }
   ta.value = text
   ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+  await el.updateComplete
+}
+
+/** 向 textarea 派发 keydown（命令面板键盘导航与两段式提交的驱动路径）。 */
+async function pressKey(
+  el: SebasWorkbenchComposer,
+  key: string,
+  init: KeyboardEventInit = {},
+): Promise<void> {
+  const ta = el.shadowRoot?.querySelector('wa-textarea')
+  ta?.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, composed: true, ...init }))
   await el.updateComplete
 }
 
@@ -476,5 +488,232 @@ describe('submit control state machine (4.3, design D4)', () => {
     await el.updateComplete
     const err = el.shadowRoot?.querySelector('[data-testid="composer-error"]')
     expect(err?.textContent).toContain('会话空闲')
+  })
+})
+
+// ── session-slash-commands 3.1/3.2 命令面板 ──────────────────────────────
+
+/** claude 形态的广告表（goal 带参数提示；compact 恰好也被 claude 广告）。 */
+const claudeCommands: AvailableCommandInfo[] = [
+  { name: 'goal', description: '跨回合追踪目标', hint: '<condition>' },
+  { name: 'compact', description: '压缩会话历史', hint: null },
+  { name: 'review', description: '复查最近改动' },
+]
+
+/** opencode 形态：有命令表面，但既不广告 goal 也不广告 compact。 */
+const opencodeCommands: AvailableCommandInfo[] = [
+  { name: 'init', description: '分析代码库并生成 AGENTS.md' },
+  { name: 'help', description: '列出可用命令' },
+]
+
+describe('command palette (session-slash-commands 3.1/3.2, design D4)', () => {
+  function paletteOf(el: SebasWorkbenchComposer) {
+    return el.shadowRoot?.querySelector('[data-testid="command-palette"]')
+  }
+  function optionsOf(el: SebasWorkbenchComposer): HTMLElement[] {
+    return [
+      ...(el.shadowRoot?.querySelectorAll('[data-testid="command-palette"] [role="option"]') ??
+        []),
+    ] as HTMLElement[]
+  }
+  function selectedCommand(el: SebasWorkbenchComposer): string | null | undefined {
+    return optionsOf(el)
+      .find((o) => o.getAttribute('aria-selected') === 'true')
+      ?.getAttribute('data-command')
+  }
+
+  it('opens on a leading slash listing name, argument hint, and description; first option is highlighted', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/')
+
+    const palette = paletteOf(el)
+    expect(palette).toBeTruthy()
+    expect(palette?.getAttribute('role')).toBe('listbox')
+    const options = optionsOf(el)
+    expect(options.map((o) => o.getAttribute('data-command'))).toEqual([
+      'goal',
+      'compact',
+      'review',
+    ])
+    // 行内容三要素：命令名 + 参数提示 + 说明。
+    expect(options[0]?.textContent).toContain('/goal')
+    expect(options[0]?.textContent).toContain('<condition>')
+    expect(options[0]?.textContent).toContain('跨回合追踪目标')
+    // 面板打开即高亮首位；aria-selected 模式同 model 菜单的 listbox。
+    expect(options[0]?.getAttribute('aria-selected')).toBe('true')
+    expect(options[1]?.getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('narrows live by a case-insensitive prefix as the operator types', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/CO')
+    expect(optionsOf(el).map((o) => o.getAttribute('data-command'))).toEqual(['compact'])
+  })
+
+  it('renders no palette when nothing matches, for a non-leading slash, or once args begin', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+
+    // 无匹配：空态不渲染。
+    await type(el, '/zzz')
+    expect(paletteOf(el)).toBeNull()
+
+    // 非首字符 `/`（如 path/to）不触发。
+    await type(el, 'path/to')
+    expect(paletteOf(el)).toBeNull()
+
+    // 命令名段结束（出现空白）= 参数阶段，面板随之关闭。
+    await type(el, '/goal clear')
+    expect(paletteOf(el)).toBeNull()
+  })
+
+  it('moves the highlight with ArrowUp/ArrowDown and clamps at the bounds', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/')
+    expect(selectedCommand(el)).toBe('goal')
+    await pressKey(el, 'ArrowDown')
+    expect(selectedCommand(el)).toBe('compact')
+    await pressKey(el, 'ArrowDown')
+    expect(selectedCommand(el)).toBe('review')
+    await pressKey(el, 'ArrowDown')
+    expect(selectedCommand(el)).toBe('review') // 底部钳位
+    await pressKey(el, 'ArrowUp')
+    expect(selectedCommand(el)).toBe('compact')
+  })
+
+  it('dismisses on Escape and re-opens when the input changes again', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/')
+    expect(paletteOf(el)).toBeTruthy()
+
+    await pressKey(el, 'Escape')
+    expect(paletteOf(el)).toBeNull()
+
+    // 文本一变即重新获得开启资格：继续输入的前缀实时重过滤。
+    await type(el, '/re')
+    expect(paletteOf(el)).toBeTruthy()
+    expect(optionsOf(el).map((o) => o.getAttribute('data-command'))).toEqual(['review'])
+  })
+
+  it('two-phase Enter: completes name + space without sending, then a later Enter submits', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/go')
+    await pressKey(el, 'Enter')
+
+    // 第一段：补全 `name + 空格`、面板关闭、焦点留输入框——面板开着时
+    // Enter 绝不触发发送（两段式语义）。
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as { value: string }
+    expect(ta.value).toBe('/goal ')
+    expect(paletteOf(el)).toBeNull()
+    expect(api.sendMessage).not.toHaveBeenCalled()
+
+    // 第二段：参数补完后再次 Enter 正常提交。
+    await type(el, '/goal keep tests green')
+    await pressKey(el, 'Enter')
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', '/goal keep tests green')
+  })
+
+  it('Tab completes the highlighted command without sending', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/')
+    await pressKey(el, 'ArrowDown') // 高亮移到 compact
+    await pressKey(el, 'Tab')
+
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as { value: string }
+    expect(ta.value).toBe('/compact ')
+    expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('clicking a palette row completes that command', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands })
+    await type(el, '/')
+    ;(el.shadowRoot?.querySelector('[data-command="review"]') as HTMLElement).click()
+    await el.updateComplete
+
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as { value: string }
+    expect(ta.value).toBe('/review ')
+    expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+// ── session-slash-commands 4.1/4.2 拦截与诚实退化 ─────────────────────────
+
+describe('interception and honest degradation (session-slash-commands 4.1/4.2, design D3)', () => {
+  it('blocks an unadvertised command inline without sending (opencode shape: /goal not in surface)', async () => {
+    const el = await mount({ ...focus, sessionCommands: opencodeCommands })
+    await type(el, '/goal clear the board')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    // 就地点名提示、不发请求、文本保留可改。
+    const notice = el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')
+    expect(notice?.textContent).toContain('/goal')
+    expect(api.sendMessage).not.toHaveBeenCalled()
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as { value: string }
+    expect(ta.value).toBe('/goal clear the board')
+  })
+
+  it('lets the universal built-in /compact through verbatim even when unadvertised', async () => {
+    const el = await mount({ ...focus, sessionCommands: opencodeCommands })
+    await type(el, '/compact')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', '/compact')
+    expect(el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')).toBeNull()
+  })
+
+  it('clears the notice after the operator edits the text and allows resubmission', async () => {
+    const el = await mount({ ...focus, sessionCommands: opencodeCommands })
+    await type(el, '/goal nope')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await el.updateComplete
+    expect(el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')).toBeTruthy()
+
+    // 改字 → 提示就地清除，可再提交。
+    await type(el, 'plain follow-up')
+    expect(el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')).toBeNull()
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', 'plain follow-up')
+  })
+
+  it('empty surface (native): no palette on / and /anything passes through as ordinary text (4.2)', async () => {
+    const el = await mount({ ...focus, sessionCommands: [] })
+    await type(el, '/')
+    expect(el.shadowRoot?.querySelector('[data-testid="command-palette"]')).toBeNull()
+
+    await type(el, '/anything at all')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.sendMessage).toHaveBeenCalledWith('web%00web-1', '/anything at all')
+    expect(el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')).toBeNull()
+  })
+
+  it('advertised command passes verbatim with args; the busy path queues it unchanged (D5)', async () => {
+    const el = await mount({ ...focus, sessionCommands: claudeCommands, turnInFlight: true })
+    await type(el, '/goal keep tests green until CI passes')
+    // turn 在飞 + 有字 = 排队形态：slash 提交与普通消息同一条 sendMessage
+    // 路径（D5 不特判），原文下发。
+    expect(
+      (el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).getAttribute(
+        'data-state',
+      ),
+    ).toBe('queued')
+    ;(el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      'web%00web-1',
+      '/goal keep tests green until CI passes',
+    )
+    expect(el.shadowRoot?.querySelector('[data-testid="slash-unsupported"]')).toBeNull()
   })
 })

@@ -78,6 +78,9 @@ pub(crate) fn build_session_rows(
                 remote: info.remote.clone(),
                 // rail-declutter-unread 1.2：未读徽标的服务端计数随行下发。
                 msg_count: info.msg_count,
+                // （session-slash-commands 2.2）命令表随行透出（composer
+                // 面板数据源；空表不上 wire）。
+                available_commands: info.available_commands.clone(),
             }
         })
         .collect();
@@ -121,7 +124,7 @@ pub(crate) fn session_summary(
             title: e.title.clone(),
         })
         .collect();
-    serde_json::json!({
+    let mut summary = serde_json::json!({
         "channel": info.channel,
         "reference": info.key,
         "session_id": info.session_id,
@@ -145,7 +148,14 @@ pub(crate) fn session_summary(
         "msg_count": info.msg_count,
         // workbench-conversation-view 1.4：与 detail 同形状的有序条目序列。
         "entries": conversation,
-    })
+    });
+    // （session-slash-commands 2.2）聚焦会话的命令表（composer 面板数据源）。
+    // 空表不插键——旧前端看到的 summary 形状不变（新 core + 旧前端兼容）。
+    if !info.available_commands.is_empty() {
+        summary["available_commands"] =
+            serde_json::to_value(&info.available_commands).unwrap_or_default();
+    }
+    summary
 }
 
 /// Encode a (channel, reference) pair for use in URLs.
