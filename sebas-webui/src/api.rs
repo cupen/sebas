@@ -376,6 +376,10 @@ pub async fn about(State(state): State<WebUiState>) -> Response {
         "rustc_version": env!("CARGO_PKG_RUST_VERSION"),
         "router_listen": state.router.listen,
         "provider_count": state.router.provider_count,
+        // preselect-last-used-model 3.2：About INSTANCE 段的 default agent
+        // kind 读运行时真值——装配点从 cfg.acp.default_kind() 注入
+        // AgentKindProvider，这里原样透出（不再由前端写死字面量）。
+        "default_agent_kind": state.agent_kinds.default_agent_kind(),
     });
     Json(data).into_response()
 }

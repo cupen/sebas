@@ -379,6 +379,11 @@ export interface About {
   rustc_version: string
   router_listen: string | null
   provider_count: number
+  /**
+   * 新会话缺省 agent kind（preselect-last-used-model 3.2）：装配点从
+   * `cfg.acp.default_kind()` 注入的运行时真值（About INSTANCE 段只读行）。
+   */
+  default_agent_kind: string
 }
 
 /**

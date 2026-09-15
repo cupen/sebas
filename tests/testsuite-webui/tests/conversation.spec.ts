@@ -235,6 +235,98 @@ test.describe('对话视图（workbench-conversation-view）', () => {
 
       expect(collector.clean()).toEqual([])
     })
+
+    test('confirming a creation remembers the chosen pair; reopening preselects it (preselect-last-used-model)', async ({
+      page,
+    }) => {
+      test.setTimeout(90_000)
+      const rail = new ProjectRail(page)
+
+      await resetState(page.request)
+      const { name: projectName } = await ensureSceneProject(page.request)
+
+      // Seed a catalog with two models (same write path as Settings Models).
+      // Re-run safety: drop a leftover from an earlier journey first.
+      await page.request.delete('/api/providers/memory-provider')
+      const created = await page.request.post('/api/providers', {
+        data: {
+          name: 'memory-provider',
+          base_url_openai_chat: 'http://127.0.0.1:9/v1',
+          models: [
+            { id: 'mem-first', tags: [] },
+            { id: 'mem-second', tags: [] },
+          ],
+        },
+      })
+      expect(created.ok()).toBe(true)
+
+      try {
+        await page.goto('/')
+        await rail.openNewSessionDialog(projectName)
+        // First pair preselects with no memory (catalog order): mem-first.
+        const modelSelect = rail
+          .newSessionDialog()
+          .locator('[data-testid="dialog-model-select"]')
+        await expect(
+          rail.newSessionDialog().locator('[data-testid="dialog-provider-select"]'),
+        ).toBeVisible({ timeout: 15_000 })
+        await expect(modelSelect).toContainText('mem-first')
+
+        // Choose the SECOND model and confirm — the confirmation is the only
+        // write point of the last-used memory (localStorage).
+        await rail.pickDialogModel('mem-second')
+        await rail.confirmNewSessionDialog()
+        await expect(rail.newSessionDialog()).toBeHidden({ timeout: 10_000 })
+        const remembered = await page.evaluate(
+          () => localStorage.getItem('lastUsedModelPair'),
+        )
+        expect(JSON.parse(remembered ?? 'null')).toEqual({
+          provider: 'memory-provider',
+          model: 'mem-second',
+        })
+
+        // Reopen (same page, rail reuses the dialog): the remembered pair
+        // wins the preselection over the catalog's first pair.
+        await rail.openNewSessionDialog(projectName)
+        await expect(
+          rail
+            .newSessionDialog()
+            .locator('[data-testid="dialog-provider-select"]'),
+        ).toBeVisible({ timeout: 15_000 })
+        await expect(modelSelect).toContainText('mem-second')
+
+        // A stale pair (model no longer in the catalog) must NOT preselect:
+        // swap the catalog and the first pair takes over, without surfacing
+        // the vanished model as an option.
+        await rail.cancelNewSessionDialog()
+        const updated = await page.request.put('/api/providers/memory-provider', {
+          data: {
+            name: 'memory-provider',
+            base_url_openai_chat: 'http://127.0.0.1:9/v1',
+            models: [{ id: 'mem-other', tags: [] }],
+          },
+        })
+        expect(updated.ok()).toBe(true)
+        await rail.openNewSessionDialog(projectName)
+        await expect(
+          rail
+            .newSessionDialog()
+            .locator('[data-testid="dialog-provider-select"]'),
+        ).toBeVisible({ timeout: 15_000 })
+        await expect(
+          rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+        ).toContainText('mem-other')
+        await expect(
+          rail.newSessionDialog().locator('[data-testid="dialog-model-select"]'),
+        ).not.toContainText('mem-second')
+        await rail.cancelNewSessionDialog()
+      } finally {
+        // Hygiene: the shared core store must not leak into later journeys.
+        await page.request.delete('/api/providers/memory-provider')
+      }
+
+      expect(collector.clean()).toEqual([])
+    })
   })
 })
 

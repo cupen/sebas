@@ -333,12 +333,19 @@ pub async fn run(
         // async move 块里借用整个 cfg 会把它整个移进 future。
         let skills: std::sync::Arc<dyn sebas_webui::skills::SkillsService> =
             std::sync::Arc::new(crate::skills::FsSkillsService::from_config(&cfg));
+        // preselect-last-used-model 3.2：default agent kind 与 agent 目录
+        // 同一装配点注入（About INSTANCE 段经 /api/about 下发运行时真值）。
+        let agent_kinds_provider: std::sync::Arc<dyn sebas_webui::agent_kinds::AgentKindProvider> =
+            std::sync::Arc::new(sebas_webui::agent_kinds::ConfigAgentKindProvider::with_default_kind(
+                agent_kinds,
+                default_kind,
+            ));
         tokio::spawn(async move {
             sebas_webui::run_with_admin_adapter_and_auth(
                 backend,
                 router_info,
                 webui_card_cfg,
-                agent_kinds,
+                agent_kinds_provider,
                 listener,
                 None,
                 webui_auth,
