@@ -1274,6 +1274,7 @@ mod tests {
         let executor = ControlExecutor::new(
             control.clone(),
             Arc::new(FakeRunner::default()),
+            ServiceConfig::default(),
             WatchdogConfig::default(),
             "./config.toml".into(),
             services,
