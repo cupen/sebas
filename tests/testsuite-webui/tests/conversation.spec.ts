@@ -109,12 +109,16 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await expect(cards.all()).toHaveCount(0, { timeout: 15_000 })
 
       // The turn's process entries collect into ONE outer fold — NOT
-      // ordinary prose (2.1: summary `process · N`, collapsed by default,
-      // the invocation payload hidden until expanded).
+      // ordinary prose（workbench-natural-conversation-flow：summary 三段式
+      // = `process` 标签 + 尾条目结构化 title（实时「进行中工具」）+ 条目
+      // 计数；collapsed by default, the invocation payload hidden until
+      // expanded）.
       const fold = detail.processFold().first()
       await expect(fold).toBeVisible({ timeout: 15_000 })
-      const label = (await fold.locator('summary .label').textContent()) ?? ''
-      expect(label).toMatch(/^process · \d+$/)
+      await expect(fold.locator('summary .label')).toHaveText('process')
+      // 尾条目 = tool_result（结构化 title 同二级折叠），计数 = 2。
+      await expect(fold.locator('summary .running')).toHaveText('✓ Bash')
+      await expect(fold.locator('summary .fold-count')).toHaveText('2')
       expect(await fold.getAttribute('open')).toBeNull()
 
       // Expand the outer fold (the same action a keyboard user's Enter on
