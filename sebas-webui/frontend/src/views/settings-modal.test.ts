@@ -10,10 +10,14 @@
  *                name / desired / actual / uptime + /api/admin/events 最近错误；
  *                im→「飞书 IM」显示映射；无 adapter 时「无 watchdog 控制面」
  *                横幅而非空列表冒充——router 行的 desired/actual/uptime 只在
- *                此分区呈现）。停止被拒（400/409 + active_routed_sessions +
- *                count，unify-router-process-shape D4）→ 二层强制出口对话框：
- *                计数 + 流式中断后果，Force stop 以 force 重发、取消不发请求；
- *                其余失败仍走既有内联错误
+ *                此分区呈现）。动作按钮随 actual status 互斥（status-driven-
+ *                service-rows D2）：running 只 ■、stopped/disabled 只 ▶、
+ *                starting/restarting 过渡占位不可点、degraded/failed-startup
+ *                ■+⟳、busy 全禁用；core 行纯只读零按钮（D3）；watchdog /
+ *                updater 等非受管名不渲染为服务行。停止被拒（400/409 +
+ *                active_routed_sessions + count，unify-router-process-shape
+ *                D4）→ 二层强制出口对话框：计数 + 流式中断后果，Force stop
+ *                以 force 重发、取消不发请求；其余失败仍走既有内联错误
  *   - users      用户管理（add-webui-multiuser-rbac 5.3/5.4，root 专属）：
  *                /api/users 列表 + 新建对话框（用户名/密码/角色下拉）+ 行内
  *                改角色/重置密码/启停/删除；400/409 文案就地展示。分区可见性
@@ -462,13 +466,16 @@ describe('sebas-settings-modal sections', () => {
     expect(text).toContain('desired running · status running · up 1h 2m')
     expect(text).toContain('Recent errors')
     expect(text).toContain('im worker boom')
-    // 每行带 enable/disable/restart 动作钮。
+    // 动作按钮随 actual status 互斥（status-driven-service-rows）：im running
+    // 只显 ■，router stopped 只显 ▶。
     const enables = [...el.shadowRoot!.querySelectorAll('button[title="Enable service"]')]
-    expect(enables.length).toBe(2)
+    expect(enables.length).toBe(1)
+    const disables = [...el.shadowRoot!.querySelectorAll('button[title="Disable service"]')]
+    expect(disables.length).toBe(1)
     el.remove()
   })
 
-  it('core row offers only restart — no enable/disable (always started)', async () => {
+  it('core row renders no action buttons at all — read-only (restart included)', async () => {
     apiMocks.adminServicesSafe.mockResolvedValue({
       adapter_ok: true,
       services: [
@@ -482,9 +489,60 @@ describe('sebas-settings-modal sections', () => {
     const cards = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')]
     const coreCard = cards.find((c) => c.querySelector('.service-id')?.textContent === 'core')!
     expect(coreCard).toBeTruthy()
+    // core 纯只读（status-driven-service-rows D3）：无 ▶ / ■ / ⟳ 任何按钮。
     expect(coreCard.querySelector('button[title="Enable service"]')).toBeNull()
     expect(coreCard.querySelector('button[title="Disable service"]')).toBeNull()
-    expect(coreCard.querySelector('button[title="Restart service"]')).not.toBeNull()
+    expect(coreCard.querySelector('button[title="Restart service"]')).toBeNull()
+    expect(coreCard.querySelectorAll('button').length).toBe(0)
+    // 动作区容器仍渲染（定宽占位，D4）。
+    expect(coreCard.querySelector('.service-actions')).not.toBeNull()
+    el.remove()
+  })
+
+  it('renders no watchdog/updater rows — only real managed services', async () => {
+    // 合成行已在后端删除（status-driven-service-rows 1.1）；前端如实渲染
+    // /api/admin/services 所给行，且永不自行补 watchdog / updater 行。
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [
+        { name: 'core', status: 'running', desired: 'running', uptime_secs: 1 },
+        { name: 'webui', status: 'running', desired: 'running', uptime_secs: 2 },
+      ],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+    const el = await mount()
+    await goto(el, 2)
+    const ids = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-id')].map((s) =>
+      s.textContent?.trim(),
+    )
+    expect(ids).toEqual(['core', 'webui'])
+    expect(ids).not.toContain('watchdog')
+    expect(ids).not.toContain('updater')
+    const text = el.shadowRoot!.textContent ?? ''
+    expect(text).not.toContain('watchdog')
+    expect(text).not.toContain('updater')
+    el.remove()
+  })
+
+  it('renders only managed names even if the backend leaks a synthetic entry', async () => {
+    // 纵深防御：非受管名（watchdog/updater/feishu）不得渲染为服务行
+    // （spec「名称不属于受管集合的条目 SHALL NOT 渲染为服务行」）。
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [
+        { name: 'router', status: 'running', desired: 'running', uptime_secs: 3 },
+        { name: 'watchdog', status: 'running', desired: 'enabled', uptime_secs: null },
+        { name: 'updater', status: 'idle', desired: 'enabled', uptime_secs: null },
+        { name: 'feishu', status: 'running', desired: 'running', uptime_secs: null },
+      ],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+    const el = await mount()
+    await goto(el, 2)
+    const ids = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-id')].map((s) =>
+      s.textContent?.trim(),
+    )
+    expect(ids).toEqual(['router'])
     el.remove()
   })
 
@@ -581,6 +639,141 @@ describe('sebas-settings-modal sections', () => {
     await el.updateComplete
     expect(navItems(el)[0]!.getAttribute('aria-current')).toBe('false')
     expect(navItems(el)[1]!.getAttribute('aria-current')).toBe('true')
+    el.remove()
+  })
+})
+
+describe('status-driven-service-rows：动作按钮随 actual status 互斥（D2）', () => {
+  /** 装一个单行（router）Services 分区，返回 modal 与该行卡片。 */
+  async function mountRow(
+    status: string,
+  ): Promise<{ el: SebasSettingsModal; card: HTMLElement }> {
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [{ name: 'router', status, desired: 'running', uptime_secs: 5 }],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+    const el = await mount()
+    await goto(el, 2)
+    const card = el.shadowRoot!.querySelector<HTMLElement>('.service-card')!
+    expect(card).toBeTruthy()
+    return { el, card }
+  }
+
+  function buttonsOf(card: HTMLElement): string[] {
+    return [...card.querySelectorAll('button')].map((b) => b.textContent?.trim() ?? '')
+  }
+
+  function placeholderOf(card: HTMLElement): Element | null {
+    return card.querySelector('.service-actions .service-transition')
+  }
+
+  it('running 只显 ■（disable），不显 ▶ / ⟳', async () => {
+    const { el, card } = await mountRow('running')
+    expect(buttonsOf(card)).toEqual(['■'])
+    el.remove()
+  })
+
+  it('stopped 只显 ▶（enable），不显 ■ / ⟳', async () => {
+    const { el, card } = await mountRow('stopped')
+    expect(buttonsOf(card)).toEqual(['▶'])
+    el.remove()
+  })
+
+  it('disabled 只显 ▶（enable）', async () => {
+    const { el, card } = await mountRow('disabled')
+    expect(buttonsOf(card)).toEqual(['▶'])
+    el.remove()
+  })
+
+  it.each(['starting', 'restarting'])(
+    '%s 渲染不可点的过渡占位（无 ▶ / ■，点击无请求）',
+    async (status) => {
+      const { el, card } = await mountRow(status)
+      expect(buttonsOf(card)).toEqual([])
+      const ph = placeholderOf(card)
+      expect(ph).not.toBeNull()
+      expect(ph!.tagName).toBe('SPAN')
+      ph!.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+      await el.updateComplete
+      expect(apiMocks.enableService).not.toHaveBeenCalled()
+      expect(apiMocks.disableService).not.toHaveBeenCalled()
+      expect(apiMocks.restartService).not.toHaveBeenCalled()
+      el.remove()
+    },
+  )
+
+  it.each(['degraded', 'failed-startup'])('%s 显 ■ + ⟳，不显 ▶', async (status) => {
+    const { el, card } = await mountRow(status)
+    expect(buttonsOf(card)).toEqual(['■', '⟳'])
+    expect(placeholderOf(card)).toBeNull()
+    el.remove()
+  })
+
+  it('未知 status 按过渡占位降级（fail-safe，不猜按钮）', async () => {
+    const { el, card } = await mountRow('some-future-state')
+    expect(buttonsOf(card)).toEqual([])
+    expect(placeholderOf(card)).not.toBeNull()
+    el.remove()
+  })
+
+  it('busy 期间行内动作全部禁用，动作结束后恢复', async () => {
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [{ name: 'router', status: 'stopped', desired: 'running', uptime_secs: 5 }],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+    let resolveEnable!: (v: unknown) => void
+    apiMocks.enableService.mockReturnValue(
+      new Promise((resolve) => (resolveEnable = resolve)),
+    )
+    const el = await mount()
+    await goto(el, 2)
+    const card = el.shadowRoot!.querySelector<HTMLElement>('.service-card')!
+    const enable = card.querySelector<HTMLButtonElement>('button[title="Enable service"]')!
+    enable.click()
+    await el.updateComplete
+    // 执行期间：行内按钮禁用（busy）。
+    expect(enable.disabled).toBe(true)
+    resolveEnable({ operation_id: 'op-x', status: 'accepted', message: 'accepted' })
+    await settle(el)
+    expect(enable.disabled).toBe(false)
+    // 成功后刷新列表。
+    expect(apiMocks.adminServicesSafe).toHaveBeenCalledTimes(2)
+    el.remove()
+  })
+
+  it('动作区定宽：--service-actions-w 声明一次、.service-actions 引用，每行恰一个定宽容器', async () => {
+    apiMocks.adminServicesSafe.mockResolvedValue({
+      adapter_ok: true,
+      services: [
+        { name: 'core', status: 'running', desired: 'running', uptime_secs: 1 },
+        { name: 'router', status: 'running', desired: 'running', uptime_secs: 2 },
+        { name: 'webui', status: 'starting', desired: 'running', uptime_secs: null },
+      ],
+    })
+    apiMocks.adminEventsSafe.mockResolvedValue({ adapter_ok: true, events: [] })
+    const el = await mount()
+    await goto(el, 2)
+    // 每行（core 只读、running 两钮、过渡占位）都渲染恰一个 .service-actions
+    // 定宽容器——jsdom 无布局，真实 x 对齐由 Playwright 冒烟断言。
+    const actions = [
+      ...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card .service-actions'),
+    ]
+    expect(actions.length).toBe(3)
+    for (const a of actions) {
+      expect(a.children.length).toBeGreaterThanOrEqual(0)
+    }
+    const coreCard = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.service-card')].find(
+      (c) => c.querySelector('.service-id')?.textContent === 'core',
+    )!
+    expect(coreCard.querySelector('.service-actions')!.children.length).toBe(0)
+    // 自定义属性在组件样式表中声明一次，宽度规则引用 var()。
+    const css = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    expect(css.match(/--service-actions-w:/g)?.length).toBe(1)
+    expect(css).toMatch(/\.service-card \.service-actions\s*\{[^}]*var\(--service-actions-w\)/)
     el.remove()
   })
 })

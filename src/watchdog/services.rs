@@ -259,10 +259,17 @@ impl ServiceManager {
         });
     }
 
-    /// 全部服务快照（固定顺序 core → webui → router）。
+    /// 全部服务快照（固定顺序 core → webui → router → im；status-driven-
+    /// service-rows：ServiceStatus 列表恰为受管 entry 快照集合，im 也是受管
+    /// entry——缺了它「im managed when enabled」就永远不含真实 im 行）。
     pub async fn all_snapshots(&self) -> Vec<ServiceSnapshot> {
         let mut out = Vec::new();
-        for name in [ServiceName::Core, ServiceName::WebUi, ServiceName::Router] {
+        for name in [
+            ServiceName::Core,
+            ServiceName::WebUi,
+            ServiceName::Router,
+            ServiceName::Im,
+        ] {
             if let Some(snap) = self.snapshot(name).await {
                 out.push(snap);
             }

@@ -646,70 +646,48 @@ impl ControlExecutor {
         }
     }
 
-    /// Return the current status of all managed services — real supervision
-    /// snapshots plus the updater operation state. There is no "feishu" row:
-    /// feishu is a core-internal adapter, not a managed service.
+    /// Return the current status of all managed services. The list is exactly
+    /// the managed supervision snapshots — no synthetic rows (status-driven-
+    /// service-rows: the watchdog itself and the updater are supervisor-
+    /// internal roles, not managed services; updater progress is presented via
+    /// update/rollback operations and the event timeline). There is no
+    /// "feishu" row: feishu is a core-internal adapter, not a managed service.
     pub async fn service_status(&self) -> RpcControlResponse {
-        use crate::watchdog::control::OperationStatus;
-        let control = self.control.lock().await;
-
-        let updater_status = match &control.running_exclusive() {
-            Some(op_id) => {
-                if let Some(record) = control.operation(op_id) {
-                    match record.status {
-                        OperationStatus::Running => "running",
-                        _ => "pending",
-                    }
-                } else {
-                    "idle"
+        let services = self
+            .services
+            .all_snapshots()
+            .await
+            .into_iter()
+            .map(|snap| {
+                let status = match snap.state {
+                    ServiceState::Starting => "starting",
+                    ServiceState::Running => "running",
+                    ServiceState::Restarting => "restarting",
+                    ServiceState::Stopped => "stopped",
+                    ServiceState::Disabled => "disabled",
+                    ServiceState::Degraded => "degraded",
+                    ServiceState::FailedStartup => "failed-startup",
+                };
+                let desired = match snap.desired {
+                    DesiredState::Enabled => "enabled",
+                    DesiredState::Disabled => "disabled",
+                };
+                let uptime_secs = snap.started_at.map(|t| t.elapsed().as_secs());
+                let startup_failure = snap.startup_failure.as_ref().map(|sf| RpcStartupFailure {
+                    service: snap.name.as_str().into(),
+                    count: sf.count,
+                    last_stderr: sf.last_stderr.clone(),
+                    at: iso_from_unix(sf.at_unix),
+                });
+                RpcServiceStatus {
+                    name: snap.name.as_str().into(),
+                    status: status.into(),
+                    desired: desired.into(),
+                    uptime_secs,
+                    startup_failure,
                 }
-            }
-            None => "idle",
-        };
-
-        let mut services = vec![RpcServiceStatus {
-            name: "watchdog".into(),
-            status: "running".into(),
-            desired: "enabled".into(),
-            uptime_secs: None,
-            startup_failure: None,
-        }];
-        for snap in self.services.all_snapshots().await {
-            let status = match snap.state {
-                ServiceState::Starting => "starting",
-                ServiceState::Running => "running",
-                ServiceState::Restarting => "restarting",
-                ServiceState::Stopped => "stopped",
-                ServiceState::Disabled => "disabled",
-                ServiceState::Degraded => "degraded",
-                ServiceState::FailedStartup => "failed-startup",
-            };
-            let desired = match snap.desired {
-                DesiredState::Enabled => "enabled",
-                DesiredState::Disabled => "disabled",
-            };
-            let uptime_secs = snap.started_at.map(|t| t.elapsed().as_secs());
-            let startup_failure = snap.startup_failure.as_ref().map(|sf| RpcStartupFailure {
-                service: snap.name.as_str().into(),
-                count: sf.count,
-                last_stderr: sf.last_stderr.clone(),
-                at: iso_from_unix(sf.at_unix),
-            });
-            services.push(RpcServiceStatus {
-                name: snap.name.as_str().into(),
-                status: status.into(),
-                desired: desired.into(),
-                uptime_secs,
-                startup_failure,
-            });
-        }
-        services.push(RpcServiceStatus {
-            name: "updater".into(),
-            status: updater_status.into(),
-            desired: "enabled".into(),
-            uptime_secs: None,
-            startup_failure: None,
-        });
+            })
+            .collect();
 
         RpcControlResponse::Services { services }
     }
@@ -1247,46 +1225,114 @@ mod tests {
         runner.gate.notify_waiters();
     }
 
+    /// disabled entry 的 spawner：desired Disabled 的 entry 永不该被 spawn。
+    /// 被调用即记账（断言处读数），返回 Err 而非 panic 以免毒化监督 task。
+    struct NeverSpawner {
+        spawns: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::watchdog::supervisor::ServiceSpawner for NeverSpawner {
+        async fn spawn(
+            &self,
+        ) -> crate::error::Result<crate::watchdog::supervisor::SpawnedInstance> {
+            self.spawns.fetch_add(1, Ordering::SeqCst);
+            Err(SebasError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "disabled entry must never spawn",
+            )))
+        }
+    }
+
+    /// 注册了一个 disabled im entry 的 executor：验证 ServiceStatus 列表形状
+    /// （恰为受管 entry 快照集合）用。
+    fn executor_with_disabled_im(
+    ) -> (ControlExecutor, Arc<Mutex<ControlService>>, Arc<NeverSpawner>) {
+        let control = Arc::new(Mutex::new(ControlService::new()));
+        let spawner = Arc::new(NeverSpawner {
+            spawns: AtomicUsize::new(0),
+        });
+        let services = ServiceManager::new(
+            std::env::temp_dir().join(format!("sebas-executor-im-{}.json", std::process::id())),
+        );
+        services.register(
+            crate::watchdog::supervisor::ServiceSpec::new(
+                ServiceName::Im,
+                spawner.clone(),
+                DesiredState::Disabled,
+            ),
+            false,
+        );
+        let executor = ControlExecutor::new(
+            control.clone(),
+            Arc::new(FakeRunner::default()),
+            WatchdogConfig::default(),
+            "./config.toml".into(),
+            services,
+        );
+        (executor, control, spawner)
+    }
+
     #[tokio::test]
-    async fn service_status_reports_watchdog_updater_and_no_feishu_row() {
-        let (executor, _control) = executor_with(Arc::new(FakeRunner::default()));
+    async fn service_status_lists_exactly_the_managed_entries_no_synthetic_rows() {
+        // 注册形态：列表恰为受管 entry 快照集合（此处 = disabled 的 im），
+        // 无 watchdog / updater 合成行、无 feishu（core 内部适配器）。
+        let (executor, _control, spawner) = executor_with_disabled_im();
+        // 等监督 task 就位：desired Disabled → 状态稳定为 disabled（不 spawn）。
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let RpcControlResponse::Services { services } = executor.service_status().await else {
             panic!("service_status must return Services");
         };
         let names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"watchdog"));
-        assert!(names.contains(&"updater"));
+        assert_eq!(names, vec!["im"], "list must equal the managed entry set");
+        assert_eq!(services[0].status, "disabled");
+        assert_eq!(
+            spawner.spawns.load(Ordering::SeqCst),
+            0,
+            "disabled entry must never spawn"
+        );
+
+        // 空表形态：无受管 entry → 列表为空，而非合成行垫底。
+        let (executor, _control) = executor_with(Arc::new(FakeRunner::default()));
+        let RpcControlResponse::Services { services } = executor.service_status().await else {
+            panic!("service_status must return Services");
+        };
         assert!(
-            !names.contains(&"feishu"),
-            "feishu is a core-internal adapter, not a managed service"
+            services.is_empty(),
+            "no managed entries → empty list, got {services:?}"
         );
     }
 
     #[tokio::test]
     async fn service_status_for_filters_to_requested_service() {
-        let (executor, _control) = executor_with(Arc::new(FakeRunner::default()));
+        let (executor, _control, _spawner) = executor_with_disabled_im();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let RpcControlResponse::Services { services } =
-            executor.service_status_for("updater").await
+            executor.service_status_for("im").await
         else {
             panic!("service_status_for must return Services");
         };
         assert_eq!(services.len(), 1);
-        assert_eq!(services[0].name, "updater");
+        assert_eq!(services[0].name, "im");
 
-        let RpcControlResponse::Services { services } =
-            executor.service_status_for("no-such-service").await
-        else {
-            panic!("service_status_for must return Services");
-        };
-        assert!(services.is_empty(), "unknown service yields empty list");
+        // watchdog / updater 已不是可查询的服务行（合成行删除，spec「服务
+        // 列表不含合成行」）；其余未知名同样为空列表而非报错。
+        for unknown in ["watchdog", "updater", "no-such-service"] {
+            let RpcControlResponse::Services { services } =
+                executor.service_status_for(unknown).await
+            else {
+                panic!("service_status_for must return Services");
+            };
+            assert!(services.is_empty(), "{unknown} must not match any row");
+        }
     }
 
     // service_from_str 与 executor 的 ServiceSet 名称面共享（防漂移）。
     #[test]
     fn service_from_str_knows_all_rpc_service_names() {
-        for name in ["core", "webui", "router"] {
+        for name in ["core", "webui", "router", "im"] {
             assert!(service_from_str(name).is_some());
         }
     }
