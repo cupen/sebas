@@ -48,6 +48,7 @@ import type { ConversationEntryView } from '../api/client.js'
 import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { readAnchor, writeSeen as writeCursor } from './unread-cursor.js'
+import { sharedWs } from '../api/shared-ws.js'
 
 /** Bottom-scroll threshold for "mark-as-seen" detection. */
 const NEAR_BOTTOM_PX = 80
@@ -427,6 +428,21 @@ export class SebasTranscriptView extends LitElement {
    */
   @state() private turnUnits: TurnUnit[] = []
 
+  /**
+   * （workbench-live-conversation-flow 2.2）流式增量的就地缓冲：turn.append
+   * 帧的条目先落这里（position 去重），与 `entries` 属性合并进渲染管线。
+   * 快照重取（entries 属性）是收敛基准——重取带来的条目 position 覆盖缓冲
+   * 后，缓冲里被覆盖的部分即被裁掉。
+   */
+  private streamEntries: ConversationEntryView[] = []
+  /**
+   * （6.1）流式期间已标记已读的可见回复段数（markdown/error）：快照的
+   * `msg_count` 尚未赶上流式进度时，把这段增量补进段数锚，rail 徽标与
+   * seam 才不闪现。msg_count 属性每次到达（快照收敛）即清零。
+   */
+  private streamMsgBonus = 0
+  /** turn.append 订阅的退订句柄（connectedCallback 挂，disconnected 摘）。 */
+  private unsubscribeTurn: (() => void) | null = null
   /** Debounce timer for mark-as-seen writes. */
   private markSeenTimer: number | null = null
   /** Bound scroll handler so we can detach on disconnect. */
@@ -781,11 +797,19 @@ export class SebasTranscriptView extends LitElement {
     super.connectedCallback()
     this.recomputeSeam()
     window.addEventListener('resize', this.boundOnResize)
+    // 流式订阅（workbench-live-conversation-flow 2.2）：按聚焦会话过滤，
+    // position 去重后并入渲染管线。
+    this.unsubscribeTurn = sharedWs.subscribe((event) => {
+      if (event.type !== 'turn.append') return
+      this.onTurnAppend(event.session_id, event.entries)
+    })
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback()
     window.removeEventListener('resize', this.boundOnResize)
+    this.unsubscribeTurn?.()
+    this.unsubscribeTurn = null
     if (this.markSeenTimer !== null) {
       clearTimeout(this.markSeenTimer)
       this.markSeenTimer = null
@@ -793,9 +817,55 @@ export class SebasTranscriptView extends LitElement {
   }
 
   protected willUpdate(changed: Map<string, unknown>): void {
+    if (changed.has('sessionKey')) {
+      // 换会话：上一个会话的流式残留全部作废（快照是新会话的真源）。
+      this.streamEntries = []
+      this.streamMsgBonus = 0
+    }
+    if (changed.has('msgCount')) {
+      // 快照的段数到了（含流式期间产生的段）：增量补丁清零。
+      this.streamMsgBonus = 0
+    }
     if (changed.has('entries') || changed.has('sessionKey')) {
-      this.turnUnits = groupConversation(mergeSpawnErrors(this.entries))
+      // 快照收敛：position 已被属性覆盖的流式条目裁掉，只留快照还没
+      // 追上的尾巴（乱序竞态下绝不回退视图）。
+      const snapMax = this.entries.reduce((m, e) => Math.max(m, e.position), 0)
+      this.streamEntries = this.streamEntries.filter((e) => e.position > snapMax)
+      this.rebuildUnits()
       this.recomputeSeam()
+    }
+  }
+
+  /** 渲染管线输入：快照条目 + 流式尾巴 → 错误合并 → 回合分组。 */
+  private rebuildUnits(): void {
+    const merged = [...this.entries, ...this.streamEntries]
+    this.turnUnits = groupConversation(mergeSpawnErrors(merged))
+  }
+
+  /**
+   * turn.append 到达（workbench-live-conversation-flow 2.2 / 6.1）：position
+   * 去重后并入渲染管线。聚焦且贴底（sticky）时随渲染推进读锚——角标不闪、
+   * 已读缝不出现；未贴底不写锚，照常计未读（session-unread-badge 语义）。
+   * 思考/工具条目不进段数锚增量（与 msg_count 只数可见回复段的口径一致）。
+   */
+  private onTurnAppend(sessionId: string, incoming: ConversationEntryView[]): void {
+    if (sessionId !== this.sessionKey || incoming.length === 0) return
+    const maxKnown = Math.max(
+      this.entries.reduce((m, e) => Math.max(m, e.position), 0),
+      this.streamEntries.reduce((m, e) => Math.max(m, e.position), 0),
+    )
+    const fresh = incoming.filter((e) => e.position > maxKnown)
+    if (fresh.length === 0) return
+    this.streamEntries.push(...fresh)
+    this.rebuildUnits()
+    this.recomputeSeam()
+    if (this.sticky) {
+      if (this.msgCount != null) {
+        this.streamMsgBonus += fresh.filter(
+          (e) => e.element_type === 'markdown' || e.element_type === 'error',
+        ).length
+      }
+      this.scheduleMarkSeen()
     }
   }
 
@@ -833,7 +903,11 @@ export class SebasTranscriptView extends LitElement {
 
   private writeSeen(value: number): void {
     // 段数锚只在 payload 带来 msg_count 时推进（单调 max 由游标模块保证）。
-    writeCursor(this.sessionKey, value, this.msgCount ?? undefined)
+    // 流式期间快照还没追上的可见段（6.1）以增量补丁一并计入，rail 徽标
+    // 与 seam 才不会在流式会话上闪现。
+    const anchor =
+      this.msgCount != null ? this.msgCount + this.streamMsgBonus : undefined
+    writeCursor(this.sessionKey, value, anchor)
   }
 
   // ---- seam logic -------------------------------------------------------

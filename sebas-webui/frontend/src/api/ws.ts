@@ -31,6 +31,19 @@ export interface WsEvents {
   }
   'config.updated': { type: 'config.updated' }
   /**
+   * （workbench-live-conversation-flow 2.2）实时回合内容：同一合并窗内某
+   * 会话追加的 transcript 条目（落库序、position 单调）。`seq` 是本帧最后
+   * 一条的 position（去重锚）。纯增量补充——乱序/迟到/重复以快照重取收敛：
+   * position ≤ 已知最大值 = 已见过，跳过。思考/工具条目不计未读（与
+   * session-unread-badge 的计数口径一致）。
+   */
+  'turn.append': {
+    type: 'turn.append'
+    session_id: string
+    entries: import('./client.js').ConversationEntryView[]
+    seq: number
+  }
+  /**
    * A gated tool call awaits an operator decision (the review card).
    * `session_id` is the URL-safe encoded session key; `request_id` equals
    * the kernel's tool_use_id and is what `api.answerPermission` takes
@@ -56,6 +69,7 @@ const EVENTS = {
   'session.pending_dropped': true,
   'config.updated': true,
   'permission.requested': true,
+  'turn.append': true,
 }
 
 export type WsEventHandler = (event: WsEvent) => void

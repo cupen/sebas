@@ -299,7 +299,7 @@ describe('row action consolidation (rail-declutter-unread 3.1/3.2)', () => {
     el.remove()
   })
 
-  it('session row has a single … menu holding Archive and Close (danger); no inline buttons', async () => {
+  it('session row has a single … menu whose only lifecycle entry is Archive (danger) (4.2)', async () => {
     const el = await mount()
     ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
@@ -307,31 +307,39 @@ describe('row action consolidation (rail-declutter-unread 3.1/3.2)', () => {
     // 行内不再有直删/归档按钮。
     expect(item.querySelector('button[title="Archive this session"]')).toBeNull()
     expect(item.querySelector('button[title="Close (delete) this session"]')).toBeNull()
-    // 唯一的 … 菜单：归档 + 关闭（danger）。
+    // 唯一的 … 菜单：归档（danger，唯一出口）——close 菜单项已并入归档语义。
     expect(item.querySelectorAll('wa-dropdown').length).toBe(1)
     const archive = item.querySelector('wa-dropdown-item[value="archive"]')
     const close = item.querySelector('wa-dropdown-item[value="close"]')
     expect(archive).toBeTruthy()
-    expect(close).toBeTruthy()
-    expect(close!.getAttribute('variant')).toBe('danger')
+    expect(close).toBeNull()
+    expect(archive!.getAttribute('variant')).toBe('danger')
     el.remove()
   })
 
-  it('the … menu triggers archive through the menu item (3.2)', async () => {
+  it('the … menu archives through the confirm dialog (4.2)', async () => {
     mockOf(apiMock.archiveSession).mockResolvedValue({ status: 'archived' })
     const el = await mount()
     ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
     const item = el.shadowRoot!.querySelector('li.session-item')!
     ;(item.querySelector('wa-dropdown-item[value="archive"]') as HTMLElement).click()
+    await el.updateComplete
+    // 确认框弹出（归档一律确认——「将丢弃 N 条待执行」的告知不依赖状态）。
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="归档会话"]')
+    expect((dialog as any).open).toBe(true)
+    expect(apiMock.archiveSession).not.toHaveBeenCalled()
+    ;([...(dialog as HTMLElement).querySelectorAll('wa-button')].find(
+      (b) => b.textContent?.trim() === '归档',
+    ) as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
     expect(apiMock.archiveSession).toHaveBeenCalledWith('oc_1%00')
     el.remove()
   })
 
-  it('the … menu closes a dormant session immediately and asks first for a working one (3.2)', async () => {
-    mockOf(apiMock.closeSession).mockResolvedValue({ status: 'closed', discarded_pending: 0 })
+  it('archive always confirms first, whatever the session state (4.2)', async () => {
+    mockOf(apiMock.archiveSession).mockResolvedValue({ status: 'archived' })
     const dormant = row({ project_id: 'proj-alpha', status: 'done', status_slug: 'done' })
     const working = row({ project_id: 'proj-alpha', status: 'working', status_slug: 'working' })
     mockOf(apiMock.sessions).mockResolvedValue(sessionList([dormant, working]))
@@ -339,16 +347,23 @@ describe('row action consolidation (rail-declutter-unread 3.1/3.2)', () => {
     ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
     const items = [...el.shadowRoot!.querySelectorAll('li.session-item')]
-    // inactive：直删。
-    ;(items[0]!.querySelector('wa-dropdown-item[value="close"]') as HTMLElement).click()
+    // inactive：确认框弹出，不直接归档。
+    ;(items[0]!.querySelector('wa-dropdown-item[value="archive"]') as HTMLElement).click()
+    await el.updateComplete
+    let dialog = el.shadowRoot!.querySelector('wa-dialog[label="归档会话"]')
+    expect((dialog as any).open).toBe(true)
+    ;([...(dialog as HTMLElement).querySelectorAll('wa-button')].find(
+      (b) => b.textContent?.trim() === '归档',
+    ) as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    expect(apiMock.closeSession).toHaveBeenCalledTimes(1)
-    // active：先弹确认，不直接删。
-    ;(items[1]!.querySelector('wa-dropdown-item[value="close"]') as HTMLElement).click()
+    // happy-dom 下 wa-button 的合成 click 会双发；组件侧有重入护栏，
+    // 这里只断言归档确实经确认框执行（严格计数见组件单测）。
+    expect(apiMock.archiveSession).toHaveBeenCalled()
+    // active：同样先确认。
+    ;(items[1]!.querySelector('wa-dropdown-item[value="archive"]') as HTMLElement).click()
     await el.updateComplete
-    expect(apiMock.closeSession).toHaveBeenCalledTimes(1)
-    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="Close session"]')
+    dialog = el.shadowRoot!.querySelector('wa-dialog[label="归档会话"]')
     expect((dialog as any).open).toBe(true)
     el.remove()
   })
@@ -445,7 +460,7 @@ describe('session naming by first prompt (rail-declutter-unread 3.4)', () => {
     el.remove()
   })
 
-  it('the close confirmation names the session by the same label', async () => {
+  it('the archive confirmation names the session by the same label', async () => {
     const working = row({
       project_id: 'proj-alpha',
       status: 'working',
@@ -458,9 +473,9 @@ describe('session naming by first prompt (rail-declutter-unread 3.4)', () => {
     ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
     await el.updateComplete
     const item = el.shadowRoot!.querySelector('li.session-item')!
-    ;(item.querySelector('wa-dropdown-item[value="close"]') as HTMLElement).click()
+    ;(item.querySelector('wa-dropdown-item[value="archive"]') as HTMLElement).click()
     await el.updateComplete
-    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="Close session"]')
+    const dialog = el.shadowRoot!.querySelector('wa-dialog[label="归档会话"]')
     expect(dialog?.textContent).toContain('确认弹窗里的名字')
     const line = el.shadowRoot!.querySelector('[data-testid="close-discards-pending"]')
     expect(line?.textContent).toContain('2')

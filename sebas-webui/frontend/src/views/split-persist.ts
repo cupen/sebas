@@ -15,14 +15,17 @@ export const RAIL_WIDTH_KEY = 'sebas.rail-width'
 /** 会话流|输入框分割的 localStorage 键。 */
 export const COMPOSER_HEIGHT_KEY = 'sebas.composer-height'
 
-/** 侧栏宽度边界（px）。 */
+/** 侧栏宽度边界（px）。上限 520（workbench-live-conversation-flow 5.2）。 */
 export const RAIL_MIN_PX = 180
-export const RAIL_MAX_PX = 480
+export const RAIL_MAX_PX = 520
 /** 输入框最低高度（px）；上限是主区一半（按当时量得的高度算）。 */
 export const COMPOSER_MIN_PX = 120
 
-/** 侧栏默认宽度（既有 220px 定宽的延续）。 */
-export const RAIL_DEFAULT_PX = 220
+/**
+ * 侧栏默认宽度（workbench-live-conversation-flow 5.2）：280px 保证行标题
+ * 在 ≥1440px 视口下 12 个中文字可见。旧存值（<280）是用户偏好，继续生效。
+ */
+export const RAIL_DEFAULT_PX = 280
 /** 输入框默认高度（px）。 */
 export const COMPOSER_DEFAULT_PX = 220
 

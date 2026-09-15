@@ -61,14 +61,14 @@ describe('rail width persistence (5.1)', () => {
     expect(loadRailWidth(store)).toBe(320)
   })
 
-  it('clamps into [180, 480] on save, and clamps out-of-range history on load', () => {
+  it('clamps into [180, 520] on save, and clamps out-of-range history on load (5.2)', () => {
     const store = fakeStorage()
     saveRailWidth(50, store)
     expect(loadRailWidth(store)).toBe(180)
     saveRailWidth(9999, store)
-    expect(loadRailWidth(store)).toBe(480)
+    expect(loadRailWidth(store)).toBe(520)
     store.setItem(RAIL_WIDTH_KEY, '9999')
-    expect(loadRailWidth(store)).toBe(480)
+    expect(loadRailWidth(store)).toBe(520)
   })
 
   it('returns null when nothing (or garbage) is stored', () => {
@@ -85,16 +85,31 @@ describe('rail width persistence (5.1)', () => {
   })
 
   it('degrades silently when there is no storage at all (jsdom opaque origin)', () => {
-    expect(() => saveRailWidth(300, null)).not.toThrow()
-    expect(loadRailWidth(null)).toBeNull()
-    // 探针化的默认存储在此环境同样不可用且不抛。
-    expect(defaultStorage()).toBeNull()
-    expect(() => saveRailWidth(300)).not.toThrow()
+    // 全局 localStorage 缺位时 setup 有兜底（7.2）；这里显式模拟 opaque
+    // origin——探针一写就抛，defaultStorage 必须安静地退回 null。
+    const desc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    const throwing = {
+      length: 0,
+      clear: () => { throw new Error('opaque') },
+      getItem: () => { throw new Error('opaque') },
+      key: () => { throw new Error('opaque') },
+      removeItem: () => { throw new Error('opaque') },
+      setItem: () => { throw new Error('opaque') },
+    }
+    Object.defineProperty(globalThis, 'localStorage', { value: throwing, configurable: true })
+    try {
+      expect(() => saveRailWidth(300)).not.toThrow()
+      expect(loadRailWidth()).toBeNull()
+      expect(defaultStorage()).toBeNull()
+    } finally {
+      if (desc) Object.defineProperty(globalThis, 'localStorage', desc)
+      else delete (globalThis as { localStorage?: unknown }).localStorage
+    }
   })
 
   it('clampRailWidth falls back to the default on non-finite input', () => {
-    expect(clampRailWidth(Number.NaN)).toBe(220)
-    expect(clampRailWidth(220)).toBe(220)
+    expect(clampRailWidth(Number.NaN)).toBe(280)
+    expect(clampRailWidth(280)).toBe(280)
   })
 })
 
