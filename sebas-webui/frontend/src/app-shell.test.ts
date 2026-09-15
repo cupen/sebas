@@ -61,13 +61,17 @@ vi.mock('../api/shared-ws.js', () => ({
 
 // outlet 会实例化 sebas-dashboard；composer 依赖 WA 表单组件的
 // ElementInternals（jsdom 不完整），与 shell 无关 —— mock 掉模块即可，
-// <sebas-workbench-composer> 作为未知元素惰性渲染。
-vi.mock('./views/workbench-composer.js', () => ({}))
+// <sebas-workbench-composer> 作为未知元素惰性渲染。dashboard 还从该模块
+// 取一次性对焦请求的事件名（workbench-rail-polish 3.2），mock 里补上。
+vi.mock('./views/workbench-composer.js', () => ({
+  COMPOSER_FOCUS_REQUEST: 'sebas:composer-focus',
+}))
 
 // ---- 被测模块（mock 生效后导入）----------------------------------------
 
 import { matchRoute, redirectFor } from './router.js'
 import { ROUTES, SebasApp } from './app-shell.js'
+import { APP_TAGLINE } from './branding.js'
 import './views/dashboard.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -121,6 +125,15 @@ async function mountShell(): Promise<SebasApp> {
 }
 
 describe('sidebar IA v2', () => {
+  it('renders the shared brand tagline in the rail brand (workbench-rail-polish 1.1)', async () => {
+    const el = await mountShell()
+    // 三处副标题（rail 顶 / 登录页 / 首启页）同一常量：rail 顶先验。
+    expect(el.shadowRoot!.querySelector('.brand .name small')?.textContent).toBe(APP_TAGLINE)
+    // 旧「agent router」副标题不再出现。
+    expect(el.shadowRoot!.textContent).not.toContain('agent router')
+    el.remove()
+  })
+
   it('mounts the project tree + bottom settings entry, and ships no legacy nav links', async () => {
     const el = await mountShell()
     const nav = el.shadowRoot!.querySelector('nav')

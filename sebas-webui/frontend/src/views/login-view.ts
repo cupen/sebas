@@ -10,6 +10,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { ApiError, api } from '../api/client.js'
+import { APP_TAGLINE } from '../branding.js'
 
 @customElement('sebas-login')
 export class SebasLogin extends LitElement {
@@ -169,7 +170,7 @@ export class SebasLogin extends LitElement {
       <div class="card">
         <div class="brand">
           <span class="mark" aria-hidden="true">❯</span>
-          <span class="name">sebas<small>agent router</small></span>
+          <span class="name">sebas<small>${APP_TAGLINE}</small></span>
         </div>
         <p class="title">登录以继续</p>
         <form @submit=${this.submit}>

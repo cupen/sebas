@@ -19,6 +19,7 @@ import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
 import { api, setUnauthorizedHandler, type Role } from './api/client.js'
+import { APP_TAGLINE } from './branding.js'
 import { icon } from './components/icons.js'
 import {
   clampRailWidth,
@@ -602,7 +603,7 @@ export class SebasApp extends LitElement {
         <nav slot="start" aria-label="Primary">
           <a class="brand" href="/" aria-label="sebas console home">
             <span class="mark" aria-hidden="true">❯</span>
-            <span class="name">sebas<small>agent router</small></span>
+            <span class="name">sebas<small>${APP_TAGLINE}</small></span>
           </a>
           <sebas-project-rail
             .activePath=${this.selectedPath}

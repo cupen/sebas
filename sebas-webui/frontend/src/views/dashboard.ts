@@ -32,7 +32,7 @@ import '../components/status-badge.js'
 import '../components/review-card.js'
 import '../components/pending-stack.js'
 import './transcript-view.js'
-import './workbench-composer.js'
+import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
@@ -59,6 +59,16 @@ function mergeEntries(
 
 /** 节点可用性轮询周期（8.2：节点回归/掉线免刷新反映到 composer 门禁）。 */
 const NODE_POLL_MS = 10_000
+
+/**
+ * 创建后 composer 对焦的短窗（workbench-rail-polish 3.2 真实浏览器修正）：
+ * wa-dialog 的 requestClose 在关闭动画收尾会 `trigger.focus()` 把焦点抢回
+ * 项目行「+」，而创建往返只需几毫秒——一次性送焦必输。挂起改为短窗重试，
+ * 时长盖过 hide 动画（~150ms+）加余量。
+ */
+const COMPOSER_FOCUS_WINDOW_MS = 1_000
+/** 短窗内的重试节拍。 */
+const COMPOSER_FOCUS_TICK_MS = 100
 
 @customElement('sebas-dashboard')
 export class SebasDashboard extends LitElement {
@@ -562,6 +572,9 @@ export class SebasDashboard extends LitElement {
       this.refetch()
     })
     window.addEventListener('sebas:refetch', this.refetch)
+    // workbench-rail-polish 3.2/D2：rail 创建会话成功后的对焦请求（请求
+    // 一次性派发，落地走下面的短窗重试）。
+    window.addEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
     this.nodeTimer = window.setInterval(() => { void this.loadNodes() }, NODE_POLL_MS)
     // 5.2：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
     this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
@@ -571,6 +584,8 @@ export class SebasDashboard extends LitElement {
     this.unsubscribe?.()
     this.unlistenNarrow?.()
     window.removeEventListener('sebas:refetch', this.refetch)
+    window.removeEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
+    this.stopComposerFocusWindow()
     if (this.nodeTimer !== undefined) {
       window.clearInterval(this.nodeTimer)
       this.nodeTimer = undefined
@@ -593,6 +608,81 @@ export class SebasDashboard extends LitElement {
       this.activatedFocusKey = focusKey
       void api.activateSession(focusKey).catch(() => undefined)
     }
+  }
+
+  protected updated(changed: PropertyValues): void {
+    super.updated(changed)
+    // workbench-rail-polish 3.2：渲染即核对一拍（聚焦 key 常在请求之后才
+    // 随 summary 到达——这趟渲染往往就是首个能落焦的时机）。
+    this.focusComposerTick()
+  }
+
+  /**
+   * workbench-rail-polish 3.2/D2（真实浏览器修正版）：composer 对焦的
+   * 短窗重试。rail 创建成功派发 `COMPOSER_FOCUS_REQUEST` 时，占位会话的
+   * 聚焦 key 往往还没到（summary 未刷新），且 wa-dialog 的关闭动画收尾
+   * 还会 `trigger.focus()` 把焦点抢回项目行「+」——一次送焦必输。于是
+   * 短窗（COMPOSER_FOCUS_WINDOW_MS）内每个节拍穿透 shadow 核对活焦点
+   * 是否已在 composer 输入框内，不在就重送（focusInput 对已聚焦元素是
+   * 幂等 no-op）；到点放弃，绝不抢别的焦点。节拍由 setTimeout 链驱动
+   * （插队时刻不与渲染重合，updated() 只作加速的旁路核对）。仅创建流程
+   * 派发该事件；会话切换（openSession/深链）不经此路，不抢键盘焦点。
+   */
+  private composerFocusDeadline: number | null = null
+  private composerFocusTimer: number | undefined = undefined
+
+  private onComposerFocusRequest = (): void => {
+    this.composerFocusDeadline = Date.now() + COMPOSER_FOCUS_WINDOW_MS
+    this.focusComposerTick()
+  }
+
+  /** 一拍：核对焦点去向，短窗未满则按需重送并排下一拍。 */
+  private focusComposerTick(): void {
+    const deadline = this.composerFocusDeadline
+    if (deadline === null) return
+    if (Date.now() >= deadline) {
+      this.stopComposerFocusWindow()
+      return
+    }
+    if (this.effectiveFocusKey() !== null && !this.composerInputHasFocus()) {
+      // focusInput 内部先等 composer 自身渲染完（textarea 刚上屏也能落焦）。
+      void this.renderRoot.querySelector('sebas-workbench-composer')?.focusInput()
+    }
+    this.scheduleComposerFocusTick()
+  }
+
+  private scheduleComposerFocusTick(): void {
+    if (this.composerFocusTimer !== undefined) return
+    this.composerFocusTimer = window.setTimeout(() => {
+      this.composerFocusTimer = undefined
+      this.focusComposerTick()
+    }, COMPOSER_FOCUS_TICK_MS)
+  }
+
+  private stopComposerFocusWindow(): void {
+    this.composerFocusDeadline = null
+    if (this.composerFocusTimer !== undefined) {
+      window.clearTimeout(this.composerFocusTimer)
+      this.composerFocusTimer = undefined
+    }
+  }
+
+  /**
+   * 键盘焦点是否已在 composer 的输入框内（穿透 shadow 判断）：活焦点沿
+   * shadowRoot.activeElement 逐层下探，落在 wa-textarea 宿主或其内部
+   * 原生 textarea 都算数。
+   */
+  private composerInputHasFocus(): boolean {
+    const composerRoot = this.renderRoot.querySelector('sebas-workbench-composer')?.shadowRoot
+    if (!composerRoot) return false
+    const input = composerRoot.querySelector('wa-textarea')
+    if (!input) return false
+    let deep: Element | null = composerRoot.activeElement
+    if (deep === null) return false
+    while (deep instanceof HTMLElement && deep.shadowRoot?.activeElement) {
+      deep = deep.shadowRoot.activeElement
+    }
+    return deep === input || (input.shadowRoot !== null && input.shadowRoot.contains(deep))
   }
 
   /** 上一次触发过 activate 的焦点 key（每焦点一次，防重复请求）。 */

@@ -13,6 +13,7 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { ApiError, api } from '../api/client.js'
+import { APP_TAGLINE } from '../branding.js'
 
 /** 服务端与前端共用的最小密码长度（spec：不满足即 400，不做静默降级）。 */
 export const MIN_PASSWORD_LENGTH = 8
@@ -197,7 +198,7 @@ export class SebasSetup extends LitElement {
       <div class="card">
         <div class="brand">
           <span class="mark" aria-hidden="true">❯</span>
-          <span class="name">sebas<small>agent router</small></span>
+          <span class="name">sebas<small>${APP_TAGLINE}</small></span>
         </div>
         <p class="title">创建管理员账户</p>
         <p class="hint">这是此实例的第一个账户（root），之后可在 Settings 内管理其他用户。</p>

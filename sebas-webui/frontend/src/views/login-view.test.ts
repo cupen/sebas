@@ -40,6 +40,7 @@ import './login-view.js'
 import type { SebasLogin } from './login-view.js'
 // mocked 模块里的 ApiError 类——与组件内 instanceof 同一构造器。
 import { ApiError } from '../api/client.js'
+import { APP_TAGLINE } from '../branding.js'
 
 async function mount(): Promise<SebasLogin> {
   const el = document.createElement('sebas-login') as SebasLogin
@@ -78,6 +79,14 @@ afterEach(() => {
 })
 
 describe('sebas-login two-field form (add-webui-multiuser-rbac 5.1)', () => {
+  it('renders the shared brand tagline (workbench-rail-polish 1.1)', async () => {
+    const el = await mount()
+    // 与 rail 顶/首启页同一 APP_TAGLINE 常量，无「agent router」残留。
+    expect(el.shadowRoot!.querySelector('.brand .name small')?.textContent).toBe(APP_TAGLINE)
+    expect(el.shadowRoot!.textContent).not.toContain('agent router')
+    el.remove()
+  })
+
   it('renders separate username and password fields', async () => {
     const el = await mount()
     expect(field(el, 'username')).toBeTruthy()
