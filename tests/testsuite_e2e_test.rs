@@ -1695,6 +1695,187 @@ async fn mode_mid_session_switch() {
     );
 }
 
+/// session-slash-commands 5.2：命令广告与透传的进程级旅程（Windows 可跑）。
+///
+/// fake-claude 带 `--advertise-commands`：
+/// 1. initialize 握手的命令表经 `AcpEvent::AvailableCommands` → 引擎物化 →
+///    会话 detail 的 `available_commands`（goal 带参数提示 + 说明、compact
+///    裸命令）——面板的数据源在进程级可见；
+/// 2. `/goal some-condition`、`/compact` 两条提交 200 接受后**原样**到达
+///    stub（journal in 帧断言原文，回合各收敛到 Done）。
+/// 前端「未广告命令拦截」是组件行为（vitest 已覆盖）——后端契约只有一条：
+/// 透传无损。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn slash_commands_advertise_and_reach_stub() {
+    let sb = Sandbox::new("testsuite_e2e", "slash-commands");
+    let journal = sb.advertising_journal_fake_agent();
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 1) 创建 acp（claude 驱动）会话——仓库现状的真实请求形状。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hello", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 2) 首回合 Done 且命令表已物化（空表不插键——键在场即非空）。
+    let detail = wait_for(
+        "session detail to advertise the stub command table",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    let done = v["status_slug"].as_str() == Some("done");
+                    let advertised = v["available_commands"]
+                        .as_array()
+                        .is_some_and(|c| !c.is_empty());
+                    (done && advertised).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    let commands = detail["available_commands"]
+        .as_array()
+        .expect("command table");
+    let find = |name: &str| {
+        commands
+            .iter()
+            .find(|c| c["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("command {name} must be advertised: {commands:?}"))
+    };
+    let goal = find("goal");
+    assert_eq!(
+        goal["hint"], "<condition>",
+        "claude argumentHint must map to the panel's param hint"
+    );
+    assert_eq!(
+        goal["description"], "Track a goal across turns",
+        "panel description must survive the chain"
+    );
+    let compact = find("compact");
+    assert_eq!(
+        compact["description"], "Clear conversation context",
+        "compact (universal built-in) must be advertised too"
+    );
+
+    // 3) `/goal some-condition`：200 接受 → journal in 帧原文到达 stub →
+    //    回合收敛（stub 对未知文本走 hello 场景应答）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "/goal some-condition" }),
+    )
+    .await
+    .expect("send slash command");
+    assert_eq!(status, 200, "slash submission must be accepted: {body}");
+    wait_for(
+        "slash command to reach the stub verbatim (journal in-frame)",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    content
+                        .lines()
+                        .any(|l| l.contains("\"dir\":\"in\"") && l.contains("\"/goal some-condition\""))
+                        .then_some(())
+                })
+            }
+        },
+    )
+    .await;
+    wait_turn_done(&cli, &sb, &detail_url).await;
+
+    // 4) `/compact`：同款透传（universal built-in 不被任何一侧改写）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "/compact" }),
+    )
+    .await
+    .expect("send /compact");
+    assert_eq!(status, 200, "{body}");
+    wait_for(
+        "/compact to reach the stub verbatim (journal in-frame)",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let journal = journal.clone();
+            move || {
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let Ok(content) = std::fs::read_to_string(&journal) else {
+                        return None;
+                    };
+                    content
+                        .lines()
+                        .any(|l| l.contains("\"dir\":\"in\"") && l.contains("\"/compact\""))
+                        .then_some(())
+                })
+            }
+        },
+    )
+    .await;
+    wait_turn_done(&cli, &sb, &detail_url).await;
+}
+
+/// Poll the session detail until the current turn settles to Done.
+async fn wait_turn_done(cli: &reqwest::Client, sb: &Sandbox, detail_url: &str) {
+    wait_for(
+        "session turn to reach Done",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.to_string();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() == Some("done")).then_some(())
+                })
+            }
+        },
+    )
+    .await;
+}
+
 /// add-workspace-root 4.3：workspace root 执法的进程级旅程——「注册后收紧根」
 /// 变体，Windows 可跑（只重启 webui 单进程，不依赖 unix 信号）。
 ///

@@ -457,7 +457,9 @@ path = "{fake}"
 # workbench-turn-queue：慢档让 turn 在内容帧之后停留 800ms（driver 的
 # watchdog 探测超时 1.5s，800ms 同步 sleep 仍可应答）——浏览器旅程因此有
 # 确定性的 WORKING 窗口可提交忙中消息；其余旅程的轮询超时远大于此，无感。
-args = ["--slow-ms", "800"]
+# session-slash-commands 5.3：广告 goal/compact 命令表，composer 命令面板
+# 旅程的数据源；空表会话走「诚实退化」分支由既有旅程（非 `/` 输入）覆盖。
+args = ["--slow-ms", "800", "--advertise-commands"]
 sessions_dir = "{cfg}/claude-sessions"
 work_dir = "{cfg}/work"
 {fakeacp_toml}

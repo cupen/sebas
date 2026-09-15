@@ -293,8 +293,12 @@ fn main() {
                             ));
                         }
                         // session-slash-commands：`--advertise-commands`
-                        // 时响应带固定命令表（SDK 侧 get_server_info() 拿到
-                        // 的就是这个内层 response 对象）。
+                        // 时 initialize 控制响应带固定命令表。payload 就是
+                        // 信封的内层 response 对象（真 CLI 形状）：cc-agent-sdk
+                        // flatten 后它留在 `info["response"]` 一层，claude
+                        // 驱动的映射负责解层（session-slash-commands 5.2
+                        // 进程级 e2e 实测过旧注释「SDK 拿到的就是本对象」
+                        // 是错的——差一层才对）。
                         let payload = if flags.advertise_commands {
                             json!({
                                 "commands": [

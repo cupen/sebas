@@ -879,16 +879,26 @@ fn args_to_extra_args(args: &[String]) -> HashMap<String, Option<String>> {    l
 }
 
 /// （session-slash-commands 1.2）把 `get_server_info()` 返回的初始化载荷
-/// 防御性映射成命令表。SDK 把控制响应的 `response` 内层数据原样透出为
-/// `serde_json::Value`——`info["commands"]` 就是 CLI 广告的命令数组，但**条
-/// 目字段名随 CLI 版本漂移**（无类型定义），因此逐条容错：
-/// - `commands` 缺失 / 非数组 → 空表（诚实退化，面板隐藏）；
+/// 防御性映射成命令表。**载荷位置随 SDK 解包行为漂移**：真 CLI 的
+/// initialize 控制响应是双层信封 `response:{subtype,request_id,response:
+/// {commands:[…]}}`（Python SDK 显式解一层 `response["response"]`）；本仓
+/// 依赖的 cc-agent-sdk 0.1.7 只消费外层 `subtype`/`request_id`、把剩余键
+/// `#[serde(flatten)]` 进返回值——载荷因此留在 `info["response"]` 下而不是
+/// 顶层（进程级 e2e 实测，`info["commands"]` 恒缺）。两种形状都认，取先
+/// 命中者；条目字段名再逐条容错：
+/// - `commands`（任一层）缺失 / 非数组 → 空表（诚实退化，面板隐藏）；
 /// - 条目缺 `name` / `name` 非字符串 → 跳过该条（无名命令不可用）；
 /// - `description` 缺失 / 非字符串 → 空串；
 /// - 参数提示按偏好键序 `argumentHint` → `argument_hint` → `argHint` →
 ///   `hint` 取第一个字符串值，全未命中为 `None`。
 pub(crate) fn map_server_info_commands(info: &serde_json::Value) -> Vec<AvailableCommand> {
-    let Some(entries) = info.get("commands").and_then(|c| c.as_array()) else {
+    let payload = if info.get("commands").is_some() {
+        info
+    } else {
+        // 信封形态：真 CLI 载荷在 `response` 键下（flatten 后仍保留该键）。
+        info.get("response").unwrap_or(&serde_json::Value::Null)
+    };
+    let Some(entries) = payload.get("commands").and_then(|c| c.as_array()) else {
         return Vec::new();
     };
     const HINT_KEYS: [&str; 4] = ["argumentHint", "argument_hint", "argHint", "hint"];
@@ -1496,6 +1506,29 @@ mod tests {
     fn server_info_commands_empty_array_yields_empty_table() {
         let evts = map_server_info_commands(&serde_json::json!({"commands": []}));
         assert!(evts.is_empty(), "empty advertisement = no command surface");
+    }
+
+    #[test]
+    fn server_info_commands_real_cli_envelope_unwraps_response_key() {
+        // 进程级 e2e 实测（session-slash-commands 5.2）：cc-agent-sdk 0.1.7
+        // flatten 后真 CLI 信封载荷留在 `response` 键下——映射必须解一层，
+        // 否则 claude 会话的命令表恒空（面板静默消失）。
+        let evts = map_server_info_commands(&serde_json::json!({
+            "response": {
+                "commands": [
+                    {"name": "goal", "description": "Track a goal across turns",
+                     "argumentHint": "<condition>"},
+                    {"name": "compact", "description": "Clear conversation context"}
+                ]
+            }
+        }));
+        assert_eq!(evts.len(), 2, "envelope-nested commands must surface");
+        assert_eq!(evts[0].name, "goal");
+        assert_eq!(evts[0].hint.as_deref(), Some("<condition>"));
+        assert_eq!(evts[1].name, "compact");
+        assert_eq!(evts[1].hint, None);
+        // 信封里没有 commands（ack 类响应）→ 空表，不是 panic。
+        assert!(map_server_info_commands(&serde_json::json!({"response": {}})).is_empty());
     }
 
     #[test]

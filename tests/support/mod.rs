@@ -709,6 +709,30 @@ usage_file = "{}"
         journal
     }
 
+    /// （session-slash-commands 5.2）给 fake-claude 加 `--advertise-commands`
+    /// （initialize 控制响应带固定命令表 goal/compact——命令物化与 webui
+    /// 载荷的进程级数据源）+ `--journal`（in 帧落盘——断言 slash 提交原样
+    /// 到达 stub 的数据源）。必须在 spawn 之前调用；返回 journal 路径。
+    pub fn advertising_journal_fake_agent(&self) -> std::path::PathBuf {
+        let journal = self.path.join("fake-claude-journal.jsonl");
+        let toml = std::fs::read_to_string(&self.config_path).expect("read config");
+        let needle = "[acp.agents.claude]\n";
+        assert!(
+            toml.contains(needle),
+            "[acp.agents.claude] section not found in config"
+        );
+        // TOML basic strings treat `\` as an escape — forward slashes only
+        // (same convention as journal_fake_agent).
+        let arg = format!(
+            "{needle}args = [\"--advertise-commands\", \"--journal\", \"{}\"]\n",
+            forward_slash(&journal)
+        );
+        let patched = toml.replace(needle, &arg);
+        assert_ne!(toml, patched, "advertise+journal patch did not apply");
+        std::fs::write(&self.config_path, patched).expect("write config");
+        journal
+    }
+
     /// Standalone webui: `sebas webui -c <config>`; `secret` is what the
     /// webui presents to the core channel (pass a different one for
     /// wrong-secret cases).
