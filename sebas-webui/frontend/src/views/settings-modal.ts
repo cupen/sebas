@@ -113,6 +113,13 @@ const SERVICE_DISPLAY_NAME: Record<string, string> = {
   im: '飞书 IM',
 }
 
+/**
+ * 受管服务名集合（与 wire 层 ManagedService 枚举对齐）。名称不属于此集合
+ * 的条目（watchdog / updater 等监督器内部角色）SHALL NOT 渲染为服务行
+ * （status-driven-service-rows：后端已不合成此类行，此处为渲染侧兜底）。
+ */
+const MANAGED_SERVICE_NAMES: ReadonlySet<string> = new Set(['core', 'webui', 'router', 'im'])
+
 /** 分区导航的静态元数据（icon 名见 components/icons.ts）。顺序即规约；
  * 可见性由 visibleSections 按角色裁剪（users 仅 root、services 非
  * member/viewer），元数据本身不做裁剪。 */
@@ -694,6 +701,13 @@ export class SebasSettingsModal extends LitElement {
       border: 1px solid var(--sebas-border);
       border-radius: var(--sebas-radius-lg);
       margin-bottom: var(--sebas-space-3);
+      /* status-driven-service-rows D4：动作区定宽 = 2 × .row-action(26px) +
+       * 4px gap。声明一次，flex-basis / width 两处引用；按钮尺寸若变只需
+       * 同步这一个常量。状态列同样定宽——右贴动作区只能对齐右缘，状态
+       * 文本宽度随词变化（running/starting/failed-startup…），圆点要落到
+       * 同一 x 必须把状态列本身钉住（spec 场景「状态列纵向对齐」）。 */
+      --service-actions-w: 56px;
+      --service-status-w: 104px;
     }
     .service-card .service-info {
       flex: 1;
@@ -710,6 +724,9 @@ export class SebasSettingsModal extends LitElement {
       margin-top: 2px;
     }
     .service-card .service-status {
+      flex: 0 0 var(--service-status-w);
+      width: var(--service-status-w);
+      white-space: nowrap;
       display: flex;
       align-items: center;
       gap: 6px;
@@ -736,10 +753,24 @@ export class SebasSettingsModal extends LitElement {
       font-weight: 400;
       color: var(--sebas-text-faint);
     }
+    /* 动作区定宽（D4）：core 只读行与过渡占位同样占满定宽，不足处自然
+     * 留白、右贴对齐——所有行的状态圆点与状态文字落在同一 x。 */
     .service-card .service-actions {
-      flex: 0 0 auto;
+      flex: 0 0 var(--service-actions-w);
+      width: var(--service-actions-w);
       display: flex;
+      justify-content: flex-end;
       gap: 4px;
+    }
+    /* 过渡占位（starting/restarting/未知 status）：与按钮同框但不可点。 */
+    .service-card .service-actions .service-transition {
+      width: 26px;
+      height: 26px;
+      display: grid;
+      place-items: center;
+      color: var(--sebas-text-faint);
+      font-size: 0.8rem;
+      user-select: none;
     }
     .service-sub {
       font-size: 0.72rem;
@@ -2436,7 +2467,9 @@ export class SebasSettingsModal extends LitElement {
             ${this.serviceAction.text}
           </div>`
         : nothing}
-      ${this.services.map((s) => this.renderServiceRow(s))}
+      ${this.services
+        .filter((s) => MANAGED_SERVICE_NAMES.has(s.name))
+        .map((s) => this.renderServiceRow(s))}
       ${this.serviceEvents.length > 0
         ? html`
             <div class="service-errors">
@@ -2458,12 +2491,25 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /** 单个受管服务行：name（含 im→飞书 IM 映射）/ desired / actual / uptime。 */
+  /**
+   * 单个受管服务行：name（含 im→飞书 IM 映射）/ desired / actual / uptime。
+   * 动作区按 actual status 互斥（status-driven-service-rows D2）：running 只
+   * 显 ■；stopped/disabled 只显 ▶；starting/restarting（及未知 status 的
+   * fail-safe 降级）显不可点的过渡占位；degraded/failed-startup 显 ■+⟳；
+   * busy 期间全部禁用。core 行纯只读：不渲染任何动作按钮（连 ⟳ 也没有——
+   * enable-core-by-default，core 重启只经 CLI / 升级流程）。动作区容器恒
+   * 渲染且定宽（D4），只读/过渡行的空缺以等宽占位填充。
+   */
   private renderServiceRow(s: AdminService) {
     const running = s.status === 'running'
-    // core 恒启动（enable-core-by-default）：不渲染 enable/disable，只留
-    // restart（走 restart-core 确认路径）。
-    const alwaysOn = s.name === 'core'
+    const readOnly = s.name === 'core'
+    const degraded = s.status === 'degraded' || s.status === 'failed-startup'
+    const disable = running || degraded
+    const enable = s.status === 'stopped' || s.status === 'disabled'
+    const restart = degraded
+    // 过渡态（starting/restarting）与未知 status：不可点占位，不猜按钮。
+    const placeholder = !readOnly && !disable && !enable
+    const busy = this.serviceBusy !== null
     return html`
       <div class="service-card">
         <div class="service-info">
@@ -2479,34 +2525,57 @@ export class SebasSettingsModal extends LitElement {
           <span class="dot ${running ? 'on' : 'off'}"></span>${s.status}
         </div>
         <div class="service-actions">
-          ${alwaysOn
-            ? ''
+          ${readOnly
+            ? nothing
             : html`
-                <button
-                  class="row-action"
-                  title="Enable service"
-                  ?disabled=${this.serviceBusy !== null}
-                  @click=${() => void this.runServiceAction('enable', s.name)}
-                >
-                  ▶
-                </button>
-                <button
-                  class="row-action"
-                  title="Disable service"
-                  ?disabled=${this.serviceBusy !== null}
-                  @click=${() => (this.confirmTarget = { kind: 'disable', name: s.name })}
-                >
-                  ■
-                </button>
+                ${enable
+                  ? html`
+                      <button
+                        class="row-action"
+                        title="Enable service"
+                        ?disabled=${busy}
+                        @click=${() => void this.runServiceAction('enable', s.name)}
+                      >
+                        ▶
+                      </button>
+                    `
+                  : nothing}
+                ${disable
+                  ? html`
+                      <button
+                        class="row-action"
+                        title="Disable service"
+                        ?disabled=${busy}
+                        @click=${() => (this.confirmTarget = { kind: 'disable', name: s.name })}
+                      >
+                        ■
+                      </button>
+                    `
+                  : nothing}
+                ${restart
+                  ? html`
+                      <button
+                        class="row-action"
+                        title="Restart service"
+                        ?disabled=${busy}
+                        @click=${() => (this.confirmTarget = { kind: 'restart', name: s.name })}
+                      >
+                        ⟳
+                      </button>
+                    `
+                  : nothing}
+                ${placeholder
+                  ? html`
+                      <span
+                        class="service-transition"
+                        title="Service is ${s.status}"
+                        aria-hidden="true"
+                      >
+                        ⋯
+                      </span>
+                    `
+                  : nothing}
               `}
-          <button
-            class="row-action"
-            title="Restart service"
-            ?disabled=${this.serviceBusy !== null}
-            @click=${() => (this.confirmTarget = { kind: 'restart', name: s.name })}
-          >
-            ⟳
-          </button>
         </div>
       </div>
     `

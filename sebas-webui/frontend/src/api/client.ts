@@ -962,8 +962,6 @@ export const api = {
     post<{ operation_id: string; message: string }>('/api/admin/update/dev'),
   adminRollback: () =>
     post<{ operation_id: string; message: string }>('/api/admin/rollback'),
-  adminRestart: () =>
-    post<{ operation_id: string; message: string }>('/api/admin/restart'),
   /** Per-service enable/disable（ServiceSet RPC，选择持久化）。
    * 503 = 无 watchdog 控制面；401/403 = 鉴权/CSRF 拒绝，调用方区分呈现。
    * disable 的 force 透传（unify-router-process-shape D3/D4）：停止被拒
@@ -978,18 +976,14 @@ export const api = {
       force ? { force: true } : undefined,
     ),
   /**
-   * Per-service restart（fix-settings-menu-and-services-semantics D3）。
-   * core 走既有 restart-core 路径（spec「restart 操作」）；其余受管服务走
-   * watchdog 监督循环的 ServiceRestart。两个端点的 wire 形状同为
-   * mutation_json 的 {status:"accepted", operation_id, message}。
+   * Per-service restart（watchdog 监督循环的 ServiceRestart；wire 形状为
+   * mutation_json 的 {status:"accepted", operation_id, message}）。
+   * status-driven-service-rows D3：core 行纯只读、不渲染 ⟳，特判 core 的
+   * 直连重启调用已删（core 重启只经 CLI / 升级流程；后端 admin 路由保留
+   * 但前端无调用方）。
    */
-  restartService: async (name: string): Promise<AdminMutationResult> => {
-    if (name === 'core') {
-      const r = await api.adminRestart()
-      return { operation_id: r.operation_id, status: 'accepted', message: r.message }
-    }
-    return post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/restart`)
-  },
+  restartService: (name: string) =>
+    post<AdminMutationResult>(`/api/admin/services/${encodeURIComponent(name)}/restart`),
 
   // Project registry (Workbench left rail).
   projects,
