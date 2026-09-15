@@ -562,7 +562,7 @@ pub async fn run(
         backend,
         router,
         card_config,
-        agent_kinds,
+        Arc::new(ConfigAgentKindProvider::new(agent_kinds)),
         listener,
         None,
         30,
@@ -586,7 +586,7 @@ pub async fn run_with_admin_adapter(
         backend,
         router,
         card_config,
-        agent_kinds,
+        Arc::new(ConfigAgentKindProvider::new(agent_kinds)),
         listener,
         admin_adapter,
         30,
@@ -602,13 +602,15 @@ pub async fn run_with_admin_adapter(
 /// 的起点与显式 root 约束、项目注册/列表/查看的范围判定都以它为准；由装配方
 /// 经 `resolve_workspace_root`（env > config > cwd 回退 + 告警）计算。
 /// `skills` 是 skills 管理面的仓操作接缝（add-agent-skills 5.1，生产装配点
-/// webui_cmd / run 注入 config 装配的真实现）。
+/// webui_cmd / run 注入 config 装配的真实现）。`agent_kinds` 由装配点以
+/// `ConfigAgentKindProvider::with_default_kind` 构造（preselect-last-used-model
+/// 3.2：default agent kind 一并从 config 注入，供 /api/about 下发）。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_admin_adapter_and_auth(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
     card_config: CardConfig,
-    agent_kinds: Vec<AgentKindSource>,
+    agent_kinds: Arc<dyn AgentKindProvider>,
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     auth: Arc<AuthHandle>,
@@ -646,7 +648,7 @@ async fn run_full(
     backend: Arc<dyn SessionBackend>,
     router: RouterInfo,
     card_config: CardConfig,
-    agent_kinds: Vec<AgentKindSource>,
+    agent_kinds: Arc<dyn AgentKindProvider>,
     listener: tokio::net::TcpListener,
     admin_adapter: Option<Arc<dyn AdminAdapter>>,
     archive_retention_days: u64,
@@ -654,7 +656,6 @@ async fn run_full(
     workspace_root: std::path::PathBuf,
     skills: Arc<dyn SkillsService>,
 ) {
-    let provider = Arc::new(ConfigAgentKindProvider::new(agent_kinds));
     let addr = listener.local_addr().expect("bound listener");
     // 引导用户：就绪日志直接给出可点开的访问地址 + 按鉴权形态的下一步提示。
     // 独立 `sebas webui` 进程与 `core --webui` 内嵌形态共用这一条就绪日志
@@ -677,7 +678,7 @@ async fn run_full(
         router,
         card_config,
         admin_adapter,
-        provider,
+        agent_kinds,
         archive_retention_days,
         auth,
         workspace_root,

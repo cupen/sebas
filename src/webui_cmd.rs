@@ -394,11 +394,19 @@ pub async fn run(args: WebUiArgs) -> Result<()> {
     // add-agent-skills 5.1：skills 管理面的仓操作接缝——仓目录与
     // placement/no_placement 表从 config 装配（core 逻辑在 sebas::skills）。
     let skills = Arc::new(crate::skills::FsSkillsService::from_config(&cfg));
+    // preselect-last-used-model 3.2：default agent kind 与 agent 目录同一
+    // 装配点注入（About INSTANCE 段经 /api/about 下发运行时真值）。
+    let agent_kinds_provider: Arc<dyn sebas_webui::agent_kinds::AgentKindProvider> = Arc::new(
+        sebas_webui::agent_kinds::ConfigAgentKindProvider::with_default_kind(
+            agent_kinds,
+            default_kind,
+        ),
+    );
     sebas_webui::run_with_admin_adapter_and_auth(
         backend_dyn,
         router_info,
         merged_card_cfg,
-        agent_kinds,
+        agent_kinds_provider,
         listener,
         admin_adapter,
         auth,

@@ -238,6 +238,9 @@ async fn settings_router_about_expose_page_data() {
     assert!(v["version"].as_str().is_some());
     assert!(v["uptime"].as_str().is_some());
     assert!(v["provider_count"].is_u64());
+    // preselect-last-used-model 3.2：无 config 装配（本 fixture）回落到
+    // AcpConfig::default_kind 同款的历史缺省，仍必须出现在载荷里。
+    assert_eq!(v["default_agent_kind"], "claude", "about payload: {v}");
 }
 
 #[tokio::test]

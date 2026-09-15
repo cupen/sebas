@@ -236,6 +236,8 @@ export interface AboutInfo {
   rustc_version: string
   router_listen: string | null
   provider_count: number
+  /** 新会话缺省 agent kind（preselect-last-used-model 3.2 的载荷字段）。 */
+  default_agent_kind: string
 }
 
 /** Router gateway card backing the settings Models section (listen/debug/auth). */

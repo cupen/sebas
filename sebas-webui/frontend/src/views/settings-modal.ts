@@ -22,8 +22,9 @@
  *                  已设置显实际值、未设置显「未设置（用默认）」、set_unset
  *                  敏感项只显已设置/未设置；失败内联错误态，不渲染空表）
  *   - about      → INSTANCE 段在上（工作区根目录 + 复制、default agent
- *                  kind、default provider/model + 跳转 Models——原 Settings
- *                  总览的三只读项迁此），BUILD 段在下（/api/about）
+ *                  kind 读 /api/about 下发的运行时真值；default
+ *                  provider/model 行已随 preselect-last-used-model 删除——
+ *                  创建预选不再依赖配置默认），BUILD 段在下（/api/about）
  *
  * 角色 → 可见分区（add-webui-multiuser-rbac 5.4，design D3 呈现层裁剪）：
  * users 仅 root；services 仅 root/admin；其余分区各角色通用。`role` 为
@@ -151,7 +152,7 @@ const SECTION_DESC: Record<SettingsSection, string> = {
     'Agent skills stored on this machine. Browse and remove entries, then Sync to project the store onto your agents. This page never creates or edits skills — use the CLI, git or npx, then Refresh.',
   'env-vars':
     'Read-only reference: the environment variables this sebas instance reads. Sensitive ones only show whether they are set.',
-  about: 'What this instance is — its workspace, defaults, and the build it runs on.',
+  about: 'What this instance is — its workspace, the default agent kind, and the build it runs on.',
 }
 
 /** 读取上次停留分区；缺值/非法值（含旧值 `settings`/`env`）一律回退 null
@@ -902,20 +903,6 @@ export class SebasSettingsModal extends LitElement {
       outline: var(--sebas-focus-ring);
       outline-offset: 1px;
     }
-    .linkish {
-      padding: 0;
-      border: none;
-      background: none;
-      font: inherit;
-      color: var(--sebas-accent);
-      cursor: pointer;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-    .linkish:focus-visible {
-      outline: var(--sebas-focus-ring);
-      outline-offset: 2px;
-    }
     /* Appearance 分区：主题三态选项。swatch 的颜色是刻意的硬编码——
      * 它展示的是两套调色板本身，必须不随当前主题变化。 */
     .theme-options {
@@ -1394,12 +1381,11 @@ export class SebasSettingsModal extends LitElement {
    * 删除一并移除——Services 分区自己拉取并呈现同一事实。
    */
   private loadOverview(): void {
-    // workbench-agent-wire-fix 3.3：/api/agent-defaults 退役——default
-    // provider/model 行如实呈现「未设置」（★ 设置的本地默认不跨弹窗存活）。
-    this.defaults = null
     // 工作区根目录：browse-dirs 不带 path 时服务端回显其解析出的默认
     // 工作根（默认 agent kind 的 work_dir / cwd），这是「既有 API」里
-    // 唯一诚实携带该值的端点（/api/summary 无 work-dir 字段）。
+    // 唯一诚实携带该值的端点（/api/summary 无 work-dir 字段）。default
+    // agent kind 由 /api/about 载荷下发（renderAbout 直读）；default
+    // provider/model 行已随 preselect-last-used-model 删除。
     api
       .fsBrowseDirs('')
       .then((d) => {
@@ -2723,10 +2709,11 @@ export class SebasSettingsModal extends LitElement {
   }
 
   /**
-   * About（revamp…2.2）：INSTANCE 段在上——原 Settings 总览的三只读项
-   * （工作区根目录 + 复制、default agent kind、default provider/model +
-   * 跳转 Models）；BUILD 段在下——/api/about 的真实字段。缺值如实显示
-   * '—'，绝不编造。
+   * About（revamp…2.2 + preselect-last-used-model 3.1）：INSTANCE 段在上——
+   * 工作区根目录 + 复制、default agent kind（读 /api/about 下发的运行时
+   * 真值，不再写死字面量）；BUILD 段在下——/api/about 的真实字段。default
+   * provider/model 行已删除：创建预选不再依赖配置默认（last-used 语义），
+   * 保留该行只会永远显示「未设置」的死 UI。缺值如实显示 '—'，绝不编造。
    */
   private renderAbout() {
     if (this.aboutError)
@@ -2769,20 +2756,9 @@ export class SebasSettingsModal extends LitElement {
         </div>
         <div class="kv">
           <dt>Default agent kind</dt>
-          <dd>acp <span class="service-sub">(default kind for new sessions)</span></dd>
-        </div>
-        <div class="kv">
-          <dt>Default provider / model</dt>
           <dd>
-            ${this.defaults?.provider
-              ? html`<button
-                  class="linkish"
-                  title="Open the Models section"
-                  @click=${() => (this.section = 'models')}
-                >
-                  ${this.defaults.provider}${this.defaults.model ? ` / ${this.defaults.model}` : ''}
-                </button>`
-              : '— (set one in Models)'}
+            ${a.default_agent_kind ?? '—'}
+            <span class="service-sub">(default kind for new sessions)</span>
           </dd>
         </div>
       </dl>

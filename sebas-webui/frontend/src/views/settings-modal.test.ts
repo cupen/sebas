@@ -29,9 +29,10 @@
  *                已设置显实际值、未设置显「未设置（用默认）」、set_unset
  *                敏感项只显已设置/未设置（set 缺失如实显「无法确定」）；
  *                失败 → 分区内联错误态，不渲染空表假象
- *   - about      INSTANCE 段在上（原 Settings 总览三只读项：工作区根目录 +
- *                复制、default agent kind、default provider/model + 跳转
- *                Models），BUILD 段在下（/api/about 真实字段）
+ *   - about      INSTANCE 段在上（工作区根目录 + 复制、default agent kind
+ *                读 /api/about 下发的运行时真值；default provider/model 行
+ *                已随 preselect-last-used-model 删除），BUILD 段在下
+ *                （/api/about 真实字段）
  * 原 `Settings` 总览分区移除：「全部进程重启」「重置 Settings」两个高危
  * 动作随之删除（任何分区都不得再出现入口）。
  * 缺省首项 generic；上次分区记忆走 localStorage `lastSettingsSection`
@@ -310,6 +311,7 @@ beforeEach(() => {
     rustc_version: '1.88',
     router_listen: '127.0.0.1:8787',
     provider_count: 2,
+    default_agent_kind: 'claude',
   })
   // /api/env 策划清单默认桩：四条覆盖三种呈现形态（plain 已设置/未设置、
   // set_unset 已设置/未设置）。
@@ -607,14 +609,12 @@ describe('sebas-settings-modal sections', () => {
     expect(apiMocks.about).toHaveBeenCalled()
     expect(apiMocks.fsBrowseDirs).toHaveBeenCalled()
     const text = el.shadowRoot!.textContent ?? ''
-    // INSTANCE 段：原 Settings 总览三只读项。
+    // INSTANCE 段：工作区根目录 + default agent kind（读 /api/about 真值）。
     expect(text).toContain('Instance')
     expect(text).toContain('Workspace root')
     expect(text).toContain('/tmp/test-work')
     expect(text).toContain('Default agent kind')
-    expect(text).toContain('acp')
-    expect(text).toContain('Default provider / model')
-    expect(text).toContain('— (set one in Models)')
+    expect(text).toContain('claude')
     // BUILD 段：/api/about 真实字段。
     expect(text).toContain('Build')
     expect(text).toContain('0.4.2')
@@ -629,6 +629,21 @@ describe('sebas-settings-modal sections', () => {
     // 工作区根目录带复制按钮。
     const copy = el.shadowRoot!.querySelector('button[title="Copy workspace root"]')
     expect(copy).toBeTruthy()
+    el.remove()
+  })
+
+  it('About INSTANCE no longer renders the default provider/model row or a Models jump link', async () => {
+    const el = await mount()
+    await goto(el, 6)
+    const text = el.shadowRoot!.textContent ?? ''
+    // preselect-last-used-model 3.1：行已删除——无论配置与否都不渲染，
+    // 跳转 Models 的链接随之消失（创建预选改 last-used 语义，该行只是
+    // 数据源已 404 的假勾选死 UI）。
+    expect(text).not.toContain('Default provider / model')
+    expect(text).not.toContain('— (set one in Models)')
+    expect(
+      el.shadowRoot!.querySelector('button[title="Open the Models section"]'),
+    ).toBeNull()
     el.remove()
   })
 

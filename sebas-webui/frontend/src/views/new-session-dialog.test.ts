@@ -1,20 +1,23 @@
 // @vitest-environment jsdom
 /**
- * sebas-new-session-dialog（workbench-interaction-polish 3.1，design D2）。
+ * sebas-new-session-dialog（workbench-interaction-polish 3.1，design D2；
+ * 预选语义改自 preselect-last-used-model 1.2）。
  *
  * Covered:
  *   - 禁用：无 agent 可选（catalog 为空）→ 确认禁用；未选 agent → 确认禁用
- *   - 预选：项目 default_agent 预选；目录 default provider/model 预选；
- *     default 不在目录内 → 落目录首项（不伪造选项）
+ *   - 预选级联：上次确认的 (provider, model) 对仍在目录 → 该对；无记忆/
+ *     stale 记忆 → 目录第一对（不伪造选项）；配置 defaults 不再参与
+ *   - 确认写记忆：dialog-confirm 时 saveLastUsedPair（唯一写入点）
  *   - 取消：dialog-cancel 事件、不创建任何东西（无创建 API 调用）
  *   - 确认：dialog-confirm detail 携带 agent/model/mode；mode 缺省 = null
  *     （wire 上省略），选 edit = 'edit'
- *   - 目录不可得：显式提示，无 provider/model 下拉
+ *   - 目录不可得：显式引导（Settings → Models），无 provider/model 下拉
  *   - 不可达 agent：禁选并标注 cause
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SebasNewSessionDialog } from './new-session-dialog.js'
+import { LAST_USED_PAIR_KEY } from '../api/model-catalog.js'
 import {
   elementInternalsPolyfillInvoked,
   installWaDomPolyfills,
@@ -96,6 +99,7 @@ async function pick(el: SebasNewSessionDialog, testid: string, value: string): P
 
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.removeItem(LAST_USED_PAIR_KEY)
   ;(api.agents as ReturnType<typeof vi.fn>).mockResolvedValue({
     agents: [
       { id: 'claude', display: 'Claude Code', reachable: true, version: 'v1' },
@@ -112,6 +116,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = ''
+  localStorage.removeItem(LAST_USED_PAIR_KEY)
   if (!elementInternalsPolyfillInvoked()) {
     throw new Error('ElementInternals polyfill was never invoked')
   }
@@ -127,15 +132,12 @@ describe('sebas-new-session-dialog', () => {
         },
       ],
     })
-    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
-      default_provider: 'deepseek',
-      default_model: 'deepseek-reasoner',
-    })
     const el = await mount({ open: true, projectId: 'proj-a', defaultAgent: 'claude' })
-    // 预选：项目 default_agent + 目录 default model。
+    // 预选：项目 default_agent + 无 last-used 记忆 → 目录第一对（配置的
+    // defaults 不再参与预选）。
     expect(agentSelect(el).value).toBe('claude')
     const modelSel = syncWaSelect(el, 'dialog-model-select') as HTMLElement & { value: string }
-    expect(modelSel.value).toBe('deepseek-reasoner')
+    expect(modelSel.value).toBe('deepseek-chat')
 
     const confirmed = vi.fn()
     el.addEventListener('dialog-confirm', confirmed)
@@ -148,7 +150,7 @@ describe('sebas-new-session-dialog', () => {
       unknown
     >
     expect(detail.agent).toBe('claude')
-    expect(detail.model).toBe('deepseek-reasoner')
+    expect(detail.model).toBe('deepseek-chat')
     expect(detail.mode).toBeNull()
   })
 
@@ -214,14 +216,28 @@ describe('sebas-new-session-dialog', () => {
     })
   })
 
-  it('a configured default outside the catalog cannot preselect (no fabricated options)', async () => {
+  it('preselect cascade: a remembered pair still in the catalog wins the preselection', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
+        { name: 'alpha', models: [{ id: 'a1', tags: [] }, { id: 'a2', tags: [] }] },
+        { name: 'beta', models: [{ id: 'b1', tags: [] }] },
+      ],
+    })
+    // 上次确认了 beta / b1（全局记忆）→ 重开对话框预选该对，而非目录第一对。
+    localStorage.setItem(LAST_USED_PAIR_KEY, JSON.stringify({ provider: 'beta', model: 'b1' }))
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    const providerSel = syncWaSelect(el, 'dialog-provider-select') as HTMLElement & { value: string }
+    expect(providerSel.value).toBe('beta')
+    expect((syncWaSelect(el, 'dialog-model-select') as HTMLElement & { value: string }).value).toBe('b1')
+  })
+
+  it('preselect cascade: a vanished remembered pair falls back to the first pair without fabricating it as an option', async () => {
     ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
       providers: [{ name: 'alpha', models: [{ id: 'a1', tags: [] }] }],
     })
-    ;(api.providerDefaults as ReturnType<typeof vi.fn>).mockResolvedValue({
-      default_provider: 'ghost',
-      default_model: 'nope',
-    })
+    // stale 记忆（provider 已不在目录）→ 落目录第一对，绝不把 stale 对渲染
+    // 成选项。
+    localStorage.setItem(LAST_USED_PAIR_KEY, JSON.stringify({ provider: 'ghost', model: 'nope' }))
     const el = await mount({ open: true, defaultAgent: 'claude' })
     const providerSel = syncWaSelect(el, 'dialog-provider-select') as HTMLElement & { value: string }
     expect(providerSel.value).toBe('alpha')
@@ -232,6 +248,38 @@ describe('sebas-new-session-dialog', () => {
     expect(options).toEqual(['alpha'])
   })
 
+  it('confirming a creation writes the last-used memory (the only write point)', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [
+        { name: 'alpha', models: [{ id: 'a1', tags: [] }, { id: 'a2', tags: [] }] },
+      ],
+    })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBeNull()
+
+    await pick(el, 'dialog-model-select', 'a2')
+    const confirmed = vi.fn()
+    el.addEventListener('dialog-confirm', confirmed)
+    confirmButton(el).click()
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(confirmed).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(localStorage.getItem(LAST_USED_PAIR_KEY) ?? 'null')).toEqual({
+      provider: 'alpha',
+      model: 'a2',
+    })
+  })
+
+  it('cancel writes no last-used memory', async () => {
+    ;(api.providers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      providers: [{ name: 'alpha', models: [{ id: 'a1', tags: [] }] }],
+    })
+    const el = await mount({ open: true, defaultAgent: 'claude' })
+    ;(el.shadowRoot?.querySelector('[data-testid="dialog-cancel"]') as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBeNull()
+  })
+
   it('states catalog unavailability honestly instead of empty selects', async () => {
     ;(api.providers as ReturnType<typeof vi.fn>).mockRejectedValue(
       Object.assign(new Error('503'), { status: 503 }),
@@ -240,7 +288,9 @@ describe('sebas-new-session-dialog', () => {
     expect(el.shadowRoot?.querySelector('[data-testid="dialog-provider-select"]')).toBeNull()
     expect(el.shadowRoot?.querySelector('[data-testid="dialog-model-select"]')).toBeNull()
     const hint = el.shadowRoot?.querySelector('[data-testid="dialog-catalog-unavailable"]')
-    expect(hint?.textContent).toContain('模型目录不可用')
+    // 显式引导：说明没有模型 + 指路 Settings → Models。
+    expect(hint?.textContent).toContain('尚未配置任何模型')
+    expect(hint?.textContent).toContain('Settings → Models')
     // agent 选择不受目录影响。
     expect(agentSelect(el).value).toBe('claude')
   })

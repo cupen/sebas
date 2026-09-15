@@ -1,15 +1,20 @@
 /**
- * New-session creation dialog (workbench-interaction-polish D2, rail 持有).
+ * New-session creation dialog (workbench-interaction-polish D2, rail 持有;
+ * 预选语义改自 preselect-last-used-model 1.2).
  *
  * The ONLY place an agent can be chosen (agent is immutable after creation).
  * wa-dialog 承载：agent 必选下拉（/api/agents，预选项目 default_agent，
  * 无记录时首个可达 agent）+ 两级模型选择（provider → model，Settings 目录
- * 共用 loadModelCatalog；目录不可得显式说明）+ 权限 mode 下拉
- * （ask | edit | allow | auto，缺省「agent 默认」= wire 上省略 mode 字段）。
+ * 共用 loadModelCatalog；预选三级：上次确认的 (provider, model) 对（浏览器
+ * localStorage 全局记忆，确认动作写入）仍在目录内 → 该对，否则目录第一对；
+ * 目录空/不可得显式引导去 Settings → Models，不渲染空选择器）+ 权限 mode
+ * 下拉（ask | edit | allow | auto，缺省「agent 默认」= wire 上省略 mode 字段）。
  *
  * Confirm dispatches `dialog-confirm` with { agent, model, mode }; the rail
  * performs the POST /api/sessions call and the post-create focus flow.
- * Cancel dispatches `dialog-cancel` — nothing is created, nothing focused.
+ * Confirm 同时把选定的 (provider, model) 写入 last-used 记忆（唯一写入点；
+ * 会话内模型 chip 切换不写）。Cancel dispatches `dialog-cancel` — nothing is
+ * created, nothing focused.
  * 无可选 agent（catalog 为空）时确认钮禁用（spec「dialog requires an
  * explicit agent」）。
  */
@@ -18,8 +23,10 @@ import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo } from '../api/client.js'
 import {
+  loadLastUsedPair,
   loadModelCatalog,
-  preselectFromCatalog,
+  preselectLastUsed,
+  saveLastUsedPair,
   type ModelCatalog,
 } from '../api/model-catalog.js'
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
@@ -98,8 +105,8 @@ export class SebasNewSessionDialog extends LitElement {
 
   protected willUpdate(changed: PropertyValues): void {
     // 打开时重置表单：agent 预选项目 default_agent（无记录兜底首个可达），
-    // 模型预选目录 default；mode 回到「agent 默认」。重取数据源（管理页
-    // 可能刚改过目录/defaults）。
+    // 模型预选 last-used（缺失/失效兜底目录第一对）；mode 回到「agent 默认」。
+    // 重取数据源（管理页可能刚改过目录/defaults）。
     if (changed.has('open') && this.open) {
       void this.loadAgents()
       void this.loadCatalog()
@@ -114,14 +121,19 @@ export class SebasNewSessionDialog extends LitElement {
     }
   }
 
-  /** 目录预选规则（共用 preselectFromCatalog，default 不在目录内不伪造）。 */
+  /**
+   * 目录预选（preselect-last-used-model 1.2 三级规则）：上次确认的
+   * (provider, model) 对仍在目录内 → 该对；否则目录第一对；目录空/不可得
+   * → 全 null（就地引导，不渲染空选择器）。stale 记忆不伪造选项；配置的
+   * defaults 不再参与预选。
+   */
   private applyCatalogPreselect(): void {
     if (!this.catalog) {
       this.selectedProvider = null
       this.model = null
       return
     }
-    const pre = preselectFromCatalog(this.catalog)
+    const pre = preselectLastUsed(this.catalog, loadLastUsedPair())
     this.selectedProvider = pre.provider
     this.model = pre.model
   }
@@ -160,6 +172,12 @@ export class SebasNewSessionDialog extends LitElement {
 
   private confirm(): void {
     if (this.confirmDisabled) return
+    // 记忆唯一写入点（preselect-last-used-model 1.2）：创建对话框的确认
+    // 动作——会话内模型 chip 的切换不经过这里，绝不写 last-used 记忆。
+    // 目录不可得（未选模型）时无对可记，跳过。
+    if (this.selectedProvider && this.model) {
+      saveLastUsedPair({ provider: this.selectedProvider, model: this.model })
+    }
     this.dispatchEvent(
       new CustomEvent<NewSessionDialogConfirm>('dialog-confirm', {
         detail: { agent: this.agent, model: this.model, mode: this.mode },
@@ -213,10 +231,11 @@ export class SebasNewSessionDialog extends LitElement {
             )}
           </wa-select>
 
-          <!-- 两级模型选择（可选）：目录不可得显式说明，绝不渲染空列表。 -->
+          <!-- 两级模型选择（可选）：目录空/不可得显式引导到 Settings →
+               Models，绝不渲染空列表。 -->
           ${this.catalogUnavailable
             ? html`<p class="hint" data-testid="dialog-catalog-unavailable" role="status">
-                模型目录不可用（Settings → Models 里配置 provider 后可选）
+                尚未配置任何模型：请到 Settings → Models 添加 provider 后再选
               </p>`
             : html`
                 <wa-select

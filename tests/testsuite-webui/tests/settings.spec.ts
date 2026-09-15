@@ -7,7 +7,9 @@
  *
  * Since revamp-settings-nav-and-models-editor the sections are Generic →
  * Appearance → Services → Models → About: the former Settings overview shell
- * is gone (its three read-only items moved into About's INSTANCE segment,
+ * is gone (the read-only items moved into About's INSTANCE segment — since
+ * preselect-last-used-model WITHOUT the default provider/model row, whose
+ * data source retired to 404; creation preselect is last-used-first now,
  * above BUILD = /api/about; its restart-all / reset maintenance actions are
  * retired — per-service restart lives only in Services). Since
  * split-env-vars-settings-section the former Env table lives in its own
@@ -101,18 +103,18 @@ test.describe('设置面', () => {
       await settings.openViaSidebar()
       await settings.openSection('About')
 
-      // INSTANCE 段在上（原 Settings 总览三只读项）：工作区根目录 + 复制、
-      // default agent kind、default provider/model。
+      // INSTANCE 段在上：工作区根目录 + 复制、default agent kind（读
+      // /api/about 真值）。preselect-last-used-model：default provider/model
+      // 行已删除——创建预选改 last-used 语义，该行只是数据源已 404 的死 UI。
       const instance = settings.panel.locator('dl.about-list.about-instance')
       await expect(instance).toBeVisible({ timeout: 10_000 })
       await expect(instance).toContainText('Workspace root')
-      await expect(instance).toContainText('Default agent kind')
-      await expect(instance).toContainText('Default provider / model')
+      await expect(instance.locator('.kv', { hasText: 'Default agent kind' }).locator('dd'))
+        .toContainText(truth.default_agent_kind)
       await expect(
         instance.locator('button[title="Copy workspace root"]'),
       ).toBeAttached()
-      // Fresh sandbox: no default set — honest absence, not a fabricated row.
-      await expect(instance).toContainText('— (set one in Models)')
+      await expect(instance.locator('.kv', { hasText: 'Default provider' })).toHaveCount(0)
 
       // BUILD 段在下（/api/about 真实字段），对账 contains 断言。
       const build = settings.panel.locator('dl.about-list.about-build')

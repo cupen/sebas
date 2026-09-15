@@ -160,16 +160,38 @@ pub async fn discover_all(sources: &[AgentKindSource]) -> Vec<AgentKindInfo> {
 #[async_trait]
 pub trait AgentKindProvider: Send + Sync {
     async fn agent_kinds(&self) -> Vec<AgentKindInfo>;
+    /// The kind a new session gets when the operator does not request one:
+    /// config `[acp] default` at the assembly point, with the same historical
+    /// `"claude"` fallback `AcpConfig::default_kind` applies when unset.
+    /// Surfaced read-only on `/api/about` (About INSTANCE segment,
+    /// preselect-last-used-model 3.2) — never invented there.
+    fn default_agent_kind(&self) -> String;
 }
 
 /// The production provider: probes each configured `AgentKindSource`.
 pub struct ConfigAgentKindProvider {
     sources: Vec<AgentKindSource>,
+    default_kind: String,
 }
 
 impl ConfigAgentKindProvider {
+    /// Minimal assemblies without config context (tests, bare servers): the
+    /// fallback mirrors `AcpConfig::default_kind`'s own unset default, so the
+    /// reported value is the product's real semantic default, not a guess.
     pub fn new(sources: Vec<AgentKindSource>) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            default_kind: "claude".to_string(),
+        }
+    }
+
+    /// Config-driven production form（webui_cmd / run 装配点）：显式传入
+    /// `cfg.acp.default_kind().to_string()`。
+    pub fn with_default_kind(sources: Vec<AgentKindSource>, default_kind: String) -> Self {
+        Self {
+            sources,
+            default_kind,
+        }
     }
 }
 
@@ -177,6 +199,10 @@ impl ConfigAgentKindProvider {
 impl AgentKindProvider for ConfigAgentKindProvider {
     async fn agent_kinds(&self) -> Vec<AgentKindInfo> {
         discover_all(&self.sources).await
+    }
+
+    fn default_agent_kind(&self) -> String {
+        self.default_kind.clone()
     }
 }
 

@@ -133,6 +133,26 @@ export class ProjectRail {
       }, agent)
   }
 
+  /** Pick the provider level in the dialog's two-level model selector. */
+  async pickDialogProvider(provider: string): Promise<void> {
+    await this.newSessionDialog()
+      .locator('[data-testid="dialog-provider-select"]')
+      .evaluate((el, v) => {
+        ;(el as unknown as { value: string }).value = v as string
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }, provider)
+  }
+
+  /** Pick the model level in the dialog's two-level model selector. */
+  async pickDialogModel(model: string): Promise<void> {
+    await this.newSessionDialog()
+      .locator('[data-testid="dialog-model-select"]')
+      .evaluate((el, v) => {
+        ;(el as unknown as { value: string }).value = v as string
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }, model)
+  }
+
   /** Pick a permission mode ('' = agent default = omit the field). */
   async pickDialogMode(mode: string): Promise<void> {
     await this.newSessionDialog()

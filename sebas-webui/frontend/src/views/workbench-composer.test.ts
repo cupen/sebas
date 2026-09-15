@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SebasWorkbenchComposer } from './workbench-composer.js'
 import type { AvailableCommandInfo, Summary } from '../api/client.js'
+import { LAST_USED_PAIR_KEY } from '../api/model-catalog.js'
 import {
   elementInternalsPolyfillInvoked,
   installWaDomPolyfills,
@@ -370,6 +371,25 @@ describe('model chip (4.2, design D3)', () => {
 
     expect(api.setSessionModel).toHaveBeenCalledWith('web%00web-1', 'haiku')
     expect(el.shadowRoot?.querySelector('[data-testid="model-menu"]')).toBeNull()
+  })
+
+  it('switching a session model never writes the last-used creation memory (preselect-last-used-model 2.1)', async () => {
+    seedCatalog()
+    // 反证：记忆已存在（上次创建确认写入），会话内 chip 切换后必须原样。
+    const remembered = JSON.stringify({ provider: 'deepseek', model: 'deepseek-chat' })
+    localStorage.setItem(LAST_USED_PAIR_KEY, remembered)
+    const el = await mount(focus)
+    ;(el.shadowRoot?.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
+    await el.updateComplete
+    const item = el.shadowRoot?.querySelector('.menu-item[data-model="haiku"]') as HTMLElement
+    item.click()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+
+    expect(api.setSessionModel).toHaveBeenCalledWith('web%00web-1', 'haiku')
+    // 记忆未被会话级切换改写——它只属于创建对话框的确认动作。
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBe(remembered)
+    localStorage.removeItem(LAST_USED_PAIR_KEY)
   })
 
   it('closes the menu on outside click and on Escape', async () => {

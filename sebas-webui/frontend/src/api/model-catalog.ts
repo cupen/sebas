@@ -40,8 +40,8 @@ export interface ModelCatalog {
  * Providers without a `models` list contribute nothing (they stay a valid
  * two-level choice only if some model exists — with none, there is nothing
  * to pick, and inventing an entry would be a lie). Defaults pass through
- * untouched: the caller decides whether a default that is absent from the
- * catalog can still be preselected (it cannot — no fabricated options).
+ * untouched as adapter output (preselect-last-used-model：创建预选已改用
+ * last-used 语义；defaults 载荷只为 router 管理面保留透传，不再参与预选).
  */
 export function toModelCatalog(
   providers: ProviderAdmin[],
@@ -92,27 +92,65 @@ export async function loadModelCatalog(): Promise<LoadedCatalog> {
   }
 }
 
+// ─── preselect-last-used-model 1.1：上次选择记忆与三级预选 ───────────────────
+
 /**
- * 预选规则（原 composer 内联逻辑的唯一留存处）：配置的 default provider /
- * default model 在目录内才用（不伪造选项）；否则取目录第一对。空目录返回
- * 全 null。
+ * 创建对话框「上次选择」记忆的 localStorage 键：全局一份 `(provider, model)`
+ * 对。写入点唯一——创建对话框的确认动作；会话内模型 chip 的切换绝不写它。
  */
-export function preselectFromCatalog(catalog: ModelCatalog): {
+export const LAST_USED_PAIR_KEY = 'lastUsedModelPair'
+
+/**
+ * 读取上次确认的 (provider, model) 对。localStorage 不可得（jsdom opaque
+ * origin、隐私模式等）或载荷形状不对（手改/旧版本残留）→ 如实返回 null，
+ * 绝不抛错——记忆缺失只影响预选，不阻塞创建。
+ */
+export function loadLastUsedPair(): ModelCatalogPair | null {
+  try {
+    const raw = localStorage.getItem(LAST_USED_PAIR_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const { provider, model } = parsed as { provider?: unknown; model?: unknown }
+    if (typeof provider !== 'string' || typeof model !== 'string') return null
+    return { provider, model }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 写入上次确认的 (provider, model) 对（唯一调用方：创建对话框确认动作）。
+ * storage 不可得时静默放弃——记忆是锦上添花，创建本身不依赖它。
+ */
+export function saveLastUsedPair(pair: ModelCatalogPair): void {
+  try {
+    localStorage.setItem(LAST_USED_PAIR_KEY, JSON.stringify(pair))
+  } catch {
+    // storage 不可得：放弃记忆，不阻塞创建。
+  }
+}
+
+/**
+ * 预选规则（preselect-last-used-model，取代 configured-defaults 语义）：
+ * ① 上次确认的对仍在目录内 → 该对（stale 对绝不伪造为选项）；② 否则目录
+ * 第一对；③ 目录空 → 全 null（消费方呈显式引导，不渲染空选择器）。
+ * 配置的 default provider/model 不再参与预选（adapter 仍透传该载荷，router
+ * 管理面继续用）。
+ */
+export function preselectLastUsed(
+  catalog: ModelCatalog,
+  lastUsed: ModelCatalogPair | null,
+): {
   provider: string | null
   model: string | null
 } {
   if (catalog.pairs.length === 0) return { provider: null, model: null }
-  const provider =
-    catalog.defaultProvider && catalog.pairs.some((p) => p.provider === catalog.defaultProvider)
-      ? catalog.defaultProvider
-      : catalog.pairs[0]!.provider
-  const models = catalog.pairs.filter((p) => p.provider === provider).map((p) => p.model)
-  const wanted =
-    catalog.defaultProvider === provider && catalog.defaultModel !== null
-      ? catalog.defaultModel
-      : null
-  const model = wanted && models.includes(wanted) ? wanted : (models[0] ?? null)
-  return { provider, model }
+  const hit = lastUsed
+    ? catalog.pairs.find((p) => p.provider === lastUsed.provider && p.model === lastUsed.model)
+    : undefined
+  const target = hit ?? catalog.pairs[0]!
+  return { provider: target.provider, model: target.model }
 }
 
 /** 一个会话模型分组：provider 归属组，或目录查不到的「会话提供」兜底组。 */

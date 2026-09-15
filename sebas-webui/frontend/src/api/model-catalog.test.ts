@@ -6,9 +6,12 @@
  *   - a provider without models contributes nothing
  *   - configured defaults absent from the catalog pass through untouched
  *   - the healthy path flattens pairs in payload order
+ * preselect-last-used-model 1.1: last-used 记忆读写（localStorage，try/catch）
+ * 与三级预选（last-used ∈ 目录 → 该对；否则第一对；空目录 → null；stale 对
+ * 不伪造选项）。
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ProviderAdmin } from './client.js'
 
 // loadModelCatalog 走真实 api 客户端——mock 掉 fetch 面（providers /
@@ -22,10 +25,13 @@ vi.mock('./client.js', () => ({
 
 import { api } from './client.js'
 import {
+  LAST_USED_PAIR_KEY,
+  loadLastUsedPair,
   loadModelCatalog,
-  preselectFromCatalog,
+  preselectLastUsed,
   groupSessionModels,
   SESSION_PROVIDED_GROUP_LABEL,
+  saveLastUsedPair,
   toModelCatalog,
 } from './model-catalog.js'
 
@@ -141,41 +147,69 @@ describe('loadModelCatalog', () => {
   })
 })
 
-describe('preselectFromCatalog', () => {
-  it('prefers the configured default provider/model when present in the catalog', () => {
-    const catalog = toModelCatalog(
-      [
-        provider('alpha', [{ id: 'a1', tags: [] }]),
-        provider('beta', [{ id: 'b1', tags: [] }]),
-      ],
-      { default_provider: 'beta', default_model: 'b1' },
-    )
-    expect(preselectFromCatalog(catalog)).toEqual({ provider: 'beta', model: 'b1' })
+describe('preselectLastUsed（preselect-last-used-model 1.1 三级规则）', () => {
+  const catalog = toModelCatalog(
+    [
+      provider('alpha', [{ id: 'a1', tags: [] }, { id: 'a2', tags: [] }]),
+      provider('beta', [{ id: 'b1', tags: [] }]),
+    ],
+    // defaults 载荷仍在 adapter 里透传，但不再参与预选——预选只看 last-used。
+    { default_provider: 'beta', default_model: 'b1' },
+  )
+
+  it('① the last-used pair wins when it is still in the catalog (defaults ignored)', () => {
+    expect(
+      preselectLastUsed(catalog, { provider: 'alpha', model: 'a2' }),
+    ).toEqual({ provider: 'alpha', model: 'a2' })
   })
 
-  it('falls back to the first pair; a default model of another provider only applies with its provider', () => {
-    const catalog = toModelCatalog(
-      [provider('alpha', [{ id: 'a1', tags: [] }, { id: 'a2', tags: [] }])],
-      { default_provider: null, default_model: 'a2' },
-    )
-    // default provider 未配置 → 首个 provider；default_model 不在「default
-    // provider 一致」的预选规则内 → 该 provider 首个模型。
-    expect(preselectFromCatalog(catalog)).toEqual({ provider: 'alpha', model: 'a1' })
+  it('② a null / missing last-used pair falls back to the catalog first pair', () => {
+    expect(preselectLastUsed(catalog, null)).toEqual({ provider: 'alpha', model: 'a1' })
   })
 
-  it('never fabricates an absent default', () => {
-    const catalog = toModelCatalog([provider('alpha', [{ id: 'a1', tags: [] }])], {
-      default_provider: 'ghost',
-      default_model: 'nope',
+  it('② a stale pair (provider or model gone) falls back to the first pair, never fabricated as an option', () => {
+    // provider 不在了。
+    expect(preselectLastUsed(catalog, { provider: 'ghost', model: 'a1' })).toEqual({
+      provider: 'alpha',
+      model: 'a1',
     })
-    expect(preselectFromCatalog(catalog)).toEqual({ provider: 'alpha', model: 'a1' })
+    // provider 在、模型不在了。
+    expect(preselectLastUsed(catalog, { provider: 'alpha', model: 'a9' })).toEqual({
+      provider: 'alpha',
+      model: 'a1',
+    })
   })
 
-  it('empty catalog preselects nothing', () => {
-    expect(preselectFromCatalog(toModelCatalog([], null))).toEqual({
+  it('③ an empty catalog preselects nothing', () => {
+    expect(preselectLastUsed(toModelCatalog([], null), { provider: 'alpha', model: 'a1' })).toEqual({
       provider: null,
       model: null,
     })
+  })
+})
+
+describe('last-used memory (localStorage, preselect-last-used-model 1.1)', () => {
+  afterEach(() => {
+    localStorage.removeItem(LAST_USED_PAIR_KEY)
+  })
+
+  it('save + load round-trips the pair', () => {
+    saveLastUsedPair({ provider: 'openai', model: 'gpt-5' })
+    expect(loadLastUsedPair()).toEqual({ provider: 'openai', model: 'gpt-5' })
+    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBe(
+      JSON.stringify({ provider: 'openai', model: 'gpt-5' }),
+    )
+  })
+
+  it('no memory yet reads as null (not an error)', () => {
+    expect(loadLastUsedPair()).toBeNull()
+  })
+
+  it('a malformed payload reads as null (shape-checked, never thrown)', () => {
+    localStorage.setItem(LAST_USED_PAIR_KEY, '{not json')
+    expect(loadLastUsedPair()).toBeNull()
+    localStorage.setItem(LAST_USED_PAIR_KEY, JSON.stringify({ provider: 7, model: null }))
+    expect(loadLastUsedPair()).toBeNull()
   })
 })
 

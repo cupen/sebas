@@ -18,12 +18,17 @@ use tower::ServiceExt;
 /// Canned provider: returns a fixed list, no subprocess probing.
 struct CannedProvider {
     kinds: Vec<AgentKindInfo>,
+    default_kind: String,
 }
 
 #[async_trait::async_trait]
 impl AgentKindProvider for CannedProvider {
     async fn agent_kinds(&self) -> Vec<AgentKindInfo> {
         self.kinds.clone()
+    }
+
+    fn default_agent_kind(&self) -> String {
+        self.default_kind.clone()
     }
 }
 
@@ -38,6 +43,10 @@ fn info(id: &str, reachable: bool, cause: Option<&str>, version: Option<&str>) -
 }
 
 async fn app_with(kinds: Vec<AgentKindInfo>) -> axum::Router {
+    app_with_default(kinds, "claude".to_string()).await
+}
+
+async fn app_with_default(kinds: Vec<AgentKindInfo>, default_kind: String) -> axum::Router {
     let map = SessionMap::new();
     let (router, _rx) = DispatchHandle::new(map);
     let backend: Arc<dyn sebas_webui::SessionBackend> =
@@ -46,7 +55,10 @@ async fn app_with(kinds: Vec<AgentKindInfo>) -> axum::Router {
         backend,
         RouterInfo::default(),
         CardConfig::default(),
-        Arc::new(CannedProvider { kinds }),
+        Arc::new(CannedProvider {
+            kinds,
+            default_kind,
+        }),
     )
 }
 
@@ -106,4 +118,14 @@ async fn agents_catalog_still_lists_native_when_no_provider_entries() {
     let agents = v["agents"].as_array().unwrap();
     assert_eq!(agents.len(), 1, "native row is always present");
     assert_eq!(agents[0]["id"], "native");
+}
+
+/// preselect-last-used-model 3.2：`/api/about` 载荷携带装配点注入的
+/// default agent kind 运行时真值（About INSTANCE 段只读行的数据源）。
+#[tokio::test]
+async fn about_payload_carries_injected_default_agent_kind() {
+    let app = app_with_default(vec![], "codex".to_string()).await;
+    let (status, v) = get_json(&app, "/api/about").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["default_agent_kind"], "codex", "about payload: {v}");
 }
