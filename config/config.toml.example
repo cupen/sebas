@@ -24,7 +24,7 @@ driver = "claude"
 # LLM provider 网关（三协议纯透传：Anthropic / OpenAI chat-completions /
 # OpenAI Responses，契约见 openspec/specs/router-core/spec.md）。router 只以
 # 独立进程运行：`sebas router -c <path>`（手工）或 watchdog 托管
-# [watchdog.router]（拉起同一入口的子进程）；`--debug`
+# [service.router]（拉起同一入口的子进程）；`--debug`
 # 注入内置 test provider（固定文字+回显，不拨上游，跳过鉴权）。
 #
 # provider 写顶层 [provider.<name>]，名称即 preset
@@ -52,13 +52,11 @@ driver = "claude"
 # api_key_env = "MY_GATEWAY_KEY"
 #
 # 路由表：model（可含 glob，键加引号）→ provider 数组，顺序 = 优先级。
-# [router.routes]
-# "claude-*" = ["anthropic"]
 # "deepseek-*" = ["deepseek", "ark"]
 
 # watchdog 托管的服务开关。不写 = core 恒启动、webui 开、router 关；
 # 在 WebUI 服务页启停（core 除外）会持久化到 ~/.sebas/services.json，优先于此处。
-# [watchdog.webui]     # 默认启用；端口冲突自动降级 degraded
+# [service.webui]     # 默认启用；端口冲突自动降级 degraded
 # host = "127.0.0.1"
 # port = 9797
 # auth = true          # 登录鉴权开关。开启（默认）= 全部 /api 与 /ws 需登录：
@@ -70,12 +68,12 @@ driver = "claude"
 #                      # false = 全路由免登录（仅测试用）；host 非 loopback
 #                      # 时无论开关与否都拒绝启动（安全门）。
 #
-# core 恒启动（会话核心，无开关）。[watchdog.core] 只配置通道路径：
-# [watchdog.core]
+# core 恒启动（会话核心，无开关）。[service.core] 只配置通道路径：
+# [service.core]
 # channel_path = "~/.sebas/core.sock"   # 缺省 XDG_RUNTIME_DIR/sebas/core.sock
 # secret_file = "~/.sebas/core.secret"  # 缺省 <config 目录>/core.secret
 #
-# [watchdog.router]    # router 受管子进程；watchdog --debug 强制启用
+# [service.router]    # router 受管子进程；watchdog --debug 强制启用
 # enabled = true
 
 # env 覆盖（优先级高于本文件）：SEBAS_ROUTER_LISTEN /

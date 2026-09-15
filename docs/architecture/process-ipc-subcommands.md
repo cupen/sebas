@@ -99,9 +99,9 @@ stdout 就是它的输出流，读端关闭会导致 EPIPE 刷屏甚至卡死子
 
 | 服务 | 配置键 | 默认 | 出处 |
 |---|---|---|---|
-| core | 无（`[watchdog.core]` 只剩 `channel_path` / `secret_file`） | **恒启动**（不可停用）；旧的 `enabled` 键被忽略并告警 | `src/watchdog.rs::run_watchdog`（`services.register_core`）+ `src/config.rs::warn_deprecated_watchdog_keys` |
-| webui | `[watchdog.webui] enabled` | **开**（`src/config.rs::default_webui_enabled` → `true`；host `127.0.0.1`，port `9797`） | `src/config.rs::WatchdogWebUiConfig` |
-| router | `[watchdog.router] enabled` | **关**；`sebas run --debug` 强制开（`config.router.enabled \|\| debug`） | `src/config.rs::WatchdogRouterConfig` + `src/watchdog.rs::run_watchdog` |
+| core | 无（`[service.core]` 只剩 `channel_path` / `secret_file`） | **恒启动**（不可停用）；旧的 `enabled` 键被忽略并告警 | `src/watchdog.rs::run_watchdog`（`services.register_core`）+ `src/config.rs::warn_deprecated_watchdog_keys` |
+| webui | `[service.webui] enabled` | **开**（`src/config.rs::default_webui_enabled` → `true`；host `127.0.0.1`，port `9797`） | `src/config.rs::WatchdogWebUiConfig` |
+| router | `[service.router] enabled` | **关**；`sebas run --debug` 强制开（`config.router.enabled \|\| debug`） | `src/config.rs::WatchdogRouterConfig` + `src/watchdog.rs::run_watchdog` |
 | im | `[watchdog.im] enabled` | **随 feishu**：显式值优先，缺省 = `cfg.feishu.is_enabled()`（显式 `[feishu] enabled`，缺省回退 app_id+app_secret 双非空） | `src/config.rs::WatchdogImConfig` / `FeishuConfig::is_enabled` + `src/main.rs`（`Cmd::Run` 分支传 `im_enabled_default`） |
 
 期望态三层合成（`src/watchdog/services.rs`，`register` / `initial_desired`）——
@@ -146,7 +146,7 @@ core 例外：`register_core` 忽略 config 与 `services.json` 覆盖层，期�
 |---|---|---|---|---|
 | **pipe readiness**（`src/ipc.rs::ParentIpc`/`ChildIpc`） | core → watchdog 单向 | 无 socket——spawn 时继承的 stdout fd | `SEBAS_IPC=1` 环境标记（`src/ipc.rs::is_under_watchdog`） | spawn → ready → 持续排空到 EOF；控制命令**不**走管道（Ready-only 协议，`ChildMsg` 仅剩 `Ready`） |
 | **control RPC**（`src/watchdog/control_rpc.rs::serve` / `::request`） | cli / webui / im / core → watchdog（管理面） | **约定路径函数**：`src/watchdog/control_rpc.rs::default_socket_path`——`$XDG_RUNTIME_DIR/sebas/control.sock`，未设时 per-uid 临时目录回退（恒以 `control.sock` 结尾）；客户端同函数解析，`--socket` / `$SEBAS_CONTROL_SOCKET` 可覆盖（`src/main.rs::run_control`） | **仅 secret 比对 + socket mode 0600，无对端 uid 校验**（`handle_envelope`：`envelope.secret != server_secret` → `unauthorized`；actor 里的 uid 只是审计元数据） | watchdog 存活期；命令面 = `RpcControlRequest` 全部 11 个变体（§2.3）；重操作异步受理（`operation_id`） |
-| **core session channel**（`src/core_channel/server.rs::serve` / `::serve_bound`） | webui / im / router → core（数据面）；core 是服务端 | **注入 env / config 同源解析**：router 只认 `$SEBAS_CORE_SOCKET`（watchdog 按 `[watchdog.core] channel_path` 或缺省注入，`sebas-router/src/core_channel.rs::socket_path`）；webui / im / core 自己按同一 config 解析（`src/core_channel/server.rs::socket_path`——`channel_path` 覆盖 `$XDG_RUNTIME_DIR/sebas/core.sock` 或 per-uid 回退） | **双因子**：`SO_PEERCRED` 对端 uid 相等（先于一切读取，`server.rs::peer_uid_ok`）+ secret 握手行（`server.rs::read_handshake`，成功后服务端回 `{"handshake":"ok"}` ack）——仅此通道有 uid 校验 | core 存活期；快照先行（snapshot-then-subscribe）；会话流滞后订阅者被 drop，状态流滞后则重发快照；优雅退出删 socket 文件（secret 文件**不**删） |
+| **core session channel**（`src/core_channel/server.rs::serve` / `::serve_bound`） | webui / im / router → core（数据面）；core 是服务端 | **注入 env / config 同源解析**：router 只认 `$SEBAS_CORE_SOCKET`（watchdog 按 `[service.core] channel_path` 或缺省注入，`sebas-router/src/core_channel.rs::socket_path`）；webui / im / core 自己按同一 config 解析（`src/core_channel/server.rs::socket_path`——`channel_path` 覆盖 `$XDG_RUNTIME_DIR/sebas/core.sock` 或 per-uid 回退） | **双因子**：`SO_PEERCRED` 对端 uid 相等（先于一切读取，`server.rs::peer_uid_ok`）+ secret 握手行（`server.rs::read_handshake`，成功后服务端回 `{"handshake":"ok"}` ack）——仅此通道有 uid 校验 | core 存活期；快照先行（snapshot-then-subscribe）；会话流滞后订阅者被 drop，状态流滞后则重发快照；优雅退出删 socket 文件（secret 文件**不**删） |
 
 两条 socket 通道的**位置发现机制不同**（排查走错通道的高发区）：
 control 靠两端共用一个约定路径函数；core channel 靠 watchdog 注入 env /
@@ -163,7 +163,7 @@ core 启动时**无条件武装**通道（`src/run.rs::arm_core_channel`）：
    现场生成（`src/core_channel/secret.rs::generate`，32 字节 CSPRNG hex）；
 3. 两种来源都原子写入 secret 文件（`secret.rs::write_secret_file`：tmp+rename、
    0600），路径由 `src/config.rs::core_secret_file_path` 解析——
-   `[watchdog.core] secret_file` 显式键优先，缺省 `<config 文件所在目录>/core.secret`；
+   `[service.core] secret_file` 显式键优先，缺省 `<config 文件所在目录>/core.secret`；
 4. 最后才发 ready。
 
 客户端（standalone webui / im：`src/core_channel/client.rs::CoreChannelBackend::with_secret`；

@@ -1,0 +1,15 @@
+[project]
+name = "sebas-tasks"
+version = "0.0.0"
+description = "Python-side install surface for sebas's invoke task harness (tasks.py). Nothing here changes any entry behavior — this only makes `pip install .` provision the harness deps declaratively on every platform."
+requires-python = ">=3.9"
+dependencies = [
+    "invoke>=2.0",
+]
+
+[tool.setuptools]
+py-modules = []
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

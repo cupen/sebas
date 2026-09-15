@@ -1084,13 +1084,14 @@ impl Drop for CoreSecretEnv {
 }
 
 /// 沙箱 config：channel_path 指进沙箱（绝不落真实 XDG_RUNTIME_DIR）。
+/// TOML 值用正斜杠——Windows 反斜杠路径在 basic string 里是 `\U` 转义起点。
 fn arm_config(dir: &StdPath) -> (crate::config::Config, std::path::PathBuf) {
     let config_path = dir.join("config.toml");
     // TOML basic string 不能裸写反斜杠（`\U` 是 unicode 转义），Windows
     // 路径归一为正斜杠——std::path 在 Windows 上同样接受。
     let channel_path_toml = dir.join("core.sock").display().to_string().replace('\\', "/");
     let raw = format!(
-        "[watchdog.core]\nchannel_path = \"{}\"\n",
+        "[service.core]\nchannel_path = \"{}\"\n",
         channel_path_toml
     );
     let cfg = crate::config::Config::parse(&raw).expect("sandbox arm config parses");

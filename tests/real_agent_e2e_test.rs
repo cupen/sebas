@@ -212,11 +212,11 @@ download_dir = "{downloads}"
 
 # RELATIVE path: every sandbox child runs with cwd = scene dir, so the unix
 # socket never depends on the checkout depth (sun_path caps paths at 108 B).
-[watchdog.core]
+[service.core]
 channel_path = "core-channel.sock"
 
 # The bare core owns the webui via --webui-port (spawn form below).
-[watchdog.webui]
+[service.webui]
 enabled = false
 
 # Router validate requires >=1 provider with a base_url; never dialed here

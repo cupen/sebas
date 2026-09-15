@@ -41,7 +41,7 @@ pub async fn run(args: Args) -> Result<(), SebasError> {
     // 与 webui / im / router 订阅同一套 secret 解析：env 优先，缺失时按同一份
     // config 发现 core 自动武装落盘的 secret 文件。
     let secret_file = crate::config::core_secret_file_path(
-        cfg.watchdog.core.secret_file.as_deref(),
+        cfg.service.core.secret_file.as_deref(),
         std::path::Path::new(&args.config),
     );
     let backend = crate::core_channel::client::CoreChannelBackend::with_secret(

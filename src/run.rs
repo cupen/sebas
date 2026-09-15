@@ -311,10 +311,10 @@ pub async fn run(
         // design D4）：开关关闭 → disabled 态全路由免登录；打开 → 建库 +
         // env 引导 root，零用户留给首启设置页。装配提到 bind 之前，让非
         // loopback 安全门先于 bind 完成裁决。
-        let webui_auth = if cfg.watchdog.webui.auth {
+        let webui_auth = if cfg.service.webui.auth {
             crate::webui_cmd::bootstrap_auth()
         } else {
-            tracing::warn!("webui auth disabled via [watchdog.webui] auth = false: all routes are public");
+            tracing::warn!("webui auth disabled via [service.webui] auth = false: all routes are public");
             std::sync::Arc::new(sebas_webui::auth::AuthHandle::disabled())
         };
         // 非 loopback 安全门与独立 webui 进程同一裁决（webui_cmd::
@@ -322,7 +322,7 @@ pub async fn run(
         // 公网地址，开关关闭 / 用户库无启用用户时在 bind 前硬失败——不给
         // 公网留裸奔端口或抢注 root 的窗口。默认 127.0.0.1 时门不触发。
         if !webui_host_is_loopback(&webui_host) {
-            crate::webui_cmd::ensure_non_loopback_bind_allowed(cfg.watchdog.webui.auth, &webui_auth)?;
+            crate::webui_cmd::ensure_non_loopback_bind_allowed(cfg.service.webui.auth, &webui_auth)?;
         }
         let listener = tokio::net::TcpListener::bind(format!("{webui_host}:{webui_port}"))
             .await
@@ -350,7 +350,7 @@ pub async fn run(
                 None,
                 webui_auth,
                 webui_workspace_root,
-                cfg.watchdog.webui.archive_retention_days,
+                cfg.service.webui.archive_retention_days,
                 skills,
             )
             .await;
@@ -679,7 +679,7 @@ pub(crate) async fn arm_core_channel(
         Ok(s) if !s.is_empty() => (s, "env"),
         _ => (crate::core_channel::generate_secret(), "generated"),
     };
-    let secret_file = cfg.watchdog.core.secret_file_path(config_path);
+    let secret_file = cfg.service.core.secret_file_path(config_path);
     crate::core_channel::write_secret_file(&secret_file, &secret).map_err(|e| {
         crate::error::SebasError::Config(format!(
             "core secret 文件写入失败 ({}): {e}",

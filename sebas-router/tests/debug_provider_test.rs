@@ -44,8 +44,6 @@ api_key = "test-key"
 base_url_openai_chat = "http://127.0.0.1:9"
 api_key = "test-key-oai"
 
-[router.routes]
-"claude-*" = ["anth-mock"]
 "#;
 
 fn client() -> reqwest::Client {

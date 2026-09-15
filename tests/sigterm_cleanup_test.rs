@@ -39,6 +39,11 @@
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+// Windows keeps only the PathBuf half: the workspace_target_debug helper
+// compiles there (D4, .exe-aware binary resolution) but the SIGTERM journey
+// itself stays unix-gated, so `Path` has no user.
+#[cfg(windows)]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -49,8 +54,10 @@ use support::TestDir;
 
 /// Locate the workspace `target/debug` directory by walking up from
 /// `CARGO_MANIFEST_DIR` (the `sebas` crate root). Assumes the standard
-/// cargo workspace layout (`target/debug` at the workspace root).
-#[cfg(unix)]
+/// cargo workspace layout (`target/debug` at the workspace root). The
+/// platform difference lives at the call site (`.exe` suffix on Windows,
+/// D4); this lookup itself is identical everywhere.
+#[cfg(any(unix, windows))]
 fn workspace_target_debug() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR is always set during cargo test");
@@ -99,8 +106,9 @@ level = "info"
 async fn sigterm_cleans_up_child_and_persists_state() {
     // ---- 1. Locate binaries in the workspace target dir. -----------------
     let target_dir = workspace_target_debug();
-    let sebas_bin = target_dir.join("sebas");
-    let fake_claude_bin = target_dir.join("fake-claude");
+    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
+    let sebas_bin = target_dir.join(format!("sebas{exe_suffix}"));
+    let fake_claude_bin = target_dir.join(format!("fake-claude{exe_suffix}"));
     if !sebas_bin.exists() || !fake_claude_bin.exists() {
         eprintln!(
             "skipping: required binaries missing ({}, {})",

@@ -2,14 +2,14 @@
 //!
 //! - `RouteTable::from_config` / `RouteTable::resolve`：按优先级链解析 model
 //!   → provider + 经 `model_map` 重命名后的 upstream_model。
-//! - `glob_match` / `split_namespace` / `extract_model_from_body` /
-//!   `extract_model_from_path`：路由层公共辅助。
+//! - `split_namespace` / `extract_model_from_body` / `extract_model_from_path`：
+//!   路由层公共辅助。
 //!
 //! 优先级（高 → 低）：`provider/model` 命名空间（provider 须存在，否则按普通
-//! model 名继续走）> 精确 > glob（routes 按 model 名排序，glob 撞车取字典序
-//! 首个命中；每个路由组内 provider 数组顺序即优先级，当前取第一个）> 全局默认
-//! （唯一 provider 的隐式默认折叠进 `default_provider`）。model 缺失（GET 类）
-//! 直接走默认链，`upstream_model` 为 `None`。
+//! model 名继续走）> 精确（routes 里只剩别名与 debug 注入条目，`[router.routes]`
+//! 配置来源已作废）> 全局默认（唯一 provider 的隐式默认折叠进
+//! `default_provider`）。model 缺失（GET 类）直接走默认链，`upstream_model`
+//! 为 `None`。
 //!
 //! 协议一致性：解析到的 provider 缺请求 `proto` 对应的 base_url 槽位 →
 //! `ProtocolMismatch`，纯透传，不做协议转换。
@@ -26,7 +26,7 @@ use crate::proto::WireProtocol;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RouteError {
     /// 无任何路由/默认可解析（proxy 映 502）。
-    #[error("no route for model (no namespace/exact/glob/default matched)")]
+    #[error("no route for model (no namespace/exact/default matched)")]
     NoRoute,
     /// 解析到的 provider 协议与请求协议不一致（proxy 映 400）。
     #[error("protocol mismatch: provider '{provider}' does not speak the request protocol")]
@@ -59,7 +59,7 @@ pub struct RouteTable {
 impl RouteTable {
     pub fn from_config(cfg: &RouterConfig) -> RouteTable {
         // 唯一 provider 隐式默认：`default_provider` 未配置且 providers 恰有一个
-        // 时，默认指向它——单 provider 场景可整体省略 `default_provider` 与 `routes`。
+        // 时，默认指向它——单 provider 场景可整体省略 `default_provider`。
         let default_provider = cfg.default_provider.clone().or_else(|| {
             if cfg.providers.len() == 1 {
                 cfg.providers.keys().next().cloned()
@@ -78,8 +78,8 @@ impl RouteTable {
 
     /// 按优先级链解析 model → provider + upstream_model。
     ///
-    /// 优先级：命名空间 > 精确 > glob > 全局默认（唯一 provider 的隐式默认
-    /// 已在 `from_config` 折叠进 `default_provider`）。
+    /// 优先级：命名空间 > 精确（别名 / debug 条目）> 全局默认（唯一 provider
+    /// 的隐式默认已在 `from_config` 折叠进 `default_provider`）。
     /// `model` 为 `None`（GET 类）直接走默认链，`upstream_model` 置 `None`。
     pub fn resolve(
         &self,
@@ -148,9 +148,8 @@ impl RouteTable {
         })
     }
 
-    /// 按 routes 匹配 model：先精确、后 glob（routes 已按 model 名排序，
-    /// glob 撞车时字典序首个命中）。每个路由组取 provider 数组第一个（主）。
-    /// 无命中 → `None`。
+    /// 按 routes 精确匹配 model（routes 只剩别名与 debug 注入条目——
+    /// `[router.routes]` 配置来源已作废）。无命中 → `None`。
     fn match_route(&self, model: &str) -> Option<&str> {
         for r in &self.routes {
             if r.model == model {
@@ -161,43 +160,8 @@ impl RouteTable {
                 return r.providers.first().map(String::as_str);
             }
         }
-        for r in &self.routes {
-            if r.model.contains('*') && glob_match(&r.model, model) {
-                // TODO(故障转移): 同上一处，glob 命中后同样只取主 provider。
-                return r.providers.first().map(String::as_str);
-            }
-        }
         None
     }
-}
-
-/// 手写 glob 匹配（无 glob crate）。`*` 匹配任意字符（含空）；无 `*` 时精确相等。
-/// 首段必须前缀、末段必须后缀（pattern 以 `*` 结尾时末段为空，`ends_with("")`
-/// 恒真即天然豁免）、中段按序子串查找（各段须在前一段匹配尾之后出现）。
-pub fn glob_match(pattern: &str, s: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().expect("split 至少产一个段");
-    let second = match parts.next() {
-        Some(seg) => seg,
-        None => return pattern == s, // 无 '*'：精确相等
-    };
-    // 有至少一个 '*'。首段必须前缀。
-    if !s.starts_with(first) {
-        return false;
-    }
-    let mut pos = first.len();
-    // 从 `second` 起逐段：每读出下一段时，当前段为中段（须按序子串命中）；
-    // 迭代结束时，当前段为末段（须为后缀；pattern 以 '*' 结尾则末段为空，
-    // `ends_with("")` 恒真，天然豁免后缀要求）。
-    let mut seg = second;
-    for next in parts {
-        match s[pos..].find(seg) {
-            Some(idx) => pos += idx + seg.len(),
-            None => return false,
-        }
-        seg = next;
-    }
-    s[pos..].ends_with(seg)
 }
 
 /// 拆分 `provider/model` 命名空间。返回 `(provider, rest)`；无 `/` 返 `None`。
@@ -282,51 +246,6 @@ mod tests {
         names.iter().map(|(n, p)| simple_provider(n, *p)).collect()
     }
 
-    // -------------------- glob_match 各形态 --------------------
-
-    #[test]
-    fn glob_no_star_is_exact() {
-        assert!(glob_match("claude-sonnet", "claude-sonnet"));
-        assert!(!glob_match("claude-sonnet", "claude-opus"));
-        assert!(!glob_match("claude-sonnet", ""));
-        assert!(glob_match("", "")); // 空 pattern 精确匹配空串
-    }
-
-    #[test]
-    fn glob_prefix_star() {
-        assert!(glob_match("claude-*", "claude-sonnet"));
-        assert!(glob_match("claude-*", "claude-")); // * 可匹配空
-        assert!(!glob_match("claude-*", "claude")); // 缺少 "-"
-    }
-
-    #[test]
-    fn glob_suffix_star() {
-        assert!(glob_match("*-sonnet", "claude-sonnet"));
-        assert!(glob_match("*-sonnet", "x-sonnet"));
-        assert!(!glob_match("*-sonnet", "claude-opus"));
-    }
-
-    #[test]
-    fn glob_middle_star() {
-        assert!(glob_match("claude-*-4", "claude-sonnet-4"));
-        assert!(glob_match("claude-*-4", "claude--4")); // 中段匹配空
-        assert!(!glob_match("claude-*-4", "claude-sonnet-3"));
-        assert!(!glob_match("claude-*-4", "claude-4")); // 无 "-4" 后缀
-    }
-
-    #[test]
-    fn glob_no_match() {
-        assert!(!glob_match("claude-*", "gpt-4"));
-        assert!(!glob_match("gpt-*", "claude-sonnet"));
-    }
-
-    #[test]
-    fn glob_star_only_matches_anything() {
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("*", ""));
-        assert!(glob_match("*", "claude-sonnet-4"));
-    }
-
     // -------------------- 命名空间 --------------------
 
     #[test]
@@ -350,8 +269,8 @@ mod tests {
 
     #[test]
     fn unknown_namespace_falls_back_to_normal_model() {
-        // "foo/claude-sonnet"：foo 不是 provider → 整串作为普通 model 走精确/glob。
-        // 配置精确路由 "foo/claude-sonnet" → openai 命中。
+        // "foo/claude-sonnet"：foo 不是 provider → 整串作为普通 model 走精确匹配。
+        // 路由条目 "foo/claude-sonnet" → openai（别名/debug 条目的精确匹配层）命中。
         let cfg = build_cfg(
             simple_providers(&[
                 ("anthropic", WireProtocol::Anthropic),
@@ -369,26 +288,6 @@ mod tests {
     }
 
     // -------------------- 优先级 --------------------
-
-    #[test]
-    fn exact_beats_glob_despite_order() {
-        // route[0]: claude-* → anthropic（glob）
-        // route[1]: claude-sonnet → openai（精确）
-        // 即便 glob 在前，精确优先 → openai。
-        let cfg = build_cfg(
-            simple_providers(&[
-                ("anthropic", WireProtocol::Anthropic),
-                ("openai", WireProtocol::OpenAiChat),
-            ]),
-            &[("claude-*", &["anthropic"]), ("claude-sonnet", &["openai"])],
-            None,
-        );
-        let table = RouteTable::from_config(&cfg);
-        let d = table
-            .resolve(Some("claude-sonnet"), WireProtocol::OpenAiChat)
-            .expect("exact should match");
-        assert_eq!(d.provider, "openai");
-    }
 
     #[test]
     fn route_provider_array_priority_takes_first() {
@@ -412,10 +311,10 @@ mod tests {
 
     #[test]
     fn protocol_mismatch_returns_error() {
-        // route claude-* → anthropic（Anthropic）。请求协议 OpenAi → 不一致。
+        // route claude-sonnet → anthropic（Anthropic）。请求协议 OpenAi → 不一致。
         let cfg = build_cfg(
             simple_providers(&[("anthropic", WireProtocol::Anthropic)]),
-            &[("claude-*", &["anthropic"])],
+            &[("claude-sonnet", &["anthropic"])],
             None,
         );
         let table = RouteTable::from_config(&cfg);

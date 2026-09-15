@@ -24,7 +24,7 @@ pub enum Cmd {
     /// transparent proxy). See openspec/specs/router-core/spec.md.
     Router(RouterArgs),
     /// Start the standalone WebUI dashboard server.
-    /// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
+    /// Spawned by the watchdog when `[service.webui] enabled = true`.
     #[command(name = "webui")]
     WebUi(WebUiArgs),
     /// 初始化 / 修改 WebUI 登录用户（多用户库 auth.db，PBKDF2 落盘）。
@@ -257,7 +257,7 @@ pub struct RouterArgs {
 }
 
 /// `sebas webui` — start the standalone WebUI dashboard server.
-/// Spawned by the watchdog when `[watchdog.webui] enabled = true`.
+/// Spawned by the watchdog when `[service.webui] enabled = true`.
 #[derive(Parser)]
 pub struct WebUiArgs {
     /// Path to the sebas config.toml.
