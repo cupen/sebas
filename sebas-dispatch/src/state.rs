@@ -383,6 +383,21 @@ pub enum BeginSpawn {
     AlreadySpawning,
 }
 
+/// 聚焦即拉起的路由结果（`route_activate`，workbench-live-conversation-flow
+/// 3.1）。与 `TextRoute` 的差别：绝无 Enqueued/Overflow——激活不入队任何
+/// 文本，只决定「要不要把子进程拉起来」。
+pub enum ActivateRoute {
+    /// Active 映射：子进程活着，激活是幂等无操作。
+    AlreadyLive,
+    /// Spawning 占位：拉起已在途，无需重复触发。
+    AlreadyStarting,
+    /// 占位/失败态换到 Spawning，调用方走 fresh spawn（无 prompt）。
+    SpawnNew,
+    /// Dormant 映射被认领并换到 Spawning；调用方按给定旧 session_id 走
+    /// resume（无 prompt；load 被拒时既有回退语义不变）。
+    Resume(String),
+}
+
 const MAX_PENDING: usize = 16;
 
 /// 分配一个 per-key 单调 pending id（自由函数以便在持有 inner 写锁的窗口
@@ -510,6 +525,57 @@ impl SessionMap {
                             );
                             Ok(TextRoute::Overflow { cap: MAX_PENDING })
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 聚焦即拉起（workbench-live-conversation-flow 3.1）：为聚焦的会话
+    /// 拉起子进程（不带 prompt、不跑首轮）。与 `route_text` 同一套原子
+    /// 状态机，但绝不创建新映射、绝不入队：Active = 幂等无操作，Dormant =
+    /// 认领并交还原 session_id（resume），占位/失败态按需换到 Spawning。
+    /// 返回 `None` = 未知 key（调用方按 404 处置）。
+    pub async fn route_activate(&self, key: &ChannelKey) -> Option<ActivateRoute> {
+        let mut g = self.inner.write().await;
+        match g.get_mut(key) {
+            None => None,
+            Some(m) => {
+                m.last_active_unix = crate::engine::now_unix();
+                match &mut m.state {
+                    MappingState::Active { .. } => Some(ActivateRoute::AlreadyLive),
+                    MappingState::Spawning {
+                        pending,
+                        awaiting_first_prompt,
+                    } => {
+                        // 0-turn 占位（awaiting_first_prompt）= 等待启动的空会
+                        // 话：激活语义与首条消息相同——消费标记、换到无标记的
+                        // Spawning 并走 fresh spawn（route_text 同一语义）。
+                        // 已在途的常规 spawn（标记已消费）才是 AlreadyStarting。
+                        if *awaiting_first_prompt {
+                            m.state = MappingState::Spawning {
+                                pending: std::mem::take(pending),
+                                awaiting_first_prompt: false,
+                            };
+                            Some(ActivateRoute::SpawnNew)
+                        } else {
+                            Some(ActivateRoute::AlreadyStarting)
+                        }
+                    }
+                    MappingState::Dormant { session_id } => {
+                        let old = session_id.clone();
+                        m.state = MappingState::Spawning {
+                            pending: Vec::new(),
+                            awaiting_first_prompt: false,
+                        };
+                        Some(ActivateRoute::Resume(old))
+                    }
+                    MappingState::SpawnFailed { .. } => {
+                        m.state = MappingState::Spawning {
+                            pending: Vec::new(),
+                            awaiting_first_prompt: false,
+                        };
+                        Some(ActivateRoute::SpawnNew)
                     }
                 }
             }

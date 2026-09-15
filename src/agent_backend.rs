@@ -850,6 +850,23 @@ impl SessionBackend for DualSessionBackend {
         self.events.subscribe()
     }
 
+    // 聚焦即拉起（workbench-live-conversation-flow 3.1）：native 会话无
+    // 子进程生命周期（内核即进程），activate 恒为无操作。
+    async fn activate(&self, key: ChannelKey) -> Result<bool, SessionRejection> {
+        if Self::is_native(&key) {
+            return Ok(false);
+        }
+        self.acp.activate(key).await
+    }
+
+    // 回合内容流（workbench-live-conversation-flow 1.2）：native 侧不产流，
+    // ACP 桥（内嵌形态即 InProcessBackend→engine）是唯一来源。
+    fn subscribe_turn_events(
+        &self,
+    ) -> broadcast::Receiver<sebas_dispatch::TurnStreamEvent> {
+        self.acp.subscribe_turn_events()
+    }
+
     // make-core-own-provider-data 3.1：状态库域不属于任何一个执行体（provider
     // /aliases/settings/projects/presets 是 core 持有的共享数据）。复合后端
     // 必须转发到承载状态库的一侧（acp 桥，内嵌形态即 InProcessBackend→

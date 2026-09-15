@@ -139,7 +139,11 @@ async fn handle_web_spawn(
         router.apply_mode_changed(session_id.as_str(), mode.as_deref()).await;
     }
     // Seed card state and wire the pump (no Feishu card operations).
-    router.seed_card(session_id.clone(), prompt.clone()).await;
+    // 激活路径（空 prompt）不开轮：无 seed（卡片/transcript 的 prompt 条目
+    // 只随真实首条消息写入）。
+    if !prompt.is_empty() {
+        router.seed_card(session_id.clone(), prompt.clone()).await;
+    }
     // sebas-9pz ②: idle_kill_secs 接线(与 Feishu 路径一致)。
     let idle_timeout = idle_timeout_from(cfg, &kind);
     spawn_acp_pump_with_idle(

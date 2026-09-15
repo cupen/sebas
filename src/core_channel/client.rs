@@ -15,6 +15,7 @@
 use super::protocol::{
     ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
 };
+use sebas_dispatch::TurnStreamEvent;
 use super::secret::ChannelSecret;
 use async_trait::async_trait;
 use sebas_channels::ChannelKey;
@@ -63,6 +64,9 @@ pub struct CoreChannelBackend {
     /// wire-webui-sebas-agent-e2e: native approval notices relayed by the
     /// channel; consumed by the same review-card feed as the in-process backend.
     notices: broadcast::Sender<PermissionNotice>,
+    /// 实时回合内容（workbench-live-conversation-flow 1.2）：订阅流里的
+    /// `turn` 帧转播到这里，webui WS 面再转播给浏览器。
+    turn_events: broadcast::Sender<TurnStreamEvent>,
     status: std::sync::Mutex<ConnStatus>,
 }
 
@@ -98,11 +102,13 @@ impl CoreChannelBackend {
     pub fn with_secret(path: PathBuf, secret: ChannelSecret) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
+        let (turn_events, _) = broadcast::channel(256);
         let backend = Arc::new(Self {
             path,
             secret,
             events,
             notices,
+            turn_events,
             status: std::sync::Mutex::new(ConnStatus::Failed {
                 kind: FailKind::StartupFailed,
                 cause: "尚未连接 core".into(),
@@ -357,6 +363,12 @@ impl CoreChannelBackend {
                     self.set_status(ConnStatus::Connected);
                     let _ = self.notices.send(notice);
                 }
+                // 实时回合内容（workbench-live-conversation-flow 1.2）：纯
+                // 增量补充，转播即完事；丢失由快照重取收敛。
+                SessionStreamFrame::Turn { event } => {
+                    self.set_status(ConnStatus::Connected);
+                    let _ = self.turn_events.send(event);
+                }
             }
         }
     }
@@ -511,6 +523,19 @@ impl SessionBackend for CoreChannelBackend {
 
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    fn subscribe_turn_events(&self) -> broadcast::Receiver<TurnStreamEvent> {
+        self.turn_events.subscribe()
+    }
+
+    async fn activate(&self, key: ChannelKey) -> Result<bool, SessionRejection> {
+        match self.request(&CoreChannelRequest::Activate { key }).await? {
+            CoreChannelResponse::Activated { started } => Ok(started),
+            CoreChannelResponse::Ok => Ok(false),
+            CoreChannelResponse::Rejected { rejection } => Err(rejection),
+            other => Err(unavailable(format!("unexpected response: {other:?}"))),
+        }
     }
 
     async fn spawn(

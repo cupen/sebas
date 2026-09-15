@@ -250,6 +250,19 @@ pub struct TurnEntry {
     pub title: Option<String>,
 }
 
+/// 实时回合内容事件（workbench-live-conversation-flow 1.1）：transcript
+/// 每追加一批条目就发布一条，core 通道以 `SessionStreamFrame::Turn` 帧转
+/// 发、webui 以 `turn.append` WS 事件转播。`entries` 是同一 250ms 合并窗
+/// 内该会话追加的条目（按落库顺序、position 单调）；日志仍是唯一事实——
+/// 合并只影响传输分帧，消费端以快照重取收敛。与 [`SessionEvent::PendingDropped`]
+/// 同构的 `(channel, key)` 寻址。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TurnStreamEvent {
+    pub channel: String,
+    pub key: String,
+    pub entries: Vec<TurnEntry>,
+}
+
 impl TurnEntry {
     pub fn prompt(position: u64, content: impl Into<String>) -> Self {
         Self::new(position, "prompt", "markdown", content)
@@ -824,3 +837,23 @@ fn chat_message_count_ignores_noise_and_empty_entries() {
     // 空 transcript = 0。
     assert_eq!(count_chat_messages(&[]), 0);
 }
+
+    /// workbench-live-conversation-flow 1.1：TurnStreamEvent serde 往返，
+    /// wire 形状带 channel/key/entries（与 SessionEvent::PendingDropped 同构
+    /// 的寻址字段）。
+    #[test]
+    fn turn_stream_event_round_trips() {
+        let ev = TurnStreamEvent {
+            channel: "web".into(),
+            key: "web-1".into(),
+            entries: vec![
+                TurnEntry::markdown(3, "hello "),
+                TurnEntry::markdown(4, "world"),
+            ],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: TurnStreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ev);
+        assert!(json.contains("\"channel\":\"web\""));
+        assert!(json.contains("\"entries\":["));
+    }

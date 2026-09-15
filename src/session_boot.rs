@@ -161,14 +161,20 @@ pub async fn acp_spawn_and_activate(
             "create-with-model failed (non-fatal; session uses its default model)"
         );
     }
-    mgr.send(
-        &session_id,
-        AcpCommand::CreateSession {
-            session_id: session_id.clone(),
-            prompt: prompt.to_string(),
-        },
-    )
-    .await?;
+    // 空 prompt = 激活语义（workbench-live-conversation-flow 3.1）：只建
+    // 会话与握手、不跑首轮。通用 ACP driver 的 session/new（含模型广告）
+    // 在握手期已完成；专用 claude driver 的 CreateSession 会把 prompt 当
+    // 首轮 query，空串会产生垃圾回合——必须跳过。
+    if !prompt.is_empty() {
+        mgr.send(
+            &session_id,
+            AcpCommand::CreateSession {
+                session_id: session_id.clone(),
+                prompt: prompt.to_string(),
+            },
+        )
+        .await?;
+    }
     // Persist the driver-reported real ACP session id (native-ACP agents) on
     // the mapping so a later resume loads the conversation by the id the
     // agent actually knows (acp-session-mapping 场景 1). `None` (Claude) is
@@ -262,14 +268,17 @@ pub async fn acp_resume_and_activate(
     // it appends to the loaded conversation; for a fallback-fresh session
     // it is simply the first prompt (run_main drives both through
     // `send_prompt`).
-    mgr.send(
-        &session_id,
-        AcpCommand::ContinueSession {
-            session_id: session_id.clone(),
-            prompt: prompt.to_string(),
-        },
-    )
-    .await?;
+    // 空 prompt = 激活语义（聚焦即拉起）：加载历史对话但不跑首轮。
+    if !prompt.is_empty() {
+        mgr.send(
+            &session_id,
+            AcpCommand::ContinueSession {
+                session_id: session_id.clone(),
+                prompt: prompt.to_string(),
+            },
+        )
+        .await?;
+    }
     // Persist the (possibly NEW) real ACP session id: a successful load
     // re-records the loaded id under the same routing id; a fallback-fresh
     // session records the new session's id under the new routing id.

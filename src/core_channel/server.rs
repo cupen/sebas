@@ -20,7 +20,7 @@ use crate::error::{Result, SebasError};
 use sebas_channels::ChannelKey;
 use sebas_dispatch::provider_state::ProviderMode;
 use sebas_dispatch::SessionInfo;
-use sebas_dispatch::{DispatchHandle, SessionEvent};
+use sebas_dispatch::{DispatchHandle, SessionEvent, TurnEntry, TurnStreamEvent};
 use sebas_ipc::{IpcListener, IpcStream, ReadHalf, WriteHalf};
 use sebas_webui::session_backend::{PermissionNotice, SessionBackend, SessionRejection};
 use std::path::{Path, PathBuf};
@@ -333,6 +333,16 @@ async fn serve_subscription(
 
     let mut events = backend.subscribe();
     let mut approvals = backend.permission_requests();
+    // 实时回合内容（workbench-live-conversation-flow 1.1）：独立合并任务把
+    // 250ms 窗内的追加按会话合帧，经 mpsc 交给本订阅流。Lagged 只丢增量
+    // （快照收敛），与 SessionEvent 的「Lagged 即断」语义刻意不同。
+    const TURN_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+    let (turn_tx, mut turn_frames) = tokio::sync::mpsc::channel::<TurnStreamEvent>(64);
+    tokio::spawn(turn_coalescer(
+        backend.subscribe_turn_events(),
+        TURN_COALESCE_WINDOW,
+        turn_tx,
+    ));
     // 订阅先于快照（对本地与远端是同一套顺序理由）：先挂上接收端，再取两份快照，
     // 这样订阅瞬间发生的变更一定落在快照里或事件里，不会两头都落空。
     let mut remote_events = projection.as_ref().map(|p| p.subscribe());
@@ -377,6 +387,11 @@ async fn serve_subscription(
             notice = recv_approval(&mut remote_notices) => {
                 SessionStreamFrame::ApprovalRequested { notice }
             }
+            turn = recv_turn_frame(&mut turn_frames) => match turn {
+                Some(event) => SessionStreamFrame::Turn { event },
+                // 合并任务没了（core 关停）：这一路退化为永不就绪，其余照常。
+                None => std::future::pending().await,
+            },
         };
         pending.push(frame);
         // Bounded flush: a live local reader drains in microseconds. A
@@ -433,6 +448,75 @@ async fn recv_remote_event(
             }
             Err(broadcast::error::RecvError::Closed) => None,
         },
+    }
+}
+
+/// 从回合合并任务取下一帧；任务消失后这一路永久就绪为 pending（与
+/// `recv_remote_event` 的 None 语义一致）。
+async fn recv_turn_frame(
+    frames: &mut tokio::sync::mpsc::Receiver<TurnStreamEvent>,
+) -> Option<TurnStreamEvent> {
+    match frames.recv().await {
+        Some(event) => Some(event),
+        None => std::future::pending().await,
+    }
+}
+
+/// 回合内容合并器（workbench-live-conversation-flow 1.1）：把 transcript
+/// 逐条追加的 `TurnStreamEvent` 按会话聚成 250ms 窗口批帧；单组内容超过
+/// 4KB 立即冲刷（不等窗口）。Lagged 只丢增量——日志是唯一事实，消费端以
+/// 快照重取收敛，绝不因落后断流。
+async fn turn_coalescer(
+    mut rx: broadcast::Receiver<TurnStreamEvent>,
+    window: std::time::Duration,
+    tx: tokio::sync::mpsc::Sender<TurnStreamEvent>,
+) {
+    const TURN_FLUSH_BYTES: usize = 4096;
+    let mut buf: std::collections::HashMap<(String, String), Vec<TurnEntry>> =
+        std::collections::HashMap::new();
+    let mut deadline: Option<tokio::time::Instant> = None;
+    loop {
+        // sleep_until 按值持有 Instant——deadline 不被 future 借用，接收臂
+        // 可以自由改写它。
+        let sleep_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match deadline {
+                Some(d) => Box::pin(tokio::time::sleep_until(d)),
+                None => Box::pin(std::future::pending()),
+            };
+        let mut flush_now = false;
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Ok(event) => {
+                    let group = buf
+                        .entry((event.channel.clone(), event.key))
+                        .or_default();
+                    group.extend(event.entries);
+                    if deadline.is_none() {
+                        deadline = Some(tokio::time::Instant::now() + window);
+                    }
+                    let total: usize = group.iter().map(|e| e.content.len()).sum();
+                    if total > TURN_FLUSH_BYTES {
+                        flush_now = true;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "turn coalescer lagged; skipping deltas (snapshot converges)");
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = sleep_fut => {
+                deadline = None;
+                flush_now = true;
+            }
+        }
+        if flush_now {
+            for ((channel, key), entries) in buf.drain() {
+                let _ = tx
+                    .send(TurnStreamEvent { channel, key, entries })
+                    .await;
+            }
+            deadline = None;
+        }
     }
 }
 
@@ -872,6 +956,14 @@ async fn dispatch(
                 Err(rejection) => CoreChannelResponse::Rejected { rejection },
             }
         }
+        CoreChannelRequest::Activate { key } => {
+            // 聚焦即拉起（workbench-live-conversation-flow 3.1）：无 prompt
+            // 拉起子进程。幂等；未知 key 由后端如实回报 started=false。
+            match backend.activate(key).await {
+                Ok(started) => CoreChannelResponse::Activated { started },
+                Err(rejection) => CoreChannelResponse::Rejected { rejection },
+            }
+        }
         CoreChannelRequest::EnsureMessage {
             key,
             message,
@@ -1277,6 +1369,49 @@ fn usable_project_dir(dir: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::turn_coalescer;
+    use sebas_dispatch::{TurnEntry, TurnStreamEvent};
+
+    /// workbench-live-conversation-flow 1.1：同窗批帧——窗口内同会话的多条
+    /// 追加合成一帧（entries 按落库序）；超 4KB 立即冲刷不等窗口。
+    #[tokio::test]
+    async fn turn_coalescer_batches_by_window_and_flushes_oversized() {
+        let (tx, rx) = broadcast::channel::<TurnStreamEvent>(16);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(turn_coalescer(
+            rx,
+            std::time::Duration::from_millis(25),
+            out_tx,
+        ));
+        tx.send(TurnStreamEvent {
+            channel: "web".into(),
+            key: "k".into(),
+            entries: vec![TurnEntry::markdown(0, "a")],
+        })
+        .unwrap();
+        tx.send(TurnStreamEvent {
+            channel: "web".into(),
+            key: "k".into(),
+            entries: vec![TurnEntry::markdown(1, "b")],
+        })
+        .unwrap();
+        let first = out_rx.recv().await.unwrap();
+        assert_eq!(first.channel, "web");
+        assert_eq!(first.key, "k");
+        assert_eq!(first.entries.len(), 2, "same-window appends batch into one frame");
+
+        // 超限单条立即冲刷（不与下一窗合并）。
+        tx.send(TurnStreamEvent {
+            channel: "web".into(),
+            key: "k".into(),
+            entries: vec![TurnEntry::markdown(2, "x".repeat(5000))],
+        })
+        .unwrap();
+        let second = out_rx.recv().await.unwrap();
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].content.len(), 5000);
+    }
+
     use super::*;
 
     // ── unify-router-process-shape 2.1：router_activity 计数语义 ──

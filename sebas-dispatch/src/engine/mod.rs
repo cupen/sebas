@@ -12,7 +12,9 @@ mod inbound;
 mod maps;
 pub mod provider_card;
 
-pub use events::{RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, count_chat_messages};
+pub use events::{
+    RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent, count_chat_messages,
+};
 pub use maps::{AutoModeSwitch, AutoModeSwitchMap, MsgIdMap, PermCardEntry, PermCardMap, ReplyTargetMap};
 
 use crate::card_events::{
@@ -296,6 +298,9 @@ pub struct DispatchHandle {
     /// `InProcessBackend` 订阅它把 Claude/ACP 会话的权限请求转成 webui 审查卡。
     /// 只广播 `PermissionRequest`；其余变体不上这条通道。
     perm_events: broadcast::Sender<AcpEvent>,
+    /// 实时回合内容广播（workbench-live-conversation-flow 1.1）：
+    /// transcript 每批追加 → TurnStreamEvent，core 通道订阅转发。
+    turn_events: broadcast::Sender<crate::engine::events::TurnStreamEvent>,
     /// Per-session rendered transcript (`session_id` → ordered entries),
     /// the source for the WebUI/channel turn-content retrieval. Dropped
     /// with the mapping so a recycled session_id cannot inherit stale
@@ -322,6 +327,7 @@ impl Clone for DispatchHandle {
             help_card_msgid: self.help_card_msgid.clone(),
             events: self.events.clone(),
             perm_events: self.perm_events.clone(),
+            turn_events: self.turn_events.clone(),
             turn_log: self.turn_log.clone(),
         }
     }
@@ -378,6 +384,7 @@ impl DispatchHandle {
         let (tx, rx) = mpsc::channel(channel_buffer);
         let (events, _) = broadcast::channel(256);
         let (perm_events, _) = broadcast::channel(256);
+        let (turn_events, _) = broadcast::channel(256);
         (
             Self {
                 map,
@@ -397,6 +404,7 @@ impl DispatchHandle {
                 help_card_msgid: MsgIdMap::default(),
                 events,
                 perm_events,
+                turn_events,
             },
             rx,
         )
@@ -576,10 +584,23 @@ impl DispatchHandle {
     /// Append one entry to a session's transcript. Position is assigned
     /// monotonically from the log length.
     async fn transcript_push(&self, session_id: &str, mut entry: TurnEntry) {
-        let mut g = self.turn_log.write().await;
-        let log = g.entry(session_id.to_string()).or_default();
-        entry.position = log.len() as u64;
-        log.push(entry);
+        {
+            let mut g = self.turn_log.write().await;
+            let log = g.entry(session_id.to_string()).or_default();
+            entry.position = log.len() as u64;
+            log.push(entry.clone());
+        };
+        // 实时回合内容广播（workbench-live-conversation-flow 1.1）：条目
+        // 已落账（日志是唯一事实），广播只是增量补充——订阅者落后时
+        // Lagged 由消费端按快照收敛，绝不为此阻塞入账路径。无 key（如
+        // spawn-failed 合成 id）时静默跳过：没有可寻址的会话面。
+        if let Some(key) = self.map.lookup_key_by_session(session_id).await {
+            let _ = self.turn_events.send(crate::engine::events::TurnStreamEvent {
+                channel: key.channel_str().to_string(),
+                key: key.reference.clone(),
+                entries: vec![entry],
+            });
+        }
     }
 
     /// Public transcript append for out-of-impl callers (native bridge).
@@ -598,6 +619,68 @@ impl DispatchHandle {
     /// `RecvError::Lagged` and must re-snapshot via [`Self::session_info_snapshot`].
     pub fn subscribe_session_events(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    /// Subscribe to live turn-content events（workbench-live-conversation-flow
+    /// 1.1）。Lagged 是建议性的：内容可从 transcript 快照恢复，消费端不因
+    /// 落后断链。
+    pub fn subscribe_turn_events(&self) -> broadcast::Receiver<crate::engine::events::TurnStreamEvent> {
+        self.turn_events.subscribe()
+    }
+
+    /// 聚焦即拉起（workbench-live-conversation-flow 3.1）：为聚焦的会话
+    /// 拉起子进程——0-turn 占位走 fresh spawn、Dormant 走 resume，均**不带
+    /// prompt**（不跑首轮；通用 ACP driver 的 session/new 与模型广告在握手
+    /// 期完成，无需 prompt）。幂等：Active/Spawning 是无操作。失败经既有
+    /// fail_spawn 路径如实进 transcript，占位保留。
+    pub async fn web_activate_session(&self, key: ChannelKey) -> Result<bool, crate::error::DispatchError> {
+        use crate::state::ActivateRoute;
+        match self.map.route_activate(&key).await {
+            None => Ok(false),
+            Some(ActivateRoute::AlreadyLive | ActivateRoute::AlreadyStarting) => Ok(false),
+            Some(ActivateRoute::SpawnNew) => {
+                // 与首条消息的 SpawnNew 臂同一装配：读回 0-turn 创建时记住的
+                // project_dir/kind/model/mode，spawn 出正确的 agent。
+                let (project_dir, kind, model, mode) = self
+                    .map
+                    .get(&key)
+                    .await
+                    .map(|m| {
+                        (
+                            m.project_dir.clone(),
+                            m.pending_kind.clone(),
+                            m.pending_model.clone(),
+                            m.pending_mode.clone(),
+                        )
+                    })
+                    .unwrap_or((None, None, None, None));
+                self.publish_created(&key).await;
+                self.emit(Out::WebSpawn {
+                    key,
+                    // 空 prompt = 激活语义（拉起但不跑首轮），出站泵据此跳过
+                    // 首轮命令。
+                    prompt: String::new(),
+                    project_dir,
+                    kind,
+                    model,
+                    mode,
+                })
+                .await;
+                Ok(true)
+            }
+            Some(ActivateRoute::Resume(old_sid)) => {
+                self.publish_updated(&key).await;
+                self.emit(Out::SpawnResume {
+                    key,
+                    session_id: old_sid,
+                    // 空 prompt = 激活语义：resume 加载历史对话但不跑首轮。
+                    prompt: String::new(),
+                    input_msg_id: None,
+                })
+                .await;
+                Ok(true)
+            }
+        }
     }
 
     /// Subscribe to the ACP permission broadcast (design D6): every
