@@ -11,6 +11,7 @@ import { navigate } from '../router.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import { fullSessionLabel } from './project-rail.js'
+import { guardedHide } from '../components/wa-hide-guard.js'
 import '../components/status-badge.js'
 import '@awesome.me/webawesome/dist/components/button/button.js'
 import '@awesome.me/webawesome/dist/components/input/input.js'
@@ -381,7 +382,7 @@ export class SebasSessions extends LitElement {
             </div>
           `}
 
-      <wa-dialog label="Close session" ?open=${this.closeTarget !== null}>
+      <wa-dialog label="Close session" ?open=${this.closeTarget !== null} @wa-hide=${guardedHide(() => (this.closeTarget = null))}>
         <p class="dialog-body">
           Closing will terminate the agent child process and drop the session
           mapping. This cannot be undone.

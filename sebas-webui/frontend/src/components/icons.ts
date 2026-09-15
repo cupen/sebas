@@ -6,6 +6,7 @@
  */
 
 import { html, nothing, type TemplateResult } from 'lit'
+import { unsafeSVG } from 'lit/directives/unsafe-svg.js'
 
 const PATHS: Record<string, string> = {
   dashboard:
@@ -35,6 +36,8 @@ const PATHS: Record<string, string> = {
     '<circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/>',
   add:
     '<line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/>',
+  more:
+    '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
   sun:
     '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
   logout:
@@ -47,7 +50,9 @@ const PATHS: Record<string, string> = {
     '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
 }
 
-/** Render a decorative inline-SVG icon by name; empty string when unknown. */
+/** Render a decorative inline-SVG icon by name; empty string when unknown.
+ * Paths inject through unsafeSVG: an `innerHTML=${...}` binding would set a
+ * literal (invalid) attribute and the glyph would never paint. */
 export function icon(name: string, size = 16): TemplateResult | typeof nothing {
   const body = PATHS[name]
   if (!body) return nothing
@@ -61,6 +66,5 @@ export function icon(name: string, size = 16): TemplateResult | typeof nothing {
     stroke-width="1.8"
     stroke-linecap="round"
     stroke-linejoin="round"
-    innerHTML=${body}
-  ></svg>`
+  >${unsafeSVG(body)}</svg>`
 }

@@ -74,6 +74,7 @@ import {
   ApiError,
 } from '../api/client.js'
 import { icon } from '../components/icons.js'
+import { guardedHide } from '../components/wa-hide-guard.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { viewStyles } from '../styles/shared.js'
 import { getThemeMode, resolvesToLight, setThemeMode, type ThemeMode } from '../theme.js'
@@ -2832,18 +2833,6 @@ export class SebasSettingsModal extends LitElement {
     `
   }
 
-  /**
-   * wa-hide 来源守卫（redesign-provider-models-settings 2.1 / design D6）：
-   * Web Awesome 子控件（如 `<wa-select>`）收起自身列表框时会冒泡 composed
-   * `wa-hide`；`<wa-dialog>` 只在事件源是对话框自身时才关闭，子控件冒泡
-   * 上来的 hide 一律忽略——编辑器内任何选择交互都不会连带关闭整个弹窗。
-   */
-  private guardedHide(close: () => void): (e: Event) => void {
-    return (e: Event) => {
-      if (e.target === e.currentTarget) close()
-    }
-  }
-
   /** 对话框群：provider 编辑器/删除/设默认 + Services 行动作确认与停止
    *  拒绝的强制出口（全部挂在 settings 面板外层；全部带 wa-hide 来源守卫
    *  ——编辑器 / 设默认 / 删除 / 服务确认 / 强制出口，共 5 处）。原 Settings
@@ -2856,7 +2845,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label=${this.editorLabel()}
         ?open=${this.editor !== null}
-        @wa-hide=${this.guardedHide(() => (this.editor = null))}
+        @wa-hide=${guardedHide(() => (this.editor = null))}
         class="provider-editor"
       >
         ${this.editor === null ? nothing : this.renderEditorBody()}
@@ -2876,7 +2865,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Delete provider"
         ?open=${this.deleteTarget !== null}
-        @wa-hide=${this.guardedHide(() => (this.deleteTarget = null))}
+        @wa-hide=${guardedHide(() => (this.deleteTarget = null))}
       >
         <p class="dialog-text">
           Delete provider
@@ -2899,7 +2888,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Set default for new sessions"
         ?open=${this.defaultDraft !== null}
-        @wa-hide=${this.guardedHide(() => (this.defaultDraft = null))}
+        @wa-hide=${guardedHide(() => (this.defaultDraft = null))}
       >
         ${this.defaultDraft === null
           ? nothing
@@ -2954,7 +2943,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="New user"
         ?open=${this.userCreate !== null}
-        @wa-hide=${this.guardedHide(() => (this.userCreate = null))}
+        @wa-hide=${guardedHide(() => (this.userCreate = null))}
         class="user-create"
       >
         ${this.userCreate === null
@@ -3016,7 +3005,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Reset password"
         ?open=${this.userReset !== null}
-        @wa-hide=${this.guardedHide(() => (this.userReset = null))}
+        @wa-hide=${guardedHide(() => (this.userReset = null))}
         class="user-reset"
       >
         ${this.userReset === null
@@ -3061,7 +3050,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Delete user"
         ?open=${this.userDelete !== null}
-        @wa-hide=${this.guardedHide(() => (this.userDelete = null))}
+        @wa-hide=${guardedHide(() => (this.userDelete = null))}
         class="user-delete"
       >
         ${this.userDelete === null
@@ -3104,7 +3093,7 @@ export class SebasSettingsModal extends LitElement {
       <wa-dialog
         label="Delete skill"
         ?open=${this.skillDelete !== null}
-        @wa-hide=${this.guardedHide(() => (this.skillDelete = null))}
+        @wa-hide=${guardedHide(() => (this.skillDelete = null))}
         class="skill-delete"
       >
         ${this.skillDelete === null
@@ -3148,7 +3137,7 @@ export class SebasSettingsModal extends LitElement {
           ? `${this.confirmTarget.kind === 'disable' ? 'Disable' : 'Restart'} service`
           : 'Service action'}
         ?open=${this.confirmTarget !== null}
-        @wa-hide=${this.guardedHide(() => (this.confirmTarget = null))}
+        @wa-hide=${guardedHide(() => (this.confirmTarget = null))}
       >
         <p class="dialog-text">
           ${this.confirmTarget?.kind === 'disable' ? 'Disable' : 'Restart'} managed service
@@ -3188,7 +3177,7 @@ export class SebasSettingsModal extends LitElement {
         class="service-force-stop"
         label="Force stop service"
         ?open=${this.forceStop !== null}
-        @wa-hide=${this.guardedHide(() => (this.forceStop = null))}
+        @wa-hide=${guardedHide(() => (this.forceStop = null))}
       >
         <p class="dialog-text">
           Stopping <strong>${this.forceStop?.name ?? ''}</strong> was rejected: there

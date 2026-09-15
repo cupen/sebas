@@ -25,6 +25,8 @@ import {
   type NodeInfo,
 } from '../api/client.js'
 import { sharedWs } from '../api/shared-ws.js'
+import { icon } from '../components/icons.js'
+import { guardedHide } from '../components/wa-hide-guard.js'
 import { unreadCount, writeFocusAnchor } from './unread-cursor.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
@@ -162,8 +164,7 @@ export class SebasProjectRail extends LitElement {
       background: var(--sebas-accent-strong); border: none;
       border-radius: var(--sebas-radius-sm);
       color: var(--sebas-accent-ink); cursor: pointer;
-      font-size: 16px; line-height: 1; font-weight: 700;
-      font-family: var(--sebas-font-mono); padding: 0;
+      padding: 0;
       display: grid; place-items: center; width: 22px; height: 22px;
       transition: opacity var(--sebas-dur) var(--sebas-ease), filter var(--sebas-dur) var(--sebas-ease);
     }
@@ -242,7 +243,7 @@ export class SebasProjectRail extends LitElement {
     .row-action {
       width: 20px; height: 20px; background: none; border: 1px solid var(--sebas-border);
       border-radius: var(--sebas-radius-sm); color: var(--sebas-text-faint); cursor: pointer;
-      font-size: 13px; line-height: 1; display: grid; place-items: center; padding: 0; opacity: 0;
+      display: grid; place-items: center; padding: 0; opacity: 0;
       transition: opacity var(--sebas-dur) var(--sebas-ease), color var(--sebas-dur) var(--sebas-ease), background var(--sebas-dur) var(--sebas-ease), border-color var(--sebas-dur) var(--sebas-ease);
     }
     .row-remove:hover { color: var(--sebas-status-failed); background: var(--sebas-status-failed-bg); }
@@ -685,7 +686,7 @@ export class SebasProjectRail extends LitElement {
             title="Session actions"
             aria-label="Session actions for ${fullLabel}"
             aria-haspopup="menu"
-          >…</button>
+          >${icon('more', 12)}</button>
           <!-- （workbench-live-conversation-flow 4.2）归档是唯一生命周期
                出口，自带 close 语义（终止子进程 + 丢弃待执行，确认框点名）。 -->
           <wa-dropdown-item value="archive" variant="danger" @click=${(e: Event) => this.requestArchive(e, row)}>归档</wa-dropdown-item>
@@ -739,7 +740,7 @@ export class SebasProjectRail extends LitElement {
                 title="Project actions"
                 aria-label="Project actions for ${p.name}"
                 aria-haspopup="menu"
-              >…</button>
+              >${icon('more', 12)}</button>
               <wa-dropdown-item value="remove" @click=${(e: Event) => this.openRemoveDialog(e, p)}>移除项目</wa-dropdown-item>
             </wa-dropdown>
             <button
@@ -751,7 +752,7 @@ export class SebasProjectRail extends LitElement {
                 e.stopPropagation()
                 this.openNewSessionDialog(p)
               }}
-            >+</button>
+            >${icon('add', 12)}</button>
           </span>
         </div>
         ${nodeOk ? nothing : html`<div class="node-cause" data-testid="project-node-cause">节点 ${nodeLabel} 不可用：${st.cause ?? st.status}</div>`}
@@ -795,7 +796,7 @@ export class SebasProjectRail extends LitElement {
     return html`
       <div class="section-label">
         <span>Projects</span>
-        <button class="add-btn" aria-label="Add project" title="添加项目" @click=${this.openAddDialog}>+</button>
+        <button class="add-btn" aria-label="Add project" title="添加项目" @click=${this.openAddDialog}>${icon('add', 14)}</button>
       </div>
       ${this.error ? html`<div class="error">${this.error} <button class="retry-btn" @click=${() => void this.refresh()}>重试</button></div>` : nothing}
       ${this.degradedHint ? html`<div class="degraded-hint" role="status" data-testid="project-degraded-hint">${this.degradedHint}</div>` : nothing}
@@ -803,7 +804,7 @@ export class SebasProjectRail extends LitElement {
       ${this.renderWaiting()}
       ${this.renderHistory()}
 
-      <wa-dialog label="Add project" style="--width: 480px;" .open=${this.addDialogOpen} @wa-hide=${() => this.closeAddDialog()}>
+      <wa-dialog label="Add project" style="--width: 480px;" .open=${this.addDialogOpen} @wa-hide=${guardedHide(() => this.closeAddDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-4);">
           <p style="font-size:0.85rem;color:var(--sebas-text);margin:0;">Choose a directory to add as a project:</p>
           <sebas-folder-picker class="folder-picker" @folder-selected=${this.onFolderSelected}></sebas-folder-picker>
@@ -834,7 +835,7 @@ export class SebasProjectRail extends LitElement {
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeAddDialog()}>Cancel</wa-button>
       </wa-dialog>
 
-      <wa-dialog label="Remove project" style="--width: 440px;" .open=${this.removeTarget !== null} @wa-hide=${() => this.closeRemoveDialog()}>
+      <wa-dialog label="Remove project" style="--width: 440px;" .open=${this.removeTarget !== null} @wa-hide=${guardedHide(() => this.closeRemoveDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
             移除项目 <b>${this.removeTarget?.name ?? ''}</b>？
@@ -857,7 +858,7 @@ export class SebasProjectRail extends LitElement {
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeRemoveDialog()}>取消</wa-button>
       </wa-dialog>
 
-      <wa-dialog label="归档会话" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${() => this.closeConfirmDialog()}>
+      <wa-dialog label="归档会话" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${guardedHide(() => this.closeConfirmDialog())}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
             归档会话 <b>${this.closeTarget ? truncateName(fullSessionLabel(this.closeTarget)) : ''}</b>？

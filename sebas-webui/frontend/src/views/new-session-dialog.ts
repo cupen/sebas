@@ -22,6 +22,7 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo } from '../api/client.js'
+import { guardedHide } from '../components/wa-hide-guard.js'
 import {
   loadLastUsedPair,
   loadModelCatalog,
@@ -201,7 +202,7 @@ export class SebasNewSessionDialog extends LitElement {
         label=${this.projectName ? `New session in ${this.projectName}` : 'New session'}
         style="--width: 460px;"
         ?open=${this.open}
-        @wa-hide=${() => this.cancel()}
+        @wa-hide=${guardedHide(() => this.cancel())}
         data-testid="new-session-dialog"
       >
         <div class="form">
