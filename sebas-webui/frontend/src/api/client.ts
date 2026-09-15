@@ -902,6 +902,15 @@ export const api = {
     post<{ status: string; redirect: string; active_session_key: string }>(
       `/api/sessions/${encodedKey}/switch`,
     ),
+  /**
+   * （workbench-live-conversation-flow 3.1）聚焦即拉起：无 prompt 拉起会话
+   * 子进程（0-turn 占位 fresh、Dormant resume）。幂等——已活/在途返回
+   * `already-running`；失败不致命（占位保留），调用方 fire-and-forget。
+   */
+  activateSession: (encodedKey: string) =>
+    post<{ status: 'started' | 'already-running' }>(
+      `/api/sessions/${encodedKey}/activate`,
+    ),
 
   // Provider 管理（BFF → core 状态库；preset 表跟随代码）。
   providers: () => get<{ providers: ProviderAdmin[] }>('/api/providers'),

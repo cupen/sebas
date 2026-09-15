@@ -26,7 +26,9 @@
 //!    than delivered a gap; the client re-snapshots on reconnect.
 
 use sebas_channels::ChannelKey;
-use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{
+    PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent,
+};
 use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
 use serde::{Deserialize, Serialize};
 
@@ -123,6 +125,12 @@ pub enum CoreChannelRequest {
         message: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
+    },
+    /// 聚焦即拉起（workbench-live-conversation-flow 3.1）：无 prompt 拉起
+    /// 会话子进程（占位 fresh / Dormant resume），幂等（已活/在途 → started
+    /// = false）。
+    Activate {
+        key: ChannelKey,
     },
     /// （extract-im-service 2.1）IM 前端 ensure 语义的消息投递：未知 key 按
     /// 入站文本历史语义自动建会话、dormant 会话懒复活；已知 active key 等
@@ -257,6 +265,9 @@ pub enum CoreChannelResponse {
     Turns { entries: Vec<TurnEntry> },
     /// Focused-session result.
     Focused { key: Option<ChannelKey> },
+    /// Activate 的应答：started = 本次调用真正触发了拉起（false = 已活着
+    /// 或已在途，幂等无操作）。
+    Activated { started: bool },
     /// Typed rejection — names the reason; nothing was mutated.
     Rejected {
         #[serde(flatten)]
@@ -309,6 +320,12 @@ pub enum SessionStreamFrame {
     /// a request with no reachable client fails closed at the kernel.
     ApprovalRequested {
         notice: PermissionNotice,
+    },
+    /// 实时回合内容帧（workbench-live-conversation-flow 1.1）：同一合并窗
+    /// 内某会话追加的 transcript 条目。日志仍是唯一事实——本帧是增量补充，
+    /// 乱序/迟到/丢失由消费端以快照重取收敛，不参与重连重放。
+    Turn {
+        event: TurnStreamEvent,
     },
 }
 

@@ -13,7 +13,9 @@
 use async_trait::async_trait;
 use sebas_channels::key::ChannelKey;
 use sebas_dispatch::engine::CancelOutcome;
-use sebas_dispatch::{PendingSubmission, SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{
+    PendingSubmission, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -221,6 +223,23 @@ pub trait SessionBackend: Send + Sync {
     /// Subscribe to session events (created / updated / removed / resync).
     /// Bounded: a lagging consumer sees `broadcast::error::RecvError::Lagged`.
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent>;
+
+    /// 聚焦即拉起（workbench-live-conversation-flow 3.1）：无 prompt 拉起
+    /// 会话子进程（占位 fresh / Dormant resume）。幂等：已活/在途 →
+    /// `Ok(false)`。默认实现 = 无子进程概念的后端如实回报无事可做。
+    async fn activate(&self, _key: ChannelKey) -> Result<bool, SessionRejection> {
+        Ok(false)
+    }
+
+    /// Subscribe to live turn-content events（workbench-live-conversation-flow
+    /// 1.1）：transcript 每批追加一条事件，携带 `(channel, key)` 与按落库序
+    /// 排列的条目。Lagged 是建议性的（内容可从快照恢复），消费端不得因此
+    /// 断链。默认实现返回一个立即关闭的接收端——不承载流的后端据此让消费
+    /// 方进入「无流」旁路（消费端对 Closed 的处置是停用该支路，不是报错）。
+    fn subscribe_turn_events(&self) -> broadcast::Receiver<TurnStreamEvent> {
+        let (_tx, rx) = broadcast::channel(1);
+        rx
+    }
 
     /// Create a session, optionally rooted in a project directory. Returns
     /// the new session key. The placeholder is immediately visible in
@@ -587,6 +606,19 @@ impl SessionBackend for InProcessBackend {
 
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.router.subscribe_session_events()
+    }
+
+    fn subscribe_turn_events(&self) -> broadcast::Receiver<TurnStreamEvent> {
+        self.router.subscribe_turn_events()
+    }
+
+    async fn activate(&self, key: ChannelKey) -> Result<bool, SessionRejection> {
+        self.router
+            .web_activate_session(key)
+            .await
+            .map_err(|e| SessionRejection::Unavailable {
+                cause: format!("activate failed: {e}"),
+            })
     }
 
     async fn spawn(

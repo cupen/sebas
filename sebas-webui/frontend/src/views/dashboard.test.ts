@@ -25,6 +25,7 @@ const apiMocks = vi.hoisted(() => ({
   projectsList: vi.fn(),
   closeSession: vi.fn(),
   archiveSession: vi.fn(),
+  activateSession: vi.fn(async () => ({ status: 'already-running' })),
   nodes: vi.fn(),
   agents: vi.fn(),
 }))
@@ -38,6 +39,7 @@ vi.mock('../api/client.js', () => ({
     projects: { branch: apiMocks.projectsBranch, list: apiMocks.projectsList },
     closeSession: apiMocks.closeSession,
     archiveSession: apiMocks.archiveSession,
+    activateSession: apiMocks.activateSession,
     nodes: apiMocks.nodes,
     agents: apiMocks.agents,
   },
@@ -315,7 +317,7 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
-  it('renders the migrated session head: badge, agent lock, model pick, close + archive (3.3)', async () => {
+  it('renders the migrated session head as display-only (workbench-live-conversation-flow 4.2)', async () => {
     apiMocks.summary.mockResolvedValue(focusedSummary())
     apiMocks.session.mockResolvedValue({
       ...detailFixture(),
@@ -332,13 +334,13 @@ describe('sebas-dashboard (workbench main area)', () => {
     expect(head!.querySelector('sebas-status-badge')).toBeTruthy()
     expect(head!.textContent).toContain('chat-live')
     expect(head!.querySelector('[data-testid="agent-lock"]')?.textContent).toContain('claude')
-    // 会话内模型选择：available_models 非空才显示。
-    const modelSelect = head!.querySelector('wa-select.model-select')
-    expect(modelSelect).toBeTruthy()
-    // Close/归档动作可达。
-    const buttons = [...head!.querySelectorAll('wa-button')].map((b) => b.textContent?.trim())
-    expect(buttons).toContain('Close')
-    expect(buttons).toContain('Archive')
+    // 头部去交互化：零按钮、零链接、零 mode/model 切换控件。
+    expect(head!.querySelector('wa-button')).toBeNull()
+    expect(head!.querySelector('a[href="/sessions"]')).toBeNull()
+    expect(head!.querySelector('wa-select')).toBeNull()
+    // 切换交互归 composer：mode/model 供数到位。
+    const composer = el.shadowRoot!.querySelector('sebas-workbench-composer')
+    expect(composer).toBeTruthy()
     // review cards 从工作台可达（3.3）。
     expect(el.shadowRoot!.querySelector('sebas-review-cards')).toBeTruthy()
     el.remove()
@@ -353,38 +355,17 @@ describe('sebas-dashboard (workbench main area)', () => {
     el.remove()
   })
 
-  it('close confirmation names the discarded pending count (turn-queue semantics)', async () => {
+  it('focus transitions fire the idempotent activate call (workbench-live-conversation-flow 3.1)', async () => {
     apiMocks.summary.mockResolvedValue(focusedSummary())
-    apiMocks.session.mockResolvedValue({
-      ...detailFixture(),
-      pending: [{ id: 1, text: 'queued msg', position: 0, disposition: 'turn', priority: false }],
-    })
+    apiMocks.session.mockResolvedValue(detailFixture())
     const el = await mount()
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    // 打开确认对话框。
-    const closeBtn = [...el.shadowRoot!.querySelectorAll('wa-button')].find((b) =>
-      b.textContent?.trim() === 'Close',
-    )
-    closeBtn!.click()
-    await el.updateComplete
-    const note = el.shadowRoot!.querySelector<HTMLElement>('[data-testid="close-discards-pending"]')
-    expect(note?.textContent).toContain('1')
-  })
-
-  it('archives the focused session from the workbench and refetches (3.3)', async () => {
-    apiMocks.summary.mockResolvedValue(focusedSummary())
-    apiMocks.archiveSession.mockResolvedValue({ status: 'archived', entry: {} })
-    const el = await mount()
-    await new Promise((r) => setTimeout(r, 0))
-    await el.updateComplete
-    const archiveBtn = [...el.shadowRoot!.querySelectorAll('wa-button')].find((b) =>
-      b.textContent?.trim() === 'Archive',
-    )
-    archiveBtn!.click()
-    await new Promise((r) => setTimeout(r, 0))
-    await el.updateComplete
-    expect(apiMocks.archiveSession).toHaveBeenCalledWith('oc_live%00')
+    // 聚焦即拉起：焦点 key 首次出现时触发 activate；同焦点不重复请求。
+    expect(apiMocks.activateSession).toHaveBeenCalledWith('oc_live%00')
+    const calls = apiMocks.activateSession.mock.calls.length
+    await new Promise((r) => setTimeout(r, 30))
+    expect(apiMocks.activateSession.mock.calls.length).toBe(calls)
     el.remove()
   })
 

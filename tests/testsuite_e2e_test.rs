@@ -2128,3 +2128,162 @@ async fn get_json_status(
         .map_err(|e| format!("body of {url}: {e}"))?;
     Ok((status, json))
 }
+
+/// workbench-live-conversation-flow 3.1/7.1：聚焦即拉起的进程级旅程。
+///
+/// 0-turn 占位（无 prompt）→ `POST /api/sessions/{key}/activate` 一次 =
+/// `started`（无 prompt 拉起子进程，占位离开 starting 态且没有任何回合）
+/// → 再 activate = `already-running`（幂等，无重复 spawn）。模型芯片的
+/// 数据源（fakeacp 的 configOptions）由沙箱冒烟覆盖——专用 claude 驱动
+/// 不报 configOptions，这里不断言模型表。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn activate_placeholder_spawns_without_prompt() {
+    let sb = Sandbox::new("testsuite_e2e", "activate-placeholder");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 0-turn 占位：创建请求不带 prompt。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "agent": "claude" }),
+    )
+    .await
+    .expect("create placeholder");
+    assert_eq!(status, 201, "create placeholder: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let activate_url = format!("{}/api/sessions/{key}/activate", sb.webui_url());
+
+    // 第一次激活 = started（无 prompt 拉起）。
+    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+        .await
+        .expect("activate #1");
+    assert_eq!(status, 200, "activate #1: {body}");
+    assert_eq!(body["status"], "started", "activate #1: {body}");
+
+    // 子进程拉起后离开 starting 态（无 prompt、无回合——0-turn 占位保持）。
+    let detail = wait_for(
+        "placeholder to leave starting after activate",
+        Duration::from_secs(25),
+        &sb.path.clone(),
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli
+                        .get(&url)
+                        .send()
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?;
+                    (v["status_slug"].as_str() != Some("starting")).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        detail["entries"].as_array().map(Vec::len),
+        Some(0),
+        "activation must not run a turn: {detail}"
+    );
+
+    // 幂等：第二次激活 = already-running（无第二次 spawn）。
+    let (status, body) = post_json(&cli, &activate_url, serde_json::json!({}))
+        .await
+        .expect("activate #2");
+    assert_eq!(status, 200, "activate #2: {body}");
+    assert_eq!(body["status"], "already-running", "activate #2: {body}");
+}
+
+/// workbench-live-conversation-flow 2.1/7.1：回合内容实时流式的进程级
+/// 旅程——订阅 `/ws` 后提交一条消息，`turn.append` 帧（合并窗批帧，条目
+/// position 单调）必须在回合结束前/后到达，且内容覆盖操作员 prompt 与
+/// agent 回复。快照重取收敛由组件测试覆盖，这里只钉传输契约。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn turn_appends_stream_over_ws() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let sb = Sandbox::new("testsuite_e2e", "turn-append-ws");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 创建并等首回合收敛（fake-claude 对任意 prompt 回 "hello world"）。
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "stream me", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+
+    // 先订阅（快照帧先行），再提交第二条消息——帧在提交之后到达证明是
+    // 推送而非轮询假象。
+    let ws_url = sb.webui_url().replace("http://", "ws://") + "/ws";
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("ws connect");
+    // 排干订阅快照帧。
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions/{key}/message", sb.webui_url()),
+        serde_json::json!({ "message": "second turn please" }),
+    )
+    .await
+    .expect("send message");
+    assert_eq!(status, 200, "send: {body}");
+
+    // 收 8 秒帧：必须出现 turn.append，且条目含 prompt 与 agent 内容。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut prompt_seen = false;
+    let mut agent_seen = false;
+    while tokio::time::Instant::now() < deadline {
+        let frame = match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => text,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(e))) => panic!("ws read failed: {e}"),
+            Ok(None) => panic!("ws closed early"),
+            Err(_) => break, // 2s 无帧：回合内容已全部到齐（或超时判负）
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&frame) else {
+            continue;
+        };
+        if v["type"] != "turn.append" {
+            continue;
+        }
+        let entries = v["entries"].as_array().cloned().unwrap_or_default();
+        for e in &entries {
+            let kind = e["kind"].as_str().unwrap_or("");
+            let content = e["content"].as_str().unwrap_or("");
+            if kind == "prompt" && content.contains("second turn please") {
+                prompt_seen = true;
+            }
+            if kind == "content" && !content.is_empty() && e["position"].as_u64().unwrap_or(0) > 1 {
+                agent_seen = true;
+            }
+        }
+        if prompt_seen && agent_seen {
+            break;
+        }
+    }
+    assert!(prompt_seen, "prompt entry must stream over ws");
+    assert!(agent_seen, "agent content must stream over ws");
+    let _ = ws.close(None).await;
+}

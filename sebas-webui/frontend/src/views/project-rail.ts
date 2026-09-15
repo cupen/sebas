@@ -519,40 +519,32 @@ export class SebasProjectRail extends LitElement {
   // ─── Close session（5.2：inactive 直删 / active 需确认）────────────
   @state() private closeTarget: SessionRow | null = null
   @state() private closeError: string | null = null
-  private static readonly ACTIVE_SLUGS = new Set(['starting', 'queued', 'working'])
 
-  private async closeSession(e: Event, row: SessionRow) {
+  // ─── Archive（workbench-live-conversation-flow 4.2：唯一出口，确认框
+  // 合并 close 语义——终止子进程 + 点名将被丢弃的待执行条数）────────────
+  private requestArchive(e: Event, row: SessionRow) {
     void e
-    if (SebasProjectRail.ACTIVE_SLUGS.has(row.status_slug)) {
-      // active 会话误杀不可逆——先内联确认。
-      this.closeTarget = row
-      this.closeError = null
-      return
-    }
-    try {
-      await api.closeSession(row.encoded_key)
-      void this.refresh()
-    } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
+    // 归档即关闭（服务端语义）：一律内联确认，不因会话空闲而跳过——
+    // 「将丢弃 N 条待执行」的告知不该依赖会话状态。
+    this.closeTarget = row
+    this.closeError = null
   }
   private closeConfirmDialog() { this.closeTarget = null; this.closeError = null }
-  private async confirmCloseSession() {
+  private archiving = false
+  private async confirmArchiveSession() {
     const row = this.closeTarget
-    if (!row) return
+    if (!row || this.archiving) return
+    // 重入护栏：确认按钮的合成 click 可能双发，归档只执行一次。
+    this.archiving = true
     try {
-      await api.closeSession(row.encoded_key)
+      await api.archiveSession(row.encoded_key)
       this.closeConfirmDialog()
       void this.refresh()
     } catch (err) {
       this.closeError = err instanceof Error ? err.message : String(err)
+    } finally {
+      this.archiving = false
     }
-  }
-
-  private async archiveSession(e: Event, encodedKey: string) {
-    void e
-    try {
-      await api.archiveSession(encodedKey)
-      void this.refresh()
-    } catch (err) { this.error = err instanceof Error ? err.message : String(err) }
   }
 
   private async restoreSession(e: Event, encodedKey: string) {
@@ -694,8 +686,9 @@ export class SebasProjectRail extends LitElement {
             aria-label="Session actions for ${fullLabel}"
             aria-haspopup="menu"
           >…</button>
-          <wa-dropdown-item value="archive" @click=${(e: Event) => this.archiveSession(e, row.encoded_key)}>归档</wa-dropdown-item>
-          <wa-dropdown-item value="close" variant="danger" @click=${(e: Event) => this.closeSession(e, row)}>关闭</wa-dropdown-item>
+          <!-- （workbench-live-conversation-flow 4.2）归档是唯一生命周期
+               出口，自带 close 语义（终止子进程 + 丢弃待执行，确认框点名）。 -->
+          <wa-dropdown-item value="archive" variant="danger" @click=${(e: Event) => this.requestArchive(e, row)}>归档</wa-dropdown-item>
         </wa-dropdown>
       </li>`
   }
@@ -864,13 +857,13 @@ export class SebasProjectRail extends LitElement {
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeRemoveDialog()}>取消</wa-button>
       </wa-dialog>
 
-      <wa-dialog label="Close session" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${() => this.closeConfirmDialog()}>
+      <wa-dialog label="归档会话" style="--width: 440px;" .open=${this.closeTarget !== null} @wa-hide=${() => this.closeConfirmDialog()}>
         <div class="wa-stack" style="gap:var(--sebas-space-3);">
           <p style="font-size:0.88rem;color:var(--sebas-text);margin:0;">
-            关闭会话 <b>${this.closeTarget ? truncateName(fullSessionLabel(this.closeTarget)) : ''}</b>？
+            归档会话 <b>${this.closeTarget ? truncateName(fullSessionLabel(this.closeTarget)) : ''}</b>？
           </p>
           <p style="font-size:0.8rem;color:var(--sebas-text-dim);margin:0;">
-            该会话的 agent 子进程正在运行，关闭会终止子进程并移除会话映射，不可撤销。
+            归档会终止 agent 子进程并把会话移入 History（只读，可恢复），不可撤销。
           </p>
           ${closePendingCount > 0
             ? html`<p
@@ -882,7 +875,7 @@ export class SebasProjectRail extends LitElement {
             : nothing}
           ${this.closeError ? html`<div style="color:var(--sebas-status-failed);font-size:0.78rem;">${this.closeError}</div>` : nothing}
         </div>
-        <wa-button slot="footer" variant="danger" @click=${() => void this.confirmCloseSession()}>关闭会话</wa-button>
+        <wa-button slot="footer" variant="danger" @click=${() => void this.confirmArchiveSession()}>归档</wa-button>
         <wa-button slot="footer" appearance="plain" @click=${() => this.closeConfirmDialog()}>取消</wa-button>
       </wa-dialog>
 

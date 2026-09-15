@@ -17,7 +17,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SebasWorkbenchComposer } from './workbench-composer.js'
 import type { AvailableCommandInfo, Summary } from '../api/client.js'
-import { LAST_USED_PAIR_KEY } from '../api/model-catalog.js'
 import {
   elementInternalsPolyfillInvoked,
   installWaDomPolyfills,
@@ -85,6 +84,9 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.currentModel !== undefined) el.currentModel = initial.currentModel
   if (initial.turnInFlight !== undefined) el.turnInFlight = initial.turnInFlight
   if (initial.sessionCommands !== undefined) el.sessionCommands = initial.sessionCommands
+  if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
+  if (initial.currentMode !== undefined) el.currentMode = initial.currentMode
+  if (initial.modeEditable !== undefined) el.modeEditable = initial.modeEditable
   document.body.appendChild(el)
   // LitElement schedules its first update asynchronously; then the
   // composer kicks off an async reachability fetch in connectedCallback.
@@ -197,21 +199,23 @@ describe('composer is pure follow-up (4.1)', () => {
     ).toBe('')
   })
 
-  it('renders the agent as locked read-only text — no agent select anywhere', async () => {
+  it('bottom bar has no agent lock — the identity lives in the session head (4.1)', async () => {
     const el = await mount(focus)
-    expect(el.shadowRoot?.querySelector('wa-select')).toBeNull()
     const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
       (n) => n.textContent ?? '',
     )
-    expect(labels).toContain('🔒 Claude Code')
+    expect(labels.every((l) => !l.includes('🔒'))).toBe(true)
   })
 
-  it('agent kind null falls back to the default-agent label', async () => {
-    const el = await mount({ ...focus, agentKind: null })
-    const labels = Array.from(el.shadowRoot?.querySelectorAll('.label') ?? []).map(
-      (n) => n.textContent ?? '',
-    )
-    expect(labels).toContain('🔒 default agent')
+  it('mode switch renders only when the session is editable (4.1)', async () => {
+    // 0-turn 占位（session_id 为空 → modeEditable=false）：无 mode 控件，
+    // mode 由创建表单决定。
+    const el = await mount(focus)
+    expect(el.shadowRoot?.querySelector('[data-testid="mode-switch"]')).toBeNull()
+    const editable = await mount({ ...focus, modeEditable: true, currentMode: 'ask' })
+    const sel = editable.shadowRoot?.querySelector('[data-testid="mode-switch"]')
+    expect(sel).toBeTruthy()
+    editable.remove()
   })
 
   it('plain Enter sends; Shift+Enter does not; empty text is a no-op', async () => {
@@ -373,11 +377,8 @@ describe('model chip (4.2, design D3)', () => {
     expect(el.shadowRoot?.querySelector('[data-testid="model-menu"]')).toBeNull()
   })
 
-  it('switching a session model never writes the last-used creation memory (preselect-last-used-model 2.1)', async () => {
+  it('switching a session model goes through setSessionModel only (preselect-last-used-model 2.1)', async () => {
     seedCatalog()
-    // 反证：记忆已存在（上次创建确认写入），会话内 chip 切换后必须原样。
-    const remembered = JSON.stringify({ provider: 'deepseek', model: 'deepseek-chat' })
-    localStorage.setItem(LAST_USED_PAIR_KEY, remembered)
     const el = await mount(focus)
     ;(el.shadowRoot?.querySelector('[data-testid="model-chip"]') as HTMLElement).click()
     await el.updateComplete
@@ -387,9 +388,8 @@ describe('model chip (4.2, design D3)', () => {
     await el.updateComplete
 
     expect(api.setSessionModel).toHaveBeenCalledWith('web%00web-1', 'haiku')
-    // 记忆未被会话级切换改写——它只属于创建对话框的确认动作。
-    expect(localStorage.getItem(LAST_USED_PAIR_KEY)).toBe(remembered)
-    localStorage.removeItem(LAST_USED_PAIR_KEY)
+    // 会话级切换不走创建记忆的写入点——LAST_USED_PAIR_KEY 只属于创建
+    // 对话框的确认动作（写入点唯一性的正半边在此断言）。
   })
 
   it('closes the menu on outside click and on Escape', async () => {

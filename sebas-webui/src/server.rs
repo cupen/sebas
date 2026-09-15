@@ -231,6 +231,8 @@ fn build_router_full(
         .route("/api/sessions/{key}/message", post(api::send_message))
         // workbench-interaction-polish 1.2：中断在飞 turn（cancel 链路 BFF 面）。
         .route("/api/sessions/{key}/cancel", post(api::cancel_session))
+        // 聚焦即拉起（workbench-live-conversation-flow 3.1）。
+        .route("/api/sessions/{key}/activate", post(api::activate_session))
         .route("/api/sessions/{key}/model", post(api::set_session_model))
         // （add-agent-mode-selection）中程切换会话权限模式。
         .route("/api/sessions/{key}/mode", post(api::set_session_mode))

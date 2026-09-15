@@ -54,7 +54,7 @@
 
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type AgentKindInfo, type AvailableCommandInfo } from '../api/client.js'
+import { api, type AvailableCommandInfo } from '../api/client.js'
 import {
   loadModelCatalog,
   groupSessionModels,
@@ -64,6 +64,8 @@ import {
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
+import '@awesome.me/webawesome/dist/components/select/select.js'
+import '@awesome.me/webawesome/dist/components/option/option.js'
 
 /** Reachability 轮询周期：断连横幅与 composer 禁用态的翻转延迟上限。 */
 const WORKBENCH_REACHABILITY_POLL_MS = 5_000
@@ -114,12 +116,25 @@ export class SebasWorkbenchComposer extends LitElement {
    * （status == Working）。dashboard 供数；turn 结束（WS 推送）自动复位。
    */
   @property({ type: Boolean }) turnInFlight = false
+  /**
+   * （workbench-live-conversation-flow 3.2）聚焦会话的子进程正在拉起
+   * （0-turn 占位激活中 / Dormant resume 在途）。模型芯片据此显示
+   * 「启动中…」而不是误导性的「无可用模型」——后者只在 spawn 完成
+   * 且 agent 确实没报模型时出现。
+   */
+  @property({ type: Boolean }) childStarting = false
+  /**
+   * （4.1）mode 切换自会话头迁入底沿左端：当前期望 mode（desired，
+   * 远端会话为节点回报值）。`null` = 会话未记录 mode（创建表单的
+   * 「agent 默认」）。
+   */
+  @property({ attribute: false }) currentMode: string | null = null
+  /** mode 切换可用性：0-turn 占位（无 session_id）不可切——mode 由创建表单决定。 */
+  @property({ type: Boolean }) modeEditable = false
 
   @state() private text = ''
   @state() private sending = false
   @state() private error: string | null = null
-  /** Agent catalog（/api/agents）：跟随模式 🔒 标签的 display 名解析。 */
-  @state() private agents: AgentKindInfo[] = []
   /**
    * Settings 目录（design D3 分组交叉引用的数据源）：只用于把会话平铺模型
    * id 归回 provider 组；目录不可得时芯片退化为平铺，不伪造分组。
@@ -129,6 +144,8 @@ export class SebasWorkbenchComposer extends LitElement {
   @state() private unreachable: { ok: false; cause: string } | null = null
   /** 中程切换聚焦会话模型时的在途标记（add-acp-model-selection 语义）。 */
   @state() private modelSwitching = false
+  /** 中程切换会话权限模式的在途标记（add-agent-mode-selection 语义）。 */
+  @state() private modeSwitching = false
   /** 模型芯片两级菜单的开合（design D3）。 */
   @state() private modelMenuOpen = false
   /**
@@ -153,7 +170,6 @@ export class SebasWorkbenchComposer extends LitElement {
   connectedCallback(): void {
     super.connectedCallback()
     void this.loadReachability()
-    void this.loadAgents()
     void this.loadCatalog()
     // defaults/catalog 变更（管理页 set/clear）即时反映到芯片分组。
     window.addEventListener('sebas:refetch', this.reloadCatalogBound)
@@ -203,16 +219,6 @@ export class SebasWorkbenchComposer extends LitElement {
     this.catalog = catalog
   }
 
-  private async loadAgents(): Promise<void> {
-    try {
-      const d = await api.agents()
-      this.agents = d.agents
-    } catch {
-      // catalog 不可达：🔒 标签退回 raw slug（display 名是锦上添花）。
-      this.agents = []
-    }
-  }
-
   private async loadReachability(): Promise<void> {
     try {
       const data = await api.summary()
@@ -221,9 +227,6 @@ export class SebasWorkbenchComposer extends LitElement {
       } else {
         this.unreachable = null
       }
-      // 逐 agent 可用性归 /api/agents（workbench-agent-wire-fix 3.2），
-      // summary 只承担 core 可达性门禁。
-      void this.loadAgents()
     } catch {
       /* add-webui-allowed-roots D6：summary 请求本身失败（服务进程死亡 /
        * 网络故障）与 reachability.ok = false 同款对待——进入不可达态禁用
@@ -321,20 +324,25 @@ export class SebasWorkbenchComposer extends LitElement {
     }
   }
 
-  /**
-   * Follow-up mode's read-only agent label: the bound kind resolved to its
-   * display name via /api/agents; unknown/unreachable kinds fall back
-   * to the raw slug, and `null` (the wire's "no kind recorded") means the
-   * configured default.
-   */
-  private agentLabel(): string {
-    if (this.agentKind) {
-      const a = this.agents.find((x) => x.id === this.agentKind)
-      return a?.display ?? this.agentKind
+  /** 底沿左端的 mode 切换（add-agent-mode-selection 通道不变）。 */
+  private async switchMode(mode: string): Promise<void> {
+    const key = this.sessionKey
+    if (!key || this.modeSwitching) return
+    this.modeSwitching = true
+    this.error = null
+    try {
+      await api.setSessionMode(key, mode)
+      this.dispatchEvent(
+        new CustomEvent('composer-sent', { detail: { key }, bubbles: true, composed: true }),
+      )
+    } catch (e) {
+      this.error = String(e)
+    } finally {
+      this.modeSwitching = false
     }
-    return this.agents.find((x) => x.id === 'native' && false)?.display ?? 'default agent'
   }
 
+  /**
   // ── 命令面板（session-slash-commands 3.1–3.3 / 4.1–4.2，design D3/D4/D5）──
 
   /**
@@ -510,6 +518,17 @@ export class SebasWorkbenchComposer extends LitElement {
 
   private renderModelChip() {
     if (this.sessionModels.length === 0) {
+      // 子进程拉起中（workbench-live-conversation-flow 3.2）：模型表要等
+      // agent 上报，此刻「无可用模型」是误导——显式呈现启动中。
+      if (this.childStarting) {
+        return html`<span
+          class="label placeholder model-chip-empty"
+          data-testid="model-chip-starting"
+          role="status"
+          title="子进程拉起中，模型表随后可用"
+          >启动中…</span
+        >`
+      }
       // 显式诚实态：该会话无可选模型，绝不渲染空菜单（agent-workbench
       // delta「chip without session models is stated honestly」）。
       return html`<span
@@ -657,12 +676,26 @@ export class SebasWorkbenchComposer extends LitElement {
         </div>
         <div class="composer-bottom">
           <div class="left-tools">
-            <span
-              class="label"
-              data-testid="agent-lock"
-              title="Agent is immutable — chosen when the session was created"
-              >🔒 ${this.agentLabel()}</span
-            >
+            ${this.modeEditable
+              ? html`<wa-select
+                  class="mode-select"
+                  size="xs"
+                  hoist
+                  value=${this.currentMode ?? ''}
+                  ?disabled=${this.modeSwitching}
+                  aria-label="Session mode"
+                  data-testid="mode-switch"
+                  @change=${(e: Event) => {
+                    const v = (e as unknown as { target: { value: string } }).target.value
+                    if (v) void this.switchMode(v)
+                  }}
+                >
+                  <wa-option value="ask">ask</wa-option>
+                  <wa-option value="edit">edit</wa-option>
+                  <wa-option value="allow">allow</wa-option>
+                  <wa-option value="auto">auto</wa-option>
+                </wa-select>`
+              : nothing}
           </div>
           <div class="right-tools">
             ${this.renderModelChip()}

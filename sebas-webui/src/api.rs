@@ -1184,6 +1184,44 @@ pub async fn send_message(
     (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
 }
 
+/// POST /api/sessions/{key}/activate — 聚焦即拉起（workbench-live-conversation-flow
+/// 3.1）：无 prompt 拉起会话子进程（0-turn 占位 fresh、Dormant resume）。
+/// 幂等：已活/在途返回 `already-running`。归档会话与越界项目的会话照常
+/// 拒绝（拉起 = 打开，不在放行之列）；前端聚焦时 fire-and-forget 调用，
+/// 失败不致命——占位保留，错误经事件流就地呈现。
+pub async fn activate_session(
+    State(state): State<WebUiState>,
+    Path(key): Path<String>,
+) -> Response {
+    if crate::archive::is_archived(&key) {
+        return api_error(StatusCode::BAD_REQUEST, "Session is archived");
+    }
+    let session_key = match decode_session_key(&key) {
+        Some(k) => k,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid session key"),
+    };
+    if let Some(rej) = out_of_scope_session_rejection(&state, &session_key).await {
+        return rej;
+    }
+    let infos = state.backend.snapshot().await;
+    if !infos
+        .iter()
+        .any(|i| i.channel == session_key.channel.as_str() && i.key == session_key.reference)
+    {
+        return api_error(StatusCode::NOT_FOUND, "Session not found");
+    }
+    match state.backend.activate(session_key).await {
+        Ok(started) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": if started { "started" } else { "already-running" },
+            })),
+        )
+            .into_response(),
+        Err(rej) => rejection_response(rej),
+    }
+}
+
 /// POST /api/sessions/{key}/cancel — interrupt the session's in-flight turn
 /// over the core channel (workbench-interaction-polish 1.2，design D5)。
 /// 会话与子进程存活（interrupt-and-heal）；排队提交不随取消丢弃。类型化
@@ -2082,6 +2120,27 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
     }
 }
 
+/// 取下一条回合内容事件；接收端关闭后把支路停用并永久挂起（与
+/// permission 支路的 None 语义一致，避免忙等）。Lagged 跳过——增量可由
+/// 快照收敛，连接不断。
+async fn recv_turn_event(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<sebas_dispatch::TurnStreamEvent>>,
+) -> Option<sebas_dispatch::TurnStreamEvent> {
+    loop {
+        match rx.as_mut() {
+            None => return std::future::pending().await,
+            Some(r) => match r.recv().await {
+                Ok(ev) => return Some(ev),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    *rx = None;
+                    return std::future::pending().await;
+                }
+            },
+        }
+    }
+}
+
 /// Per-connection loop: forwards backend session events, answers the
 /// protocol keep-alive with server pings, and drains client frames (only
 /// Close is meaningful) until either side hangs up.
@@ -2091,6 +2150,9 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
     // Review-card feed (gated tool calls). Backends without permission
     // interaction yield `None`; the select leg below then never fires.
     let mut permissions = state.backend.permission_requests();
+    // 实时回合内容（workbench-live-conversation-flow 2.1）。默认后端给的是
+    // 立即关闭的接收端——Closed 后停用支路（Option 置 None），不忙等。
+    let mut turns = Some(state.backend.subscribe_turn_events());
     let mut ping = tokio::time::interval(WS_PING_INTERVAL);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.reset();
@@ -2131,6 +2193,21 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                         tool_name: notice.tool_name,
                         args: notice.args,
                         reason: notice.reason,
+                    };
+                    let text = serde_json::to_string(&frame).unwrap_or_default();
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            turn = recv_turn_event(&mut turns) => {
+                if let Some(event) = turn {
+                    // seq = 本帧最后一条的 position：前端的去重锚。
+                    let seq = event.entries.last().map(|e| e.position).unwrap_or(0);
+                    let frame = WebUiEvent::TurnAppend {
+                        session_id: encode_channel_key(&event.channel, &event.key),
+                        entries: event.entries,
+                        seq,
                     };
                     let text = serde_json::to_string(&frame).unwrap_or_default();
                     if sender.send(Message::Text(text.into())).await.is_err() {

@@ -1,6 +1,6 @@
 //! Real-time events pushed to WebUI clients over the WebSocket channel.
 
-use sebas_dispatch::PendingDisposition;
+use sebas_dispatch::{PendingDisposition, TurnEntry};
 use serde::Serialize;
 
 /// （workbench-turn-queue 7.3）一次性「未执行」提示的条目形状：id + 文本 +
@@ -53,12 +53,24 @@ pub enum WebUiEvent {
         args: serde_json::Value,
         reason: String,
     },
+    /// 实时回合内容（workbench-live-conversation-flow 2.1）：同一合并窗内
+    /// 某会话追加的 transcript 条目（落库序、position 单调）。`seq` 是本帧
+    /// 最后一条的 position（前端的去重锚）。纯增量补充：乱序/迟到/丢失由
+    /// 客户端以快照重取收敛，不参与重放。
+    #[serde(rename = "turn.append")]
+    TurnAppend {
+        session_id: String,
+        entries: Vec<TurnEntry>,
+        seq: u64,
+    },
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::WebUiEvent;
     use serde_json::json;
+    use sebas_dispatch::TurnEntry;
 
     /// Every event serializes to a JSON object tagged with its dotted
     /// `type`; this shape is the WS contract clients key off.
@@ -125,5 +137,25 @@ mod tests {
             let got = serde_json::to_value(&event).unwrap();
             assert_eq!(got, want, "wrong JSON shape for {want}");
         }
+    }
+
+    /// workbench-live-conversation-flow 2.1：turn.append 帧带 dotted type、
+    /// encoded session id 与条目数组；seq = 最后一条的 position。
+    #[test]
+    fn turn_append_serializes_with_dotted_type_tag() {
+        let event = WebUiEvent::TurnAppend {
+            session_id: "web%00web-1".into(),
+            entries: vec![
+                TurnEntry::markdown(3, "hello "),
+                TurnEntry::markdown(4, "world"),
+            ],
+            seq: 4,
+        };
+        let got = serde_json::to_value(&event).unwrap();
+        assert_eq!(got["type"], "turn.append");
+        assert_eq!(got["session_id"], "web%00web-1");
+        assert_eq!(got["seq"], 4);
+        assert_eq!(got["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(got["entries"][0]["content"], "hello ");
     }
 }

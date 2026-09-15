@@ -149,9 +149,11 @@ export class SebasApp extends LitElement {
       min-height: 0;
       min-width: 0;
       --min: 180px;
-      --max: 480px;
-      /* 缝宽 = 浮岛间距（rest 透明时就是纯留白）。 */
-      --divider-width: 12px;
+      /* （workbench-live-conversation-flow 5.2）上限 520 与
+         split-persist 的 RAIL_MAX_PX 一致。 */
+      --max: 520px;
+      /* （5.1）缝宽 6px：rail 与工作台视觉相邻，把手 hover 亮起。 */
+      --divider-width: 6px;
     }
     wa-split-panel.frame::part(panel) {
       min-width: 0;

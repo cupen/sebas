@@ -103,11 +103,6 @@ export class SebasDashboard extends LitElement {
    */
   @state() private selectedBranch: string | null = null
   /**
-   * 中程切换聚焦会话模型（add-acp-model-selection 语义）：非空 = 请求已发出，
-   * 等事件回流。
-   */
-  @state() private modelSwitching = false
-  /**
    * 输入框高度（px；workbench-interaction-polish 5.2/D1）：localStorage
    * 记忆，拖拽 stage|composer 分割线时 clamp 后写回。
    */
@@ -115,7 +110,6 @@ export class SebasDashboard extends LitElement {
   /** 窄屏（<640px）：分割线禁拖，布局退化。 */
   @state() private narrow: boolean = isNarrowViewport()
   /** Close 确认对话框（session-detail 迁移；workbench-turn-queue：点名丢弃条数）。 */
-  @state() private confirmClose = false
   private unsubscribe?: () => void
   /**
    * 8.2：节点可用性轮询（节点上下线没有对应的会话事件）。rail 与项目头部
@@ -199,7 +193,9 @@ export class SebasDashboard extends LitElement {
         min-width: 0;
         --min: 120px;
         --max: 50%;
-        --divider-width: 12px;
+        /* （workbench-live-conversation-flow 5.1）6px 细缝：舞台与输入框
+           视觉相邻，拖拽把手 hover 亮起。 */
+        --divider-width: 6px;
       }
       wa-split-panel.vsplit::part(panel) {
         min-width: 0;
@@ -218,7 +214,9 @@ export class SebasDashboard extends LitElement {
         display: flex;
         flex-direction: column;
         min-height: 0;
-        padding: 0 var(--sebas-space-3) 0 var(--sebas-space-3);
+        /* （5.1）space-2：与 composer 列同一 token——左右边缘齐平，且与
+           rail 的间隔由 divider + nav margin 分担，不再叠加双份 12px。 */
+        padding: 0 var(--sebas-space-2) 0 var(--sebas-space-2);
       }
       /* 舞台浮岛：项目头部 + 会话头 + 对话流合为一张圆角 surface 卡片，
          区域分隔靠留缝与色阶——不再有通高 border-bottom 硬线。 */
@@ -236,7 +234,7 @@ export class SebasDashboard extends LitElement {
       .composer-col {
         display: flex;
         min-height: 0;
-        padding: 0 var(--sebas-space-3) var(--sebas-space-3);
+        padding: 0 var(--sebas-space-2) var(--sebas-space-3);
       }
       /* 项目头部：舞台浮岛内的通栏条（去 border-bottom 硬线，浮岛内以
          既有 border-left 状态条 + 间距分区）。 */
@@ -521,7 +519,8 @@ export class SebasDashboard extends LitElement {
         display: flex;
         flex-direction: column;
         justify-content: flex-end;
-        padding: 0 var(--sebas-space-5) 0;
+        /* （5.1）与舞台列同一水平 token——对话区与输入框左右边缘齐平。 */
+        padding: 0 var(--sebas-space-2) 0;
       }
       /* 审批卡贴在输入框之上：整体限高内部滚动，卡再多也不挤占对话区。 */
       .composer-area sebas-review-cards {
@@ -585,7 +584,19 @@ export class SebasDashboard extends LitElement {
     // 深链参数变化（/sessions/A → /sessions/B 复用同一元素）：立即按新 key
     // 取 detail（读即设服务端焦点）。
     if (changed.has('deepLinkKey')) this.loadFocused(this.effectiveFocusKey())
+    // 聚焦即拉起（workbench-live-conversation-flow 3.1）：焦点换了就触发
+    // 一次 activate（幂等——已活/在途是服务端 no-op）。深链、rail 点击、
+    // 创建会话三条聚焦路径都经过这里，拉起带 resume；失败 fire-and-forget
+    // （占位保留，spawn 失败经事件流就地呈现）。
+    const focusKey = this.effectiveFocusKey()
+    if (focusKey !== null && focusKey !== this.activatedFocusKey) {
+      this.activatedFocusKey = focusKey
+      void api.activateSession(focusKey).catch(() => undefined)
+    }
   }
+
+  /** 上一次触发过 activate 的焦点 key（每焦点一次，防重复请求）。 */
+  private activatedFocusKey: string | null = null
 
   /**
    * 生效的聚焦 key：深链优先（URL 决定视图——读 detail 即设置服务端焦点
@@ -825,6 +836,9 @@ export class SebasDashboard extends LitElement {
               .sessionModels=${this.focusedDetail?.available_models ?? d.active_session?.available_models ?? []}
               .currentModel=${this.focusedDetail?.current_model ?? d.active_session?.current_model ?? null}
               .sessionCommands=${this.focusedDetail?.available_commands ?? d.active_session?.available_commands ?? []}
+              .childStarting=${(this.focusedDetail?.status_slug ?? '') === 'starting'}
+              .currentMode=${this.focusedDetail?.desired_mode ?? null}
+              .modeEditable=${this.focusedDetail?.session_id != null}
               @composer-sent=${this.onComposerSent}
             ></sebas-workbench-composer>
           </div>
@@ -1031,155 +1045,14 @@ export class SebasDashboard extends LitElement {
             ${ungated
               ? html`<span class="ungated" data-testid="session-ungated" title="auto：该机器交给 agent 自主执行，不产生审批">ungated</span>`
               : nothing}
-            <!-- （add-agent-mode-selection）mode 切换入口：提交走
-                 POST /api/sessions/{key}/mode；执行体拒绝时错误经事件流
-                 呈现，mode 标签保持原值。0-turn 占位（无 session_id）不可
-                 切——会话还没建立，mode 由创建表单决定。 -->
-            ${d.session_id
-              ? html`<span class="mode-pick">
-                  <wa-select
-                    class="mode-select"
-                    size="xs"
-                    hoist
-                    value=${desired ?? ''}
-                    ?disabled=${this.modeSwitching}
-                    aria-label="Session mode"
-                    data-testid="mode-switch"
-                    @change=${(e: Event) => {
-                      const v = (e as unknown as { target: { value: string } }).target.value
-                      if (v) void this.setMode(d.encoded_key, v)
-                    }}
-                  >
-                    <wa-option value="ask">ask</wa-option>
-                    <wa-option value="edit">edit</wa-option>
-                    <wa-option value="allow">allow</wa-option>
-                    <wa-option value="auto">auto</wa-option>
-                  </wa-select>
-                </span>`
-              : nothing}
+            <!-- （workbench-live-conversation-flow 4.2）头部去交互化：mode
+                 切换迁至输入框底沿、模型切换归 composer 芯片、归档是
+                 rail 行溢出菜单的唯一入口——头部只留展示。 -->
             <span>last active ${d.last_active}</span>
-            ${d.available_models && d.available_models.length > 0
-              ? html`<span class="model-pick">
-                  <!-- Web Awesome 3.x 派发标准 change 事件（不派发 wa-change）。 -->
-                  <wa-select
-                    class="model-select"
-                    size="xs"
-                    hoist
-                    value=${d.current_model ?? ''}
-                    ?disabled=${this.modelSwitching}
-                    aria-label="Session model"
-                    @change=${(e: Event) => {
-                      const v = (e as unknown as { target: { value: string } }).target.value
-                      if (v) void this.setModel(d.encoded_key, v)
-                    }}
-                  >
-                    ${d.available_models.map((m) => html`<wa-option value=${m}>${m}</wa-option>`)}
-                  </wa-select>
-                </span>`
-              : nothing}
           </span>
         </div>
-        <div class="actions">
-          <a href="/sessions">All sessions</a>
-          <wa-button
-            size="s"
-            appearance="outlined"
-            aria-label="Archive this session"
-            @click=${() => void this.archiveFocused()}
-            >Archive</wa-button
-          >
-          <wa-button
-            size="s"
-            variant="danger"
-            appearance="outlined"
-            aria-label="Close this session"
-            @click=${() => (this.confirmClose = true)}
-            >Close</wa-button
-          >
-        </div>
       </div>
-      <wa-dialog label="Close session" ?open=${this.confirmClose}>
-        <p class="dialog-body">
-          Closing will terminate the agent child process and clear this chat's
-          permission allowlist. This cannot be undone.
-          ${d.pending.length > 0
-            ? html`<span class="discard-note" data-testid="close-discards-pending"
-                >将丢弃 <b>${d.pending.length}</b> 条待执行消息，它们不会被执行。</span
-              >`
-            : nothing}
-        </p>
-        <wa-button slot="footer" appearance="plain" @click=${() => (this.confirmClose = false)}
-          >Cancel</wa-button
-        >
-        <wa-button slot="footer" variant="danger" @click=${() => void this.doClose(d.encoded_key)}
-          >Close session</wa-button
-        >
-      </wa-dialog>
     `
-  }
-
-  /**
-   * 中程切换聚焦会话模型（add-acp-model-selection 2.3）：把选择送后端 →
-   * 驱动发 `session/set_config_option{configId:"model"}`。wire 层失败（agent
-   * 拒绝无效模型）经非 terminal Error 事件回流；快照的 `current_model` 在
-   * `ModelChanged` 到达后由 refetch 刷新。
-   */
-  /** 中程切换会话权限模式时的在途标记（add-agent-mode-selection）。 */
-  @state() private modeSwitching = false
-
-  /** （add-agent-mode-selection）mode 切换：命令送达后重取快照（effective
-   * 随 ModeChanged 落定；拒绝则错误事件呈现、标签保持原值）。 */
-  private async setMode(key: string, mode: string): Promise<void> {
-    if (this.modeSwitching) return
-    this.modeSwitching = true
-    try {
-      await api.setSessionMode(key, mode)
-      await new Promise((r) => setTimeout(r, 400))
-      this.refetch()
-    } finally {
-      this.modeSwitching = false
-    }
-  }
-
-  private async setModel(key: string, modelId: string): Promise<void> {
-    if (this.modelSwitching) return
-    this.modelSwitching = true
-    try {
-      await api.setSessionModel(key, modelId)
-      // 命令已送达驱动；连刷两次以捕捉 ModelChanged 之后的快照更新。
-      await new Promise((r) => setTimeout(r, 400))
-      this.refetch()
-    } finally {
-      this.modelSwitching = false
-    }
-  }
-
-  /** Close（session-detail 迁移）：关闭后焦点指针随响应收敛，就地重取。 */
-  private async doClose(key: string): Promise<void> {
-    this.confirmClose = false
-    try {
-      await api.closeSession(key)
-      // 关闭的正是深链会话时清掉深链参数，避免 effective-focus 又指向死会话。
-      if (this.deepLinkKey === key) this.deepLinkKey = null
-      this.refetch()
-    } catch {
-      /* close 失败（会话已被别处关闭）：refetch 收敛视图。 */
-      this.refetch()
-    }
-  }
-
-  /** 归档入口（3.3）：会话关闭并移入 /api/archive，就地清焦点重取。 */
-  private async archiveFocused(): Promise<void> {
-    const key = this.focusedDetail?.encoded_key ?? this.effectiveFocusKey()
-    if (!key) return
-    try {
-      await api.archiveSession(key)
-      if (this.deepLinkKey === key) this.deepLinkKey = null
-      this.refetch()
-    } catch {
-      /* 归档失败：refetch 收敛视图。 */
-      this.refetch()
-    }
   }
 
   /** 懒加载选中项目的分支（project-header 的 mono pill 用），选中即取，失败不渲染。 */
