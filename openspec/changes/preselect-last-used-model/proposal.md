@@ -25,7 +25,7 @@
 ## Impact
 
 - frontend：`new-session-dialog.ts`（预选 + localStorage + 空目录引导）、`model-catalog.ts`（预选 helper 从 defaults 语义改为 last-used 语义）、`settings-modal.ts`（About 行删改）；单测同步。
-- 后端零改动（router defaults 载荷、管理入口、路由兜底均不动）。
+- sebas-webui BFF：既有概要载荷加一个 `default agent kind` 真实值字段（`cfg.acp.default_kind()`，纯加法），供 About 行改读；router defaults 载荷、管理入口、路由兜底均不动。
 
 ## Non-goals
 

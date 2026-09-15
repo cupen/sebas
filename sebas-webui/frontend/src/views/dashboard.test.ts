@@ -49,7 +49,31 @@ vi.mock('../api/shared-ws.js', () => ({
   sharedWs: { subscribe: () => () => {} },
 }))
 
-vi.mock('./workbench-composer.js', () => ({}))
+// workbench-composer 模块打桩：WA 表单依赖 jsdom 缺失的 ElementInternals。
+// dashboard 同时从该模块取一次性对焦请求的事件名（workbench-rail-polish
+// 3.2），mock 里补上常量。
+vi.mock('./workbench-composer.js', () => ({
+  COMPOSER_FOCUS_REQUEST: 'sebas:composer-focus',
+}))
+
+// 对焦中介的可观察 composer 替身：真组件被 mock 掉了，这里顶一个同名
+// 元素——focusInput 记录调用并真实把焦点落进 shadow 里的输入框替身
+// （用例自行 append `<wa-textarea tabindex="-1">`），偷走/送回都可断言。
+const composerFocusInput = vi.fn()
+class StubWorkbenchComposer extends HTMLElement {
+  constructor() {
+    super()
+    this.attachShadow({ mode: 'open' })
+  }
+  focusInput(): void {
+    composerFocusInput()
+    const target = this.shadowRoot?.querySelector('wa-textarea')
+    if (target) target.focus()
+  }
+}
+if (!customElements.get('sebas-workbench-composer')) {
+  customElements.define('sebas-workbench-composer', StubWorkbenchComposer)
+}
 
 import './dashboard.js'
 import type { SebasDashboard } from './dashboard.js'
@@ -743,5 +767,157 @@ describe('conversation incremental sync (conversation-incremental-sync 2.1/2.2)'
     expect(calls[calls.length - 1]).toEqual(['oc_live%00']) // 无 entries_after = 全量
     expect(transcriptOf(el2)!.entries.map((e) => e.position)).toEqual([0, 1, 2])
     el2.remove()
+  })
+})
+
+describe('creation focus chain (workbench-rail-polish 3.2)', () => {
+  /** 收敛一轮 refetch 链（mock 全部即时 resolve，一个宏任务轮即够）。 */
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  /** 替身 composer 的输入框：focusInput 的真实落点，焦点核对的数据源。 */
+  function mountInput(composer: StubWorkbenchComposer): HTMLElement {
+    const input = document.createElement('wa-textarea')
+    input.setAttribute('tabindex', '-1')
+    composer.shadowRoot!.appendChild(input)
+    return input
+  }
+
+  it('routes the focus request into the composer once the placeholder is focused', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const composer = el.shadowRoot!.querySelector(
+      'sebas-workbench-composer',
+    ) as StubWorkbenchComposer
+    const input = mountInput(composer)
+    expect(composerFocusInput).not.toHaveBeenCalled()
+
+    // rail 创建成功派发的请求（事件名与源码共用常量词表）。
+    window.dispatchEvent(new CustomEvent('sebas:composer-focus'))
+    await settle(el)
+    expect(composerFocusInput).toHaveBeenCalledTimes(1)
+    expect(composer.shadowRoot!.activeElement).toBe(input)
+    el.remove()
+  })
+
+  it('holds the request until the placeholder becomes the focused session', async () => {
+    const el = await mount() // summaryBase：active_session_key = null
+    await settle(el)
+    const composer = el.shadowRoot!.querySelector(
+      'sebas-workbench-composer',
+    ) as StubWorkbenchComposer
+    const input = mountInput(composer)
+    window.dispatchEvent(new CustomEvent('sebas:composer-focus'))
+    await settle(el)
+    // 占位还没成为聚焦会话：焦点按兵不动（摘要往返尚未带回 key）。
+    expect(composerFocusInput).not.toHaveBeenCalled()
+
+    // summary 到达（WS / sebas:refetch 同一路径）→ 挂起请求在渲染后落下；
+    // 焦点落进输入框后 hasFocus 短路，重试节拍不再重复送焦。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    ;(el as unknown as { refetch: () => void }).refetch()
+    await settle(el)
+    expect(composerFocusInput).toHaveBeenCalledTimes(1)
+    expect(composer.shadowRoot!.activeElement).toBe(input)
+    el.remove()
+  })
+
+  it('the composer binding stays intact under the stub (sessionKey flows)', async () => {
+    // 守护用例：替身元素不得破坏既有 composer 供数绑定（纯属性直填）。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const composer = el.shadowRoot!.querySelector('sebas-workbench-composer') as HTMLElement & {
+      sessionKey?: string | null
+    }
+    expect(composer.sessionKey).toBe('oc_live%00')
+    el.remove()
+  })
+
+  it('re-claims focus when an async focus() steals it within the short window', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const composer = el.shadowRoot!.querySelector(
+      'sebas-workbench-composer',
+    ) as StubWorkbenchComposer
+    const input = mountInput(composer)
+
+    window.dispatchEvent(new CustomEvent('sebas:composer-focus'))
+    await settle(el)
+    // 首次落焦真的进了输入框。
+    expect(composerFocusInput).toHaveBeenCalledTimes(1)
+    expect(composer.shadowRoot!.activeElement).toBe(input)
+
+    // 模拟 wa-dialog 关闭动画尾部的 trigger.focus() 插队：焦点被偷出 composer。
+    const thief = document.createElement('button')
+    document.body.appendChild(thief)
+    thief.focus()
+    expect(composer.shadowRoot!.activeElement).toBeNull()
+
+    // 短窗内的下一个节拍把焦点重新送回输入框（这才是 spec 场景的终态）。
+    await new Promise((r) => setTimeout(r, 300))
+    expect(composerFocusInput.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(composer.shadowRoot!.activeElement).toBe(input)
+    el.remove()
+  })
+
+  it('treats focus deep inside the textarea shadow as already in place (no re-send)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const composer = el.shadowRoot!.querySelector(
+      'sebas-workbench-composer',
+    ) as StubWorkbenchComposer
+    // 真实几何（tasks.md 4.1 的 focusChain 终态）：composer shadow 里的
+    // wa-textarea 宿主 + 它自己 shadow 里的原生 textarea——键盘焦点真身
+    // 落在最内层。
+    const host = document.createElement('wa-textarea')
+    host.attachShadow({ mode: 'open' })
+    const native = document.createElement('textarea')
+    host.shadowRoot!.appendChild(native)
+    composer.shadowRoot!.appendChild(host)
+    native.focus()
+
+    window.dispatchEvent(new CustomEvent('sebas:composer-focus'))
+    await settle(el)
+    // hasFocus 穿透两层 shadow 认出焦点已在输入框内：短窗不重送
+    // （focusInput 对已聚焦元素是幂等 no-op，这里的断言是"一次都不必发"）。
+    expect(composerFocusInput).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  it('gives up after the deadline and does not steal focus back', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const composer = el.shadowRoot!.querySelector(
+      'sebas-workbench-composer',
+    ) as StubWorkbenchComposer
+    const input = mountInput(composer)
+
+    window.dispatchEvent(new CustomEvent('sebas:composer-focus'))
+    await settle(el)
+    // 窗内偷一次：会被纠正（重送焦点）。
+    const thief = document.createElement('button')
+    document.body.appendChild(thief)
+    thief.focus()
+    await new Promise((r) => setTimeout(r, 300))
+    expect(composerFocusInput.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(composer.shadowRoot!.activeElement).toBe(input)
+
+    // 熬过 ~1s 截止（派发起已耗 ~300ms，再候 900ms 到窗外）。
+    await new Promise((r) => setTimeout(r, 900))
+    const callsAtExpiry = composerFocusInput.mock.calls.length
+
+    // 截止后焦点再被偷走也不回收——绝不抢别的焦点。
+    thief.focus()
+    await new Promise((r) => setTimeout(r, 300))
+    expect(composerFocusInput.mock.calls.length).toBe(callsAtExpiry)
+    expect(composer.shadowRoot!.activeElement).toBeNull()
+    el.remove()
   })
 })

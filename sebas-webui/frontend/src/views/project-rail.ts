@@ -28,6 +28,7 @@ import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
 import { guardedHide } from '../components/wa-hide-guard.js'
 import { unreadCount, writeFocusAnchor } from './unread-cursor.js'
+import { COMPOSER_FOCUS_REQUEST } from './workbench-composer.js'
 import type { NewSessionDialogConfirm } from './new-session-dialog.js'
 import '../components/folder-picker.js'
 import './new-session-dialog.js'
@@ -191,7 +192,11 @@ export class SebasProjectRail extends LitElement {
       user-select: none;
     }
     .row:hover { background: var(--sebas-surface-2); color: var(--sebas-text-bright); }
-    .row.active { background: var(--sebas-accent-soft); color: var(--sebas-accent); }
+    /* workbench-rail-polish D1：项目行选中 = 中性提亮（surface 提亮一档 +
+       文字变亮 + 字重加重），不再借 accent 底——accent 只留给会话行的
+       「当前」标记，两态同屏可辨。选中语义不变（主区正在显示的项目）。 */
+    .row.active { background: var(--sebas-surface-3); color: var(--sebas-text-bright); }
+    .row.active .name { font-weight: 600; }
     .row.dragging { opacity: 0.4; }
     .row.drag-over { box-shadow: inset 0 2px 0 var(--sebas-accent); }
     .chevron { display: inline-grid; place-items: center; width: 10px; color: var(--sebas-text-faint); font-size: 9px; line-height: 1; transition: transform var(--sebas-dur) var(--sebas-ease); }
@@ -199,7 +204,8 @@ export class SebasProjectRail extends LitElement {
     .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
     .meta { display: flex; align-items: center; gap: 6px; color: var(--sebas-text-faint); font-size: 0.7rem; }
     .meta .count { background: var(--sebas-surface-2); border-radius: 999px; padding: 1px 7px; font-weight: 500; font-variant-numeric: tabular-nums; }
-    .row.active .meta .count { background: var(--sebas-accent-strong); color: var(--sebas-accent-ink); }
+    /* （D1）旧的项目行选中态计数徽标 accent 覆盖已随中性提亮一并撤除：
+       选中项目行上的计数徽标回归同一套中性 pill。 */
     .wait-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sebas-status-working); display: inline-block; }
     /* 8.5：项目/会话行上的节点标注。本机也显示（spec：命名每个项目所在的
        节点），但只有非在线态才带告警色。 */
@@ -477,9 +483,24 @@ export class SebasProjectRail extends LitElement {
         mode: e.detail.mode,
       })
       this.closeNewSessionDialog()
-      this.onSelect(p.path)
+      // workbench-rail-polish 3.1/D2：创建成功后的焦点链三步显式化，不再
+      // 借用 onSelect 的 toggle——从已展开的项目行「+」进来会把组误折叠，
+      // 新会话行根本不可见。
+      // ① 强制展开（非 toggle）：新会话行必须立即可见；
+      this.expanded = { ...this.expanded, [p.path]: true }
+      // ② 不派发 rail-select：主区项目切换语义不掺进创建路径；新会话行的
+      //    「当前」标记由 refresh() 后的 active_session_key 回填（创建请求
+      //    服务端已 set_focus）。
       void this.refresh()
       if (location.pathname !== '/') navigate('/')
+      // ③ 一次性 composer 对焦请求（COMPOSER_FOCUS_REQUEST，dashboard 接力
+      //    到 focusInput）。setTimeout(0)：在 /sessions 上创建时先让路由
+      //    切换把工作台挂载出来，监听方才在场。仅创建成功这一个时机派发
+      //    ——openSession 等切换路径绝不抢键盘焦点。
+      window.setTimeout(
+        () => window.dispatchEvent(new CustomEvent(COMPOSER_FOCUS_REQUEST)),
+        0,
+      )
     } catch (err) {
       // 失败留在对话框内就地呈现——不假装创建成功。
       this.newSessionError = err instanceof Error ? err.message : String(err)
