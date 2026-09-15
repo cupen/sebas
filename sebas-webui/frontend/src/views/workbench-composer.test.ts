@@ -152,6 +152,36 @@ const focus = {
   currentModel: 'sonnet',
 }
 
+describe('one-shot input focus (workbench-rail-polish 3.2)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('focusInput targets the textarea host (delegates into the native input)', async () => {
+    const el = await mount(focus)
+    const ta = el.shadowRoot?.querySelector('wa-textarea') as unknown as HTMLElement
+    expect(ta).toBeTruthy()
+    const focusSpy = vi.spyOn(ta, 'focus')
+    await el.focusInput()
+    expect(focusSpy).toHaveBeenCalledTimes(1)
+    el.remove()
+  })
+
+  it('focusInput waits out the pending render when the placeholder just landed', async () => {
+    const el = await mount({}) // 无聚焦：还没有 textarea
+    expect(el.shadowRoot?.querySelector('wa-textarea')).toBeNull()
+    // 真实时序（dashboard 渲染提交 sessionKey 后才调 focusInput）：update
+    // 已排队、textarea 未上屏——await updateComplete 必须等它上屏再查。
+    el.sessionKey = 'web%00web-1'
+    // WaTextarea.focus 转发到内部原生 textarea：原生侧的探针能接到。
+    const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus')
+    await el.focusInput()
+    expect(el.shadowRoot?.querySelector('wa-textarea')).toBeTruthy()
+    expect(focusSpy).toHaveBeenCalled()
+    el.remove()
+  })
+})
+
 // ── 4.1 纯跟随化 ─────────────────────────────────────────────────────────
 
 describe('composer is pure follow-up (4.1)', () => {

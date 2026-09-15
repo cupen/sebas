@@ -89,6 +89,14 @@ function parseSlashCommandName(text: string): string | null {
 /** 提交控件的五态（design D4 优先级渲染的判别值，测试按 data-state 断言）。 */
 type SubmitState = 'disabled' | 'send' | 'sending' | 'stop' | 'queued'
 
+/**
+ * 一次性 composer 对焦请求的事件名（workbench-rail-polish 3.2/D2）：rail
+ * 创建会话成功后派发、dashboard 接力到 `focusInput()`。沿 `sebas:*`
+ * window 事件惯例（sebas:refetch / sebas:ws-state 同款）。仅创建成功这一个
+ * 时机派发——会话切换（openSession/深链）绝不经过这里，不抢键盘焦点。
+ */
+export const COMPOSER_FOCUS_REQUEST = 'sebas:composer-focus'
+
 @customElement('sebas-workbench-composer')
 export class SebasWorkbenchComposer extends LitElement {
   /**
@@ -252,6 +260,18 @@ export class SebasWorkbenchComposer extends LitElement {
     const hasText = this.text.trim().length > 0
     if (this.turnInFlight) return hasText ? 'queued' : 'stop'
     return hasText ? 'send' : 'disabled'
+  }
+
+  /**
+   * 把键盘焦点落进输入框（workbench-rail-polish 3.2/D2，公开方法）：创建
+   * 会话成功后由 dashboard 代为调用一次。先等本组件把当前状态渲染完——
+   * 聚焦 key 刚从 summary 到达时 wa-textarea 可能尚未上屏，直接查会扑空；
+   * wa-textarea 自带 focus 转发到内部原生 textarea，键盘焦点真正落在
+   * 输入框里。仅创建流程走这里；openSession 等切换路径绝不调用。
+   */
+  async focusInput(): Promise<void> {
+    await this.updateComplete
+    this.renderRoot.querySelector('wa-textarea')?.focus()
   }
 
   private async submit(): Promise<void> {

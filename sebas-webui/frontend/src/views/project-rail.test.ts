@@ -11,7 +11,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { api, type Project, type SessionRow } from '../api/client.js'
 import { writeFocusAnchor } from './unread-cursor.js'
 import './project-rail.js'
-import type { SebasProjectRail } from './project-rail.js'
+import { SebasProjectRail } from './project-rail.js'
 
 // ---- localStorage polyfill --------------------------------------------
 // 测试环境的全局没有 localStorage；徽标读锚走共享游标模块（写全局），用
@@ -902,6 +902,233 @@ describe('creation dialog wiring (workbench-interaction-polish 3.2)', () => {
     await el.updateComplete
     expect((await dialogOf(el)).open).toBe(false)
     expect(mockOf(apiMock.createSession)).not.toHaveBeenCalled()
+    el.remove()
+  })
+})
+
+// ─── workbench-rail-polish：rail 高亮分层 + 创建焦点链 ────────────────────────
+
+describe('rail highlight layering (workbench-rail-polish 2.1)', () => {
+  it('project active goes neutral while the focused session keeps the accent', async () => {
+    const el = await mount()
+    // happy-dom 下 Lit 走 adoptedStyleSheets（shadow 里没有 <style> 元素）：
+    // 直接断言组件静态样式表的 cssText（与挂载环境无关）。
+    const styles = SebasProjectRail.styles
+    const styleText = (Array.isArray(styles) ? styles : [styles])
+      .map((s) => (s as unknown as { cssText: string }).cssText)
+      .join('\n')
+    // 项目行选中 = 中性提亮（surface 底 + 亮文字），绝不沾 accent。
+    const activeRule = styleText.match(/\.row\.active\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(activeRule).toContain('var(--sebas-surface')
+    expect(activeRule).toContain('var(--sebas-text-bright)')
+    expect(activeRule).not.toContain('accent')
+    // accent 覆盖连计数徽标一并撤干净：项目行上所有规则整体中性。
+    for (const line of styleText.split('\n')) {
+      if (line.includes('.row.active')) expect(line).not.toContain('accent')
+    }
+    // 会话行「当前」标记保留 accent 底（驱动语义 activePath /
+    // active_session_key 均不变，这里只看皮）。
+    const currentRule = styleText.match(/li\.session-item\.current\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(currentRule).toContain('var(--sebas-accent-soft)')
+    expect(currentRule).toContain('var(--sebas-accent)')
+    // 两态样式组合互不相同（spec：clearly different visual treatments）。
+    expect(activeRule).not.toBe(currentRule)
+    el.remove()
+  })
+})
+
+// 渲染 DOM 面：样式表断言之上的三条 scenario 行级可测面——同屏点亮、
+// current 标记不随项目选中态翻转、active 类落在且只落在选中项目行上。
+describe('rail highlight layering — rendered rows (workbench-rail-polish scenarios)', () => {
+  /** 挂载时把焦点指针钉在 alpha 的首个会话上（/api/sessions 的 active_session_key）。 */
+  async function mountWithFocusedSession(): Promise<SebasProjectRail> {
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList(sessionRows),
+      active_session_key: sessionRows[0]!.encoded_key,
+    })
+    return mount()
+  }
+
+  it('highlights the selected project row and its focused session row at once, with distinct treatments', async () => {
+    const el = await mountWithFocusedSession()
+    el.activePath = '/home/me/alpha'
+    // 展开选中项目组，让其中的会话行同屏渲染（spec：including the session
+    // focused inside the selected project）。
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+
+    const activeRow = el.shadowRoot!.querySelector('.row.active')
+    expect(activeRow).toBeTruthy()
+    expect(activeRow!.getAttribute('aria-current')).toBe('true')
+    const currentItem = activeRow!.closest('li')!.querySelector('li.session-item.current')
+    expect(currentItem).toBeTruthy()
+    expect(currentItem!.getAttribute('aria-current')).toBe('true')
+    // 同屏两态 = 两个不同元素、两套类名；皮的具体差异由样式表断言看管。
+    expect(currentItem).not.toBe(activeRow)
+    expect(activeRow!.classList.contains('current')).toBe(false)
+    expect(currentItem!.classList.contains('active')).toBe(false)
+    el.remove()
+  })
+
+  it('keeps the focused-session marker regardless of which project is selected', async () => {
+    const el = await mountWithFocusedSession()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click() // 展开 alpha
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('li.session-item.current')).toBeTruthy()
+
+    // 项目选中态切到另一个项目：聚焦会话行的 current 标记原样保留。
+    el.activePath = '/home/me/beta'
+    await el.updateComplete
+    const activeRows = [...el.shadowRoot!.querySelectorAll('.row.active')]
+    expect(activeRows).toHaveLength(1)
+    expect(activeRows[0]!.textContent).toContain('beta')
+    const current = el.shadowRoot!.querySelector('li.session-item.current')
+    expect(current).toBeTruthy()
+    expect(current!.getAttribute('aria-current')).toBe('true')
+    el.remove()
+  })
+
+  it('emphasizes exactly the selected project row with the active class', async () => {
+    const el = await mount()
+    expect(el.shadowRoot!.querySelector('.row.active')).toBeNull()
+    el.activePath = '/home/me/beta'
+    await el.updateComplete
+    const rows = [...el.shadowRoot!.querySelectorAll('.row')]
+    const active = rows.filter((r) => r.classList.contains('active'))
+    expect(active).toHaveLength(1)
+    expect(active[0]!.textContent).toContain('beta')
+    expect(active[0]!.getAttribute('aria-current')).toBe('true')
+    // 中性强调在类名层面即与会话行的 current 标记互斥（无 accent 的皮由
+    // 样式表断言看管）。
+    expect(active[0]!.classList.contains('current')).toBe(false)
+    el.remove()
+  })
+})
+
+describe('creation focus chain (workbench-rail-polish 3.1/3.2)', () => {
+  beforeEach(() => {
+    mockOf(apiMock.createSession).mockReset()
+  })
+
+  /** 打开 alpha 的创建对话框并确认（走 confirmNewSession 的成功路径）。 */
+  async function confirmCreation(el: SebasProjectRail): Promise<void> {
+    const plus = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'button[aria-label="New session in alpha"]',
+    )!
+    plus.click()
+    await el.updateComplete
+    ;(el.shadowRoot!.querySelector('sebas-new-session-dialog') as HTMLElement).dispatchEvent(
+      new CustomEvent('dialog-confirm', {
+        detail: { agent: 'codex', model: null, mode: null },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    // 两拍：createSession 落定 + setTimeout(0) 的对焦请求派发落定。
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  it('creating from an expanded project keeps the group expanded (no toggle-collapse)', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    const el = await mount()
+    ;(el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('li.session-item')).toBeTruthy()
+
+    await confirmCreation(el)
+
+    // 旧实现（onSelect toggle）在这里会把已展开的组折叠掉——组必须仍展开。
+    expect(el.shadowRoot!.querySelector('li.session-item')).toBeTruthy()
+    expect(
+      (el as unknown as { expanded: Record<string, boolean> }).expanded['/home/me/alpha'],
+    ).toBe(true)
+    el.remove()
+  })
+
+  it('creating from a collapsed project expands it (placeholder row visible)', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    const el = await mount()
+    expect(el.shadowRoot!.querySelector('li.session-item')).toBeNull()
+
+    await confirmCreation(el)
+
+    expect(
+      (el as unknown as { expanded: Record<string, boolean> }).expanded['/home/me/alpha'],
+    ).toBe(true)
+    expect(el.shadowRoot!.querySelector('li.session-item')).toBeTruthy()
+    el.remove()
+  })
+
+  it('marks the new placeholder row current and visible under its project (server set_focus backfill)', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new%00' })
+    // 创建成功后的 refresh() 回填（服务端 create_session 已 set_focus）：
+    // /api/sessions 带上新占位行，焦点指针指向它。
+    const placeholderRow = row({
+      encoded_key: 'oc_new%00',
+      project_id: 'proj-alpha',
+      status: 'starting',
+      status_slug: 'starting',
+    })
+    mockOf(apiMock.sessions).mockResolvedValue({
+      ...sessionList([
+        ...sessionRows.filter((r) => r.project_id === 'proj-alpha'),
+        placeholderRow,
+      ]),
+      active_session_key: 'oc_new%00',
+    })
+    const el = await mount()
+    await confirmCreation(el)
+
+    const placeholder = el.shadowRoot!.querySelector('li.session-item.current')
+    expect(placeholder).toBeTruthy()
+    expect(placeholder!.getAttribute('aria-current')).toBe('true')
+    expect(placeholder!.textContent).toContain(placeholderRow.session_id_short!)
+    // 占位行就挂在被创建项目（alpha）的组下——保持展开，新行立即可见。
+    const alphaLi = (el.shadowRoot!.querySelectorAll('.row')[0] as HTMLElement).closest('li')!
+    expect(alphaLi.querySelector('li.session-item.current')).toBe(placeholder)
+    el.remove()
+  })
+
+  it('does not dispatch rail-select on the creation path', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    const el = await mount()
+    const selected = vi.fn()
+    el.addEventListener('rail-select', selected)
+    await confirmCreation(el)
+    // 创建不再冒充项目选择：主区切换语义不掺进创建路径。
+    expect(selected).not.toHaveBeenCalled()
+    el.remove()
+  })
+
+  it('requests composer focus exactly once after a successful creation', async () => {
+    mockOf(apiMock.createSession).mockResolvedValue({ key: 'oc_new' })
+    const el = await mount()
+    const requested = vi.fn()
+    window.addEventListener('sebas:composer-focus', requested)
+    await confirmCreation(el)
+    expect(requested).toHaveBeenCalledTimes(1)
+    window.removeEventListener('sebas:composer-focus', requested)
+    el.remove()
+  })
+
+  it('a failed creation neither expands nor requests focus', async () => {
+    mockOf(apiMock.createSession).mockRejectedValue(new Error('HTTP 409: 已有会话'))
+    const el = await mount()
+    const requested = vi.fn()
+    window.addEventListener('sebas:composer-focus', requested)
+    await confirmCreation(el)
+    expect(requested).not.toHaveBeenCalled()
+    expect(
+      (el as unknown as { expanded: Record<string, boolean> }).expanded['/home/me/alpha'],
+    ).toBeFalsy()
+    // 失败留在对话框内就地呈现（既有语义不变）。
+    const dialog = el.shadowRoot!.querySelector(
+      'sebas-new-session-dialog',
+    ) as unknown as HTMLElement & { open: boolean }
+    expect(dialog.open).toBe(true)
+    window.removeEventListener('sebas:composer-focus', requested)
     el.remove()
   })
 })
