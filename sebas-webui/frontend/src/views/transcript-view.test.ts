@@ -1,28 +1,36 @@
 // @vitest-environment jsdom
 /**
  * sebas-transcript-view — the conversation view
- * (workbench-conversation-view 2.1–2.5 + workbench-agent-identity-and-
- * process-folds 2.1–3.2).
+ * (workbench-natural-conversation-flow 1.1–2.3; former workbench-
+ * conversation-view 2.1–2.5 and workbench-agent-identity-and-process-folds
+ * 2.1–3.2 keep their coverage here, updated to the run model).
  *
  * The component groups the ordered entry sequence into turns (a prompt
  * opens an operator turn; agent chunks until the next prompt form ONE
- * bubble), chunks each agent turn into text segments + ONE process block,
- * and runs a turn-counting seen-boundary seam. Scenarios:
+ * turn), splits each agent turn into ALTERNATING text/process runs, and
+ * runs a turn-counting seen-boundary seam. Scenarios:
  *
- *   2.1  N streamed chunks → one agent bubble; all thinking+tool entries
- *        fold into ONE process block at the first process entry position;
- *        text segments stay outside in stream order
- *   2.2  process fold collapsed by default; second-level per-entry folds
- *        also collapsed, titled by the entry title (generic fallback),
- *        DOM identity keyed by position
- *   2.3  middle truncation of long titles (grapheme-safe)
- *   2.4  a multi-chunk turn counts as ONE unseen turn and the seam never
- *        splits a turn
- *   2.5  empty entries skipped, keyboard-operable folds, fill mode intact
- *   3.1  assistant author label display → slug → assistant fallback
- *   3.2  "已收到" receipt badge while the prompt is still the newest entry
- *        (pure entry-sequence: queued/non-working included); gone once the
- *        agent reply arrives
+ *   1.1  splitAgentRuns: contiguous same-kind entries merge into one run;
+ *        kind changes alternate text/process runs at their arrival
+ *        positions; errors never join a run (standalone counted bubbles)
+ *   1.2  process run id = the run's first entry position, stable across
+ *        regrouping; fold open state tracked per id in a local Map and
+ *        restored after re-render (D2)
+ *   2.1  one collapsed-by-default fold per process run; second-level
+ *        per-entry folds inside (structured titles, generic fallback);
+ *        summary row shows the running entry title + entry count and
+ *        updates live; an expanded fold appends streamed entries in place
+ *        without collapsing (D3)
+ *   2.2  agent side carries no card chrome (no .bubble); user side keeps
+ *        the tinted block; error bubbles keep their counted card
+ *   2.3  "已收到" receipt badge while the prompt is still the newest entry
+ *        (pure entry-sequence); gone once the agent reply arrives
+ *   ws   turn.append frames (shared-ws mock) drive the streaming faces at
+ *        unit level: position dedup (incremental-sync cursor), session
+ *        filtering, live fold summary, live receipt clearing, and the
+ *        queued-submission turn boundary
+ *   (seam / seen-boundary / fill-mode / author-label coverage from the
+ *   former changes keeps running unchanged)
  *
  * The localStorage polyfill below replaces whatever jsdom ships so the
  * tests stay deterministic across environments and so the production
@@ -30,7 +38,7 @@
  * verbatim.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationEntryView } from '../api/client.js'
 import {
   ERROR_MERGE_WINDOW_SECS,
@@ -38,8 +46,11 @@ import {
   groupConversation,
   mergeSpawnErrors,
   middleTruncate,
+  processRunSummary,
   resolveAgentDisplay,
+  splitAgentRuns,
 } from './transcript-view.js'
+import type { ProcessItem, ProcessRun } from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
 
 // ---- localStorage polyfill --------------------------------------------
@@ -66,6 +77,33 @@ const ls = {
   },
 }
 Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true })
+
+// ---- shared-ws mock -----------------------------------------------------
+// The component subscribes to the shared WS client for `turn.append`
+// frames (the incremental-sync path). The mock replaces the real client
+// (which would dial a socket from jsdom) with a handler sink so tests can
+// emit streaming frames deterministically: position dedup (sync cursor),
+// session filtering, live fold summary, live receipt clearing, and the
+// queued-submission turn boundary all ride this path in production.
+const wsMock = vi.hoisted(() => {
+  const handlers = new Set<(event: unknown) => void>()
+  return {
+    handlers,
+    subscribe: (handler: (event: unknown) => void) => {
+      handlers.add(handler)
+      return () => handlers.delete(handler)
+    },
+  }
+})
+vi.mock('../api/shared-ws.js', () => ({ sharedWs: { subscribe: wsMock.subscribe } }))
+
+/** Emit a `turn.append` frame to every live subscriber (mounted views). */
+function emitTurnAppend(sessionId: string, entries: ConversationEntryView[]): void {
+  const seq = entries.reduce((m, e) => Math.max(m, e.position), 0)
+  for (const handler of wsMock.handlers) {
+    handler({ type: 'turn.append', session_id: sessionId, entries, seq })
+  }
+}
 
 // ---- component import -------------------------------------------------
 // Importing the module side-effect registers `<sebas-transcript-view>`
@@ -139,9 +177,79 @@ function streamedTurn(prompt: string, chunks: string[], startAt: number): Conver
   return out
 }
 
+/** An agent turn mixing text and process entries around a prompt. */
+function mixedTurnEntries(): ConversationEntryView[] {
+  return [
+    entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+    entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+    entry({ position: 2, kind: 'content', content: 'step one.', created_at_unix: FIXED_DATES.T1 }),
+    entry({ position: 3, kind: 'content', element_type: 'tool', content: '📖 **read**', created_at_unix: FIXED_DATES.T1 }),
+    entry({ position: 4, kind: 'content', content: 'mid text.', created_at_unix: FIXED_DATES.T2 }),
+    entry({ position: 5, kind: 'content', element_type: 'thinking', content: 'reconsider', created_at_unix: FIXED_DATES.T2 }),
+    entry({ position: 6, kind: 'content', element_type: 'tool', content: '✓ **bash**', created_at_unix: FIXED_DATES.T2 }),
+    entry({ position: 7, kind: 'content', content: 'final.', created_at_unix: FIXED_DATES.T3 }),
+  ]
+}
+
 // ---- pure-function coverage -------------------------------------------
 
-describe('groupConversation (design D3/D4)', () => {
+describe('splitAgentRuns (D1, 1.1)', () => {
+  it('merges contiguous same-kind entries: text concatenates, process accumulates', () => {
+    const runs = splitAgentRuns([
+      entry({ position: 1, content: 'a' }),
+      entry({ position: 2, content: 'b' }),
+      entry({ position: 3, element_type: 'tool', content: '📖 **read**' }),
+      entry({ position: 4, element_type: 'tool', content: '✓ **read**' }),
+      entry({ position: 5, content: 'c' }),
+    ])
+    expect(runs.map((r) => r.type)).toEqual(['text', 'process', 'text'])
+    const [t1, proc, t2] = runs
+    if (t1.type !== 'text' || proc.type !== 'process' || t2.type !== 'text') {
+      return expect.unreachable()
+    }
+    expect(t1.content).toBe('ab')
+    expect(t1.position).toBe(1)
+    expect(proc.items.map((it) => it.position)).toEqual([3, 4])
+    expect(proc.position).toBe(3)
+    expect(t2.content).toBe('c')
+    expect(t2.position).toBe(5)
+  })
+
+  it('alternates at every kind change — 正文-过程-正文交错', () => {
+    const runs = splitAgentRuns(mixedTurnEntries().filter((e) => e.kind === 'content'))
+    expect(runs.map((r) => r.type)).toEqual(['process', 'text', 'process', 'text', 'process', 'text'])
+    const procs = runs.flatMap((r) => (r.type === 'process' ? [r] : []))
+    expect(procs.map((r) => r.position)).toEqual([1, 3, 5])
+    expect(procs[2].items.map((it) => it.position)).toEqual([5, 6])
+    expect(procs[2].items.map((it) => it.elementType)).toEqual(['thinking', 'tool'])
+  })
+
+  it('thinking and tool are the same kind — one run, both inside', () => {
+    const runs = splitAgentRuns([
+      entry({ position: 1, element_type: 'thinking', content: 'hmm' }),
+      entry({ position: 2, element_type: 'tool', content: '📖 **read**' }),
+    ])
+    expect(runs).toHaveLength(1)
+    if (runs[0].type !== 'process') return expect.unreachable()
+    expect(runs[0].items.map((it) => it.elementType)).toEqual(['thinking', 'tool'])
+  })
+
+  it('single entries keep their run shape', () => {
+    expect(splitAgentRuns([entry({ position: 1, content: 'only' })].map((e) => e))).toEqual([
+      { type: 'text', content: 'only', position: 1 },
+    ])
+    const proc = splitAgentRuns([entry({ position: 1, element_type: 'tool', content: 'x', title: 't' })])
+    if (proc[0].type !== 'process') return expect.unreachable()
+    expect(proc[0].items[0]).toEqual({
+      elementType: 'tool',
+      content: 'x',
+      title: 't',
+      position: 1,
+    } satisfies ProcessItem)
+  })
+})
+
+describe('groupConversation (run model)', () => {
   it('one agent turn from N chunks — turn grouping, not entry grouping', () => {
     const units = groupConversation(
       mergeSpawnErrors(streamedTurn('do it', ['a', 'b', 'c', 'd'], FIXED_DATES.T1)),
@@ -151,13 +259,13 @@ describe('groupConversation (design D3/D4)', () => {
     expect(units[1].kind).toBe('agent')
     const agent = units[1]
     if (agent.kind !== 'agent') return expect.unreachable()
-    const text = agent.blocks[0]
+    const text = agent.runs[0]
     expect(text.type).toBe('text')
     if (text.type !== 'text') return expect.unreachable()
     expect(text.content).toBe('abcd')
   })
 
-  it('text → tool → text: both tool entries land in ONE process block at the first process position (2.1)', () => {
+  it('text → tool → text: the process run sits between the text segments at its arrival position (2.1)', () => {
     const entries = [
       entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
       entry({ position: 1, kind: 'content', content: 'let me check.', created_at_unix: FIXED_DATES.T1 }),
@@ -169,36 +277,32 @@ describe('groupConversation (design D3/D4)', () => {
     expect(units).toHaveLength(2)
     const agent = units[1]
     if (agent.kind !== 'agent') return expect.unreachable()
-    expect(agent.blocks.map((b) => b.type)).toEqual(['text', 'process', 'text'])
-    // 单一过程块定位在首个过程条目（position 2），两条工具都在里面。
-    const proc = agent.blocks[1]
+    expect(agent.runs.map((r) => r.type)).toEqual(['text', 'process', 'text'])
+    const proc = agent.runs[1]
     if (proc.type !== 'process') return expect.unreachable()
     expect(proc.position).toBe(2)
     expect(proc.items.map((it) => it.position)).toEqual([2, 3])
   })
 
-  it('a multi-run turn folds ALL thinking+tool entries into the single process block (2.1)', () => {
-    const entries = [
-      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 2, kind: 'content', content: 'step one.', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 3, kind: 'content', element_type: 'tool', content: '📖 **read**', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 4, kind: 'content', content: 'mid text.', created_at_unix: FIXED_DATES.T2 }),
-      entry({ position: 5, kind: 'content', element_type: 'thinking', content: 'reconsider', created_at_unix: FIXED_DATES.T2 }),
-      entry({ position: 6, kind: 'content', element_type: 'tool', content: '✓ **bash**', created_at_unix: FIXED_DATES.T2 }),
-      entry({ position: 7, kind: 'content', content: 'final.', created_at_unix: FIXED_DATES.T3 }),
-    ]
-    const units = groupConversation(mergeSpawnErrors(entries))
+  it('a multi-run turn alternates runs at their arrival positions (2.1)', () => {
+    const units = groupConversation(mergeSpawnErrors(mixedTurnEntries()))
     const agent = units[1]
     if (agent.kind !== 'agent') return expect.unreachable()
-    // 过程块只有一个、定位在首个过程条目（position 1）；文本段按流序留在块外。
-    expect(agent.blocks.map((b) => b.type)).toEqual(['process', 'text', 'text', 'text'])
-    const proc = agent.blocks[0]
-    if (proc.type !== 'process') return expect.unreachable()
-    expect(proc.position).toBe(1)
-    expect(proc.items.map((it) => it.position)).toEqual([1, 3, 5, 6])
-    expect(proc.items.map((it) => it.elementType)).toEqual(['thinking', 'tool', 'thinking', 'tool'])
-    const texts = agent.blocks.flatMap((b) => (b.type === 'text' ? [b.content] : []))
+    // 时间序：每个过程 run 折叠在自己的发生位置，不再是回合级单折叠。
+    expect(agent.runs.map((r) => r.type)).toEqual([
+      'process',
+      'text',
+      'process',
+      'text',
+      'process',
+      'text',
+    ])
+    const procs = agent.runs.flatMap((r) => (r.type === 'process' ? [r] : []))
+    expect(procs.map((r) => r.position)).toEqual([1, 3, 5])
+    expect(procs[0].items.map((it) => it.position)).toEqual([1])
+    expect(procs[1].items.map((it) => it.position)).toEqual([3])
+    expect(procs[2].items.map((it) => it.position)).toEqual([5, 6])
+    const texts = agent.runs.flatMap((r) => (r.type === 'text' ? [r.content] : []))
     expect(texts).toEqual(['step one.', 'mid text.', 'final.'])
   })
 
@@ -208,7 +312,7 @@ describe('groupConversation (design D3/D4)', () => {
     )
     const agent = units[1]
     if (agent.kind !== 'agent') return expect.unreachable()
-    expect(agent.blocks.map((b) => b.type)).toEqual(['text'])
+    expect(agent.runs.map((r) => r.type)).toEqual(['text'])
   })
 
   it('carries the entry title into process items; missing title tolerates legacy entries (2.2)', () => {
@@ -220,7 +324,7 @@ describe('groupConversation (design D3/D4)', () => {
     const units = groupConversation(mergeSpawnErrors(entries))
     const agent = units[1]
     if (agent.kind !== 'agent') return expect.unreachable()
-    const proc = agent.blocks[0]
+    const proc = agent.runs[0]
     if (proc.type !== 'process') return expect.unreachable()
     expect(proc.items[0].title).toBe('read · src/main.rs')
     expect(proc.items[1].title).toBeNull()
@@ -242,6 +346,83 @@ describe('groupConversation (design D3/D4)', () => {
     ]
     const units = groupConversation(mergeSpawnErrors(entries))
     expect(units.map((u) => u.kind)).toEqual(['operator', 'error'])
+  })
+
+  it('an error mid-turn splits the agent turn and never joins a run (D5, 1.1)', () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'before.', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', element_type: 'error', content: '**spawn failed**: x', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 3, kind: 'content', content: 'after.', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    const units = groupConversation(mergeSpawnErrors(entries))
+    expect(units.map((u) => u.kind)).toEqual(['operator', 'agent', 'error', 'agent'])
+    for (const u of units) {
+      if (u.kind !== 'agent') continue
+      expect(u.runs.map((r) => r.type)).toEqual(['text'])
+    }
+  })
+})
+
+describe('process run ids (D2, 1.2)', () => {
+  it('the run id is the first entry position and stays stable across regrouping', () => {
+    const base = mixedTurnEntries()
+    const ids = (entries: ConversationEntryView[]): number[] =>
+      groupConversation(mergeSpawnErrors(entries)).flatMap((u) =>
+        u.kind === 'agent'
+          ? u.runs.flatMap((r) => (r.type === 'process' ? [r.position] : []))
+          : [],
+      )
+    const before = ids(base)
+    expect(before).toEqual([1, 3, 5])
+    // 流式追加（尾部文本段后新开一个过程 run）：既有 run 的 id 全部原位
+    // 不动，新 run 拿自己的首条目 position——折叠展开状态据此跨重渲染恢复。
+    const after = ids([
+      ...base,
+      entry({ position: 8, kind: 'content', element_type: 'tool', content: '✓ **edit**', created_at_unix: FIXED_DATES.T3 }),
+      entry({ position: 9, kind: 'content', content: 'tail.', created_at_unix: FIXED_DATES.T3 }),
+    ])
+    expect(after).toEqual([1, 3, 5, 8])
+  })
+
+  it('run id always equals its first item position', () => {
+    const runs = groupConversation(
+      mergeSpawnErrors(mixedTurnEntries()),
+    ).flatMap((u) => (u.kind === 'agent' ? u.runs : []))
+    for (const r of runs) {
+      if (r.type !== 'process') continue
+      expect(r.position).toBe(r.items[0]?.position)
+    }
+  })
+})
+
+describe('processRunSummary (D3)', () => {
+  const run = (items: ProcessItem[]): ProcessRun => ({ type: 'process', items, position: items[0]?.position ?? 0 })
+
+  it('reflects the running (last) entry: structured title wins', () => {
+    const s = processRunSummary(
+      run([
+        { elementType: 'thinking', content: 'hmm', title: null, position: 1 },
+        { elementType: 'tool', content: '📖 **read**', title: 'read · src/main.rs', position: 2 },
+      ]),
+    )
+    expect(s.label).toBe('read · src/main.rs')
+    expect(s.full).toBe('read · src/main.rs')
+  })
+
+  it('falls back to the generic element-type label for untitled entries', () => {
+    const s = processRunSummary(
+      run([{ elementType: 'tool', content: '✓ **bash**', title: null, position: 3 }]),
+    )
+    expect(s.label).toBe('tool')
+    expect(s.full).toBeNull()
+  })
+
+  it('as entries stream in, the moving tail changes the summary', () => {
+    const r = run([{ elementType: 'thinking', content: 'hmm', title: null, position: 1 }])
+    expect(processRunSummary(r).label).toBe('thinking')
+    r.items.push({ elementType: 'tool', content: 'x', title: 'write · a.rs', position: 2 })
+    expect(processRunSummary(r).label).toBe('write · a.rs')
   })
 })
 
@@ -277,9 +458,9 @@ describe('mergeSpawnErrors', () => {
   })
 })
 
-// ---- middle truncation (2.3, design D5) ---------------------------------
+// ---- middle truncation (2.3) ---------------------------------------------
 
-describe('middleTruncate (2.3/D5)', () => {
+describe('middleTruncate (2.3)', () => {
   const graphemeCount = (s: string): number => {
     const seg = new Intl.Segmenter('en', { granularity: 'grapheme' })
     return [...seg.segment(s)].length
@@ -345,13 +526,15 @@ describe('assistant author label fallback chain (3.1, D1)', () => {
 // ---- rendered-component coverage ---------------------------------------
 
 describe('sebas-transcript-view (conversation rendering)', () => {
-  it('renders N streamed chunks as ONE assistant bubble (2.1)', async () => {
+  it('renders N streamed chunks as ONE natural-flow turn, not per-chunk bubbles (2.1)', async () => {
     const el = await mount({
       entries: streamedTurn('do it', ['chunk one ', 'chunk two ', 'chunk three'], FIXED_DATES.T1),
     })
     const assistant = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
     expect(assistant?.length).toBe(1)
-    const bodies = assistant?.[0]?.querySelectorAll<HTMLElement>('.bubble > .body')
+    const flow = assistant?.[0]?.querySelector<HTMLElement>('.flow')
+    expect(flow).toBeTruthy()
+    const bodies = flow?.querySelectorAll<HTMLElement>('.body')
     expect(bodies?.length).toBe(1)
     expect(bodies?.[0]?.textContent).toContain('chunk one')
     expect(bodies?.[0]?.textContent).toContain('chunk three')
@@ -378,25 +561,16 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(blocks?.[0]?.querySelector('.author.you')?.textContent).toBe('you')
   })
 
-  it('mixed turn renders ONE process fold; text segments stay outside in stream order (2.1)', async () => {
-    const entries = [
-      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 2, kind: 'content', content: 'step one.', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 3, kind: 'content', element_type: 'tool', content: '📖 **read**', created_at_unix: FIXED_DATES.T1 }),
-      entry({ position: 4, kind: 'content', content: 'mid text.', created_at_unix: FIXED_DATES.T2 }),
-      entry({ position: 5, kind: 'content', element_type: 'thinking', content: 'reconsider', created_at_unix: FIXED_DATES.T2 }),
-      entry({ position: 6, kind: 'content', element_type: 'tool', content: '✓ **bash**', created_at_unix: FIXED_DATES.T2 }),
-      entry({ position: 7, kind: 'content', content: 'final.', created_at_unix: FIXED_DATES.T3 }),
-    ]
-    const el = await mount({ entries })
+  it('mixed turn renders one fold PER process run, each at its arrival position (2.1)', async () => {
+    const el = await mount({ entries: mixedTurnEntries() })
     const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
-    // 全部过程条目只折一次（旧结构会是 thinking 折叠 + 工具组两个折叠）。
+    // 时间序切分：三个过程 run = 三个折叠，各在自己的发生位置。
     const folds = assistant.querySelectorAll<HTMLDetailsElement>('details.process-fold')
-    expect(folds.length).toBe(1)
-    expect(folds[0].getAttribute('data-process-count')).toBe('4')
+    expect(folds.length).toBe(3)
+    expect([...folds].map((f) => f.dataset.processId)).toEqual(['1', '3', '5'])
+    expect([...folds].map((f) => f.getAttribute('data-process-count'))).toEqual(['1', '1', '2'])
     // 文本段按流序留在折叠外（三段）。
-    const segments = assistant.querySelectorAll<HTMLElement>('.bubble > .body:not(.fold-body)')
+    const segments = assistant.querySelectorAll<HTMLElement>('.flow > .body:not(.fold-body)')
     expect(segments.length).toBe(3)
     expect(segments[0].textContent).toContain('step one.')
     expect(segments[1].textContent).toContain('mid text.')
@@ -409,12 +583,12 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     })
     const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
     expect(assistant.querySelector('details')).toBeNull()
-    const bodies = assistant.querySelectorAll<HTMLElement>('.bubble > .body')
+    const bodies = assistant.querySelectorAll<HTMLElement>('.flow > .body')
     expect(bodies.length).toBe(1)
     expect(bodies[0].textContent).toContain('chunk one')
   })
 
-  it('process fold and second-level folds collapse by default; titles show with generic fallback (2.2)', async () => {
+  it('process folds and second-level folds collapse by default; titles show with generic fallback (2.1/2.2)', async () => {
     const entries = [
       entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
       entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'deep thought', created_at_unix: FIXED_DATES.T1 }),
@@ -424,8 +598,15 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const el = await mount({ entries })
     const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
     const fold = assistant.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.dataset.processId).toBe('1')
     expect(fold.getAttribute('data-process-count')).toBe('3')
-    expect(fold.querySelector('summary .label')?.textContent?.trim()).toBe('process · 3')
+    // 折叠行：固定 process 标签 + 实时摘要（进行中条目 = run 尾部，此处
+    // 是无 title 的 tool → 通用标签）+ 条目计数。
+    expect(fold.querySelector('summary .label')?.textContent?.trim()).toBe('process')
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('tool')
+    // run 尾条目无 title → 通用标签、summary 不带 title 属性。
+    expect(fold.querySelector('summary')!.hasAttribute('title')).toBe(false)
+    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('3')
     // 外层默认收起；二级也全部默认收起。
     expect(fold.open).toBe(false)
     const items = assistant.querySelectorAll<HTMLDetailsElement>('details.process-item')
@@ -453,6 +634,120 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     // 其余二级折叠不受影响。
     expect(items[0].open).toBe(false)
     expect(items[2].open).toBe(false)
+  })
+
+  it('the fold summary tracks the running tool and entry count as entries stream in (D3, 2.1)', async () => {
+    const base = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const el = await mount({ entries: base })
+    let fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.getAttribute('data-process-count')).toBe('1')
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('thinking')
+    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('1')
+    // 流式增量到达（快照收敛路径重分组）：同一 run 的摘要实时刷新——
+    // 进行中的工具 title + 累计条目数。
+    el.entries = [
+      ...base,
+      entry({ position: 2, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.dataset.processId).toBe('1')
+    expect(fold.getAttribute('data-process-count')).toBe('2')
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · deploy.sh')
+    expect(fold.querySelector('summary')!.getAttribute('title')).toBe('bash · deploy.sh')
+    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('2')
+  })
+
+  it('a collapsed fold never opens by itself while its entries stream in (D3, 2.1)', async () => {
+    // spec 场景「folds stay collapsed with a live summary while streaming」
+    // 的收起半边：折叠默认收起，流式条目连续落进同一 run 时不得自开——
+    // 摘要照常实时刷新（进行中工具 title + 累计计数）。
+    const base = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const el = await mount({ entries: base })
+    expect(el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!.open).toBe(
+      false,
+    )
+    el.entries = [
+      ...base,
+      entry({ position: 2, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '✓ **bash**', title: 'bash · verify.sh', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    const fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.dataset.processId).toBe('1')
+    expect(fold.open).toBe(false)
+    expect(fold.getAttribute('data-process-count')).toBe('3')
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · verify.sh')
+  })
+
+  it('an expanded fold stays open and appends streamed entries in place (D2/D3, 2.1)', async () => {
+    // 夹具让过程 run 收尾（run 是尾部 run），流式追加的过程条目才会并入
+    // 同一 run——这正是「展开后新条目就地追加」的场景。
+    const base = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'step one.', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const el = await mount({ entries: base })
+    const fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.dataset.processId).toBe('2')
+    fold.querySelector('summary')!.click()
+    await el.updateComplete
+    expect(fold.open).toBe(true)
+    // 流式全量重分组（快照收敛）：新过程条目并入同一 run——折叠保持展开、
+    // 新条目就地追加。
+    el.entries = [
+      ...base,
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '📖 **read**', title: 'read · src/lib.rs', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    const fold2 = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold2.dataset.processId).toBe('2')
+    expect(fold2.open).toBe(true)
+    expect(fold2.getAttribute('data-process-count')).toBe('2')
+    const items = fold2.querySelectorAll<HTMLDetailsElement>('details.process-item')
+    expect(items.length).toBe(2)
+    expect(items[1].dataset.position).toBe('3')
+  })
+
+  it('a fold that appears later starts collapsed while an expanded sibling stays open (D2/D3)', async () => {
+    const base = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'content', content: 'step one.', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const el = await mount({ entries: base })
+    const first = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    first.querySelector('summary')!.click()
+    await el.updateComplete
+    expect(first.open).toBe(true)
+    // 流式追加出第二个过程 run：新折叠默认收起，已展开的不受影响。
+    el.entries = [
+      ...base,
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '📖 **read**', created_at_unix: FIXED_DATES.T2 }),
+      entry({ position: 4, kind: 'content', content: 'after.', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    const folds = el.shadowRoot!.querySelectorAll<HTMLDetailsElement>('details.process-fold')
+    expect(folds.length).toBe(2)
+    expect(folds[0].dataset.processId).toBe('1')
+    expect(folds[0].open).toBe(true)
+    expect(folds[1].dataset.processId).toBe('3')
+    expect(folds[1].open).toBe(false)
   })
 
   it('second-level folds keep position-keyed DOM identity (2.2)', async () => {
@@ -484,6 +779,54 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(summary.getAttribute('title')).toBe(long)
   })
 
+  it('agent side drops the card shell; user side keeps the tinted block; errors keep their card (2.2)', async () => {
+    const el = await mount({
+      entries: streamedTurn('do it', ['answer'], FIXED_DATES.T1),
+    })
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    // agent 侧：裸排流容器在、卡片壳不在。
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    expect(assistant.querySelector('.flow')).toBeTruthy()
+    expect(assistant.querySelector('.bubble')).toBeNull()
+    // 用户侧：轻底色块保留 tinted 背景、无边框阴影。
+    const user = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-user')!
+    expect(user.querySelector('.msg-block')).toBeTruthy()
+    expect(styleText).toMatch(
+      /\.turn-block \.msg-block\s*\{[^}]*background:\s*var\(--sebas-accent-soft\)/,
+    )
+    expect(styleText).toMatch(/\.turn-block \.msg-block\s*\{[^}]*border-radius:/)
+    expect(styleText).not.toContain('.turn-block.is-user .bubble')
+    // 错误气泡保留计数卡片形态（D5）。
+    const errEl = await mount({
+      entries: [
+        entry({ kind: 'content', element_type: 'error', content: '**spawn failed**: x', created_at_unix: FIXED_DATES.T1 }),
+      ],
+    })
+    expect(errEl.shadowRoot!.querySelector('.turn-block.is-error .bubble')).toBeTruthy()
+  })
+
+  it('user block keeps the tint but carries no card chrome — no border, no shadow (2.2/D4)', async () => {
+    // spec「lightly tinted block without card chrome (no border or shadow)」：
+    // .msg-block 规则体只许有底色/圆角——卡片边框与阴影不得回归。
+    const el = await mount({ entries: streamedTurn('hi', ['hello'], FIXED_DATES.T1) })
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    // 命中 .msg-block 的全部规则体（含与 .flow 合写的布局规则）——任何一条
+    // 都不许给用户色块加回卡片边框或阴影。
+    const rules = [
+      ...styleText.matchAll(/\.turn-block [^{]*\.msg-block[^{]*\{([^}]*)\}/g),
+    ].map((m) => m[1])
+    expect(rules.length).toBeGreaterThanOrEqual(2)
+    const joined = rules.join('\n')
+    expect(joined).toContain('background: var(--sebas-accent-soft)')
+    expect(joined).toMatch(/\bborder-radius:/) // 圆角保留
+    expect(joined).not.toMatch(/\bborder:\s/) // 卡片边框不得回归
+    expect(joined).not.toContain('box-shadow')
+  })
+
   it('a multi-chunk unseen turn counts as ONE unseen turn and the seam never splits it (2.4)', async () => {
     const entries = [
       ...streamedTurn('old', ['seen'], FIXED_DATES.T1),
@@ -501,15 +844,13 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(false)
     expect(seam?.textContent).toContain('~2 new')
-    // 边界不切开回合：seam 下方第一个块是完整回合的开头（operator 气泡），
-    // 第二个块就是那个完整的七 chunk agent 气泡。
+    // 边界落在未读第一个回合（operator 块）上方，不切开任何回合。
     const seamNext = seam?.nextElementSibling
-    // 边界落在未读第一个回合（operator 气泡）上方，不切开任何回合。
     expect(seamNext?.classList.contains('is-user')).toBe(true)
-    const agentBubbles = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
-    expect(agentBubbles?.length).toBe(2)
-    expect(agentBubbles?.[1]?.textContent).toContain('a')
-    expect(agentBubbles?.[1]?.textContent).toContain('g')
+    const agentBlocks = el.shadowRoot?.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
+    expect(agentBlocks?.length).toBe(2)
+    expect(agentBlocks?.[1]?.textContent).toContain('a')
+    expect(agentBlocks?.[1]?.textContent).toContain('g')
   })
 
   it('no seam when everything is seen; mark-all-seen writes and hides', async () => {
@@ -563,12 +904,12 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(stored.anchor_count).toBe(3)
   })
 
-  it('timestamps render inside each bubble meta row with datetime attrs', async () => {
+  it('timestamps render inside each meta row with datetime attrs', async () => {
     const el = await mount({
       entries: streamedTurn('hi', ['a', 'b'], FIXED_DATES.T1),
     })
     const times = el.shadowRoot?.querySelectorAll<HTMLTimeElement>(
-      '.turn-block .bubble .meta time.time',
+      '.turn-block .meta time.time',
     )
     expect(times?.length).toBe(2)
     expect(times?.[0]?.getAttribute('datetime')).toBe(new Date(FIXED_DATES.T1 * 1000).toISOString())
@@ -653,7 +994,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const badge = el.shadowRoot?.querySelector<HTMLElement>('[data-receipt]')
     expect(badge).toBeTruthy()
     expect(badge?.textContent).toContain('已收到')
-    // 角标挂在最后一条操作者气泡上。
+    // 角标挂在最后一条操作者色块上。
     expect(badge?.closest('.turn-block')?.classList.contains('is-user')).toBe(true)
   })
 
@@ -684,5 +1025,121 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     expect(userBlocks.length).toBe(2)
     expect(userBlocks[0].querySelector('[data-receipt]')).toBeNull()
     expect(userBlocks[1].querySelector('[data-receipt]')).toBeTruthy()
+  })
+
+  it('a queued submission starts its own turn; later output flows into the new turn (turn-start scenario)', async () => {
+    // spec 场景「a submission appears when its turn starts」：第二条提交在
+    // agent 仍在输出时被接受——它终结前一个 agent 回合，先以带 receipt
+    // 角标的操作者色块出现；新输出开新回合，不并入上一回合。
+    const base = [
+      entry({ position: 0, kind: 'prompt', content: 'first', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'answer one', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 2, kind: 'prompt', content: 'second', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    const el = await mount({ entries: base })
+    expect(el.shadowRoot!.querySelectorAll('.turn-block.is-assistant')).toHaveLength(1)
+    const badges = el.shadowRoot!.querySelectorAll('[data-receipt]')
+    expect(badges).toHaveLength(1)
+    expect(badges[0].closest('.turn-block')?.textContent).toContain('second')
+    // 排队中的提交后续回复到达：开新 agent 回合（与第一回合文本互不掺混），
+    // receipt 随首个输出条目消失。
+    emitTurnAppend('oc_test', [
+      entry({ position: 3, kind: 'content', content: 'answer two', created_at_unix: FIXED_DATES.T3 }),
+    ])
+    await el.updateComplete
+    const assistants = el.shadowRoot!.querySelectorAll<HTMLElement>('.turn-block.is-assistant')
+    expect(assistants).toHaveLength(2)
+    expect(assistants[0].textContent).toContain('answer one')
+    expect(assistants[0].textContent).not.toContain('answer two')
+    expect(assistants[1].textContent).toContain('answer two')
+    expect(el.shadowRoot!.querySelector('[data-receipt]')).toBeNull()
+  })
+
+  it('clears the receipt badge live when the first reply entry streams in via turn.append (3.2)', async () => {
+    // spec 场景「badge clears when the reply streams」的实况迁移：角标先在，
+    // 首个 agent 输出条目经 WS 增量到达后当帧消失（非重挂载重放）。
+    const el = await mount({
+      entries: streamedTurn('waiting on the agent', [], FIXED_DATES.T4),
+    })
+    expect(el.shadowRoot?.querySelector('[data-receipt]')).toBeTruthy()
+    emitTurnAppend('oc_test', [
+      entry({ position: 1, kind: 'content', content: 'reply', created_at_unix: FIXED_DATES.T5 }),
+    ])
+    await el.updateComplete
+    expect(el.shadowRoot?.querySelector('[data-receipt]')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.turn-block.is-assistant')?.textContent).toContain('reply')
+  })
+
+  it('turn.append drives the live fold summary with position dedup and session filter (D3 + sync cursor)', async () => {
+    // 增量同步游标面：turn.append 帧按 position 去重并入渲染管线；重复帧
+    // 不重复计数、迟到旧帧被丢弃、非聚焦会话的帧被忽略；快照收敛后同一
+    // run id / 同一摘要（游标协议与快照一致）。
+    const base = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', content: 'let me check.', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const el = await mount({ entries: base })
+    expect(el.shadowRoot!.querySelector('details.process-fold')).toBeNull()
+
+    // 帧 1：thinking 新开过程 run —— 折叠默认收起、摘要 = 通用标签、计数 1。
+    emitTurnAppend('oc_test', [
+      entry({ position: 2, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+    ])
+    await el.updateComplete
+    let fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.dataset.processId).toBe('2')
+    expect(fold.open).toBe(false)
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('thinking')
+    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('1')
+
+    // 帧 2：工具条目并入同一 run —— 摘要实时切到进行中的结构化 title、
+    // 计数 2、仍保持收起。
+    emitTurnAppend('oc_test', [
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    await el.updateComplete
+    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.open).toBe(false)
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · deploy.sh')
+    expect(fold.querySelector('summary')!.getAttribute('title')).toBe('bash · deploy.sh')
+    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('2')
+
+    // 游标去重：重复 position 的帧不重复计数、二级折叠不重复渲染。
+    emitTurnAppend('oc_test', [
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    await el.updateComplete
+    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.getAttribute('data-process-count')).toBe('2')
+    expect(fold.querySelectorAll('details.process-item')).toHaveLength(2)
+
+    // 迟到的旧 position 帧被丢弃；非聚焦会话的帧被忽略。
+    emitTurnAppend('oc_test', [
+      entry({ position: 1, kind: 'content', content: 'STALE', created_at_unix: FIXED_DATES.T1 }),
+    ])
+    emitTurnAppend('oc_other', [
+      entry({ position: 9, kind: 'content', element_type: 'tool', content: 'elsewhere', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    await el.updateComplete
+    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.getAttribute('data-process-count')).toBe('2')
+    expect(el.shadowRoot!.textContent).not.toContain('STALE')
+    expect(el.shadowRoot!.textContent).not.toContain('elsewhere')
+
+    // 快照收敛把流式尾巴并入 `entries`：同一 run id、同一摘要——游标协议
+    // 与快照协议收敛到同一视图。
+    el.entries = [
+      ...base,
+      entry({ position: 2, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 3, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
+    ]
+    await el.updateComplete
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    await el.updateComplete
+    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    expect(fold.dataset.processId).toBe('2')
+    expect(fold.getAttribute('data-process-count')).toBe('2')
+    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · deploy.sh')
+    expect(fold.open).toBe(false)
   })
 })
