@@ -78,7 +78,7 @@ overlay、core secret、auth file），MUST NOT 绑定 9797 或读写真实
 
 ### Requirement: 鉴权与访问旅程
 
-套件 SHALL 在鉴权关闭与开启两种形态下分别验证：关闭时应用免登录直达 workbench；开启时未登录访问被重定向到登录页、错误凭据被拒绝、admin/admin 登录成功进入 workbench、登出后回到未鉴权态。沙箱装配 SHALL 支持以参数切换两种形态（统一测试账户 admin/admin）。
+套件 SHALL 在鉴权关闭、鉴权开启已有用户、鉴权开启零用户三种形态下分别验证：关闭时应用免登录直达 workbench 且无任何门禁元素（含可达性轮询窗口内）；开启已有用户时未登录访问被重定向到登录页、错误凭据被拒绝、admin/admin 登录成功进入 workbench、登出后回到未鉴权态；开启零用户时渲染首启设置页（root 建户就地校验、建户进入 workbench、会话经刷新存活、再次 setup 请求被 409 拒绝），且该页 SHALL 在可达性轮询窗口内保持稳定不被翻转成登录页。沙箱装配 SHALL 支持以参数切换三种形态（登录形态统一测试账户 admin/admin；零用户形态不预建户）。
 
 #### Scenario: 免登录直达
 
@@ -89,6 +89,11 @@ overlay、core secret、auth file），MUST NOT 绑定 9797 或读写真实
 
 - **WHEN** 鉴权开启时以 admin/admin 登录、登出
 - **THEN** 登录后进入 workbench，登出后再次访问需重新登录；错误凭据被拒绝且不进入应用
+
+#### Scenario: 首启 root 引导
+
+- **WHEN** 鉴权开启且用户库零用户时打开根路径（第三种沙箱形态）
+- **THEN** 渲染首启设置页并跨越两个可达性轮询间隔保持稳定（不翻转成登录页）；建 root 后进入 workbench 且会话经刷新存活；再次 setup 请求被 409 拒绝
 
 ### Requirement: 工作台、项目与会话管理面旅程
 
