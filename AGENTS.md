@@ -25,6 +25,11 @@ bd dolt push            # Push beads data to remote
   [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0-beta.4/)
   and must be **one concise sentence** summarizing the change — no long-winded
   bodies or stacked detail clauses; details belong in issues/PRs, not commits.
+  **标题硬上限**：主题行 ≤20 个字（汉字计），只概括一两件事；禁止 `——` 后接
+  细节罗列、禁止堆叠从句（如「四级通知 + fatal 全锁……（change-name）」这类
+  写法）。实在需要说明时才加正文：主题行后空行，编号列表 ≤3 条。示例对比：
+  - ❌ `feat(webui): 分级通知层落地——四级通知 + fatal 全锁随推送可达性翻转，client 拦截器判级（add-xxx）`
+  - ✅ `feat(webui): 四级通知层与 fatal 锁定`
 - Merging a `feat/*` branch back to `main`:
   1. Rebase onto `main` first, then merge with `--no-ff`.
   2. Exception: few commits and no new feature → rebase onto `main` and
