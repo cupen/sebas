@@ -279,7 +279,7 @@ The workbench SHALL provide a modal dialog with a server-side directory browser 
 
 ### Requirement: New session without prompt
 
-The workbench SHALL support creating a 0-turn placeholder session without requiring a prompt. The placeholder SHALL appear in the session list immediately and SHALL be activated. An ACP child SHALL NOT be spawned until the first message is sent. Each project row SHALL have a dedicated "New session" button (the rail carries no Inbox group — sessions with no project are not created from the workbench). Clicking it SHALL open a creation dialog — the ONLY place an agent can be chosen — which SHALL require an explicit agent choice drawn from `/api/agents` (no implicit or "null" agent), SHALL preselect the target project's remembered default agent when one exists, SHALL carry an optional permission-mode choice (`ask | edit | allow | auto`, defaulting to "agent default" which omits the `mode` field on the wire), and MAY carry an optional two-level model choice (provider, then model) drawn from the Settings catalog, preselected per the configured default provider and model. Confirming the dialog SHALL create and activate the placeholder; cancelling SHALL create nothing.
+The workbench SHALL support creating a 0-turn placeholder session without requiring a prompt. The placeholder SHALL appear in the session list immediately and SHALL be activated. An ACP child SHALL NOT block creation: focusing a placeholder session that has no live child SHALL start the child in the background — resuming the recorded conversation when the session mapping allows it and reporting honestly when it does not — and the first message SHALL also start the child if focus never did (for example the operator submits from the rail preview without switching). Clicking it SHALL open a creation dialog — the ONLY place an agent can be chosen — which SHALL require an explicit agent choice drawn from `/api/agents` (no implicit or "null" agent), SHALL preselect the target project's remembered default agent when one exists, SHALL carry an optional permission-mode choice (`ask | edit | allow | auto`, defaulting to "agent default" which omits the `mode` field on the wire), and MAY carry an optional two-level model choice (provider, then model) drawn from the Settings catalog, preselected per the configured default provider and model. Confirming the dialog SHALL create and activate the placeholder; cancelling SHALL create nothing. A failed background start SHALL NOT kill the placeholder: it stays in the list and the failure is surfaced where it happened.
 
 #### Scenario: dialog requires an explicit agent
 
@@ -298,7 +298,7 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 
 #### Scenario: first message spawns the child
 
-- **WHEN** the operator sends a message into a zero-turn placeholder session
+- **WHEN** the operator sends a message into a zero-turn placeholder session whose child was never started (or has not finished starting)
 - **THEN** the system spawns the ACP child and the session transitions to working
 
 #### Scenario: dialog carries the permission-mode choice
@@ -306,19 +306,34 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 - **WHEN** the creation dialog is open and the operator leaves the mode dropdown on its default
 - **THEN** confirming creates the session without a `mode` field on the wire; choosing `edit` creates it with `mode=edit`
 
+#### Scenario: focusing the placeholder starts the child with resume
+
+- **WHEN** the operator focuses a placeholder session that has no live child, and the session carries a persisted conversation mapping
+- **THEN** the child starts in the background and continues the recorded conversation, and the session becomes usable without the operator sending a prompt first
+
+#### Scenario: failed background start keeps the placeholder
+
+- **WHEN** the background start of a placeholder's child fails
+- **THEN** the session remains in the list as a placeholder and the failure is stated, not silently swallowed
+
 ### Requirement: Session archive
 
-Each session row SHALL have an archive button that moves the session to the History group. An archived session SHALL be read-only — the operator cannot send messages into it, cannot close it, and cannot switch to it as the active session. An archived session SHALL be restorable to its original project by clicking it in the History group.
+The rail session row's overflow menu SHALL be the ONLY operator-facing archive entry: archiving moves the session to the History group and carries the close semantics (the child is killed if active and staged or queued submissions are discarded, which the confirm dialog warns about with the pending count). The focused session's header SHALL render no action buttons and no navigation link — no "All sessions", no Archive, no Close, and no mode switcher. An archived session SHALL be read-only — the operator cannot send messages into it, cannot close it, and cannot switch to it as the active session. An archived session SHALL be restorable to its original project by clicking it in the History group.
 
 #### Scenario: archive a session
 
-- **WHEN** the operator clicks the archive button on a session row
-- **THEN** the session is moved to the History group, marked as read-only, and the operator cannot interact with it
+- **WHEN** the operator picks archive in a rail session row's overflow menu and confirms
+- **THEN** the session is moved to the History group, marked as read-only, and any pending submissions are reported as discarded in the confirm dialog before the action
 
 #### Scenario: restore archived session
 
 - **WHEN** the operator clicks an archived session in the History group
 - **THEN** the session is restored to its original project, becomes writable, and is activated
+
+#### Scenario: focused session header offers no actions
+
+- **WHEN** a session is focused and the operator looks at the session header
+- **THEN** the header shows display information only — no action buttons, no mode switcher, and no "All sessions" link
 
 ### Requirement: History group is the archive
 
@@ -411,19 +426,34 @@ bodies keep their existing model-selection behavior unchanged.
 
 ### Requirement: Model selector offers the backend catalog before any session
 
-The creation dialog's model selector SHALL offer the catalog the operator configured in Settings — every configured provider's model list, presented as two levels (provider, then model) — so the operator can pick a model for the first turn of a new session. The default selection SHALL follow the configured default provider and model. When the catalog is empty or unavailable, the dialog SHALL state its unavailability honestly rather than offering an empty or fabricated list. Changes to the configured catalog or the default SHALL be reflected in the dialog without requiring a restart.
+The creation dialog's model selector SHALL offer the catalog the operator configured in Settings — every configured provider's model list, presented as two levels (provider, then model) — so the operator can pick a model for the first turn of a new session. There is no configured default provider/model feeding this preselection: the dialog SHALL preselect, in order, the operator's last-used (provider, model) pair — remembered globally in the browser and written only by a creation-dialog confirmation — when that pair still exists in the catalog; otherwise the catalog's first pair. When the catalog is empty or unavailable, the dialog SHALL NOT offer an empty or fabricated list: it SHALL present an explicit indication that no models are configured and direct the operator to Settings → Models to add one. Catalog changes SHALL be reflected in the dialog without requiring a restart; a remembered pair that has vanished from the catalog SHALL NOT be preselected.
 
-The workbench composer SHALL present the focused session's model selection as a single chip at the composer's bottom-right, offering that session's `available_models`, because a mid-session switch is valid only if the session's execution body accepts the chosen model. The chip SHALL NOT derive its options from the catalog or from another session's `available_models`. When the focused session exposes no models, the chip SHALL state that honestly rather than rendering an empty menu.
+The workbench composer SHALL present the focused session's model selection as a single chip at the composer's bottom-right, offering that session's `available_models`, because a mid-session switch is valid only if the session's execution body accepts the chosen model. The chip SHALL NOT derive its options from the catalog or from another session's `available_models`, and switching a session's model SHALL NOT write the last-used pair remembered for creation. While the focused session's child is starting (the eager start of a placeholder or a re-opened session), the chip SHALL state that startup is in progress rather than claiming no models exist. When the focused session's child has finished starting and exposes no models, the chip SHALL state that honestly rather than rendering an empty menu.
 
 #### Scenario: selector populated before any session
 
-- **WHEN** a default provider with a models catalog is configured and the operator opens the creation dialog
-- **THEN** the dialog's model selector offers the catalog's models
+- **WHEN** the operator opens the creation dialog with a non-empty catalog and no last-used pair remembered
+- **THEN** the dialog's model selector offers the catalog's models with the catalog's first pair preselected
 
 #### Scenario: provider and model are chosen in two levels
 
 - **WHEN** the creation dialog is open with two providers configured in Settings
 - **THEN** the selector first offers the providers, and choosing one offers that provider's models
+
+#### Scenario: last-used pair wins the preselection
+
+- **WHEN** the operator previously confirmed a creation with `openai / gpt-5` and opens the creation dialog again with `gpt-5` still present in the catalog
+- **THEN** the selector preselects provider `openai` and model `gpt-5`, not the catalog's first pair
+
+#### Scenario: vanished last-used pair falls back to the first pair
+
+- **WHEN** the remembered last-used pair's model (or provider) no longer exists in the catalog
+- **THEN** the selector preselects the catalog's first pair instead, without surfacing the stale pair as an option
+
+#### Scenario: creating writes the memory, session switches do not
+
+- **WHEN** the operator confirms a creation with a chosen (provider, model) pair, or separately switches a focused session's model via the composer chip
+- **THEN** only the creation confirmation updates the remembered last-used pair; the session-level switch leaves it untouched
 
 #### Scenario: existing sessions keep session-sourced options
 
@@ -435,10 +465,20 @@ The workbench composer SHALL present the focused session's model selection as a 
 - **WHEN** no provider catalog exists and the focused session exposes no models
 - **THEN** the creation dialog and the composer chip each present an explicit unavailability indication rather than an empty list
 
+#### Scenario: empty catalog directs the operator to configure one
+
+- **WHEN** the creation dialog opens with an empty or unavailable catalog
+- **THEN** the model area states that no models are configured and directs the operator to Settings → Models, rather than rendering an empty selector
+
 #### Scenario: chip without session models is stated honestly
 
-- **WHEN** the focused session exposes no `available_models`
+- **WHEN** the focused session exposes no `available_models` after its child has finished starting
 - **THEN** the chip presents an explicit unavailability indication rather than an empty menu
+
+#### Scenario: chip states startup in progress
+
+- **WHEN** the focused session's child is starting and has not reported models yet
+- **THEN** the chip states that the agent is starting rather than showing "no models available"
 
 ### Requirement: Rail project removal entry
 
@@ -606,33 +646,55 @@ When the session ends or is closed while entries are pending, those entries SHAL
 
 The workbench SHALL render the focused session as a conversation between the
 operator and the agent, in transcript order: each submission the operator made
-SHALL appear as their own turn, and each agent turn SHALL appear as a single
-assistant bubble. One agent turn SHALL be composed of everything the agent
-produced for that turn — the streamed text concatenated in arrival order, its
-thinking, and its tool invocations — and SHALL NOT be rendered as a series of
-per-chunk bubbles. All thinking and tool entries of the turn SHALL be
-collected into ONE collapsed-by-default process fold inside the turn's bubble
-(replacing the former per-run thinking folds and the separate "used N tools"
-group); the fold SHALL sit at the position of the turn's first process entry,
-with the streamed text segments remaining outside it in arrival order.
-Expanding the process fold SHALL reveal second-level folds — one per thinking
-segment and one per tool invocation — each collapsed by default. A submission
-SHALL appear in the conversation only when its turn starts.
+SHALL appear as their own turn, rendered as a lightly tinted block without
+card chrome (no border or shadow), and each agent turn SHALL render as a
+natural conversation flow — the author label followed by the turn's content
+laid out directly in the conversation, not wrapped in a large bubble or card
+container. One agent turn SHALL be composed of everything the agent produced
+for that turn — the streamed text concatenated in arrival order and its
+thinking and tool invocations — and SHALL NOT be rendered as a series of
+per-chunk bubbles. Within an agent turn, entries SHALL be split in arrival
+order into alternating text runs and process runs: every run of contiguous
+thinking/tool entries SHALL become ONE collapsed-by-default process fold
+positioned between the text segments at the run's actual position in the
+turn (replacing the former single turn-wide fold); each fold SHALL contain
+second-level folds — one per thinking segment and one per tool invocation —
+each collapsed by default, titled per the structured-title rule. Process
+folds SHALL stay collapsed while their entries stream in, and the fold's
+summary row SHALL update live during streaming (the running tool's title and
+the entry count); when the operator has expanded a fold, newly streamed
+entries of that fold SHALL append in place. A submission SHALL appear in the
+conversation only when its turn starts.
 
 #### Scenario: both sides of the conversation are visible
 
 - **WHEN** the operator opens a session in which they submitted messages across several turns
-- **THEN** the workbench shows their submissions and the agent's replies in transcript order, each submission as the operator's own turn
+- **THEN** the workbench shows their submissions and the agent's replies in transcript order, each submission as the operator's own tinted block
 
 #### Scenario: one agent turn is one bubble
 
 - **WHEN** an agent turn arrives as many streamed text chunks plus thinking plus tool invocations
-- **THEN** the workbench renders one assistant bubble for that turn, with the text in order and all thinking and tool entries collected into a single collapsed process fold inside the bubble
+- **THEN** the workbench renders that turn as one continuous natural flow — the text in order with all thinking and tool entries interleaved as collapsed process folds at their positions — and not as a series of per-chunk bubbles nor as a card-wrapped block
+
+#### Scenario: process folds interleave in arrival order
+
+- **WHEN** an agent turn produces text, then a run of thinking and tool entries, then more text
+- **THEN** one collapsed process fold sits between the two text segments, at the position where those entries occurred
+
+#### Scenario: folds stay collapsed with a live summary while streaming
+
+- **WHEN** thinking and tool entries stream into a process run while its fold is collapsed
+- **THEN** the fold does not open by itself, and its summary row updates live to reflect the running tool and the accumulated entry count
+
+#### Scenario: an expanded fold appends streamed entries in place
+
+- **WHEN** the operator has expanded a process fold while its turn is still streaming
+- **THEN** new entries of that run appear inside the fold as they arrive, without collapsing it
 
 #### Scenario: tool invocations are not mistaken for prose
 
 - **WHEN** an agent turn invokes tools
-- **THEN** those invocations are rendered as second-level folds inside the process fold and are distinguishable from the turn's prose
+- **THEN** those invocations are rendered as second-level folds inside their process fold and are distinguishable from the turn's prose
 
 #### Scenario: a submission appears when its turn starts
 
@@ -852,16 +914,15 @@ graphics are out of scope).
 
 After the operator's submission is accepted by the server (the entry is
 present in the session payload) and before the agent's output for that turn
-begins arriving, the operator's message bubble SHALL show a low-key receipt
-badge indicating the message was received. The badge SHALL disappear once
-entries of the agent's reply turn start arriving. The badge is a visual hint
-only — it SHALL NOT change turn ordering or persistence semantics.
+begins arriving, the operator's message SHALL show a low-key receipt badge
+indicating the message was received. The badge SHALL disappear once entries
+of the agent's reply turn start arriving. The badge is a visual hint only —
+it SHALL NOT change turn ordering or persistence semantics.
 
 #### Scenario: badge shows while waiting
 
-- **WHEN** the operator sends a message and the server has accepted it, but
-  no agent output entries for the reply turn have arrived yet
-- **THEN** the operator's message bubble shows the receipt badge
+- **WHEN** the operator sends a message and the server has accepted it, but no agent output entries for the reply turn have arrived yet
+- **THEN** the operator's message block shows the receipt badge
 
 #### Scenario: badge clears when the reply streams
 
@@ -943,3 +1004,72 @@ sequence and cursor unchanged.
 
 - **WHEN** the page is reloaded (F5) and the same session is reopened
 - **THEN** the first fetch is full again (no stale localStorage cursor)
+
+### Requirement: Rail selection hierarchy is visually distinct
+
+The rail SHALL render the project-selection highlight and the focused-session
+marker as visually distinct states: the focused-session marker SHALL keep the
+accent treatment (accent background), while the selected project row SHALL
+emphasize with a neutral treatment (elevated surface and brighter text, not
+the accent color). When a project row and a session row are highlighted at
+the same time — including the session focused inside the selected project —
+the two states SHALL be distinguishable at a glance. The selected-project
+semantics are unchanged: the highlight still names the project the workbench
+is displaying.
+
+#### Scenario: project selection and focused session are both visible
+
+- **WHEN** the operator selects a project whose session is the focused one
+- **THEN** the project row and the session row are both highlighted, and the two highlights use clearly different visual treatments rather than the same accent style
+
+#### Scenario: focused-session marker keeps the accent
+
+- **WHEN** a session becomes the focused session
+- **THEN** its rail row keeps the accent-background marker regardless of any project selection state
+
+#### Scenario: selected project uses neutral emphasis
+
+- **WHEN** the operator selects a project row
+- **THEN** the row is emphasized with a neutral surface and brighter text and is not rendered with the accent background used by the focused-session marker
+
+### Requirement: Creating a session lands focus on the placeholder
+
+Confirming the new-session dialog SHALL leave the target project's group
+expanded (or expand it), make the new placeholder's rail row visible and
+marked as the current session, and move keyboard focus into the composer
+input so the operator can type the first message immediately. The creation
+flow SHALL NOT collapse the project group it was opened from.
+
+#### Scenario: project group stays expanded after creation
+
+- **WHEN** the operator confirms the creation dialog opened from an expanded project row
+- **THEN** the project group remains expanded and the new session row is visible under it
+
+#### Scenario: placeholder row is selected
+
+- **WHEN** the creation dialog is confirmed
+- **THEN** the new placeholder's rail row is marked as the current session
+
+#### Scenario: composer input has keyboard focus
+
+- **WHEN** the creation dialog is confirmed and the workbench renders the placeholder
+- **THEN** the composer text input holds keyboard focus and the first keystroke goes into it
+
+### Requirement: Workbench chrome density and alignment
+
+The workbench layout SHALL keep the rail, conversation stage, and composer visually adjacent: the draggable boundary between rail and main area SHALL be slim (at most 8px rendered divider), the conversation stage and the composer SHALL share the same horizontal inset so their left and right edges align, and the vertical gap between the stage and the composer SHALL be minimal. On viewports at least 1440px wide, the rail SHALL default to 280px with a drag ceiling of 520px, sized so a session row title keeps at least 12 CJK characters visible at the standard title size.
+
+#### Scenario: edges align between stage and composer
+
+- **WHEN** the workbench renders with a focused session
+- **THEN** the conversation stage and the composer share the same left and right edges
+
+#### Scenario: slim divider
+
+- **WHEN** the rail is resized
+- **THEN** the visible divider between rail and main area stays within 8px
+
+#### Scenario: rail shows twelve CJK characters
+
+- **WHEN** a rail session row has a 12-character Chinese title and the rail is at its default width on a viewport of at least 1440px
+- **THEN** the title is visible without truncation

@@ -4,10 +4,9 @@ Defines the directory-picker project registration, zero-prompt session creation,
 
 ## Requirements
 
-
 ### Requirement: Add project via directory picker
 
-The workbench SHALL provide a modal dialog with a server-side directory tree browser and a manual path input, either of which SHALL register a project directory. The tree browser SHALL lazy-load subdirectory listings on expand from `GET /api/fs/browse-dirs?path=...&root=...`, scoped to the server-side work root. The tree SHALL open at the server's default work directory (the listing rooted there, its canonical path displayed so the operator can see the starting scope), and expanding any node SHALL list its subdirectories without error — including on Windows, where previously the path round-trip failed with a 400. The registered project name SHALL be the directory's basename. The system SHALL probe the directory for a git branch after registration to determine directory accessibility; the branch name SHALL NOT be displayed in the project row. The manual path input SHALL NOT be bounded by the tree's root scope.
+The workbench SHALL provide a modal dialog with a server-side directory tree browser and a manual path input, either of which SHALL register a project directory. The tree browser SHALL lazy-load subdirectory listings on expand from `GET /api/fs/browse-dirs?path=...&root=...`, scoped to the workspace root. The tree SHALL open at the workspace root (the listing rooted there, its canonical path displayed so the operator can see the starting scope), and expanding any node SHALL list its subdirectories without error — including on Windows, where previously the path round-trip failed with a 400. The registered project name SHALL be the directory's basename. The system SHALL probe the directory for a git branch after registration to determine directory accessibility; the branch name SHALL NOT be displayed in the project row. The manual path input SHALL be bounded by the workspace root: a path that resolves outside it SHALL be rejected with an out-of-scope error, identically to the browser path.
 
 #### Scenario: add project via directory browser
 
@@ -17,7 +16,7 @@ The workbench SHALL provide a modal dialog with a server-side directory tree bro
 #### Scenario: tree opens at the server work directory
 
 - **WHEN** the Add Project dialog opens
-- **THEN** the directory tree's top level lists the contents of the server's default work directory and shows its canonical path, without requiring the operator to navigate down from a filesystem root
+- **THEN** the directory tree's top level lists the contents of the workspace root (replacing the former server work directory start) and shows its canonical path, without requiring the operator to navigate down from a filesystem root
 
 #### Scenario: expanding a node lists subdirectories without error
 
@@ -31,8 +30,8 @@ The workbench SHALL provide a modal dialog with a server-side directory tree bro
 
 #### Scenario: manual path outside the tree root still registers
 
-- **WHEN** the operator types a valid directory path that lies outside the tree's starting scope and submits it
-- **THEN** the directory is registered as a project
+- **WHEN** the operator types a valid directory path that resolves outside the workspace root and submits it
+- **THEN** the registration is rejected with an out-of-scope error and no project is created — the former out-of-scope tolerance is revoked by this change
 
 #### Scenario: project name from directory name
 
@@ -51,7 +50,7 @@ The workbench SHALL provide a modal dialog with a server-side directory tree bro
 
 ### Requirement: New session without prompt
 
-The workbench SHALL support creating a 0-turn placeholder session without requiring a prompt. The placeholder SHALL appear in the session list immediately and SHALL be activated. An ACP child SHALL NOT be spawned until the first message is sent. The project row SHALL have a dedicated "New session" button.
+The workbench SHALL support creating a 0-turn placeholder session without requiring a prompt. The placeholder SHALL appear in the session list immediately and SHALL be activated. An ACP child SHALL NOT block creation: focusing a placeholder session that has no live child SHALL start the child in the background — resuming the recorded conversation when the session mapping allows it — and the first message SHALL also start the child if focus never did. The project row SHALL have a dedicated "New session" button. A failed background start SHALL NOT remove the placeholder.
 
 #### Scenario: create empty session from project
 
@@ -60,7 +59,7 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 
 #### Scenario: first message spawns the child
 
-- **WHEN** the operator sends a message into a zero-turn placeholder session
+- **WHEN** the operator sends a message into a zero-turn placeholder session whose child was never started (or has not finished starting)
 - **THEN** the system spawns the ACP child and the session transitions to working
 
 #### Scenario: empty session created via API
@@ -68,14 +67,24 @@ The workbench SHALL support creating a 0-turn placeholder session without requir
 - **WHEN** `POST /api/sessions` is called without a `prompt` field
 - **THEN** a placeholder session is created and the response includes its key, with status `spawning` and no turn entries
 
+#### Scenario: focusing the placeholder starts the child with resume
+
+- **WHEN** the operator focuses a placeholder session that has no live child and the session carries a recorded conversation mapping
+- **THEN** the child starts in the background and resumes that conversation without the operator sending a prompt first
+
+#### Scenario: failed background start keeps the placeholder
+
+- **WHEN** the background start of a placeholder's child fails
+- **THEN** the placeholder stays in the session list and the failure is stated, not silently swallowed
+
 ### Requirement: Session archive
 
-Each session row SHALL have an archive button that moves the session to the History group. An archived session SHALL be read-only — the operator cannot send messages into it, cannot close it, and cannot switch to it as the active session. An archived session SHALL be restorable to its original project.
+The rail session row's overflow menu SHALL be the operator-facing archive entry: archiving moves the session to the History group and carries the close semantics (the child is killed if active; the confirm dialog warns about pending submissions that will be discarded). The focused session's header SHALL render no action buttons and no navigation link. An archived session SHALL be read-only — the operator cannot send messages into it, cannot close it, and cannot switch to it as the active session. An archived session SHALL be restorable to its original project.
 
 #### Scenario: archive a session
 
-- **WHEN** the operator clicks the archive button on a session row
-- **THEN** the session is moved to the History group, marked as read-only, and the operator cannot interact with it
+- **WHEN** the operator picks archive in a rail session row's overflow menu and confirms
+- **THEN** the session is moved to the History group, marked as read-only, and cannot be interacted with
 
 #### Scenario: archived session is read-only
 
@@ -86,6 +95,11 @@ Each session row SHALL have an archive button that moves the session to the Hist
 
 - **WHEN** the operator clicks an archived session in the History group
 - **THEN** the session is restored to its original project, becomes writable, and is activated
+
+#### Scenario: focused session header offers no actions
+
+- **WHEN** a session is focused and the operator looks at the session header
+- **THEN** the header shows display information only — no Archive button, no Close button, and no "All sessions" link
 
 ### Requirement: History group is the archive
 

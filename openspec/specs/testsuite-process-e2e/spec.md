@@ -22,7 +22,7 @@
 
 ### Requirement: 沙箱全隔离
 
-每个用例 MUST 运行在一次性沙箱内：配置文件落在 scratch 目录（含 dispatch state_file、media download_dir、acp sessions_dir/work_dir、watchdog.core channel_path、watchdog.webui host/port），端口 SHALL 不同于 9797；环境变量 MUST 全量覆盖默认值——伪造 `SEBAS_CORE_SECRET`，并显式设置 `SEBAS_STATE_DB`、`SEBAS_STATE_FILE`、`SEBAS_ROUTER_PROVIDER_OVERLAY` 指向沙箱路径。套件 MUST NOT 读写操作员真实 `~/.sebas`、真实凭据或占用其端口。
+每个用例 MUST 运行在一次性沙箱内：配置文件落在 scratch 目录（含 dispatch state_file、media download_dir、acp sessions_dir/work_dir、service.core channel_path、service.webui host/port），端口 SHALL 不同于 9797；环境变量 MUST 全量覆盖默认值——伪造 `SEBAS_CORE_SECRET`，并显式设置 `SEBAS_STATE_DB`、`SEBAS_STATE_FILE`、`SEBAS_ROUTER_PROVIDER_OVERLAY` 指向沙箱路径。套件 MUST NOT 读写操作员真实 `~/.sebas`、真实凭据或占用其端口。
 
 #### Scenario: 与操作员实例完全隔离
 
