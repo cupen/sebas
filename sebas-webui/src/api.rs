@@ -8,7 +8,7 @@
 //! (`core --webui`) or across the core session channel (standalone webui).
 
 use crate::auth::Identity;
-use crate::events::WebUiEvent;
+use crate::events::{WebUiEvent, notification_frame};
 use crate::models::{CardConfigInfo, ConversationEntryView, SessionStatus};
 use crate::routes::{
     build_session_rows, decode_session_key, encode_channel_key, encode_session_key,
@@ -17,16 +17,20 @@ use crate::routes::{
 use crate::server::WebUiState;
 use crate::session_backend::{Reachability, SessionRejection};
 use crate::user_store::StoreError;
+use crate::ws_rpc::{Frame, JsonCodec, ResponseFrame, WsCodec};
 use axum::Extension;
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt};
 use sebas_dispatch::SessionEvent;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 
@@ -674,7 +678,10 @@ pub struct AuthSetupForm {
     pub password: Option<String>,
 }
 
-pub async fn auth_setup(State(state): State<WebUiState>, Json(form): Json<AuthSetupForm>) -> Response {
+pub async fn auth_setup(
+    State(state): State<WebUiState>,
+    Json(form): Json<AuthSetupForm>,
+) -> Response {
     let (Some(username), Some(password)) = (form.username, form.password) else {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -696,10 +703,9 @@ pub async fn auth_setup(State(state): State<WebUiState>, Json(form): Json<AuthSe
             )
                 .into_response()
         }
-        Err(crate::auth::SetupError::AlreadySetup) => api_error(
-            StatusCode::CONFLICT,
-            "用户库已有用户，无法再次初始化 root",
-        ),
+        Err(crate::auth::SetupError::AlreadySetup) => {
+            api_error(StatusCode::CONFLICT, "用户库已有用户，无法再次初始化 root")
+        }
         Err(crate::auth::SetupError::WeakPassword) => api_error(
             StatusCode::BAD_REQUEST,
             format!("密码过短：至少 {} 位", crate::auth::MIN_PASSWORD_LEN),
@@ -708,9 +714,10 @@ pub async fn auth_setup(State(state): State<WebUiState>, Json(form): Json<AuthSe
             StatusCode::BAD_REQUEST,
             "WebUI 鉴权已关闭（[service.webui] auth = false），无需首启设置",
         ),
-        Err(crate::auth::SetupError::Unavailable) => {
-            api_error(StatusCode::SERVICE_UNAVAILABLE, "用户库不可用（auth.db 打开失败）")
-        }
+        Err(crate::auth::SetupError::Unavailable) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "用户库不可用（auth.db 打开失败）",
+        ),
         Err(crate::auth::SetupError::Store(StoreError::UsernameTaken)) => {
             api_error(StatusCode::CONFLICT, "用户名已存在（大小写不敏感）")
         }
@@ -788,8 +795,16 @@ pub async fn users_create(
     if password.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "密码不能为空");
     }
-    let Some(role_word) = form.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-        return api_error(StatusCode::BAD_REQUEST, "role 必填（root/admin/member/viewer）");
+    let Some(role_word) = form
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "role 必填（root/admin/member/viewer）",
+        );
     };
     let role = match role_word.parse::<crate::rbac::Role>() {
         Ok(r) => r,
@@ -849,8 +864,16 @@ pub async fn users_set_role(
     let Some(store) = state.auth.user_store() else {
         return api_error(StatusCode::SERVICE_UNAVAILABLE, USERS_STORE_UNAVAILABLE);
     };
-    let Some(role_word) = form.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-        return api_error(StatusCode::BAD_REQUEST, "role 字段必填（root/admin/member/viewer）");
+    let Some(role_word) = form
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "role 字段必填（root/admin/member/viewer）",
+        );
     };
     let role = match role_word.parse::<crate::rbac::Role>() {
         Ok(r) => r,
@@ -1010,7 +1033,10 @@ pub async fn create_session(
                 Some(p) => {
                     let Some(dir) = p.get("path").and_then(|v| v.as_str()).map(str::to_string)
                     else {
-                        return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}"));
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            format!("未知 project_id: {id}"),
+                        );
                     };
                     let node = p
                         .get("node_id")
@@ -1029,7 +1055,9 @@ pub async fn create_session(
                     }
                     (Some(dir), Some(node))
                 }
-                None => return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}")),
+                None => {
+                    return api_error(StatusCode::BAD_REQUEST, format!("未知 project_id: {id}"));
+                }
             }
         }
         None => (None, None),
@@ -1422,9 +1450,7 @@ fn filter_out_of_scope_local_projects(
             !is_local(p)
                 || p.get("path")
                     .and_then(|v| v.as_str())
-                    .is_some_and(|path| {
-                        crate::fs::stored_path_within_prefix(path, &root_prefix)
-                    })
+                    .is_some_and(|path| crate::fs::stored_path_within_prefix(path, &root_prefix))
         })
         .collect()
 }
@@ -1468,11 +1494,8 @@ async fn projects_from_backend(state: &WebUiState) -> Vec<serde_json::Value> {
             .map(str::is_empty)
             .unwrap_or(true);
         if let Some(obj) = p.as_object_mut() {
-            obj.entry("node_id")
-                .or_insert_with(|| json!(node.clone()));
-            if needs_id
-                && let Some(path) = path.as_deref()
-            {
+            obj.entry("node_id").or_insert_with(|| json!(node.clone()));
+            if needs_id && let Some(path) = path.as_deref() {
                 obj.insert(
                     "id".into(),
                     json!(crate::projects::project_id_for_on(&node, path)),
@@ -1553,17 +1576,13 @@ pub async fn projects_add(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
     // 重复检查按 `(节点, 路径)`：同一路径在另一台机器上是另一个项目。
-    if projects_from_backend(&state)
-        .await
-        .iter()
-        .any(|p| {
-            p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
-                && p.get("node_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(crate::projects::LOCAL_NODE_ID)
-                    == crate::projects::LOCAL_NODE_ID
-        })
-    {
+    if projects_from_backend(&state).await.iter().any(|p| {
+        p.get("path").and_then(|v| v.as_str()) == Some(canonical.as_str())
+            && p.get("node_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(crate::projects::LOCAL_NODE_ID)
+                == crate::projects::LOCAL_NODE_ID
+    }) {
         return api_error(StatusCode::CONFLICT, format!("项目已注册: {path}"));
     }
     // backend 可用 → 状态库（响应不带 degraded）；不可用 → 文件注册表降级，
@@ -1641,10 +1660,7 @@ async fn projects_add_remote(state: &WebUiState, node_id: &str, path: &str) -> R
                 );
             }
             None => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("未知执行节点: {node_id}"),
-                );
+                return api_error(StatusCode::BAD_REQUEST, format!("未知执行节点: {node_id}"));
             }
         },
         Err(cause) => {
@@ -1774,7 +1790,9 @@ pub async fn projects_remove(State(state): State<WebUiState>, Path(id): Path<Str
         .snapshot()
         .await
         .iter()
-        .filter(|info| crate::projects::project_id_for_session(info).as_deref() == Some(id.as_str()))
+        .filter(|info| {
+            crate::projects::project_id_for_session(info).as_deref() == Some(id.as_str())
+        })
         .count();
     if live_sessions > 0 {
         return (
@@ -1884,7 +1902,9 @@ pub async fn projects_reorder(
     let local_entries: Vec<serde_json::Value> = next
         .iter()
         .filter(|v| {
-            v.get("node_id").and_then(|x| x.as_str()).unwrap_or(crate::projects::LOCAL_NODE_ID)
+            v.get("node_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or(crate::projects::LOCAL_NODE_ID)
                 == crate::projects::LOCAL_NODE_ID
         })
         .cloned()
@@ -1892,7 +1912,9 @@ pub async fn projects_reorder(
     let remote_ids: Vec<String> = next
         .iter()
         .filter(|v| {
-            v.get("node_id").and_then(|x| x.as_str()).unwrap_or(crate::projects::LOCAL_NODE_ID)
+            v.get("node_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or(crate::projects::LOCAL_NODE_ID)
                 != crate::projects::LOCAL_NODE_ID
         })
         .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
@@ -1969,10 +1991,8 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
     }
     // add-workspace-root 2.3：越界**本机**项目按不可达处理——`accessible:
     // false`、分支为空，不暴露存在性，也不在围栏外做 git 探测。
-    let in_scope = crate::fs::stored_path_in_workspace_root(
-        &project_path,
-        &state.workspace_root,
-    ) == Some(true);
+    let in_scope = crate::fs::stored_path_in_workspace_root(&project_path, &state.workspace_root)
+        == Some(true);
     let accessible = in_scope && crate::projects::is_accessible(&project_path);
     // TTL 缓存：branch_at 距今 < 30s 用缓存。
     let now = std::time::SystemTime::now()
@@ -1986,8 +2006,7 @@ pub async fn projects_branch(State(state): State<WebUiState>, Path(id): Path<Str
         .map(str::to_string);
     let branch = if !in_scope {
         None
-    } else if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some()
-    {
+    } else if branch_at != 0 && now.saturating_sub(branch_at) < 30 && cached_branch.is_some() {
         cached_branch
     } else {
         let fresh = crate::projects::probe_git_branch(std::path::Path::new(&project_path));
@@ -2073,13 +2092,86 @@ pub async fn restore_session(
     }
 }
 
-/// GET /ws — upgrade to a WebSocket and stream session events as
-/// self-describing JSON frames. Every connected client receives every
-/// event via its own backend subscription; one client disconnecting never
-/// affects the others. Unknown event types are forward-compatible
-/// additions clients must tolerate.
+/// GET /ws — upgrade to a WebSocket speaking the WS RPC protocol
+/// (add-ws-rpc-protocol): server pushes ride `Notification` frames (the
+/// former bare tagged JSON), client `Request`s dispatch through the handler
+/// registry below. Every connected client receives every event via its own
+/// backend subscription; one client disconnecting never affects the others.
+/// Unknown methods and malformed frames are forward-compatible additions
+/// clients and the server must tolerate without dropping the connection.
 pub async fn ws_handler(State(state): State<WebUiState>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(move |socket| ws_connection(state, socket))
+}
+
+/// add-ws-rpc-protocol D3：客户端 Request 的 handler 注册表（method →
+/// handler）。handler 一律短平快读（本期仅 ping 自证）；需要长耗时时应
+/// spawn 后经 oneshot 回填——design 留缝不入码。
+type RpcHandler = Arc<
+    dyn Fn(
+            WebUiState,
+            serde_json::Value,
+        ) -> BoxFuture<'static, Result<serde_json::Value, RpcFailure>>
+        + Send
+        + Sync,
+>;
+
+/// Handler 失败的语义化错误：`code` 是稳定机器串（error Response 的
+/// wire 载荷），`message` 面向操作者。
+struct RpcFailure {
+    code: String,
+    message: String,
+}
+
+/// Built-in method table. New methods register here; the first real
+/// business consumer is the sister change `add-core-reachability-ws-push`.
+fn rpc_handlers() -> HashMap<&'static str, RpcHandler> {
+    let mut handlers: HashMap<&'static str, RpcHandler> = HashMap::new();
+    // D6 ping 自证：无业务依赖，一次往返即证明 id 关联 / Response 回路 /
+    // 超时与 unknown_method 之外的协议路径。
+    let ping: RpcHandler = Arc::new(
+        |_state: WebUiState,
+         _params: serde_json::Value|
+         -> BoxFuture<'static, Result<serde_json::Value, RpcFailure>> {
+            Box::pin(async { Ok(serde_json::Value::String("pong".into())) })
+        },
+    );
+    handlers.insert("ping", ping);
+    handlers
+}
+
+/// Parse one client text frame and produce the reply frame, if any
+/// (add-ws-rpc-protocol D3). `Request`s dispatch through the handler
+/// registry; unknown methods get an `unknown_method` error Response with
+/// the request's id and the connection stays up. Malformed payloads and
+/// frames that are not Requests (client-sent Responses / Notifications
+/// carry no meaning) are ignored: no reply, connection untouched.
+async fn handle_client_frame(
+    state: &WebUiState,
+    codec: &dyn WsCodec,
+    handlers: &HashMap<&'static str, RpcHandler>,
+    raw: &str,
+) -> Option<Frame> {
+    match codec.decode(raw) {
+        Ok(Frame::Request(request)) => {
+            let response = match handlers.get(request.method.as_str()) {
+                Some(handler) => match handler(state.clone(), request.params).await {
+                    Ok(result) => Frame::Response(ResponseFrame::ok(request.id, result)),
+                    Err(failure) => Frame::Response(ResponseFrame::error(
+                        request.id,
+                        failure.code,
+                        failure.message,
+                    )),
+                },
+                None => Frame::Response(ResponseFrame::error(
+                    request.id,
+                    "unknown_method",
+                    format!("no handler registered for method {:?}", request.method),
+                )),
+            };
+            Some(response)
+        }
+        _ => None,
+    }
 }
 
 /// Translate a backend session event into the WS frame vocabulary the SPA
@@ -2141,9 +2233,10 @@ async fn recv_turn_event(
     }
 }
 
-/// Per-connection loop: forwards backend session events, answers the
-/// protocol keep-alive with server pings, and drains client frames (only
-/// Close is meaningful) until either side hangs up.
+/// Per-connection loop: forwards backend events as `Notification` frames,
+/// answers the protocol keep-alive with server pings, and dispatches client
+/// `Request` frames through the RPC handler registry until either side
+/// hangs up (add-ws-rpc-protocol D3).
 async fn ws_connection(state: WebUiState, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.backend.subscribe();
@@ -2156,6 +2249,10 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
     let mut ping = tokio::time::interval(WS_PING_INTERVAL);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.reset();
+    // add-ws-rpc-protocol D2：JSON 是首个 codec 实现；封套编解码集中在这
+    // 一条缝上，换格式不动帧语义与分发行为。
+    let codec = JsonCodec;
+    let handlers = rpc_handlers();
 
     loop {
         tokio::select! {
@@ -2168,7 +2265,7 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                 match event {
                     Ok(event) => {
                         if let Some(frame) = session_event_to_frame(event) {
-                            let text = serde_json::to_string(&frame).unwrap_or_default();
+                            let text = codec.encode(&notification_frame(frame));
                             if sender.send(Message::Text(text.into())).await.is_err() {
                                 break;
                             }
@@ -2194,7 +2291,7 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                         args: notice.args,
                         reason: notice.reason,
                     };
-                    let text = serde_json::to_string(&frame).unwrap_or_default();
+                    let text = codec.encode(&notification_frame(frame));
                     if sender.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
@@ -2209,7 +2306,7 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                         entries: event.entries,
                         seq,
                     };
-                    let text = serde_json::to_string(&frame).unwrap_or_default();
+                    let text = codec.encode(&notification_frame(frame));
                     if sender.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
@@ -2218,11 +2315,23 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
             frame = receiver.next() => {
                 match frame {
                     Some(Ok(msg)) => {
-                        if matches!(msg, Message::Close(_)) {
-                            break;
+                        match msg {
+                            Message::Close(_) => break,
+                            Message::Text(text) => {
+                                // add-ws-rpc-protocol D3：客户端 Text 帧进入
+                                // RPC 分发；被忽略的帧不回写、不断连。
+                                if let Some(reply) =
+                                    handle_client_frame(&state, &codec, &handlers, &text).await
+                                {
+                                    let wire = codec.encode(&reply);
+                                    if sender.send(Message::Text(wire.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            // Binary and pong replies are drained and ignored.
+                            _ => {}
                         }
-                        // Any other client frame is drained and ignored: the
-                        // channel is server-push only.
                     }
                     _ => break,
                 }
@@ -2428,11 +2537,7 @@ mod env_endpoint_tests {
 
         // 遮蔽钉死：整个响应体的任何字段都不含明文。
         let raw = serde_json::to_string(&body).unwrap();
-        for literal in [
-            "pw-super-secret-1234",
-            "fl-secret-6789",
-            "ctrl-secret-abcd",
-        ] {
+        for literal in ["pw-super-secret-1234", "fl-secret-6789", "ctrl-secret-abcd"] {
             assert!(!raw.contains(literal), "response leaks secret: {raw}");
         }
     }

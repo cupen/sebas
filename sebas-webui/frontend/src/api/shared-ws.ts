@@ -4,7 +4,7 @@
  * module load and reconnects with backoff on loss.
  */
 import type { ReactiveController, ReactiveControllerHost } from 'lit'
-import { WsClient } from './ws.js'
+import { WsClient, jsonFrameCodec } from './ws.js'
 
 // A no-op host: the shared client outlives any single view. Lit requires a
 // host to invoke the controller lifecycle itself, so the shim forwards
@@ -18,6 +18,9 @@ const eagerHost = {
 } as never as ReactiveControllerHost
 
 export const sharedWs = new WsClient(eagerHost, {
+  // add-ws-rpc-protocol D2/D5：codec 在构造点注入（JSON 首实现）——换单
+  // 侧线上格式只动这里，帧语义与订阅面不动。
+  codec: jsonFrameCodec,
   onReconnect: () => window.dispatchEvent(new CustomEvent('sebas:refetch')),
   // add-webui-allowed-roots D6：连接状态变化广播给 app-shell，渲染全局
   // 断线横幅（重连成功即消失）。

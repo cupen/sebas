@@ -2293,10 +2293,10 @@ async fn turn_appends_stream_over_ws() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&frame) else {
             continue;
         };
-        if v["type"] != "turn.append" {
+        if v["method"] != "turn.append" {
             continue;
         }
-        let entries = v["entries"].as_array().cloned().unwrap_or_default();
+        let entries = v["params"]["entries"].as_array().cloned().unwrap_or_default();
         for e in &entries {
             let kind = e["kind"].as_str().unwrap_or("");
             let content = e["content"].as_str().unwrap_or("");
