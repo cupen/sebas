@@ -61,12 +61,15 @@ test.describe('对话视图（workbench-conversation-view）', () => {
       await expect(detail.statusBadge).toHaveAttribute('slug', 'done', { timeout: 20_000 })
 
       // Alternation: operator turn q1 < agent reply < operator turn q2 in
-      // the rendered conversation stream.
+      // the rendered conversation stream. badge 先到、转录气泡后落——
+      // 用收敛式等待等第 4 块（q2 的回复）上屏，不钉计数瞬帧。
       const blocks = page.locator(
         'sebas-dashboard sebas-transcript-view .turn-block',
       )
+      await expect
+        .poll(async () => await blocks.count(), { timeout: 20_000 })
+        .toBeGreaterThanOrEqual(4)
       const count = await blocks.count()
-      expect(count).toBeGreaterThanOrEqual(4)
       const texts = await blocks.allTextContents()
       const classes = []
       for (let i = 0; i < count; i++) {

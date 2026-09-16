@@ -143,12 +143,12 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 原生内核模型选择 | ✅ | src `agent_backend.rs`（`dual_set_session_model_routes_native_key_and_rejects_unknown`、spawn 期模型落快照 override）；前端 `workbench-composer.test.ts` 模型下拉/切换 |
 | | 会话前模型目录（backend catalog；interaction-polish 修订：目录选择移入创建对话框，loadModelCatalog 共用）| ✅ | 前端 `new-session-dialog.test.ts`（两级选择/预选/目录不可得诚实标注/不伪造 default）；`model-catalog.test.ts`（providers × models 展平、空目录不造假、loadModelCatalog 读取失败不抛）；browser `conversation.spec.ts`「the creation dialog offers provider → model from the Settings catalog」+ `models.spec.ts`「a fetched-and-saved catalog reaches the creation dialog without a restart」（编辑器抓取→保存→同页免刷新可读的设置↔工作台接缝旅程，2026-09-11 补）|
 | | Rail project removal entry（审计补行；rail-declutter-unread D5 修订）| ✅ | `session_endpoints_test::projects_remove_project / projects_remove_unknown_returns_404 / projects_remove_blocked_while_live_sessions_exist`（有存活会话 409 typed rejection 带会话数、无会话放行）；browser `projects.spec.ts`「removed project disappears」+「… menu removal: blocked while live sessions exist」（… 菜单 → 移除弹窗就地预检 + 后端拒绝一致）；前端 `project-rail.test.ts`（预检文案/旧「迁移 Inbox」文案废除/拒绝内联）|
-| | Rail session close entry（turn-queue 修订；rail-declutter-unread 3.2 修订）| ✅ | 前端 `project-rail.test.ts`（close 移入会话行 `…` 菜单：inactive 直删/active 先确认/关闭 danger、点名丢弃 pending 条数/无 pending 省略、无行内直删按钮）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（close names the loss，经 `…` 菜单）|
+| | Rail session close entry（turn-queue 修订；rail-declutter-unread 3.2 修订）| ✅ | 前端 `project-rail.test.ts`（close 移入会话行 `…` 菜单：inactive 直删/active 先确认/关闭 danger、点名丢弃 pending 条数/无 pending 省略、无行内直删按钮）；`dashboard.test.ts`（close 确认点名丢弃数）；`session_endpoints_test::close_response_names_discarded_pending_count`；browser `session-mgmt.spec.ts`、`pending-stack.spec.ts`（archive names the loss，经 `…` 菜单归档确认——workbench-live-conversation-flow 4.2 归档即关闭，点名语义由归档确认框承接）|
 | | Placeholder session is immediately writable（审计补行）| ✅ | `spawn_race_test`（占位首条消息必须 SpawnNew、0-turn 占位同样 spawn、标记 dump/restore 存活）；J: workbench（占位会话）；browser `session-roundtrip.spec.ts` |
 | | Session agent binding is immutable（wire-fix 补行；interaction-polish 修订：agent 选择唯一入口在创建对话框）| ✅ | 前端 `workbench-composer.test.ts`（🔒 只读小字、工具条无任何 agent/创建/设置控件）、`new-session-dialog.test.ts`（对话框是唯一选 agent 处）；browser `models.spec.ts`「detail head shows the bound agent with the lock affordance」|
 | | Composer submissions always deliver（wire-fix 补行）| ✅ | `spawn_race_test`（占位标记一次性消费/生产发射路径 WebSpawn 携带 kind/model/0-turn 占位同样 spawn——「输入框发不出消息」回归锁）；E `session_round_trip_via_webui_http` |
 | | Project-level default agent（wire-fix 补行）| ✅ | `session_endpoints_test::project_default_agent_follows_last_use`（创建即记录/跟随最近一次/项目间互不串/无记录如实空，2026-09-11 补）；前端 `new-session-dialog.test.ts`（defaultAgent 预选、无记录兜底首个可达）、`project-rail.test.ts`（对话框绑定项目 default_agent）|
-| | Pending submissions stack above the composer（turn-queue 新增）| ✅ | 前端 `pending-stack.test.ts`（顺序/disposition 措辞/priority 钉住/移除与重排和解）；browser `pending-stack.spec.ts`（忙中提交上栈、刷新存活、close 点名损失）|
+| | Pending submissions stack above the composer（turn-queue 新增）| ✅ | 前端 `pending-stack.test.ts`（顺序/disposition 措辞/priority 钉住/移除与重排和解）；browser `pending-stack.spec.ts`（忙中提交上栈、刷新存活、归档点名损失）|
 | | Workbench renders the focused session as a conversation（conversation-view 新增）| ✅ | 前端 `transcript-view.test.ts`（两侧交替、N chunk 一气泡、tool 组可展开不混排、submission 回合开始即现）；`dashboard.test.ts`（聚焦会话内联 conversation）；browser `conversation.spec.ts`（两侧按序交替 + gated tool 组展开）|
 | | Workbench is the single conversation surface（conversation-view 新增）| ✅ | 前端 `project-rail.test.ts`（点击就地切换留在 workbench 3.1、current 标记跟随焦点指针 3.2）；`dashboard.test.ts`（深链 `/sessions/:key` 经 deepLinkKey 渲染、聚焦会话 head 带 close+archive）；browser `conversation.spec.ts`「rail click focuses the session in place on the workbench」|
 | permission-flow | Hook 驱动权限请求 | ✅ | `permission_flow_test`；fake-claude "perm" 场景 |
@@ -160,10 +160,10 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | Session mode gates whether a decision is requested（add-agent-mode-selection 修订）| ✅ | E `mode_threads_to_agent_argv`（argv 透传 + allow 免审批 + 未知 mode 400）；E/J `mode_mid_session_switch` / `remote_node_mode_journey`（远端 allow 免门控↔ask 恢复 waiting）；sebas-acp driver 单测（词汇映射/argv 解析）；browser `mode.spec.ts` |
 | | webui：会话创建携带 mode | ✅ | `session_endpoints_test::create_session_with_mode_threads_spawn_and_mid_session_mode_switch_works`（wire 透传 + 未知 mode 400）；E `mode_threads_to_agent_argv`；browser `mode.spec.ts` |
 | | webui：会话中途切换 mode | ✅ | 同上（SetMode 经 SendAcp）；E `mode_mid_session_switch`（journal 记录运行时切换 + effective 落定）|
-| | webui：会话 mode 在 dashboard 可见可切 | ✅ | 前端 `dashboard.test.ts`（mode-tag 本机/远端同通道）；browser `mode.spec.ts`（head tag + mode-switch 切换）|
+| | webui：会话 mode 在 dashboard 可见可切 | ✅ | 前端 `dashboard.test.ts`（mode-tag 本机/远端同通道）；browser `mode.spec.ts`（head tag 展示 + composer 底沿 mode-switch 切换）|
 | | webui：SessionBackend seam 承载 mode | ✅ | `spawn_race_test`（WebSpawn 携带 mode=None 透传）；src `core_channel/tests.rs`（Spawn/CreatePlaceholder/SetSessionMode 帧分发）|
 | | Submit control reflects submission and turn state（interaction-polish 新增）| ✅ | 前端 `workbench-composer.test.ts`（disabled/send/sending/stop/queued 逐态、停止走 cancelSession、排队复用 sendMessage、turn 结束复位）；browser `submit-control.spec.ts`（working 停止方块 → cancel 链路 → 会话存活可继续；有字排队形态 → pending-stack；取消不丢排队提交）|
-| | Composer toolbar composition（interaction-polish 新增）| ✅ | 前端 `workbench-composer.test.ts`（左下 🔒 agent、右下模型芯片+发送；无创建/设置/mode 控件）；browser `mode.spec.ts`（composer 无 mode 控件）、`first-paint.spec.ts`（无聚焦 = 指向 rail 创建入口的提示，无任何创建控件）|
+| | Composer toolbar composition（interaction-polish 新增）| ✅ | 前端 `workbench-composer.test.ts`（左下 🔒 agent、右下模型芯片+发送；无创建/设置/mode 控件）；browser `mode.spec.ts`（无聚焦时 composer 无 mode 控件）、`first-paint.spec.ts`（无聚焦 = 指向 rail 创建入口的提示，无任何创建控件）|
 | | Workbench layout is resizable（interaction-polish 新增）| ✅ | 前端 `split-persist.test.ts`（假 storage 持久化与恢复、180–480/120–半高 clamp、隐私模式退化）、`app-shell.test.ts`（frame 分割面板 + railWidth clamp）、`dashboard.test.ts`（vsplit + composerHeight）；browser `layout.spec.ts`（两道分割线拖拽、localStorage `sebas.rail-width`/`sebas.composer-height`、刷新恢复、<640px 禁拖退化）|
 | | Workbench regions read as floating islands（interaction-polish 新增）| ✅ | 前端 `app-shell.test.ts`（nav 圆角浮岛、无通高 border-right、frame 分割缝）；browser `layout.spec.ts`（canvas 与浮岛异色、分隔缝 rest 透明 hover 亮起、舞台浮岛在位）|
 
@@ -290,6 +290,11 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 鉴权闭环 | 深链重定向 | deep link under auth redirects to the login page | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
 | 鉴权闭环 | 登录与登出 | session cookie survives reload until logout, then the gate returns | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
 | 鉴权闭环 | 登录与登出 | wrong credentials rejected, admin/admin enters, logout returns | `auth.spec.ts` | 鉴权与访问旅程「登录闭环」 |
+| 鉴权闭环 | 免登录直达 | the workbench is the homepage and no gate ever appears | `auth-off.spec.ts` | 鉴权与访问旅程「免登录直达」 |
+| 首启 root 引导 | 首启门禁 | homepage shows the setup card and never flips to the login gate | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| 首启 root 引导 | 校验与建户 | in-place validation rejects short password and mismatch without submitting | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| 首启 root 引导 | 校验与建户 | creating root enters the workbench and the session survives reload | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
+| 首启 root 引导 | 校验与建户 | a second setup POST is refused after root exists (409) | `auth-setup.spec.ts` | 鉴权与访问旅程「首启 root 引导」 |
 | agent 对话覆盖 | 首回合往返与重载恢复 | composer submit → reply → done → reload restores | `session-roundtrip.spec.ts` | agent 对话覆盖「首回合往返」、会话核心旅程「重载恢复」 |
 | agent 对话覆盖 | 流式分批 | chunks arrive in batches and the turn converges to done | `streaming.spec.ts` | agent 对话覆盖「流式分批渲染」 |
 | agent 对话覆盖 | 多轮连续 | 4.1 two consecutive rounds append in order and survive reload | `dialog.spec.ts` | agent 对话覆盖「同会话多轮连续」 |
@@ -333,7 +338,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 对话视图 | 工具组展开 | the gated tool call renders as the turn tool group and expands | `conversation.spec.ts` | 同上（tool 组不混排 scenario）|
 | 对话视图 | 就地聚焦 | rail click focuses the session in place on the workbench | `conversation.spec.ts` | agent-workbench「Workbench is the single conversation surface」 |
 | 对话视图 | 模型两级选择 | creation mode offers provider → model from the Settings catalog; empty catalog is stated honestly | `conversation.spec.ts` | agent-workbench「Model selector offers the backend catalog before any session」 |
-| 待执行堆叠区 | 忙中提交上栈 | busy-time submission rides the stack, survives refresh, and close names the loss | `pending-stack.spec.ts` | agent-workbench「Pending submissions stack above the composer」+「Rail session close entry」 |
+| 待执行堆叠区 | 忙中提交上栈 | busy-time submission rides the stack, survives refresh, and archive names the loss | `pending-stack.spec.ts` | agent-workbench「Pending submissions stack above the composer」+「Rail session close entry」 |
 | 部署韧性 | 核心通道停启 | core 停 → 横幅含 cause、composer 门禁、加项目降级提示；core 恢复 → 横幅消失 | `deployment.spec.ts` | webui「全局核心可达性横幅」「项目注册降级如实提示」（harden-core-channel-deployment，detached 双进程形态）⁵ |
 | 审批卡片旅程（detached） | detached 审批闭环 | allow path — ApprovalRequested 跨进程到达 review-card，allow 后 transcript 记录允许语义 | `approval-detached.spec.ts` | webui「approval_answer end-to-end (detached topology)」（cover-core-channel-test-gaps B1.2，detached 双进程形态）⁶ |
 | 审批卡片旅程（detached） | detached 审批闭环 | deny path — deny 后 transcript 记录拒绝语义，回合完成 | `approval-detached.spec.ts` | webui「approval_answer rejects unknown request_id」⁶（cover B1.2，detached） |
@@ -374,14 +379,19 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 > scenario 文本相同（工作台旅程的「项目增删」「close 与 archive」「深链与退役路径」
 > 同理），经上表 tree 侧行同源锚定。harness 级 scenario（沙箱装配：启动即隔离 /
 > 成功退出清理 / 失败保留现场；一键入口：一键运行 / 单旅程过滤 / 渐进补用例不改入口 /
-> 顶层裸 test 拒绝）由入口机制承担、鉴权「免登录直达」由全部主 config 用例隐式承担，
-> 均不设单用例行。
+> 顶层裸 test 拒绝）由入口机制承担，均不设单用例行。
 >
 > 旅程加固波（2026-09-11，交付终验前）：新增 4 例——未读徽标跨层旅程
 > （`unread-badge.spec.ts` 新 spec）、History 倒序浏览器旅程（`session-mgmt.spec.ts`）、
 > 设置分区导航 IA 旅程（`settings.spec.ts`）、编辑器抓取→保存→创建对话框接缝旅程
 > （`models.spec.ts`）。树形账本 53 行 = 全套件 `it` 总数 65（主 config 58 + auth 3 +
 > detached 4；较上期注记 +4，均入主 config）。
+>
+> 鉴权三形态补全（2026-09-16，webui auth e2e）：新增 5 例——免登录直达的专属
+> 守卫（`auth-off.spec.ts`，原由全部主 config 用例隐式承担）与首启 root 引导
+> 四例（`auth-setup.spec.ts`，第三种沙箱形态：auth 开、零用户、不预建户，
+> tasks.py `TESTSUITE_AUTH_SETUP=1` 端口 9896）。树形账本 58 行 = 全套件
+> `it` 总数 70（主 config 59 + auth 3 + auth-setup 4 + detached 4）。
 
 原「浏览器级 UI 渲染」豁免条目：workbench 首屏、审批卡片操作、登录页闭环等
 浏览器面由本套件覆盖（豁免范围收窄为「飞书端卡片渲染」等其余条目）。
@@ -447,6 +457,9 @@ requirement 级残留：**0 条**（五簇复核 2026-09-11 收口）。本期�
 
 | 日期 | change | commit | 说明 |
 |---|---|---|---|
+| 2026-09-16 | add-webui-tiered-notices（工作树实施，spec-go 过渡提交） | 未提交 | 分级通知层：四级通知（info/warn/error/fatal，top-center，wa-toast 栈 + 自研驻留横幅）+ fatal 锁定语义（core 不可达时 `wa-split-panel.frame` inert 全锁 + 遮罩卡，恢复即解锁 + 「核心已恢复」info toast）；`client.ts` 统一拦截未豁免 API 失败自动判级（豁免名单集中一处）；旧 ws-banner/core-banner 退役收编（WS 断线 = 持续 warn 驻留横幅）；`ReachabilityInfo` 接 `kind` 三档分文案。证据：notify store 单测（栈上限/去重/退订）、notice-layer/banner 组件单测（四级变体/时长/手关/焦点）、app-shell 单测（get 初始化/翻转 fatal+解锁+toast/重连收敛/轮询退役守卫）、client 拦截器单测；浏览器级 `tiered-notices.spec.ts`（detached 停核→fatal+inert、恢复→解锁+toast）+ deployment 旅程同步新语义。**语义碰撞裁决留痕**：fatal 全锁使「停核期间经 UI 加项目看降级提示」不可达（rail 连同入口 inert），deployment 旅程移除该步并注明，降级注册契约由 API 级 `projects_add_degraded_when_core_unreachable`（201 + degraded.cause）承载，两 spec 文本均无需改动。回归：cargo 587 全绿、vitest 454 全绿、detached 套件 4 passed。 |
+| 2026-09-16 | add-core-reachability-ws-push（工作树实施，spec-go 过渡提交） | 未提交 | 前端两处 5s `/api/summary` 轮询（app-shell 横幅 + composer 提交门）退役，core 通道可达性改 WS 推送：trait 新增 `reachability_updates()` 广播通道（channel 后端 `set_status()` 收口发布、真翻转才发；in-process/fake 走默认立即关闭接收端）；协议方法 `core.reachability.get`（当前态）+ `core.reachability` 翻转 Notification（payload 与 `/api/summary.reachability` 同形）；订阅权上收 app-shell（`sebas:ws-state` connected 时 get 初始态 + 订阅翻转），composer 经 property 链消费下传状态，提交门判定单一出处。证据：`core_channel/tests.rs` 3 例（翻转序列/零重复帧/startup 富化）、`ws_test.rs` FlipBackend 集成（get 当前态/翻转推帧/恢复推 ok:true）、前端 shell+composer 单测（get 初始化/翻转更新/重连收敛/无 `setInterval`+`api.summary` 残留守卫）；浏览器套件 69-70/72（1-2 例串行多播 flaky 隔离全绿，失败点跨 run 漂移为既有遗留类）。「停 core→横幅/禁用翻转」旅程由 Rust FlipBackend 集成测试承载（浏览器级无停 core 旅程，留待呈现层 change 需要时补）。 |
+| 2026-09-16 | add-ws-rpc-protocol（工作树实施，spec-go 过渡提交） | 未提交 | `/ws` 协议层落地：三帧封套（Request/Response/Notification）+ 可换 codec 缝（Rust `WsCodec` trait / TS `WsFrameCodec`，JSON 首实现）；7 种既有事件帧迁入 Notification（method=原 type、params 字段名逐字保真），裸帧退役；服务端 `ping` 自证 + unknown_method 拒单不断连；客户端 `request()` id 关联/超时/断线批量拒付。证据：`sebas-webui/tests/ws_test.rs`（集成：id 回显、unknown_method、畸形帧容忍）+ `ws_rpc_contract_test.rs`（codec 可换性两侧、7 事件 params 保真、视图字段抽查）+ 前端 `ws.test.ts` 18 例（关联/超时/拒付/乱序/换 codec 字节级差异）；进程级 e2e `turn_appends_stream_over_ws` 解封改断言后单跑绿（真实二进制 turn.append 以 Notification 到达）。回归：cargo 584+ 全绿、vitest 414 全绿。已知串行套件遗留：session-roundtrip 全量下受前序旅程在途回合事件多播影响（操作者在途 spec 注释自述，隔离跑 1.9s 绿，与本 change 无关）。 |
 | 2026-09-12 | 套件卫生加固轮（工作树实施） | fix/testsuite-hardening | 四件套：① Sandbox 每个顶层子进程自成进程组、SandboxDir 析构 killpg 整树（堵 sebas-gc7 孙进程泄漏，e2e 全程 0 残留）；② tasks.py `_sweep_orphan_test_processes` 孤儿清扫（Rust 套件路径直接杀、sbtestsuite 仅目录已消失时杀）+ detached teardown TERM→宽限→KILL 升级（收口 sebas-oo2）+ `.tests-failed` 保留现场豁免（此前被同次 finally 清理秒删）；③ submit-control 两条流式用例把 working 轮询提前到 goto 之前（冷窗口 flake 根修）；④ deployment 旅程自足化——起点自建会话深链聚焦（原先依赖字母序在前的 approval-detached 留下的服务端焦点指针，单跑 `--case deployment` 必挂）、降级注册改用每次尝试唯一的子目录（重试 attempt 撞 409）、恢复后新建会话重建聚焦（重启后深链会话暂离 summary、convergence 清 deepLinkKey 不回头——产品面登记 sebas-5mj/sebas-an1）。**附带发现并修复沙箱隔离违例**：archive.json 落在 `SEBAS_HOME`（~/.sebas）而沙箱 env 未覆盖，Rust 套件与 webui 沙箱长期读写操作员真实归档（93 条测试污染，已备份为 `archive.json.polluted-backup-20260912` 后清空）；两个 harness 现均注入 `SEBAS_HOME`+`SEBAS_ARCHIVE_PATH`，全量套件后真实归档保持 0 条。回归：e2e 19/19、acceptance 9/9、webui 58+3+4 全绿（deployment 单跑与全量均过）。 |
 | 2026-09-11 | 旅程加固波（交付终验前，工作树实施） | 未提交（feat/webui 工作树） | 对照三个已实现 change（rail-declutter-unread、workbench-interaction-polish、revamp-settings-nav-and-models-editor）盘点 Scenario→层覆盖缺口，补 4 条浏览器级旅程：未读徽标跨层旅程（`unread-badge.spec.ts` 新 spec：真实回复→API msg_count→徽标免刷新亮起→聚焦清零+锚落 localStorage，覆盖 session-unread-badge 三个此前仅组件单测的 scenario）；History 倒序浏览器旅程（D7，此前仅前端单测）；设置分区导航 IA 旅程（分区顺序/分隔线/About 压底/缺省聚焦/记忆/旧值回退，revamp 后仅沙箱目检）；编辑器抓取→保存→创建对话框免重启接缝旅程（设置↔工作台接缝，此前两半各测各的）。发现并记录实施期问题 #8（rail 行名跟随最新 prompt）。testsuite-webui 61→65（58+3+4）全绿。 |
 | 2026-09-11 | rail-declutter-unread（工作树实施） | 未提交（feat/webui 工作树） | rail 收敛 + 未读徽标：Inbox 分组移除（无项目会话不再进 rail，API 仍可达）；移除项目遇非归档会话改 typed rejection 409（废除「迁移 Inbox」承诺，`session_endpoints_test` 两例 + browser 旅程）；项目/会话行操作收敛 `…` 菜单（wa-dropdown）；会话行新增未读徽标（服务端 `msg_count` = 可见回复段口径，dispatch 引擎 `count_chat_messages` 派生 + native 后端 flush 处累计；浏览器 localStorage 游标 `unread-cursor.ts` 与 seam 同锚）；会话名改 prompt_preview（40 码点截断）；History 倒序；composer 创建强制选项目。浏览器用例改写 6 处（projects 1.2 分支呈现按 D8 改写）+ 新增 1 例（主 config 42→43）；全套件 3 配置 50 例全绿（46+3+4）。 |

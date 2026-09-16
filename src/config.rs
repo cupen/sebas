@@ -745,6 +745,42 @@ fn warn_deprecated_watchdog_keys(raw: &str) {
     }
 }
 
+/// [service.webui] 未知键点名（webui auth e2e 复盘）：该节承载 auth 开关，
+/// serde 刻意不拒绝未知键（旧二进制读新配置的前向兼容），代价是键名打错
+/// 或写错节都静默落回默认——`auth` 误配的症状（首启设置页翻登录页）与
+/// 「开关开着」完全同貌，无从排查。启动期把被忽略的键点名，误配当场可见。
+fn warn_unknown_webui_keys(raw: &str) {
+    let unknown = unknown_webui_keys(raw);
+    if !unknown.is_empty() {
+        // 同 warn_deprecated_watchdog_keys：tracing 可能尚未初始化，stderr 兜底。
+        let msg = format!(
+            "config [service.webui] has unknown field(s) ({}) ignored: typo or removed key - a miswritten `auth` key silently means auth stays on",
+            unknown.join(", ")
+        );
+        tracing::warn!("{msg}");
+        eprintln!("warning: {msg}");
+    }
+}
+
+/// 纯收集（测试锚点）：raw 中 `[service.webui]` 表内不在已知字段集的键。
+fn unknown_webui_keys(raw: &str) -> Vec<String> {
+    const KNOWN: [&str; 5] = ["enabled", "host", "port", "auth", "archive_retention_days"];
+    let Ok(v) = toml::from_str::<toml::Value>(raw) else {
+        return Vec::new(); // 解析失败由主 parse 报错，这里不抢戏
+    };
+    v.get("service")
+        .and_then(|s| s.get("webui"))
+        .and_then(|w| w.as_table())
+        .map(|table| {
+            table
+                .keys()
+                .filter(|k| !KNOWN.contains(&k.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn default_github_repo() -> String {
     "cupen/sebas".into()
 }
@@ -784,6 +820,7 @@ impl Config {
     /// defaults (CLI flags are applied by the caller before/after this).
     pub fn parse(s: &str) -> Result<Self> {
         warn_deprecated_watchdog_keys(s);
+        warn_unknown_webui_keys(s);
         let mut cfg: Config =
             toml::from_str(s).map_err(|e| SebasError::Config(format!("toml parse: {e}")))?;
         cfg.acp.apply_implicit_default();
@@ -1279,6 +1316,21 @@ auth = false
             !cfg.service.webui.auth,
             "显式 false 应优先于默认值"
         );
+    }
+
+    #[test]
+    fn unknown_webui_keys_are_named_for_the_operator() {
+        // 键名打错（auht）：parse 仍成功（前向兼容刻意宽容），但键被点名。
+        let raw = "[service.webui]\nauht = false\n";
+        assert!(Config::parse(raw).is_ok());
+        assert_eq!(unknown_webui_keys(raw), vec!["auht".to_string()]);
+        // 已退役的 allowed_roots 同样被点名（静默忽略 → 启动期可见）。
+        let legacy = "[service.webui]\nallowed_roots = [\"/tmp\"]\n";
+        assert_eq!(unknown_webui_keys(legacy), vec!["allowed_roots".to_string()]);
+        // 干净配置零误报：全字段 + 缺节都不在名单上。
+        let clean = "[service.webui]\nenabled = true\nhost = \"127.0.0.1\"\nport = 9797\nauth = false\narchive_retention_days = 30\n";
+        assert!(unknown_webui_keys(clean).is_empty());
+        assert!(unknown_webui_keys("[feishu]\nenabled = false\n").is_empty());
     }
 
     #[test]

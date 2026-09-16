@@ -59,7 +59,11 @@ test.describe('agent 对话覆盖', () => {
       await page.waitForTimeout(400)
       await expect(detail.sessionHead).toBeVisible({ timeout: 15_000 })
       await expect(workbench.composerTextarea).toBeVisible()
-      await expect(workbench.submitControl).toHaveAttribute('data-state', 'disabled')
+      // 满套件串行下，前序旅程的在途回合事件可能多播一小段：等控件落定到
+      // resting-disabled（30s 收敛窗），不钉加载瞬间的帧。
+      await expect(workbench.submitControl).toHaveAttribute('data-state', 'disabled', {
+        timeout: 30_000,
+      })
 
       // First message into the placeholder spawns the agent child — the
       // spawn + turn-start gap is seconds-scale, so wait generously.

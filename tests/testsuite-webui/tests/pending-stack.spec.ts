@@ -1,7 +1,7 @@
 /**
  * Journey — 待执行堆叠区 (workbench-turn-queue 7.1–7.3, design D8).
  *
- * 功能：工作台堆叠区 / 子功能：忙中提交可见、刷新后仍在、关闭点名丢弃、
+ * 功能：工作台堆叠区 / 子功能：忙中提交可见、刷新后仍在、归档点名丢弃、
  * 终结提示（未执行）。
  *
  * 场景基座：沙箱 fake-claude 带 `--slow-ms 800`（tasks.py 装配）。首 prompt
@@ -27,14 +27,14 @@ test.describe('待执行堆叠区', () => {
     collector = new ErrorCollector(page)
   })
 
-  test('busy-time submission rides the stack, survives refresh, and close names the loss', async ({
+  test('busy-time submission rides the stack, survives refresh, and archive names the loss', async ({
     page,
   }) => {
     const rail = new ProjectRail(page)
     await resetState(page.request)
 
     // 首会话：流式场景让 turn 在飞一段时间。
-    // rail-declutter-unread：会话要出现在 rail（供 … 菜单关闭），须绑定项目。
+    // rail-declutter-unread：会话要出现在 rail（供 … 菜单归档），须绑定项目。
     const { id: projectId, name: projectName } = await ensureSceneProject(page.request)
     const key = await createSession(page.request, { prompt: 'stream', projectId })
     await page.goto('/')
@@ -59,7 +59,7 @@ test.describe('待执行堆叠区', () => {
     )
 
     // 等两个回合（排队回合也会跑完）收敛到 done，再造一个确定性的
-    // WORKING 窗口用于「带队列关闭」段。
+    // WORKING 窗口用于「带队列归档」段。
     await waitStatus(page.request, key, ['done'], 20_000)
     await sendMessage(page.request, key, 'stream')
     // 等 turn 真正进入 WORKING（首个内容帧），随后的提交才确定性入队——
@@ -67,16 +67,16 @@ test.describe('待执行堆叠区', () => {
     await waitStatus(page.request, key, ['working'], 10_000)
     await sendMessage(page.request, key, 'drop me')
 
-    // Rail 关闭该会话：确认对话框点名「将丢弃 1 条」，确认后出现一次性
-    // 「未执行」提示，逐条点名被丢弃的提交（7.3）。
+    // Rail 归档该会话（归档即关闭，4.2：唯一生命周期出口）：确认对话框
+    // 点名「将丢弃 1 条」，确认后出现一次性「未执行」提示，逐条点名被
+    // 丢弃的提交（7.3）。
     await rail.expandProject(projectName)
-    await rail.closeSession('stream')
+    const dialog = await rail.openArchiveDialog('stream')
     // wa-dialog host 在 top layer 读作 hidden——断言渲染出的内部元素
     // （与 settings.spec 的既有纪律一致）。
-    const dialog = page.locator('wa-dialog', { hasText: '关闭会话' })
     const discardLine = dialog.locator('[data-testid="close-discards-pending"]')
     await expect(discardLine).toContainText('1', { timeout: 10_000 })
-    await dialog.locator('wa-button').filter({ hasText: '关闭会话' }).click()
+    await rail.confirmArchive()
 
     // 会话终结：未执行提示在焦点清空后仍然可见（提示是唯一记录）。
     const notice = page.locator('sebas-pending-stack [role="alert"]')
