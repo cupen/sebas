@@ -241,6 +241,19 @@ pub trait SessionBackend: Send + Sync {
         rx
     }
 
+    /// （add-core-reachability-ws-push D1）核心可达性**翻转**的独立广播通道
+    /// （`subscribe_turn_events` 先例）：只有状态真变才发布（D2，发布点在
+    /// channel 后端的 `set_status()` 收口），可达性本身是全量状态——Lagged
+    /// 丢帧无一致性代价，下一帧或客户端重连后的 get 收敛。
+    ///
+    /// 默认实现返回一个立即关闭的接收端：不承载翻转源的后端（in-process
+    /// 与 core 同进程同生共死、fake 后端、native/dual 复合后端）据此让
+    /// 消费方停用该支路（对 Closed 的处置是停用，不是报错）。
+    fn reachability_updates(&self) -> broadcast::Receiver<Reachability> {
+        let (_tx, rx) = broadcast::channel(1);
+        rx
+    }
+
     /// Create a session, optionally rooted in a project directory. Returns
     /// the new session key. The placeholder is immediately visible in
     /// `snapshot` (Spawning) and via the event stream (Created).
@@ -1476,6 +1489,28 @@ mod tests {
         assert!(matches!(
             backend.message(key, "x".into()).await,
             Err(SessionRejection::Unavailable { .. })
+        ));
+    }
+
+    // （add-core-reachability-ws-push 1.1）无翻转源的后端给立即关闭的接收端
+    // ——消费方（ws 支路）据此停用该腿，不是报错。
+    #[tokio::test]
+    async fn reachability_updates_default_is_immediately_closed() {
+        let backend = FakeBackend::new();
+        let mut rx = backend.reachability_updates();
+        assert!(matches!(
+            rx.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+
+        // in-process 同款（与 core 同进程同生共死，无独立翻转源）。
+        let map = sebas_dispatch::SessionMap::new();
+        let (router, _rx) = sebas_dispatch::DispatchHandle::new(map);
+        let in_process = InProcessBackend::new(router);
+        let mut rx = in_process.reachability_updates();
+        assert!(matches!(
+            rx.recv().await,
+            Err(broadcast::error::RecvError::Closed)
         ));
     }
 

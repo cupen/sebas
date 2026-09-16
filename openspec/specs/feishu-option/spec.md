@@ -45,7 +45,7 @@ sebas SHALL 提供飞书接入的显式开关节 `[feishu] enabled`。`enabled` 
 
 ### Requirement: webui 主控部署形态
 
-watchdog 默认 SHALL 将 webui 注册为主控服务（`[watchdog.webui] enabled` 默认 `true`），而 core（会话核心）SHALL 恒启动——无 `[watchdog.core] enabled` 开关，watchdog SHALL 无条件拉起并监督 core；旧的 `enabled` 键被忽略并告警。im 服务（飞书 bot 宿主）SHALL 默认跟随 `[feishu]` 启用判定（飞书启用即拉起，停用即不拉起），并可经 `[watchdog.im]` 显式覆盖。webui 与 im 进程都是 core session channel 的客户端，跨 core 重启保持存活。二者是核心的两个通道（`web` 与 `feishu`），通过通道抽象与核心交互。
+watchdog 默认 SHALL 将 webui 注册为主控服务（`[service.webui] enabled` 默认 `true`），而 core（会话核心）SHALL 恒启动——无 `[service.core] enabled` 开关，watchdog SHALL 无条件拉起并监督 core；旧的 `enabled` 键被忽略并告警。im 服务（飞书 bot 宿主）SHALL 默认跟随 `[feishu]` 启用判定（飞书启用即拉起，停用即不拉起），并可经 `[watchdog.im]` 显式覆盖。webui 与 im 进程都是 core session channel 的客户端，跨 core 重启保持存活。二者是核心的两个通道（`web` 与 `feishu`），通过通道抽象与核心交互。
 
 #### Scenario: 默认部署只起 webui
 

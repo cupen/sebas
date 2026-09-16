@@ -16,7 +16,7 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AgentKindInfo, type ConversationEntryView, type NodeInfo, type NodesResponse, type PendingSubmission, type Project, type SessionDetail, type SessionRow, type Summary } from '../api/client.js'
-import type { WsEvent } from '../api/ws.js'
+import type { WsEvent, CoreReachabilityState } from '../api/ws.js'
 import { sharedWs } from '../api/shared-ws.js'
 import { icon } from '../components/icons.js'
 import { viewStyles } from '../styles/shared.js'
@@ -105,6 +105,12 @@ export class SebasDashboard extends LitElement {
    */
   @property({ attribute: false })
   selectedPath: string | null = null
+  /**
+   * （add-core-reachability-ws-push D4）shell 下传的结构化核心可达性——
+   * 纯透传给 composer 的提交门，dashboard 自己不做任何判读。`null` =
+   * 未知（get 未应答），composer 对齐旧默认不禁用。
+   */
+  @property({ attribute: false }) coreReachability: CoreReachabilityState | null = null
   /**
    * Branch of the selected project, fetched lazily for the project header
    * pill. Cleared on every selection change so a slow response can never
@@ -929,6 +935,7 @@ export class SebasDashboard extends LitElement {
               .childStarting=${(this.focusedDetail?.status_slug ?? '') === 'starting'}
               .currentMode=${this.focusedDetail?.desired_mode ?? null}
               .modeEditable=${this.focusedDetail?.session_id != null}
+              .coreReachability=${this.coreReachability}
               @composer-sent=${this.onComposerSent}
             ></sebas-workbench-composer>
           </div>

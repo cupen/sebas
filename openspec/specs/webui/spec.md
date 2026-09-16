@@ -36,30 +36,38 @@ table), `GET/POST /api/auth/login`, `GET /api/auth/me`, `POST
 /api/projects` (register), `POST /api/projects/reorder`, `POST
 /api/projects/{id}/remove`, `GET /api/projects/{id}/branch`, `GET
 /api/fs/browse-dirs` (lazy directory listing for the folder picker, scoped to
-the server's work directory — the configured work dir of the default agent
-kind, falling back to the WebUI process working directory; an explicit `root`
-query parameter overrides the default), `POST /api/sessions/{key}/archive`
-(archive a session), `POST /api/sessions/{key}/restore` (restore an archived
-session), `GET /api/archive` (list archived sessions with expiry info), and
-`GET /ws` (WebSocket session stream). Project and session mutations are
-POST-only and carry the same posture as the existing session APIs. The
-provider management cluster under `/api/*` (`GET/POST /api/providers`,
-`PUT/DELETE /api/providers/{name}`, `POST /api/providers/{name}/probe`,
-`GET /api/provider-presets`, `GET /api/provider-defaults`,
-`GET/POST/DELETE /api/model-aliases`, `DELETE /api/model-aliases/{alias}`)
-SHALL be fulfilled by the WebUI backend from the core-owned provider store
-over the core channel, never by proxying the router process. The retired
-`/router/api/*` namespace (including `POST /router/api/reload`) and the
-retired `GET /api/router` endpoint SHALL NOT be served. Without a reachable
-core these routes SHALL fail honestly (503) and SHALL NOT serve a stale
-snapshot. The JSON admin API `/api/admin/*` (status, events, services,
-update, update/dry-run, update/dev, rollback, restart) is always mounted:
-without a control-plane adapter its reads report `adapter_ok: false` and its
-mutations return 503 (honest degradation). `GET /health` returns the literal
-`ok`. All browser assets the UI needs to render — styles, fonts, Web Awesome,
-markdown rendering, and syntax highlighting — are self-hosted under
-`/assets/*`; the UI SHALL NOT depend on an external CDN at render time.
-Navigation SHALL only link to routes this surface serves.
+the workspace root — the listing starts at the workspace root, and an
+explicit `root` query parameter is honoured only inside it), `POST
+/api/sessions/{key}/archive` (archive a session), `POST
+/api/sessions/{key}/restore` (restore an archived session), `GET /api/archive`
+(list archived sessions with expiry info), and `GET /ws` (WebSocket session
+stream). Project and session mutations are POST-only and carry the same
+posture as the existing session APIs. The provider management cluster under
+`/api/*` (`GET/POST /api/providers`, `PUT/DELETE /api/providers/{name}`,
+`POST /api/providers/{name}/probe`, `GET /api/provider-presets`, `GET
+/api/provider-defaults`, `GET/POST/DELETE /api/model-aliases`, `DELETE
+/api/model-aliases/{alias}`) SHALL be fulfilled by the WebUI backend from the
+core-owned provider store over the core channel, never by proxying the router
+process. The retired `/router/api/*` namespace (including `POST
+/router/api/reload`) and the retired `GET /api/router` endpoint SHALL NOT be
+served. Without a reachable core these routes SHALL fail honestly (503) and
+SHALL NOT serve a stale snapshot. The JSON admin API `/api/admin/*` (status,
+events, services, update, update/dry-run, update/dev, rollback, restart) is
+always mounted: without a control-plane adapter its reads report
+`adapter_ok: false` and its mutations return 503 (honest degradation). `GET
+/health` returns the literal `ok`. All browser assets the UI needs to render
+— styles, fonts, Web Awesome, markdown rendering, and syntax highlighting —
+are self-hosted under `/assets/*`; the UI SHALL NOT depend on an external CDN
+at render time. Navigation SHALL only link to routes this surface serves.
+
+The WebUI SHALL enforce the workspace root (per the `workspace-root`
+capability) on every project-directory surface: local project registration
+SHALL accept only paths inside the workspace root; the project list SHALL
+omit local projects outside it; and viewing or opening a session bound to a
+local project outside it SHALL be rejected. Housekeeping writes on such
+sessions (close, archive) SHALL remain available so out-of-scope sessions can
+be cleaned up. A legacy `[watchdog.webui] allowed_roots` key SHALL be
+ignored.
 
 `GET /api/fs/browse-dirs` SHALL honour a path round-trip contract: the `path`
 echoed in a listing response SHALL be accepted verbatim as the `path` of a
@@ -162,9 +170,9 @@ position, disposition (`staging` | `turn`) and priority flag.
 #### Scenario: browse-dirs defaults to the server work directory
 
 - **WHEN** `GET /api/fs/browse-dirs` is called with no `root` parameter
-- **THEN** the listing is rooted at the server's configured work directory
-  (or the process working directory when none is configured), and the
-  response `path` echoes that directory
+- **THEN** the listing is rooted at the workspace root (which replaces the
+  former work-directory start) and the response `path` echoes its canonical
+  form
 
 #### Scenario: browse-dirs path round-trips on expand
 
@@ -194,44 +202,67 @@ position, disposition (`staging` | `turn`) and priority flag.
 
 #### Scenario: browse-dirs rejects a root outside the allowed list
 
-- **WHEN** `[watchdog.webui] allowed_roots` is configured as `["~/work"]`
+- **WHEN** the workspace root is `/home/op/work`
 - **AND** `GET /api/fs/browse-dirs` is called with `root=/etc`
 - **THEN** the response is 400 with an out-of-scope error, and no directory
-  content outside the allowed roots is disclosed
+  content outside the workspace root is disclosed
 
 #### Scenario: browse-dirs accepts an allowed root
 
-- **WHEN** `allowed_roots` contains a directory and a request carries that
-  directory as the explicit `root` (or a subpath of it as `path`)
+- **WHEN** a request carries the workspace root itself, or a subpath of it,
+  as the explicit `root` (or as `path`)
 - **THEN** the listing succeeds for that scope
 
 #### Scenario: unconfigured allowed_roots preserves current behavior
 
-- **WHEN** `allowed_roots` is absent or empty
-- **AND** `GET /api/fs/browse-dirs` is called with an explicit `root` that
-  exists
-- **THEN** the listing succeeds — the whitelist is opt-in, and the default
-  fallback root (work dir / process cwd) remains the no-`root` scope
+- **WHEN** neither `SEBAS_WORKSPACE_ROOT` nor the config entry provides a
+  workspace root
+- **THEN** the process working directory becomes the root and a startup
+  warning recommends explicit configuration — the former "no constraint when
+  unconfigured" behavior is replaced by an always-present boundary
 
 #### Scenario: project registration rejects a path outside allowed roots
 
-- **WHEN** `allowed_roots` is configured
-- **AND** `POST /api/projects` is called with a body path that resolves
-  outside every allowed root
+- **WHEN** `POST /api/projects` is called with a body path that resolves
+  outside the workspace root
 - **THEN** the response is 400 with an out-of-scope error and the project is
   not registered
 
 #### Scenario: project registration accepts a path inside allowed roots
 
-- **WHEN** `allowed_roots` is configured
-- **AND** `POST /api/projects` is called with a path inside an allowed root
+- **WHEN** `POST /api/projects` is called with a path inside the workspace
+  root
 - **THEN** the project registers as before
 
 #### Scenario: project registration without allowed_roots is unchanged
 
-- **WHEN** `allowed_roots` is absent or empty
-- **AND** `POST /api/projects` is called with an existing directory path
-- **THEN** the project registers as before (existence checks only)
+- **WHEN** the config still carries a legacy `[watchdog.webui] allowed_roots`
+  key
+- **THEN** the key is ignored at parse time and registration is governed
+  solely by the workspace root — the whitelist mechanism no longer exists
+
+#### Scenario: out-of-root project is hidden from the project list
+
+- **WHEN** a project registered before the workspace root was tightened
+  resolves outside the workspace root
+- **AND** the browser requests `GET /api/projects`
+- **THEN** that project is not listed
+
+#### Scenario: opening a session of an out-of-root project is rejected
+
+- **WHEN** a session is bound to a local project directory outside the
+  workspace root
+- **AND** the browser requests the session detail, sends it a message, or
+  switches to it
+- **THEN** the response is a 4xx out-of-scope rejection, and no spawn or turn
+  is started
+
+#### Scenario: housekeeping on an out-of-root session stays available
+
+- **WHEN** a session is bound to a local project directory outside the
+  workspace root
+- **AND** the browser closes or archives that session
+- **THEN** the request succeeds so the out-of-scope session can be cleaned up
 
 #### Scenario: pending submissions ride in the session payload
 
@@ -285,9 +316,13 @@ refresh visible view data automatically when the connection is restored
 server-side business errors (4xx/5xx with a backend error body) so views can
 react appropriately. List-style views (dashboard, project rail, sessions)
 SHALL render an inline failure state with a retry affordance instead of a
-blank panel when their initial data load fails. The workbench composer SHALL
-treat a failing `/api/summary` poll as core-unreachable for its submit gate,
-consistent with a reported `reachability.ok = false`.
+blank panel when their initial data load fails. The workbench composer's
+submit gate SHALL consume the same WS-pushed core reachability state as the
+global banner (initial get + flip notifications): a reported
+`reachability.ok = false` SHALL disable the composer until a recovery
+notification or a fresh get response reports reachable, and `/api/summary`
+SHALL remain a pure on-demand read endpoint whose availability no longer
+feeds the submit gate.
 
 #### Scenario: ws 断线显示全局横幅
 
@@ -317,34 +352,27 @@ consistent with a reported `reachability.ok = false`.
 
 #### Scenario: summary 轮询失败等同 core 不可达
 
-- **WHEN** the composer's periodic `/api/summary` request itself fails
-- **THEN** the submit gate treats the core as unreachable, matching the
-  behavior for a reported `reachability.ok = false`
+- **WHEN** the 5s polling is retired and the composer's reachability source
+  is WS push only, while `/api/summary` remains available as an on-demand
+  read endpoint
+- **THEN** the submit gate follows only pushed `core.reachability` state
+  (initial get + flip notifications); an `/api/summary` failure on the
+  on-demand path SHALL no longer disable or enable the submit gate
 
 ### Requirement: Local-only binding
 
-The standalone WebUI SHALL default to a loopback bind (`127.0.0.1:9797`).
-The legacy `core --webui` path binds hard-coded `127.0.0.1`. A non-loopback
-`watchdog.webui.host` SHALL be refused with a configuration error unless the
-authentication switch is enabled and at least one enabled user exists in the
-user store (see「鉴权开关（auth）与首启用户引导」and「非 loopback bind 与
-开关联动」below).
+The standalone WebUI SHALL default to a loopback bind (`127.0.0.1:9797`). The legacy `core --webui` path binds hard-coded `127.0.0.1`. A non-loopback `service.webui.host` SHALL be refused with a configuration error unless the authentication switch is enabled and at least one enabled user exists in the user store (see「鉴权开关（auth）与首启用户引导」and「非 loopback bind 与 开关联动」below).
 
 #### Scenario: non-loopback refused without auth
 
-- **WHEN** the config sets `watchdog.webui.host = "0.0.0.0"` while the user
-  store holds no enabled user, or while `auth = false`
+- **WHEN** the config sets `service.webui.host = "0.0.0.0"` while the user
+store holds no enabled user, or while `auth = false`
 - **THEN** `sebas webui` exits with a configuration error rather than
-  binding
+binding
 
 ### Requirement: 非 loopback bind 与开关联动
 
-当 `watchdog.webui.host` 非 loopback 时，webui SHALL 仅在 `auth = true`
-（或缺省）且用户库存在至少一个启用用户时才允许绑定启动。零用户时
-SHALL 先经环境变量引导（`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`）
-建立 root，否则以配置错误拒绝启动——防止公网下「先访问者注册
-root」。开关关闭时无论用户库为何，SHALL 拒绝非 loopback bind
-（防止误关开关叠加公网暴露）。
+当 `service.webui.host` 非 loopback 时，webui SHALL 仅在 `auth = true` （或缺省）且用户库存在至少一个启用用户时才允许绑定启动。零用户时 SHALL 先经环境变量引导（`SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`） 建立 root，否则以配置错误拒绝启动——防止公网下「先访问者注册 root」。开关关闭时无论用户库为何，SHALL 拒绝非 loopback bind （防止误关开关叠加公网暴露）。
 
 #### Scenario: 开关关闭拒绝公网 bind
 
@@ -354,13 +382,13 @@ root」。开关关闭时无论用户库为何，SHALL 拒绝非 loopback bind
 #### Scenario: 开关打开但零用户拒绝公网 bind
 
 - **WHEN** 配置设置 `auth = true`（或缺省）、`host = "0.0.0.0"`，
-  用户库零用户且未设凭据环境变量
+用户库零用户且未设凭据环境变量
 - **THEN** `sebas webui` 以配置错误退出，不绑定端口
 
 #### Scenario: 开关打开且凭据存在允许公网 bind
 
 - **WHEN** 配置设置 `auth = true`（或缺省）、`host = "0.0.0.0"`，
-  且用户库存在启用用户（含环境变量引导建立的 root）
+且用户库存在启用用户（含环境变量引导建立的 root）
 - **THEN** `sebas webui` 正常绑定并在日志中提示已启用登录鉴权
 
 ### Requirement: Mutation posture
@@ -606,32 +634,26 @@ Admin mutations SHALL proxy to the watchdog over the control RPC using the `SEBA
 
 ### Requirement: Watchdog lifecycle ownership
 
-The WebUI SHALL be spawned by the watchdog as a separate process (with the
-control secret) by default — `[watchdog.webui] enabled` defaults to `true`
-unless explicitly set to `false` — and SHALL survive core restarts. The
-WebUI SHALL bind to `127.0.0.1:9797` by default; port conflict with a
-legacy `core --webui` (or any other process) is resolved by kernel-level
-bind atomicity — the first to bind wins, the second bind fails with a
-distinct exit code.
+The WebUI SHALL be spawned by the watchdog as a separate process (with the control secret) by default — `[service.webui] enabled` defaults to `true` unless explicitly set to `false` — and SHALL survive core restarts. The WebUI SHALL bind to `127.0.0.1:9797` by default; port conflict with a legacy `core --webui` (or any other process) is resolved by kernel-level bind atomicity — the first to bind wins, the second bind fails with a distinct exit code.
 
 #### Scenario: single owner
 
 - **WHEN** the watchdog-spawned WebUI is running and a legacy
-  `core --webui` is attempted
+`core --webui` is attempted
 - **THEN** the second start is refused by the ownership guard (port
-  already bound)
+already bound)
 
 #### Scenario: default enablement
 
 - **WHEN** the watchdog starts with a configuration that contains no
-  `[watchdog.webui]` section
+`[service.webui]` section
 - **THEN** the watchdog spawns and supervises the WebUI child process
 
 #### Scenario: explicit disable
 
-- **WHEN** the configuration sets `[watchdog.webui] enabled = false`
+- **WHEN** the configuration sets `[service.webui] enabled = false`
 - **THEN** the watchdog does not spawn the WebUI and reports it as a
-  disabled service
+disabled service
 
 ### Requirement: WebUI bind failure exit code
 
@@ -891,7 +913,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 
 `Env Vars` 分区 SHALL 承载环境变量只读表（数据来自 `GET /api/env`，见「环境变量只读展示」），与 `About` 同属底部只读参考组。
 
-`About` 分区 SHALL 分两段呈现：INSTANCE 段在上（工作区根目录 + 复制按钮、当前 default agent kind、当前 default provider/model + 跳转 Models 分区的链接，数据来自既有 `/api/summary`、`/api/agent-defaults`），BUILD 段在下（`/api/about` 的运行时构建信息）。
+`About` 分区 SHALL 分两段呈现：INSTANCE 段在上（工作区根目录 + 复制按钮、当前 default agent kind——读自运行时数据而非写死字面量；不呈现 default provider/model 行——创建预选不再依赖配置默认，见 agent-workbench「Model selector offers the backend catalog before any session」），BUILD 段在下（`/api/about` 的运行时构建信息）。
 
 原 `Settings` 总览分区移除，其维护动作「全部进程重启」与「重置 Settings」SHALL 一并移除——逐服务 restart 由 Services 分区承载，不做广播式入口。
 
@@ -923,7 +945,7 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 #### Scenario: Settings 分区总览
 
 - **WHEN** 聚焦 `About` 分区
-- **THEN** 主区先呈现 INSTANCE 段——工作区根目录（路径 + 复制按钮）、default agent kind（只读）、default provider/model（只读 + 跳转 Models 分区的链接），后呈现 BUILD 段（版本、commit、构建时间）
+- **THEN** 主区先呈现 INSTANCE 段——工作区根目录（路径 + 复制按钮）、default agent kind（只读，取真实运行时值），后呈现 BUILD 段（版本、commit、构建时间）；INSTANCE 段不含 default provider/model 行
 
 #### Scenario: Generic 分区不再有环境变量表
 
@@ -938,7 +960,12 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 #### Scenario: About 分区承载实例信息
 
 - **WHEN** 聚焦 `About` 分区
-- **THEN** 主区先呈现 INSTANCE 段（工作区根目录 + 复制按钮、default agent kind、default provider/model + 跳转 Models 链接），后呈现 BUILD 段（版本、commit、构建时间）
+- **THEN** 主区先呈现 INSTANCE 段（工作区根目录 + 复制按钮、default agent kind 只读真实值），后呈现 BUILD 段（版本、commit、构建时间）
+
+#### Scenario: About 不再呈现 default provider/model
+
+- **WHEN** 操作员聚焦 `About` 分区，无论当前是否配置了默认 provider/model
+- **THEN** INSTANCE 段不渲染 default provider/model 行，也不渲染跳转 Models 分区的对应链接
 
 #### Scenario: 高危动作二次确认
 
@@ -947,17 +974,32 @@ webui 在为会话派生 acp 子进程（web_spawn）时 SHALL 把 spawn failure
 
 ### Requirement: 全局核心可达性横幅
 
-app-shell SHALL 提供全局"核心不可达"横幅：当 `/api/summary` 的 `reachability.ok` 为 false 时展示，内容含 cause（如 `socket absent`），呈现层级与现有"与服务器的连接已断开"横幅一致（全局、role=alert）；可达性恢复后横幅 SHALL 消失。横幅 SHALL 不阻塞页面其余部分的浏览（与"webui 在 core 不可达时继续服务"的既有语义一致）。
+app-shell SHALL 提供全局「核心不可达」fatal 通知，其状态由 WS 推送驱动而非轮询：客户端在 `/ws` 连接建立或重连后 SHALL 主动请求当前可达性（`core.reachability.get`），此后随 `core.reachability` 翻转通知即时更新；WS 断线窗口内错过的翻转 SHALL 由重连后的 get 响应收敛。当推送的可达性状态为 `reachability.ok = false` 时，在视口顶部居中通知层呈现驻留横幅，并对工作台整体施加锁定遮罩（交互与浏览一并锁住，工作台内的交互元素不可聚焦、不可激活）；横幅文案 SHALL 按 `reachability.kind` 分档呈现（`startup_failed` / `auth_rejected` / `disconnected` 各成一句），并保留 cause 原文；横幅呈现 role=alert 且 SHALL NOT 可手动关闭。锁定期间可达性推送订阅 SHALL 保持；横幅自身 SHALL 可交互；auth 门禁页（登录 / 首启设置）SHALL 不受锁定影响。可达性恢复通知到达后横幅 SHALL 消失、锁定 SHALL 解除，并 SHALL 弹出一条「核心已恢复」的 info 级通知。
 
 #### Scenario: core 不可达时横幅出现
 
-- **WHEN** core 进程停止或通道不可达，浏览器停留在任意页面
-- **THEN** 全局横幅出现且文本包含 `reachability` 上报的 cause
+- **WHEN** core 进程停止或通道不可达（翻转通知到达），浏览器停留在工作台任意页面
+- **THEN** fatal 横幅即时出现且文本按 `reachability.kind` 分档并含 cause 原文，工作台被锁定遮罩覆盖、其中交互元素不可聚焦不可激活
 
 #### Scenario: core 恢复后横幅消失
 
 - **WHEN** core 恢复服务且通道重新握手成功
-- **THEN** 无需刷新页面，横幅在下一次可达性轮询后消失
+- **THEN** 恢复通知到达后无需刷新页面，横幅即时消失、锁定解除，并出现「核心已恢复」info 通知
+
+#### Scenario: 连接建立即获当前态
+
+- **WHEN** 浏览器建立（或断线重连后重建）`/ws` 连接
+- **THEN** 客户端发起可达性 get 请求并以响应初始化横幅与锁定状态，不依赖轮询
+
+#### Scenario: 断线窗口的翻转由重连收敛
+
+- **WHEN** `/ws` 断线期间 core 经历不可达→可达翻转
+- **THEN** 重连后的 get 响应携带当前真实状态，横幅与锁定据此收敛
+
+#### Scenario: auth 门禁页不受锁定影响
+
+- **WHEN** 鉴权启用且操作者处于登录页或首启设置页时 core 不可达
+- **THEN** 登录 / 设置流程照常可交互，不出现工作台锁定遮罩
 
 ### Requirement: 项目注册降级如实提示
 
@@ -1049,14 +1091,18 @@ be presented as an empty successful list.
   sanitized reason, not an empty list presented as success
 
 ### Requirement: Services 分区与 router 状态归属
-Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）。core 为恒启动服务：其行 SHALL 仅呈现状态与 restart 入口，SHALL NOT 渲染 enable/disable 按钮（enable-core-by-default）。无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。router 的运行状态（desired / actual / uptime）SHALL 仅由本分区呈现；Models 分区 SHALL NOT 呈现 router 网关总览、listen / debug / auth 或任何 router 运行状态，provider 管理面与 router 运行状态在产品语义上分离。
+Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `GET /api/admin/services` 获取受管服务表，渲染每个进程的 name / desired / actual status / uptime_secs / 最近错误（由 `/api/admin/events` 提供，无事件则不渲染错误行）。受管服务名固定为 `core` / `webui` / `router` / `im`（IM 在配置未启用时不出现；产品对外名称保留「飞书」由前端做 i18n）；名称不属于受管集合的条目（如 watchdog / updater 等监督器内部角色）SHALL NOT 渲染为服务行。core 为恒启动服务：其行 SHALL 呈纯只读——仅呈现名称与状态，SHALL NOT 渲染 enable / disable / restart 任何动作按钮（enable-core-by-default；core 重启只经 CLI 或升级流程）。
+
+非 core 行的动作按钮 SHALL 按 actual status 驱动互斥显示：`running` 只渲染 ■（disable）；`stopped` / `disabled` 只渲染 ▶（enable）；`starting` / `restarting` SHALL 渲染不可点击的过渡占位（保持动作区列宽不变，不闪现启停钮）；`degraded` / `failed-startup` 渲染 ■ + ⟳。⟳（restart）在非过渡态的非 core 行恒可渲染。任一行动作执行期间（busy）该行全部动作 SHALL 禁用。各行动作区 SHALL 定宽：按钮空缺（core 只读行、过渡占位）以等宽占位填充，使所有行的状态圆点与状态文字纵向对齐到同一水平位置。
+
+无 watchdog adapter 时 SHALL 显式呈现 `adapter_ok: false` 横幅、不暴露 enable/disable/restart 按钮；该形态下 `/api/admin/services` 返回空数组且后端响应携带 `adapter_ok: false`。router 的运行状态（desired / actual / uptime）SHALL 仅由本分区呈现；Models 分区 SHALL NOT 呈现 router 网关总览、listen / debug / auth 或任何 router 运行状态，provider 管理面与 router 运行状态在产品语义上分离。
 
 停止 `router` SHALL 走强制出口流：停止请求被拒（存在活跃 routed 会话，响应携带会话计数）时，前端 SHALL 呈现确认对话框——显示活跃会话计数与后果（流式中断），操作员可取消或选择「强制停止」；强制停止 SHALL 以 `force: true` 重发并被服务端放行。前端 SHALL NOT 预先查询活跃会话数（避免竞态窗口），拒绝驱动弹窗即可；并发竞态（确认期间会话增减）由服务端再次执法兜底。
 
 #### Scenario: Services 渲染受管子进程
 
 - **WHEN** watchdog 拉起 core/webui/router/im 四个进程，Services 分区聚焦
-- **THEN** 列表呈现 core / webui / router / im 四行及 desired / actual / uptime；im 在配置未启用时不出现该行
+- **THEN** 列表呈现 core / webui / router / im 四行及 desired / actual / uptime；im 在配置未启用时不出现该行；不出现 watchdog / updater 等任何非受管行
 
 #### Scenario: 无 watchdog adapter 退化
 
@@ -1065,13 +1111,13 @@ Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `G
 
 #### Scenario: enable 成功
 
-- **WHEN** 操作员对 `router` 点击 enable
+- **WHEN** 操作员对处于 `stopped` 状态的 `router` 点击 ▶
 - **THEN** 前端 POST `/api/admin/services/router/enable` 收到 200；列表行刷新（desired 变 on）；若后端返回 503 则内联呈现错误且不刷新
 
 #### Scenario: disable 成功
 
-- **WHEN** 操作员对辅助服务（如 `router`）点击 disable（前提：confirm 弹窗已确认）
-- **THEN** 前端 POST `/api/admin/services/router/disable` 收到 200；列表行刷新；core 行不渲染 enable/disable 按钮
+- **WHEN** 操作员对处于 `running` 状态的辅助服务（如 `router`）点击 ■（前提：confirm 弹窗已确认）
+- **THEN** 前端 POST `/api/admin/services/router/disable` 收到 200；列表行刷新；core 行不渲染任何动作按钮
 
 #### Scenario: router 停止被拒呈现强制出口
 
@@ -1085,8 +1131,38 @@ Services 分区 SHALL 以 watchdog 受管子进程为唯一数据源：调用 `G
 
 #### Scenario: restart 操作
 
-- **WHEN** 操作员对 `core` 点击 restart
-- **THEN** 前端走 `Admin actions via control plane` 既有 restart-core 路径；成功后列表行 uptime 重置
+- **WHEN** 操作员对辅助服务（如 `router`）点击 ⟳ 并确认
+- **THEN** 前端 POST `/api/admin/services/router/restart` 收到 200，成功后列表行刷新；core 行不存在 ⟳，restart 对 core 不可达
+
+#### Scenario: core 行完全只读
+
+- **WHEN** core 行渲染（任意状态）
+- **THEN** 该行仅呈现名称与状态，无 ▶ / ■ / ⟳ 任何动作按钮
+
+#### Scenario: running 行启停钮互斥
+
+- **WHEN** 某辅助服务 actual status 为 `running`
+- **THEN** 该行动作区只渲染 ■，不渲染 ▶
+
+#### Scenario: stopped 行启停钮互斥
+
+- **WHEN** 某辅助服务 actual status 为 `stopped` 或 `disabled`
+- **THEN** 该行动作区只渲染 ▶，不渲染 ■
+
+#### Scenario: 过渡态渲染禁用占位
+
+- **WHEN** 某辅助服务 actual status 为 `starting` 或 `restarting`
+- **THEN** 该行动作区渲染不可点击的过渡占位，不渲染 ▶ / ■，动作区列宽与其它行一致
+
+#### Scenario: 降级态渲染恢复与下车道
+
+- **WHEN** 某辅助服务 actual status 为 `degraded` 或 `failed-startup`
+- **THEN** 该行动作区渲染 ■ 与 ⟳，不渲染 ▶
+
+#### Scenario: 状态列纵向对齐
+
+- **WHEN** Services 列表同时渲染 core（无按钮）、running 辅助服务（■ + ⟳）与过渡态服务（占位）
+- **THEN** 三行的状态圆点与状态文字对齐到同一水平位置，动作区以定宽 + 占位填充
 
 #### Scenario: router 状态只在 Services 呈现
 
@@ -1195,17 +1271,17 @@ WebUI SHALL 暴露 `POST /api/sessions/{key}/mode`（请求体 `{"mode": "<ask|e
 
 ### Requirement: 会话 mode 在 dashboard 可见可切
 
-会话 dashboard SHALL 展示当前会话的 mode（含远端会话已有的 desired/effective 呈现），并提供切换入口（下拉/菜单），提交后走中途切换端点。mode 显示对远端节点会话沿用 effective/desired 差异化呈现（effective 缺失时只显 desired）。
+会话 dashboard SHALL 展示当前会话的 mode（含远端会话已有的 desired/effective 呈现），切换入口 SHALL 位于输入框底沿左端，与模型芯片、提交按钮同一工具条，提交后走中途切换端点。会话头部 SHALL NOT 渲染 mode 切换控件。mode 显示对远端节点会话沿用 effective/desired 差异化呈现（effective 缺失时只显 desired）。
 
 #### Scenario: composer 创建表单的 mode 选择
 
-- **WHEN** 操作者在创建模式展开表单
-- **THEN** 表单提供 mode 下拉，缺省项为"agent 默认"（不发送 mode 字段）
+- **WHEN** 操作者在创建对话框展开表单
+- **THEN** 表单提供 mode 下拉，缺省项为「agent 默认」（不发送 mode 字段）
 
 #### Scenario: 会话头部切换 mode
 
-- **WHEN** 操作者在会话头部选择另一个 mode
-- **THEN** 前端提交 `POST /api/sessions/{key}/mode`；成功后头部 mode 更新，失败显示非致命错误且保持原显示
+- **WHEN** 操作者在输入框底沿的 mode 下拉选择另一个 mode
+- **THEN** 前端提交 `POST /api/sessions/{key}/mode`；成功后下拉显示的 mode 更新，失败显示非致命错误且保持原显示
 
 ### Requirement: SessionBackend seam 承载 mode
 
@@ -1257,15 +1333,7 @@ WebUI SHALL 提供只读端点 `GET /api/env`：读取 **webui 进程自身**的
 
 ### Requirement: 鉴权开关（auth）与首启用户引导
 
-WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。开关为
-`true` 时，鉴权门 SHALL 恒在：`/api/*`、`/ws` 需要有效会话；用户库
-（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入首启引导流程（见
-`webui-user-management` 能力：设置页或环境变量建立 root），期间 `GET
-/api/auth/me` SHALL 报告 `needs_setup: true`。开关为 `false` 时，无论用户库
-是否存在用户，SHALL 对所有路由（含静态资源）完全放行，不要求登录且不触发
-引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染登录
-页）。`sebas webui-passwd` 在开关关闭时仍可管理用户（为重新启用做准
-备），但不产生任何强制登录效果。
+WebUI SHALL 提供 `[service.webui] auth` 配置开关，默认 `true`。开关为 `true` 时，鉴权门 SHALL 恒在：`/api/*`、`/router/api/*`、`/ws` 需要有效 会话；用户库（auth.db）零用户时 SHALL 不自动生成任何凭据，改为进入 首启引导流程（见 `webui-user-management` 能力：设置页或环境变量建立 root），期间 `GET /api/auth/me` SHALL 报告 `needs_setup: true`。开关为 `false` 时，无论用户库是否存在用户，SHALL 对所有路由（含静态资源） 完全放行，不要求登录且不触发引导；`GET /api/auth/me` SHALL 报告 `enabled: false`（前端据此不渲染登录页）。`sebas webui-passwd` 在开关 关闭时仍可管理用户（为重新启用做准备），但不产生任何强制登录效果。
 
 #### Scenario: 默认打开且有用户
 
@@ -1276,20 +1344,19 @@ WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。开关
 
 - **WHEN** 配置未写 `auth`、用户库零用户、且未设凭据环境变量
 - **THEN** `GET /api/auth/me` 返回 `needs_setup: true`（前端渲染首启
-  设置页而非登录页），受保护 API 仍对未带会话请求返回 401
+设置页而非登录页），受保护 API 仍对未带会话请求返回 401
 
 #### Scenario: 环境变量引导 root
 
 - **WHEN** 用户库零用户且 `SEBAS_WEBUI_USER` + `SEBAS_WEBUI_PASSWORD`
-  非空
+非空
 - **THEN** 启动时建立名为该用户名的 root 用户，`needs_setup` 不再出现
 
 #### Scenario: 测试环境关闭
 
-- **WHEN** 配置设置 `watchdog.webui.auth = false`
+- **WHEN** 配置设置 `service.webui.auth = false`
 - **THEN** 未带任何会话的 `/api/summary` 请求返回 200，全部路由免登录
-- **AND** `GET /api/auth/me` 返回
-  `{"enabled": false, "authenticated": false}`
+- **AND** `GET /api/auth/me` 返回 `{"enabled": false, "authenticated": false}`
 
 #### Scenario: 关闭后重新打开立即生效
 
@@ -1320,3 +1387,37 @@ WebUI SHALL 提供 `[watchdog.webui] auth` 配置开关，默认 `true`。开关
 
 - **WHEN** 前端渲染登录门
 - **THEN** 登录表单有用户名与密码两个输入框，401 就地提示「凭据错误」
+
+### Requirement: 分级通知层
+
+WebUI SHALL 提供唯一的视口级顶部居中通知层，按四级呈现全局通知：info（蓝色瞬时 toast，数秒自动消失）、warn（琥珀色：瞬时来源用自动消失 toast，持续状态用驻留横幅）、error（红色驻留 toast，须操作者手动关闭）、fatal（驻留横幅 + 锁定，语义见「全局核心可达性横幅」）。判级 SHALL 由前端按影响面裁定——应用瘫痪 = fatal、单个视图 / 能力不可用 = error、单个操作失败且可立即重试 = warn、无损状态提示 = info；HTTP 状态码只是信号、不直接定级。API 客户端 SHALL 对未豁免的请求失败自动按级弹出（操作失败类 → warn），而有内联错误呈现的表单调用点与带重试的列表加载 SHALL 豁免统一拦截、维持内联呈现；401 SHALL 走既有登录跳转、SHALL NOT 进入通知层。通知层 SHALL 满足：瞬时 toast 栈上限三条、超出挤掉最旧瞬时条（error 驻留条不参与挤占）；同一文案在去重窗口内 SHALL NOT 重复弹出；info / warn toast 可提前手动关闭；fatal 横幅不可手动关闭。既有「与服务器的连接已断开」横幅 SHALL 收编为本层的持续 warn 驻留横幅，旧实现 SHALL 移除。通知层与 settings 弹窗等浮层叠放时 SHALL 保持在上；窄屏 SHALL 退化为全宽贴顶。
+
+#### Scenario: 四级形态可辨识
+
+- **WHEN** info / warn / error / fatal 各级通知呈现
+- **THEN** 四级在配色上可区分（info 蓝、warn 琥珀、error 红、fatal 红 + 锁定遮罩），且颜色不是唯一的信息通道（附图标与文案）
+
+#### Scenario: API 操作失败自动弹 warn
+
+- **WHEN** 一个未豁免的 API 调用因网络失败或服务端错误而失败（如保存请求超时）
+- **THEN** 通知层弹出 warn 级失败提示并自动消失，该调用点无需自行处理全局呈现
+
+#### Scenario: 内联错误点不双弹
+
+- **WHEN** composer 提交、settings 保存或列表初始加载等有内联错误呈现的调用点失败
+- **THEN** 错误维持内联呈现，通知层不重复弹出同一失败
+
+#### Scenario: 驻留 error 须手动关闭
+
+- **WHEN** 视图 / 能力级故障由视图显式上报为 error 级通知
+- **THEN** 该通知不自动消失，操作者手动关闭后即移除
+
+#### Scenario: 栈上限与去重
+
+- **WHEN** 瞬时通知超过三条，或同一文案在去重窗口内重复触发
+- **THEN** 超出时挤掉最旧的瞬时条，重复文案不产生第二条
+
+#### Scenario: WS 断线收编为持续 warn 驻留横幅
+
+- **WHEN** `/ws` 连接断开
+- **THEN** 持续 warn 驻留横幅出现在通知层（旧 app-shell 横幅不再渲染），既有指数退避重连继续；重连成功后横幅消失并触发既有 `sebas:refetch` 刷新

@@ -1984,3 +1984,120 @@ async fn close_reports_discarded_pending_and_notifies_observers() {
     );
     assert!(saw_removed, "Removed follows the drop annotation");
 }
+
+// ── add-core-reachability-ws-push 1.2: set_status 收口发布 ──────────────────
+
+use crate::core_channel::client;
+
+/// 等到 forwarder 首次失败的确定性翻转（初始 `尚未连接 core` → socket 缺失
+/// 的带路径 cause），此后 forwarder 的重试永远 latch 同一状态、不再发布——
+/// 后续受控的 `set_status` 序列就能钉死帧序。
+async fn await_first_flip(
+    rx: &mut tokio::sync::broadcast::Receiver<Reachability>,
+) -> Reachability {
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("forwarder's first failed connect must publish its flip")
+        .expect("reachability broadcast open")
+}
+
+fn fail_status(kind: client::FailKind, cause: &str) -> client::ConnStatus {
+    client::ConnStatus::Failed {
+        kind,
+        cause: cause.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn set_status_publishes_only_true_flips() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CoreChannelBackend::new(dir.path().join("missing.sock"), SECRET.into());
+    let mut rx = backend.reachability_updates();
+
+    let first = await_first_flip(&mut rx).await;
+    assert!(
+        matches!(first, Reachability::StartupFailed { .. }),
+        "first flip is the forwarder's socket-not-found latch: {first:?}"
+    );
+
+    // 首次 Connected 是真翻转（当前 latch 的是 Failed）→ 恰好一帧；随后
+    // 的重复写（每次成功请求都会 latch Connected 一次）不产帧。
+    backend.set_status(client::ConnStatus::Connected);
+    assert_eq!(rx.recv().await.unwrap(), Reachability::Reachable);
+    backend.set_status(client::ConnStatus::Connected);
+    let repeat = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+    assert!(
+        repeat.is_err(),
+        "Connected→Connected repeats must not publish, got {repeat:?}"
+    );
+}
+
+#[tokio::test]
+async fn set_status_publishes_every_true_flip_in_order() {
+    let _env = StartupErrorFile::unset();
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CoreChannelBackend::new(dir.path().join("missing.sock"), SECRET.into());
+    let mut rx = backend.reachability_updates();
+    let first = await_first_flip(&mut rx).await;
+    assert!(matches!(first, Reachability::StartupFailed { .. }));
+
+    // Connected → Failed{AuthRejected} → Connected → Failed{Disconnected}
+    // → Connected：每次真翻转恰好一帧，kind 与 cause 原样随帧。
+    backend.set_status(client::ConnStatus::Connected);
+    assert_eq!(rx.recv().await.unwrap(), Reachability::Reachable);
+
+    backend.set_status(fail_status(client::FailKind::AuthRejected, "handshake refused"));
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        Reachability::AuthRejected {
+            cause: "handshake refused".into()
+        }
+    );
+
+    backend.set_status(client::ConnStatus::Connected);
+    assert_eq!(rx.recv().await.unwrap(), Reachability::Reachable);
+
+    backend.set_status(fail_status(client::FailKind::Disconnected, "connection dropped"));
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        Reachability::Disconnected {
+            cause: "connection dropped".into()
+        }
+    );
+
+    backend.set_status(client::ConnStatus::Connected);
+    assert_eq!(rx.recv().await.unwrap(), Reachability::Reachable);
+}
+
+#[tokio::test]
+async fn set_status_frames_carry_startup_summary_enrichment() {
+    let _env = StartupErrorFile::set("startup-failure: bad config\n");
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CoreChannelBackend::new(dir.path().join("missing.sock"), SECRET.into());
+    let mut rx = backend.reachability_updates();
+    let first = await_first_flip(&mut rx).await;
+    let first_cause = match first {
+        Reachability::StartupFailed { cause } => cause,
+        other => panic!("expected the latched StartupFailed flip, got {other:?}"),
+    };
+    assert_eq!(
+        first_cause, "core startup failed: bad config",
+        "the latched flip itself is enriched"
+    );
+
+    // 同 kind、不同 cause 的后续翻转照常发布且同样富化（广播与读端同一
+    // 映射：读端此刻对同一状态给出同一 enriched cause）。
+    backend.set_status(fail_status(client::FailKind::StartupFailed, "socket absent"));
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        Reachability::StartupFailed {
+            cause: "core startup failed: bad config".into()
+        }
+    );
+    assert_eq!(
+        backend.reachability().await,
+        Reachability::StartupFailed {
+            cause: "core startup failed: bad config".into()
+        }
+    );
+}

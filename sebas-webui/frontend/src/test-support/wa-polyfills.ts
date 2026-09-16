@@ -12,6 +12,9 @@
  *      open 时抛 `TypeError: this.dialog.showModal is not a function`。
  *   3. `Element.getAnimations`：jsdom 无 Web Animations API，WA 的过渡代码
  *      抛 `TypeError: el.getAnimations is not a function`。
+ *   4. Popover（add-webui-tiered-notices 2.1）：jsdom/happy-dom 均无
+ *      `showPopover` / `hidePopover`，wa-toast 的栈显隐（`showStack`/
+ *      `hideStack`）在入栈首条时抛 TypeError。垫成 no-op。
  *
  * 约定：任何渲染 WA 组件的测试文件，都应在导入被测模块前调用一次
  * `installWaDomPolyfills()`。安装幂等（原型标记），重复调用安全。
@@ -128,6 +131,21 @@ export function installWebAnimationsPolyfill(): void {
 }
 
 /**
+ * 补 Popover API 最小面（add-webui-tiered-notices 2.1）：show/hide 为 no-op。
+ * wa-toast 的 showStack/hideStack 依赖 `matches(':popover-open')`（两环境均
+ * 恒 false → 不会重入 no-op）；`customStates` 无需垫——WA 基类在构造器里
+ * 自建该对象（internals.states 缺位时 set 是安全 no-op）。
+ */
+export function installPopoverPolyfill(): void {
+  if (typeof HTMLElement === 'undefined') return
+  const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+  if (proto.__sebasPatchedPopover) return
+  if (typeof proto.showPopover !== 'function') proto.showPopover = function () {}
+  if (typeof proto.hidePopover !== 'function') proto.hidePopover = function () {}
+  proto.__sebasPatchedPopover = true
+}
+
+/**
  * 一次性装好 WA 渲染所需的全部垫片——**测试文件首选入口**。
  * 新增 jsdom 缺口时只改这里，避免每个测试文件各漏一处。
  */
@@ -135,4 +153,5 @@ export function installWaDomPolyfills(): void {
   installElementInternalsPolyfill()
   installDialogPolyfill()
   installWebAnimationsPolyfill()
+  installPopoverPolyfill()
 }

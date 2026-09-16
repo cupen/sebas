@@ -15,10 +15,12 @@ pub struct PendingSubmissionView {
 
 /// Events that the WebUI can push to connected clients.
 ///
-/// Each event serializes to a JSON object with a `type` tag, so a single
-/// WebSocket text frame carries a complete, self-describing message. Names
-/// are dotted (`session.created`), replacing the former SSE two-part
-/// `event: update` encoding.
+/// Each event serializes to a JSON object with a `type` tag. On the wire
+/// events no longer travel as bare frames: [`notification_frame`] wraps the
+/// serialized shape into the WS RPC `Notification` envelope (add-ws-rpc-
+/// protocol), with `method` = the dotted `type` and `params` = the payload
+/// below. Names remain dotted (`session.created`), a carry-over from the
+/// former SSE two-part `event: update` encoding.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum WebUiEvent {
@@ -63,14 +65,41 @@ pub enum WebUiEvent {
         entries: Vec<TurnEntry>,
         seq: u64,
     },
+    /// （add-core-reachability-ws-push D3/D5）核心可达性翻转推送。params 与
+    /// `/api/summary` 的 `reachability` 段同形（`reachability_payload`）：
+    /// 可达 `{ok:true}`；不可达 `{ok:false, kind, cause}`（kind ∈
+    /// startup_failed | auth_rejected | disconnected）。前端 kind 分文案逻辑
+    /// 原样复用，banner 不靠 cause 字符串匹配的既有契约不变。
+    #[serde(rename = "core.reachability")]
+    CoreReachability {
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+    },
+}
+
+/// add-ws-rpc-protocol：事件统一包进 Notification 封套——`method` = 原
+/// dotted `type`，`params` = 原载荷（剥掉已被 `method` 取代的 type 标签，
+/// 载荷结构不变）。dotted 名字仍由上面的 serde rename 表唯一持有，这里只
+/// 做搬运，不给漂移留缝。
+pub fn notification_frame(event: WebUiEvent) -> crate::ws_rpc::Frame {
+    let mut params = serde_json::to_value(&event).unwrap_or_default();
+    let method = params
+        .as_object_mut()
+        .and_then(|obj| obj.remove("type"))
+        .and_then(|tag| tag.as_str().map(str::to_string))
+        .unwrap_or_default();
+    crate::ws_rpc::Frame::Notification(crate::ws_rpc::NotificationFrame { method, params })
 }
 
 #[cfg(test)]
 mod tests {
 
     use super::WebUiEvent;
-    use serde_json::json;
     use sebas_dispatch::TurnEntry;
+    use serde_json::json;
 
     /// Every event serializes to a JSON object tagged with its dotted
     /// `type`; this shape is the WS contract clients key off.
@@ -157,5 +186,69 @@ mod tests {
         assert_eq!(got["seq"], 4);
         assert_eq!(got["entries"].as_array().unwrap().len(), 2);
         assert_eq!(got["entries"][0]["content"], "hello ");
+    }
+
+    /// add-ws-rpc-protocol：事件以 Notification 封套投递——method = 原
+    /// dotted type，params = 原载荷且不再携带 type 标签。spec 场景
+    /// 「turn.append 以 Notification 到达」的帧形状钉死在这里。
+    #[test]
+    fn events_wrap_into_notification_envelope() {
+        let frame = super::notification_frame(WebUiEvent::TurnAppend {
+            session_id: "web%00web-1".into(),
+            entries: vec![TurnEntry::markdown(3, "hello ")],
+            seq: 3,
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification, got {frame:?}");
+        };
+        assert_eq!(notification.method, "turn.append");
+        assert_eq!(notification.params["session_id"], "web%00web-1");
+        assert_eq!(notification.params["seq"], 3);
+        assert_eq!(notification.params["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(notification.params["entries"][0]["content"], "hello ");
+        assert!(
+            notification.params.get("type").is_none(),
+            "type tag must move into method, params keeps the bare payload: {}",
+            notification.params
+        );
+
+        // 无载荷事件：params 退化为空对象，method 仍带 dotted 名。
+        let frame = super::notification_frame(WebUiEvent::ConfigUpdated);
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification, got {frame:?}");
+        };
+        assert_eq!(notification.method, "config.updated");
+        assert_eq!(notification.params, json!({}));
+    }
+
+    /// add-core-reachability-ws-push D5：可达性帧的 params 与 /api/summary
+    /// 的 reachability 段同形——可达只有 `{ok:true}`（无 kind/cause 噪声），
+    /// 不可达携带机器可读 kind 与原文 cause。
+    #[test]
+    fn core_reachability_payload_matches_summary_shape() {
+        let frame = super::notification_frame(WebUiEvent::CoreReachability {
+            ok: true,
+            kind: None,
+            cause: None,
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification");
+        };
+        assert_eq!(notification.method, "core.reachability");
+        assert_eq!(notification.params, json!({ "ok": true }));
+
+        let frame = super::notification_frame(WebUiEvent::CoreReachability {
+            ok: false,
+            kind: Some("startup_failed"),
+            cause: Some("core startup failed: bad config".into()),
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification");
+        };
+        assert_eq!(notification.method, "core.reachability");
+        assert_eq!(
+            notification.params,
+            json!({ "ok": false, "kind": "startup_failed", "cause": "core startup failed: bad config" })
+        );
     }
 }

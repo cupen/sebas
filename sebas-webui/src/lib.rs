@@ -15,10 +15,11 @@ pub mod projects;
 pub mod rbac;
 pub mod routes;
 pub mod server;
-pub mod skills;
 pub mod session_backend;
+pub mod skills;
 pub mod user_store;
 pub mod web_adapter;
+pub mod ws_rpc;
 
 #[doc(hidden)]
 pub use server::WebUiState;

@@ -7,6 +7,8 @@
  * on `ApiError.status`.
  */
 
+import { notify } from '../notify.js'
+
 export type StatusSlug =
   | 'starting'
   | 'queued'
@@ -337,6 +339,12 @@ export interface SessionDetail {
  */
 export interface ReachabilityInfo {
   ok: boolean
+  /**
+   * （add-webui-tiered-notices D5）机器可读不可达分档，与 `core.reachability`
+   * 推送 / `core.reachability.get` 响应同词表；fatal 横幅按它分文案，kind
+   * 缺失退化通用「核心不可达」。可达时缺省。
+   */
+  kind?: 'startup_failed' | 'auth_rejected' | 'disconnected'
   cause?: string
 }
 
@@ -632,19 +640,76 @@ function isAuthExempt(path: string): boolean {
 }
 
 /**
+ * 统一通知拦截的豁免名单（add-webui-tiered-notices D4/4.1，注释互链
+ * `openspec/changes/add-webui-tiered-notices`）——**唯一清单**。名单内的
+ * 调用点都已有内联错误呈现（表单就地报错 / 列表自带重试态）或走 401 登录
+ * 跳转，拦截器跳过以免同一失败双弹；新增 API 调用点若失败已就地呈现，
+ * 必须把它的 path 模式加进来（并注明调用点），否则会自动弹 warn。
+ */
+const NOTIFY_EXEMPT_PATHS: RegExp[] = [
+  // 401 跳登录路径（isAuthExempt 同名单）：登录/首启/登出/探活自身失败就地
+  // 呈现，且 401 本就整体不入通知层（见 reportForNotice）。
+  /^\/api\/auth\//,
+  // settings 表单与各分区（settings-modal.ts：失败一律内联呈现）。
+  /^\/api\/settings$/,
+  /^\/api\/env$/,
+  /^\/api\/agents$/, // 新建会话对话框 / composer 目录（「目录不可用」内联态）
+  /^\/api\/users(\/|$)/,
+  /^\/api\/skills(\/|$)/,
+  /^\/api\/providers(\/|$)/, // 含 /probe 抓模型（settings 表单内联）
+  /^\/api\/provider-presets$/,
+  /^\/api\/provider-defaults$/, // settings + 新建会话对话框（目录不可用态）
+  // composer 提交与回合内控制（composer / turn-stream / review-card 内联）。
+  /^\/api\/sessions\/[^/]+\/(message|model|mode|cancel|pending|activate)/,
+  /^\/api\/permissions\//, // review-card 应答（卡片内联重试）
+  // dashboard / 列表加载与项目面（视图自带内联重试态 / 就地报错）。
+  /^\/api\/summary$/,
+  /^\/api\/sessions(\/|$)/, // 列表/详情加载（重试态）+ createSession 表单 +
+  // switch/close/archive/restore（确认框内联）；activate 由调用方
+  // fire-and-forget（失败不致命，占位保留）——全段豁免。
+  /^\/api\/projects(\/|$)/, // rail 加载/增删/排序（内联 addError 等）
+  /^\/api\/archive(\/|$)/,
+  /^\/api\/nodes$/, // rail/composer 节点面（remote_available=false 内联退化）
+  /^\/api\/admin(\/|$)/, // services 分区（*Safe 包装 + 内联退化呈现）
+  /^\/api\/fs\//, // folder-picker（内联错误态）
+]
+
+/**
+ * 影响面判级（spec「判级由前端按影响面裁定，HTTP 状态只是信号」）：拦截器
+ * 只对**未豁免**的失败弹 warn——操作调用（非 GET）给「操作失败」文案，读
+ * 给「加载失败」文案；401 不入通知层（既有登录跳转接管）。当前视图面全部
+ * 已豁免（各自内联），本规则先立、有源再接（proposal Non-goals 同款姿态）。
+ */
+function reportForNotice(method: string, path: string, message: string, status: number | null): void {
+  if (status === 401) return // 401 → 登录跳转，SHALL NOT 进入通知层
+  if (NOTIFY_EXEMPT_PATHS.some((re) => re.test(path))) return
+  const action = method === 'GET' ? '加载失败' : '操作失败'
+  notify({
+    level: 'warn',
+    message: `${action}：${message}`,
+    dedupeKey: `${method} ${path.split('?')[0]}`,
+  })
+}
+
+/**
  * fetch 的唯一包装点：网络级失败（TypeError，无 HTTP 响应）转成
  * `NetworkError`；HTTP 响应（含 4xx/5xx）原样返回，由 `unwrap` 归一。
+ * 网络级失败在转换前先过统一通知拦截（add-webui-tiered-notices 4.1）。
  */
 async function doFetch(path: string, init?: RequestInit): Promise<Response> {
   try {
     return await fetch(path, init)
   } catch (e) {
-    if (e instanceof TypeError) throw new NetworkError()
+    if (e instanceof TypeError) {
+      const err = new NetworkError()
+      reportForNotice(init?.method ?? 'GET', path, err.message, null)
+      throw err
+    }
     throw e
   }
 }
 
-async function unwrap<T>(resp: Response, path?: string): Promise<T> {
+async function unwrap<T>(resp: Response, path?: string, method = 'GET'): Promise<T> {
   if (resp.ok) return (await resp.json()) as T
   if (resp.status === 401 && onUnauthorized && path && !isAuthExempt(path)) onUnauthorized()
   let message = `HTTP ${resp.status}`
@@ -668,11 +733,12 @@ async function unwrap<T>(resp: Response, path?: string): Promise<T> {
   } catch {
     // non-JSON error body; keep the generic message
   }
+  if (path) reportForNotice(method, path, message, resp.status)
   throw new ApiError(resp.status, message, code, count)
 }
 
 async function get<T>(path: string): Promise<T> {
-  return unwrap<T>(await doFetch(path, { headers: { accept: 'application/json' } }), path)
+  return unwrap<T>(await doFetch(path, { headers: { accept: 'application/json' } }), path, 'GET')
 }
 
 /**
@@ -702,6 +768,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
       body: body === undefined ? '{}' : JSON.stringify(body),
     }),
     path,
+    'POST',
   )
 }
 
@@ -716,6 +783,7 @@ async function put<T>(path: string, body?: unknown): Promise<T> {
       body: body === undefined ? '{}' : JSON.stringify(body),
     }),
     path,
+    'PUT',
   )
 }
 
@@ -726,6 +794,7 @@ async function del<T>(path: string): Promise<T> {
       headers: { accept: 'application/json' },
     }),
     path,
+    'DELETE',
   )
 }
 
@@ -749,6 +818,7 @@ const projects = {
         method: 'POST',
       }),
       `/api/projects/${encodeURIComponent(id)}/remove`,
+      'POST',
     ),
   reorder: (ids: string[]) =>
     post<{ projects: Project[] }>('/api/projects/reorder', { ids }),
@@ -1068,7 +1138,7 @@ export interface FsBrowseResponse {
   entries: { name: string; is_dir: boolean; has_subdirs?: boolean }[]
 }
 
-async function unwrapText(resp: Response, path?: string): Promise<string> {
+async function unwrapText(resp: Response, path?: string, method = 'GET'): Promise<string> {
   if (resp.ok) return resp.text()
   if (resp.status === 401 && onUnauthorized && path && !isAuthExempt(path)) onUnauthorized()
   let message = `HTTP ${resp.status}`
@@ -1078,5 +1148,6 @@ async function unwrapText(resp: Response, path?: string): Promise<string> {
   } catch {
     /* non-JSON error body */
   }
+  if (path) reportForNotice(method, path, message, resp.status)
   throw new ApiError(resp.status, message)
 }
