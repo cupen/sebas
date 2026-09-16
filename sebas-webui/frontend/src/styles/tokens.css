@@ -72,6 +72,18 @@
   --sebas-status-dormant-bg: rgba(148, 160, 180, 0.1);
   --sebas-status-dormant-border: rgba(148, 160, 180, 0.28);
 
+  /* 分级通知层（add-webui-tiered-notices D6）：notice 是系统对人的通道，
+   * 与 status hue（描述机器状态）以 alias 关联而非合并——改 status 不动
+   * notice 语义，反之亦然。info/warn/error 是 toast 的左侧色条/图标/倒计时
+   * 环指示色；warn-bg / fatal-bg 是驻留横幅的深底（对白字 ≥ AA：fatal
+   * ≈ 10:1、warn ≈ 7.5:1），明暗两主题共用同一深底（警示横幅恒为高对比
+   * 深色，修旧 core-banner 白字对浅红 #f47174 对比不足 AA 的缺陷）。 */
+  --sebas-notice-info: var(--sebas-status-starting);
+  --sebas-notice-warn: var(--sebas-status-working);
+  --sebas-notice-error: var(--sebas-status-failed);
+  --sebas-notice-warn-bg: #7a4a08;
+  --sebas-notice-fatal-bg: #7f1d1d;
+
   /* Elevation */
   --sebas-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
   --sebas-shadow-2: 0 12px 32px rgba(0, 0, 0, 0.42);
