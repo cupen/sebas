@@ -371,12 +371,15 @@ def testsuite_webui(c, case=None):
 
         suite_dir = "tests/testsuite-webui"
         if case:
-            # --case auth runs the auth-on form; --case deployment or
-            # --case approval-detached the detached dual-process topology
-            # (core + standalone webui, no shared-secret env); anything else
-            # filters the main suite.
+            # --case auth runs the auth-on form; --case auth-setup the
+            # zero-user first-run setup form (auth on, no provisioned user);
+            # --case deployment or --case approval-detached the detached
+            # dual-process topology (core + standalone webui, no shared-secret
+            # env); anything else filters the main suite.
             if case == "auth":
                 cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
+            elif case == "auth-setup":
+                cmd = f"pnpm --dir {suite_dir} exec playwright test --config playwright.auth-setup.config.ts"
             elif case in ("deployment", "approval-detached"):
                 cmd = (
                     f"pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
@@ -388,6 +391,7 @@ def testsuite_webui(c, case=None):
             cmd = (
                 f"pnpm --dir {suite_dir} exec playwright test"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth.config.ts"
+                f" && pnpm --dir {suite_dir} exec playwright test --config playwright.auth-setup.config.ts"
                 f" && pnpm --dir {suite_dir} exec playwright test --config playwright.detached.config.ts"
             )
         result = c.run(cmd, echo=True)
@@ -418,6 +422,8 @@ def testsuite_webui(c, case=None):
 _TESTSUITE_PORT = 9899
 _TESTSUITE_AUTH_PORT = 9898
 _TESTSUITE_HUMAN_PORT = 9879
+# auth-setup 姿态（auth 开、零用户、不预建户）：first-run root 引导旅程专用。
+_TESTSUITE_AUTH_SETUP_PORT = 9896
 
 
 def _sandbox_bin(name):
@@ -567,10 +573,13 @@ def _health_ok(url):
         return False
 
 
-def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
+def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False, provision=True):
     """Assemble a throwaway backend and block until signalled; then clean up.
     Mirrors the retired bash harness semantics (ports, env names, pointer and
     marker contracts) so Playwright configs and the reporter keep working.
+
+    `provision=False`（auth-setup 姿态，auth.spec 之外的第三形态）保持 auth
+    开关打开但零用户——首启设置页形态，专供 first-run root 引导旅程。
 
     `detached=True` is the dual-process topology (harden-core-channel-deployment
     5.4): the core runs WITHOUT `--webui` and a standalone `sebas webui` serves
@@ -624,9 +633,10 @@ def _run_webui_sandbox(port, auth_on, keep, reuse, human, detached=False):
         f.write(work)
     _write_sandbox_config(work, fake_bin, auth_on, webui_enabled=detached, port=port, fake_acp_bin=fake_acp_bin)
 
-    if auth_on:
+    if auth_on and provision:
         # 统一测试账号 admin/admin：webui-passwd 写沙箱内 auth.db（首个用户
         # 默认 root），建户先于进程拉起、失败即退（fail-fast，不等 health）。
+        # auth-setup 姿态（provision=False）跳过——零用户正是被测前提。
         result = subprocess.run(
             [sebas_bin, "webui-passwd", "--user", "admin", "--password-stdin"],
             input=b"admin",
@@ -831,19 +841,24 @@ def testsuite_webui_server(c):
     is the two-process `core --webui` + standalone `sebas router --debug`
     form (unify-router-process-shape)."""
     auth_on = os.environ.get("TESTSUITE_AUTH", "0") == "1"
+    # auth-setup：auth 开但零用户（不预建户）——首启设置页旅程的第三形态。
+    setup_mode = os.environ.get("TESTSUITE_AUTH_SETUP", "0") == "1"
     detached = os.environ.get("TESTSUITE_MODE", "") == "detached"
     if detached:
         default_port = 9897
+    elif setup_mode:
+        default_port = _TESTSUITE_AUTH_SETUP_PORT
     else:
         default_port = _TESTSUITE_AUTH_PORT if auth_on else _TESTSUITE_PORT
     try:
         _run_webui_sandbox(
             port=int(os.environ.get("TESTSUITE_PORT", default_port)),
-            auth_on=auth_on,
+            auth_on=auth_on or setup_mode,
             keep=os.environ.get("TESTSUITE_KEEP", "0") == "1",
             reuse=os.environ.get("TESTSUITE_REUSE", "0") == "1",
             human=os.environ.get("TESTSUITE_HUMAN", "0") == "1",
             detached=detached,
+            provision=not setup_mode,
         )
     finally:
         _cleanup_stale_sandboxes()

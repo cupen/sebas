@@ -67,8 +67,12 @@ test.describe('模型管理覆盖', () => {
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
 
-      // No picker anywhere (D4 presentation, re-pinned here as the pre-state).
+      // No picker (D4 presentation, re-pinned here as the pre-state): the
+      // composer states the absence honestly — a placeholder, not a chip.
       await expect(detail.modelPick).toHaveCount(0)
+      await expect(
+        page.locator('sebas-workbench-composer [data-testid="model-chip-unavailable"]'),
+      ).toBeVisible()
 
       // The webui delivers the command (HTTP 200). The Claude driver answers
       // SetModel with a NON-terminal error (7f1d7c9): the session survives,
@@ -131,8 +135,8 @@ test.describe('模型管理覆盖', () => {
         })
         .toBe('ok-model')
 
-      // The UI renders the model picker for this session and shows the new
-      // model selected.
+      // The UI renders the composer model chip for this session and shows
+      // the new model selected（4.2：选择器归 composer 底沿）.
       await page.goto(`/sessions/${key}`)
       await expect(detail.host).toBeVisible()
       await expect(detail.modelPick).toBeVisible()

@@ -95,8 +95,9 @@ export class Workbench {
  * The focused session ON THE WORKBENCH (workbench-conversation-view 3.3/3.4:
  * the retired `sebas-session-detail` view is gone - `/sessions/:key` deep
  * links and rail switches render the same `sebas-dashboard` focused). One
- * object for the session head (badge/chat id/model pick/close/archive), the
- * conversation stream, and the follow-up composer.
+ * object for the session head（display-only since workbench-live-conversation-
+ * flow 4.2：badge/chat id/mode 标签——close/archive 收进 rail 行菜单、模型
+ * 芯片归 composer 底沿）, the conversation stream, and the follow-up composer.
  */
 export class FocusedSession {
   readonly page: Page
@@ -108,10 +109,6 @@ export class FocusedSession {
   readonly emptyConversation: Locator
   readonly composerTextarea: Locator
   readonly sendButton: Locator
-  readonly closeButton: Locator
-  readonly archiveButton: Locator
-  readonly closeDialog: Locator
-  readonly closeDialogConfirm: Locator
   readonly unavailableNote: Locator
   readonly modelPick: Locator
 
@@ -131,17 +128,8 @@ export class FocusedSession {
     // The composer is the dashboard's own workbench composer (follow-up mode).
     this.composerTextarea = page.locator('sebas-workbench-composer wa-textarea textarea')
     this.sendButton = page.locator('sebas-workbench-composer .send-button')
-    this.closeButton = page
-      .locator('sebas-dashboard .session-head wa-button')
-      .filter({ hasText: 'Close' })
-    this.archiveButton = page
-      .locator('sebas-dashboard .session-head wa-button')
-      .filter({ hasText: 'Archive' })
-    this.closeDialog = page.locator('sebas-dashboard wa-dialog[label="Close session"]')
-    this.closeDialogConfirm = page
-      .locator('sebas-dashboard wa-dialog[label="Close session"] wa-button')
-      .filter({ hasText: 'Close session' })
-    this.modelPick = page.locator('sebas-dashboard .session-head .model-pick')
+    // 模型选择器（4.2：头部去交互化后归 composer 底沿的芯片）。
+    this.modelPick = page.locator('sebas-workbench-composer [data-testid="model-chip"]')
   }
 
   /** Status badge's current slug (`data`-driven attribute on the element). */

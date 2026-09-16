@@ -14,11 +14,18 @@ export const WEBUI_PORT = 9899
 export default defineConfig({
   testDir: './tests',
   // auth.spec.ts runs under playwright.auth.config.ts (auth-on form, port 9898);
+  // auth-setup.spec.ts runs under playwright.auth-setup.config.ts (auth-on +
+  // zero-user form, port 9896 — the zero-user premise is unbuildable here);
   // deployment.spec.ts + approval-detached.spec.ts run under
   // playwright.detached.config.ts (detached dual-process form, port 9897) —
   // stopping the core there would be lethal to the shared single-process
   // sandbox, and the approval loop needs the channel topology.
-  testIgnore: [/auth\.spec\.ts/, /deployment\.spec\.ts/, /approval-detached\.spec\.ts/],
+  testIgnore: [
+    /auth\.spec\.ts/,
+    /auth-setup\.spec\.ts/,
+    /deployment\.spec\.ts/,
+    /approval-detached\.spec\.ts/,
+  ],
   timeout: 30_000,
   retries: 1,
   workers: 1,
