@@ -5,7 +5,7 @@
 ## What Changes
 
 - 新增视口级 top-center 通知层，承载四级通知：info（蓝 toast，约 5s 自动消）、warn（琥珀：瞬时 toast 约 8s / 持续态驻留横幅）、error（红 toast，驻留须手动关）、fatal（驻留横幅 + 全屏锁定遮罩）。
-- fatal 语义：core 不可达（`/api/summary` 的 `reachability.ok = false`）时整个应用框架 `inert` 锁定（浏览也锁），横幅自身可交互；5s 轮询沿用，恢复后自动解锁并弹「核心已恢复」info toast；auth 门禁页（登录/首启设置）不在锁定范围。
+- fatal 语义：core 不可达（推送的 `reachability.ok = false`，见落地顺序注）时整个应用框架 `inert` 锁定（浏览也锁），横幅自身可交互；可达性由 WS 推送驱动（初始态 get + 翻转通知，无轮询），恢复通知到达即自动解锁并弹「核心已恢复」info toast；auth 门禁页（登录/首启设置）不在锁定范围。
 - 删除现有 ws-banner 与 core-banner，行为收编进新层（WS 断线 = 持续 warn 驻留横幅；两者同时在场纵向堆叠）。
 - `client.ts` 统一拦截未豁免的 API 失败，按影响面自动判级弹出（操作失败 → warn toast）；表单与带重试按钮的内联错误点 opt-out 保留内联，避免双弹。
 - 前端 `ReachabilityInfo` 接后端已有的 `reachability.kind`（startup_failed / auth_rejected / disconnected），fatal 横幅按 kind 分文案，cause 原文保留。
@@ -27,6 +27,8 @@
 - 前端：`app-shell.ts`（旧横幅删除、新层挂载、锁定控制）、新增 notice-layer 组件与通知 store、`api/client.ts`（错误拦截钩子 + opt-out 参数）、`api/client.ts` 的 `ReachabilityInfo` 类型补 `kind`、`styles/tokens.css` 与 `wa-overrides.css`（info 蓝等变体 token）。
 - 后端：无改动（`reachability.kind` 已在 `/api/summary` 输出中）。
 - 测试：notice-layer / app-shell 单测，`testsuite-webui-browser` 增补锁定与分级场景。
+
+落地顺序注：可达性数据源归姊妹 change `add-core-reachability-ws-push`（前置 `add-ws-rpc-protocol`）。本 change 的「全局核心可达性横幅」delta 已按推送语义 rebase（含推送场景集），SHALL 在该 change 之后落地，呈现层消费其推送状态。
 
 ## Non-goals
 

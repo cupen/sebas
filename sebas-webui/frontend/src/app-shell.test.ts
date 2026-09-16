@@ -93,6 +93,7 @@ vi.mock('./views/workbench-composer.js', () => ({
 
 import { matchRoute, redirectFor } from './router.js'
 import { ROUTES, SebasApp } from './app-shell.js'
+import { resetNotices } from './notify.js'
 import { APP_TAGLINE } from './branding.js'
 import './views/dashboard.js'
 import { readFileSync } from 'node:fs'
@@ -105,6 +106,8 @@ const here = dirname(fileURLToPath(import.meta.url))
 const projectFixture = { path: '/home/me/sebas', name: 'sebas', added_at: 1, branch: 'main' }
 
 beforeEach(() => {
+  // 通知 store 是模块级单例：跨用例隔离（去重窗口 8s > 用例间隔）。
+  resetNotices()
   apiMocks.summary.mockResolvedValue({
     active_count: 0,
     dormant_count: 0,
@@ -331,36 +334,59 @@ describe('deep-link reachability (workbench-conversation-view 3.1)', () => {
   })
 })
 
-describe('global disconnect banner (add-webui-allowed-roots D6)', () => {
-  it('shows the banner while /ws is down and clears it on reconnect', async () => {
-    const el = await mountShell()
-    expect(el.shadowRoot!.querySelector('.ws-banner')).toBeNull()
-
-    window.dispatchEvent(
-      new CustomEvent('sebas:ws-state', { detail: { connected: false } }),
-    )
+/**
+ * add-webui-tiered-notices 3.2：旧 app-shell `ws-banner` 已删除，`/ws` 断线
+ * 收编为通知层的持续 warn 驻留横幅（重连即消，`sebas:refetch` 钩子不动）。
+ */
+describe('ws 断线 → 持续 warn 驻留横幅（add-webui-tiered-notices 3.2）', () => {
+  /** 让子组件（通知层/横幅）的 Lit 更新落定。 */
+  async function flush(el: SebasApp): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
-    const banner = el.shadowRoot!.querySelector<HTMLElement>('.ws-banner')
+  }
+
+  function layerOf(el: SebasApp): HTMLElement & { shadowRoot: ShadowRoot } {
+    const layer = el.shadowRoot!.querySelector('sebas-notice-layer') as unknown as
+      | (HTMLElement & { shadowRoot: ShadowRoot })
+      | null
+    expect(layer).toBeTruthy()
+    return layer!
+  }
+
+  it('shows the persistent warn banner while /ws is down and clears it on reconnect', async () => {
+    const el = await mountShell()
+    const layer = layerOf(el)
+    // 起点干净：既无断线横幅也无 fatal 横幅。
+    expect(layer.shadowRoot.querySelector('[data-testid="ws-down-banner"]')).toBeNull()
+    expect(layer.shadowRoot.querySelector('[data-testid="core-fatal-banner"]')).toBeNull()
+
+    window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: false } }))
+    await flush(el)
+    const banner = layer.shadowRoot.querySelector(
+      '[data-testid="ws-down-banner"]',
+    ) as unknown as { shadowRoot: ShadowRoot }
     expect(banner).toBeTruthy()
-    expect(banner?.textContent ?? '').toContain('与服务器的连接已断开')
-    expect(banner?.getAttribute('role')).toBe('alert')
+    expect(banner.shadowRoot.textContent).toContain('与服务器的连接已断开')
+    expect(banner.shadowRoot.querySelector('[role="alert"]')).toBeTruthy()
 
     // 重连成功：横幅消失（sebas:refetch 刷新由既有钩子负责）。
-    window.dispatchEvent(
-      new CustomEvent('sebas:ws-state', { detail: { connected: true } }),
-    )
-    await el.updateComplete
-    expect(el.shadowRoot!.querySelector('.ws-banner')).toBeNull()
+    window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: true } }))
+    await flush(el)
+    expect(layer.shadowRoot.querySelector('[data-testid="ws-down-banner"]')).toBeNull()
     el.remove()
   })
 })
 
 
 /**
- * add-core-reachability-ws-push 2.1：横幅由 WS 推送驱动（get 初始化 + 翻转
- * 通知），不再轮询 /api/summary。推送在断线窗口丢帧由重连后的 get 收敛。
+ * add-webui-tiered-notices：「全局核心可达性横幅」MODIFIED 为 fatal 锁定语义。
+ * 横幅由 WS 推送驱动（get 初始化 + 翻转通知），`ok=false` 进 fatal——横幅 +
+ * 工作台整体 inert 锁定遮罩；恢复即解锁并弹「核心已恢复」info。断线窗口丢
+ * 帧由重连后的 get 收敛。旧 `core-unreachable-banner` testid 迁移至
+ * `core-fatal-banner`（5.1）。
  */
-describe('global core-unreachable banner (add-core-reachability-ws-push)', () => {
+describe('global core fatal notice (add-webui-tiered-notices)', () => {
   function connectWs(): void {
     window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: true } }))
   }
@@ -377,46 +403,79 @@ describe('global core-unreachable banner (add-core-reachability-ws-push)', () =>
     wsMocks.clearHandlers()
   })
 
-  function bannerOf(el: SebasApp): HTMLElement | null {
-    return el.shadowRoot!.querySelector<HTMLElement>('[data-testid="core-unreachable-banner"]')
+  function layerOf(el: SebasApp): HTMLElement & { shadowRoot: ShadowRoot } {
+    const layer = el.shadowRoot!.querySelector('sebas-notice-layer') as unknown as
+      | (HTMLElement & { shadowRoot: ShadowRoot })
+      | null
+    expect(layer).toBeTruthy()
+    return layer!
+  }
+
+  function bannerOf(el: SebasApp): (HTMLElement & { shadowRoot: ShadowRoot }) | null {
+    return layerOf(el).shadowRoot.querySelector(
+      '[data-testid="core-fatal-banner"]',
+    ) as unknown as (HTMLElement & { shadowRoot: ShadowRoot }) | null
+  }
+
+  function frameOf(el: SebasApp): HTMLElement {
+    return el.shadowRoot!.querySelector('wa-split-panel.frame')!
   }
 
   it('initializes from core.reachability.get when /ws connects; unknown state shows nothing', async () => {
     wsMocks.request.mockResolvedValue({ ok: false, kind: 'startup_failed', cause: 'socket absent' })
     const el = await mountShell()
-    // 未知态（get 未应答）：不渲染横幅——对齐旧默认的读数前行为。
+    // 未知态（get 未应答）：不渲染横幅也不锁定。
     expect(bannerOf(el)).toBeNull()
+    expect(frameOf(el).hasAttribute('inert')).toBe(false)
 
     connectWs()
     await flush(el)
-    // 初始态 = get 响应：横幅出现，role=alert、cause 原文，浏览不受影响。
+    // 初始态 = get 响应：fatal 横幅按 kind 分档 + cause 原文，role=alert。
     expect(wsMocks.request).toHaveBeenCalledWith('core.reachability.get')
     const banner = bannerOf(el)
     expect(banner).toBeTruthy()
-    expect(banner?.getAttribute('role')).toBe('alert')
-    expect(banner?.textContent ?? '').toContain('核心不可达')
-    expect(banner?.textContent ?? '').toContain('socket absent')
-    expect(el.shadowRoot!.querySelector('.outlet sebas-dashboard')).toBeTruthy()
+    expect(banner!.shadowRoot.querySelector('[role="alert"]')).toBeTruthy()
+    expect(banner!.shadowRoot.textContent).toContain('核心启动失败')
+    expect(banner!.shadowRoot.textContent).toContain('socket absent')
+    // 锁定：工作台整体 inert（浏览一并锁）+ 遮罩与原因卡在场。
+    expect(frameOf(el).hasAttribute('inert')).toBe(true)
+    expect(layerOf(el).shadowRoot.querySelector('[data-testid="core-lock-overlay"]')).toBeTruthy()
     el.remove()
   })
 
-  it('updates on core.reachability flip notifications; recovery clears without a reload', async () => {
+  it('updates on core.reachability flips; recovery clears, unlocks and toasts 核心已恢复', async () => {
     wsMocks.request.mockResolvedValue({ ok: true })
     const el = await mountShell()
     connectWs()
     await flush(el)
     expect(bannerOf(el)).toBeNull()
+    expect(frameOf(el).hasAttribute('inert')).toBe(false)
 
-    // 翻转通知（kind + cause）：横幅即时出现，不等待任何轮询周期。
+    // 翻转通知（kind + cause）：横幅即时出现，工作台被锁，不等待任何轮询。
     wsMocks.emit({ type: 'core.reachability', ok: false, kind: 'disconnected', cause: 'connection dropped' })
     await flush(el)
-    const banner = bannerOf(el)
-    expect(banner?.textContent ?? '').toContain('connection dropped')
+    expect(bannerOf(el)!.shadowRoot.textContent).toContain('与核心的连接已断开')
+    expect(bannerOf(el)!.shadowRoot.textContent).toContain('connection dropped')
+    expect(frameOf(el).hasAttribute('inert')).toBe(true)
 
-    // 恢复通知：横幅即时消失，无需刷新页面。
+    // 恢复通知：无需刷新页面——横幅即时消失、锁定解除，「核心已恢复」info 弹出。
     wsMocks.emit({ type: 'core.reachability', ok: true })
     await flush(el)
     expect(bannerOf(el)).toBeNull()
+    expect(frameOf(el).hasAttribute('inert')).toBe(false)
+    expect(layerOf(el).shadowRoot.querySelector('[data-testid="core-lock-overlay"]')).toBeNull()
+    const items = [...layerOf(el).shadowRoot.querySelectorAll('wa-toast-item')]
+    expect(items.some((it) => it.textContent?.includes('核心已恢复'))).toBe(true)
+    el.remove()
+  })
+
+  it('a kind-less payload degrades to the generic headline (D5)', async () => {
+    wsMocks.request.mockResolvedValue({ ok: false, cause: 'mystery' })
+    const el = await mountShell()
+    connectWs()
+    await flush(el)
+    expect(bannerOf(el)!.shadowRoot.textContent).toContain('核心不可达')
+    expect(bannerOf(el)!.shadowRoot.textContent).toContain('mystery')
     el.remove()
   })
 
@@ -427,7 +486,7 @@ describe('global core-unreachable banner (add-core-reachability-ws-push)', () =>
     await flush(el)
     expect(bannerOf(el)).toBeNull()
 
-    // 断线（全局断线横幅接手）；断线窗口 core 翻转——帧已丢失，无人记账。
+    // 断线（持续 warn 横幅接手）；断线窗口 core 翻转——帧已丢失，无人记账。
     window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: false } }))
     await el.updateComplete
     wsMocks.request.mockResolvedValueOnce({
@@ -436,18 +495,38 @@ describe('global core-unreachable banner (add-core-reachability-ws-push)', () =>
       cause: 'core rejected channel handshake',
     })
 
-    // 重连：同一 get 动作带回当前真实状态，横幅据此收敛。
+    // 重连：同一 get 动作带回当前真实状态，横幅与锁定据此收敛。
     connectWs()
     await flush(el)
-    expect(bannerOf(el)?.textContent ?? '').toContain('core rejected channel handshake')
+    expect(bannerOf(el)!.shadowRoot.textContent).toContain('核心拒绝接入')
+    expect(bannerOf(el)!.shadowRoot.textContent).toContain('core rejected channel handshake')
+    expect(frameOf(el).hasAttribute('inert')).toBe(true)
     el.remove()
   })
 
-  it('retires the poller: no interval and no summary fetch in the shell source', () => {
+  it('auth 门禁页不受锁定影响：login 态无工作台骨架、无通知层实例', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false })
+    wsMocks.request.mockResolvedValue({ ok: false, kind: 'disconnected' })
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('sebas-login')).toBeTruthy()
+    connectWs()
+    await flush(el)
+    // 登录/设置流程照常可交互：不渲染通知层（锁定遮罩无处存在），也无骨架可锁。
+    expect(el.shadowRoot!.querySelector('sebas-notice-layer')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeNull()
+    el.remove()
+  })
+
+  it('retires the poller and the legacy banner markup: no interval, no old testid', () => {
     const src = readFileSync(join(here, 'app-shell.ts'), 'utf8')
     expect(src).not.toContain('CORE_REACHABILITY_POLL_MS')
     expect(src).not.toContain('setInterval')
     expect(src).not.toContain('pollCoreReachability')
+    // 5.1：旧横幅实现（ws-banner / core-banner / stacked）整体删除。
+    expect(src).not.toContain('core-unreachable-banner')
+    expect(src).not.toContain('ws-banner')
+    expect(src).not.toContain('core-banner')
+    expect(src).not.toContain('stacked')
   })
 })
 

@@ -5,8 +5,9 @@
  * shape — see session_backend.rs `PermissionDecision`).
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, NetworkError, parseBackendHint, withQuery } from './client.js'
+import { resetNotices, subscribeNotices, type NoticeState } from '../notify.js'
 
 const fetchMock = vi.fn()
 
@@ -234,5 +235,75 @@ describe('network-level failures', () => {
     const err = await api.sessions().catch((e) => e)
     expect(err).toBeInstanceOf(ApiError)
     expect((err as ApiError).status).toBe(503)
+  })
+})
+
+/**
+ * 统一通知拦截（add-webui-tiered-notices 4.1）：未豁免必弹 / 豁免不弹 /
+ * 401 不入层。观察面是 notify store（client 与测试共享同一模块实例）。
+ */
+describe('unified notice interception (add-webui-tiered-notices 4.1)', () => {
+  const seen: NoticeState[] = []
+  const unsub = subscribeNotices((s) => seen.push(s))
+
+  beforeEach(() => {
+    resetNotices()
+  })
+
+  afterAll(() => {
+    unsub()
+  })
+
+  it('auto-notifies a warn for a failing NON-exempt call (network level)', async () => {
+    // /api/about 当前无调用方（about 视图已退休）：规范上的未豁免样例。
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    await api.about().catch(() => undefined)
+    expect(seen[seen.length - 1].items).toHaveLength(1)
+    const item = seen[seen.length - 1].items[0]
+    expect(item.level).toBe('warn')
+    expect(item.message).toContain('加载失败')
+    expect(item.message).toContain('无法连接服务器')
+    expect(item.dedupeKey).toBe('GET /api/about')
+  })
+
+  it('auto-notifies a warn for a 5xx on a NON-exempt call, deduped per endpoint', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(503, { error: 'backend down' }))
+
+    await api.about().catch(() => undefined)
+    await api.about().catch(() => undefined) // 去重窗口内：不重复弹
+    expect(seen[seen.length - 1].items).toHaveLength(1)
+    expect(seen[seen.length - 1].items[0].message).toContain('backend down')
+  })
+
+  it('does not notify for exempt call points (dashboard/list loads, settings forms)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(503, { error: 'backend down' }))
+
+    // 列表加载（内联重试态）与 settings 表单（就地呈现）都在豁免名单。
+    await api.sessions().catch(() => undefined)
+    await api.settings().catch(() => undefined)
+    await api.summary().catch(() => undefined)
+    expect(seen[seen.length - 1].items).toHaveLength(0)
+  })
+
+  it('does not notify for exempt call points (composer submit path)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(504, { error: 'gateway timeout' }))
+
+    await api.sendMessage('oc_x', 'hello').catch(() => undefined)
+    expect(seen[seen.length - 1].items).toHaveLength(0)
+  })
+
+  it('never lets a 401 into the notice layer (login redirect owns it)', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(errorResponse(401, { error: 'login required' }))
+
+    const err = await api.about().catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(401)
+    expect(seen[seen.length - 1].items).toHaveLength(0)
   })
 })

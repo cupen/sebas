@@ -21,8 +21,10 @@ import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
 import { api, setUnauthorizedHandler, type Role } from './api/client.js'
 import { sharedWs } from './api/shared-ws.js'
 import type { CoreReachabilityState } from './api/ws.js'
+import { notify, setFatal, setWsDown } from './notify.js'
 import { APP_TAGLINE } from './branding.js'
 import { icon } from './components/icons.js'
+import './components/notice-layer.js'
 import {
   clampRailWidth,
   isNarrowViewport,
@@ -90,17 +92,14 @@ export class SebasApp extends LitElement {
   /** 窄屏（<640px）：分割线禁拖，布局退化既有纵向堆叠。 */
   @state() private narrow: boolean = isNarrowViewport()
   /**
-   * `/ws` 断线中（add-webui-allowed-roots D6）：共享 WS 客户端经
-   * `sebas:ws-state` 广播连接状态，顶部横幅提示操作者当前视图可能冻结，
-   * 重连成功即消失并触发 `sebas:refetch` 刷新。
-   */
-  @state() private wsDown = false
-  /**
-   * 全局「核心不可达」横幅（add-core-reachability-ws-push D4）：订阅权上收
-   * shell——`/ws` 连接建立/重连即 `core.reachability.get` 初始化，此后随
-   * `core.reachability` 翻转通知即时更新（不再轮询 /api/summary）。结构化
-   * ok/kind/cause 与 `/api/summary` 的 reachability 段同形（D5），横幅展示
-   * cause 原文；`null` = 未知（get 未应答/连接未立）——不渲染横幅。
+   * 全局「核心不可达」fatal 通知（add-core-reachability-ws-push D4 →
+   * add-webui-tiered-notices 2.4）：订阅权上收 shell——`/ws` 连接建立/重连
+   * 即 `core.reachability.get` 初始化，此后随 `core.reachability` 翻转通知
+   * 即时更新（不再轮询 /api/summary）。结构化 ok/kind/cause 与
+   * `/api/summary` 的 reachability 段同形（D5）；`ok=false` 时本状态一路
+   * 三用：store 的 fatal 槽位（横幅 + 锁定遮罩）、wa-split-panel 的 inert
+   * （工作台整体锁定）、下传 dashboard/composer 的提交门。`null` = 未知
+   * （get 未应答/连接未立）——不渲染横幅不锁定。
    */
   @state() private coreReachability: CoreReachabilityState | null = null
 
@@ -274,36 +273,7 @@ export class SebasApp extends LitElement {
       margin: var(--sebas-space-3) var(--sebas-space-3) var(--sebas-space-3) 0;
       display: flex;
       flex-direction: column;
-      position: relative; /* 断线横幅的定位上下文 */
-    }
-    /* 全局断线横幅（add-webui-allowed-roots D6）：骑在出口区顶部，不占
-       布局流——断线期间视图本就可能冻结，横幅不应把内容顶来顶去。 */
-    .ws-banner {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 10;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      padding: 6px 12px;
-      background: var(--sebas-status-warn, #b45309);
-      color: #fff;
-      font-size: 0.8rem;
-      font-weight: 500;
-    }
-    .ws-banner svg {
-      flex: 0 0 auto;
-    }
-    .core-banner.stacked {
-      top: 30px;
-    }
-    /* 全局「核心不可达」横幅（4.1）：与 ws-banner 同款定位；两者同时在场
-       （ws 断线 + core 不可达）时纵向堆叠，互不遮挡。 */
-    .core-banner {
-      background: var(--sebas-status-failed, #b91c1c);
+      position: relative; /* 子视图定位上下文 */
     }
     .outlet {
       /* 满幅工作台：workbench 类路由（/ 与 /sessions/:key）直接铺满
@@ -427,8 +397,8 @@ export class SebasApp extends LitElement {
     document.addEventListener('click', this.onClick)
     // 5.1：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
     this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
-    // add-webui-allowed-roots D6：WS 连接状态 → 全局断线横幅；connected=true
-    // 时顺带发起可达性 get（onWsState）。
+    // add-webui-tiered-notices 3.2：WS 连接状态 → 通知层的持续 warn 驻留
+    // 横幅（重连即消）；connected=true 时顺带发起可达性 get（onWsState）。
     window.addEventListener('sebas:ws-state', this.onWsState)
     // add-core-reachability-ws-push D4：订阅 core.reachability 翻转推送
     // （shell 常驻，订阅不漏帧；初始态由连接建立时的 get 补齐）。
@@ -442,11 +412,28 @@ export class SebasApp extends LitElement {
     void this.checkAuth()
   }
 
+  /**
+   * 翻转推送 / get 响应的统一入账点（add-webui-tiered-notices 2.4）：
+   * 状态落 @state 之外，还把 fatal 槽位同步进通知层——`ok=false` 进 fatal
+   * （横幅 + 锁定）；从 fatal 恢复时清槽位并弹「核心已恢复」info。未知态
+   * （调用方跳过）与重复 false 推送都幂等。
+   */
+  private applyCoreReachability(next: CoreReachabilityState): void {
+    const hadFatal = this.coreReachability?.ok === false
+    this.coreReachability = next
+    if (next.ok === false) {
+      setFatal({ kind: next.kind, cause: next.cause })
+    } else if (hadFatal) {
+      setFatal(null)
+      notify({ level: 'info', message: '核心已恢复' })
+    }
+  }
+
   /** 翻转推送 → 结构化状态（D4：沿用/扩展 coreUnreachableCause 为 ok/kind/cause）。 */
   private onCoreReachabilityEvent = (ev: { type: string }): void => {
     if (ev.type !== 'core.reachability') return
     const { ok, kind, cause } = ev as { type: 'core.reachability'; ok: boolean; kind?: CoreReachabilityState['kind']; cause?: string }
-    this.coreReachability = { ok, ...(kind ? { kind } : {}), ...(cause ? { cause } : {}) }
+    this.applyCoreReachability({ ok, ...(kind ? { kind } : {}), ...(cause ? { cause } : {}) })
   }
 
   /**
@@ -461,21 +448,20 @@ export class SebasApp extends LitElement {
         kind?: CoreReachabilityState['kind']
         cause?: string
       }
-      this.coreReachability = {
+      this.applyCoreReachability({
         ok: payload?.ok !== false,
         ...(payload?.kind ? { kind: payload.kind } : {}),
         ...(payload?.cause ? { cause: payload.cause } : {}),
-      }
+      })
     } catch {
       // get 本身失败：保留当前状态，重连后的下一次 get 收敛。
     }
   }
 
   private onWsState = (e: Event): void => {
-    this.wsDown = (e as CustomEvent<{ connected: boolean }>).detail?.connected === false
-    if ((e as CustomEvent<{ connected: boolean }>).detail?.connected === true) {
-      void this.refreshCoreReachability()
-    }
+    const connected = (e as CustomEvent<{ connected: boolean }>).detail?.connected !== false
+    setWsDown(!connected)
+    if (connected) void this.refreshCoreReachability()
   }
 
   /**
@@ -624,6 +610,7 @@ export class SebasApp extends LitElement {
         primary="start"
         position-in-pixels=${this.railWidth}
         ?disabled=${this.narrow}
+        ?inert=${this.coreReachability?.ok === false}
         @wa-reposition=${this.onRailReposition}
       >
         <nav slot="start" aria-label="Primary">
@@ -658,16 +645,6 @@ export class SebasApp extends LitElement {
           </div>
         </nav>
         <main slot="end" @open-settings=${() => (this.settingsOpen = true)}>
-          ${this.wsDown
-            ? html`<div class="ws-banner" role="alert">
-                ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
-              </div>`
-            : nothing}
-          ${this.coreReachability?.ok === false
-            ? html`<div class="ws-banner core-banner${this.wsDown ? ' stacked' : ''}" role="alert" data-testid="core-unreachable-banner">
-                ${icon('alert', 14)}<span>核心不可达：${this.coreReachability?.cause ?? 'core not connected'}（会话与项目面暂不可用，页面浏览不受影响）</span>
-              </div>`
-            : nothing}
           <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>
         </main>
       </wa-split-panel>
@@ -676,6 +653,7 @@ export class SebasApp extends LitElement {
         ?open=${this.settingsOpen}
         @close=${() => (this.settingsOpen = false)}
       ></sebas-settings-modal>
+      <sebas-notice-layer></sebas-notice-layer>
     `
   }
 }

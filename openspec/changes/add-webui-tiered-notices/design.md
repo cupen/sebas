@@ -2,7 +2,7 @@
 
 动机见 proposal（Why）。落设计前已核实的现状约束：
 
-- `app-shell.ts` 有两条**非锁定**横幅：`ws-banner`（琥珀）与 `core-banner`（红，5s 轮询 `/api/summary` 驱动），骑在主区顶部；spec 既有 Requirement「全局核心可达性横幅」明文「SHALL 不阻塞浏览」——本期将其反转为 fatal 锁定。
+- `app-shell.ts` 有两条**非锁定**横幅：`ws-banner`（琥珀）与 `core-banner`（红，可达性状态驱动），骑在主区顶部；spec 既有 Requirement「全局核心可达性横幅」明文「SHALL 不阻塞浏览」——本期将其反转为 fatal 锁定。数据源注：可达性由姊妹 change `add-core-reachability-ws-push` 从 5s 轮询改为 WS 推送（get 初始态 + 翻转通知，前置 `add-ws-rpc-protocol`）；本 change 在其之后落地，fatal 层直接消费 shell 持有的推送状态，不接轮询。
 - 项目无全局 toast 系统；Web Awesome **3.12.0** 自带 `wa-toast`（栈）+ `wa-toast-item`，本设计已核对其样式 API：栈支持 `placement="top-center"`（`inset-block-start:0; inline-start:50%; translate:-50%`）、`--width`（默认 28rem）、`--gap`、`::part(stack)`、≤480px 自动全宽；条目可见色全部走 token——`--accent-color`（左侧 4px 色条 + 图标 + 自动消失倒计时环的指示色，`:host` 源码定义并消费；默认 `--wa-color-fill-loud`）、`--wa-color-surface-raised`（底）、`--wa-color-surface-border`（边）、`--wa-color-text-normal`（文）、`--wa-shadow-l`；出入场动画与 `prefers-reduced-motion` 内建；**关闭按钮无条件内建渲染（3.12.0 无 `closable` 属性）**；live region 按变体自动选 role（danger→alert/assertive，其余→status/polite）。
 - `wa-overrides.css` 已把 `--wa-color-surface-*` / `--wa-color-text-*` / brand 色阶映射到 sebas 调色板——toast 的表面/文字/边框因此**零覆盖即入景**，只需换 accent。
 - `tokens.css` 无 warn/info 专用状态 token（旧横幅的 `var(--sebas-status-warn, #b45309)` 一直在吃 fallback 字面量）；且现行 core-banner 白字落在 `--sebas-status-failed`（#f47174）上，对比度不足 AA——本期一并修正。
@@ -36,10 +36,10 @@
 条目底/边/字沿用主题（surface-raised / surface-border / text-normal 已 sebas 化），左侧 4px accent 条 + 图标 + 文案三通道传达级别（满足「颜色不是唯一通道」）；自动消失的条目自带 progress-ring 倒计时（accent 同色）。时长由 `duration` 承载、layer 统一配置：info/warn 给秒数自动消，**error 给 `duration=0` 驻留至手动关闭**（关闭按钮 WA 内建恒在，info/warn 可随时提前手关，无需开关属性）。
 
 **D3 — 持续横幅与锁定遮罩自研（`sebas-notice-banner` / 遮罩层）**
-持续态不合身 toast（见共识），复用现有 banner 的视觉语言（全宽条、图标 + 文案、role=alert）：warn 态底色 `--sebas-notice-warn-bg`（深琥珀、对白字 AA）；fatal 态底色 `--sebas-notice-fatal-bg`（**深红新 token**，修现行白字对 #f47174 的对比缺陷；文案按 kind 分档 + cause 原文，不可关）。fatal 锁定：对 `wa-split-panel.frame`（rail + main 的共同祖先）施加 `inert` + 视觉遮罩（`--wa-color-overlay-modal` 同款半透明、居中一张原因卡与轮询提示）；横幅在遮罩之上保持可交互（tabindex=-1，锁定时焦点移入，恢复归还此前焦点、元素已失则落 body）。auth 门禁页在 shell 渲染分支之外，天然不受影响。备选（否）：遮罩只盖 main 留 rail 可点——rail 的项目树同样依赖 core，可点也无意义，全锁语义更简单。
+持续态不合身 toast（见共识），复用现有 banner 的视觉语言（全宽条、图标 + 文案、role=alert）：warn 态底色 `--sebas-notice-warn-bg`（深琥珀、对白字 AA）；fatal 态底色 `--sebas-notice-fatal-bg`（**深红新 token**，修现行白字对 #f47174 的对比缺陷；文案按 kind 分档 + cause 原文，不可关）。fatal 锁定：对 `wa-split-panel.frame`（rail + main 的共同祖先）施加 `inert` + 视觉遮罩（`--wa-color-overlay-modal` 同款半透明、居中一张原因卡与恢复提示）；横幅在遮罩之上保持可交互（tabindex=-1，锁定时焦点移入，恢复归还此前焦点、元素已失则落 body）。auth 门禁页在 shell 渲染分支之外，天然不受影响。备选（否）：遮罩只盖 main 留 rail 可点——rail 的项目树同样依赖 core，可点也无意义，全锁语义更简单。
 
 **D4 — 判级入口：`notice.ts` store + client.ts 拦截器**
-模块级轻量 store（订阅广播，同 `sebas:ws-state`/`sebas:refetch` 的事件风格）：`notify({level, message, dedupeKey?})` 供视图显式上报（error 级生产者）；client.ts 在 `ApiError` 抛出前统一拦截未豁免调用，按影响面映射（网络失败/5xx 于操作调用 → warn「操作失败」类文案；视图级加载失败由视图 opt-out 后自行内联或上报 error）。豁免名单集中在 client.ts 一处以注释互链（settings 表单、composer 提交、dashboard/列表加载、`/api/summary` 轮询、401 跳登录路径）。栈上限 3（挤最旧瞬时条）与 8s 去重窗口在 store 内实现。
+模块级轻量 store（订阅广播，同 `sebas:ws-state`/`sebas:refetch` 的事件风格）：`notify({level, message, dedupeKey?})` 供视图显式上报（error 级生产者）；client.ts 在 `ApiError` 抛出前统一拦截未豁免调用，按影响面映射（网络失败/5xx 于操作调用 → warn「操作失败」类文案；视图级加载失败由视图 opt-out 后自行内联或上报 error）。豁免名单集中在 client.ts 一处以注释互链（settings 表单、composer 提交、dashboard/列表加载、401 跳登录路径）。栈上限 3（挤最旧瞬时条）与 8s 去重窗口在 store 内实现。
 
 **D5 — kind 分文案**
 `ReachabilityInfo` 补 `kind?: 'startup_failed' | 'auth_rejected' | 'disconnected'`；fatal 横幅三档文案（启动失败 / 核心拒绝接入 / 连接断开）+ cause 原文小字；`kind` 缺失时退化为通用「核心不可达」。接掉 app-shell 注释里的既有 TODO（cover-A kind 字段）。
@@ -57,7 +57,7 @@
 - [fatal 锁定与既有 `sebas:refetch`/WS 重连叠加] → 无冲突：refetch 是数据层行为；锁定期间视图冻结可接受，恢复后 refetch 收敛。
 - [inert 在测试环境（happy-dom）行为差异] → 断言停留在 attribute 层（`inert` 存在/移除），不模拟焦点漫游。
 - [旧 `data-testid="core-unreachable-banner"` 的既有测试迁移] → tasks 显式列入（改指新横幅 testid）。
-- [5s 轮询间隔内恢复感知延迟] → 「核心已恢复」info toast 补偿；不缩短轮询（既有间隔是稳定性决策）。
+- [可达性感知延迟] → 数据源是 WS 推送（翻转即达），无轮询间隔可优化；遗留风险仅剩 `/ws` 断线期间锁态冻结——断线本身有持续 warn 横幅，重连 get 收敛（数据源 change 的结构自愈）。
 
 ## Migration Plan
 
