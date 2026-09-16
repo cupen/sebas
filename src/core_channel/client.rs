@@ -38,8 +38,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// (A1.1, design D1). The kind is latched next to the cause so
 /// [`CoreChannelBackend::reachability`] can map it onto the `Reachability`
 /// variants without re-deriving it from cause strings.
+///
+/// `pub(super)`：`core_channel::tests` 驱动 `set_status` 翻转序列时构造。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailKind {
+pub(super) enum FailKind {
     /// Socket absent — the core never came up (or its startup failed).
     StartupFailed,
     /// Handshake rejected — the secret did not match.
@@ -48,8 +50,9 @@ enum FailKind {
     Disconnected,
 }
 
+/// `pub(super)`：同 [`FailKind`]——tests 经 `set_status` 做确定性翻转驱动。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ConnStatus {
+pub(super) enum ConnStatus {
     Connected,
     Failed { kind: FailKind, cause: String },
 }
@@ -67,6 +70,10 @@ pub struct CoreChannelBackend {
     /// 实时回合内容（workbench-live-conversation-flow 1.2）：订阅流里的
     /// `turn` 帧转播到这里，webui WS 面再转播给浏览器。
     turn_events: broadcast::Sender<TurnStreamEvent>,
+    /// （add-core-reachability-ws-push D2）可达性翻转广播：`set_status()`
+    /// 收口发布，真翻转才发。广播与读端共享同一 ConnStatus→Reachability
+    /// 映射（含 startup summary 富化），不另造第二份。
+    reachability_tx: broadcast::Sender<Reachability>,
     status: std::sync::Mutex<ConnStatus>,
 }
 
@@ -103,12 +110,14 @@ impl CoreChannelBackend {
         let (events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
         let (turn_events, _) = broadcast::channel(256);
+        let (reachability_tx, _) = broadcast::channel(16);
         let backend = Arc::new(Self {
             path,
             secret,
             events,
             notices,
             turn_events,
+            reachability_tx,
             status: std::sync::Mutex::new(ConnStatus::Failed {
                 kind: FailKind::StartupFailed,
                 cause: "尚未连接 core".into(),
@@ -138,8 +147,26 @@ impl CoreChannelBackend {
         }
     }
 
-    fn set_status(&self, status: ConnStatus) {
-        *self.status.lock().unwrap() = status;
+    /// 状态收口（add-core-reachability-ws-push D2）：全部 ConnStatus 翻转
+    /// 必经此点。发布前与旧值比较——`Connected→Connected` 类重复写（每次
+    /// 请求成功都会 latch 一次）不产生帧；真翻转才广播对应的 `Reachability`
+    /// （含 startup summary 富化，与 [`Self::reachability`] 读端同一映射）。
+    ///
+    /// `pub(super)`：`core_channel::tests` 经它做确定性的翻转序列驱动
+    /// （公开 API 的翻转与 forwarder 任务交错，无法钉死帧序）。
+    pub(super) fn set_status(&self, status: ConnStatus) {
+        let flipped = {
+            let mut guard = self.status.lock().unwrap();
+            if *guard == status {
+                false
+            } else {
+                *guard = status.clone();
+                true
+            }
+        };
+        if flipped {
+            let _ = self.reachability_tx.send(status_to_reachability(&status));
+        }
     }
 
     /// Latch a failed connection attempt at the failure point and turn it
@@ -378,6 +405,25 @@ fn unavailable(cause: String) -> SessionRejection {
     SessionRejection::Unavailable { cause }
 }
 
+/// （add-core-reachability-ws-push D2）ConnStatus → `Reachability` 的共享
+/// 映射：`reachability()` 读端与 `set_status()` 广播端共用，startup summary
+/// 富化（无条件、不收窄）只活在这一份里。
+fn status_to_reachability(status: &ConnStatus) -> Reachability {
+    match status {
+        ConnStatus::Connected => Reachability::Reachable,
+        ConnStatus::Failed { kind, cause } => {
+            // D2: the unconditional fail-fast enrich stays on every
+            // unreachable branch; the kind rides alongside it.
+            let cause = enrich_with_startup_summary(cause);
+            match kind {
+                FailKind::StartupFailed => Reachability::StartupFailed { cause },
+                FailKind::AuthRejected => Reachability::AuthRejected { cause },
+                FailKind::Disconnected => Reachability::Disconnected { cause },
+            }
+        }
+    }
+}
+
 /// 一次性 state domain 查询（unify-router-process-shape 2.2，design D2）：
 /// watchdog 停 router 前查 `router_activity` 用——不需要常驻订阅流，一次
 /// 连接 + 握手 + 单请求即走。secret 经 [`ChannelSecret::current`] 现场解析
@@ -523,6 +569,12 @@ impl SessionBackend for CoreChannelBackend {
 
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    /// （add-core-reachability-ws-push D1/D2）翻转广播的接收端：发布点在
+    /// [`Self::set_status`] 收口，与读端 [`Self::reachability`] 共享同一映射。
+    fn reachability_updates(&self) -> broadcast::Receiver<Reachability> {
+        self.reachability_tx.subscribe()
     }
 
     fn subscribe_turn_events(&self) -> broadcast::Receiver<TurnStreamEvent> {
@@ -815,19 +867,7 @@ impl SessionBackend for CoreChannelBackend {
     }
 
     async fn reachability(&self) -> Reachability {
-        match &*self.status.lock().unwrap() {
-            ConnStatus::Connected => Reachability::Reachable,
-            ConnStatus::Failed { kind, cause } => {
-                // D2: the unconditional fail-fast enrich stays on every
-                // unreachable branch; the kind rides alongside it.
-                let cause = enrich_with_startup_summary(cause);
-                match kind {
-                    FailKind::StartupFailed => Reachability::StartupFailed { cause },
-                    FailKind::AuthRejected => Reachability::AuthRejected { cause },
-                    FailKind::Disconnected => Reachability::Disconnected { cause },
-                }
-            }
-        }
+        status_to_reachability(&self.status.lock().unwrap())
     }
 
     async fn state_snapshot(&self, domain: &str) -> Option<serde_json::Value> {

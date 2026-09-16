@@ -65,6 +65,19 @@ pub enum WebUiEvent {
         entries: Vec<TurnEntry>,
         seq: u64,
     },
+    /// （add-core-reachability-ws-push D3/D5）核心可达性翻转推送。params 与
+    /// `/api/summary` 的 `reachability` 段同形（`reachability_payload`）：
+    /// 可达 `{ok:true}`；不可达 `{ok:false, kind, cause}`（kind ∈
+    /// startup_failed | auth_rejected | disconnected）。前端 kind 分文案逻辑
+    /// 原样复用，banner 不靠 cause 字符串匹配的既有契约不变。
+    #[serde(rename = "core.reachability")]
+    CoreReachability {
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+    },
 }
 
 /// add-ws-rpc-protocol：事件统一包进 Notification 封套——`method` = 原
@@ -206,5 +219,36 @@ mod tests {
         };
         assert_eq!(notification.method, "config.updated");
         assert_eq!(notification.params, json!({}));
+    }
+
+    /// add-core-reachability-ws-push D5：可达性帧的 params 与 /api/summary
+    /// 的 reachability 段同形——可达只有 `{ok:true}`（无 kind/cause 噪声），
+    /// 不可达携带机器可读 kind 与原文 cause。
+    #[test]
+    fn core_reachability_payload_matches_summary_shape() {
+        let frame = super::notification_frame(WebUiEvent::CoreReachability {
+            ok: true,
+            kind: None,
+            cause: None,
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification");
+        };
+        assert_eq!(notification.method, "core.reachability");
+        assert_eq!(notification.params, json!({ "ok": true }));
+
+        let frame = super::notification_frame(WebUiEvent::CoreReachability {
+            ok: false,
+            kind: Some("startup_failed"),
+            cause: Some("core startup failed: bad config".into()),
+        });
+        let crate::ws_rpc::Frame::Notification(notification) = frame else {
+            panic!("events must wrap into a Notification");
+        };
+        assert_eq!(notification.method, "core.reachability");
+        assert_eq!(
+            notification.params,
+            json!({ "ok": false, "kind": "startup_failed", "cause": "core startup failed: bad config" })
+        );
     }
 }

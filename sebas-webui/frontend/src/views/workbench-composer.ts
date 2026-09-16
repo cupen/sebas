@@ -24,11 +24,15 @@
  * flat list. Switching goes through `session/set_config_option`
  * (`POST /api/sessions/{key}/model`). No models = explicit honest note.
  *
- * Reaches the agent-core reachability report from /api/summary to gate
- * submit when the core is offline (a submit would only bounce), re-polled
- * on a 5s interval so the banner and disabled state follow reality. A
- * transient submit error is surfaced inline via the shared `.callout-error`
- * style and the message text is preserved so the operator can retry.
+ * Core reachability is PUSHED (add-core-reachability-ws-push D4): the
+ * composer consumes the structured state the app-shell passes down
+ * (`coreReachability`, sourced from `core.reachability.get` + flip
+ * notifications — no polling, no on-mount fetch). `ok=false` gates submit
+ * (a submit would only bounce) with the reported cause; `null` (unknown) and
+ * `ok=true` both leave submit available — the unknown default aligns with the
+ * retired poller's pre-first-read behavior. A transient submit error is
+ * surfaced inline via the shared `.callout-error` style and the message text
+ * is preserved so the operator can retry.
  *
  * Command palette (session-slash-commands 3.1–3.2/D4): when the input's
  * first character is `/` and the focused session advertises commands
@@ -55,6 +59,7 @@
 import { LitElement, css, html, nothing, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import { api, type AvailableCommandInfo } from '../api/client.js'
+import type { CoreReachabilityState } from '../api/ws.js'
 import {
   loadModelCatalog,
   groupSessionModels,
@@ -66,9 +71,6 @@ import { viewStyles } from '../styles/shared.js'
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js'
 import '@awesome.me/webawesome/dist/components/select/select.js'
 import '@awesome.me/webawesome/dist/components/option/option.js'
-
-/** Reachability 轮询周期：断连横幅与 composer 禁用态的翻转延迟上限。 */
-const WORKBENCH_REACHABILITY_POLL_MS = 5_000
 
 /**
  * universal built-in 例外集（session-slash-commands D3）：claude 广告
@@ -139,6 +141,12 @@ export class SebasWorkbenchComposer extends LitElement {
   @property({ attribute: false }) currentMode: string | null = null
   /** mode 切换可用性：0-turn 占位（无 session_id）不可切——mode 由创建表单决定。 */
   @property({ type: Boolean }) modeEditable = false
+  /**
+   * （add-core-reachability-ws-push D4）shell 下传的结构化核心可达性（
+   * `core.reachability.get` 初始化 + 翻转通知更新，dashboard 纯透传）。
+   * `null` = 未知：对齐旧轮询器的首个读数前行为，不禁用提交门。
+   */
+  @property({ attribute: false }) coreReachability: CoreReachabilityState | null = null
 
   @state() private text = ''
   @state() private sending = false
@@ -148,8 +156,6 @@ export class SebasWorkbenchComposer extends LitElement {
    * id 归回 provider 组；目录不可得时芯片退化为平铺，不伪造分组。
    */
   @state() private catalog: ModelCatalog | null = null
-  /** Set when the agent core is unreachable; gates submit. */
-  @state() private unreachable: { ok: false; cause: string } | null = null
   /** 中程切换聚焦会话模型时的在途标记（add-acp-model-selection 语义）。 */
   @state() private modelSwitching = false
   /** 中程切换会话权限模式的在途标记（add-agent-mode-selection 语义）。 */
@@ -168,8 +174,19 @@ export class SebasWorkbenchComposer extends LitElement {
    * 请求；用户修改文本后清除，可再提交。
    */
   @state() private slashNotice: string | null = null
-  /** Reachability 轮询定时器（connectedCallback 启动，disconnectedCallback 清理）。 */
-  private reachabilityTimer: number | undefined = undefined
+
+  /**
+   * 提交门的不可达视图（add-core-reachability-ws-push D4）：消费下传的
+   * `coreReachability`，ok=false 时携带 cause；未知（null）与可达均为
+   * null——不禁用。判定单一出处，输入门/提交状态机/横幅共用。
+   */
+  private get unreachable(): { cause: string } | null {
+    const r = this.coreReachability
+    if (r !== null && r.ok === false) {
+      return { cause: r.cause ?? 'core not connected' }
+    }
+    return null
+  }
 
   private reloadCatalogBound = (): void => {
     void this.loadCatalog()
@@ -177,25 +194,15 @@ export class SebasWorkbenchComposer extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback()
-    void this.loadReachability()
     void this.loadCatalog()
     // defaults/catalog 变更（管理页 set/clear）即时反映到芯片分组。
     window.addEventListener('sebas:refetch', this.reloadCatalogBound)
-    // Reachability 只在挂载时求值一次会让断连横幅永不恢复（core 回来后
-    // composer 仍被禁用）——周期性重查，横幅与禁用态随真实状态翻转。
-    this.reachabilityTimer = window.setInterval(() => {
-      void this.loadReachability()
-    }, WORKBENCH_REACHABILITY_POLL_MS)
   }
 
   disconnectedCallback(): void {
     window.removeEventListener('sebas:refetch', this.reloadCatalogBound)
     this.removeMenuDismissListeners()
     super.disconnectedCallback()
-    if (this.reachabilityTimer !== undefined) {
-      window.clearInterval(this.reachabilityTimer)
-      this.reachabilityTimer = undefined
-    }
   }
 
   protected updated(changed: PropertyValues): void {
@@ -225,23 +232,6 @@ export class SebasWorkbenchComposer extends LitElement {
   private async loadCatalog(): Promise<void> {
     const { catalog } = await loadModelCatalog()
     this.catalog = catalog
-  }
-
-  private async loadReachability(): Promise<void> {
-    try {
-      const data = await api.summary()
-      if (data.reachability && data.reachability.ok === false) {
-        this.unreachable = { ok: false, cause: data.reachability.cause ?? 'core not connected' }
-      } else {
-        this.unreachable = null
-      }
-    } catch {
-      /* add-webui-allowed-roots D6：summary 请求本身失败（服务进程死亡 /
-       * 网络故障）与 reachability.ok = false 同款对待——进入不可达态禁用
-       * 提交门，如实呈现而不是放行一次注定失败的提交。轮询恢复后自动
-       * 解除。 */
-      this.unreachable = { ok: false, cause: '无法获取服务状态（服务可能未运行）' }
-    }
   }
 
   /** 跟随模式输入门禁：无聚焦会话或 core 不可达 = 禁用。 */

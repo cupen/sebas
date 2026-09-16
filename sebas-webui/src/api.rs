@@ -133,6 +133,34 @@ fn reachability_payload(r: &Reachability) -> serde_json::Value {
     }
 }
 
+/// （add-core-reachability-ws-push D5）`Reachability` → 翻转推送事件的转换。
+/// 与 [`reachability_payload`] 是同一映射的两张皮——drift 由 ws 集成测试
+/// 钉死（推送帧 params 必须逐字段等于 get 响应）。
+fn reachability_event(r: Reachability) -> WebUiEvent {
+    match r {
+        Reachability::Reachable => WebUiEvent::CoreReachability {
+            ok: true,
+            kind: None,
+            cause: None,
+        },
+        Reachability::StartupFailed { cause } => WebUiEvent::CoreReachability {
+            ok: false,
+            kind: Some("startup_failed"),
+            cause: Some(cause),
+        },
+        Reachability::AuthRejected { cause } => WebUiEvent::CoreReachability {
+            ok: false,
+            kind: Some("auth_rejected"),
+            cause: Some(cause),
+        },
+        Reachability::Disconnected { cause } => WebUiEvent::CoreReachability {
+            ok: false,
+            kind: Some("disconnected"),
+            cause: Some(cause),
+        },
+    }
+}
+
 /// GET /api/sessions — every session row plus counts, focused-first.
 /// Runs archive cleanup before returning.
 pub async fn sessions_list(State(state): State<WebUiState>) -> Response {
@@ -2136,6 +2164,18 @@ fn rpc_handlers() -> HashMap<&'static str, RpcHandler> {
         },
     );
     handlers.insert("ping", ping);
+    // add-core-reachability-ws-push D3/D5：当前可达性快照——payload 与
+    // /api/summary 的 reachability 段同形（reachability_payload）。客户端
+    // 连接/重连后主动 get：初始态与断线窗口的收敛由同一请求覆盖，服务端
+    // 无连接级状态。
+    let reachability: RpcHandler = Arc::new(
+        |state: WebUiState,
+         _params: serde_json::Value|
+         -> BoxFuture<'static, Result<serde_json::Value, RpcFailure>> {
+            Box::pin(async move { Ok(reachability_payload(&state.backend.reachability().await)) })
+        },
+    );
+    handlers.insert("core.reachability.get", reachability);
     handlers
 }
 
@@ -2212,12 +2252,13 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
     }
 }
 
-/// 取下一条回合内容事件；接收端关闭后把支路停用并永久挂起（与
-/// permission 支路的 None 语义一致，避免忙等）。Lagged 跳过——增量可由
-/// 快照收敛，连接不断。
-async fn recv_turn_event(
-    rx: &mut Option<tokio::sync::broadcast::Receiver<sebas_dispatch::TurnStreamEvent>>,
-) -> Option<sebas_dispatch::TurnStreamEvent> {
+/// 取下一条广播事件；接收端关闭后把支路停用并永久挂起（与 permission
+/// 支路的 None 语义一致，避免忙等）。Lagged 跳过——turn 是可由快照收敛的
+/// 增量、可达性是全量状态（add-core-reachability-ws-push），都无一致性
+/// 代价，连接不断。
+async fn recv_broadcast<T: Clone>(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<T>>,
+) -> Option<T> {
     loop {
         match rx.as_mut() {
             None => return std::future::pending().await,
@@ -2246,6 +2287,9 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
     // 实时回合内容（workbench-live-conversation-flow 2.1）。默认后端给的是
     // 立即关闭的接收端——Closed 后停用支路（Option 置 None），不忙等。
     let mut turns = Some(state.backend.subscribe_turn_events());
+    // add-core-reachability-ws-push D3：可达性翻转推送支路。无翻转源的后端
+    // （in-process 等）给立即关闭的接收端——Closed 后停用，与 turns 同语义。
+    let mut reach_updates = Some(state.backend.reachability_updates());
     let mut ping = tokio::time::interval(WS_PING_INTERVAL);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.reset();
@@ -2297,7 +2341,7 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                     }
                 }
             }
-            turn = recv_turn_event(&mut turns) => {
+            turn = recv_broadcast(&mut turns) => {
                 if let Some(event) = turn {
                     // seq = 本帧最后一条的 position：前端的去重锚。
                     let seq = event.entries.last().map(|e| e.position).unwrap_or(0);
@@ -2307,6 +2351,16 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                         seq,
                     };
                     let text = codec.encode(&notification_frame(frame));
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            // add-core-reachability-ws-push D3/D5：真翻转才有的帧（后端
+            // set_status 收口已去重），params 与 get 响应同形。
+            flip = recv_broadcast(&mut reach_updates) => {
+                if let Some(reachability) = flip {
+                    let text = codec.encode(&notification_frame(reachability_event(reachability)));
                     if sender.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
