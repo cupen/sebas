@@ -19,6 +19,8 @@ import { LitElement, css, html, nothing } from 'lit'
 import { customElement, state } from 'lit/decorators.js'
 import { matchRoute, navigate, redirectFor, type RouteDef } from './router.js'
 import { api, setUnauthorizedHandler, type Role } from './api/client.js'
+import { sharedWs } from './api/shared-ws.js'
+import type { CoreReachabilityState } from './api/ws.js'
 import { APP_TAGLINE } from './branding.js'
 import { icon } from './components/icons.js'
 import {
@@ -94,22 +96,21 @@ export class SebasApp extends LitElement {
    */
   @state() private wsDown = false
   /**
-   * 全局「核心不可达」横幅（harden-core-channel-deployment 4.1/D6）：自持
-   * `/api/summary` 轮询（与 composer 的 reachability 同间隔），`ok=false`
-   * 时以 `role=alert` 呈现 cause 原文，恢复即消失。与 ws-banner 同层（骑在
-   * 出口区顶部、不阻塞浏览），判别器当前是 `ok+cause`——cover-A 的 `kind`
-   * 字段落地后在此替换文案选择，cause 保持原文渲染。
+   * 全局「核心不可达」横幅（add-core-reachability-ws-push D4）：订阅权上收
+   * shell——`/ws` 连接建立/重连即 `core.reachability.get` 初始化，此后随
+   * `core.reachability` 翻转通知即时更新（不再轮询 /api/summary）。结构化
+   * ok/kind/cause 与 `/api/summary` 的 reachability 段同形（D5），横幅展示
+   * cause 原文；`null` = 未知（get 未应答/连接未立）——不渲染横幅。
    */
-  @state() private coreUnreachableCause: string | null = null
-
-  private static readonly CORE_REACHABILITY_POLL_MS = 5_000
-  private corePollTimer: number | undefined = undefined
+  @state() private coreReachability: CoreReachabilityState | null = null
 
   private params: Record<string, string> = {}
   private onNavigateBound: () => void = () => {}
   private onClick: (e: MouseEvent) => void = () => {}
   /** 窄屏媒体查询退订句柄（5.1）。 */
   private unlistenNarrow: (() => void) | null = null
+  /** 共享 WS 客户端的事件订阅退订句柄（可达性翻转推送）。 */
+  private unsubscribeWs: (() => void) | null = null
 
   /**
    * 拖拽 rail|main 分割线（5.1/D1）：换算 px、clamp、写 localStorage 并
@@ -426,35 +427,55 @@ export class SebasApp extends LitElement {
     document.addEventListener('click', this.onClick)
     // 5.1：窄屏翻转 → 分割线禁拖（布局退化由 CSS 媒体查询承接）。
     this.unlistenNarrow = onNarrowChange((n) => (this.narrow = n))
-    // add-webui-allowed-roots D6：WS 连接状态 → 全局断线横幅。
+    // add-webui-allowed-roots D6：WS 连接状态 → 全局断线横幅；connected=true
+    // 时顺带发起可达性 get（onWsState）。
     window.addEventListener('sebas:ws-state', this.onWsState)
-    // harden-core-channel-deployment 4.1：全局核心可达性轮询（与 composer
-    // 的 WORKBENCH_REACHABILITY_POLL_MS 同间隔）。
-    this.corePollTimer = window.setInterval(
-      () => void this.pollCoreReachability(),
-      SebasApp.CORE_REACHABILITY_POLL_MS,
-    )
-    void this.pollCoreReachability()
-    // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。
-    setUnauthorizedHandler(() => this.showLogin())
+    // add-core-reachability-ws-push D4：订阅 core.reachability 翻转推送
+    // （shell 常驻，订阅不漏帧；初始态由连接建立时的 get 补齐）。
+    this.unsubscribeWs = sharedWs.subscribe(this.onCoreReachabilityEvent)
+    // 会话过期 / 中途启用鉴权：任何 API 401 都把界面切回登录页。首启设置
+    // 页态除外——零用户时登录门永不可过（没有凭据能试）。
+    setUnauthorizedHandler(() => {
+      if (this.authState !== 'setup') this.showLogin()
+    })
     this.onNavigate()
     void this.checkAuth()
   }
 
-  private async pollCoreReachability(): Promise<void> {
+  /** 翻转推送 → 结构化状态（D4：沿用/扩展 coreUnreachableCause 为 ok/kind/cause）。 */
+  private onCoreReachabilityEvent = (ev: { type: string }): void => {
+    if (ev.type !== 'core.reachability') return
+    const { ok, kind, cause } = ev as { type: 'core.reachability'; ok: boolean; kind?: CoreReachabilityState['kind']; cause?: string }
+    this.coreReachability = { ok, ...(kind ? { kind } : {}), ...(cause ? { cause } : {}) }
+  }
+
+  /**
+   * add-core-reachability-ws-push D3：`/ws` 连接建立/重连即 get 当前态——
+   * 初始态与断线窗口丢失翻转的收敛由同一动作覆盖（重连后 get 的响应即
+   * 真实状态），不靠客户端记账。get 失败（断线竞态等）不推翻既有状态。
+   */
+  private async refreshCoreReachability(): Promise<void> {
     try {
-      const summary = await api.summary()
-      const ok = summary.reachability?.ok !== false
-      this.coreUnreachableCause = ok
-        ? null
-        : (summary.reachability?.cause ?? 'core not connected')
+      const payload = (await sharedWs.request('core.reachability.get')) as {
+        ok?: boolean
+        kind?: CoreReachabilityState['kind']
+        cause?: string
+      }
+      this.coreReachability = {
+        ok: payload?.ok !== false,
+        ...(payload?.kind ? { kind: payload.kind } : {}),
+        ...(payload?.cause ? { cause: payload.cause } : {}),
+      }
     } catch {
-      // summary 本身失败（webui 重启窗口等）不推翻既有状态：下一轮重试。
+      // get 本身失败：保留当前状态，重连后的下一次 get 收敛。
     }
   }
 
   private onWsState = (e: Event): void => {
     this.wsDown = (e as CustomEvent<{ connected: boolean }>).detail?.connected === false
+    if ((e as CustomEvent<{ connected: boolean }>).detail?.connected === true) {
+      void this.refreshCoreReachability()
+    }
   }
 
   /**
@@ -520,10 +541,8 @@ export class SebasApp extends LitElement {
     document.removeEventListener('click', this.onClick)
     this.unlistenNarrow?.()
     window.removeEventListener('sebas:ws-state', this.onWsState)
-    if (this.corePollTimer !== undefined) {
-      window.clearInterval(this.corePollTimer)
-      this.corePollTimer = undefined
-    }
+    this.unsubscribeWs?.()
+    this.unsubscribeWs = null
     super.disconnectedCallback()
   }
 
@@ -564,7 +583,10 @@ export class SebasApp extends LitElement {
   private renderOutlet() {
     switch (this.routeId) {
       case 'dashboard':
-        return html`<sebas-dashboard .selectedPath=${this.selectedPath}></sebas-dashboard>`
+        return html`<sebas-dashboard
+          .selectedPath=${this.selectedPath}
+          .coreReachability=${this.coreReachability}
+        ></sebas-dashboard>`
       case 'sessions':
         return html`<sebas-sessions></sebas-sessions>`
       case 'session-deep-link':
@@ -572,10 +594,14 @@ export class SebasApp extends LitElement {
         // 指针）——没有独立详情页。
         return html`<sebas-dashboard
           .selectedPath=${this.selectedPath}
+          .coreReachability=${this.coreReachability}
           .deepLinkKey=${this.params['key'] ?? null}
         ></sebas-dashboard>`
       default:
-        return html`<sebas-dashboard .selectedPath=${this.selectedPath}></sebas-dashboard>`
+        return html`<sebas-dashboard
+          .selectedPath=${this.selectedPath}
+          .coreReachability=${this.coreReachability}
+        ></sebas-dashboard>`
     }
   }
 
@@ -637,9 +663,9 @@ export class SebasApp extends LitElement {
                 ${icon('alert', 14)}<span>与服务器的连接已断开，正在重连…（当前显示可能已过期）</span>
               </div>`
             : nothing}
-          ${this.coreUnreachableCause !== null
+          ${this.coreReachability?.ok === false
             ? html`<div class="ws-banner core-banner${this.wsDown ? ' stacked' : ''}" role="alert" data-testid="core-unreachable-banner">
-                ${icon('alert', 14)}<span>核心不可达：${this.coreUnreachableCause}（会话与项目面暂不可用，页面浏览不受影响）</span>
+                ${icon('alert', 14)}<span>核心不可达：${this.coreReachability?.cause ?? 'core not connected'}（会话与项目面暂不可用，页面浏览不受影响）</span>
               </div>`
             : nothing}
           <div class="outlet${this.isWideRoute() ? '' : ' padded'}">${this.renderOutlet()}</div>

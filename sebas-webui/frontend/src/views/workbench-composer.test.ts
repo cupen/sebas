@@ -21,6 +21,11 @@ import {
   elementInternalsPolyfillInvoked,
   installWaDomPolyfills,
 } from '../test-support/wa-polyfills.js'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const here = dirname(fileURLToPath(import.meta.url))
 
 // ---- WA 渲染垫片（共享）--------------------------------------------------
 installWaDomPolyfills()
@@ -71,11 +76,6 @@ const summaryReachable: Summary = {
   reachability: { ok: true },
 }
 
-const summaryUnreachable: Summary = {
-  ...summaryReachable,
-  reachability: { ok: false, cause: 'router down' },
-}
-
 async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   const el = document.createElement('sebas-workbench-composer') as SebasWorkbenchComposer
   if (initial.sessionKey !== undefined) el.sessionKey = initial.sessionKey
@@ -87,6 +87,7 @@ async function mount(initial: Partial<SebasWorkbenchComposer> = {}) {
   if (initial.childStarting !== undefined) el.childStarting = initial.childStarting
   if (initial.currentMode !== undefined) el.currentMode = initial.currentMode
   if (initial.modeEditable !== undefined) el.modeEditable = initial.modeEditable
+  if (initial.coreReachability !== undefined) el.coreReachability = initial.coreReachability
   document.body.appendChild(el)
   // LitElement schedules its first update asynchronously; then the
   // composer kicks off an async reachability fetch in connectedCallback.
@@ -286,9 +287,13 @@ describe('composer is pure follow-up (4.1)', () => {
     expect(ta.value).toBe('retry me')
   })
 
-  it('renders disabled with cause when the core is unreachable; recovers without remount', async () => {
-    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryUnreachable)
-    const el = await mount(focus)
+  // ── add-core-reachability-ws-push 2.2：提交门消费 shell 下传的推送状态 ──
+
+  it('gates submit on the pushed reachability; the recovery state re-enables without remount', async () => {
+    const el = await mount({
+      ...focus,
+      coreReachability: { ok: false, kind: 'disconnected', cause: 'router down' },
+    })
     const ta = el.shadowRoot?.querySelector('wa-textarea')
     expect(ta?.hasAttribute('disabled')).toBe(true)
     const callout = el.shadowRoot?.querySelector<HTMLElement>('.callout-warning')
@@ -299,14 +304,35 @@ describe('composer is pure follow-up (4.1)', () => {
       ),
     ).toBe('disabled')
 
-    // core 恢复：下一次轮询拉到 ok → 禁用解除，无需重挂载。
-    ;(api.summary as ReturnType<typeof vi.fn>).mockResolvedValue(summaryReachable)
-    await (el as unknown as { loadReachability(): Promise<void> }).loadReachability()
+    // 恢复通知（shell 下传 ok=true）：禁用解除，无需重挂载、无任何 fetch。
+    el.coreReachability = { ok: true }
     await el.updateComplete
     expect(el.shadowRoot?.querySelector('.callout-warning')).toBeNull()
     expect(
       (el.shadowRoot?.querySelector('wa-textarea') as HTMLElement).hasAttribute('disabled'),
     ).toBe(false)
+    expect(
+      (el.shadowRoot?.querySelector('[data-testid="submit-control"]') as HTMLElement).getAttribute(
+        'data-state',
+      ),
+    ).toBe('disabled') // 有字才 send——此刻输入为空，退回普通禁用态。
+  })
+
+  it('unknown reachability (null) leaves the gate open — the retired fetch leaves no residue', async () => {
+    // shell 尚未下传任何状态（get 未应答）：对齐旧轮询器读数前的默认——
+    // 不禁用。composer 自身不再发任何 reachability 请求。
+    const el = await mount(focus)
+    expect(api.summary).not.toHaveBeenCalled()
+    expect(
+      (el.shadowRoot?.querySelector('wa-textarea') as HTMLElement).hasAttribute('disabled'),
+    ).toBe(false)
+    el.remove()
+
+    // 结构性守卫：轮询定时器与挂载 fetch 已从源码删除。
+    const src = readFileSync(join(here, 'workbench-composer.ts'), 'utf8')
+    expect(src).not.toContain('WORKBENCH_REACHABILITY_POLL_MS')
+    expect(src).not.toContain('api.summary')
+    expect(src).not.toContain('setInterval')
   })
 })
 

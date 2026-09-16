@@ -10,9 +10,9 @@
  * - server events arrive as Notifications whose `method` is the legacy
  *   dotted type (session.created / session.updated / session.removed /
  *   session.pending_dropped / config.updated / permission.requested /
- *   turn.append) and whose `params` is the legacy payload; subscribers
- *   receive the reconstituted `{type, ...payload}` event, so dispatch keys
- *   are unchanged;
+ *   turn.append / core.reachability) and whose `params` is the legacy
+ *   payload; subscribers receive the reconstituted `{type, ...payload}`
+ *   event, so dispatch keys are unchanged;
  * - unknown methods are tolerated (ignored — forward compatibility);
  * - `request(method, params)` correlates the matching-id Response:
  *   10s timeout, immediate `not_connected` rejection when the socket is
@@ -67,9 +67,32 @@ export interface WsEvents {
     args: unknown
     reason: string
   }
+  /**
+   * （add-core-reachability-ws-push D3/D5）核心可达性翻转推送。params 与
+   * `/api/summary` 的 `reachability` 段同形：可达只有 `{ok:true}`；不可达
+   * 携带机器可读 `kind`（startup_failed | auth_rejected | disconnected）与
+   * 原文 cause。横幅/提交门据此更新，kind 分文案、不靠 cause 字符串匹配。
+   */
+  'core.reachability': {
+    type: 'core.reachability'
+    ok: boolean
+    kind?: 'startup_failed' | 'auth_rejected' | 'disconnected'
+    cause?: string
+  }
 }
 
 export type WsEvent = WsEvents[keyof WsEvents]
+
+/**
+ * （add-core-reachability-ws-push D4）结构化核心可达性状态：`core.reachability`
+ * 推送与 `core.reachability.get` 响应归一后的形状（`type` 标签不入状态）。
+ * app-shell 独占持有，横幅渲染与 composer 提交门（下传）同源消费。
+ */
+export interface CoreReachabilityState {
+  ok: boolean
+  kind?: 'startup_failed' | 'auth_rejected' | 'disconnected'
+  cause?: string
+}
 
 /** Known event type names; anything else arriving is ignored. */
 const EVENTS = {
@@ -80,6 +103,7 @@ const EVENTS = {
   'config.updated': true,
   'permission.requested': true,
   'turn.append': true,
+  'core.reachability': true,
 }
 
 export type WsEventHandler = (event: WsEvent) => void

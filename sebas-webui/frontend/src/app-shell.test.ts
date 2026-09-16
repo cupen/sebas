@@ -29,7 +29,30 @@ const apiMocks = vi.hoisted(() => ({
   projectsBranch: vi.fn(),
   projectsAdd: vi.fn(),
   projectsReorder: vi.fn(),
+  setUnauthorizedHandler: vi.fn(),
 }))
+
+/**
+ * 共享 WS 客户端 mock（add-core-reachability-ws-push 2.1）：subscribe 捕获
+ * handler 供用例派发 `core.reachability` 翻转通知（emit），request 可编程
+ * 供用例编排 `core.reachability.get` 的应答。路径必须与被测模块同解——
+ * 本文件在 src/，故用 './api/shared-ws.js'（'../api/…' 会指到不存在的
+ * frontend/api/，mock 静默失效）。
+ */
+const wsMocks = vi.hoisted(() => {
+  const handlers = new Set<(ev: unknown) => void>()
+  return {
+    request: vi.fn(),
+    subscribe: vi.fn((h: (ev: unknown) => void) => {
+      handlers.add(h)
+      return () => handlers.delete(h)
+    }),
+    emit: (ev: unknown): void => {
+      for (const h of handlers) h(ev)
+    },
+    clearHandlers: (): void => handlers.clear(),
+  }
+})
 
 // 注意路径：本文件位于 src/，client 模块是 './api/client.js'（'../api/…'
 // 会解析到不存在的 frontend/api/，mock 静默失效）。真实模块的其余导出
@@ -38,6 +61,7 @@ vi.mock('./api/client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/client.js')>()
   return {
     ...actual,
+    setUnauthorizedHandler: apiMocks.setUnauthorizedHandler,
     api: {
       ...actual.api,
       summary: apiMocks.summary,
@@ -55,9 +79,7 @@ vi.mock('./api/client.js', async (importOriginal) => {
   }
 })
 
-vi.mock('../api/shared-ws.js', () => ({
-  sharedWs: { subscribe: () => () => {} },
-}))
+vi.mock('./api/shared-ws.js', () => ({ sharedWs: wsMocks }))
 
 // outlet 会实例化 sebas-dashboard；composer 依赖 WA 表单组件的
 // ElementInternals（jsdom 不完整），与 shell 无关 —— mock 掉模块即可，
@@ -334,64 +356,98 @@ describe('global disconnect banner (add-webui-allowed-roots D6)', () => {
 })
 
 
-describe('global core-unreachable banner (harden-core-channel-deployment 4.1)', () => {
-  it('shows the banner with the reported cause while the core is unreachable, without blocking browsing', async () => {
-    apiMocks.summary.mockResolvedValue({
-      active_count: 0,
-      recent_sessions: [],
-      reachability: { ok: false, cause: 'socket absent' },
-    })
-    const el = await mountShell()
+/**
+ * add-core-reachability-ws-push 2.1：横幅由 WS 推送驱动（get 初始化 + 翻转
+ * 通知），不再轮询 /api/summary。推送在断线窗口丢帧由重连后的 get 收敛。
+ */
+describe('global core-unreachable banner (add-core-reachability-ws-push)', () => {
+  function connectWs(): void {
+    window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: true } }))
+  }
+
+  /** 让 get 往返 / 通知派发 / Lit 重渲染都落定。 */
+  async function flush(el: SebasApp): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
     await el.updateComplete
+  }
 
-    const banner = el.shadowRoot!.querySelector<HTMLElement>(
-      '[data-testid="core-unreachable-banner"]',
-    )
+  afterEach(() => {
+    wsMocks.request.mockReset()
+    wsMocks.clearHandlers()
+  })
+
+  function bannerOf(el: SebasApp): HTMLElement | null {
+    return el.shadowRoot!.querySelector<HTMLElement>('[data-testid="core-unreachable-banner"]')
+  }
+
+  it('initializes from core.reachability.get when /ws connects; unknown state shows nothing', async () => {
+    wsMocks.request.mockResolvedValue({ ok: false, kind: 'startup_failed', cause: 'socket absent' })
+    const el = await mountShell()
+    // 未知态（get 未应答）：不渲染横幅——对齐旧默认的读数前行为。
+    expect(bannerOf(el)).toBeNull()
+
+    connectWs()
+    await flush(el)
+    // 初始态 = get 响应：横幅出现，role=alert、cause 原文，浏览不受影响。
+    expect(wsMocks.request).toHaveBeenCalledWith('core.reachability.get')
+    const banner = bannerOf(el)
     expect(banner).toBeTruthy()
     expect(banner?.getAttribute('role')).toBe('alert')
     expect(banner?.textContent ?? '').toContain('核心不可达')
     expect(banner?.textContent ?? '').toContain('socket absent')
-    // 浏览不受影响：工作台照常渲染。
     expect(el.shadowRoot!.querySelector('.outlet sebas-dashboard')).toBeTruthy()
     el.remove()
   })
 
-  it('clears the banner on the next successful reachability poll, without a page reload', async () => {
-    apiMocks.summary.mockResolvedValueOnce({
-      active_count: 0,
-      recent_sessions: [],
-      reachability: { ok: false, cause: 'connection refused' },
-    })
+  it('updates on core.reachability flip notifications; recovery clears without a reload', async () => {
+    wsMocks.request.mockResolvedValue({ ok: true })
     const el = await mountShell()
-    await new Promise((r) => setTimeout(r, 0))
-    await el.updateComplete
-    expect(
-      el.shadowRoot!.querySelector('[data-testid="core-unreachable-banner"]'),
-    ).toBeTruthy()
+    connectWs()
+    await flush(el)
+    expect(bannerOf(el)).toBeNull()
 
-    apiMocks.summary.mockResolvedValue({
-      active_count: 0,
-      recent_sessions: [],
-      reachability: { ok: true },
-    })
-    ;(el as any).pollCoreReachability()
-    await new Promise((r) => setTimeout(r, 0))
-    await el.updateComplete
-    expect(
-      el.shadowRoot!.querySelector('[data-testid="core-unreachable-banner"]'),
-    ).toBeNull()
+    // 翻转通知（kind + cause）：横幅即时出现，不等待任何轮询周期。
+    wsMocks.emit({ type: 'core.reachability', ok: false, kind: 'disconnected', cause: 'connection dropped' })
+    await flush(el)
+    const banner = bannerOf(el)
+    expect(banner?.textContent ?? '').toContain('connection dropped')
+
+    // 恢复通知：横幅即时消失，无需刷新页面。
+    wsMocks.emit({ type: 'core.reachability', ok: true })
+    await flush(el)
+    expect(bannerOf(el)).toBeNull()
     el.remove()
   })
 
-  it('shows no banner while the core is reachable', async () => {
+  it('a missed flip during a ws outage converges via the fresh get on reconnect', async () => {
+    wsMocks.request.mockResolvedValueOnce({ ok: true })
     const el = await mountShell()
-    await new Promise((r) => setTimeout(r, 0))
+    connectWs()
+    await flush(el)
+    expect(bannerOf(el)).toBeNull()
+
+    // 断线（全局断线横幅接手）；断线窗口 core 翻转——帧已丢失，无人记账。
+    window.dispatchEvent(new CustomEvent('sebas:ws-state', { detail: { connected: false } }))
     await el.updateComplete
-    expect(
-      el.shadowRoot!.querySelector('[data-testid="core-unreachable-banner"]'),
-    ).toBeNull()
+    wsMocks.request.mockResolvedValueOnce({
+      ok: false,
+      kind: 'auth_rejected',
+      cause: 'core rejected channel handshake',
+    })
+
+    // 重连：同一 get 动作带回当前真实状态，横幅据此收敛。
+    connectWs()
+    await flush(el)
+    expect(bannerOf(el)?.textContent ?? '').toContain('core rejected channel handshake')
     el.remove()
+  })
+
+  it('retires the poller: no interval and no summary fetch in the shell source', () => {
+    const src = readFileSync(join(here, 'app-shell.ts'), 'utf8')
+    expect(src).not.toContain('CORE_REACHABILITY_POLL_MS')
+    expect(src).not.toContain('setInterval')
+    expect(src).not.toContain('pollCoreReachability')
   })
 })
 
@@ -429,6 +485,42 @@ describe('multiuser auth gate (add-webui-multiuser-rbac 5.2/5.4)', () => {
     expect(el.shadowRoot!.querySelector('.outlet')).toBeNull()
     el.remove()
   })
+
+  /** shell 在 connectedCallback 注册的全局 401 处理器（client 经 mock 捕获）。 */
+  function unauthorizedHandler(): () => void {
+    const calls = apiMocks.setUnauthorizedHandler.mock.calls
+    expect(calls.length).toBeGreaterThan(0)
+    return calls[calls.length - 1][0] as () => void
+  }
+
+  it('a 401 while on the first-run setup view does NOT flip to the login gate', async () => {
+    // 零用户首启姿态：可达性轮询恒 401，登录门无凭据可试——setup 态必须
+    // 纹丝不动（webui auth e2e：曾把设置页 5 秒踢翻成登录页，root 引导
+    // 旅程断头）。
+    apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false, needs_setup: true })
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('sebas-setup')).toBeTruthy()
+    unauthorizedHandler()()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('sebas-setup')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('sebas-login')).toBeNull()
+    el.remove()
+  })
+
+  it('a 401 outside the setup view (expired session) still flips to the login gate', async () => {
+    apiMocks.authMe.mockResolvedValue({ enabled: false, authenticated: false })
+    const el = await mountShell()
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeTruthy()
+    unauthorizedHandler()()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('sebas-login')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.outlet')).toBeNull()
+    el.remove()
+  })
+
+  // （add-core-reachability-ws-push D6）登录/首启设置态的「跳过轮询」特判
+  // 随轮询器一起消亡：可达性初始态来自 /ws 连接建立后的 get——auth 开启时
+  // 升级前拒绝已天然挡住未认证端，无需任何等价物。
 
   it('a setup-success enters the workbench and re-fetches the identity (role drives the modal)', async () => {
     apiMocks.authMe.mockResolvedValue({ enabled: true, authenticated: false, needs_setup: true })
