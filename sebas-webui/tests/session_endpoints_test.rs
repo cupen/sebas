@@ -1634,11 +1634,11 @@ async fn concurrent_project_sessions_run_simultaneously_and_leave_a_untouched() 
     assert_detail_untouched(&detail_before, &detail_after);
 }
 
-/// workbench-conversation-view 1.4：`GET /api/summary` 的聚焦会话 payload 与
-/// detail 的条目序列同形状且内容一致——同一会话两侧给出一致的条目视图
-/// （position/kind/element_type/content 全等），且 summary 不携带退役字段。
+/// fix-webui-streaming-liveness 3.1：`GET /api/summary` 的聚焦会话 payload
+/// 只带会话元信息、**不含** transcript（`entries` 键移除，D3 拆分）；正文
+/// 一律走 detail 游标路径——同一会话的 detail 仍返回完整条目序列。
 #[tokio::test]
-async fn summary_focused_session_matches_detail_entry_view() {
+async fn summary_focused_session_carries_metadata_without_transcript() {
     let _env = isolated_projects().await;
     let (router, _rx, app) = fixture().await;
     let dir = tempfile::tempdir().unwrap();
@@ -1656,7 +1656,8 @@ async fn summary_focused_session_matches_detail_entry_view() {
 
     let (_, detail) = get_json(&app, &format!("/api/sessions/{encoded}")).await;
     // 读 detail 已把焦点设到该会话（display pointer）。
-    let (_, summary) = get_json(&app, "/api/summary").await;
+    let (status, summary) = get_json(&app, "/api/summary").await;
+    assert_eq!(status, StatusCode::OK);
     let focused = summary["active_session"]
         .as_object()
         .expect("focused payload");
@@ -1669,15 +1670,28 @@ async fn summary_focused_session_matches_detail_entry_view() {
         focused.get("body").is_none() && focused.get("user_prompt").is_none(),
         "retired fields must not reappear on the summary payload"
     );
-    let summary_entries = focused["entries"].as_array().expect("summary entries");
-    let detail_entries = detail["entries"].as_array().expect("detail entries");
-    assert_eq!(
-        summary_entries, detail_entries,
-        "summary and detail must agree on the conversation entry view"
+    assert!(
+        focused.get("entries").is_none(),
+        "summary must NOT embed the focused transcript (D3 split): {focused:?}"
     );
-    assert!(summary_entries.len() >= 2, "prompt + content present");
-    assert_eq!(summary_entries[0]["kind"], "prompt");
-    assert_eq!(summary_entries[0]["content"], "summary sync");
+    // 元信息仍在（会话头/状态/待生效栈/段计数的数据源）。
+    assert!(focused.get("status_slug").is_some());
+    assert!(focused.get("pending").is_some());
+    assert!(focused.get("msg_count").is_some());
+    // summary 顶层形状不变（键仍在），整个响应保持 KB 级（不含条目即不再随
+    // transcript 体积线性膨胀）。
+    assert!(summary.get("active_session_key").is_some());
+    assert!(summary.get("recent_sessions").is_some());
+    assert!(
+        summary.to_string().len() < 64 * 1024,
+        "summary response must stay kilobyte-scale, got {} bytes",
+        summary.to_string().len()
+    );
+    // 正文走 detail 路径：条目序列完整（prompt + content）。
+    let detail_entries = detail["entries"].as_array().expect("detail entries");
+    assert!(detail_entries.len() >= 2, "prompt + content present");
+    assert_eq!(detail_entries[0]["kind"], "prompt");
+    assert_eq!(detail_entries[0]["content"], "summary sync");
 }
 
 /// Task 6.2: removing a project leaves its sessions running and reachable.

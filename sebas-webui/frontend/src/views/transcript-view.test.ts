@@ -42,6 +42,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationEntryView } from '../api/client.js'
 import {
   ERROR_MERGE_WINDOW_SECS,
+  TRUNCATE_CHARS,
+  TRUNCATE_LINES,
   awaitingReceipt,
   groupConversation,
   mergeSpawnErrors,
@@ -49,9 +51,19 @@ import {
   processRunSummary,
   resolveAgentDisplay,
   splitAgentRuns,
+  truncateHtml,
 } from './transcript-view.js'
 import type { ProcessItem, ProcessRun } from './transcript-view.js'
 import type { SebasTranscriptView } from './transcript-view.js'
+
+// ---- markdown mock（4.3 计数面）-----------------------------------------
+// 全文件以可计数的替身替换 markdown 管线：正文断言只依赖 textContent（
+// `<p>${source}</p>` 足够），渲染成本断言（流式帧期间调用次数持平）依赖
+// mock 的调用记录。
+vi.mock('../components/markdown.js', () => ({
+  renderMarkdown: vi.fn((source: string) => `<p>${source}</p>`),
+}))
+import { renderMarkdown } from '../components/markdown.js'
 
 // ---- localStorage polyfill --------------------------------------------
 // A tiny in-memory Map-shaped object replaces the host's `localStorage`.
@@ -119,12 +131,14 @@ async function mount(opts: {
   sessionKey?: string
   msgCount?: number
   agentDisplay?: string | null
+  turnLive?: boolean
 }): Promise<SebasTranscriptView> {
   const el = document.createElement('sebas-transcript-view') as SebasTranscriptView
   el.entries = opts.entries
   el.sessionKey = opts.sessionKey ?? 'oc_test'
   if (opts.msgCount !== undefined) el.msgCount = opts.msgCount
   if (opts.agentDisplay !== undefined) el.agentDisplay = opts.agentDisplay
+  if (opts.turnLive !== undefined) el.turnLive = opts.turnLive
   document.body.appendChild(el)
   // Lit schedules its first update asynchronously; then the
   // component's `requestAnimationFrame(() => applyAutoScroll())` runs
@@ -565,7 +579,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const el = await mount({ entries: mixedTurnEntries() })
     const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
     // 时间序切分：三个过程 run = 三个折叠，各在自己的发生位置。
-    const folds = assistant.querySelectorAll<HTMLDetailsElement>('details.process-fold')
+    const folds = assistant.querySelectorAll<HTMLElement>('.process-fold')
     expect(folds.length).toBe(3)
     expect([...folds].map((f) => f.dataset.processId)).toEqual(['1', '3', '5'])
     expect([...folds].map((f) => f.getAttribute('data-process-count'))).toEqual(['1', '1', '2'])
@@ -582,10 +596,34 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entries: streamedTurn('do it', ['chunk one ', 'chunk two '], FIXED_DATES.T1),
     })
     const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
-    expect(assistant.querySelector('details')).toBeNull()
+    expect(assistant.querySelector('.process-fold, .process-item')).toBeNull()
     const bodies = assistant.querySelectorAll<HTMLElement>('.flow > .body')
     expect(bodies.length).toBe(1)
     expect(bodies[0].textContent).toContain('chunk one')
+  })
+
+  it('fold affordances are lightweight inline links with no details chrome (4.4)', async () => {
+    const entries = [
+      entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+      entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'deep thought', created_at_unix: FIXED_DATES.T1 }),
+    ]
+    const el = await mount({ entries })
+    const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
+    // spec「fold affordance is a lightweight link」：折叠态 DOM 中 link 控件
+    // 存在（glyph + 标签 + 计数），且不再有 details/summary 卡框结构。
+    expect(assistant.querySelector('details, summary')).toBeNull()
+    const link = assistant.querySelector<HTMLButtonElement>('button.fold-link')!
+    expect(link.getAttribute('aria-expanded')).toBe('false')
+    expect(link.querySelector('.kind-icon')).toBeTruthy()
+    expect(link.querySelector('.label')?.textContent?.trim()).toBe('process')
+    expect(link.querySelector('.fold-count')?.textContent?.trim()).toBe('1')
+    // 样式面：折叠容器无边框/无底色卡框（link 化的外观合同）。
+    const styleText = [...el.shadowRoot!.querySelectorAll('style')]
+      .map((s) => s.textContent ?? '')
+      .join('\n')
+    const foldRule = styleText.match(/\.turn-block \.process-fold\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(foldRule).not.toMatch(/\bborder:/)
+    expect(foldRule).not.toMatch(/\bbackground:/)
   })
 
   it('process folds and second-level folds collapse by default; titles show with generic fallback (2.1/2.2)', async () => {
@@ -597,43 +635,55 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     ]
     const el = await mount({ entries })
     const assistant = el.shadowRoot!.querySelector<HTMLElement>('.turn-block.is-assistant')!
-    const fold = assistant.querySelector<HTMLDetailsElement>('details.process-fold')!
+    const fold = assistant.querySelector<HTMLElement>('.process-fold')!
     expect(fold.dataset.processId).toBe('1')
     expect(fold.getAttribute('data-process-count')).toBe('3')
     // 折叠行：固定 process 标签 + 实时摘要（进行中条目 = run 尾部，此处
     // 是无 title 的 tool → 通用标签）+ 条目计数。
-    expect(fold.querySelector('summary .label')?.textContent?.trim()).toBe('process')
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('tool')
-    // run 尾条目无 title → 通用标签、summary 不带 title 属性。
-    expect(fold.querySelector('summary')!.hasAttribute('title')).toBe(false)
-    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('3')
-    // 外层默认收起；二级也全部默认收起。
-    expect(fold.open).toBe(false)
-    const items = assistant.querySelectorAll<HTMLDetailsElement>('details.process-item')
+    const link = fold.querySelector<HTMLButtonElement>('button.fold-link')!
+    expect(link.querySelector('.label')?.textContent?.trim()).toBe('process')
+    expect(link.querySelector('.running')?.textContent?.trim()).toBe('tool')
+    // run 尾条目无 title → 通用标签、link 不带 title 属性。
+    expect(link.hasAttribute('title')).toBe(false)
+    expect(link.querySelector('.fold-count')?.textContent?.trim()).toBe('3')
+    // 外层默认收起（无展开体——二级折叠只在展开体内渲染，收起态不残留
+    // 隐藏 DOM）；展开后二级全部默认收起。
+    expect(link.getAttribute('aria-expanded')).toBe('false')
+    expect(fold.querySelector('.fold-body')).toBeNull()
+    link.click()
+    await el.updateComplete
+    const items = [...assistant.querySelectorAll<HTMLElement>('.process-item')]
     expect(items.length).toBe(3)
-    items.forEach((d) => expect(d.open).toBe(false))
-    // 二级 summary：有 title 显示 title 且 title 属性保全量；无 title 回退
+    items.forEach((d) =>
+      expect(d.querySelector<HTMLButtonElement>('button.fold-link')!.getAttribute('aria-expanded')).toBe('false'),
+    )
+    // 二级 link：有 title 显示 title 且 title 属性保全量；无 title 回退
     // 通用标签（thinking / tool）且不带 title 属性。
     expect(items[0].dataset.position).toBe('1')
-    expect(items[0].querySelector('summary .item-title')?.textContent?.trim()).toBe('thinking')
-    expect(items[0].querySelector('summary')!.hasAttribute('title')).toBe(false)
-    expect(items[1].querySelector('summary .item-title')?.textContent?.trim()).toBe(
+    expect(items[0].querySelector('.item-title')?.textContent?.trim()).toBe('thinking')
+    expect(items[0].querySelector('button.fold-link')!.hasAttribute('title')).toBe(false)
+    expect(items[1].querySelector('.item-title')?.textContent?.trim()).toBe(
       'read_file · src/app.ts',
     )
-    expect(items[1].querySelector('summary')!.getAttribute('title')).toBe('read_file · src/app.ts')
-    expect(items[2].querySelector('summary .item-title')?.textContent?.trim()).toBe('tool')
-    // 展开层级：外层打开后二级仍收起，逐条再点才展开（键盘同路径）。
-    fold.querySelector('summary')!.click()
+    expect(items[1].querySelector('button.fold-link')!.getAttribute('title')).toBe(
+      'read_file · src/app.ts',
+    )
+    expect(items[2].querySelector('.item-title')?.textContent?.trim()).toBe('tool')
+    // 展开层级：逐条点击二级 link 才展开（键盘同路径——原生 button 激活）。
+    const itemLinks = [...assistant.querySelectorAll<HTMLButtonElement>('.process-item button.fold-link')]
+    itemLinks.forEach((b) => expect(b.getAttribute('aria-expanded')).toBe('false'))
+    itemLinks[1].click()
     await el.updateComplete
-    expect(fold.open).toBe(true)
-    items.forEach((d) => expect(d.open).toBe(false))
-    items[1].querySelector('summary')!.click()
-    await el.updateComplete
-    expect(items[1].open).toBe(true)
+    expect(itemLinks[1].getAttribute('aria-expanded')).toBe('true')
     expect(items[1].textContent).toContain('read_file')
     // 其余二级折叠不受影响。
-    expect(items[0].open).toBe(false)
-    expect(items[2].open).toBe(false)
+    expect(itemLinks[0].getAttribute('aria-expanded')).toBe('false')
+    expect(itemLinks[2].getAttribute('aria-expanded')).toBe('false')
+    // 再点一次同一 link：收起（点击切换展开/收起）；外层同理。
+    link.click()
+    await el.updateComplete
+    expect(link.getAttribute('aria-expanded')).toBe('false')
+    expect(fold.querySelector('.fold-body')).toBeNull()
   })
 
   it('the fold summary tracks the running tool and entry count as entries stream in (D3, 2.1)', async () => {
@@ -642,10 +692,11 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries: base })
-    let fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
-    expect(fold.getAttribute('data-process-count')).toBe('1')
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('thinking')
-    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('1')
+    const linkOf = () =>
+      el.shadowRoot!.querySelector<HTMLElement>('.process-fold button.fold-link')!
+    expect(el.shadowRoot!.querySelector('.process-fold')!.getAttribute('data-process-count')).toBe('1')
+    expect(linkOf().querySelector('.running')?.textContent?.trim()).toBe('thinking')
+    expect(linkOf().querySelector('.fold-count')?.textContent?.trim()).toBe('1')
     // 流式增量到达（快照收敛路径重分组）：同一 run 的摘要实时刷新——
     // 进行中的工具 title + 累计条目数。
     el.entries = [
@@ -655,12 +706,12 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
-    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    const fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.dataset.processId).toBe('1')
     expect(fold.getAttribute('data-process-count')).toBe('2')
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · deploy.sh')
-    expect(fold.querySelector('summary')!.getAttribute('title')).toBe('bash · deploy.sh')
-    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('2')
+    expect(linkOf().querySelector('.running')?.textContent?.trim()).toBe('bash · deploy.sh')
+    expect(linkOf().getAttribute('title')).toBe('bash · deploy.sh')
+    expect(linkOf().querySelector('.fold-count')?.textContent?.trim()).toBe('2')
   })
 
   it('a collapsed fold never opens by itself while its entries stream in (D3, 2.1)', async () => {
@@ -672,9 +723,10 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 1, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries: base })
-    expect(el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!.open).toBe(
-      false,
-    )
+    expect(
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!
+        .getAttribute('aria-expanded'),
+    ).toBe('false')
     el.entries = [
       ...base,
       entry({ position: 2, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
@@ -683,11 +735,11 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
-    const fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    const fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.dataset.processId).toBe('1')
-    expect(fold.open).toBe(false)
+    expect(fold.querySelector('.fold-body')).toBeNull()
     expect(fold.getAttribute('data-process-count')).toBe('3')
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · verify.sh')
+    expect(fold.querySelector('.running')?.textContent?.trim()).toBe('bash · verify.sh')
   })
 
   it('an expanded fold stays open and appends streamed entries in place (D2/D3, 2.1)', async () => {
@@ -699,11 +751,11 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 2, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries: base })
-    const fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    const fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.dataset.processId).toBe('2')
-    fold.querySelector('summary')!.click()
+    fold.querySelector<HTMLButtonElement>('button.fold-link')!.click()
     await el.updateComplete
-    expect(fold.open).toBe(true)
+    expect(fold.querySelector('.fold-body')).toBeTruthy()
     // 流式全量重分组（快照收敛）：新过程条目并入同一 run——折叠保持展开、
     // 新条目就地追加。
     el.entries = [
@@ -713,11 +765,11 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
-    const fold2 = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    const fold2 = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold2.dataset.processId).toBe('2')
-    expect(fold2.open).toBe(true)
+    expect(fold2.querySelector('.fold-body')).toBeTruthy()
     expect(fold2.getAttribute('data-process-count')).toBe('2')
-    const items = fold2.querySelectorAll<HTMLDetailsElement>('details.process-item')
+    const items = fold2.querySelectorAll<HTMLElement>('.process-item')
     expect(items.length).toBe(2)
     expect(items[1].dataset.position).toBe('3')
   })
@@ -729,10 +781,10 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 2, kind: 'content', content: 'step one.', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries: base })
-    const first = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
-    first.querySelector('summary')!.click()
+    const first = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
+    first.querySelector<HTMLButtonElement>('button.fold-link')!.click()
     await el.updateComplete
-    expect(first.open).toBe(true)
+    expect(first.querySelector('.fold-body')).toBeTruthy()
     // 流式追加出第二个过程 run：新折叠默认收起，已展开的不受影响。
     el.entries = [
       ...base,
@@ -742,12 +794,12 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
-    const folds = el.shadowRoot!.querySelectorAll<HTMLDetailsElement>('details.process-fold')
+    const folds = el.shadowRoot!.querySelectorAll<HTMLElement>('.process-fold')
     expect(folds.length).toBe(2)
     expect(folds[0].dataset.processId).toBe('1')
-    expect(folds[0].open).toBe(true)
+    expect(folds[0].querySelector('.fold-body')).toBeTruthy()
     expect(folds[1].dataset.processId).toBe('3')
-    expect(folds[1].open).toBe(false)
+    expect(folds[1].querySelector('.fold-body')).toBeNull()
   })
 
   it('second-level folds keep position-keyed DOM identity (2.2)', async () => {
@@ -758,7 +810,10 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 17, kind: 'content', element_type: 'tool', content: 'c', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries })
-    const items = el.shadowRoot!.querySelectorAll<HTMLDetailsElement>('details.process-item')
+    // 二级折叠在展开体内：先展开外层折叠。
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const items = el.shadowRoot!.querySelectorAll<HTMLElement>('.process-item')
     expect([...items].map((d) => d.dataset.position)).toEqual(['4', '9', '17'])
   })
 
@@ -770,13 +825,13 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 1, kind: 'content', element_type: 'tool', content: '📖 **read**', title: long, created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries })
-    const summary = el.shadowRoot!.querySelector<HTMLDetailsElement>(
-      'details.process-item summary',
-    )!
-    const shown = summary.querySelector<HTMLElement>('.item-title')?.textContent?.trim()
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    const link = el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!
+    const shown = link.querySelector<HTMLElement>('.item-title')?.textContent?.trim()
     expect(shown).toBe(middleTruncate(long))
     expect(shown).toContain('…')
-    expect(summary.getAttribute('title')).toBe(long)
+    expect(link.getAttribute('title')).toBe(long)
   })
 
   it('agent side drops the card shell; user side keeps the tinted block; errors keep their card (2.2)', async () => {
@@ -857,11 +912,11 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     const entries = streamedTurn('do it', ['a', 'b'], FIXED_DATES.T1)
     store.set('sebas:seen:oc_test', String(FIXED_DATES.T2))
     const el = await mount({ entries })
+    // 4.2：seam 节点恒渲染（hidden 属性切换显隐）——全部已读时 hidden。
     let seam = el.shadowRoot?.querySelector<HTMLElement>('.seam')
     expect(seam?.hasAttribute('hidden')).toBe(true)
-    expect(seam?.textContent ?? '').not.toContain('new since you last viewed')
 
-    // 未读态 → mark all seen → 游标写入最大时间戳、seam 消失。
+    // 未读态 → mark all seen → 游标写入最大时间戳、seam 隐藏。
     store.set('sebas:seen:oc_test', String(FIXED_DATES.T1 - 10))
     el.entries = [...entries]
     await el.updateComplete
@@ -1079,18 +1134,20 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 1, kind: 'content', content: 'let me check.', created_at_unix: FIXED_DATES.T1 }),
     ]
     const el = await mount({ entries: base })
-    expect(el.shadowRoot!.querySelector('details.process-fold')).toBeNull()
+    expect(el.shadowRoot!.querySelector('.process-fold')).toBeNull()
 
     // 帧 1：thinking 新开过程 run —— 折叠默认收起、摘要 = 通用标签、计数 1。
     emitTurnAppend('oc_test', [
       entry({ position: 2, kind: 'content', element_type: 'thinking', content: 'plan', created_at_unix: FIXED_DATES.T1 }),
     ])
     await el.updateComplete
-    let fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    const linkOf = () =>
+      el.shadowRoot!.querySelector<HTMLElement>('.process-fold button.fold-link')!
+    let fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.dataset.processId).toBe('2')
-    expect(fold.open).toBe(false)
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('thinking')
-    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('1')
+    expect(linkOf().getAttribute('aria-expanded')).toBe('false')
+    expect(linkOf().querySelector('.running')?.textContent?.trim()).toBe('thinking')
+    expect(linkOf().querySelector('.fold-count')?.textContent?.trim()).toBe('1')
 
     // 帧 2：工具条目并入同一 run —— 摘要实时切到进行中的结构化 title、
     // 计数 2、仍保持收起。
@@ -1098,20 +1155,27 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 3, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
     ])
     await el.updateComplete
-    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
-    expect(fold.open).toBe(false)
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · deploy.sh')
-    expect(fold.querySelector('summary')!.getAttribute('title')).toBe('bash · deploy.sh')
-    expect(fold.querySelector('summary .fold-count')?.textContent?.trim()).toBe('2')
+    fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
+    expect(linkOf().getAttribute('aria-expanded')).toBe('false')
+    expect(linkOf().querySelector('.running')?.textContent?.trim()).toBe('bash · deploy.sh')
+    expect(linkOf().getAttribute('title')).toBe('bash · deploy.sh')
+    expect(linkOf().querySelector('.fold-count')?.textContent?.trim()).toBe('2')
 
-    // 游标去重：重复 position 的帧不重复计数、二级折叠不重复渲染。
+    // 游标去重：重复 position 的帧不重复计数、二级折叠不重复渲染
+    // （展开折叠体后核对逐条渲染）。
     emitTurnAppend('oc_test', [
       entry({ position: 3, kind: 'content', element_type: 'tool', content: '⚙ **bash**', title: 'bash · deploy.sh', created_at_unix: FIXED_DATES.T2 }),
     ])
     await el.updateComplete
-    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.getAttribute('data-process-count')).toBe('2')
-    expect(fold.querySelectorAll('details.process-item')).toHaveLength(2)
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
+    expect(fold.querySelectorAll('.process-item')).toHaveLength(2)
+    // 收起复原（后续断言继续以收起态为准）。
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
 
     // 迟到的旧 position 帧被丢弃；非聚焦会话的帧被忽略。
     emitTurnAppend('oc_test', [
@@ -1121,7 +1185,7 @@ describe('sebas-transcript-view (conversation rendering)', () => {
       entry({ position: 9, kind: 'content', element_type: 'tool', content: 'elsewhere', created_at_unix: FIXED_DATES.T2 }),
     ])
     await el.updateComplete
-    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.getAttribute('data-process-count')).toBe('2')
     expect(el.shadowRoot!.textContent).not.toContain('STALE')
     expect(el.shadowRoot!.textContent).not.toContain('elsewhere')
@@ -1136,10 +1200,266 @@ describe('sebas-transcript-view (conversation rendering)', () => {
     await el.updateComplete
     await new Promise((r) => requestAnimationFrame(() => r(null)))
     await el.updateComplete
-    fold = el.shadowRoot!.querySelector<HTMLDetailsElement>('details.process-fold')!
+    fold = el.shadowRoot!.querySelector<HTMLElement>('.process-fold')!
     expect(fold.dataset.processId).toBe('2')
     expect(fold.getAttribute('data-process-count')).toBe('2')
-    expect(fold.querySelector('summary .running')?.textContent?.trim()).toBe('bash · deploy.sh')
-    expect(fold.open).toBe(false)
+    expect(linkOf().querySelector('.running')?.textContent?.trim()).toBe('bash · deploy.sh')
+    expect(linkOf().getAttribute('aria-expanded')).toBe('false')
+  })
+})
+
+// ---- fix-webui-streaming-liveness 4.1/4.2/4.3/4.5 -------------------------
+
+/** jsdom 无布局：把滚动几何装进容器（configurable 以便用例间重定义）。 */
+function fakeScrollLayout(box: HTMLElement, scrollHeight: number, clientHeight: number): void {
+  Object.defineProperty(box, 'scrollHeight', { configurable: true, value: scrollHeight })
+  Object.defineProperty(box, 'clientHeight', { configurable: true, value: clientHeight })
+}
+
+const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()))
+
+describe('truncateHtml (4.5，纯函数)', () => {
+  it('passes short content through untouched', () => {
+    const r = truncateHtml({ content: 'short\nanswer' })
+    expect(r.truncated).toBe(false)
+    expect(r.preview).toBe('short\nanswer')
+    expect(r.omittedLines).toBe(0)
+    expect(r.omittedChars).toBe(0)
+  })
+
+  it('truncates by the line threshold and reports omitted lines/chars', () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `line-${i}`)
+    const content = lines.join('\n')
+    const r = truncateHtml({ content })
+    expect(r.truncated).toBe(true)
+    expect(r.preview).toBe(lines.slice(0, TRUNCATE_LINES).join('\n'))
+    expect(r.omittedLines).toBe(60 - TRUNCATE_LINES)
+    expect(r.omittedChars).toBe(content.length - r.preview.length)
+  })
+
+  it('truncates by the char threshold when it hits first', () => {
+    const content = 'x'.repeat(TRUNCATE_CHARS + 500) // 单行：行阈值不触发
+    const r = truncateHtml({ content })
+    expect(r.truncated).toBe(true)
+    expect(r.preview).toHaveLength(TRUNCATE_CHARS)
+    expect(r.omittedChars).toBe(500)
+    expect(r.omittedLines).toBe(0)
+  })
+
+  it('the earlier threshold wins when both exceed', () => {
+    const content = Array.from({ length: 100 }, () => 'y'.repeat(200)).join('\n')
+    const r = truncateHtml({ content })
+    // 字符阈值（8_000）先到：行阈值切点是 40×200+39 = 8_039。
+    expect(r.preview).toHaveLength(TRUNCATE_CHARS)
+    expect(r.truncated).toBe(true)
+  })
+})
+
+describe('scroll following (fix-webui-streaming-liveness 4.1)', () => {
+  function scrollBox(el: SebasTranscriptView): HTMLElement {
+    return el.shadowRoot!.querySelector<HTMLElement>('.scroll')!
+  }
+
+  it('sticky stays engaged at the bottom and streamed frames pin the view to the bottom', async () => {
+    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1) })
+    const box = scrollBox(el)
+    fakeScrollLayout(box, 2000, 500)
+    box.scrollTop = 1500
+    box.dispatchEvent(new Event('scroll'))
+    expect(el.sticky).toBe(true)
+    // 流式帧（turnUnits 变化）驱动滚动提交：瞬时贴底。
+    emitTurnAppend('oc_test', [
+      entry({ position: 90, kind: 'content', content: 'more', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    await el.updateComplete
+    await nextFrame()
+    await el.updateComplete
+    expect(box.scrollTop).toBe(2000)
+  })
+
+  it('scrolling up disengages sticky; streamed frames do not yank the view', async () => {
+    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1) })
+    const box = scrollBox(el)
+    fakeScrollLayout(box, 2000, 500)
+    box.scrollTop = 100
+    box.dispatchEvent(new Event('scroll'))
+    expect(el.sticky).toBe(false)
+    emitTurnAppend('oc_test', [
+      entry({ position: 90, kind: 'content', content: 'more', created_at_unix: FIXED_DATES.T2 }),
+    ])
+    await el.updateComplete
+    await nextFrame()
+    await el.updateComplete
+    expect(box.scrollTop).toBe(100)
+  })
+
+  it('returning near the bottom re-engages sticky (pure geometry, no seam math)', async () => {
+    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1) })
+    const box = scrollBox(el)
+    fakeScrollLayout(box, 2000, 500)
+    box.scrollTop = 100
+    box.dispatchEvent(new Event('scroll'))
+    expect(el.sticky).toBe(false)
+    box.scrollTop = 1800 // 距底 0 ≤ 阈值
+    box.dispatchEvent(new Event('scroll'))
+    expect(el.sticky).toBe(true)
+  })
+
+  it('pure streamed appends commit the scroll even when entries/seam never change', async () => {
+    // updated() 的 turnUnits 依赖：全部已读（seam 恒 null）、entries 属性
+    // 不变——只有 turnUnits 变化的纯增量帧也必须提交滚动（旧实现漏滚）。
+    store.set('sebas:seen:oc_test', String(FIXED_DATES.T5 + 1000))
+    const el = await mount({ entries: streamedTurn('q', ['a'], FIXED_DATES.T1) })
+    const box = scrollBox(el)
+    fakeScrollLayout(box, 2000, 500)
+    box.scrollTop = 1500
+    box.dispatchEvent(new Event('scroll'))
+    emitTurnAppend('oc_test', [
+      entry({ position: 90, kind: 'content', content: 'more', created_at_unix: FIXED_DATES.T1 }),
+    ])
+    await el.updateComplete
+    await nextFrame()
+    await el.updateComplete
+    expect(box.scrollTop).toBe(2000)
+  })
+})
+
+describe('seam template identity (fix-webui-streaming-liveness 4.2)', () => {
+  it('seam toggling preserves unit DOM identity and fold open state', async () => {
+    // 初始全部已读（seam hidden），展开一个过程折叠。
+    store.set('sebas:seen:oc_test', String(FIXED_DATES.T5))
+    const el = await mount({ entries: mixedTurnEntries() })
+    const link = el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!
+    link.click()
+    await el.updateComplete
+    expect(link.getAttribute('aria-expanded')).toBe('true')
+    const firstBlock = el.shadowRoot!.querySelector('.turn-block.is-assistant')!
+
+    // 流式追加新回合（时间戳越过读锚）→ seam 出现。
+    emitTurnAppend('oc_test', [
+      entry({
+        position: 99,
+        kind: 'content',
+        content: 'new turn',
+        created_at_unix: FIXED_DATES.T5 + 100,
+      }),
+    ])
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(false)
+    // 关键断言：同一 DOM 节点仍在（showSeam 翻转不触发整块重建），折叠
+    // 展开态保留。
+    expect(el.shadowRoot!.querySelector('.turn-block.is-assistant')).toBe(firstBlock)
+    const linkAfter = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      '.process-fold button.fold-link',
+    )!
+    expect(linkAfter).toBe(link)
+    expect(linkAfter.getAttribute('aria-expanded')).toBe('true')
+
+    // mark all seen → seam 隐藏；节点身份依旧。
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.seam button.link')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('.seam')?.hasAttribute('hidden')).toBe(true)
+    expect(el.shadowRoot!.querySelector('.turn-block.is-assistant')).toBe(firstBlock)
+  })
+})
+
+describe('markdown incremental rendering (fix-webui-streaming-liveness 4.3)', () => {
+  const mockRender = () => vi.mocked(renderMarkdown)
+
+  it('streaming frames render the live tail as plain text — markdown calls stay flat', async () => {
+    const el = await mount({
+      entries: streamedTurn('q', ['chunk one '], FIXED_DATES.T1),
+      turnLive: true,
+    })
+    await el.updateComplete
+    mockRender().mockClear()
+    // N 帧纯文本流：live tail 走纯文本，历史条目内容不变——renderMarkdown
+    // 调用次数不随帧线性增长（此前每帧对全部文本 run 重解析）。
+    for (let i = 2; i <= 6; i++) {
+      emitTurnAppend('oc_test', [
+        entry({ position: i, kind: 'content', content: `chunk ${i} `, created_at_unix: FIXED_DATES.T1 }),
+      ])
+      await el.updateComplete
+    }
+    expect(mockRender().mock.calls.length).toBe(0)
+
+    // 定稿（turnLive 翻 false，随状态刷新到达）：tail 一次性换 markdown。
+    el.turnLive = false
+    await el.updateComplete
+    expect(mockRender().mock.calls.length).toBeGreaterThan(0)
+  })
+
+  it('with turnLive false (history posture) markdown stays the default', async () => {
+    const el = await mount({ entries: streamedTurn('q', ['settled'], FIXED_DATES.T1) })
+    const liveBodies = el.shadowRoot!.querySelectorAll('.body.text-live')
+    expect(liveBodies.length).toBe(0)
+    expect(el.shadowRoot!.querySelector('.turn-block.is-assistant .body')?.innerHTML).toContain(
+      '<p>settled</p>',
+    )
+  })
+})
+
+describe('truncation + view-all dialog (fix-webui-streaming-liveness 4.5)', () => {
+  const longEntries = (): ConversationEntryView[] => [
+    entry({ position: 0, kind: 'prompt', content: 'go', created_at_unix: FIXED_DATES.T1 }),
+    entry({
+      position: 1,
+      kind: 'content',
+      element_type: 'tool',
+      title: 'bash · big.sh',
+      content: Array.from({ length: 80 }, (_, i) => `row ${i}`).join('\n'),
+      created_at_unix: FIXED_DATES.T1,
+    }),
+  ]
+
+  it('an expanded over-threshold entry shows the preview, the omission notice and view-all', async () => {
+    const el = await mount({ entries: longEntries() })
+    // 展开外层折叠 + 该二级条目（二级 body 只在其自身展开时渲染）。
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!.click()
+    await el.updateComplete
+    const body = el.shadowRoot!.querySelector('[data-truncated]')
+    expect(body).toBeTruthy()
+    expect(body!.textContent).toContain('row 0')
+    expect(body!.textContent).not.toContain('row 79') // 预览不含被截断部分
+    const note = el.shadowRoot!.querySelector('[data-testid="truncation-note"]')
+    expect(note?.textContent).toContain('已截断')
+    expect(note?.textContent).toContain('查看全部')
+  })
+
+  it('an expanded under-threshold entry renders in full with no truncation note', async () => {
+    const el = await mount({ entries: mixedTurnEntries() })
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!.click()
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-truncated]')).toBeNull()
+    expect(el.shadowRoot!.querySelector('[data-testid="truncation-note"]')).toBeNull()
+    expect(el.shadowRoot!.querySelector('button.view-all')).toBeNull()
+  })
+
+  it('view-all opens an isolated dialog; closing unmounts it outside the scroll surface', async () => {
+    const el = await mount({ entries: longEntries() })
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-fold button.fold-link')!.click()
+    await el.updateComplete
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.process-item button.fold-link')!.click()
+    await el.updateComplete
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('button.view-all')!.click()
+    await el.updateComplete
+    const dialog = el.shadowRoot!.querySelector('[data-testid="view-all-dialog"]')
+    expect(dialog).toBeTruthy()
+    expect(dialog!.textContent).toContain('row 79') // 完整内容只在弹层
+    // 隔离：完整内容不在会话滚动容器内。
+    expect(el.shadowRoot!.querySelector('.scroll')!.textContent).not.toContain('row 79')
+
+    // 关闭（wa-hide：Esc/背板/关闭钮的统一出口）→ 弹层整棵卸载。
+    dialog!.dispatchEvent(new Event('wa-hide'))
+    await el.updateComplete
+    expect(el.shadowRoot!.querySelector('[data-testid="view-all-dialog"]')).toBeNull()
+    // 对话面本身不受影响：预览仍在、无残留弹层节点。
+    expect(el.shadowRoot!.querySelector('[data-truncated]')).toBeTruthy()
+    expect(el.shadowRoot!.querySelector('.scroll')!.textContent).toContain('row 0')
   })
 })
