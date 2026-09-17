@@ -133,6 +133,19 @@ describe('WsClient', () => {
     expect(received).toHaveLength(1)
   })
 
+  it('dispatches the session.resync resync signal (fix-webui-streaming-liveness 5.4)', () => {
+    // D6 丢帧收敛的前端入口：白名单放行 session.resync，消费端据此清游标
+    // 全量重取。无载荷——type 标签即全部语义。
+    const client = makeClient()
+    client.hostConnected()
+    const received: WsEvent[] = []
+    client.subscribe((e) => received.push(e))
+    const socket = FakeSocket.instances[0]!
+    socket.open()
+    socket.emit('session.resync')
+    expect(received).toEqual([{ type: 'session.resync' }])
+  })
+
   it('request() correlates the matching-id response (ping self-proof)', async () => {
     const client = makeClient()
     client.hostConnected()

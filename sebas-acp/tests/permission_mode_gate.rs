@@ -251,12 +251,19 @@ async fn set_mode_auto_silences_the_next_tool_call_without_respawn() {
     // 所以第二跳仍会咨询——正是这条 journal 证明静默出自**驱动门控**，
     // 而非 fake 自身的跳过逻辑。
     let raw = std::fs::read_to_string(&journal).expect("journal exists");
-    assert_eq!(
+    // 驱动下发的 SetMode：判定窗口钉在「首个 hook 应答之前」——1s 看门狗
+    // 存活探针与 SetMode 走同一条 wire 消息（set_permission_mode），探针
+    // 落在泊车窗口之外时会被 journal 记为第二条 "in"（纯时序，非本测试的
+    // 关注点）；SetMode 必然先于第一跳应答（门控要读它），以此划窗。
+    let first_answer = raw
+        .lines()
+        .position(|l| l.contains("permissionDecision") && l.contains("control_response"))
+        .unwrap_or(raw.len());
+    assert!(
         raw.lines()
-            .filter(|l| l.contains("set_permission_mode") && l.contains("\"dir\":\"in\""))
-            .count(),
-        1,
-        "driver must issue exactly one set_permission_mode: {raw}"
+            .take(first_answer)
+            .any(|l| l.contains("set_permission_mode") && l.contains("\"dir\":\"in\"")),
+        "driver must issue set_permission_mode before the first hook answer: {raw}"
     );
     assert_eq!(
         raw.lines()

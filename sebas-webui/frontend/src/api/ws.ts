@@ -9,10 +9,10 @@
  *   single place that touches the byte representation;
  * - server events arrive as Notifications whose `method` is the legacy
  *   dotted type (session.created / session.updated / session.removed /
- *   session.pending_dropped / config.updated / permission.requested /
- *   turn.append / core.reachability) and whose `params` is the legacy
- *   payload; subscribers receive the reconstituted `{type, ...payload}`
- *   event, so dispatch keys are unchanged;
+ *   session.pending_dropped / session.turn_stalled / session.resync /
+ *   config.updated / permission.requested / turn.append / core.reachability)
+ *   and whose `params` is the legacy payload; subscribers receive the
+ *   reconstituted `{type, ...payload}` event, so dispatch keys are unchanged;
  * - unknown methods are tolerated (ignored — forward compatibility);
  * - `request(method, params)` correlates the matching-id Response:
  *   10s timeout, immediate `not_connected` rejection when the socket is
@@ -49,6 +49,13 @@ export interface WsEvents {
     session_id: string
     released: number
   }
+  /**
+   * （fix-webui-streaming-liveness 5.4/5.1，D6）重新同步信号：服务端检测到
+   * 本连接的订阅落后（broadcast Lagged）或 core 通道重连给出快照重取信号时
+   * 推送。无载荷——消费端清本地增量游标与流式缓冲后全量重取，不得因陈旧
+   * 游标永久拒收增量。
+   */
+  'session.resync': { type: 'session.resync' }
   'config.updated': { type: 'config.updated' }
   /**
    * （workbench-live-conversation-flow 2.2）实时回合内容：同一合并窗内某
@@ -111,6 +118,7 @@ const EVENTS = {
   'session.removed': true,
   'session.pending_dropped': true,
   'session.turn_stalled': true,
+  'session.resync': true,
   'config.updated': true,
   'permission.requested': true,
   'turn.append': true,

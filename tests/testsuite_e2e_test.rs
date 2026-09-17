@@ -20,8 +20,9 @@ use std::time::Duration;
 mod support;
 
 use support::{
-    Sandbox, free_port, http_client, post_json, wait_for, wait_reachable, wait_router_addr,
-    wait_unreachable_with_cause, webui_healthy,
+    Sandbox, free_port, http_client, next_ws_frame, post_json, spawn_sse_stub_upstream,
+    wait_for, wait_reachable, wait_router_addr, wait_unreachable_with_cause, webui_healthy,
+    ws_connect, WsStream,
 };
 
 /// 从 core 日志里等出一次性 bootstrap 配对 token（只打印一次，读过就没了）。
@@ -3016,4 +3017,458 @@ async fn permission_loop_allow_session_switches_auto_over_core_channel() {
         "second ensure must be accepted: {resp:?}"
     );
     wait_turn_marker(&sb, &key, "perm done", 2).await;
+}
+
+// ── fix-webui-streaming-liveness 6.1/6.2/6.3：流式活性与瘦 summary ─────────
+
+/// One `turn.append` notification's **content** entry texts (prompt/tool
+/// entries excluded) — the per-frame streaming unit the assertions count.
+fn append_frame_texts(ev: &serde_json::Value) -> Vec<String> {
+    ev["params"]["entries"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e["kind"].as_str() == Some("content"))
+                .filter_map(|e| e["content"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// fix-webui-streaming-liveness 6.1：claude 会话流式 e2e（回合进行中分多次帧
+/// 到达，非一次整块）。fake-claude "drip" 场景以 400ms 间隔发 3 个
+/// partial-stream 文本块——每个都落在独立的 core-channel 合并窗（250ms）里，
+/// webui WS 因此收到**多帧**；首帧到达时刻的 HTTP 快照证明内容在回合内可见
+/// （状态仍 working），最终 transcript 与帧序列对账一致且**逐字各一次**——
+/// partial 流 + 完整帧不产生重复（driver 1.3 的进程级证据）。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn claude_turn_streams_multiple_frames_to_the_webui() {
+    let sb = Sandbox::new("testsuite_e2e", "claude-drip");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 先连 WS，再建会话：订阅先于一切落账，首帧起不漏。webui 启动会与
+    // core 的 socket bind 竞速——首个流式订阅尝试可能失败、经 1s 退避后才
+    // 连上；`session.resync` 随每次订阅快照到达，等到它（或短超时内没等到
+    // = 订阅已在前置检查期间上线，不会再来）再创建会话。
+    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "drip", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+
+    // 回合收尾由 HTTP 轮询判定（claude kind 收尾无 transcript 标记帧）。
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+    let poll_cli = cli.clone();
+    let poll_url = detail_url.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(v) = poll_cli.get(&poll_url).send().await
+                && let Ok(j) = v.json::<serde_json::Value>().await
+                && j["status_slug"].as_str() == Some("done")
+            {
+                let _ = done_tx.send(j);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    // 读帧：记录每个 turn.append 的 content 帧内容；首帧到达即抓一份 HTTP
+    // 快照（回合必须仍在飞、transcript 已有首块）。
+    let mut frames: Vec<Vec<String>> = Vec::new();
+    let mut mid_turn: Option<serde_json::Value> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!("timed out waiting for the drip turn; frames so far: {frames:?}")
+            }
+            done = &mut done_rx => {
+                let done = done.expect("done watcher alive");
+                assert_eq!(
+                    done["status_slug"].as_str(),
+                    Some("done"),
+                    "turn must end Done: {done}"
+                );
+                break;
+            }
+            ev = next_ws_frame(&mut ws) => {
+                let ev = ev;
+                if ev["method"] == "turn.append"
+                    && ev["params"]["session_id"] == key.as_str()
+                {
+                    let texts = append_frame_texts(&ev);
+                    if !texts.is_empty() {
+                        if mid_turn.is_none() {
+                            let snap: serde_json::Value = cli
+                                .get(&detail_url)
+                                .send()
+                                .await
+                                .expect("mid-turn detail")
+                                .json()
+                                .await
+                                .expect("mid-turn json");
+                            assert_eq!(
+                                snap["status_slug"].as_str(), Some("working"),
+                                "the first streamed frame must arrive while the turn is in flight: {snap}"
+                            );
+                            let streamed: String = snap["entries"]
+                                .as_array()
+                                .map(|b| {
+                                    b.iter()
+                                        .filter(|e| e["kind"].as_str() == Some("content"))
+                                        .filter_map(|e| e["content"].as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("")
+                                })
+                                .unwrap_or_default();
+                            assert!(
+                                streamed.contains("drip0"),
+                                "the first chunk must already be visible mid-turn: {streamed:?}"
+                            );
+                            mid_turn = Some(snap);
+                        }
+                        frames.push(texts);
+                    }
+                }
+            }
+        }
+    }
+
+    // 收尾竞速窗口：最后一个 content 帧可能与 done 信号同时就绪（250ms 合
+    // 并窗的冲刷略迟于状态翻转），短暂排水补齐「逐字各一次」的对账——多帧
+    // 断言只用 done 之前到达的帧，不受此处影响。
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(drain_deadline, next_ws_frame(&mut ws)).await {
+            Ok(ev) => {
+                if ev["method"] == "turn.append" && ev["params"]["session_id"] == key.as_str() {
+                    let texts = append_frame_texts(&ev);
+                    if !texts.is_empty() {
+                        frames.push(texts);
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // 核心断言：**多帧**、且每帧只是回合的一部分——不是一次整块。
+    assert!(
+        frames.len() >= 2,
+        "the turn must stream as multiple turn.append frames, got {frames:?}"
+    );
+    let all: String = frames.concat().concat();
+    assert_eq!(
+        all, "drip0 drip1 drip2 ",
+        "frames must carry the partial-stream chunks in order, each exactly once: {frames:?}"
+    );
+
+    // 快照面对账：transcript = prompt + 3 个内容条目（不多不少——完整
+    // assistant 帧的文本块被 driver 跳过，无重复）。
+    let detail: serde_json::Value = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("final detail")
+        .json()
+        .await
+        .expect("final json");
+    let entries = detail["entries"].as_array().expect("entries");
+    let contents: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["content"].as_str())
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["drip", "drip0 ", "drip1 ", "drip2 "],
+        "transcript must reconcile with the streamed frames, no duplication: {contents:?}"
+    );
+}
+
+/// fix-webui-streaming-liveness 6.2：native 会话在 webui 面逐 delta 到达。
+/// SSE 假上游按 400ms 间隔吐 4 个 text_delta——native pump 逐 delta 落账并
+/// 广播（不再攒到回合边界整块 flush），webui WS 在「🗒 turn summary」收尾帧
+/// 之前收到**多帧**增量；最终 transcript 与帧序列对账一致、逐字各一次。
+/// （IM 桥面的粒度一致性由 agent_backend 的对账单测 2.2 承载；本用例钉
+/// detached 拓扑下 webui 面的实时性。）
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn native_turn_streams_deltas_to_the_webui() {
+    let sb = Sandbox::new("testsuite_e2e", "native-drip");
+    // 本地 SSE 上游：4 个 text_delta，间隔 400ms（每个落在独立合并窗）。
+    let upstream = spawn_sse_stub_upstream(&["alpha ", "beta ", "gamma ", "end"], 400).await;
+    let base = format!("http://127.0.0.1:{upstream}");
+    let cli = http_client();
+    let _core = sb.spawn_core_extra(&[
+        ("SEBAS_AGENT_PROVIDER_BASE_URL", base.as_str()),
+        ("SEBAS_AGENT_PROVIDER_API_KEY", "sk-sandbox-native"),
+    ]);
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    // 先连 WS 并等核心通道订阅上线（同 claude drip 用例：resync 即信号，
+    // 4s 未到则订阅已在前置检查期间上线）。
+    let mut ws: WsStream = ws_connect(&sb.webui_url()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let ev = next_ws_frame(&mut ws).await;
+            if ev["method"] == "session.resync" {
+                break;
+            }
+        }
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "hi", "agent": "native" }),
+    )
+    .await
+    .expect("create native session");
+    assert_eq!(status, 201, "native spawn must not be rejected: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+
+    // 读帧到收尾标记（🗒 turn summary 条目，native 回合结束才落账）。
+    let mut frames: Vec<Vec<String>> = Vec::new();
+    let mut mid_turn: Option<String> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, next_ws_frame(&mut ws))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for native turn frames"));
+        if ev["method"] != "turn.append" || ev["params"]["session_id"] != key.as_str() {
+            continue;
+        }
+        let texts = append_frame_texts(&ev);
+        if texts.is_empty() {
+            continue;
+        }
+        if texts.iter().any(|t| t.contains("turn summary")) {
+            // 收尾帧可能同时捎带同一合并窗内的最后一个 delta——先入账再收。
+            let tail: Vec<String> = texts
+                .into_iter()
+                .filter(|t| !t.contains("turn summary"))
+                .collect();
+            if !tail.is_empty() {
+                frames.push(tail);
+            }
+            break;
+        }
+        if mid_turn.is_none() {
+            // 首 delta 帧到达即抓 HTTP 快照：transcript 只有已到部分
+            // ——正文在回合内可见，不是收尾一次性整块。
+            let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+            let snap: serde_json::Value = cli
+                .get(&detail_url)
+                .send()
+                .await
+                .expect("mid-turn detail")
+                .json()
+                .await
+                .expect("mid-turn json");
+            let streamed: String = snap["entries"]
+                .as_array()
+                .map(|b| {
+                    b.iter()
+                        .filter(|e| e["kind"].as_str() == Some("content"))
+                        .filter_map(|e| e["content"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            assert!(
+                streamed.contains("alpha ") && !streamed.contains("end"),
+                "mid-turn transcript must show the leading deltas only: {streamed:?}"
+            );
+            mid_turn = Some(streamed);
+        }
+        frames.push(texts);
+    }
+
+    // 多帧逐 delta；帧内容拼起来恰好是上游的 4 段（各一次、有序）。
+    assert!(
+        frames.len() >= 2,
+        "native deltas must arrive as multiple turn.append frames, got {frames:?}"
+    );
+    let all: String = frames.concat().concat();
+    assert_eq!(
+        all, "alpha beta gamma end",
+        "frames must carry every delta exactly once, in order: {frames:?}"
+    );
+    assert!(mid_turn.is_some(), "the mid-turn snapshot must have been taken");
+
+    // 快照面对账：transcript 与帧序列完全一致（📖 过程痕迹之外，正文四段）。
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let detail: serde_json::Value = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("final detail")
+        .json()
+        .await
+        .expect("final json");
+    let transcript: String = detail["entries"]
+        .as_array()
+        .map(|b| {
+            b.iter()
+                .filter(|e| e["kind"].as_str() == Some("content"))
+                .filter(|e| !e["content"].as_str().unwrap_or("").contains("turn summary"))
+                .filter_map(|e| e["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        transcript, "alpha beta gamma end",
+        "native transcript must reconcile with the streamed deltas exactly once: {transcript:?}"
+    );
+    assert!(
+        detail["entries"]
+            .as_array()
+            .is_some_and(|b| b.iter().any(|e| e["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("turn summary")))),
+        "the turn-end summary entry must close the turn: {detail}"
+    );
+}
+
+/// fix-webui-streaming-liveness 6.3（HTTP 级钉住的两条）：大会话（1200 条
+/// transcript）下 `GET /api/summary` 恒为 KB 级（<100KB）且不内嵌 entries，
+/// 响应体积不随流式条目数线性增长（流式中途与收尾后两次采样同为 KB 级）；
+/// 正文只走 detail 游标路径——`entries_after=<cursor>` 只回尾部条目。
+/// （headless Chrome 的 long-task 采样不在 HTTP 断言能力内，另行执行。）
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn summary_stays_small_while_transcript_is_large() {
+    let sb = Sandbox::new("testsuite_e2e", "summary-flood");
+    let cli = http_client();
+    let _core = sb.spawn_core();
+    let _webui = sb.spawn_webui(&sb.core_secret);
+    wait_reachable(&cli, &sb).await;
+
+    let (status, body) = post_json(
+        &cli,
+        &format!("{}/api/sessions", sb.webui_url()),
+        serde_json::json!({ "prompt": "flood", "agent": "claude" }),
+    )
+    .await
+    .expect("create session");
+    assert_eq!(status, 201, "create session: {body}");
+    let key = body["key"].as_str().expect("key").to_string();
+    let detail_url = format!("{}/api/sessions/{key}", sb.webui_url());
+    let summary_url = format!("{}/api/summary", sb.webui_url());
+    let hint = sb.path.clone();
+
+    async fn summary_size(cli: &reqwest::Client, url: &str) -> (usize, serde_json::Value) {
+        let resp = cli.get(url).send().await.expect("summary");
+        let bytes = resp.bytes().await.expect("summary body");
+        let size = bytes.len();
+        let v = serde_json::from_slice(&bytes).expect("summary json");
+        (size, v)
+    }
+
+    // 回合收尾：1200 条全部落账。1200 个 back-to-back 的 delta 在几秒内跑完
+    // ——「working + 已有 content」的采样窗可能比 wait_for 的轮询间隔还短，
+    // 所以这里的判据只看条目数（done 同样满足），不与状态位竞速。
+    wait_for(
+        "flood turn to land 1201 entries",
+        Duration::from_secs(90),
+        &hint,
+        {
+            let cli = cli.clone();
+            let url = detail_url.clone();
+            move || {
+                let cli = cli.clone();
+                let url = url.clone();
+                Box::pin(async move {
+                    let v = cli.get(&url).send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+                    let n = v["entries"]
+                        .as_array()
+                        .map(|b| b.len())
+                        .unwrap_or(0);
+                    (n >= 1201).then_some(v)
+                })
+            }
+        },
+    )
+    .await;
+
+    // 收尾后采样：summary 体积与条目数无关（1200 条仍 <100KB）。
+    let (final_size, final_summary) = summary_size(&cli, &summary_url).await;
+    assert!(
+        final_size < 100 * 1024,
+        "post-turn summary must stay <100KB with 1200 entries, got {final_size} bytes"
+    );
+    assert_eq!(
+        final_summary["active_session_key"].as_str(),
+        Some(key.as_str()),
+        "summary must still name the focused session"
+    );
+    assert!(
+        final_summary["active_session"].get("entries").is_none(),
+        "summary must not embed the transcript (D3 split)"
+    );
+
+    // 正文只走 detail：全量 ≥1200 条；游标增量只回尾部（响应有界）。
+    let full: serde_json::Value = cli
+        .get(&detail_url)
+        .send()
+        .await
+        .expect("full detail")
+        .json()
+        .await
+        .expect("full json");
+    let entries = full["entries"].as_array().expect("entries");
+    assert!(
+        entries.len() >= 1200,
+        "the flood turn must land >=1200 entries, got {}",
+        entries.len()
+    );
+    let cursor = entries.len() as u64 - 300;
+    let tail: serde_json::Value = cli
+        .get(format!("{detail_url}?entries_after={cursor}"))
+        .send()
+        .await
+        .expect("cursor detail")
+        .json()
+        .await
+        .expect("cursor json");
+    let tail_entries = tail["entries"].as_array().expect("tail entries");
+    assert_eq!(
+        tail_entries.len() as u64,
+        entries.len() as u64 - 1 - cursor,
+        "the cursor fetch must return exactly the entries after the cursor"
+    );
+    assert_eq!(
+        tail_entries[0]["position"].as_u64(),
+        Some(cursor + 1),
+        "cursor fetch starts strictly after the cursor"
+    );
+    assert_eq!(
+        tail_entries.last().unwrap()["position"].as_u64(),
+        Some(entries.len() as u64 - 1),
+    );
 }

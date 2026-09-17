@@ -77,19 +77,15 @@ pub async fn summary(State(state): State<WebUiState>) -> Response {
     let focused = state.backend.focused().await;
     let reachability = state.backend.reachability().await;
     let (rows, active, dormant, spawning) = build_session_rows(&infos, focused.as_ref());
-    // workbench-conversation-view 1.4（design D1）：聚焦会话与 detail 同形状
-    // ——条目序列随 summary 下发，客户端不必再为对话内容发第二个请求；
-    // 取不到（瞬时失败）给空序列而不是失败 payload。
-    let active_session = match focused.as_ref() {
-        Some(f) => {
-            let turns = state.backend.turns(f.clone(), 0).await.unwrap_or_default();
-            infos
-                .iter()
-                .find(|i| i.channel == f.channel.as_str() && i.key == f.reference)
-                .map(|info| session_summary(info, &turns))
-        }
-        None => None,
-    };
+    // fix-webui-streaming-liveness 3.1（D3）：聚焦会话只带元信息，**不带**
+    // transcript（entries 键移除）——正文一律走 detail 游标路径
+    // （/api/sessions/{key}?entries_after=<cursor>），summary 响应回到 KB 级。
+    let active_session = focused.as_ref().and_then(|f| {
+        infos
+            .iter()
+            .find(|i| i.channel == f.channel.as_str() && i.key == f.reference)
+            .map(session_summary)
+    });
 
     let data = json!({
         "active_count": active,
@@ -2264,7 +2260,7 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
                 .collect(),
         }),
         // fix-pending-queue-liveness 2.2：看门狗强制收尾的事实转发给前端，
-        // 分级通知的低档（warn）就地呈现（点名会话与释放条目数）。
+        // 分级通知的低档（warn）就地呈现（点名会话与释放条数）。
         SessionEvent::TurnStalled {
             channel,
             key,
@@ -2273,30 +2269,49 @@ fn session_event_to_frame(ev: SessionEvent) -> Option<WebUiEvent> {
             session_id: encode_channel_key(&channel, &key),
             released,
         }),
-        SessionEvent::Resync => None,
+        // fix-webui-streaming-liveness 5.1（D6）：重新同步信号转发——core 通道
+        // 重连（快照重取）或本连接订阅落后时，浏览器清游标全量重取，不再
+        // 静默丢弃。
+        SessionEvent::Resync => Some(WebUiEvent::SessionResync),
     }
 }
 
 /// 取下一条广播事件；接收端关闭后把支路停用并永久挂起（与 permission
-/// 支路的 None 语义一致，避免忙等）。Lagged 跳过——turn 是可由快照收敛的
-/// 增量、可达性是全量状态（add-core-reachability-ws-push），都无一致性
-/// 代价，连接不断。
+/// 支路的 None 语义一致，避免忙等）。Lagged 上报给调用方裁决（D6）——turn
+/// 流的增量有缺口，消费端必须发 `session.resync` 让浏览器快照重取；可达性
+/// 是全量状态，落后无一致性代价，照旧静默跳过。连接都不断。
 async fn recv_broadcast<T: Clone>(
     rx: &mut Option<tokio::sync::broadcast::Receiver<T>>,
-) -> Option<T> {
+) -> BroadcastRecv<T> {
     loop {
         match rx.as_mut() {
-            None => return std::future::pending().await,
+            // 支路已停用（后端没有该流，或已因 Closed 置 None）：这一臂必须
+            // 永久挂起——返回值会被 select 臂当作「无事发生」立即再轮询，
+            // 退化成 100% CPU 忙等（首版实现的真实事故，测试抓出的）。
+            None => loop {
+                std::future::pending::<()>().await;
+            },
             Some(r) => match r.recv().await {
-                Ok(ev) => return Some(ev),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Ok(ev) => return BroadcastRecv::Event(ev),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    return BroadcastRecv::Lagged;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     *rx = None;
-                    return std::future::pending().await;
+                    return BroadcastRecv::Closed;
                 }
             },
         }
     }
+}
+
+/// [`recv_broadcast`] 的结果：事件、订阅落后（Lagged）或支路已关闭。
+enum BroadcastRecv<T> {
+    Event(T),
+    /// 该客户端的订阅落后：错过的增量不可弥补，消费端应触发快照重取。
+    Lagged,
+    /// 支路已关闭（后端没有该流）：select 臂停用（永久挂起）。
+    Closed,
 }
 
 /// Per-connection loop: forwards backend events as `Notification` frames,
@@ -2340,9 +2355,15 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                             }
                         }
                     }
-                    // A slow client lagged the broadcast: skip what it missed
-                    // rather than killing the connection.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // A slow client lagged the broadcast: the missed session
+                    // events are gone — tell the browser to resync (D6) and
+                    // keep the connection up.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let text = codec.encode(&notification_frame(WebUiEvent::SessionResync));
+                        if sender.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -2367,24 +2388,37 @@ async fn ws_connection(state: WebUiState, socket: WebSocket) {
                 }
             }
             turn = recv_broadcast(&mut turns) => {
-                if let Some(event) = turn {
-                    // seq = 本帧最后一条的 position：前端的去重锚。
-                    let seq = event.entries.last().map(|e| e.position).unwrap_or(0);
-                    let frame = WebUiEvent::TurnAppend {
-                        session_id: encode_channel_key(&event.channel, &event.key),
-                        entries: event.entries,
-                        seq,
-                    };
-                    let text = codec.encode(&notification_frame(frame));
-                    if sender.send(Message::Text(text.into())).await.is_err() {
-                        break;
+                match turn {
+                    BroadcastRecv::Event(event) => {
+                        // seq = 本帧最后一条的 position：前端的去重锚。
+                        let seq = event.entries.last().map(|e| e.position).unwrap_or(0);
+                        let frame = WebUiEvent::TurnAppend {
+                            session_id: encode_channel_key(&event.channel, &event.key),
+                            entries: event.entries,
+                            seq,
+                        };
+                        let text = codec.encode(&notification_frame(frame));
+                        if sender.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
                     }
+                    // fix-webui-streaming-liveness 5.1（D6）：turn 流落后 =
+                    // 增量有缺口——发 `session.resync` 让浏览器清游标全量重取，
+                    // 连接不断（旧实现静默 continue，缺口永不收敛）。
+                    BroadcastRecv::Lagged => {
+                        let text = codec.encode(&notification_frame(WebUiEvent::SessionResync));
+                        if sender.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    BroadcastRecv::Closed => {}
                 }
             }
             // add-core-reachability-ws-push D3/D5：真翻转才有的帧（后端
-            // set_status 收口已去重），params 与 get 响应同形。
+            // set_status 收口已去重），params 与 get 响应同形。落后静默跳过
+            // ——可达性是全量状态，下一帧翻转即收敛，无一致性代价。
             flip = recv_broadcast(&mut reach_updates) => {
-                if let Some(reachability) = flip {
+                if let BroadcastRecv::Event(reachability) = flip {
                     let text = codec.encode(&notification_frame(reachability_event(reachability)));
                     if sender.send(Message::Text(text.into())).await.is_err() {
                         break;
@@ -2737,5 +2771,86 @@ mod env_endpoint_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
+mod ws_resync_tests {
+    //! fix-webui-streaming-liveness 5.1（D6）：WS 循环丢帧收敛的单元面——
+    //! `recv_broadcast` 必须把 Lagged 上报为 `BroadcastRecv::Lagged`（由
+    //! ws_connection 翻译成 `session.resync` 帧后继续连接），`SessionEvent::Resync`
+    //! 必须映射为同名帧（core 通道重连的快照重取信号直通浏览器）。
+    //! 帧序列化契约在 events.rs 钉死；慢消费者注入 Lagged 的 ws 集成路径
+    //! 归 ws_test / e2e 套件（后续 review 阶段）。
+
+    use super::*;
+
+    /// 订阅落后：容量 1 的广播灌 2 条，接收端必须报告 Lagged（而不是静默
+    /// continue 吞掉缺口）。
+    #[tokio::test]
+    async fn recv_broadcast_reports_lagged_instead_of_silently_dropping() {
+        let (tx, rx) = tokio::sync::broadcast::channel::<u32>(1);
+        let mut opt_rx = Some(rx);
+        tx.send(1).unwrap();
+        // 第一条正常送达。
+        assert!(matches!(
+            recv_broadcast(&mut opt_rx).await,
+            BroadcastRecv::Event(1)
+        ));
+        // 接收端未取走前灌两条：容量 1，必然落后。
+        tx.send(2).unwrap();
+        tx.send(3).unwrap();
+        assert!(
+            matches!(recv_broadcast(&mut opt_rx).await, BroadcastRecv::Lagged),
+            "a fallen-behind subscriber must be told to resync, not silently skipped"
+        );
+        // 落后之后仍能继续收新事件（连接不断的前提）。
+        assert!(matches!(
+            recv_broadcast(&mut opt_rx).await,
+            BroadcastRecv::Event(3)
+        ));
+    }
+
+    /// 支路关闭：报告 Closed（ws_connection 据此停用支路，不忙等）。
+    #[tokio::test]
+    async fn recv_broadcast_reports_closed_when_the_stream_ends() {
+        let (tx, rx) = tokio::sync::broadcast::channel::<u32>(1);
+        drop(tx);
+        let mut opt_rx = Some(rx);
+        assert!(matches!(
+            recv_broadcast(&mut opt_rx).await,
+            BroadcastRecv::Closed
+        ));
+    }
+
+    /// 忙等回归（fix-webui-streaming-liveness 5.1）：停用的支路（None）必须
+    /// 永久挂起，绝不立即返回——首版实现 `None => Closed` 与 select 臂的
+    /// 「Closed => {}」组合成 100% CPU 忙等，整个连接循环（含 WS 握手）被
+    /// 单线程 runtime 上的自旋饿死。
+    #[tokio::test]
+    async fn recv_broadcast_parks_forever_when_the_leg_is_deactivated() {
+        let mut opt_rx: Option<tokio::sync::broadcast::Receiver<u32>> = None;
+        let raced = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            recv_broadcast(&mut opt_rx),
+        )
+        .await;
+        assert!(
+            raced.is_err(),
+            "a deactivated leg must park forever, not return Closed and spin the select loop"
+        );
+    }
+
+    /// `SessionEvent::Resync`（core 通道重连后的快照重取信号）必须转发为
+    /// `session.resync` WS 帧，不再是静默丢弃。
+    #[test]
+    fn session_resync_maps_to_the_resync_frame() {
+        let frame = session_event_to_frame(SessionEvent::Resync)
+            .expect("Resync must produce a frame now");
+        let wrapped = crate::events::notification_frame(frame);
+        let crate::ws_rpc::Frame::Notification(notification) = wrapped else {
+            panic!("resync must ride a Notification frame");
+        };
+        assert_eq!(notification.method, "session.resync");
     }
 }

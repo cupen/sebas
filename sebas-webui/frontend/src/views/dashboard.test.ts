@@ -1075,26 +1075,34 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
     el.remove()
   })
 
-  it('a turn.append frame alone keeps the view fresh through the silent window', async () => {
+  it('a turn.append frame updates the focused buffer directly and issues no refetch (3.2 dispatch)', async () => {
+    // D4 分流：流式正文帧自带增量——dashboard 只把它并入聚焦会话缓冲，
+    // 不发任何 HTTP 请求（旧实现每帧全量 refetch 的放大回路已拆除）。
     apiMocks.summary.mockResolvedValue(focusedSummary())
-    apiMocks.session.mockResolvedValue({ ...detailFixture(), status_slug: 'queued' })
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), status_slug: 'working' })
     const el = await mount()
-    expect(composerOf(el).turnInFlight).toBe(false)
+    await settle(el)
+    apiMocks.session.mockClear()
+    apiMocks.summary.mockClear()
 
-    apiMocks.summary.mockResolvedValue({
-      ...focusedSummary(),
-      active_session: { ...focusedSummary().active_session!, turn_engaged: true },
-    })
-    apiMocks.session.mockResolvedValue({ ...detailFixture(), turn_engaged: true })
     wsMocks.emit({
       type: 'turn.append',
       session_id: 'oc_live%00',
-      entries: [],
+      entries: [
+        { position: 3, kind: 'content', element_type: 'markdown', content: 'streamed live', created_at_unix: 1_700_000_300 },
+      ],
       seq: 3,
     })
     await settle(el)
 
-    expect(composerOf(el).turnInFlight).toBe(true)
+    // 缓冲就地推进：transcript 拿到 4 条（帧内条目并入），零请求。
+    const transcript = el.shadowRoot!.querySelector(
+      'sebas-transcript-view',
+    ) as unknown as { entries: ConversationEntryView[] }
+    expect(transcript.entries.map((e) => e.position)).toEqual([0, 1, 2, 3])
+    expect(transcript.entries[3].content).toBe('streamed live')
+    expect(apiMocks.session).not.toHaveBeenCalled()
+    expect(apiMocks.summary).not.toHaveBeenCalled()
     el.remove()
   })
 
@@ -1136,6 +1144,144 @@ describe('sebas-dashboard (silent working window refetch chain)', () => {
     expect(composer.sessionKey ?? null).toBeNull()
     expect(composer.turnInFlight).toBe(false)
     // detail 从未被拉（无焦点键可拉）。
+    expect(apiMocks.session).not.toHaveBeenCalled()
+    el.remove()
+  })
+})
+
+describe('ws event dispatch, throttling and resync (fix-webui-streaming-liveness 3.2/5.3)', () => {
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function transcriptOf(
+    el: SebasDashboard,
+  ): (HTMLElement & { entries: ConversationEntryView[] }) | null {
+    return el.shadowRoot!.querySelector<HTMLElement & { entries: ConversationEntryView[] }>(
+      'sebas-transcript-view',
+    )
+  }
+
+  it('session.* events coalesce into throttled list refreshes (≥500ms window)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    const base = apiMocks.summary.mock.calls.length
+    // 节流窗内的三个会话事件：只产生一轮刷新。
+    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
+    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
+    wsMocks.emit({ type: 'session.created', session_id: 'oc_new%00' })
+    await settle(el)
+    expect(apiMocks.summary.mock.calls.length).toBe(base + 1)
+    // 窗口过后的下一事件触发新一轮（尾沿计时器已排定，≥500ms 后落地）。
+    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'done' })
+    await new Promise((r) => setTimeout(r, 650))
+    await settle(el)
+    expect(apiMocks.summary.mock.calls.length).toBe(base + 2)
+    el.remove()
+  })
+
+  it('a stale detail response never paints over a newer fetch (fetchSeq guard)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    let releaseStale!: (d: SessionDetail) => void
+    const stale = new Promise<SessionDetail>((resolve) => (releaseStale = resolve))
+    // 首拉（代际 A）挂起；随后的 refetch（代际 B）立即返回含新条目的快照。
+    apiMocks.session.mockImplementationOnce(() => stale)
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      entries: [
+        ...detailFixture().entries,
+        { position: 3, kind: 'content', element_type: 'markdown', content: 'from newer fetch', created_at_unix: 1_700_000_300 },
+      ],
+    })
+    const el = await mount()
+    await settle(el)
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    expect(transcriptOf(el)!.entries.map((e) => e.content)).toContain('from newer fetch')
+    // 迟到的 A 响应（旧快照）到达：不得回退 B 的缓冲。
+    releaseStale(detailFixture())
+    await settle(el)
+    const entries = transcriptOf(el)!.entries
+    expect(entries).toHaveLength(4)
+    expect(entries[3].content).toBe('from newer fetch')
+    el.remove()
+  })
+
+  it('session.resync drops every cursor and refetches the focused session in full (5.3)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    // 先建立本地游标（增量一轮：0..2 → 3）。
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      entries: [
+        { position: 3, kind: 'content', element_type: 'markdown', content: 'incremental', created_at_unix: 1_700_000_300 },
+      ],
+    })
+    window.dispatchEvent(new Event('sebas:refetch'))
+    await settle(el)
+    let calls = apiMocks.session.mock.calls
+    // 增量请求携带推进前的游标 2（响应并入后本地序列到 3）。
+    expect(calls[calls.length - 1]).toEqual(['oc_live%00', 2])
+    // resync：清全部游标 → 聚焦会话全量重取（无 entries_after）。
+    wsMocks.emit({ type: 'session.resync' })
+    await settle(el)
+    calls = apiMocks.session.mock.calls
+    expect(calls[calls.length - 1]).toEqual(['oc_live%00'])
+    el.remove()
+  })
+
+  it('a recycled position with new content (core restart) resets the cursor and refetches full (5.3)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    const el = await mount()
+    await settle(el)
+    // 本地游标在 2（0..2 全量）。
+    // 重复帧（同 position 同内容）：去重丢弃，绝不触发重取。
+    wsMocks.emit({
+      type: 'turn.append',
+      session_id: 'oc_live%00',
+      entries: [
+        { position: 2, kind: 'content', element_type: 'markdown', content: 'second entry', created_at_unix: 1_700_000_200 },
+      ],
+      seq: 2,
+    })
+    await settle(el)
+    expect(apiMocks.session).toHaveBeenCalledTimes(1)
+    // 世代回绕（core 重启后 position 从 0 重计、内容不同）：单调性矛盾 →
+    // 清缓冲、游标置空、全量重取。
+    wsMocks.emit({
+      type: 'turn.append',
+      session_id: 'oc_live%00',
+      entries: [
+        { position: 0, kind: 'content', element_type: 'markdown', content: 'REBUILT', created_at_unix: 1_700_009_999 },
+      ],
+      seq: 0,
+    })
+    await settle(el)
+    const calls = apiMocks.session.mock.calls
+    // 单调性矛盾必须强制全量重取。
+    expect(calls[calls.length - 1]).toEqual(['oc_live%00'])
+    el.remove()
+  })
+
+  it('a turn.append for a non-focused session neither buffers nor refetches (3.2)', async () => {
+    apiMocks.summary.mockResolvedValue(summaryBase)
+    apiMocks.session.mockResolvedValue(detailFixture())
+    const el = await mount()
+    await settle(el)
+    apiMocks.session.mockClear()
+    wsMocks.emit({
+      type: 'turn.append',
+      session_id: 'oc_other%00',
+      entries: [
+        { position: 9, kind: 'content', element_type: 'markdown', content: 'elsewhere', created_at_unix: 1 },
+      ],
+      seq: 9,
+    })
+    await settle(el)
     expect(apiMocks.session).not.toHaveBeenCalled()
     el.remove()
   })

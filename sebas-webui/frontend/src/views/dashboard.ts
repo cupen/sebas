@@ -61,6 +61,13 @@ function mergeEntries(
 const NODE_POLL_MS = 10_000
 
 /**
+ * session.* 元数据事件的列表刷新合并下限（fix-webui-streaming-liveness 3.2，
+ * D4）：≥500ms 一次 summary/sessions 刷新，窗口内的会话事件合并成一轮——
+ * 消灭「每事件 5+ 全量请求」的放大回路。
+ */
+const LIST_REFRESH_MIN_MS = 500
+
+/**
  * 创建后 composer 对焦的短窗（workbench-rail-polish 3.2 真实浏览器修正）：
  * wa-dialog 的 requestClose 在关闭动画收尾会 `trigger.focus()` 把焦点抢回
  * 项目行「+」，而创建往返只需几毫秒——一次性送焦必输。挂起改为短窗重试，
@@ -89,6 +96,12 @@ export class SebasDashboard extends LitElement {
    * 页面生命周期内跨会话切换保留；F5 / 元素重建即随实例消亡，回到全量。
    */
   private sessionEntries = new Map<string, ConversationEntryView[]>()
+  /**
+   * 3.2（D4）loadFocused 的请求代际：每次调用自增，响应落状态前核对——
+   * 只有最新代际允许写 sessionEntries/focusedDetail，迟到的旧响应一律丢弃
+   * （防回退；project-rail 同款模式）。
+   */
+  private fetchSeq = 0
   /** Set when the focused detail fetch failed (session vanished mid-flight). */
   @state() private focusedUnavailable = false
   /**
@@ -193,11 +206,83 @@ export class SebasDashboard extends LitElement {
    */
   @state() private agents: AgentKindInfo[] = []
 
+  /**
+   * fix-webui-streaming-liveness 3.2（D4）：WS 事件按类型分流——流式正文
+   * （turn.append）只更新聚焦会话缓冲（帧已带增量，零 HTTP）；会话元数据
+   * （created/updated/removed/stalled）节流合并后刷新 summary/sessions；
+   * resync 清游标全量重取；其余事件不触发请求（审批卡归 review-cards 自己
+   * 的订阅局部更新，可达性归 shell）。
+   */
   private onWsEvent = (ev: WsEvent): void => {
-    if (ev.type === 'session.pending_dropped' && ev.session_id === this.data?.active_session_key) {
-      this.droppedPending = ev.dropped
-      this.droppedPendingFor = ev.session_id
+    switch (ev.type) {
+      case 'turn.append':
+        this.applyTurnAppend(ev)
+        return
+      case 'session.created':
+      case 'session.updated':
+      case 'session.removed':
+      case 'session.turn_stalled':
+        this.scheduleListRefresh()
+        return
+      case 'session.resync':
+        this.handleResync()
+        return
+      case 'session.pending_dropped':
+        if (ev.session_id === this.data?.active_session_key) {
+          this.droppedPending = ev.dropped
+          this.droppedPendingFor = ev.session_id
+        }
+        return
+      default:
+        // config.updated / permission.requested / core.reachability：各有
+        // 更局部的消费面，dashboard 不再为它们全量 refetch。
+        return
     }
+  }
+
+  /**
+   * turn.append 到达（3.2，D4）：只更新聚焦会话的本地增量缓冲——并入
+   * sessionEntries 与 focusedDetail，游标随之推进，不发生任何请求。
+   *
+   * 5.3（D6）：世代回绕检测——帧内条目 position ≤ 本地游标且内容与已知
+   * 条目矛盾（core 重启/会话重建后 position 从 0 重计）时，清缓冲、游标
+   * 置空、全量重取（单调性矛盾判定，无协议改动；见 handleResync）。
+   */
+  private applyTurnAppend(ev: Extract<WsEvent, { type: 'turn.append' }>): void {
+    const key = ev.session_id
+    if (key !== this.effectiveFocusKey()) return
+    const cached = this.sessionEntries.get(key)
+    // 无本地序列（尚未首拉/首拉在途）：不凭空造缓冲，loadFocused 的合并
+    // 路径会把在途响应与后续帧对齐。
+    if (!cached || cached.length === 0) return
+    const cursor = cached[cached.length - 1].position
+    const contradictory = ev.entries.some((e) => {
+      if (e.position > cursor) return false
+      // 位置已被本地序列占用：内容一致 = 重复帧（丢弃）；不一致 = 世代回绕。
+      const known = cached.find((c) => c.position === e.position)
+      return !known || known.content !== e.content
+    })
+    if (contradictory) {
+      this.handleResync()
+      return
+    }
+    const fresh = ev.entries.filter((e) => e.position > cursor)
+    if (fresh.length === 0) return
+    const merged = [...cached, ...fresh].sort((a, b) => a.position - b.position)
+    this.sessionEntries.set(key, merged)
+    if (this.focusedDetail?.encoded_key === key) {
+      this.focusedDetail = { ...this.focusedDetail, entries: merged }
+    }
+  }
+
+  /**
+   * session.resync 到达（5.3，D6）：丢帧/core 重启后的世代作废——resync
+   * 无会话载荷，诚实做法是清掉全部本地游标与缓冲，聚焦会话随即全量重取
+   * （游标 = 序列末位，序列清空即游标置空）。
+   */
+  private handleResync(): void {
+    this.sessionEntries.clear()
+    this.loadFocused(this.effectiveFocusKey())
   }
 
   static styles = [
@@ -586,10 +671,8 @@ export class SebasDashboard extends LitElement {
     super.connectedCallback()
     this.refetch()
     void this.loadAgents()
-    this.unsubscribe = sharedWs.subscribe((ev) => {
-      this.onWsEvent(ev)
-      this.refetch()
-    })
+    // 3.2（D4）：订阅回调只做事件分流——不再无条件 refetch。
+    this.unsubscribe = sharedWs.subscribe(this.onWsEvent)
     window.addEventListener('sebas:refetch', this.refetch)
     // workbench-rail-polish 3.2/D2：rail 创建会话成功后的对焦请求（请求
     // 一次性派发，落地走下面的短窗重试）。
@@ -605,6 +688,10 @@ export class SebasDashboard extends LitElement {
     window.removeEventListener('sebas:refetch', this.refetch)
     window.removeEventListener(COMPOSER_FOCUS_REQUEST, this.onComposerFocusRequest)
     this.stopComposerFocusWindow()
+    if (this.listRefreshTimer !== null) {
+      window.clearTimeout(this.listRefreshTimer)
+      this.listRefreshTimer = null
+    }
     if (this.nodeTimer !== undefined) {
       window.clearInterval(this.nodeTimer)
       this.nodeTimer = undefined
@@ -708,6 +795,52 @@ export class SebasDashboard extends LitElement {
   private activatedFocusKey: string | null = null
 
   /**
+   * session.* 元数据刷新的节流状态（3.2，D4）：排定的计时器 + 上次执行
+   * 时刻。窗口内多事件合并成一轮尾沿刷新。
+   */
+  private listRefreshTimer: number | null = null
+  private lastListRefreshAt = 0
+
+  /**
+   * 节流的列表刷新（3.2，D4）：距上次刷新不足 {@link LIST_REFRESH_MIN_MS}
+   * 时排尾沿计时器，其余事件静默合并；否则（首个事件）立即出发。刷新面
+   * 只有 summary + sessions 两个轻请求——聚焦正文由 summary 到达后的
+   * loadFocused 游标增量承载，节点/项目/分支不跟随会话事件。
+   */
+  private scheduleListRefresh(): void {
+    if (this.listRefreshTimer !== null) return
+    const elapsed = Date.now() - this.lastListRefreshAt
+    const delay = Math.max(0, LIST_REFRESH_MIN_MS - elapsed)
+    this.listRefreshTimer = window.setTimeout(() => {
+      this.listRefreshTimer = null
+      this.lastListRefreshAt = Date.now()
+      this.refreshLists()
+    }, delay)
+  }
+
+  /** 元数据列表刷新（summary + sessions）；不含节点/项目（后台轮询承载）。 */
+  private refreshLists(): void {
+    api
+      .summary()
+      .then((d) => {
+        this.data = d
+        this.error = ''
+        this.loadFocused(this.effectiveFocusKey())
+      })
+      .catch((e) => {
+        this.error = String(e)
+      })
+    api
+      .sessions()
+      .then((list) => {
+        this.allRows = list.recent_sessions
+      })
+      .catch(() => {
+        /* summary already surfaces failures */
+      })
+  }
+
+  /**
    * 生效的聚焦 key：深链优先（URL 决定视图——读 detail 即设置服务端焦点
    * 指针，summary 随后收敛到同一会话）；无深链时由 summary 的焦点指针驱动
    * （rail switch / 创建会话就地生效）。
@@ -716,6 +849,10 @@ export class SebasDashboard extends LitElement {
     return this.deepLinkKey ?? this.data?.active_session_key ?? null
   }
 
+  /**
+   * 全量 refetch（连接建立/重连、`sebas:refetch` 外部请求、手动重试）：
+   * 初始装载与显式刷新入口——WS 事件流本身不再走到这里（3.2，D4 分流）。
+   */
   private refetch = (): void => {
     void this.loadNodes()
     api
@@ -1000,10 +1137,16 @@ export class SebasDashboard extends LitElement {
     // 7.3：焦点清空（会话移除）时保留提示；切到别的会话才清除。
     if (key !== null && key !== this.droppedPendingFor) this.droppedPending = null
     if (!key) {
+      // 代际一并作废：清空后在途的旧响应不得再落状态。
+      this.fetchSeq += 1
       this.focusedDetail = null
       this.focusedUnavailable = false
       return
     }
+    // 3.2（D4）：请求代际（沿用 project-rail 同款模式）——并发触发下只有
+    // 最新一次 loadFocused 的响应允许落状态，迟到的旧响应（哪怕还聚焦同
+    // 一会话）直接丢弃，绝不回退较新的缓冲。
+    const seq = ++this.fetchSeq
     const cached = this.sessionEntries.get(key)
     const cursor = cached && cached.length > 0 ? cached[cached.length - 1].position : undefined
     const incremental = cursor !== undefined
@@ -1011,6 +1154,7 @@ export class SebasDashboard extends LitElement {
     const pending = incremental ? api.session(key, cursor) : api.session(key)
     pending
       .then((d) => {
+        if (seq !== this.fetchSeq) return
         if (this.effectiveFocusKey() !== d.encoded_key) return
         // merge 成功才推进游标（序列表即游标真源）；status/pending 等其余
         // 字段随本次响应照常刷新（D2：状态变化必须随增量响应同行）。
@@ -1020,6 +1164,7 @@ export class SebasDashboard extends LitElement {
         this.focusedUnavailable = false
       })
       .catch(() => {
+        if (seq !== this.fetchSeq) return
         if (this.effectiveFocusKey() !== key) return
         if (!incremental) {
           // 首拉失败：无本地序列可保，照旧温和空态。
@@ -1041,6 +1186,13 @@ export class SebasDashboard extends LitElement {
   private renderTurnStream() {
     const d = this.focusedDetail
     const key = this.effectiveFocusKey()!
+    // 4.3（D5.3）：turnLive = engine 的回合占用事实（与 composer 的提交门
+    // 同一判定链）——驱动 transcript 的「流式当前条目纯文本」增量渲染。
+    const turnLive =
+      this.focusedDetail?.turn_engaged ??
+      this.data?.active_session?.turn_engaged ??
+      (this.focusedDetail?.status_slug ?? this.data?.active_session?.status_slug ?? null) ===
+        'working'
     return html`
       <div class="turn-stream-area" aria-label="Focused session conversation">
         ${d && d.encoded_key === key
@@ -1073,6 +1225,7 @@ export class SebasDashboard extends LitElement {
                     sessionKey=${d.encoded_key}
                     .msgCount=${d.msg_count ?? null}
                     .agentDisplay=${this.focusedAgentDisplay()}
+                    .turnLive=${turnLive}
                   ></sebas-transcript-view>`}
             `
           : this.focusedUnavailable

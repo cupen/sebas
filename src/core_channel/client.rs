@@ -396,6 +396,13 @@ impl CoreChannelBackend {
                     self.set_status(ConnStatus::Connected);
                     let _ = self.turn_events.send(event);
                 }
+                // fix-webui-streaming-liveness 5.2（D6）：core 侧 turn 流
+                // 落后的重同步信号——按既有 Resync 语义转播给订阅者（前端
+                // 清游标全量重取），连接保持。
+                SessionStreamFrame::Resync => {
+                    self.set_status(ConnStatus::Connected);
+                    let _ = self.events.send(SessionEvent::Resync);
+                }
             }
         }
     }
