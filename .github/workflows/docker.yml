@@ -19,6 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # 只在 tag 触发路径校验 tag ↔ Cargo.toml 版本一致性，不一致即失败、
+      # 不登录不构建不推送，ghcr 不产出任何镜像。main→latest 路径跳过本步，
+      # 行为零改动。
+      - name: Verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ./.github/actions/verify-release-tag
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 

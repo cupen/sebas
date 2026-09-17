@@ -17,9 +17,25 @@ jobs:
       contents: write # 创建 GitHub Release
     steps:
       - uses: actions/checkout@v6
-      - uses: taiki-e/create-gh-release-action@v1
-        # 仓库目前没有 CHANGELOG.md，先不传 changelog
-        # 有 changelog 后可加: changelog: CHANGELOG.md
+      # 校验失败（tag 与 Cargo.toml 版本不一致）即 job 失败：
+      # Release 不创建，下游 upload-assets 因 needs 链整体跳过，不产出任何资产。
+      - name: Verify tag matches Cargo.toml version
+        id: verify
+        uses: ./.github/actions/verify-release-tag
+      # taiki-e/create-gh-release-action@v1 不支持 prerelease 输入与自动 notes，
+      # 改用 runner 预装的 gh：--generate-notes 相对上一 tag 自动生成变更摘要，
+      # 预发布 tag（vX.Y.Z-<后缀>）按 is_prerelease 追加 --prerelease。
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ steps.verify.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          args=(create "$GITHUB_REF_NAME" --generate-notes --verify-tag)
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh "${args[@]}"
 
   upload-assets:
     needs: create-release
@@ -42,14 +58,49 @@ jobs:
       - name: Install NASM (aws-lc-rs 在 Windows 上需要)
         if: runner.os == 'Windows'
         run: choco install nasm -y --no-progress
+      # 前端显式工具链：sebas-webui/build.rs 在 cargo build 时构建前端并嵌入，
+      # 找不到 pnpm 会静默嵌占位页（只发 cargo:warning）。release runner 必须
+      # 显式装好 pnpm + Node 让 discover_pnpm 命中 PATH——不经 corepack，规避
+      # runner 差异；版本对齐 ci.yml 与 package.json 的 packageManager（pnpm@11.24.0）。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: sebas-webui/frontend/pnpm-lock.yaml
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           # sebas-node 是执行节点的独立二进制（add-remote-execution-node D0）。
           # 两个产物打进同一个归档；装哪一个是运维的选择（节点机不需要主控角色）。
+          # 两 bin 分属两个 crate，root 带 [package] 非 virtual manifest——
+          # 不开 workspace 该 action 单次 `cargo build --bin a --bin b` 解析
+          # 不到 default-run 包外的 target，双平台构建即挂（review 实证 exit 101）。
           bin: sebas,sebas-node
+          workspace: true
           target: ${{ matrix.target }}
           archive: sebas-$tag-$target
           tar: unix   # Linux 发 tar.gz
           zip: windows # Windows 发 zip
           checksum: sha256
           locked: true
+      # 产物级自检：rust-embed 未开压缩 feature，占位页文本以明文留在二进制里。
+      # 检出特征即说明前端没有真实构建嵌入，fail 掉本次发布，不交付残次产物。
+      - name: Verify embedded frontend is not the placeholder page
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/sebas"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            bin="${bin}.exe"
+          fi
+          # 文件缺失时 grep exit 2 会被 `if grep -q` 当「未检出」静默放过——
+          # 先显式守卫（review P2：空过路径）。
+          [[ -f "$bin" ]] || { echo "::error::$bin 不存在——构建产物缺失"; exit 1; }
+          if grep -q "Frontend bundle not built" "$bin"; then
+            echo "::error::$bin 内检出占位页特征文本——前端未真实嵌入，拒绝发布"
+            echo "::error::检查上方构建日志里 pnpm install / pnpm build 是否失败"
+            exit 1
+          fi
+          echo "frontend self-check ok: no placeholder marker in $bin"

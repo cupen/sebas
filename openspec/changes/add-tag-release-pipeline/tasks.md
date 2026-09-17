@@ -1,22 +1,27 @@
 ## 1. verify-release-tag composite action
 
-- [ ] 1.1 新建 `.github/actions/verify-release-tag/action.yml`：bash 步骤取 Cargo.toml 首个 `^version` 与 `GITHUB_REF_NAME` 去 `v` 前缀逐字比对，不一致输出两值并 `exit 1`；定义输出 `is_prerelease`（tag 名含 `-` 即 true）。验证：把校验逻辑提为本地 bash 脚本，以 `GITHUB_REF_NAME=v0.1.0`（通过）、`v9.9.9`（失败）、`v0.2.0-rc.1`（通过且 is_prerelease=true）三例断言
+- [x] 1.1 新建 `.github/actions/verify-release-tag/action.yml`：bash 步骤取 Cargo.toml 首个 `^version` 与 `GITHUB_REF_NAME` 去 `v` 前缀逐字比对，不一致输出两值并 `exit 1`；定义输出 `is_prerelease`（tag 名含 `-` 即 true）。验证：把校验逻辑提为本地 bash 脚本，以 `GITHUB_REF_NAME=v0.1.0`（通过）、`v9.9.9`（失败）、`v0.2.0-rc.1`（通过且 is_prerelease=true）三例断言（已跑：三例全过，另附非 v 形态 tag 防御例）
 
 ## 2. release.yml 改造
 
-- [ ] 2.1 create-release job：移除 taiki-e/create-gh-release-action，改为 `gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag`，`is_prerelease=true` 时追加 `--prerelease`；job 首步挂 verify-release-tag。验证：对照 design 决策 2 评审 + 组 4 静态门禁
-- [ ] 2.2 upload-assets job 两个平台在构建前插入 `actions/setup-node@v4`（node 22）与 `pnpm/action-setup@v4`（version 11.24.0）。验证：对照 design 决策 3 评审 + 组 4 静态门禁
-- [ ] 2.3 upload-rust-binary-action 之后加产物自检步：对 `target/<target>/release/sebas`（windows 加 `.exe`）跑 `grep -q "Frontend bundle not built"`，命中 `exit 1`。验证：本地用带占位页特征文本的假二进制与真二进制各跑一次 grep 断言（真二进制可用 `cargo build --bin sebas` 产物）
-- [ ] 2.4 确认 job 依赖链：upload-assets `needs: create-release` 保持，校验失败即全链不发布。验证：对照 spec「不一致的 tag 快速失败」场景推演触发路径
+- [x] 2.1 create-release job：移除 taiki-e/create-gh-release-action，改为 `gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag`，`is_prerelease=true` 时追加 `--prerelease`；job 首步挂 verify-release-tag。验证：对照 design 决策 2 评审 + 组 4 静态门禁
+- [x] 2.2 upload-assets job 两个平台在构建前插入 `actions/setup-node@v4`（node 22）与 `pnpm/action-setup@v4`（version 11.24.0）。验证：对照 design 决策 3 评审 + 组 4 静态门禁
+- [x] 2.3 upload-rust-binary-action 之后加产物自检步：对 `target/<target>/release/sebas`（windows 加 `.exe`）跑 `grep -q "Frontend bundle not built"`，命中 `exit 1`。验证：本地用带占位页特征文本的假二进制与真二进制各跑一次 grep 断言（真二进制用本地 `target/release/sebas`，rust-embed 无压缩 feature 已核实，占位文本以明文可 grep）
+- [x] 2.4 确认 job 依赖链：upload-assets `needs: create-release` 保持，校验失败即全链不发布。验证：对照 spec「不一致的 tag 快速失败」场景推演触发路径
 
 ## 3. Dockerfile 与 docker.yml
 
-- [ ] 3.1 Dockerfile builder 阶段追加 `RUN cargo build --release --locked -p sebas-node --bin sebas-node`，runtime 阶段 COPY sebas-node 至 `/usr/local/bin/`；ENTRYPOINT/CMD 不动。验证：对照 design 决策 4 评审；本地 docker 可用则 `docker build` 跑通，否则以首发实证兜底并在报告中注明
-- [ ] 3.2 docker.yml 在登录 ghcr 前挂 verify-release-tag，步骤带 `if: startsWith(github.ref, 'refs/tags/')`；main→latest 路径行为零改动。验证：对照 design 决策 5 评审推演 tag/main 两条触发路径 + 组 4 静态门禁
+- [x] 3.1 Dockerfile builder 阶段追加 `RUN cargo build --release --locked -p sebas-node --bin sebas-node`，runtime 阶段 COPY sebas-node 至 `/usr/local/bin/`；ENTRYPOINT/CMD 不动。验证：对照 design 决策 4 评审；本地 docker build 跑通（见交付报告）
+- [x] 3.2 docker.yml 在登录 ghcr 前挂 verify-release-tag，步骤带 `if: startsWith(github.ref, 'refs/tags/')`；main→latest 路径行为零改动。验证：对照 design 决策 5 评审推演 tag/main 两条触发路径 + 组 4 静态门禁
 
 ## 4. 静态验证
 
-- [ ] 4.1 三个 workflow 与 composite action 过 actionlint（可用 scoop/choco/go install 安装；确实装不上则以 `python -c "yaml.safe_load(...)"` 逐文件解析替代并在报告注明）。验证：actionlint 退出码 0（或替代手段通过）
+- [x] 4.1 三个 workflow 与 composite action 过 actionlint（可用 scoop/choco/go install 安装；确实装不上则以 `python -c "yaml.safe_load(...)"` 逐文件解析替代并在报告注明）。验证：actionlint 退出码 0（或替代手段通过）（go install 装上 actionlint v1.7.12，三个 workflow 退出码 0；composite action 内部不被 actionlint 覆盖（阴性对照实验证实），由 YAML 解析 + run 块 `bash -n`（9 块全过）+ 校验脚本 4 例实际执行补位）
+
+## 5. v0.1.0 首发实战验收
+
+（本节需 git 合并 / 推 tag / 观察 Actions 真跑，实现沙箱不打 tag 不推远端——整体留给操作员按序执行；下列框保持未勾。）
+
 
 ## 5. v0.1.0 首发实战验收
 
