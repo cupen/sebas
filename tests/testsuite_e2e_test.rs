@@ -2721,3 +2721,299 @@ async fn parked_permission_does_not_trip_the_stall_guard() {
         "no stall warning may be logged for a parked session"
     );
 }
+
+// ── feishu-free permission approval loop (the im surface over the core channel) ──
+//
+// 飞书在权限回路里的唯一职责是「权限卡片呈现 + card.action.trigger 回调」；
+// 卡片之前的整条审批回路（agent 泊车 → PermissionNotice 广播 → 订阅流
+// ApprovalRequested 帧 → ApprovalAnswer 回灌 → 泊住的 hook 复活 → 回合完成）
+// 与飞书零耦合，用 fake-claude 的 "perm" 场景（真实 hook_callback 泊车，
+// allow/deny 决定直接改写 tool_result）经核心通道裸帧走全环。这一组用例
+// 就是那条「长链路的前 9 步」：任何一截断裂（驱动泊车、广播、帧下发、
+// 应答路由、oneshot 复活）都会在这里当场爆。卡片回调之后的解析/路由语义
+// 由 sebas-feishu event_parse_test 与 sebas-im frontend 单测覆盖。
+
+use std::path::Path;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use support::forward_slash;
+
+use sebas::core_channel::protocol::{
+    ChannelHandshake, CoreChannelRequest, CoreChannelResponse, SessionStreamFrame,
+};
+use sebas_channels::ChannelKey;
+use sebas_webui::session_backend::{PermissionDecision, PermissionNotice};
+
+/// 把沙箱 config 的 `channel_path` 从相对名补成绝对路径：Sandbox 写的相对名
+/// 依赖「子进程 cwd=沙箱」的字符串映射（Windows named pipe 名从路径字符串
+/// 确定性派生），测试进程直连时必须与服务端同一字符串——绝对路径对两端都
+/// 成立，也顺带满足 Unix 上的文件语义。只影响本组用例自己的沙箱实例。
+fn pin_absolute_channel(sb: &Sandbox) {
+    let cfg = std::fs::read_to_string(&sb.config_path).expect("read sandbox config");
+    let patched = cfg.replace(
+        "channel_path = \"core-channel.sock\"",
+        &format!("channel_path = \"{}\"", forward_slash(&sb.channel_path)),
+    );
+    assert_ne!(cfg, patched, "channel_path line not found in sandbox config");
+    std::fs::write(&sb.config_path, patched).expect("write sandbox config");
+}
+
+/// 通道可连接性轮询（named pipe 无文件残留，不能靠 path.exists()）。
+async fn wait_channel_accept(sb: &Sandbox) {
+    let hint = sb.path.clone();
+    wait_for("core channel to accept a handshake", Duration::from_secs(20), &hint, move || {
+        let path = sb.channel_path.clone();
+        let secret = sb.core_secret.clone();
+        Box::pin(async move {
+            let Ok(stream) = sebas_ipc::connect(&path).await else {
+                return None;
+            };
+            let (r, mut w) = sebas_ipc::split(stream);
+            let hs = serde_json::to_string(&ChannelHandshake { secret }).unwrap();
+            if w.write_all(hs.as_bytes()).await.is_err()
+                || w.write_all(b"\n").await.is_err()
+                || w.flush().await.is_err()
+            {
+                return None;
+            }
+            let mut reader = BufReader::new(r);
+            let mut ack = String::new();
+            match tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut ack)).await {
+                Ok(Ok(1..)) => Some(()),
+                _ => None,
+            }
+        })
+    })
+    .await;
+}
+/// 开一条订阅连接：握手 + Subscribe，吃掉 ack 与 Snapshot 帧，返回读端。
+async fn open_subscriber(sb: &Sandbox) -> BufReader<sebas_ipc::ReadHalf> {
+    let stream = sebas_ipc::connect(&sb.channel_path).await.expect("subscriber connect");
+    let (r, mut w) = sebas_ipc::split(stream);
+    let hs = serde_json::to_string(&ChannelHandshake {
+        secret: sb.core_secret.clone(),
+    })
+    .unwrap();
+    w.write_all(hs.as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.write_all(serde_json::to_string(&CoreChannelRequest::Subscribe).unwrap().as_bytes())
+        .await
+        .unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.flush().await.unwrap();
+    let mut reader = BufReader::new(r);
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.expect("handshake ack");
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("snapshot frame");
+    let frame: SessionStreamFrame = serde_json::from_str(line.trim()).expect("frame json");
+    assert!(
+        matches!(frame, SessionStreamFrame::Snapshot { .. }),
+        "first stream frame must be the snapshot: {line}"
+    );
+    reader
+}
+
+/// 单发请求连接（订阅连接只推流不处理请求）：握手 → 请求 → 读响应。
+async fn raw_channel_request(
+    channel: &Path,
+    secret: &str,
+    req: &CoreChannelRequest,
+) -> CoreChannelResponse {
+    let stream = sebas_ipc::connect(channel).await.expect("request connect");
+    let (r, mut w) = sebas_ipc::split(stream);
+    let hs = serde_json::to_string(&ChannelHandshake {
+        secret: secret.to_string(),
+    })
+    .unwrap();
+    w.write_all(hs.as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.write_all(serde_json::to_string(req).unwrap().as_bytes()).await.unwrap();
+    w.write_all(b"\n").await.unwrap();
+    w.flush().await.unwrap();
+    let mut reader = BufReader::new(r);
+    let mut ack = String::new();
+    reader.read_line(&mut ack).await.expect("handshake ack");
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("response in time")
+        .expect("response line");
+    serde_json::from_str(line.trim()).expect("response json")
+}
+
+/// 从订阅流读一帧（超时由调用方的 tick 循环套）。
+async fn read_frame(reader: &mut BufReader<sebas_ipc::ReadHalf>) -> SessionStreamFrame {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("stream alive");
+    serde_json::from_str(line.trim()).expect("frame json")
+}
+
+/// 等 Turns 里出现第 `n` 个含 `marker` 的条目（transcript 是唯一事实）。
+async fn wait_turn_marker(sb: &Sandbox, key: &ChannelKey, marker: &str, n: usize) {
+    let hint = sb.path.clone();
+    let path = sb.channel_path.clone();
+    let secret = sb.core_secret.clone();
+    let key = key.clone();
+    let marker = marker.to_string();
+    wait_for(
+        &format!("{n}-th transcript marker `{marker}`"),
+        Duration::from_secs(30),
+        &hint,
+        move || {
+            let path = path.clone();
+            let secret = secret.clone();
+            let key = key.clone();
+            let marker = marker.clone();
+            Box::pin(async move {
+                match raw_channel_request(
+                    &path,
+                    &secret,
+                    &CoreChannelRequest::Turns { key, from: 0 },
+                )
+                .await
+                {
+                    CoreChannelResponse::Turns { entries } => {
+                        let count = entries
+                            .iter()
+                            .filter(|e| e.content.contains(&marker))
+                            .count();
+                        (count >= n).then_some(())
+                    }
+                    other => panic!("Turns must return Turns, got {other:?}"),
+                }
+            })
+        },
+    )
+    .await;
+}
+
+/// 全环共享旅程：EnsureMessage("perm") → 真实泊车 → 订阅流收到
+/// ApprovalRequested → ApprovalAnswer{decision} → transcript 出现 `marker`。
+/// 返回收到的 notice 供用例做字段断言。
+async fn drive_parked_perm_to_decision(
+    sb: &Sandbox,
+    mut reader: BufReader<sebas_ipc::ReadHalf>,
+    decision: PermissionDecision,
+    marker: &str,
+) -> PermissionNotice {
+    let key = ChannelKey::feishu("oc_perm_loop", None);
+    let resp = raw_channel_request(
+        &sb.channel_path,
+        &sb.core_secret,
+        &CoreChannelRequest::EnsureMessage {
+            key: key.clone(),
+            message: "perm".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok | CoreChannelResponse::Spawned { .. }),
+        "ensure must be accepted: {resp:?}"
+    );
+
+    // 真实泊车产生的 ApprovalRequested（非合成事件）：60s 预算内逐帧吃，
+    // 中间的会话生命周期 Event 帧全部越过。
+    let notice = {
+        let wait = async {
+            loop {
+                if let SessionStreamFrame::ApprovalRequested { notice } =
+                    read_frame(&mut reader).await
+                {
+                    break notice;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "ApprovalRequested frame did not arrive within 60s; logs at {}",
+                    sb.path.display()
+                )
+            })
+    };
+    assert_eq!(notice.tool_name, "Bash", "parked tool: {notice:?}");
+    assert_eq!(
+        notice.args["command"].as_str(),
+        Some("rm -rf /"),
+        "parked tool args: {notice:?}"
+    );
+
+    // 应答走独立请求连接 → Ok。
+    let resp = raw_channel_request(
+        &sb.channel_path,
+        &sb.core_secret,
+        &CoreChannelRequest::ApprovalAnswer {
+            request_id: notice.request_id.clone(),
+            decision,
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok),
+        "answer must be accepted: {resp:?}"
+    );
+
+    // 泊住的 hook 复活：transcript 出现决定对应的 tool_result。
+    wait_turn_marker(sb, &key, marker, 1).await;
+    notice
+}
+
+/// allow_once：只放行本次，回合完成且 transcript 记录执行痕迹。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn permission_loop_allow_once_over_core_channel() {
+    let sb = Sandbox::new("testsuite_e2e", "perm-loop-allow");
+    pin_absolute_channel(&sb);
+    let _core = sb.spawn_core();
+    wait_channel_accept(&sb).await;
+    let reader = open_subscriber(&sb).await;
+    drive_parked_perm_to_decision(&sb, reader, PermissionDecision::AllowOnce, "perm done").await;
+}
+
+/// deny：回合完成且 transcript 记录拒绝语义——fail-closed 的应答半边。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn permission_loop_deny_over_core_channel() {
+    let sb = Sandbox::new("testsuite_e2e", "perm-loop-deny");
+    pin_absolute_channel(&sb);
+    let _core = sb.spawn_core();
+    wait_channel_accept(&sb).await;
+    let reader = open_subscriber(&sb).await;
+    drive_parked_perm_to_decision(&sb, reader, PermissionDecision::Deny, "denied by fake").await;
+}
+
+/// allow_session：放行本次 + 会话切 auto——同 key 的第二个 "perm" 回合
+/// **不再泊车**（无新 ApprovalRequested），直接执行完成。
+#[tokio::test]
+#[ignore = "process-level e2e; run with -- --ignored or invoke testsuite-e2e"]
+async fn permission_loop_allow_session_switches_auto_over_core_channel() {
+    let sb = Sandbox::new("testsuite_e2e", "perm-loop-session");
+    pin_absolute_channel(&sb);
+    let _core = sb.spawn_core();
+    wait_channel_accept(&sb).await;
+    let reader = open_subscriber(&sb).await;
+    let key = ChannelKey::feishu("oc_perm_loop", None);
+    drive_parked_perm_to_decision(&sb, reader, PermissionDecision::AllowSession, "perm done").await;
+
+    // 第二回合：mode 已 auto → fake-claude 跳过 hook 直接执行。泊住的回合
+    // 永远写不出第二个 tool_result，所以「第二个 marker 到账」同时就是
+    // 「未再泊车」的对账——mode 没切上时这里 30s 超时爆掉。
+    let resp = raw_channel_request(
+        &sb.channel_path,
+        &sb.core_secret,
+        &CoreChannelRequest::EnsureMessage {
+            key: key.clone(),
+            message: "perm".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, CoreChannelResponse::Ok),
+        "second ensure must be accepted: {resp:?}"
+    );
+    wait_turn_marker(&sb, &key, "perm done", 2).await;
+}

@@ -302,12 +302,13 @@ fn denylist_entries() -> &'static [DenyEntry] {
 /// 盘符前缀分量（`C:\`）即命中。UNC 根（`\\server\share`）不是盘符根，不拦。
 #[cfg(windows)]
 fn is_drive_root(resolved: &Path) -> bool {
-    use std::path::Prefix;
+    use std::path::{Component, Prefix};
     resolved.parent().is_none()
         && resolved.has_root()
         && matches!(
-            resolved.prefix(),
-            Some(Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+            resolved.components().next(),
+            Some(Component::Prefix(pc))
+                if matches!(pc.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
         )
 }
 
@@ -323,7 +324,10 @@ fn matches_deny_entry(resolved: &Path, entry: &DenyEntry) -> bool {
 fn matches_deny_entry(resolved: &Path, entry: &DenyEntry) -> bool {
     let lower = |p: &Path| p.to_string_lossy().to_lowercase();
     if entry.by_name {
-        return resolved.file_name().map(lower) == Some(lower(&entry.path));
+        let last = resolved
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase());
+        return last == Some(lower(&entry.path));
     }
     lower(resolved) == lower(&entry.path)
 }
@@ -752,6 +756,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // 造「解析到名单目录」的条目要靠 symlink 到 /tmp、/etc
     fn browse_dirs_omits_denylisted_children_others_unchanged() {
         // 名单形子目录造在 tempdir 里（tempdir 在 /tmp 之下，其**子**目录
         // 按精确匹配语义不命中——所以这里造的是解析形恰为名单形的东西：
