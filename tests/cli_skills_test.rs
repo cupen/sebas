@@ -379,3 +379,107 @@ fn sync_leaves_private_entries_and_counts_them() {
     );
     assert!(!lines.iter().any(|l| l.contains("user-byhand")), "私产不得列名: {lines:?}");
 }
+
+// ── 补充覆盖（review add-agent-skills）───────────────────────────────────────
+
+/// 空仓（目录缺失同）list 的排版：一行说明指名仓路径、不是错误（tasks 4.1
+/// 文档化输出约定）。
+#[test]
+fn list_lines_empty_store_states_store_path_without_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+    let lines = list_lines(&missing);
+    assert_eq!(lines.len(), 1, "空仓打一行说明: {lines:?}");
+    assert!(
+        lines[0].contains("skill 仓为空") && lines[0].contains(&missing.display().to_string()),
+        "说明须点名仓路径: {}",
+        lines[0]
+    );
+}
+
+/// sync 报告排版：written/overwritten/deleted 列表逐名带 `+`/`~`/`-` 前缀、
+/// 计数与名单一致；no placement 的 backend 未写任何文件（只一行说明）。
+#[test]
+fn sync_lines_render_name_lists_and_no_placement_wrote_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("store");
+    // 落点经方言表从 home 推导：`<home>/.claude/skills`。
+    let home = tmp.path().join("home");
+    let backend = home.join(".claude").join("skills");
+    fs::create_dir_all(&backend).unwrap();
+    make_skill(&store, "fresh", SKILL_BODY);
+    make_skill(&store, "updated", SKILL_BODY);
+
+    // 预置：updated 已投影过（重跑成覆盖）、stale 只在名册里（→ deleted）、
+    // user-byhand 是用户私产（→ 只计数）。
+    make_skill(&backend, "updated", SKILL_BODY);
+    let stale = make_skill(&backend, "stale", "---\nname: stale\ndescription: 旧\n---\n");
+    fs::write(stale.join("old.txt"), "old").unwrap();
+    make_skill(&backend, "user-byhand", SKILL_BODY);
+    fs::write(
+        backend.join(sebas::skills::PROJECTION_MANIFEST),
+        r#"{"projected": ["updated", "stale"], "store_hash": "x"}"#,
+    )
+    .unwrap();
+
+    let outcome = skills::sync_all(&store, &["claude".into()], &home).unwrap();
+    assert_eq!(outcome[0].backend, "claude");
+    let report = outcome[0].report.as_ref().unwrap();
+    assert_eq!(report.written, vec!["fresh".to_string()]);
+    assert_eq!(report.overwritten, vec!["updated".to_string()]);
+    assert_eq!(report.deleted, vec!["stale".to_string()]);
+    assert_eq!(report.private_ignored, 1);
+
+    let lines = sync_lines(&outcome);
+    assert!(
+        lines[0].contains("written=1 overwritten=1 deleted=1 private_ignored=1"),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.trim() == "+ fresh"), "写入名单逐名呈现: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.starts_with("  ~ updated")),
+        "覆盖名单带仓 wins 注记: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("  - stale")),
+        "删除名单逐名呈现: {lines:?}"
+    );
+
+    // NoPlacement 形态：一行说明，明确「未写任何文件」。
+    let outcome = skills::sync_all(&store, &["gemini".into()], &home).unwrap();
+    let lines = sync_lines(&outcome);
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].starts_with("gemini: no placement") && lines[0].contains("未写任何文件"),
+        "NoPlacement 如实一行: {}",
+        lines[0]
+    );
+}
+
+/// add 之后仓即唯一记录：store 下只有条目目录本身，没有任何 sebas 维护的
+/// 索引/状态文件（spec「the store on disk is the only record」）。
+#[test]
+fn add_leaves_no_index_file_store_is_the_only_record() {
+    let sb = Sandbox::new();
+    let _env = ENV_LOCK.lock().unwrap();
+    let _home = sb.enter();
+
+    let src_tmp = tempfile::tempdir().unwrap();
+    let src = make_skill(src_tmp.path(), "my-skill", SKILL_BODY);
+    run(sb.args(SkillsCmd::Add {
+        source: src.display().to_string(),
+    }))
+    .expect("local add 应成功");
+
+    let mut entries: Vec<String> = fs::read_dir(sb.store())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["my-skill".to_string()],
+        "仓内只有条目目录，无索引/状态文件"
+    );
+}

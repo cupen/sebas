@@ -53,6 +53,9 @@ sebas 目前没有任何「skill 管理」的面：用户想让 agent backend �
 ## Non-goals
 
 - 远程执行节点的 skills 交付（node-link 运输接入）——后续 change。
+- composer 内的技能提示/面板——输入框可见性归 agent 自身广告域（见 design D6）：
+  claude 经 session-slash-commands 的命令面板自然可见，opencode 的 skills 是上下
+  文材质不是命令、面板永无（如实语义）；sebas 不建仓来源的会话内提示。
 - webui 上的 skill 编辑器 / 在线新建——增改只走 CLI 与社区方案。
 - 监听文件系统自动同步（watch）、后台定时同步——触发永远手动。
 - 项目级（某仓库内）skills 的管理——随项目树，不进本面。
