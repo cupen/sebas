@@ -327,6 +327,11 @@ pub enum SessionStreamFrame {
     Turn {
         event: TurnStreamEvent,
     },
+    /// （fix-webui-streaming-liveness 5.2，D6）重新同步信号：core 侧检测到
+    /// 该订阅的 turn 流落后（合并器 Lagged，增量已有不可弥补缺口）时发出。
+    /// 客户端收到后按 `SessionEvent::Resync` 语义重取受影响会话的快照；
+    /// 连接保持——断连重连只是最后手段，不再是丢帧的常规收敛路径。
+    Resync,
 }
 
 /// One frame of the **state** subscription stream (add-state-store 4.2).

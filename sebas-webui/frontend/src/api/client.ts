@@ -162,11 +162,9 @@ export interface SessionSummary {
    * 方回退 `status_slug === 'working'` 判定。
    */
   turn_engaged?: boolean
-  /**
-   * Focused session only（workbench-conversation-view 1.4）: the conversation
-   * as one ordered entry sequence, same shape as the detail endpoint.
-   */
-  entries?: ConversationEntryView[]
+  // （fix-webui-streaming-liveness 3.3，D3 BREAKING）`entries` 已随 summary
+  // 拆分退役：聚焦会话正文一律走 detail 游标路径
+  // （`/api/sessions/{key}?entries_after=<n>`）。
 }
 
 export interface CardConfig {

@@ -22,7 +22,9 @@ use sebas_agent::policy::{ApprovalAnswer, Approver, ApproverHub, PolicyConfig, P
 use sebas_agent::session::{AgentEvent, SessionConfig, SessionHandle, SessionManager};
 use sebas_agent::tools::ToolRegistry;
 use sebas_channels::ChannelKey;
-use sebas_dispatch::{SessionEvent, SessionInfo, TurnEntry};
+use sebas_dispatch::{
+    SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent, count_chat_messages,
+};
 use sebas_webui::session_backend::{
     CloseReport, PermissionDecision, PermissionNotice, Reachability, SessionBackend,
     SessionRejection,
@@ -39,16 +41,13 @@ struct NativeSession {
     workdir: Option<String>,
     prompt: String,
     /// Rendered transcript entries (turn-content retrieval source).
+    /// fix-webui-streaming-liveness 2.1（D2）：文本 delta 逐条落账——与 IM 桥
+    /// （`native_dispatch_bridge`）和 ACP 引擎同粒度，不再攒到回合/工具边界
+    /// 整块 flush。日志（本 vec）仍是唯一事实。
     transcript: Vec<TurnEntry>,
-    /// The in-flight streamed text, flushed into the transcript on tool
-    /// boundaries and turn end.
-    text_buf: String,
-    /// rail-declutter-unread D1/D2：累计「可见回复段」数——在 transcript
-    /// flush 处累加（`flush_text` 落一段正文 +1；`⚠` 错误行 +1）。工具
-    /// 痕迹（push_markdown 的 📖/✓/⏳/🛡/🗒 行）是过程噪声，不计。
-    /// 不用 `count_chat_messages` 派生：native transcript 全部是 markdown，
-    /// 连续段永不打断，派生口径在这里退化为 1。
-    msg_count: u64,
+    /// rail-declutter-unread D1/D2：可见回复段数改为**派生**口径——
+    /// `count_chat_messages`（相邻连续 markdown 条目合并为一段，ACP 面同
+    /// 款），逐 delta 落账后不再按 flush 次数累计。
     /// （wire-webui-sebas-agent-e2e）会话级模型 override。`None` = 走内核默认；
     /// 设置后下一次 turn 起用，新值即时生效。
     current_model_override: Option<String>,
@@ -65,32 +64,27 @@ struct NativeSession {
 }
 
 impl NativeSession {
-    fn flush_text(&mut self) {
-        if self.text_buf.is_empty() {
-            return;
-        }
-        let text = std::mem::take(&mut self.text_buf);
-        self.msg_count += 1;
-        self.transcript.push(TurnEntry {
+    /// Append one content entry (position assigned monotonically from the
+    /// transcript length) and return the landed entry for the live turn
+    /// event. The clone keeps the transcript authoritative; the returned
+    /// entry rides the broadcast.
+    fn push_entry(&mut self, element_type: &str, content: String) -> TurnEntry {
+        let entry = TurnEntry {
             position: self.transcript.len() as u64,
             kind: "content".into(),
-            element_type: "markdown".into(),
-            content: text,
-            created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
-            title: None,
-        });
-    }
-
-    fn push_markdown(&mut self, content: String) {
-        self.flush_text();
-        self.transcript.push(TurnEntry {
-            position: self.transcript.len() as u64,
-            kind: "content".into(),
-            element_type: "markdown".into(),
+            element_type: element_type.into(),
             content,
             created_at_unix: chrono::Utc::now().timestamp().max(0) as u64,
             title: None,
-        });
+        };
+        self.transcript.push(entry.clone());
+        entry
+    }
+
+    /// 可见回复段数（派生口径，与 ACP 面一致）：连续 markdown 合并一段、
+    /// error 逐条计、prompt/thinking/tool 不计。
+    fn msg_count(&self) -> u64 {
+        count_chat_messages(&self.transcript)
     }
 
     fn info(&self, key: &ChannelKey) -> SessionInfo {
@@ -125,8 +119,9 @@ impl NativeSession {
             // （add-agent-mode-selection）native 内核不承载 mode：不声称生效。
             desired_mode: None,
             effective_mode: None,
-            // rail-declutter-unread D1：transcript flush 处累计的可见回复段数。
-            msg_count: self.msg_count,
+            // rail-declutter-unread D1：可见回复段数——派生口径（2.1 随逐
+            // delta 落账切换），transcript 是唯一事实。
+            msg_count: self.msg_count(),
             // （session-slash-commands 2.3）native 内核无命令发现——
             // AgentEvent 词汇不动，命令表恒空（composer 不渲染面板、
             // `/` 前缀按普通文本放行的诚实退化）。
@@ -149,6 +144,10 @@ pub struct NativeAgentBackend {
     sessions: Arc<RwLock<HashMap<String, NativeSession>>>,
     /// Lifecycle + review-card events for the WebUI relay.
     events: broadcast::Sender<SessionEvent>,
+    /// 实时回合内容（fix-webui-streaming-liveness 2.1，D2）：native 面的
+    /// turn 事件流——transcript 每落一条就广播一次，webui WS 以 `turn.append`
+    /// 转播。Lagged 只丢增量（快照收敛），消费端不断链。
+    turn_events: broadcast::Sender<TurnStreamEvent>,
     /// Gated-call feed (review cards).
     notices: broadcast::Sender<PermissionNotice>,
     /// Why the native backend is unavailable (missing LLM credentials), if so.
@@ -309,12 +308,14 @@ impl NativeAgentBackend {
             None => ApproverHub::new(),
         };
         let (events, _) = broadcast::channel(256);
+        let (turn_events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
         Arc::new(Self {
             manager,
             hub,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             events,
+            turn_events,
             notices,
             unavailable_cause,
             available_models,
@@ -341,15 +342,36 @@ impl NativeAgentBackend {
 
     /// Drive one native session: kernel events → transcript + lifecycle
     /// events + review-card notices. Runs until the session task dies.
+    ///
+    /// fix-webui-streaming-liveness 2.1（D2）：transcript 的每一次落账都同步
+    /// 广播一条 `TurnStreamEvent`（逐 delta、逐工具痕迹），webui 据此实时
+    /// 呈现——transcript 与 turn 流由同一段代码产出，粒度天然一致。broadcast
+    /// `send` 是同步的，锁内发送不会阻塞 pump。
     async fn pump(
         mut rx: broadcast::Receiver<AgentEvent>,
         key: ChannelKey,
         encoded: String,
         sessions: Arc<RwLock<HashMap<String, NativeSession>>>,
         events: broadcast::Sender<SessionEvent>,
+        turn_events: broadcast::Sender<TurnStreamEvent>,
         notices: broadcast::Sender<PermissionNotice>,
     ) {
         use AgentEvent as AE;
+        // transcript 落账 + turn 事件广播的一体化出口（锁内调用）。
+        fn land(
+            session: &mut NativeSession,
+            turn_events: &broadcast::Sender<TurnStreamEvent>,
+            key: &ChannelKey,
+            element_type: &str,
+            content: String,
+        ) {
+            let entry = session.push_entry(element_type, content);
+            let _ = turn_events.send(TurnStreamEvent {
+                channel: key.channel_str().to_string(),
+                key: key.reference.clone(),
+                entries: vec![entry],
+            });
+        }
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
@@ -365,7 +387,11 @@ impl NativeAgentBackend {
                 };
                 match ev {
                     AE::TextDelta { delta, .. } => {
-                        session.text_buf.push_str(&delta);
+                        // D2：逐 delta 落账 + 实时 turn 事件（不再只写
+                        // text_buf 攒整块）。段计数走派生口径，不逐 delta 发
+                        // Updated——会话状态刷新骑工具/回合边界，正文走
+                        // turn.append。
+                        land(session, &turn_events, &key, "markdown", delta);
                         None
                     }
                     AE::ThinkingDelta { .. } | AE::ToolProgress { .. } | AE::ToolFinish { .. } => {
@@ -375,8 +401,13 @@ impl NativeAgentBackend {
                         tool_name, args, ..
                     } => {
                         let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
-                        session
-                            .push_markdown(format!("📖 **{tool_name}**\n```json\n{args_str}\n```"));
+                        land(
+                            session,
+                            &turn_events,
+                            &key,
+                            "markdown",
+                            format!("📖 **{tool_name}**\n```json\n{args_str}\n```"),
+                        );
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -384,7 +415,13 @@ impl NativeAgentBackend {
                     AE::ToolEnd {
                         tool_name, result, ..
                     } => {
-                        session.push_markdown(format!("✓ **{tool_name}**\n{result}"));
+                        land(
+                            session,
+                            &turn_events,
+                            &key,
+                            "markdown",
+                            format!("✓ **{tool_name}**\n{result}"),
+                        );
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -396,9 +433,13 @@ impl NativeAgentBackend {
                         reason,
                         ..
                     } => {
-                        session.push_markdown(format!(
-                            "⏳ **{tool_name}** awaits approval — {reason}"
-                        ));
+                        land(
+                            session,
+                            &turn_events,
+                            &key,
+                            "markdown",
+                            format!("⏳ **{tool_name}** awaits approval — {reason}"),
+                        );
                         let _ = notices.send(PermissionNotice {
                             request_id,
                             session_id: encoded.clone(),
@@ -413,7 +454,13 @@ impl NativeAgentBackend {
                     AE::ToolPolicy {
                         tool_name, outcome, ..
                     } => {
-                        session.push_markdown(format!("🛡 **{tool_name}** policy: {outcome}"));
+                        land(
+                            session,
+                            &turn_events,
+                            &key,
+                            "markdown",
+                            format!("🛡 **{tool_name}** policy: {outcome}"),
+                        );
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -424,9 +471,15 @@ impl NativeAgentBackend {
                         tool_calls,
                         ..
                     } => {
-                        session.push_markdown(format!(
-                            "🗒 turn summary — {model_calls} model calls, {tool_calls} tools, {turn_ms}ms"
-                        ));
+                        land(
+                            session,
+                            &turn_events,
+                            &key,
+                            "markdown",
+                            format!(
+                                "🗒 turn summary — {model_calls} model calls, {tool_calls} tools, {turn_ms}ms"
+                            ),
+                        );
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
                         })
@@ -434,11 +487,9 @@ impl NativeAgentBackend {
                     AE::Error {
                         message, terminal, ..
                     } => {
-                        // ⚠ 错误行是操作员可见的 agent 产出（D2 口径含 error）
-                        // ——计入段数；terminal 错误随后拆除映射，计数值随
-                        // 会话一起消失。
-                        session.msg_count += 1;
-                        session.push_markdown(format!("⚠ {message}"));
+                        // ⚠ 错误行是操作员可见的 agent 产出——进 transcript 并
+                        // 走 turn 流；terminal 错误随后拆除映射。
+                        land(session, &turn_events, &key, "markdown", format!("⚠ {message}"));
                         // workbench-interaction-polish 1.1：turn 终态（含取消
                         // 的非 terminal "turn cancelled"）复位在飞标志。
                         session.in_flight = false;
@@ -446,9 +497,8 @@ impl NativeAgentBackend {
                         None
                     }
                     AE::Finished { .. } => {
-                        session.flush_text();
-                        // workbench-interaction-polish 1.1：turn 收尾复位在飞
-                        // 标志（下一条 prompt 由 message() 再置位）。
+                        // 正文已逐 delta 落账（2.1），收尾无积压可 flush；
+                        // Updated 仍照发——状态/段计数随快照刷新。
                         session.in_flight = false;
                         Some(SessionEvent::Updated {
                             session: session.info(&key),
@@ -499,6 +549,12 @@ impl SessionBackend for NativeAgentBackend {
         self.events.subscribe()
     }
 
+    /// 实时回合内容（fix-webui-streaming-liveness 2.1，D2）：native 面自己
+    /// 承载 turn 流（pump 逐落账广播），不再依赖 ACP 桥。
+    fn subscribe_turn_events(&self) -> broadcast::Receiver<TurnStreamEvent> {
+        self.turn_events.subscribe()
+    }
+
     async fn spawn(
         &self,
         prompt: String,
@@ -538,8 +594,6 @@ impl SessionBackend for NativeAgentBackend {
                     workdir: project_dir.clone(),
                     prompt: prompt.clone(),
                     transcript: Vec::new(),
-                    text_buf: String::new(),
-                    msg_count: 0,
                     current_model_override: None,
                     available_models: self.available_models.clone(),
                     default_model: self.default_model.clone(),
@@ -560,11 +614,12 @@ impl SessionBackend for NativeAgentBackend {
         };
         let sessions = self.sessions.clone();
         let events = self.events.clone();
+        let turn_events = self.turn_events.clone();
         let notices = self.notices.clone();
         let pump_key = key.clone();
         let pump_encoded = encoded.clone();
         tokio::spawn(async move {
-            Self::pump(rx, pump_key, pump_encoded, sessions, events, notices).await;
+            Self::pump(rx, pump_key, pump_encoded, sessions, events, turn_events, notices).await;
         });
 
         // First prompt drives the first turn.
@@ -693,6 +748,9 @@ pub struct DualSessionBackend {
     pub acp: Arc<dyn SessionBackend>,
     pub native: Arc<NativeAgentBackend>,
     events: broadcast::Sender<SessionEvent>,
+    /// 实时回合内容的合流出口（fix-webui-streaming-liveness 2.1，D2）：
+    /// acp 桥与 native pump 两路 turn 流在此合成一条，webui WS 只订阅本后端。
+    turn_events: broadcast::Sender<TurnStreamEvent>,
     /// Merged review-card notices from both children (acp + native), so a
     /// Claude/ACP permission request reaches the webui review card through the
     /// same channel as a native gated call.
@@ -718,6 +776,7 @@ impl DualSessionBackend {
 
     pub fn new(acp: Arc<dyn SessionBackend>, native: Arc<NativeAgentBackend>) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
+        let (turn_events, _) = broadcast::channel(256);
         let (notices, _) = broadcast::channel(64);
         // Merge both children's lifecycle streams into one relay.
         {
@@ -738,6 +797,39 @@ impl DualSessionBackend {
         {
             let tx = events.clone();
             let mut rx = native.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => {
+                            let _ = tx.send(ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        // fix-webui-streaming-liveness 2.1（D2）：合流两路 turn 流——acp 桥
+        // （内嵌形态即 engine 的 transcript 广播）与 native pump。Lagged 只丢
+        // 增量（快照收敛），不断链。
+        {
+            let tx = turn_events.clone();
+            let mut rx = acp.subscribe_turn_events();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => {
+                            let _ = tx.send(ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        {
+            let tx = turn_events.clone();
+            let mut rx = native.subscribe_turn_events();
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
@@ -784,6 +876,7 @@ impl DualSessionBackend {
             acp,
             native,
             events,
+            turn_events,
             notices,
         })
     }
@@ -862,12 +955,12 @@ impl SessionBackend for DualSessionBackend {
         self.acp.activate(key).await
     }
 
-    // 回合内容流（workbench-live-conversation-flow 1.2）：native 侧不产流，
-    // ACP 桥（内嵌形态即 InProcessBackend→engine）是唯一来源。
+    // 回合内容流（fix-webui-streaming-liveness 2.1，D2）：acp 桥与 native
+    // pump 两路在此合流（`new()` 里的中继任务），订阅端拿到单一出口。
     fn subscribe_turn_events(
         &self,
     ) -> broadcast::Receiver<sebas_dispatch::TurnStreamEvent> {
-        self.acp.subscribe_turn_events()
+        self.turn_events.subscribe()
     }
 
     // make-core-own-provider-data 3.1：状态库域不属于任何一个执行体（provider
@@ -1490,5 +1583,202 @@ mod tests {
             }
             other => panic!("expected SendAcp PermissionReply, got {other:?}"),
         }
+    }
+
+    // ── fix-webui-streaming-liveness 2.1：pump 期间可见增量事件 ────────────
+
+    /// 一轮两段文本的脚本 turn：kernel 逐段回调 TextDelta，宿主 pump 逐条
+    /// 落账并广播 turn 事件。
+    fn two_chunk_turn() -> sebas_agent::llm::LlmTurn {
+        sebas_agent::llm::LlmTurn {
+            content: vec![
+                sebas_agent::message::ContentBlock::Text {
+                    text: "chunk one ".into(),
+                },
+                sebas_agent::message::ContentBlock::Text {
+                    text: "chunk two".into(),
+                },
+            ],
+            stop_reason: sebas_agent::llm::StopReason::EndTurn,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_pump_streams_turn_events_during_the_turn() {
+        // D2：delta 落账即广播——两段文本作为**独立帧**先于回合收尾标记
+        // （🗒 turn summary，kernel 回合结束才发）到达，position 单调、内容与
+        // transcript 一致（文本不再攒到回合边界整块 flush——旧实现下两段会
+        // 合成收尾时刻的一条整块条目，turn 流压根不存在）。
+        let manager = {
+            let llm = FakeLlmClient::scripted(vec![two_chunk_turn()]);
+            SessionManager::new(
+                Arc::new(llm),
+                ToolRegistry::with_sandbox(Duration::from_secs(10), SandboxMode::Firewall),
+                SessionConfig::default(),
+            )
+        };
+        let backend = NativeAgentBackend::with_manager(manager);
+        // 先订阅 turn 流，再 spawn（broadcast 只转发订阅后的事件）。
+        let mut turns = backend.subscribe_turn_events();
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("spawn");
+
+        let deadline = Duration::from_secs(10);
+        let mut streamed: Vec<TurnEntry> = Vec::new();
+        loop {
+            let event = tokio::time::timeout(deadline, turns.recv())
+                .await
+                .expect("event timeout")
+                .expect("turn stream open");
+            for entry in event.entries {
+                let is_summary = entry.content.contains("turn summary");
+                streamed.push(entry);
+                if is_summary {
+                    // 回合收尾标记到达：流式窗口结束。
+                    break;
+                }
+            }
+            if streamed.iter().any(|e| e.content.contains("turn summary")) {
+                break;
+            }
+        }
+
+        // 两段文本 = 两条独立 turn 事件，先于收尾标记到达。
+        assert_eq!(
+            streamed.iter().map(|e| e.content.as_str()).collect::<Vec<_>>(),
+            vec!["chunk one ", "chunk two", "🗒 turn summary — 1 model calls, 0 tools, 0ms"],
+            "deltas must stream as separate live entries before the turn-end marker: {streamed:?}"
+        );
+        assert_eq!(
+            streamed.iter().map(|e| e.position).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "positions assigned monotonically"
+        );
+
+        // transcript（快照面）与 turn 流完全一致——同一段代码产出。
+        let snapshotted = backend.turns(key.clone(), 0).await.unwrap();
+        assert_eq!(snapshotted, streamed, "turn stream == transcript");
+
+        backend.close(key).await.unwrap();
+    }
+
+    // ── fix-webui-streaming-liveness 2.2：webui 面 × IM 桥面对账 ───────────
+
+    #[tokio::test]
+    async fn native_transcript_parity_between_webui_face_and_im_bridge_face() {
+        // 同一脚本（多段文本）分别经 webui 面（NativeAgentBackend pump）与
+        // IM 桥面（native_dispatch_bridge → router turn_log）驱动，两侧
+        // transcript 条目序列必须一致——spec「webui 面与 IM 面对流式粒度
+        // SHALL 一致」的验收，钉住 2.1 改动的逐 delta 落账路径。
+        //
+        // 脚本刻意不含 gated 工具：⏳/🛡/🗒 审批与回合摘要是 webui 面独有
+        // 的过程呈现（IM 桥的 pump 本就不渲染这些 AgentEvent，属既有呈现
+        // 差异、不属流式粒度）；本对账钉的是内容生产路径（delta 落账）。
+        let make_manager = || {
+            let llm = FakeLlmClient::scripted(vec![two_chunk_turn()]);
+            SessionManager::new(
+                Arc::new(llm),
+                ToolRegistry::with_sandbox(Duration::from_secs(10), SandboxMode::Firewall),
+                SessionConfig::default(),
+            )
+            .with_policy(Arc::new(
+                sebas_agent::policy::PolicyEngine::new(Default::default()),
+            ))
+            .with_approver(sebas_agent::policy::ApproverHub::new())
+        };
+
+        // ── webui 面：spawn → 等收尾文本落账。
+        let backend = NativeAgentBackend::with_manager(make_manager());
+        let ws = tempfile::tempdir().unwrap();
+        let key = backend
+            .spawn("go".into(), Some(ws.path().to_string_lossy().into()))
+            .await
+            .expect("webui spawn");
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let joined: String = backend
+                    .turns(key.clone(), 0)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.content.clone())
+                    .collect();
+                if joined.contains("turn summary") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("webui turn must complete");
+        let webui_turns = backend.turns(key.clone(), 0).await.unwrap();
+
+        // ── IM 桥面：prompt → 等落账。
+        use sebas_dispatch::native_bridge::NativeSessionBridge;
+        let (router, mut out_rx) = sebas_dispatch::DispatchHandle::new(sebas_dispatch::state::SessionMap::new());
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let bridge = crate::native_dispatch_bridge::DispatchNativeBridge::new(
+            Arc::new(make_manager()),
+            router.clone(),
+        );
+        let bridge_key = sebas_channels::ChannelKey::new("feishu", "agent-parity");
+        bridge.clone().prompt(bridge_key.clone(), "go".into());
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if router.session_exists(&bridge_key).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("bridge session registered");
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let turns = router.session_turns(&bridge_key, 0).await.unwrap_or_default();
+                let joined: String = turns.iter().map(|e| e.content.clone()).collect();
+                if joined.contains("chunk two") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("bridge turn must complete");
+        let bridge_turns = router.session_turns(&bridge_key, 0).await.unwrap_or_default();
+
+        // ── 对账：两侧的流式内容条目（position/kind/element_type/content）
+        // 全等；webui 面允许在此之外多出它独有的回合摘要呈现（🗒 SessionSummary，
+        // IM 桥的 pump 本就不渲染该事件——既有呈现差异，不属流式粒度）。
+        // created_at_unix 不进对账：两面先后驱动，跨秒界即差 1s，非语义差异。
+        let semantic = |e: &TurnEntry| {
+            (
+                e.position,
+                e.kind.clone(),
+                e.element_type.clone(),
+                e.content.clone(),
+            )
+        };
+        assert!(!webui_turns.is_empty(), "webui face must have transcript");
+        assert_eq!(
+            webui_turns[..bridge_turns.len()]
+                .iter()
+                .map(semantic)
+                .collect::<Vec<_>>(),
+            bridge_turns.iter().map(semantic).collect::<Vec<_>>(),
+            "webui face and IM bridge face must render identical streamed transcripts"
+        );
+        assert!(
+            webui_turns[bridge_turns.len()..]
+                .iter()
+                .all(|e| e.content.contains("turn summary")),
+            "webui-only extras must be presentation traces only: {:?}",
+            &webui_turns[bridge_turns.len()..]
+        );
+
+        backend.close(key).await.unwrap();
     }
 }

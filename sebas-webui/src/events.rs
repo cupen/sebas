@@ -44,6 +44,12 @@ pub enum WebUiEvent {
     /// `released` = 解除卡死的待执行提交条数；前端据此弹 warn 分级通知。
     #[serde(rename = "session.turn_stalled")]
     SessionTurnStalled { session_id: String, released: usize },
+    /// （fix-webui-streaming-liveness 5.1，D6）重新同步信号：服务端检测到
+    /// 订阅落后（WS broadcast Lagged）或 core 通道重连给出快照重取信号时
+    /// 发给浏览器。无载荷——前端清本地增量游标与流式缓冲后全量重取受影响
+    /// 视图，不因陈旧游标永久拒收增量。
+    #[serde(rename = "session.resync")]
+    SessionResync,
     /// Configuration was updated. No sender exists yet; the variant is
     /// reserved so clients must tolerate it (and unknown types) arriving.
     #[serde(rename = "config.updated")]
@@ -159,6 +165,8 @@ mod tests {
                     "released": 2
                 }),
             ),
+            // fix-webui-streaming-liveness 5.1：resync 帧无载荷，dotted 名即契约。
+            (WebUiEvent::SessionResync, json!({"type": "session.resync"})),
             (WebUiEvent::ConfigUpdated, json!({"type": "config.updated"})),
             (
                 WebUiEvent::PermissionRequested {

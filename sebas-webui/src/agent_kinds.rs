@@ -90,8 +90,10 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
 
     // Version: `<exe> --version` (first non-empty line of stdout, falling back
     // to stderr). Failure to print a version is not fatal — presence already
-    // proved reachability.
-    let version = tokio::process::Command::new(exe)
+    // proved reachability. Probe the RESOLVED path: on Windows a bare name may
+    // only exist as a PATHEXT-suffixed file (`opencode.cmd`), which a raw
+    // spawn of the bare name would miss.
+    let version = tokio::process::Command::new(resolved_binary(exe).unwrap_or_else(|| exe.into()))
         .arg("--version")
         .output()
         .await
@@ -120,6 +122,15 @@ pub async fn discover_agent(source: &AgentKindSource) -> AgentKindInfo {
 /// slash-containing) path is checked directly; a bare name is resolved against
 /// `$PATH`. Mirrors `config.rs::check_binary_reachable` semantics.
 fn binary_reachable(exe: &str) -> bool {
+    resolved_binary(exe).is_some()
+}
+
+/// Resolve `exe` to a spawnable file path: a slash-containing path is checked
+/// directly; a bare name is resolved against `$PATH`. Unix checks the
+/// executable bit; Windows follows the CreateProcess naming — bare names
+/// gain PATHEXT suffixes (`sh` → `sh.exe`, `opencode` → `opencode.cmd`) and
+/// extensionless files (npm shims) are skipped, they cannot be spawned.
+fn resolved_binary(exe: &str) -> Option<std::path::PathBuf> {
     let is_executable = |p: &std::path::Path| -> bool {
         if !p.is_file() {
             return false;
@@ -137,12 +148,40 @@ fn binary_reachable(exe: &str) -> bool {
         }
     };
 
-    if exe.contains('/') {
-        is_executable(std::path::Path::new(exe))
-    } else {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(exe))))
-            .unwrap_or(false)
+    if exe.contains('/') || exe.contains('\\') {
+        let p = std::path::Path::new(exe);
+        return is_executable(p).then(|| p.to_path_buf());
+    }
+
+    let dirs = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    #[cfg(unix)]
+    return dirs.into_iter().map(|dir| dir.join(exe)).find(|p| is_executable(p));
+    #[cfg(windows)]
+    {
+        let exts: Vec<String> = if std::path::Path::new(exe).extension().is_some() {
+            vec![String::new()]
+        } else {
+            std::env::var_os("PATHEXT")
+                .map(|v| {
+                    v.to_string_lossy()
+                        .split(';')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_ascii_lowercase())
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![".exe".to_string()])
+        };
+        for dir in dirs {
+            for ext in &exts {
+                let cand = dir.join(format!("{exe}{ext}"));
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+        None
     }
 }
 

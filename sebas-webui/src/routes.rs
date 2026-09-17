@@ -100,13 +100,14 @@ pub(crate) fn build_session_rows(
     (rows, active, dormant, spawning)
 }
 
-/// Compact summary used by the dashboard's focused-session banner. Carries
-/// the session's conversation as one ordered entry sequence (same shape as
-/// the detail endpoint — workbench-conversation-view 1.4).
-pub(crate) fn session_summary(
-    info: &SessionInfo,
-    entries: &[sebas_dispatch::TurnEntry],
-) -> serde_json::Value {
+/// Compact summary used by the dashboard's focused-session banner.
+///
+/// fix-webui-streaming-liveness 3.1（D3，BREAKING）：**不再内嵌**聚焦会话的
+/// transcript（`entries` 键移除）——正文一律走 `/api/sessions/{key}
+/// ?entries_after=<cursor>` detail 游标路径。此前 summary 随聚焦会话体积线性
+/// 膨胀（实测 2.8MB/1074 条），是「每帧全量 refetch」放大回路的载荷大头；
+/// 拆分后单响应回到 KB 级。会话元信息（状态/模型/pending/段计数等）原样保留。
+pub(crate) fn session_summary(info: &SessionInfo) -> serde_json::Value {
     let derived = SessionStatus::derive(&info.status, info.phase.as_deref().unwrap_or(""))
         .with_parked_approvals(
             info.remote
@@ -114,19 +115,6 @@ pub(crate) fn session_summary(
                 .map(|r| r.parked_approvals)
                 .unwrap_or(0),
         );
-    let conversation: Vec<crate::models::ConversationEntryView> = entries
-        .iter()
-        .map(|e| crate::models::ConversationEntryView {
-            position: e.position,
-            kind: e.kind.clone(),
-            element_type: e.element_type.clone(),
-            content: e.content.clone(),
-            created_at_unix: e.created_at_unix,
-            // workbench-agent-identity-and-process-folds 1.1：工具条目标题
-            // 原样透传（None = 旧条目，前端回退通用标签）。
-            title: e.title.clone(),
-        })
-        .collect();
     let mut summary = serde_json::json!({
         "channel": info.channel,
         "reference": info.key,
@@ -149,8 +137,6 @@ pub(crate) fn session_summary(
         // rail-declutter-unread：聚焦会话的段计数（transcript 标记已读时
         // 推进浏览器读锚用，保证 seam 与徽标一致）。
         "msg_count": info.msg_count,
-        // workbench-conversation-view 1.4：与 detail 同形状的有序条目序列。
-        "entries": conversation,
     });
     // （session-slash-commands 2.2）聚焦会话的命令表（composer 面板数据源）。
     // 空表不插键——旧前端看到的 summary 形状不变（新 core + 旧前端兼容）。

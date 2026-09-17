@@ -152,7 +152,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | Workbench renders the focused session as a conversation（conversation-view 新增）| ✅ | 前端 `transcript-view.test.ts`（两侧交替、N chunk 一气泡、tool 组可展开不混排、submission 回合开始即现）；`dashboard.test.ts`（聚焦会话内联 conversation）；browser `conversation.spec.ts`（两侧按序交替 + gated tool 组展开）|
 | | Workbench is the single conversation surface（conversation-view 新增）| ✅ | 前端 `project-rail.test.ts`（点击就地切换留在 workbench 3.1、current 标记跟随焦点指针 3.2）；`dashboard.test.ts`（深链 `/sessions/:key` 经 deepLinkKey 渲染、聚焦会话 head 带 close+archive）；browser `conversation.spec.ts`「rail click focuses the session in place on the workbench」|
 | permission-flow | Hook 驱动权限请求 | ✅ | `permission_flow_test`；fake-claude "perm" 场景 |
-| | 三种决定结果 | ✅ | `permission_flow_test`、sebas-webui `acp_permission_roundtrip_test` |
+| | 三种决定结果 | ✅ | `permission_flow_test`、sebas-webui `acp_permission_roundtrip_test`；E `permission_loop_allow_once/deny/allow_session_over_core_channel`（fake-claude "perm" 真实泊车经核心通道全环：allow 执行 / deny 拒绝 / allow_session 切 auto 后第二回合免审批，飞书无关面，2026-09-18 补） |
 | | allowlist 命中自动批准 | ✅ | `permission_flow_test` |
 | | allowlist 作用域与生命周期 | ✅ | `permission_flow_test` |
 | | 迟到点击处理 | ✅ | src `core_channel/tests.rs`（typed rejection）|
@@ -205,9 +205,9 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | | 回合内容获取 | ✅ | `backend_methods_reach_the_right_handlers`（turns 增量位置语义）；`session_events_test::tool_events_are_labelled_tool_in_turn_content`（submission 与 tool 条目可区分，conversation-view 修订）、`turns_are_incremental_by_position`；`full_e2e_test` 回合内容回读 |
 | | 核心不可达诚实降级 | ✅ | `unreachable_causes_are_distinct`、`client_converges_after_server_restart`；E `reachability_flips_across_core_restart`、`secret_rotation_self_heal_across_core_restart`；webui 全局横幅 + browser `deployment.spec.ts`（横幅 cause/composer 门禁/恢复消隐）|
 | | 协议使用中性会话键 | ✅ | `full_e2e_test`（ChannelKey 语义）；`core_channel/protocol.rs` 内联测试 |
-| | 审批请求全执行体外显 | ✅ | `acp_permission_request_streams_and_answer_routes_back`；`permission_flow_test`；browser `approval-detached.spec.ts`（detached 审批 allow/deny，cover B1.2）|
+| | 审批请求全执行体外显 | ✅ | `acp_permission_request_streams_and_answer_routes_back`；`permission_flow_test`；browser `approval-detached.spec.ts`（detached 审批 allow/deny，cover B1.2）；E `permission_loop_allow_once_over_core_channel`（真实泊车非合成：订阅流 ApprovalRequested 带 request_id/tool/args）|
 | | Spawn backend 提示校验 | ✅ | src `agent_backend.rs`（`unknown_backend_hint_rejects_without_session`、`native_missing_credentials_rejection_names_the_backend`、缺省=ACP）|
-| | 通道上的 gated-call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/无应答 fail-closed/unknown rid typed rejection）；`permission_flow_test` |
+| | 通道上的 gated-call 审批 | ✅ | src `core_channel/tests.rs`（审批往返/无应答 fail-closed/unknown rid typed rejection）；`permission_flow_test`；E `permission_loop_allow_once/deny/allow_session_over_core_channel`（跨进程全环：帧下发→ApprovalAnswer→泊住 hook 复活→transcript 记录决定语义）|
 | | 通道上的会话模型选择 | ✅ | src `agent_backend.rs`（native key 分发 + unknown 拒绝 + override 落快照）；E/browser `models.spec.ts`（fakeacp set_session_model happy-path + 未知模型 typed rejection，cover B2.2）|
 | | 无注入密钥的通道自动武装（harden）| ✅ | `auto_arm_without_env_writes_secret_file_and_completes_handshake`、`auto_arm_with_env_uses_env_value_and_writes_matching_file`；E `no_secret_assembly_end_to_end`（0600 + 会话往返）|
 | | 通道客户端密钥文件发现（harden）| ✅ | `client_discovers_secret_from_file_and_heals_key_rotation`、`discovery_both_missing_warns_once_and_uses_empty`；E `secret_rotation_self_heal_across_core_restart` |

@@ -21,10 +21,22 @@
  *     between the text segments. Each fold keeps second-level per-entry
  *     folds (structured titles, generic fallback, middle-truncated); its
  *     summary row shows the running entry's title + the entry count and
- *     updates live as streaming refetches land (D3). Fold open state is
+ *     updates live as streamed frames land (D3). Fold open state is
  *     tracked per run id (the run's first entry position) in a local Map so
  *     an expanded fold survives full regroupings and streamed entries append
- *     in place (D2);
+ *     in place (D2). The collapsed affordance of every fold — process run
+ *     and second-level alike — is a lightweight inline link (glyph + title
+ *     + count), never a button block or card chrome (fix-webui-streaming-
+ *     liveness 4.4); an expanded second-level body over the truncation
+ *     threshold renders a preview + explicit omission notice + a "view all"
+ *     escape that opens an isolated wa-dialog outside the conversation's
+ *     scroll container (4.5);
+ *   - markdown is incremental (4.3): the live tail — the last text run of
+ *     the last agent turn while `turnLive` (the engine's turn_engaged fact)
+ *     — renders as plain text; once the turn settles it is rendered with
+ *     the full markdown pipeline exactly once. Historical runs ride Lit's
+ *     value-cached unsafeHTML, so streaming frames no longer re-parse
+ *     unchanged content;
  *   - error entries (spawn failures) do not join runs — they render as
  *     their own counted error bubbles, positioned in sequence (D5);
  *   - the operator's newest submission shows a low-key "已收到" receipt
@@ -40,12 +52,17 @@
  * array index, keeps the seam pinned to the same logical turn even when an
  * older card refreshes in place.
  *
- * Scroll behaviour (unchanged):
- *   - while `sticky` is true, the view auto-scrolls to the seam (when
- *     there are unseen turns) or to the bottom (when everything is seen)
- *   - a near-bottom scroll (within 80px) marks turns as seen (250ms
- *     debounce, monotonic — only ever advances the boundary)
- *   - scrolling up past the seam disengages sticky; returning re-engages
+ * Scroll behaviour (fix-webui-streaming-liveness 4.1, rewritten):
+ *   - `sticky` means "the reader never deliberately scrolled up": any
+ *     scroll within NEAR_BOTTOM_PX of the bottom (re)engages it, anything
+ *     further disengages it. No seam-relative judgment — the former
+ *     scrollTop≈seamTop comparison misread the programmatic seam-centering
+ *     scroll as a deliberate scroll-up and froze auto-follow;
+ *   - while `sticky`, every update commits an INSTANT pin to the bottom
+ *     (no smooth scrolling — animated commits never catch up with
+ *     per-frame streaming);
+ *   - a near-bottom scroll marks turns as seen (250ms debounce, monotonic
+ *     — only ever advances the boundary)
  */
 
 import { LitElement, css, html, nothing } from 'lit'
@@ -57,11 +74,57 @@ import { icon } from '../components/icons.js'
 import { renderMarkdown } from '../components/markdown.js'
 import { readAnchor, writeSeen as writeCursor } from './unread-cursor.js'
 import { sharedWs } from '../api/shared-ws.js'
+// 4.5：「查看全部」隔离弹层（独立于会话滚动容器的 wa-dialog）。
+import '@awesome.me/webawesome/dist/components/dialog/dialog.js'
 
 /** Bottom-scroll threshold for "mark-as-seen" detection. */
 const NEAR_BOTTOM_PX = 80
 /** Debounce window for mark-as-seen writes. */
 const MARK_SEEN_DEBOUNCE_MS = 250
+
+/**
+ * 展开条目的截断阈值（fix-webui-streaming-liveness 4.5，D5.5）：行数或
+ * 字符数任一超限即截断显示（取先到）。实现侧常量，后续可调。
+ */
+export const TRUNCATE_LINES = 40
+export const TRUNCATE_CHARS = 8_000
+
+/** `truncateHtml` 的结果：预览段 + 截断判定 + 如实的省略量。 */
+export interface TruncateResult {
+  preview: string
+  truncated: boolean
+  /** 预览之后省略的行数（按换行切分）。 */
+  omittedLines: number
+  /** 预览之后省略的字符数。 */
+  omittedChars: number
+}
+
+/**
+ * 展开条目的截断视图（4.5，D5.5，纯函数）：内容超过 {@link TRUNCATE_LINES}
+ * 行或 {@link TRUNCATE_CHARS} 字符（任一先到即触发）时只保留预览段，并
+ * 如实报告省略的行数与字符数——正文渲染方据此展示「已截断」明示与
+ * 「查看全部」出口。未超限时 preview 即原文、truncated 为 false。
+ */
+export function truncateHtml(entry: { content: string }): TruncateResult {
+  const content = entry.content
+  const totalChars = content.length
+  const lines = content.split('\n')
+  let cut = totalChars
+  if (lines.length > TRUNCATE_LINES) {
+    cut = Math.min(cut, lines.slice(0, TRUNCATE_LINES).join('\n').length)
+  }
+  if (totalChars > TRUNCATE_CHARS) {
+    cut = Math.min(cut, TRUNCATE_CHARS)
+  }
+  const preview = content.slice(0, cut)
+  const omittedLines = Math.max(0, lines.length - preview.split('\n').length)
+  return {
+    preview,
+    truncated: cut < totalChars,
+    omittedLines,
+    omittedChars: totalChars - preview.length,
+  }
+}
 
 /**
  * Window (in unix seconds) within which consecutive identical error entries
@@ -419,6 +482,14 @@ export class SebasTranscriptView extends LitElement {
    */
   @property({ attribute: false }) agentDisplay: string | null = null
   /**
+   * （4.3，D5.3）回合在飞：engine 的 `turn_engaged` 事实（dashboard 从
+   * detail/summary 读出后下传）。true 时对话末尾的流式文本条目以纯文本
+   * 呈现（跳过 markdown 解析——渲染成本不随帧线性增长）；回合定稿（属性
+   * 翻 false，随状态刷新到达）后该条目一次性换 markdown 渲染。缺省 false
+   * = 历史查看姿态，全部条目走 markdown。
+   */
+  @property({ attribute: false }) turnLive = false
+  /**
    * When true (default), auto-scroll on new entries. Flipped to false
    * internally when the reader scrolls up past the seam so we don't
    * fight deliberate scroll-up.
@@ -450,6 +521,13 @@ export class SebasTranscriptView extends LitElement {
    * id 只在会话内有意义，换会话清空。
    */
   private foldOpen = new Map<string, boolean>()
+
+  /**
+   * （4.5）「查看全部」弹层正在展示的条目；null = 弹层关闭。弹层渲染在
+   * 会话滚动容器之外（.scroll 的兄弟节点），置 null 即整棵卸载 DOM——
+   * 关闭不在对话滚动面留下任何节点。
+   */
+  @state() private viewAllEntry: { title: string; content: string } | null = null
 
   /**
    * （workbench-live-conversation-flow 2.2）流式增量的就地缓冲：turn.append
@@ -492,7 +570,8 @@ export class SebasTranscriptView extends LitElement {
       max-height: 58vh;
       overflow-y: auto;
       padding: var(--sebas-space-4) var(--sebas-space-5);
-      scroll-behavior: smooth;
+      /* 4.1（D5.1）：滚动提交是瞬时贴底——smooth 动画在逐帧流式下永远追
+         不上目标（下一帧又抬高 scrollHeight，动画互相打断），去掉。 */
       /* 预览稿 .turn-stream 同款纵向流布局：行间固定 gap，seam 作为
          整行分隔条自然落在两行气泡之间（不受气泡 max-width 约束）。 */
       display: flex;
@@ -682,9 +761,9 @@ export class SebasTranscriptView extends LitElement {
     /* 回合内多段文本（工具组切开的两段论述）：段间留一行呼吸，视觉上
        明确「中间发生过事」（design Risks：分段规则可读）。 */
     .turn-block .body + .body,
-    .turn-block .body + details,
-    .turn-block details + .body,
-    .turn-block details + details {
+    .turn-block .body + .process-fold,
+    .turn-block .process-fold + .body,
+    .turn-block .process-fold + .process-fold {
       margin-top: var(--sebas-space-2);
     }
     .turn-block .body :is(p, pre, ul, ol, h1, h2, h3, h4) {
@@ -732,36 +811,37 @@ export class SebasTranscriptView extends LitElement {
       border-left: 3px solid var(--sebas-border-strong);
       color: var(--sebas-text-dim);
     }
-    /* 过程折叠（一 run 一折，2.1/D1）：内容侧没有气泡壳后折叠自成一格——
-       surface-2 浅底 + 细边圆角（贴地分组条，非卡片：无阴影）。summary 是
-       原生 details/summary，可键盘展开（2.5）；行内实时渲染「进行中条目
-       title + 条目计数」（D3）。展开后为二级逐条折叠（.process-item）。 */
-    .turn-block details.fold {
+    /* 过程折叠（4.4，D5.4）：collapsed affordance 收敛为**单行行内 link**
+       （glyph + 标签 + 进行中标题 + 计数）——无按钮块、无卡框、无大面积
+       容器样式。展开体保留轻量分区（虚线顶边），open 状态由组件托管
+       （foldOpen Map），显隐即条件渲染。 */
+    .turn-block .process-fold {
       margin: var(--sebas-space-2) 0;
-      border: 1px solid var(--sebas-border);
-      border-radius: var(--sebas-radius-md);
-      background: var(--sebas-surface-2);
+      min-width: 0;
     }
-    .turn-block details.fold summary {
-      display: flex;
+    .turn-block .fold-link {
+      display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 7px 12px;
-      list-style: none;
+      max-width: 100%;
+      padding: 0;
+      background: none;
+      border: none;
       cursor: pointer;
-      color: var(--sebas-text-dim);
+      font: inherit;
       font-size: 0.78rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      user-select: none;
-      border-radius: var(--sebas-radius-md);
-      transition: background var(--sebas-dur) var(--sebas-ease),
-        color var(--sebas-dur) var(--sebas-ease);
+      color: var(--sebas-text-dim);
+      text-align: left;
+      transition: color var(--sebas-dur) var(--sebas-ease);
     }
-    .turn-block details.fold summary::-webkit-details-marker {
-      display: none;
+    .turn-block .fold-link:hover {
+      color: var(--sebas-accent);
     }
-    .turn-block details.fold summary .kind-icon {
+    .turn-block .fold-link:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
+    }
+    .turn-block .fold-link .kind-icon {
       display: grid;
       place-items: center;
       width: 18px;
@@ -771,26 +851,25 @@ export class SebasTranscriptView extends LitElement {
       background: var(--sebas-accent-soft);
       color: var(--sebas-accent);
     }
-    .turn-block details.fold summary:hover {
-      background: var(--sebas-surface-3);
-      color: var(--sebas-text-bright);
+    .turn-block .fold-link .label {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
     }
     /* 进行中条目的 title（结构化 title 或通用标签）：mono 小字、不吃
-       summary 的大小写（路径参数被 uppercase 会变形），超长省略号收干。 */
-    .turn-block details.fold summary .running {
-      flex: 1;
+       标签的大小写（路径参数被 uppercase 会变形），超长省略号收干。 */
+    .turn-block .fold-link .running {
       min-width: 0;
-      text-align: left;
       font-family: var(--sebas-font-mono);
       font-size: 0.76rem;
-      text-transform: none;
-      letter-spacing: 0;
       color: var(--sebas-text-faint);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .turn-block details.fold summary .fold-count {
+    .turn-block .fold-link:hover .running {
+      color: var(--sebas-accent);
+    }
+    .turn-block .fold-link .fold-count {
       color: var(--sebas-accent);
       font-variant-numeric: tabular-nums;
     }
@@ -800,44 +879,65 @@ export class SebasTranscriptView extends LitElement {
       padding: 8px 12px 12px;
       font-size: 0.82rem;
       line-height: 1.6;
+      margin-top: var(--sebas-space-2);
       border-top: 1px dashed var(--sebas-border);
     }
-    /* 过程折叠的二级折叠（2.2）：thinking 段 / 工具条目各一折，默认收起。
-       summary 是条目标题（title 或通用标签）——mono 小字、不改大小写
-       （路径参数被 uppercase 会变形）。相邻条目以虚线分隔，沿用同一视觉
-       语言。 */
-    .turn-block details.process-item + details.process-item {
+    /* 过程折叠的二级折叠（4.4/4.5）：collapsed 同为单行行内 link；相邻
+       条目以虚线分隔，沿用同一视觉语言。 */
+    .turn-block .process-item + .process-item {
       margin-top: var(--sebas-space-2);
       padding-top: var(--sebas-space-2);
       border-top: 1px dashed var(--sebas-border);
     }
-    .turn-block details.process-item summary {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      list-style: none;
-      cursor: pointer;
-      user-select: none;
+    .turn-block .process-item .item-link {
       font-family: var(--sebas-font-mono);
       font-size: 0.76rem;
-      color: var(--sebas-text-dim);
-      transition: color var(--sebas-dur) var(--sebas-ease);
     }
-    .turn-block details.process-item summary::-webkit-details-marker {
-      display: none;
-    }
-    .turn-block details.process-item summary:hover,
-    .turn-block details.process-item summary:focus-visible {
-      color: var(--sebas-text-bright);
-    }
-    .turn-block details.process-item summary .item-title {
+    .turn-block .process-item .item-title {
       min-width: 0;
       overflow-wrap: anywhere;
     }
-    .turn-block details.process-item .item-body {
+    .turn-block .process-item .item-body {
       padding-top: var(--sebas-space-2);
       font-size: 0.8rem;
       line-height: 1.6;
+    }
+    /* （4.5）展开条目的截断：明示省略量 + 「查看全部」行内出口。 */
+    .turn-block .truncation-note {
+      margin: var(--sebas-space-2) 0 0;
+      font-size: 0.72rem;
+      color: var(--sebas-text-faint);
+    }
+    .turn-block .truncation-note .view-all {
+      padding: 0;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font: inherit;
+      color: var(--sebas-accent);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .turn-block .truncation-note .view-all:focus-visible {
+      outline: var(--sebas-focus-ring);
+      outline-offset: 2px;
+    }
+    /* （4.3）流式中的当前条目：纯文本呈现保住换行语义（未经 markdown
+       解析），定稿后换 markdown 渲染。 */
+    .turn-block .body.text-live {
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+    }
+    /* （4.5）「查看全部」弹层：会话滚动容器之外的独立 wa-dialog。 */
+    .view-all-dialog {
+      --wa-panel-width: min(720px, 90vw);
+    }
+    .view-all-body {
+      min-width: 0;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      max-height: min(70vh, 640px);
+      overflow-y: auto;
     }
   `
 
@@ -931,7 +1031,16 @@ export class SebasTranscriptView extends LitElement {
       this.scrollEl = el
       el.addEventListener('scroll', this.boundOnScroll, { passive: true })
     }
-    if (changed.has('entries') || changed.has('sessionKey') || changed.has('seamIndex')) {
+    if (
+      changed.has('entries') ||
+      changed.has('sessionKey') ||
+      changed.has('seamIndex') ||
+      // 4.1（D5.1）：流式帧经 turn.append → rebuildUnits 只改 turnUnits
+      // （entries/seamIndex 都可能没变）——不监听它，纯增量就不触发滚动。
+      // turnLive 翻转（定稿换 markdown）同样改变渲染高度，一并跟随。
+      changed.has('turnUnits') ||
+      changed.has('turnLive')
+    ) {
       // Wait one frame for layout to settle, then scroll. Without the
       // rAF, scrollHeight can lag the freshly-inserted entries.
       requestAnimationFrame(() => this.applyAutoScroll())
@@ -1010,22 +1119,16 @@ export class SebasTranscriptView extends LitElement {
   private onScroll(): void {
     const el = this.scrollEl
     if (!el) return
+    // 4.1（D5.1）：贴底跟随判定只看几何——距底 ≤ 阈值即（重新）贴底跟随，
+    // 更远即用户主动上滚（停止跟随）。不再用 seam 相对位移：旧判定把
+    // 「自动滚到 seam 中心」的编程滚动误读成用户上滚，sticky 被翻 false
+    // 后自动滚动整体停摆——未读缝卡死流式跟随的根源。
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    const nearBottom = distanceFromBottom <= NEAR_BOTTOM_PX
-    const seam = this.renderRoot.querySelector<HTMLElement>('.seam')
-    const seamTop = seam ? seam.offsetTop : Number.POSITIVE_INFINITY
-    // Distance the reader has scrolled relative to the seam. Positive
-    // when they're at or below the seam; negative when above it.
-    const relativeToSeam = el.scrollTop - seamTop
-    if (nearBottom || relativeToSeam >= 0) {
-      // The reader is at-or-past the seam — re-engage sticky if we'd
-      // disengaged it on a deliberate scroll-up.
+    if (distanceFromBottom <= NEAR_BOTTOM_PX) {
       if (!this.sticky) this.sticky = true
       this.scheduleMarkSeen()
-    } else {
-      // The reader has scrolled above the seam — let them read old
-      // content without us yanking them back.
-      if (this.sticky) this.sticky = false
+    } else if (this.sticky) {
+      this.sticky = false
     }
   }
 
@@ -1051,19 +1154,19 @@ export class SebasTranscriptView extends LitElement {
     }
   }
 
-  /** Apply the spec-mandated scroll behaviour for the current frame. */
+  /**
+   * Apply the scroll behaviour for the current frame（4.1，D5.1）: sticky
+   * = 瞬时贴底（scrollHeight 提交，无 smooth 动画）。未读缝不再参与自动
+   * 滚动定位——seam 只是标记与「mark all seen」出口，想读旧内容向上滚动
+   * 即自然解除 sticky。
+   */
   private applyAutoScroll(): void {
     const el = this.scrollEl
     if (!el || !this.sticky) return
-    if (this.seamIndex !== null && this.unseenCount > 0) {
-      const seam = this.renderRoot.querySelector<HTMLElement>('.seam')
-      if (seam && typeof seam.scrollIntoView === 'function') {
-        seam.scrollIntoView({ block: 'center' })
-      }
-    } else {
-      // Already-seen case: stick to the newest turn.
-      el.scrollTop = el.scrollHeight
-    }
+    const previous = el.style.scrollBehavior
+    el.style.scrollBehavior = 'auto'
+    el.scrollTop = el.scrollHeight
+    el.style.scrollBehavior = previous
   }
 
   // ---- render -----------------------------------------------------------
@@ -1074,35 +1177,59 @@ export class SebasTranscriptView extends LitElement {
     // 操作者提交即显示（排队窗非 working 也成立）。agent entry 一到（收尾
     // 不再是 prompt）条件即不成立，角标消失。
     const receipt = awaitingReceipt(this.turnUnits)
-    // seam 仍是整行分隔条（文案 / localStorage 锚定 / 滚动锚点均不变），
-    // 但内联落在最后一条已读与第一条未读**回合**之间（index =
-    // seamIndex）；全部已读时保留行首的 hidden 占位，供滚动逻辑
-    // querySelector('.seam') 命中。
-    const seam = showSeam
-      ? html`
-          <div class="seam" data-count=${this.unseenCount} role="status">
-            <span class="pill"
-              ><span class="count">~${this.unseenCount} new</span> since you last viewed</span
-            >
-            <button type="button" class="link" @click=${this.markAllSeen}>
-              mark all seen
-            </button>
-          </div>
-        `
-      : html`<div class="seam" hidden></div>`
-    return html`
-      <div class="scroll" role="log" aria-label="Session conversation">
-        ${showSeam
-          ? this.turnUnits.map((u, i) =>
-              i === this.seamIndex
-                ? html`${seam}${this.renderUnit(u, receipt && i === this.turnUnits.length - 1)}`
-                : this.renderUnit(u, receipt && i === this.turnUnits.length - 1),
-            )
-          : html`${seam}${this.turnUnits.map((u, i) =>
-              this.renderUnit(u, receipt && i === this.turnUnits.length - 1),
-            )}`}
+    // 4.2（D5.2）：seam 真假同一模板字面量——节点恒渲染，显隐只切 hidden
+    // 属性。流式中的翻转不再在两个模板分支间切换，Lit 的既有条目 DOM 身份
+    // 保留（不整洞重建），二级折叠展开态随之保留。
+    const seam = html`
+      <div class="seam" ?hidden=${!showSeam} data-count=${this.unseenCount} role="status">
+        <span class="pill"
+          ><span class="count">~${this.unseenCount} new</span> since you last viewed</span
+        >
+        <button type="button" class="link" @click=${this.markAllSeen}>
+          mark all seen
+        </button>
       </div>
     `
+    return html`
+      <div class="scroll" role="log" aria-label="Session conversation">
+        ${this.seamIndex === null ? seam : nothing}
+        ${this.turnUnits.map((u, i) =>
+          // 4.2：map 项是**同一个**模板字面量——seam 有无是项内 child part
+          // 的值翻转，不是项模板身份切换。seam 落点移动时其余回合的 DOM
+          // 身份照旧保留（Lit 按索引复用节点）。
+          html`${i === this.seamIndex ? seam : nothing}${this.renderUnit(
+            u,
+            receipt && i === this.turnUnits.length - 1,
+          )}`,
+        )}
+      </div>
+      ${this.renderViewAllDialog()}
+    `
+  }
+
+  /**
+   * （4.5）「查看全部」隔离弹层：渲染在会话滚动容器（.scroll）之外的
+   * 独立 wa-dialog；关闭（wa-hide，含 Esc/背板/关闭钮）即置 null——
+   * 条件渲染移除整棵子树，对话滚动面不残留任何节点。
+   */
+  private renderViewAllDialog() {
+    const entry = this.viewAllEntry
+    if (!entry) return nothing
+    return html`
+      <wa-dialog
+        class="view-all-dialog"
+        data-testid="view-all-dialog"
+        label=${entry.title}
+        .open=${true}
+        @wa-hide=${this.closeViewAll}
+      >
+        <div class="body view-all-body">${unsafeHTML(renderMarkdown(entry.content))}</div>
+      </wa-dialog>
+    `
+  }
+
+  private closeViewAll = (): void => {
+    this.viewAllEntry = null
   }
 
   private renderUnit(u: TurnUnit, receipt: boolean) {
@@ -1177,76 +1304,137 @@ export class SebasTranscriptView extends LitElement {
             <span class="author">${label}</span>
             <time class="time" datetime=${iso || nothing}>${ts}</time>
           </div>
-          ${u.runs.map((r) => this.renderAgentRun(r))}
+          ${u.runs.map((r, i) => this.renderAgentRun(r, this.isLiveTextTail(u, i)))}
         </div>
       </div>
     `
   }
 
-  private renderAgentRun(r: AgentRun) {
+  /**
+   * 该 run 是否为「流式中的当前文本条目」（4.3，D5.3）：末尾 agent 回合的
+   * 最后一个 text run，且回合仍在飞（turnLive）。仅它以纯文本增量呈现；
+   * 其余 run（历史文本、过程折叠）照常 markdown。
+   */
+  private isLiveTextTail(u: AgentUnit, runIndex: number): boolean {
+    return (
+      this.turnLive &&
+      this.turnUnits[this.turnUnits.length - 1] === u &&
+      runIndex === u.runs.length - 1 &&
+      u.runs[runIndex].type === 'text'
+    )
+  }
+
+  private renderAgentRun(r: AgentRun, liveText: boolean = false) {
     if (r.type === 'text') {
+      if (liveText) {
+        // 4.3（D5.3）：流式中的当前条目用纯文本呈现（Lit 文本绑定，零
+        // markdown 解析、无 unsafeHTML 重解析）——渲染成本不随帧线性增长。
+        // 回合定稿（turnLive 翻 false）后本方法走回 markdown 分支，一次性
+        // 完成富文本渲染。
+        return html`<div class="body text-live">${r.content}</div>`
+      }
       return html`<div class="body">${unsafeHTML(renderMarkdown(r.content))}</div>`
     }
     return this.renderProcessRun(r)
   }
 
   /**
-   * 一 run 一折（2.1/D1）：过程 run 渲染为默认收起的折叠（原生 details/
-   * summary，键盘可展开 2.5），嵌在正文段之间的真实发生位置。open 状态以
-   * run id（首条目 position，D2）记在 {@link foldOpen}——流式全量重分组
-   * 后按 id 恢复，未命中即收起（流式期间永不自动展开，D3）。summary 行
-   * 实时渲染「进行中条目的结构化 title（缺省通用标签）+ 条目计数」——
-   * 数据源即增量 refetch 后的 run 内容，无需新事件。
+   * 一 run 一折（4.4，D5.4）：collapsed 呈现是**单行行内 link**——类型
+   * glyph + `process` 标签 + 进行中条目 title（缺省通用标签）+ 条目计数，
+   * 无按钮块、无边框卡框。点击切换展开/收起（状态由组件托管，见
+   * {@link toggleFold}）；展开体按 run id 记在 {@link foldOpen}（D2）——
+   * 流式全量重分组后按 id 恢复，未命中即收起（流式期间永不自动展开，
+   * D3）。summary 行实时更新「进行中 title + 计数」，数据源即增量到达的
+   * run 内容。
    */
   private renderProcessRun(r: ProcessRun) {
     const id = String(r.position)
+    const open = this.foldOpen.get(id) === true
     const { label, full } = processRunSummary(r)
     return html`
-      <details
-        class="fold process-fold"
-        data-process-id=${id}
-        data-process-count=${r.items.length}
-        .open=${this.foldOpen.get(id) === true}
-      >
-        <summary @click=${this.foldToggle(id)} title=${full ?? nothing}>
+      <div class="process-fold" data-process-id=${id} data-process-count=${r.items.length}>
+        <button
+          type="button"
+          class="fold-link"
+          data-testid="process-fold-link"
+          aria-expanded=${open}
+          title=${full ?? nothing}
+          @click=${this.toggleFold(id)}
+        >
           <span class="kind-icon" aria-hidden="true">${icon('zap', 11)}</span>
           <span class="label">process</span>
           <span class="running">${label}</span>
           <span class="fold-count">${r.items.length}</span>
-        </summary>
-        <div class="body fold-body">
-          ${repeat(r.items, (it) => it.position, (it) => this.renderProcessItem(it))}
-        </div>
-      </details>
+        </button>
+        ${open
+          ? html`<div class="body fold-body">
+              ${repeat(r.items, (it) => it.position, (it) => this.renderProcessItem(it))}
+            </div>`
+          : nothing}
+      </div>
     `
   }
 
   /**
-   * 折叠开合写入 {@link foldOpen}（D2）。click 监听挂在 summary 上（挂在
-   * details 上会连折叠体内二级折叠的点击一起收到），而 click 先于 details
-   * 的默认翻转（activation behavior 在事件派发后才生效）——此刻 `open`
-   * 仍是旧值，翻转后的状态即取反。
+   * 折叠开合写入 {@link foldOpen}（D2/4.4）：link 化后开合完全由组件托管
+   * （没有原生 details 的默认翻转），显式 requestUpdate 重渲染换显隐。
    */
-  private foldToggle(id: string): (ev: Event) => void {
-    return (ev) => {
-      const summary = ev.currentTarget as HTMLElement
-      const details = summary.parentElement as HTMLDetailsElement
-      if (details.tagName !== 'DETAILS') return
-      this.foldOpen.set(id, !details.open)
+  private toggleFold(id: string): (ev: Event) => void {
+    return () => {
+      this.foldOpen.set(id, !(this.foldOpen.get(id) === true))
+      this.requestUpdate()
     }
   }
 
-  /** 二级折叠（2.2）：title 概要 + `title` 属性保全量；无 title 回退通用标签。 */
+  /**
+   * 二级折叠（4.4/4.5）：collapsed 同为单行行内 link（title 概要，
+   * `title` 属性保全量；无 title 回退通用标签）；展开体超截断阈值时
+   * 只渲预览 + 「已截断」明示 + 「查看全部」出口（弹层见
+   * {@link renderViewAllDialog}）。
+   */
   private renderProcessItem(it: ProcessItem) {
+    const id = `item:${it.position}`
+    const open = this.foldOpen.get(id) === true
     const { label, full } = processItemLabel(it)
     return html`
-      <details class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
-        <summary title=${full ?? nothing}>
+      <div class="process-item" data-position=${it.position} data-element-type=${it.elementType}>
+        <button
+          type="button"
+          class="fold-link item-link"
+          data-testid="process-item-link"
+          aria-expanded=${open}
+          title=${full ?? nothing}
+          @click=${this.toggleFold(id)}
+        >
           <span class="item-title">${label}</span>
-        </summary>
-        <div class="body item-body">${unsafeHTML(renderMarkdown(it.content))}</div>
-      </details>
+        </button>
+        ${open ? this.renderItemBody(it) : nothing}
+      </div>
     `
+  }
+
+  /** （4.5）二级条目的展开体：超阈值截断 + 明示省略量 + 「查看全部」。 */
+  private renderItemBody(it: ProcessItem) {
+    const cut = truncateHtml(it)
+    if (!cut.truncated) {
+      return html`<div class="body item-body">${unsafeHTML(renderMarkdown(it.content))}</div>`
+    }
+    return html`
+      <div class="body item-body" data-truncated>
+        ${unsafeHTML(renderMarkdown(cut.preview))}
+        <p class="truncation-note" data-testid="truncation-note">
+          已截断：省略 ${cut.omittedLines} 行 / ${cut.omittedChars} 字符
+          <button type="button" class="view-all" @click=${() => this.openViewAll(it)}>
+            查看全部
+          </button>
+        </p>
+      </div>
+    `
+  }
+
+  private openViewAll(it: ProcessItem): void {
+    const { label } = processItemLabel(it)
+    this.viewAllEntry = { title: label, content: it.content }
   }
 }
 

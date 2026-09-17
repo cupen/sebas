@@ -782,10 +782,15 @@ usage_file = "{}"
     /// webui presents to the core channel (pass a different one for
     /// wrong-secret cases).
     pub fn spawn_webui(&self, secret: &str) -> tokio::process::Child {
+        self.spawn_webui_extra(secret, &[])
+    }
+
+    /// Same as [`Self::spawn_webui`] with extra env vars.
+    pub fn spawn_webui_extra(&self, secret: &str, extra: &[(&str, &str)]) -> tokio::process::Child {
         self.spawn(
             &["webui", "-c", &forward_slash(&self.config_path)],
             secret,
-            &[],
+            extra,
             &self.webui_log,
         )
     }
@@ -1103,6 +1108,158 @@ fn find_json_string(text: &str, key_prefix: &str) -> Option<String> {
     let rest = &text[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+// ---- 流式假上游 + /ws 客户端（fix-webui-streaming-liveness 6.1/6.2/6.3）----
+
+/// Spawn a local stub upstream that answers any request with an Anthropic
+/// SSE stream carrying the given text deltas, `spacing_ms` apart, then the
+/// closing stop/end_turn/stop events. Binds 127.0.0.1 on a probed free port
+/// and returns it — no external traffic.
+///
+/// This is the upstream for the native-kernel streaming e2e: the kernel's
+/// `AnthropicMessagesClient` posts `{stream:true}` to `{base}/v1/messages`
+/// and turns each `content_block_delta` into a `StreamEvent::TextDelta`, so
+/// spacing the deltas in time is what makes the downstream pump land them
+/// (and broadcast them) one by one.
+pub async fn spawn_sse_stub_upstream(chunks: &[&str], spacing_ms: u64) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind sse stub upstream");
+    let port = listener.local_addr().unwrap().port();
+    let chunks: Vec<String> = chunks.iter().map(|s| s.to_string()).collect();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                continue;
+            };
+            let chunks = chunks.clone();
+            tokio::spawn(async move {
+                // Read the request to its end (headers + content-length body),
+                // same discipline as spawn_stub_upstream.
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= pos + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let frame = |json: String| format!("event: anthropic\ndata: {json}\n\n");
+                let _ = sock
+                    .write_all(
+                        frame(
+                            serde_json::json!({"type":"message_start","message":{"id":"msg_sse_stub","type":"message","role":"assistant","model":"stub-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}})
+                                .to_string(),
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = sock
+                    .write_all(
+                        frame(
+                            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})
+                                .to_string(),
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                for text in &chunks {
+                    tokio::time::sleep(Duration::from_millis(spacing_ms)).await;
+                    let _ = sock
+                        .write_all(
+                            frame(
+                                serde_json::json!({
+                                    "type":"content_block_delta","index":0,
+                                    "delta":{"type":"text_delta","text":text}
+                                })
+                                .to_string(),
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                }
+                let _ = sock
+                    .write_all(
+                        frame(
+                            serde_json::json!({"type":"content_block_stop","index":0}).to_string(),
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = sock
+                    .write_all(
+                        frame(
+                            serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}})
+                                .to_string(),
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = sock
+                    .write_all(frame(serde_json::json!({"type":"message_stop"}).to_string()).as_bytes())
+                    .await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+/// A live WebUI `/ws` connection (process-level e2e). The stream auto-answers
+/// protocol pings while being read; drop it to disconnect.
+pub type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Connect to the WebUI WebSocket endpoint (`http://…` base is rewritten to
+/// `ws://` and `/ws` appended).
+pub async fn ws_connect(base: &str) -> WsStream {
+    let url = format!("{}/ws", base.replacen("http://", "ws://", 1));
+    let (stream, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("ws connect");
+    stream
+}
+
+/// Next JSON frame from the socket (text payloads only; control frames are
+/// skipped). Hard timeout so a bug surfaces as a failure, not a hang.
+pub async fn next_ws_frame(
+    ws: &mut (impl futures_util::StreamExt<
+        Item = Result<
+            tokio_tungstenite::tungstenite::Message,
+            tokio_tungstenite::tungstenite::Error,
+        >,
+    > + Unpin),
+) -> serde_json::Value {
+    let msg = tokio::time::timeout(Duration::from_secs(15), ws.next())
+        .await
+        .expect("timed out waiting for a ws frame")
+        .expect("websocket stream ended")
+        .expect("websocket error");
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Text(text) => serde_json::from_str(&text)
+            .expect("ws frame must be envelope JSON"),
+        _ => Box::pin(next_ws_frame(ws)).await,
+    }
 }
 
 #[cfg(test)]

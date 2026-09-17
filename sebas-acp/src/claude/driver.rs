@@ -172,6 +172,42 @@ struct DriverCfg {
     startup_timeout: Duration,
 }
 
+/// Assemble the SDK launch options (fix-webui-streaming-liveness 1.1, D1).
+/// Pure so the launch contract is unit-pinnable: `include_partial_messages:
+/// true` makes the SDK pass `--include-partial-messages` on the child
+/// command line (cc-agent-sdk `subprocess.rs` maps the flag 1:1), which is
+/// what makes the CLI emit `stream_event` frames — the raw material
+/// `map_message` turns into token-level deltas (1.2).
+#[allow(clippy::too_many_arguments)]
+fn claude_launch_options(
+    claude_path: String,
+    work_dir: Option<String>,
+    hooks: HashMap<HookEvent, Vec<HookMatcher>>,
+    env: HashMap<String, String>,
+    extra_args: HashMap<String, Option<String>>,
+    resume: bool,
+    session_id: String,
+    stderr_callback: Arc<dyn Fn(String) + Send + Sync>,
+) -> ClaudeAgentOptions {
+    ClaudeAgentOptions {
+        cli_path: Some(claude_path.into()),
+        cwd: work_dir.map(Into::into),
+        hooks: Some(hooks),
+        env,
+        extra_args,
+        resume: if resume { Some(session_id) } else { None },
+        // Hermetic: never load the host user's settings/hooks (spike §8b).
+        setting_sources: Some(vec![]),
+        stderr_callback: Some(stderr_callback),
+        // Token-level partials ON: the driver maps `Message::StreamEvent`
+        // into TextDelta/ThinkingDelta (see map_message). Text/thinking
+        // blocks on the *final* Assistant frame are skipped there, so the
+        // pair produces each chunk exactly once.
+        include_partial_messages: true,
+        ..Default::default()
+    }
+}
+
 impl CcDriver {
     /// Spawn the claude child and complete the SDK initialize handshake.
     /// On timeout the client is dropped, which SIGKILLs the child
@@ -286,22 +322,16 @@ impl CcDriver {
             }) as Arc<dyn Fn(String) + Send + Sync>
         };
 
-        let options = ClaudeAgentOptions {
-            cli_path: Some(claude_path.clone().into()),
-            cwd: work_dir.clone().map(Into::into),
-            hooks: Some(hooks),
-            env: env_map,
+        let options = claude_launch_options(
+            claude_path.clone(),
+            work_dir.clone(),
+            hooks,
+            env_map,
             extra_args,
-            resume: if resume {
-                Some(session_id.clone())
-            } else {
-                None
-            },
-            // Hermetic: never load the host user's settings/hooks (spike §8b).
-            setting_sources: Some(vec![]),
-            stderr_callback: Some(stderr_cb),
-            ..Default::default()
-        };
+            resume,
+            session_id.clone(),
+            stderr_cb,
+        );
 
         let mut client = ClaudeClient::new(options);
         let res = {
@@ -1002,10 +1032,18 @@ pub(crate) fn map_server_info_commands(info: &serde_json::Value) -> Vec<Availabl
 /// Pure except for `tool_names` bookkeeping (tool_use id → name so
 /// User(tool_result) frames can name the tool in `ToolEnd`).
 ///
-/// Mapping notes (spike §4.2):
-/// - `Assistant` blocks arrive whole (partials disabled — parity with the
-///   bridge's v2.1.220 envelope mode): text → TextDelta, thinking →
-///   ThinkingDelta, tool_use → ToolStart.
+/// Mapping notes (spike §4.2; partials semantics per
+/// fix-webui-streaming-liveness D1):
+/// - `StreamEvent` frames carry the token-level partials: text/thinking
+///   deltas map to TextDelta/ThinkingDelta (1.2). Block boundaries
+///   (`content_block_start`/`stop`) carry no content in this mapping —
+///   text/thinking stream as a continuous delta run, and the tool lifecycle
+///   stays anchored on the final Assistant frame so ToolStart/ToolEnd keep
+///   their existing pairing.
+/// - `Assistant` blocks arrive whole AFTER the partial stream: text and
+///   thinking blocks are SKIPPED (already delivered as deltas — replaying
+///   them would duplicate the transcript); only non-text blocks (tool_use)
+///   map here (1.3).
 /// - Tool results ride `Message::User` frames — walked as raw JSON so SDK
 ///   type strictness (e.g. missing optional fields) can't drop them.
 /// - `Result{is_error:false}` → Finished; `is_error:true` → terminal Error
@@ -1023,16 +1061,10 @@ pub(crate) fn map_message(
                 .content
                 .iter()
                 .filter_map(|b| match b {
-                    ContentBlock::Text(t) if !t.text.is_empty() => Some(AcpEvent::TextDelta {
-                        session_id: sid(),
-                        delta: t.text.clone(),
-                    }),
-                    ContentBlock::Thinking(t) if !t.thinking.is_empty() => {
-                        Some(AcpEvent::ThinkingDelta {
-                            session_id: sid(),
-                            delta: t.thinking.clone(),
-                        })
-                    }
+                    // Text/thinking blocks were already streamed as deltas
+                    // (include_partial_messages is on); mapping them again
+                    // would duplicate the transcript content (1.3).
+                    ContentBlock::Text(_) | ContentBlock::Thinking(_) => None,
                     ContentBlock::ToolUse(t) => {
                         tool_names.insert(t.id.clone(), t.name.clone());
                         Some(AcpEvent::ToolStart {
@@ -1182,7 +1214,55 @@ pub(crate) fn map_message(
                 vec![]
             }
         }
-        // StreamEvent (partials disabled), ControlCancelRequest — nothing.
+        // Partial stream frames (fix-webui-streaming-liveness 1.2, D1).
+        Message::StreamEvent(se) => map_stream_event(session_id, se),
+        // ControlCancelRequest — nothing.
+        _ => vec![],
+    }
+}
+
+/// Map one SDK `StreamEvent` (the raw Anthropic streaming payload rides in
+/// `event` as JSON) into zero or more `AcpEvent`s (1.2).
+///
+/// Vocabulary (Anthropic streaming dialect):
+/// - `content_block_delta` + `delta.type = text_delta`     → TextDelta
+/// - `content_block_delta` + `delta.type = thinking_delta` → ThinkingDelta
+/// - `content_block_delta` + input_json_delta / signature_delta → nothing
+///   (the tool lifecycle stays on the final Assistant frame);
+/// - `content_block_start` / `content_block_stop` → block boundaries: no
+///   content event in this mapping (deltas already stream continuously; a
+///   boundary event would have no consumer in the engine's log-append model);
+/// - `message_start` / `message_delta` / `message_stop` and unknown
+///   sub-types → nothing (forward-compatible silence).
+pub(crate) fn map_stream_event(session_id: &str, se: &claude_agent_sdk::StreamEvent) -> Vec<AcpEvent> {
+    if se.event.get("type").and_then(|t| t.as_str()) != Some("content_block_delta") {
+        return vec![];
+    }
+    let delta = match se.event.get("delta") {
+        Some(d) => d,
+        None => return vec![],
+    };
+    match delta.get("type").and_then(|t| t.as_str()) {
+        Some("text_delta") => {
+            let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if text.is_empty() {
+                return vec![];
+            }
+            vec![AcpEvent::TextDelta {
+                session_id: session_id.to_string(),
+                delta: text.to_string(),
+            }]
+        }
+        Some("thinking_delta") => {
+            let thinking = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+            if thinking.is_empty() {
+                return vec![];
+            }
+            vec![AcpEvent::ThinkingDelta {
+                session_id: session_id.to_string(),
+                delta: thinking.to_string(),
+            }]
+        }
         _ => vec![],
     }
 }
@@ -1708,6 +1788,18 @@ mod tests {
         serde_json::from_value(v).expect("assistant message parses")
     }
 
+    /// Build a `stream_event` frame from the raw Anthropic event payload
+    /// (fix-webui-streaming-liveness 1.2): the SDK keeps it as opaque JSON.
+    fn stream_event_msg(event: serde_json::Value) -> Message {
+        let v = serde_json::json!({
+            "type": "stream_event",
+            "uuid": "u-1",
+            "session_id": "s1",
+            "event": event,
+        });
+        serde_json::from_value(v).expect("stream_event parses")
+    }
+
     fn assistant_msg_with_usage(
         blocks: serde_json::Value,
         model: &str,
@@ -1730,14 +1822,134 @@ mod tests {
     }
 
     #[test]
-    fn assistant_text_maps_to_text_delta() {
+    fn assistant_text_block_is_skipped_partials_carry_the_text() {
+        // fix-webui-streaming-liveness 1.3：partials 开启后，完整 Assistant
+        // 帧的文本/思考块不再翻事件（partial 流已按 token 送过），只有非文本
+        // 块（tool_use）与 usage 照常。
         let mut names = HashMap::new();
         let m = assistant_msg(serde_json::json!([{"type": "text", "text": "hi"}]));
+        assert!(map_message("s1", &mut names, &m).is_empty());
+    }
+
+    // ---- fix-webui-streaming-liveness 1.2：StreamEvent 各子型 ----
+
+    #[test]
+    fn stream_event_text_delta_maps_to_text_delta() {
+        let mut names = HashMap::new();
+        let m = stream_event_msg(serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "hel"}
+        }));
         let evts = map_message("s1", &mut names, &m);
         assert!(matches!(
             &evts[..],
-            [AcpEvent::TextDelta { delta, .. }] if delta == "hi"
+            [AcpEvent::TextDelta { delta, .. }] if delta == "hel"
         ));
+    }
+
+    #[test]
+    fn stream_event_thinking_delta_maps_to_thinking_delta() {
+        let mut names = HashMap::new();
+        let m = stream_event_msg(serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "hmm"}
+        }));
+        let evts = map_message("s1", &mut names, &m);
+        assert!(matches!(
+            &evts[..],
+            [AcpEvent::ThinkingDelta { delta, .. }] if delta == "hmm"
+        ));
+    }
+
+    #[test]
+    fn stream_event_block_boundaries_and_tool_deltas_carry_no_content_event() {
+        // 块边界（start/stop）与工具 JSON 增量：本映射不发内容事件——文本/
+        // 思考以连续 delta 流呈现，工具生命周期锚定在完整 Assistant 帧
+        // （ToolStart/ToolEnd 配对不变）。mapper 必须容忍全部子型（静默）。
+        let mut names = HashMap::new();
+        let frames = vec![
+            serde_json::json!({
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+            serde_json::json!({
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
+            }),
+            serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"cmd"}
+            }),
+            serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig"}
+            }),
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+            serde_json::json!({"type": "message_start", "message": {}}),
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": null}}),
+            serde_json::json!({"type": "message_stop"}),
+            serde_json::json!({"type": "someday_new_subtype"}),
+        ];
+        for f in frames {
+            let m = stream_event_msg(f.clone());
+            assert!(
+                map_message("s1", &mut names, &m).is_empty(),
+                "no content event expected for {f}"
+            );
+        }
+        assert!(names.is_empty(), "tool_names untouched by stream events");
+    }
+
+    #[test]
+    fn stream_event_empty_delta_text_emits_nothing() {
+        let mut names = HashMap::new();
+        let m = stream_event_msg(serde_json::json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": ""}
+        }));
+        assert!(map_message("s1", &mut names, &m).is_empty());
+    }
+
+    #[test]
+    fn partial_stream_plus_final_assistant_frame_yields_the_text_exactly_once() {
+        // fix-webui-streaming-liveness 1.3：同一段文本 partial+final 不产生
+        // 重复 transcript 内容——StreamEvent 翻增量、完整帧的文本块跳过，
+        // 拼接结果只有一份。
+        let mut names = HashMap::new();
+        let mut evts = vec![];
+        evts.extend(map_message(
+            "s1",
+            &mut names,
+            &stream_event_msg(serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "hello "}
+            })),
+        ));
+        evts.extend(map_message(
+            "s1",
+            &mut names,
+            &stream_event_msg(serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "world"}
+            })),
+        ));
+        evts.extend(map_message(
+            "s1",
+            &mut names,
+            &assistant_msg(serde_json::json!([{"type": "text", "text": "hello world"}])),
+        ));
+        let joined: String = evts
+            .iter()
+            .filter_map(|e| match e {
+                AcpEvent::TextDelta { delta, .. } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, "hello world", "exactly one copy of the text");
+        assert!(
+            evts.iter().all(|e| matches!(e, AcpEvent::TextDelta { .. })),
+            "no duplicate-carrying events: {evts:?}"
+        );
     }
 
     #[test]
@@ -1881,10 +2093,9 @@ mod tests {
             456,
         );
         let evts = map_message("s1", &mut names, &m);
-        // Expect TextDelta + UsageUpdate
-        assert_eq!(evts.len(), 2);
-        assert!(matches!(&evts[0], AcpEvent::TextDelta { delta, .. } if delta == "hello"));
-        match &evts[1] {
+        // Text blocks are skipped (partials carry the text); usage still lands.
+        assert_eq!(evts.len(), 1);
+        match &evts[0] {
             AcpEvent::UsageUpdate { session_id, usage } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4-20250514"));
@@ -1899,8 +2110,7 @@ mod tests {
     fn assistant_without_usage_does_not_emit_usage_update() {
         let mut names = HashMap::new();
         let m = assistant_msg(serde_json::json!([{"type": "text", "text": "hi"}]));
-        let evts = map_message("s1", &mut names, &m);
-        assert!(matches!(&evts[..], [AcpEvent::TextDelta { .. }]));
+        assert!(map_message("s1", &mut names, &m).is_empty());
     }
 
     #[test]
@@ -1973,6 +2183,48 @@ mod tests {
             ]
         );
         assert_eq!(DEFAULT_CLAUDE_MODEL, "default");
+    }
+
+    // ---- fix-webui-streaming-liveness 1.1：launch 参数 ----
+
+    #[test]
+    fn launch_options_enable_partial_messages() {
+        // fix-webui-streaming-liveness 1.1（D1）：launch 契约钉死——options
+        // `include_partial_messages: true`。cc-agent-sdk 的 subprocess
+        // transport 把该 flag 1:1 渲染成子进程命令行的
+        // `--include-partial-messages`（真 CLI 据此发 stream_event 帧）。
+        let options = claude_launch_options(
+            "claude".into(),
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            false,
+            "s1".into(),
+            Arc::new(|_: String| {}),
+        );
+        assert!(
+            options.include_partial_messages,
+            "partials must be requested at launch: --include-partial-messages"
+        );
+        // 其余装配原样透传（resume false → None；cli_path/cwd 钉住）。
+        assert!(options.resume.is_none());
+        assert_eq!(options.cli_path.as_deref(), Some(std::path::Path::new("claude")));
+        assert!(options.cwd.is_none());
+
+        // resume 形态：会话 id 原样携带。
+        let resumed = claude_launch_options(
+            "claude".into(),
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            true,
+            "conv-1".into(),
+            Arc::new(|_: String| {}),
+        );
+        assert_eq!(resumed.resume.as_deref(), Some("conv-1"));
+        assert!(resumed.include_partial_messages, "resume keeps partials on");
     }
 
     #[test]

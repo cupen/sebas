@@ -242,10 +242,10 @@ fn a_real_child_without_declared_enforcement_reports_no_effective_mode() {
     assert_eq!(summary.mode, None, "期望与实际不同，差异可见");
 }
 
-/// `set_model` / `cancel` 在真子进程上如实报告「做不到」：Claude 专用驱动没有
-/// ACP 的 `set_config_option` 通道，节点不得把「命令发出去了」当成「已切换」。
+/// 运行时模型切换经 SDK 控制协议送达（workbench-composer-input-polish 2.3，
+/// 乐观生效、生效值以节点回报为准）；`cancel` 在无在飞 turn 时仍如实回 false。
 #[test]
-fn a_real_child_reports_unsupported_model_switch_and_idle_cancel() {
+fn a_real_child_switches_model_via_control_request_and_idle_cancel_is_false() {
     let Some(fake) = fake_claude() else {
         eprintln!("skipped: 找不到 target/debug/fake-claude-cli");
         return;
@@ -270,13 +270,13 @@ fn a_real_child_reports_unsupported_model_switch_and_idle_cancel() {
         "空闲会话的取消应如实回 false"
     );
 
-    // 模型切换：驱动明确说不支持 → 节点如实回错，且会话仍可继续用。
-    let err = host.set_model("s-1", "some-model").unwrap_err();
-    assert_eq!(err.code, SessionRejectCode::NodeError);
-    assert!(
-        err.cause.contains("不支持") || err.cause.contains("模型未变"),
-        "成因要说明「模型没变」：{}",
-        err.cause
+    // 模型切换：控制请求送达即乐观生效（SDK 无失败回执语义），节点如实
+    // 回报生效值，不把期望值回显成已生效。
+    let effective = host.set_model("s-1", "some-model").unwrap();
+    assert_eq!(
+        effective.as_deref(),
+        Some("some-model"),
+        "生效值以节点回报为准"
     );
 }
 

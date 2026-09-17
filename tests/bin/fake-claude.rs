@@ -37,6 +37,13 @@
 //!   tool_result "perm done", deny → tool_result is_error.
 //! - user text == "stream" → 5 text frames with a 250ms pause before the
 //!   result frame (exercises the 150ms-debounce pump's transient states).
+//! - user text == "drip" → 3 partial-stream chunks spaced 400ms apart, then
+//!   the result frame — deterministic multi-frame streaming for the webui
+//!   liveness e2e (fix-webui-streaming-liveness 6.1). Total in-scenario
+//!   silence stays ≪ the driver watchdog's 1.5s probe deadline.
+//! - user text == "flood" → 1200 partial-stream chunks back-to-back, no
+//!   pauses — a ≥1000-entry transcript for the small-summary performance
+//!   assertion (fix-webui-streaming-liveness 6.3).
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -259,8 +266,18 @@ fn main() {
         &json!({"argv": std::env::args().skip(1).collect::<Vec<_>>()}),
     );
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines().map_while(Result::ok);
+    // stdin 在后台线程读入并经 channel 转交：场景中途（流式分块之间）也能
+    // 非阻塞地应答 driver 的看门狗探针（真 CLI 的控制帧与流式帧并发处理；
+    // 单线程阻塞读会让探针把驱动泵卡到场景结束，流式帧被整段突发转发）。
+    let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines().map_while(Result::ok) {
+            if stdin_tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
     let mut init_sent = false;
     let mut hook_counter: u64 = 0;
     // sebas-9pz ① hang test: once the "hang" prompt arrives, stop emitting
@@ -269,7 +286,7 @@ fn main() {
     // detector (no content for N seconds) can fire.
     let mut hanging = false;
 
-    while let Some(line) = lines.next() {
+    while let Ok(line) = stdin_rx.recv() {
         let v: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -399,7 +416,7 @@ fn main() {
                 let text = user_text(&v);
                 if text.contains("crash") {
                     // D6: mid-session process crash — one last frame, then die.
-                    io.emit(&assistant_text(&flags.session_id, "boom", reported_model(&flags)));
+                    emit_assistant_text(&mut io, &flags.session_id, "boom", reported_model(&flags));
                     io.out.flush().unwrap();
                     std::process::exit(1);
                 }
@@ -433,14 +450,18 @@ fn main() {
                     // 状态——control_request 探测照常应答（驱动 hang 链因此
                     // 不触发），但再无任何事件帧。引擎停滞看门狗（
                     // `[dispatch] turn_stall_timeout`）是这种停滞的唯一兜底。
-                    io.emit(&assistant_text(&flags.session_id, "stalling...", reported_model(&flags)));
+                    emit_assistant_text(&mut io, &flags.session_id, "stalling...", reported_model(&flags));
                     hanging = true;
                 } else if text == "perm" {
-                    perm_turn(&flags, &mut io, &mut lines, &mut hook_counter);
+                    perm_turn(&flags, &mut io, &stdin_rx, &mut hook_counter);
                 } else if text == "stream" {
-                    stream_turn(&flags, &mut io);
+                    stream_turn(&mut flags, &mut io, &stdin_rx);
+                } else if text == "drip" {
+                    drip_turn(&mut flags, &mut io, &stdin_rx);
+                } else if text == "flood" {
+                    flood_turn(&mut flags, &mut io, &stdin_rx);
                 } else {
-                    run_scenario(&flags, &mut io, &mut lines, &mut hook_counter);
+                    run_scenario(&flags, &mut io, &stdin_rx, &mut hook_counter);
                 }
                 // Like the real CLI in streaming mode, stay alive for further
                 // user messages until stdin closes (multi-turn).
@@ -455,7 +476,7 @@ fn main() {
 fn perm_turn(
     flags: &Flags,
     io: &mut Io,
-    lines: &mut dyn Iterator<Item = String>,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
     hook_counter: &mut u64,
 ) {
     let sid = &flags.session_id;
@@ -493,7 +514,7 @@ fn perm_turn(
             }
         }
     }));
-    let decision = wait_hook_decision(lines, &req_id, io);
+    let decision = wait_hook_decision(stdin_rx, &req_id, io);
     if decision == "allow" {
         io.emit(&tool_result_frame(sid, "tc-1", "perm done\n", false));
     } else {
@@ -505,23 +526,120 @@ fn perm_turn(
 /// "stream" prompt: 5 text chunks, then a pause so the debounced pump can
 /// flush a transient mid-turn card before Finished (mirrors the ACP-era
 /// fake's "stream" trigger).
-fn stream_turn(flags: &Flags, io: &mut Io) {
-    let sid = &flags.session_id;
-    let model = reported_model(flags);
+fn stream_turn(
+    flags: &mut Flags,
+    io: &mut Io,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
+) {
+    let sid = flags.session_id.clone();
+    let model = reported_model(flags).to_string();
     for i in 0..5 {
-        io.emit(&assistant_text(sid, &format!("chunk{i} "), model));
+        emit_assistant_text(io, &sid, &format!("chunk{i} "), &model);
     }
     // 800ms: the 150ms debounce tick must flush a transient 🚧 card well
     // before the result frame; SDK startup (version probe + spawn) adds
     // ~100ms of latency, so smaller margins flake under parallel test load.
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    io.emit(&result_frame(sid, "success", false));
+    // Sleep in short slices answering the watchdog probe (as the real CLI
+    // would) — an unanswered probe blocks the driver's read loop and bursts
+    // all frames + result into one pump iteration, which drops the pending
+    // SEED→WORKING reaction.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        pump_controls(stdin_rx, io, flags);
+    }
+    io.emit(&result_frame(&sid, "success", false));
+}
+
+/// "drip" prompt (fix-webui-streaming-liveness 6.1): 3 partial-stream chunks
+/// spaced 400ms apart so each lands in its own core-channel coalescing window
+/// (250ms) — the webui observes MULTIPLE turn.append frames mid-turn instead
+/// of one block at completion. Between chunks the watchdog probe (and any
+/// other pending control_request) is answered exactly like the main loop
+/// would, mirroring the real CLI's concurrent control/stream processing.
+fn drip_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiver<String>) {
+    let sid = flags.session_id.clone();
+    for i in 0..3 {
+        emit_assistant_text(io, &sid, &format!("drip{i} "), reported_model(flags));
+        // Between chunks: 400ms gaps put each chunk in its own coalescing
+        // window. The final pause is a short 150ms — just enough for the last
+        // window to flush before the turn completes, keeping the whole
+        // scenario ≈0.95s, well inside the watchdog probe's 1.5s deadline.
+        let pause = if i + 1 < 3 { 400 } else { 150 };
+        std::thread::sleep(std::time::Duration::from_millis(pause));
+        pump_controls(stdin_rx, io, flags);
+    }
+    io.emit(&result_frame(&sid, "success", false));
+}
+
+/// Non-blocking drain of stdin lines that arrived while a scenario runs;
+/// control_requests (the driver's watchdog probe) are answered exactly like
+/// the main loop's control arm — a probe left unanswered blocks the driver's
+/// message pump until the scenario returns, which would burst the stream.
+/// Non-control lines (user prompts — the driver never sends them mid-turn)
+/// are dropped.
+fn pump_controls(stdin_rx: &std::sync::mpsc::Receiver<String>, io: &mut Io, flags: &mut Flags) {
+    while let Ok(line) = stdin_rx.try_recv() {
+        let v: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        io.journal_write("in", &v);
+        if v.get("type").and_then(Value::as_str) != Some("control_request") {
+            continue;
+        }
+        let req_id = v
+            .get("request_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let subtype = v
+            .pointer("/request/subtype")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if subtype == "set_permission_mode" {
+            let new_mode = v
+                .pointer("/request/mode")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            io.journal_write(
+                "mode_change",
+                &json!({ "type": "mode_change", "mode": new_mode }),
+            );
+            if !new_mode.is_empty() {
+                flags.permission_mode = Some(new_mode);
+            }
+        }
+        io.emit(&json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": req_id, "response": {}}
+        }));
+    }
+}
+
+/// "flood" prompt (fix-webui-streaming-liveness 6.3): 1200 partial-stream
+/// chunks — a ≥1000-entry transcript. Every 100 chunks the scenario pumps
+/// stdin: without it the stdout pipe fills (~64KB), the child blocks on
+/// write and can never answer the driver's watchdog probe, which in turn
+/// blocks the driver's message pump — a deadlock that kills the session at
+/// the probe deadline.
+fn flood_turn(flags: &mut Flags, io: &mut Io, stdin_rx: &std::sync::mpsc::Receiver<String>) {
+    let sid = flags.session_id.clone();
+    for i in 0..1200u32 {
+        emit_assistant_text(io, &sid, &format!("f{i} "), reported_model(flags));
+        if (i + 1) % 100 == 0 {
+            pump_controls(stdin_rx, io, flags);
+        }
+    }
+    io.emit(&result_frame(&sid, "success", false));
 }
 
 fn run_scenario(
     flags: &Flags,
     io: &mut Io,
-    lines: &mut dyn Iterator<Item = String>,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
     hook_counter: &mut u64,
 ) {
     let sid = &flags.session_id;
@@ -535,8 +653,8 @@ fn run_scenario(
     match flags.scenario.as_str() {
         "hello" => {
             let model = reported_model(flags);
-            io.emit(&assistant_text(sid, "hello ", model));
-            io.emit(&assistant_text(sid, "world", model));
+            emit_assistant_text(io, sid, "hello ", model);
+            emit_assistant_text(io, sid, "world", model);
             settle();
             io.emit(&result_frame(sid, "success", false));
         }
@@ -548,7 +666,20 @@ fn run_scenario(
                     {"type": "thinking", "thinking": "hmm"}
                 ], "model": reported_model(flags)}
             }));
-            io.emit(&assistant_text(sid, "thought out loud", reported_model(flags)));
+            // The thinking delta rides the partial stream (real CLI with
+            // --include-partial-messages); the final thinking block is
+            // skipped by the driver.
+            io.emit(&json!({
+                "type": "stream_event",
+                "uuid": "u-think",
+                "session_id": sid,
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "hmm"}
+                }
+            }));
+            emit_assistant_text(io, sid, "thought out loud", reported_model(flags));
             settle();
             io.emit(&result_frame(sid, "success", false));
         }
@@ -585,7 +716,7 @@ fn run_scenario(
                     }
                 }
             }));
-            let decision = wait_hook_decision(lines, &req_id, io);
+            let decision = wait_hook_decision(stdin_rx, &req_id, io);
             if decision == "allow" && flags.scenario == "bash" {
                 io.emit(&tool_result_frame(sid, tool_id, "hi\n", false));
             } else {
@@ -606,13 +737,12 @@ fn run_scenario(
 /// Any control_request seen while waiting (e.g. the driver's watchdog
 /// `set_model` probe) is acked inline so it doesn't consume our response
 /// or starve the probe of its answer.
-#[allow(clippy::while_let_on_iterator)] // &mut dyn Iterator: no by_ref (Sized)
 fn wait_hook_decision(
-    lines: &mut dyn Iterator<Item = String>,
+    stdin_rx: &std::sync::mpsc::Receiver<String>,
     req_id: &str,
     io: &mut Io,
 ) -> String {
-    while let Some(line) = lines.next() {
+    while let Ok(line) = stdin_rx.recv() {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -672,6 +802,25 @@ fn assistant_text(sid: &str, text: &str, model: &str) -> Value {
             {"type": "text", "text": text}
         ], "model": model}
     })
+}
+
+/// Emit one visible text chunk the way the real CLI does under
+/// `--include-partial-messages` (fix-webui-streaming-liveness 1.1): a
+/// `stream_event` frame carrying the token delta FIRST, then the final
+/// whole-message `assistant` frame. The driver maps the delta and skips the
+/// final text block, so consumers see each chunk exactly once.
+fn emit_assistant_text(io: &mut Io, sid: &str, text: &str, model: &str) {
+    io.emit(&json!({
+        "type": "stream_event",
+        "uuid": format!("u-{}", text.len()),
+        "session_id": sid,
+        "event": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": text}
+        }
+    }));
+    io.emit(&assistant_text(sid, text, model));
 }
 
 /// assistant 帧 model 字段的当前值：set_model 切换过的值优先，否则 init 帧

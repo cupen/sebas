@@ -335,9 +335,11 @@ async fn serve_subscription(
     let mut approvals = backend.permission_requests();
     // 实时回合内容（workbench-live-conversation-flow 1.1）：独立合并任务把
     // 250ms 窗内的追加按会话合帧，经 mpsc 交给本订阅流。Lagged 只丢增量
-    // （快照收敛），与 SessionEvent 的「Lagged 即断」语义刻意不同。
+    // （快照收敛），与 SessionEvent 的「Lagged 即断」语义刻意不同——合并器
+    // 落后时改发 `Resync` 帧（fix-webui-streaming-liveness 5.2，D6），让
+    // 客户端快照重取后继续收流。
     const TURN_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
-    let (turn_tx, mut turn_frames) = tokio::sync::mpsc::channel::<TurnStreamEvent>(64);
+    let (turn_tx, mut turn_frames) = tokio::sync::mpsc::channel::<SessionStreamFrame>(64);
     tokio::spawn(turn_coalescer(
         backend.subscribe_turn_events(),
         TURN_COALESCE_WINDOW,
@@ -388,7 +390,7 @@ async fn serve_subscription(
                 SessionStreamFrame::ApprovalRequested { notice }
             }
             turn = recv_turn_frame(&mut turn_frames) => match turn {
-                Some(event) => SessionStreamFrame::Turn { event },
+                Some(frame) => frame,
                 // 合并任务没了（core 关停）：这一路退化为永不就绪，其余照常。
                 None => std::future::pending().await,
             },
@@ -454,22 +456,23 @@ async fn recv_remote_event(
 /// 从回合合并任务取下一帧；任务消失后这一路永久就绪为 pending（与
 /// `recv_remote_event` 的 None 语义一致）。
 async fn recv_turn_frame(
-    frames: &mut tokio::sync::mpsc::Receiver<TurnStreamEvent>,
-) -> Option<TurnStreamEvent> {
+    frames: &mut tokio::sync::mpsc::Receiver<SessionStreamFrame>,
+) -> Option<SessionStreamFrame> {
     match frames.recv().await {
-        Some(event) => Some(event),
+        Some(frame) => Some(frame),
         None => std::future::pending().await,
     }
 }
 
 /// 回合内容合并器（workbench-live-conversation-flow 1.1）：把 transcript
 /// 逐条追加的 `TurnStreamEvent` 按会话聚成 250ms 窗口批帧；单组内容超过
-/// 4KB 立即冲刷（不等窗口）。Lagged 只丢增量——日志是唯一事实，消费端以
-/// 快照重取收敛，绝不因落后断流。
+/// 4KB 立即冲刷（不等窗口）。Lagged 不再只丢增量——缺口不可弥补，改发
+/// `SessionStreamFrame::Resync`（fix-webui-streaming-liveness 5.2，D6）让
+/// 客户端快照重取，之后照常续流，绝不因落后断流。
 async fn turn_coalescer(
     mut rx: broadcast::Receiver<TurnStreamEvent>,
     window: std::time::Duration,
-    tx: tokio::sync::mpsc::Sender<TurnStreamEvent>,
+    tx: tokio::sync::mpsc::Sender<SessionStreamFrame>,
 ) {
     const TURN_FLUSH_BYTES: usize = 4096;
     let mut buf: std::collections::HashMap<(String, String), Vec<TurnEntry>> =
@@ -500,7 +503,15 @@ async fn turn_coalescer(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "turn coalescer lagged; skipping deltas (snapshot converges)");
+                    warn!(skipped, "turn coalescer lagged; sending resync frame");
+                    // 缺口不可弥补：丢弃半窗缓冲（快照重取自会覆盖），先发
+                    // resync 再续流。合帧语义保持：落后窗口内的残余条目由
+                    // 重取覆盖，无需照发。
+                    buf.clear();
+                    if tx.send(SessionStreamFrame::Resync).await.is_err() {
+                        return;
+                    }
+                    deadline = None;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             },
@@ -512,7 +523,9 @@ async fn turn_coalescer(
         if flush_now {
             for ((channel, key), entries) in buf.drain() {
                 let _ = tx
-                    .send(TurnStreamEvent { channel, key, entries })
+                    .send(SessionStreamFrame::Turn {
+                        event: TurnStreamEvent { channel, key, entries },
+                    })
                     .await;
             }
             deadline = None;
@@ -1396,6 +1409,9 @@ mod tests {
         })
         .unwrap();
         let first = out_rx.recv().await.unwrap();
+        let SessionStreamFrame::Turn { event: first } = first else {
+            panic!("expected a Turn frame, got {first:?}")
+        };
         assert_eq!(first.channel, "web");
         assert_eq!(first.key, "k");
         assert_eq!(first.entries.len(), 2, "same-window appends batch into one frame");
@@ -1408,8 +1424,76 @@ mod tests {
         })
         .unwrap();
         let second = out_rx.recv().await.unwrap();
+        let SessionStreamFrame::Turn { event: second } = second else {
+            panic!("expected a Turn frame, got {second:?}")
+        };
         assert_eq!(second.entries.len(), 1);
         assert_eq!(second.entries[0].content.len(), 5000);
+    }
+
+    /// fix-webui-streaming-liveness 5.2（D6）：合并器落后（容量 1 的广播被
+    /// 灌爆）必须改发 `Resync` 帧给客户端（快照重取信号），且之后照常续流
+    /// ——不再静默吞缺口。
+    #[tokio::test]
+    async fn turn_coalescer_sends_resync_when_it_lags_then_keeps_streaming() {
+        let (tx, rx) = broadcast::channel::<TurnStreamEvent>(1);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(turn_coalescer(
+            rx,
+            std::time::Duration::from_millis(25),
+            out_tx,
+        ));
+        // 接收端尚未取走任何批帧前灌 3 条：容量 1，合并器必然落后。
+        for i in 0..3u64 {
+            tx.send(TurnStreamEvent {
+                channel: "web".into(),
+                key: "k".into(),
+                entries: vec![TurnEntry::markdown(i, format!("d{i}"))],
+            })
+            .unwrap();
+        }
+        // 先到的一帧可能是首个窗口批帧（时序），但 resync 必须在后续到达。
+        let mut saw_resync = false;
+        for _ in 0..4 {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+                    .await
+                    .expect("frame timeout")
+                    .expect("coalescer alive");
+            match frame {
+                SessionStreamFrame::Resync => {
+                    saw_resync = true;
+                    break;
+                }
+                SessionStreamFrame::Turn { .. } => continue,
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        assert!(saw_resync, "lag must surface a Resync frame to the client");
+
+        // 落后恢复后照常续流：新事件仍以 Turn 帧到达（落后的残余批帧可能
+        // 先到，跳过即可）。
+        tx.send(TurnStreamEvent {
+            channel: "web".into(),
+            key: "k".into(),
+            entries: vec![TurnEntry::markdown(9, "after")],
+        })
+        .unwrap();
+        let mut resumed = false;
+        for _ in 0..6 {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+                    .await
+                    .expect("frame timeout")
+                    .expect("coalescer alive");
+            if let SessionStreamFrame::Turn { event } = frame {
+                if event.entries.iter().any(|e| e.content == "after") {
+                    resumed = true;
+                    break;
+                }
+            }
+        }
+        assert!(resumed, "stream must resume with Turn frames after resync");
     }
 
     use super::*;

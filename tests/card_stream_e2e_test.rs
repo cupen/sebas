@@ -81,6 +81,7 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
     let phase1_deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut merged = String::new();
     let mut saw_working = false;
+    let mut saw_full_card = false;
     loop {
         if std::time::Instant::now() > phase1_deadline {
             panic!("no full-5-chunk card with WORKING reaction within 5s; last: {merged}");
@@ -93,8 +94,13 @@ async fn fake_claude_stream_merges_five_chunks_then_done() {
         match o {
             Out::UpdateCard { .. } | Out::SendCard { .. } => {
                 let s = card_str(&o);
-                let all = (0..5).all(|i| s.contains(&format!("chunk{i}")));
-                if saw_working && all {
+                // 全 chunk 卡与 WORKING reaction 是两个独立事实，到达顺序
+                // 不约定（partial 双帧节奏下全 chunk 卡可能先于 reaction
+                // tick 刷出且是最后一张卡）——只要求 deadline 内都见到。
+                if (0..5).all(|i| s.contains(&format!("chunk{i}"))) {
+                    saw_full_card = true;
+                }
+                if saw_working && saw_full_card {
                     break;
                 }
                 merged = s; // keep last for the panic message
