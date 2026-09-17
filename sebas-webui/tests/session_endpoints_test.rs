@@ -2309,6 +2309,57 @@ async fn session_payloads_carry_pending_submissions_in_delivery_order() {
     assert_eq!(pending[1]["text"], "staged two");
 }
 
+/// fix-pending-queue-liveness 2.3：detail / 行载荷按引擎事实携带
+/// `turn_engaged`（WORKING ∨ 泊车 ∨ spawn 窗口），且只在 `true` 时上 wire
+/// ——键缺省 = 前端回退 `status_slug === 'working'` 判定（旧 core 组合）。
+#[tokio::test]
+async fn session_payloads_carry_turn_engaged_fact() {
+    let (router, _rx, app) = fixture().await;
+
+    // spawn 窗口（s3 = Spawning 占位）→ true；行载荷同样携带。
+    let encoded_spawning = encode(&key("c"));
+    let (status, detail) = tq_get(&app, &format!("/api/sessions/{encoded_spawning}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["turn_engaged"], true, "spawn window is engaged");
+    let (_, list) = tq_get(&app, "/api/sessions").await;
+    let rows = list["recent_sessions"].as_array().expect("rows");
+    let spawning_row = rows
+        .iter()
+        .find(|r| r["status_slug"] == "starting")
+        .expect("spawning row");
+    assert_eq!(spawning_row["turn_engaged"], true);
+    let dormant_row = rows
+        .iter()
+        .find(|r| r["status_slug"] == "dormant")
+        .expect("dormant row");
+    assert!(
+        dormant_row.get("turn_engaged").is_none(),
+        "false must be omitted so old-core clients keep their fallback semantics"
+    );
+
+    // WORKING 相位 → true；终态后不再占用、键不上 wire。
+    router.seed_card("s1".into(), "run".into()).await;
+    router
+        .dispatch_acp_event(AcpEvent::TextDelta {
+            session_id: "s1".into(),
+            delta: "streaming".into(),
+        })
+        .await;
+    let encoded_s1 = encode(&key("a"));
+    let (_, detail) = tq_get(&app, &format!("/api/sessions/{encoded_s1}")).await;
+    assert_eq!(detail["turn_engaged"], true, "WORKING is engaged");
+    router
+        .dispatch_acp_event(AcpEvent::Finished {
+            session_id: "s1".into(),
+        })
+        .await;
+    let (_, detail) = tq_get(&app, &format!("/api/sessions/{encoded_s1}")).await;
+    assert!(
+        detail.get("turn_engaged").is_none(),
+        "a settled session must not claim turn engagement: {detail}"
+    );
+}
+
 /// 6.2：pending remove / move 端点——成功 + 三类类型化 4xx。
 #[tokio::test]
 async fn pending_remove_and_move_endpoints() {

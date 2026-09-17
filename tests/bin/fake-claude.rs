@@ -403,6 +403,14 @@ fn main() {
                 } else if text == "hang" {
                     // sebas-9pz ① hang test: enter the silent-hang state.
                     hanging = true;
+                } else if text == "stall" {
+                    // fix-pending-queue-liveness e2e：先出一帧（卡片 FSM 进
+                    // WORKING，回合确实在跑），随后进入「活着但对 ACP 沉默」
+                    // 状态——control_request 探测照常应答（驱动 hang 链因此
+                    // 不触发），但再无任何事件帧。引擎停滞看门狗（
+                    // `[dispatch] turn_stall_timeout`）是这种停滞的唯一兜底。
+                    io.emit(&assistant_text(&flags.session_id, "stalling..."));
+                    hanging = true;
                 } else if text == "perm" {
                     perm_turn(&flags, &mut io, &mut lines, &mut hook_counter);
                 } else if text == "stream" {

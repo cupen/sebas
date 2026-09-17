@@ -45,9 +45,27 @@ vi.mock('../api/client.js', () => ({
   },
 }))
 
-vi.mock('../api/shared-ws.js', () => ({
-  sharedWs: { subscribe: () => () => {} },
-}))
+/**
+ * 共享 WS 客户端 mock（fix-pending-queue-liveness 扩展）：subscribe 捕获
+ * handler 供用例派发 WS 帧（emit），验证「事件驱动的 refetch 链」对会话
+ * 状态迁移的覆盖（session.updated / turn.append）。其余用例不派发帧，
+ * 行为与旧 no-op mock 等价。
+ */
+const wsMocks = vi.hoisted(() => {
+  const handlers = new Set<(ev: unknown) => void>()
+  return {
+    subscribe: vi.fn((h: (ev: unknown) => void) => {
+      handlers.add(h)
+      return () => handlers.delete(h)
+    }),
+    emit: (ev: unknown): void => {
+      for (const h of handlers) h(ev)
+    },
+    clearHandlers: (): void => handlers.clear(),
+  }
+})
+
+vi.mock('../api/shared-ws.js', () => ({ sharedWs: wsMocks }))
 
 // workbench-composer 模块打桩：WA 表单依赖 jsdom 缺失的 ElementInternals。
 // dashboard 同时从该模块取一次性对焦请求的事件名（workbench-rail-polish
@@ -176,6 +194,7 @@ beforeEach(() => {
   // Call counts must not leak between tests (e.g. the "never fetches a
   // detail when nothing is focused" assertion below).
   vi.clearAllMocks()
+  wsMocks.clearHandlers()
   apiMocks.summary.mockResolvedValue(summaryBase)
   apiMocks.session.mockResolvedValue(detailFixture())
   // dashboard 用 projects.list 把 selectedPath 解析成稳定 id 来分组会话行。
@@ -467,6 +486,86 @@ describe('sebas-dashboard (workbench main area)', () => {
     // 会话内模型面与当前模型照常透传。
     expect(composer.sessionModels).toEqual(['m1', 'm2'])
     expect(composer.currentModel).toBe('m1')
+    el.remove()
+  })
+
+  it('drives the composer from the engine fact turn_engaged, not the display slug (3.1)', async () => {
+    // 泊车会话的呈现词是 waiting；引擎事实 turn_engaged=true 判定「在飞」
+    // ——slug 判定（只认 working）会把它伪装成直接发送。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      status_slug: 'waiting',
+      turn_engaged: true,
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const area = el.shadowRoot!.querySelector('.composer-area')!
+    const composer = area.querySelector('sebas-workbench-composer') as HTMLElement & {
+      turnInFlight?: boolean
+      waitingApproval?: boolean
+    }
+    expect(composer.turnInFlight).toBe(true)
+    const stack = area.querySelector('sebas-pending-stack') as HTMLElement & {
+      turnEngaged?: boolean
+      waitingApproval?: boolean
+    }
+    expect(stack.turnEngaged).toBe(true)
+    el.remove()
+  })
+
+  it('falls back to the working-slug heuristic when the core predates turn_engaged (3.1)', async () => {
+    // 旧 core：键缺省 + slug waiting → 不判定在飞（waiting 呈现词不承担
+    // 状态判定，design D3）；对照 slug working 的既有 D4 断言。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      status_slug: 'waiting',
+    })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const composer = el
+      .shadowRoot!.querySelector('.composer-area')!
+      .querySelector('sebas-workbench-composer') as HTMLElement & { turnInFlight?: boolean }
+    expect(composer.turnInFlight).toBe(false)
+    el.remove()
+  })
+
+  it('lifts the parked fact from review-cards into composer and stack (3.2)', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), turn_engaged: true })
+    const el = await mount()
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+    const area = el.shadowRoot!.querySelector('.composer-area')!
+    const review = area.querySelector('sebas-review-cards') as HTMLElement
+    const composer = area.querySelector('sebas-workbench-composer') as HTMLElement & {
+      waitingApproval?: boolean
+    }
+    const stack = area.querySelector('sebas-pending-stack') as HTMLElement & {
+      waitingApproval?: boolean
+    }
+    review.dispatchEvent(
+      new CustomEvent('review-pending-changed', {
+        detail: { count: 1 },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await el.updateComplete
+    expect(composer.waitingApproval).toBe(true)
+    expect(stack.waitingApproval).toBe(true)
+    review.dispatchEvent(
+      new CustomEvent('review-pending-changed', {
+        detail: { count: 0 },
+        bubbles: true,
+        composed: true,
+      }),
+    )
+    await el.updateComplete
+    expect(composer.waitingApproval).toBe(false)
     el.remove()
   })
 
@@ -918,6 +1017,126 @@ describe('creation focus chain (workbench-rail-polish 3.2)', () => {
     await new Promise((r) => setTimeout(r, 300))
     expect(composerFocusInput.mock.calls.length).toBe(callsAtExpiry)
     expect(composer.shadowRoot!.activeElement).toBeNull()
+    el.remove()
+  })
+})
+
+/**
+ * fix-pending-queue-liveness：静默工作窗（stall 场景）内 refetch 链的组件级
+ * 钉死。契约问题：「turn 开轮 → 首帧内容」产生的 session.updated 与
+ * turn.append 帧到达后，dashboard 的 refetch（任意 WS 帧都触发，读的是
+ * 实时 summary/detail）能否把引擎事实 turn_engaged 送进 composer 的五态机
+ * ——送达即呈 stop/queued，静默窗全程不回退 disabled。
+ *
+ * mock 数据形状对齐 wire 契约：turn_engaged 只在 true 时上 wire（键缺省 =
+ * false），所以消费面的回退链（detail ?? summary ?? slug）用「键缺省」表达。
+ */
+describe('sebas-dashboard (silent working window refetch chain)', () => {
+  async function settle(el: SebasDashboard): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await el.updateComplete
+  }
+
+  function composerOf(el: SebasDashboard): StubWorkbenchComposer & {
+    waitingApproval?: boolean
+  } {
+    return el.shadowRoot!.querySelector('sebas-workbench-composer') as unknown as
+      StubWorkbenchComposer & { waitingApproval?: boolean }
+  }
+
+  function stackOf(el: SebasDashboard): HTMLElement & { turnEngaged?: boolean } {
+    return el.shadowRoot!.querySelector('sebas-pending-stack') as unknown as
+      HTMLElement & { turnEngaged?: boolean }
+  }
+
+  it('a session.updated frame mid-window refetches and drives the composer to turn-in-flight', async () => {
+    // 开轮瞬间（SEED）：turn_engaged 键不上 wire，slug queued——composer 禁用。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({
+      ...detailFixture(),
+      status_slug: 'queued',
+    })
+    const el = await mount()
+    expect(composerOf(el).turnInFlight).toBe(false)
+
+    // 引擎在首个内容帧翻 WORKING 并发布 Updated；WS 帧触发 refetch，
+    // 实时读回 working + turn_engaged=true（stall 场景静默窗的稳态）。
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      active_session: { ...focusedSummary().active_session!, turn_engaged: true },
+    })
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), turn_engaged: true })
+    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
+    await settle(el)
+
+    expect(composerOf(el).turnInFlight).toBe(true)
+    expect(stackOf(el).turnEngaged).toBe(true)
+    el.remove()
+  })
+
+  it('a turn.append frame alone keeps the view fresh through the silent window', async () => {
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), status_slug: 'queued' })
+    const el = await mount()
+    expect(composerOf(el).turnInFlight).toBe(false)
+
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      active_session: { ...focusedSummary().active_session!, turn_engaged: true },
+    })
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), turn_engaged: true })
+    wsMocks.emit({
+      type: 'turn.append',
+      session_id: 'oc_live%00',
+      entries: [],
+      seq: 3,
+    })
+    await settle(el)
+
+    expect(composerOf(el).turnInFlight).toBe(true)
+    el.remove()
+  })
+
+  it('a stale detail payload without the key does not mask a fresh summary fact (fallback chain)', async () => {
+    // detail 在途/滞回（无键，旧形状）不应遮蔽 summary 已到的新事实——
+    // 消费链 detail ?? summary ?? slug 的 `??` 半边。
+    apiMocks.summary.mockResolvedValue(focusedSummary())
+    apiMocks.session.mockResolvedValue({ ...detailFixture(), status_slug: 'queued' })
+    const el = await mount()
+    expect(composerOf(el).turnInFlight).toBe(false)
+
+    apiMocks.summary.mockResolvedValue({
+      ...focusedSummary(),
+      active_session: { ...focusedSummary().active_session!, turn_engaged: true },
+    })
+    // detail 故意停在旧形状（无 turn_engaged 键）。
+    wsMocks.emit({ type: 'session.updated', session_id: 'oc_live%00', status: 'working' })
+    await settle(el)
+
+    expect(composerOf(el).turnInFlight).toBe(true)
+    el.remove()
+  })
+
+  it('an API-created working session that is NOT focused leaves the composer unbound (sessionKey null)', async () => {
+    // 观测症状的机制钉死：API 创建会话（web_spawn）不动 web 焦点指针——
+    // 浏览器停在 `/` 且未聚焦该会话时，composer 的 sessionKey 为 null，
+    // submitState 第一分支即 disabled，与 turn 状态无关。深链/点击聚焦后
+    // 才进入上一组用例的 refetch 链。
+    apiMocks.summary.mockResolvedValue({
+      ...summaryBase,
+      active_session: null,
+      active_session_key: null,
+      recent_sessions: [row({ encoded_key: 'oc_live%00', chat_id: 'chat-live', status_slug: 'working' })],
+    })
+    const el = await mount()
+    await settle(el)
+
+    const composer = composerOf(el)
+    expect(composer.sessionKey ?? null).toBeNull()
+    expect(composer.turnInFlight).toBe(false)
+    // detail 从未被拉（无焦点键可拉）。
+    expect(apiMocks.session).not.toHaveBeenCalled()
     el.remove()
   })
 })

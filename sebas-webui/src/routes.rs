@@ -81,6 +81,9 @@ pub(crate) fn build_session_rows(
                 // （session-slash-commands 2.2）命令表随行透出（composer
                 // 面板数据源；空表不上 wire）。
                 available_commands: info.available_commands.clone(),
+                // fix-pending-queue-liveness 2.3：回合占用事实随行透出（只在
+                // true 时上 wire；缺省 = 前端回退 slug 判定）。
+                turn_engaged: info.turn_engaged,
             }
         })
         .collect();
@@ -154,6 +157,12 @@ pub(crate) fn session_summary(
     if !info.available_commands.is_empty() {
         summary["available_commands"] =
             serde_json::to_value(&info.available_commands).unwrap_or_default();
+    }
+    // fix-pending-queue-liveness 2.3：回合占用事实（只在 true 时插键——键
+    // 缺省 = 前端回退 status_slug 判定；false 上 wire 会破坏旧 core 组合的
+    // 回退语义，working 相位在旧 core 下无键可读）。
+    if info.turn_engaged {
+        summary["turn_engaged"] = serde_json::Value::Bool(true);
     }
     summary
 }

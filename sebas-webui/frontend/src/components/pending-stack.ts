@@ -1,10 +1,17 @@
 /**
- * 待生效堆叠区（workbench-turn-queue 7.1–7.3，design D8）。
+ * 待生效堆叠区（workbench-turn-queue 7.1–7.3；fix-pending-queue-liveness
+ * 修订 D8 为两级反馈）。
  *
  * 渲染在 composer 上方、投递序列出聚焦会话的待生效提交（pending
  * submissions），不占 transcript 空间。每个条目声明处置：
  *   - staging → 「将并入首条消息」（spawn 窗口暂存，激活时合并）；
  *   - turn → 「待执行 · 第 N 位」（N 为组内 1 基位置）。
+ *
+ * 队列不前进时（fix-pending-queue-liveness 3.2）条目注明原因：按
+ * `turnEngaged`（回合占用）与 `waitingApproval`（泊车审批在等）渲染
+ * 「等待你的审批」/「等待当前回合结束」+ 起等时刻——空转会话 + 增长的栈
+ * 永不无解释。起等时刻是组件侧锚点（首次观察到阻塞条件的时刻），随条件
+ * 解除/会话切换重置。
  *
  * 交互面：
  *   - 逐条删除（× 按钮）；
@@ -12,9 +19,10 @@
  *     「先判后动」：非法落点不发请求、不做乐观更新）；
  *   - 键盘可达的上移/下移按钮（纯拖拽不可达，仓库有 a11y 门禁）。
  *
- * 对账（design D8）：操作先乐观更新，随即以服务端返回的全量 pending
- * 重建列表；`AlreadyStarted`（提交已开跑）等拒绝一律静默刷新，绝不弹错
- * ——服务端真相经 refetch 事件回到组件。
+ * 拒绝反馈两级判据（fix-pending-queue-liveness 3.3，design D4）：操作后以
+ * 服务端 post-op 真相为判——条目已不在（被并发开始消费）= 竞态竞输，静默
+ * 对账；条目仍在 / 4xx / 网络失败 = 确定性拒绝，走分级通知低档（warn）
+ * 就地点名条目与原因。堆叠区对服务端未执行的操作绝不无感。
  *
  * 会话终结（7.3）：`dropped` 非空时渲染一次性「未执行」提示，逐条点名
  * 被丢弃的提交——堆叠区随会话消失，提示是唯一记录。
@@ -22,7 +30,8 @@
 
 import { LitElement, css, html, nothing } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { api, type PendingSubmission } from '../api/client.js'
+import { ApiError, NetworkError, api, type PendingSubmission } from '../api/client.js'
+import { notify } from '../notify.js'
 
 @customElement('sebas-pending-stack')
 export class SebasPendingStack extends LitElement {
@@ -32,6 +41,17 @@ export class SebasPendingStack extends LitElement {
   @property({ attribute: false }) sessionKey: string | null = null
   /** （7.3）会话终结时被丢弃的提交；null = 无提示。非空数组渲染一次性提示。 */
   @property({ attribute: false }) dropped: PendingSubmission[] | null = null
+  /**
+   * （fix-pending-queue-liveness 3.2）聚焦会话的回合是否被占用（引擎事实
+   * `turn_engaged`：WORKING ∨ 泊车 ∨ spawn 窗口）。true 且栈内有 turn 条目
+   * = 队列没有前进，条目注明原因与起等时刻。
+   */
+  @property({ type: Boolean }) turnEngaged = false
+  /**
+   * （fix-pending-queue-liveness 3.2）回合被占用是因为在等操作者的权限批复
+   * （泊车）。阻塞原因随之呈现为「等待你的审批」而不是「等待当前回合结束」。
+   */
+  @property({ type: Boolean }) waitingApproval = false
 
   /** 乐观视图：操作在途时覆盖展示，成功即被服务端返回值清空。 */
   @state() private optimistic: PendingSubmission[] | null = null
@@ -39,10 +59,23 @@ export class SebasPendingStack extends LitElement {
   @state() private busyId: number | null = null
   /** HTML5 拖拽进行中的条目 id。 */
   @state() private dragId: number | null = null
+  /**
+   * 阻塞条件的起等锚点（Date.now() 毫秒）：首次观察到「回合占用且栈内有
+   * turn 条目」的时刻；条件解除 / 会话切换即重置。纯呈现侧状态——刷新后
+   * 重新起算（不伪造一个服务端时刻）。
+   */
+  @state() blockedSince: number | null = null
 
   protected willUpdate(changed: Map<string, unknown>): void {
     // 服务端对账后的下一次全量刷新（prop 更新）接管真相，撤销乐观覆盖。
     if (changed.has('pending')) this.optimistic = null
+    // 会话切换：上一个会话的阻塞锚点作废。
+    if (changed.has('sessionKey')) this.blockedSince = null
+    // 阻塞条件的进入/离开：进入记锚点，离开清锚点。
+    const blocked =
+      this.turnEngaged && this.view.some((x) => x.disposition === 'turn')
+    if (blocked && this.blockedSince === null) this.blockedSince = Date.now()
+    if (!blocked && this.blockedSince !== null) this.blockedSince = null
   }
 
   static styles = css`
@@ -136,17 +169,67 @@ export class SebasPendingStack extends LitElement {
     return this.view.filter((x) => x.disposition === 'turn').indexOf(p) + 1
   }
 
+  /**
+   * 条目的处置词（fix-pending-queue-liveness 3.2）：队列被占用时 turn 条目
+   * 点名阻塞条件（泊车审批 → 「等待你的审批」；普通在跑回合 → 「等待当前
+   * 回合结束」）并附起等时刻；空闲时维持位置词。staging 条目语义不变。
+   */
+  private dispositionText(p: PendingSubmission): string {
+    if (p.disposition === 'staging') return '将并入首条消息'
+    if (!this.turnEngaged || this.blockedSince === null) {
+      return `待执行 · 第 ${this.turnOrdinal(p)} 位`
+    }
+    const wait = `已等 ${formatWaitDuration(Date.now() - this.blockedSince)}`
+    if (this.waitingApproval) return `等待你的审批 · ${wait}`
+    return `等待当前回合结束 · 第 ${this.turnOrdinal(p)} 位 · ${wait}`
+  }
+
   private dispatchChanged(): void {
     this.dispatchEvent(
       new CustomEvent('pending-changed', { bubbles: true, composed: true }),
     )
   }
 
-  /** 静默对账（design D8）：拒绝即放弃乐观态并请求一次全量刷新。 */
+  /** 静默对账：放弃乐观态并请求一次全量刷新（服务端真相经 prop 回到组件）。 */
   private reconcileSilently(): void {
     this.optimistic = null
     this.busyId = null
     window.dispatchEvent(new CustomEvent('sebas:refetch'))
+  }
+
+  /**
+   * 两级判据的失败半边（fix-pending-queue-liveness 3.3，design D4）：请求
+   * 失败（4xx / 网络失败）后取一次服务端 post-op 真相——条目已不在 = 竞态
+   * 竞输（如该提交已开跑），静默对账；条目仍在 / 真相取不到（网络失败归入
+   * 确定性拒绝）= 低档通知点名条目与原因。
+   */
+  private async handleFailure(
+    key: string,
+    p: PendingSubmission,
+    op: string,
+    err: unknown,
+  ): Promise<void> {
+    let postList: PendingSubmission[] | null = null
+    try {
+      postList = (await api.session(key)).pending
+    } catch {
+      postList = null
+    }
+    if (postList !== null && !postList.some((x) => x.id === p.id)) {
+      this.reconcileSilently()
+      return
+    }
+    this.reportRejection(p, op, describeError(err))
+  }
+
+  /** 确定性拒绝：低档（warn）就地短暂呈现，点名条目文本与原因；随后对账。 */
+  private reportRejection(p: PendingSubmission, op: string, reason: string): void {
+    this.reconcileSilently()
+    notify({
+      level: 'warn',
+      message: `${op}未生效：「${quoteText(p.text)}」（${reason}）`,
+      dedupeKey: `pending:${op}:${p.id}`,
+    })
   }
 
   private async removeEntry(e: Event, p: PendingSubmission): Promise<void> {
@@ -159,10 +242,16 @@ export class SebasPendingStack extends LitElement {
     this.optimistic = this.view.filter((x) => x.id !== p.id)
     try {
       const { pending } = await api.removePending(key, p.id)
-      this.optimistic = pending
-      this.dispatchChanged()
-    } catch {
-      this.reconcileSilently()
+      if (pending.some((x) => x.id === p.id)) {
+        // 2xx 但条目仍在服务端全量里 = 服务端没有执行该操作（确定性拒绝，
+        // spec「the entry still present after the operation」）。
+        this.reportRejection(p, '移除', '服务端未执行该移除')
+      } else {
+        this.optimistic = pending
+        this.dispatchChanged()
+      }
+    } catch (err) {
+      await this.handleFailure(key, p, '移除', err)
     } finally {
       this.busyId = null
     }
@@ -171,7 +260,7 @@ export class SebasPendingStack extends LitElement {
   /**
    * 组内移动（键盘 ↑/↓ 与拖拽共用）。`toIndex` 是条目在其处置组内的
    * 0 基插入位。非优先项的目标位若落在优先项之前 → 不发请求、不更新
-   * （spec「先判后动」）；服务端仍可能拒绝（竞态），按静默对账处理。
+   * （spec「先判后动」）；服务端拒绝/未按意图收敛按两级判据处理。
    */
   private async move(e: Event, p: PendingSubmission, toIndex: number): Promise<void> {
     e.stopPropagation()
@@ -198,10 +287,23 @@ export class SebasPendingStack extends LitElement {
     this.busyId = p.id
     try {
       const { pending } = await api.movePending(key, p.id, toIndex)
-      this.optimistic = pending
-      this.dispatchChanged()
-    } catch {
-      this.reconcileSilently()
+      if (!pending.some((x) => x.id === p.id)) {
+        // 竞态竞输：条目已被并发开始消费（不在服务端全量里）——静默对账。
+        this.optimistic = pending
+        this.dispatchChanged()
+        return
+      }
+      const got = pending
+        .filter((x) => x.disposition === p.disposition)
+        .findIndex((x) => x.id === p.id)
+      if (got === toIndex) {
+        this.optimistic = pending
+        this.dispatchChanged()
+      } else {
+        this.reportRejection(p, '重排', '服务端未按意图重排该条目')
+      }
+    } catch (err) {
+      await this.handleFailure(key, p, '重排', err)
     } finally {
       this.busyId = null
     }
@@ -284,10 +386,8 @@ export class SebasPendingStack extends LitElement {
                   >
                     ${p.priority ? html`<span class="prio" title="优先（/btw）">/btw</span>` : nothing}
                     <span class="text" title=${p.text}>${p.text}</span>
-                    <span class="disp">
-                      ${p.disposition === 'staging'
-                        ? '将并入首条消息'
-                        : `待执行 · 第 ${this.turnOrdinal(p)} 位`}
+                    <span class="disp" data-testid=${`pending-disposition-${p.id}`}>
+                      ${this.dispositionText(p)}
                     </span>
                     ${p.priority
                       ? nothing
@@ -346,4 +446,28 @@ declare global {
   interface HTMLElementTagNameMap {
     'sebas-pending-stack': SebasPendingStack
   }
+}
+
+/** 通知文案里的条目文本截断（点名但不刷屏）。 */
+function quoteText(text: string): string {
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text
+}
+
+/**
+ * 失败的呈现原因词（fix-pending-queue-liveness 3.3）：ApiError 携带服务端
+ * 的类型化拒绝文案（「待执行提交不存在」/「该提交已开始执行」…）；网络级
+ * 失败如实说「无法确认」——两级判据里它归入确定性拒绝（宁可误报不可无感）。
+ */
+function describeError(err: unknown): string {
+  if (err instanceof ApiError) return err.message
+  if (err instanceof NetworkError) return '网络失败，原因无法确认'
+  return String(err)
+}
+
+/** 起等时长的呈现分桶（秒 → 分钟 → 小时，不假精度）。 */
+export function formatWaitDuration(ms: number): string {
+  const secs = Math.max(0, Math.floor(ms / 1000))
+  if (secs < 60) return `${secs} 秒`
+  if (secs < 3600) return `${Math.floor(secs / 60)} 分钟`
+  return `${Math.floor(secs / 3600)} 小时`
 }

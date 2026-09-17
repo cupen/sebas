@@ -39,6 +39,16 @@ export interface WsEvents {
     session_id: string
     dropped: PendingSubmission[]
   }
+  /**
+   * （fix-pending-queue-liveness 2.2）某会话的停滞回合被看门狗强制收尾、
+   * 队列已解除卡死。`released` = 释放的搁浅待执行提交条数。shell 据此弹
+   * warn 分级通知（点名会话与条目数）。
+   */
+  'session.turn_stalled': {
+    type: 'session.turn_stalled'
+    session_id: string
+    released: number
+  }
   'config.updated': { type: 'config.updated' }
   /**
    * （workbench-live-conversation-flow 2.2）实时回合内容：同一合并窗内某
@@ -100,6 +110,7 @@ const EVENTS = {
   'session.updated': true,
   'session.removed': true,
   'session.pending_dropped': true,
+  'session.turn_stalled': true,
   'config.updated': true,
   'permission.requested': true,
   'turn.append': true,

@@ -406,6 +406,8 @@ fn remote_session() -> SessionInfo {
         effective_mode: Some("edit".into()),
         msg_count: 0,
         available_commands: Vec::new(),
+        // fix-pending-queue-liveness 2.3：远端泊车中的会话同样是回合占用。
+        turn_engaged: true,
     }
 }
 

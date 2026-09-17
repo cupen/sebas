@@ -11,6 +11,7 @@ mod events;
 mod inbound;
 mod maps;
 pub mod provider_card;
+pub mod stall;
 
 pub use events::{
     RemoteSessionView, SessionEvent, SessionInfo, TurnEntry, TurnStreamEvent, count_chat_messages,
@@ -306,6 +307,10 @@ pub struct DispatchHandle {
     /// with the mapping so a recycled session_id cannot inherit stale
     /// content. In-memory only.
     turn_log: Arc<RwLock<HashMap<String, Vec<TurnEntry>>>>,
+    /// 回合停滞看门狗的事实登记表（fix-pending-queue-liveness 2.1/2.2，
+    /// design D1/D2）：事件时钟 + 泊车豁免 + 阈值。扫描与收尾逻辑在
+    /// [`DispatchHandle::force_settle_stalled_turns`]。
+    stall: stall::StallRegistry,
 }
 
 impl Clone for DispatchHandle {
@@ -329,6 +334,7 @@ impl Clone for DispatchHandle {
             perm_events: self.perm_events.clone(),
             turn_events: self.turn_events.clone(),
             turn_log: self.turn_log.clone(),
+            stall: self.stall.clone(),
         }
     }
 }
@@ -405,6 +411,7 @@ impl DispatchHandle {
                 events,
                 perm_events,
                 turn_events,
+                stall: stall::StallRegistry::default(),
             },
             rx,
         )
@@ -499,6 +506,18 @@ impl DispatchHandle {
             }
             None => 0,
         };
+        // fix-pending-queue-liveness 2.3（design D3）：「回合占用」的引擎事实
+        // ——WORKING 相位 ∨ 泊车审批在等 ∨ spawn 窗口。呈现层据此驱动提交
+        // 控件的排队/停止形态，不再猜展示词 slug。SpawnFailed/Dormant/终态
+        // 相位一律不占用。
+        let turn_engaged = match &m.state {
+            crate::state::MappingState::Spawning { .. } => true,
+            crate::state::MappingState::Active { session_id } => {
+                phase.as_deref() == Some(crate::card_state::phase::WORKING)
+                    || self.stall.parked_count(session_id).await > 0
+            }
+            _ => false,
+        };
         Some(SessionInfo {
             channel: key.channel_str().to_string(),
             key: key.reference.clone(),
@@ -531,6 +550,8 @@ impl DispatchHandle {
             // （session-slash-commands 2.1）agent 广告的命令表随快照下发
             // （AvailableCommands 事件物化；无发现能力 = 空表）。
             available_commands: m.available_commands.clone(),
+            // fix-pending-queue-liveness 2.3：回合占用事实随快照下发。
+            turn_engaged,
         })
     }
 
@@ -785,7 +806,18 @@ impl DispatchHandle {
     /// Send an `Out` to the outbound pump. Per openspec/specs/acp-driver/spec.md ("Channel send
     /// fail"): a closed channel is a bug in dev (panic via debug_assert)
     /// and an error-log-and-continue in prod — never a silent drop.
+    ///
+    /// fix-pending-queue-liveness 2.1（design D2）：`PermissionReply` 出站的
+    /// 唯一漏斗在这里——批复离开引擎即解除该请求的泊车豁免（webui 审查卡与
+    /// 飞书点击两条路径都经 `emit`），泊车解除后看门狗对回合重新计时。
     pub async fn emit(&self, out: Out) {
+        if let Out::SendAcp {
+            cmd: AcpCommand::PermissionReply { request_id, .. },
+            ..
+        } = &out
+        {
+            self.stall.note_permission_resolved(request_id).await;
+        }
         if let Err(e) = self.tx.send(out).await {
             tracing::error!(?e, "router→outbound channel closed; dropping message");
             debug_assert!(false, "router→outbound channel send failed: {e}");
@@ -879,6 +911,10 @@ impl DispatchHandle {
             .seed_and_report(session_id.as_str(), &user_prompt)
             .await;
         if seeded {
+            // fix-pending-queue-liveness 2.1：回合开轮点之一（spawn 首轮 /
+            // emit_turn_card 开轮都经此）——停滞时钟以本轮开轮时刻起算，排队
+            // 回合不继承上一回合的等待时长。
+            self.stall.touch(&session_id).await;
             // 幂等语义：只有真正新建（而非重入保留）才记录 prompt，防止
             // 重入把同一条 prompt 重复追加进 transcript。
             self.transcript_push(&session_id, TurnEntry::prompt(0, user_prompt.clone()))
@@ -895,6 +931,9 @@ impl DispatchHandle {
     /// 返回 `Some(新 emoji)` 表示 FSM 发生转移 —— 由调用方决定是否发
     /// `Out::React`（本方法保持纯状态契约），见 `emit_reaction`。
     pub async fn apply_event(&self, session_id: &str, event: &AcpEvent) -> Option<&'static str> {
+        // fix-pending-queue-liveness 2.1：事件时钟单点写入（流式漏斗臂）——
+        // 任何事件到达都会重置该会话的停滞计时。
+        self.stall.touch(session_id).await;
         let cfg = self.card_cfg.read().await;
         // transcript 条目在 apply 闭包外追加（锁序：card_states → turn_log，
         // 与其他路径不交叉）。TextDelta/Thinking/Tool 事件是内容流，逐条入账。
@@ -1846,6 +1885,111 @@ impl DispatchHandle {
         // Reset CardState and emit the per-turn card + ContinueSession.
         self.emit_turn_card(key.clone(), session_id, next.prompt, next.reply_to)
             .await;
+    }
+
+    /// fix-pending-queue-liveness：看门狗阈值装配点（`[dispatch]
+    /// turn_stall_timeout`，秒；0 = 关闭）。
+    pub fn set_turn_stall_timeout(&self, secs: u64) {
+        self.stall.set_timeout_secs(secs);
+    }
+
+    /// 停滞看门狗事实登记表（仅测试：回拨时钟模拟长停滞）。
+    #[doc(hidden)]
+    pub fn stall_registry(&self) -> &stall::StallRegistry {
+        &self.stall
+    }
+
+    /// 看门狗扫描 + 强制收尾（fix-pending-queue-liveness 2.2，design D5）。
+    ///
+    /// 对每个「WORKING/SEED 相位、无泊车审批、超过 `turn_stall_timeout` 无
+    /// 任何事件」的活跃会话，把停滞回合按「回合异常结束、会话存活」收尾
+    /// （对齐 `AcpEvent::Error { terminal: false }` 臂的既有语义：SEED/
+    /// WORKING → DONE + drain），随后发 [`SessionEvent::TurnStalled`] 点名
+    /// 会话与释放的搁浅条目数。不引入新事件类型、不拆会话。
+    ///
+    /// 由核心进程的周期任务调用（`src/run.rs` 装配）；`timeout = 0` 时扫描
+    /// 在登记表内短路，本方法即 no-op。返回本次收尾的 `(key, released)`
+    /// 供测试断言。
+    pub async fn force_settle_stalled_turns(&self) -> Vec<(ChannelKey, usize)> {
+        let mut settled = Vec::new();
+        for facts in self.stall.stalled_sessions().await {
+            let sid = facts.session_id.clone();
+            // 泊车豁免已按引擎事实在扫描层过滤（design D2）；这里再核对
+            // 「仍有活跃映射 + 相位仍可收尾」，把扫描与收尾窗口内的竞态
+            // （回合已自行结束/会话已拆除）挡在收尾之前。
+            let Some(key) = self.map.lookup_key_by_session(&sid).await else {
+                self.stall.drop_session(&sid).await;
+                continue;
+            };
+            let phase = self.card_states.status_emoji(&sid).await;
+            if !matches!(
+                phase.as_deref(),
+                Some(crate::card_state::phase::SEED) | Some(crate::card_state::phase::WORKING)
+            ) {
+                // 终态驻留（正常 Finished 等）的旧时钟条目顺手回收：每轮扫描
+                // 都会撞上 phase 检查，留着只是白耗一枚哈希槽（纯效率，时钟
+                // 本就不再参与判定）。
+                self.stall.drop_session(&sid).await;
+                continue;
+            }
+            // 收尾锚定（防误收尾）：仅 SEED/WORKING 转移到 DONE，与
+            // non-terminal Error 臂同款契约。
+            let settled_now = self
+                .card_states
+                .apply(&sid, |st| {
+                    if matches!(
+                        st.status_emoji.as_str(),
+                        crate::card_state::phase::SEED | crate::card_state::phase::WORKING
+                    ) {
+                        st.status_emoji = crate::card_state::phase::DONE.into();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .await;
+            if !settled_now {
+                continue;
+            }
+            // transcript 就地点名（会话内可见「回合为何被收尾」）；数字是
+            // 收尾时刻的搁浅条目数——drain 会让队头开轮，其余随之解除卡死。
+            let released = self.map.queue_len(&key).await;
+            self.transcript_push(
+                &sid,
+                TurnEntry::error(
+                    0,
+                    format!(
+                        "**回合停滞被强制收尾**：超过 {} 秒无任何事件（最后事件 {} 秒前），队列中 {} 条待执行提交已解除卡死。",
+                        self.stall.timeout_secs(),
+                        facts.silent_for_secs,
+                        released
+                    ),
+                ),
+            )
+            .await;
+            self.flush_card(&sid).await;
+            // 时钟退役：drain 开轮的下一回合由 seed_card 重置计时；队列空时
+            // 会话停在终态，扫描不再看它。
+            self.stall.drop_session(&sid).await;
+            if released > 0 {
+                self.drain_queue_if_terminal(&key, &sid).await;
+            }
+            self.publish_updated(&key).await;
+            tracing::warn!(
+                session_id = %sid,
+                last_event_unix = facts.last_event_unix,
+                silent_for_secs = facts.silent_for_secs,
+                released,
+                "turn stalled: no events for the configured timeout; force-settled to DONE and drained the queue (fix-pending-queue-liveness)"
+            );
+            self.publish(SessionEvent::TurnStalled {
+                channel: key.channel_str().to_string(),
+                key: key.reference.clone(),
+                released,
+            });
+            settled.push((key, released));
+        }
+        settled
     }
 }
 
