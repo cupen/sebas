@@ -96,8 +96,8 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 
 | 能力 | requirement 簇 | 状态 | 证据 |
 |---|---|---|---|
-| acp-model-selection | 会话模型清单暴露 | ✅ | sebas-acp `acp_resume_test::spawn_outcome_carries_model_info_from_config_options`（ConfigOptions 进快照）；前端 `workbench-composer.test.ts`（dropdown 喂清单/无 option 无 dropdown/会话清单与创建目录独立 D8）；browser `models.spec.ts`（set_session_model happy-path）|
-| | set_config_option 换模型 | ✅ | add-acp-model-selection 测试（sebas-acp）|
+| acp-model-selection | 会话模型清单暴露 | ✅ | sebas-acp `acp_resume_test::spawn_outcome_carries_model_info_from_config_options`（ConfigOptions 进快照）；claude 驱动别名模型面（workbench-composer-input-polish 2.1–2.3）：`claude_model_selection.rs`（内置表 spawn 拼装/配置覆盖替换/帧观察 ModelChanged/set_model 控制链 + 帧纠偏）、`tests/config_test.rs`（models 键缺省/覆盖/空表回退）；E `claude_model_surface_reaches_snapshot_and_switch_round_trips`（别名表随快照可达 + 切换链路 200 + 帧确认）；前端 `workbench-composer.test.ts`（dropdown 喂清单/无 option 无 dropdown/只读 current 芯片/会话清单与创建目录独立 D8）；browser `models.spec.ts`（set_session_model happy-path + claude 别名表切换旅程）|
+| | set_config_option 换模型 | ✅ | add-acp-model-selection 测试（sebas-acp）；claude 控制协议等价通道（workbench-composer-input-polish 2.3）：`claude_model_selection.rs::set_model_switches_via_control_protocol_and_frames_correct`（journal 记 set_model、乐观 ModelChanged、帧纠偏）+ E 同上 |
 | | 模型选择存活于会话生命周期 | ✅ | 同上 |
 | router-model-aliases | 别名实体与持久化 | ✅ | sebas-router `config` overlay 测试；state_channel_contract `alias_mutation_rejects_invalid_entry`（core 落库面）|
 | | 别名解析优先级 | ✅ | 同上 |
@@ -238,6 +238,7 @@ spawn-fail 进程级注入，见豁免清单）；requirement 级「未命中且
 | acp-driver | ✅ | `full_e2e_test`、`pump_unit_test`、`continue_session_test`、sebas-acp resume/timeout 测试（注：`kill_reaps_child_process` 在 Windows 既有失败，与本套件无关）|
 | | └ add-agent-mode-selection：启动权限模式 / 运行时切换 / 探针不覆盖 | ✅ | E `mode_threads_to_agent_argv`（argv 断言）+ `mode_mid_session_switch`（ModeChanged + 探针共存）；sebas-acp driver 单测（control_mode_flag/parse/strip）|
 | acp-session-mapping | ✅ | 见核心簇① |
+| session-slash-commands | ✅ | 前端 `workbench-composer.test.ts`（面板触发/前缀过滤/两段式补全/拦截与诚实退化 + workbench-composer-input-polish 3.1/3.2：行收敛单行化守卫、hover∨高亮同源 markdown 气泡、Esc/移开收泡、360×240 内部滚动、sanitize 结构守卫）；sebas-acp `canned/no_duplicate_prompt`（命令表先导事件契约）；claude 命令发现 E `slash_commands_advertise_and_reach_stub` |
 | acp-model-selection | ✅ | 见核心簇② |
 | agent-bench | ✅ | sebas-agent bench 内联测试；🚫 真实模型跑分豁免 |
 | agent-core | ✅ | sebas-agent 91 项内联测试（policy/tools/turn loop/budgets/streaming）|
@@ -321,7 +322,7 @@ requirement），子功能 = 二层 `test.describe`，一行 = 一条用例；�
 | 未读徽标 | 真实回复点亮与聚焦清零 | a reply to an unfocused session lights the badge; focusing clears it and parks the anchor | `unread-badge.spec.ts` | session-unread-badge「new reply on an unfocused session」「focusing the session clears the badge」「first visit shows no unread」（rail-declutter-unread，跨层旅程：fake-claude 回复 → API `msg_count` 投影 → 徽标免刷新亮起 → 聚焦清零且锚落 localStorage） |
 | 会话管理 | 多会话切换 | 2.1 dual-session switch (rail + deep-link) does not crosstalk | `sessions.spec.ts` | 会话管理覆盖「多会话切换」 |
 | 会话管理 | archive 写保护 | 2.2 archive → 400 write-protection → restore unhides honestly | `sessions.spec.ts` | 会话管理覆盖「archive 写保护与 restore 诚实语义」 |
-| 模型管理覆盖 | 无模型诚实缺省 | 3.2 set_model on a model-less session fails non-terminally and honestly | `models.spec.ts` | 模型管理覆盖「无模型会话 set_model 诚实拒绝」 |
+| 模型管理覆盖 | claude 别名模型面与切换 | claude alias table reaches the snapshot, switch rides the control protocol, and the chip follows | `models.spec.ts` | acp-model-selection「Claude session exposes the alias table」+「Claude switch applies from the next turn」（workbench-composer-input-polish；原「无模型会话 set_model 诚实拒绝」的浏览器载体随 claude 自报模型面退役——claude 现在有别名表，无模型诚实缺省由前端单测 + 无 configOptions 的通用 ACP agent 承载）|
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | 3.2 providers are editable: model entries with capability tags persist; browsing stays probe-free | `models.spec.ts` | webui「Provider management page」（redesign-provider-models-settings）|
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | fetch lists the official ids without persisting; picking joins the catalog via an ordinary edit | `models.spec.ts` | webui「Fetch models from the provider's official base URL」 |
 | 模型管理覆盖 | settings provider 抓取 + 条目编辑 | a fetched-and-saved catalog reaches the creation dialog without a restart | `models.spec.ts` | webui「Fetch models…」+ agent-workbench「Model selector offers the backend catalog before any session」reflected-without-restart（revamp-settings-nav-and-models-editor；设置编辑器抓取→保存→创建对话框同页免刷新可读的接缝旅程） |

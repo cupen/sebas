@@ -185,6 +185,11 @@ pub struct AcpClaudeConfig {
     pub startup_timeout_secs: u64,
     #[serde(default = "default_idle_kill")]
     pub idle_kill_secs: u64,
+    /// （workbench-composer-input-polish 2.1）模型别名表覆盖：`None`（键缺
+    /// 省）与空表都回退内置别名表（default/opus/sonnet/haiku）；非空列表
+    /// 整体替换内置表。全名模型 id（如 `sonnet[1m]`）亦可写进来。
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
 }
 
 impl Default for AcpClaudeConfig {
@@ -197,6 +202,19 @@ impl Default for AcpClaudeConfig {
             work_dir: None,
             startup_timeout_secs: default_startup_timeout(),
             idle_kill_secs: default_idle_kill(),
+            models: None,
+        }
+    }
+}
+
+impl AcpClaudeConfig {
+    /// （workbench-composer-input-polish 2.1）本 agent 实例生效的模型别名
+    /// 表，单一归一出处：键缺省（`None`）与显式空表都回退内置——空表没有
+    /// 可选词汇，等效「未覆盖」（任务 2.1「空表回退内置」）。
+    pub fn resolved_models(&self) -> Vec<String> {
+        match self.models.as_deref() {
+            Some(list) if !list.is_empty() => list.to_vec(),
+            _ => sebas_acp::claude::builtin_claude_models(),
         }
     }
 }

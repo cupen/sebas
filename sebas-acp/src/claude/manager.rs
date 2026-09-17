@@ -82,7 +82,7 @@ impl SessionManager {
         agents.insert(
             "claude".to_string(),
             AgentEntry {
-                driver: Arc::new(super::driver::ClaudeDriver),
+                driver: Arc::new(super::driver::ClaudeDriver::default()),
                 startup_timeout,
             },
         );

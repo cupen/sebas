@@ -39,11 +39,13 @@ async fn one_prompt_yields_exactly_three_events() {
 
     // Drain the event stream with a 2s budget per call. The claude driver
     // advertises the (empty — the stub runs without `--advertise-commands`)
-    // command table right after connect (session-slash-commands 1.2); drain
-    // those first. The next three events must be, in order: TextDelta "hello
-    // ", TextDelta "world", Finished — and nothing else. If the prompt had
-    // been sent twice we would see four TextDelta events (two "hello "
-    // pairs) before the Finished.
+    // command table right after connect (session-slash-commands 1.2), and
+    // the frame-observed ModelChanged (workbench-composer-input-polish 2.2:
+    // init frame's model name) leads the turn — drain those first. The next
+    // three events must be, in order: TextDelta "hello ", TextDelta "world",
+    // Finished — and nothing else. If the prompt had been sent twice we
+    // would see four TextDelta events (two "hello " pairs) before the
+    // Finished.
     loop {
         let evt = tokio::time::timeout(Duration::from_secs(2), mgr.next_event(&id))
             .await
@@ -56,6 +58,8 @@ async fn one_prompt_yields_exactly_three_events() {
                     "the bare stub advertises no commands, got {commands:?}"
                 );
             }
+            // init 帧观察出的 ModelChanged 是合法先导事件（2.2）。
+            AcpEvent::ModelChanged { .. } => {}
             other => {
                 assert!(
                     matches!(&other, AcpEvent::TextDelta { delta, .. } if delta == "hello "),
