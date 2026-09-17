@@ -35,6 +35,7 @@
 - [x] 6.1 用 AGENTS.md 沙箱配方（`<SB>` 穿刺所有路径）跑全流程：`sebas skills add`（local 形态）→ `sebas skills list` → `sebas skills sync`（针头 backend 目录指向 `<SB>` 内伪落点）→ 删 → 再 sync 验证删除。验证：手工运行记录贴在 change 的验证说明中，四步产物树与预期一致。
 - [x] 6.2 手测 `sebas skills add` 的 git 与 npx 真源各一次（真实网络允许时），记结果；不可外联环境注明「未验证，沙箱不覆盖」如实报告。验证：任务完成说明里二选一（成功日志 / 环境限制声明）。
 - [x] 6.3 AGENTS.md 操作指引补一段 skills 仓与 sync 语义（含「webui 删除后需 sync 才清 backend」），并检查 AGENTS.md 沙箱 recipe 的 config 示例是否需要 `[skills]` 穿刺项。验证：`git diff AGENTS.md` 可见新增段落。
+- [x] 6.4 实证 claude 命令发现是否含 skills（design D6 的 open question）：沙箱把 `HOME` 钉进临时目录、置入真 claude binary、放一个 skill 进沙箱 `~/.claude/skills/`，起会话抓 initialize 应答的 `commands` 数组查是否含该 skill 条目；结论落盘 design.md D6（含则 claude 面板可见性成立，不含则 D6 补如实说明）。握手先于任何 turn、理论上不需凭据——此点一并实证；环境不可验（无真 binary / 凭据门控）时如实报告，与 6.2 同款出路。验证：design D6 出现带出处的结论或环境限制声明。
 
 ## 7. 收尾
 
