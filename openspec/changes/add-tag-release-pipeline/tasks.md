@@ -25,7 +25,7 @@
 
 ## 5. v0.1.0 首发实战验收
 
-- [ ] 5.1 改动经评审流程合入 main（feat 分支 rebase + --no-ff）。验证：`git log` 可见合并提交且 workflow 文件与任务 1–4 产物一致
+- [x] 5.1 改动经评审流程合入 main（feat 分支 rebase + --no-ff）。验证：`git log` 可见合并提交且 workflow 文件与任务 1–4 产物一致
 - [ ] 5.2 向用户确认后推送 `v0.1.0`，盯 Release 与 Docker 两个 workflow 运行至全绿。验证：Actions 两 workflow 结论 success
 - [ ] 5.3 验收 GitHub Release：非 draft、非 pre-release、正文含自动生成 notes；资产 = linux tar.gz + windows zip + 各自 `.sha256` 共 4 件；下载解包含 `sebas` 与 `sebas-node`，`sha256sum -c` 通过。验证：逐项对照 spec「发布归档含双二进制与 sha256」场景
 - [ ] 5.4 验收镜像：`docker pull ghcr.io/cupen/sebas:v0.1.0`，`sebas --version` 与 `sebas-node --version` 均出版本号，不带 command 启动冒烟进 sebas core；本地无法跑容器则以 registry manifest API + 推送日志为证。验证：对照 spec「docker 镜像含双二进制」场景；顺带提醒用户检查 ghcr package 可见性
