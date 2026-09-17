@@ -1,0 +1,50 @@
+name: 'Verify release tag'
+description: >-
+  校验推送的 tag（去 v 前缀）与 Cargo.toml 的 workspace version 逐字一致，
+  不一致立即失败——发布流水线在产出任何 Release 或镜像之前先过这道门。
+  同时输出 is_prerelease：tag 含 "-" 即预发布（v[0-9]+.* 触发模式下连字符
+  只出现在 semver 预发布段，如 v0.2.0-rc.1）。
+outputs:
+  is_prerelease:
+    description: 'tag 带预发布后缀（含 "-"）时为 true，正式版本为 false'
+    value: ${{ steps.verify.outputs.is_prerelease }}
+runs:
+  using: composite
+  steps:
+    - id: verify
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        tag="${GITHUB_REF_NAME:?GITHUB_REF_NAME is required}"
+        version="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml \
+          | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')"
+
+        if [[ -z "$version" ]]; then
+          echo "::error::无法从 Cargo.toml 读到首个 ^version 行"
+          exit 1
+        fi
+
+        case "$tag" in
+          v[0-9]*)
+            expected="${tag#v}"
+            ;;
+          *)
+            echo "::error::tag '$tag' 不是 v<数字> 形态，发布流水线只接受 v0.1.0 / v0.2.0-rc.1 这类 tag"
+            exit 1
+            ;;
+        esac
+
+        if [[ "$expected" != "$version" ]]; then
+          echo "::error::tag 与 Cargo.toml 版本不一致：tag '$tag'（去前缀 '$expected'）≠ Cargo.toml version '$version'"
+          echo "::error::请更新 Cargo.toml 的 workspace version，或改用与之一致的 tag"
+          exit 1
+        fi
+
+        if [[ "$tag" == *-* ]]; then
+          echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "tag '$tag' == Cargo.toml version '$version'（is_prerelease=$([[ "$tag" == *-* ]] && echo true || echo false)）"
